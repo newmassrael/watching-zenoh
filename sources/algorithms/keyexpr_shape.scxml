@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  The shape of the key k, read in one pass: how many chunks it has (0 when one
+  of them is empty: the empty text, a leading or trailing `/`, `//`), whether
+  it holds a `*` byte, whether one of its chunks is `**`, and whether it holds
+  a `$` byte.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="keyexpr_shape"
+       version="1.0">
+  <sce:import kind="event-schema" src="keyexpr_shape_schema.scxml" as="Shape"/>
+  <sce:signature>
+    <sce:param name="k" type="bytes"/>
+    <sce:return type="record:Shape"/>
+  </sce:signature>
+  <sce:body>
+    <sce:var name="n" type="uint32" init="len(k)"/>
+    <!-- chunks: the chunks begun; run: the bytes of the current chunk, held to
+         three, which is all `**` needs; stars: its `*` bytes, likewise. -->
+    <sce:var name="chunks" type="uint32" init="1"/>
+    <sce:var name="empty" type="bool" init="n === 0"/>
+    <sce:var name="star" type="bool" init="false"/>
+    <sce:var name="double_star" type="bool" init="false"/>
+    <sce:var name="dollar" type="bool" init="false"/>
+    <sce:var name="run" type="uint8" init="0"/>
+    <sce:var name="stars" type="uint8" init="0"/>
+    <sce:foreach item="byte" in="k">
+      <sce:if cond="byte === 47">
+        <sce:if cond="run === 0">
+          <sce:assign target="empty" expr="true"/>
+        </sce:if>
+        <sce:if cond="run === 2 &amp;&amp; stars === 2">
+          <sce:assign target="double_star" expr="true"/>
+        </sce:if>
+        <!-- At most one chunk per byte, and a text is shorter than 2^32 bytes. -->
+        <sce:if cond="chunks &lt; n">
+          <sce:assign target="chunks" expr="chunks + 1"/>
+        </sce:if>
+        <sce:assign target="run" expr="0"/>
+        <sce:assign target="stars" expr="0"/>
+        <sce:else>
+          <sce:if cond="byte === 36">
+            <sce:assign target="dollar" expr="true"/>
+          </sce:if>
+          <sce:if cond="byte === 42">
+            <sce:assign target="star" expr="true"/>
+            <sce:if cond="stars &lt; 3">
+              <sce:assign target="stars" expr="stars + 1"/>
+            </sce:if>
+          </sce:if>
+          <sce:if cond="run &lt; 3">
+            <sce:assign target="run" expr="run + 1"/>
+          </sce:if>
+        </sce:else>
+      </sce:if>
+    </sce:foreach>
+    <sce:if cond="run === 0">
+      <sce:assign target="empty" expr="true"/>
+    </sce:if>
+    <sce:if cond="run === 2 &amp;&amp; stars === 2">
+      <sce:assign target="double_star" expr="true"/>
+    </sce:if>
+    <sce:var name="shape" type="record:Shape">
+      <sce:set name="chunks" expr="empty ? 0 : chunks"/>
+      <sce:set name="star" expr="star"/>
+      <sce:set name="double_star" expr="double_star"/>
+      <sce:set name="dollar" expr="dollar"/>
+    </sce:var>
+    <sce:return expr="shape"/>
+  </sce:body>
+</scxml>

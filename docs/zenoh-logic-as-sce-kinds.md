@@ -254,9 +254,19 @@ The list above is the census as taken. This list records what changed since.
   start with a negative `;` duration (upstream panics): it now moves the start
   back, as upstream moves a `now()` start, and the range holds nothing. In a
   query that form cannot arrive, since a parameter list splits on `;`.
-- **W1, open.** S2 row 1 and S6 row 1 are K: the matcher becomes an algorithm
-  over chunk offsets with a bottom-up table. Its frames are under the stack gate
-  and it is on the query path the kit measures, so it lands with those readings.
+- **W1, fixed.** The keyexpr matcher is SCE documents
+  (`sources/algorithms/keyexpr_*.scxml`): intersects, includes and matches
+  read the two key texts, a greedy walk with one backtrack frame where `**`
+  stands on one side at most, a dynamic programme with `uint64` rows where it
+  stands on both. wz-session-core's `keyexpr_match` and the upstream-shaped
+  wz-zenoh-keyexpr both answer through it, so S2 row 1 and S6 row 1 are one
+  implementation; the uint32 placeholders are gone. The generated relations
+  answer what the hand-written descent answered on every pair of one to three
+  chunks over every chunk kind, and the E18 differential tests against
+  upstream zenoh-keyexpr pass. Every caller holds the key text now (no chunk
+  views), and a Put delivered in place costs the growable backing no
+  allocation. A host instrument times it at 1.10 of the hand-written descent
+  in one process; the kit reading is the next step.
 - **W4 and W5, gaps of SCE, not wz edits.** The lend book needs of a pool what
   the `buffer-pool` kind does not state: a slot count fixed at run time, a
   headroom the lender writes before the slot (the stream length prefix), a

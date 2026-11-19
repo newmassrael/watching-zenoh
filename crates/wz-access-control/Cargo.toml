@@ -37,7 +37,7 @@ path = "src/lib.rs"
 # subject is the SAME identity the routing layer keys on.
 wz-routing-graph = { path = "../wz-routing-graph" }
 # The directional keyexpr-inclusion matcher SSOT
-# (`keyexpr_includes_target`): an ACL rule keyexpr must INCLUDE the message
+# (`keyexpr_includes`): an ACL rule keyexpr must INCLUDE the message
 # keyexpr (`rule ⊇ msg`, zenoh `policy_decision_point`'s `nodes_including`),
 # NOT merely intersect it. Default features carry the wildcard kinds + the
 # `keyexpr-includes` toggle the scan needs.

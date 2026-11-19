@@ -111,7 +111,7 @@ use crate::id_map::{IdMap, PeerAliases};
 use crate::key_gate::{Admitted, ClassId, EntityId, EntityKind, KeyGate, KeyId, PeerOp, Refused};
 #[cfg(feature = "key-set-closed")]
 use crate::keyexpr_match::keyexpr_intersects_text;
-use crate::keyexpr_match::{keyexpr_intersects_target, MAX_KEYEXPR_CHUNKS};
+use crate::keyexpr_match::MAX_KEYEXPR_CHUNKS;
 use crate::registry_error::RegisterError;
 
 // R311gb (Track 2) — `resolve_wireexpr` lives in the `alloc`-gated
@@ -249,13 +249,12 @@ impl SubscriptionId {
 struct Subscriber<C: SampleSink, P: Storage = Profile> {
     id: SubscriptionId,
     /// R311gb (Track 2) — the canonical keyexpr pattern, stored as one
-    /// [`BoundedString`] (no-alloc backing on MCU). Matching splits it
-    /// on `/` at dispatch time into a stack chunk view rather than
-    /// keeping a pre-split owned `Vec<String>`, so the subscriber row
-    /// carries a single bounded buffer. Empty literal chunks are
-    /// preserved (a pattern like `a//b` keeps its empty chunk); `*` /
-    /// `**` are single-char chunks; matching is performed by
-    /// [`keyexpr_pattern_matches`].
+    /// [`BoundedString`] (no-alloc backing on MCU). Matching reads it
+    /// as text at dispatch time rather than keeping a pre-split owned
+    /// `Vec<String>`, so the subscriber row carries a single bounded
+    /// buffer. A pattern with an empty chunk (like `a//b`) is stored as
+    /// written and matches nothing; `*` / `**` are single-char chunks;
+    /// matching is performed by [`keyexpr_intersects`].
     pattern: BoundedString<{ caps::MAX_KEYEXPR_BYTES }, P>,
     /// R223 — locality filter applied before the sink fires.
     /// See [`crate::locality`] for the semantics and the wz
@@ -273,13 +272,11 @@ struct Subscriber<C: SampleSink, P: Storage = Profile> {
     sink: C,
 }
 
-/// R311dn / di-15-pre — keyexpr glob + intersection matchers moved
-/// to [`crate::keyexpr_match`]; re-exported here so prior
-/// `crate::pubsub::keyexpr_pattern_matches` /
-/// `crate::pubsub::keyexpr_intersect_patterns` callsites (declare/
-/// subscriber, declare/queryable, declare/liveliness_subscriber,
-/// query.rs, this file's tests) keep their existing import paths.
-pub use crate::keyexpr_match::{keyexpr_intersect_patterns, keyexpr_pattern_matches};
+/// The keyexpr glob and intersection matchers live in
+/// [`crate::keyexpr_match`]; re-exported here because callers in other
+/// crates reach them as `wz_session_core::pubsub::keyexpr_matches` /
+/// `wz_session_core::pubsub::keyexpr_intersects`.
+pub use crate::keyexpr_match::{keyexpr_intersects, keyexpr_matches};
 
 /// The application-written half of the subscriber registry: the local
 /// subscriptions, the counter that numbers them, and what only the application
@@ -577,27 +574,16 @@ fn push_priority_band(push: &PushOwned) -> usize {
 /// the interest is a publisher's concrete `demo/a` in the case that motivated
 /// this — so the test is INTERSECTION, not one-sided glob matching.
 ///
-/// Splits into stack chunk views (no heap). A keyexpr deeper than
+/// Matched as text (no heap). On the fixed backing a keyexpr deeper than
 /// [`MAX_KEYEXPR_CHUNKS`] is treated as non-matching rather than matched
-/// truncated, mirroring the sibling registries' conservative rule.
+/// truncated, mirroring the sibling registries' conservative rule; the
+/// matcher applies that bound itself.
 #[cfg(feature = "declare-subscriber")]
 fn subscription_matches_interest(pattern: &str, interest: Option<&str>) -> bool {
-    let Some(interest) = interest else {
-        return true;
-    };
-    let mut sub_chunks: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
-    for c in pattern.split('/') {
-        if sub_chunks.push(c).is_err() {
-            return false;
-        }
+    match interest {
+        Some(interest) => keyexpr_intersects(pattern, interest),
+        None => true,
     }
-    let mut interest_chunks: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
-    for c in interest.split('/') {
-        if interest_chunks.push(c).is_err() {
-            return false;
-        }
-    }
-    keyexpr_intersect_patterns(&sub_chunks, &interest_chunks)
 }
 
 /// R311y530 — one remembered inbound SUBSCRIBER `Interest`.
@@ -2484,33 +2470,25 @@ fn scan_subscribers<C: SampleSink, P: Storage>(
     MATCH_SCANS.with(|scans| scans.set(scans.get() + 1));
     let mut fired: usize = 0;
     // R2662 (open-debt item 763) — THE ARRIVING KEYEXPR MAY ITSELF BE A
-    // PATTERN, so it is split ONCE here and each subscriber is INTERSECTED
-    // against it. The prior `keyexpr_pattern_matches(&chunks, keyexpr)`
-    // compared a subscriber pattern against the arriving key as a LITERAL,
-    // so a `demo/*` Put matched the subscriber `demo/*` character-for-
-    // character and missed `demo/a` — upstream's subscriber rule is
+    // PATTERN, so each subscriber is INTERSECTED against it. A one-sided
+    // match that compares a subscriber pattern against the arriving key as a
+    // LITERAL lets a `demo/*` Put match the subscriber `demo/*` character-for-
+    // character and miss `demo/a` — upstream's subscriber rule is
     // intersection, and a real zenoh-pico client does send such keys
     // (`wz_storage_wildcard_update_pico_interop` fires `demo/**` and the
-    // storage plane applies it, so they ARRIVE; only local delivery dropped
-    // them).
+    // storage plane applies it, so they ARRIVE and must be delivered).
     //
-    // ⛔ FOR A CONCRETE ARRIVING KEY THIS IS IDENTICAL TO THE PRIOR MATCH —
-    // the argument `query.rs` @ `fn matches` already recorded when the QUERY
-    // plane made this same move. So this widens delivery to the wildcard
-    // case and changes nothing about the concrete one.
+    // ⛔ FOR A CONCRETE ARRIVING KEY INTERSECTION IS THE ONE-SIDED MATCH —
+    // the argument `query.rs` @ `fn matches` records for the QUERY plane.
+    // So this widens delivery to the wildcard case and changes nothing about
+    // the concrete one.
     //
-    // The split is hoisted OUT of the loop because the target is one value
-    // for the whole scan, which is also the shape
-    // `crate::declare::declared_intersects` uses: split the target once,
-    // then ask per candidate.
-    let mut target: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
-    for c in keyexpr.split('/') {
-        // Over-depth arriving key: conservatively deliver to nobody, the
-        // same direction `keyexpr_intersects_target` takes for an
-        // over-depth candidate on the no-alloc backing.
-        if target.push(c).is_err() {
-            return None;
-        }
+    // Over-depth arriving key on the fixed backing: delivered to nobody and
+    // answered `None`, so a caller that remembers answers does not remember
+    // it. The matcher would refuse it for every subscriber anyway; the depth
+    // is counted here only for that answer.
+    if crate::bounded::ENFORCES_CAPACITY && keyexpr.split('/').count() > MAX_KEYEXPR_CHUNKS {
+        return None;
     }
     for (position, subscriber) in subscribers.iter_mut().enumerate() {
         let pass = if is_remote {
@@ -2521,11 +2499,10 @@ fn scan_subscribers<C: SampleSink, P: Storage>(
         if !pass {
             continue;
         }
-        // R2662 — the subscriber's pattern is the CANDIDATE now, and
-        // `keyexpr_intersects_target` does its own bounded split (the same
-        // defensive over-depth skip the hand-rolled loop here used to do,
-        // moved behind the one seam so every scan inherits it).
-        if keyexpr_intersects_target(&subscriber.pattern, &target) {
+        // R2662 — the subscriber's pattern is the CANDIDATE; the matcher
+        // applies the fixed backing's depth bound to it, the same defensive
+        // over-depth skip every scan inherits from the one seam.
+        if keyexpr_intersects(&subscriber.pattern, keyexpr) {
             // R311gb-2b — deliver via the DIP seam (borrowed view,
             // no projection step). On MCU `C` is a closed `enum`
             // whose `deliver` injects; on AP a `BoxedSink` closure.
@@ -2693,9 +2670,8 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     /// (a `Locality::Remote` subscriber is not a matching target for its
     /// own session's publisher), and the two keyexprs must INTERSECT as
     /// patterns — both sides may be wildcards, which is why this is
-    /// [`keyexpr_intersect_patterns`] and not the one-sided
-    /// [`keyexpr_pattern_matches`] the dispatch path uses against a
-    /// literal sample keyexpr.
+    /// [`keyexpr_intersects`] and not the one-sided
+    /// [`keyexpr_matches`], which reads its target as a literal key.
     ///
     /// This is zenoh-pico's local-target count rather than zenoh's:
     /// pico gates on the subscriber's `_allowed_origin` before counting
@@ -2719,26 +2695,11 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         {
             return false;
         }
-        let mut publish_chunks: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
-        for c in publish_keyexpr.split('/') {
-            // A keyexpr deeper than the declared bound cannot be
-            // represented, so it matches nothing — the same conservative
-            // answer `keyexpr_pattern_matches` gives an over-deep target.
-            if publish_chunks.push(c).is_err() {
-                return false;
-            }
-        }
+        // On the fixed backing a keyexpr or a pattern deeper than the
+        // chunk bound matches nothing; the matcher applies that bound.
         self.subscribers.iter().any(|subscriber| {
-            if !subscriber.allowed_origin.allows_local() {
-                return false;
-            }
-            let mut chunks: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
-            for c in subscriber.pattern.split('/') {
-                if chunks.push(c).is_err() {
-                    return false;
-                }
-            }
-            keyexpr_intersect_patterns(&chunks, &publish_chunks)
+            subscriber.allowed_origin.allows_local()
+                && keyexpr_intersects(&subscriber.pattern, publish_keyexpr)
         })
     }
 
@@ -4039,200 +4000,140 @@ mod tests {
     // ── R100 wildcard matcher behaviour ──
 
     #[test]
-    fn keyexpr_pattern_matches_literal_equality() {
-        assert!(keyexpr_pattern_matches(&["home", "temp"], "home/temp"));
-        assert!(!keyexpr_pattern_matches(&["home", "temp"], "home/humid"));
-        assert!(!keyexpr_pattern_matches(&["home"], "home/temp"));
-        assert!(!keyexpr_pattern_matches(&["home", "temp"], "home"));
+    fn keyexpr_matches_literal_equality() {
+        assert!(keyexpr_matches("home/temp", "home/temp"));
+        assert!(!keyexpr_matches("home/temp", "home/humid"));
+        assert!(!keyexpr_matches("home", "home/temp"));
+        assert!(!keyexpr_matches("home/temp", "home"));
     }
 
     #[test]
-    fn keyexpr_pattern_matches_single_chunk_wildcard() {
+    fn keyexpr_matches_single_chunk_wildcard() {
         // `*` matches exactly one chunk.
-        assert!(keyexpr_pattern_matches(
-            &["home", "*", "temp"],
-            "home/kitchen/temp"
-        ));
-        assert!(keyexpr_pattern_matches(
-            &["home", "*", "temp"],
-            "home/bedroom/temp"
-        ));
+        assert!(keyexpr_matches("home/*/temp", "home/kitchen/temp"));
+        assert!(keyexpr_matches("home/*/temp", "home/bedroom/temp"));
         // The wildcard does NOT match zero chunks.
-        assert!(!keyexpr_pattern_matches(
-            &["home", "*", "temp"],
-            "home/temp"
-        ));
+        assert!(!keyexpr_matches("home/*/temp", "home/temp"));
         // The wildcard does NOT span chunk boundaries.
-        assert!(!keyexpr_pattern_matches(
-            &["home", "*", "temp"],
-            "home/kitchen/sub/temp"
-        ));
+        assert!(!keyexpr_matches("home/*/temp", "home/kitchen/sub/temp"));
     }
 
     #[test]
-    fn keyexpr_pattern_matches_double_star_zero_or_more() {
+    fn keyexpr_matches_double_star_zero_or_more() {
         // `**` matches zero chunks.
-        assert!(keyexpr_pattern_matches(&["home", "**"], "home"));
+        assert!(keyexpr_matches("home/**", "home"));
         // `**` matches one chunk.
-        assert!(keyexpr_pattern_matches(&["home", "**"], "home/temp"));
+        assert!(keyexpr_matches("home/**", "home/temp"));
         // `**` matches many chunks.
-        assert!(keyexpr_pattern_matches(
-            &["home", "**"],
-            "home/kitchen/temp/c"
-        ));
+        assert!(keyexpr_matches("home/**", "home/kitchen/temp/c"));
         // `**` at the prefix.
-        assert!(keyexpr_pattern_matches(
-            &["**", "temp"],
-            "home/kitchen/temp"
-        ));
-        assert!(keyexpr_pattern_matches(&["**", "temp"], "temp"));
+        assert!(keyexpr_matches("**/temp", "home/kitchen/temp"));
+        assert!(keyexpr_matches("**/temp", "temp"));
         // `**` in the middle.
-        assert!(keyexpr_pattern_matches(
-            &["home", "**", "temp"],
-            "home/temp"
-        ));
-        assert!(keyexpr_pattern_matches(
-            &["home", "**", "temp"],
-            "home/kitchen/temp"
-        ));
-        assert!(keyexpr_pattern_matches(
-            &["home", "**", "temp"],
-            "home/a/b/c/temp"
-        ));
+        assert!(keyexpr_matches("home/**/temp", "home/temp"));
+        assert!(keyexpr_matches("home/**/temp", "home/kitchen/temp"));
+        assert!(keyexpr_matches("home/**/temp", "home/a/b/c/temp"));
         // Negative: literal suffix must still align.
-        assert!(!keyexpr_pattern_matches(
-            &["home", "**", "temp"],
-            "home/kitchen/humid"
-        ));
+        assert!(!keyexpr_matches("home/**/temp", "home/kitchen/humid"));
     }
 
     // ── R220 `$*` intra-chunk DSL matcher behaviour ──
 
     #[test]
-    fn keyexpr_pattern_matches_dsl_prefix_suffix_anchors() {
+    fn keyexpr_matches_dsl_prefix_suffix_anchors() {
         // `prefix$*suffix` anchors both ends: target must start with
         // "sensor_" and end with "_temp", with any (possibly empty)
         // bytes in between within the same chunk.
-        assert!(keyexpr_pattern_matches(
-            &["sensor_$*_temp"],
-            "sensor_room1_temp"
-        ));
-        assert!(keyexpr_pattern_matches(&["sensor_$*_temp"], "sensor__temp"));
+        assert!(keyexpr_matches("sensor_$*_temp", "sensor_room1_temp"));
+        assert!(keyexpr_matches("sensor_$*_temp", "sensor__temp"));
         // Missing the required suffix → no match.
-        assert!(!keyexpr_pattern_matches(
-            &["sensor_$*_temp"],
-            "sensor_room1_humid"
-        ));
+        assert!(!keyexpr_matches("sensor_$*_temp", "sensor_room1_humid"));
         // Missing the required prefix → no match.
-        assert!(!keyexpr_pattern_matches(
-            &["sensor_$*_temp"],
-            "device_room1_temp"
-        ));
+        assert!(!keyexpr_matches("sensor_$*_temp", "device_room1_temp"));
     }
 
     #[test]
-    fn keyexpr_pattern_matches_dsl_leading_only_floats_prefix() {
+    fn keyexpr_matches_dsl_leading_only_floats_prefix() {
         // `$*foo` lets the leading sub-part float; target need only
         // end with "foo".
-        assert!(keyexpr_pattern_matches(&["$*foo"], "barfoo"));
-        assert!(keyexpr_pattern_matches(&["$*foo"], "foo"));
+        assert!(keyexpr_matches("$*foo", "barfoo"));
+        assert!(keyexpr_matches("$*foo", "foo"));
         // Target lacks the required suffix.
-        assert!(!keyexpr_pattern_matches(&["$*foo"], "barfo"));
+        assert!(!keyexpr_matches("$*foo", "barfo"));
     }
 
     #[test]
-    fn keyexpr_pattern_matches_dsl_trailing_only_floats_suffix() {
+    fn keyexpr_matches_dsl_trailing_only_floats_suffix() {
         // `foo$*` lets the trailing sub-part float; target need only
         // start with "foo".
-        assert!(keyexpr_pattern_matches(&["foo$*"], "foobar"));
-        assert!(keyexpr_pattern_matches(&["foo$*"], "foo"));
+        assert!(keyexpr_matches("foo$*", "foobar"));
+        assert!(keyexpr_matches("foo$*", "foo"));
         // Target lacks the required prefix.
-        assert!(!keyexpr_pattern_matches(&["foo$*"], "fobar"));
+        assert!(!keyexpr_matches("foo$*", "fobar"));
     }
 
     #[test]
-    fn keyexpr_pattern_matches_dsl_multiple_dsl_in_order() {
+    fn keyexpr_matches_dsl_multiple_dsl_in_order() {
         // Multiple `$*` in one chunk anchor sub-parts in order
         // without overlap, mirroring zenoh-pico's
         // _z_chunk_right_contains_all_stardsl_subchunks_of_left.
-        assert!(keyexpr_pattern_matches(&["$*aa$*bb$*"], "xxaaYYbbZZ"));
+        assert!(keyexpr_matches("$*aa$*bb$*", "xxaaYYbbZZ"));
         // The order is enforced: "bb" before "aa" must not match.
-        assert!(!keyexpr_pattern_matches(&["$*aa$*bb$*"], "xxbbYYaaZZ"));
+        assert!(!keyexpr_matches("$*aa$*bb$*", "xxbbYYaaZZ"));
         // Overlap is rejected: two non-overlapping "foo" needed.
-        assert!(keyexpr_pattern_matches(&["$*foo$*foo$*"], "foofoo"));
-        assert!(!keyexpr_pattern_matches(&["$*foo$*foo$*"], "foofo"));
+        assert!(keyexpr_matches("$*foo$*foo$*", "foofoo"));
+        assert!(!keyexpr_matches("$*foo$*foo$*", "foofo"));
     }
 
     #[test]
-    fn keyexpr_pattern_matches_dsl_does_not_cross_chunk_boundary() {
+    fn keyexpr_matches_dsl_does_not_cross_chunk_boundary() {
         // `foo$*bar` is bounded by the same `/` separator the pattern
         // chunk is, so the matching content for `$*` cannot span
         // across chunks. The target chunk that aligns with the
         // pattern chunk is `foobaz`; the next pattern chunk is `bar`
         // which must align with the next target chunk independently.
-        assert!(!keyexpr_pattern_matches(
-            &["home", "foo$*bar"],
-            "home/foobaz/bar"
-        ));
+        assert!(!keyexpr_matches("home/foo$*bar", "home/foobaz/bar"));
         // Same chunk → match.
-        assert!(keyexpr_pattern_matches(
-            &["home", "foo$*bar"],
-            "home/foobazbar"
-        ));
+        assert!(keyexpr_matches("home/foo$*bar", "home/foobazbar"));
     }
 
     #[test]
-    fn keyexpr_pattern_matches_dsl_chunk_alone_acts_like_single_star() {
+    fn keyexpr_matches_dsl_chunk_alone_acts_like_single_star() {
         // A non-canonical `$*`-only chunk behaves like `*`: any
         // single-chunk target content matches at the matcher level.
         // After R221 the registry call sites canonicalize on register
         // so a registered `home/$*/temp` is stored as
-        // `["home", "*", "temp"]`; this test exercises the matcher
+        // `home/*/temp`; this test exercises the matcher
         // directly with the pre-canonical shape to document the
         // matcher's own fallback semantics for non-canonical input.
-        assert!(keyexpr_pattern_matches(
-            &["home", "$*", "temp"],
-            "home/kitchen/temp"
-        ));
-        assert!(keyexpr_pattern_matches(
-            &["home", "$*", "temp"],
-            "home/x/temp"
-        ));
+        assert!(keyexpr_matches("home/$*/temp", "home/kitchen/temp"));
+        assert!(keyexpr_matches("home/$*/temp", "home/x/temp"));
         // Still does not span chunk boundaries.
-        assert!(!keyexpr_pattern_matches(
-            &["home", "$*", "temp"],
-            "home/a/b/temp"
-        ));
+        assert!(!keyexpr_matches("home/$*/temp", "home/a/b/temp"));
         // Still does not collapse to zero chunks.
-        assert!(!keyexpr_pattern_matches(
-            &["home", "$*", "temp"],
-            "home/temp"
-        ));
+        assert!(!keyexpr_matches("home/$*/temp", "home/temp"));
     }
 
     #[test]
-    fn keyexpr_pattern_matches_dsl_combines_with_double_star() {
+    fn keyexpr_matches_dsl_combines_with_double_star() {
         // `**` traversal and intra-chunk `$*` interact orthogonally:
         // `**` consumes whole chunks, `$*` consumes intra-chunk
         // substrings within a single chunk.
-        assert!(keyexpr_pattern_matches(
-            &["sensors", "**", "id_$*"],
+        assert!(keyexpr_matches(
+            "sensors/**/id_$*",
             "sensors/room1/sub1/id_42"
         ));
-        assert!(keyexpr_pattern_matches(
-            &["sensors", "**", "id_$*"],
-            "sensors/id_42"
-        ));
+        assert!(keyexpr_matches("sensors/**/id_$*", "sensors/id_42"));
         // The literal in the DSL chunk must still align.
-        assert!(!keyexpr_pattern_matches(
-            &["sensors", "**", "id_$*"],
+        assert!(!keyexpr_matches(
+            "sensors/**/id_$*",
             "sensors/room1/value_42"
         ));
     }
 
-    // ── R293 keyexpr_intersect_patterns — honest 2-pattern matcher ──
+    // ── R293 keyexpr_intersects — honest 2-pattern matcher ──
     //
-    // `keyexpr_intersect_patterns(a_chunks, b_chunks)` returns true
+    // `keyexpr_intersects(a, b)` returns true
     // iff at least one literal keyexpr exists that both `a` and `b`
     // would match. The function backs `has_matching` on the
     // RemoteQueryableRegistry and RemoteSubscriberRegistry; the
@@ -4241,39 +4142,35 @@ mod tests {
     // OR query-pattern over literal-peer) that missed two-pattern
     // overlap cases such as `home/*/temp ∩ */sensor/temp`.
 
-    fn split(s: &str) -> Vec<&str> {
-        s.split('/').collect()
-    }
-
     #[test]
     fn intersect_literals_equal() {
-        let a = split("home/temp");
-        let b = split("home/temp");
-        assert!(keyexpr_intersect_patterns(&a, &b));
+        let a = "home/temp";
+        let b = "home/temp";
+        assert!(keyexpr_intersects(a, b));
     }
 
     #[test]
     fn intersect_literals_differ() {
-        let a = split("home/temp");
-        let b = split("home/door");
-        assert!(!keyexpr_intersect_patterns(&a, &b));
-        let c = split("kitchen/temp");
-        assert!(!keyexpr_intersect_patterns(&a, &c));
+        let a = "home/temp";
+        let b = "home/door";
+        assert!(!keyexpr_intersects(a, b));
+        let c = "kitchen/temp";
+        assert!(!keyexpr_intersects(a, c));
     }
 
     #[test]
     fn intersect_pattern_covers_literal_either_side() {
         // The pre-R293 asymmetric form caught these; the new matcher
         // must keep them green.
-        let pat = split("home/**");
-        let lit = split("home/temp");
-        assert!(keyexpr_intersect_patterns(&pat, &lit));
-        assert!(keyexpr_intersect_patterns(&lit, &pat));
+        let pat = "home/**";
+        let lit = "home/temp";
+        assert!(keyexpr_intersects(pat, lit));
+        assert!(keyexpr_intersects(lit, pat));
 
-        let mid_star = split("sensors/*/temp");
-        let exact = split("sensors/room1/temp");
-        assert!(keyexpr_intersect_patterns(&mid_star, &exact));
-        assert!(keyexpr_intersect_patterns(&exact, &mid_star));
+        let mid_star = "sensors/*/temp";
+        let exact = "sensors/room1/temp";
+        assert!(keyexpr_intersects(mid_star, exact));
+        assert!(keyexpr_intersects(exact, mid_star));
     }
 
     #[test]
@@ -4282,19 +4179,19 @@ mod tests {
         // (and any `<x>/sensor/temp` for `<x> == home`). This is
         // the textbook two-pattern overlap case the pre-R293
         // approximation missed.
-        let a = split("home/*/temp");
-        let b = split("*/sensor/temp");
-        assert!(keyexpr_intersect_patterns(&a, &b));
-        assert!(keyexpr_intersect_patterns(&b, &a));
+        let a = "home/*/temp";
+        let b = "*/sensor/temp";
+        assert!(keyexpr_intersects(a, b));
+        assert!(keyexpr_intersects(b, a));
     }
 
     #[test]
     fn intersect_two_patterns_no_shared_literal() {
         // `home/* ∩ kitchen/*` share no literal: first chunk
         // disagrees on the literal anchor.
-        let a = split("home/*");
-        let b = split("kitchen/*");
-        assert!(!keyexpr_intersect_patterns(&a, &b));
+        let a = "home/*";
+        let b = "kitchen/*";
+        assert!(!keyexpr_intersects(a, b));
     }
 
     #[test]
@@ -4303,23 +4200,23 @@ mod tests {
         // tail; `home/temp` exhausts after two chunks, `home/**`
         // consumes one chunk then `**` swallows the trailing
         // `temp` (or zero, depending on the recursion arm).
-        let a = split("home/**");
-        let b = split("home/temp");
-        assert!(keyexpr_intersect_patterns(&a, &b));
-        let c = split("home");
-        assert!(keyexpr_intersect_patterns(&a, &c));
-        let d = split("home/**");
-        assert!(keyexpr_intersect_patterns(&a, &d));
+        let a = "home/**";
+        let b = "home/temp";
+        assert!(keyexpr_intersects(a, b));
+        let c = "home";
+        assert!(keyexpr_intersects(a, c));
+        let d = "home/**";
+        assert!(keyexpr_intersects(a, d));
     }
 
     #[test]
     fn intersect_double_star_both_sides_overlap_mid() {
         // `**/temp ∩ home/**` shares `home/temp` (and any
         // `home/<x>.../temp`).
-        let a = split("**/temp");
-        let b = split("home/**");
-        assert!(keyexpr_intersect_patterns(&a, &b));
-        assert!(keyexpr_intersect_patterns(&b, &a));
+        let a = "**/temp";
+        let b = "home/**";
+        assert!(keyexpr_intersects(a, b));
+        assert!(keyexpr_intersects(b, a));
     }
 
     #[test]
@@ -4327,16 +4224,16 @@ mod tests {
         // `home/**/temp ∩ kitchen/**/temp` — literal anchors on
         // both sides disagree at position 0, no `**` shape can
         // bridge them.
-        let a = split("home/**/temp");
-        let b = split("kitchen/**/temp");
-        assert!(!keyexpr_intersect_patterns(&a, &b));
+        let a = "home/**/temp";
+        let b = "kitchen/**/temp";
+        assert!(!keyexpr_intersects(a, b));
     }
 
     #[test]
     fn intersect_double_star_match_anywhere() {
         // `**` alone is the zenoh match-everything pattern; it
         // intersects with every chunk shape.
-        let star_star = split("**");
+        let star_star = "**";
         for ke in [
             "home/temp",
             "**",
@@ -4345,13 +4242,12 @@ mod tests {
             "sensors/$*",
             "home/*/door",
         ] {
-            let other = split(ke);
             assert!(
-                keyexpr_intersect_patterns(&star_star, &other),
+                keyexpr_intersects(star_star, ke),
                 "** should intersect with {ke}"
             );
             assert!(
-                keyexpr_intersect_patterns(&other, &star_star),
+                keyexpr_intersects(ke, star_star),
                 "{ke} should intersect with ** (symmetric)"
             );
         }
@@ -4361,14 +4257,14 @@ mod tests {
     fn intersect_dsl_one_side_matches_other_literal_chunk() {
         // `pre$*post ∩ prefix_post` — single-side $*; the DSL chunk
         // covers the literal chunk on the other side.
-        let a = split("a/pre$*post/b");
-        let b = split("a/prefix_post/b");
-        assert!(keyexpr_intersect_patterns(&a, &b));
-        assert!(keyexpr_intersect_patterns(&b, &a));
+        let a = "a/pre$*post/b";
+        let b = "a/prefix_post/b";
+        assert!(keyexpr_intersects(a, b));
+        assert!(keyexpr_intersects(b, a));
         // And a negative case: literal does not satisfy DSL anchors.
-        let c = split("a/wrongprefix_post/b");
+        let c = "a/wrongprefix_post/b";
         // `pre$*post` requires `pre` prefix and `post` suffix.
-        assert!(!keyexpr_intersect_patterns(&a, &c));
+        assert!(!keyexpr_intersects(a, c));
     }
 
     #[test]
@@ -4381,34 +4277,34 @@ mod tests {
         // shared chunk literal.
 
         // `pre$*` ∩ `$*post` — shared literal `prepost` exists.
-        let a = split("pre$*");
-        let b = split("$*post");
-        assert!(keyexpr_intersect_patterns(&a, &b));
+        let a = "pre$*";
+        let b = "$*post";
+        assert!(keyexpr_intersects(a, b));
 
         // Identical DSL chunks: trivially intersect.
-        let c = split("a$*b");
-        let d = split("a$*b");
-        assert!(keyexpr_intersect_patterns(&c, &d));
+        let c = "a$*b";
+        let d = "a$*b";
+        assert!(keyexpr_intersects(c, d));
     }
 
     #[test]
     fn intersect_dsl_both_sides_lead_anchor_mismatch_rejects() {
         // Lead anchors `A` vs `B` are byte-distinct (neither is a
         // prefix of the other) — no shared chunk literal possible.
-        let a = split("A$*Z");
-        let b = split("B$*Z");
-        assert!(!keyexpr_intersect_patterns(&a, &b));
-        assert!(!keyexpr_intersect_patterns(&b, &a));
+        let a = "A$*Z";
+        let b = "B$*Z";
+        assert!(!keyexpr_intersects(a, b));
+        assert!(!keyexpr_intersects(b, a));
     }
 
     #[test]
     fn intersect_dsl_both_sides_trail_anchor_mismatch_rejects() {
         // Trail anchors `A` vs `B` are byte-distinct — no shared
         // chunk literal.
-        let a = split("X$*A");
-        let b = split("X$*B");
-        assert!(!keyexpr_intersect_patterns(&a, &b));
-        assert!(!keyexpr_intersect_patterns(&b, &a));
+        let a = "X$*A";
+        let b = "X$*B";
+        assert!(!keyexpr_intersects(a, b));
+        assert!(!keyexpr_intersects(b, a));
     }
 
     #[test]
@@ -4416,10 +4312,10 @@ mod tests {
         // Lead anchor `AB` extends `A` — the shorter is a prefix
         // of the longer. Shared literal exists (`AB...` family
         // covers both patterns when trails align).
-        let a = split("A$*Z");
-        let b = split("AB$*Z");
-        assert!(keyexpr_intersect_patterns(&a, &b));
-        assert!(keyexpr_intersect_patterns(&b, &a));
+        let a = "A$*Z";
+        let b = "AB$*Z";
+        assert!(keyexpr_intersects(a, b));
+        assert!(keyexpr_intersects(b, a));
     }
 
     #[test]
@@ -4427,10 +4323,10 @@ mod tests {
         // Trail anchor `BC` extends `C` — the shorter is a suffix
         // of the longer. Shared literal exists in the `...BC`
         // family (lead empties trivially align).
-        let a = split("$*C");
-        let b = split("$*BC");
-        assert!(keyexpr_intersect_patterns(&a, &b));
-        assert!(keyexpr_intersect_patterns(&b, &a));
+        let a = "$*C";
+        let b = "$*BC";
+        assert!(keyexpr_intersects(a, b));
+        assert!(keyexpr_intersects(b, a));
     }
 
     #[test]
@@ -4441,10 +4337,10 @@ mod tests {
         // b = "$*B$*A$*"   — middles [B, A] in opposite order
         // Lead/trail both empty → compatible. Shared literal e.g.
         // "BABA" satisfies both pattern orderings.
-        let a = split("$*A$*B$*");
-        let b = split("$*B$*A$*");
-        assert!(keyexpr_intersect_patterns(&a, &b));
-        assert!(keyexpr_intersect_patterns(&b, &a));
+        let a = "$*A$*B$*";
+        let b = "$*B$*A$*";
+        assert!(keyexpr_intersects(a, b));
+        assert!(keyexpr_intersects(b, a));
     }
 
     #[test]
@@ -4454,10 +4350,10 @@ mod tests {
         // concatenation) satisfies both. zenoh-pico matches the
         // outcome via the `right has $*` over-approximation
         // branch (line 156 of keyexpr_match_template.h).
-        let a = split("$*ABC$*");
-        let b = split("$*XYZ$*");
-        assert!(keyexpr_intersect_patterns(&a, &b));
-        assert!(keyexpr_intersect_patterns(&b, &a));
+        let a = "$*ABC$*";
+        let b = "$*XYZ$*";
+        assert!(keyexpr_intersects(a, b));
+        assert!(keyexpr_intersects(b, a));
     }
 
     #[test]
@@ -4465,10 +4361,10 @@ mod tests {
         // Lead "AB" extends "A", trail "BA" extends "A" — both
         // anchor checks pass. Shared literal example: "ABA"
         // (a pattern: "AB" + "" + "A"; b pattern: "A" + "B" + "A").
-        let a = split("AB$*A");
-        let b = split("A$*BA");
-        assert!(keyexpr_intersect_patterns(&a, &b));
-        assert!(keyexpr_intersect_patterns(&b, &a));
+        let a = "AB$*A";
+        let b = "A$*BA";
+        assert!(keyexpr_intersects(a, b));
+        assert!(keyexpr_intersects(b, a));
     }
 
     #[test]
@@ -4476,10 +4372,10 @@ mod tests {
         // Lead "AB" and "AX" share the first byte 'A' but diverge
         // at the second byte. Neither is a prefix of the other —
         // no shared literal with both `AB` and `AX` prefixes.
-        let a = split("AB$*Z");
-        let b = split("AX$*Z");
-        assert!(!keyexpr_intersect_patterns(&a, &b));
-        assert!(!keyexpr_intersect_patterns(&b, &a));
+        let a = "AB$*Z";
+        let b = "AX$*Z";
+        assert!(!keyexpr_intersects(a, b));
+        assert!(!keyexpr_intersects(b, a));
     }
 
     #[test]
@@ -4496,12 +4392,10 @@ mod tests {
             ("**", "anything/at/all"),
             ("a/$*/b", "a/literal/b"),
         ];
-        for (lhs, rhs) in cases {
-            let a = split(lhs);
-            let b = split(rhs);
+        for &(lhs, rhs) in cases {
             assert_eq!(
-                keyexpr_intersect_patterns(&a, &b),
-                keyexpr_intersect_patterns(&b, &a),
+                keyexpr_intersects(lhs, rhs),
+                keyexpr_intersects(rhs, lhs),
                 "symmetry must hold for {lhs} vs {rhs}",
             );
         }
@@ -6083,7 +5977,7 @@ mod tests {
     fn local_publish_matches_double_star_wildcard() {
         // Pattern `home/**` matches `home/kitchen/temp` through the
         // `**` zero-or-more-chunks rule. The matcher is the same
-        // `keyexpr_pattern_matches` the wire path uses, so wildcard
+        // `keyexpr_intersects` the wire path uses, so wildcard
         // semantics carry across origins.
         let mut registry = SubscriberRegistry::new();
         let counter = Arc::new(AtomicUsize::new(0));

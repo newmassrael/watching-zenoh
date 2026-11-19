@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  Whether the key expressions a and b share a key: zenoh's `intersects`, read
+  over the two texts. Either may be a pattern; the answer is symmetric.
+
+  * A text with an empty chunk (the empty text, a leading or trailing `/`,
+    `//`) shares nothing, and on a build whose key buffer is fixed (`bounded`)
+    neither does one of more than `chunk_bound` chunks.
+  * Two texts without a `*` are literal keys: they share one when they are the
+    same text.
+  * With `**` on one side at most, keyexpr_walk walks the other side's chunks
+    from the side that holds it (keyexpr_chunk_intersects at each step).
+  * With `**` on both sides, keyexpr_intersects_dp fills the table of their
+    prefixes, its bits over the side of at most 63 chunks; two such texts of
+    more than 63 chunks each are refused, the bound of a uint64 row.
+
+  `wild_single`, `wild_double` and `wild_dsl` are the build's wildcard switches
+  (`keyexpr-wildcard-single`, `keyexpr-wildcard-double`, `keyexpr-dollar-star`):
+  a wildcard whose switch is off is a literal chunk.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="keyexpr_intersects"
+       version="1.0">
+  <sce:import kind="algorithm" src="keyexpr_shape.scxml" as="keyexpr_shape"/>
+  <sce:import kind="event-schema" src="keyexpr_shape_schema.scxml" as="Shape"/>
+  <sce:import kind="algorithm" src="keyexpr_range_equal.scxml" as="keyexpr_range_equal"/>
+  <sce:import kind="algorithm" src="keyexpr_walk.scxml" as="keyexpr_walk"/>
+  <sce:import kind="algorithm" src="keyexpr_intersects_dp.scxml" as="keyexpr_intersects_dp"/>
+  <sce:signature>
+    <sce:param name="a" type="bytes"/>
+    <sce:param name="b" type="bytes"/>
+    <sce:param name="wild_single" type="bool"/>
+    <sce:param name="wild_double" type="bool"/>
+    <sce:param name="wild_dsl" type="bool"/>
+    <sce:param name="bounded" type="bool"/>
+    <sce:param name="chunk_bound" type="uint32"/>
+    <sce:return type="bool"/>
+  </sce:signature>
+  <sce:body>
+    <!-- Where no chunk bound applies, the walk from a judges both texts as it
+         goes and answers unless b holds a `**`; only then are the two shapes
+         read. -->
+    <sce:if cond="!bounded">
+      <sce:var name="quick" type="uint8" init="keyexpr_walk(a, b, 1, wild_single, wild_double, wild_dsl)"/>
+      <sce:if cond="quick !== 2">
+        <sce:return expr="quick === 1"/>
+      </sce:if>
+    </sce:if>
+    <sce:var name="sa" type="record:Shape" init="keyexpr_shape(a)"/>
+    <sce:var name="sb" type="record:Shape" init="keyexpr_shape(b)"/>
+    <!-- A `$*` chunk is spelled with a `$`: without one in either text the
+         chunk steps need not look for it. -->
+    <sce:var name="dsl" type="bool" init="wild_dsl &amp;&amp; (sa.dollar || sb.dollar)"/>
+    <sce:if cond="sa.chunks === 0 || sb.chunks === 0">
+      <sce:return expr="false"/>
+    </sce:if>
+    <sce:if cond="bounded &amp;&amp; (sa.chunks &gt; chunk_bound || sb.chunks &gt; chunk_bound)">
+      <sce:return expr="false"/>
+    </sce:if>
+    <sce:if cond="!sa.star &amp;&amp; !sb.star">
+      <sce:return expr="keyexpr_range_equal(a, 0, len(a), b, 0, len(b))"/>
+    </sce:if>
+    <sce:var name="da" type="bool" init="wild_double &amp;&amp; sa.double_star"/>
+    <sce:var name="db" type="bool" init="wild_double &amp;&amp; sb.double_star"/>
+    <sce:if cond="da &amp;&amp; db">
+      <sce:if cond="sb.chunks &lt;= 63">
+        <sce:return expr="keyexpr_intersects_dp(a, b, wild_single, dsl)"/>
+      </sce:if>
+      <sce:if cond="sa.chunks &lt;= 63">
+        <sce:return expr="keyexpr_intersects_dp(b, a, wild_single, dsl)"/>
+      </sce:if>
+      <sce:return expr="false"/>
+    </sce:if>
+    <!-- `**` on one side at most: the walk runs over the other side's chunks
+         from the side that holds it. -->
+    <sce:if cond="db">
+      <sce:return expr="keyexpr_walk(b, a, 1, wild_single, wild_double, dsl) === 1"/>
+    </sce:if>
+    <sce:return expr="keyexpr_walk(a, b, 1, wild_single, wild_double, dsl) === 1"/>
+  </sce:body>
+</scxml>

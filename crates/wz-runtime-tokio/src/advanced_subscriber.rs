@@ -282,7 +282,7 @@ fn issue_recovery_get<R, T>(
     let final_states = Arc::clone(statesref);
     let final_pending = Arc::clone(pending);
     let final_finish = finish.clone();
-    let sub_chunks: Vec<String> = sub_keyexpr.split('/').map(str::to_string).collect();
+    let sub = sub_keyexpr.to_owned();
     // R2505 — EVERY recovery / history GET carries `QueryTarget::All`, and it
     // is pinned HERE rather than at the three call sites because this helper is
     // the one seam all of them pass through: `session.query` below is the only
@@ -309,12 +309,9 @@ fn issue_recovery_get<R, T>(
         move |reply: &dyn ReplyView| {
             // The `_anyke` counterpart (see this fn's docs): a reply keyed outside
             // the subscription is dropped here rather than delivered as if it were
-            // a sample on it. Split per reply rather than cached as `&str` slices
-            // because the callback is `'static`; recovery replies are rare enough
-            // that the allocation is not on any hot path.
-            let sub: Vec<&str> = sub_chunks.iter().map(String::as_str).collect();
-            let reply_ke: Vec<&str> = reply.keyexpr().split('/').collect();
-            if !wz_session_core::pubsub::keyexpr_intersect_patterns(&sub, &reply_ke) {
+            // a sample on it. The subscription key is owned because the callback
+            // is `'static`; the matcher reads both keys as text.
+            if !wz_session_core::keyexpr_match::keyexpr_intersects(&sub, reply.keyexpr()) {
                 return;
             }
             // R2554 — the SAME entry the live subscription uses, which is what

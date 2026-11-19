@@ -30,7 +30,7 @@
 //! process holds one shared-memory system (`docs/shm-transport.md`, section 6).
 
 use wz_runtime_tokio::declaration_aggregation::DeclarationAggregation;
-use wz_runtime_tokio::keyexpr_match::keyexpr_includes_target;
+use wz_runtime_tokio::keyexpr_match::keyexpr_includes;
 use wz_runtime_tokio::locality::Locality;
 use wz_runtime_tokio::qos::{CongestionControl, Priority};
 use wz_runtime_tokio::session::PublishOptions;
@@ -135,11 +135,10 @@ impl PublicationQos {
     /// order of its tree and warns that it did; wz applies the first written, which is the order
     /// an operator reads, and reports the others for the same warning.
     pub fn find(&self, key: &str) -> Option<PublicationQosMatch<'_>> {
-        let chunks: Vec<&str> = key.split('/').collect();
         let mut including = self
             .rules
             .iter()
-            .filter(|rule| keyexpr_includes_target(&rule.0, &chunks));
+            .filter(|rule| keyexpr_includes(&rule.0, key));
         let (key_expr, defaults) = including.next()?;
         Some(PublicationQosMatch {
             key_expr: key_expr.as_str(),

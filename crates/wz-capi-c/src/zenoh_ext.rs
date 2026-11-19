@@ -453,10 +453,7 @@ unsafe extern "C" fn cache_on_query(query: *mut z_loaned_query_t, context: *mut 
         let matches = if exact {
             key == &query_ke
         } else {
-            wz_runtime_tokio::keyexpr_match::keyexpr_intersect_patterns(
-                &query_ke.split('/').collect::<Vec<_>>(),
-                &key.split('/').collect::<Vec<_>>(),
-            )
+            wz_runtime_tokio::keyexpr_match::keyexpr_intersects(&query_ke, key)
         };
         if !matches {
             continue;

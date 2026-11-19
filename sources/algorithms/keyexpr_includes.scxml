@@ -4,27 +4,24 @@
   SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 -->
 <!--
-  KeyExpr `includes` predicate — watching-zenoh v1 semantics.
+  Whether the key expression a covers every key b covers: zenoh's `includes`,
+  read over the two texts. It is not symmetric.
 
-  zenoh-pico defines `_z_keyexpr_includes(left, right)` as "every key
-  matching `right` also matches `left`" (asymmetric — left is the
-  broader expression). The general case requires the same wildcard
-  trie-walk as `keyexpr_intersect` (see
-  `zenoh-pico/include/zenoh-pico/session/keyexpr_match_template.h`).
+  * A text with an empty chunk covers and is covered by nothing, and on a build
+    whose key buffer is fixed (`bounded`) neither is one of more than
+    `chunk_bound` chunks.
+  * A `**` of b with none in a: no; a chunk that is not `**` does not cover any
+    number of chunks.
+  * With `**` in a alone, or nowhere, keyexpr_walk walks b's chunks from a
+    (relation 2, keyexpr_chunk_includes at each step).
+  * With `**` on both sides, keyexpr_includes_dp fills the table of their
+    prefixes, its bits over b when b has at most 63 chunks and over a
+    otherwise; two such texts of more than 63 chunks each are refused, the
+    bound of a uint64 row.
 
-  Under the watching-zenoh v1 lock (RFC §5.A line 311 + §5.L line
-  2642-2647 + Appendix C line 4001-4003) the runtime KeyExpr set is
-  compile-time fixed and each entry resolves to a single uint32 ID, so
-  `includes` collapses to exact ID equality — identical to
-  `keyexpr_intersect`. The semantic distinction is preserved at the
-  call site (subscription bookkeeping vs declaration-graph filtering)
-  even though the body is the same; Phase A4+ const-fold extensions
-  may diverge the two predicates without breaking call-site contracts.
-
-  Authored as a sibling of `keyexpr_intersect.scxml` so the per-call
-  trace site is named honestly; consumers that need the wildcard form
-  re-author this fixture with a wildcard body when the compile-time
-  KeyExpr set ceases to be uint32-keyed.
+  `wild_single`, `wild_double` and `wild_dsl` are the build's wildcard switches
+  (`keyexpr-wildcard-single`, `keyexpr-wildcard-double`, `keyexpr-dollar-star`):
+  a wildcard whose switch is off is a literal chunk.
 -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
@@ -33,12 +30,55 @@
        sce:kind="algorithm"
        name="keyexpr_includes"
        version="1.0">
+  <sce:import kind="algorithm" src="keyexpr_shape.scxml" as="keyexpr_shape"/>
+  <sce:import kind="event-schema" src="keyexpr_shape_schema.scxml" as="Shape"/>
+  <sce:import kind="algorithm" src="keyexpr_walk.scxml" as="keyexpr_walk"/>
+  <sce:import kind="algorithm" src="keyexpr_includes_dp.scxml" as="keyexpr_includes_dp"/>
   <sce:signature>
-    <sce:param name="broader_id" type="uint32"/>
-    <sce:param name="narrower_id" type="uint32"/>
+    <sce:param name="a" type="bytes"/>
+    <sce:param name="b" type="bytes"/>
+    <sce:param name="wild_single" type="bool"/>
+    <sce:param name="wild_double" type="bool"/>
+    <sce:param name="wild_dsl" type="bool"/>
+    <sce:param name="bounded" type="bool"/>
+    <sce:param name="chunk_bound" type="uint32"/>
     <sce:return type="bool"/>
   </sce:signature>
   <sce:body>
-    <sce:return expr="broader_id === narrower_id"/>
+    <!-- Where no chunk bound applies, the walk from a judges both texts as it
+         goes and answers unless b holds a `**`; only then are the two shapes
+         read. -->
+    <sce:if cond="!bounded">
+      <sce:var name="quick" type="uint8" init="keyexpr_walk(a, b, 2, wild_single, wild_double, wild_dsl)"/>
+      <sce:if cond="quick !== 2">
+        <sce:return expr="quick === 1"/>
+      </sce:if>
+    </sce:if>
+    <sce:var name="sa" type="record:Shape" init="keyexpr_shape(a)"/>
+    <sce:var name="sb" type="record:Shape" init="keyexpr_shape(b)"/>
+    <!-- A `$*` chunk is spelled with a `$`: without one in either text the
+         chunk steps need not look for it. -->
+    <sce:var name="dsl" type="bool" init="wild_dsl &amp;&amp; (sa.dollar || sb.dollar)"/>
+    <sce:if cond="sa.chunks === 0 || sb.chunks === 0">
+      <sce:return expr="false"/>
+    </sce:if>
+    <sce:if cond="bounded &amp;&amp; (sa.chunks &gt; chunk_bound || sb.chunks &gt; chunk_bound)">
+      <sce:return expr="false"/>
+    </sce:if>
+    <sce:var name="da" type="bool" init="wild_double &amp;&amp; sa.double_star"/>
+    <sce:var name="db" type="bool" init="wild_double &amp;&amp; sb.double_star"/>
+    <sce:if cond="db">
+      <sce:if cond="!da">
+        <sce:return expr="false"/>
+      </sce:if>
+      <sce:if cond="sb.chunks &lt;= 63">
+        <sce:return expr="keyexpr_includes_dp(a, b, false, wild_single, dsl)"/>
+      </sce:if>
+      <sce:if cond="sa.chunks &lt;= 63">
+        <sce:return expr="keyexpr_includes_dp(a, b, true, wild_single, dsl)"/>
+      </sce:if>
+      <sce:return expr="false"/>
+    </sce:if>
+    <sce:return expr="keyexpr_walk(a, b, 2, wild_single, wild_double, dsl) === 1"/>
   </sce:body>
 </scxml>

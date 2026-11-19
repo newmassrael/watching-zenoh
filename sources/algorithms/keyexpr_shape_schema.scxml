@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  What the relations of the keyexpr matcher need to know of a key's text
+  before they walk it: the record keyexpr_shape returns.
+
+  chunks - how many `/`-separated chunks it has, or 0 when one is empty.
+  star   - whether it holds a `*` byte (every wildcard is spelled with one).
+  double_star - whether one of its chunks is `**`.
+  dollar - whether it holds a `$` byte, without which no chunk is a `$*` chunk.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       version="1.0"
+       sce:kind="event-schema"
+       name="keyexpr_shape_schema"
+       sce:event-name="keyexpr.shape">
+  <datamodel>
+    <data id="chunks" sce:type="uint32" sce:direction="in"/>
+    <data id="star" sce:type="bool" sce:direction="in"/>
+    <data id="double_star" sce:type="bool" sce:direction="in"/>
+    <data id="dollar" sce:type="bool" sce:direction="in"/>
+  </datamodel>
+</scxml>

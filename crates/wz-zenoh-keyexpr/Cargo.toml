@@ -64,6 +64,17 @@ serde = { version = "1.0.225", default-features = false, features = ["alloc", "d
 # `token-cell` is what `KeArcTree` shares its nodes through: a `TokenCell` is read and written only
 # with the tree's token, and `DefaultToken` is a type of the public API.
 token-cell = { version = "2.0.0", default-features = false }
+# `intersects` and `includes` are watching-zenoh's one key expression matcher
+# (`wz_session_core::keyexpr_match`). Upstream's language always has every wildcard, so all three
+# wildcard features and `keyexpr-includes` are on; `alloc` is the growable chunk backing, without
+# which a key deeper than the fixed bound would match nothing.
+wz-session-core = { path = "../wz-session-core", default-features = false, features = [
+    "alloc",
+    "keyexpr-dollar-star",
+    "keyexpr-includes",
+    "keyexpr-wildcard-double",
+    "keyexpr-wildcard-single",
+] }
 zenoh-result = { path = "../wz-zenoh-result", default-features = false }
 
 [dev-dependencies]

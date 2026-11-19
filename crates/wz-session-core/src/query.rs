@@ -14,7 +14,7 @@
 //!
 //! Both follow the same keyexpr-wildcard matching contract
 //! (`*` single chunk, `**` zero-or-more chunks; matcher reused from
-//! [`pubsub::keyexpr_pattern_matches`](crate::pubsub::keyexpr_pattern_matches))
+//! [`pubsub::keyexpr_intersects`](crate::pubsub::keyexpr_intersects))
 //! and the same peer-alias resolution rule (mapping_id != 0 → look up
 //! a literal in the peer keyexpr table populated by inbound
 //! `Declare(DeclKexpr)`; mapping_id == 0 → use suffix verbatim).
@@ -103,8 +103,6 @@ use alloc::vec::Vec;
 // no-alloc control plane (queryable table + per-row keyexpr pattern).
 use crate::bounded::{BoundedString, BoundedVec, Profile, Storage};
 use crate::caps;
-#[cfg(feature = "storage-profile")]
-use crate::keyexpr_match::MAX_KEYEXPR_CHUNKS;
 use crate::query_mode::QueryTarget;
 use crate::registry_error::RegisterError;
 // R311y834 — the only consumers are `QueryResponder` and the dispatcher, both
@@ -576,13 +574,13 @@ impl QueryableId {
 struct Queryable<C: QuerySink, P: Storage = Profile> {
     id: QueryableId,
     /// R311gb (Track 2) — the canonical keyexpr pattern, stored as one
-    /// [`BoundedString`] (no-alloc backing on MCU). Matching splits it
-    /// on `/` at dispatch time into a stack chunk view rather than
-    /// keeping a pre-split owned `Vec<String>`. Empty literal chunks
-    /// are preserved (`a//b` keeps its empty chunk); `*` (single-chunk
-    /// wildcard), `**` (zero-or-more-chunk wildcard), and `$*` intra-
-    /// chunk substring wildcards (R220) match via the shared
-    /// [`keyexpr_pattern_matches`] helper.
+    /// [`BoundedString`] (no-alloc backing on MCU). Matching reads it
+    /// as text at dispatch time rather than keeping a pre-split owned
+    /// `Vec<String>`. A pattern with an empty chunk (`a//b`) is stored
+    /// as written and matches nothing; `*` (single-chunk wildcard),
+    /// `**` (zero-or-more-chunk wildcard), and `$*` intra-chunk
+    /// substring wildcards (R220) match via the shared
+    /// [`crate::keyexpr_match`] matchers.
     pattern: BoundedString<{ caps::MAX_KEYEXPR_BYTES }, P>,
     /// What is true of [`Self::pattern`] (a wildcard, a key the matchers accept), read once when
     /// the queryable is declared: the pattern does not change, so a match does not scan it.
@@ -657,8 +655,8 @@ impl<C: QuerySink, P: Storage> Queryable<C, P> {
         // replication aligner's initial-alignment `@zid/*/<fp>/aligner`
         // Discovery, which must reach a queryable declared on the concrete
         // `@zid/<zid>/<fp>/aligner` — so the inbound `keyexpr` cannot be treated
-        // as a concrete literal (the prior `keyexpr_pattern_matches(self, query)`
-        // matched the query's `*` character-literally and missed it). Intersect the
+        // as a concrete literal (a one-sided `keyexpr_matches(pattern, query)`
+        // would match the query's `*` character-literally and miss it). Intersect the
         // query with this queryable's pattern, the same question
         // `declare::declared_intersects` asks; the query is split only when a
         // wildcard makes the walk necessary. For a concrete query this is
@@ -2417,15 +2415,9 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
     /// reports `true` for the dispatch would also fire.
     #[cfg(feature = "storage-profile")]
     pub fn has_local_matching(&self, query_keyexpr: &str, require_complete: bool) -> bool {
-        let mut query_chunks: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
-        for c in query_keyexpr.split('/') {
-            // A keyexpr deeper than the declared bound cannot be
-            // represented, so it matches nothing — the same conservative
-            // answer the sibling registries give an over-deep target.
-            if query_chunks.push(c).is_err() {
-                return false;
-            }
-        }
+        // On the fixed backing a keyexpr or a pattern deeper than the chunk
+        // bound matches nothing — the same conservative answer the sibling
+        // registries give an over-deep target; the matcher applies it.
         self.queryables.iter().any(|queryable| {
             if !queryable.allowed_origin.allows_local() {
                 return false;
@@ -2433,16 +2425,13 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
             if require_complete && !queryable.complete {
                 return false;
             }
-            let mut pattern_chunks: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
-            for c in queryable.pattern.split('/') {
-                if pattern_chunks.push(c).is_err() {
-                    return false;
-                }
-            }
             if require_complete {
                 #[cfg(feature = "keyexpr-includes")]
                 {
-                    crate::keyexpr_match::keyexpr_includes_patterns(&pattern_chunks, &query_chunks)
+                    crate::keyexpr_match::keyexpr_includes(
+                        queryable.pattern.as_str(),
+                        query_keyexpr,
+                    )
                 }
                 // Unreachable in any build that can ask: `session-matching`
                 // forwards `keyexpr-includes`, and only a matching poll
@@ -2453,7 +2442,7 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
                     false
                 }
             } else {
-                crate::keyexpr_match::keyexpr_intersect_patterns(&pattern_chunks, &query_chunks)
+                crate::keyexpr_match::keyexpr_intersects(queryable.pattern.as_str(), query_keyexpr)
             }
         })
     }
@@ -2496,19 +2485,7 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
     ) -> usize {
         let interest_key = pattern.unwrap_or("**");
         let reaches = |queryable_pattern: &str| -> bool {
-            let mut a: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
-            let mut b: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
-            for c in queryable_pattern.split('/') {
-                if a.push(c).is_err() {
-                    return false;
-                }
-            }
-            for c in interest_key.split('/') {
-                if b.push(c).is_err() {
-                    return false;
-                }
-            }
-            crate::keyexpr_match::keyexpr_intersect_patterns(&a, &b)
+            crate::keyexpr_match::keyexpr_intersects(queryable_pattern, interest_key)
         };
         let mut declared = 0usize;
         let mut merged: Option<(u64, bool)> = None;

@@ -9662,7 +9662,7 @@ layer_c1am_cargo_test_adminspace() {
 # rather than free-riding the default set. Two real deps surfaced on the slim
 # build and are now pulled by adminspace-core (wz-session-core/Cargo.toml):
 #   * keyexpr-wildcard-double — the `@/<zid>/<whatami>/**` queryable's wire-path
-#     match (keyexpr_intersects_target); without it `**` degrades to a literal
+#     match (keyexpr_intersects); without it `**` degrades to a literal
 #     chunk and a remote admin GET never reaches the handler. Locked by the unit
 #     `admin_queryable_double_wildcard_routes_root_and_subpath_gets`.
 #   * pubsub-encoding — the reply EncodingHint (application/json / text/plain);
@@ -13007,15 +13007,20 @@ layer_c1o_keyexpr_gating_behavior() {
     # 9 -> 12, 20 -> 23, 20 -> 23: three tests more in every arm, measured on 2026-10-28. Two of
     # them are the tests of the key facts (`KeyFacts`) that `keyexpr_match` gained; the third was
     # not attributed to a commit. 12 -> 14, 23 -> 25, 23 -> 25 (2026-11-07): the two tests of the
-    # descent that remembers refuted suffix pairs, which run in every arm.
-    _runci_guarded_test "C1o keyexpr alloc" 14 \
+    # descent that remembers refuted suffix pairs, which run in every arm. 14 -> 11, 25 -> 23,
+    # 25 -> 22 (2026-11-19, round 4530): the relations are generated from SCXML; the tests of the
+    # hand-written descent left with it (the remembering descent, the chunk split, one of each
+    # pair of over-depth and literal tests that asked the same thing of the two old entry points),
+    # and the comparison with that descent over 819 by 819 key pairs and the 63-chunk bound of the
+    # prefix table came in. The OFF arms still run `*_off_degrades_to_literal` in the alloc arm.
+    _runci_guarded_test "C1o keyexpr alloc" 11 \
         cargo test -p wz-session-core --no-default-features --features alloc \
         --lib keyexpr_match --quiet || return 1
-    _runci_guarded_test "C1o keyexpr alloc+wildcards" 25 \
+    _runci_guarded_test "C1o keyexpr alloc+wildcards" 23 \
         cargo test -p wz-session-core --no-default-features \
         --features alloc,keyexpr-wildcard-single,keyexpr-wildcard-double,keyexpr-dollar-star,keyexpr-includes \
         --lib keyexpr_match --quiet || return 1
-    _runci_guarded_test "C1o keyexpr wildcards-no-alloc" 25 \
+    _runci_guarded_test "C1o keyexpr wildcards-no-alloc" 22 \
         cargo test -p wz-session-core --no-default-features \
         --features keyexpr-wildcard-single,keyexpr-wildcard-double,keyexpr-dollar-star,keyexpr-includes \
         --lib keyexpr_match --quiet || return 1
@@ -13817,7 +13822,8 @@ layer_c1m_session_lwip() {
     # gated on `rx-in-place`). The same file runs again on the FIXED bounded
     # backing (`bounded-heapless`, the MCU profile's), the one leg where a Put
     # delivered in place must cost the heap NOTHING; on the growable backing
-    # above it costs the matcher's two scratch lists. 3 = what each PRINTED.
+    # above it cost the matcher's scratch until the matcher read the key's text
+    # (2026-11-19), and costs nothing since. 3 = what each PRINTED.
     # B3 moved both 3 -> 4 (the extension-chain test above). 4 = what each
     # PRINTED.
     wz_test_args wz-session-lwip rx_frame_allocations

@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  Whether the pattern p matches the key t, read as a literal key (a `*` in t is
+  a byte, not a wildcard): the glob walk of a subscriber's pattern over a
+  published key.
+
+  * A text with an empty chunk matches nothing, and on a build whose key
+    buffer is fixed (`bounded`) neither does one of more than `chunk_bound`
+    chunks.
+  * keyexpr_walk walks t's chunks from p (relation 0): `*` (when
+    `wild_single`) takes one chunk that is not VERBATIM, any other chunk must
+    match (keyexpr_chunk_matches), and the last `**` (when `wild_double`) takes
+    what is left over, except a VERBATIM chunk.
+
+  A wildcard whose switch is off is a literal chunk.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="keyexpr_matches"
+       version="1.0">
+  <sce:import kind="algorithm" src="keyexpr_shape.scxml" as="keyexpr_shape"/>
+  <sce:import kind="event-schema" src="keyexpr_shape_schema.scxml" as="Shape"/>
+  <sce:import kind="algorithm" src="keyexpr_walk.scxml" as="keyexpr_walk"/>
+  <sce:signature>
+    <sce:param name="p" type="bytes"/>
+    <sce:param name="t" type="bytes"/>
+    <sce:param name="wild_single" type="bool"/>
+    <sce:param name="wild_double" type="bool"/>
+    <sce:param name="wild_dsl" type="bool"/>
+    <sce:param name="bounded" type="bool"/>
+    <sce:param name="chunk_bound" type="uint32"/>
+    <sce:return type="bool"/>
+  </sce:signature>
+  <sce:body>
+    <!-- Where no chunk bound applies, the walk judges both texts as it goes, and
+         a `**` of t is two bytes to it: no shape is read. -->
+    <sce:if cond="!bounded">
+      <sce:return expr="keyexpr_walk(p, t, 0, wild_single, wild_double, wild_dsl) === 1"/>
+    </sce:if>
+    <sce:var name="sp" type="record:Shape" init="keyexpr_shape(p)"/>
+    <sce:var name="st" type="record:Shape" init="keyexpr_shape(t)"/>
+    <sce:if cond="sp.chunks === 0 || st.chunks === 0">
+      <sce:return expr="false"/>
+    </sce:if>
+    <sce:if cond="bounded &amp;&amp; (sp.chunks &gt; chunk_bound || st.chunks &gt; chunk_bound)">
+      <sce:return expr="false"/>
+    </sce:if>
+    <!-- A `$*` chunk of p is spelled with a `$`: without one the chunk step
+         need not look for it. -->
+    <sce:return expr="keyexpr_walk(p, t, 0, wild_single, wild_double, wild_dsl &amp;&amp; sp.dollar) === 1"/>
+  </sce:body>
+</scxml>

@@ -2134,7 +2134,7 @@ pub enum AdminDeclaration {}
 /// the entity's declared (canonical) keyexpr; it may itself contain wildcards (a
 /// subscriber on `demo/**` → `@/<zid>/<whatami>/subscriber/demo/**`), which the
 /// intersection matcher handles symmetrically. A grammar-invalid pattern yields an
-/// ill-formed target that [`keyexpr_match::keyexpr_intersects_target`] treats as
+/// ill-formed target that [`keyexpr_match::keyexpr_intersects`] treats as
 /// no-match (silently skipped) — wz's no-panic posture, NOT zenoh's
 /// `.try_into().unwrap()`.
 #[cfg(all(test, feature = "adminspace-introspection-handlers"))]
@@ -2309,7 +2309,7 @@ impl AdminConfigWriteSpace {
     /// with `strip_prefix`, so `@/*/peer/config/batch-size` — an ordinary
     /// wildcard write upstream applies to its own config — was silently
     /// dropped. Set semantics is the fix, and it is [`wz_session_core::keyexpr_match`]'s
-    /// existing `keyexpr_intersects_target`, unconditionally available here
+    /// existing `keyexpr_intersects`, unconditionally available here
     /// because `adminspace-core` implies `keyexpr-wildcard-double`.
     ///
     /// # Gate 2 is read POSITIONALLY, and that is a DELIBERATE divergence
@@ -2501,10 +2501,10 @@ fn reply_leg(
 
 /// Whether the GET `query` intersects the admin key `key`.
 ///
-/// The key is split into a chunk view on the stack, bounded as every keyexpr scan
-/// in this crate is ([`wz_session_core::keyexpr_match::MAX_KEYEXPR_CHUNKS`]): unbounded on the
-/// growable backing, so the AP answers exactly as before, and a key deeper than the
-/// bound is not a match on a no-heap node.
+/// The key is bounded as every keyexpr scan in this crate is
+/// ([`wz_session_core::keyexpr_match::MAX_KEYEXPR_CHUNKS`]): unbounded on the growable backing,
+/// so the AP answers exactly as before, and a key deeper than the bound is not a match on a
+/// no-heap node.
 ///
 /// A GET names one key far more often than it names a pattern, and every leg of the answer asks
 /// this of its own key, so the exact case is answered by comparing the two texts: two keys with
@@ -2524,14 +2524,13 @@ pub fn key_intersects_query(query: &str, key: &str) -> bool {
 /// the config, the status, the plugins, the per-entity documents), and a query that was looked at
 /// anew for each of them was scanned for wildcards, and for the ones whose keys hold a wildcard
 /// split into chunks, once per leg: about a quarter of the instructions of an answered GET, in a
-/// profile of the MCU node's `status/connect`. Prepared here, the query is scanned once, and its
-/// chunks are made at most once and only if a leg needs them.
+/// profile of the MCU node's `status/connect`. Prepared here, the query is scanned once, and a
+/// leg the scan cannot answer is left to the general rule.
 pub struct PreparedQuery<'a> {
     text: &'a str,
     /// No wildcard, no empty chunk and no deeper than the scans accept: against a plain key
     /// such a query intersects exactly when the two are the same text.
     plain: bool,
-    chunks: core::cell::OnceCell<Option<wz_session_core::keyexpr_match::KeyChunks<'a>>>,
 }
 
 impl<'a> PreparedQuery<'a> {
@@ -2539,7 +2538,6 @@ impl<'a> PreparedQuery<'a> {
         Self {
             text,
             plain: is_plain_key(text),
-            chunks: core::cell::OnceCell::new(),
         }
     }
 
@@ -2562,18 +2560,7 @@ impl<'a> PreparedQuery<'a> {
                 _ => {}
             }
         }
-        let Some(key_chunks) = wz_session_core::keyexpr_match::KeyChunks::split(key) else {
-            return false;
-        };
-        let query_chunks = self
-            .chunks
-            .get_or_init(|| wz_session_core::keyexpr_match::KeyChunks::split(self.text));
-        match query_chunks {
-            Some(query_chunks) => {
-                wz_session_core::keyexpr_match::keyexpr_intersects_chunks(query_chunks, &key_chunks)
-            }
-            None => false,
-        }
+        wz_session_core::keyexpr_match::keyexpr_intersects(self.text, key)
     }
 }
 
@@ -2632,15 +2619,11 @@ fn starts_with_chunks(query: &str, prefix: &str) -> bool {
         && (query.len() == prefix.len() || query.as_bytes()[prefix.len()] == b'/')
 }
 
-/// [`key_intersects_query`] by the general rule alone: both keys split into chunks and
-/// intersected chunk by chunk, with none of the preparation. The reference the tests hold
-/// [`PreparedQuery`] to, over every pair they build.
+/// [`key_intersects_query`] by the general rule alone, with none of the preparation: the
+/// reference the tests hold [`PreparedQuery`]'s shortcuts to, over every pair they build.
 #[cfg(test)]
-fn key_intersects_query_by_chunks(query: &str, key: &str) -> bool {
-    let Some(chunks) = wz_session_core::keyexpr_match::KeyChunks::split(key) else {
-        return false;
-    };
-    wz_session_core::keyexpr_match::keyexpr_intersects_target(query, &chunks)
+fn key_intersects_query_by_rule(query: &str, key: &str) -> bool {
+    wz_session_core::keyexpr_match::keyexpr_intersects(query, key)
 }
 
 /// The bytes reserved for the key buffer of one admin answer: `@/<zid>/<whatami>/` is 17 bytes
@@ -4375,10 +4358,10 @@ mod tests {
 
     /// Every key and query of up to three chunks over a vocabulary with the wildcards, an empty
     /// chunk and chunks that share a prefix: the shortcut for a plain key and a plain query
-    /// answers exactly as the chunk-by-chunk rule does for every pair, and the keys deeper than
-    /// the scans accept are answered by the rule, not by equality.
+    /// answers exactly as the general rule does for every pair, and the keys deeper than the
+    /// scans accept are answered by the rule, not by equality.
     #[test]
-    fn the_exact_key_shortcut_answers_as_the_chunk_rule_does() {
+    fn the_exact_key_shortcut_answers_as_the_general_rule_does() {
         let chunks = ["a", "b", "ab", "*", "**", "$*", "a$*", ""];
         let mut texts: Vec<String> = Vec::new();
         for depth in 1..=3usize {
@@ -4397,18 +4380,18 @@ mod tests {
         }
         let mut shortcut_taken = 0usize;
         for query in &texts {
-            // One preparation, asked of every key, as an answer's legs ask it: what the first
-            // key caused to be prepared must serve the others as the rule would.
+            // One preparation, asked of every key, as an answer's legs ask it: it must serve
+            // every key as the rule would.
             let prepared = PreparedQuery::new(query);
             for key in &texts {
                 assert_eq!(
                     prepared.intersects(key),
-                    key_intersects_query_by_chunks(query, key),
+                    key_intersects_query_by_rule(query, key),
                     "query {query:?}, key {key:?}"
                 );
                 assert_eq!(
                     key_intersects_query(query, key),
-                    key_intersects_query_by_chunks(query, key),
+                    key_intersects_query_by_rule(query, key),
                     "query {query:?}, key {key:?} (a fresh preparation)"
                 );
                 if prepared.plain && is_plain_key(key) {
@@ -4429,11 +4412,11 @@ mod tests {
         assert!(is_plain_key(&shallow));
         assert_eq!(
             key_intersects_query(&shallow, &shallow),
-            key_intersects_query_by_chunks(&shallow, &shallow)
+            key_intersects_query_by_rule(&shallow, &shallow)
         );
         assert_eq!(
             key_intersects_query(&deep, &deep),
-            key_intersects_query_by_chunks(&deep, &deep)
+            key_intersects_query_by_rule(&deep, &deep)
         );
     }
 
@@ -4703,7 +4686,7 @@ mod tests {
         // The `@/<zid>/<whatami>/**` built-in queryable must INTERSECT both the
         // bare root admin GET and any sub-path GET (`.../metrics`, deeper) so a
         // remote peer's Query reaches the handler — the wire-path match
-        // (`QueryableRegistry::has_matching` → `keyexpr_intersects_target`). The
+        // (`QueryableRegistry::has_matching` → `keyexpr_intersects`). The
         // trailing `**` is honored ONLY when `keyexpr-wildcard-double` is on;
         // `adminspace-core` pulls it, so a slim `--no-default-features`
         // adminspace build still routes remote admin GETs. The local loopback
@@ -4711,27 +4694,22 @@ mod tests {
         // is what locks the dep: drop `keyexpr-wildcard-double` from
         // `adminspace-core` and the `**` degrades to a literal chunk, flipping
         // every positive assertion below to a non-match.
-        use alloc::vec::Vec;
-        use wz_session_core::keyexpr_match::keyexpr_intersects_target;
+        use wz_session_core::keyexpr_match::keyexpr_intersects;
         let qk = admin_queryable_key("a1b2", "peer"); // "@/a1b2/peer/**"
-        let root: Vec<&str> = "@/a1b2/peer".split('/').collect();
-        let metrics: Vec<&str> = "@/a1b2/peer/metrics".split('/').collect();
-        let deep: Vec<&str> = "@/a1b2/peer/subscriber/foo".split('/').collect();
-        let foreign: Vec<&str> = "@/ffff/peer".split('/').collect();
         assert!(
-            keyexpr_intersects_target(&qk, &root),
+            keyexpr_intersects(&qk, "@/a1b2/peer"),
             "bare root admin GET reaches the /** queryable (trailing ** matches zero chunks)"
         );
         assert!(
-            keyexpr_intersects_target(&qk, &metrics),
+            keyexpr_intersects(&qk, "@/a1b2/peer/metrics"),
             "a /metrics sub-path GET reaches the /** queryable"
         );
         assert!(
-            keyexpr_intersects_target(&qk, &deep),
+            keyexpr_intersects(&qk, "@/a1b2/peer/subscriber/foo"),
             "a deep sub-path GET reaches the /** queryable"
         );
         assert!(
-            !keyexpr_intersects_target(&qk, &foreign),
+            !keyexpr_intersects(&qk, "@/ffff/peer"),
             "a foreign zid does NOT match (negative control)"
         );
     }
@@ -7055,7 +7033,7 @@ mod tests {
     /// promises a consumer.
     ///
     /// Implemented HERE rather than delegated to
-    /// [`keyexpr_match::keyexpr_intersects_target`](wz_session_core::keyexpr_match) because
+    /// [`keyexpr_match::keyexpr_intersects`](wz_session_core::keyexpr_match) because
     /// that matcher honours `*` only under `keyexpr-wildcard-single`, and this
     /// build's own gate must not report agreement because a feature that reads
     /// wildcards was compiled out. The first draft did delegate, and a

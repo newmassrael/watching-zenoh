@@ -467,7 +467,10 @@ IMAGES = (
         # the address in place (deploy/resource_budget.json's row says the rest). Layer Qzk had not
         # run on hosted since `ef49dc9911` (2,376 then; the layers before it stopped every run), so
         # the heap, batching, GET and secure rows below were read again on this tree as well.
-        peak=2672,
+        # 2,664 on 2026-11-19, read alike on origin 07a955b26 and on the tree that generates the
+        # keyexpr relations from SCXML: the six rows below were 8 bytes under (over, for the admin
+        # node) their figures before that tree, so it did not move them.
+        peak=2664,
     ),
     # The fixed client with its storage block taken from the kernel heap at start
     # (`overlays/t2g_client_heap.conf`, CONFIG_WZ_STORAGE_HEAP, feature `heap-storage`): the code of
@@ -481,8 +484,8 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        # 2,672 on 2026-11-18, the fixed client's chain (see its row).
-        peak=2672,
+        # 2,664 on 2026-11-19, the fixed client's chain (see its row).
+        peak=2664,
     ),
     # The same client with the session coalescing a send window into one datagram
     # (`overlays/t2g_client_batching.conf`). The batch writer and its flush path are two more
@@ -534,8 +537,8 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        # 2,672 on 2026-11-18, the fixed client's chain (see its row).
-        peak=2672,
+        # 2,664 on 2026-11-19, the fixed client's chain (see its row).
+        peak=2664,
     ),
     # The fixed client that ASKS (`overlays/t2g_client_get.conf`): the getter of
     # `wz_session_mcu::slot_getter` is the application layer the observer's drain runs inside, and
@@ -635,8 +638,8 @@ IMAGES = (
         # chain is not a bound on this image (the reply sink is still called through a register, and
         # the path under it is not followed).
         # 2,768 on 2026-11-18: the dial into the send of either address family, as the fixed
-        # client's row says, 96 bytes over it.
-        peak=2768,
+        # client's row says, 96 bytes over it. 2,760 on 2026-11-19 (the fixed client's row).
+        peak=2760,
     ),
     # The fixed client over the secure channel (`overlays/t2g_client_tls.conf`, decision D9):
     # the dial completes a TLS 1.3 handshake in Mbed TLS before the session sees a byte, and every
@@ -669,8 +672,9 @@ IMAGES = (
         # codecs' frames). It is the chain through the node's loop, the connect manager and the dial;
         # the handshake beneath the dial is the stack bound's, which follows the calls through a register.
         # 5,152 on 2026-11-18: the node's address and locator text of either family and the send's
-        # wider address (deploy/resource_budget.json's row).
-        peak=5152,
+        # wider address (deploy/resource_budget.json's row). 5,144 on 2026-11-19 (the fixed
+        # client's row).
+        peak=5144,
     ),
     # The fixed-memory ADMIN node over Zephyr's sockets and the secure channel on the T2G kit
     # (`overlays/t2g_admin_fixed_tls.conf`, decision D14 of docs/session-lifecycle-intent.md): it listens,
@@ -698,8 +702,9 @@ IMAGES = (
         # the word of `str.w rN, [sp, #-4]!` counted.
         # 10,912 on 2026-11-18: `fixed_admin::start` 3,968 to 4,448 and `wz_app_main` 1,760 to 2,120
         # (an `IpAddr`, a `SocketAddr` and a 62-byte locator text of either family), and the send
-        # path's wider address (deploy/resource_budget.json's row).
-        peak=10912,
+        # path's wider address (deploy/resource_budget.json's row). 10,920 on 2026-11-19:
+        # `fixed_admin::start` 4,448 to 4,456, read alike on origin 07a955b26 (the fixed client's row).
+        peak=10920,
     ),
 )
 

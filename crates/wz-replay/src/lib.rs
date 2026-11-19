@@ -239,8 +239,7 @@ impl Selection<'_> {
         match self.keyexpr {
             None => true,
             Some(pattern) => {
-                let chunks: Vec<&str> = pattern.split('/').collect();
-                wz_session_core::keyexpr_match::keyexpr_pattern_matches(&chunks, &sample.keyexpr)
+                wz_session_core::keyexpr_match::keyexpr_matches(pattern, &sample.keyexpr)
             }
         }
     }

@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  Where the chunk of the key k that begins at s ends: the next `/` at or after
+  s, or the end of k. A start past the end of k is the end of k.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="keyexpr_chunk_end"
+       version="1.0">
+  <sce:signature>
+    <sce:param name="k" type="bytes"/>
+    <sce:param name="s" type="uint32"/>
+    <sce:return type="uint32"/>
+  </sce:signature>
+  <sce:body>
+    <sce:var name="n" type="uint32" init="len(k)"/>
+    <sce:if cond="s &gt; n">
+      <sce:return expr="n"/>
+    </sce:if>
+    <sce:var name="i" type="uint32" init="s"/>
+    <sce:while cond="i &lt; n &amp;&amp; k[i] !== 47">
+      <sce:assign target="i" expr="i + 1"/>
+    </sce:while>
+    <sce:return expr="i"/>
+  </sce:body>
+</scxml>

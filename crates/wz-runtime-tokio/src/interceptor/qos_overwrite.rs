@@ -52,7 +52,7 @@ use wz_session_core::declare_ext_qos::{
     read_push_qos, read_request_qos, set_push_qos, set_request_qos,
 };
 use wz_session_core::ext_view::query_value_payload_len;
-use wz_session_core::keyexpr_match::keyexpr_includes_target;
+use wz_session_core::keyexpr_match::keyexpr_includes;
 use wz_session_core::link::{InterceptorLink, LinkSubject};
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::put_payload::payload_len as put_payload_len;
@@ -347,15 +347,10 @@ impl Interceptor for QosOverwriteInterceptor {
             }
             if !rule.key_exprs.is_empty() {
                 let key = keyexpr.get_or_insert_with(|| ctx.full_keyexpr(msg));
-                let Some(key) = key else {
+                let Some(key) = key.as_deref() else {
                     continue;
                 };
-                let chunks: Vec<&str> = key.split('/').collect();
-                if !rule
-                    .key_exprs
-                    .iter()
-                    .any(|ke| keyexpr_includes_target(ke, &chunks))
-                {
+                if !rule.key_exprs.iter().any(|ke| keyexpr_includes(ke, key)) {
                     continue;
                 }
             }

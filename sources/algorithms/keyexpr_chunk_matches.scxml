@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  Whether the pattern chunk p[p_start..p_end] matches the chunk
+  t[t_start..t_end] of a key read as a literal. Equal bytes match; then a chunk
+  that begins with `@` (VERBATIM) matches nothing else; then (when `wild_dsl`) a `$*`
+  pattern chunk matches what its sub-parts are found in. `*` and `**` never
+  reach here: the sequence walk resolves them.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="keyexpr_chunk_matches"
+       version="1.0">
+  <sce:import kind="algorithm" src="keyexpr_range_equal.scxml" as="keyexpr_range_equal"/>
+  <sce:import kind="algorithm" src="keyexpr_has_dsl.scxml" as="keyexpr_has_dsl"/>
+  <sce:import kind="algorithm" src="keyexpr_dsl_matches.scxml" as="keyexpr_dsl_matches"/>
+  <sce:signature>
+    <sce:param name="p" type="bytes"/>
+    <sce:param name="p_start" type="uint32"/>
+    <sce:param name="p_end" type="uint32"/>
+    <sce:param name="t" type="bytes"/>
+    <sce:param name="t_start" type="uint32"/>
+    <sce:param name="t_end" type="uint32"/>
+    <sce:param name="wild_dsl" type="bool"/>
+    <sce:return type="bool"/>
+  </sce:signature>
+  <sce:body>
+    <sce:if cond="p_end &gt; len(p)">
+      <sce:return expr="false"/>
+    </sce:if>
+    <sce:if cond="t_end &gt; len(t)">
+      <sce:return expr="false"/>
+    </sce:if>
+    <sce:if cond="keyexpr_range_equal(p, p_start, p_end, t, t_start, t_end)">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:if cond="p_start &lt; p_end">
+      <sce:if cond="p[p_start] === 64">
+        <sce:return expr="false"/>
+      </sce:if>
+    </sce:if>
+    <sce:if cond="t_start &lt; t_end">
+      <sce:if cond="t[t_start] === 64">
+        <sce:return expr="false"/>
+      </sce:if>
+    </sce:if>
+    <sce:if cond="wild_dsl">
+      <sce:if cond="keyexpr_has_dsl(p, p_start, p_end)">
+        <sce:return expr="keyexpr_dsl_matches(p, p_start, p_end, t, t_start, t_end)"/>
+      </sce:if>
+    </sce:if>
+    <sce:return expr="false"/>
+  </sce:body>
+</scxml>

@@ -4826,6 +4826,7 @@ dependencies = [
  "schemars 1.2.3",
  "serde",
  "token-cell",
+ "wz-session-core",
  "zenoh-result",
 ]
 

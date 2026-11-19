@@ -1,0 +1,153 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  Whether the chunks a[a_start..a_end] and b[b_start..b_end] can be one chunk:
+  zenoh's `chunk_intersect`, in its order. Equal bytes meet; then a chunk that
+  begins with `@` (VERBATIM, the admin namespace) meets nothing else; then `*`
+  (when `wild_single`) meets any chunk; then `$*` (when `wild_dsl`): one side's sub-parts
+  must be found in the other side's text, and two `$*` chunks meet when their
+  leading sub-parts are prefix-compatible and their trailing ones
+  suffix-compatible, since each side's middle sub-parts can be spelled inside
+  the other's `$*`. A wildcard whose flag is off is a literal. `**` never
+  reaches here: the sequence walks resolve it.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="keyexpr_chunk_intersects"
+       version="1.0">
+  <sce:import kind="algorithm" src="keyexpr_range_equal.scxml" as="keyexpr_range_equal"/>
+  <sce:import kind="algorithm" src="keyexpr_has_dsl.scxml" as="keyexpr_has_dsl"/>
+  <sce:import kind="algorithm" src="keyexpr_dsl_matches.scxml" as="keyexpr_dsl_matches"/>
+  <sce:signature>
+    <sce:param name="a" type="bytes"/>
+    <sce:param name="a_start" type="uint32"/>
+    <sce:param name="a_end" type="uint32"/>
+    <sce:param name="b" type="bytes"/>
+    <sce:param name="b_start" type="uint32"/>
+    <sce:param name="b_end" type="uint32"/>
+    <sce:param name="wild_single" type="bool"/>
+    <sce:param name="wild_dsl" type="bool"/>
+    <sce:return type="bool"/>
+  </sce:signature>
+  <sce:body>
+    <sce:if cond="a_end &gt; len(a)">
+      <sce:return expr="false"/>
+    </sce:if>
+    <sce:if cond="b_end &gt; len(b)">
+      <sce:return expr="false"/>
+    </sce:if>
+    <sce:if cond="a_start &gt;= a_end">
+      <sce:return expr="keyexpr_range_equal(a, a_start, a_end, b, b_start, b_end)"/>
+    </sce:if>
+    <sce:if cond="b_start &gt;= b_end">
+      <sce:return expr="false"/>
+    </sce:if>
+    <sce:if cond="keyexpr_range_equal(a, a_start, a_end, b, b_start, b_end)">
+      <sce:return expr="true"/>
+    </sce:if>
+    <!-- @verbatim: reached only by an equal chunk. -->
+    <sce:if cond="a[a_start] === 64 || b[b_start] === 64">
+      <sce:return expr="false"/>
+    </sce:if>
+    <sce:if cond="wild_single">
+      <sce:var name="a_next" type="uint32" init="a_start + 1"/>
+      <sce:var name="b_next" type="uint32" init="b_start + 1"/>
+      <sce:if cond="a[a_start] === 42 &amp;&amp; a_next === a_end">
+        <sce:return expr="true"/>
+      </sce:if>
+      <sce:if cond="b[b_start] === 42 &amp;&amp; b_next === b_end">
+        <sce:return expr="true"/>
+      </sce:if>
+    </sce:if>
+    <sce:if cond="!wild_dsl">
+      <sce:return expr="false"/>
+    </sce:if>
+    <sce:var name="a_dsl" type="bool" init="keyexpr_has_dsl(a, a_start, a_end)"/>
+    <sce:var name="b_dsl" type="bool" init="keyexpr_has_dsl(b, b_start, b_end)"/>
+    <sce:if cond="a_dsl &amp;&amp; !b_dsl">
+      <sce:return expr="keyexpr_dsl_matches(a, a_start, a_end, b, b_start, b_end)"/>
+    </sce:if>
+    <sce:if cond="b_dsl &amp;&amp; !a_dsl">
+      <sce:return expr="keyexpr_dsl_matches(b, b_start, b_end, a, a_start, a_end)"/>
+    </sce:if>
+    <sce:if cond="!a_dsl">
+      <sce:return expr="false"/>
+    </sce:if>
+    <!-- Both hold `$*`. a_lead_end / b_lead_end: where each first `$*` begins;
+         a_trail / b_trail: where the text after each last `$*` begins. -->
+    <sce:var name="a_lead_end" type="uint32" init="a_end"/>
+    <sce:var name="a_trail" type="uint32" init="a_start"/>
+    <sce:var name="a_seen" type="bool" init="false"/>
+    <sce:var name="ai" type="uint32" init="a_start"/>
+    <sce:while cond="ai &lt; a_end">
+      <sce:var name="ai1" type="uint32" init="ai + 1"/>
+      <sce:var name="a_step" type="uint32" init="ai1"/>
+      <sce:if cond="ai1 &lt; a_end">
+        <sce:if cond="a[ai] === 36 &amp;&amp; a[ai1] === 42">
+          <sce:if cond="!a_seen">
+            <sce:assign target="a_lead_end" expr="ai"/>
+            <sce:assign target="a_seen" expr="true"/>
+          </sce:if>
+          <sce:assign target="a_trail" expr="ai1 + 1"/>
+          <sce:assign target="a_step" expr="ai1 + 1"/>
+        </sce:if>
+      </sce:if>
+      <sce:assign target="ai" expr="a_step"/>
+    </sce:while>
+    <sce:var name="b_lead_end" type="uint32" init="b_end"/>
+    <sce:var name="b_trail" type="uint32" init="b_start"/>
+    <sce:var name="b_seen" type="bool" init="false"/>
+    <sce:var name="bi" type="uint32" init="b_start"/>
+    <sce:while cond="bi &lt; b_end">
+      <sce:var name="bi1" type="uint32" init="bi + 1"/>
+      <sce:var name="b_step" type="uint32" init="bi1"/>
+      <sce:if cond="bi1 &lt; b_end">
+        <sce:if cond="b[bi] === 36 &amp;&amp; b[bi1] === 42">
+          <sce:if cond="!b_seen">
+            <sce:assign target="b_lead_end" expr="bi"/>
+            <sce:assign target="b_seen" expr="true"/>
+          </sce:if>
+          <sce:assign target="b_trail" expr="bi1 + 1"/>
+          <sce:assign target="b_step" expr="bi1 + 1"/>
+        </sce:if>
+      </sce:if>
+      <sce:assign target="bi" expr="b_step"/>
+    </sce:while>
+    <!-- The leading sub-parts agree on every byte both have. -->
+    <sce:var name="la" type="uint32" init="a_start"/>
+    <sce:var name="lb" type="uint32" init="b_start"/>
+    <sce:while cond="la &lt; a_lead_end &amp;&amp; lb &lt; b_lead_end">
+      <sce:if cond="la &gt;= a_end || lb &gt;= b_end">
+        <sce:return expr="false"/>
+      </sce:if>
+      <sce:if cond="a[la] !== b[lb]">
+        <sce:return expr="false"/>
+      </sce:if>
+      <sce:assign target="la" expr="la + 1"/>
+      <sce:assign target="lb" expr="lb + 1"/>
+    </sce:while>
+    <!-- One trailing sub-part is a suffix of the other. -->
+    <sce:var name="ts_a" type="uint32" init="a_trail"/>
+    <sce:while cond="ts_a &lt; a_end">
+      <sce:if cond="keyexpr_range_equal(a, ts_a, a_end, b, b_trail, b_end)">
+        <sce:return expr="true"/>
+      </sce:if>
+      <sce:assign target="ts_a" expr="ts_a + 1"/>
+    </sce:while>
+    <sce:var name="ts_b" type="uint32" init="b_trail"/>
+    <sce:while cond="ts_b &lt; b_end">
+      <sce:if cond="keyexpr_range_equal(b, ts_b, b_end, a, a_trail, a_end)">
+        <sce:return expr="true"/>
+      </sce:if>
+      <sce:assign target="ts_b" expr="ts_b + 1"/>
+    </sce:while>
+    <!-- An empty trailing sub-part is a suffix of any. -->
+    <sce:return expr="a_trail &gt;= a_end || b_trail &gt;= b_end"/>
+  </sce:body>
+</scxml>
