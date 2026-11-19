@@ -157,6 +157,17 @@ VERDICTS: dict[str, tuple[str, str | None, str]] = {
         "datagram carrying it is observed on the wire, which is what a one-ended "
         "verdict would need (compare `ttl`'s IP_RECVTTL reader).",
     ),
+    # The `multicast-link-requires-iface` policy (Round 4521 put it on the struct): whether a
+    # multicast LINK whose locator chose no interface is refused.
+    "link_requires_iface": (
+        "none",
+        "a_link_with_no_interface_is_refused_or_opened_as_the_snapshot_says",
+        "NOT MOVABLE ON THE SCOUTING PLANE: a scouting socket is not a link, so its fan-out "
+        "builds the config with `false`, upstream's behaviour, whatever the snapshot says. "
+        "On the data-plane link its witness opens a link with no interface under each "
+        "value the build allows and sees it refused or opened -- a decision on ONE node, "
+        "not an exchange between two ends, so no end-to-end claim is made.",
+    ),
 }
 
 COVERED = {"both"}
