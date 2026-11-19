@@ -611,6 +611,241 @@ void wz_ext_internal_stream_supervisor_null(
 bool wz_ext_internal_stream_supervisor_check(
     const wz_ext_owned_stream_supervisor_t *this_);
 
+/* End-to-end protection of the program's payload: a header in front of it
+ * that lets a receiver judge whether the frame is the one its sender built
+ * (a CRC, an identifier, a length) and whether it is the next one (a
+ * counter). The header is described by a PROFILE the program hands over as
+ * JSON text, with the rules a receiver judges by; the library holds no
+ * deployment's layout or constants. Part of the unstable surface.
+ *
+ * THE SENDER (e2e-sender capability) protects a payload under the profile and
+ * the program's header values, which are fixed when it is made: every field
+ * but the CRC, the length and the counter, in the values text the profile
+ * describes, and "@address" for the fields and parts the profile derives from
+ * the node's address. It keeps a counter for each stream it sends on (the
+ * instances of one message); a frame that is built carries the stream's next
+ * value, a refused one consumes none. With crc_cache a stream keeps its last
+ * frame, and protecting an unchanged payload again gives the same bytes
+ * without the full CRC computation.
+ *
+ * THE RECEIVER (e2e-receiver capability) judges each frame it is handed in the
+ * state it keeps per stream, in storage it allocates once when it is made, and
+ * writes a verdict; the payload is reported whatever the verdict, and whether
+ * a sample reaches the application is the program's choice. Its streams are
+ * named by the program (one per message or instance), or, with the
+ * e2e-sender-demux capability, kept one per sender, chosen by the sender
+ * identity of the profile's message cell: slots taken in arrival order by
+ * intact frames, or bound to a list of senders. A frame of a sender no slot
+ * holds is judged in no stream and counted.
+ *
+ * OWNERSHIP AND THREADS. As for the segment sender: owned from *_new until
+ * *_drop, which leaves the null state; the doors take the loan; a refusal
+ * string is the program's to drop. One handle may be called from several
+ * threads. */
+
+typedef uint8_t wz_ext_e2e_rollover_t;
+#define WZ_EXT_E2E_ROLLOVER_REFUSE 0 /* refuse a stream's next frame */
+#define WZ_EXT_E2E_ROLLOVER_WRAP 1   /* count on from zero */
+
+typedef struct wz_ext_owned_e2e_sender_t {
+  void *_handle;
+} wz_ext_owned_e2e_sender_t;
+typedef struct wz_ext_loaned_e2e_sender_t {
+  void *_handle;
+} wz_ext_loaned_e2e_sender_t;
+typedef struct wz_ext_moved_e2e_sender_t {
+  wz_ext_owned_e2e_sender_t _this;
+} wz_ext_moved_e2e_sender_t;
+
+typedef struct wz_ext_e2e_sender_options_t {
+  uint64_t first_counter; /* the first frame of every stream carries it */
+  size_t streams;         /* how many streams, at least 1 */
+  wz_ext_e2e_rollover_t rollover; /* WZ_EXT_E2E_ROLLOVER_* */
+  bool crc_cache;         /* keep each stream's last frame */
+} wz_ext_e2e_sender_options_t;
+
+/* One stream, a first counter of 0, refuse after the largest, no cache. */
+void wz_ext_e2e_sender_options_default(wz_ext_e2e_sender_options_t *this_);
+
+/* A sender for profile_json with the fixed header values values_json, made as
+ * options says (NULL: the defaults). this_ holds the null state on every
+ * error; refusal may be NULL and, on _Z_ERR_CONFIG_INVALID_VALUE (-89), holds
+ * the reason, beginning "profile" or "values" and naming the place.
+ *
+ * Z_OK; Z_ERR_NULL for a NULL this_, profile_json or values_json; Z_EINVAL
+ * (-75) for text that is not UTF-8 or an unknown rollover;
+ * _Z_ERR_CONFIG_INVALID_VALUE for a profile, values text or option refused (no
+ * stream, a first counter the counter field cannot hold, values that state
+ * the counter or leave a field out). */
+z_result_t wz_ext_e2e_sender_new(wz_ext_owned_e2e_sender_t *this_,
+                                 const char *profile_json,
+                                 const char *values_json,
+                                 const wz_ext_e2e_sender_options_t *options,
+                                 z_owned_string_t *refusal);
+
+/* The size of the frame that protects payload_len bytes. Z_OK; Z_ERR_NULL. */
+z_result_t wz_ext_e2e_sender_frame_size(
+    const wz_ext_loaned_e2e_sender_t *this_, size_t payload_len, size_t *out);
+
+/* Protect payload on stream: the frame written to out (room for capacity
+ * bytes), its length to written, the counter it carries to counter (may be
+ * NULL). Z_OK; Z_ERR_OVERFLOW (-74) when capacity is less than the frame;
+ * Z_EINVAL (-75) when the frame is refused (no such stream, the stream sent its
+ * largest value and does not wrap, a payload longer than the length field
+ * describes), refusal saying why; Z_ERR_NULL for a NULL sender, out or
+ * written, or a NULL payload with a length. Anything but Z_OK writes nothing
+ * to out and consumes no counter value. */
+z_result_t wz_ext_e2e_sender_protect(const wz_ext_loaned_e2e_sender_t *this_,
+                                     size_t stream, const uint8_t *payload,
+                                     size_t len, uint8_t *out, size_t capacity,
+                                     size_t *written, uint64_t *counter,
+                                     z_owned_string_t *refusal);
+
+/* The counter the stream's next frame carries; false when the stream is spent,
+ * for no such stream, or a NULL argument. */
+bool wz_ext_e2e_sender_next(const wz_ext_loaned_e2e_sender_t *this_,
+                            size_t stream, uint64_t *out);
+
+/* Make value the stream's next counter. Z_OK; Z_EINVAL for a value the counter
+ * field cannot hold or no such stream; Z_ERR_NULL. */
+z_result_t wz_ext_e2e_sender_set(const wz_ext_loaned_e2e_sender_t *this_,
+                                 size_t stream, uint64_t value);
+
+const wz_ext_loaned_e2e_sender_t *wz_ext_e2e_sender_loan(
+    const wz_ext_owned_e2e_sender_t *this_);
+wz_ext_moved_e2e_sender_t *wz_ext_e2e_sender_move(
+    wz_ext_owned_e2e_sender_t *this_);
+void wz_ext_e2e_sender_drop(wz_ext_moved_e2e_sender_t *this_);
+void wz_ext_internal_e2e_sender_null(wz_ext_owned_e2e_sender_t *this_);
+bool wz_ext_internal_e2e_sender_check(const wz_ext_owned_e2e_sender_t *this_);
+
+/* How a receiver's streams are chosen. */
+#define WZ_EXT_E2E_KEYING_INDEXED 0         /* the program names the stream */
+#define WZ_EXT_E2E_KEYING_SENDERS_ARRIVAL 1 /* a slot per sender, in arrival
+                                               order (e2e-sender-demux) */
+#define WZ_EXT_E2E_KEYING_SENDERS_BOUND 2   /* a slot per listed sender
+                                               (e2e-sender-demux) */
+
+/* What a verdict's status says. */
+#define WZ_EXT_E2E_OK 0            /* intact, and the next frame */
+#define WZ_EXT_E2E_FIRST 1         /* intact, and the stream's baseline */
+#define WZ_EXT_E2E_REPEATED 2      /* intact, the same counter again */
+#define WZ_EXT_E2E_OUT_OF_RANGE 3  /* intact, a step above the largest gap */
+#define WZ_EXT_E2E_COUNTER_ERROR 4 /* either of the two, under a profile that
+                                      reports them as one */
+#define WZ_EXT_E2E_INTEGRITY 5     /* not intact: failed says which check */
+#define WZ_EXT_E2E_UNSLOTTED 6     /* of a sender no slot holds */
+
+/* The bits of failed. */
+#define WZ_EXT_E2E_FAILED_CRC 1
+#define WZ_EXT_E2E_FAILED_IDENT 2  /* the identifier is not the expected one */
+#define WZ_EXT_E2E_FAILED_LENGTH 4 /* the length field disagrees with the
+                                      frame */
+#define WZ_EXT_E2E_FAILED_SHORT 8  /* shorter than the header */
+
+/* The values of unslotted. */
+#define WZ_EXT_E2E_SLOTTED 0
+#define WZ_EXT_E2E_NOT_LISTED 1 /* the bound list does not name the sender */
+#define WZ_EXT_E2E_SLOTS_FULL 2 /* every slot is another sender's */
+
+/* The bits of has: which numbers of a verdict hold a value (0 otherwise). */
+#define WZ_EXT_E2E_HAS_COUNTER 1
+#define WZ_EXT_E2E_HAS_STEP 2
+#define WZ_EXT_E2E_HAS_KIND 4
+#define WZ_EXT_E2E_HAS_RESULT 8
+#define WZ_EXT_E2E_HAS_SENDER 16
+#define WZ_EXT_E2E_HAS_STREAM 32
+#define WZ_EXT_E2E_HAS_SILENCE 64
+
+typedef struct wz_ext_owned_e2e_receiver_t {
+  void *_handle;
+} wz_ext_owned_e2e_receiver_t;
+typedef struct wz_ext_loaned_e2e_receiver_t {
+  void *_handle;
+} wz_ext_loaned_e2e_receiver_t;
+typedef struct wz_ext_moved_e2e_receiver_t {
+  wz_ext_owned_e2e_receiver_t _this;
+} wz_ext_moved_e2e_receiver_t;
+
+typedef struct wz_ext_e2e_receiver_options_t {
+  uint64_t max_gap;       /* the largest gap, at most the profile's ceiling;
+                             0 for the profile's own */
+  const uint64_t *senders; /* the bound list, BORROWED for the call */
+  size_t senders_len;
+  size_t streams;         /* streams, or sender slots, at least 1 */
+  uint8_t keying;         /* WZ_EXT_E2E_KEYING_* */
+} wz_ext_e2e_receiver_options_t;
+
+/* One stream named by the program, the profile's gap. */
+void wz_ext_e2e_receiver_options_default(wz_ext_e2e_receiver_options_t *this_);
+
+/* The verdict on one frame. The payload is frame + payload_offset, for
+ * payload_len bytes, whatever the status. */
+typedef struct wz_ext_e2e_verdict_t {
+  uint8_t status;    /* WZ_EXT_E2E_OK ... _UNSLOTTED */
+  uint8_t failed;    /* WZ_EXT_E2E_FAILED_* bits */
+  uint8_t has;       /* WZ_EXT_E2E_HAS_* bits */
+  uint8_t timeout;   /* 1 when the silence before it exceeded the profile's
+                        timeout */
+  uint8_t unslotted; /* WZ_EXT_E2E_SLOTTED, _NOT_LISTED or _SLOTS_FULL */
+  uint8_t reserved[3];
+  uint64_t counter;
+  uint64_t step;     /* from the stream's baseline */
+  uint64_t kind;     /* the message cell's parts */
+  uint64_t result;
+  uint64_t sender;
+  uint64_t silence_ms;
+  size_t stream;     /* the stream or slot it was judged in */
+  size_t payload_offset;
+  size_t payload_len;
+} wz_ext_e2e_verdict_t;
+
+/* A receiver of profile_json's frames, made as options says (NULL: the
+ * defaults). expected_json gives the identifier the profile's judge.ident
+ * names, in the shape of a sender's values text (other fields it states are
+ * not read); it may be NULL when the profile judges no identifier. this_ holds
+ * the null state on every error; refusal may be NULL.
+ *
+ * Z_OK; Z_ERR_NULL for a NULL this_ or profile_json; Z_EINVAL (-75) for text
+ * that is not UTF-8, an unknown keying, or a NULL senders with a length;
+ * WZ_EXT_ERR_UNSUPPORTED for sender keying in a build without
+ * e2e-sender-demux; _Z_ERR_CONFIG_INVALID_VALUE (-89) for a profile, expected
+ * text or option refused (no stream, a gap above the profile's ceiling, sender
+ * keying under a cell with no sender, more slots than E2E_SENDER_SLOTS, a bound
+ * list that does not fit), refusal saying why. */
+z_result_t wz_ext_e2e_receiver_new(wz_ext_owned_e2e_receiver_t *this_,
+                                   const char *profile_json,
+                                   const char *expected_json,
+                                   const wz_ext_e2e_receiver_options_t *options,
+                                   z_owned_string_t *refusal);
+
+/* Judge frame, received at now_ms (the program's clock) on stream; under
+ * sender keying stream is 0 and the receiver chooses. Z_OK with the verdict;
+ * Z_EINVAL for no such stream (out zeroed, nothing moved); Z_ERR_NULL for a
+ * NULL receiver or out, or a NULL frame with a length. */
+z_result_t wz_ext_e2e_receiver_judge(const wz_ext_loaned_e2e_receiver_t *this_,
+                                     size_t stream, const uint8_t *frame,
+                                     size_t len, uint64_t now_ms,
+                                     wz_ext_e2e_verdict_t *out);
+
+/* With e2e-sender-demux: how many frames were judged in no slot, by reason
+ * (either out may be NULL), and the sender a slot holds (false for a free
+ * slot or no such slot). */
+z_result_t wz_ext_e2e_receiver_counts(
+    const wz_ext_loaned_e2e_receiver_t *this_, uint64_t *not_listed,
+    uint64_t *full);
+bool wz_ext_e2e_receiver_slot_sender(const wz_ext_loaned_e2e_receiver_t *this_,
+                                     size_t slot, uint64_t *out);
+
+const wz_ext_loaned_e2e_receiver_t *wz_ext_e2e_receiver_loan(
+    const wz_ext_owned_e2e_receiver_t *this_);
+wz_ext_moved_e2e_receiver_t *wz_ext_e2e_receiver_move(
+    wz_ext_owned_e2e_receiver_t *this_);
+void wz_ext_e2e_receiver_drop(wz_ext_moved_e2e_receiver_t *this_);
+void wz_ext_internal_e2e_receiver_null(wz_ext_owned_e2e_receiver_t *this_);
+bool wz_ext_internal_e2e_receiver_check(
+    const wz_ext_owned_e2e_receiver_t *this_);
+
 /* wz's own result codes of the doors below, outside zenoh-pico's own codes
  * (-128 to -65), so a later zenoh-pico code cannot take them. */
 #define WZ_EXT_ERR_POLICY_OFF (-2)  /* the build's policy does not allow what

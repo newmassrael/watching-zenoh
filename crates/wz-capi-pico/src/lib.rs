@@ -175,6 +175,10 @@ pub mod clock_source;
 pub mod decl_watch;
 #[cfg(feature = "unstable-api")]
 pub mod device_requires;
+// End-to-end protection of an application's payload, the sending side and the receiving judge:
+// wz doors (`wz_ext.h`) of the unstable surface, in a build with either capability.
+#[cfg(any(feature = "e2e-sender", feature = "e2e-receiver"))]
+pub mod e2e;
 // The node's event log, written and read from C: wz doors (`wz_ext.h`) of the unstable surface
 // (the event ring of the observation plane).
 pub mod encoding;

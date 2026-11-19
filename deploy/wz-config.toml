@@ -42,7 +42,10 @@
 # capability is exported (core is the model under both ABIs and always has it). `default` is
 # whether a build that names nothing has it: on unless declared `default = "off"`, so the drop-in
 # exports what the reference build does, and `off` is for a switch the reference library itself
-# leaves off. zenoh-pico's own switches for a capability are the `maps` rows to it under the
+# leaves off. `default_off_abis` names the ABIs whose build that names nothing leaves an otherwise
+# default-on capability off: one plane, one switch, exported by several ABIs whose drop-ins did not
+# all export it before. The generated Kconfig states the pico ABI's default, as an image built from
+# it is a pico node, and each crate's Cargo `default` states its own ABI's. zenoh-pico's own switches for a capability are the `maps` rows to it under the
 # upstream switches below, so a deployer who already writes a pico `config.h` can state the same
 # intent: the capability is on when one of them is on, or when all are where it says
 # `pico_combine = "all"`. `pico_flags_all` is for a capability no row reaches but which pico has
@@ -1241,11 +1244,43 @@ help = "The public-key handshake, from the RSA identity of transport/auth/pubkey
 [[capability]]
 id = "e2e-sender"
 kconfig = "WZ_CAP_E2E_SENDER"
+# On in the zenoh-c ABI's default build, which has exported these doors since they were added and
+# which a participant that sends protected messages links as it is. Off in the pico ABI's: its
+# default is zenoh-pico's own surface, and its doors are wz_ext_* of the unstable surface, as its
+# other wz-own doors are; the zenoh-c ABI has no unstable capability, so that edge reaches pico
+# alone.
+default_off_abis = ["pico"]
 os_needs = []
-upstream_off = ["zenoh", "zenoh-c"]
-abis = ["core", "c"]
-implies = []
-help = "The sending side of an end-to-end protected message (wz_capi_c_e2e_sender_*, wz-own doors) and the frame writer behind it."
+upstream_off = ["zenoh", "zenoh-c", "zenoh-pico"]
+abis = ["core", "pico", "c"]
+implies = ["unstable-api"]
+help = "The sending side of an end-to-end protected message: a frame built under a profile with the counter kept per stream (wz_capi_c_e2e_sender_*, wz_ext_e2e_sender_*, wz-own doors) and the frame writer behind it."
+
+[[capability]]
+id = "e2e-receiver"
+kconfig = "WZ_CAP_E2E_RECEIVER"
+# Off by default: neither zenoh-pico nor zenoh-c has such doors. The receiving judge of end-to-end
+# protected frames, kept per stream in storage the program sizes, with the judging rules the
+# profile states, and a status beside every sample, whose payload is always handed on.
+default = "off"
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = ["unstable-api"]
+help = "The receiving judge of end-to-end protected frames: per-stream state, the judging rules a profile states, and a status per sample (wz_ext_e2e_receiver_*, wz-own doors)."
+
+[[capability]]
+id = "e2e-sender-demux"
+kconfig = "WZ_CAP_E2E_SENDER_DEMUX"
+# Off by default: a receiver whose message has one sender, or keeps its streams by instance, does
+# not need it. On, a receiver keeps one judge per sender, chosen by the sender identity of the
+# frame's header, in at most E2E_SENDER_SLOTS slots bound by a list or taken in arrival order.
+default = "off"
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = ["e2e-receiver"]
+help = "Judging state per sender for the receiving judge, keyed by a header field, in slots bound by a list or taken in arrival order (E2E_SENDER_SLOTS)."
 
 [[capability]]
 id = "config-verdict"
@@ -2615,6 +2650,25 @@ the clock-source capability is on. A node reads its time from the registered
 sources in the order they were registered, and the first that can say what time
 it is answers; with none registered it reads the system clock. 0 registers
 none, which leaves the system clock as the only source.
+'''
+
+[[limit]]
+id = "E2E_SENDER_SLOTS"
+kconfig = "WZ_LIMIT_E2E_SENDER_SLOTS"
+default = 8
+storage = "both"
+# One receiving judge of the e2e-sender-demux capability: the program sizes its slots when it makes
+# the judge, at most this many, and a frame of one sender more is not judged and is counted.
+scope = "entity"
+binding_heap = "open"
+binding_fixed = "build"
+wire = "none"
+help = '''
+How many senders one receiving judge of end-to-end protected frames keeps a
+counter for, when the e2e-sender-demux capability is on. Each slot is one
+sender, bound by a list or taken by the first intact frame of a sender in
+arrival order; a frame of a sender no slot holds is not judged and is counted.
+At least 1.
 '''
 
 [[limit]]

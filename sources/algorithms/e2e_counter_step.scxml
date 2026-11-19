@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  The forward step of an end-to-end protection counter from the baseline a receiver holds, in the
+  counter field's own width: `(counter - baseline) mod 2^width`.
+
+  The counter field is 1 to 8 bytes wide, so the width is given as its mask (`2^width - 1`, all
+  ones for 8 bytes) and the step is the 64-bit wrapping difference cut to it. A counter that wraps
+  between two frames is the ordinary case: 0xFFFF then 0 is a step of one in a two-byte counter.
+  Going backwards is a long step forward, which `e2e_counter_verdict` judges out of range.
+
+  The receiving judge (wz-app-frame `e2e_judge`) asks it of every intact frame after the first,
+  and reports the number it returns, so the step a consumer reads is the step the verdict was
+  reached from.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="e2e_counter_step"
+       version="1.0">
+  <sce:signature>
+    <sce:param name="counter" type="uint64"/>
+    <sce:param name="baseline" type="uint64"/>
+    <sce:param name="mask" type="uint64"/>
+    <sce:return type="uint64"/>
+  </sce:signature>
+  <sce:body>
+    <sce:return expr="wrappingSub(counter, baseline) &amp; mask"/>
+  </sce:body>
+</scxml>

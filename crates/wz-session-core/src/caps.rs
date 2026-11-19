@@ -487,6 +487,11 @@ pub const EVENT_RECORD_ARGS: usize = generated::EVENT_RECORD_ARGS;
 /// source. A count of entries in a table whose rows are allocated when they are registered.
 pub const CLOCK_SOURCES: usize = generated::CLOCK_SOURCES;
 
+/// How many senders one receiving judge of end-to-end protected frames keeps a counter for, when
+/// `e2e-sender-demux` is on (`wz_app_frame::e2e_receiver`). The program sizes each judge's slots
+/// when it makes it, at most this many. At least `1`.
+pub const E2E_SENDER_SLOTS: usize = generated::E2E_SENDER_SLOTS;
+
 /// How far ahead of the node's clock, in milliseconds, a timestamp from another node may be before
 /// the hybrid logical clock (`hlc::HlcCore`) refuses it: zenoh's `UHLC_MAX_DELTA_MS`, which
 /// is 500 unless the host states otherwise. A time and not a table size: it sizes no memory.
