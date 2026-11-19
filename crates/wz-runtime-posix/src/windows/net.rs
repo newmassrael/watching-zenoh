@@ -536,20 +536,22 @@ mod tests {
         );
     }
 
-    /// A member joins a group on the loopback interface and hears a datagram sent to the group out
-    /// of that interface, the multicast path a group transport runs over.
+    /// A member joins a group on the interface the routing picks and hears a datagram this host
+    /// sends to the group, the multicast path a group transport runs over. Not the loopback: the
+    /// Windows loopback adapter carries no group.
     #[test]
-    fn a_member_joined_on_the_loopback_hears_the_group() {
+    fn a_member_joined_on_the_routings_interface_hears_the_group() {
         let group = Ipv4Addr::new(239, 255, 71, 23);
         let member = WindowsUdpSocket::bind_shared(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)))
             .expect("a member");
         member
-            .join_group(IpAddr::V4(group), GroupInterface::V4(Ipv4Addr::LOCALHOST))
-            .expect("the join on the loopback");
-        let sender = WindowsUdpSocket::bind(LOOPBACK).expect("a sender");
+            .join_group(IpAddr::V4(group), GroupInterface::Routing)
+            .expect("the join on the routing's interface");
+        let sender =
+            WindowsUdpSocket::bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))).expect("a sender");
         sender
-            .set_multicast_interface(GroupInterface::V4(Ipv4Addr::LOCALHOST))
-            .expect("the loopback as the egress");
+            .set_multicast_interface(GroupInterface::Routing)
+            .expect("the routing's egress asks nothing");
         sender
             .send_to(SocketAddr::from((group, member.local().port())), b"group")
             .expect("a send to the group");
