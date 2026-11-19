@@ -526,7 +526,10 @@ impl core::fmt::Display for Seconds {
 
 /// The process's threads as one line: `[tid name state wchan]` for each, from `/proc/self/task`,
 /// in the order the kernel lists them. On a system without it, says so.
-fn threads_now() -> String {
+///
+/// Public for a host's own watchdog: a stress harness that finds its calls stopped prints the
+/// same line the watcher prints for a stopped loop, which tells a lock from a socket from a sleep.
+pub fn threads_now() -> String {
     #[cfg(target_os = "linux")]
     {
         use core::fmt::Write as _;
