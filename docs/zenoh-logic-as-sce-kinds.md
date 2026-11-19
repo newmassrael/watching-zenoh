@@ -13,23 +13,33 @@ what the census found on the wz side.
 
 ## 1. Answer
 
-About 369k production lines of hand-written Rust were classified. 4.6k already
-run through generated SCE code (A), 56k are expressible with a kind SCE has
-today (K), and 150k are blocked (G). The rest is platform seam (S, 52k),
-diagnostics (D, 30k) and glue (X, 76k), which do not move or move by a separate
-decision.
+About 544k production lines of hand-written Rust were classified in ten slices.
+7.2k already run through generated SCE code (A), 82k are expressible with a kind
+SCE has today (K), and 192k are blocked (G). The rest is platform seam (S, 77k),
+diagnostics (D, 36k) and glue (X, 149k), which do not move or move by a separate
+decision. Slices S1 to S6 were taken first (369k lines); S7 to S10 added the C
+ABI crates, the MCU runtimes and network stacks, and the crates and files the
+first six left out, and `docs/zenoh-logic-as-sce-kinds/crates.md` now names a
+slice or a reason for every crate.
 
-The blocked lines do not need 150k lines' worth of new language. They meet a
+The blocked lines do not need 192k lines' worth of new language. They meet a
 small set of missing elements, and one of them dominates: a machine cannot own a
-table keyed by a runtime value (U1, 97 rows in all six slices). After it come
-shared state with a stated memory ordering (U8, 39 rows), unbounded data (U10,
-32 rows), in-flight request tables (U9, 24 rows, most of which reduce to U1),
-text as data (U2, 27 rows), and recursive data (U5, 17 rows).
+table keyed by a runtime value (U1, 137 rows in eight slices). After it come text
+as data (U2a, 52 rows), unbounded data (U10, 46 rows), shared state with a stated
+memory ordering (U8, 39 rows in S1 to S6, a request now withdrawn, section 5),
+in-flight request tables (U9, 36 rows, most of which reduce to U1), and JSON
+documents (U12, 23 rows).
 
-So the first SCE change is the one SCE itself names as the reopener of a
-refused construct: letting a statechart hold a `bounded-collection`
-(`docs/SCE_ACCEPTED_SUBSET.md`, the paragraph on an algorithm looping over a
-bounded-collection import), with lookup by key.
+The first SCE change is SCE ADR 0108, a statechart that holds a table by key as
+a bounded map; its Rust part landed on 2026-11-19 and its C11 part is next
+(section 5).
+
+The C build reaches the zenoh-pico preset's C ABI first (S7). On the
+cooperative path (`wz-capi-pico` over `wz-capi-port` over `wz-capi-coop`) about
+11.8k lines are protocol logic, 8.7k of them blocked. Their completion, cancel,
+undeclare and close semantics rest on the count of an `Arc` or the order of a
+`Drop`; the S7 and S8 Summaries list each place, and the target structure needs
+each as an explicit event.
 
 ## 2. Method
 
@@ -47,11 +57,25 @@ bounded-collection import), with lookup by key.
   | S4 | `wz-runtime-tokio`: router, routing, session API; `wz-routing-graph` | 95 |
   | S5 | `wz-runtime-tokio`: the rest (link pipelines, shm, storage services, config); `wz-session-mcu`; `wz-runtime-coop` | 93 |
   | S6 | the `wz-zenoh*` crates; `wz-storage`, `wz-admin`, `wz-ext-pubsub`, `wz-auth`, `wz-access-control` | 93 |
+  | S7 | the zenoh-pico preset's C ABI: `wz-capi-pico`, `wz-capi-port`, `wz-capi-coop`, `wz-capi-core` | 106 |
+  | S8 | the zenoh-c preset's C ABI: `wz-capi-c` | 73 |
+  | S9 | MCU and hosted runtimes, links, network stacks, TLS, time: 22 crates | 87 |
+  | S10 | application framing, bridges, the demo, and the files S1 to S6 left out | 84 |
 
-- **Not classified.** The analyzer (`wz-capture`, about 89k production lines),
-  whose place in the migration is a separate decision; the C ABI crates
-  (`wz-capi-*`, about 58k), which a C build re-implements or generates rather
-  than migrates; test code and `#[cfg(test)]` modules; codec layout.
+  S7 to S10 were added on 2026-11-20, after the owner ruled that all protocol
+  logic is to be in SCE and that the C build is the zenoh-pico preset, and read
+  SCE's text at `origin/main` `e7640cec53`. S10's
+  rows for files S5 and S6 already counted inside larger rows (A 151, K 902,
+  S 606, X 538 lines) are left out of the totals.
+
+- **Coverage.** `docs/zenoh-logic-as-sce-kinds/crates.md` has a row for every
+  crate: the slices that read it, or an exclusion with its kind and reason.
+  `scripts/lib/logic_census_coverage_gate.py` holds that table to the tracked
+  crates, so a new crate is a red until it is placed.
+- **Not classified.** The analyzer (`wz-capture` and the crates that follow it),
+  whose place in the migration is a separate decision; test, build, binding and
+  example crates (each named in the table); test code and `#[cfg(test)]`
+  modules; codec layout.
 - **Classes.** A: already generated SCE code that wz uses. K: expressible with
   an existing kind. G: blocked, with a gap code. S: platform seam by design.
   D: diagnostics. X: glue, re-exports, configuration plumbing.
@@ -77,13 +101,13 @@ bounded-collection import), with lookup by key.
 
 | Class | Lines | Share |
 |---|---|---|
-| A | 4,612 | 1 % |
-| K | 56,133 | 15 % |
-| G | 150,061 | 41 % |
-| S | 51,851 | 14 % |
-| D | 30,471 | 8 % |
-| X | 75,940 | 21 % |
-| Total | 369,068 | |
+| A | 7,172 | 1 % |
+| K | 82,488 | 15 % |
+| G | 192,297 | 35 % |
+| S | 76,581 | 14 % |
+| D | 36,220 | 7 % |
+| X | 149,014 | 27 % |
+| Total | 543,772 | |
 
 | Slice | A | K | G | S | D | X |
 |---|---|---|---|---|---|---|
@@ -93,6 +117,16 @@ bounded-collection import), with lookup by key.
 | S4 | 3,513 | 5,352 | 46,356 | 6,609 | 4,610 | 9,431 |
 | S5 | 870 | 11,800 | 24,180 | 30,100 | 980 | 9,750 |
 | S6 | 0 | 16,930 | 25,946 | 6,618 | 5,133 | 33,932 |
+| S7 | 0 | 3,889 | 22,273 | 5,565 | 1,587 | 25,534 |
+| S8 | 0 | 10,624 | 3,438 | 2,766 | 1,294 | 24,631 |
+| S9 | 2,452 | 4,147 | 6,393 | 13,655 | 1,497 | 4,986 |
+| S10 | 108 | 7,695 | 10,132 | 2,744 | 1,371 | 17,923 |
+
+S7's G is mostly `wz-capi-core` (13.6k), the tokio engine that zenoh-pico's
+default build and the zenoh-c ABI share; it is not on the cooperative path. Of
+S9's G, 4.9k lines are `wz-tls-record`, the analyzer's offline TLS and QUIC
+decryption, which belongs with the analyzer's decision. S8's and S7's X is the
+marshalling of the C structures, by value in pico's case.
 
 S1's A count is the hand-written binding around eight generated statecharts
 (1,296 SCXML lines); the statecharts' behaviour is carried by host actions,
@@ -108,22 +142,26 @@ them; section 4.1 maps each slice's letters.
 
 | Code | Missing element | Rows | SCE evidence |
 |---|---|---|---|
-| U1 | A table keyed by a runtime value (id, zid, keyexpr, name) that a machine owns and mutates: bind, replace, unbind, lookup by key, a counted refusal when full | 97 (S1 12, S2 18, S3 1, S4 34, S5 14, S6 18) | a `sce-static` statechart has no bounded-collection variable; statechart `list<T>` variables append, clear and read by index only; `bounded-collection` addresses entries by handle |
-| U2a | Text as data: parse, produce, slice and compare texts (locators, keys, selectors, ACL subjects) | 23 (S1 8, S6 15) | a record's string has one write and one comparison; `list<T>` refuses a string element |
-| U2b | A table keyed by a text | 4 (S5) | a lookup keyed by a text is refused |
-| U3 | A record or list element that holds bytes, a list or a collection | 13 (S1 5, S4 8) | a record's fields are fixed-width numbers, `bool`, `enum:` or a bounded string; a `bytes` field is refused |
-| U4 | A statechart or algorithm step that encodes or decodes a codec value and branches on the result | 10 (S1 9, S3 1) | calls are defined between algorithms only; no text lets an algorithm call a codec |
-| U5 | Recursive data: keyexpr trie, JSON5 value tree, persistent-map trie, shm `AllocPolicy` tree | 17 (S3 1, S4 3, S5 6, S6 7) | no tree kind exists; `docs/rfc-sce-protocol-synthesis.md` §5.H deferred it |
+| U1 | A table keyed by a runtime value (id, zid, keyexpr, name) that a machine owns and mutates: bind, replace, unbind, lookup by key, a counted refusal when full | 137 (S1 12, S2 18, S3 1, S4 34, S5 14, S6 18, S7 28, S8 3, S9 6, S10 3) | a `sce-static` statechart has no bounded-collection variable; statechart `list<T>` variables append, clear and read by index only; `bounded-collection` addresses entries by handle. SCE ADR 0108 answers it (Rust landed, C11 next) |
+| U2a | Text as data: parse, produce, slice and compare texts (locators, keys, selectors, ACL subjects) | 52 (S1 8, S6 15, S7 20, S9 3, S10 6) | a record's string has one write and one comparison; `list<T>` refuses a string element |
+| U2b | A table keyed by a text | 14 (S5 4, S7 3, S8 2, S9 1, S10 4) | a lookup keyed by a text is refused; ADR 0108's map admits a text key |
+| U3 | A record or list element that holds bytes, a list or a collection | 17 (S1 5, S4 8, S7 1, S8 3) | a record's fields are fixed-width numbers, `bool`, `enum:` or a bounded string. A bounded `bytes` field is accepted (SCE `docs/SCE_ACCEPTED_SUBSET.md`, "A byte string"), which S1 to S6 read as refused; section 8 |
+| U4 | A statechart or algorithm step that encodes or decodes a codec value and branches on the result | 11 (S1 9, S3 1, S10 1) | calls are defined between algorithms only; no text lets an algorithm call a codec. Answered by the boundary binding (section 5) |
+| U5 | Recursive data: keyexpr trie, JSON5 value tree, persistent-map trie, shm `AllocPolicy` tree | 18 (S3 1, S4 3, S5 6, S6 7, S8 1) | no tree kind exists; `docs/rfc-sce-protocol-synthesis.md` §5.H deferred it |
 | U6 | A general graph: shortest-path trees, reachability, removal of detached nodes | 7 (S4) | no kind holds a graph |
-| U7 | A bounded pool of statechart instances routed by a runtime key | 4 (S1) | the reassembly, multicast and peer-table routers stay in Rust for this |
-| U8 | State shared across execution contexts with a stated memory ordering: locks, RCU snapshots, atomics protocols, fences between lanes | 39 (S1 7, S2 1, S4 20, S5 6, S6 5) | `queue` and `broadcast-log` state their guarantee for their own element only; no `sce:extern` for atomics or fences |
-| U9 | Many requests in flight, each with its own deadline and cancellation; executor `select` loops | 24 (S1 2, S4 14, S5 2, S6 6) | see 4.2: a single deadline is expressible; the table of in-flight requests is U1 |
-| U10 | Unbounded data: growable buffers, payload arenas, caches, reorder buffers | 32 (S2 2, S3 1, S4 10, S5 11, S6 8) | AP may hold it; on MCU it is a permanent constraint (`ARCHITECTURE.md` §2.3) |
-| U11 | A value-returning host or library function inside a step: HMAC, SHAKE/keccak, lz4, RSA, xxh3, SipHash, RFC 3339, float formatting | 15 (S1 6, S3 1, S4 2, S5 1, S6 5) | only a procedure's `<sce:helper>` returns a host value; `sce:extern` is absent |
-| U12 | A JSON / JSON5 document used as data (configuration, admin replies) | 10 (S5) | no codec encoding is JSON; `text-template` has no list or record hole |
-| U13 | A step that reads a value another component computed in the same macrostep (Q), or a host effect per element of a collection (I) | 5 (S3) | `<sce:action>` returns only whether it ran; `<sce:action>` inside `<foreach>` is refused |
+| U7 | A bounded pool of statechart instances routed by a runtime key | 9 (S1 4, S7 5) | the reassembly, multicast and peer-table routers stay in Rust for this |
+| U8 | State shared across execution contexts with a stated memory ordering: locks, RCU snapshots, atomics protocols, fences between lanes | 39 (S1 7, S2 1, S4 20, S5 6, S6 5) | `queue` and `broadcast-log` state their guarantee for their own element only; no `sce:extern` for atomics or fences. Withdrawn as a request (section 5); S7 to S10 classify such state by what it is, behind a door |
+| U9 | Many requests in flight, each with its own deadline and cancellation; executor `select` loops | 36 (S1 2, S4 14, S5 2, S6 6, S7 12) | see 4.2: a single deadline is expressible; the table of in-flight requests is U1 |
+| U10 | Unbounded data: growable buffers, payload arenas, caches, reorder buffers | 46 (S2 2, S3 1, S4 10, S5 11, S6 8, S7 2, S8 3, S9 5, S10 4) | AP may hold it; on MCU it is a permanent constraint (`ARCHITECTURE.md` §2.3) |
+| U11 | A value-returning host or library function inside a step: HMAC, SHAKE/keccak, lz4, RSA, xxh3, SipHash, RFC 3339, float formatting, a logarithm | 20 (S1 6, S3 1, S4 2, S5 1, S6 5, S9 4, S10 1) | only a procedure's `<sce:helper>` returns a host value; `sce:extern` is absent. SCE ADR 0109 D5 to D7 answer part of it |
+| U12 | A JSON / JSON5 document used as data (configuration, admin replies, profiles) | 23 (S5 10, S7 1, S8 1, S10 11) | no codec encoding is JSON; `text-template` has no list or record hole |
+| U13 | A step that reads a value another component computed in the same macrostep (Q), or a host effect per element of a collection (I) | 6 (S3 5, S9 1) | `<sce:action>` returns only whether it ran; `<sce:action>` inside `<foreach>` is refused |
 | U14 | A document generic over the application's types | 1 (S3) | `docs/rfc-sce-protocol-synthesis.md` §5.G deferred it |
-| P | Expressible, but the generated form would break a measured or stated performance property | 19 (S1 2, S2 7, S3 1, S4 7, S5 1, S6 1) | each row cites the measurement or `docs/query-answer-path.md` |
+| U15 | A wire layout known only at run time: a header whose widths, byte order, masks, marks and CRC model arrive as a profile on every call | 4 (S10) | a codec fixes each field's offset, size and order in the document; nothing in SCE reads a layout description at run time |
+| U16 | A queue or pool whose capacity is a run-time value (a C program states a channel's capacity when it makes it; W4's lend book) | 1 (S7), and W4 | a `queue` is bounded at build, segmented or intrusive |
+| U17 | A full queue that drops the newest or evicts the oldest, with one consumer that removes and several producers | 2 (S7 1, S8 1) | a `queue` gives back only its oldest element, and `overwrite-oldest` was refused on it; `broadcast-log` forgets its oldest but is read without removal, with one producer |
+| U18 | A post from a thread that is not the machine's owner whose effects must be applied before the posting call returns (zenoh-c runs a session's delivery to itself inside the call) | 1 (S8) | ADR 0084: "no input waits for a macrostep"; only start, stop and the destructor wait |
+| P | Expressible, but the generated form would break a measured or stated performance property | 22 (S1 2, S2 7, S3 1, S4 7, S5 1, S6 1, S7 2, S10 1) | each row cites the measurement or `docs/query-answer-path.md` |
 | L1 | The codec census's L1 (a body chosen by an extension's identity) | 1 (S2) | `docs/zenoh-as-sce-codec-documents.md` |
 
 ### 4.1 Slice letters to catalogue codes
@@ -136,6 +174,9 @@ them; section 4.1 maps each slice's letters.
 | S4 | M→U1, L→U3, T→U5, N→U6, C→U8, A→U9, H→U10, F→U11, P→P |
 | S5 | M→U1, L→U2b, T→U5, C→U8, A→U9, H→U10, F→U11, J→U12, P→P |
 | S6 | M→U1, R→U2a, T→U5, C→U8, A→U9, H→U10, F→U11, P→P |
+
+S7 to S10 use the catalogue codes. The elements they found missing are U15 to
+U18.
 
 ### 4.2 What is not a gap
 
@@ -152,38 +193,81 @@ them; section 4.1 maps each slice's letters.
   construct, so the three parallel regions that file realises in a host loop
   are not blocked by the language.
 
-## 5. Order of the SCE work
+## 5. The target structure and the order of the SCE work
 
-The order follows the rows each element unblocks and the C11 build that the
-migration is for.
+The owner ruled on 2026-11-19 that all protocol logic is to be in SCE documents,
+and that the C build has to be the zenoh-pico preset only, for now. The
+structure below was recommended for that goal with cost ignored, accepted by the
+owner, and agreed by the SCE session the same day. The census rows are read
+against it.
 
-1. **U1: a statechart holds a `bounded-collection`, addressed by key.** 97
-   rows. SCE already names this change as the one that reopens the refused loop
-   of an algorithm over a bounded-collection import. A full table's refusal is
-   counted, as wz counts it now.
-2. **U3 and U2: composite records and bounded text.** Extension chains,
-   locators, selectors and the ACL decision need a record that holds bytes and
-   lists, bounded text operations, and a text key. The ACL logic itself is
-   already what `sce:std/acl/acl_granted` expresses (S6 row 92); it is blocked
-   only by the keyexpr text it matches.
-3. **U4: a step that calls a codec.** With it, S1 rows 10 and 26 become K, and
-   the host stops being the only caller of the generated codecs.
-4. **U5, U6, U7: trees, graphs, instance pools.** The keyexpr trie and the
-   router's link-state graph. `docs/rfc-sce-protocol-synthesis.md` §5.H is the
-   place this was deferred.
-5. **U8 and U11: memory ordering and host functions.** Either the
-   `sce:extern` of the RFC (§5.I) or a stated ordering on `queue` /
-   `broadcast-log` plus a typed host-function call. Until then these rows stay
-   host-side, inside the seam.
-6. **U10, U12, U14: per preset.** Unbounded data and JSON are AP concerns; on
-   MCU they are excluded by `ARCHITECTURE.md` §2.3. Whether they move for AP is a
-   decision, not a missing element.
-7. **P rows** are measured one by one when their slice moves; the query answer
-   path is hand-written on purpose (`docs/query-answer-path.md`).
+1. **A sans-I/O core.** The protocol is a deterministic, single-threaded set of
+   machines and algorithms, generated for Rust and for C11 from one source set.
+   It performs no I/O and reads no clock of its own.
+2. **Parsing at the boundary.** Bytes that arrive through a door are decoded by
+   a bound codec into a typed schema event before any machine sees them, and a
+   `<send>` of a bound schema is encoded on the way out. Text (locators,
+   selectors, configuration keys, `.proto` files) is read by a text-grammar
+   codec in the same place.
+3. **Concurrency in the seam only.** Every input reaches a machine through
+   SCE's inbox and processor door (SCE ADR 0084). No lock or atomic guards
+   protocol state; a lock whose only job is to guard it disappears with this
+   structure, and what stays is the door.
+4. **Lifecycles as explicit events.** A completion, an undeclare order and a
+   close are events a machine receives, not the count of an `Arc` or the order
+   of `Drop`. The C ABI's semantics today rest on both (S7, S8).
+5. **N-version testing.** The Rust and C11 emissions run the same traces, with
+   zenoh-pico as the oracle for the preset. The C header is generated from one
+   interface description, with its layout pinned.
 
-Of the slices, S5's MCU and cooperative-engine rows are the first a C11 build
-reaches: they use the MCU-class kinds (`link`, `buffer-pool`, `worker`,
-`queue`) that SCE emits for Rust and C11 only.
+What this changes in the catalogue of section 4:
+
+- **U4** is answered by a boundary binding (item 2), not by letting a step call
+  a codec. The binding reuses the declaration of SCE ADR 0102 §1.3 and the door
+  of ADR 0084; the lend-in-place encode W4 and W5 need is decided with it.
+- **U2a and U2b** are answered by a text-grammar codec: a format of its own,
+  ABNF-like and refusing by rule, not an extension of the content-line encoding.
+- **U8** is no longer a request for the language. Its rows move behind a door
+  (item 3); the state the lock guarded is classified by what it is, usually U1.
+- **U11** is SCE ADR 0109's host operations: random values (D5), a keyed digest,
+  HMAC-SHA-256 with its verification (D6), and a key's lifecycle (D7). wz asked
+  for SHAKE128 (the initial sequence number) and unkeyed SHA-256 (the credential
+  identity) as standard algorithms beside them.
+- **U1** is SCE ADR 0108: a statechart holds a table by key as a bounded map,
+  and a full table answers `full`.
+
+The order, as the SCE session set it and the owner confirmed it (the boundary
+binding before ADR 0100):
+
+1. **ADR 0108 step 6, then step 7.** Step 5, the Rust bounded map and set,
+   landed on SCE main on 2026-11-19. Step 6 is C11. At step 7 wz moves its pin,
+   once, and U1's rows open.
+2. **The literal-shift fix.** `(1 << m)` typed as the literal's width in every
+   backend; the keyexpr dynamic programmes carry a local `one` until then.
+3. **A freestanding C11 gate.** Every fixture is compiled and linked for a
+   Cortex-M target with no host library, with a per-fixture size ratchet and a
+   run under qemu. Until it exists, nothing says the C11 emission is a C build.
+4. **The boundary-binding ADR, with the lend contract.** U4, W4 and W5.
+5. **ADR 0100.** The codec census's L1 to L5: a masked tag, refusal by rule,
+   fixed values, value ranges, and where a list ends.
+6. **The text-grammar codec ADR.** U2a and U2b.
+7. **ADR 0109's C11 lane and SHAKE128.** U11. ADR 0109 builds for Rust and C++
+   first (its D0), and opens C11 on wz's request.
+
+Not yet scheduled with the SCE session: U3 (a record that holds a list), U5, U6
+and U7 (trees, graphs and pools of instances), U13 and U14, and the four
+elements S7 to S10 found: U16 and U17 (a queue's run-time capacity and its full
+policy, which the C ABIs' channels need), U18 (a delivery applied inside the
+call that posted it, which zenoh-c's contract needs), and U15. U15 is first a
+decision for the owner: either a deployment writes its profile as a codec
+document in its own repository and generates from it, and its rows become K,
+or SCE gains a kind whose input is a layout description. U9 is
+U1 once a single deadline is a statechart timer (section 4.2). U10 and U12 are
+per preset: on MCU, `ARCHITECTURE.md` §2.3 excludes them, and whether they move
+for AP is a decision. P rows are measured one by one when their slice moves.
+
+Of the slices, S7 (the zenoh-pico preset's C ABI on the cooperative engine) and
+the MCU rows of S5 and S9 are what the C build reaches first.
 
 ## 6. Behaviour a migration must carry
 
@@ -276,6 +360,27 @@ The list above is the census as taken. This list records what changed since.
   candidates for the catalogue of section 4, for the SCE session to judge.
 - **W3, open.** Not yet scoped beyond the census row.
 
+### 7.2 What S7 to S10 found (2026-11-20)
+
+Recorded, not changed.
+
+- **W5, in detail.** Generating the two `sources/links/lwip_udp_*.scxml`
+  documents as written would not give the hand-written link (S9). Both name the
+  transport Frame body as their framer, where a session datagram is a batch of
+  whole transport messages and a scouting datagram is a bare scouting message.
+  The session document says `block` where the code drops and counts in both
+  directions. The documents bind none of the six generated pools the link uses,
+  and the `link` kind's Rust form sends by copy where wz lends in place.
+- **W9, a race to check.** With `history`, zenoh-c's event listener lists the
+  connected faces and only then installs its watch (S8 row 44). A face that
+  comes up between the two is reported by neither, and one that goes down there
+  is reported up and never down. Not yet compared with upstream's order.
+- **W10, a hand copy.** `wz-ap-demo-app`'s `register_bindings` restates the two
+  binding rows of the generated sidecar for the dynamic registry (S10 row 29).
+- **W11, a divergence from pico.** Where the system gives the cooperative C ABI
+  no thread, it panics; zenoh-pico returns `_Z_ERR_SYSTEM_TASK_FAILED` (S7 row
+  17).
+
 ## 8. Open points
 
 - U4 rests on the absence of any text that lets an algorithm call a codec. If
@@ -285,5 +390,36 @@ The list above is the census as taken. This list records what changed since.
   settled.
 - S3 rows 34, 51 and 53, and S6 keyexpr rows, are K only once a bound on the
   text length is declared.
-- The classification of the analyzer (`wz-capture`) and of the C ABI crates is
-  outside this census.
+- The classification of the analyzer (`wz-capture` and the crates that follow
+  it, `docs/zenoh-logic-as-sce-kinds/crates.md`) is outside this census.
+  `wz-tls-record` is classified in S9 although it is the analyzer's.
+- U3's rows in S1 and S4 were read with a `bytes` field refused. SCE accepts a
+  bounded one, so the rows whose record holds bytes and no list are to be
+  re-read; some move to K.
+- S9 reads the chip drivers' protocols (bring-up, PHY negotiation, OA-TC6;
+  about 2.4k lines) as K. If a whole chip driver is read as seam, they are S.
+- S8 row 37: zenoh-c's FIFO channel is K only if the producer's end of stream
+  travels as a queue element; the `queue` kind states no close.
+
+## 9. How much reaches C11 today
+
+Measured on the tree of 2026-11-20 (`main` `d8e96f368`). The SCE sources under
+`sources/` number 123:
+
+| Sources | Count | Emitted as C11 by a wz lane |
+|---|---|---|
+| Codecs (`sources/codecs/`) | 65 | Emitted; Layer B checks the emit exits 0 and writes a file |
+| Algorithms (`sources/algorithms/`) | 32 | Emitted, as the codecs |
+| Statecharts (`sources/session/` 7, `reassembly_slot`) | 8 | No |
+| Buffer pools (`sources/network/*_pool_*`) | 13 | No |
+| Links (`sources/links/`) | 2 | No; the Rust form is not generated either (W5) |
+| Event schemas (`hello_received_schema`, `fragment_chunk_schema`) | 2 | No |
+| Feature manifest (`sources/features/`) | 1 | No |
+
+The emitted C11 is not compiled, linked or run by any lane:
+`scripts/verify-codegen.sh` emits it, and its Layer 1 judges that the emit
+succeeded. `out/` holds Rust only (117 files). The zenoh-pico preset's C ABI
+(`wz-capi-pico` on `wz-capi-coop`) is Rust compiled to a library, and none of
+its protocol behaviour runs through a C11 emission. The freestanding gate of
+section 5, step 3, is what turns the second column into a claim about a C
+build.
