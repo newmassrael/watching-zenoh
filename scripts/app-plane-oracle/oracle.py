@@ -316,6 +316,11 @@ def prepare(lane_path: Path, scratch: Path) -> list[str]:
                 params["suffix"] = check.get("suffix") or "/lane-no-cache"
                 params["depth"] = 1
                 variant = "segmented"
+                held = lane.get("wz", {}).get("build_env", {}).get("WZ_POLICY_REPLAY_LIVE_BEFORE_ANSWER")
+                if held == "hold-back":
+                    raise Refused(f"check {name!r}: live pieces are joined by a subscriber that no "
+                                  "round ever releases, so WZ_POLICY_REPLAY_LIVE_BEFORE_ANSWER "
+                                  "hold-back would keep every frame")
         else:
             frames = _positive(check, "frames")
             if frames > MAX_FRAMES:
@@ -630,6 +635,8 @@ def selftest() -> int:
         refused(_lane(session="peer"), "a session that is not an object")
         refused(_lane(checks=[dict(_lane()["checks"][2], segment={"profile": {}, "values": {}})]),
                 "an e2e segment without chunk_bytes")
+        refused(_lane(wz={"build_env": {"WZ_POLICY_REPLAY_LIVE_BEFORE_ANSWER": "hold-back"}}),
+                "an e2e segment under hold-back")
         refused(_lane(key_ids=KEY_IDS), "a dictionary for a build without shared-key-ids")
         refused(_keyed([]), "key_ids that is not an object")
         refused(_keyed({"dictionary": []}), "an empty dictionary")
