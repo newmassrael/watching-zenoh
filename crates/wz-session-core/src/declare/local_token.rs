@@ -72,7 +72,7 @@
 
 use crate::bounded::{BoundedString, BoundedVec, CapacityFull, Profile, Storage};
 use crate::caps;
-use crate::keyexpr_match::{keyexpr_intersect_patterns, MAX_KEYEXPR_CHUNKS};
+use crate::keyexpr_match::keyexpr_intersects;
 use crate::registry_error::RegisterError;
 
 // R311ho — borrowed codec types for the single-source reply builders
@@ -480,28 +480,16 @@ impl<P: Storage> LocalTokenRegistry<P> {
 }
 
 /// Whether a held token's concrete `keyexpr` intersects the inbound
-/// Interest `pattern` (`None` = match-all). Splits both into stack chunk
-/// views (no heap); a keyexpr deeper than [`MAX_KEYEXPR_CHUNKS`] chunks
+/// Interest `pattern` (`None` = match-all), matched as text (no heap). On
+/// the fixed backing a keyexpr deeper than
+/// [`MAX_KEYEXPR_CHUNKS`](crate::keyexpr_match::MAX_KEYEXPR_CHUNKS) chunks
 /// (cannot happen for a registered keyexpr) is treated as non-matching
-/// rather than matched truncated.
+/// rather than matched truncated; the matcher applies that bound itself.
 fn token_matches(token_keyexpr: &str, pattern: Option<&str>) -> bool {
-    let p = match pattern {
-        Some(p) => p,
-        None => return true,
-    };
-    let mut token_chunks: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
-    for c in token_keyexpr.split('/') {
-        if token_chunks.push(c).is_err() {
-            return false;
-        }
+    match pattern {
+        Some(p) => keyexpr_intersects(token_keyexpr, p),
+        None => true,
     }
-    let mut pattern_chunks: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
-    for c in p.split('/') {
-        if pattern_chunks.push(c).is_err() {
-            return false;
-        }
-    }
-    keyexpr_intersect_patterns(&token_chunks, &pattern_chunks)
 }
 
 /// The bytes [`build_token_reply`] encodes to for the same arguments: what a sender with no

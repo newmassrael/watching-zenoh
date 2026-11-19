@@ -2837,7 +2837,7 @@ pub fn check_out_of_band<R: SessionRuntime, T: TimeSource>(
 ///
 /// A PORT rather than a call into the §5.16 policy kernel, and the direction is
 /// forced rather than chosen: `wz-access-control` DEPENDS ON this crate (it
-/// reads `keyexpr_includes_target` and `link::LinkSubject` from here), so a
+/// reads `keyexpr_includes` and `link::LinkSubject` from here), so a
 /// call the other way is a cycle. Dependency inversion is the only shape that
 /// leaves the gate where both profiles build it — which is the property this
 /// atom asserts about every other piece of the close machinery, and a gate that
