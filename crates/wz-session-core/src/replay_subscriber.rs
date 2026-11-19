@@ -287,7 +287,7 @@ impl<'a> ReplaySubscriber<'a> {
         if quota == 0 {
             return Err(CreateRefused::NoQuota);
         }
-        let in_range = |ticks: u32| ticks != 0 && ticks <= MAX_TIMEOUT_TICKS;
+        let in_range = |ticks: u32| (1..=MAX_TIMEOUT_TICKS).contains(&ticks);
         if !in_range(deadlines.progress) || !in_range(deadlines.round) {
             return Err(CreateRefused::DeadlineOutOfRange);
         }

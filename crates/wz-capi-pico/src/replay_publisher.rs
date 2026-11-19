@@ -320,7 +320,7 @@ impl Shared {
         match self.shape {
             ReplayReplyShape::FramePerSample => {
                 for frame in &frames {
-                    if reply(frame).is_err() {
+                    if reply(frame.as_slice()).is_err() {
                         break;
                     }
                 }
