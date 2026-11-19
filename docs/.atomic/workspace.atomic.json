@@ -4987,6 +4987,29 @@
       "carry_forward_bullets": [
         "Step 3c: `MulticastParams` carries a snapshot and the multicast wrappers go (`Pacing::of_build_defaults`, `reassembly_config_of_build`, `Session::new_multicast`, `wire_dialed_link`, the multicast socket configs' `Default`); `NodeHlc` wrapper callers move to `for_node_by`; the C ABI router node opens through `RouterForwarder::for_node`; entity option and loopback `Default` sites and `TxQueueConf::default()` in the zenoh config crate move; the gate widens to catch them, and the session-core build-default wrappers go once no caller is left. Then step 4, the open-stage document under the `wz/` namespace."
       ]
+    },
+    "Round 4522": {
+      "decision_summary": "Pay the hosted reds main has carried since Round 4506 and the three rounds after it, read job by job from CI run 44412368690 (458774b1f): the peer scenes frozen before Round 4520 now carry the undeclare a router sends a client for a queryable it keeps past the client's interest, as upstream's broker does (`zenoh/src/net/routing/hat/broker/queries.rs` @ `fn maybe_unpropagate_queryable(`); three wz-ap-demo group tests hand the typed zid of Round 4506; the doc links a reduced build cannot reach are written by their crate path or as code spans; a declared repository path is checked on its own string and the capture crate's dev-dependency note no longer reads as a denial, the two C0 legs that refused; and the C1y, C1p and C1q count guards hold what their commands print, the C1q one a test Round 4521 added while the step before it was red. Three lanes red since Round 4506 are not paid here: the capability cost lane and the Zephyr kit lane, whose budgets are hosted readings of a tree (Round 4521's) whose run has not started, and E6c and E6d, which the C1p guard hid and the build host shows failing for a cause in the dial loop that is its own round.",
+      "changes_bullets": [
+        "`crates/wz-runtime-tokio/src/router_forward/peer_scenes/{gossip,link_state}.txt`: one line each, the `data face 1` undeclare at the scene's `Down(0)`, regenerated with `WZ_BLESS_PEER_SCENES` and equal byte for byte to the blessed files.",
+        "`crates/wz-ap-demo/src/sessions_run.rs`: three `group_params` calls take `SessionZid::from([..])` instead of a `Vec`.",
+        "`crates/wz-session-core/src/{policy,session_zid,session_actions}.rs` and `crates/wz-admin/src/adminspace.rs`: module docs link `SessionPolicy::defaults` and `SessionZid` by their crate path; `chain_frames` and `parse_admin_config_write`, compiled out of some configurations, are named in code spans.",
+        "`scripts/lib/offline_build.py` `_repo_path` reads a declared path's segments off the string; `crates/wz-capture/Cargo.toml` rewords the wz-app-frame dev-dependency note.",
+        "`scripts/run-ci.sh`: C1y accept_loop 27 to 34, C1p 101 to 102, C1q 15 to 16, each with the commit that moved it; `docs/reason-review-pins.md` re-pins session-close-ingress on session_actions.rs."
+      ],
+      "verification_bullets": [
+        "Every red job of run 44412368690 read from its own log, and the last run each lane passed (44201914197 at 4050dd889) read for the counts it printed.",
+        "On the build host at the tip of this item: the frozen peer scenes 2 of 2 with the five features they need; `wz-ap-demo --all-features` tests and clippy -D warnings; `reduced_docs_gate.py measure --only \"wz-session-core wz-admin\"` (120 configurations, nothing over the ledger); `run-ci.sh` layers C1y, C1p, C1q, C1s, C1r, C4e, C1bb, C1bc, C1ba and C1bz pass. E6c and E6d, the steps after them in the same hosted job, fail: peer-A dials one address twice and never holds two links (`wz_peer_multilink_aggregate.rs` @ `no 'live links now 2'`), the cause named in this round's carry.",
+        "Locally: `prose_build_closure_gate.py --check`, `root_relative_exclusion_lint.py` and `offline_build.py --selftest` (95 cases); reason review pins, store reason citations, reason citations, upstream citation anchors and the prose name gate; `cargo fmt --check` of the touched crates."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "E6c and E6d (multilink aggregation, red behind C1p since Round 4506): `a9bf75ef4` hands a `routing-peer` loop's configured list to `loop_peers::set_endpoints`, which keys an endpoint by its address, so a list that names one address twice opens one link where upstream starts a connector per listed endpoint (`zenoh/src/net/runtime/orchestrator.rs` @ `async fn peer_connector_retry(`); paid in the next round. Capability cost (C1cs, 17 cases over budget on hosted since 4506) and the Zephyr kit lane (Qzk: five stack bounds below their rows, zephyr-admin-fixed-tls 16 bytes above and its text 1284 bytes over its figure) are read on Round 4521's hosted run and paid by symbol diff against 4050dd889, the last run both passed. Platform macOS C ABI is green at 458774b1f, so Round 4520's fix holds there."
+      ]
     }
   },
   "inventory_entries": {
