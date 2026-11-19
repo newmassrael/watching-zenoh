@@ -2690,6 +2690,56 @@ mod tests {
         assert!(census.mismatched().is_empty());
     }
 
+    /// AN INTEREST'S RESTRICTED KEY IS READ IN THE TABLE ITS M BIT NAMES. The
+    /// receiver (`.2`) bound id 7 to `demo`; the asker (`.1`) restricts its
+    /// interest to `7 + "/tail"` with bit 6 of the options byte clear, which
+    /// upstream reads as `Mapping::Receiver`
+    /// (`commons/zenoh-codec/src/network/interest.rs` @ `we.mapping = if options.mapping() {`):
+    /// the id is the receiver's, so the key is `demo/tail`. The same bytes
+    /// with the bit set name the asker's own id 7, which it never bound, so the
+    /// key is unresolved there, and that half is the control: it is how this
+    /// plane read BOTH settings before the interest body's codec dispatched its
+    /// arm on the bit.
+    #[test]
+    fn an_interest_key_is_read_in_the_table_its_mapping_bit_names() {
+        let sender_mapped = wz_session_core::interest_build::build_interest_subscribers(
+            14,
+            true,
+            false,
+            7,
+            Some("/tail"),
+        )
+        .expect("the production interest builder")
+        .try_as_borrowed()
+        .expect("re-borrow")
+        .encode_to_vec();
+        // Outer header, `interest_id` 14 in one byte, then the options byte.
+        assert_eq!(
+            sender_mapped[2] & 0x40,
+            0x40,
+            "the builder writes the sender's mapping"
+        );
+        let mut receiver_mapped = sender_mapped.clone();
+        receiver_mapped[2] &= !0x40;
+        let bound_by_the_receiver = declare_build::build_declare_kexpr(7, "demo")
+            .expect("the production builder must build a kexpr binding")
+            .try_as_borrowed()
+            .expect("and it must re-borrow")
+            .encode_to_vec();
+
+        for (ask, want_key, want_unresolved) in [
+            (&receiver_mapped, Some("demo/tail"), None),
+            (&sender_mapped, None, Some((Direction::A, 7))),
+        ] {
+            let d = wire(&[(false, bound_by_the_receiver.clone()), (true, ask.clone())]);
+            let census = interests(&d);
+            assert_eq!(census.requests().len(), 1, "the interest is read");
+            let r = &census.requests()[0];
+            assert_eq!(r.keyexpr.as_deref(), want_key, "M={}", ask[2] >> 6 & 1);
+            assert_eq!(r.unresolved, want_unresolved, "M={}", ask[2] >> 6 & 1);
+        }
+    }
+
     /// Every input that leaves an answer unjudged is named, and the kind axis
     /// is decided before any of them.
     #[test]

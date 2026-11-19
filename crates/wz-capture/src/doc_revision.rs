@@ -2849,6 +2849,24 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R70_CARRIES,
     },
+    // Revision 72 moves no key and no word. An Interest's restricted key is read
+    // in the table bit 6 of its options byte names (upstream's
+    // `InterestOptions::MAPPING`), as a Push's key is read in the table its
+    // header's M bit names; it was always read in the sender's.
+    //
+    // ⚠ A VALUE MOVES on an Interest whose options byte clears that bit: the
+    // `mapping` of its `keyexpr` node reads `0` (it read `1`), and the `keyexpr`
+    // of its `carried` entry is resolved in the receiver's table, so a key that
+    // read `null`, or another key, reads the one the sender meant.
+    DocumentShape {
+        document: FIELDS,
+        revision: 72,
+        keys: FIELDS_R70_KEYS,
+        retiring: &[],
+        families: FIELDS_R70_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R70_CARRIES,
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -4744,6 +4762,18 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: ROW_FACTS_R10_CARRIES,
     },
+    // Revision 12 is the field document's revision 72 on these rows: an
+    // Interest's `carried` entry reads its key in the table the options byte's
+    // M bit names. No key or word moves. See that row.
+    DocumentShape {
+        document: ROW_FACTS,
+        revision: 12,
+        keys: ROW_FACTS_R10_KEYS,
+        retiring: &[],
+        families: ROW_FACTS_R10_FAMILIES,
+        planes: &[],
+        carries: ROW_FACTS_R10_CARRIES,
+    },
     // THE SAME MOVE ON THE CENSUS: a `zid` prefix is read against the capture
     // and an ambiguous one is reported.
     //
@@ -4895,6 +4925,20 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
     DocumentShape {
         document: CENSUS,
         revision: 25,
+        keys: CENSUS_R25_KEYS,
+        retiring: &[],
+        families: CENSUS_R20_FAMILIES,
+        planes: CENSUS_R6_PLANES,
+        carries: CENSUS_R20_CARRIES,
+    },
+    // Revision 26 is the field document's revision 72 on the interest plane:
+    // an Interest's restricted key is read in the table its options byte's M
+    // bit names. No key or word moves; a request whose bit is clear reads the
+    // key the sender meant in `keyexpr`, where it read `null` (with
+    // `unresolved` naming the asker's space) or another key. See that row.
+    DocumentShape {
+        document: CENSUS,
+        revision: 26,
         keys: CENSUS_R25_KEYS,
         retiring: &[],
         families: CENSUS_R20_FAMILIES,
@@ -36405,7 +36449,9 @@ mod tests {
             // folded since they began, how much of it is trimmed, and the
             // packet interval it spans) and a live handle's census began to go
             // on across front trims.
-            (CENSUS, 25u32),
+            // To 26 when an Interest's restricted key was read in the table its
+            // M bit names: values only.
+            (CENSUS, 26u32),
             // R2175 (open-debt item 552) — the field document moved to 2 when
             // its PAYLOAD PLANE joined the pin (fifteen keys revision 1 had
             // never covered) and its first three value families were declared.
@@ -36580,7 +36626,9 @@ mod tests {
             // zenoh's derivation.
             // To 71 when a record's `e2e` block became the payload plane's
             // judgement in capture order: values move.
-            (FIELDS, 71),
+            // To 72 when an Interest's restricted key was read in the table
+            // its options byte's M bit names: values move.
+            (FIELDS, 72),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.
@@ -36761,8 +36809,8 @@ mod tests {
             // The field document's rows without their trees; to 5 with the
             // field document's 64, to 6 with its 65, to 7 with its 66, to 8
             // with its 67, to 9 with its 69, to 10 with its 70, to 11 with its
-            // 71.
-            (ROW_FACTS, 11),
+            // 71, to 12 with its 72.
+            (ROW_FACTS, 12),
         ] {
             named.push(name);
             assert_eq!(revision(name), Some(expected), "{name}");

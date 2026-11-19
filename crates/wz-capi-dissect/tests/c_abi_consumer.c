@@ -4332,8 +4332,10 @@ int main(void) {
      * 25: the document gains `observed` (`messages`, `trimmed`, `unobserved`
      * and the packet `interval` they span), and a live handle's census goes
      * on across a front trim, counting what its planes folded since they
-     * began. */
-    revisioned[0].revision = 25;
+     * began.
+     * 26: an Interest's restricted key is read in the table its options
+     * byte's M bit names. Values move under stationary keys. */
+    revisioned[0].revision = 26;
     revisioned[0].doc = NULL;
     rc = wz_dissect_pcap_census(pcap, sizeof pcap, &revisioned[0].doc);
     CHECK(rc == WZ_DISSECT_OK, "census rc=%d", rc);
@@ -4626,8 +4628,11 @@ int main(void) {
      * 71: a record's `e2e` block is the payload plane's judgement, in capture
      * order over the whole capture; a slot over two flows reads each frame
      * against the one the tap took before it. Values move under stationary
-     * keys. */
-    revisioned[2].revision = 71;
+     * keys.
+     * 72: an Interest's restricted key is read in the table bit 6 of its
+     * options byte names; it was always read in the sender's. Values move
+     * under stationary keys. */
+    revisioned[2].revision = 72;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

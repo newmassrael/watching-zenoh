@@ -62,15 +62,20 @@
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
        sce:kind="codec" sce:default-endian="big" name="interest_body">
-  <!-- R121h-pre: B5-ν ownership invert. Deliberately NO
-       `<sce:variant-dispatch>` child — interest_body's flag layout
-       (KE/SU/QU/TO/RES/CUR/FUT/AGG per interest.c L55-71) maps bit 5
-       to `_Z_FLAG_N_INTEREST_CURRENT` and bit 6 to
-       `_Z_FLAG_N_INTEREST_FUTURE` (network.h:56-57). Neither is the
-       wireexpr local-mapping discriminator, so emitting a derive bit
-       there would corrupt the CURRENT/FUTURE semantics. The wireexpr
-       inner arm choice is a type-level refinement only. -->
+  <!-- The wireexpr arm is chosen by bit 6 of THIS byte, as Push, Request
+       and Response choose theirs by bit 6 of their header. Bits 5 and 6 of
+       the body byte are the wireexpr's N and M, not CURRENT and FUTURE:
+       those two live in the outer Interest header, which hoists them and
+       clears them from the body (interest.c L48-50), and zenoh names bit 6
+       of the options `InterestOptions::MAPPING`
+       (`commons/zenoh-protocol/src/network/interest.rs` @ `const MAPPING: InterestOptions = InterestOptions::options(1 << 6);`),
+       set for a key in the sender's mapping and clear for one in the
+       receiver's. Until this
+       import declared the dispatch, the decoder read every restricted key
+       as the Local (sender's) arm whatever the bit held, and resolved an
+       `M=0` key out of the wrong table. -->
   <sce:import src="wireexpr.scxml" kind="codec" as="codec_zenoh_wireexpr">
+    <sce:variant-dispatch flag="header.M"/>
     <sce:flag-bind input="N" source="header.N"/>
   </sce:import>
   <datamodel>

@@ -986,10 +986,15 @@
  * table only: `null` for a scope that only the other side held, and a literal
  * for one that both held differently.
  *
- * ⚠ ONE KEY EXPRESSION IS NOT YET HELD TO THIS: the restricted key of an
- * Interest. Its options byte has an M bit like the messages above, but its
- * `mapping` reads `1` whatever that bit holds, so do not take the value there
- * as the wire's.
+ * The restricted key of an Interest is held to it too, at field-document
+ * revision 72: its `mapping` is bit 6 of the Interest's options byte (the byte
+ * after `interest_id`, which holds `restricted` and `n` -- not the Interest
+ * header, whose bit 6 is `future`), the bit upstream names
+ * `InterestOptions::MAPPING`. Until revision 72 it read `1` whatever that bit
+ * held, and the key was resolved in the sender's table even when the bit named
+ * the receiver's, so a `keyexpr` the capture reported for such an Interest
+ * (a `carried` entry's, the census's) could be `null` or another key's. An
+ * Interest whose bit is set reads as it did.
  *
  * WHICH HALF IS `a`. Wherever a document or a record says `direction` -- a
  * row's, a record's, a `halves` entry's, a conduit's, a selector's `dir` -- the
@@ -1690,7 +1695,7 @@
  *
  * SO THE DOCUMENT CARRIES THE LIST. Its envelope reads
  *
- *     {"document":{"name":"census","revision":25,
+ *     {"document":{"name":"census","revision":26,
  *                  "planes":["exchanges","interests","keyexprs","nodes",
  *                            "payloads"]}, ...}
  *
@@ -1736,13 +1741,13 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":71,"key":"kind","values":[...],
+ *     {"name":"fields","revision":72,"key":"kind","values":[...],
  *      "carries":[{"word":"bits",
  *                  "shapes":[["end","name","selector_path","start","value"]]},
  *                 {"word":"opaque",
  *                  "shapes":[["end","name","selector_path","start"]]}, ...]}
  *
- *     {"name":"census","revision":25,"key":"mode","values":[...],
+ *     {"name":"census","revision":26,"key":"mode","values":[...],
  *      "carries":null}
  *
  * `null` is a VALUE here and not an absence: it says the word is a PASSENGER --
@@ -6154,7 +6159,7 @@ int wz_dissect_transport_layout_e2e(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":71,"key":"state",
+ *     "value_families":[{"name":"fields","revision":72,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
