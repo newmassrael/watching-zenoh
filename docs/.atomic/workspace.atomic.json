@@ -5237,6 +5237,26 @@
       "carry_forward_bullets": [
         "No real capture of a closed port or of an IGMP querier was read; the messages are built from the RFCs' layouts. An ICMPv6 quote whose packet begins with an extension header names no flow, and an error that quotes a flow the capture holds no packet of stays in the plane and on no flow, where no document writes it yet."
       ]
+    },
+    "Round 4534": {
+      "decision_summary": "What a flow's IP headers and frames said beside its transport is kept per direction: the TTL or hop limit range of the innermost IP header, the range over the TCP segments that carried RST apart from it so a reset from something between the peers shows, the outermost VLAN ids and the capture interfaces (four of each, with a mark when more were seen), every packet's IP and transport checksum verdict counted, the datagrams reassembled from IP fragments and the packets whose stated IP length passes the Ethernet MTU. The facts ride on the segment and the datagram the decapsulation hands back, stamped where the IP header was read, so a tunnelled flow reads its own header and a reassembled datagram claims none. A pcapng capture's interfaces are named with their clocks by scanning its IDBs at document time. The field document moves to revision 77 and row_facts to 17; twenty-three keys arrive and no family.",
+      "changes_bullets": [
+        "The link layer's IP header parses keep the TTL and the stated length, decapsulate stamps them and the outermost VLAN tag on the segment or datagram as IpFacts, and the dissection adds the capture interface and, on the reassembly path, the reassembled mark.",
+        "A capture module, ip_facts, folds each packet into its flow's direction; both flow kinds' ingest call it beside their other per-packet facts.",
+        "The pcapng module gains interface_descriptions, a scan of the IDBs for if_name, if_tsresol and if_tsoffset by section; the field document writes each flow's network and the document's capture_interfaces; revision 77 and row_facts revision 17 rows and key sets, the ABI header's section and pins, and the C consumer's revision pin."
+      ],
+      "verification_bullets": [
+        "The capture crate's library tests with dissect and fixtures, 1852 passed and 6 ignored, among them a direction's TTL and reset TTL ranges, ids, verdicts and counts folded from four packets, the bounded ids, three IDBs over two sections named with their clocks, and a pcapng of two interfaces whose tagged SYN, answer and reset at another TTL land on their flow's two directions while the document names the interfaces. The dissection crate's tests, 259 and 4 passed.",
+        "Red-first: with the stream path not folding its segments, the end-to-end test fails and the three unit tests pass.",
+        "fmt; clippy with warnings denied of wz-capture; wz-capture with no default features builds; the rustdoc lane over the two touched crates; the upstream citation anchor gate; the integer-cell gate."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "carry_forward_bullets": [
+        "A frame snapped shorter than it was sent is still counted capture-wide only: the packet's original length does not reach the dissection, and a per-flow count needs it carried there. The IP pieces of a datagram never reassembled are counted capture-wide too, because a later piece names no ports and so no flow.",
+        "No real capture with VLANs or several interfaces was read; the fixtures are built from the formats."
+      ]
     }
   },
   "inventory_entries": {
