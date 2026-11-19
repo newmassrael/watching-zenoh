@@ -24,13 +24,13 @@
 //!   it, record by record (fixed-memory step S2): the frame part must be ZERO.
 //!   And each Put is decoded where the datagram lies and delivered to its
 //!   subscriber as a view over those bytes (step S3, ARCHITECTURE section 9.2):
-//!   the per-record part must be ZERO on the fixed bounded backing
-//!   (`bounded-heapless`, the MCU profile's), and exactly the TWO allocations
-//!   the subscriber matcher's chunk splits make on the growable one (the AP's
-//!   backing, whose scratch lists grow; `pubsub::fire_into` and
-//!   `keyexpr_match::keyexpr_intersects_target`). Before S3 it was 7 and 5:
-//!   the boxed owned Push, its keyexpr and payload copies, the resolved keyexpr
-//!   `String` and the subscriber's payload copy, plus those two.
+//!   the per-record part must be ZERO on both backings. Until 2026-11-19 it was
+//!   one on the growable backing (the AP's), the chunk list the subscriber
+//!   matcher split the key into; the matcher reads the key's text since (the
+//!   SCE documents of `keyexpr_match`), and allocates nothing on either. Before
+//!   S3 it was 7 and 5: the boxed owned Push, its keyexpr and payload copies,
+//!   the resolved keyexpr `String` and the subscriber's payload copy, plus the
+//!   matcher's.
 //! - Without it (the copying loop every shipped image runs today) the frame
 //!   part must be POSITIVE. That half is the instrument's own control: a count
 //!   that read zero on the loop that is known to copy would prove nothing about
@@ -706,18 +706,15 @@ fn the_frame_path_of_an_inbound_frame_is_counted_per_frame_and_per_record() {
     let per_record = two - one;
     let frame_part = (2 * one).checked_sub(two).expect("cost(2) <= 2 * cost(1)");
 
-    // S3: a Put whose keyexpr fits costs nothing on the fixed backing; on the
-    // growable one, exactly the one chunk list the subscriber matcher grows: the
-    // key's. A subscriber's pattern is scanned against it as text, not split.
-    #[cfg(feature = "rx-in-place")]
-    let matcher_scratch = if fixed { 0 } else { 1 };
+    // S3: a Put costs the heap nothing on either backing: it is delivered where it
+    // lies, and the subscriber matcher reads the key and the pattern as text.
     #[cfg(feature = "rx-in-place")]
     assert_eq!(
         (frame_part, per_record, eight),
-        (0, matcher_scratch, 8 * matcher_scratch),
+        (0, 0, 0),
         "(allocations paid once per frame, per Put, cost of a frame of 8): with the \
          datagram dispatched where the socket holds it and each Put delivered where \
-         it lies, a Put costs the heap only the matcher's growable scratch"
+         it lies, a Put costs the heap nothing"
     );
     // Every frame was read where the socket held it; none was copied.
     #[cfg(feature = "rx-in-place")]
@@ -1176,8 +1173,6 @@ mod fragments {
         let (_serial, link) = wz_link_lwip::lwip_test_link();
         let link = Rc::new(link);
         let mut pair = Pair::establish(&link, 7497);
-        let fixed = wz_session_core::bounded::ENFORCES_CAPACITY;
-        let matcher_scratch = if fixed { 0 } else { 1 };
         for puts in [1usize, 2, 8] {
             let (_, body) = frame_of(0, puts);
             let expected = decoded_puts(&body);
@@ -1198,10 +1193,9 @@ mod fragments {
                      {costs:?} ({puts} Puts, chunk {chunk})"
                 );
                 assert_eq!(
-                    *last,
-                    puts * matcher_scratch,
-                    "the completing turn costs what a whole frame of the same Puts does \
-                     ({puts} Puts, chunk {chunk})"
+                    *last, 0,
+                    "the completing turn costs what a whole frame of the same Puts does, \
+                     nothing ({puts} Puts, chunk {chunk})"
                 );
                 assert_eq!(delivered, expected, "{puts} Puts, chunk {chunk}");
                 let arena = pair.acceptor.reassembly().staging();
