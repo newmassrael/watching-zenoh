@@ -5399,6 +5399,7 @@ unsafe fn field_values_door(
 /// name (`row_facts`) and revision; in CBOR (RFC 8949), the document's JSON mapped
 /// key for key: objects are maps with text keys, strings text, integers integers,
 /// other numbers the shortest float that holds them, and every length definite.
+/// The writer writes the CBOR itself; no JSON text is made and converted.
 ///
 /// # The buffer, and the memory rule unchanged
 ///
@@ -5421,10 +5422,11 @@ unsafe fn field_values_door(
 ///
 /// [`WZ_DISSECT_ERR_INVALID_ARG`] for a null pointer where one is not allowed or
 /// text that is not UTF-8, [`WZ_DISSECT_ERR_DECLARATION`] for a declaration text
-/// that is refused, [`WZ_DISSECT_ERR_CANCELLED`] when the progress callback stopped
-/// it, and [`WZ_DISSECT_ERR_DECODE`] if the conversion refused the writer's text,
-/// which is a defect of this library. On every error `needed` is 0 and the handle
-/// holds no document.
+/// that is refused, and [`WZ_DISSECT_ERR_CANCELLED`] when the progress callback
+/// stopped it. On every error `needed` is 0 and the handle holds no document.
+/// (Before the writer wrote CBOR itself, [`WZ_DISSECT_ERR_DECODE`] stood for a
+/// conversion that refused the writer's text; there is no conversion now, and
+/// this door no longer returns it.)
 ///
 /// # Safety
 /// `handle` must be a handle from [`wz_dissect_live_open`] or
@@ -5473,8 +5475,7 @@ pub unsafe extern "C" fn wz_dissect_live_row_facts_since(
     let handle = unsafe { &mut *handle };
     let written = match handle.row_facts_since(capture, Some(&map), text, after_seq, max_rows) {
         None => return WZ_DISSECT_ERR_CANCELLED,
-        Some(Err(_)) => return WZ_DISSECT_ERR_DECODE,
-        Some(Ok(written)) => written,
+        Some(written) => written,
     };
     // SAFETY: null-checked above.
     unsafe { *needed = written };
@@ -20522,9 +20523,11 @@ mod tests {
             let t = std::time::Instant::now();
             let again = wz_capture::cbor_of_json::cbor_of_json(&text).expect("the text converts");
             let convert_took = t.elapsed();
+            // The door writes CBOR itself; the conversion timed here is what it
+            // no longer pays, and its result is the door's bytes.
             assert_eq!(
                 again, facts,
-                "the conversion timed is the one the door made"
+                "the mapping of the door's own text is the door's bytes"
             );
             cursor = through_seq_of(&text);
 

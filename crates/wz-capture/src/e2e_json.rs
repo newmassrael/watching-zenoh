@@ -97,6 +97,7 @@
 use alloc::string::String;
 use core::fmt::Write as _;
 
+use wz_session_core::doc_out::{DocOut, JsonOut};
 use wz_session_core::json::{escape_into, u64_into};
 use wz_session_core::json5::Json5Value;
 
@@ -203,67 +204,87 @@ fn refuse_plain(head: &str, reason: &str) -> String {
 
 /// The header's fields as a JSON array under `key`, shared by the two verdict
 /// documents here (`"fields"`) and by the capture row's block (`"header"`).
+///
+/// The text ends where the member goes, after the comma that separates it from
+/// the one before: the key is written with no separator of its own.
 pub(crate) fn push_fields(profile: &Profile, reports: &[FieldReport], key: &str, out: &mut String) {
-    out.push('"');
-    out.push_str(key);
-    out.push_str("\":[");
-    for (i, report) in reports.iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
-        let field = &profile.fields()[report.index];
-        out.push_str("{\"name\":");
-        escape_into(&field.name, out);
-        let _ = write!(
-            out,
-            ",\"offset\":{},\"bytes\":{},\"raw\":",
-            field.offset, field.bytes
-        );
-        u64_into(report.raw, out);
-        out.push_str(",\"value\":");
-        u64_into(report.value, out);
-        if !field.parts.is_empty() {
-            out.push_str(",\"parts\":[");
-            for (j, part) in field.parts.iter().enumerate() {
-                if j > 0 {
-                    out.push(',');
-                }
-                out.push_str("{\"name\":");
-                escape_into(&part.name, out);
-                out.push_str(",\"value\":");
-                u64_into(report.parts[j], out);
-                out.push('}');
-            }
-            out.push(']');
-        }
-        out.push('}');
-    }
-    out.push(']');
+    JsonOut::value_onto(out, |w| write_fields(profile, reports, key, w));
 }
 
-fn push_fed(profile: &Profile, frame: &[u8], payload_bytes: usize, out: &mut String) {
-    out.push_str("\"crc_fed\":[");
-    for (i, item) in profile.crc().cover.iter().enumerate() {
-        if i > 0 {
-            out.push(',');
+/// [`push_fields`] through any [`DocOut`]: the member `key` and its array.
+pub(crate) fn write_fields<W: DocOut>(
+    profile: &Profile,
+    reports: &[FieldReport],
+    key: &str,
+    out: &mut W,
+) {
+    out.key(key);
+    out.open_array();
+    for report in reports {
+        let field = &profile.fields()[report.index];
+        out.open_map();
+        out.key("name");
+        out.text(&field.name);
+        out.key("offset");
+        out.uint(field.offset as u64);
+        out.key("bytes");
+        out.uint(field.bytes as u64);
+        out.key("raw");
+        out.uint_exact(report.raw);
+        out.key("value");
+        out.uint_exact(report.value);
+        if !field.parts.is_empty() {
+            out.key("parts");
+            out.open_array();
+            for (j, part) in field.parts.iter().enumerate() {
+                out.open_map();
+                out.key("name");
+                out.text(&part.name);
+                out.key("value");
+                out.uint_exact(report.parts[j]);
+                out.close_map();
+            }
+            out.close_array();
         }
+        out.close_map();
+    }
+    out.close_array();
+}
+
+/// The `crc_fed` member, written as [`push_fields`] writes its own: after the
+/// comma that separates it from the member before.
+fn push_fed(profile: &Profile, frame: &[u8], payload_bytes: usize, out: &mut String) {
+    JsonOut::value_onto(out, |w| write_fed(profile, frame, payload_bytes, w));
+}
+
+/// [`push_fed`] through any [`DocOut`]: the member `crc_fed` and its array.
+fn write_fed<W: DocOut>(profile: &Profile, frame: &[u8], payload_bytes: usize, out: &mut W) {
+    out.key("crc_fed");
+    out.open_array();
+    for item in &profile.crc().cover {
         match *item {
             Cover::Field(index) => {
                 let field = &profile.fields()[index];
-                out.push_str("{\"item\":");
-                escape_into(&field.name, out);
-                let _ = write!(out, ",\"bytes\":{},\"hex\":\"", field.bytes);
-                push_hex(&frame[field.offset..field.offset + field.bytes], out);
-                out.push_str("\"}");
+                out.open_map();
+                out.key("item");
+                out.text(&field.name);
+                out.key("bytes");
+                out.uint(field.bytes as u64);
+                out.key("hex");
+                out.hex(&frame[field.offset..field.offset + field.bytes]);
+                out.close_map();
             }
             Cover::Payload => {
-                out.push_str("{\"item\":");
-                escape_into(PAYLOAD, out);
-                let _ = write!(out, ",\"bytes\":{payload_bytes}}}");
+                out.open_map();
+                out.key("item");
+                out.text(PAYLOAD);
+                out.key("bytes");
+                out.uint(payload_bytes as u64);
+                out.close_map();
             }
         }
     }
-    out.push(']');
+    out.close_array();
 }
 
 /// The `e2e_wrap` document for building a frame from `profile_text`,

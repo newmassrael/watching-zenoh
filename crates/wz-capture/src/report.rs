@@ -46,6 +46,8 @@
 use alloc::format;
 use alloc::string::{String, ToString};
 
+use wz_session_core::doc_out::{DocOut, JsonOut};
+
 use crate::agg::{ThroughputGaps, ThroughputTable};
 
 /// R311y708 (§1.2a) — the versions these QUIC flows settled on that NO
@@ -3503,12 +3505,21 @@ fn skips_text(sk: &crate::SkipCensus, s: &mut String) {
 /// The three are apart for the reason [`crate::Dissection::expired_chains`]
 /// gives, and STRUCTURAL: zeros on a build that reassembles nothing.
 pub fn reassembly_json(d: &crate::Dissection) -> String {
-    format!(
-        "{{\"expired_chains\":{},\"abandoned_at_end\":{},\"abandoned_on_eviction\":{}}}",
-        d.expired_chains(),
-        d.abandoned_chains(),
-        d.evicted_chains()
-    )
+    let mut out = JsonOut::default();
+    write_reassembly(d, &mut out);
+    out.finish()
+}
+
+/// [`reassembly_json`] through any [`DocOut`].
+pub fn write_reassembly<W: DocOut>(d: &crate::Dissection, out: &mut W) {
+    out.open_map();
+    out.key("expired_chains");
+    out.uint(d.expired_chains() as u64);
+    out.key("abandoned_at_end");
+    out.uint(d.abandoned_chains() as u64);
+    out.key("abandoned_on_eviction");
+    out.uint(d.evicted_chains() as u64);
+    out.close_map();
 }
 
 /// R311y885 — what THIS DISSECTION's caps cost, as one JSON object, rendered
@@ -3542,6 +3553,13 @@ pub fn reassembly_json(d: &crate::Dissection) -> String {
 /// That is the failure R311y651's own comment names: a bound that bites and
 /// does not reach the export reports itself as the wire.
 pub fn dropped_by_limits_json(d: &crate::Dissection) -> String {
+    let mut out = JsonOut::default();
+    write_dropped_by_limits(d, &mut out);
+    out.finish()
+}
+
+/// [`dropped_by_limits_json`] through any [`DocOut`].
+pub fn write_dropped_by_limits<W: DocOut>(d: &crate::Dissection, out: &mut W) {
     let drops = d.health().drops;
     let l = d.limits();
     // Round 2042 (open-debt item 359) — AND THE CEILINGS THOSE LOSSES WERE
@@ -3557,36 +3575,44 @@ pub fn dropped_by_limits_json(d: &crate::Dissection) -> String {
     //
     // `Dissection::limits()` could answer all along and had only test callers
     // — the same shape Round 2041 found one accessor over.
-    let cap = |v: Option<usize>| match v {
-        Some(n) => alloc::format!("{n}"),
-        None => String::from("null"),
-    };
-    format!(
-        "{{\"frames\":{},\"stream_bytes\":{},\"skipped\":{},\"flows\":{},\
-         \"scouting\":{},\"scout_askers\":{},\"caps\":{{\"frames_per_flow\":{},\
-         \"frames_total\":{},\"stream_bytes_per_direction\":{},\"skipped_packets\":{},\
-         \"max_flows_per_table\":{},\"max_scout_askers\":{}}}}}",
-        drops.frames,
-        drops.stream_bytes,
-        drops.skipped,
-        drops.flows,
-        // R2630 (open-debt item 745) — the sixth counter, in the capture
-        // report's own `drops` order. It has no ceiling of its own: the
-        // scouting list is bounded by `frames_per_flow`, which `caps` already
-        // names, and counted apart from `frames` so a reader can tell which of
-        // the two lists that ceiling bit.
-        drops.scouting,
-        drops.scout_askers,
-        cap(l.frames_per_flow),
-        // R3356 — the ceiling over every flow, beside the per-flow one. `frames`
-        // above counts what EITHER took, so without this a reader could not tell
-        // which bound a loss was measured against.
-        cap(l.frames_total),
-        cap(l.stream_bytes_per_direction),
-        cap(l.skipped_packets),
-        cap(l.max_flows_per_table),
-        cap(l.max_scout_askers)
-    )
+    let cap = |v: Option<usize>| v.map(|n| n as u64);
+    out.open_map();
+    out.key("frames");
+    out.uint(drops.frames as u64);
+    out.key("stream_bytes");
+    out.uint(drops.stream_bytes as u64);
+    out.key("skipped");
+    out.uint(drops.skipped as u64);
+    out.key("flows");
+    out.uint(drops.flows as u64);
+    // R2630 (open-debt item 745) — the sixth counter, in the capture
+    // report's own `drops` order. It has no ceiling of its own: the
+    // scouting list is bounded by `frames_per_flow`, which `caps` already
+    // names, and counted apart from `frames` so a reader can tell which of
+    // the two lists that ceiling bit.
+    out.key("scouting");
+    out.uint(drops.scouting as u64);
+    out.key("scout_askers");
+    out.uint(drops.scout_askers as u64);
+    out.key("caps");
+    out.open_map();
+    out.key("frames_per_flow");
+    out.opt_uint(cap(l.frames_per_flow));
+    // R3356 — the ceiling over every flow, beside the per-flow one. `frames`
+    // above counts what EITHER took, so without this a reader could not tell
+    // which bound a loss was measured against.
+    out.key("frames_total");
+    out.opt_uint(cap(l.frames_total));
+    out.key("stream_bytes_per_direction");
+    out.opt_uint(cap(l.stream_bytes_per_direction));
+    out.key("skipped_packets");
+    out.opt_uint(cap(l.skipped_packets));
+    out.key("max_flows_per_table");
+    out.opt_uint(cap(l.max_flows_per_table));
+    out.key("max_scout_askers");
+    out.opt_uint(cap(l.max_scout_askers));
+    out.close_map();
+    out.close_map();
 }
 
 /// R311y885 — the same group for a person, one indented line, and the same

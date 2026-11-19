@@ -38,63 +38,72 @@
 //! or its number when the enum has no name for it.
 
 use alloc::string::String;
-use core::fmt::{self, Write as _};
+use core::fmt;
 
-use wz_session_core::json::{escape_into, u64_into, MAX_EXACT_INTEGER};
+use wz_session_core::doc_out::{DocOut, JsonOut};
+use wz_session_core::json::MAX_EXACT_INTEGER;
 
 use crate::proto_decode::{DecodedField, Unknown, Value};
 
 /// The fields of a message as a JSON array, each placed at `base` plus its own
 /// offset.
 pub(crate) fn push_fields(fields: &[DecodedField], base: usize, out: &mut String) {
-    out.push('[');
-    for (i, field) in fields.iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
-        push_field(field, base, out);
-    }
-    out.push(']');
+    JsonOut::value_onto(out, |w| write_fields(fields, base, w));
 }
 
-fn push_field(field: &DecodedField, base: usize, out: &mut String) {
-    let _ = write!(out, "{{\"number\":{}", field.number);
+/// [`push_fields`] through any [`DocOut`].
+pub(crate) fn write_fields<W: DocOut>(fields: &[DecodedField], base: usize, out: &mut W) {
+    out.open_array();
+    for field in fields {
+        write_field(field, base, out);
+    }
+    out.close_array();
+}
+
+fn write_field<W: DocOut>(field: &DecodedField, base: usize, out: &mut W) {
+    out.open_map();
+    out.key("number");
+    out.uint(field.number);
     if let Some(name) = &field.name {
-        out.push_str(",\"name\":");
-        escape_into(name, out);
+        out.key("name");
+        out.text(name);
     }
     if let Some(ty) = &field.ty {
-        out.push_str(",\"type\":");
-        escape_into(ty, out);
+        out.key("type");
+        out.text(ty);
     }
-    let _ = write!(
-        out,
-        ",\"offset\":{},\"bytes\":{}",
-        base + field.start,
-        field.end - field.start
-    );
-    push_value(&field.value, base, out);
-    out.push('}');
+    out.key("offset");
+    out.uint((base + field.start) as u64);
+    out.key("bytes");
+    out.uint((field.end - field.start) as u64);
+    write_value(&field.value, base, out);
+    out.close_map();
 }
 
 /// What follows a field's place: `fields` for a message, `wire_type` and the
 /// raw `value` for a field the schema does not know, and `value` otherwise.
-fn push_value(value: &Value, base: usize, out: &mut String) {
+fn write_value<W: DocOut>(value: &Value, base: usize, out: &mut W) {
     match value {
         Value::Message(fields) => {
-            out.push_str(",\"fields\":");
-            push_fields(fields, base, out);
+            out.key("fields");
+            write_fields(fields, base, out);
             return;
         }
         Value::Unknown(raw) => {
-            out.push_str(",\"wire_type\":\"");
-            out.push_str(raw.wire_type());
-            out.push('"');
+            out.key("wire_type");
+            out.text(raw.wire_type());
         }
         _ => {}
     }
-    out.push_str(",\"value\":");
-    push_scalar(value, out);
+    out.key("value");
+    write_scalar(value, out);
+}
+
+/// [`write_value`] onto a text that ends inside a field's object, which is
+/// where the tests read the members it writes.
+#[cfg(test)]
+fn push_value(value: &Value, base: usize, out: &mut String) {
+    JsonOut::members_onto(out, |w| write_value(value, base, w));
 }
 
 /// A value that is not a message, as JSON text: the rendering behind a
@@ -106,31 +115,31 @@ pub(crate) fn value_json(value: &Value) -> Option<String> {
     match value {
         Value::Message(_) | Value::Unknown(_) => None,
         _ => {
-            let mut out = String::new();
-            push_scalar(value, &mut out);
-            Some(out)
+            let mut out = JsonOut::default();
+            write_scalar(value, &mut out);
+            Some(out.finish())
         }
     }
 }
 
 /// The value itself, by the JSON mapping the module doc states.
-fn push_scalar(value: &Value, out: &mut String) {
+fn write_scalar<W: DocOut>(value: &Value, out: &mut W) {
     match value {
-        Value::Signed(v) => push_integer(i128::from(*v), out),
-        Value::Unsigned(v) => push_integer(i128::from(*v), out),
-        Value::Float(v) => push_float(*v, f64::from(*v), out),
-        Value::Double(v) => push_float(*v, *v, out),
-        Value::Bool(v) => out.push_str(if *v { "true" } else { "false" }),
-        Value::Text(text) => escape_into(text, out),
-        Value::Bytes(bytes) | Value::Unknown(Unknown::Len(bytes)) => push_base64(bytes, out),
+        Value::Signed(v) => write_integer(i128::from(*v), out),
+        Value::Unsigned(v) => write_integer(i128::from(*v), out),
+        Value::Float(v) => write_float(*v, f64::from(*v), out),
+        Value::Double(v) => write_float(*v, *v, out),
+        Value::Bool(v) => out.bool(*v),
+        Value::Text(text) => out.text(text),
+        Value::Bytes(bytes) | Value::Unknown(Unknown::Len(bytes)) => write_base64(bytes, out),
         Value::Enum { number, name } => match name {
-            Some(name) => escape_into(name, out),
-            None => push_integer(i128::from(*number), out),
+            Some(name) => out.text(name),
+            None => write_integer(i128::from(*number), out),
         },
         Value::Unknown(Unknown::Varint(v) | Unknown::Fixed64(v)) => {
-            push_integer(i128::from(*v), out);
+            write_integer(i128::from(*v), out);
         }
-        Value::Unknown(Unknown::Fixed32(v)) => push_integer(i128::from(*v), out),
+        Value::Unknown(Unknown::Fixed32(v)) => write_integer(i128::from(*v), out),
         // Written above, with its own key.
         Value::Message(_) => {}
     }
@@ -143,14 +152,15 @@ fn push_scalar(value: &Value, out: &mut String) {
 /// the workspace's integer door and the negative half mirrors it at the same
 /// line.
 pub(crate) fn push_integer(v: i128, out: &mut String) {
+    JsonOut::value_onto(out, |w| write_integer(v, w));
+}
+
+/// [`push_integer`] through any [`DocOut`].
+pub(crate) fn write_integer<W: DocOut>(v: i128, out: &mut W) {
     match u64::try_from(v) {
-        Ok(v) => u64_into(v, out),
-        Err(_) if v.unsigned_abs() <= u128::from(MAX_EXACT_INTEGER) => {
-            let _ = write!(out, "{v}");
-        }
-        Err(_) => {
-            let _ = write!(out, "\"{v}\"");
-        }
+        Ok(v) => out.uint_exact(v),
+        Err(_) if v.unsigned_abs() <= u128::from(MAX_EXACT_INTEGER) => out.int_wide(v),
+        Err(_) => out.text_fmt(format_args!("{v}")),
     }
 }
 
@@ -159,45 +169,59 @@ pub(crate) fn push_integer(v: i128, out: &mut String) {
 /// back to the same value of its own width (Rust's formatting of `v` is that
 /// spelling), with an exponent outside the range a plain decimal is short in.
 /// `-0.0` keeps its sign (`-0`). `wide` is `v` as a `double`, to classify it.
-fn push_float<F: fmt::Display + fmt::LowerExp>(v: F, wide: f64, out: &mut String) {
+fn write_float<W: DocOut, F: fmt::Display + fmt::LowerExp>(v: F, wide: f64, out: &mut W) {
     if wide.is_nan() {
-        out.push_str("\"NaN\"");
+        out.text("NaN");
     } else if wide.is_infinite() {
-        out.push_str(if wide > 0.0 {
-            "\"Infinity\""
-        } else {
-            "\"-Infinity\""
-        });
+        out.text(if wide > 0.0 { "Infinity" } else { "-Infinity" });
     } else {
         let magnitude = wide.abs();
         if magnitude == 0.0 || (1e-6..1e21).contains(&magnitude) {
-            let _ = write!(out, "{v}");
+            out.number_fmt(format_args!("{v}"));
         } else {
-            let _ = write!(out, "{v:e}");
+            out.number_fmt(format_args!("{v:e}"));
         }
     }
 }
 
 /// Standard base64 (RFC 4648 section 4) with padding, quoted.
+fn write_base64<W: DocOut>(bytes: &[u8], out: &mut W) {
+    out.text_fmt(format_args!("{}", Base64(bytes)));
+}
+
+/// [`write_base64`] onto a text that ends where a value goes, which is where
+/// the tests read it.
+#[cfg(test)]
 fn push_base64(bytes: &[u8], out: &mut String) {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    out.push('"');
-    for chunk in bytes.chunks(3) {
-        let b = [
-            chunk[0],
-            chunk.get(1).copied().unwrap_or(0),
-            chunk.get(2).copied().unwrap_or(0),
-        ];
-        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
-        for i in 0..4 {
-            if i <= chunk.len() {
-                out.push(char::from(ALPHABET[(n >> (18 - 6 * i)) as usize & 0x3f]));
-            } else {
-                out.push('=');
+    JsonOut::value_onto(out, |w| write_base64(bytes, w));
+}
+
+/// Bytes in standard base64 with padding, unquoted: formatted straight into
+/// the writer, so no text of the whole is assembled first.
+struct Base64<'a>(&'a [u8]);
+
+impl fmt::Display for Base64<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        const ALPHABET: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        for chunk in self.0.chunks(3) {
+            let b = [
+                chunk[0],
+                chunk.get(1).copied().unwrap_or(0),
+                chunk.get(2).copied().unwrap_or(0),
+            ];
+            let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+            let mut quad = [b'='; 4];
+            for (i, digit) in quad.iter_mut().enumerate() {
+                if i <= chunk.len() {
+                    *digit = ALPHABET[(n >> (18 - 6 * i)) as usize & 0x3f];
+                }
             }
+            // The alphabet and the padding are ASCII, so this never fails.
+            f.write_str(core::str::from_utf8(&quad).map_err(|_| fmt::Error)?)?;
         }
+        Ok(())
     }
-    out.push('"');
 }
 
 #[cfg(test)]

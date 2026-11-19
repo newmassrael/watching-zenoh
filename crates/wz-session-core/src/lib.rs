@@ -923,6 +923,15 @@ pub mod zid_hex;
 #[cfg(feature = "storage-profile")]
 pub mod json;
 
+/// One document, two encodings: the structured writer ([`doc_out::DocOut`]) a
+/// dissection document is written through, with a JSON and a CBOR encoding
+/// behind it that are the same document (RFC 8949 §6.2). Gated on `alloc` and
+/// not on `dissect`: the capture layer writes documents that need no walker
+/// (the census, the frame-check documents, the envelope every document opens
+/// with) through it too, in builds that have no walker.
+#[cfg(feature = "alloc")]
+pub mod doc_out;
+
 /// R311y842 — the READ direction of [`json`]: a hand-rolled JSON5 reader, so
 /// the stock zenoh config an operator already holds is an INPUT to wz rather
 /// than only ever an output of it. `alloc`-only, same as its emit twin.

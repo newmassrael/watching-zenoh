@@ -29,6 +29,7 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use wz_session_core::dissect::{Field, FieldValue};
+use wz_session_core::doc_out::{DocOut, JsonOut};
 use wz_session_core::passive::Direction;
 
 use crate::agg::KeyexprSpaces;
@@ -1195,22 +1196,27 @@ impl Refusal {
 /// Round 2031 (item 300) — the machine-readable rendering of one refusal,
 /// written ONCE, for the reason [`push_misbinding`] is written once.
 pub fn push_refusal(refusal: &Refusal, out: &mut String) {
-    use wz_session_core::json::escape_into;
-    out.push_str("{\"keyexpr\":");
-    escape_into(&refusal.keyexpr, out);
-    out.push_str(",\"format\":");
-    escape_into(&refusal.format, out);
-    out.push_str(",\"matched_rule\":");
-    push_matched_rule(&refusal.rule, out);
-    out.push_str(",\"under\":\"");
-    out.push_str(refusal.under.name());
-    out.push_str("\",\"samples\":");
-    out.push_str(&refusal.samples.to_string());
-    out.push_str(",\"example\":");
-    escape_into(&refusal.example, out);
-    out.push_str(",\"note\":");
-    escape_into(&refusal.sentence(), out);
-    out.push('}');
+    JsonOut::value_onto(out, |w| write_refusal(refusal, w));
+}
+
+/// [`push_refusal`] through any [`DocOut`].
+pub fn write_refusal<W: DocOut>(refusal: &Refusal, out: &mut W) {
+    out.open_map();
+    out.key("keyexpr");
+    out.text(&refusal.keyexpr);
+    out.key("format");
+    out.text(&refusal.format);
+    out.key("matched_rule");
+    write_matched_rule(&refusal.rule, out);
+    out.key("under");
+    out.text(refusal.under.name());
+    out.key("samples");
+    out.uint(refusal.samples as u64);
+    out.key("example");
+    out.text(&refusal.example);
+    out.key("note");
+    out.text(&refusal.sentence());
+    out.close_map();
 }
 
 /// R311y875 — the machine-readable rendering of one misbinding, written ONCE.
@@ -1222,22 +1228,27 @@ pub fn push_refusal(refusal: &Refusal, out: &mut String) {
 /// shape differed between the surface a person reads and the surface a product
 /// links would be a contract that disagrees with itself.
 pub fn push_misbinding(misbinding: &Misbinding, out: &mut String) {
-    use wz_session_core::json::escape_into;
-    out.push_str("{\"keyexpr\":");
-    escape_into(&misbinding.keyexpr, out);
-    out.push_str(",\"format\":");
-    escape_into(&misbinding.format, out);
-    out.push_str(",\"matched_rule\":");
-    push_matched_rule(&misbinding.rule, out);
-    out.push_str(",\"declared\":");
-    escape_into(&misbinding.declared, out);
-    out.push_str(",\"wrong\":\"");
-    out.push_str(misbinding.wrong.name());
-    out.push_str("\",\"samples\":");
-    out.push_str(&misbinding.samples.to_string());
-    out.push_str(",\"note\":");
-    escape_into(&misbinding.sentence(), out);
-    out.push('}');
+    JsonOut::value_onto(out, |w| write_misbinding(misbinding, w));
+}
+
+/// [`push_misbinding`] through any [`DocOut`].
+pub fn write_misbinding<W: DocOut>(misbinding: &Misbinding, out: &mut W) {
+    out.open_map();
+    out.key("keyexpr");
+    out.text(&misbinding.keyexpr);
+    out.key("format");
+    out.text(&misbinding.format);
+    out.key("matched_rule");
+    write_matched_rule(&misbinding.rule, out);
+    out.key("declared");
+    out.text(&misbinding.declared);
+    out.key("wrong");
+    out.text(misbinding.wrong.name());
+    out.key("samples");
+    out.uint(misbinding.samples as u64);
+    out.key("note");
+    out.text(&misbinding.sentence());
+    out.close_map();
 }
 
 /// R311y875 — the whole `payload_mapping` array, empty or not.
@@ -1260,30 +1271,35 @@ pub fn push_misbinding(misbinding: &Misbinding, out: &mut String) {
 /// array to learn whether these numbers are a floor. And there are two callers,
 /// `wz-analyze` and the C ABI; a second function is a second thing each of them
 /// can forget, which is the shape this module refuses one doc-comment up.
+///
+/// The text ends where the first member goes, after the comma that separates
+/// it from the member before: the first key is written with no separator.
 pub fn push_misbindings(declarations: Option<&Declarations<'_>>, out: &mut String) {
-    out.push_str("\"payload_mapping\":[");
+    JsonOut::value_onto(out, |w| write_misbindings(declarations, w));
+}
+
+/// [`push_misbindings`] through any [`DocOut`]: the three members, into a map
+/// the caller has open.
+pub fn write_misbindings<W: DocOut>(declarations: Option<&Declarations<'_>>, out: &mut W) {
+    out.key("payload_mapping");
+    out.open_array();
     if let Some(declarations) = declarations {
-        for (i, misbinding) in declarations.misbindings().iter().enumerate() {
-            if i > 0 {
-                out.push(',');
-            }
-            push_misbinding(misbinding, out);
+        for misbinding in declarations.misbindings().iter() {
+            write_misbinding(misbinding, out);
         }
     }
-    out.push(']');
+    out.close_array();
     // Round 2031 (item 300) — THE THIRD FINDING, which until this round existed
     // only per message. Same rule as the array above: always rendered, empty or
     // not, so an absent key can never be read as "nothing refused".
-    out.push_str(",\"payload_refusals\":[");
+    out.key("payload_refusals");
+    out.open_array();
     if let Some(declarations) = declarations {
-        for (i, refusal) in declarations.refusals().iter().enumerate() {
-            if i > 0 {
-                out.push(',');
-            }
-            push_refusal(refusal, out);
+        for refusal in declarations.refusals().iter() {
+            write_refusal(refusal, out);
         }
     }
-    out.push(']');
+    out.close_array();
     // Round 2029 (item 298) — AND WHETHER THOSE SAMPLE COUNTS ARE THE WHOLE
     // ANSWER. The verdict is reached during the walk, so a listing cap
     // truncates the tally as well as the listing; both surfaces already
@@ -1293,8 +1309,8 @@ pub fn push_misbindings(declarations: Option<&Declarations<'_>>, out: &mut Strin
     // there are no counts, and a consumer must not have to test for the key to
     // learn whether the numbers beside it are a floor.
     let exact = declarations.is_none_or(Declarations::counts_are_exact);
-    out.push_str(",\"payload_mapping_counts_exact\":");
-    out.push_str(if exact { "true" } else { "false" });
+    out.key("payload_mapping_counts_exact");
+    out.bool(exact);
 }
 
 /// R311y701 (PF2) — what a keyexpr id is resolved AGAINST.
@@ -2773,30 +2789,26 @@ pub fn decode_payload_parts(parts: PayloadParts<'_>, map: &Declarations<'_>) -> 
 /// The TEXT rendering stays in the command line. How a person reading a
 /// terminal is told which flag to go fix is a property of that surface.
 pub fn push_decoding(decoding: &PayloadDecoding, out: &mut String) {
-    use wz_session_core::json::escape_into;
+    JsonOut::value_onto(out, |w| write_decoding(decoding, w));
+}
+
+/// [`push_decoding`] through any [`DocOut`].
+pub fn write_decoding<W: DocOut>(decoding: &PayloadDecoding, out: &mut W) {
     // R311y873 — the word comes from `PayloadDecoding::state`, so this function
     // renders SHAPE and the vocabulary lives on the type. Opened here rather
     // than repeated in seven arms, which is how the arms and the prose lists
     // came to disagree in the first place.
-    let open = |out: &mut String| {
-        out.push_str("{\"state\":\"");
-        out.push_str(decoding.state());
-        out.push('"');
-    };
+    out.open_map();
+    out.key("state");
+    out.text(decoding.state());
     match decoding {
         // A caller is expected to skip the block entirely for this state -- a
         // reader who declared nothing is not told about payloads they did not
         // ask about. Rendered rather than unreachable so this function is total
         // over the type: an `unreachable!` here would make a caller's ordering
         // mistake a panic in a library a C consumer links.
-        PayloadDecoding::NoRules | PayloadDecoding::NoPayload => {
-            open(out);
-            out.push('}');
-        }
-        PayloadDecoding::KeyexprUnresolved => {
-            open(out);
-            out.push('}');
-        }
+        PayloadDecoding::NoRules | PayloadDecoding::NoPayload => {}
+        PayloadDecoding::KeyexprUnresolved => {}
         // R2170 (open-debt item 546) — RENDERED, with the one number this plane
         // actually holds. The compiler required this arm, which is the property
         // the vocabulary doc claims: an eighth word cannot reach a consumer
@@ -2805,19 +2817,17 @@ pub fn push_decoding(decoding: &PayloadDecoding, out: &mut String) {
         // between "no payload" and "the payload is somewhere this capture
         // cannot see".
         PayloadDecoding::NotOnTheWire { descriptor_bytes } => {
-            open(out);
-            out.push_str(",\"descriptor_bytes\":");
-            out.push_str(&descriptor_bytes.to_string());
-            out.push('}');
+            out.key("descriptor_bytes");
+            out.uint(*descriptor_bytes as u64);
         }
         PayloadDecoding::NoRule(keyexpr) => {
-            open(out);
-            out.push_str(",\"keyexpr\":");
-            escape_into(keyexpr, out);
+            out.key("keyexpr");
+            out.text(keyexpr);
             // `null`, and not an absent key: this is the one state that asked
             // the rules and got no answer, and "no rule won" is a fact the
             // consumer is owed in the same place it reads the winner from.
-            out.push_str(",\"matched_rule\":null}");
+            out.key("matched_rule");
+            out.null();
         }
         // The rule that covered the key is the SEGMENT rule, under the key a
         // winner is read from, and the profile under its own key: the format
@@ -2827,14 +2837,12 @@ pub fn push_decoding(decoding: &PayloadDecoding, out: &mut String) {
             rule,
             profile,
         } => {
-            open(out);
-            out.push_str(",\"keyexpr\":");
-            escape_into(keyexpr, out);
-            out.push_str(",\"matched_rule\":");
-            push_matched_rule(rule, out);
-            out.push_str(",\"profile\":");
-            escape_into(profile, out);
-            out.push('}');
+            out.key("keyexpr");
+            out.text(keyexpr);
+            out.key("matched_rule");
+            write_matched_rule(rule, out);
+            out.key("profile");
+            out.text(profile);
         }
         PayloadDecoding::EncodingMismatch {
             keyexpr,
@@ -2843,23 +2851,21 @@ pub fn push_decoding(decoding: &PayloadDecoding, out: &mut String) {
             declared,
             checked,
         } => {
-            open(out);
-            out.push_str(",\"keyexpr\":");
-            escape_into(keyexpr, out);
-            out.push_str(",\"matched_rule\":");
-            push_matched_rule(rule, out);
-            out.push_str(",\"format\":");
-            escape_into(format, out);
-            out.push_str(",\"declared\":");
-            escape_into(declared, out);
+            out.key("keyexpr");
+            out.text(keyexpr);
+            out.key("matched_rule");
+            write_matched_rule(rule, out);
+            out.key("format");
+            out.text(format);
+            out.key("declared");
+            out.text(declared);
             // Round 2025 (item 285) — an ADDED key, which this ABI's contract
             // permits where a renamed or removed one would break a linking
             // consumer. `false` is the answer for every binary declaration,
             // `application/cdr` above all, and it says the veto rests on a
             // label nothing weighed.
-            out.push_str(",\"declaration_checked\":");
-            out.push_str(if *checked { "true" } else { "false" });
-            out.push('}');
+            out.key("declaration_checked");
+            out.bool(*checked);
         }
         PayloadDecoding::Refused {
             keyexpr,
@@ -2867,16 +2873,14 @@ pub fn push_decoding(decoding: &PayloadDecoding, out: &mut String) {
             format,
             why,
         } => {
-            open(out);
-            out.push_str(",\"keyexpr\":");
-            escape_into(keyexpr, out);
-            out.push_str(",\"matched_rule\":");
-            push_matched_rule(rule, out);
-            out.push_str(",\"format\":");
-            escape_into(format, out);
-            out.push_str(",\"why\":");
-            escape_into(why, out);
-            out.push('}');
+            out.key("keyexpr");
+            out.text(keyexpr);
+            out.key("matched_rule");
+            write_matched_rule(rule, out);
+            out.key("format");
+            out.text(format);
+            out.key("why");
+            out.text(why);
         }
         PayloadDecoding::Decoded {
             keyexpr,
@@ -2887,89 +2891,79 @@ pub fn push_decoding(decoding: &PayloadDecoding, out: &mut String) {
             typed,
             schema,
         } => {
-            open(out);
-            out.push_str(",\"keyexpr\":");
-            escape_into(keyexpr, out);
-            out.push_str(",\"matched_rule\":");
-            push_matched_rule(rule, out);
+            out.key("keyexpr");
+            out.text(keyexpr);
+            out.key("matched_rule");
+            write_matched_rule(rule, out);
             // Whether the fields carry their type, and the body schema the rule
             // names: both always written, on the rule `despite_encoding`
             // states just below.
-            out.push_str(",\"typed\":");
-            out.push_str(if *typed { "true" } else { "false" });
-            out.push_str(",\"schema\":");
-            match schema {
-                Some(message) => escape_into(message, out),
-                None => out.push_str("null"),
-            }
+            out.key("typed");
+            out.bool(*typed);
+            out.key("schema");
+            out.opt_text(schema.as_deref());
             // R311y874 — present with a `null` rather than absent, R311y720's
             // rule: a consumer must never have to test for a key to learn that
             // a fact is unknown. Here the fact is "was this decoded over the
             // publisher's own label", and a missing key would read as "no",
             // which is the answer this field exists to stop being assumed.
-            out.push_str(",\"despite_encoding\":");
-            match despite_encoding {
-                Some(declared) => escape_into(declared, out),
-                None => out.push_str("null"),
-            }
-            out.push_str(",\"format\":");
-            escape_into(format, out);
-            out.push_str(",\"fields\":[");
-            for (i, f) in fields.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                out.push_str("{\"path\":");
-                escape_into(&f.path, out);
+            out.key("despite_encoding");
+            out.opt_text(despite_encoding.as_deref());
+            out.key("format");
+            out.text(format);
+            out.key("fields");
+            out.open_array();
+            for f in fields {
+                out.open_map();
+                out.key("path");
+                out.text(&f.path);
                 // R311y720 (PF4) — `name` is present with a `null` rather than
                 // absent when no declaration covers the path, on the structural
                 // rule the rest of this JSON follows: a consumer must never have
                 // to test for a key to learn that a fact is unknown.
-                out.push_str(",\"name\":");
-                match &f.name {
-                    Some(name) => escape_into(name, out),
-                    None => out.push_str("null"),
-                }
-                out.push_str(",\"value\":");
-                escape_into(&f.value, out);
-                out.push_str(",\"start\":");
-                out.push_str(&f.start.to_string());
-                out.push_str(",\"end\":");
-                out.push_str(&f.end.to_string());
+                out.key("name");
+                out.opt_text(f.name.as_deref());
+                out.key("value");
+                out.text(&f.value);
+                out.key("start");
+                out.uint(f.start as u64);
+                out.key("end");
+                out.uint(f.end as u64);
                 // How deeply the field is nested and which field it is nested
                 // in, so a consumer drawing a tree never reads the path grammar
                 // to indent one. `parent` is `null` at depth 0, structurally,
                 // on `name`'s rule just above: every entry has the same keys.
-                out.push_str(",\"depth\":");
-                out.push_str(&path_depth(&f.path).to_string());
-                out.push_str(",\"parent\":");
-                match path_parent(&f.path) {
-                    Some(parent) => escape_into(parent, out),
-                    None => out.push_str("null"),
-                }
+                out.key("depth");
+                out.uint(path_depth(&f.path) as u64);
+                out.key("parent");
+                out.opt_text(path_parent(&f.path));
                 // The field as its type reads it (`PayloadField::typed`), in
                 // three keys every entry carries: `type`, `typed_value` (JSON in
                 // protobuf's mapping, written as `proto_decode_json` writes it)
                 // and `enum_number`. `null` where a member does not apply or no
                 // type is known, so a row walked by the wire has the same keys.
                 let typed = f.typed.as_ref();
-                out.push_str(",\"type\":");
-                match typed.and_then(|t| t.ty.as_deref()) {
-                    Some(ty) => escape_into(ty, out),
-                    None => out.push_str("null"),
+                out.key("type");
+                out.opt_text(typed.and_then(|t| t.ty.as_deref()));
+                out.key("typed_value");
+                // Held as its JSON text (`TypedValue::json`, written by
+                // `proto_decode_json`), and written as the value it spells: the
+                // text in JSON, the mapping of it in CBOR.
+                match typed.and_then(|t| t.json.as_deref()) {
+                    Some(json) => out.json_value(json),
+                    None => out.null(),
                 }
-                out.push_str(",\"typed_value\":");
-                out.push_str(typed.and_then(|t| t.json.as_deref()).unwrap_or("null"));
-                out.push_str(",\"enum_number\":");
+                out.key("enum_number");
                 match typed.and_then(|t| t.enum_number) {
-                    Some(number) => out.push_str(&number.to_string()),
-                    None => out.push_str("null"),
+                    Some(number) => out.int(i64::from(number)),
+                    None => out.null(),
                 }
-                out.push('}');
+                out.close_map();
             }
-            out.push_str("]}");
+            out.close_array();
         }
     }
+    out.close_map();
 }
 
 /// The rule that won, as the object every place that names one writes: the
@@ -2977,13 +2971,13 @@ pub fn push_decoding(decoding: &PayloadDecoding, out: &mut String) {
 ///
 /// Written once, so a row's `matched_rule` and the same rule inside a
 /// `payload_mapping` or `payload_refusals` entry cannot be two spellings.
-pub(crate) fn push_matched_rule(rule: &MatchedRule, out: &mut String) {
-    use wz_session_core::json::escape_into;
-    out.push_str("{\"index\":");
-    out.push_str(&rule.index.to_string());
-    out.push_str(",\"pattern\":");
-    escape_into(&rule.pattern, out);
-    out.push('}');
+pub(crate) fn write_matched_rule<W: DocOut>(rule: &MatchedRule, out: &mut W) {
+    out.open_map();
+    out.key("index");
+    out.uint(rule.index as u64);
+    out.key("pattern");
+    out.text(&rule.pattern);
+    out.close_map();
 }
 
 #[cfg(test)]

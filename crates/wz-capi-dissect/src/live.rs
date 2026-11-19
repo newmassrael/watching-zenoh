@@ -350,6 +350,22 @@ fn window_through(issued: u64, after_seq: u64, max_rows: u64) -> u64 {
     }
 }
 
+/// A since-door of the field writer in one encoding
+/// ([`wz_capture::fields_json::fields_json_since_judged`] or
+/// [`wz_capture::fields_json::fields_cbor_since_judged`]): what a
+/// since-document door of the handle hands its walk to.
+type SinceWriter<D> = fn(
+    &wz_capture::Dissection,
+    &[u8],
+    Option<&wz_capture::payload::formats::FormatMap<'_>>,
+    Option<&wz_capture::E2eTable>,
+    &str,
+    &dyn wz_capture::fields_json::RowCoordinates,
+    wz_capture::fields_json::Since,
+    &mut wz_capture::fields_json::FieldsMemory,
+    Option<&wz_capture::Progress<'_>>,
+) -> Option<D>;
+
 /// What a [`LiveDissection`] holds on the heap that follows its row count, by
 /// structure (open-debt item 924, D7). See [`LiveDissection::memory`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1431,6 +1447,7 @@ impl LiveDissection {
     ) -> Option<String> {
         self.since_window(
             wz_capture::fields_json::Trees::Written,
+            wz_capture::fields_json::fields_json_since_judged,
             capture,
             map,
             declarations_text,
@@ -1449,7 +1466,10 @@ impl LiveDissection {
     /// that message is picked. Measured on a capture of 64-byte pushes, the trees
     /// were 74% of a row's bytes and 70% of the call that wrote them; this is the
     /// same rows, from the same walk and the same writer, without them, in the
-    /// binary form of the same document (RFC 8949's mapping of its JSON).
+    /// binary form of the same document (RFC 8949's mapping of its JSON),
+    /// written as CBOR by that writer ([`wz_capture::fields_json::fields_cbor_since_judged`])
+    /// and not converted from a JSON text: the bytes are the ones the mapping
+    /// of that text gives, and the text is never made.
     ///
     /// # Its own memory
     ///
@@ -1465,10 +1485,6 @@ impl LiveDissection {
     /// and lets them go. `None` when the progress callback stopped the call: no
     /// document is written and what the handle held is let go too, so a later
     /// take cannot hand out an answer to an earlier question.
-    ///
-    /// The conversion is of the field writer's own JSON and cannot refuse it; a
-    /// refusal would be a defect of that writer, and it comes back as the
-    /// refusal rather than as a panic across the C boundary.
     pub fn row_facts_since(
         &mut self,
         capture: &[u8],
@@ -1476,20 +1492,18 @@ impl LiveDissection {
         declarations_text: &str,
         after_seq: u64,
         max_rows: u64,
-    ) -> Option<Result<usize, wz_capture::cbor_of_json::Refused>> {
+    ) -> Option<usize> {
         self.facts_held = Vec::new();
-        let text = self.since_window(
+        self.facts_held = self.since_window(
             wz_capture::fields_json::Trees::Left,
+            wz_capture::fields_json::fields_cbor_since_judged,
             capture,
             map,
             declarations_text,
             after_seq,
             max_rows,
         )?;
-        Some(wz_capture::cbor_of_json::cbor_of_json(&text).map(|bytes| {
-            self.facts_held = bytes;
-            self.facts_held.len()
-        }))
+        Some(self.facts_held.len())
     }
 
     /// The row-facts document [`Self::row_facts_since`] left in the handle, if
@@ -1507,16 +1521,21 @@ impl LiveDissection {
     }
 
     /// The since-document of `trees`' shape for the numbers after `after_seq`, at
-    /// most `max_rows` of them, from the memory that shape keeps.
-    fn since_window(
+    /// most `max_rows` of them, from the memory that shape keeps, in the
+    /// encoding `write` writes.
+    // Eight: the window's seven and the encoding, which is the door's own
+    // choice and not part of the window it asks for.
+    #[allow(clippy::too_many_arguments)]
+    fn since_window<D>(
         &mut self,
         trees: wz_capture::fields_json::Trees,
+        write: SinceWriter<D>,
         capture: &[u8],
         map: Option<&wz_capture::payload::formats::FormatMap<'_>>,
         declarations_text: &str,
         after_seq: u64,
         max_rows: u64,
-    ) -> Option<String> {
+    ) -> Option<D> {
         self.drain(&mut []);
         let ids = HandleIds::of(self);
         let hook = self.progress;
@@ -1542,7 +1561,7 @@ impl LiveDissection {
             wz_capture::fields_json::Trees::Written => &mut self.fields_memory,
             wz_capture::fields_json::Trees::Left => &mut self.facts_memory,
         };
-        wz_capture::fields_json::fields_json_since_judged(
+        write(
             &self.dissection,
             capture,
             map,
