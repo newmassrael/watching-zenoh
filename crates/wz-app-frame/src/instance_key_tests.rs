@@ -18,9 +18,9 @@ use crate::e2e_profile::{DocError, Profile};
 use crate::e2e_receiver::{Keying, Receiver, Status};
 use crate::e2e_stream_sender::{SenderOptions, StreamSender};
 use crate::instance_key::{
-    judge, protect, Counts, Dropped, JudgeError, Judged, KeyValue, KeyedFrame, Keyer, LastOutcome,
-    LastValues, Limits, NewError, ProtectError, RecordError, Refusal, Report, StorageTooSmall,
-    DEFAULT_REPORT_INTERVAL_MS,
+    generated, judge, protect, Counts, Dropped, JudgeError, Judged, KeyValue, KeyedFrame, Keyer,
+    LastOutcome, LastValues, Limits, NewError, ProtectError, RecordError, Refusal, Report,
+    StorageTooSmall, DEFAULT_REPORT_INTERVAL_MS, REPORT_HOLD, REPORT_NOW, REPORT_REBASE,
 };
 use crate::proto_schema::ProtoFile;
 
@@ -310,6 +310,75 @@ fn an_interval_of_zero_reports_every_drop_and_the_default_is_stated() {
     let default =
         keyer(r#"{"message": "syn.keyed.Sample", "fields": [{"path": "zone", "values": [5]}]}"#);
     assert_eq!(default.report_interval_ms(), DEFAULT_REPORT_INTERVAL_MS);
+}
+
+// ---- the generated report decision ---------------------------------------
+
+/// The decision `drop_report_due.scxml` states, as the keyer made it by hand before the document:
+/// the oracle the generated function is held to over a sweep.
+fn report_due_oracle(pending: u64, last: Option<u64>, now: u64, interval: u64) -> u8 {
+    if pending == 0 {
+        return REPORT_HOLD;
+    }
+    match last {
+        None => REPORT_NOW,
+        Some(last) if now < last => REPORT_REBASE,
+        Some(last) if now - last >= interval => REPORT_NOW,
+        Some(_) => REPORT_HOLD,
+    }
+}
+
+fn report_due(pending: u64, last: Option<u64>, now: u64, interval: u64) -> u8 {
+    generated::drop_report_due(pending, last.is_some(), last.unwrap_or(0), now, interval)
+}
+
+#[test]
+fn the_generated_report_decision_is_each_case_of_its_document() {
+    // Nothing held, whatever the clock says.
+    assert_eq!(report_due(0, None, 0, 0), REPORT_HOLD);
+    assert_eq!(report_due(0, Some(5), 1_000, 0), REPORT_HOLD);
+    // The first drops ever are reported at once.
+    assert_eq!(report_due(1, None, 0, 1_000), REPORT_NOW);
+    // Within the interval, held; at it and past it, reported.
+    assert_eq!(report_due(3, Some(1_000), 1_999, 1_000), REPORT_HOLD);
+    assert_eq!(report_due(3, Some(1_000), 2_000, 1_000), REPORT_NOW);
+    assert_eq!(report_due(3, Some(1_000), u64::MAX, 1_000), REPORT_NOW);
+    // An interval of 0 reports every drop, the clock unmoved included.
+    assert_eq!(report_due(1, Some(7), 7, 0), REPORT_NOW);
+    // A clock that reads earlier than the last report starts the interval again.
+    assert_eq!(report_due(1, Some(1_000), 999, 1), REPORT_REBASE);
+    assert_eq!(report_due(1, Some(u64::MAX), 0, 0), REPORT_REBASE);
+    // The longest interval is never reached from 0.
+    assert_eq!(report_due(1, Some(0), u64::MAX - 1, u64::MAX), REPORT_HOLD);
+}
+
+#[test]
+fn the_generated_report_decision_is_the_hand_ones_over_a_sweep() {
+    let edges = [
+        0u64,
+        1,
+        2,
+        99,
+        100,
+        101,
+        1_000,
+        u64::MAX / 2,
+        u64::MAX - 1,
+        u64::MAX,
+    ];
+    for pending in [0u64, 1, u64::MAX] {
+        for last in core::iter::once(None).chain(edges.iter().copied().map(Some)) {
+            for &now in &edges {
+                for &interval in &edges {
+                    assert_eq!(
+                        report_due(pending, last, now, interval),
+                        report_due_oracle(pending, last, now, interval),
+                        "{pending} {last:?} {now} {interval}"
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[test]
