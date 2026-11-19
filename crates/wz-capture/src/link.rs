@@ -1574,6 +1574,39 @@ fn enter_link(
     })
 }
 
+/// The flow key of `a` and `b` on `link`, for a reader outside this module that
+/// names a flow it did not strip (an ICMP error's quote, [`crate::control`]).
+pub(crate) fn flow_key(a: Endpoint, b: Endpoint, link: LinkKind) -> FlowKey {
+    FlowKey::new(a, b, link).0
+}
+
+/// The ICMP, ICMPv6 or IGMP message `bytes` carries, read through the same link
+/// entry and IP chain [`decapsulate`] walks (its tunnels included), or `None`
+/// for any other packet and for a piece of a fragmented datagram. Asked of a
+/// packet `decapsulate` refused as [`SkipReason::NotTransport`] of one of those
+/// protocols, which it still is: this is the network's word about a flow, not a
+/// transport of one. See [`crate::control`].
+pub fn control_message(
+    link_type: u32,
+    packet_index: usize,
+    bytes: &[u8],
+) -> Option<crate::control::ControlMessage> {
+    if link_type == LINKTYPE_VSOCK {
+        return None;
+    }
+    let LinkBody::Ip { bytes, is_v6 } = enter_link(link_type, bytes, packet_index).ok()? else {
+        return None;
+    };
+    let walked = walk_ip_chain(bytes, is_v6, 0, None, None, Tunnel::none(), packet_index).ok()?;
+    let ChainEnd::Ip(ip) = walked.end else {
+        return None;
+    };
+    if ip.fragment.is_some() {
+        return None;
+    }
+    crate::control::read(ip.src, ip.dst, ip.proto, ip.payload, packet_index)
+}
+
 /// Decapsulate one captured packet down to the transport payload zenoh uses.
 ///
 /// R311y584 (A3) — returns both transports rather than TCP alone. The

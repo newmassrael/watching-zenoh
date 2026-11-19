@@ -1777,7 +1777,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":75,"key":"kind","values":[...],
+ *     {"name":"fields","revision":76,"key":"kind","values":[...],
  *      "carries":[{"word":"bits",
  *                  "shapes":[["end","name","selector_path","start","value"]]},
  *                 {"word":"opaque",
@@ -1849,7 +1849,9 @@
  * @carries fields unjoined passenger
  * @carries fields unjudged_reason passenger
  * @carries fields unopened_reason discriminant
+ * @carries fields unreachable passenger
  * @carries fields verdict passenger
+ * @carries fields what passenger
  * @carries fields witness passenger
  * @carries fields wrong passenger
  * @carries fields zenoh passenger
@@ -3148,6 +3150,39 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  *
  * @values fields recognized_by
  * @values fields witness
+ *
+ * THE NETWORK'S WORD ABOUT A FLOW (field-document revision 76, row_facts 16).
+ * ICMP, ICMPv6 and IGMP packets are not a transport, and `health.skips` still
+ * counts them under `not_transport`; what they say about the flows is read
+ * beside that count. Every flow object carries, after `foreign_zenoh`,
+ *
+ *   "icmp_errors":{"errors":[{"unreachable":"port","packet":12,
+ *                             "from":"10.0.0.2","mtu":null}],"more":0}
+ *
+ * the ICMP and ICMPv6 destination-unreachable and packet-too-big errors whose
+ * quote names a packet of this flow, in capture order: `unreachable` is
+ * `port`, `host`, `network`, `protocol`, `fragmentation_needed`, `prohibited`
+ * or `other`; `packet` the capture-global packet that carried the error;
+ * `from` its sender (the host for a closed port, a router on the way for the
+ * others); `mtu` the MTU a `fragmentation_needed` stated, `null` otherwise. The
+ * first 64 are listed and `more` counts the rest. An error whose quote is too
+ * short to name both ports names no flow and lands on none. The document
+ * carries, after `reassembly`,
+ *
+ *   "membership":{"events":[{"what":"query","packet":3,"from":"10.0.0.1",
+ *                            "groups":[]}],"more":0}
+ *
+ * the IGMP and MLD messages in capture order (`events`, and not `messages`,
+ * which names a flow's zenoh messages): `what` is `query`, `report` or
+ * `leave`; `groups` the groups it names, none for a general query and each
+ * group record's for a version 3 report. A switch that stops forwarding a
+ * multicast group is how scouting on 224.0.0.224 fails without a word from
+ * zenoh, and these say whether a querier asked and whether members answered.
+ * `more` counts the control messages, errors and membership alike, past the
+ * capture's bound of 1024.
+ *
+ * @values fields unreachable
+ * @values fields what
  *
  * A message of the four announcing another version is not read past that byte
  * (since field-document revision 41 and session_table revision 3): its row is a
@@ -6274,7 +6309,7 @@ int wz_dissect_transport_layout_e2e(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":75,"key":"state",
+ *     "value_families":[{"name":"fields","revision":76,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
@@ -8051,7 +8086,9 @@ int wz_dissect_live_field_values_since_window(wz_dissect_live *h,
  * @values row_facts unjoined
  * @values row_facts unjudged_reason
  * @values row_facts unopened_reason
+ * @values row_facts unreachable
  * @values row_facts verdict
+ * @values row_facts what
  * @values row_facts witness
  * @values row_facts wrong
  * @values row_facts zenoh
@@ -8094,7 +8131,9 @@ int wz_dissect_live_field_values_since_window(wz_dissect_live *h,
  * @carries row_facts unjoined passenger
  * @carries row_facts unjudged_reason passenger
  * @carries row_facts unopened_reason discriminant
+ * @carries row_facts unreachable passenger
  * @carries row_facts verdict passenger
+ * @carries row_facts what passenger
  * @carries row_facts witness passenger
  * @carries row_facts wrong passenger
  * @carries row_facts zenoh passenger */

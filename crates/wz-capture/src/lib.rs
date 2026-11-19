@@ -312,6 +312,9 @@ pub mod session_table;
 // Whether a flow is zenoh of a version this reader does not read, taken at
 // ingest beside the session table's version evidence and as ungated.
 pub mod foreign_zenoh;
+// ICMP, ICMPv6 and IGMP messages: the network's word about a flow, read off
+// packets the transport path skips. Ungated, as the skip census is.
+pub mod control;
 #[cfg(feature = "dissect")]
 pub mod session_table_json;
 #[cfg(all(test, feature = "dissect"))]
@@ -5288,6 +5291,8 @@ mod message_list_census {
             // ── does not ──
             skipped: _,
             skip_census: _,
+            // ICMP and IGMP messages, which are not zenoh messages.
+            control: _,
             limits: _,
             drops: _,
             declared_quic_ports: _,
@@ -6454,6 +6459,9 @@ pub struct Dissection {
     /// R311y643 (§1.1e) — the by-reason census, counted at the door rather than
     /// folded from `skipped` above, which is capped.
     skip_census: SkipCensus,
+    /// The ICMP, ICMPv6 and IGMP messages read off packets skipped as not a
+    /// transport, bounded: see [`control`].
+    control: control::ControlPlane,
     /// R311y594b — what this dissection may accumulate.
     limits: DissectionLimits,
     /// What the limits have cost so far.
@@ -6702,6 +6710,7 @@ impl Default for Dissection {
             datagram_flows: exit::FlowTable::default(),
             skipped: Vec::new(),
             skip_census: SkipCensus::default(),
+            control: control::ControlPlane::default(),
             declared_quic_ports: Vec::new(),
             declared_serial_linktypes: Vec::new(),
             serial: None,
@@ -8640,6 +8649,13 @@ impl Dissection {
         &self.skip_census
     }
 
+    /// The ICMP, ICMPv6 and IGMP messages this capture carried: the network's
+    /// word about its flows. Each was also counted as skipped, since none is a
+    /// transport. See [`control`].
+    pub fn control(&self) -> &control::ControlPlane {
+        &self.control
+    }
+
     /// The flow matching `key`, if the capture carried one.
     pub fn flow(&self, key: &FlowKey) -> Option<&FlowDissection> {
         self.flows.find(key)
@@ -9166,6 +9182,17 @@ impl Dissection {
                 return;
             }
             Err(reason) => {
+                // Still a skip, and counted as one: an ICMP error or an IGMP
+                // report is not a transport. What it says about the flows is
+                // read beside the count.
+                if let SkipReason::NotTransport(proto) = reason {
+                    if control::reads(proto) {
+                        if let Some(m) = link::control_message(link_type, packet_index, bytes) {
+                            self.attach_control_error(&m);
+                            self.control.observe(m);
+                        }
+                    }
+                }
                 self.note_skip(packet_index, interface_id, reason);
                 return;
             }
@@ -9173,6 +9200,21 @@ impl Dissection {
         let at = lent_place(in_container, bytes, segment.payload)
             .map_or(tcp::PayloadAt::Here, tcp::PayloadAt::Container);
         self.push_segment(segment, ts_nanos, at);
+    }
+
+    /// An ICMP or ICMPv6 error that quotes a packet of a flow this capture holds
+    /// is kept on that flow ([`session_table::LinkIngest::control_errors`]). The
+    /// flow exists already when the error is about a packet it sent; one that
+    /// quotes a flow the capture holds no packet of is in the plane alone.
+    fn attach_control_error(&mut self, message: &control::ControlMessage) {
+        let Some((key, error)) = message.about() else {
+            return;
+        };
+        if let Some(i) = self.flows.position(key) {
+            self.flows[i].ingest.observe_control_error(error);
+        } else if let Some(i) = self.datagram_flows.position(key) {
+            self.datagram_flows[i].ingest.observe_control_error(error);
+        }
     }
 
     /// Feed one TCP segment to its flow's assembler and the observer behind it.

@@ -4642,8 +4642,11 @@ int main(void) {
      * message and how each Open's extension was encoded. Six keys and two
      * families arrive; nothing retires.
      * 75: a reply pairs with its request across a named session's links.
-     * Values move under stationary keys. */
-    revisioned[2].revision = 75;
+     * Values move under stationary keys.
+     * 76: each flow gains `icmp_errors` and the document `membership`, the
+     * ICMP, ICMPv6, IGMP and MLD messages about the capture's flows and
+     * groups. Eight keys and two families arrive; nothing retires. */
+    revisioned[2].revision = 76;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

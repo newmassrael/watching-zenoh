@@ -107,6 +107,9 @@ pub struct LinkIngest {
     /// exchange that makes the flow zenoh of that version; counted here for the
     /// same reason. See [`crate::foreign_zenoh`].
     foreign: crate::foreign_zenoh::ForeignZenoh,
+    /// The ICMP and ICMPv6 errors that quoted a packet of this flow, bounded.
+    /// See [`crate::control`].
+    control_errors: crate::control::FlowErrors,
     /// How the flow's framing units read, counted at ingest for the same reason
     /// [`Self::versions`] is. See [`ReadingEvidence`].
     readings: ReadingEvidence,
@@ -680,6 +683,16 @@ impl LinkIngest {
     ) {
         self.foreign
             .observe_scouting(message, direction, self.packet, answers_a_scout);
+    }
+
+    /// An ICMP or ICMPv6 error quoted a packet of this flow.
+    pub(crate) fn observe_control_error(&mut self, error: crate::control::FlowError) {
+        self.control_errors.observe(error);
+    }
+
+    /// The ICMP and ICMPv6 errors that quoted a packet of this flow.
+    pub fn control_errors(&self) -> &crate::control::FlowErrors {
+        &self.control_errors
     }
 
     /// Whether the flow is zenoh of a version this reader does not read.

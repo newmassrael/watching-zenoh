@@ -2167,6 +2167,9 @@ fn document_selected<W: DocOut>(
     // dissection books them at.
     out.key("reassembly");
     crate::report::write_reassembly(d, out);
+    // Revision 76 — the IGMP and MLD membership messages the capture carried,
+    // capture-wide because a multicast group is not one flow's.
+    write_membership(d.control(), out);
     // R311y875 — the run's misbound rules, AFTER every row producer, for the
     // reason `wz-analyze` places its unbound-declaration note there: this is a
     // fact about what the capture turned out to hold, and both producers above
@@ -2362,6 +2365,7 @@ fn push_stream_flow<W: DocOut>(
     push_flow_number(tags.flow_id, out);
     write_zenoh(flow.ingest.versions(), &flow.zenoh_evidence(), out);
     write_foreign_zenoh(flow.ingest.foreign_zenoh(), out);
+    write_icmp_errors(flow.ingest.control_errors(), out);
     write_unit_readings(flow.ingest.readings(), out);
     write_context(
         &flow.session.context(),
@@ -2740,6 +2744,7 @@ fn push_datagram_flow<W: DocOut>(
     push_flow_number(tags.flow_id, out);
     write_zenoh(flow.ingest.versions(), &flow.zenoh_evidence(), out);
     write_foreign_zenoh(flow.ingest.foreign_zenoh(), out);
+    write_icmp_errors(flow.ingest.control_errors(), out);
     write_unit_readings(flow.ingest.readings(), out);
     write_context(
         &flow.session.context(),
@@ -5588,6 +5593,94 @@ pub(crate) fn write_foreign_zenoh<W: DocOut>(
         out.close_map();
     }
     out.close_array();
+    out.close_map();
+}
+
+/// The flow's `icmp_errors` member (field document revision 76): the ICMP and
+/// ICMPv6 errors whose quote names a packet of this flow, in capture order
+/// ([`crate::control`]).
+///
+/// ```text
+/// "icmp_errors":{"errors":[{"unreachable":"port","packet":12,
+///                           "from":"10.0.0.2","mtu":null}],"more":0}
+/// ```
+///
+/// `unreachable` is why the packet was refused: `port`, `host`, `network`,
+/// `protocol`, `fragmentation_needed`, `prohibited` or `other`. `packet` is the
+/// capture-global packet that carried the error, `from` who sent it (the host
+/// for a closed port, a router on the way for the others), `mtu` the MTU a
+/// `fragmentation_needed` stated and `null` otherwise. The list holds the first
+/// 64; `more` counts the rest. Counted at ingest.
+pub(crate) fn write_icmp_errors<W: DocOut>(errors: &crate::control::FlowErrors, out: &mut W) {
+    out.key("icmp_errors");
+    out.open_map();
+    out.key("errors");
+    out.open_array();
+    for e in errors.errors() {
+        out.open_map();
+        out.key("unreachable");
+        out.text(e.why.name());
+        out.key("packet");
+        out.uint(e.packet as u64);
+        out.key("from");
+        out.text(&e.from.ip_text());
+        out.key("mtu");
+        out.opt_uint(e.mtu.map(u64::from));
+        out.close_map();
+    }
+    out.close_array();
+    out.key("more");
+    out.uint(errors.more());
+    out.close_map();
+}
+
+/// The document's `membership` member (revision 76): the IGMP and MLD messages
+/// the capture carried, in capture order ([`crate::control`]). A switch that
+/// stops forwarding a multicast group to a port is how scouting on
+/// `224.0.0.224` fails without a word from zenoh, and these are what show it:
+/// whether a querier asked, and whether the members answered.
+///
+/// ```text
+/// "membership":{"events":[{"what":"query","packet":3,"from":"10.0.0.1",
+///                          "groups":[]}],"more":0}
+/// ```
+///
+/// `events` and not `messages`, which names a flow's zenoh messages: these are
+/// not zenoh's, and a reader of one key must not have to know which object it
+/// is under to know which it holds.
+///
+/// `what` is `query`, `report` or `leave`; `groups` the groups it names, none
+/// for a general query and every group record's for a version 3 report.
+/// `more` counts the control messages (these and the ICMP errors) past the
+/// capture's bound of 1024, so a `0` says the list is every one.
+fn write_membership<W: DocOut>(control: &crate::control::ControlPlane, out: &mut W) {
+    use crate::control::ControlKind;
+    out.key("membership");
+    out.open_map();
+    out.key("events");
+    out.open_array();
+    for m in control.messages() {
+        let ControlKind::Membership { what, groups } = &m.kind else {
+            continue;
+        };
+        out.open_map();
+        out.key("what");
+        out.text(what.name());
+        out.key("packet");
+        out.uint(m.packet as u64);
+        out.key("from");
+        out.text(&m.from.ip_text());
+        out.key("groups");
+        out.open_array();
+        for group in groups {
+            out.text(&crate::link::Endpoint::new(group, 0).ip_text());
+        }
+        out.close_array();
+        out.close_map();
+    }
+    out.close_array();
+    out.key("more");
+    out.uint(control.more());
     out.close_map();
 }
 
@@ -9504,6 +9597,38 @@ mod tests {
             push_context(&context, &ParameterGrounds::of_context(&context), &mut out);
             arms.push(out);
         }
+        // Revision 76 — every `unreachable` word on a flow's errors, and every
+        // `what` word in the document's membership.
+        {
+            use crate::control::{
+                ControlKind, ControlMessage, ControlPlane, FlowError, FlowErrors, Membership,
+                Unreachable,
+            };
+            let at = crate::link::Endpoint::new(&[10, 0, 0, 1], 0);
+            let mut errors = FlowErrors::default();
+            for why in Unreachable::all() {
+                errors.observe(FlowError {
+                    why,
+                    packet: 1,
+                    from: at,
+                    mtu: Some(1400),
+                });
+            }
+            arms.push(members(|out| write_icmp_errors(&errors, out)));
+            let mut plane = ControlPlane::default();
+            for what in [Membership::Query, Membership::Report, Membership::Leave] {
+                plane.observe(ControlMessage {
+                    from: at,
+                    to: at,
+                    packet: 2,
+                    kind: ControlKind::Membership {
+                        what,
+                        groups: alloc::vec![alloc::vec![224, 0, 0, 224]],
+                    },
+                });
+            }
+            arms.push(members(|out| write_membership(&plane, out)));
+        }
         // Revision 74 — every `open_syn` and `open_ack` word, on a context.
         {
             use wz_session_core::passive::{ShmExtEncoding, ShmHandshake};
@@ -11424,7 +11549,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 104] = [
+        let live: [(&str, &str, Vec<&'static str>); 106] = [
             // The node a `payload` range is the span of: the walk over the
             // closed set its writer's word comes from.
             (
@@ -11470,6 +11595,13 @@ mod tests {
             // How each Open's `Shm` extension was encoded (revision 74).
             (rev::FIELDS, "open_syn", ShmExtWord::names()),
             (rev::FIELDS, "open_ack", ShmExtWord::names()),
+            // The network's word about a flow (revision 76).
+            (
+                rev::FIELDS,
+                "unreachable",
+                crate::control::Unreachable::names(),
+            ),
+            (rev::FIELDS, "what", crate::control::Membership::names()),
             (rev::FIELDS, "phase", PhaseWord::names()),
             // The band's NAME is `Priority::name`, an exhaustive match over the
             // eight variants; `from_wire` is total over the 3-bit field, so the
