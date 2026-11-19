@@ -1209,6 +1209,9 @@ round_fed_gates=(
     # (EPL-2.0 OR Apache-2.0), and the license texts are in the tree. Fed by the family crates'
     # sources and manifests and LICENSES/; a text read, no build.
     "family_notice_gate.py --check"
+    # Every crate is read by a slice of the logic census or excluded with a reason.
+    # Fed by the tracked crate manifests and the census table and slices; a text read.
+    "logic_census_coverage_gate.py --check"
     "expired_blocker_lint.py"
     "reason_citation_gate.py"
     # Items 221 and 255 -- a `path:LINE` citation of this tree in a source or script
