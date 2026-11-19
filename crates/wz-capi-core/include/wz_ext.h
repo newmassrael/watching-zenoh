@@ -34,6 +34,34 @@
 z_result_t wz_ext_config_device_requires(const z_loaned_config_t *config,
                                          z_owned_string_t *out_requirement);
 
+/* The policies of the session z_open opens from this config, stated from
+ * code. The open composes them, lowest first: the build defaults, the
+ * profile (wz_ext_config_profile's, else the document's), the document's
+ * wz/policies, then wz_ext_config_policy's statements. The first two doors
+ * are in every build, wz_ext_config_document in a build with the
+ * config-document capability (it links a JSON5 reader); a build whose
+ * domain of a policy holds one value refuses every other value of it.
+ *
+ * Each call is checked at once against the build, as the open will compose
+ * it: a policy, value or profile the build does not have, a value the
+ * build's domain leaves out, a policy only the build decides, and a document
+ * whose wz member has a refused shape answer _Z_ERR_CONFIG_INVALID_VALUE
+ * and leave the config as it was. A null argument answers _Z_ERR_NULL.
+ *
+ * wz_ext_config_policy states that `policy` takes `value` (both by the
+ * declaration's ids); a second statement of the policy replaces the first.
+ * wz_ext_config_profile names the profile the session starts from, in place
+ * of the one the document names. wz_ext_config_document hands the config a
+ * zenoh JSON5 document of which only the wz member is read, so the document
+ * a zenoh-c program opens with configures these policies alike; a second
+ * call replaces the first. */
+z_result_t wz_ext_config_policy(z_loaned_config_t *config, const char *policy,
+                                const char *value);
+z_result_t wz_ext_config_profile(z_loaned_config_t *config,
+                                 const char *profile);
+z_result_t wz_ext_config_document(z_loaned_config_t *config,
+                                  const char *json5);
+
 /* A clock the program registers, which z_timestamp_new then stamps with in
  * place of the system clock: a disciplined hardware clock, or a time master
  * on the device's bus. Part of the unstable surface, and present only in a

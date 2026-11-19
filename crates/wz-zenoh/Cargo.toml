@@ -80,6 +80,11 @@ admission-retry = ["engine-tokio"]
 # `multi-route-atomic-tx` policy is off refuses it when the publish is made or the publisher
 # declared. It is off by default for the reason `link-restriction` is.
 atomic-publish = ["engine-tokio"]
+# A wz-only door, not upstream's: `Config::state_policy` and `Config::state_profile`, the open's
+# own layer of policies over the document's `wz` member, and `Session::resolved_policies`, the
+# snapshot an open resolved with the layer each value came from (`Origin`, in `config`). It is off
+# by default for the reason `link-restriction` is; `wz::ext::policies` turns it on.
+open-policies = ["engine-tokio"]
 # `transport_tcp` is what gives the configuration its default listening endpoints (`tcp/[::]:7447`
 # for a router, `tcp/[::]:0` for a peer), as it does upstream; the engine carries the link always.
 transport_tcp = ["zenoh-config/transport_tcp"]

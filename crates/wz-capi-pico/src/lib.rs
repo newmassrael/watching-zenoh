@@ -162,6 +162,9 @@ pub mod revision;
 pub mod cancellation;
 pub mod codec;
 pub mod config;
+// The policies a config states for its session, from code and from a zenoh document: wz doors
+// (`wz_ext.h`) in every build.
+pub mod config_policy;
 // What an open of a config would ask of the operating system: a wz door (`wz_ext.h`) of the
 // unstable surface (docs/target-build-contract.md T9).
 #[cfg(feature = "connectivity")]

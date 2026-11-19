@@ -70,6 +70,7 @@ use wz_session_core::policy::SessionPolicy;
 use wz_session_core::session_zid::SessionZid;
 
 use crate::config::{ConfigState, Z_CONFIG_SESSION_ZID_KEY};
+use crate::config_policy::PolicyStatements;
 use crate::pubsub::z_closure_drop_callback_t;
 use crate::result::ZResult;
 use crate::string_array::{z_loaned_string_array_t, z_owned_string_array_t, StringArrayState};
@@ -724,15 +725,16 @@ pub unsafe extern "C" fn z_scout(
     };
     let read = ScoutConfig::read(cfg.as_deref());
     // The scout's snapshot, resolved as `z_open` resolves one from its config: a scout handed
-    // no config reads pico's defaults, the empty config.
-    let policy = match cfg.as_deref() {
-        Some(cfg) => crate::session::resolve_policy(cfg),
-        None => crate::session::resolve_policy(&ConfigState::default()),
-    };
+    // no config reads pico's defaults, the empty config, and one whose policies the build refuses
+    // is refused with the open's code.
+    let unstated = PolicyStatements::default();
+    let policy =
+        crate::session::resolve_policy(cfg.as_deref().map_or(&unstated, |cfg| &cfg.policies))
+            .map(|resolved| resolved.policy);
     drop(cfg);
-    let read = match read {
-        Ok(read) => read,
-        Err(code) => {
+    let (read, policy) = match (read, policy) {
+        (Ok(read), Ok(policy)) => (read, policy),
+        (Err(code), _) | (Ok(_), Err(code)) => {
             if let Some(drop_fn) = user_drop {
                 drop_fn(user_ctx);
             }
@@ -967,6 +969,41 @@ mod tests {
         // SAFETY: both values are live locals, and `z_scout` consumes them.
         let rc = unsafe { z_scout(&mut config, &mut closure, core::ptr::null()) };
         assert_eq!(rc, crate::result::Z_ERR_INVALID);
+        assert_eq!(drops.load(Ordering::SeqCst), 1, "the drop ran once");
+        assert!(config._this.handle.is_null(), "the config was consumed");
+    }
+
+    /// `z_scout` with a config whose policies the build refuses answers the open's
+    /// `Z_ERR_CONFIG_INVALID_VALUE` before it scouts, and runs the closure's drop once.
+    #[test]
+    fn a_scout_refuses_a_config_whose_policies_the_open_refuses() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+
+        unsafe extern "C" fn count_drop(context: *mut c_void) {
+            (*(context as *const AtomicUsize)).fetch_add(1, Ordering::SeqCst);
+        }
+
+        let cfg = ConfigState {
+            policies: PolicyStatements::unchecked("no-such-policy", "on"),
+            ..ConfigState::default()
+        };
+        let mut config = crate::abi::z_moved_config_t {
+            _this: crate::abi::z_owned_config_t {
+                handle: Box::into_raw(Box::new(cfg)) as *mut c_void,
+                _pad: [core::ptr::null_mut(); 3],
+            },
+        };
+        let drops = AtomicUsize::new(0);
+        let mut closure = z_moved_closure_hello_t {
+            _this: z_owned_closure_hello_t {
+                context: &drops as *const AtomicUsize as *mut c_void,
+                call: None,
+                drop: Some(count_drop),
+            },
+        };
+        // SAFETY: both values are live locals, and `z_scout` consumes them.
+        let rc = unsafe { z_scout(&mut config, &mut closure, core::ptr::null()) };
+        assert_eq!(rc, crate::result::Z_ERR_CONFIG_INVALID_VALUE);
         assert_eq!(drops.load(Ordering::SeqCst), 1, "the drop ran once");
         assert!(config._this.handle.is_null(), "the config was consumed");
     }

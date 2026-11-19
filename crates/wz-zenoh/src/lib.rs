@@ -845,6 +845,10 @@ pub mod config {
     pub use crate::api::config::Config;
     #[zenoh_macros::unstable]
     pub use crate::api::config::Notifier;
+    // What `Session::resolved_policies` answers: the snapshot an open resolved and the layer
+    // each value came from.
+    #[cfg(feature = "open-policies")]
+    pub use wz_session_core::policy_document::{Origin, Provenance, Resolved};
 }
 
 /// The helpers `internal` re-exports reach a caller by the paths the ecosystem crate names, and they

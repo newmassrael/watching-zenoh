@@ -102,7 +102,7 @@ ALLOWED: tuple[tuple[str, str, str], ...] = (
     ("crates/wz-ap-demo/src/args.rs", "resolve_policy", "creator: the snapshot of a node no --config file describes and of a sessions document; main hands a file's snapshot down"),
     ("crates/wz-capi-coop/src/engine.rs", "resolve_policy", "creator: resolves the snapshot (build defaults until a run-time document is read)"),
     ("crates/wz-capi-core/src/open_plan.rs", "resolve_policy", "creator: the snapshot the document's wz member resolved, else the build defaults"),
-    ("crates/wz-capi-pico/src/session.rs", "resolve_policy", "creator: resolves the snapshot (build defaults until a run-time document is read)"),
+    ("crates/wz-capi-pico/src/session.rs", "resolve_policy", "creator: the snapshot a config's document and its doors resolve over the build defaults"),
     ("crates/wz-capi-pico/src/stream_supervision.rs", "resolve_policy", "creator: a reception supervisor the program makes with no session resolves its snapshot (build defaults until a run-time document is read)"),
     ("crates/wz-capi-port/src/observation/supervision.rs", "resolve_policy", "creator: resolves the snapshot (build defaults until a run-time document is read)"),
     ("crates/wz-mcu-multicast-e2e/src/lib.rs", "resolve_policy", "creator: resolves the snapshot (build defaults until a run-time document is read)"),
@@ -113,6 +113,8 @@ ALLOWED: tuple[tuple[str, str, str], ...] = (
     ("crates/wz-runtime-tokio-test-support/src/lib.rs", "fixture_policy", "creator: resolves the snapshot (build defaults until a run-time document is read); a test fixture"),
     ("crates/wz-runtime-tokio/src/router_forward.rs", "resolve_policy", "creator: resolves the snapshot (build defaults until a run-time document is read)"),
     ("crates/wz-runtime-tokio/src/zenoh_config.rs", "build_policies", "the base a zenoh document's wz member is resolved over, and a document without one"),
+    ("crates/wz-zenoh/src/api/config.rs", "judge_alone", "creator: a Rust API open's door statement, judged over the build defaults it is resolved over"),
+    ("crates/wz-zenoh/src/api/config.rs", "resolve", "creator: the snapshot a Rust API open resolves from its Config's wz member and doors"),
 )
 
 #: The items a read can be in. A `const fn` is a `fn`; `const` and `static` are named by the

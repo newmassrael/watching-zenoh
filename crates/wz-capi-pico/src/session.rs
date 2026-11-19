@@ -52,6 +52,7 @@ use crate::config::{
     ConfigState, Z_CONFIG_CONNECT_KEY, Z_CONFIG_LISTEN_KEY, Z_CONFIG_MODE_KEY,
     Z_CONFIG_SESSION_ZID_KEY,
 };
+use crate::config_policy::PolicyStatements;
 // The twelve TLS key constants are consumed ONLY by `resolve_tls_config`, which
 // exists only when a certificate has a backend that could consume it. Importing
 // them at module scope would make the no-backend build carry twelve unused
@@ -197,12 +198,16 @@ const fn pico_group(sn_resolution: SnResolution) -> wz_capi_core::drive::GroupPr
     }
 }
 
-/// The policies a session [`z_open`] opens from `config` runs under: the one place this ABI's open
-/// decides them, resolved once and handed to the engine and to the session's handle. The build
-/// defaults: pico's configuration is a set of keys and values, not a zenoh document with a `wz`
-/// member, and its door for a policy is a key of its own, which it does not have yet.
-pub(crate) fn resolve_policy(_config: &ConfigState) -> SessionPolicy {
-    SessionPolicy::defaults()
+/// The policies a session [`z_open`] opens from a config runs under, and where each came from: the
+/// one place this ABI decides them, resolved once and handed to the engine and to the session's
+/// handle. `policies` is what the config's doors stated (`ConfigState::policies`), composed over
+/// the build defaults ([`PolicyStatements::compose`]); `Z_ERR_CONFIG_INVALID_VALUE` when the build
+/// refuses any of it. The doors check a change through this before they keep it, so they and the
+/// open cannot judge a config differently.
+pub(crate) fn resolve_policy(
+    policies: &PolicyStatements,
+) -> Result<wz_session_core::policy_document::Resolved, ZResult> {
+    policies.compose(SessionPolicy::defaults())
 }
 
 /// pico's transmit model and the width of the sequence numbers its handshake advertises, under
@@ -614,8 +619,12 @@ pub unsafe extern "C" fn z_open(
         // lost its link dials the locators found here again. pico re-runs the whole open,
         // scouting included (`_z_client_reopen_task_fn` calls `_z_open`), so a router that
         // comes back on another locator is found there and not here. The scout runs under the
-        // snapshot of the open it finds a node for.
-        let policy = resolve_policy(&cfg);
+        // snapshot of the open it finds a node for, and a config whose policies the build refuses
+        // opens nothing and scouts for nothing.
+        let policy = match resolve_policy(&cfg.policies) {
+            Ok(resolved) => resolved.policy,
+            Err(code) => return code,
+        };
         // The key-wire form, judged for the engine the session opens on, and the key ids every
         // node shares that the config states (`crate::key_ids`).
         if let Err(code) = crate::key_ids::admit_at_open(&cfg, &policy) {
@@ -2302,7 +2311,7 @@ mod build_numbers {
         // Control: the open that resolves its own snapshot is given the build's width.
         let config = ConfigState::default();
         assert_eq!(
-            pico_link_policy(&resolve_policy(&config)).1,
+            pico_link_policy(&resolve_policy(&config.policies).unwrap().policy).1,
             build.sn_resolution()
         );
     }

@@ -5,7 +5,8 @@ reason. A crate that is in neither place is a crate the census has not looked at
 and nobody can tell from the slices alone. `scripts/lib/logic_census_coverage_gate.py`
 holds this table to the tracked tree: a crate with no row, a row naming no crate,
 a slice that does not name its crate, and an exclusion without a reason are each
-a failure.
+a failure. The files of the crates a slice reads are held one level down, in
+`files.md`.
 
 The `Where` column holds the slices that read the crate (`S1, S2`), or
 `excluded: <kind>`, where the kind is one of `test`, `build`, `binding`,
@@ -22,13 +23,13 @@ The `Where` column holds the slices that read the crate (`S1, S2`), or
 | `wz-analyze` | excluded: analyzer | The analyzer's offline reports; its place in the migration is the open point of section 8. |
 | `wz-ap-demo` | S10 | |
 | `wz-ap-demo-app` | S10 | |
-| `wz-app-frame` | S10 | |
+| `wz-app-frame` | S10, S11 | |
 | `wz-auth` | S6 | |
 | `wz-capi-c` | S8 | |
 | `wz-capi-coop` | S7 | |
 | `wz-capi-core` | S7 | |
 | `wz-capi-dissect` | excluded: analyzer | The C ABI of the analyzer's dissection; follows `wz-capture`. |
-| `wz-capi-pico` | S7 | |
+| `wz-capi-pico` | S7, S12 | |
 | `wz-capi-port` | S7 | |
 | `wz-capi-replay` | excluded: analyzer | The C ABI of capture replay; follows `wz-replay`. |
 | `wz-capture` | excluded: analyzer | The analyzer (pcap reading, dissection, flow verdicts); its place in the migration is the open point of section 8. |
@@ -70,15 +71,15 @@ The `Where` column holds the slices that read the crate (`S1, S2`), or
 | `wz-replay` | excluded: analyzer | Capture replay; its place in the migration follows `wz-capture`. |
 | `wz-rest` | S10 | |
 | `wz-routing-graph` | S4 | |
-| `wz-runtime-coop` | S5, S10 | |
+| `wz-runtime-coop` | S5, S10, S12 | |
 | `wz-runtime-core` | S9 | |
 | `wz-runtime-freertos` | S9 | |
 | `wz-runtime-posix` | S9 | |
-| `wz-runtime-tokio` | S4, S5, S10 | |
+| `wz-runtime-tokio` | S4, S5, S10, S12 | |
 | `wz-runtime-tokio-multicast-tests` | excluded: test | Multicast tests of the tokio runtime. |
 | `wz-runtime-tokio-test-support` | excluded: test | Helpers for the tokio runtime's tests. |
 | `wz-runtime-zephyr` | S9 | |
-| `wz-session-core` | S1, S2, S3, S10 | |
+| `wz-session-core` | S1, S2, S3, S10, S11, S12 | |
 | `wz-session-core-test-support` | excluded: test | Helpers for the session core's tests. |
 | `wz-session-lwip` | S9 | |
 | `wz-session-mcu` | S5, S10 | |
