@@ -5198,6 +5198,26 @@
         "No capture of a real shared-memory session was read; the fixtures put Shm extensions of the two encodings on this reader's own handshake messages, and the encodings each release writes were read from the zenoh-protocol crates of 1.9.0 and 1.10.2.",
         "Which release first wrote the buffer, and whether releases before 1.9.0 wrote the integer, was not read."
       ]
+    },
+    "Round 4532": {
+      "decision_summary": "A request id is the session's and not the link's: a session over several links is one transport, its sender mints one sequence of ids, and a reply may come back on another link than its request went out on. So an exchange is keyed by the two zids where the capture names the flow's session, and by the list where it cannot; the ends that leaves unpaired on flows with no named session are counted as maybe on another link, a part of the orphans and the unclosed. A key id used before its declaration is said as a fact on the unresolved alias row: the packet of its first miss and the packet of the first declaration of that id in that space after it, the reference staying unresolved because a declaration does not name a reference that came before it. The census moves to revision 27 with three keys, the field document to 75 and row_facts to 15 with values only.",
+      "changes_bullets": [
+        "The exchange plane keys open exchanges by ExchangeScope, the asker's and the answerer's zids for a named session or the list and the asker's direction otherwise, and counts in WithoutSession the orphan responses and unclosed requests a list scope leaves; the census writes it as maybe_other_link.",
+        "The throughput plane's unresolved alias keeps the packet of its first miss, its space's owner, and the packet of the first later declaration of its id in that space, which the census writes beside cause.",
+        "A two-link session fixture with chosen records in the throughput plane's tests; census revision 27 with its key set, field document 75 and row_facts 15 rows, the ABI header's paragraphs and pins, and the C consumer's census and field revision pins."
+      ],
+      "verification_bullets": [
+        "The capture crate's library tests with dissect and fixtures, 1842 passed and 6 ignored, among them a request on one link of a two-link session answered and closed on the other, paired and with nothing counted as maybe on another link, with the same records on one link as its control; an orphan reply and an unclosed request on a flow with no session counted as maybe on another link; and the reference to id 7 on one link before its declaration on the other, naming packets 4 and 5, against an id never declared that names none. The dissection crate's tests, 259 and 4 passed.",
+        "Red-first: with every exchange scoped by its list and the late declaration not recorded, the cross-link pairing test and the use-before-declaration test fail and the unnamed-flow test passes.",
+        "fmt; clippy with warnings denied of wz-capture; wz-capture with no default features builds; the rustdoc lane over the two touched crates; the upstream citation anchor gate; the integer-cell gate."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/5-network-routing-layer"
+      ],
+      "carry_forward_bullets": [
+        "The interest plane still correlates an Interest with its answers within one list; whether a sibling link of a named session answers it is the same question this round answered for exchanges, and it is left open there.",
+        "A link of a named session that the capture joined after its handshake is not attributed to the session, so its exchanges stay scoped to the list and are counted as maybe on another link."
+      ]
     }
   },
   "inventory_entries": {
