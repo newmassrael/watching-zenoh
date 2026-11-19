@@ -229,7 +229,7 @@ async fn drive_udp_acceptor_to_established(socket: UdpSocket) -> (u32, WriterHan
 async fn open_session_at_udp_reaches_established() {
     // R311ez — a `udp/...` locator opens a datagram session the same way a
     // `tcp/...` locator opens a stream session: dial_locator binds an
-    // ephemeral local socket, wire_dialed_link shares it, and the Initiator
+    // ephemeral local socket, wire_dialed_link_with_rx shares it, and the Initiator
     // handshake reaches Established against the inline datagram acceptor.
     let acc_socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind acceptor");
     let addr = acc_socket.local_addr().expect("acceptor addr");
