@@ -5339,6 +5339,7 @@ mod tests {
                 clock: TokioTime::new(),
                 #[cfg(feature = "scout")]
                 tls: CapiTlsConfig::default(),
+                #[cfg(feature = "scout")]
                 app: AppSlot::default(),
                 auth: None,
                 #[cfg(feature = "routing-namespace")]
@@ -5420,6 +5421,7 @@ mod tests {
                 clock: TokioTime::new(),
                 #[cfg(feature = "scout")]
                 tls: CapiTlsConfig::default(),
+                #[cfg(feature = "scout")]
                 app: AppSlot::default(),
                 auth: None,
                 #[cfg(feature = "routing-namespace")]
