@@ -1,0 +1,15 @@
+impact = ["watching-zenoh/local-ci-gates"]
+decision = '''
+Pay the first half of open-debt item 952. A zenoh-c open laid a document's batching and allocation mode over the transmit model its ABI chose but not its `transport/link/tx/queue/size/<priority>` keys, so a document that widened a queue opened one of upstream's size: an `init` queue made the same number of batches at the open whatever the document said, where libzenohc makes one per slot of the size it states. The stated sizes are now laid over the model as the other keys are, each only where it differs from upstream's default. The C1cc leg that witnesses item 952 now reads the same step as libzenohc (a data queue four slots wider makes four more batches at the open). Its second half stays open: a `lazy` queue makes no batch-sized block while a burst crosses, because wz's writer keeps one pool of spare buffers for every lane, so the buffers the handshake used carry the data lane's burst, where upstream's stages allocate per priority up to each lane's size.
+'''
+changes = '''
+`crates/wz-capi-core/src/open_plan.rs`: `StatedTxQueue::sizes`, a document's `size/<priority>` by the priority's wire byte where it differs from upstream's default, laid over the model's `sizes` by `over`; the stance test states a wider data queue and checks only that lane moves.
+'''
+verification = '''
+On the build host: `open_plan` 46 tests; the C1cc leg `an_init_queue_allocates_its_batches_at_the_open_and_a_lazy_one_on_traffic_on_wz_and_libzenohc` reads wz's queue step 4 as libzenohc's (0 before), and still fails on its lazy half (wz 0 batch-sized blocks on traffic, libzenohc 2), which this round names and does not claim.
+Locally: reason and store citations, reason review pins, count guard lint, `cargo fmt --check`.
+'''
+carry = '''
+Open-debt item 952, its lazy half: `OutboundTx` keeps one spare pool for every lane (`LaneState::spare`), so a lazy queue's data lane reuses the buffers the handshake's control lane made. Upstream's stage allocates a batch per priority only while fewer than that lane's size exist (`io/zenoh-transport/src/common/pipeline.rs` @ `None if self.batch_allocs < self.batch_config.0 => {`). The repayment keys the spare pool and a made-count by lane: `take_buffer` takes the priority `tx_slot_acquire` already has, and every give-back (`recycle`, `recycle_wire`, a joined write's frames, an abandoned lend) names the lane its buffer was lent for. The 51 C1cc legs after it stay unreached until then.
+Runtime configuration step 5 lands after Round 4541's capability cost repayment, its budgets that repayment's plus step 5's own growth.
+'''
