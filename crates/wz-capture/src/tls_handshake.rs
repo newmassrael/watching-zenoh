@@ -673,7 +673,9 @@ pub(crate) mod tests {
         h
     }
 
-    /// Handshakes that between them hold every word a document writes.
+    /// Handshakes that between them hold every word a document writes. Its one reader is the
+    /// document's test (`fields_json`), which is behind `dissect`.
+    #[cfg(feature = "dissect")]
     pub(crate) fn every_word() -> Vec<TlsHandshake> {
         let mut only_hello = TlsHandshake::default();
         only_hello.observe(0, &client_hello("x"));
