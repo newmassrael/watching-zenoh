@@ -2804,10 +2804,20 @@ pub fn check_lease_deadline<R: SessionRuntime, T: TimeSource>(
     if !R::with_mutex_mut(&actions.link.lease_armed, |armed| *armed) {
         return LeaseCheckOutcome::NotMonitored;
     }
+    // The watch of the peer's initial declarations first: the wake may be its own, and a sync
+    // taken as lost ends the link however long the lease still has.
+    #[cfg(feature = "alloc")]
+    if actions
+        .declaration_watch_deadline()
+        .is_some_and(|deadline_ms| now_ms >= deadline_ms)
+    {
+        engine.process_event(E::LinkLost);
+        return LeaseCheckOutcome::DeclarationsStalled;
+    }
     // R311kx — deadline arithmetic shared with the loop wake computation
     // (`lease_wake_deadline`): `deadline = baseline + adopted window`, so
     // "the wake fired" and "the window elapsed" cannot drift apart.
-    match lease_wake_deadline(actions) {
+    match lease_expiry_deadline(actions) {
         None => LeaseCheckOutcome::NoBaseline,
         Some(deadline_ms) if now_ms >= deadline_ms => {
             engine.process_event(E::LeaseExpired);
@@ -3332,7 +3342,25 @@ fn max_stamp(a: Option<u64>, b: Option<u64>) -> Option<u64> {
 /// `None` as well while the link's lease monitor is not running (before
 /// `Established`, and after its exit released the monitor): a stamp left
 /// from the established window is not a deadline anyone keeps.
+///
+/// It is also the wake of the no-progress watch of the peer's initial declarations, when that
+/// watch runs and ends first (`SessionLinkActions::declaration_watch_deadline`): the comparator
+/// that fires on it judges the watch before the lease, so every loop that wakes for the lease
+/// keeps the watch with no deadline of its own.
 pub fn lease_wake_deadline<R: SessionRuntime, T: TimeSource>(
+    actions: &SessionLinkActions<R, T>,
+) -> Option<u64> {
+    let lease = lease_expiry_deadline(actions)?;
+    #[cfg(feature = "alloc")]
+    if let Some(watch) = actions.declaration_watch_deadline() {
+        return Some(lease.min(watch));
+    }
+    Some(lease)
+}
+
+/// The lease's own expiry, which [`lease_wake_deadline`] wakes for and [`check_lease_deadline`]
+/// judges: `None` while the monitor is not running or no baseline exists.
+fn lease_expiry_deadline<R: SessionRuntime, T: TimeSource>(
     actions: &SessionLinkActions<R, T>,
 ) -> Option<u64> {
     if !R::with_mutex_mut(&actions.link.lease_armed, |armed| *armed) {

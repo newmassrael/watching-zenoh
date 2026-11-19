@@ -2650,6 +2650,27 @@ served during the wait. It is read only when that policy is on, and must be at
 least 1.
 '''
 
+[[limit]]
+id = "DECLARATION_SYNC_RX_NO_PROGRESS_MS"
+kconfig = "WZ_LIMIT_DECLARATION_SYNC_RX_NO_PROGRESS_MS"
+default = 0
+storage = "quota"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "none"
+wire = "none"
+help = '''
+How long, in milliseconds, a session waits for the next of its peer's initial
+declarations before it takes the declaration sync as cut short, when the
+reliable-gap-reconnect policy is not off. From the session's establishment
+until the peer's end of its initial declarations, a stretch this long with no
+declaration from the peer ends the link as lost, and a reconnecting session
+opens again and redoes the sync, as for a gap on the reliable channel. Each
+declaration the peer sends starts the stretch again. 0 keeps no such watch, as
+upstream keeps none. Only the tokio engine reads it, since only it notes the
+end of the peer's declarations.
+'''
+
 # The numbers of zenoh-pico's value switches (the `maps` rows above that anchor to a limit), as the
 # pico ABI states them. Each defaults to pico's own default, so the drop-in's default build states
 # what pico's does; a pico built with other numbers is matched by stating them here.

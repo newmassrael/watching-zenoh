@@ -369,6 +369,66 @@ async fn a_forward_gap_on_the_reliable_channel_ends_the_link_only_when_the_polic
     }
 }
 
+// The no-progress watch of the peer's initial declarations
+// (`DECLARATION_SYNC_RX_NO_PROGRESS_MS`): it runs from the establishment while
+// `reliable-gap-reconnect` reacts, only once an engine notes the session's
+// events (the engine that notes the peer's final), and the peer's final ends
+// it. `off` keeps none, as upstream keeps none. A window is named here because
+// the build's own is 0, which keeps none either.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_declaration_watch_runs_from_the_establishment_until_the_peers_final() {
+    use wz_runtime_tokio::policy::ReliableGapReconnect as Mode;
+    use wz_runtime_tokio::session_glue::IterationEvent;
+    use wz_session_core::lease::LeaseCheckOutcome;
+
+    const WINDOW: u64 = 250;
+    for mode in [Mode::Off, Mode::UntilDeclarationsSynced, Mode::Always] {
+        let mut params = fixture_session_init_params();
+        if params.policy.select_reliable_gap_reconnect(mode).is_err() {
+            continue;
+        }
+        let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> =
+            Arc::new(NoopOutboundDriver::default());
+        let actions = new_session_actions(outbound, params, TokioTime::new());
+        let mut engine = new_session_engine(&actions);
+        engine.initialize().unwrap_or_else(|never| match never {});
+        drive_to_established(&mut engine);
+        let established = actions
+            .link
+            .established_at
+            .lock()
+            .unwrap()
+            .expect("the establishment is stamped");
+
+        assert_eq!(
+            actions.declaration_watch_deadline_for(WINDOW),
+            None,
+            "{mode:?}: no engine has noted an event, so nothing could end a watch"
+        );
+        actions.note_declare_finals_in(IterationEvent::Lease(LeaseCheckOutcome::WithinLease));
+        let expected = match mode {
+            Mode::Off => None,
+            Mode::UntilDeclarationsSynced | Mode::Always => Some(established + WINDOW),
+        };
+        assert_eq!(
+            actions.declaration_watch_deadline_for(WINDOW),
+            expected,
+            "{mode:?}: a window after the establishment, while the sync is awaited"
+        );
+        assert_eq!(
+            actions.declaration_watch_deadline_for(0),
+            None,
+            "{mode:?}: a window of 0 keeps no watch"
+        );
+        actions.note_peer_declarations_final();
+        assert_eq!(
+            actions.declaration_watch_deadline_for(WINDOW),
+            None,
+            "{mode:?}: the peer's final ends the watch"
+        );
+    }
+}
+
 // CONTROL for the witness above: the same jump on the best-effort channel is
 // accepted in every mode, since only the reliable channel promises delivery.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

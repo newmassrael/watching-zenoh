@@ -1936,6 +1936,13 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// [`SessionLinkActions::note_declare_finals_in`], cleared by
     /// [`SessionLinkActions::reset_for_reopen`] with the gate itself.
     peer_declarations_final: core::sync::atomic::AtomicBool,
+    /// When the peer's last declaration arrived on this session, for the no-progress watch of its
+    /// initial declarations (`DECLARATION_SYNC_RX_NO_PROGRESS_MS`): `0` while it has sent none,
+    /// and `u64::MAX` while no engine has noted the session's inbound events
+    /// ([`SessionLinkActions::note_declare_finals_in`]), so an engine that cannot see the peer's
+    /// final never runs a watch that only the final could end. Reset with the flag above.
+    #[cfg(feature = "alloc")]
+    peer_declaration_progress_ms: core::sync::atomic::AtomicU64,
     /// R311jp — TX batching accumulator (zenoh-pico
     /// `_z_transport_common_t::{_batch_state,_batch_count}` + the shared
     /// TX `_wbuf` parity, `Z_FEATURE_BATCHING`). Inactive by default —
@@ -3837,6 +3844,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 outbound_frame_sn: FrameTxConduits::new(initial_frame_sn),
                 rx_sn: R::new_mutex(crate::sn::RxConduits::default()),
                 peer_declarations_final: core::sync::atomic::AtomicBool::new(false),
+                #[cfg(feature = "alloc")]
+                peer_declaration_progress_ms: core::sync::atomic::AtomicU64::new(u64::MAX),
                 tx_conduits: TxConduits::new(),
                 #[cfg(feature = "alloc")]
                 outbound_mappings: R::new_mutex(HashMap::<crate::wire_id::ExprId, String>::new()),
@@ -15761,6 +15770,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // The next peer has sent none of its initial declarations yet.
             self.peer_declarations_final
                 .store(false, core::sync::atomic::Ordering::Release);
+            #[cfg(feature = "alloc")]
+            self.peer_declaration_progress_ms
+                .store(u64::MAX, core::sync::atomic::Ordering::Release);
             // §5.21 routing-namespace — the per-session INGRESS correlation is
             // handshake-scoped too: on reopen the remote re-handshakes with EMPTY
             // declaration tables + a RESTARTED id space, so a stale blocked-id
@@ -15845,6 +15857,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// R311g1 — signature-stability: a no-op without `codec-declare` and `alloc`, and without
     /// `session-reconnect` the interest bookkeeping is skipped.
     pub fn note_declare_finals_in(&self, event: crate::driver_loop::IterationEvent<'_, '_>) {
+        #[cfg(feature = "alloc")]
+        self.note_declaration_progress(event);
         #[cfg(all(feature = "alloc", feature = "codec-declare"))]
         crate::declaration_sync::finals_in_event(event, |interest_id| {
             #[cfg(feature = "session-reconnect")]
@@ -15857,6 +15871,62 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         });
         #[cfg(not(all(feature = "alloc", feature = "codec-declare")))]
         let _ = event;
+    }
+
+    /// The progress of the peer's declaration sync that `event` shows: a declaration from the peer
+    /// restarts the no-progress watch, and the first event an engine notes arms it, since the
+    /// engine that notes events is the one that notes the peer's final too.
+    #[cfg(feature = "alloc")]
+    fn note_declaration_progress(&self, event: crate::driver_loop::IterationEvent<'_, '_>) {
+        use core::sync::atomic::Ordering;
+        #[cfg(feature = "codec-declare")]
+        let declared = crate::declaration_sync::declares_in_event(event);
+        #[cfg(not(feature = "codec-declare"))]
+        let declared = {
+            let _ = event;
+            false
+        };
+        if declared {
+            self.peer_declaration_progress_ms
+                .store(self.clock.now_monotonic_ms(), Ordering::Release);
+        } else {
+            let _ = self.peer_declaration_progress_ms.compare_exchange(
+                u64::MAX,
+                0,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+        }
+    }
+
+    /// When the no-progress watch of the peer's initial declarations ends this session's link
+    /// ([`crate::declaration_sync::stall_deadline`]), on the clock of the lease: a
+    /// `DECLARATION_SYNC_RX_NO_PROGRESS_MS` stretch after the later of the establishment and the
+    /// peer's last declaration, while `reliable-gap-reconnect` reacts and the peer's final has not
+    /// arrived. `None` before the establishment, while no engine notes the session's events, and
+    /// whenever the watch is off.
+    #[cfg(feature = "alloc")]
+    pub fn declaration_watch_deadline(&self) -> Option<u64> {
+        self.declaration_watch_deadline_for(crate::caps::DECLARATION_SYNC_RX_NO_PROGRESS_MS as u64)
+    }
+
+    /// [`Self::declaration_watch_deadline`] for a window of `window_ms`, the form a test names
+    /// a window to where the build fixes one.
+    #[cfg(feature = "alloc")]
+    pub fn declaration_watch_deadline_for(&self, window_ms: u64) -> Option<u64> {
+        let progress = self
+            .peer_declaration_progress_ms
+            .load(core::sync::atomic::Ordering::Acquire);
+        if progress == u64::MAX {
+            return None;
+        }
+        let established = R::with_mutex_mut(&self.link.established_at, |slot| *slot)?;
+        crate::declaration_sync::stall_deadline(
+            self.params.policy.reliable_gap_reconnect(),
+            self.peer_declarations_final_seen(),
+            established.max(progress),
+            window_ms,
+        )
     }
 
     /// The peer's `Declare(DeclFinal)` for `interest_id` arrived: the node stops waiting for it.

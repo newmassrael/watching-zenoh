@@ -505,6 +505,12 @@ pub const DECLARATION_SYNC_FINAL_TIMEOUT_MS: usize = generated::DECLARATION_SYNC
 /// and not a table size: it sizes no memory.
 pub const DECLARATION_SYNC_INTERVAL_MS: usize = generated::DECLARATION_SYNC_INTERVAL_MS;
 
+/// How long, in milliseconds, a session waits for the next of its peer's initial declarations
+/// before it takes the sync as cut short, when `reliable-gap-reconnect` is not `off`
+/// ([`crate::declaration_sync::stall_deadline`]). `0` keeps no watch, as upstream keeps none. A
+/// time and not a table size: it sizes no memory.
+pub const DECLARATION_SYNC_RX_NO_PROGRESS_MS: usize = generated::DECLARATION_SYNC_RX_NO_PROGRESS_MS;
+
 // The numbers of zenoh-pico's value build switches, as the pico C ABI states them. Each defaults
 // to pico's own default (`upstream_switch_map.py` holds that, the `maps` rows of
 // `deploy/wz-config.toml` that anchor to these), so the drop-in's default build states what

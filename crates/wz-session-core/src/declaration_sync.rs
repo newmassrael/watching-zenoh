@@ -151,11 +151,73 @@ pub fn finals_in_event(
     }
 }
 
+/// Whether `event` delivers at least one declaration from the peer: progress of the peer's
+/// declaration sync, which the no-progress watch ([`stall_deadline`]) restarts on. Read from the
+/// owned batch of a delivered frame, as [`finals_in_event`] reads the finals.
+#[cfg(feature = "codec-declare")]
+pub fn declares_in_event(event: crate::driver_loop::IterationEvent<'_, '_>) -> bool {
+    use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
+    use crate::network_message::NetworkMessage;
+
+    let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event else {
+        return false;
+    };
+    messages
+        .iter()
+        .any(|message| matches!(message, NetworkMessage::Declare(_)))
+}
+
+/// When the watch of a peer's initial declarations ends the link: `window_ms` after `baseline_ms`
+/// (the later of the session's establishment and the peer's last declaration), while the
+/// `reliable-gap-reconnect` `mode` reacts to a cut-short sync and the peer's end of its initial
+/// declarations has not arrived. `None` keeps no watch: `mode` is `off`, the window is `0`, or
+/// the peer's declarations are all in.
+pub const fn stall_deadline(
+    mode: crate::policy::ReliableGapReconnect,
+    peer_final_seen: bool,
+    baseline_ms: u64,
+    window_ms: u64,
+) -> Option<u64> {
+    if matches!(mode, crate::policy::ReliableGapReconnect::Off) || window_ms == 0 || peer_final_seen
+    {
+        None
+    } else {
+        Some(baseline_ms.saturating_add(window_ms))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const TIMEOUT: u64 = 1_000;
+
+    /// The watch runs only while the mode reacts, the window is set and the peer's final has not
+    /// arrived, and it ends a window after its baseline.
+    #[test]
+    fn the_declaration_watch_runs_only_in_a_reacting_mode_before_the_peers_final() {
+        use crate::policy::ReliableGapReconnect as Mode;
+        assert_eq!(stall_deadline(Mode::Off, false, 100, 250), None);
+        assert_eq!(
+            stall_deadline(Mode::UntilDeclarationsSynced, false, 100, 0),
+            None
+        );
+        assert_eq!(
+            stall_deadline(Mode::UntilDeclarationsSynced, true, 100, 250),
+            None
+        );
+        assert_eq!(stall_deadline(Mode::Always, true, 100, 250), None);
+        assert_eq!(
+            stall_deadline(Mode::UntilDeclarationsSynced, false, 100, 250),
+            Some(350)
+        );
+        assert_eq!(stall_deadline(Mode::Always, false, 100, 250), Some(350));
+        assert_eq!(
+            stall_deadline(Mode::Always, false, u64::MAX - 1, 250),
+            Some(u64::MAX),
+            "saturates rather than wrapping into the past"
+        );
+    }
 
     #[test]
     fn a_session_that_sent_no_interest_is_synced() {
