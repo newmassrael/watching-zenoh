@@ -64,16 +64,45 @@ feature_args=()
 if [ -n "$features" ]; then
     feature_args=(--features "wz-capi-pico/${features//,/,wz-capi-pico/}")
 fi
+# Cargo's own report of the build names the include directory: the vendored library's build script
+# installs the headers of the arm THIS feature list selects into its own out directory, and a tree
+# built with another feature list holds others beside it. Picking the newest of them by time read
+# the wrong arm whenever cargo kept this build's script output from an earlier run, and a program
+# compiled against another arm's struct sizes than the library's smashed its stack.
+build_report="$(mktemp)"
 # Expanded as `${a[@]+...}`: macOS's bash 3.2 reads an empty array as unbound under `set -u`.
-if ! (cd crates && cargo build -p zenoh-pico-sys -p wz-capi-pico ${feature_args[@]+"${feature_args[@]}"}); then
+if ! (cd crates && cargo build --message-format=json-render-diagnostics -p zenoh-pico-sys \
+    -p wz-capi-pico ${feature_args[@]+"${feature_args[@]}"}) > "$build_report"; then
     say "pico-program-probe on ${os}: the pico headers and the cdylib did not build NOT-MEASURED"
     exit 1
 fi
 
-# The newest include directory the vendored library's build installed: a restored build
-# cache can hold an older one beside it.
-# shellcheck disable=SC2012
-inc="$(ls -dt "$lib_dir"/build/zenoh-pico-sys-*/out/include | head -n 1)"
+py="$(command -v python3 || command -v python || true)"
+if [ -z "$py" ]; then
+    say "pico-program-probe on ${os}: no python to read cargo's build report NOT-MEASURED"
+    exit 1
+fi
+inc="$("$py" - "$build_report" <<'PY'
+import json, os, sys
+found = set()
+for line in open(sys.argv[1], encoding="utf-8"):
+    if not line.startswith("{"):
+        continue
+    msg = json.loads(line)
+    if msg.get("reason") == "build-script-executed" and "zenoh-pico-sys" in msg.get("package_id", ""):
+        found.add(os.path.join(msg["out_dir"], "include"))
+if len(found) != 1:
+    sys.exit(f"cargo reported {len(found)} zenoh-pico-sys build(s) for this feature list, not one")
+print(found.pop())
+PY
+)" || {
+    say "pico-program-probe on ${os}: the build named no single pico header arm NOT-MEASURED"
+    exit 1
+}
+rm -f "$build_report"
+if command -v cygpath > /dev/null 2>&1; then
+    inc="$(cygpath -u "$inc")"
+fi
 echo "pico headers: $inc"
 
 if command -v cygpath > /dev/null 2>&1 && [ -n "${RUNNER_TEMP:-}" ]; then
