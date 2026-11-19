@@ -761,6 +761,12 @@ const TX_CONDUITS: usize = 1;
 ))]
 const HANDSHAKE_LANE: Priority = Priority::Control;
 
+/// What the cookie-nonce slot holds under `handshake-cookie = fixed` between the InitAck and the
+/// OpenSyn admitted after it: no nonce is minted there, and the slot says that an accept is
+/// pending, so the configured cookie admits one OpenSyn per InitAck and none after the
+/// establishment (the admission spends the slot as it spends a nonce).
+const FIXED_COOKIE_PENDING: u64 = 0;
+
 /// `SessionLinkActions::peer_sync_bits`: this node accepted the link.
 #[cfg(feature = "alloc")]
 const SYNC_ACCEPTED: u8 = 1;
@@ -9279,7 +9285,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub(crate) fn admit_open_syn(&self, lease: u64, initial_sn: u64) {
         #[cfg(feature = "session-unicast-accept")]
         {
-            self.restore_accept_state_from_cookie();
+            // Under `handshake-cookie = fixed` the acceptor held what it negotiated and the
+            // cookie carries nothing to restore.
+            if !self.fixed_cookie() {
+                self.restore_accept_state_from_cookie();
+            }
             R::with_mutex_mut(&self.cookie_nonce, |slot| *slot = None);
         }
         // R311ke — the peer's announced initial_sn seeds the RX gate on the
@@ -17096,8 +17106,21 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             // final HERE, which is what makes this the right site and not an
             // earlier one: each capability above is staged from the
             // post-InitSyn merge, and the comments on those lines say so.
-            a.draw_cookie_nonce();
-            let nonce: Option<u64> = R::with_mutex_mut(&a.cookie_nonce, |slot| *slot);
+            // `handshake-cookie = fixed`: no cookie is minted. The InitAck carries the session's
+            // configured cookie (the `None` below falls back to it), nothing carried is released
+            // after the send, and the nonce slot marks the accept as pending until an OpenSyn
+            // is admitted, so the same value cannot admit a second OpenSyn after it.
+            let fixed_cookie = a.fixed_cookie();
+            if fixed_cookie {
+                R::with_mutex_mut(&a.cookie_nonce, |slot| *slot = Some(FIXED_COOKIE_PENDING));
+            } else {
+                a.draw_cookie_nonce();
+            }
+            let nonce: Option<u64> = if fixed_cookie {
+                None
+            } else {
+                R::with_mutex_mut(&a.cookie_nonce, |slot| *slot)
+            };
             #[cfg(not(feature = "tx-lend-only"))]
             let cookie_carried = {
                 let peer_zid: Option<SessionZid> =
@@ -17401,6 +17424,32 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         true
     }
 
+    /// Whether this session answers an InitSyn with its configured cookie and holds what it
+    /// negotiated itself (`handshake-cookie = fixed`), from the snapshot it was handed.
+    pub fn fixed_cookie(&self) -> bool {
+        matches!(
+            self.params.policy.handshake_cookie(),
+            crate::policy::HandshakeCookie::Fixed
+        )
+    }
+
+    /// `cookie_valid` under `handshake-cookie = fixed`: an accept is pending (its InitAck went
+    /// out and no OpenSyn has been admitted since), and the OpenSyn's cookie is exactly the
+    /// configured one, an absent cookie reading as an empty one. Nothing is decoded: the
+    /// acceptor holds the state the cookie would have carried.
+    fn fixed_cookie_echoed(&self) -> bool {
+        let pending = R::with_mutex_mut(&self.cookie_nonce, |slot| {
+            *slot == Some(FIXED_COOKIE_PENDING)
+        });
+        if !pending {
+            return false;
+        }
+        let configured: &[u8] = &self.params.cookie;
+        R::with_mutex_mut(&self.inbound_opensyn_cookie, |echoed| {
+            echoed.as_deref().unwrap_or(&[]) == configured
+        })
+    }
+
     /// R57 placeholder constant (`true`) pending the per-source
     /// token-bucket implementation round.
     pub fn accept_rate_token(&self) -> bool {
@@ -17431,6 +17480,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// executed any dynamic check).
     pub fn cookie_valid(&self) -> bool {
         R::with_mutex_mut(&self.trace, |t| t.cookie_valid_check += 1);
+        if self.fixed_cookie() {
+            return self.fixed_cookie_echoed();
+        }
 
         // Defensive: any missing material rejects. A well-formed handshake
         // populates every slot before this guard runs. Each slot is read in

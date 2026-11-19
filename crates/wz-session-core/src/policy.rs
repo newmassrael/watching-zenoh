@@ -310,6 +310,7 @@ mod tests {
             QueryUnanswerableFinal::HELD,
             ZidDerivation::HELD,
             HandshakeStrayMessage::HELD,
+            HandshakeCookie::HELD,
             KeyWireForm::HELD,
         ];
         assert_eq!(

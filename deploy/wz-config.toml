@@ -3893,6 +3893,35 @@ establishment ends; an answer longer than the hold is not sent again.
 '''
 
 [[policy]]
+id = "handshake-cookie"
+kind = "choice"
+kconfig = "WZ_POLICY_HANDSHAKE_COOKIE"
+choices = ["stateless", "fixed"]
+default = "stateless"
+upstream = "Puts what an acceptor negotiated into its InitAck cookie, sealed and bound to the handshake, keeps nothing of the accept until the OpenSyn, and admits an OpenSyn only when it echoes that cookie."
+scope = "link"
+binding = "open"
+mutability = "fixed"
+# `wire` is visible: the InitAck carries another cookie and the OpenSyn that is admitted differs.
+wire = "visible"
+since = 2
+help = '''
+What cookie a node puts in the InitAck of a link it accepts, and what it takes
+back. `stateless` is upstream's: the cookie carries what the acceptor
+negotiated, sealed, the acceptor holds nothing of the accept until the OpenSyn,
+and only an OpenSyn that echoes that cookie is admitted. `fixed` sends the
+session's configured cookie (the session parameters' cookie, empty unless the
+configuration states one), admits an OpenSyn only when its cookie is exactly
+that value (an empty cookie for an empty value), and holds what it negotiated
+on its own side until the OpenSyn, so a peer that echoes no cookie can open. A
+held accept is one handshake in flight, so it is bounded by the bound on
+accepts in their handshake and is let go when the OpenAck goes out or the
+accept times out. Under `fixed` the cookie binds nothing to the handshake: a
+peer that knows the value can open, as one that echoes the cookie can under
+`stateless`.
+'''
+
+[[policy]]
 id = "key-wire-form"
 kind = "choice"
 kconfig = "WZ_POLICY_KEY_WIRE_FORM"
@@ -3979,6 +4008,7 @@ link-tie-order = "zid-number"
 query-unanswerable-final = "none"
 zid-derivation = "random"
 handshake-stray-message = "fail"
+handshake-cookie = "stateless"
 key-wire-form = "declared"
 
 # ─── Protocol facts (part of the conformance statement a build gives of itself) ───────────────
