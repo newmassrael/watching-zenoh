@@ -48,14 +48,21 @@
 //! The dictionary is data an open is handed ([`KeyIdsAtOpen`]), held on the heap and shared by
 //! every link of the session ([`SharedKeyIds`]); [`crate::caps::MAX_SHARED_KEY_IDS`] bounds how
 //! many entries an open may hand it. An image with no allocator has no dictionary yet.
+//!
+//! A configuration document states it as `wz/key-ids`, read with the rest of the document's `wz`
+//! member (`crate::policy_document`), whose refusals it shares ([`crate::policy_document::KeyIdsReason`]).
+//! What an open's caller states beside the document is composed over it
+//! ([`KeyIdsAtOpen::over`]), as the policies are.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
+use crate::json5::{number_as_u64, Json5Value};
 use crate::keyexpr_canon::{validate_keyexpr, KeyexprRefusal};
 use crate::keyexpr_match::is_wild;
 use crate::policy::KeyWireForm;
+use crate::policy_document::{KeyIdsReason, Origin, Reason, Refusal, Refusals};
 use crate::wire_id::ExprId;
 
 #[cfg(not(target_has_atomic = "ptr"))]
@@ -145,6 +152,103 @@ impl fmt::Display for KeyIdsRefused {
 
 impl core::error::Error for KeyIdsRefused {}
 
+/// One fault of a dictionary's entries, borrowed from them: the rules of a dictionary stated once,
+/// for [`KeyIds::with_limit`], which refuses the first, and for the reader of a document's
+/// `wz/key-ids`, which reports each ([`read_document_member`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Fault<'a> {
+    TooMany {
+        stated: usize,
+        limit: usize,
+    },
+    ZeroId {
+        at: usize,
+    },
+    NotAKeyExpr {
+        at: usize,
+        key: &'a str,
+        refusal: KeyexprRefusal,
+    },
+    DuplicateId {
+        id: ExprId,
+    },
+    DuplicateKey {
+        key: &'a str,
+    },
+}
+
+impl<'a> Fault<'a> {
+    /// The fault as an open's door refuses it.
+    fn refused(self) -> KeyIdsRefused {
+        match self {
+            Self::TooMany { stated, limit } => KeyIdsRefused::TooMany { stated, limit },
+            Self::ZeroId { at } => KeyIdsRefused::ZeroId { at },
+            Self::NotAKeyExpr { at, refusal, .. } => KeyIdsRefused::NotAKeyExpr { at, refusal },
+            Self::DuplicateId { id } => KeyIdsRefused::DuplicateId { id },
+            Self::DuplicateKey { key } => KeyIdsRefused::DuplicateKey {
+                key: String::from(key),
+            },
+        }
+    }
+
+    /// The fault as a document's reader reports it.
+    fn reason(self) -> KeyIdsReason<'a> {
+        match self {
+            Self::TooMany { stated, limit } => KeyIdsReason::TooMany { stated, limit },
+            Self::ZeroId { at } => KeyIdsReason::ZeroId { at },
+            Self::NotAKeyExpr { at, key, refusal } => {
+                KeyIdsReason::NotAKeyExpr { at, key, refusal }
+            }
+            Self::DuplicateId { id } => KeyIdsReason::DuplicateId { id },
+            Self::DuplicateKey { key } => KeyIdsReason::DuplicateKey { key },
+        }
+    }
+}
+
+/// Each fault of a dictionary of `stated` entries, of which `entries` are those read whole, each
+/// with its place among them, its id and its key, under `limit`: more entries than the limit,
+/// then each entry's own faults in their order (id 0, then a key that is not a canonical key
+/// expression), then each id and each key named more than once, ascending, once each. An id 0
+/// named twice is refused as id 0 and not again as a duplicate.
+pub(crate) fn dictionary_faults<'a>(
+    stated: usize,
+    entries: &[(usize, ExprId, &'a str)],
+    limit: usize,
+    mut report: impl FnMut(Fault<'a>),
+) {
+    if stated > limit {
+        report(Fault::TooMany { stated, limit });
+    }
+    for &(at, id, key) in entries {
+        if id == 0 {
+            report(Fault::ZeroId { at });
+        }
+        if let Err(refusal) = validate_keyexpr(key) {
+            report(Fault::NotAKeyExpr { at, key, refusal });
+        }
+    }
+    let mut ids: Vec<ExprId> = entries
+        .iter()
+        .map(|&(_, id, _)| id)
+        .filter(|id| *id != 0)
+        .collect();
+    ids.sort_unstable();
+    for (index, pair) in ids.windows(2).enumerate() {
+        let repeated = pair[0] == pair[1];
+        if repeated && (index == 0 || ids[index - 1] != pair[0]) {
+            report(Fault::DuplicateId { id: pair[0] });
+        }
+    }
+    let mut keys: Vec<&'a str> = entries.iter().map(|&(_, _, key)| key).collect();
+    keys.sort_unstable();
+    for (index, pair) in keys.windows(2).enumerate() {
+        let repeated = pair[0] == pair[1];
+        if repeated && (index == 0 || keys[index - 1] != pair[0]) {
+            report(Fault::DuplicateKey { key: pair[0] });
+        }
+    }
+}
+
 /// One entry: an id and the key it names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Entry {
@@ -180,42 +284,39 @@ impl KeyIds {
         entries: impl IntoIterator<Item = (ExprId, &'a str)>,
         limit: usize,
     ) -> Result<Self, KeyIdsRefused> {
-        let given: Vec<(ExprId, &str)> = entries.into_iter().collect();
-        if given.len() > limit {
-            return Err(KeyIdsRefused::TooMany {
-                stated: given.len(),
-                limit,
-            });
+        let given: Vec<(usize, ExprId, &str)> = entries
+            .into_iter()
+            .enumerate()
+            .map(|(at, (id, key))| (at, id, key))
+            .collect();
+        let mut first = None;
+        dictionary_faults(given.len(), &given, limit, |fault| {
+            first.get_or_insert(fault);
+        });
+        if let Some(fault) = first {
+            return Err(fault.refused());
         }
-        let mut rows = Vec::with_capacity(given.len());
-        for (at, (id, key)) in given.into_iter().enumerate() {
-            if id == 0 {
-                return Err(KeyIdsRefused::ZeroId { at });
-            }
-            validate_keyexpr(key).map_err(|refusal| KeyIdsRefused::NotAKeyExpr { at, refusal })?;
-            rows.push(Entry {
+        let mut rows: Vec<Entry> = given
+            .into_iter()
+            .map(|(_, id, key)| Entry {
                 id,
                 key: String::from(key),
-            });
-        }
+            })
+            .collect();
         rows.sort_unstable_by_key(|entry| entry.id);
-        if let Some(pair) = rows.windows(2).find(|pair| pair[0].id == pair[1].id) {
-            return Err(KeyIdsRefused::DuplicateId { id: pair[0].id });
-        }
         let mut by_key: Vec<usize> = (0..rows.len()).collect();
         by_key.sort_unstable_by(|a, b| rows[*a].key.as_bytes().cmp(rows[*b].key.as_bytes()));
-        if let Some(pair) = by_key
-            .windows(2)
-            .find(|pair| rows[pair[0]].key == rows[pair[1]].key)
-        {
-            return Err(KeyIdsRefused::DuplicateKey {
-                key: rows[pair[0]].key.clone(),
-            });
-        }
         Ok(Self {
             entries: rows,
             by_key,
         })
+    }
+
+    /// Each entry, its id and its key, ascending by id.
+    pub fn iter(&self) -> impl Iterator<Item = (ExprId, &str)> + '_ {
+        self.entries
+            .iter()
+            .map(|entry| (entry.id, entry.key.as_str()))
     }
 
     /// How many entries the dictionary holds.
@@ -498,6 +599,270 @@ impl KeyIdsAtOpen {
     pub fn set_link(&mut self, locator: &str, form: KeyWireForm) {
         self.links.retain(|(stated, _)| stated != locator);
         self.links.push((String::from(locator), form));
+    }
+
+    /// What the open's caller states (`self`) over what the configuration document states
+    /// (`document`), the order the policies are composed in: the caller's dictionary in place of
+    /// the document's when the caller states one, and the form the caller states for an endpoint
+    /// in place of the document's for the same endpoint. What the caller does not state is the
+    /// document's.
+    pub fn over(&self, document: KeyIdsAtOpen) -> KeyIdsAtOpen {
+        let mut composed = document;
+        if let Some(ids) = &self.ids {
+            composed.ids = Some(ids.clone());
+        }
+        for (locator, form) in &self.links {
+            composed.set_link(locator, *form);
+        }
+        composed
+    }
+}
+
+/// The two lists of `wz/key-ids`, by the paths a refusal names them with.
+const DICTIONARY: &str = "wz/key-ids/dictionary";
+const LINKS: &str = "wz/key-ids/links";
+
+/// The key ids the `wz/key-ids` member `value` of a document states, each refusal of it pushed
+/// onto `refusals` as the document's ([`KeyIdsReason`]): the reader of the `wz` member
+/// (`crate::policy_document`) calls it, so a refused part of the member refuses the document as
+/// a refused policy does. `in_domain` is the build's domain of `key-wire-form`
+/// ([`form_in_domain`]). What it returns is the caller's to drop when a refusal was pushed.
+///
+/// `dictionary` is a list of `{ id, key }` and `links` a list of `{ locator, form }`; either may
+/// be left out. An empty dictionary is no dictionary, as the door that hands one over with no
+/// entry takes one back.
+pub(crate) fn read_document_member<'a>(
+    value: &'a Json5Value,
+    in_domain: impl Fn(KeyWireForm) -> bool,
+    refusals: &mut Refusals<'a>,
+) -> KeyIdsAtOpen {
+    let mut read = KeyIdsAtOpen::default();
+    let Json5Value::Object(members) = value else {
+        refusals.push(Refusal {
+            layer: Origin::Document,
+            reason: Reason::NotAnObject {
+                member: "wz/key-ids",
+            },
+        });
+        return read;
+    };
+    let (mut dictionary, mut links) = (false, false);
+    for (key, value) in members {
+        match key.as_str() {
+            "dictionary" => {
+                if dictionary {
+                    refusals.push(Refusal {
+                        layer: Origin::Document,
+                        reason: Reason::MemberStatedTwice { member: DICTIONARY },
+                    });
+                }
+                dictionary = true;
+                read.ids = read_dictionary(value, refusals);
+            }
+            "links" => {
+                if links {
+                    refusals.push(Refusal {
+                        layer: Origin::Document,
+                        reason: Reason::MemberStatedTwice { member: LINKS },
+                    });
+                }
+                links = true;
+                read.links = read_links(value, &in_domain, refusals);
+            }
+            other => refuse(refusals, KeyIdsReason::UnknownMember { member: other }),
+        }
+    }
+    read
+}
+
+/// `reason` pushed onto `refusals` as the document's.
+fn refuse<'a>(refusals: &mut Refusals<'a>, reason: KeyIdsReason<'a>) {
+    refusals.push(Refusal {
+        layer: Origin::Document,
+        reason: Reason::KeyIds(reason),
+    });
+}
+
+/// The dictionary `wz/key-ids/dictionary` states, or `None` when it states no entry or a
+/// refusal of it was pushed.
+fn read_dictionary<'a>(value: &'a Json5Value, refusals: &mut Refusals<'a>) -> Option<SharedKeyIds> {
+    let Json5Value::Array(items) = value else {
+        refuse(refusals, KeyIdsReason::NotAnArray { member: DICTIONARY });
+        return None;
+    };
+    let found_before = refusals.found();
+    let mut entries: Vec<(usize, ExprId, &'a str)> = Vec::with_capacity(items.len());
+    for (at, item) in items.iter().enumerate() {
+        let Some((id, key)) = two_fields(DICTIONARY, at, item, ["id", "key"], refusals) else {
+            continue;
+        };
+        let id = match id {
+            Json5Value::Number(text) => {
+                number_as_u64(text).and_then(|number| ExprId::try_from(number).ok())
+            }
+            _ => None,
+        };
+        if id.is_none() {
+            refuse(refusals, KeyIdsReason::NotAnId { at });
+        }
+        let key = match key {
+            Json5Value::String(text) => Some(text.as_str()),
+            _ => {
+                refuse(
+                    refusals,
+                    KeyIdsReason::NotAString {
+                        member: DICTIONARY,
+                        at,
+                        field: "key",
+                    },
+                );
+                None
+            }
+        };
+        if let (Some(id), Some(key)) = (id, key) {
+            entries.push((at, id, key));
+        }
+    }
+    dictionary_faults(
+        items.len(),
+        &entries,
+        crate::caps::MAX_SHARED_KEY_IDS,
+        |fault| refuse(refusals, fault.reason()),
+    );
+    if refusals.found() != found_before || entries.is_empty() {
+        return None;
+    }
+    KeyIds::new(entries.iter().map(|&(_, id, key)| (id, key)))
+        .ok()
+        .map(alloc::sync::Arc::new)
+}
+
+/// The endpoints' forms `wz/key-ids/links` states, in its order.
+fn read_links<'a>(
+    value: &'a Json5Value,
+    in_domain: &impl Fn(KeyWireForm) -> bool,
+    refusals: &mut Refusals<'a>,
+) -> Vec<(String, KeyWireForm)> {
+    let mut links = Vec::new();
+    let Json5Value::Array(items) = value else {
+        refuse(refusals, KeyIdsReason::NotAnArray { member: LINKS });
+        return links;
+    };
+    let mut stated: Vec<&'a str> = Vec::with_capacity(items.len());
+    for (at, item) in items.iter().enumerate() {
+        let Some((locator, form)) = two_fields(LINKS, at, item, ["locator", "form"], refusals)
+        else {
+            continue;
+        };
+        let locator = match locator {
+            Json5Value::String(text) if text.is_empty() => {
+                refuse(refusals, KeyIdsReason::EmptyLocator { at });
+                None
+            }
+            Json5Value::String(text) => Some(text.as_str()),
+            _ => {
+                refuse(
+                    refusals,
+                    KeyIdsReason::NotAString {
+                        member: LINKS,
+                        at,
+                        field: "locator",
+                    },
+                );
+                None
+            }
+        };
+        let form = match form {
+            Json5Value::String(text) => Some(text.as_str()),
+            _ => {
+                refuse(
+                    refusals,
+                    KeyIdsReason::NotAString {
+                        member: LINKS,
+                        at,
+                        field: "form",
+                    },
+                );
+                None
+            }
+        };
+        let (Some(locator), Some(form)) = (locator, form) else {
+            continue;
+        };
+        if stated.contains(&locator) {
+            refuse(refusals, KeyIdsReason::LinkStatedTwice { locator });
+            continue;
+        }
+        stated.push(locator);
+        match key_wire_form_named(form) {
+            None => refuse(refusals, KeyIdsReason::UnknownForm { locator, form }),
+            Some(named) if !in_domain(named) => {
+                refuse(refusals, KeyIdsReason::FormOutsideDomain { locator, form });
+            }
+            Some(named) => links.push((String::from(locator), named)),
+        }
+    }
+    links
+}
+
+/// The two fields `names` of entry `at` of the list `member`, or `None` with each refusal of
+/// its shape pushed: an entry that is not an object, a field it lacks, a field the entries of
+/// the list do not have, a field stated twice.
+fn two_fields<'a>(
+    member: &'static str,
+    at: usize,
+    item: &'a Json5Value,
+    names: [&'static str; 2],
+    refusals: &mut Refusals<'a>,
+) -> Option<(&'a Json5Value, &'a Json5Value)> {
+    let Json5Value::Object(fields) = item else {
+        refuse(refusals, KeyIdsReason::EntryNotAnObject { member, at });
+        return None;
+    };
+    let mut found: [Option<&'a Json5Value>; 2] = [None, None];
+    let mut whole = true;
+    for (field, value) in fields {
+        match names.iter().position(|name| *name == field.as_str()) {
+            Some(index) if found[index].is_some() => {
+                refuse(
+                    refusals,
+                    KeyIdsReason::FieldStatedTwice {
+                        member,
+                        at,
+                        field: names[index],
+                    },
+                );
+                whole = false;
+            }
+            Some(index) => found[index] = Some(value),
+            None => {
+                refuse(
+                    refusals,
+                    KeyIdsReason::UnknownField {
+                        member,
+                        at,
+                        field: field.as_str(),
+                    },
+                );
+                whole = false;
+            }
+        }
+    }
+    for (name, value) in names.into_iter().zip(found) {
+        if value.is_none() {
+            refuse(
+                refusals,
+                KeyIdsReason::MissingField {
+                    member,
+                    at,
+                    field: name,
+                },
+            );
+        }
+    }
+    match found {
+        [Some(first), Some(second)] if whole => Some((first, second)),
+        _ => None,
     }
 }
 
@@ -1423,5 +1788,441 @@ mod registry_tests {
             heard.lock().unwrap().is_empty(),
             "a released dictionary answers nothing"
         );
+    }
+}
+
+#[cfg(test)]
+mod document_tests {
+    use super::*;
+    use crate::json5::parse;
+    use crate::policy::SessionPolicy;
+    use crate::policy_document::{resolve_document, statements_from_json5};
+    use alloc::format;
+    use alloc::string::ToString;
+    use alloc::sync::Arc;
+    use alloc::vec;
+
+    /// The key-id refusals the reader of the `wz` member found in `tree`, in their order; a
+    /// refusal of another kind fails the test.
+    fn key_id_reasons(tree: &Json5Value) -> Vec<KeyIdsReason<'_>> {
+        statements_from_json5(tree)
+            .expect_err("the member is refused")
+            .iter()
+            .map(|refusal| match refusal.reason {
+                Reason::KeyIds(reason) => reason,
+                other => panic!("not a key-id refusal: {other:?}"),
+            })
+            .collect()
+    }
+
+    /// `member` as the `wz/key-ids` of a document.
+    fn document(member: &str) -> Json5Value {
+        parse(&format!(r#"{{ wz: {{ "key-ids": {member} }} }}"#)).expect("JSON5")
+    }
+
+    fn dictionary_of(entries: &[(ExprId, &str)]) -> Option<SharedKeyIds> {
+        Some(Arc::new(
+            KeyIds::new(entries.iter().copied()).expect("a valid dictionary"),
+        ))
+    }
+
+    fn links_of(links: &[(&str, KeyWireForm)]) -> Vec<(String, KeyWireForm)> {
+        links
+            .iter()
+            .map(|(locator, form)| (locator.to_string(), *form))
+            .collect()
+    }
+
+    #[test]
+    fn the_member_is_read_into_the_dictionary_and_the_endpoints_forms() {
+        let tree = document(
+            r#"{
+                dictionary: [ { id: 40, key: "lab/rig" }, { key: "lab/rig/alpha", id: 0x29 } ],
+                links: [
+                    { locator: "tcp/192.0.2.7:7447", form: "literal" },
+                    { form: "declared", locator: "udp/192.0.2.8:7447" },
+                ],
+            }"#,
+        );
+        let read = statements_from_json5(&tree).expect("well formed");
+        assert_eq!(
+            read.key_ids,
+            KeyIdsAtOpen {
+                ids: dictionary_of(&[(40, "lab/rig"), (41, "lab/rig/alpha")]),
+                links: links_of(&[
+                    ("tcp/192.0.2.7:7447", KeyWireForm::Literal),
+                    ("udp/192.0.2.8:7447", KeyWireForm::Declared),
+                ]),
+            }
+        );
+        assert!(
+            resolve_document(SessionPolicy::defaults(), &tree).is_ok(),
+            "the policies resolve beside the member"
+        );
+    }
+
+    #[test]
+    fn a_member_that_states_nothing_reads_as_no_key_ids() {
+        for member in ["{}", "{ dictionary: [] }", "{ links: [] }"] {
+            let read = statements_from_json5(&document(member))
+                .expect("well formed")
+                .key_ids;
+            assert_eq!(read, KeyIdsAtOpen::default(), "{member}");
+        }
+        let tree = parse(r#"{ wz: { policies: {} } }"#).unwrap();
+        assert_eq!(
+            statements_from_json5(&tree).expect("well formed").key_ids,
+            KeyIdsAtOpen::default(),
+            "a document with no member states no key ids"
+        );
+    }
+
+    /// Each rule of the dictionary and of the links, refused by its name.
+    #[test]
+    fn each_fault_of_the_member_is_refused_by_name() {
+        let endpoint = "tcp/192.0.2.7:7447";
+        let not_canonical = validate_keyexpr("lab//a").expect_err("not canonical");
+        let cases: [(&str, Vec<KeyIdsReason<'static>>); 6] = [
+            (
+                r#"{ dictionary: [ { id: 0, key: "lab/a" } ] }"#,
+                vec![KeyIdsReason::ZeroId { at: 0 }],
+            ),
+            (
+                r#"{ dictionary: [ { id: 5, key: "lab/a" }, { id: 5, key: "lab/b" } ] }"#,
+                vec![KeyIdsReason::DuplicateId { id: 5 }],
+            ),
+            (
+                r#"{ dictionary: [ { id: 5, key: "lab/a" }, { id: 6, key: "lab/a" } ] }"#,
+                vec![KeyIdsReason::DuplicateKey { key: "lab/a" }],
+            ),
+            (
+                r#"{ dictionary: [ { id: 5, key: "lab//a" } ] }"#,
+                vec![KeyIdsReason::NotAKeyExpr {
+                    at: 0,
+                    key: "lab//a",
+                    refusal: not_canonical,
+                }],
+            ),
+            (
+                r#"{ links: [ { locator: "tcp/192.0.2.7:7447", form: "Literal" } ] }"#,
+                vec![KeyIdsReason::UnknownForm {
+                    locator: endpoint,
+                    form: "Literal",
+                }],
+            ),
+            (
+                r#"{ links: [ { locator: "tcp/192.0.2.7:7447", form: "literal" },
+                              { locator: "tcp/192.0.2.7:7447", form: "declared" } ] }"#,
+                vec![KeyIdsReason::LinkStatedTwice { locator: endpoint }],
+            ),
+        ];
+        for (member, expected) in cases {
+            let tree = document(member);
+            assert_eq!(key_id_reasons(&tree), expected, "{member}");
+        }
+    }
+
+    #[test]
+    fn a_dictionary_over_the_limit_is_refused_by_name() {
+        let limit = crate::caps::MAX_SHARED_KEY_IDS;
+        if limit >= usize::from(ExprId::MAX) {
+            // Every id a wireexpr has fits: no dictionary of distinct ids is over the limit.
+            return;
+        }
+        let entries: Vec<String> = (1..=limit + 1)
+            .map(|id| format!(r#"{{ id: {id}, key: "lab/k{id}" }}"#))
+            .collect();
+        let tree = document(&format!("{{ dictionary: [ {} ] }}", entries.join(", ")));
+        assert_eq!(
+            key_id_reasons(&tree),
+            [KeyIdsReason::TooMany {
+                stated: limit + 1,
+                limit
+            }]
+        );
+    }
+
+    #[test]
+    fn a_form_the_domain_leaves_out_is_refused_and_the_others_kept() {
+        let tree = parse(
+            r#"{ links: [ { locator: "tcp/192.0.2.7:7447", form: "shared" },
+                          { locator: "tcp/192.0.2.8:7447", form: "literal" } ] }"#,
+        )
+        .unwrap();
+        let mut refusals = Refusals::new();
+        let read = read_document_member(&tree, |form| form != KeyWireForm::Shared, &mut refusals);
+        let reasons: Vec<Reason<'_>> = refusals.iter().map(|refusal| refusal.reason).collect();
+        assert_eq!(
+            reasons,
+            [Reason::KeyIds(KeyIdsReason::FormOutsideDomain {
+                locator: "tcp/192.0.2.7:7447",
+                form: "shared",
+            })]
+        );
+        assert_eq!(
+            read.links,
+            links_of(&[("tcp/192.0.2.8:7447", KeyWireForm::Literal)])
+        );
+    }
+
+    /// The reader holds a form to the build's own domain of `key-wire-form`.
+    #[test]
+    fn the_build_domain_decides_each_form() {
+        for form in [
+            KeyWireForm::Declared,
+            KeyWireForm::Shared,
+            KeyWireForm::Literal,
+        ] {
+            let id = form.id();
+            let tree = document(&format!(
+                r#"{{ dictionary: [ {{ id: 40, key: "lab/rig" }} ],
+                     links: [ {{ locator: "tcp/192.0.2.7:7447", form: "{id}" }} ] }}"#
+            ));
+            if form_in_domain(form) {
+                assert!(statements_from_json5(&tree).is_ok(), "{id}");
+            } else {
+                assert_eq!(
+                    key_id_reasons(&tree),
+                    [KeyIdsReason::FormOutsideDomain {
+                        locator: "tcp/192.0.2.7:7447",
+                        form: id,
+                    }],
+                    "{id}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn each_fault_of_shape_is_refused_by_name() {
+        let cases: [(&str, Vec<KeyIdsReason<'static>>); 10] = [
+            (
+                r#"{ colour: "blue" }"#,
+                vec![KeyIdsReason::UnknownMember { member: "colour" }],
+            ),
+            (
+                "{ dictionary: {} }",
+                vec![KeyIdsReason::NotAnArray { member: DICTIONARY }],
+            ),
+            (
+                r#"{ links: "tcp/192.0.2.7:7447" }"#,
+                vec![KeyIdsReason::NotAnArray { member: LINKS }],
+            ),
+            (
+                "{ dictionary: [ 40 ] }",
+                vec![KeyIdsReason::EntryNotAnObject {
+                    member: DICTIONARY,
+                    at: 0,
+                }],
+            ),
+            (
+                "{ dictionary: [ { id: 40 } ] }",
+                vec![KeyIdsReason::MissingField {
+                    member: DICTIONARY,
+                    at: 0,
+                    field: "key",
+                }],
+            ),
+            (
+                r#"{ dictionary: [ { id: 40, key: "lab/a", note: "x" } ] }"#,
+                vec![KeyIdsReason::UnknownField {
+                    member: DICTIONARY,
+                    at: 0,
+                    field: "note",
+                }],
+            ),
+            (
+                r#"{ dictionary: [ { id: 40, id: 41, key: "lab/a" } ] }"#,
+                vec![KeyIdsReason::FieldStatedTwice {
+                    member: DICTIONARY,
+                    at: 0,
+                    field: "id",
+                }],
+            ),
+            (
+                r#"{ dictionary: [ { id: 70000, key: "lab/a" }, { id: -1, key: "lab/b" },
+                                   { id: "40", key: "lab/c" }, { id: 1.5, key: 7 } ] }"#,
+                vec![
+                    KeyIdsReason::NotAnId { at: 0 },
+                    KeyIdsReason::NotAnId { at: 1 },
+                    KeyIdsReason::NotAnId { at: 2 },
+                    KeyIdsReason::NotAnId { at: 3 },
+                    KeyIdsReason::NotAString {
+                        member: DICTIONARY,
+                        at: 3,
+                        field: "key",
+                    },
+                ],
+            ),
+            (
+                r#"{ links: [ { locator: "", form: "literal" } ] }"#,
+                vec![KeyIdsReason::EmptyLocator { at: 0 }],
+            ),
+            (
+                "{ links: [ { locator: 7, form: true } ] }",
+                vec![
+                    KeyIdsReason::NotAString {
+                        member: LINKS,
+                        at: 0,
+                        field: "locator",
+                    },
+                    KeyIdsReason::NotAString {
+                        member: LINKS,
+                        at: 0,
+                        field: "form",
+                    },
+                ],
+            ),
+        ];
+        for (member, expected) in cases {
+            let tree = document(member);
+            assert_eq!(key_id_reasons(&tree), expected, "{member}");
+        }
+    }
+
+    /// Every refusal the reader of the `wz` member found in `tree`, in their order.
+    fn reasons_of(tree: &Json5Value) -> Vec<Reason<'_>> {
+        statements_from_json5(tree)
+            .expect_err("refused")
+            .iter()
+            .map(|refusal| refusal.reason)
+            .collect()
+    }
+
+    #[test]
+    fn a_member_stated_twice_or_of_the_wrong_kind_is_refused() {
+        let twice = parse(r#"{ wz: { "key-ids": {}, "key-ids": {} } }"#).unwrap();
+        assert_eq!(
+            reasons_of(&twice),
+            [Reason::MemberStatedTwice {
+                member: "wz/key-ids"
+            }]
+        );
+        let list_twice = document("{ dictionary: [], dictionary: [] }");
+        assert_eq!(
+            reasons_of(&list_twice),
+            [Reason::MemberStatedTwice { member: DICTIONARY }]
+        );
+        let not_an_object = document("[]");
+        assert_eq!(
+            reasons_of(&not_an_object),
+            [Reason::NotAnObject {
+                member: "wz/key-ids"
+            }]
+        );
+    }
+
+    /// A refused member refuses the whole document, with every refusal of the policies beside
+    /// it, in the one list the document's reader reports.
+    #[test]
+    fn a_refused_member_refuses_the_document_beside_the_policies() {
+        let tree = parse(
+            r#"{ wz: { policies: { "no-such-policy": "on" },
+                       "key-ids": { dictionary: [ { id: 0, key: "lab/a" } ] } } }"#,
+        )
+        .unwrap();
+        let refusals = resolve_document(SessionPolicy::defaults(), &tree).unwrap_err();
+        let reasons: Vec<Reason<'_>> = refusals.iter().map(|refusal| refusal.reason).collect();
+        assert_eq!(
+            reasons,
+            [
+                Reason::KeyIds(KeyIdsReason::ZeroId { at: 0 }),
+                Reason::UnknownPolicy {
+                    policy: "no-such-policy",
+                    value: "on"
+                },
+            ]
+        );
+        assert!(
+            refusals
+                .iter()
+                .all(|refusal| refusal.layer == Origin::Document),
+            "{refusals}"
+        );
+        assert_eq!(
+            format!("{}", refusals.iter().next().expect("one")),
+            "the document states id 0 in entry 0 of `wz/key-ids/dictionary`, and no key may \
+             have it"
+        );
+    }
+
+    #[test]
+    fn the_dictionary_rules_report_every_fault_and_the_door_the_first() {
+        let entries = [
+            (0, 0, "lab//a"),
+            (1, 5, "lab/b"),
+            (2, 5, "lab/b"),
+            (3, 5, "lab/c"),
+        ];
+        let mut found = Vec::new();
+        dictionary_faults(entries.len(), &entries, 2, |fault| found.push(fault));
+        assert_eq!(
+            found,
+            [
+                Fault::TooMany {
+                    stated: 4,
+                    limit: 2
+                },
+                Fault::ZeroId { at: 0 },
+                Fault::NotAKeyExpr {
+                    at: 0,
+                    key: "lab//a",
+                    refusal: validate_keyexpr("lab//a").expect_err("not canonical"),
+                },
+                Fault::DuplicateId { id: 5 },
+                Fault::DuplicateKey { key: "lab/b" },
+            ],
+            "an id named three times is reported once"
+        );
+        assert_eq!(
+            KeyIds::with_limit(entries.iter().map(|&(_, id, key)| (id, key)), 2),
+            Err(KeyIdsRefused::TooMany {
+                stated: 4,
+                limit: 2
+            })
+        );
+    }
+
+    #[test]
+    fn the_callers_statements_go_over_the_documents() {
+        let document = KeyIdsAtOpen {
+            ids: dictionary_of(&[(40, "lab/rig")]),
+            links: links_of(&[
+                ("tcp/192.0.2.7:7447", KeyWireForm::Literal),
+                ("tcp/192.0.2.8:7447", KeyWireForm::Shared),
+            ]),
+        };
+        assert_eq!(
+            KeyIdsAtOpen::default().over(document.clone()),
+            document,
+            "a caller that states nothing leaves the document's"
+        );
+        let door = KeyIdsAtOpen {
+            ids: dictionary_of(&[(7, "lab/other")]),
+            links: links_of(&[("tcp/192.0.2.8:7447", KeyWireForm::Declared)]),
+        };
+        let composed = door.over(document.clone());
+        assert_eq!(
+            composed.ids, door.ids,
+            "the caller's dictionary replaces it"
+        );
+        assert_eq!(
+            composed.links,
+            links_of(&[
+                ("tcp/192.0.2.7:7447", KeyWireForm::Literal),
+                ("tcp/192.0.2.8:7447", KeyWireForm::Declared),
+            ]),
+            "the caller's form of an endpoint replaces the document's for that endpoint alone"
+        );
+        let links_only = KeyIdsAtOpen {
+            ids: None,
+            links: links_of(&[("tcp/192.0.2.9:7447", KeyWireForm::Literal)]),
+        };
+        let composed = links_only.over(document.clone());
+        assert_eq!(
+            composed.ids, document.ids,
+            "no dictionary stated keeps the document's"
+        );
+        assert_eq!(composed.links.len(), 3);
     }
 }

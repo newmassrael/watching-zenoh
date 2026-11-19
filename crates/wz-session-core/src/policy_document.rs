@@ -35,11 +35,19 @@
 //! `resolve_document` resolves them over a base. `resolve_document_under` adds what the open's
 //! caller states beside the document ([`Overrides`]), the same way for every ABI. `wz/limits` is
 //! refused by name: the limits a document may state are not read at the open by this build.
+//!
+//! `wz/key-ids` states the key ids every node of a deployment shares: `dictionary`, a list of
+//! `{ id, key }`, and `links`, a list of `{ locator, form }` that states the key-wire form of one
+//! endpoint apart from the session's. A build with the `shared-key-ids` capability reads it into
+//! the statements' `key_ids` (`crate::shared_key_ids::KeyIdsAtOpen`), and its refusals
+//! ([`KeyIdsReason`]) are found by the same reader, so they refuse the document as a refused
+//! policy does. A build without the capability refuses the member by name.
 
 use core::fmt;
 
-use crate::policy::{SessionPolicy, POLICIES, POLICY_COUNT, PROFILES};
-use crate::policy_binding::{Binding, PolicyEntry, SelectError, ValueSet};
+use crate::keyexpr_canon::KeyexprRefusal;
+use crate::policy::{KeyWireForm, SessionPolicy, POLICIES, POLICY_COUNT, PROFILES};
+use crate::policy_binding::{Binding, PolicyEntry, PolicyValue, SelectError, ValueSet};
 
 /// Where a policy's value in a snapshot came from: the layer that stated it last.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -244,9 +252,222 @@ pub enum Reason<'a> {
     /// A member of the document's `wz` tree is stated more than once; JSON5 allows it, and a
     /// later one may not silently win.
     MemberStatedTwice {
-        /// The member, `wz`, `wz/profile` or `wz/policies`.
+        /// The member: `wz`, `wz/profile`, `wz/policies`, `wz/key-ids` or one of its two members.
         member: &'static str,
     },
+    /// `wz/key-ids`, or a part of it, is refused.
+    KeyIds(KeyIdsReason<'a>),
+}
+
+/// Why `wz/key-ids`, or a part of it, was refused. An entry is named by its place in its list,
+/// counted from 0.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyIdsReason<'a> {
+    /// The build was made without the `shared-key-ids` capability, which reads the member.
+    NotInBuild,
+    /// `wz/key-ids` holds a member other than `dictionary` and `links`.
+    UnknownMember {
+        /// The member's key.
+        member: &'a str,
+    },
+    /// `dictionary` or `links` holds something other than an array.
+    NotAnArray {
+        /// The member, `wz/key-ids/dictionary` or `wz/key-ids/links`.
+        member: &'static str,
+    },
+    /// An entry of a list is something other than an object.
+    EntryNotAnObject {
+        /// The list.
+        member: &'static str,
+        /// The entry's place in it.
+        at: usize,
+    },
+    /// An entry of a list lacks one of its fields.
+    MissingField {
+        /// The list.
+        member: &'static str,
+        /// The entry's place in it.
+        at: usize,
+        /// The field it lacks.
+        field: &'static str,
+    },
+    /// An entry of a list states a field the entries of that list do not have.
+    UnknownField {
+        /// The list.
+        member: &'static str,
+        /// The entry's place in it.
+        at: usize,
+        /// The field's key.
+        field: &'a str,
+    },
+    /// An entry of a list states one of its fields more than once.
+    FieldStatedTwice {
+        /// The list.
+        member: &'static str,
+        /// The entry's place in it.
+        at: usize,
+        /// The field.
+        field: &'static str,
+    },
+    /// A field that holds text holds something else.
+    NotAString {
+        /// The list.
+        member: &'static str,
+        /// The entry's place in it.
+        at: usize,
+        /// The field.
+        field: &'static str,
+    },
+    /// The `id` of a dictionary entry is not an integer from 0 to 65535, the ids a wireexpr has.
+    NotAnId {
+        /// The entry's place in the dictionary.
+        at: usize,
+    },
+    /// A dictionary entry names id 0, which is the literal's and no key's.
+    ZeroId {
+        /// The entry's place in the dictionary.
+        at: usize,
+    },
+    /// Two dictionary entries name the same id.
+    DuplicateId {
+        /// The id.
+        id: u16,
+    },
+    /// Two dictionary entries name the same key.
+    DuplicateKey {
+        /// The key.
+        key: &'a str,
+    },
+    /// A dictionary entry names a text that is not a canonical key expression.
+    NotAKeyExpr {
+        /// The entry's place in the dictionary.
+        at: usize,
+        /// The text.
+        key: &'a str,
+        /// Where and why the text stops being one.
+        refusal: KeyexprRefusal,
+    },
+    /// The dictionary has more entries than the build's `MAX_SHARED_KEY_IDS`.
+    TooMany {
+        /// How many it has.
+        stated: usize,
+        /// How many the build allows.
+        limit: usize,
+    },
+    /// A link entry names an empty locator, which no endpoint is.
+    EmptyLocator {
+        /// The entry's place in the links.
+        at: usize,
+    },
+    /// A link entry names a form `key-wire-form` does not have.
+    UnknownForm {
+        /// The endpoint.
+        locator: &'a str,
+        /// The form stated.
+        form: &'a str,
+    },
+    /// A link entry names a form the build's domain of `key-wire-form` leaves out.
+    FormOutsideDomain {
+        /// The endpoint.
+        locator: &'a str,
+        /// The form stated.
+        form: &'a str,
+    },
+    /// Two link entries name the same locator.
+    LinkStatedTwice {
+        /// The locator.
+        locator: &'a str,
+    },
+}
+
+impl fmt::Display for KeyIdsReason<'_> {
+    /// What the layer states and why it is refused, as the words after the layer's name.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        const DICTIONARY: &str = "wz/key-ids/dictionary";
+        const FORM: &str = <KeyWireForm as PolicyValue>::POLICY;
+        match *self {
+            Self::NotInBuild => f.write_str(
+                "states `wz/key-ids`, which a build without the `shared-key-ids` capability does \
+                 not read",
+            ),
+            Self::UnknownMember { member } => write!(
+                f,
+                "states `wz/key-ids/{member}`, which wz does not read (it reads `dictionary` and \
+                 `links`)"
+            ),
+            Self::NotAnArray { member } => {
+                write!(f, "states `{member}` as something other than an array")
+            }
+            Self::EntryNotAnObject { member, at } => write!(
+                f,
+                "states entry {at} of `{member}` as something other than an object"
+            ),
+            Self::MissingField { member, at, field } => {
+                write!(f, "states entry {at} of `{member}` without its `{field}`")
+            }
+            Self::UnknownField { member, at, field } => write!(
+                f,
+                "states `{field}` in entry {at} of `{member}`, which such an entry does not have"
+            ),
+            Self::FieldStatedTwice { member, at, field } => write!(
+                f,
+                "states `{field}` more than once in entry {at} of `{member}`"
+            ),
+            Self::NotAString { member, at, field } => write!(
+                f,
+                "states the `{field}` of entry {at} of `{member}` as something other than a string"
+            ),
+            Self::NotAnId { at } => write!(
+                f,
+                "states the `id` of entry {at} of `{DICTIONARY}` as something other than an \
+                 integer from 0 to 65535"
+            ),
+            Self::ZeroId { at } => write!(
+                f,
+                "states id 0 in entry {at} of `{DICTIONARY}`, and no key may have it"
+            ),
+            Self::DuplicateId { id } => {
+                write!(f, "states the id {id} more than once in `{DICTIONARY}`")
+            }
+            Self::DuplicateKey { key } => {
+                write!(f, "states the key `{key}` more than once in `{DICTIONARY}`")
+            }
+            Self::NotAKeyExpr { at, key, refusal } => write!(
+                f,
+                "states `{key}` in entry {at} of `{DICTIONARY}`, which is not a canonical key \
+                 expression ({:?} at byte {})",
+                refusal.fault, refusal.offset
+            ),
+            Self::TooMany { stated, limit } => write!(
+                f,
+                "states {stated} entries in `{DICTIONARY}`, and the build allows {limit} \
+                 (MAX_SHARED_KEY_IDS)"
+            ),
+            Self::EmptyLocator { at } => write!(
+                f,
+                "states an empty `locator` in entry {at} of `wz/key-ids/links`"
+            ),
+            Self::UnknownForm { locator, form } => {
+                write!(
+                    f,
+                    "states the key-wire form `{form}` for `{locator}`, and `{FORM}` has no \
+                     value `{form}` (its values: "
+                )?;
+                write_ids(f, <KeyWireForm as PolicyValue>::IDS.iter().copied())?;
+                f.write_str(")")
+            }
+            Self::FormOutsideDomain { locator, form } => write!(
+                f,
+                "states the key-wire form `{form}` for `{locator}`, and the build leaves `{form}` \
+                 out of the domain of `{FORM}` (it allows {})",
+                PolicyEntry::of::<KeyWireForm>().domain()
+            ),
+            Self::LinkStatedTwice { locator } => write!(
+                f,
+                "states the key-wire form of `{locator}` more than once in `wz/key-ids/links`"
+            ),
+        }
+    }
 }
 
 /// A refusal: the layer it was found in, and why.
@@ -315,8 +536,8 @@ impl fmt::Display for Refusal<'_> {
             }
             Reason::UnknownMember { member } => write!(
                 f,
-                "{layer} states `wz/{member}`, which wz does not read (it reads `wz/profile` and \
-                 `wz/policies`)"
+                "{layer} states `wz/{member}`, which wz does not read (it reads `wz/profile`, \
+                 `wz/policies` and `wz/key-ids`)"
             ),
             Reason::LimitsNotRead => write!(
                 f,
@@ -325,6 +546,7 @@ impl fmt::Display for Refusal<'_> {
             Reason::MemberStatedTwice { member } => {
                 write!(f, "{layer} states `{member}` more than once")
             }
+            Reason::KeyIds(reason) => write!(f, "{layer} {reason}"),
         }
     }
 }
@@ -545,6 +767,8 @@ pub use from_json5::{
 mod from_json5 {
     use alloc::vec::Vec;
 
+    #[cfg(not(feature = "shared-key-ids"))]
+    use super::KeyIdsReason;
     use super::{
         compose, find_profile, Layer, Origin, Overrides, Reason, Refusal, Refusals, Resolved,
         Statement,
@@ -553,21 +777,26 @@ mod from_json5 {
     use crate::policy::{SessionPolicy, POLICIES, POLICY_COUNT};
     use crate::policy_binding::PolicyEntry;
 
-    /// What the `wz` member of a document states: the profile it names and the statements of
-    /// its `wz/policies`, in the document's order.
+    /// What the `wz` member of a document states: the profile it names, the statements of its
+    /// `wz/policies`, in the document's order, and the key ids of its `wz/key-ids`.
     #[derive(Clone, Debug, Default, PartialEq, Eq)]
     pub struct DocumentStatements<'a> {
         /// The id `wz/profile` names, if it names one.
         pub profile: Option<&'a str>,
         /// The members of `wz/policies`, each a policy's id and a value's id.
         pub statements: Vec<Statement<'a>>,
+        /// The dictionary and the endpoints' key-wire forms `wz/key-ids` states; nothing when
+        /// the document states no such member.
+        #[cfg(feature = "shared-key-ids")]
+        pub key_ids: crate::shared_key_ids::KeyIdsAtOpen,
     }
 
     /// The profile and the statements the `wz` member of `tree` states, or every refusal of its
     /// shape: a `wz` or `wz/policies` that is not an object, a value that is not a string, a
-    /// member of `wz` other than `profile` and `policies` (`limits` refused by name), a member
-    /// stated twice. A document with no `wz` member states nothing. Whether the policies, the
-    /// values and the profile exist is for [`resolve_document`].
+    /// member of `wz` other than `profile`, `policies` and `key-ids` (`limits` refused by name),
+    /// a member stated twice, and every refusal of `wz/key-ids` ([`super::KeyIdsReason`]). A
+    /// document with no `wz` member states nothing. Whether the policies, the values and the
+    /// profile exist is for [`resolve_document`].
     // The refusals are held inline because the core has no heap to box them in.
     #[allow(clippy::result_large_err)]
     pub fn statements_from_json5(
@@ -652,6 +881,7 @@ mod from_json5 {
         wz: bool,
         profile: bool,
         policies: bool,
+        key_ids: bool,
     }
 
     fn refuse<'a>(refusals: &mut Refusals<'a>, reason: Reason<'a>) {
@@ -752,6 +982,27 @@ mod from_json5 {
                             ),
                         }
                     }
+                }
+                "key-ids" => {
+                    if seen.key_ids {
+                        refuse(
+                            refusals,
+                            Reason::MemberStatedTwice {
+                                member: "wz/key-ids",
+                            },
+                        );
+                    }
+                    seen.key_ids = true;
+                    #[cfg(feature = "shared-key-ids")]
+                    {
+                        read.key_ids = crate::shared_key_ids::read_document_member(
+                            value,
+                            crate::shared_key_ids::form_in_domain,
+                            refusals,
+                        );
+                    }
+                    #[cfg(not(feature = "shared-key-ids"))]
+                    refuse(refusals, Reason::KeyIds(KeyIdsReason::NotInBuild));
                 }
                 "limits" => refuse(refusals, Reason::LimitsNotRead),
                 other => refuse(refusals, Reason::UnknownMember { member: other }),
@@ -1339,6 +1590,29 @@ mod tests {
             assert!(
                 text.contains("states `wz/colour`, which wz does not read"),
                 "{text}"
+            );
+        }
+
+        /// A build without the capability refuses `wz/key-ids` by name, whatever it holds, and
+        /// with it the whole document.
+        #[cfg(not(feature = "shared-key-ids"))]
+        #[test]
+        fn key_ids_are_refused_by_name_in_a_build_without_the_capability() {
+            let tree =
+                parse(r#"{ wz: { "key-ids": { dictionary: [ { id: 40, key: "lab/rig" } ] } } }"#)
+                    .unwrap();
+            let refusals = resolve_document(SessionPolicy::defaults(), &tree).unwrap_err();
+            let refusal = only(&refusals);
+            assert_eq!(refusal.reason, Reason::KeyIds(KeyIdsReason::NotInBuild));
+            assert_eq!(
+                format!("{refusal}"),
+                "the document states `wz/key-ids`, which a build without the `shared-key-ids` \
+                 capability does not read"
+            );
+            assert_eq!(
+                statements_from_json5(&tree).unwrap_err(),
+                refusals,
+                "the shape reader refuses it the same"
             );
         }
 
