@@ -5075,6 +5075,28 @@
         "The treeless JSON document read 5.05 to 5.33 and 5.65 to 5.99 us a row in the same pair of runs, while the converter, whose code did not change, moved 1.62 to 1.69 and 1.70 to 1.87: the difference is inside that pair's noise and is not decided; interleaved runs on one quiet machine decide it.",
         "The consumer's own per-row figure, over its live step on its machine, is its number to read after it moves its pin."
       ]
+    },
+    "Round 4526": {
+      "decision_summary": "Step 4a of the staged policy binding: a node's policies are chosen when it opens, from the `wz` member of its zenoh JSON5 document. The values come in layers, the build defaults, then a named profile (`wz/profile`, declared in `deploy/wz-config.toml` and generated into the build; one, `upstream`, every policy at upstream's behaviour), then the document's own `wz/policies`, each value recording the layer it came from. Every statement of every layer is validated before any is applied, so a configuration is never partly applied: one refusal refuses the document, and every refusal found is reported by name (a policy the build does not have, a value the policy does not have with the values it has, a value outside the build's domain naming the domain, a policy only the build decides, a value that is not a string, a member that is not an object, a profile the build does not have, a member stated twice, a member of `wz` the reader does not read, and `wz/limits`, refused as step 4b's). The zenoh config reader resolves the member into the node config; a zenoh-c open runs under it and a refused member fails the open as an invalid configuration (`Z_EINVAL`); the demo hands a `--config` file's snapshot down to its tuning and scouting sockets. A document with no `wz` member runs under the build defaults, as before. The pico and cooperative opens keep the build defaults until their config doors (step 5), and so does the Rust API, whose `Config` has no door for the member yet.",
+      "changes_bullets": [
+        "`crates/wz-session-core/src/policy_document.rs` (new): `Origin`, `Statement`, `Layer`, `Profile`, `Provenance`, `Resolved`, the `Reason`/`Refusal`/`Refusals` refusal set (bounded, no allocator), `resolve`, and with `alloc` `statements_from_json5` and `resolve_document`; `policy_binding.rs`: `PolicyField`, `PolicyEntry`, `ValueSet`, `SelectError`.",
+        "`deploy/wz-config.toml` `[[profile]] id = \"upstream\"`; `scripts/lib/wz_config.py` reads and validates profiles and emits `POLICIES`, `PROFILES` and an `impl PolicyField` per policy into `policy_generated.rs`, and `wz/profile` into `deploy/wz-config.schema.json`, with selftest arms both ways.",
+        "`crates/wz-runtime-tokio/src/zenoh_config.rs`: the `wz` member is taken out before the key boundary and resolved into `ZenohNodeConfig::policies`; `ConfigIngestError::PoliciesRefused`. `wz-capi-core` `open_plan`: `resolve_policy(node)` is the node's resolved snapshot and `OpenRefusal::Policies` refuses first; `wz-capi-c` maps it to `Z_EINVAL`.",
+        "`wz-ap-demo`: `TransportTuning::from_argv_under`, the `--config` snapshot handed to the tuning and to every scouting binder, a POLICIES report line; `policy_read_gate.py` reasons updated."
+      ],
+      "verification_bullets": [
+        "`wz_config.py --write` reproduced the generated Rust and the schema the worker wrote by hand byte for byte; `--check` and `--selftest` (362 arms) pass.",
+        "On a build host (22 cores, 30 GB): `cargo check --workspace --all-targets`; `policy_document` 22 tests with the default features and 12 without (the allocator-free core); wz-session-core lib 1035; wz-runtime-tokio with zenoh-config 844, the six `wz_member_tests` among them; wz-capi-core lib 221; wz-capi-c lib 207, its two `policy_document_tests` and the `open_refusals` file with the three new rows; wz-ap-demo by default (118 and 28), with zenoh-config, with all features (246 and 65) and `transport_tuning_policy_tests`; the zenoh API crate 184; clippy -D warnings of wz-session-core (also without default features), wz-capi-core, wz-capi-c, wz-capi-pico, wz-capi-coop, the zenoh API crate, wz-runtime-tokio with zenoh-config and wz-ap-demo by default, with zenoh-config and with all features; `session_slot_bytes.py --check` equal to the record. `guarded_count_gate.py` over the range measured the 15 guards it reaches; the two ap-demo `stock_config_tests` guards that printed two more are moved to what they printed.",
+        "Locally: `policy_read_gate.py --check` and `--selftest`, `rust_api_surface.py`, `cargo fmt --all --check`, reason review pins, store reason citations, reason citations, upstream citation anchors and the prose name gate."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/4-conflict-policy",
+        "feature-inventory--composable-framework-atomic--preset-catalog/2-naming-convention/2-2-presets",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Step 4b: limits as quotas under `wz/limits`, which 4a refuses by name. Step 5: the config doors of the three ABIs (pico's key/value config, the Rust `Config`, an API override layer), and a document round trip that keeps the member (`ZenohNodeConfig::to_json5` and the zenoh-c config export drop it today; a flat key store also folds a member stated twice). Capability cost (C1cs) and the Zephyr kit lane (Qzk), red since Round 4506, wait for a hosted reading of this tree."
+      ]
     }
   },
   "inventory_entries": {
