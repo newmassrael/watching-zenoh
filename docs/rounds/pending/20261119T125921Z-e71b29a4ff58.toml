@@ -1,0 +1,17 @@
+impact = ["wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"]
+decision = '''
+The network's own word about a flow is read: an ICMP or ICMPv6 destination-unreachable or packet-too-big error quotes the start of the packet it refuses, so it is put on the flow that quote names, with why, the packet that carried it, its sender and the MTU it stated; and the IGMP and MLD queries, reports and leaves are kept capture-wide with the groups they name, because a switch that stops forwarding a multicast group is how multicast scouting fails without a word from zenoh. These packets stay skipped and counted under not_transport, since none is a transport; the facts are read beside the count, through the same link entry and IP chain walk. Each flow holds its first 64 errors and the capture its first 1024 control messages, each with a count of the rest. The field document moves to revision 76 and row_facts to 16; nine keys and two families arrive, nothing retires.
+'''
+changes = '''
+A capture module, control, reads ICMP type 3, ICMPv6 types 1 and 2, IGMP queries, reports of the three versions and leaves, and MLD queries, reports of both versions and done, into ControlMessage; it bounds what a capture and a flow hold.
+The link layer gains control_message, reading a packet through the link entry and IP chain walk decapsulate uses; the dissection reads it for a packet skipped as one of those protocols, attaches an error to the stream or datagram flow its quote names, and keeps every message in its plane.
+The field document writes each flow's icmp_errors and the document's membership; revision 76 and row_facts revision 16 rows and tables, the vocabulary gate's two families, the ABI header's section and tags, and the C consumer's revision pin.
+'''
+verification = '''
+The capture crate's library tests with dissect and fixtures, 1848 passed and 6 ignored, among them a port-unreachable that names the UDP flow it quotes, a fragmentation-needed with its MTU and a short quote that names none, the IGMP general and group queries, reports of versions 1 to 3 and a leave, the ICMPv6 port-unreachable, packet-too-big and an MLD query, and a capture of a datagram, the host's error about it and an IGMP query, whose error lands on the flow and whose query in the document's membership while both stay counted as skipped. The dissection crate's tests, 259 and 4 passed.
+Red-first: with the error kept off its flow, the end-to-end test fails and the parser tests pass.
+fmt; clippy with warnings denied of wz-capture; wz-capture with no default features builds; the rustdoc lane over the two touched crates; the upstream citation anchor gate; the integer-cell gate.
+'''
+carry = '''
+No real capture of a closed port or of an IGMP querier was read; the messages are built from the RFCs' layouts. An ICMPv6 quote whose packet begins with an extension header names no flow, and an error that quotes a flow the capture holds no packet of stays in the plane and on no flow, where no document writes it yet.
+'''
