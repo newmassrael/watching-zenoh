@@ -99,7 +99,7 @@ ALLOWED: tuple[tuple[str, str, str], ...] = (
     ("crates/wz-session-core/src/key_gate.rs", "of_build", "the gate a registry starts from; the session hands its own in step 3b"),
     ("crates/wz-session-core/src/key_gate_open.rs", "of_build", "the build-time refusal of a closed default without the feature"),
     # Outside session-core: every site that still reads the build.
-    ("crates/wz-ap-demo/src/args.rs", "resolve_policy", "creator: the snapshot its --config file's wz member resolved, else the build defaults"),
+    ("crates/wz-ap-demo/src/args.rs", "resolve_policy", "creator: the snapshot of a node no --config file describes and of a sessions document; main hands a file's snapshot down"),
     ("crates/wz-capi-coop/src/engine.rs", "resolve_policy", "creator: resolves the snapshot (build defaults until a run-time document is read)"),
     ("crates/wz-capi-core/src/open_plan.rs", "resolve_policy", "creator: the snapshot the document's wz member resolved, else the build defaults"),
     ("crates/wz-capi-pico/src/session.rs", "resolve_policy", "creator: resolves the snapshot (build defaults until a run-time document is read)"),

@@ -2837,8 +2837,9 @@ pub(crate) struct StockConfigExpansion {
     /// expansion for the reason `ignored` is: a test can assert on a value.
     pub(crate) mode_unstated: Option<wz::runtime_tokio::zenoh_config::UnstatedMode>,
     /// The node's policies as the file's `wz` member resolved them over the build defaults, and
-    /// where each value came from: what `main` holds for `resolve_policy` to hand every session,
-    /// router and socket of the node. Every value from the build defaults when the file has no
+    /// where each value came from: the node's snapshot, which `main` hands its tuning
+    /// ([`TransportTuning::from_argv_under`]) and through it every session, router and socket of
+    /// the node. Every value from the build defaults when the file has no
     /// such member; a member the reader refused is the expansion's error, never this.
     pub(crate) policies: wz::runtime_tokio::policy_document::Resolved,
 }
@@ -10473,11 +10474,14 @@ impl ScoutSocketArgs {
     /// rather than copied from `group_and_port` above: that one also carries an
     /// `all(test, zenoh-config)` arm, for a test this method has no counterpart
     /// to, and matching it would leave this dead code in exactly that build.
+    ///
+    /// `policy` is the node's snapshot: the joined scouting socket is bound as a link's joined
+    /// half is, so the loopback and the interface rule reach it too.
     #[cfg(any(feature = "scouting-active", feature = "scouting-responder"))]
-    pub(crate) fn as_socket_config(&self) -> wz::runtime_tokio::McastSocketConfig<'_> {
-        // The node's snapshot: the joined scouting socket is bound as a link's joined half is,
-        // so the interface rule reaches it too.
-        let policy = resolve_policy();
+    pub(crate) fn as_socket_config(
+        &self,
+        policy: &wz::runtime_tokio::policy::SessionPolicy,
+    ) -> wz::runtime_tokio::McastSocketConfig<'_> {
         wz::runtime_tokio::McastSocketConfig {
             iface: self.interface.as_deref(),
             ttl: self.ttl,
@@ -10864,35 +10868,13 @@ pub(crate) struct TransportTuning {
     pub(crate) policy: wz::runtime_tokio::policy::SessionPolicy,
 }
 
-/// The snapshot `main` holds for the node when a `--config` file describes it; unset otherwise.
-static NODE_POLICY: std::sync::OnceLock<wz::runtime_tokio::policy::SessionPolicy> =
-    std::sync::OnceLock::new();
-
-/// The snapshot of a demo node's policies: the one place the demo resolves the values its
-/// sessions, routers and sockets read. What the `--config` file's `wz` member resolved to, which
-/// `main` holds before any of them is made (`hold_node_policy`); the build defaults for a node
-/// no file describes, and for one whose file has no such member.
+/// The snapshot of the policies of a demo node no `--config` file describes, and of the sessions
+/// a sessions document runs, which has no `wz` member: the build defaults. A node a file
+/// describes runs under the snapshot the file's `wz` member resolved
+/// (`StockConfigExpansion::policies`), which `main` hands its tuning
+/// ([`TransportTuning::from_argv_under`]) and its scouting sockets.
 pub(crate) fn resolve_policy() -> wz::runtime_tokio::policy::SessionPolicy {
-    match NODE_POLICY.get() {
-        Some(held) => *held,
-        None => wz::runtime_tokio::policy::SessionPolicy::defaults(),
-    }
-}
-
-/// Hold `policy`, the snapshot the `--config` file resolved
-/// ([`StockConfigExpansion::policies`]), as the node's for the rest of the run. Held once, before
-/// any session, router or socket reads [`resolve_policy`]; a second snapshot is refused rather
-/// than replacing the one the node already runs under.
-#[cfg(feature = "zenoh-config")]
-pub(crate) fn hold_node_policy(
-    policy: wz::runtime_tokio::policy::SessionPolicy,
-) -> Result<(), String> {
-    NODE_POLICY.set(policy).map_err(|_| {
-        String::from(
-            "--config: the node's policies are already held, and a second snapshot would \
-             replace the one its sessions run under",
-        )
-    })
+    wz::runtime_tokio::policy::SessionPolicy::defaults()
 }
 
 /// R2925 — the demo's flag for each priority's queue size, indexed by the
@@ -10943,8 +10925,22 @@ impl TransportTuning {
     /// default: the operator asked for a specific wire announcement, and
     /// announcing a different one because their digits were unparseable is the
     /// failure this whole round exists to remove.
+    ///
+    /// The node's snapshot is the demo's own ([`resolve_policy`]); `main` reads the tuning
+    /// through [`Self::from_argv_under`] with the snapshot its `--config` file resolved.
+    #[cfg(all(test, feature = "zenoh-config"))]
     pub(crate) fn from_argv(rest: &[String]) -> Result<Self, String> {
-        let mut out = Self::default();
+        Self::from_argv_under(rest, resolve_policy())
+    }
+
+    /// `from_argv` under `policy`, the node's snapshot: the tuning starts from
+    /// [`Self::of_policy`], so the defaults a policy decides and [`Self::policy`] are the
+    /// snapshot's, and every session the node opens is handed it.
+    pub(crate) fn from_argv_under(
+        rest: &[String],
+        policy: wz::runtime_tokio::policy::SessionPolicy,
+    ) -> Result<Self, String> {
+        let mut out = Self::of_policy(policy);
         if let Some(v) = parse_pair(rest, "--batch-size") {
             out.batch_size = v
                 .parse::<u16>()
@@ -12749,5 +12745,56 @@ mod multicast_max_sessions_flag_tests {
                 "{bad}: {err}"
             );
         }
+    }
+}
+
+/// The tuning a node runs with is read under the snapshot `main` hands it, not under the demo's
+/// own: the snapshot is what every session the node opens is given.
+#[cfg(test)]
+mod transport_tuning_policy_tests {
+    use super::*;
+    use wz::runtime_tokio::policy::SessionPolicy;
+    use wz::runtime_tokio::policy_document::{resolve, Layer, Origin, Statement};
+
+    fn argv(words: &[&str]) -> Vec<String> {
+        words.iter().map(|word| (*word).to_owned()).collect()
+    }
+
+    /// The build defaults with `sn-resolution` at another width the build's domain allows; the
+    /// build defaults themselves where it allows one width.
+    fn a_chosen_snapshot() -> SessionPolicy {
+        let defaults = SessionPolicy::defaults();
+        ["bits-8", "bits-16", "bits-32", "bits-64"]
+            .into_iter()
+            .filter_map(|width| {
+                let statements = [Statement::new("sn-resolution", width)];
+                let layer = Layer {
+                    origin: Origin::Document,
+                    statements: &statements,
+                };
+                resolve(defaults, &[layer]).ok()
+            })
+            .map(|resolved| resolved.policy)
+            .find(|policy| *policy != defaults)
+            .unwrap_or(defaults)
+    }
+
+    #[test]
+    fn the_tuning_carries_the_snapshot_it_is_read_under() {
+        let chosen = a_chosen_snapshot();
+        let tuning = TransportTuning::from_argv_under(&argv(&["--lease-ms", "2000"]), chosen)
+            .expect("the flags read");
+        assert_eq!(tuning.policy, chosen);
+        // The width a node offers when no flag states one is the snapshot's.
+        assert_eq!(tuning.sn_resolution, chosen.sn_resolution());
+        assert_eq!(tuning.lease_ms, 2000);
+        // A flag still states over the snapshot's default.
+        let stated = TransportTuning::from_argv_under(&argv(&["--sn-resolution", "16bit"]), chosen)
+            .expect("the flags read");
+        assert_eq!(
+            stated.sn_resolution,
+            wz::runtime_tokio::policy::SnResolution::Bits16
+        );
+        assert_eq!(stated.policy, chosen);
     }
 }

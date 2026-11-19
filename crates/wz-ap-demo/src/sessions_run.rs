@@ -175,7 +175,9 @@ async fn answer_scouts(
     let Some(socket) = scouting else {
         return Ok(());
     };
-    crate::runner::spawn_scouting_responder(socket, whatami, zid, locators.clone())
+    // A sessions document has no `wz` member: its sessions run under the demo's own snapshot.
+    let policy = crate::args::resolve_policy();
+    crate::runner::spawn_scouting_responder(socket, &policy, whatami, zid, locators.clone())
         .await
         .map_err(|e| e.to_string())?;
     eprintln!(

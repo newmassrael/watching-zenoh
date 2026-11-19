@@ -263,15 +263,19 @@ fn demo_main() -> ExitCode {
     let from_document = rest.iter().any(|a| a == "--config");
     #[cfg(feature = "zenoh-config")]
     let expanded;
+    //
+    // The node's snapshot of the policies is decided here too, once: what the file's `wz` member
+    // resolved to, or the demo's own for a node no file describes. It is handed to the tuning
+    // below, and through it to every session, router and socket the node makes.
     #[cfg(feature = "zenoh-config")]
-    let rest = match crate::args::expand_stock_zenoh_config(rest, |p| {
+    let (rest, node_policy) = match crate::args::expand_stock_zenoh_config(rest, |p| {
         std::fs::read_to_string(p).map_err(|e| format!("--config: cannot read {p}: {e}"))
     }) {
         Err(message) => {
             eprintln!("wz-ap-demo: {message}");
             return ExitCode::from(2);
         }
-        Ok(None) => rest,
+        Ok(None) => (rest, crate::args::resolve_policy()),
         Ok(Some(exp)) => {
             // R2081 (open-debt item 208) — READ and APPLIED are two facts and
             // this used to print them as one. The old line said "honoured" and
@@ -307,13 +311,9 @@ fn demo_main() -> ExitCode {
             for (label, body) in exp.report_lines() {
                 eprintln!("wz-ap-demo: --config {}: {label} {body}", exp.path);
             }
-            // The node's policies, held before the tuning below or any session reads them.
-            if let Err(message) = crate::args::hold_node_policy(exp.policies.policy) {
-                eprintln!("wz-ap-demo: {message}");
-                return ExitCode::from(2);
-            }
+            let node_policy = exp.policies.policy;
             expanded = exp.argv;
-            &expanded[..]
+            (&expanded[..], node_policy)
         }
     };
     #[cfg(not(feature = "zenoh-config"))]
@@ -324,6 +324,8 @@ fn demo_main() -> ExitCode {
         );
         return ExitCode::from(2);
     }
+    #[cfg(not(feature = "zenoh-config"))]
+    let node_policy = crate::args::resolve_policy();
 
     // R311y843 — the two handshake values an operator can move, read ONCE from
     // the already-expanded command line so every run mode announces the same
@@ -331,7 +333,7 @@ fn demo_main() -> ExitCode {
     // parse failure: a node that started with a default lease because the
     // digits were unreadable is the silent misconfiguration `--config` exists
     // to end.
-    let tuning = match crate::args::TransportTuning::from_argv(rest) {
+    let tuning = match crate::args::TransportTuning::from_argv_under(rest, node_policy) {
         Ok(t) => t,
         Err(message) => {
             eprintln!("wz-ap-demo: {message}");
@@ -1668,7 +1670,13 @@ fn demo_main() -> ExitCode {
     // an argv one).
     let connect_opt = if scout_requested {
         let budget_ms = scout_budget_ms.unwrap_or(DEFAULT_SCOUT_BUDGET_MS);
-        match resolve_scouted_locator(&runtime, node_zid.clone(), budget_ms, &scout_socket) {
+        match resolve_scouted_locator(
+            &runtime,
+            node_zid.clone(),
+            budget_ms,
+            &scout_socket,
+            &tuning.policy,
+        ) {
             Ok(locator) => Some(locator),
             Err(code) => return code,
         }
@@ -2979,10 +2987,11 @@ fn resolve_scouted_locator(
     zid: Vec<u8>,
     budget_ms: u64,
     socket: &crate::args::ScoutSocketArgs,
+    policy: &wz::runtime_tokio::policy::SessionPolicy,
 ) -> Result<String, ExitCode> {
     runtime
         .block_on(crate::runner::scout_for_peer_locator(
-            zid, budget_ms, socket,
+            zid, budget_ms, socket, policy,
         ))
         .map_err(|e| {
             eprintln!("{e}");
@@ -3001,6 +3010,7 @@ fn resolve_scouted_locator(
     _zid: Vec<u8>,
     _budget_ms: u64,
     _socket: &crate::args::ScoutSocketArgs,
+    _policy: &wz::runtime_tokio::policy::SessionPolicy,
 ) -> Result<String, ExitCode> {
     eprintln!(
         "wz-ap-demo: --scout requires the `scouting-active` feature \
