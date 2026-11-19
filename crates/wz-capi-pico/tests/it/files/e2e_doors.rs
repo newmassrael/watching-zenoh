@@ -18,8 +18,8 @@ use std::ffi::CString;
 
 use wz_app_frame::e2e_frame::{build, Values};
 use wz_app_frame::e2e_profile::Profile;
-use wz_capi_pico::e2e::receiver::*;
-use wz_capi_pico::e2e::sender::*;
+use wz_capi_pico::e2e_receiver::*;
+use wz_capi_pico::e2e_sender::*;
 use wz_capi_pico::result::{
     ZResult, Z_EINVAL, Z_ERR_CONFIG_INVALID_VALUE, Z_ERR_NULL, Z_ERR_OVERFLOW, Z_OK,
 };

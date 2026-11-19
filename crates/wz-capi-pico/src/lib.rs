@@ -179,10 +179,17 @@ pub mod clock_source;
 pub mod decl_watch;
 #[cfg(feature = "unstable-api")]
 pub mod device_requires;
-// End-to-end protection of an application's payload, the sending side and the receiving judge:
-// wz doors (`wz_ext.h`) of the unstable surface, in a build with either capability.
+// End-to-end protection of an application's payload: what the sending and the receiving doors
+// share, in a build with either capability.
 #[cfg(any(feature = "e2e-sender", feature = "e2e-receiver"))]
-pub mod e2e;
+mod e2e;
+// The receiving judge of end-to-end protected frames: wz doors (`wz_ext.h`) of the unstable
+// surface.
+#[cfg(feature = "e2e-receiver")]
+pub mod e2e_receiver;
+// The sending side of end-to-end protection: wz doors (`wz_ext.h`) of the unstable surface.
+#[cfg(feature = "e2e-sender")]
+pub mod e2e_sender;
 // `wz_ext_redeclare`: tell a session's peers what it holds again.
 #[cfg(feature = "unstable-api")]
 pub mod redeclare;

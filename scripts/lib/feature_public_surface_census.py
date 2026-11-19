@@ -517,11 +517,12 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # `_drop`, `wz_ext_segment_put_options_default` and the two `wz_ext_internal_*` doors,
         # and the types and constants they take, declared in `wz_ext.h`; off by default, as
         # upstream has no such doors.
-        # `e2e-sender` and `e2e-receiver` each gate `pub mod e2e` (either one is enough), whose
-        # public items are wz's own doors `wz_ext_e2e_sender_*` and `wz_ext_e2e_receiver_*`, the
-        # types and constants they take, declared in `wz_ext.h`; `e2e-sender-demux` gates the
-        # receiver's sender slots inside it. Off by default in this ABI, as upstream has no such
-        # doors.
+        # `e2e-sender` gates `pub mod e2e_sender` and `e2e-receiver` gates `pub mod e2e_receiver`,
+        # whose public items are wz's own doors `wz_ext_e2e_sender_*` and `wz_ext_e2e_receiver_*`,
+        # the types and constants they take, declared in `wz_ext.h` (what both share is the
+        # private `mod e2e`); `e2e-sender-demux` gates the receiver's two slot doors
+        # `wz_ext_e2e_receiver_counts` and `_slot_sender` inside it. Off by default in this ABI,
+        # as upstream has no such doors.
         # `scout-mcu` gates `pub mod scout` beside the default `scout`: the same module, whose
         # public items are pico's `z_scout`, `z_hello_*` and `z_closure_hello*` doors, each
         # `#[no_mangle] extern "C"`, and the types they take; the feature only changes the window
