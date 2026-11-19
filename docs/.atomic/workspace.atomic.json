@@ -5499,6 +5499,30 @@
       "carry_forward_bullets": [
         "The next hosted run settles C1bzr and the E lanes. The two other reds of run 44572424670 are Round 4538's (the DNS helper `every_word` unused, and `wz-capture` built without default features), passed to watching-zenoh-16, with watching-zenoh-63 standing in if it does not answer."
       ]
+    },
+    "Round 4547": {
+      "decision_summary": "Pay the Z8 routing red Round 4545 carried (`three_node_combination`, 7 of 8 since Round 4506), at the cause Round 4545 named. A node's liveliness get read the node's own tables alone, and since Round 4506 a router tells a peer below it no token it was not asked for, so a peer node under a router got none of the tokens beyond it. The get now does what upstream's peer hat does with its session's `Current` interest: it is told the keys the node already knows, then sent to one gateway through the node's interest broker (`zenoh/src/net/routing/hat/peer/interests.rs` @ `if msg.mode == InterestMode::Current {`), whose answers reach the get under its id, each key once, and whose end (or the broker's deadline) ends it. The answers are the get's alone: they are not counted as tokens of the node's face, whose ids are the gateway's numbers and not the node's. A node that asks no router, or is built without the broker, ends the get at once with what it knows, as before.",
+      "changes_bullets": [
+        "`crates/wz-runtime-tokio/src/router_forward.rs`: `LocalFaceEvent::InterestFinal { interest }`, what a `DeclareFinal` with an interest id is to the `Local` face; `RouterForwarder::ask_routers_current_tokens(id, key)`, the node's own `Current` token interest to one gateway (0 without `routing-interest-pending-gc`).",
+        "`crates/wz-runtime-tokio/src/router_forward/brokered_interest.rs`: `propagate_current_kinds` takes an interest's kinds rather than a received body (`BrokeredKinds`), and `ask_gateways_current_tokens` brokers the node's own interest with the `Local` face as its source.",
+        "`crates/wz-capi-core/src/drive/router_node/local_face.rs`: `LocalLiveliness::{tokens_get_id, get_tokens, end_tokens_get}` and the face's held `TokensGet` (the keys told, the key handler, the end); a router's answer under a get's id goes to that get and not to the face's tokens; two tests.",
+        "`crates/wz-capi-core/src/drive/router_node/engine.rs`: `liveliness_get_on_wire` holds its leg's callback until the get ends, records the get's cancel under an id taken before it is asked, and asks through `get_tokens`."
+      ],
+      "verification_bullets": [
+        "On the build host: Z8 routing 8 of 8 (7 at Round 4545) and liveliness 46 of 46; `local_face` 15 (the two new tests among them); `router_forward` with the router hat 340, with token tables 402, with the interest broker 354; clippy `-D warnings` of wz-runtime-tokio (all features and its default lib) and wz-capi-core with all features; `router_interest_qos_gate.py`.",
+        "The default-feature lib of wz-capi-core does not pass clippy on main for a line this round does not touch (`router_node.rs` `&AppSlot::default()`, Round 4541's), which its owner repays with Round 4541's capability cost.",
+        "The guarded count gate over this round's range.",
+        "Locally: reason and store citations, upstream citation anchors, count guard lint, `cargo fmt --check`."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "Q footprint multicast-e2e text +360/+496 over its tolerance (hosted run 44572424670), to be attributed by symbol between the last green Layer Q and Round 4540; the table and the section 6.9 footprint caveats move together.",
+        "C1cc init-queue leg, open-debt item 952: the C ABI's stated queue lays no `queue/size/*` over the model and a lazy queue makes no batch-sized block on traffic; 51 C1cc legs are unreached behind it.",
+        "Runtime configuration step 5 (the config doors of the three ABIs) lands after Round 4541's capability cost repayment, its budgets that repayment's plus step 5's own growth."
+      ]
     }
   },
   "inventory_entries": {
