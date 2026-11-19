@@ -20,7 +20,7 @@
     feature = "queryable"
 ))]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -31,8 +31,9 @@ use wz_capi_pico::app_transport::{
     wz_ext_link_result_t, wz_ext_link_t, wz_ext_loaned_transport_t, wz_ext_owned_transport_t,
     wz_ext_transport_accepted, wz_ext_transport_drop, wz_ext_transport_event,
     wz_ext_transport_loan, wz_ext_transport_move, wz_ext_transport_new, wz_ext_transport_received,
-    wz_ext_transport_t, WZ_EXT_LINK_CLOSED, WZ_EXT_LINK_EVENT_CLOSED, WZ_EXT_LINK_EVENT_CONNECTED,
-    WZ_EXT_LINK_EVENT_WRITABLE, WZ_EXT_LINK_OK, WZ_EXT_LINK_STREAM_DIAL, WZ_EXT_LINK_STREAM_LISTEN,
+    wz_ext_transport_t, WZ_EXT_LINK_CLOSED, WZ_EXT_LINK_DATAGRAM, WZ_EXT_LINK_DATAGRAM_LISTEN,
+    WZ_EXT_LINK_EVENT_CLOSED, WZ_EXT_LINK_EVENT_CONNECTED, WZ_EXT_LINK_EVENT_WRITABLE,
+    WZ_EXT_LINK_GROUP, WZ_EXT_LINK_OK, WZ_EXT_LINK_STREAM_DIAL, WZ_EXT_LINK_STREAM_LISTEN,
     WZ_EXT_LINK_WOULD_BLOCK,
 };
 use wz_capi_pico::result::{
@@ -54,9 +55,20 @@ use wz_capi_pico::{
     Z_OK,
 };
 
-/// The locators the two sessions name. Synthetic: no socket is opened for either.
+/// The locators the sessions name. Synthetic: no socket is opened for any.
 const LISTEN: &str = "tcp/192.0.2.100:7447";
 const ACCEPTED_REMOTE: &str = "tcp/192.0.2.200:41000";
+const DATAGRAM_LISTEN: &str = "udp/192.0.2.100:7447";
+const DATAGRAM_REMOTE: &str = "udp/192.0.2.200:41000";
+const GROUP: &str = "udp/239.1.2.3:7447#iface=lan7";
+
+/// The address each member of a group sends from, which the other is told with each datagram.
+fn member_source(side: Side) -> &'static CStr {
+    match side {
+        Side::Listening => c"udp/192.0.2.1:7447",
+        Side::Dialling => c"udp/192.0.2.2:7447",
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Side {
@@ -92,6 +104,14 @@ struct Pipe {
     orphan_sends: AtomicUsize,
     /// Set while the pipe refuses new dials.
     refusing: AtomicBool,
+    /// Whether the dialling side's stream sends are answered partly and with would-blocks.
+    faults: AtomicBool,
+    /// The links that carry datagrams, which are handed over whole with their source.
+    datagrams: Mutex<HashSet<(Side, u64)>>,
+    /// Each side's group link, when it joined one.
+    groups: Mutex<HashMap<Side, u64>>,
+    /// How many times the transport told a side a link was read down.
+    drained: AtomicUsize,
 }
 
 impl Pipe {
@@ -133,29 +153,22 @@ unsafe extern "C" fn on_open(
             pipe.listener.store(link, Ordering::SeqCst);
             WZ_EXT_LINK_OK
         }
+        (Side::Listening, WZ_EXT_LINK_DATAGRAM_LISTEN) if locator == DATAGRAM_LISTEN => {
+            pipe.listener.store(link, Ordering::SeqCst);
+            WZ_EXT_LINK_OK
+        }
+        // Each member joins the group; the pipe hands a member's datagrams to the other.
+        (side, WZ_EXT_LINK_GROUP) if locator == GROUP => {
+            pipe.groups.lock().unwrap().insert(side, link);
+            pipe.datagrams.lock().unwrap().insert((side, link));
+            WZ_EXT_LINK_OK
+        }
         (Side::Dialling, WZ_EXT_LINK_STREAM_DIAL) if locator == LISTEN => {
             if pipe.refusing.load(Ordering::SeqCst) {
                 return WZ_EXT_LINK_CLOSED;
             }
-            pipe.dials.fetch_add(1, Ordering::SeqCst);
-            // The listening program accepts the stream, and the two links are paired before the
-            // dial is reported up, so neither side sends into nothing.
-            let mut accepted: wz_ext_link_t = 0;
-            let listener = pipe.listener.load(Ordering::SeqCst);
-            let remote = CString::new(ACCEPTED_REMOTE).unwrap();
-            if wz_ext_transport_accepted(
-                pipe.loan(Side::Listening),
-                listener,
-                remote.as_ptr(),
-                &mut accepted,
-            ) != Z_OK
-            {
+            if !accept_and_pair(pipe, link, ACCEPTED_REMOTE, false) {
                 return WZ_EXT_LINK_CLOSED;
-            }
-            {
-                let mut peers = pipe.peers.lock().unwrap();
-                peers.insert((Side::Dialling, link), accepted);
-                peers.insert((Side::Listening, accepted), link);
             }
             // Reported up from the program's own thread, after open has answered.
             let pipe = Arc::clone(pipe);
@@ -169,8 +182,43 @@ unsafe extern "C" fn on_open(
             });
             WZ_EXT_LINK_WOULD_BLOCK
         }
+        // A datagram link is up at once: there is no connection to make.
+        (Side::Dialling, WZ_EXT_LINK_DATAGRAM) if locator == DATAGRAM_LISTEN => {
+            if accept_and_pair(pipe, link, DATAGRAM_REMOTE, true) {
+                WZ_EXT_LINK_OK
+            } else {
+                WZ_EXT_LINK_CLOSED
+            }
+        }
         _ => WZ_EXT_LINK_CLOSED,
     }
+}
+
+/// The listening program accepts the dialled `link` on its listener, under `remote`, and the two
+/// links are paired before the dial is answered, so neither side sends into nothing.
+unsafe fn accept_and_pair(pipe: &Arc<Pipe>, link: u64, remote: &str, datagram: bool) -> bool {
+    pipe.dials.fetch_add(1, Ordering::SeqCst);
+    let mut accepted: wz_ext_link_t = 0;
+    let listener = pipe.listener.load(Ordering::SeqCst);
+    let remote = CString::new(remote).unwrap();
+    if wz_ext_transport_accepted(
+        pipe.loan(Side::Listening),
+        listener,
+        remote.as_ptr(),
+        &mut accepted,
+    ) != Z_OK
+    {
+        return false;
+    }
+    if datagram {
+        let mut datagrams = pipe.datagrams.lock().unwrap();
+        datagrams.insert((Side::Dialling, link));
+        datagrams.insert((Side::Listening, accepted));
+    }
+    let mut peers = pipe.peers.lock().unwrap();
+    peers.insert((Side::Dialling, link), accepted);
+    peers.insert((Side::Listening, accepted), link);
+    true
 }
 
 unsafe extern "C" fn on_send(
@@ -182,12 +230,49 @@ unsafe extern "C" fn on_send(
 ) -> wz_ext_link_result_t {
     let ctx = ctx(context);
     let pipe = &ctx.pipe;
+    // A group member's datagram goes to the other member, with this member's address.
+    let member = {
+        let groups = pipe.groups.lock().unwrap();
+        (groups.get(&ctx.side) == Some(&link)).then(|| groups.get(&ctx.side.other()).copied())
+    };
+    if let Some(other) = member {
+        if let Some(other) = other {
+            let _ = wz_ext_transport_received(
+                pipe.loan(ctx.side.other()),
+                other,
+                data,
+                len,
+                member_source(ctx.side).as_ptr(),
+            );
+        }
+        *written = len;
+        return WZ_EXT_LINK_OK;
+    }
     let Some(peer) = pipe.peer_of(ctx.side, link) else {
         pipe.orphan_sends.fetch_add(1, Ordering::SeqCst);
         return WZ_EXT_LINK_CLOSED;
     };
+    // A datagram is handed over whole, with the address the other side knows this one by.
+    if pipe.datagrams.lock().unwrap().contains(&(ctx.side, link)) {
+        let source = match ctx.side {
+            Side::Dialling => CString::new(DATAGRAM_REMOTE).unwrap(),
+            Side::Listening => CString::new(DATAGRAM_LISTEN).unwrap(),
+        };
+        if wz_ext_transport_received(
+            pipe.loan(ctx.side.other()),
+            peer,
+            data,
+            len,
+            source.as_ptr(),
+        ) != Z_OK
+        {
+            return WZ_EXT_LINK_CLOSED;
+        }
+        *written = len;
+        return WZ_EXT_LINK_OK;
+    }
     let mut take = len;
-    if ctx.side == Side::Dialling {
+    if ctx.side == Side::Dialling && pipe.faults.load(Ordering::SeqCst) {
         let n = pipe.dialler_sends.fetch_add(1, Ordering::SeqCst);
         if n % 7 == 3 {
             pipe.blocks.fetch_add(1, Ordering::SeqCst);
@@ -226,6 +311,13 @@ unsafe extern "C" fn on_close(context: *mut c_void, link: wz_ext_link_t) {
     let ctx = ctx(context);
     let pipe = &ctx.pipe;
     pipe.closes.fetch_add(1, Ordering::SeqCst);
+    // A member that closes its group link has left the group.
+    {
+        let mut groups = pipe.groups.lock().unwrap();
+        if groups.get(&ctx.side) == Some(&link) {
+            groups.remove(&ctx.side);
+        }
+    }
     let peer = {
         let mut peers = pipe.peers.lock().unwrap();
         let peer = peers.remove(&(ctx.side, link));
@@ -238,6 +330,10 @@ unsafe extern "C" fn on_close(context: *mut c_void, link: wz_ext_link_t) {
     if let Some(peer) = peer {
         let _ = wz_ext_transport_event(pipe.loan(ctx.side.other()), peer, WZ_EXT_LINK_EVENT_CLOSED);
     }
+}
+
+unsafe extern "C" fn on_drained(context: *mut c_void, _link: wz_ext_link_t) {
+    ctx(context).pipe.drained.fetch_add(1, Ordering::SeqCst);
 }
 
 unsafe extern "C" fn on_drop(context: *mut c_void) {
@@ -256,6 +352,7 @@ fn make_transport(pipe: &Arc<Pipe>, side: Side) -> *mut wz_ext_owned_transport_t
         open: Some(on_open),
         send: Some(on_send),
         close: Some(on_close),
+        drained: Some(on_drained),
         drop: Some(on_drop),
     };
     let owned: *mut wz_ext_owned_transport_t =
@@ -413,6 +510,7 @@ unsafe fn converge(session: &z_owned_session_t, key: &CStr, heard: &Heard, probe
 #[test]
 fn two_sessions_joined_by_the_programs_transport_carry_a_put_a_sequence_and_a_query() {
     let pipe = Arc::new(Pipe::default());
+    pipe.faults.store(true, Ordering::SeqCst);
     let listening = make_transport(&pipe, Side::Listening);
     let dialling = make_transport(&pipe, Side::Dialling);
 
@@ -624,13 +722,13 @@ fn an_open_over_the_transport_refuses_what_it_does_not_carry_by_name() {
         ),
         (
             Z_CONFIG_CONNECT_KEY,
-            "udp/192.0.2.100:7447",
-            WZ_EXT_ERR_UNSUPPORTED,
+            "serial//dev/ttyQ9",
+            Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN,
         ),
         (
             Z_CONFIG_LISTEN_KEY,
-            "udp/239.1.2.3:7447#iface=lan7",
-            WZ_EXT_ERR_UNSUPPORTED,
+            "quic/192.0.2.100:7447",
+            Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN,
         ),
     ] {
         let mut cfg = config_over(key, locator, transport);
@@ -723,6 +821,7 @@ fn the_programs_calls_are_refused_by_name() {
             open: Some(on_open),
             send: None,
             close: Some(on_close),
+            drained: None,
             drop: None,
         };
         let mut owned: wz_ext_owned_transport_t = std::mem::zeroed();
@@ -748,4 +847,220 @@ fn the_programs_calls_are_refused_by_name() {
             "drop ran with the last reference"
         );
     }
+}
+
+/// Declare a subscriber on `key` of `session`, which records what it is handed.
+unsafe fn subscribe(session: &z_owned_session_t, key: &CStr) -> (Arc<Heard>, z_owned_subscriber_t) {
+    let heard = Arc::new(Heard::default());
+    let mut closure = std::mem::zeroed();
+    assert_eq!(
+        z_closure_sample(
+            &mut closure,
+            Some(on_sample),
+            Some(on_sample_drop),
+            Arc::into_raw(Arc::clone(&heard)) as *mut c_void,
+        ),
+        Z_OK
+    );
+    let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+    assert_eq!(z_view_keyexpr_from_str(&mut ke, key.as_ptr()), Z_OK);
+    let mut subscriber: z_owned_subscriber_t = std::mem::zeroed();
+    assert_eq!(
+        z_declare_subscriber(
+            z_session_loan(session),
+            &mut subscriber,
+            z_view_keyexpr_loan(&ke),
+            z_closure_sample_move(&mut closure),
+            std::ptr::null(),
+        ),
+        Z_OK
+    );
+    (heard, subscriber)
+}
+
+/// Declare a queryable on `key` of `session` that answers every query with one reply.
+unsafe fn serve(session: &z_owned_session_t, key: &CStr) -> z_owned_queryable_t {
+    let mut closure = std::mem::zeroed();
+    assert_eq!(
+        z_closure_query(
+            &mut closure,
+            Some(on_query),
+            Some(on_query_drop),
+            std::ptr::null_mut()
+        ),
+        Z_OK
+    );
+    let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+    assert_eq!(z_view_keyexpr_from_str(&mut ke, key.as_ptr()), Z_OK);
+    let mut opts: z_queryable_options_t = std::mem::zeroed();
+    z_queryable_options_default(&mut opts);
+    let mut queryable: z_owned_queryable_t = std::mem::zeroed();
+    assert_eq!(
+        z_declare_queryable(
+            z_session_loan(session),
+            &mut queryable,
+            z_view_keyexpr_loan(&ke),
+            z_closure_query_move(&mut closure),
+            &opts,
+        ),
+        Z_OK
+    );
+    queryable
+}
+
+/// Ask `key` of `session` until a reply comes, or the bound runs out: the queryable's declaration
+/// takes a moment to reach the asking session. The replies of the get that was answered.
+unsafe fn ask(session: &z_owned_session_t, key: &CStr) -> Vec<Vec<u8>> {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let replies = Arc::new(Replies::default());
+        let mut closure = std::mem::zeroed();
+        assert_eq!(
+            z_closure_reply(
+                &mut closure,
+                Some(on_reply),
+                Some(on_reply_drop),
+                Arc::into_raw(Arc::clone(&replies)) as *mut c_void,
+            ),
+            Z_OK
+        );
+        let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(z_view_keyexpr_from_str(&mut ke, key.as_ptr()), Z_OK);
+        let mut opts: z_get_options_t = std::mem::zeroed();
+        z_get_options_default(&mut opts);
+        opts.timeout_ms = 1000;
+        assert_eq!(
+            z_get(
+                z_session_loan(session),
+                z_view_keyexpr_loan(&ke),
+                std::ptr::null(),
+                z_closure_reply_move(&mut closure),
+                &mut opts,
+            ),
+            Z_OK
+        );
+        wait_until("the get to complete", Duration::from_secs(5), || {
+            replies.done.load(Ordering::SeqCst)
+        });
+        let got = replies.payloads.lock().unwrap().clone();
+        if !got.is_empty() {
+            return got;
+        }
+        assert!(Instant::now() < deadline, "no get was ever answered");
+    }
+}
+
+/// A session opened on `locator` under `key` over `transport`.
+unsafe fn open_over(
+    key: u8,
+    locator: &str,
+    transport: *mut wz_ext_owned_transport_t,
+) -> z_owned_session_t {
+    let mut session: z_owned_session_t = std::mem::zeroed();
+    let mut cfg = config_over(key, locator, transport);
+    assert_eq!(
+        z_open(&mut session, z_config_move(&mut cfg), std::ptr::null()),
+        Z_OK,
+        "{locator} opens over the program's transport"
+    );
+    session
+}
+
+unsafe fn close(mut session: z_owned_session_t) {
+    z_close(z_session_loan_mut(&mut session), std::ptr::null());
+    z_session_drop(z_session_move(&mut session));
+}
+
+/// A put and a get between `listener` and `dialler`: the subscriber and the queryable on the
+/// listening side, the put and the get from the dialling side.
+unsafe fn put_and_get(listener: &z_owned_session_t, dialler: &z_owned_session_t) {
+    let (heard, mut subscriber) = subscribe(listener, c"demo/pipe/**");
+    let mut queryable = serve(listener, c"demo/ask");
+    converge(dialler, c"demo/pipe/probe", &heard, "probe");
+    assert_eq!(
+        ask(dialler, c"demo/ask"),
+        [b"answer-over-the-pipe".to_vec()],
+        "the query got its one reply"
+    );
+    z_undeclare_subscriber(z_subscriber_move(&mut subscriber));
+    z_undeclare_queryable(z_queryable_move(&mut queryable));
+}
+
+/// A client session opens over the program's transport and carries a put and a get, on the
+/// engine the build has: the test of a cooperative-engine build as much as of a tokio one.
+#[test]
+fn a_client_session_opens_over_the_programs_transport_on_the_builds_engine() {
+    let pipe = Arc::new(Pipe::default());
+    let listening = make_transport(&pipe, Side::Listening);
+    let dialling = make_transport(&pipe, Side::Dialling);
+    unsafe {
+        let listener = open_over(Z_CONFIG_LISTEN_KEY, LISTEN, listening);
+        let dialler = open_over(Z_CONFIG_CONNECT_KEY, LISTEN, dialling);
+        assert_eq!(pipe.dials.load(Ordering::SeqCst), 1);
+        put_and_get(&listener, &dialler);
+        close(dialler);
+        close(listener);
+    }
+    drop_transport(dialling);
+    drop_transport(listening);
+    wait_until("both transports to drop", Duration::from_secs(10), || {
+        pipe.drops.load(Ordering::SeqCst) == 2
+    });
+}
+
+/// A datagram pair: the listening session listens for datagrams, the program accepts the
+/// dialling session's source on it, and each datagram crosses the pipe whole with its source.
+#[cfg(all(feature = "engine-tokio", feature = "link-udp"))]
+#[test]
+fn a_datagram_pair_carries_a_put_and_a_get() {
+    let pipe = Arc::new(Pipe::default());
+    let listening = make_transport(&pipe, Side::Listening);
+    let dialling = make_transport(&pipe, Side::Dialling);
+    unsafe {
+        let listener = open_over(Z_CONFIG_LISTEN_KEY, DATAGRAM_LISTEN, listening);
+        let dialler = open_over(Z_CONFIG_CONNECT_KEY, DATAGRAM_LISTEN, dialling);
+        assert_eq!(pipe.dials.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            pipe.datagrams.lock().unwrap().len(),
+            2,
+            "both ends of the pair are datagram links"
+        );
+        put_and_get(&listener, &dialler);
+        close(dialler);
+        close(listener);
+    }
+    drop_transport(dialling);
+    drop_transport(listening);
+    wait_until("both transports to drop", Duration::from_secs(10), || {
+        pipe.drops.load(Ordering::SeqCst) == 2
+    });
+}
+
+/// A two-member group: each session joins the group over its program's transport, the pipe hands
+/// each member's datagrams to the other with the member's address, and a put and a get cross the
+/// group. Closing a session leaves the group, which its program hears as the link's close.
+#[cfg(feature = "multicast-transport")]
+#[test]
+fn a_two_member_group_carries_a_put_and_a_get() {
+    let pipe = Arc::new(Pipe::default());
+    let first = make_transport(&pipe, Side::Listening);
+    let second = make_transport(&pipe, Side::Dialling);
+    unsafe {
+        let one = open_over(Z_CONFIG_LISTEN_KEY, GROUP, first);
+        let two = open_over(Z_CONFIG_LISTEN_KEY, GROUP, second);
+        assert_eq!(pipe.groups.lock().unwrap().len(), 2, "both members joined");
+        put_and_get(&one, &two);
+        close(two);
+        wait_until(
+            "the second member to leave",
+            Duration::from_secs(10),
+            || !pipe.groups.lock().unwrap().contains_key(&Side::Dialling),
+        );
+        close(one);
+    }
+    drop_transport(second);
+    drop_transport(first);
+    wait_until("both transports to drop", Duration::from_secs(10), || {
+        pipe.drops.load(Ordering::SeqCst) == 2
+    });
 }
