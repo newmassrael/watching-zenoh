@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  Stream activation - when a node judges whether its periodic streams keep arriving.
+
+  A receiver supervises each periodic stream with a reception deadline. It judges none of them
+  until two gates are open: a start delay has passed since the first poll that had a clock, and a
+  condition the application supplies holds (the supply is in range, the bus is up). Every time
+  the two gates open together, the deadlines of every stream that can time out are counted again
+  from that moment, so a period with the gates shut is never charged to a stream, and a stream
+  that never arrived times out one deadline after the activation.
+
+  Division of labour with the host (the machine owns the states, the host owns the clock and the
+  condition):
+    - The host polls. A poll that has a clock raises `clock.seen`; whether the start delay has
+      passed is a comparison of three numbers over the time source (`tick_elapsed`), the host's,
+      which raises `delay.over`. A poll without a clock judges nothing, so the host raises
+      `condition.fails` for it: the next poll with a clock activates again and re-bases.
+    - The condition is the application's value, and the host raises `condition.holds` or
+      `condition.fails` on every poll, as the level it is. The edge is the machine's: only the
+      transition into `Active` re-bases the streams.
+    - The streams, their deadlines and their error counts are the host's table (one row per
+      stream, a keyed table). The machine says WHEN the table is re-based and its counts reset.
+
+  The states:
+    Unclocked - no poll has had a clock yet; the start delay has not begun.
+    Delaying  - the start delay runs from the first poll that had a clock.
+    Inactive  - the delay has passed and the condition does not hold. Nothing is judged.
+    Active    - the delay has passed and the condition holds. Every poll judges the streams.
+
+  Engine-free: every effect is a no-arg `<sce:action>` host-trait call, so the generated
+  `StreamActivationPolicy<A>` carries no `IScriptEngine` and compiles `no_std`.
+
+  Host actions (the generated `StreamActivationActions` trait):
+    begin_delay - entered Delaying: the start delay is counted from this poll's time.
+    activate    - entered Active: re-base every stream that can time out at this poll's time,
+                  and reset the error counts of every stream and of the node.
+
+  Events fed by the host:
+    clock.seen      - a poll had a clock.
+    delay.over      - the start delay has passed.
+    condition.holds - the application's condition holds at this poll.
+    condition.fails - it does not, or the poll had no clock.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="statechart"
+       name="stream_activation"
+       version="1.0"
+       initial="Unclocked">
+
+  <state id="Unclocked">
+    <transition event="clock.seen" target="Delaying"/>
+  </state>
+
+  <state id="Delaying">
+    <onentry>
+      <sce:action name="begin_delay" effect="duty"/>
+    </onentry>
+    <transition event="delay.over" target="Inactive"/>
+  </state>
+
+  <state id="Inactive">
+    <transition event="condition.holds" target="Active"/>
+  </state>
+
+  <!-- No transition on condition.holds: the condition is raised as a level on every poll, and
+       only the edge into Active re-bases the streams. -->
+  <state id="Active">
+    <onentry>
+      <sce:action name="activate" effect="duty"/>
+    </onentry>
+    <transition event="condition.fails" target="Inactive"/>
+  </state>
+
+</scxml>

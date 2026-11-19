@@ -46,6 +46,7 @@
   <sce:feature name="deferred-fire" requires="alloc"/>
   <sce:feature name="dissect" requires="alloc codec-close codec-declare codec-fragment codec-frame codec-init-body codec-join codec-keep-alive codec-open-body codec-push codec-request codec-response codec-response-final"/>
   <sce:feature name="dissect-serde" requires="dissect"/>
+  <sce:feature name="e2e-supervision"/>
   <sce:feature name="ext-pubsub-group-membership" requires="alloc wire-bincode"/>
   <sce:feature name="ext-pubsub-serde-codec" requires="alloc"/>
   <sce:feature name="initial-sn-compact"/>
