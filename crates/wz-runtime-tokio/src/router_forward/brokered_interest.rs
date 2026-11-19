@@ -53,6 +53,15 @@ use wz_session_core::interest_build::{
 /// The default interest deadline, zenoh's `routing.interests.timeout`.
 const DEFAULT_INTEREST_TIMEOUT: Duration = Duration::from_millis(10_000);
 
+/// What a brokered copy asks for: its kinds, and which of the planes a gateway finalizes on its
+/// `DeclareFinal` it names.
+#[derive(Clone, Copy)]
+struct BrokeredKinds {
+    kinds: InterestKinds,
+    subscribers: bool,
+    queryables: bool,
+}
+
 /// R2903 — one brokered CurrentFuture copy a gateway holds as live: where it went and under
 /// which id, which is what the client's Final is passed on under.
 #[derive(Clone, Debug)]
@@ -226,6 +235,39 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let Some(kinds) = interest_kinds_of(options) else {
             return 0;
         };
+        self.propagate_current_kinds(
+            inbound,
+            src_interest_id,
+            BrokeredKinds {
+                kinds,
+                subscribers: options.su(),
+                queryables: options.qu(),
+            },
+            aggregate,
+            current_future,
+            target,
+            upstreams,
+        )
+    }
+
+    /// [`Self::propagate_current_interest`] for an interest named by its kinds rather than read
+    /// off one a face sent: the node's own ([`Self::ask_routers_current_tokens`]).
+    #[allow(clippy::too_many_arguments)]
+    fn propagate_current_kinds(
+        &self,
+        inbound: FaceId,
+        src_interest_id: u64,
+        brokered: BrokeredKinds,
+        aggregate: bool,
+        current_future: bool,
+        target: Option<&str>,
+        upstreams: Vec<FaceId>,
+    ) -> usize {
+        let BrokeredKinds {
+            kinds,
+            subscribers,
+            queryables,
+        } = brokered;
         if upstreams.is_empty() {
             return 0;
         }
@@ -275,14 +317,43 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                         upstream: up,
                         up_id,
                         target: target.map(str::to_owned),
-                        subscribers: options.su(),
-                        queryables: options.qu(),
+                        subscribers,
+                        queryables,
                         finalized: false,
                     });
             }
             sent += 1;
         }
         sent
+    }
+
+    /// Ask one gateway of the node for the liveliness tokens alive on `target`, for the node's
+    /// own face under `interest_id`, as upstream's peer hat sends its session's `Current`
+    /// interest to one gateway (`zenoh/src/net/routing/hat/peer/interests.rs` @
+    /// `if msg.mode == InterestMode::Current {`): the answers are relayed to the face under that
+    /// id, and the gateway's end of them, or the deadline, ends it there
+    /// ([`super::LocalFaceEvent::InterestFinal`]). A router tells a peer below it no token it was
+    /// not asked for, so a node that only read its own tables would not see a token beyond its
+    /// router. Answers how many gateways were asked: none for a node that asks no router.
+    #[cfg(feature = "routing-token-tables")]
+    pub(super) fn ask_gateways_current_tokens(&self, interest_id: u64, target: &str) -> usize {
+        if !self.tables.routes_interest_north() {
+            return 0;
+        }
+        let upstreams = self.interest_upstreams(super::LOCAL_FACE, false);
+        self.propagate_current_kinds(
+            super::LOCAL_FACE,
+            interest_id,
+            BrokeredKinds {
+                kinds: InterestKinds::TOKENS,
+                subscribers: false,
+                queryables: false,
+            },
+            false,
+            false,
+            Some(target),
+            upstreams,
+        )
     }
 
     /// Brokering as `respond_to_interest` reaches it: the upstreams for a CURRENT interest from a
