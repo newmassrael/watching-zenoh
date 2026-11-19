@@ -115,11 +115,10 @@ pub mod keyexpr_canon;
 
 // R311dn / di-15-pre — keyexpr glob + intersection matchers
 // (zenoh `**` / `*` / `$*` DSL) lifted from
-// `wz-runtime-tokio::pubsub`. The two `pub fn` entry points
-// (`keyexpr_pattern_matches`, `keyexpr_intersect_patterns`) back
-// the future inherent `has_matching` methods on
-// `Remote{Subscriber,Queryable}Registry` (R311do / R311dp) once
-// those registries migrate into wz-session-core.
+// `wz-runtime-tokio::pubsub`. Its text entry points
+// (`keyexpr_matches`, `keyexpr_intersects`, `keyexpr_includes`)
+// back the inherent `has_matching` methods on
+// `Remote{Subscriber,Queryable}Registry` (R311do / R311dp).
 //
 // R311fz — un-gated from `alloc`: the matcher now backs its one
 // indexed buffer onto `bounded::BoundedVec<&str, MAX_KEYEXPR_CHUNKS>`

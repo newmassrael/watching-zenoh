@@ -118,7 +118,7 @@ I6. Each invariant above is held by a test that can fail for exactly one reason 
   is a literal finds its literal subscribers in constant time. Subscriptions with a wildcard are kept in
   a trie over the key's chunks, whose traversal cost depends on the wildcard subscriptions that could
   match, as the upstream resource tree's does. The wildcard and intersection semantics are the existing
-  ones (`keyexpr_intersects_target`); this changes how candidates are found, not what matches.
+  ones (`keyexpr_intersects`); this changes how candidates are found, not what matches.
 - A cached route is attached to the key it was computed for. A declaration for key K marks stale the
   cached keys that intersect K, found through the same index. Nothing else is recomputed.
 - The resource test (`names_a_resource`) becomes a lookup in the index rather than a scan.

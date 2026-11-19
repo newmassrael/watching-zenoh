@@ -125,6 +125,7 @@ fn group_params(zid: &[u8], lease_ms: u64, policy: &SessionPolicy) -> MulticastP
         // members.
         join_rule: GroupJoinRule::Pico,
         max_sessions: None,
+        policy: *policy,
     }
 }
 

@@ -132,6 +132,15 @@ CLASSIFIED: dict[tuple[str, str], tuple[str, str]] = {
         "advisories that the session MAY use the capability; the offer comes in "
         "two encodings for shared memory, and the flags read no body",
     ),
+    ("crates/wz-session-core/src/passive.rs", "extension"): (
+        "hint",
+        "the observer's account of where a handshake's shared memory stopped "
+        "(`ShmHandshake`) finds the shared-memory entry of each of the four messages "
+        "by its id on purpose: what it reports is the encoding the wire wrote, so "
+        "that two releases whose encodings differ show as such instead of as an "
+        "absent extension. It reads no body, and a look-alike of the same id can "
+        "only make it report an entry that was carried",
+    ),
     ("crates/wz-session-core/src/ext_chain.rs", "stage_in_canonical_order"): (
         "outbound",
         "replaces the entry of one id on this side's own handshake chain and places it "

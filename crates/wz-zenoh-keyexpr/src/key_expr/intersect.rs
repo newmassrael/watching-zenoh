@@ -16,13 +16,17 @@
 // src/key_expr/intersect/mod.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2).
 
 //! Intersection between key expressions: do two sets of keys have a key in common?
+//!
+//! The answer is watching-zenoh's one key expression matcher (`wz_session_core::keyexpr_match`):
+//! [`keyexpr::intersects`] asks it about the two key texts, and [`ClassicIntersector`] about the
+//! bytes it is given.
 
 use super::keyexpr;
 
 mod classical;
 pub use classical::ClassicIntersector;
 
-/// The intersection algorithm [`keyexpr::intersects`] uses.
+/// The default intersection algorithm, the one [`keyexpr::intersects`] answers by.
 pub const DEFAULT_INTERSECTOR: ClassicIntersector = ClassicIntersector;
 
 /// An algorithm that tells whether `left` and `right` intersect.
@@ -32,7 +36,7 @@ pub trait Intersector<Left, Right> {
 }
 
 pub(crate) mod restriction {
-    /// A value known to hold no `$*`, whose chunks are then compared without the glob step.
+    /// A value known to hold no `$*`, which an algorithm may then answer without a `$*` step.
     #[repr(transparent)]
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct NoSubWilds<T>(pub T);
@@ -81,31 +85,13 @@ impl<
         if left_bytes == right_bytes {
             return true;
         }
-        // Two different key expressions without a wildcard denote two different keys, and when no
-        // `$*` is involved the chunks are compared without the glob step.
+        // Two different key expressions without a wildcard denote two different keys, and a pair
+        // with no `$*` is handed over as such. Every `T` gets this impl, a caller's own intersector
+        // included, so these answers stay though the default one would give the same.
         match left.match_complexity() as u8 | right.match_complexity() as u8 {
             0 => false,
             1 => self.intersect(NoSubWilds(left_bytes), NoSubWilds(right_bytes)),
             _ => self.intersect(left_bytes, right_bytes),
         }
-    }
-}
-
-/// What the algorithms ask of a slice of bytes about verbatim chunks (those starting with `@`).
-pub(crate) trait MayHaveVerbatim {
-    /// Whether the first chunk starts with `@`.
-    fn has_direct_verbatim(&self) -> bool;
-    /// Whether the first chunk is non-empty and starts with `@`.
-    fn has_direct_verbatim_non_empty(&self) -> bool {
-        self.has_direct_verbatim()
-    }
-}
-
-impl MayHaveVerbatim for [u8] {
-    fn has_direct_verbatim(&self) -> bool {
-        matches!(self, [b'@', ..])
-    }
-    fn has_direct_verbatim_non_empty(&self) -> bool {
-        self.first() == Some(&b'@')
     }
 }

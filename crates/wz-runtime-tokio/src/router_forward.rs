@@ -375,7 +375,7 @@ use wz_session_core::driver_loop::MulticastPeerId;
 use wz_session_core::extbound::multicast_region_and_bound_of;
 use wz_session_core::extbound::{Bound, Region, INITIAL_INTEREST_ID};
 use wz_session_core::face::{FaceEventKind, FaceEventSink, FaceSnapshot};
-use wz_session_core::keyexpr_match::keyexpr_intersects_target;
+use wz_session_core::keyexpr_match::keyexpr_intersects;
 use wz_session_core::linkstate_oam::{
     build_linkstate_oam_owned, try_parse_linkstate_oam, LinkstateOam,
 };
@@ -3579,10 +3579,10 @@ struct HostedSubscriber {
 }
 
 impl HostedSubscriber {
-    /// Whether the subscriber is handed a publication whose key splits into `target_chunks`,
-    /// made by the node's own session when `from_local` and by a face otherwise.
-    fn takes(&self, target_chunks: &[&str], from_local: bool) -> bool {
-        keyexpr_intersects_target(&self.keyexpr, target_chunks)
+    /// Whether the subscriber is handed a publication of the key `target`, made by the node's
+    /// own session when `from_local` and by a face otherwise.
+    fn takes(&self, target: &str, from_local: bool) -> bool {
+        keyexpr_intersects(&self.keyexpr, target)
             && if from_local {
                 self.origin.allows_local()
             } else {
@@ -8186,7 +8186,6 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // `target: None` is an UNRESTRICTED interest (see `dump_interest_tokens`): upstream's
         // matcher admits every subscriber for an absent resource
         // (`zenoh/src/net/routing/hat/peer/pubsub.rs` @ `res.is_none_or`).
-        let target_chunks: Option<Vec<&str>> = target.map(|t| t.split('/').collect());
         let mut per_ke: HashMap<String, ()> = HashMap::new();
         for table in self.mesh_hats_answering(inbound).map(|hat| &hat.subs) {
             let hits = match target {
@@ -8217,9 +8216,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // it comes up), so a dump without them leaves the group's members unknown to every
         // face that joins after them.
         for k in self.sub_keys(Holder::Group) {
-            let matched = match target_chunks.as_deref() {
+            let matched = match target {
                 None => true,
-                Some(chunks) => keyexpr_intersects_target(&k, chunks),
+                Some(target) => keyexpr_intersects(&k, target),
             };
             if matched {
                 per_ke.insert(k, ());
@@ -9290,7 +9289,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         } = egress;
         // Deliver to each Client-tier face subscribing a keyexpr that INTERSECTS
         // the published K, excluding the inbound face (never echo a client's own
-        // Push back to it). Wildcard-aware via the SAME `keyexpr_intersects_target`
+        // Push back to it). Wildcard-aware via the SAME `keyexpr_intersects`
         // SSOT the mesh data route reads through `interested_remote` — a client
         // subscribing `demo/**` must receive a `demo/data` Push, NOT just an exact
         // `demo/data` sub (exact `HashSet::contains` would silently blackhole every
@@ -11368,12 +11367,11 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// namespace.
     #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
     fn hosts_a_subscriber_of(&self, keyexpr: &str) -> bool {
-        let target_chunks: Vec<&str> = keyexpr.split('/').collect();
         let inside_namespace = self.fwd.relative_key(keyexpr).is_some();
         self.tables
             .local_subscribers
             .iter()
-            .any(|sub| sub.takes(&target_chunks, false) && (inside_namespace || !sub.namespaced))
+            .any(|sub| sub.takes(keyexpr, false) && (inside_namespace || !sub.namespaced))
     }
 
     /// The delivery half of [`dispatch_local_subscribers`](Self::dispatch_local_subscribers): the
@@ -11541,10 +11539,10 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         }
         let matched: Vec<(bool, Arc<Hosted<HostedSubscriberHandler>>)> = {
             let locals = &self.tables.local_subscribers;
-            let target_chunks: Vec<&str> = full.keyexpr().split('/').collect();
+            let target = full.keyexpr();
             locals
                 .iter()
-                .filter(|sub| sub.takes(&target_chunks, from_local))
+                .filter(|sub| sub.takes(target, from_local))
                 .map(|sub| (sub.namespaced, Arc::clone(&sub.handler)))
                 .collect()
         };
@@ -11957,13 +11955,12 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         deadline: Instant,
         calls: &local_publish::DeliveryScope<'_>,
     ) -> usize {
-        let query_chunks: Vec<&str> = keyexpr.split('/').collect();
         let target = read_request_target(request);
         let matched: Vec<(bool, Arc<Hosted<HostedQueryHandler>>)> = {
             let locals = &self.tables.local_queryables;
             locals
                 .iter()
-                .filter(|lq| keyexpr_intersects_target(&lq.keyexpr, &query_chunks))
+                .filter(|lq| keyexpr_intersects(&lq.keyexpr, keyexpr))
                 .filter(|lq| !matches!(target, Some(QueryTarget::AllComplete)) || lq.complete)
                 // The query is the node's own session's when it came from the `Local` face.
                 .filter(|lq| {
@@ -12166,19 +12163,18 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         keyexpr: &str,
         locality: wz_session_core::locality::Locality,
     ) -> bool {
-        use wz_session_core::keyexpr_match::keyexpr_includes_target;
+        use wz_session_core::keyexpr_match::keyexpr_includes;
         let wire = self.fwd.wire_key(keyexpr);
         let keyexpr = &*wire;
-        let chunks: Vec<&str> = keyexpr.split('/').collect();
         // Whether a queryable of `region` meets the key of a querier. The session counts its own
         // queryables that intersect the key, or the complete ones that include it when the
         // querier asks for those (`zenoh/src/api/session.rs` @ `fn matching_status_local`); the
         // hat counts the queryables of the faces by inclusion, complete or not.
         let meets = |region: Region, declared: &str, complete: bool, complete_required: bool| {
             let covers = if region == Region::Local && !complete_required {
-                keyexpr_intersects_target(declared, &chunks)
+                keyexpr_intersects(declared, keyexpr)
             } else {
-                keyexpr_includes_target(declared, &chunks)
+                keyexpr_includes(declared, keyexpr)
             };
             covers && (!complete_required || complete)
         };
@@ -26790,7 +26786,7 @@ mod tests {
     }
 
     /// R311y463 — the WILDCARD target arm. Every token-interest test above asks
-    /// with the token's own LITERAL, so `keyexpr_intersects_target` was only ever
+    /// with the token's own LITERAL, so `keyexpr_intersects` was only ever
     /// exercised on an exact match. A foreign subscriber asks with a pattern
     /// (`z_sub_liveliness -k 'group1/**'`), so the intersect is on the real path.
     #[cfg(feature = "routing-token-tables")]

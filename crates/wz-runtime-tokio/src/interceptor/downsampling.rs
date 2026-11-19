@@ -97,7 +97,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use wz_codecs::push::PushOwnedVariant;
-use wz_session_core::keyexpr_match::keyexpr_intersects_target;
+use wz_session_core::keyexpr_match::keyexpr_intersects;
 use wz_session_core::network_message::NetworkMessage;
 
 use wz_session_core::link::{InterceptorLink, LinkSubject};
@@ -331,7 +331,6 @@ impl DownsamplingInterceptor {
         keyexpr: &str,
         link: Option<&LinkSubject>,
     ) -> bool {
-        let target_chunks: Vec<&str> = keyexpr.split('/').collect();
         let Some(state) = self
             .rules
             .iter()
@@ -342,7 +341,7 @@ impl DownsamplingInterceptor {
                 s.rule
                     .key_exprs
                     .iter()
-                    .any(|ke| keyexpr_intersects_target(ke, &target_chunks))
+                    .any(|ke| keyexpr_intersects(ke, keyexpr))
             })
         else {
             return true; // ungoverned (kind, keyexpr) — never rate-limited

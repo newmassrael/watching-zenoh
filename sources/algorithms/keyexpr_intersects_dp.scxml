@@ -1,0 +1,129 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  Whether the keys r and c, both well formed and at least one holding `**`,
+  share a key: a dynamic programme over their prefixes. P(i, j) is whether the
+  first i chunks of r and the first j of c share a key:
+
+  * P(0, 0) holds.
+  * The i-th chunk of r is `**`: it matches nothing more, P(i - 1, j), or it
+    takes the j-th chunk of c, unless that chunk is VERBATIM, and stays,
+    P(i, j - 1).
+  * The j-th chunk of c is `**`: the same with the sides exchanged.
+  * Otherwise the two chunks meet (keyexpr_chunk_intersects) and P(i - 1, j - 1).
+
+  One row of P is one uint64, a bit for each prefix of c, so c has at most 63
+  chunks (the caller picks the side that has); r has any number. Only the row
+  above is kept. Every chunk of r is read once and the chunks of c once a row.
+  `**` does not cross a VERBATIM chunk: zenoh's `it_intersect`.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="keyexpr_intersects_dp"
+       version="1.0">
+  <sce:import kind="algorithm" src="keyexpr_chunk_end.scxml" as="keyexpr_chunk_end"/>
+  <sce:import kind="algorithm" src="keyexpr_chunk_kind.scxml" as="keyexpr_chunk_kind"/>
+  <sce:import kind="algorithm" src="keyexpr_chunk_intersects.scxml" as="keyexpr_chunk_intersects"/>
+  <sce:signature>
+    <sce:param name="r" type="bytes"/>
+    <sce:param name="c" type="bytes"/>
+    <sce:param name="wild_single" type="bool"/>
+    <sce:param name="wild_dsl" type="bool"/>
+    <sce:return type="bool"/>
+  </sce:signature>
+  <sce:body>
+    <sce:var name="rn" type="uint32" init="len(r)"/>
+    <sce:var name="cn" type="uint32" init="len(c)"/>
+    <!-- Row 0: the empty prefix of r shares a key with a prefix of c that is
+         all `**`. -->
+    <!-- one: the bit shifted into place. A uint64 local and not a literal: a
+         literal operand of a shift is not typed by the uint64 it is or-ed into
+         (the Rust emit reads `(1 &lt;&lt; m) as u64`, an i32 shift). -->
+    <sce:var name="one" type="uint64" init="1"/>
+    <sce:var name="prev" type="uint64" init="1"/>
+    <sce:var name="m" type="uint32" init="0"/>
+    <sce:var name="cs0" type="uint32" init="0"/>
+    <sce:var name="more0" type="bool" init="true"/>
+    <sce:while cond="more0">
+      <sce:var name="ce0" type="uint32" init="keyexpr_chunk_end(c, cs0)"/>
+      <sce:if cond="m &gt;= 63">
+        <sce:return expr="false"/>
+      </sce:if>
+      <sce:assign target="m" expr="m + 1"/>
+      <sce:if cond="keyexpr_chunk_kind(c, cs0, ce0) === 2">
+        <sce:var name="below0" type="uint32" init="m - 1"/>
+        <sce:if cond="((prev &gt;&gt; below0) &amp; 1) === 1">
+          <sce:assign target="prev" expr="prev | (one &lt;&lt; m)"/>
+        </sce:if>
+      </sce:if>
+      <sce:if cond="ce0 &lt; cn">
+        <sce:assign target="cs0" expr="ce0 + 1"/>
+        <sce:else>
+          <sce:assign target="more0" expr="false"/>
+        </sce:else>
+      </sce:if>
+    </sce:while>
+    <!-- One row for each chunk of r. -->
+    <sce:var name="rs" type="uint32" init="0"/>
+    <sce:var name="rmore" type="bool" init="true"/>
+    <sce:while cond="rmore">
+      <sce:var name="re" type="uint32" init="keyexpr_chunk_end(r, rs)"/>
+      <sce:var name="rkind" type="uint8" init="keyexpr_chunk_kind(r, rs, re)"/>
+      <sce:var name="cur" type="uint64" init="0"/>
+      <!-- P(i, 0): the prefix of r ends in `**` and matches nothing more. -->
+      <sce:if cond="rkind === 2 &amp;&amp; (prev &amp; 1) === 1">
+        <sce:assign target="cur" expr="1"/>
+      </sce:if>
+      <sce:var name="j" type="uint32" init="0"/>
+      <sce:var name="cs" type="uint32" init="0"/>
+      <sce:var name="cmore" type="bool" init="true"/>
+      <sce:while cond="cmore &amp;&amp; j &lt; 63">
+        <sce:var name="ce" type="uint32" init="keyexpr_chunk_end(c, cs)"/>
+        <sce:var name="ckind" type="uint8" init="keyexpr_chunk_kind(c, cs, ce)"/>
+        <!-- jb: the bit of P(i, j) for this chunk of c; j: its left neighbour. -->
+        <sce:var name="jb" type="uint32" init="j + 1"/>
+        <sce:var name="up" type="bool" init="((prev &gt;&gt; jb) &amp; 1) === 1"/>
+        <sce:var name="left" type="bool" init="((cur &gt;&gt; j) &amp; 1) === 1"/>
+        <sce:var name="diag" type="bool" init="((prev &gt;&gt; j) &amp; 1) === 1"/>
+        <sce:var name="v" type="bool" init="false"/>
+        <sce:if cond="rkind === 2">
+          <sce:assign target="v" expr="up || (ckind !== 3 &amp;&amp; left)"/>
+          <sce:else>
+            <sce:if cond="ckind === 2">
+              <sce:assign target="v" expr="left || (rkind !== 3 &amp;&amp; up)"/>
+              <sce:else>
+                <sce:if cond="diag">
+                  <sce:assign target="v" expr="keyexpr_chunk_intersects(r, rs, re, c, cs, ce, wild_single, wild_dsl)"/>
+                </sce:if>
+              </sce:else>
+            </sce:if>
+          </sce:else>
+        </sce:if>
+        <sce:if cond="v">
+          <sce:assign target="cur" expr="cur | (one &lt;&lt; jb)"/>
+        </sce:if>
+        <sce:assign target="j" expr="jb"/>
+        <sce:if cond="ce &lt; cn">
+          <sce:assign target="cs" expr="ce + 1"/>
+          <sce:else>
+            <sce:assign target="cmore" expr="false"/>
+          </sce:else>
+        </sce:if>
+      </sce:while>
+      <sce:assign target="prev" expr="cur"/>
+      <sce:if cond="re &lt; rn">
+        <sce:assign target="rs" expr="re + 1"/>
+        <sce:else>
+          <sce:assign target="rmore" expr="false"/>
+        </sce:else>
+      </sce:if>
+    </sce:while>
+    <sce:return expr="((prev &gt;&gt; m) &amp; 1) === 1"/>
+  </sce:body>
+</scxml>

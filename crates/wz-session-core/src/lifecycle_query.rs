@@ -374,8 +374,7 @@ where
         let key = view.keyexpr();
 
         let verbs_key = self.verbs_key();
-        let verbs_chunks: alloc::vec::Vec<&str> = verbs_key.split('/').collect();
-        if crate::keyexpr_match::keyexpr_intersects_target(key, &verbs_chunks) {
+        if crate::keyexpr_match::keyexpr_intersects(key, &verbs_key) {
             let mut body: FixedText<64> = FixedText::new();
             write_verbs_json(&mut body, O::BOUND);
             return match body.finish() {

@@ -507,8 +507,8 @@ print("  atoms=%d active=%d declared-cargo-features=%d" % (len(atoms), active_n,
 #
 # R311y299 wrote a SIXTH copy of that keyexpr claim right here, and got it
 # wrong: it cited "6 live consumers" of a function the reason never names. The
-# atom gates TWO fns; the reason names keyexpr_includes_patterns, the consumers
-# belong to keyexpr_includes_target -- which turned out to DELEGATE to _patterns
+# atom gated TWO fns; the reason named keyexpr_includes_patterns, the consumers
+# belonged to keyexpr_includes_target -- which turned out to DELEGATE to _patterns
 # (keyexpr_match.rs:449), so the conclusion held and the evidence did not.
 # R311y300 then "corrected" it to "the reason is CORRECT" off a grep that
 # excluded the defining file and therefore the only direct call site. Three

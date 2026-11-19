@@ -287,9 +287,7 @@ pub unsafe extern "C" fn z_keyexpr_intersects(
         else {
             return false;
         };
-        let a_chunks: Vec<&str> = a.split('/').collect();
-        let b_chunks: Vec<&str> = b.split('/').collect();
-        wz_runtime_tokio::keyexpr_match::keyexpr_intersect_patterns(&a_chunks, &b_chunks)
+        wz_runtime_tokio::keyexpr_match::keyexpr_intersects(a, b)
     })
 }
 
@@ -646,9 +644,7 @@ pub unsafe extern "C" fn z_keyexpr_includes(
         else {
             return false;
         };
-        let a_chunks: Vec<&str> = a.split('/').collect();
-        let b_chunks: Vec<&str> = b.split('/').collect();
-        wz_runtime_tokio::keyexpr_match::keyexpr_includes_patterns(&a_chunks, &b_chunks)
+        wz_runtime_tokio::keyexpr_match::keyexpr_includes(a, b)
     })
 }
 

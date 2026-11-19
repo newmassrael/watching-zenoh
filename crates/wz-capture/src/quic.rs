@@ -320,9 +320,36 @@ pub struct QuicCensus {
     /// declared port carrying real zenoh would report that zenoh as unopened
     /// QUIC, which is this round's own mirror-image hazard.
     pub declared: bool,
+    /// Initial packets per direction, `a` then `b`.
+    pub initials: [usize; 2],
+    /// The direction of the first Initial, the client's: 0 for `a`.
+    pub opener: Option<usize>,
+    /// The other direction sent a recognised packet after that Initial: the
+    /// server answered.
+    pub answered: bool,
+    /// The opener's Initials before the answer, or all of them when none came:
+    /// one more than the Initials it resent.
+    pub initials_before_answer: usize,
 }
 
 impl QuicCensus {
+    /// [`Self::add`] for a packet the direction `d` (0 for `a`) sent.
+    pub fn add_from(&mut self, p: QuicPacket, d: usize) {
+        if p.kind == QuicPacketKind::Initial {
+            self.initials[d] += 1;
+            if self.opener.is_none() {
+                self.opener = Some(d);
+            }
+        }
+        match self.opener {
+            Some(opener) if opener != d => self.answered = true,
+            Some(_) if !self.answered && p.kind == QuicPacketKind::Initial => {
+                self.initials_before_answer += 1;
+            }
+            _ => {}
+        }
+        self.add(p);
+    }
     /// Fold one recognised packet in.
     pub fn add(&mut self, p: QuicPacket) {
         self.packets += 1;
@@ -784,5 +811,36 @@ mod tests {
             (4, 1347, 1, 1, 1)
         );
         assert_eq!(c.version, Some(1), "the first REAL version wins");
+    }
+
+    fn packet(kind: QuicPacketKind) -> QuicPacket {
+        QuicPacket {
+            kind,
+            version: Some(1),
+            bytes: 1200,
+        }
+    }
+
+    /// Initials resent before an answer are counted, and the answer is the
+    /// other direction's first packet; Initials after it are not resends.
+    #[test]
+    fn an_answer_ends_the_count_of_resent_initials() {
+        let mut c = QuicCensus::default();
+        for _ in 0..3 {
+            c.add_from(packet(QuicPacketKind::Initial), 1);
+        }
+        assert_eq!(
+            (c.opener, c.answered, c.initials_before_answer),
+            (Some(1), false, 3)
+        );
+        c.add_from(packet(QuicPacketKind::Initial), 0);
+        c.add_from(packet(QuicPacketKind::Initial), 1);
+        assert_eq!((c.answered, c.initials_before_answer), (true, 3));
+        assert_eq!(c.initials, [1, 4]);
+        // An opener that is never answered: every Initial is before the answer.
+        let mut lone = QuicCensus::default();
+        lone.add_from(packet(QuicPacketKind::Initial), 0);
+        lone.add_from(packet(QuicPacketKind::Handshake), 0);
+        assert_eq!((lone.answered, lone.initials_before_answer), (false, 1));
     }
 }

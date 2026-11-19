@@ -113,6 +113,10 @@ pub struct LinkIngest {
     /// What the flow's IP headers and frames said, per direction. See
     /// [`crate::ip_facts`].
     ip_facts: crate::ip_facts::FlowFacts,
+    /// What a TCP flow's connection did: windows, acknowledgements,
+    /// retransmissions, attempts. Empty for every other flow. See
+    /// [`crate::tcp_facts`].
+    tcp_facts: crate::tcp_facts::TcpFacts,
     /// How the flow's framing units read, counted at ingest for the same reason
     /// [`Self::versions`] is. See [`ReadingEvidence`].
     readings: ReadingEvidence,
@@ -714,6 +718,16 @@ impl LinkIngest {
     /// What the flow's IP headers and frames said, per direction.
     pub fn ip_facts(&self) -> &crate::ip_facts::FlowFacts {
         &self.ip_facts
+    }
+
+    /// One TCP segment of the flow, at the capture's `at_ns`.
+    pub(crate) fn observe_tcp(&mut self, segment: &crate::link::Segment<'_>, at_ns: Option<u64>) {
+        self.tcp_facts.observe(segment.from_low, segment, at_ns);
+    }
+
+    /// What the flow's TCP connection did; empty for a flow that is not TCP.
+    pub fn tcp_facts(&self) -> &crate::tcp_facts::TcpFacts {
+        &self.tcp_facts
     }
 
     /// Whether the flow is zenoh of a version this reader does not read.

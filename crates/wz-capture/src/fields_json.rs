@@ -2172,6 +2172,9 @@ fn document_selected<W: DocOut>(
     write_membership(d.control(), out);
     // Revision 77 — the interfaces a flow's `network.interface_ids` name.
     write_capture_interfaces(capture, out);
+    // Revision 80 — the name lookups, capture-wide because a lookup precedes
+    // the flow it names, and when it fails there is no flow.
+    write_dns(d.dns(), &tcp_openings(d), out);
     // R311y875 — the run's misbound rules, AFTER every row producer, for the
     // reason `wz-analyze` places its unbound-declaration note there: this is a
     // fact about what the capture turned out to hold, and both producers above
@@ -2369,6 +2372,11 @@ fn push_stream_flow<W: DocOut>(
     write_foreign_zenoh(flow.ingest.foreign_zenoh(), out);
     write_icmp_errors(flow.ingest.control_errors(), out);
     write_network(flow.ingest.ip_facts(), out);
+    write_tcp(
+        (flow.flow.link() == crate::link::LinkKind::Tcp).then(|| flow.ingest.tcp_facts()),
+        out,
+    );
+    write_handshake(Handshakes::of_stream(flow), out);
     write_unit_readings(flow.ingest.readings(), out);
     write_context(
         &flow.session.context(),
@@ -2749,6 +2757,11 @@ fn push_datagram_flow<W: DocOut>(
     write_foreign_zenoh(flow.ingest.foreign_zenoh(), out);
     write_icmp_errors(flow.ingest.control_errors(), out);
     write_network(flow.ingest.ip_facts(), out);
+    write_tcp(
+        (flow.flow.link() == crate::link::LinkKind::Tcp).then(|| flow.ingest.tcp_facts()),
+        out,
+    );
+    write_handshake(Handshakes::of_datagram(flow), out);
     write_unit_readings(flow.ingest.readings(), out);
     write_context(
         &flow.session.context(),
@@ -5724,6 +5737,504 @@ fn write_network<W: DocOut>(facts: &crate::ip_facts::FlowFacts, out: &mut W) {
         out.close_map();
     }
     out.close_array();
+}
+
+/// The flow's `tcp` member (field document revision 78): what a TCP flow's
+/// connection did ([`crate::tcp_facts`]); `null` for every other flow.
+///
+/// ```text
+/// "tcp":{"attempts":[{"syn_packet":0,"syns":1,"syn_gaps_ns":[],
+///                     "answer":"syn_ack","answer_packet":1,
+///                     "syn_to_answer_ns":180000,"answer_to_ack_ns":40000,
+///                     "port_reuse":false}],"attempts_more":0,
+///        "halves":[{"direction":"a","window_scale":7,"mss":1460,
+///                   "zero_window":{"spans":[{"start_packet":9,
+///                                            "start_ns":...,"end_packet":12,
+///                                            "end_ns":...}],"count":1},
+///                   "window_full":0,"dup_acks":0,"last_ack_ns":...,
+///                   "retransmits":{"timeout":0,"fast":0,"spurious":0,
+///                                  "events":[]},
+///                   "ack_gap_ns":{"samples":0,"median":null,"max":null},
+///                   "more":0}, {"direction":"b",...}]}
+/// ```
+///
+/// Per attempt: `syn_packet` the first SYN, `syns` how many it took and
+/// `syn_gaps_ns` how far apart (the first eight), `answer` `syn_ack`, `rst` or
+/// `none` with its `answer_packet`, `syn_to_answer_ns` from the last SYN and
+/// `answer_to_ack_ns` to the opener's acknowledgement, both at the tap (a tap
+/// beside the opener shows the round trip in the first, one beside the
+/// acceptor in the second), and `port_reuse`, an earlier attempt of the capture
+/// on this four-tuple. Per direction: `window_scale` the shift its windows are
+/// read under, `null` when a SYN was not seen, and `window_full` `null` then
+/// too; `mss` its SYN's; the zero-window spans (`end_packet` and `end_ns` `null`
+/// while the window stayed 0) and their `count`; `dup_acks`; `last_ack_ns`;
+/// retransmissions by kind with their events; the small-segment
+/// acknowledgement gap's `median` and `max` over `samples`; `more`, the events
+/// and spans past the lists' bound of 64. Instants are capture nanoseconds,
+/// `null` for a packet with no clock.
+fn write_tcp<W: DocOut>(facts: Option<&crate::tcp_facts::TcpFacts>, out: &mut W) {
+    use crate::tcp_facts::Moment;
+    out.key("tcp");
+    let Some(facts) = facts else {
+        out.null();
+        return;
+    };
+    let instant = |at: Option<u64>, out: &mut W| match at {
+        Some(ns) => out.uint_exact(ns),
+        None => out.null(),
+    };
+    let opt_ns = |ns: Option<u64>, out: &mut W| match ns {
+        Some(ns) => out.uint(ns),
+        None => out.null(),
+    };
+    out.open_map();
+    out.key("attempts");
+    out.open_array();
+    for a in facts.attempts() {
+        out.open_map();
+        out.key("syn_packet");
+        out.uint(a.first_syn.packet as u64);
+        out.key("syns");
+        out.uint(u64::from(a.syns));
+        out.key("syn_gaps_ns");
+        out.open_array();
+        for gap in &a.syn_gaps_ns {
+            out.uint(*gap);
+        }
+        out.close_array();
+        out.key("answer");
+        out.text(a.answer.name());
+        out.key("answer_packet");
+        out.opt_uint(a.answered_at.map(|m| m.packet as u64));
+        out.key("syn_to_answer_ns");
+        opt_ns(a.syn_to_answer_ns, out);
+        out.key("answer_to_ack_ns");
+        opt_ns(a.answer_to_ack_ns, out);
+        out.key("port_reuse");
+        out.bool(a.port_reuse);
+        out.close_map();
+    }
+    out.close_array();
+    out.key("attempts_more");
+    out.uint(facts.attempts_more());
+    out.key("halves");
+    out.open_array();
+    for (d, (direction, h)) in [Direction::A, Direction::B]
+        .iter()
+        .zip(facts.halves())
+        .enumerate()
+    {
+        out.open_map();
+        out.key("direction");
+        out.text(dir_name(*direction));
+        out.key("window_scale");
+        out.opt_uint(facts.window_scale(d).map(u64::from));
+        out.key("mss");
+        out.opt_uint(h.mss.map(u64::from));
+        out.key("zero_window");
+        out.open_map();
+        out.key("spans");
+        out.open_array();
+        for span in &h.zero_spans {
+            out.open_map();
+            out.key("start_packet");
+            out.uint(span.start.packet as u64);
+            out.key("start_ns");
+            instant(span.start.at_ns, out);
+            out.key("end_packet");
+            out.opt_uint(span.end.map(|m: Moment| m.packet as u64));
+            out.key("end_ns");
+            instant(span.end.and_then(|m| m.at_ns), out);
+            out.close_map();
+        }
+        out.close_array();
+        out.key("count");
+        out.uint(h.zero_count);
+        out.close_map();
+        out.key("window_full");
+        out.opt_uint(h.window_full);
+        out.key("dup_acks");
+        out.uint(h.dup_acks);
+        out.key("last_ack_ns");
+        instant(h.last_ack.and_then(|m| m.at_ns), out);
+        out.key("retransmits");
+        out.open_map();
+        for kind in crate::tcp_facts::Retransmit::all() {
+            out.key(kind.name());
+            out.uint(
+                h.retransmits[match kind {
+                    crate::tcp_facts::Retransmit::Timeout => 0,
+                    crate::tcp_facts::Retransmit::Fast => 1,
+                    crate::tcp_facts::Retransmit::Spurious => 2,
+                }],
+            );
+        }
+        out.key("events");
+        out.open_array();
+        for e in &h.events {
+            out.open_map();
+            // Not `kind`, which names a field value's kind in this document.
+            out.key("retransmit");
+            out.text(e.kind.name());
+            out.key("packet");
+            out.uint(e.at.packet as u64);
+            out.key("at_ns");
+            instant(e.at.at_ns, out);
+            out.close_map();
+        }
+        out.close_array();
+        out.close_map();
+        out.key("ack_gap_ns");
+        out.open_map();
+        out.key("samples");
+        out.uint(h.gaps.len() as u64 + h.gaps_more);
+        let (median, max) = h.gap_median_max().unzip();
+        out.key("median");
+        opt_ns(median, out);
+        out.key("max");
+        opt_ns(max, out);
+        out.close_map();
+        out.key("more");
+        out.uint(h.more);
+        out.close_map();
+    }
+    out.close_array();
+    out.close_map();
+}
+
+/// What a flow's handshake said in the clear, for each layer it carried.
+#[derive(Clone, Copy, Default)]
+struct Handshakes<'f> {
+    tls: Option<&'f crate::tls_handshake::TlsHandshake>,
+    websocket: Option<[&'f crate::ws::WsDeframer; 2]>,
+    quic: Option<&'f crate::quic::QuicCensus>,
+}
+
+impl<'f> Handshakes<'f> {
+    /// A stream flow's: its TLS records or its WebSocket opening.
+    fn of_stream(flow: &'f crate::FlowDissection) -> Self {
+        match flow.framing() {
+            crate::Framing::Encrypted(state) => Handshakes {
+                tls: Some(state.handshake()),
+                ..Self::default()
+            },
+            crate::Framing::WebSocket { a, b } => Handshakes {
+                websocket: Some([a, b]),
+                ..Self::default()
+            },
+            _ => Self::default(),
+        }
+    }
+
+    /// A datagram flow's: its QUIC packets.
+    fn of_datagram(flow: &'f crate::DatagramDissection) -> Self {
+        Handshakes {
+            quic: flow.quic.as_ref(),
+            ..Self::default()
+        }
+    }
+}
+
+/// The flow's `handshake` member (revision 79), `null` for a flow that carried
+/// no TLS, WebSocket or QUIC.
+///
+/// `tls`: `sni` the server name the ClientHello asked for; `version` the
+/// version number the ServerHello chose (771 is TLS 1.2, 772 TLS 1.3);
+/// `client` the direction of the ClientHello; `completed` `yes` when
+/// application data flowed both ways after it, `no` when a fatal alert was
+/// read, `undecided` otherwise; `alerts` those sent in the clear, before their
+/// sender changed cipher spec, each with its `direction`, `level` (1 warning,
+/// 2 fatal) and `description` (the alert number: 42 `bad_certificate`, 48
+/// `unknown_ca`), the first 8 and `alerts_more` past them; `certificate` the
+/// server's first, `subject`, `issuer`, `not_before` and `not_after`, when it
+/// was sent in the clear (TLS 1.2 and below), `null` otherwise.
+///
+/// `websocket`: per direction, `opening_seen` whether its HTTP opening was in
+/// the capture, its `status` (a response's code, `null` for a request) and
+/// `subprotocols` (what a request offered or a response chose), and its Ping
+/// and Pong frames as `controls`, each its `control`, `packet` and `at_ns`, the
+/// first 64 and `more` past them.
+///
+/// `quic`: `client` the direction of the first Initial, `answered` whether the
+/// other direction sent a packet after it, `initial_resends` the client's
+/// Initials before the answer (or in all, unanswered) less the first.
+fn write_handshake<W: DocOut>(found: Handshakes<'_>, out: &mut W) {
+    out.key("handshake");
+    if found.tls.is_none() && found.websocket.is_none() && found.quic.is_none() {
+        out.null();
+        return;
+    }
+    let side = |d: Option<usize>, out: &mut W| match d {
+        Some(0) => out.text(dir_name(Direction::A)),
+        Some(_) => out.text(dir_name(Direction::B)),
+        None => out.null(),
+    };
+    out.open_map();
+    out.key("tls");
+    match found.tls {
+        None => out.null(),
+        Some(tls) => {
+            out.open_map();
+            out.key("sni");
+            out.opt_text(tls.sni.as_deref());
+            out.key("version");
+            out.opt_uint(tls.version.map(u64::from));
+            out.key("client");
+            side(tls.client, out);
+            out.key("completed");
+            out.text(tls.completion().name());
+            out.key("alerts");
+            out.open_array();
+            for alert in &tls.alerts {
+                out.open_map();
+                out.key("direction");
+                side(Some(alert.direction), out);
+                out.key("level");
+                out.uint(u64::from(alert.level));
+                out.key("description");
+                out.uint(u64::from(alert.description));
+                out.close_map();
+            }
+            out.close_array();
+            out.key("alerts_more");
+            out.uint(tls.alerts_more);
+            out.key("certificate");
+            match &tls.certificate {
+                None => out.null(),
+                Some(cert) => {
+                    out.open_map();
+                    out.key("subject");
+                    out.text(&cert.subject);
+                    out.key("issuer");
+                    out.text(&cert.issuer);
+                    out.key("not_before");
+                    out.text(&cert.not_before);
+                    out.key("not_after");
+                    out.text(&cert.not_after);
+                    out.close_map();
+                }
+            }
+            out.close_map();
+        }
+    }
+    out.key("websocket");
+    match found.websocket {
+        None => out.null(),
+        Some(halves) => {
+            out.open_map();
+            out.key("halves");
+            out.open_array();
+            for (d, deframer) in halves.iter().enumerate() {
+                out.open_map();
+                out.key("direction");
+                side(Some(d), out);
+                let opening = deframer.opening();
+                out.key("opening_seen");
+                out.bool(opening.is_some());
+                out.key("status");
+                out.opt_uint(opening.and_then(|o| o.status).map(u64::from));
+                out.key("subprotocols");
+                out.open_array();
+                for protocol in opening.map(|o| o.subprotocols.as_slice()).unwrap_or(&[]) {
+                    out.text(protocol);
+                }
+                out.close_array();
+                let (frames, more) = deframer.pings_pongs();
+                out.key("controls");
+                out.open_array();
+                for frame in frames {
+                    out.open_map();
+                    out.key("control");
+                    out.text(if frame.ping { "ping" } else { "pong" });
+                    out.key("packet");
+                    out.opt_uint(frame.packet.map(|p| p as u64));
+                    out.key("at_ns");
+                    match frame.at_ns {
+                        Some(ns) => out.uint_exact(ns),
+                        None => out.null(),
+                    }
+                    out.close_map();
+                }
+                out.close_array();
+                out.key("more");
+                out.uint(more);
+                out.close_map();
+            }
+            out.close_array();
+            out.close_map();
+        }
+    }
+    out.key("quic");
+    match found.quic {
+        None => out.null(),
+        Some(quic) => {
+            out.open_map();
+            out.key("client");
+            side(quic.opener, out);
+            out.key("answered");
+            out.bool(quic.answered);
+            out.key("initial_resends");
+            out.uint(quic.initials_before_answer.saturating_sub(1) as u64);
+            out.close_map();
+        }
+    }
+    out.close_map();
+}
+
+/// Every TCP connection attempt of the capture: the endpoint its SYN was sent
+/// to and the packet of that SYN, in capture order.
+fn tcp_openings(d: &crate::Dissection) -> Vec<(crate::link::Endpoint, usize)> {
+    let mut openings: Vec<(crate::link::Endpoint, usize)> = d
+        .flows()
+        .iter()
+        .filter(|f| f.flow.link() == crate::link::LinkKind::Tcp)
+        .flat_map(|f| {
+            f.ingest.tcp_facts().attempts().iter().map(move |a| {
+                let acceptor = if a.opener_is_a {
+                    f.flow.high
+                } else {
+                    f.flow.low
+                };
+                (acceptor, a.first_syn.packet)
+            })
+        })
+        .collect();
+    openings.sort_by_key(|(_, packet)| *packet);
+    openings
+}
+
+/// The document's `dns` member (revision 80): every A, AAAA and SRV question
+/// the capture's DNS and multicast DNS datagrams asked, in the order first
+/// sent, with what answered it ([`crate::dns`]).
+///
+/// ```text
+/// "dns":{"queries":[{"name":"router.local","qtype":"a","mdns":false,
+///                    "asker":{"addr":"10.0.0.1","port":40000},
+///                    "server":{"addr":"10.0.0.53","port":53},
+///                    "query_packet":0,"query_ns":T,"sent":1,
+///                    "answered":true,"answer_packet":1,"answer_ns":T,
+///                    "rcode":"noerror","rcode_number":0,
+///                    "addresses":[{"addr":"10.0.0.2","target":null,
+///                                  "port":null,"ttl_s":60,
+///                                  "connected":{"syn_packet":2,
+///                                               "port":7447}}],
+///                    "addresses_more":0}],
+///        "more":0,"unmatched_answers":0}
+/// ```
+///
+/// `sent` counts the query and its resends; `answered` is `false`, with the
+/// answer's keys `null`, when no response came. `rcode` is `noerror`,
+/// `formerr`, `servfail`, `nxdomain`, `notimp`, `refused` or `other`, its
+/// number beside it. `addresses` are the response's records about the name
+/// and its SRV targets: an A or AAAA record's `addr`, an SRV record's `target`
+/// and `port`, each `ttl_s`; `connected` the first TCP SYN the capture holds to
+/// that address (and to the SRV port, for an SRV record's target) sent after
+/// the answer, `null` when none was. `more` counts the queries past the
+/// capture's bound of 256, `addresses_more` a query's records past 16, and
+/// `unmatched_answers` the responses that answered no query the capture held.
+fn write_dns<W: DocOut>(
+    plane: &crate::dns::DnsPlane,
+    openings: &[(crate::link::Endpoint, usize)],
+    out: &mut W,
+) {
+    use crate::link::LinkKind;
+    let endpoint = |e: &crate::link::Endpoint, out: &mut W| {
+        out.open_map();
+        out.key("addr");
+        out.text(&e.addr_text(LinkKind::Udp));
+        out.key("port");
+        out.uint(u64::from(e.port));
+        out.close_map();
+    };
+    let instant = |at: Option<u64>, out: &mut W| match at {
+        Some(ns) => out.uint_exact(ns),
+        None => out.null(),
+    };
+    out.key("dns");
+    out.open_map();
+    out.key("queries");
+    out.open_array();
+    for q in plane.queries() {
+        out.open_map();
+        out.key("name");
+        out.text(&q.name);
+        out.key("qtype");
+        out.text(q.qtype.name());
+        out.key("mdns");
+        out.bool(q.mdns);
+        out.key("asker");
+        endpoint(&q.asker, out);
+        out.key("server");
+        endpoint(&q.server, out);
+        out.key("query_packet");
+        out.uint(q.query.packet as u64);
+        out.key("query_ns");
+        instant(q.query.at_ns, out);
+        out.key("sent");
+        out.uint(u64::from(q.sent));
+        out.key("answered");
+        out.bool(q.answer.is_some());
+        out.key("answer_packet");
+        out.opt_uint(q.answer.map(|a| a.packet as u64));
+        out.key("answer_ns");
+        instant(q.answer.and_then(|a| a.at_ns), out);
+        out.key("rcode");
+        out.opt_text(q.rcode.map(|r| crate::dns::Rcode::of(r).name()));
+        out.key("rcode_number");
+        out.opt_uint(q.rcode.map(u64::from));
+        out.key("addresses");
+        out.open_array();
+        let after = q.answer.map_or(usize::MAX, |a| a.packet);
+        // An SRV record's port, for the addresses of its target.
+        let srv_port = q.records.iter().find_map(|r| r.port);
+        for r in &q.records {
+            out.open_map();
+            out.key("addr");
+            match &r.addr {
+                Some(a) => out.text(&a.addr_text(LinkKind::Udp)),
+                None => out.null(),
+            }
+            out.key("target");
+            out.opt_text(r.target.as_deref());
+            out.key("port");
+            out.opt_uint(r.port.map(u64::from));
+            out.key("ttl_s");
+            out.uint(u64::from(r.ttl_s));
+            out.key("connected");
+            let opening = r.addr.and_then(|a| {
+                openings.iter().find(|(to, packet)| {
+                    *packet > after
+                        && to.addr() == a.addr()
+                        && match srv_port {
+                            Some(port) => u32::from(port) == to.port,
+                            None => true,
+                        }
+                })
+            });
+            match opening {
+                Some((to, packet)) => {
+                    out.open_map();
+                    out.key("syn_packet");
+                    out.uint(*packet as u64);
+                    out.key("port");
+                    out.uint(u64::from(to.port));
+                    out.close_map();
+                }
+                None => out.null(),
+            }
+            out.close_map();
+        }
+        out.close_array();
+        out.key("addresses_more");
+        out.uint(q.records_more);
+        out.close_map();
+    }
+    out.close_array();
+    out.key("more");
+    out.uint(plane.more());
+    out.key("unmatched_answers");
+    out.uint(plane.unmatched());
+    out.close_map();
 }
 
 /// The document's `capture_interfaces` member (revision 77): every interface a
@@ -9758,6 +10269,66 @@ mod tests {
             }
             arms.push(members(|out| write_membership(&plane, out)));
         }
+        // Revision 78 — a TCP flow's `tcp`, with every word, and `null` for a
+        // flow that is not TCP.
+        {
+            arms.push(members(|out| write_tcp(None, out)));
+            for facts in crate::tcp_facts::tests::every_word() {
+                arms.push(members(|out| write_tcp(Some(&facts), out)));
+            }
+        }
+        // Revision 80 — the document's `dns`, with every word and an address
+        // a later SYN connected to.
+        {
+            let plane = crate::dns::tests::every_word();
+            let opened = [(crate::link::Endpoint::new(&[10, 0, 0, 2], 7447), 50)];
+            arms.push(members(|out| write_dns(&plane, &opened, out)));
+            let empty = crate::dns::DnsPlane::default();
+            arms.push(members(|out| write_dns(&empty, &[], out)));
+        }
+        // Revision 79 — a flow's `handshake`: TLS with every word, WebSocket
+        // with a Ping and a Pong, QUIC answered and not, and `null`.
+        {
+            arms.push(members(|out| write_handshake(Handshakes::default(), out)));
+            for tls in crate::tls_handshake::tests::every_word() {
+                arms.push(members(|out| {
+                    write_handshake(
+                        Handshakes {
+                            tls: Some(&tls),
+                            ..Handshakes::default()
+                        },
+                        out,
+                    )
+                }));
+            }
+            let [client, server] = crate::ws::tests::a_subprotocol_mismatch();
+            arms.push(members(|out| {
+                write_handshake(
+                    Handshakes {
+                        websocket: Some([&client, &server]),
+                        ..Handshakes::default()
+                    },
+                    out,
+                )
+            }));
+            for opener in [0usize, 1] {
+                let quic = crate::quic::QuicCensus {
+                    opener: Some(opener),
+                    answered: opener == 1,
+                    initials_before_answer: 2,
+                    ..Default::default()
+                };
+                arms.push(members(|out| {
+                    write_handshake(
+                        Handshakes {
+                            quic: Some(&quic),
+                            ..Handshakes::default()
+                        },
+                        out,
+                    )
+                }));
+            }
+        }
         // Revision 77 — a pcapng capture's interfaces, which a classic pcap
         // fixture leaves an empty list.
         {
@@ -11684,7 +12255,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 106] = [
+        let live: [(&str, &str, Vec<&'static str>); 113] = [
             // The node a `payload` range is the span of: the walk over the
             // closed set its writer's word comes from.
             (
@@ -11737,6 +12308,31 @@ mod tests {
                 crate::control::Unreachable::names(),
             ),
             (rev::FIELDS, "what", crate::control::Membership::names()),
+            // A TCP connection's attempt answers and retransmission kinds
+            // (revision 78).
+            (rev::FIELDS, "answer", crate::tcp_facts::SynAnswer::names()),
+            (
+                rev::FIELDS,
+                "retransmit",
+                crate::tcp_facts::Retransmit::names(),
+            ),
+            // A handshake's completion, the side that opened it, and a
+            // WebSocket control frame's kind (revision 79).
+            (
+                rev::FIELDS,
+                "completed",
+                crate::tls_handshake::Completion::names(),
+            ),
+            (
+                rev::FIELDS,
+                "client",
+                alloc::vec![dir_name(Direction::A), dir_name(Direction::B)],
+            ),
+            (rev::FIELDS, "control", alloc::vec!["ping", "pong"]),
+            // A name lookup's question type and its answer's rcode (revision
+            // 80).
+            (rev::FIELDS, "qtype", crate::dns::QueryType::names()),
+            (rev::FIELDS, "rcode", crate::dns::Rcode::names()),
             (rev::FIELDS, "phase", PhaseWord::names()),
             // The band's NAME is `Priority::name`, an exhaustive match over the
             // eight variants; `from_wire` is total over the 3-bit field, so the

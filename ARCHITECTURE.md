@@ -409,7 +409,7 @@ Once SCE extensions land, this project authors:
   (scout/hello/session control, data-plane, declarations,
   attachments, timestamps, encoding info)
 - Forge algorithm sources (CRC16, VLE encode/decode,
-  keyexpr_intersect, keyexpr_includes)
+  keyexpr_intersects, keyexpr_includes, keyexpr_matches)
 - Forge bounded-collection sources (local sub/queryable/pending-
   query tables, in-flight reassembly table)
 - Forge link sources (UDP unicast/multicast, TCP, Serial, WebSocket)
@@ -462,8 +462,9 @@ watching-zenoh/
 │   ├── algorithms/
 │   │   ├── crc16_ccitt.scxml          # kind=algorithm
 │   │   ├── vle_u64.scxml
-│   │   ├── keyexpr_intersect.scxml    # used at runtime over bounded-collection
-│   │   └── keyexpr_includes.scxml
+│   │   ├── keyexpr_intersects.scxml   # wildcard matching over the key texts
+│   │   ├── keyexpr_includes.scxml     #   (and keyexpr_matches + chunk helpers)
+│   │   └── keyexpr_matches.scxml
 │   ├── collections/
 │   │   ├── local_sub_table.scxml      # kind=bounded-collection
 │   │   ├── local_queryable_table.scxml

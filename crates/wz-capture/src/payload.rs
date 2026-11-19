@@ -3098,12 +3098,9 @@ pub mod formats {
         patterns: impl IntoIterator<Item = &'p str>,
         keyexpr: &str,
     ) -> Option<usize> {
-        patterns.into_iter().position(|pattern| {
-            // The matcher takes CHUNKS, which is the same split
-            // `filter::compile_pattern` performs for the same function.
-            let chunks: Vec<&str> = pattern.split('/').collect();
-            wz_session_core::keyexpr_match::keyexpr_pattern_matches(&chunks, keyexpr)
-        })
+        patterns
+            .into_iter()
+            .position(|pattern| wz_session_core::keyexpr_match::keyexpr_matches(pattern, keyexpr))
     }
 
     /// The position of the first of the segment rules' `patterns` that covers
@@ -4025,7 +4022,7 @@ pub mod formats {
 
         /// The format for this key expression, if a rule covers it.
         ///
-        /// Matching is ZENOH'S OWN (`keyexpr_pattern_matches`), not a glob
+        /// Matching is ZENOH'S OWN (`keyexpr_matches`), not a glob
         /// written here — a second dialect would disagree with the router about
         /// `**` at exactly the interesting cases, which is the argument
         /// [`crate::filter`] already makes for the selector language.
@@ -4228,10 +4225,7 @@ pub mod formats {
         /// [`Self::for_keyexpr`] states.
         pub fn field_name(&self, keyexpr: &str, path: &str) -> Option<(DeclarationId, &str)> {
             let at = self.names.iter().position(|(pattern, p, _)| {
-                p == path && {
-                    let chunks: Vec<&str> = pattern.split('/').collect();
-                    wz_session_core::keyexpr_match::keyexpr_pattern_matches(&chunks, keyexpr)
-                }
+                p == path && wz_session_core::keyexpr_match::keyexpr_matches(pattern, keyexpr)
             })?;
             Some((
                 DeclarationId(self.rules.len() + at),
@@ -4250,10 +4244,7 @@ pub mod formats {
             self.names.iter().any(|(pattern, p, _)| {
                 p.strip_prefix(path)
                     .is_some_and(|rest| rest.starts_with('.'))
-                    && {
-                        let chunks: Vec<&str> = pattern.split('/').collect();
-                        wz_session_core::keyexpr_match::keyexpr_pattern_matches(&chunks, keyexpr)
-                    }
+                    && wz_session_core::keyexpr_match::keyexpr_matches(pattern, keyexpr)
             })
         }
 

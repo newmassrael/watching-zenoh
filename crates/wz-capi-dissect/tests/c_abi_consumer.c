@@ -4648,8 +4648,17 @@ int main(void) {
      * groups. Nine keys and two families arrive; nothing retires.
      * 77: each flow gains `network`, its IP headers' and frames' facts per
      * direction, and the document `capture_interfaces`. Twenty-three keys
-     * arrive; no family. */
-    revisioned[2].revision = 77;
+     * arrive; no family.
+     * 78: each flow gains `tcp`, its connection's attempts, windows,
+     * acknowledgements and retransmissions, `null` for a flow that is not
+     * TCP. Thirty keys and two families arrive; nothing retires.
+     * 79: each flow gains `handshake`, what its TLS, WebSocket or QUIC
+     * handshake said, `null` for a flow that carried none. Twenty-three keys
+     * and three families arrive; nothing retires.
+     * 80: the document gains `dns`, the capture's name lookups and what
+     * answered them. Eighteen keys and two families arrive; nothing
+     * retires. */
+    revisioned[2].revision = 80;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

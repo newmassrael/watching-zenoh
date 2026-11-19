@@ -1097,11 +1097,7 @@ pub unsafe extern "C" fn z_keyexpr_includes(
     r: *const z_loaned_keyexpr_t,
 ) -> bool {
     guard_val(false, || match (keyexpr_str(l), keyexpr_str(r)) {
-        (Some(a), Some(b)) => {
-            let a_chunks: Vec<&str> = a.split('/').collect();
-            let b_chunks: Vec<&str> = b.split('/').collect();
-            wz_session_core::keyexpr_match::keyexpr_includes_patterns(&a_chunks, &b_chunks)
-        }
+        (Some(a), Some(b)) => wz_session_core::keyexpr_match::keyexpr_includes(a, b),
         _ => false,
     })
 }
@@ -1116,11 +1112,7 @@ pub unsafe extern "C" fn z_keyexpr_intersects(
     r: *const z_loaned_keyexpr_t,
 ) -> bool {
     guard_val(false, || match (keyexpr_str(l), keyexpr_str(r)) {
-        (Some(a), Some(b)) => {
-            let a_chunks: Vec<&str> = a.split('/').collect();
-            let b_chunks: Vec<&str> = b.split('/').collect();
-            wz_session_core::keyexpr_match::keyexpr_intersect_patterns(&a_chunks, &b_chunks)
-        }
+        (Some(a), Some(b)) => wz_session_core::keyexpr_match::keyexpr_intersects(a, b),
         _ => false,
     })
 }

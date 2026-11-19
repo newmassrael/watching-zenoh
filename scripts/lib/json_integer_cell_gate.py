@@ -171,6 +171,39 @@ CELLS: dict[tuple[str, str], tuple[Cell, ...]] = {
             born=70,
         ),
     ),
+    # Field document 78: every capture instant of a flow's `tcp` goes through
+    # one closure, so the function writes one cell.
+    ("crates/wz-capture/src/fields_json.rs", "write_tcp"): (
+        Cell(
+            "fields",
+            "a tcp instant",
+            "the instants of a flow's `tcp`",
+            "the `tcp` instants are nanoseconds since 1970",
+            born=78,
+        ),
+    ),
+    # Field document 79: the one capture instant of a flow's `handshake`, a
+    # WebSocket control frame's `at_ns`.
+    ("crates/wz-capture/src/fields_json.rs", "write_handshake"): (
+        Cell(
+            "fields",
+            "a handshake instant",
+            "the instants of a flow's `handshake`",
+            "the `handshake` instants are nanoseconds since 1970",
+            born=79,
+        ),
+    ),
+    # Field document 80: a lookup's `query_ns` and `answer_ns`, through one
+    # closure.
+    ("crates/wz-capture/src/fields_json.rs", "write_dns"): (
+        Cell(
+            "fields",
+            "a dns instant",
+            "the instants of the document's `dns`",
+            "the `dns` instants are nanoseconds since 1970",
+            born=80,
+        ),
+    ),
     ("crates/wz-capture/src/fields_json.rs", "push_parameters"): (
         Cell("fields", "a context parameters entry's integer value", _PARAMETERS_HEADER, _PARAMETERS_ROW, born=45),
     ),

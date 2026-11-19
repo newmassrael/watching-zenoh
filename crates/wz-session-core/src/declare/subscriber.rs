@@ -10,7 +10,7 @@
 //! `wz-runtime-tokio::declare::subscriber`). AP-side test fixtures
 //! stay in the wz-runtime-tokio shell because they exercise
 //! Tokio-bound sync primitives. `has_matching` is an inherent method
-//! on the registry calling [`crate::keyexpr_match::keyexpr_intersect_patterns`]
+//! on the registry calling [`crate::keyexpr_match::keyexpr_intersects`]
 //! directly — no extension-trait split (R311dn-pre lift made this
 //! possible).
 
@@ -362,7 +362,7 @@ impl<P: Storage> RemoteSubscriberPeer<P> {
     /// Q-side `has_matching`; returns `true` iff at least one
     /// currently-declared peer subscriber's keyexpr intersects
     /// `publish_keyexpr` under
-    /// [`crate::keyexpr_match::keyexpr_intersect_patterns`] — i.e.
+    /// [`crate::keyexpr_match::keyexpr_intersects`] — i.e.
     /// there exists at least one literal `/`-separated keyexpr that
     /// both sides match. The Q-side has_matching doc-comment carries
     /// the per-case textbook expansion (literal-literal byte-equal,
@@ -1919,8 +1919,8 @@ mod tests {
         // The LOCAL delivery membership check (zenoh compute_data_route parity):
         // a `home/**` subscriber must NOT match a malformed published key (an
         // empty `/`-delimited chunk). This is the local-delivery twin of the
-        // mesh-forward drop — both route through the matcher's
-        // `target_chunks_well_formed` invariant, so a stray `home/temp/` /
+        // mesh-forward drop — both route through the matcher's refusal of
+        // a text with an empty chunk, so a stray `home/temp/` /
         // `home//temp` / `/home/temp` / `""` reaches no subscriber on any path.
         let mut reg = RemoteSubscriberRegistry::new();
         let body =

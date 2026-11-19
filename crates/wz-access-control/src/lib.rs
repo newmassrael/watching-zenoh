@@ -33,7 +33,7 @@
 //!   [`LinkSubject`] the two link axes already travel on rather than taking a
 //!   parameter of its own.
 //! - Keyexpr rule matching uses
-//!   [`keyexpr_includes_target`]:
+//!   [`keyexpr_includes`]:
 //!   a rule keyexpr must INCLUDE the message keyexpr (`rule ⊇ msg`), the
 //!   directional predicate zenoh's `policy_decision_point` applies via
 //!   `deny.nodes_including(key_expr)` / `allow.nodes_including(key_expr)`. This
@@ -70,7 +70,7 @@
 //! container.
 
 use wz_routing_graph::Zid;
-use wz_session_core::keyexpr_match::keyexpr_includes_target;
+use wz_session_core::keyexpr_match::keyexpr_includes;
 use wz_session_core::link::{InterceptorLink, LinkSubject};
 
 /// Allow or deny — zenoh-config `Permission`. The verdict of every rule and the
@@ -615,9 +615,8 @@ impl AclPolicy {
 
     /// The verdict for a request — the wz port of zenoh
     /// `PolicyEnforcer::policy_decision_point` (deny-first, then default, then
-    /// allow). `keyexpr` is the message's key expression; it is split once here
-    /// and each rule keyexpr is tested for INCLUSION of it via the
-    /// [`keyexpr_includes_target`] SSOT.
+    /// allow). `keyexpr` is the message's key expression; each rule keyexpr is
+    /// tested for INCLUSION of it via the [`keyexpr_includes`] SSOT.
     ///
     /// `subject` is OPTIONAL, and the `None` spelling is load-bearing rather
     /// than a convenience (open-debt item 655, R2347). It means the enforcer
@@ -662,9 +661,8 @@ impl AclPolicy {
         if self.config.rules.is_empty() {
             return self.config.default_permission;
         }
-        // Split the message keyexpr ONCE; each rule keyexpr is then tested for
-        // `rule ⊇ msg` against these chunks (the directional ACL predicate).
-        let target_chunks: Vec<&str> = keyexpr.split('/').collect();
+        // Each rule keyexpr is tested for `rule ⊇ msg` (the directional ACL
+        // predicate).
         let applies = |rule: &AclRule| -> bool {
             rule.flow == flow
                 && rule.subject.matches(subject)
@@ -691,7 +689,7 @@ impl AclPolicy {
                 && rule
                     .key_exprs
                     .iter()
-                    .any(|ke| keyexpr_includes_target(ke, &target_chunks))
+                    .any(|ke| keyexpr_includes(ke, keyexpr))
         };
         // Deny wins, checked first (zenoh `deny.nodes_including(..).any(..)`).
         if self

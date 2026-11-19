@@ -1,0 +1,174 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  Whether the pattern chunk p[ps..pe], which holds `$*`, covers the chunk
+  t[ts..te]. The pattern is split on `$*` into sub-parts: the leading one, if
+  not empty, is a prefix of the target chunk; the trailing one, if not empty, a
+  suffix of what is left; each middle one is found leftmost-first in what is
+  left, in order and without overlap, and an empty middle one (a non-canonical
+  `$*$*`) is no constraint. zenoh-pico's
+  `_z_chunk_right_contains_all_stardsl_subchunks_of_left`; with the target a
+  pattern chunk of its own this is also the inclusion of a `$*` chunk.
+
+  Offsets outside their text, or a start past its end, are no match. Nothing is
+  subtracted: two ranges are compared by walking both cursors together, so the
+  range analysis proves every index from the guards.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="keyexpr_dsl_matches"
+       version="1.0">
+  <sce:signature>
+    <sce:param name="p" type="bytes"/>
+    <sce:param name="ps" type="uint32"/>
+    <sce:param name="pe" type="uint32"/>
+    <sce:param name="t" type="bytes"/>
+    <sce:param name="ts" type="uint32"/>
+    <sce:param name="te" type="uint32"/>
+    <sce:return type="bool"/>
+  </sce:signature>
+  <sce:body>
+    <sce:if cond="pe &gt; len(p)">
+      <sce:return expr="false"/>
+    </sce:if>
+    <sce:if cond="te &gt; len(t)">
+      <sce:return expr="false"/>
+    </sce:if>
+    <sce:if cond="ps &gt; pe">
+      <sce:return expr="false"/>
+    </sce:if>
+    <sce:if cond="ts &gt; te">
+      <sce:return expr="false"/>
+    </sce:if>
+    <!-- r: where what is left of the target begins. -->
+    <sce:var name="r" type="uint32" init="ts"/>
+    <!-- seg: where the current sub-part of the pattern begins. -->
+    <sce:var name="seg" type="uint32" init="ps"/>
+    <sce:var name="first" type="bool" init="true"/>
+    <sce:while cond="seg &lt;= pe">
+      <!-- q: where the sub-part ends, at the next `$*` or at pe; last: no `$*`
+           follows it. -->
+      <sce:var name="q" type="uint32" init="seg"/>
+      <sce:var name="last" type="bool" init="true"/>
+      <!-- after: where the next sub-part begins, past the `$*` at q. -->
+      <sce:var name="after" type="uint32" init="pe"/>
+      <sce:while cond="last &amp;&amp; q &lt; pe">
+        <sce:var name="star" type="bool" init="false"/>
+        <sce:if cond="p[q] === 36">
+          <sce:var name="q1" type="uint32" init="q + 1"/>
+          <sce:if cond="q1 &lt; pe">
+            <sce:if cond="p[q1] === 42">
+              <sce:assign target="star" expr="true"/>
+              <sce:assign target="after" expr="q1 + 1"/>
+            </sce:if>
+          </sce:if>
+        </sce:if>
+        <sce:if cond="star">
+          <sce:assign target="last" expr="false"/>
+          <sce:else>
+            <sce:assign target="q" expr="q + 1"/>
+          </sce:else>
+        </sce:if>
+      </sce:while>
+      <sce:if cond="first">
+        <!-- The leading sub-part is a prefix of the target chunk. -->
+        <sce:var name="lk" type="uint32" init="seg"/>
+        <sce:var name="lx" type="uint32" init="r"/>
+        <sce:while cond="lk &lt; q">
+          <sce:if cond="lx &gt;= te">
+            <sce:return expr="false"/>
+          </sce:if>
+          <sce:if cond="p[lk] !== t[lx]">
+            <sce:return expr="false"/>
+          </sce:if>
+          <sce:assign target="lk" expr="lk + 1"/>
+          <sce:assign target="lx" expr="lx + 1"/>
+        </sce:while>
+        <sce:assign target="r" expr="lx"/>
+        <sce:assign target="first" expr="false"/>
+        <sce:if cond="last">
+          <!-- No `$*` at all: the caller routes only a chunk that holds one. -->
+          <sce:return expr="false"/>
+        </sce:if>
+        <sce:else>
+          <sce:if cond="last">
+            <!-- The trailing sub-part: empty, or a suffix of what is left. -->
+            <sce:if cond="seg === q">
+              <sce:return expr="true"/>
+            </sce:if>
+            <sce:var name="ts_" type="uint32" init="r"/>
+            <sce:while cond="ts_ &lt; te">
+              <sce:var name="tk" type="uint32" init="seg"/>
+              <sce:var name="tx" type="uint32" init="ts_"/>
+              <sce:var name="tsame" type="bool" init="true"/>
+              <sce:while cond="tsame &amp;&amp; tk &lt; q">
+                <sce:if cond="tx &gt;= te">
+                  <sce:assign target="tsame" expr="false"/>
+                  <sce:else>
+                    <sce:if cond="p[tk] !== t[tx]">
+                      <sce:assign target="tsame" expr="false"/>
+                      <sce:else>
+                        <sce:assign target="tk" expr="tk + 1"/>
+                        <sce:assign target="tx" expr="tx + 1"/>
+                      </sce:else>
+                    </sce:if>
+                  </sce:else>
+                </sce:if>
+              </sce:while>
+              <sce:if cond="tsame &amp;&amp; tx === te">
+                <sce:return expr="true"/>
+              </sce:if>
+              <sce:assign target="ts_" expr="ts_ + 1"/>
+            </sce:while>
+            <sce:return expr="false"/>
+            <sce:else>
+              <!-- A middle sub-part, mfound leftmost-first in what is left; an
+                   empty one is no constraint. -->
+              <sce:if cond="seg &lt; q">
+                <sce:var name="mfound" type="bool" init="false"/>
+                <sce:var name="ms" type="uint32" init="r"/>
+                <sce:while cond="!mfound &amp;&amp; ms &lt; te">
+                  <sce:var name="mk" type="uint32" init="seg"/>
+                  <sce:var name="mx" type="uint32" init="ms"/>
+                  <sce:var name="msame" type="bool" init="true"/>
+                  <sce:while cond="msame &amp;&amp; mk &lt; q">
+                    <sce:if cond="mx &gt;= te">
+                      <sce:assign target="msame" expr="false"/>
+                      <sce:else>
+                        <sce:if cond="p[mk] !== t[mx]">
+                          <sce:assign target="msame" expr="false"/>
+                          <sce:else>
+                            <sce:assign target="mk" expr="mk + 1"/>
+                            <sce:assign target="mx" expr="mx + 1"/>
+                          </sce:else>
+                        </sce:if>
+                      </sce:else>
+                    </sce:if>
+                  </sce:while>
+                  <sce:if cond="msame">
+                    <sce:assign target="r" expr="mx"/>
+                    <sce:assign target="mfound" expr="true"/>
+                    <sce:else>
+                      <sce:assign target="ms" expr="ms + 1"/>
+                    </sce:else>
+                  </sce:if>
+                </sce:while>
+                <sce:if cond="!mfound">
+                  <sce:return expr="false"/>
+                </sce:if>
+              </sce:if>
+            </sce:else>
+          </sce:if>
+        </sce:else>
+      </sce:if>
+      <sce:assign target="seg" expr="after"/>
+    </sce:while>
+    <sce:return expr="false"/>
+  </sce:body>
+</scxml>

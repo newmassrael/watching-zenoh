@@ -6547,8 +6547,11 @@ layer_c1u_cargo_test_tls() {
     # both transports' legs run (C1v counts the same file, and moves with this one). PRINTED.
     # 9 -> 11: the two cases of `drive_against_peer`, the bound on a reconnect's peer wait, in
     # the same file and under no link feature, so C1v moves with it.
+    # 11 -> 12: Round 4521's `the_replay_pace_is_the_opening_snapshots`, under no link feature,
+    # which landed while an earlier guard of the same job was red; hosted run 44434030103 printed
+    # 12, and so did a build host. C1v moves with it.
     wz_test_args wz-runtime-tokio session_reconnect_e2e
-    _runci_guarded_test C1u 11 cargo test -p wz-runtime-tokio --features transport-link-tls "${WZ_TEST_ARGS[@]}" --quiet \
+    _runci_guarded_test C1u 12 cargo test -p wz-runtime-tokio --features transport-link-tls "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     # R3463 — 6 -> 8. The two witnesses of decision D9 of
     # docs/session-lifecycle-intent.md: over mutual TLS a peer that claims the zid its
@@ -6613,8 +6616,9 @@ layer_c1v_cargo_test_ws() {
     # R311y801 — 6 -> 7 with C1u, same commit, same reason (see C1u's note).
     # f0676600a -- 7 -> 9, with C1u, same commit, same reason. PRINTED.
     # 9 -> 11, with C1u, same commit, same reason.
+    # 11 -> 12, with C1u, same commit, same reason.
     wz_test_args wz-runtime-tokio session_reconnect_e2e
-    _runci_guarded_test C1v 11 cargo test -p wz-runtime-tokio --features transport-link-ws "${WZ_TEST_ARGS[@]}" --quiet \
+    _runci_guarded_test C1v 12 cargo test -p wz-runtime-tokio --features transport-link-ws "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     # R2355 — the MULTI-PEER ws accept, which no lane ran until now. The
     # `transport-link-ws` registry entry carried "the multi-peer `--router ws/`
@@ -9662,7 +9666,7 @@ layer_c1am_cargo_test_adminspace() {
 # rather than free-riding the default set. Two real deps surfaced on the slim
 # build and are now pulled by adminspace-core (wz-session-core/Cargo.toml):
 #   * keyexpr-wildcard-double — the `@/<zid>/<whatami>/**` queryable's wire-path
-#     match (keyexpr_intersects_target); without it `**` degrades to a literal
+#     match (keyexpr_intersects); without it `**` degrades to a literal
 #     chunk and a remote admin GET never reaches the handler. Locked by the unit
 #     `admin_queryable_double_wildcard_routes_root_and_subpath_gets`.
 #   * pubsub-encoding — the reply EncodingHint (application/json / text/plain);
@@ -13007,15 +13011,20 @@ layer_c1o_keyexpr_gating_behavior() {
     # 9 -> 12, 20 -> 23, 20 -> 23: three tests more in every arm, measured on 2026-10-28. Two of
     # them are the tests of the key facts (`KeyFacts`) that `keyexpr_match` gained; the third was
     # not attributed to a commit. 12 -> 14, 23 -> 25, 23 -> 25 (2026-11-07): the two tests of the
-    # descent that remembers refuted suffix pairs, which run in every arm.
-    _runci_guarded_test "C1o keyexpr alloc" 14 \
+    # descent that remembers refuted suffix pairs, which run in every arm. 14 -> 11, 25 -> 23,
+    # 25 -> 22 (2026-11-19, round 4530): the relations are generated from SCXML; the tests of the
+    # hand-written descent left with it (the remembering descent, the chunk split, one of each
+    # pair of over-depth and literal tests that asked the same thing of the two old entry points),
+    # and the comparison with that descent over 819 by 819 key pairs and the 63-chunk bound of the
+    # prefix table came in. The OFF arms still run `*_off_degrades_to_literal` in the alloc arm.
+    _runci_guarded_test "C1o keyexpr alloc" 11 \
         cargo test -p wz-session-core --no-default-features --features alloc \
         --lib keyexpr_match --quiet || return 1
-    _runci_guarded_test "C1o keyexpr alloc+wildcards" 25 \
+    _runci_guarded_test "C1o keyexpr alloc+wildcards" 23 \
         cargo test -p wz-session-core --no-default-features \
         --features alloc,keyexpr-wildcard-single,keyexpr-wildcard-double,keyexpr-dollar-star,keyexpr-includes \
         --lib keyexpr_match --quiet || return 1
-    _runci_guarded_test "C1o keyexpr wildcards-no-alloc" 25 \
+    _runci_guarded_test "C1o keyexpr wildcards-no-alloc" 22 \
         cargo test -p wz-session-core --no-default-features \
         --features keyexpr-wildcard-single,keyexpr-wildcard-double,keyexpr-dollar-star,keyexpr-includes \
         --lib keyexpr_match --quiet || return 1
@@ -13613,7 +13622,9 @@ layer_c1m_session_lwip() {
     # the run (the tokens leg below is the same number).
     # 29 -> 31: the peers a command line holds by their zid (`LaunchedPeers`), a cell set once
     # and read as the list the node holds, and its refusals.
-    _runci_guarded_test "C1m mcu slot node" 31 \
+    # 31 -> 32: Round 4521's `the_sessions_the_node_makes_carry_the_snapshot_it_is_handed`;
+    # hosted run 44434030103 printed 32, and so did a build host.
+    _runci_guarded_test "C1m mcu slot node" 32 \
         cargo test -p wz-session-mcu --features client-slot --lib slot_node --quiet || return 1
     # The same tests of a node built with `declare-token`: the number is the same, and what two of
     # them assert is the other half (a token is declared, and is not refused).
@@ -13817,7 +13828,8 @@ layer_c1m_session_lwip() {
     # gated on `rx-in-place`). The same file runs again on the FIXED bounded
     # backing (`bounded-heapless`, the MCU profile's), the one leg where a Put
     # delivered in place must cost the heap NOTHING; on the growable backing
-    # above it costs the matcher's two scratch lists. 3 = what each PRINTED.
+    # above it cost the matcher's scratch until the matcher read the key's text
+    # (2026-11-19), and costs nothing since. 3 = what each PRINTED.
     # B3 moved both 3 -> 4 (the extension-chain test above). 4 = what each
     # PRINTED.
     wz_test_args wz-session-lwip rx_frame_allocations

@@ -318,10 +318,15 @@ pub mod control;
 // What a flow's IP headers and frames said, per direction, taken at ingest
 // beside the other per-flow facts and as ungated.
 pub mod ip_facts;
+// What a TCP flow's connection did under its session, taken at ingest the same
+// way.
+pub mod dns;
 #[cfg(feature = "dissect")]
 pub mod session_table_json;
 #[cfg(all(test, feature = "dissect"))]
 mod session_table_tests;
+pub mod tcp_facts;
+pub mod tls_handshake;
 /// Captures of upstream software outside the calibration corpus
 /// (`captures/upstream/`), each read for the behaviour it was taken to hold,
 /// through the field document a consumer reads.
@@ -4387,6 +4392,18 @@ impl FlowDissection {
         while let Some(resync) = deframer.take_resync() {
             resyncs.push(resync);
         }
+        // A Ping or Pong taken in this push is placed now, while the bytes
+        // that carried it are still held.
+        let assembler = match direction {
+            Direction::A => &self.low_to_high,
+            Direction::B => &self.high_to_low,
+        };
+        deframer.place(|offset| {
+            (
+                assembler.packet_for_offset(offset),
+                assembler.instant_of_offset(offset),
+            )
+        });
         for resync in resyncs {
             self.ws_resyncs.push((direction, resync));
         }
@@ -4739,6 +4756,13 @@ impl FlowDissection {
                         summary.records += 1;
                         changed = true;
                         carry[index].next = record.index + 1;
+                        // TLS 1.3's certificate and its alerts after the
+                        // ServerHello are only ever read here.
+                        state.handshake.observe_opened(
+                            index,
+                            opened.content_type,
+                            &opened.plaintext,
+                        );
                         // (1) of `decrypt_with`.
                         if opened.content_type == tls::CT_APPLICATION_DATA {
                             carry[index]
@@ -5296,6 +5320,8 @@ mod message_list_census {
             skip_census: _,
             // ICMP and IGMP messages, which are not zenoh messages.
             control: _,
+            // DNS lookups, which are not zenoh messages either.
+            dns: _,
             limits: _,
             drops: _,
             declared_quic_ports: _,
@@ -6465,6 +6491,9 @@ pub struct Dissection {
     /// The ICMP, ICMPv6 and IGMP messages read off packets skipped as not a
     /// transport, bounded: see [`control`].
     control: control::ControlPlane,
+    /// The DNS and multicast DNS lookups read off UDP datagrams on their
+    /// ports, beside the path every datagram takes: see [`dns`].
+    dns: dns::DnsPlane,
     /// R311y594b — what this dissection may accumulate.
     limits: DissectionLimits,
     /// What the limits have cost so far.
@@ -6714,6 +6743,7 @@ impl Default for Dissection {
             skipped: Vec::new(),
             skip_census: SkipCensus::default(),
             control: control::ControlPlane::default(),
+            dns: dns::DnsPlane::default(),
             declared_quic_ports: Vec::new(),
             declared_serial_linktypes: Vec::new(),
             serial: None,
@@ -8664,6 +8694,13 @@ impl Dissection {
         &self.control
     }
 
+    /// The DNS and multicast DNS lookups the capture carried, each with what
+    /// answered it. Their datagrams also took the path every UDP datagram
+    /// takes. See [`dns`].
+    pub fn dns(&self) -> &dns::DnsPlane {
+        &self.dns
+    }
+
     /// The flow matching `key`, if the capture carried one.
     pub fn flow(&self, key: &FlowKey) -> Option<&FlowDissection> {
         self.flows.find(key)
@@ -9264,6 +9301,10 @@ impl Dissection {
             &segment.checksums,
             segment.rst,
         );
+        // A vsock record rides this path too, with no TCP header to read.
+        if segment.flow.link() == link::LinkKind::Tcp {
+            self.flows[idx].ingest.observe_tcp(&segment, ts_nanos);
+        }
         self.advance_clock(idx, ts_nanos, FlowKind::Stream);
         let flow = &mut self.flows[idx];
         // Item 252 — recorded for every segment, a pure ACK included: a
@@ -9606,6 +9647,8 @@ impl Dissection {
             tunnel: link::Tunnel::none(),
             // AF_VSOCK has no IP header.
             ip: link::IpFacts::default(),
+            // Nor a TCP one: no acknowledgement and no window.
+            tcp: link::TcpHeader::default(),
         };
         let at_ns = flow.session.observed_at_nanos();
         let before = flow.assembler(direction).len();
@@ -9651,6 +9694,19 @@ impl Dissection {
         in_container: Option<usize>,
     ) {
         self.tally_checksums(&d.checksums);
+        if matches!(link, DatagramLink::Udp)
+            && dns::DnsPlane::reads(d.source().port, d.destination().port)
+        {
+            self.dns.observe(
+                d.source(),
+                d.destination(),
+                d.payload,
+                dns::Moment {
+                    packet: d.packet_index,
+                    at_ns: ts_nanos,
+                },
+            );
+        }
         let idx = match self.datagram_flows.position(&d.flow) {
             Some(i) => i,
             None => {
@@ -9725,10 +9781,11 @@ impl Dissection {
         // resembles a short header (`T_MID_INIT | 0x40` = `0x41`) out of here:
         // the sound rule needs a long header with a known version, which zenoh
         // does not produce.
+        let seat = agg::dir_index(direction);
         match &mut flow.quic {
             Some(census) => {
                 match quic::recognise_on_quic_flow(d.payload) {
-                    Some(p) => census.add(p),
+                    Some(p) => census.add_from(p, seat),
                     // Counted, not ignored. A QUIC flow carrying a datagram this
                     // reader cannot name is a fact, and absorbing it into the
                     // packet count would claim a packet that was never read.
@@ -9744,7 +9801,7 @@ impl Dissection {
                 // evidence as well as premise, and the census should say so.
                 if let Some(p) = quic::recognise_long(d.payload) {
                     let mut census = quic::QuicCensus::default();
-                    census.add(p);
+                    census.add_from(p, seat);
                     flow.quic = Some(census);
                     self.quic_seen = true;
                     self.evict_datagram_flows_beyond_cap();
@@ -9768,7 +9825,7 @@ impl Dissection {
                         ..Default::default()
                     };
                     match quic::recognise_on_quic_flow(d.payload) {
-                        Some(p) => census.add(p),
+                        Some(p) => census.add_from(p, seat),
                         None => census.add_unrecognised(d.payload.len()),
                     }
                     flow.quic = Some(census);

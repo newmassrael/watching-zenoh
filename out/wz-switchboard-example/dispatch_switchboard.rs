@@ -115,21 +115,21 @@ pub fn dispatch_switchboard(
     let mut injected = 0usize;
 
     // home/*/temp -> temp_update (value via temp_payload)
-    if wz_session_core::keyexpr_match::keyexpr_pattern_matches(&["home", "*", "temp"], target_keyexpr)
+    if wz_session_core::keyexpr_match::keyexpr_matches("home/*/temp", target_keyexpr)
         && injector.inject_value("temp_update", payload)
     {
         injected += 1;
     }
 
     // home/*/humidity -> humidity_update (value via humidity_payload)
-    if wz_session_core::keyexpr_match::keyexpr_pattern_matches(&["home", "*", "humidity"], target_keyexpr)
+    if wz_session_core::keyexpr_match::keyexpr_matches("home/*/humidity", target_keyexpr)
         && injector.inject_value("humidity_update", payload)
     {
         injected += 1;
     }
 
     // home/*/reset -> reset (signal)
-    if wz_session_core::keyexpr_match::keyexpr_pattern_matches(&["home", "*", "reset"], target_keyexpr) {
+    if wz_session_core::keyexpr_match::keyexpr_matches("home/*/reset", target_keyexpr) {
         injector.inject("reset", "");
         injected += 1;
     }

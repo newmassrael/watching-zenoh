@@ -140,6 +140,17 @@ ACCOUNTING = (
 # excuse another crate's site.
 ALLOWED = [
     (
+        "wz-capture/tcp_facts.rs",
+        "peer.pending.pop_front();",
+        "A direction's small segment leaves the queue of segments awaiting their "
+        "acknowledgement when an acknowledgement covers it (round 4535): it was "
+        "queued only to time that answer, and the gap is kept in `gaps` or "
+        "counted in `gaps_more` beside the removal. Two answers give no gap: an "
+        "acknowledgement stamped before its segment, a capture clock that stepped "
+        "back, and an acknowledging packet the capture gave no time; neither is a "
+        "time of the connection.",
+    ),
+    (
         "wz-capture/segment_chain.rs",
         "let _ = self.closed.remove(&key);",
         "The segment chain lets go of what a query's final closed, kept for the "
@@ -166,6 +177,14 @@ ALLOWED = [
         "wz-capture/tls.rs",
         "self.instants.drain(..cut.min(self.instants.len()));",
         "The third list of the mapping in the entries above, cut with them.",
+    ),
+    (
+        "wz-capture/tls_handshake.rs",
+        "self.held[layer][d].drain(..4 + len);",
+        "A whole handshake message leaving the bytes held until it was whole: "
+        "it was copied into the body the next line parses, so nothing leaves "
+        "unread. Bytes that overflow the bound are a separate site, counted as "
+        "`overflowed` for that direction.",
     ),
     (
         "wz-capture/segment_chain.rs",

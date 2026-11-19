@@ -6937,11 +6937,10 @@ async fn run_router_hat_until(
 
     // The runtime connect-list reconcile channel (`router-connect-reconcile`): the
     // loop drains `FaceSources::reconcile`; the host holds the sender and fires it
-    // from the app-tick once the `--connect-after` deadline elapses. Compute the
-    // one-shot schedule (deadline + the NEW full desired set = the initial dials
-    // PLUS the added endpoints) BEFORE `dials` moves into `FaceSources` — the loop's
-    // add-dedup skips the already-dialed initials and slice-2 redial reads the full
-    // set as the desired gate. Created only when the feature is compiled.
+    // from the app-tick once the `--connect-after` deadline elapses. The one-shot
+    // schedule is the deadline and the endpoints to ADD: the loop keeps every
+    // startup `--connect` member and adds a listed endpoint only where the set
+    // does not hold it yet. Created only when the feature is compiled.
     #[cfg(feature = "router-connect-reconcile")]
     let (reconcile_tx, reconcile_rx) =
         tokio::sync::mpsc::unbounded_channel::<wz::runtime_tokio::accept_loop::ConnectReconcile>();
@@ -6967,12 +6966,10 @@ async fn run_router_hat_until(
     let reconcile_schedule: Option<(
         tokio::time::Instant,
         Vec<wz::runtime_tokio::locator::AnyLocator>,
-    )> = connect_after_addrs.map(|(ms, mut addrs)| {
-        let mut full = dials.clone();
-        full.append(&mut addrs);
+    )> = connect_after_addrs.map(|(ms, addrs)| {
         (
             tokio::time::Instant::now() + Duration::from_millis(ms),
-            full,
+            addrs,
         )
     });
     #[cfg(feature = "router-connect-reconcile")]
@@ -7930,25 +7927,30 @@ async fn run_router_hat_until(
                     }
                 }
                 // `--connect-after` reconcile fire: once the deadline elapses, send
-                // the NEW full desired connect-set on the reconcile channel; the loop
-                // dials the added endpoint(s) (add-dedup skips the initial dials). One
-                // shot, latched. Fires within one app-tick of the deadline — the test
-                // gates on the resulting FaceUp event, not on the exact instant.
+                // the listed endpoints on the reconcile channel as an ADD; the loop
+                // dials an endpoint the set does not hold yet. One shot, latched.
+                // Fires within one app-tick of the deadline — the test gates on the
+                // resulting FaceUp event, not on the exact instant.
+                //
+                // An ADD, the verb `connect-add` sends, and not a REPLACE by the
+                // startup dials followed by these. The connect list counts each
+                // listing of an endpoint as a link of its own (`EndpointKey`), so
+                // that concatenation listed an endpoint named by both `--connect`
+                // and `--connect-after` twice, and the loop dialled it a second
+                // time; an ADD leaves the startup members, their DNS resolution
+                // included, where they are.
                 #[cfg(feature = "router-connect-reconcile")]
-                if let Some((deadline, full_set)) = reconcile_schedule.as_ref() {
+                if let Some((deadline, added)) = reconcile_schedule.as_ref() {
                     if !reconcile_fired && tokio::time::Instant::now() >= *deadline {
                         reconcile_fired = true;
                         log::info!(
                             "wz-ap-demo router-hat: --connect-after fired; reconciling \
-                             connect-list to {} endpoint(s)",
-                            full_set.len()
+                             connect-list with {} added endpoint(s)",
+                            added.len()
                         );
-                        // A REPLACE, and correct as such: `full_set` is composed
-                        // as `dials + addrs`, so it already carries the startup
-                        // seed with its DNS resolution intact.
                         let _ = reconcile_tx.send(
-                            wz::runtime_tokio::accept_loop::ConnectReconcile::Replace(
-                                full_set.clone(),
+                            wz::runtime_tokio::accept_loop::ConnectReconcile::Add(
+                                added.clone(),
                             ),
                         );
                     }

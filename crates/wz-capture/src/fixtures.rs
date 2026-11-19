@@ -300,13 +300,27 @@ fn tcp_segment(
     seq: u32,
     payload: &[u8],
 ) -> Vec<u8> {
+    tcp_segment_flagged(src, sport, dst, dport, seq, 0x10, payload)
+}
+
+/// [`tcp_segment`] with its flags given: 0x02 a SYN, 0x12 a SYN/ACK, 0x10 an
+/// ACK.
+pub(crate) fn tcp_segment_flagged(
+    src: [u8; 4],
+    sport: u16,
+    dst: [u8; 4],
+    dport: u16,
+    seq: u32,
+    flags: u8,
+    payload: &[u8],
+) -> Vec<u8> {
     let mut tcp = Vec::new();
     tcp.extend_from_slice(&sport.to_be_bytes());
     tcp.extend_from_slice(&dport.to_be_bytes());
     tcp.extend_from_slice(&seq.to_be_bytes());
     tcp.extend_from_slice(&0u32.to_be_bytes());
     tcp.push(5 << 4);
-    tcp.push(0x10); // ACK
+    tcp.push(flags);
     tcp.extend_from_slice(&64u16.to_be_bytes());
     tcp.extend_from_slice(&0u16.to_be_bytes());
     tcp.extend_from_slice(&0u16.to_be_bytes());
@@ -328,6 +342,56 @@ fn tcp_segment(
         eth.push(0);
     }
     eth
+}
+
+/// A capture of one TCP connection, `10.0.0.1:40000` to `10.0.0.2:7447`: its
+/// three-way handshake, then each `(from_low, payload)` in order, each
+/// direction's bytes numbered on from its SYN.
+#[cfg(test)]
+pub(crate) fn tcp_connection_capture(payloads: &[(bool, &[u8])]) -> Vec<u8> {
+    const SPORT: u16 = 40_000;
+    const DPORT: u16 = 7447;
+    let (mut low_seq, mut high_seq) = (1_000u32, 5_000u32);
+    let mut packets = alloc::vec![
+        tcp_segment_flagged(LOW, SPORT, HIGH, DPORT, low_seq, 0x02, &[]),
+        tcp_segment_flagged(HIGH, DPORT, LOW, SPORT, high_seq, 0x12, &[]),
+    ];
+    low_seq += 1;
+    high_seq += 1;
+    packets.push(tcp_segment(LOW, SPORT, HIGH, DPORT, low_seq, &[]));
+    for (from_low, payload) in payloads {
+        if *from_low {
+            packets.push(tcp_segment(LOW, SPORT, HIGH, DPORT, low_seq, payload));
+            low_seq += payload.len() as u32;
+        } else {
+            packets.push(tcp_segment(HIGH, DPORT, LOW, SPORT, high_seq, payload));
+            high_seq += payload.len() as u32;
+        }
+    }
+    pcap_of(&packets)
+}
+
+/// An Ethernet pcap of `packets`, the `i`th at 1 s and `i` microseconds.
+#[cfg(test)]
+pub(crate) fn pcap_of(packets: &[Vec<u8>]) -> Vec<u8> {
+    let refs: Vec<(u32, u32, &[u8])> = packets
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (1u32, i as u32, p.as_slice()))
+        .collect();
+    crate::pcap::write(crate::link::LINKTYPE_ETHERNET, &refs)
+}
+
+/// One UDP datagram in an Ethernet frame.
+#[cfg(test)]
+pub(crate) fn udp_datagram(
+    src: [u8; 4],
+    sport: u16,
+    dst: [u8; 4],
+    dport: u16,
+    payload: &[u8],
+) -> Vec<u8> {
+    udp_packet(src, sport, dst, dport, payload)
 }
 
 /// One message of a TCP stream: the two-byte little-endian length zenoh puts in

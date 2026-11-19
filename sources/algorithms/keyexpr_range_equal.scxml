@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  Whether a[a_start..a_end] and b[b_start..b_end] are the same bytes. Offsets
+  outside their text, or a start past its end, are not equal. The two cursors
+  walk together, so no length is subtracted.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="keyexpr_range_equal"
+       version="1.0">
+  <sce:signature>
+    <sce:param name="a" type="bytes"/>
+    <sce:param name="a_start" type="uint32"/>
+    <sce:param name="a_end" type="uint32"/>
+    <sce:param name="b" type="bytes"/>
+    <sce:param name="b_start" type="uint32"/>
+    <sce:param name="b_end" type="uint32"/>
+    <sce:return type="bool"/>
+  </sce:signature>
+  <sce:body>
+    <sce:if cond="a_end &gt; len(a)">
+      <sce:return expr="false"/>
+    </sce:if>
+    <sce:if cond="b_end &gt; len(b)">
+      <sce:return expr="false"/>
+    </sce:if>
+    <sce:var name="i" type="uint32" init="a_start"/>
+    <sce:var name="j" type="uint32" init="b_start"/>
+    <sce:while cond="i &lt; a_end &amp;&amp; j &lt; b_end">
+      <sce:if cond="a[i] !== b[j]">
+        <sce:return expr="false"/>
+      </sce:if>
+      <sce:assign target="i" expr="i + 1"/>
+      <sce:assign target="j" expr="j + 1"/>
+    </sce:while>
+    <sce:return expr="i === a_end &amp;&amp; j === b_end"/>
+  </sce:body>
+</scxml>

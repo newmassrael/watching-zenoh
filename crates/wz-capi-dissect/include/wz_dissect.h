@@ -1272,7 +1272,15 @@
  * date after 1900, and an id and a sequence number are wire values); to the
  * `initial_sn` of a flow's `halves` (a key that exists from field document 70
  * and takes the rule from its first appearance: a ring origin is as wide as
- * the session's ring); to every integer of a
+ * the session's ring); to the instants of a flow's `tcp` (`start_ns`,
+ * `end_ns`, `last_ack_ns` and an event's `at_ns`, keys that exist from field
+ * document 78 and take the rule from their first appearance: nanoseconds since
+ * 1970 are past the line); to the instants of a flow's `handshake` (a
+ * WebSocket control frame's `at_ns`, a key that exists there from field
+ * document 79 and takes the rule from its first appearance, for the same
+ * reason); to the instants of the document's `dns` (`query_ns` and
+ * `answer_ns`, keys that exist from field document 80, for the same reason);
+ * to every integer of a
  * record's `segment` in the values document (that document takes the rule from
  * its revision 2, where the key arrives: the same header fields); and to
  * `oldest_ts_ns` in the retention document. It does NOT apply to counts,
@@ -1777,7 +1785,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":77,"key":"kind","values":[...],
+ *     {"name":"fields","revision":80,"key":"kind","values":[...],
  *      "carries":[{"word":"bits",
  *                  "shapes":[["end","name","selector_path","start","value"]]},
  *                 {"word":"opaque",
@@ -1810,11 +1818,15 @@
  * @carries census offset_space passenger
  * @carries census sender_end passenger
  * @carries fields announced_version passenger
+ * @carries fields answer passenger
  * @carries fields basis passenger
  * @carries fields batch_header passenger
  * @carries fields body passenger
  * @carries fields carried_state discriminant
  * @carries fields check passenger
+ * @carries fields client passenger
+ * @carries fields completed passenger
+ * @carries fields control passenger
  * @carries fields counter_reason passenger
  * @carries fields direction passenger
  * @carries fields displaced passenger
@@ -1837,9 +1849,12 @@
  * @carries fields place passenger
  * @carries fields priority passenger
  * @carries fields q_basis passenger
+ * @carries fields qtype passenger
+ * @carries fields rcode passenger
  * @carries fields reason passenger
  * @carries fields recognized_by passenger
  * @carries fields request_kind passenger
+ * @carries fields retransmit passenger
  * @carries fields selected passenger
  * @carries fields size_verdict passenger
  * @carries fields span_of passenger
@@ -3183,6 +3198,153 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  *
  * @values fields unreachable
  * @values fields what
+ *
+ * WHETHER A NAME RESOLVED (field-document revision 80, row_facts 20). The
+ * document carries, after `capture_interfaces`, `dns`: every A, AAAA and SRV
+ * question asked by a UDP datagram on port 53 (DNS) or 5353 (multicast DNS),
+ * in the order first sent, with what answered it. An endpoint named by host
+ * is looked up before any session; when the name does not resolve no SYN
+ * follows, and this is the only place the capture says why.
+ *
+ *   "dns":{"queries":[{"name":"router.lan","qtype":"a","mdns":false,
+ *                      "asker":{"addr":"10.0.0.1","port":40001},
+ *                      "server":{"addr":"10.0.0.53","port":53},
+ *                      "query_packet":0,"query_ns":T,"sent":1,
+ *                      "answered":true,"answer_packet":1,"answer_ns":T,
+ *                      "rcode":"nxdomain","rcode_number":3,"addresses":[],
+ *                      "addresses_more":0}],
+ *          "more":0,"unmatched_answers":0}
+ *
+ * `qtype` is `a`, `aaaa` or `srv`; other questions are not read. `sent` counts
+ * the query and its resends (the same id, endpoints and question).
+ * `answered` is `false`, with `answer_packet`, `answer_ns`, `rcode` and
+ * `rcode_number` `null`, when no response came: no answer, not an error.
+ * `rcode` is `noerror`, `formerr`, `servfail`, `nxdomain`, `notimp`,
+ * `refused` or `other`, its number beside it. A DNS response answers the
+ * query of its id sent from the endpoint it is addressed to; a multicast DNS
+ * response, addressed to the group, answers the oldest unanswered multicast
+ * query whose name and type one of its records names.
+ *
+ * `addresses` are the response's records about the name and about the
+ * targets of its SRV records: an A or AAAA record's `addr` (`target` and
+ * `port` `null`), an SRV record's `target` and `port` (`addr` `null`), each
+ * with `ttl_s`. `connected` is, for an address, the first TCP SYN the capture
+ * holds to it (and to the SRV record's port, when the question was SRV) sent
+ * after the answer, as `syn_packet` and `port`; `null` when there was none.
+ * The first 16 records, `addresses_more` past them; the first 256 queries,
+ * `more` past them; `unmatched_answers` counts the responses that answered no
+ * query the capture held. DNS over TCP is not read. The datagrams on those
+ * ports also take the path every UDP datagram takes.
+ *
+ * @values fields qtype
+ * @values fields rcode
+ *
+ * WHAT A HANDSHAKE SAID (field-document revision 79, row_facts 19). Every flow
+ * object carries, after `tcp`, `handshake`: `null` for a flow that carried no
+ * TLS, WebSocket or QUIC, and otherwise an object whose three members are each
+ * `null` but the one the flow carried:
+ *
+ *   "handshake":{"tls":{"sni":"router.local","version":771,"client":"a",
+ *                       "completed":"no",
+ *                       "alerts":[{"direction":"a","level":2,
+ *                                  "description":48}],"alerts_more":0,
+ *                       "certificate":{"subject":"CN=router,O=Acme",
+ *                                      "issuer":"CN=Acme CA",
+ *                                      "not_before":"2026-01-01T00:00:00Z",
+ *                                      "not_after":"2027-01-01T00:00:00Z"}},
+ *                "websocket":null,"quic":null}
+ *
+ * TLS: `sni` the server name the ClientHello asked for; `version` the number
+ * the ServerHello chose (771 is TLS 1.2, 772 TLS 1.3, from its
+ * `supported_versions` when it carries one); `client` the direction of the
+ * ClientHello; `completed` `yes` when application data flowed both ways after
+ * the handshake, `no` when a fatal alert was read, `undecided` otherwise
+ * (and for a capture without the ServerHello). `alerts` each with the
+ * `direction` that sent it, its `level` (1 warning, 2 fatal) and its
+ * `description`, the alert number (RFC 8446 section 6: a client that does not
+ * trust the server's CA sends 48 `unknown_ca` or 42 `bad_certificate`); the
+ * first 8, `alerts_more` past them. `certificate` the server's first
+ * certificate: its `subject` and `issuer` as `KEY=value` pairs in the order
+ * the certificate writes them (CN, O, OU, C, ST, L by name, any other
+ * attribute by its dotted OID), its validity as `YYYY-MM-DDTHH:MM:SSZ`; `null`
+ * when it was not read. Under TLS 1.2 these are all in the clear. TLS 1.3
+ * encrypts its certificate and every alert after the ServerHello: they are
+ * read only out of the records a key log opened (`wz_dissect_set_keylog`), so
+ * without one a TLS 1.3 refusal reads `completed` `undecided` and no alert.
+ *
+ * WebSocket: `halves`, one per direction, `a` then `b`, each with
+ * `opening_seen` whether its HTTP opening was in the capture, `status` the
+ * response's status code (`null` for the request's half), `subprotocols` the
+ * `Sec-WebSocket-Protocol` values in order (what the request offered, what
+ * the response chose), and `controls` its Ping and Pong frames, each with its
+ * `control` word (`ping` or `pong`), the `packet` that carried its first byte
+ * and that packet's `at_ns`; the first 64, `more` past them. `client` is a
+ * direction word, `a` or `b`, as `direction` is.
+ *
+ * QUIC: `client` the direction of the first Initial; `answered` whether the
+ * other direction sent a packet after it; `initial_resends` how many more
+ * Initials the client sent before that answer (in all, when none came). Why a
+ * QUIC connection closed is inside its protected packets and is not read.
+ *
+ * @values fields completed
+ * @values fields client
+ * @values fields control
+ *
+ * WHAT A TCP CONNECTION DID (field-document revision 78, row_facts 18). Every
+ * flow object carries, after `network`, `tcp`: `null` for a flow that is not
+ * TCP, and otherwise
+ *
+ *   "tcp":{"attempts":[{"syn_packet":0,"syns":1,"syn_gaps_ns":[],
+ *                       "answer":"syn_ack","answer_packet":1,
+ *                       "syn_to_answer_ns":180000,"answer_to_ack_ns":40000,
+ *                       "port_reuse":false}],"attempts_more":0,
+ *          "halves":[{"direction":"a","window_scale":7,"mss":1460,
+ *                     "zero_window":{"spans":[{"start_packet":9,"start_ns":T,
+ *                                              "end_packet":12,"end_ns":T}],
+ *                                    "count":1},
+ *                     "window_full":0,"dup_acks":0,"last_ack_ns":T,
+ *                     "retransmits":{"timeout":0,"fast":0,"spurious":0,
+ *                                    "events":[{"retransmit":"fast",
+ *                                               "packet":15,"at_ns":T}]},
+ *                     "ack_gap_ns":{"samples":1,"median":40000000,
+ *                                   "max":40000000},"more":0},
+ *                    {"direction":"b",...}]}
+ *
+ * Each ATTEMPT to connect: `syn_packet` its first SYN, `syns` how many it took
+ * and `syn_gaps_ns` the gaps between them (the first eight); `answer` is
+ * `syn_ack`, `rst` (no listener, or a filter) or `none` (nothing the capture
+ * saw), with its `answer_packet`; `syn_to_answer_ns` from the last SYN to the
+ * answer and `answer_to_ack_ns` from the SYN/ACK to the opener's ACK, both at
+ * the tap: a tap beside the opener shows the round trip in the first and
+ * almost nothing in the second, one beside the acceptor the reverse.
+ * `port_reuse` marks an attempt on a four-tuple an earlier attempt of the
+ * capture used (a new SYN of another initial sequence number). Eight
+ * attempts are listed; `attempts_more` counts the rest.
+ *
+ * Each DIRECTION: `window_scale` the shift its windows are read under (its
+ * SYN's Window Scale when both SYNs offered one, 0 when either did not) and
+ * `null` when a SYN was not seen, `window_full` then `null` too ("unstated",
+ * not zero): otherwise the data segments that reached the edge of the window
+ * the peer last advertised. `mss` its SYN's. `zero_window` the spans from a
+ * segment advertising a window of 0 to the next advertising more (`end_*`
+ * `null` while it stayed 0) and their `count`. `dup_acks` the segments with no
+ * data and no SYN, FIN or RST that repeated the previous acknowledgement and
+ * window while the peer had data outstanding. `last_ack_ns` the last
+ * acknowledgement. `retransmits` by kind, as Wireshark's TCP analysis draws
+ * them: `spurious` when the peer had already acknowledged the data, `fast`
+ * when the peer sent two or more duplicate acknowledgements of its start, the
+ * last within 20 ms, `timeout` otherwise; a keep-alive is none of them. Its
+ * `events` list each with its `packet` and `at_ns`. `ack_gap_ns` the gap from
+ * a small segment (shorter than the receiver's stated MSS, 536 without its
+ * SYN) to the acknowledgement covering it, over `samples`: Nagle's algorithm
+ * meeting a delayed acknowledgement shows as gaps near 40 or 200 ms. `more`
+ * counts the events and spans past the lists' bound of 64. Instants are the
+ * capture's nanoseconds, `null` for a packet with no clock. A connection that
+ * never got its SYN/ACK has no zenoh session and so no session-table row; its
+ * flow object here is where it is.
+ *
+ * @values fields answer
+ * @values fields retransmit
  *
  * WHAT THE IP HEADERS AND THE FRAMES SAID (field-document revision 77,
  * row_facts 17). Every flow object carries, after `icmp_errors`, one entry per
@@ -6347,7 +6509,7 @@ int wz_dissect_transport_layout_e2e(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":77,"key":"state",
+ *     "value_families":[{"name":"fields","revision":80,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
@@ -8086,11 +8248,15 @@ int wz_dissect_live_field_values_since_window(wz_dissect_live *h,
  * document. `h` is not const, for wz_dissect_live_fields_since's reason.
  *
  * @values row_facts announced_version
+ * @values row_facts answer
  * @values row_facts basis
  * @values row_facts batch_header
  * @values row_facts body
  * @values row_facts carried_state
  * @values row_facts check
+ * @values row_facts client
+ * @values row_facts completed
+ * @values row_facts control
  * @values row_facts counter_reason
  * @values row_facts direction
  * @values row_facts displaced
@@ -8112,9 +8278,12 @@ int wz_dissect_live_field_values_since_window(wz_dissect_live *h,
  * @values row_facts place
  * @values row_facts priority
  * @values row_facts q_basis
+ * @values row_facts qtype
+ * @values row_facts rcode
  * @values row_facts reason
  * @values row_facts recognized_by
  * @values row_facts request_kind
+ * @values row_facts retransmit
  * @values row_facts selected
  * @values row_facts size_verdict
  * @values row_facts span_of
@@ -8131,11 +8300,15 @@ int wz_dissect_live_field_values_since_window(wz_dissect_live *h,
  * @values row_facts wrong
  * @values row_facts zenoh
  * @carries row_facts announced_version passenger
+ * @carries row_facts answer passenger
  * @carries row_facts basis passenger
  * @carries row_facts batch_header passenger
  * @carries row_facts body passenger
  * @carries row_facts carried_state discriminant
  * @carries row_facts check passenger
+ * @carries row_facts client passenger
+ * @carries row_facts completed passenger
+ * @carries row_facts control passenger
  * @carries row_facts counter_reason passenger
  * @carries row_facts direction passenger
  * @carries row_facts displaced passenger
@@ -8157,9 +8330,12 @@ int wz_dissect_live_field_values_since_window(wz_dissect_live *h,
  * @carries row_facts place passenger
  * @carries row_facts priority passenger
  * @carries row_facts q_basis passenger
+ * @carries row_facts qtype passenger
+ * @carries row_facts rcode passenger
  * @carries row_facts reason passenger
  * @carries row_facts recognized_by passenger
  * @carries row_facts request_kind passenger
+ * @carries row_facts retransmit passenger
  * @carries row_facts selected passenger
  * @carries row_facts size_verdict passenger
  * @carries row_facts span_of passenger

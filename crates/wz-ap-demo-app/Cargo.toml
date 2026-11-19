@@ -40,7 +40,7 @@ default = ["alloc"]
 alloc = ["sce-forge-runtime/alloc"]
 
 [dependencies]
-# keyexpr_pattern_matches (un-gated) — the generated dispatch's matcher.
+# keyexpr_matches (un-gated) — the generated dispatch's matcher.
 # `switchboard` brings the AP dynamic SwitchboardRegistry + the EventInjector
 # port the generated SensorMonitorInjector impls (alloc is on by default).
 wz-session-core = { path = "../wz-session-core", features = ["switchboard"] }
