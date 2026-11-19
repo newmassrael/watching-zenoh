@@ -641,6 +641,42 @@ config WZ_POLICY_SUPERVISION_AFTER_EXPIRY_ALLOWS_REARM
 	  Whether `rearm` stays selectable after the build; the chosen default always does.
 	  A target with no operating system keeps only the default unless this is set here.
 
+choice WZ_POLICY_E2E_SUPERVISION_NOTIFY
+	prompt "e2e-supervision-notify"
+	default WZ_POLICY_E2E_SUPERVISION_NOTIFY_STATUS_ONLY
+	help
+	  What a reception supervisor tells the application when a stream stops
+	  arriving. `status-only` tells the stream, its sender and the error counts, and
+	  keeps no payload. `last-value` also hands back the payload the stream last
+	  carried, which the supervisor keeps in a cell of the application's storage per
+	  stream, for an application that delivers a value with every loss as it does
+	  with every sample. Decided when the supervisor is made, and fixed for its life.
+	  Upstream: Supervises no stream's reception: a periodic message that stops
+	  arriving is not noticed by the library, so there is no loss to tell and no
+	  value to tell it with.
+
+config WZ_POLICY_E2E_SUPERVISION_NOTIFY_STATUS_ONLY
+	bool "status-only"
+
+config WZ_POLICY_E2E_SUPERVISION_NOTIFY_LAST_VALUE
+	bool "last-value"
+
+endchoice
+
+config WZ_POLICY_E2E_SUPERVISION_NOTIFY_ALLOWS_STATUS_ONLY
+	bool "e2e-supervision-notify allows status-only" if !WZ_POLICY_E2E_SUPERVISION_NOTIFY_STATUS_ONLY
+	default y
+	help
+	  Whether `status-only` stays selectable after the build; the chosen default always does.
+	  A target with no operating system keeps only the default unless this is set here.
+
+config WZ_POLICY_E2E_SUPERVISION_NOTIFY_ALLOWS_LAST_VALUE
+	bool "e2e-supervision-notify allows last-value" if !WZ_POLICY_E2E_SUPERVISION_NOTIFY_LAST_VALUE
+	default y
+	help
+	  Whether `last-value` stays selectable after the build; the chosen default always does.
+	  A target with no operating system keeps only the default unless this is set here.
+
 choice WZ_POLICY_EVENT_RING_FULL
 	prompt "event-ring-full"
 	default WZ_POLICY_EVENT_RING_FULL_OVERWRITE_OLDEST

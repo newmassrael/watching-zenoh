@@ -322,6 +322,48 @@ impl Default for SupervisionAfterExpiry {
     }
 }
 
+/// `e2e-supervision-notify`: What a reception supervisor tells the application when a
+/// stream stops arriving. `status-only` tells the stream, its sender and the error counts,
+/// and keeps no payload. `last-value` also hands back the payload the stream last carried,
+/// which the supervisor keeps in a cell of the application's storage per stream, for an
+/// application that delivers a value with every loss as it does with every sample. Decided
+/// when the supervisor is made, and fixed for its life.
+/// Upstream: Supervises no stream's reception: a periodic message that stops arriving is
+/// not noticed by the library, so there is no loss to tell and no value to tell it with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum E2eSupervisionNotify {
+    /// `status-only`.
+    StatusOnly,
+    /// `last-value`.
+    LastValue,
+}
+
+impl E2eSupervisionNotify {
+    /// The value as the declaration, the Kconfig and the environment spell it.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::StatusOnly => "status-only",
+            Self::LastValue => "last-value",
+        }
+    }
+
+    const CHOICES: [&str; 2] = ["status-only", "last-value"];
+    const ALL: [Self; 2] = [Self::StatusOnly, Self::LastValue];
+
+    const fn stated() -> Self {
+        let stated = option_env!("WZ_POLICY_E2E_SUPERVISION_NOTIFY");
+        let index = policy_choice(stated, &Self::CHOICES, 0);
+        Self::ALL[index]
+    }
+}
+
+impl Default for E2eSupervisionNotify {
+    /// The build default; a machine reads the value of the snapshot it is handed instead.
+    fn default() -> Self {
+        Self::stated()
+    }
+}
+
 /// `event-ring-full`: Which event a full event ring gives up. `overwrite-oldest` writes the
 /// new event over the oldest, so the ring always holds the latest: it is what a post-mortem
 /// wants, and needs no reader at all. `drop-newest` refuses the new event and counts the
@@ -674,6 +716,10 @@ pub struct SessionPolicy {
     /// making progress is not noticed by the library, so there is no expiry and nothing for
     /// a later feed to do.
     supervision_after_expiry: SupervisionAfterExpiryBound,
+    /// `e2e-supervision-notify`. Upstream: Supervises no stream's reception: a periodic
+    /// message that stops arriving is not noticed by the library, so there is no loss to
+    /// tell and no value to tell it with.
+    e2e_supervision_notify: E2eSupervisionNotifyBound,
     /// `event-ring-full`. Upstream: Keeps no record of the events a node has: a log call
     /// with no logger installed is dropped, so neither the oldest nor the newest of them
     /// survives.
@@ -725,6 +771,7 @@ impl SessionPolicy {
             key_set: Bound::build_default(),
             sn_resolution: Bound::build_default(),
             supervision_after_expiry: Bound::build_default(),
+            e2e_supervision_notify: Bound::build_default(),
             event_ring_full: Bound::build_default(),
             clock_quality_stamping: Bound::build_default(),
             routing_face_drive: Bound::build_default(),
@@ -972,6 +1019,20 @@ impl SessionPolicy {
         value: SupervisionAfterExpiry,
     ) -> Result<(), OutsideDomain<SupervisionAfterExpiry>> {
         self.supervision_after_expiry = Bound::select(value)?;
+        Ok(())
+    }
+
+    /// `e2e-supervision-notify` as this snapshot holds it.
+    pub const fn e2e_supervision_notify(&self) -> E2eSupervisionNotify {
+        self.e2e_supervision_notify.get()
+    }
+
+    /// Selects `e2e-supervision-notify`, when the build's domain holds `value`.
+    pub fn select_e2e_supervision_notify(
+        &mut self,
+        value: E2eSupervisionNotify,
+    ) -> Result<(), OutsideDomain<E2eSupervisionNotify>> {
+        self.e2e_supervision_notify = Bound::select(value)?;
         Ok(())
     }
 
@@ -2403,6 +2464,48 @@ impl PolicyField for SupervisionAfterExpiry {
     }
 }
 
+/// How `e2e-supervision-notify` is held: in no byte when its domain is one value.
+type E2eSupervisionNotifyBound = Bound<E2eSupervisionNotify, { E2eSupervisionNotify::HELD }>;
+
+impl PolicyValue for E2eSupervisionNotify {
+    const POLICY: &'static str = "e2e-supervision-notify";
+    const ALL: &'static [Self] = &[Self::StatusOnly, Self::LastValue];
+    const IDS: &'static [&'static str] = &["status-only", "last-value"];
+    const DOMAIN: Domain<Self> = Domain::from_stated(
+        &[
+            option_env!("WZ_POLICY_E2E_SUPERVISION_NOTIFY_ALLOWS_STATUS_ONLY"),
+            option_env!("WZ_POLICY_E2E_SUPERVISION_NOTIFY_ALLOWS_LAST_VALUE"),
+        ],
+        Self::DEFAULT as usize,
+        DEFAULTS_ONLY,
+    );
+    const DEFAULT: Self = Self::stated();
+    const SCOPE: Scope = Scope::Runtime;
+    const BINDING: Binding = Binding::Open;
+    const MUTABILITY: Mutability = Mutability::Fixed;
+    const WIRE: Wire = Wire::None;
+    const BOUNDARY: Option<&'static str> = None;
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+const _: () = assert!(
+    default_is_allowed::<E2eSupervisionNotify>(E2eSupervisionNotify::DEFAULT as usize),
+    "the default of e2e-supervision-notify is outside its WZ_POLICY_*_ALLOWS_*"
+);
+
+impl PolicyField for E2eSupervisionNotify {
+    fn select_in(policy: &mut SessionPolicy, value: Self) -> Result<(), OutsideDomain<Self>> {
+        policy.select_e2e_supervision_notify(value)
+    }
+
+    fn held_in(policy: &SessionPolicy) -> Self {
+        policy.e2e_supervision_notify.get()
+    }
+}
+
 /// How `event-ring-full` is held: in no byte when its domain is one value.
 type EventRingFullBound = Bound<EventRingFull, { EventRingFull::HELD }>;
 
@@ -2658,7 +2761,7 @@ impl PolicyField for LinkTieOrder {
 
 /// How many policies the declaration states: the length of [`POLICIES`] and of every table kept
 /// per policy.
-pub const POLICY_COUNT: usize = 23;
+pub const POLICY_COUNT: usize = 24;
 
 /// Every policy as a reader that names it by its id sees it, in the order of the fields of
 /// [`SessionPolicy`].
@@ -2680,6 +2783,7 @@ pub static POLICIES: [PolicyEntry; POLICY_COUNT] = [
     PolicyEntry::of::<KeySet>(),
     PolicyEntry::of::<SnResolution>(),
     PolicyEntry::of::<SupervisionAfterExpiry>(),
+    PolicyEntry::of::<E2eSupervisionNotify>(),
     PolicyEntry::of::<EventRingFull>(),
     PolicyEntry::of::<ClockQualityStamping>(),
     PolicyEntry::of::<RoutingFaceDrive>(),
@@ -2712,6 +2816,7 @@ const PROFILE_UPSTREAM: Profile = Profile {
         Statement::new("key-set", "open"),
         Statement::new("sn-resolution", "bits-32"),
         Statement::new("supervision-after-expiry", "latch"),
+        Statement::new("e2e-supervision-notify", "status-only"),
         Statement::new("event-ring-full", "overwrite-oldest"),
         Statement::new("clock-quality-stamping", "always"),
         Statement::new("routing-face-drive", "task-per-face"),
