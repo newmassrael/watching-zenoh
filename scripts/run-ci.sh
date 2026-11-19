@@ -2368,6 +2368,14 @@ layer_c0_test_discipline() {
     # checkout is in Layer Z, which provisions one.
     _runci_leg family_notice_gate.selftest -- python3 scripts/lib/family_notice_gate.py --selftest
     _runci_leg family_notice_gate --after family_notice_gate.selftest -- python3 scripts/lib/family_notice_gate.py --check
+    # The logic census's COVERAGE gate. `docs/zenoh-logic-as-sce-kinds.md` classifies the
+    # hand-written protocol logic slice by slice, and its first six slices were scoped by hand:
+    # the cooperative engine's C ABI, the MCU network stacks and more were outside it with
+    # nothing saying so. Every tracked crate must have a row in the census's crate table, read
+    # by a slice that names it or excluded with a kind and a reason. Enforcement MEASURED by
+    # deleting one row of the real table.
+    _runci_leg logic_census_coverage_gate.selftest -- python3 scripts/lib/logic_census_coverage_gate.py --selftest
+    _runci_leg logic_census_coverage_gate --after logic_census_coverage_gate.selftest -- python3 scripts/lib/logic_census_coverage_gate.py --check
     # R311y621 (§7.14) — the SOLO-PLANE-PAGE gate. R311y618 severed one leg of
     # `CaptureReport::is_complete` and all 229 tests stayed green: the pages
     # that should have caught it attached TWO planes, and the other plane
@@ -7843,7 +7851,8 @@ layer_c1ay_cargo_test_router_hat() {
     # 388 -> 389, counted from the source: the late peer of a router told no token until it asks.
     # 389 -> 390, counted from the source: a router's peer told a later token for its interest.
     # 390 -> 399: the five, the one and the three (token tables) of the first guard's note.
-    _runci_guarded_test "C1AY router_forward 401" 401 \
+    # 401 -> 402, printed on the build host: a peer node's liveliness subscriber asks its routers.
+    _runci_guarded_test "C1AY router_forward 402" 402 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables --lib router_forward --quiet || return 1
     # R2415 — 146 -> 140. NOT this round's tests: `d7cd078f` re-gated the mcast
     # egress plane from `transport-multicast` onto `router-multicast-faces`, so six
@@ -13627,8 +13636,9 @@ layer_c1m_session_lwip() {
     _runci_guarded_test "C1m mcu slot node" 32 \
         cargo test -p wz-session-mcu --features client-slot --lib slot_node --quiet || return 1
     # The same tests of a node built with `declare-token`: the number is the same, and what two of
-    # them assert is the other half (a token is declared, and is not refused).
-    _runci_guarded_test "C1m mcu slot node with tokens" 31 \
+    # them assert is the other half (a token is declared, and is not refused). 31 -> 32: Round
+    # 4521's snapshot test, as the first arm; hosted run 44572424670 printed 32.
+    _runci_guarded_test "C1m mcu slot node with tokens" 32 \
         cargo test -p wz-session-mcu --features client-slot,declare-token --lib slot_node --quiet || return 1
     # The same tests of a node that binds the lifecycle verbs in band (`client-verbs`, what a
     # declaration that names a commander builds), and one more: the verbs are declared under the

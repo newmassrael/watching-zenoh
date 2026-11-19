@@ -5408,6 +5408,82 @@
       "carry_forward_bullets": [
         "The C program over the program transport is not yet a Linux lane (there is no Linux C-program job in the Platform workflow) and runs observed on macOS and Windows until two green runs. The cooperative engine's pico open has no group join and no datagram listen, so its program transport carries streams and dialled datagrams only. The pico preset ends a handshake that receives a message out of its step without a Close and, at the opener's OpenAck step, does not end it at all; wz's `fail` follows zenoh's Close(INVALID). The `wz/key-ids` member of a config document and the per-link form in the document wait for the runtime-configuration document reader. The per-handle, per-stream and dictionary tables are sans-I/O Rust until SCE's keyed table (ADR 0108) reaches the pin."
       ]
+    },
+    "Round 4542": {
+      "decision_summary": "The logic census (`docs/zenoh-logic-as-sce-kinds.md`) left out whole crates with nothing saying so, among them the C ABI the zenoh-pico preset's C build reaches first. The owner has since ruled that all protocol logic is to be in SCE documents and that the C build is the zenoh-pico preset for now. Four new slices classify what was left out: S7 the zenoh-pico preset's C ABI (`wz-capi-pico`, `wz-capi-port`, `wz-capi-coop`, `wz-capi-core`), S8 the zenoh-c preset's (`wz-capi-c`), S9 the MCU and hosted runtimes, links, network stacks, TLS and time (22 crates), and S10 the application framing, bridges, the demo and the files the first six slices did not cite. A table names a slice or an exclusion with its reason for every crate, and a new gate holds it to the tracked crates, so the question \"was anything missed\" has an answer a run gives. Section 5 now states the target structure the owner accepted and the SCE session agreed (a sans-I/O core generated for Rust and C11, parsing at the boundary, concurrency only at SCE's doors, lifecycles as explicit events, N-version testing), and the order of the SCE work the SCE session set and the owner confirmed, with the boundary binding before ADR 0100. Section 9 measures what of the SCE sources reaches C11 today.",
+      "changes_bullets": [
+        "`docs/zenoh-logic-as-sce-kinds/S7.md` to `S10.md`: 106, 73, 87 and 84 rows. Totals move from 369k to 544k lines (A 7.2k, K 82k, G 192k, S 77k, D 36k, X 149k); S10's rows for files S5 and S6 already counted are left out of the sum. On the cooperative pico path about 11.8k lines are protocol logic, 8.7k blocked, and its completion, cancel, undeclare and close rest on an `Arc` count or a `Drop` order at each place the S7 and S8 Summaries list.",
+        "`docs/zenoh-logic-as-sce-kinds.md`: section 1 (answer), 2 (the new slices, the coverage table), 3 (totals), 4 (row counts of S7 to S10; U15 a layout known only at run time, U16 a queue's run-time capacity, U17 a full queue that drops or evicts with several producers, U18 a post applied before the posting call returns; U8 withdrawn as a request; U3 narrower, since SCE accepts a bounded `bytes` field), 5 (target structure and SCE order), 7.2 (W5 in detail, W9 a race to check in zenoh-c's event listener with history, W10 a hand copy of the demo's binding rows, W11 a panic where pico returns an error), 8 (open points), 9 (C11 reach: of 123 sources the 65 codecs and 32 algorithms are emitted and none compiled; statecharts, pools, links and schemas are not emitted).",
+        "`docs/zenoh-logic-as-sce-kinds/crates.md` and `scripts/lib/logic_census_coverage_gate.py` (selftest and check), registered in `scripts/run-ci.sh` and the pre-push hook's round-fed gates."
+      ],
+      "verification_bullets": [
+        "`logic_census_coverage_gate.py --selftest` passes 15 cases, and `--check` reads 99 tracked crates: 62 read by a slice, 37 excluded with a reason. With the `wz-capi-coop` row deleted from the real table it fails naming that crate, and it passes again with the row restored. The pre-push hook's 151 round-fed static gates pass, among them the new one, the provenance lint and the prose dependency gate, and the upstream citation gate passes with resolution against the pinned checkout (53 bare, budget 53). Each slice's agent checked every `crates/...rs:N` citation of its slice against the tree (468 in S7, 348 in S8, all of S9 and S10). `validate-workspace` shows T1 orphans unchanged. Nothing was built: the round changes documents and a text-reading gate."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.a-new-kind-algorithm",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage"
+      ],
+      "carry_forward_bullets": [
+        "U15 is a decision for the owner: a deployment writes its frame profile as a codec document in its own repository, or SCE gains a kind that reads a layout at run time. U16 to U18 go to the SCE session's catalogue. W9 (zenoh-c event listener with history: a face that changes between the listing and the watch) is to be compared with upstream's order and fixed or closed. U3's rows in S1 and S4 are to be re-read now that a bounded `bytes` field is accepted. A peer session's unlanded move of protocol code into `wz-app-frame` is classified when it lands."
+      ]
+    },
+    "Round 4543": {
+      "decision_summary": "Pay the reason-pin red Round 4541 left: four files the `session-close-ingress` reason cites changed in that round (the program transport, the session policies and the shared key ids touched `session_glue.rs`, `session_open.rs`, `wz-session-core/src/drive.rs` and `session_actions.rs`), and their rows still named the blobs earlier rounds read. The reason was read again against each file at the tip; every anchor it cites still holds, so the reason is unchanged and only the four rows move.",
+      "changes_bullets": [
+        "`docs/reason-review-pins.md`: the `session-close-ingress` rows of `crates/wz-runtime-tokio/src/session_glue.rs`, `crates/wz-runtime-tokio/src/session_open.rs`, `crates/wz-session-core/src/drive.rs` and `crates/wz-session-core/src/session_actions.rs` name the blobs at Round 4541's tip."
+      ],
+      "verification_bullets": [
+        "Each anchor the reason cites in the four files read at the tip: `drive_session_until_terminal_with_extra_deadline` parks on `out_of_band_signalled` in both of its arms (`session_glue.rs`); `fn plan_endpoint` parses the locator string (`session_open.rs`); the trait default of `fn admits_open` answers `false`, and `crate::lifecycle_wire::tail_of(` and `check_out_of_band` are there (`wz-session-core/src/drive.rs`); `pub struct OutOfBand<R: SessionRuntime> {` holds the `core::task::Waker` the loop is woken by, and `out_of_band_signalled` is the link's view of it (`session_actions.rs`). `reason_review_pin_gate.py --check` passes: 55 rows."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The capability cost lane's red from Round 4541 is paid in its own round: its largest growth, the session core's whole locator parser linked into every cooperative build by the zid derivation, is fixed at its cause there before any budget moves."
+      ]
+    },
+    "Round 4544": {
+      "decision_summary": "The hosted run of the DNS round (run 44572424670) failed every lane that builds the capture crate's tests without `dissect`: C0mut, C1bn, the analyzer-crate lanes, C1cn shard 0 and C1cf, on `function every_word is never used` in dns.rs. The cause is the round's own and the two before it: the `every_word` fixtures of the TCP, TLS-handshake and DNS readers exist for the field document's vocabulary gate, which only a `dissect` build compiles, and the capture helpers the handshake and lookup capture tests use exist for tests that only a `dissect` build compiles, yet each was compiled in every test build. Each now carries the condition its only caller carries. Nothing a build emits moves.",
+      "changes_bullets": [
+        "tcp_facts, tls_handshake and dns: `every_word` is compiled with `dissect` only.",
+        "fixtures: `tcp_connection_capture`, `pcap_of` and `udp_datagram` are compiled in tests with `dissect` only."
+      ],
+      "verification_bullets": [
+        "clippy of wz-capture over every target with warnings denied, in six feature arms: no default features, the defaults, fixtures, dissect, dissect and fixtures, all features; all six pass. Before the change the fixtures arm failed on the three capture helpers and the hosted lanes on the fixtures, which is the red this round pays. fmt."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "carry_forward_bullets": [
+        "The rounds that added these fixtures ran clippy with all features only; a test fixture used by a feature-gated caller needs the arm without that feature as well."
+      ]
+    },
+    "Round 4545": {
+      "decision_summary": "Pay the Z8 liveliness red Round 4540 carried (13 of 46 since Round 4506), at its cause. Round 4506 made a router tell a peer south of it only the tokens the peer asked for, as upstream's peer hat does (`zenoh/src/net/routing/hat/peer/token.rs` @ `New south-bound peer remote; not propagating tokens`); a wz peer node did not ask. Its liveliness subscriber's interest stayed in the node's own tables, the interest a client of the node sends when it subscribes was only answered from them, and the router's withdrawal of a token the node was answered but never held, or never told, was dropped. Each now goes as upstream's: the node sends its liveliness subscriber's interest to the routers it is linked to, `Future` or `CurrentFuture` as the session's history asks, again to a router that comes up later, and a Final at its end (`zenoh/src/api/session.rs` @ `InterestMode::CurrentFuture`); a client's `Future` interest is routed to the gateways in its own mode (`zenoh/src/net/routing/hat/peer/interests.rs` @ `mode: msg.mode,`); a token a gateway answers to a client's `CurrentFuture` interest is held by the node as well as relayed (`zenoh/src/net/routing/dispatcher/token.rs` @ `if interest.mode.is_future() {`); and a withdrawal that names its key is passed on to the faces that asked although the node never held the token (the same file, `.or(res)`). The interests a node sends a router take their ids from one counter, so a publisher's and a liveliness subscriber's the session numbered alike no longer meet on the wire.",
+      "changes_bullets": [
+        "`crates/wz-runtime-tokio/src/router_forward.rs`: `OwnInterest` (`id`, `wire_id`, `keyexpr`, `plane`) replaces the `(id, keyexpr, queryables)` row, with `OwnInterestPlane::{Subscribers, Queryables, Tokens { history }}`; `hold_own_interest` and `drop_own_interest` send and end it on every router face; `ask_local_tokens(id, key, current, history)` holds a token interest on a node that asks north and `forget_local_tokens` ends it; `send_own_interest` builds a token interest as the session does (`build_interest_liveliness_subscriber`).",
+        "`RouterForwarder::interest_ids`, one counter for every interest the node sends a router or a gateway, which the broker's copies take their ids from too; `interest_broker::PendingCurrentInterests::allocate_id` is its tests' id source alone.",
+        "`crates/wz-runtime-tokio/src/router_forward/brokered_interest.rs`: `broker_future_interest` routes a client's `Future` interest to the gateways and keeps the copy for its Final; `holds_brokered_token_answer` and `OnTables::hold_answered_token` register a token answered to a `CurrentFuture` interest, unpropagated; `undeclare_token` passes a keyed withdrawal of a token the node never held to `undeclare_push_token`.",
+        "`crates/wz-session-core/src/interest_build.rs`: `build_interest_propagated_as`, the propagated builder in the downstream interest's own mode, stamping `ext_qos` as `build_interest_propagated` does.",
+        "`crates/wz-capi-core/src/drive/router_node/local_face.rs` passes the subscriber's history to `ask_local_tokens`; `scripts/run-ci.sh` C1AY router_forward with token tables 401 -> 402.",
+        "Round 4540's own reds in hosted run 44572424670: two switch door tests hold half a retry and a target of no byte `Z_EINVAL` whatever the policy, as Round 4540 made them; C1m slot node with tokens 31 -> 32 (Round 4521's snapshot test, which the lattice gate read as two equal-feature guards disagreeing).",
+        "`docs/hosted-red-acks.md`: a row for run 44572424670."
+      ],
+      "verification_bullets": [
+        "On the build host: Z8 liveliness 46 of 46 (33 at Round 4540), the cause found by tracing `test_liveliness_subget_peer_middle` (the router never received a token interest from the peer face) and `test_liveliness_subscriber_double_clientviapeer_history_before` (a withdrawal by an id the peer never held); bisection of Round 4506 placed the red on `48b4c61dc` (3) and `cba059eed` (13).",
+        "`router_forward` with the router hat 340, with token tables 402 (the new `a_peer_nodes_liveliness_subscriber_asks_its_routers_for_tokens` among them), with the interest broker 354; `interest_broker` 8; `interest_build` 10; `local_face` 13; clippy `-D warnings` of wz-runtime-tokio (all features and its default lib), wz-capi-core and wz-session-core; `router_interest_qos_gate.py` (8 router-plane calls, all through a stamping builder).",
+        "The Z8 layer: every other file at its expectation but `routing` (7 of 8, carried); the guarded count gate over the range, 88 guards measured, the one it moved here.",
+        "The switch door tests of wz-capi-c with `switch-doors`, 16 of 16 with the four policies off and with them on; the guarded count gate over this round's range (30 guards measured) and the guarded count lattice gate.",
+        "Locally: reason and store citations, upstream citation anchors, count guard lint, prose name gate, `cargo fmt --check`."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "Z8 routing 7 of 8, red since Round 4506 for the same cause: `three_node_combination`'s recipe of a router, a client holding a token and a peer that gets the tokens alive times out (`zenoh/tests/routing.rs` @ `async fn three_node_combination(`). A node's liveliness get reads the node's own tables alone (`crates/wz-capi-core/src/drive/router_node/engine.rs` @ `fn liveliness_get_on_wire(`), and a router no longer tells a peer below it a token unasked; upstream's peer hat sends its session's `Current` interest to one gateway (`zenoh/src/net/routing/hat/peer/interests.rs` @ `if msg.mode == InterestMode::Current {`). Paid in the next round: the get asks a router, its answers reach the get, and the router's Final ends it.",
+        "C1cc init-queue leg, open-debt item 952, carried as Round 4540 states."
+      ]
     }
   },
   "inventory_entries": {
