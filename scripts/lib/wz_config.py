@@ -2208,21 +2208,41 @@ def _refuses_text(text: str) -> bool:
     return False
 
 
+class RustWords(str):
+    """A `&[<word>, ...]` slice literal that also keeps its items, so a layout that puts it on a
+    line of its own can break it one item a line where rustfmt would."""
+
+    items: list[str]
+
+    def __new__(cls, items: list[str]) -> "RustWords":
+        out = super().__new__(cls, "&[" + ", ".join(items) + "]")
+        out.items = items
+        return out
+
+
 def rust_tuple_rows(rows: list[list[str]]) -> list[str]:
     """Array rows of tuples, each laid out as rustfmt lays it out: on one line when its elements
-    fit the call width, else one element a line."""
+    fit the call width, else one element a line, and an element that is a slice of words
+    ([`RustWords`]) one item a line when it does not fit rustfmt's array width or the line."""
     out: list[str] = []
     for parts in rows:
         inner = ", ".join(parts)
         if len(inner) <= RUST_FN_CALL_WIDTH and len(f"    ({inner}),") <= RUST_MAX_WIDTH:
             out.append(f"    ({inner}),")
-        else:
-            out += ["    ("] + [f"        {p}," for p in parts] + ["    ),"]
+            continue
+        out.append("    (")
+        for p in parts:
+            if isinstance(p, RustWords) and (len(", ".join(p.items)) > RUST_ARRAY_WIDTH
+                                              or len(f"        {p},") > RUST_MAX_WIDTH):
+                out += ["        &["] + [f"            {item}," for item in p.items] + ["        ],"]
+            else:
+                out.append(f"        {p},")
+        out.append("    ),")
     return out
 
 
-def rust_word_list(words: list[str]) -> str:
-    return "&[" + ", ".join(rust_word(w) for w in words) + "]"
+def rust_word_list(words: list[str]) -> RustWords:
+    return RustWords([rust_word(w) for w in words])
 
 
 def emit_rust_conformance_items(decl: dict) -> str:
@@ -2606,10 +2626,11 @@ def emit_rust_policies(decl: dict) -> str:
                 "    pub const fn id(self) -> &'static str {", "        match self {"]
         out += [f'            Self::{camel(v)} => "{v}",' for v in values]
         out += ["        }", "    }", ""]
-        ids = ", ".join(f'"{v}"' for v in values)
-        variants = ", ".join(f"Self::{camel(v)}" for v in values)
-        out += [f"    const CHOICES: [&str; {len(values)}] = [{ids}];",
-                f"    const ALL: [Self; {len(values)}] = [{variants}];", "",
+        out += rust_static_array(f"const CHOICES: [&str; {len(values)}] =",
+                                 [f'"{v}"' for v in values], "    ")
+        out += rust_static_array(f"const ALL: [Self; {len(values)}] =",
+                                 [f"Self::{camel(v)}" for v in values], "    ")
+        out += ["",
                 "    const fn stated() -> Self {",
                 f'        let stated = option_env!("{pol["kconfig"]}");',
                 f"        let index = policy_choice(stated, &Self::CHOICES, {values.index(pol['default'])});",
@@ -2657,14 +2678,15 @@ def emit_rust_policies(decl: dict) -> str:
     return "\n".join(out) + "\n"
 
 
-def rust_static_array(head: str, items: list[str]) -> list[str]:
-    """`<head> [<items>];` at the top level, as rustfmt lays it out: on one line when the items fit
-    its array width and the line fits, else one item a line."""
+def rust_static_array(head: str, items: list[str], indent: str = "") -> list[str]:
+    """`<head> [<items>];` at the depth `indent` gives (the top level when it is empty), as rustfmt
+    lays it out: on one line when the items fit its array width and the line fits, else one item a
+    line."""
     inner = ", ".join(items)
-    one = f"{head} [{inner}];"
+    one = f"{indent}{head} [{inner}];"
     if len(inner) <= RUST_ARRAY_WIDTH and len(one) <= RUST_MAX_WIDTH:
         return [one]
-    return [f"{head} ["] + [f"    {item}," for item in items] + ["];"]
+    return [f"{indent}{head} ["] + [f"{indent}    {item}," for item in items] + [f"{indent}];"]
 
 
 def policy_field_rust(pol: dict) -> list[str]:
@@ -4961,6 +4983,15 @@ def cmd_selftest() -> int:
            not default_on({"default_off_abis": ["pico"]}, "pico")
            and default_on({"default_off_abis": ["pico"]}, "c")
            and default_on({}, "pico") and not default_on({"default": "off"}, "c"))
+    long_words = [f"value-number-{n}-of-a-long-policy" for n in range(4)]
+    expect("a policy's choices wider than rustfmt's array width go one a line, as rustfmt lays "
+           "them, in the policy impl and in the conformance rows",
+           rust_static_array("const CHOICES: [&str; 4] =", [rust_word(w) for w in long_words],
+                             "    ")[0] == "    const CHOICES: [&str; 4] = ["
+           and rust_tuple_rows([[rust_word("p"), rust_word("WZ_POLICY_P"),
+                                 rust_word_list(long_words)]])[3] == "        &["
+           and rust_static_array("const ALL: [Self; 2] =", ["Self::A", "Self::B"], "    ")
+           == ["    const ALL: [Self; 2] = [Self::A, Self::B];"])
     feature_bits = emit_rust_feature_bits(load_decl())
     expect("the features word is the capabilities' observation_bits, in bit order",
            "CLOCK_SOURCE: u64 = 1 << 0;" in feature_bits and "RESOURCE_SNAPSHOT: u64 = 1 << 3;" in feature_bits
