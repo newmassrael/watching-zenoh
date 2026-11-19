@@ -27,14 +27,20 @@ Any of, outside a comment and a string literal:
 
   * `SessionPolicy::from_build()`, `SessionPolicy::defaults()`, `SessionPolicy::default()`;
   * `<Policy>::default()` and `<Policy>::stated()` of a policy's value type;
-  * `<SessionPolicy as Default>::default()` and the same of a value type.
+  * `<SessionPolicy as Default>::default()` and the same of a value type;
+  * a struct that derives `Default` and has a field of `SessionPolicy` or of a value type: its
+    `default()`, and every `..Default::default()` and derived `Default` built on it, take the
+    build's value, so the read is placed at the struct (step 3c);
+  * `<field>: Default::default()` where some struct gives `<field>` such a type: the compiler
+    infers the value type, so the read is placed where it is written (step 3c).
 
 The value types are read from the generated module (`policy_generated.rs`, `pub enum <Name>`),
 never listed here, so a policy the declaration adds is in the population the moment it exists.
 
-What this cannot see, stated rather than implied: a value type renamed by `use .. as ..`, a
-`Default::default()` whose type is inferred, and a struct whose derived `Default` holds a policy.
-Each is a read of the build the gate does not name.
+What this cannot see, stated rather than implied: a value type renamed by `use .. as ..`, an
+inferred `Default::default()` that is not a field initializer (a `let` or an argument), and a
+hand-written `impl Default` that reaches the build through a call the patterns above do not
+name. Each is a read of the build the gate does not name.
 
 ## The population
 
@@ -218,31 +224,126 @@ def is_integration_test(rel: Path) -> bool:
     return len(parts) > 3 and parts[0] == "crates" and parts[2] == "tests"
 
 
+#: A struct definition: its attributes, its name and the bracket its fields open with.
+STRUCT_RE = re.compile(
+    r"(?P<attrs>(?:#\s*\[[^\]]*\]\s*)*)"
+    r"(?:pub(?:\s*\([^)]*\))?\s+)?struct\s+(?P<name>[A-Za-z_]\w*)\s*(?:<[^>{(;]*>\s*)?"
+    r"(?:where[^{;]*)?(?P<open>[{(])"
+)
+DERIVES_DEFAULT_RE = re.compile(r"#\s*\[\s*derive\s*\([^\]]*\bDefault\b[^\]]*\)\s*\]")
+FIELD_ATTR_RE = re.compile(r"#\s*\[[^\]]*\]")
+#: A field set from the `Default` of a type the compiler infers: `name: Default::default()`.
+INFERRED_RE = re.compile(r"(?<![\w.])(?P<field>[a-z_]\w*)\s*:\s*(?:core::default::|std::default::)?Default\s*::\s*default\s*\(\s*\)")
+
+
+def _split_top(body: str) -> list[str]:
+    """`body` split at the commas outside any bracket."""
+    parts: list[str] = []
+    depth = 0
+    cur: list[str] = []
+    for i, ch in enumerate(body):
+        if ch in "<([{":
+            depth += 1
+        elif ch in ")]}" or (ch == ">" and (i == 0 or body[i - 1] != "-")):
+            depth -= 1
+        if ch == "," and depth == 0:
+            parts.append("".join(cur))
+            cur = []
+            continue
+        cur.append(ch)
+    parts.append("".join(cur))
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _last_segment(ty: str) -> str:
+    """The type a field names, without its path: `crate::policy::KeySet` is `KeySet`."""
+    return ty.strip().split("::")[-1].strip()
+
+
+def struct_fields(stripped: str) -> list[tuple[int, str, bool, list[tuple[str, str]]]]:
+    """Every struct of `stripped`: (offset, name, whether it derives `Default`, [(field, type)]).
+    A tuple struct's fields are named by their position."""
+    pairs = brace_pairs(stripped)
+    out: list[tuple[int, str, bool, list[tuple[str, str]]]] = []
+    for m in STRUCT_RE.finditer(stripped):
+        open_at = m.start("open")
+        if m.group("open") == "{":
+            close = pairs.get(open_at)
+            if close is None:
+                continue
+            body = stripped[open_at + 1 : close]
+        else:
+            depth = 0
+            close = open_at
+            for i in range(open_at, len(stripped)):
+                if stripped[i] == "(":
+                    depth += 1
+                elif stripped[i] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        close = i
+                        break
+            body = stripped[open_at + 1 : close]
+        fields: list[tuple[str, str]] = []
+        for index, part in enumerate(_split_top(body)):
+            part = re.sub(r"^(?:pub(?:\s*\([^)]*\))?\s+)", "", FIELD_ATTR_RE.sub("", part).strip())
+            if m.group("open") == "{":
+                if ":" not in part:
+                    continue
+                name, ty = part.split(":", 1)
+                fields.append((name.strip(), ty.strip()))
+            else:
+                fields.append((str(index), part))
+        derives = bool(DERIVES_DEFAULT_RE.search(m.group("attrs") or ""))
+        out.append((m.start("name"), m.group("name"), derives, fields))
+    return out
+
+
 def reads(root: Path) -> list[tuple[str, int, str, str]]:
-    """Every read of the build defaults in production code: (path, line, item, text)."""
-    pattern = read_re(policy_types(root))
+    """Every read of the build defaults in production code: (path, line, item, text).
+
+    Besides a call that reads the build, two shapes read it without naming it: a struct with a
+    field of a policy's type (or a `SessionPolicy`) that derives `Default`, whose `default()`,
+    `..Default::default()` and every struct deriving from it take the build's value, read at the
+    struct; and `<field>: Default::default()` where `<field>` is a field some struct gives a
+    policy's type, read where it is written."""
+    types = policy_types(root)
+    pattern = read_re(types)
+    held = set(types) | {"SessionPolicy"}
     all_sources = sources(root)
     test_only = cfg_test_files(all_sources)
+    production: list[tuple[Path, str, list[tuple[int, int]]]] = []
+    policy_fields: set[str] = set()
     found: list[tuple[str, int, str, str]] = []
     for path in all_sources:
         rel = path.relative_to(root)
         if rel == GENERATED or is_integration_test(rel) or path.resolve() in test_only:
             continue
         text = path.read_text(encoding="utf-8", errors="replace")
-        if "SessionPolicy" not in text and "::default" not in text and "::stated" not in text:
-            continue
         stripped = rust_comments.strip_comments(text, blank_literals=True)
-        hits = list(pattern.finditer(stripped))
-        if not hits:
-            continue
         skip = cfg_test_spans(stripped)
+        production.append((rel, stripped, skip))
+        for at, name, derives, fields in struct_fields(stripped):
+            if any(a <= at <= b for a, b in skip):
+                continue
+            typed = [(f, t) for f, t in fields if _last_segment(t) in held]
+            policy_fields.update(f for f, _ in typed if not f.isdigit())
+            if derives and typed:
+                line = stripped.count("\n", 0, at) + 1
+                said = ", ".join(f"{f}: {_last_segment(t)}" for f, t in typed)
+                found.append((rel.as_posix(), line, name, f"derive(Default) of {said}"))
+    for rel, stripped, skip in production:
+        hits = list(pattern.finditer(stripped))
+        inferred = [m for m in INFERRED_RE.finditer(stripped) if m.group("field") in policy_fields]
+        if not hits and not inferred:
+            continue
         spans = item_spans(stripped)
-        for m in hits:
+        for m in hits + inferred:
             if any(a <= m.start() <= b for a, b in skip):
                 continue
             line = stripped.count("\n", 0, m.start()) + 1
             found.append((rel.as_posix(), line, enclosing_item(spans, m.start()), " ".join(m.group(0).split())))
-    return found
+    return sorted(found)
 
 
 def allows(entry: tuple[str, str, str], path: str, item: str) -> bool:
@@ -317,8 +418,17 @@ def selftest() -> int:
                "pub fn quoted() -> &'static str {\n    \"SessionPolicy::from_build()\"\n}\n"
                "pub fn snapshot(p: &SessionPolicy) -> KeySet {\n    p.key_set()\n}\n"
                "#[cfg(test)]\nmod tests {\n    fn t() { let _ = SessionPolicy::from_build(); }\n}\n"
-               "#[cfg(all(\n    test,\n    feature = \"x\"\n))]\nmod more;\n")
-        _write(root, "crates/a/src/more.rs", "fn t() { let _ = SessionPolicy::default(); }\n")
+               "#[cfg(all(\n    test,\n    feature = \"x\"\n))]\nmod more;\n"
+               "#[derive(Debug, Default)]\npub struct Derived {\n    #[cfg(feature = \"x\")]\n"
+               "    pub keys: crate::policy::KeySet,\n    pub hook: Box<dyn Fn(u8) -> u8>,\n}\n"
+               "#[derive(Default)]\npub struct Wrapped(pub KeySet);\n"
+               "#[derive(Default)]\npub struct Unrelated {\n    pub n: u8,\n    pub keys_seen: u32,\n}\n"
+               "pub struct Plain {\n    pub keys: KeySet,\n}\n"
+               "pub fn fill() -> Plain {\n    Plain { keys: Default::default() }\n}\n"
+               "pub fn other() -> Unrelated {\n    Unrelated { n: Default::default(), keys_seen: 0 }\n}\n")
+        _write(root, "crates/a/src/more.rs",
+               "fn t() { let _ = SessionPolicy::default(); }\n"
+               "#[derive(Default)]\nstruct InTest {\n    keys: KeySet,\n}\n")
         _write(root, "crates/a/tests/it.rs", "fn t() { let _ = SessionPolicy::from_build(); }\n")
 
         found = reads(root)
@@ -332,6 +442,13 @@ def selftest() -> int:
             ("crates/a/src/lib.rs", "FOLD"),
             ("crates/a/src/lib.rs", "arrayed"),
             ("crates/a/src/lib.rs", "generic"),
+            # A derived `Default` over a policy's type reads the build at the struct, a tuple
+            # field included; a struct with no such field, or none derived, does not.
+            ("crates/a/src/lib.rs", "Derived"),
+            ("crates/a/src/lib.rs", "Wrapped"),
+            # A field of a policy's type filled from an inferred `Default` reads it there; a
+            # field of another type filled the same way does not.
+            ("crates/a/src/lib.rs", "fill"),
         }
         if got != want:
             failures.append(f"reads found {sorted(got)}, want {sorted(want)}")
@@ -346,6 +463,9 @@ def selftest() -> int:
             ("crates/a/src/lib.rs", "by_trait", "a creator"),
             ("crates/a/src/lib.rs", "by_type", "a creator"),
             ("crates/a/src/lib.rs", "generic", "a creator"),
+            ("crates/a/src/lib.rs", "Derived", "a creator"),
+            ("crates/a/src/lib.rs", "Wrapped", "a creator"),
+            ("crates/a/src/lib.rs", "fill", "a creator"),
         )
         findings, _ = check(root, allowed)
         refused = [f for f in findings if "reads the build in" in f]
