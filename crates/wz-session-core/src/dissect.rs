@@ -4570,7 +4570,7 @@ fn push_tree<W: crate::doc_out::DocOut>(
         // for a reader to learn.
         FieldValue::Bits(v) => {
             out.key("value");
-            out.uint_exact(u64::from(*v));
+            out.uint_exact(*v);
         }
         FieldValue::Flag(b) => {
             out.key("value");

@@ -58,6 +58,10 @@ pub trait DocOut: Default {
     /// was used to encode.
     type Done;
 
+    /// The encoding's name (`json`, `cbor`): what a memory of written rows is
+    /// keyed by, since the same row is other bytes in the other encoding.
+    const ENCODING: &'static str;
+
     /// The encoded bytes, and the writer let go.
     fn finish(self) -> Self::Done;
 
@@ -93,6 +97,15 @@ pub trait DocOut: Default {
     fn number(&mut self, spelled: &str);
     /// [`Self::number`] spelled by `args`.
     fn number_fmt(&mut self, args: fmt::Arguments<'_>);
+    /// One value a model holds as its JSON text (RFC 8259), written as the
+    /// value that text spells: [`JsonOut`] writes the text, [`CborOut`] the
+    /// mapping of it ([`cbor::of_json_into`], the one reader of the mapping).
+    ///
+    /// The text must be one JSON value, which a model that holds a value so
+    /// made with a JSON writer. [`CborOut`] writes `null` for text that is not,
+    /// where [`JsonOut`] would have copied it: the encodings could disagree only
+    /// over text no writer of this workspace makes.
+    fn json_value(&mut self, text: &str);
     /// `true` or `false`.
     fn bool(&mut self, v: bool);
     /// `null`.
@@ -212,6 +225,7 @@ impl JsonOut {
 
 impl DocOut for JsonOut {
     type Done = String;
+    const ENCODING: &'static str = "json";
 
     fn finish(self) -> String {
         self.out
@@ -300,6 +314,12 @@ impl DocOut for JsonOut {
     fn number_fmt(&mut self, args: fmt::Arguments<'_>) {
         self.separate();
         let _ = self.out.write_fmt(args);
+        self.after_value = true;
+    }
+
+    fn json_value(&mut self, text: &str) {
+        self.separate();
+        self.out.push_str(text);
         self.after_value = true;
     }
 
@@ -393,6 +413,7 @@ impl CborOut {
 
 impl DocOut for CborOut {
     type Done = Vec<u8>;
+    const ENCODING: &'static str = "cbor";
 
     fn finish(self) -> Vec<u8> {
         self.out
@@ -465,6 +486,15 @@ impl DocOut for CborOut {
             let _ = write!(scratch, "{v}");
             cbor::number(&scratch, &mut self.out);
             self.scratch = scratch;
+        }
+    }
+
+    fn json_value(&mut self, text: &str) {
+        self.element();
+        let mark = self.out.len();
+        if cbor::of_json_into(text, &mut self.out).is_err() {
+            self.out.truncate(mark);
+            self.out.push(cbor::SIMPLE_NULL);
         }
     }
 
@@ -710,5 +740,321 @@ pub mod cbor {
             return Some(sign | (whole >> shift) as u16);
         }
         None
+    }
+
+    /// Deeper nesting is refused by [`of_json_into`]. A document nests a few
+    /// levels below a row; this bounds a malformed text, not a real one.
+    pub const MAX_DEPTH: usize = 256;
+
+    /// Why [`of_json_into`] refused a text, and the byte offset it was refused
+    /// at.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Refused {
+        /// Byte offset into the text.
+        pub at: usize,
+        /// What was wrong there.
+        pub why: &'static str,
+    }
+
+    /// `text`, one JSON value (RFC 8259) with nothing but whitespace around
+    /// it, appended to `out` as one CBOR data item: RFC 8949 §6.2's mapping
+    /// under the preferred serialization the module doc states, through the
+    /// same head, number and float primitives [`super::CborOut`] writes with.
+    /// The one reader of that mapping: `wz-capture`'s converter is this, and
+    /// so is [`super::DocOut::json_value`] of a value held as its JSON text.
+    ///
+    /// The text is read once. A container's head is written as one byte when
+    /// it opens and completed when it closes, the bytes after it moved once
+    /// when it has 24 members or more.
+    ///
+    /// # Errors
+    ///
+    /// [`Refused`] for text that is not one JSON value, a string escape that
+    /// does not name a Unicode scalar value (a lone surrogate), a number that
+    /// does not fit a double, and nesting deeper than [`MAX_DEPTH`]; `out` may
+    /// then hold part of the item.
+    pub fn of_json_into(text: &str, out: &mut Vec<u8>) -> Result<(), Refused> {
+        let mut reader = Reader {
+            text: text.as_bytes(),
+            at: 0,
+            depth: 0,
+            out,
+            scratch: Vec::new(),
+        };
+        reader.document()
+    }
+
+    /// The one pass over the text, and where it writes.
+    struct Reader<'t, 'o> {
+        text: &'t [u8],
+        at: usize,
+        depth: usize,
+        out: &'o mut Vec<u8>,
+        /// A string's unescaped bytes, before its length is written.
+        scratch: Vec<u8>,
+    }
+
+    impl Reader<'_, '_> {
+        fn refuse<T>(&self, why: &'static str) -> Result<T, Refused> {
+            Err(Refused { at: self.at, why })
+        }
+
+        fn document(&mut self) -> Result<(), Refused> {
+            self.skip_space();
+            self.value()?;
+            self.skip_space();
+            if self.at != self.text.len() {
+                return self.refuse("text follows the value");
+            }
+            Ok(())
+        }
+
+        fn skip_space(&mut self) {
+            while let Some(b' ' | b'\t' | b'\n' | b'\r') = self.text.get(self.at) {
+                self.at += 1;
+            }
+        }
+
+        fn peek(&self) -> Option<u8> {
+            self.text.get(self.at).copied()
+        }
+
+        fn expect(&mut self, byte: u8, why: &'static str) -> Result<(), Refused> {
+            if self.peek() == Some(byte) {
+                self.at += 1;
+                Ok(())
+            } else {
+                self.refuse(why)
+            }
+        }
+
+        fn literal(&mut self, word: &[u8], head: u8) -> Result<(), Refused> {
+            if self.text[self.at..].starts_with(word) {
+                self.at += word.len();
+                self.out.push(head);
+                Ok(())
+            } else {
+                self.refuse("not a JSON value")
+            }
+        }
+
+        fn value(&mut self) -> Result<(), Refused> {
+            match self.peek() {
+                Some(b'{') => self.container(b'}', MAJOR_MAP),
+                Some(b'[') => self.container(b']', MAJOR_ARRAY),
+                Some(b'"') => self.string(),
+                Some(b't') => self.literal(b"true", SIMPLE_TRUE),
+                Some(b'f') => self.literal(b"false", SIMPLE_FALSE),
+                Some(b'n') => self.literal(b"null", SIMPLE_NULL),
+                Some(b'-' | b'0'..=b'9') => self.number(),
+                Some(_) => self.refuse("not a JSON value"),
+                None => self.refuse("the text ends where a value belongs"),
+            }
+        }
+
+        /// An object (`close` is `}`, members are `"key": value`) or an array.
+        fn container(&mut self, close: u8, major: u8) -> Result<(), Refused> {
+            if self.depth == MAX_DEPTH {
+                return self.refuse("nested deeper than MAX_DEPTH");
+            }
+            self.depth += 1;
+            self.at += 1;
+            let place = open_head(major, self.out);
+            let mut members = 0u64;
+            self.skip_space();
+            if self.peek() == Some(close) {
+                self.at += 1;
+            } else {
+                loop {
+                    self.skip_space();
+                    if major == MAJOR_MAP {
+                        if self.peek() != Some(b'"') {
+                            return self.refuse("an object's key is not a string");
+                        }
+                        self.string()?;
+                        self.skip_space();
+                        self.expect(b':', "a key is not followed by ':'")?;
+                        self.skip_space();
+                    }
+                    self.value()?;
+                    members += 1;
+                    self.skip_space();
+                    match self.peek() {
+                        Some(b',') => self.at += 1,
+                        Some(c) if c == close => {
+                            self.at += 1;
+                            break;
+                        }
+                        _ => return self.refuse("a member is not followed by ',' or the close"),
+                    }
+                }
+            }
+            close_head(place, major, members, self.out);
+            self.depth -= 1;
+            Ok(())
+        }
+
+        /// Where the run of plain string bytes from `from` ends: the first
+        /// quote, backslash or control byte, or the end of the text.
+        fn run_end(&self, from: usize) -> usize {
+            self.text[from..]
+                .iter()
+                .position(|&b| b == b'"' || b == b'\\' || b < 0x20)
+                .map_or(self.text.len(), |p| from + p)
+        }
+
+        /// A string, unescaped into a text string.
+        fn string(&mut self) -> Result<(), Refused> {
+            self.at += 1;
+            // Most strings hold no escape: they are copied as they stand, with
+            // the length their run already gave.
+            let start = self.at;
+            let end = self.run_end(start);
+            if self.text.get(end) == Some(&b'"') {
+                self.at = end + 1;
+                head(MAJOR_TEXT, (end - start) as u64, self.out);
+                self.out.extend_from_slice(&self.text[start..end]);
+                return Ok(());
+            }
+            let mut scratch = core::mem::take(&mut self.scratch);
+            scratch.clear();
+            let result = self.string_body(&mut scratch);
+            if result.is_ok() {
+                head(MAJOR_TEXT, scratch.len() as u64, self.out);
+                self.out.extend_from_slice(&scratch);
+            }
+            self.scratch = scratch;
+            result
+        }
+
+        fn string_body(&mut self, into: &mut Vec<u8>) -> Result<(), Refused> {
+            loop {
+                // The run of bytes up to the next quote, escape or control byte
+                // is copied as it stands: the text is UTF-8 already.
+                let start = self.at;
+                self.at = self.run_end(start);
+                into.extend_from_slice(&self.text[start..self.at]);
+                match self.peek() {
+                    Some(b'"') => {
+                        self.at += 1;
+                        return Ok(());
+                    }
+                    Some(b'\\') => {
+                        self.at += 1;
+                        let c = self.escape()?;
+                        let mut buf = [0u8; 4];
+                        into.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+                    }
+                    Some(_) => return self.refuse("a control byte inside a string"),
+                    None => return self.refuse("the text ends inside a string"),
+                }
+            }
+        }
+
+        /// The character an escape names; `self.at` is past the backslash.
+        fn escape(&mut self) -> Result<char, Refused> {
+            let Some(b) = self.peek() else {
+                return self.refuse("the text ends inside an escape");
+            };
+            self.at += 1;
+            Ok(match b {
+                b'"' => '"',
+                b'\\' => '\\',
+                b'/' => '/',
+                b'b' => '\u{08}',
+                b'f' => '\u{0C}',
+                b'n' => '\n',
+                b'r' => '\r',
+                b't' => '\t',
+                b'u' => {
+                    let first = self.hex4()?;
+                    let code = if (0xD800..0xDC00).contains(&first) {
+                        // A high surrogate names a character only with the low
+                        // one that follows it.
+                        if !self.text[self.at..].starts_with(b"\\u") {
+                            return self.refuse("a high surrogate with no low one after it");
+                        }
+                        self.at += 2;
+                        let low = self.hex4()?;
+                        if !(0xDC00..0xE000).contains(&low) {
+                            return self.refuse("a high surrogate with no low one after it");
+                        }
+                        0x10000 + ((first - 0xD800) << 10) + (low - 0xDC00)
+                    } else {
+                        first
+                    };
+                    match char::from_u32(code) {
+                        Some(c) => c,
+                        None => return self.refuse("an escape names no Unicode scalar value"),
+                    }
+                }
+                _ => return self.refuse("not a JSON escape"),
+            })
+        }
+
+        fn hex4(&mut self) -> Result<u32, Refused> {
+            let Some(digits) = self.text.get(self.at..self.at + 4) else {
+                return self.refuse("the text ends inside a \\u escape");
+            };
+            let mut v = 0u32;
+            for &d in digits {
+                let n = match d {
+                    b'0'..=b'9' => d - b'0',
+                    b'a'..=b'f' => d - b'a' + 10,
+                    b'A'..=b'F' => d - b'A' + 10,
+                    _ => return self.refuse("a \\u escape is not four hex digits"),
+                };
+                v = (v << 4) | u32::from(n);
+            }
+            self.at += 4;
+            Ok(v)
+        }
+
+        /// A number, checked against RFC 8259 §6's grammar and then written by
+        /// [`number`].
+        fn number(&mut self) -> Result<(), Refused> {
+            let start = self.at;
+            if self.peek() == Some(b'-') {
+                self.at += 1;
+            }
+            match self.peek() {
+                Some(b'0') => self.at += 1,
+                Some(b'1'..=b'9') => self.digits(),
+                _ => return self.refuse("a number has no digits"),
+            }
+            if self.peek() == Some(b'.') {
+                self.at += 1;
+                if !matches!(self.peek(), Some(b'0'..=b'9')) {
+                    return self.refuse("a fraction has no digits");
+                }
+                self.digits();
+            }
+            if let Some(b'e' | b'E') = self.peek() {
+                self.at += 1;
+                if let Some(b'+' | b'-') = self.peek() {
+                    self.at += 1;
+                }
+                if !matches!(self.peek(), Some(b'0'..=b'9')) {
+                    return self.refuse("an exponent has no digits");
+                }
+                self.digits();
+            }
+            // ASCII digits and signs by construction above.
+            let spelled = core::str::from_utf8(&self.text[start..self.at]).unwrap_or("");
+            if number(spelled, self.out) {
+                Ok(())
+            } else {
+                Err(Refused {
+                    at: start,
+                    why: "a number that does not fit a double",
+                })
+            }
+        }
+
+        fn digits(&mut self) {
+            while let Some(b'0'..=b'9') = self.peek() {
+                self.at += 1;
+            }
+        }
     }
 }

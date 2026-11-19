@@ -2946,8 +2946,11 @@ pub fn write_decoding<W: DocOut>(decoding: &PayloadDecoding, out: &mut W) {
                 out.key("type");
                 out.opt_text(typed.and_then(|t| t.ty.as_deref()));
                 out.key("typed_value");
+                // Held as its JSON text (`TypedValue::json`, written by
+                // `proto_decode_json`), and written as the value it spells: the
+                // text in JSON, the mapping of it in CBOR.
                 match typed.and_then(|t| t.json.as_deref()) {
-                    Some(json) => write_typed_value(json, out),
+                    Some(json) => out.json_value(json),
                     None => out.null(),
                 }
                 out.key("enum_number");
@@ -2961,35 +2964,6 @@ pub fn write_decoding<W: DocOut>(decoding: &PayloadDecoding, out: &mut W) {
         }
     }
     out.close_map();
-}
-
-/// A typed value held as its JSON text ([`crate::payload::formats::TypedValue`]'s
-/// `json`), written as the value that text spells, so the binary encoding holds
-/// the value and not its spelling.
-///
-/// The text is one scalar of `proto_decode_json`'s mapping: a number, a string,
-/// `true` or `false`. A number is written as it is spelled; a string is read
-/// back to its characters, which the writer escapes as `proto_decode_json` did,
-/// so the JSON encoding is the text it was given. Text that is not one scalar is
-/// not a value that mapping writes, and is written as `null` rather than spliced
-/// into the document unread.
-fn write_typed_value<W: DocOut>(json: &str, out: &mut W) {
-    match json {
-        "true" => out.bool(true),
-        "false" => out.bool(false),
-        "null" => out.null(),
-        _ if json.starts_with('"') => {
-            // A string with no escape in it is its own characters.
-            match json.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
-                Some(body) if !body.contains(['\\', '"']) => out.text(body),
-                _ => match wz_session_core::json5::parse(json) {
-                    Ok(wz_session_core::json5::Json5Value::String(text)) => out.text(&text),
-                    _ => out.null(),
-                },
-            }
-        }
-        _ => out.number(json),
-    }
 }
 
 /// The rule that won, as the object every place that names one writes: the
