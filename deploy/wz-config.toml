@@ -1302,6 +1302,21 @@ implies = ["unstable-api"]
 help = "The sending side of a declared segment profile: one message cut into the pieces the profile's header describes, put on a publisher or handed to a callback (wz_capi_c_segment_sender_*, wz_ext_segment_sender_*, wz-own doors)."
 
 [[capability]]
+id = "shared-key-ids"
+kconfig = "WZ_CAP_SHARED_KEY_IDS"
+# Off by default: a node that names a key by an id it never declared cannot be read by a stock
+# peer, which has no such dictionary, so a build has the dictionary and the forms of the
+# key-wire-form policy that use it only when a deployment asks for them. The pico ABI's door is
+# wz_ext_* and part of its unstable surface, as its other wz-own doors are; the cooperative engine
+# holds the dictionary, and a session opened on the tokio engine refuses one by name.
+default = "off"
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = ["unstable-api"]
+help = "Key ids every node of a deployment shares: a dictionary of key expressions and their ids given at open (wz_ext_config_key_ids, a wz-own door), so a put, a query or a declaration names its key by the id with no declaration first, as the key-wire-form policy says."
+
+[[capability]]
 id = "rx-callback-offload"
 kconfig = "WZ_CAP_RX_CALLBACK_OFFLOAD"
 # Off by default: zenoh-c runs a subscriber's callback where the sample arrives, and so does a build
@@ -2119,6 +2134,24 @@ help = '''
 The key expressions one peer may have declared to this session at a time,
 to name them by a short id. One more is refused and counted, and a message
 that names it is dropped, as one naming an undeclared id is.
+'''
+
+[[limit]]
+id = "MAX_SHARED_KEY_IDS"
+kconfig = "WZ_LIMIT_MAX_SHARED_KEY_IDS"
+default = 256
+# A quota of the heap profile: the dictionary is handed to the open and held on the heap, and an
+# image with no allocator has none yet.
+storage = "quota"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "none"
+# `wire` is none: the limit refuses a dictionary at the open, before any byte is sent.
+wire = "none"
+help = '''
+The entries of the key-id dictionary every node of a deployment shares
+(shared-key-ids) that one session may be given. A dictionary of more is
+refused when it is handed over, and no session holds it.
 '''
 
 [[limit]]
@@ -3360,6 +3393,39 @@ so both ends of a link must state the same value: a peer that keeps one link by
 the other order closes the link this node kept, and neither link survives.
 '''
 
+[[policy]]
+id = "key-wire-form"
+kind = "choice"
+kconfig = "WZ_POLICY_KEY_WIRE_FORM"
+choices = ["declared", "shared", "literal"]
+default = "declared"
+upstream = "Names a key on the wire by the id of a key expression it declared to that peer first, or by the whole key; a peer reads an id only when it was declared to it, and refuses one it never was."
+scope = "link"
+binding = "open"
+mutability = "fixed"
+# `wire` is visible: `shared` sends ids a peer without the same dictionary cannot read.
+wire = "visible"
+since = 2
+help = '''
+How a node names a key on the wire to the peer of a link. `declared` is
+upstream's: the id of a key expression the node declared to that peer, or the
+whole key. `literal` sends the whole key every time and declares nothing for
+it. `shared` uses the key-id dictionary every node of the deployment holds
+(the shared-key-ids capability): the key's own id when the dictionary holds
+it, the id of the longest entry that ends at one of its slashes followed by
+the rest of the key, or the whole key, whichever takes the fewest bytes, with
+no declaration first; a key with a wildcard goes by an id only when the
+dictionary holds that exact pattern, a peer that announced itself a router is
+sent the declared form, and a reply names its key whole. A peer that does not hold the same
+dictionary cannot read what `shared` sends, so both ends of the link must
+hold it. Every node that holds the dictionary reads an id only the dictionary
+names, whatever its own value. Only the cooperative engine reads this policy,
+and it applies the value of the session to every link of it. A session
+opened with `shared` and no dictionary is refused, and so is one whose value is
+not `declared` in a build without the capability or, on the zenoh-pico
+interface, on the tokio engine.
+'''
+
 # A profile is a named set of policy values a run-time document starts from: the document names it
 # by `wz/profile`, and its own `wz/policies` override the profile's values. A profile states its
 # values in a `[profile.policies]` table, policy id = value; each value is one of its policy's, and
@@ -3404,6 +3470,7 @@ routing-face-drive = "task-per-face"
 routing-table-sharing = "rwlock"
 reassembly-pool-overflow = "reject"
 link-tie-order = "zid-number"
+key-wire-form = "declared"
 
 # ─── Protocol facts (part of the conformance statement a build gives of itself) ───────────────
 #

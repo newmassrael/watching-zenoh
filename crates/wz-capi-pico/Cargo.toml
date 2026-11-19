@@ -294,6 +294,19 @@ segment-sender = [
     "dep:wz-app-frame",
     "wz-capi-core?/segment-sender",
 ]
+# `shared-key-ids`: the key ids every node of a deployment shares and the door that hands a config
+# its dictionary (`wz_ext_config_key_ids`). wz's own, which zenoh-pico has not, so off as the
+# reference build is, and part of the unstable surface: it implies `unstable-api`. The dictionary is
+# held by the cooperative engine, which reads an id only the dictionary names and names a key by
+# it as the session's key-wire form says; a session opened on the tokio engine with a dictionary or
+# a form other than `declared` is refused. The model is session-core's.
+shared-key-ids = [
+    "unstable-api",
+    "wz-session-core/shared-key-ids",
+    "wz-capi-port/shared-key-ids",
+    "wz-capi-core?/shared-key-ids",
+    "wz-capi-coop?/shared-key-ids",
+]
 # `remote-declaration-watch` and `declarations-synced-event`: the declaration watch, the doors that
 # tell a program what a peer declares and retracts (`wz_ext_decl_watch_declare`,
 # `wz_ext_decl_watch_drop`). wz's own, which zenoh-pico has not, so off as the reference build is.
