@@ -53,6 +53,18 @@ impl Quota {
         Self::new(0)
     }
 
+    /// The tighter of two limits, each `0` for no bound: a holder bound by both is bound by
+    /// this one. A build's limit is a constant, and `0` on a host, so a caller that narrows it
+    /// by a value of its own asks here rather than taking a `min` that `0` would turn into no
+    /// place at all.
+    pub const fn tighter(a: usize, b: usize) -> usize {
+        match (a, b) {
+            (0, limit) | (limit, 0) => limit,
+            (a, b) if a < b => a,
+            (_, b) => b,
+        }
+    }
+
     /// The bound; `0` is none.
     pub const fn limit(&self) -> usize {
         self.limit
@@ -104,6 +116,15 @@ mod tests {
         }
         assert_eq!(quota.try_acquire(), Err(QuotaExceeded { limit: 3 }));
         assert_eq!(quota.live(), 3, "a refusal takes no place");
+    }
+
+    #[test]
+    fn the_tighter_of_two_limits_reads_zero_as_no_bound() {
+        assert_eq!(Quota::tighter(0, 0), 0, "neither bounds");
+        assert_eq!(Quota::tighter(0, 4), 4);
+        assert_eq!(Quota::tighter(4, 0), 4);
+        assert_eq!(Quota::tighter(3, 4), 3);
+        assert_eq!(Quota::tighter(4, 3), 3);
     }
 
     #[test]
