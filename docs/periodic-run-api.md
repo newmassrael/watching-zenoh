@@ -92,7 +92,8 @@ one library serves one arm. The wz library follows: the `multi-thread` feature o
 
 The program's timer, lock, thread and event wait are zenoh-pico's own platform exports, which
 the wz library provides on Windows with the bytes and the answers of zenoh-pico's Windows
-backend (`vendor/zenoh-pico/src/system/windows/system.c`, `crates/wz-capi-pico/src/os/windows.rs`):
+backend (`vendor/zenoh-pico/src/system/windows/system.c` @ `z_clock_t z_clock_now(void) {` and
+the functions beside it; `crates/wz-capi-pico/src/os/windows.rs`):
 
 | Family | Exports | Windows primitive |
 |---|---|---|
