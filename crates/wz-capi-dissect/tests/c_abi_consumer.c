@@ -4645,8 +4645,11 @@ int main(void) {
      * Values move under stationary keys.
      * 76: each flow gains `icmp_errors` and the document `membership`, the
      * ICMP, ICMPv6, IGMP and MLD messages about the capture's flows and
-     * groups. Eight keys and two families arrive; nothing retires. */
-    revisioned[2].revision = 76;
+     * groups. Nine keys and two families arrive; nothing retires.
+     * 77: each flow gains `network`, its IP headers' and frames' facts per
+     * direction, and the document `capture_interfaces`. Twenty-three keys
+     * arrive; no family. */
+    revisioned[2].revision = 77;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

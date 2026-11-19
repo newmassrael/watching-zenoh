@@ -965,6 +965,101 @@ impl<'a> Iterator for LocalOptions<'a> {
 ///
 /// An absent or malformed list leaves the default — an option list is
 /// metadata, and refusing a whole capture over one is the wrong trade.
+/// `if_name`: the interface's name, UTF-8.
+const OPT_IF_NAME: u16 = 2;
+/// `if_tsoffset`: seconds to add to every timestamp of the interface, a signed
+/// 64-bit integer.
+const OPT_IF_TSOFFSET: u16 = 14;
+
+/// One interface a capture described, as the field document names it: which
+/// section's numbering it is in, its id there, and what its IDB said.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterfaceDescription {
+    /// The section, counted from 0: an interface id restarts at each Section
+    /// Header Block.
+    pub section: usize,
+    /// The interface id within the section.
+    pub id: u32,
+    /// The `LINKTYPE_*` value.
+    pub link_type: u32,
+    /// `if_name`, when the IDB states one and it is UTF-8.
+    pub name: Option<alloc::string::String>,
+    /// The raw `if_tsresol` byte, 6 when unstated.
+    pub ts_resol: u8,
+    /// `if_tsoffset` in seconds, 0 when unstated.
+    pub ts_offset: i64,
+}
+
+/// Every interface a pcapng capture's IDBs describe, in file order, read by
+/// the block walk's byte-order and length rules. A block that breaks them ends
+/// the scan where it stands: the interfaces before it are returned, and a
+/// growing capture's partial last block is simply not reached yet. Empty for
+/// a container that is not pcapng.
+pub fn interface_descriptions(bytes: &[u8]) -> Vec<InterfaceDescription> {
+    let mut out = Vec::new();
+    let mut off = 0usize;
+    let mut swapped = false;
+    let mut section: Option<usize> = None;
+    let mut next_id = 0u32;
+    while off + MIN_BLOCK_LEN <= bytes.len() {
+        let raw_type = [bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]];
+        if u32::from_be_bytes(raw_type) == BT_SHB {
+            let bom = u32::from_le_bytes([
+                bytes[off + 8],
+                bytes[off + 9],
+                bytes[off + 10],
+                bytes[off + 11],
+            ]);
+            swapped = match bom {
+                BOM => false,
+                x if x == BOM.swap_bytes() => true,
+                _ => break,
+            };
+            section = Some(section.map_or(0, |s| s + 1));
+            next_id = 0;
+        }
+        let Some(current) = section else {
+            break;
+        };
+        let total = u32_at(bytes, off + 4, swapped) as usize;
+        if total < MIN_BLOCK_LEN || !total.is_multiple_of(4) || off + total > bytes.len() {
+            break;
+        }
+        let body = &bytes[off + 8..off + total - 4];
+        if u32_at(bytes, off, swapped) == BT_IDB && body.len() >= 8 {
+            let options = OptionList::new(&body[8..], swapped);
+            let name = options
+                .iter()
+                .find(|o| o.code == OPT_IF_NAME)
+                .and_then(|o| core::str::from_utf8(o.value).ok())
+                .map(|s| alloc::string::String::from(s.trim_end_matches('\0')));
+            let ts_offset = options
+                .iter()
+                .find(|o| o.code == OPT_IF_TSOFFSET && o.value.len() == 8)
+                .map(|o| {
+                    let raw: [u8; 8] = o.value.try_into().unwrap_or([0; 8]);
+                    if swapped {
+                        i64::from_be_bytes(raw)
+                    } else {
+                        i64::from_le_bytes(raw)
+                    }
+                })
+                .unwrap_or(0);
+            out.push(InterfaceDescription {
+                section: current,
+                id: next_id,
+                link_type: u32::from(u16_at(body, 0, swapped)),
+                name,
+                ts_resol: scan_tsresol(&body[8..], swapped).unwrap_or(Interface::DEFAULT_TSRESOL),
+                ts_offset,
+            });
+            next_id += 1;
+        }
+        off += total;
+    }
+    out
+}
+
 fn scan_tsresol(body: &[u8], swapped: bool) -> Option<u8> {
     OptionList::new(body, swapped)
         .iter()

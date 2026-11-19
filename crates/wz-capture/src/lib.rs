@@ -315,6 +315,9 @@ pub mod foreign_zenoh;
 // ICMP, ICMPv6 and IGMP messages: the network's word about a flow, read off
 // packets the transport path skips. Ungated, as the skip census is.
 pub mod control;
+// What a flow's IP headers and frames said, per direction, taken at ingest
+// beside the other per-flow facts and as ungated.
+pub mod ip_facts;
 #[cfg(feature = "dissect")]
 pub mod session_table_json;
 #[cfg(all(test, feature = "dissect"))]
@@ -7025,13 +7028,18 @@ impl Dissection {
                 // packet `done.packet_index` places the datagram at: a datagram
                 // reassembled from pieces is positioned and timed by the one
                 // packet at which a reader could first have seen it whole.
-                Ok(Transport::Udp(d) | Transport::RawEth(d)) => {
-                    // Reassembled from pieces: no one packet holds the payload.
+                Ok(Transport::Udp(mut d) | Transport::RawEth(mut d)) => {
+                    // Reassembled from pieces: no one packet holds the payload,
+                    // and no one IP header speaks for it.
+                    d.ip.reassembled = true;
+                    d.ip.interface = Some(interface_id);
                     self.push_datagram(d, ts_nanos, DatagramLink::Udp, None);
                     return;
                 }
-                Ok(Transport::Tcp(s)) => {
+                Ok(Transport::Tcp(mut s)) => {
                     // Reassembled from pieces: no one packet holds the payload.
+                    s.ip.reassembled = true;
+                    s.ip.interface = Some(interface_id);
                     self.push_segment(s, ts_nanos, tcp::PayloadAt::Here);
                     return;
                 }
@@ -9139,7 +9147,7 @@ impl Dissection {
                 None => ts,
             });
         }
-        let segment = match link::decapsulate(link_type, packet_index, bytes) {
+        let mut segment = match link::decapsulate(link_type, packet_index, bytes) {
             Ok(Transport::Tcp(s)) => s,
             // R311y597 — raweth joins the datagram path rather than getting
             // one of its own, and the reason is measured, not assumed: pico
@@ -9154,13 +9162,15 @@ impl Dissection {
             // handshake whatever its destination MAC says (see
             // [`link_handshake`]), and its `Endpoint` is a MAC that no address
             // rule downstream can read.
-            Ok(Transport::Udp(d)) => {
+            Ok(Transport::Udp(mut d)) => {
                 let at = lent_place(in_container, bytes, d.payload);
+                d.ip.interface = Some(interface_id);
                 self.push_datagram(d, ts_nanos, DatagramLink::Udp, at);
                 return;
             }
-            Ok(Transport::RawEth(d)) => {
+            Ok(Transport::RawEth(mut d)) => {
                 let at = lent_place(in_container, bytes, d.payload);
+                d.ip.interface = Some(interface_id);
                 self.push_datagram(d, ts_nanos, DatagramLink::RawEth, at);
                 return;
             }
@@ -9199,6 +9209,7 @@ impl Dissection {
         };
         let at = lent_place(in_container, bytes, segment.payload)
             .map_or(tcp::PayloadAt::Here, tcp::PayloadAt::Container);
+        segment.ip.interface = Some(interface_id);
         self.push_segment(segment, ts_nanos, at);
     }
 
@@ -9247,6 +9258,12 @@ impl Dissection {
         // still stamps its frames.
         self.touch(Touched::Stream(segment.flow));
         self.flows[idx].ingest.begin_packet(packet_index as u64);
+        self.flows[idx].ingest.observe_ip(
+            segment.from_low,
+            &segment.ip,
+            &segment.checksums,
+            segment.rst,
+        );
         self.advance_clock(idx, ts_nanos, FlowKind::Stream);
         let flow = &mut self.flows[idx];
         // Item 252 — recorded for every segment, a pure ACK included: a
@@ -9587,6 +9604,8 @@ impl Dissection {
             // exists, so there is no carrier for one to have arrived inside;
             // if that ever stops being true this line is where it shows.
             tunnel: link::Tunnel::none(),
+            // AF_VSOCK has no IP header.
+            ip: link::IpFacts::default(),
         };
         let at_ns = flow.session.observed_at_nanos();
         let before = flow.assembler(direction).len();
@@ -9670,6 +9689,9 @@ impl Dissection {
         self.datagram_flows[idx]
             .ingest
             .begin_packet(d.packet_index as u64);
+        self.datagram_flows[idx]
+            .ingest
+            .observe_ip(d.from_low, &d.ip, &d.checksums, false);
         self.advance_clock(idx, ts_nanos, FlowKind::Datagram);
         let flow = &mut self.datagram_flows[idx];
         flow.last_activity = d.packet_index;

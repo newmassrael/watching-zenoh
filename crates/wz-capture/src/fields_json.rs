@@ -2170,6 +2170,8 @@ fn document_selected<W: DocOut>(
     // Revision 76 — the IGMP and MLD membership messages the capture carried,
     // capture-wide because a multicast group is not one flow's.
     write_membership(d.control(), out);
+    // Revision 77 — the interfaces a flow's `network.interface_ids` name.
+    write_capture_interfaces(capture, out);
     // R311y875 — the run's misbound rules, AFTER every row producer, for the
     // reason `wz-analyze` places its unbound-declaration note there: this is a
     // fact about what the capture turned out to hold, and both producers above
@@ -2366,6 +2368,7 @@ fn push_stream_flow<W: DocOut>(
     write_zenoh(flow.ingest.versions(), &flow.zenoh_evidence(), out);
     write_foreign_zenoh(flow.ingest.foreign_zenoh(), out);
     write_icmp_errors(flow.ingest.control_errors(), out);
+    write_network(flow.ingest.ip_facts(), out);
     write_unit_readings(flow.ingest.readings(), out);
     write_context(
         &flow.session.context(),
@@ -2745,6 +2748,7 @@ fn push_datagram_flow<W: DocOut>(
     write_zenoh(flow.ingest.versions(), &flow.zenoh_evidence(), out);
     write_foreign_zenoh(flow.ingest.foreign_zenoh(), out);
     write_icmp_errors(flow.ingest.control_errors(), out);
+    write_network(flow.ingest.ip_facts(), out);
     write_unit_readings(flow.ingest.readings(), out);
     write_context(
         &flow.session.context(),
@@ -5632,6 +5636,131 @@ pub(crate) fn write_icmp_errors<W: DocOut>(errors: &crate::control::FlowErrors, 
     out.key("more");
     out.uint(errors.more());
     out.close_map();
+}
+
+/// The flow's `network` member (field document revision 77): what its IP
+/// headers and frames said beside the transport, one entry per direction, `a`
+/// then `b` ([`crate::ip_facts`]).
+///
+/// ```text
+/// "network":[{"direction":"a","packets":40,"ttl":{"min":64,"max":64},
+///             "rst_ttl":null,"vlan_ids":[10],"interface_ids":[0],
+///             "ids_more":false,
+///             "ip_checksum":{"valid":40,"invalid":0,"absent":0},
+///             "transport_checksum":{"valid":40,"invalid":0,"absent":0,
+///                                   "partial":0},
+///             "reassembled":0,"over_mtu":0}, {"direction":"b",...}]
+/// ```
+///
+/// `ttl` is the range of the TTL (IPv4) or hop limit (IPv6) over the
+/// direction's packets, of the innermost IP header for a tunnelled one, and
+/// `rst_ttl` the range over its TCP segments that carried RST: a reset whose
+/// TTL is not the peer's came from something between the two. Each is `null`
+/// with no such packet. `vlan_ids` are the outermost tags' VLAN ids and
+/// `interface_ids` the capture interfaces the packets were read off (the
+/// document's `capture_interfaces` names them), four of each at most, and
+/// `ids_more` is `true` when either list left an id out. The two checksum
+/// objects count each packet's verdict. `reassembled` counts the datagrams
+/// that arrived as IP fragments, `over_mtu` the packets whose IP header
+/// stated more than 1500 bytes, which a capture taken on the sending host
+/// before segmentation offload shows. Counted at ingest.
+fn write_network<W: DocOut>(facts: &crate::ip_facts::FlowFacts, out: &mut W) {
+    out.key("network");
+    out.open_array();
+    for (direction, half) in [Direction::A, Direction::B].iter().zip(facts.halves()) {
+        out.open_map();
+        out.key("direction");
+        out.text(dir_name(*direction));
+        out.key("packets");
+        out.uint(half.packets);
+        for (key, range) in [("ttl", half.ttl), ("rst_ttl", half.rst_ttl)] {
+            out.key(key);
+            match range {
+                Some(r) => {
+                    out.open_map();
+                    out.key("min");
+                    out.uint(u64::from(r.min));
+                    out.key("max");
+                    out.uint(u64::from(r.max));
+                    out.close_map();
+                }
+                None => out.null(),
+            }
+        }
+        for (key, ids) in [
+            ("vlan_ids", &half.vlans),
+            ("interface_ids", &half.interfaces),
+        ] {
+            out.key(key);
+            out.open_array();
+            for id in &ids.held {
+                out.uint(u64::from(*id));
+            }
+            out.close_array();
+        }
+        out.key("ids_more");
+        out.bool(half.vlans.more || half.interfaces.more);
+        out.key("ip_checksum");
+        out.open_map();
+        for (key, n) in ["valid", "invalid", "absent"].iter().zip(half.ip_checksum) {
+            out.key(key);
+            out.uint(n);
+        }
+        out.close_map();
+        out.key("transport_checksum");
+        out.open_map();
+        for (key, n) in ["valid", "invalid", "absent", "partial"]
+            .iter()
+            .zip(half.transport_checksum)
+        {
+            out.key(key);
+            out.uint(n);
+        }
+        out.close_map();
+        out.key("reassembled");
+        out.uint(half.reassembled);
+        out.key("over_mtu");
+        out.uint(half.over_mtu);
+        out.close_map();
+    }
+    out.close_array();
+}
+
+/// The document's `capture_interfaces` member (revision 77): every interface a
+/// pcapng capture's IDBs describe, in file order, so a flow's
+/// `network.interface_ids` can be named and each interface's clock read.
+///
+/// ```text
+/// "capture_interfaces":[{"section":0,"id":0,"link_type":1,"name":"eth0",
+///                        "ts_resolution":6,"ts_offset_s":0}]
+/// ```
+///
+/// `section` counts Section Header Blocks from 0, and `id` restarts in each, so
+/// the pair names an interface. `name` is `if_name`, `null` when unstated.
+/// `ts_resolution` is the raw `if_tsresol` byte (a power of ten, or of two with
+/// the high bit set; 6 is microseconds), `ts_offset_s` the `if_tsoffset`
+/// seconds every timestamp of the interface is shifted by. Empty for a classic
+/// pcap, whose one interface is the file's own link type.
+fn write_capture_interfaces<W: DocOut>(capture: &[u8], out: &mut W) {
+    out.key("capture_interfaces");
+    out.open_array();
+    for i in crate::pcapng::interface_descriptions(capture) {
+        out.open_map();
+        out.key("section");
+        out.uint(i.section as u64);
+        out.key("id");
+        out.uint(u64::from(i.id));
+        out.key("link_type");
+        out.uint(u64::from(i.link_type));
+        out.key("name");
+        out.opt_text(i.name.as_deref());
+        out.key("ts_resolution");
+        out.uint(u64::from(i.ts_resol));
+        out.key("ts_offset_s");
+        out.int(i.ts_offset);
+        out.close_map();
+    }
+    out.close_array();
 }
 
 /// The document's `membership` member (revision 76): the IGMP and MLD messages
@@ -9628,6 +9757,12 @@ mod tests {
                 });
             }
             arms.push(members(|out| write_membership(&plane, out)));
+        }
+        // Revision 77 — a pcapng capture's interfaces, which a classic pcap
+        // fixture leaves an empty list.
+        {
+            let pcapng = crate::pcapng::write(&[(crate::link::LINKTYPE_ETHERNET, 6)], &[]);
+            arms.push(members(|out| write_capture_interfaces(&pcapng, out)));
         }
         // Revision 74 — every `open_syn` and `open_ack` word, on a context.
         {

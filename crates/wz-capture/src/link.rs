@@ -1088,6 +1088,9 @@ pub struct Segment<'a> {
     /// Empty when it arrived on the wire it was addressed on. Reported, never
     /// acted on: the flow is keyed by the INNER header and stays so.
     pub tunnel: Tunnel,
+    /// What its IP header and its frame said beside the transport. Reported,
+    /// never acted on.
+    pub ip: IpFacts,
 }
 
 /// Why a captured packet yielded no TCP segment.
@@ -1249,6 +1252,9 @@ pub struct Datagram<'a> {
     /// Item 252 — the carriers this datagram arrived inside, outermost first.
     /// Empty when it arrived on the wire it was addressed on.
     pub tunnel: Tunnel,
+    /// What its IP header and its frame said beside the transport. Reported,
+    /// never acted on.
+    pub ip: IpFacts,
 }
 
 impl Datagram<'_> {
@@ -1529,6 +1535,32 @@ struct IpDatagram<'a> {
     payload: &'a [u8],
     /// `Some` when this packet is one piece of a larger datagram.
     fragment: Option<FragmentInfo>,
+    /// The IPv4 TTL or the IPv6 hop limit.
+    ttl: u8,
+    /// The datagram's length as its header states it, header included: the
+    /// IPv4 total length, or 40 plus the IPv6 payload length.
+    stated_len: u32,
+}
+
+/// What the IP header and the link frame said about one packet, beside its
+/// transport: the facts a reader uses to tell a middlebox's packet from the
+/// peer's, and one interface's traffic from another's.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IpFacts {
+    /// The TTL (IPv4) or hop limit (IPv6) of the IP header the transport was
+    /// read from: the innermost one, for a tunnelled packet. `None` for a
+    /// datagram reassembled from pieces and for a link with no IP header.
+    pub ttl: Option<u8>,
+    /// The length that IP header states, header included.
+    pub stated_len: Option<u32>,
+    /// The outermost 802.1Q tag's VLAN id on an Ethernet frame, `None` for an
+    /// untagged frame or another link.
+    pub vlan: Option<u16>,
+    /// The capture interface the packet was read off (a pcapng interface id;
+    /// 0 for a classic pcap), set by the dissection.
+    pub interface: Option<u32>,
+    /// The datagram was reassembled from IP fragments.
+    pub reassembled: bool,
 }
 
 /// What a LINK-layer frame turned out to carry.
@@ -1677,6 +1709,13 @@ pub fn decapsulate(
         transport: transport_checksum(&ip.src, &ip.dst, ip.proto, ip.payload),
         tunnel: tunnel_checksum,
     };
+    let facts = IpFacts {
+        ttl: Some(ip.ttl),
+        stated_len: Some(ip.stated_len),
+        vlan: outer_vlan(link_type, bytes),
+        interface: None,
+        reassembled: false,
+    };
     transport_from_ip(
         ip.src,
         ip.dst,
@@ -1686,6 +1725,36 @@ pub fn decapsulate(
         checksums,
         tunnel,
     )
+    .map(|t| t.with_ip(facts))
+}
+
+/// The VLAN id of an Ethernet frame's first 802.1Q or 802.1ad tag, the one
+/// nearest the MAC addresses: what a switch port sees.
+fn outer_vlan(link_type: u32, bytes: &[u8]) -> Option<u16> {
+    if link_type != LINKTYPE_ETHERNET || bytes.len() < ETHERNET_HEADER_LEN + 2 {
+        return None;
+    }
+    let ethertype = u16::from_be_bytes([bytes[12], bytes[13]]);
+    (ethertype == ETHERTYPE_VLAN || ethertype == ETHERTYPE_QINQ)
+        .then(|| u16::from_be_bytes([bytes[14], bytes[15]]) & 0x0FFF)
+}
+
+impl<'a> Transport<'a> {
+    /// The transport with `facts` on its segment or datagram; any other
+    /// variant as it is.
+    fn with_ip(self, facts: IpFacts) -> Self {
+        match self {
+            Transport::Tcp(mut s) => {
+                s.ip = facts;
+                Transport::Tcp(s)
+            }
+            Transport::Udp(mut d) => {
+                d.ip = facts;
+                Transport::Udp(d)
+            }
+            other => other,
+        }
+    }
 }
 
 /// Where the transport payload [`decapsulate`] would hand back
@@ -2342,6 +2411,9 @@ fn strip_udp(
         packet_index,
         checksums,
         tunnel,
+        // Stamped by `decapsulate`, which holds the IP header this was read
+        // from; a datagram reassembled from pieces has no one header.
+        ip: IpFacts::default(),
     })
 }
 
@@ -2510,6 +2582,8 @@ fn strip_raweth(bytes: &[u8], packet_index: usize) -> Option<Datagram<'_>> {
         // the chain here would need the frame to know what carried it, which
         // is exactly what a link header cannot say.
         tunnel: Tunnel::none(),
+        // A raweth frame has no IP header: no TTL and no stated length.
+        ip: IpFacts::default(),
     })
 }
 
@@ -2668,6 +2742,8 @@ fn strip_ipv4(bytes: &[u8]) -> Result<IpDatagram<'_>, SkipReason> {
         proto: bytes[9],
         payload: &bytes[ihl..end],
         fragment,
+        ttl: bytes[8],
+        stated_len: total_len as u32,
     })
 }
 
@@ -2810,6 +2886,8 @@ fn strip_ipv6(bytes: &[u8]) -> Result<IpDatagram<'_>, SkipReason> {
                 proto: next_header,
                 payload: &bytes[at.min(end)..end],
                 fragment,
+                ttl: bytes[7],
+                stated_len: 40 + payload_len as u32,
             });
         }
         let step = match next_header {
@@ -2908,6 +2986,8 @@ fn strip_tcp(
         packet_index,
         checksums,
         tunnel,
+        // Stamped by `decapsulate`, as a datagram's is.
+        ip: IpFacts::default(),
     })
 }
 

@@ -1777,7 +1777,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":76,"key":"kind","values":[...],
+ *     {"name":"fields","revision":77,"key":"kind","values":[...],
  *      "carries":[{"word":"bits",
  *                  "shapes":[["end","name","selector_path","start","value"]]},
  *                 {"word":"opaque",
@@ -3183,6 +3183,44 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  *
  * @values fields unreachable
  * @values fields what
+ *
+ * WHAT THE IP HEADERS AND THE FRAMES SAID (field-document revision 77,
+ * row_facts 17). Every flow object carries, after `icmp_errors`, one entry per
+ * direction, `a` then `b`:
+ *
+ *   "network":[{"direction":"a","packets":40,"ttl":{"min":64,"max":64},
+ *               "rst_ttl":null,"vlan_ids":[10],"interface_ids":[0],
+ *               "ids_more":false,
+ *               "ip_checksum":{"valid":40,"invalid":0,"absent":0},
+ *               "transport_checksum":{"valid":40,"invalid":0,"absent":0,
+ *                                     "partial":0},
+ *               "reassembled":0,"over_mtu":0},{"direction":"b",...}]
+ *
+ * `ttl` is the range of the TTL (IPv4) or hop limit (IPv6) over the direction's
+ * packets, read from the innermost IP header of a tunnelled one, and `rst_ttl`
+ * the range over its TCP segments that carried RST: a reset whose TTL is not
+ * the peer's came from something between the two. Each is `null` with no such
+ * packet; a datagram reassembled from IP fragments has no one header and
+ * gives no TTL. `vlan_ids` are the VLAN ids of the outermost 802.1Q or 802.1ad
+ * tags and `interface_ids` the capture interfaces the packets were read off,
+ * four of each at most, `ids_more` saying either list left one out. The two
+ * checksum objects count each packet's verdict, as `health.streams` counts the
+ * capture's (`partial` is a transport checksum left to the sender's offload).
+ * `reassembled` counts the datagrams that arrived as IP fragments; `over_mtu`
+ * the packets whose IP header stated more than 1500 bytes, which a capture
+ * taken on the sending host before segmentation offload shows. Counted at
+ * ingest. The document carries, after `membership`,
+ *
+ *   "capture_interfaces":[{"section":0,"id":0,"link_type":1,"name":"eth0",
+ *                          "ts_resolution":6,"ts_offset_s":0}]
+ *
+ * every interface a pcapng capture's IDBs describe, in file order: `section`
+ * counts Section Header Blocks from 0 and `id` restarts in each; `name` is
+ * `if_name` or `null`; `ts_resolution` the raw `if_tsresol` byte (a power of
+ * ten, or of two with the high bit set; 6 is microseconds); `ts_offset_s` the
+ * `if_tsoffset` seconds. Empty for a classic pcap. A frame snapped shorter than
+ * it was sent is counted capture-wide only, in `health.skips.truncated` when it
+ * could not be read at all.
  *
  * A message of the four announcing another version is not read past that byte
  * (since field-document revision 41 and session_table revision 3): its row is a
@@ -6309,7 +6347,7 @@ int wz_dissect_transport_layout_e2e(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":76,"key":"state",
+ *     "value_families":[{"name":"fields","revision":77,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,

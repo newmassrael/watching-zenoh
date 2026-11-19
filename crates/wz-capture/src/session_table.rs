@@ -110,6 +110,9 @@ pub struct LinkIngest {
     /// The ICMP and ICMPv6 errors that quoted a packet of this flow, bounded.
     /// See [`crate::control`].
     control_errors: crate::control::FlowErrors,
+    /// What the flow's IP headers and frames said, per direction. See
+    /// [`crate::ip_facts`].
+    ip_facts: crate::ip_facts::FlowFacts,
     /// How the flow's framing units read, counted at ingest for the same reason
     /// [`Self::versions`] is. See [`ReadingEvidence`].
     readings: ReadingEvidence,
@@ -693,6 +696,24 @@ impl LinkIngest {
     /// The ICMP and ICMPv6 errors that quoted a packet of this flow.
     pub fn control_errors(&self) -> &crate::control::FlowErrors {
         &self.control_errors
+    }
+
+    /// One packet of the flow, travelling from `low` (`a_to_b`) or not: what
+    /// its IP header and frame said, its checksums, and whether it carried a
+    /// TCP RST.
+    pub(crate) fn observe_ip(
+        &mut self,
+        a_to_b: bool,
+        ip: &crate::link::IpFacts,
+        checksums: &crate::link::Checksums,
+        rst: bool,
+    ) {
+        self.ip_facts.observe(a_to_b, ip, checksums, rst);
+    }
+
+    /// What the flow's IP headers and frames said, per direction.
+    pub fn ip_facts(&self) -> &crate::ip_facts::FlowFacts {
+        &self.ip_facts
     }
 
     /// Whether the flow is zenoh of a version this reader does not read.
