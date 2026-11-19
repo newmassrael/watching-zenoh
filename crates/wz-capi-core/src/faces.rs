@@ -2083,7 +2083,7 @@ impl Inner {
     /// upstream's matching status counts them: `Session::matching_status_local` walks the
     /// session's subscribers and queryables whatever origin each was declared for.
     fn local_entity_matches(&self, plane: FilterPlane, keyexpr: &str, any_origin: bool) -> bool {
-        use wz_runtime_tokio::keyexpr_match::keyexpr_includes_target;
+        use wz_runtime_tokio::keyexpr_match::keyexpr_includes;
         match plane {
             FilterPlane::Subscribers => self.subs.iter().any(|sub| {
                 (any_origin || sub.allowed_origin.allows_local())
@@ -2092,8 +2092,7 @@ impl Inner {
             FilterPlane::Queryables { complete_required } => self.qbls.iter().any(|qbl| {
                 (any_origin || qbl.allowed_origin.allows_local())
                     && if complete_required {
-                        let target: Vec<&str> = keyexpr.split('/').collect();
-                        qbl.complete && keyexpr_includes_target(&qbl.keyexpr, &target)
+                        qbl.complete && keyexpr_includes(&qbl.keyexpr, keyexpr)
                     } else {
                         keyexpr_intersects_text(keyexpr, &qbl.keyexpr)
                     }
