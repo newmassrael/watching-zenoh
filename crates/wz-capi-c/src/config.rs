@@ -35,6 +35,7 @@ use crate::ffi::guarded;
 use crate::result::{ZResult, Z_EGENERIC, Z_EIO, Z_ENULL, Z_EPARSE, Z_OK};
 use wz_capi_core::drive::ConfiguredZid;
 use wz_runtime_tokio::json5::Json5Value;
+use wz_runtime_tokio::zenoh_config::WZ_MEMBER;
 
 /// zenoh-c's `mode` key (`Z_CONFIG_MODE_KEY`, `zenoh_constants.h:23`).
 pub(crate) const MODE_KEY: &str = "mode";
@@ -86,9 +87,82 @@ pub(crate) const SESSION_ZID_KEY: &str = "id";
 /// wz's own reader refused (`Z_EPARSE`, measured through the C ABI, where
 /// upstream refuses the same insert at the door). One reader cannot disagree
 /// with itself.
+///
+/// # The `wz` member is held whole
+///
+/// A document's [`WZ_MEMBER`] is not a set of zenoh keys: it is wz's own document, which the open
+/// resolves whole (`wz_session_core::policy_document::resolve_document`), and a leaf set cannot
+/// hold everything that resolution judges. JSON5 keeps a member stated twice, and the resolution
+/// refuses a policy or a member stated twice in it; a map of leaves keeps the later one and the
+/// refusal is gone, so the same text would open here and be refused by every other reader of it.
+/// The member is therefore kept as the values it was stated with, one per top-level `wz` member
+/// in the order stated, and a key below it (`wz/profile`, `wz/policies/<id>`) is a path into
+/// that tree ([`Self::insert`]).
 #[derive(Debug, Default)]
 pub(crate) struct ConfigState {
     entries: BTreeMap<String, Json5Value>,
+    wz: Vec<Json5Value>,
+}
+
+/// An insert below the [`WZ_MEMBER`] whose path runs through a value that is not an object: a
+/// tree has no place for it, and the value in the way is the caller's own statement, which an
+/// insert does not discard. Nothing is stored.
+#[derive(Debug)]
+pub(crate) struct ThroughAValue;
+
+/// The segments of `key` below the document's [`WZ_MEMBER`], none for the member itself, or
+/// `None` when `key` is not a path of that member.
+fn below_wz_member(key: &str) -> Option<Vec<&str>> {
+    let rest = key.strip_prefix(WZ_MEMBER)?;
+    if rest.is_empty() {
+        return Some(Vec::new());
+    }
+    Some(rest.strip_prefix('/')?.split('/').collect())
+}
+
+/// Store `value` at the member `head` of the object `at`, or at `rest` below it, replacing what
+/// that path held: at the last segment every member of that key gives way to the one statement,
+/// as an insert of a zenoh key replaces its subtree. A step through `null`, zenoh's spelling of a
+/// member left unset, makes an object there. A step through any other value that is not an
+/// object refuses the insert ([`ThroughAValue`]); `at` may then hold part of the path, and the
+/// caller drops it.
+fn set_below(
+    at: &mut Json5Value,
+    head: &str,
+    rest: &[&str],
+    value: Json5Value,
+) -> Result<(), ThroughAValue> {
+    if matches!(at, Json5Value::Null) {
+        *at = Json5Value::Object(Vec::new());
+    }
+    let Json5Value::Object(members) = at else {
+        return Err(ThroughAValue);
+    };
+    let Some((next, deeper)) = rest.split_first() else {
+        match members.iter().position(|(key, _)| key == head) {
+            Some(first) => {
+                members[first].1 = value;
+                let mut index = 0;
+                members.retain(|(key, _)| {
+                    let keep = index == first || key != head;
+                    index += 1;
+                    keep
+                });
+            }
+            None => members.push((head.to_owned(), value)),
+        }
+        return Ok(());
+    };
+    // A member stated twice on the way is left as stated, for the open to refuse: the step is
+    // through the later one, which is the one a reader of the member takes.
+    let index = match members.iter().rposition(|(key, _)| key == head) {
+        Some(index) => index,
+        None => {
+            members.push((head.to_owned(), Json5Value::Object(Vec::new())));
+            members.len() - 1
+        }
+    };
+    set_below(&mut members[index].1, next, deeper, value)
 }
 
 impl ConfigState {
@@ -135,6 +209,9 @@ impl ConfigState {
     /// `insert("scouting", "{\"delay\":99}")` then
     /// `insert("scouting", "{\"timeout\":77}")` leaves `delay` back at `null`.
     /// A merge here would make wz remember an instruction upstream forgot.
+    ///
+    /// The store of zenoh's keys; the doors store through [`Self::insert`], which takes a path
+    /// of the [`WZ_MEMBER`] to the member's tree instead.
     fn insert_value(&mut self, key: &str, value: Json5Value) {
         let under = format!("{key}/");
         self.entries
@@ -146,6 +223,53 @@ impl ConfigState {
         } else {
             self.entries.insert(key.to_owned(), value);
         }
+    }
+
+    /// Store one json5 VALUE at `key`, as every door does: a path of the [`WZ_MEMBER`] into the
+    /// member's tree, any other key into the leaves of zenoh's keys
+    /// ([`Self::insert_value`]). Either replaces what stood at `key`, as upstream's insert does.
+    /// Refused, storing nothing, when `key` runs below the member through a value that is not an
+    /// object.
+    fn insert(&mut self, key: &str, value: Json5Value) -> Result<(), ThroughAValue> {
+        match below_wz_member(key) {
+            Some(below) => self.insert_wz(&below, value),
+            None => {
+                self.insert_value(key, value);
+                Ok(())
+            }
+        }
+    }
+
+    /// Store `value` at `below` in the [`WZ_MEMBER`]: the member itself, every top-level `wz`
+    /// member giving way to the one statement, or a path into the member a reader of it takes,
+    /// the last one stated, made when there is none.
+    fn insert_wz(&mut self, below: &[&str], value: Json5Value) -> Result<(), ThroughAValue> {
+        let Some((head, rest)) = below.split_first() else {
+            self.wz = vec![value];
+            return Ok(());
+        };
+        // Edited on a copy, so a refused insert leaves the member as it was.
+        let mut members = self.wz.clone();
+        if members.is_empty() {
+            members.push(Json5Value::Object(Vec::new()));
+        }
+        let last = members.len() - 1;
+        set_below(&mut members[last], head, rest, value)?;
+        self.wz = members;
+        Ok(())
+    }
+
+    /// The value at `below` in the [`WZ_MEMBER`] a reader of it takes, the last one stated, as
+    /// `Json5Value::get` takes the later of a member stated twice; `None` when nothing is there.
+    fn wz_value(&self, below: &[&str]) -> Option<&Json5Value> {
+        below.iter().try_fold(self.wz.last()?, |at, step| match at {
+            Json5Value::Object(members) => members
+                .iter()
+                .rev()
+                .find(|(key, _)| key == step)
+                .map(|(_, value)| value),
+            _ => None,
+        })
     }
 
     /// Whether storing `value` at `key` would put a value into a key whose own
@@ -222,6 +346,9 @@ impl ConfigState {
     /// not — and half a subtree would be a value the caller could re-insert to
     /// silently lose the rest.
     fn render(&self, key: &str) -> Option<String> {
+        if let Some(below) = below_wz_member(key) {
+            return self.wz_value(&below).map(Json5Value::to_json5_text);
+        }
         if let Some(value) = self.entries.get(key) {
             return Some(value.to_json5_text());
         }
@@ -280,6 +407,9 @@ impl ConfigState {
             let segments: Vec<&str> = key.split('/').collect();
             root.insert(&segments, value, key)?;
         }
+        // Each top-level `wz` member as it was stated, so the document read back, here or by any
+        // other reader of it, resolves as the stated one does.
+        root.insert_repeated(WZ_MEMBER, &self.wz)?;
         let mut out = String::new();
         root.write(&mut out, 1, Layout::Indented);
         Ok(out)
@@ -289,6 +419,7 @@ impl ConfigState {
     fn deep_copy(&self) -> Self {
         Self {
             entries: self.entries.clone(),
+            wz: self.wz.clone(),
         }
     }
 
@@ -345,6 +476,9 @@ impl core::fmt::Display for NestConflict {
 enum NestNode<'a> {
     /// A stored value, rendered by its own `to_json5_text` like any other.
     Leaf(&'a Json5Value),
+    /// Values each written as a member of its own under the one key, in order: the top-level
+    /// `wz` members as stated, a member stated twice included.
+    Repeated(&'a [Json5Value]),
     /// Named children, in key order.
     Branch(std::collections::BTreeMap<&'a str, NestNode<'a>>),
 }
@@ -404,7 +538,7 @@ impl<'a> NestNode<'a> {
             return Ok(());
         }
         let child = children.entry(head).or_default();
-        if matches!(child, NestNode::Leaf(_)) {
+        if !matches!(child, NestNode::Branch(_)) {
             return Err(NestConflict {
                 held: String::from(*head),
                 wanted: String::from(key),
@@ -413,10 +547,44 @@ impl<'a> NestNode<'a> {
         child.insert(rest, value, key)
     }
 
+    /// Place `values` under `name`, each written as a member of its own, or name the key already
+    /// in the way. Nothing is placed for no value.
+    fn insert_repeated(
+        &mut self,
+        name: &'a str,
+        values: &'a [Json5Value],
+    ) -> Result<(), NestConflict> {
+        if values.is_empty() {
+            return Ok(());
+        }
+        let NestNode::Branch(children) = self else {
+            // Unreachable through `render_nested`, whose root is a branch; a refusal for the
+            // reason `insert` gives.
+            return Err(NestConflict {
+                held: String::from("<a value>"),
+                wanted: String::from(name),
+            });
+        };
+        if children.contains_key(name) {
+            return Err(NestConflict {
+                held: String::from(name),
+                wanted: String::from(name),
+            });
+        }
+        children.insert(name, NestNode::Repeated(values));
+        Ok(())
+    }
+
     /// Write this node at `depth`, in `layout`.
     fn write(&self, out: &mut String, depth: usize, layout: Layout) {
         match self {
             NestNode::Leaf(value) => out.push_str(&value.to_json5_text()),
+            // Without the key it is repeated under, the value a reader takes: the last.
+            NestNode::Repeated(values) => {
+                if let Some(value) = values.last() {
+                    out.push_str(&value.to_json5_text());
+                }
+            }
             NestNode::Branch(children) => {
                 if children.is_empty() {
                     out.push_str("{}");
@@ -432,10 +600,12 @@ impl<'a> NestNode<'a> {
                     Layout::Compact => ("{", ",", String::new(), String::new()),
                 };
                 out.push_str(open);
-                for (i, (name, child)) in children.iter().enumerate() {
-                    if i > 0 {
+                let mut written = 0usize;
+                let mut open_member = |out: &mut String, name: &str| {
+                    if written > 0 {
                         out.push_str(sep);
                     }
+                    written += 1;
                     out.push_str(&pad);
                     out.push('"');
                     out.push_str(name);
@@ -443,7 +613,20 @@ impl<'a> NestNode<'a> {
                     if matches!(layout, Layout::Indented) {
                         out.push(' ');
                     }
-                    child.write(out, depth + 1, layout);
+                };
+                for (&name, child) in children {
+                    match child {
+                        NestNode::Repeated(values) => {
+                            for value in values.iter() {
+                                open_member(out, name);
+                                out.push_str(&value.to_json5_text());
+                            }
+                        }
+                        _ => {
+                            open_member(out, name);
+                            child.write(out, depth + 1, layout);
+                        }
+                    }
                 }
                 out.push_str(&tail);
                 out.push('}');
@@ -607,8 +790,13 @@ pub unsafe extern "C" fn zc_config_insert_json5(
         if ConfigState::refuses(key, &parsed) {
             return Z_EGENERIC;
         }
-        state.insert_value(key, parsed);
-        Z_OK
+        // A path below the `wz` member through a value that is not an object is refused at the
+        // door with the same code, nothing stored. A statement the member can hold is judged at
+        // the open, which fails with `Z_EINVAL` when the resolution refuses it.
+        match state.insert(key, parsed) {
+            Ok(()) => Z_OK,
+            Err(ThroughAValue) => Z_EGENERIC,
+        }
     })
 }
 
@@ -838,11 +1026,18 @@ unsafe fn install_parsed(this_: *mut z_owned_config_t, text: &str) -> ZResult {
     // install an EMPTY config and report success, which is the vacuous accept
     // this crate refuses everywhere else. Upstream refuses it too: its
     // `json5::from_str::<Config>` cannot make a struct out of a number.
-    if !matches!(document, wz_runtime_tokio::json5::Json5Value::Object(_)) {
+    let Json5Value::Object(members) = document else {
         return Z_EPARSE;
-    }
-    let mut state = ConfigState::default();
-    for (path, leaf) in document.leaf_entries() {
+    };
+    // The `wz` members are held whole, each as stated (see `ConfigState`); the rest of the
+    // document is zenoh's keys, decomposed into leaves.
+    let (wz, zenoh): (Vec<_>, Vec<_>) = members.into_iter().partition(|(key, _)| key == WZ_MEMBER);
+    let mut state = ConfigState {
+        entries: BTreeMap::new(),
+        wz: wz.into_iter().map(|(_, value)| value).collect(),
+    };
+    let zenoh = Json5Value::Object(zenoh);
+    for (path, leaf) in zenoh.leaf_entries() {
         // The same typed refusal the insert doors make, and a DOCUMENT's own
         // code for it: measured on `libzenohc.so` 1.10.0, `zc_config_from_str`
         // answers `Z_EPARSE` for an `id` the insert door answers `Z_EGENERIC`
@@ -852,7 +1047,12 @@ unsafe fn install_parsed(this_: *mut z_owned_config_t, text: &str) -> ZResult {
         if ConfigState::refuses(&path, leaf) {
             return Z_EPARSE;
         }
-        state.insert_value(&path, leaf.clone());
+        // A flat key spelled as a path of the `wz` member (`"wz/profile"`) is that path, as a
+        // flat zenoh key is the nesting it spells; one through a value that is not an object
+        // has no place, and the document does not read.
+        if state.insert(&path, leaf.clone()).is_err() {
+            return Z_EPARSE;
+        }
     }
     install(this_, state);
     Z_OK
@@ -991,12 +1191,14 @@ pub unsafe extern "C" fn zc_config_insert_json5_from_substr(
         let Some(parsed) = parse_json5_value(value) else {
             return Z_EPARSE;
         };
-        // The counted form is the same door: the same refusal, the same code.
+        // The counted form is the same door: the same refusals, the same code.
         if ConfigState::refuses(key, &parsed) {
             return Z_EGENERIC;
         }
-        state.insert_value(key, parsed);
-        Z_OK
+        match state.insert(key, parsed) {
+            Ok(()) => Z_OK,
+            Err(ThroughAValue) => Z_EGENERIC,
+        }
     })
 }
 
@@ -1903,5 +2105,283 @@ mod tests {
             "a member the second statement did not mention must be gone"
         );
         assert_eq!(state.render("wz-fixture/beta").as_deref(), Some("77"));
+    }
+
+    /// The document's `wz` member through the config doors: what the inserts and the document
+    /// doors store, the open reads as the policy-document resolution reads the same text, and
+    /// the export reads back to the same member.
+    mod wz_member {
+        use super::*;
+        use wz_runtime_tokio::policy::{SessionPolicy, SubscriberOverload};
+        use wz_runtime_tokio::policy_document::{resolve_document, Origin, Resolved};
+        use wz_runtime_tokio::zenoh_config::ZenohNodeConfig;
+        use wz_session_core::policy_binding::PolicyValue;
+
+        /// A value of `subscriber-overload` other than the build default that the build's
+        /// domain allows, by its id; the build default itself where the build allows one value.
+        fn a_chosen_overload() -> &'static str {
+            <SubscriberOverload as PolicyValue>::ALL
+                .iter()
+                .copied()
+                .find(|value| {
+                    *value != <SubscriberOverload as PolicyValue>::DEFAULT
+                        && <SubscriberOverload as PolicyValue>::DOMAIN.contains(*value)
+                })
+                .unwrap_or(<SubscriberOverload as PolicyValue>::DEFAULT)
+                .id()
+        }
+
+        /// What the open resolves the policies of `cfg` to: the document the open renders, read
+        /// by the one reader the open reads it with; `None` when the reader refuses it.
+        unsafe fn resolved_at_open(cfg: &z_owned_config_t) -> Option<Resolved> {
+            // SAFETY: a live owned config, only read here.
+            let state =
+                unsafe { config_state(z_config_loan(cfg) as *mut _) }.expect("a live state");
+            let document = state.render_nested().expect("the config nests");
+            ZenohNodeConfig::from_json5(&document)
+                .ok()
+                .map(|ingest| ingest.config.policies)
+        }
+
+        /// What the policy-document resolution, which every ABI shares, makes of `text`;
+        /// `None` when it refuses it.
+        fn resolved_as_document(text: &str) -> Option<Resolved> {
+            let tree = wz_runtime_tokio::json5::parse(text).expect("a JSON5 document");
+            resolve_document(SessionPolicy::defaults(), &tree).ok()
+        }
+
+        /// A config read by `zc_config_from_str` from `text`, and the code it answered.
+        unsafe fn from_str(text: &str) -> (ZResult, z_owned_config_t) {
+            let text = std::ffi::CString::new(text).expect("no NUL");
+            // SAFETY: a zeroed owned config is the gravestone this ABI defines.
+            let mut cfg: z_owned_config_t = unsafe { std::mem::zeroed() };
+            // SAFETY: a writable slot and a NUL-terminated document.
+            let rc = unsafe { zc_config_from_str(&mut cfg, text.as_ptr()) };
+            (rc, cfg)
+        }
+
+        /// Each spelling of the member through the insert door resolves at the open as the
+        /// document it spells; a second insert of a path replaces the first, so the policy is
+        /// stated once and not refused as stated twice.
+        #[test]
+        fn the_inserts_resolve_as_the_document_they_spell() {
+            let value = a_chosen_overload();
+            let quoted = format!("\"{value}\"");
+            let quoted = quoted.as_str();
+            let object = format!(
+                r#"{{ profile: "upstream", policies: {{ "subscriber-overload": "{value}" }} }}"#
+            );
+            let object = object.as_str();
+            let with_profile = format!(r#"{{ "wz": {object} }}"#);
+            let with_profile = with_profile.as_str();
+            let policy_alone =
+                format!(r#"{{ "wz": {{ "policies": {{ "subscriber-overload": "{value}" }} }} }}"#);
+            let policy_alone = policy_alone.as_str();
+            let cases: Vec<(Vec<(&str, &str)>, &str)> = vec![
+                (
+                    vec![("wz/policies/subscriber-overload", quoted)],
+                    policy_alone,
+                ),
+                (
+                    vec![
+                        ("wz/profile", "\"upstream\""),
+                        ("wz/policies/subscriber-overload", quoted),
+                    ],
+                    with_profile,
+                ),
+                (vec![("wz", object)], with_profile),
+                (
+                    vec![
+                        ("wz/policies/subscriber-overload", "\"block\""),
+                        ("wz/policies/subscriber-overload", quoted),
+                    ],
+                    policy_alone,
+                ),
+                (
+                    vec![
+                        ("wz", r#"{ policies: { "key-set": "open" } }"#),
+                        ("wz", object),
+                    ],
+                    with_profile,
+                ),
+                (
+                    vec![("wz", "null"), ("wz/policies/subscriber-overload", quoted)],
+                    policy_alone,
+                ),
+            ];
+            for (inserts, document) in &cases {
+                // SAFETY: a config built through the C doors.
+                let cfg = unsafe { config_of(inserts) };
+                let want = resolved_as_document(document);
+                // SAFETY: a live config.
+                assert_eq!(unsafe { resolved_at_open(&cfg) }, want, "{inserts:?}");
+                // SAFETY: the config is live and owned here.
+                unsafe { z_config_drop((&mut { cfg } as *mut z_owned_config_t).cast()) };
+            }
+            // The statement alone is one the build allows, so the cases above compare snapshots
+            // and not two refusals.
+            let alone = resolved_as_document(policy_alone).expect("a value the build allows");
+            assert_eq!(alone.policy.subscriber_overload().id(), value);
+            assert_eq!(
+                alone.provenance.origin("subscriber-overload"),
+                Some(Origin::Document)
+            );
+        }
+
+        /// The member reads back through the get door, at the member, an interior path and a
+        /// leaf, and a path it does not hold answers as any absent key does.
+        #[test]
+        fn the_get_door_answers_the_paths_of_the_member() {
+            // SAFETY: a config built through the C doors.
+            let cfg = unsafe {
+                config_of(&[
+                    ("wz/profile", "\"upstream\""),
+                    ("wz/policies/key-set", "\"open\""),
+                ])
+            };
+            // SAFETY: a live config.
+            unsafe {
+                assert_eq!(
+                    get_text(&cfg, "wz/profile"),
+                    (Z_OK, String::from("\"upstream\""))
+                );
+                assert_eq!(
+                    get_text(&cfg, "wz/policies"),
+                    (Z_OK, String::from("{\"key-set\":\"open\"}"))
+                );
+                assert_eq!(
+                    get_text(&cfg, "wz"),
+                    (
+                        Z_OK,
+                        String::from(
+                            "{\"profile\":\"upstream\",\"policies\":{\"key-set\":\"open\"}}"
+                        )
+                    )
+                );
+                assert_eq!(get_text(&cfg, "wz/policies/event-ring-full").0, Z_EPARSE);
+                z_config_drop((&mut { cfg } as *mut z_owned_config_t).cast());
+            }
+        }
+
+        /// A member a JSON5 document states twice, or a policy it states twice, is kept as
+        /// stated, so the open refuses the text as the resolution every ABI shares refuses it;
+        /// a store of leaves would keep the later one and open on it.
+        #[test]
+        fn a_member_the_document_states_twice_is_refused_at_the_open_as_elsewhere() {
+            for document in [
+                r#"{ wz: { policies: { "key-set": "open", "key-set": "closed" } } }"#,
+                r#"{ wz: { profile: "upstream" }, wz: {} }"#,
+                r#"{ wz: { policies: { "key-set": "open" }, policies: {} } }"#,
+            ] {
+                assert_eq!(resolved_as_document(document), None, "{document}");
+                // SAFETY: a document read through the C door.
+                let (rc, cfg) = unsafe { from_str(document) };
+                assert_eq!(rc, Z_OK, "{document}");
+                // SAFETY: a live config.
+                assert_eq!(unsafe { resolved_at_open(&cfg) }, None, "{document}");
+                // SAFETY: the config is live and owned here.
+                unsafe { z_config_drop((&mut { cfg } as *mut z_owned_config_t).cast()) };
+            }
+        }
+
+        /// A statement the member can hold is stored and judged at the open; a path through a
+        /// value that is not an object has no place in the member, and the door refuses it
+        /// with nothing stored, as a document holding it is refused by its door.
+        #[test]
+        fn a_path_through_a_value_is_refused_at_the_door_and_stores_nothing() {
+            // SAFETY: a config built through the C doors, and NUL-terminated strings.
+            unsafe {
+                let mut cfg = config_of(&[("wz/profile", "\"upstream\"")]);
+                let key = std::ffi::CString::new("wz/profile/id").expect("no NUL");
+                let value = std::ffi::CString::new("\"upstream\"").expect("no NUL");
+                let rc = zc_config_insert_json5(
+                    z_config_loan_mut(&mut cfg),
+                    key.as_ptr(),
+                    value.as_ptr(),
+                );
+                assert_eq!(rc, Z_EGENERIC);
+                let rc = zc_config_insert_json5_from_substr(
+                    z_config_loan_mut(&mut cfg),
+                    key.as_ptr(),
+                    "wz/profile/id".len(),
+                    value.as_ptr(),
+                    "\"upstream\"".len(),
+                );
+                assert_eq!(rc, Z_EGENERIC);
+                assert_eq!(
+                    get_text(&cfg, "wz"),
+                    (Z_OK, String::from("{\"profile\":\"upstream\"}")),
+                    "a refused insert stores nothing"
+                );
+                z_config_drop((&mut { cfg } as *mut z_owned_config_t).cast());
+
+                let (rc, _) = from_str(r#"{ wz: { profile: "upstream" }, "wz/profile/id": 1 }"#);
+                assert_eq!(rc, Z_EPARSE);
+
+                // A member that is no object is a statement the door stores and the open refuses.
+                let cfg = config_of(&[("wz", "\"upstream\"")]);
+                assert_eq!(resolved_at_open(&cfg), None);
+                z_config_drop((&mut { cfg } as *mut z_owned_config_t).cast());
+            }
+        }
+
+        /// What `zc_config_to_string` writes, `zc_config_from_str` reads back to the same member:
+        /// the open resolves both alike, a member stated twice included.
+        #[test]
+        fn the_member_survives_the_document_round_trip() {
+            let value = a_chosen_overload();
+            let quoted = format!("\"{value}\"");
+            // An image whose domain leaves out a value of the profile refuses it, and the round
+            // trip then compares two refusals.
+            let upstream_allowed =
+                resolved_as_document(r#"{ wz: { profile: "upstream" } }"#).is_some();
+            for inserts in [
+                vec![
+                    ("wz/profile", "\"upstream\""),
+                    ("wz/policies/subscriber-overload", quoted.as_str()),
+                    ("mode", "\"peer\""),
+                ],
+                vec![("wz/policies/subscriber-overload", quoted.as_str())],
+            ] {
+                // SAFETY: a config built through the C doors, its export read back by the
+                // document door; both are dropped here.
+                unsafe {
+                    let cfg = config_of(&inserts);
+                    let mut out: crate::abi::z_owned_string_t = std::mem::zeroed();
+                    assert_eq!(zc_config_to_string(z_config_loan(&cfg), &mut out), Z_OK);
+                    let document = take_text(&mut out);
+                    let (rc, back) = from_str(&document);
+                    assert_eq!(rc, Z_OK, "{document}");
+                    let resolved = resolved_at_open(&cfg);
+                    let names_the_profile = inserts.iter().any(|(key, _)| *key == "wz/profile");
+                    assert_eq!(
+                        resolved.is_some(),
+                        upstream_allowed || !names_the_profile,
+                        "{document}"
+                    );
+                    assert_eq!(resolved_at_open(&back), resolved, "{document}");
+                    assert_eq!(resolved_as_document(&document), resolved, "{document}");
+                    assert_eq!(get_text(&back, "wz"), get_text(&cfg, "wz"), "{document}");
+                    z_config_drop((&mut { cfg } as *mut z_owned_config_t).cast());
+                    z_config_drop((&mut { back } as *mut z_owned_config_t).cast());
+                }
+            }
+            // A member stated twice is written twice and still refused once read back.
+            let twice = r#"{ wz: { profile: "upstream" }, wz: { policies: {} } }"#;
+            // SAFETY: as above.
+            unsafe {
+                let (rc, cfg) = from_str(twice);
+                assert_eq!(rc, Z_OK);
+                let mut out: crate::abi::z_owned_string_t = std::mem::zeroed();
+                assert_eq!(zc_config_to_string(z_config_loan(&cfg), &mut out), Z_OK);
+                let document = take_text(&mut out);
+                assert_eq!(document.matches("\"wz\":").count(), 2, "{document}");
+                let (rc, back) = from_str(&document);
+                assert_eq!(rc, Z_OK, "{document}");
+                assert_eq!(resolved_at_open(&back), None, "{document}");
+                z_config_drop((&mut { cfg } as *mut z_owned_config_t).cast());
+                z_config_drop((&mut { back } as *mut z_owned_config_t).cast());
+            }
+        }
     }
 }

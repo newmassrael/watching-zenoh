@@ -1583,7 +1583,8 @@ pub struct ZenohNodeConfig {
     /// `wz` member, or one that states it `null`, leaves every value at the build default. The
     /// snapshot is for the creator of a session the node opens to hand its machines; a member the
     /// resolution refuses is [`ConfigIngestError::PoliciesRefused`], never this field at the
-    /// defaults.
+    /// defaults. [`Self::to_json5`] writes it as a `wz` member that this build reads back to an
+    /// equal snapshot and provenance.
     pub policies: crate::policy_document::Resolved,
 }
 
@@ -1980,6 +1981,11 @@ impl ZenohNodeConfig {
     /// parser. Keys are emitted in the order they appear in
     /// `DEFAULT_CONFIG.json5`, so a diff against the reference reads top to
     /// bottom.
+    ///
+    /// The [`WZ_MEMBER`] comes last, and only when a value of the policies is
+    /// not the build default: a node whose document stated nothing of wz's is
+    /// emitted as before, and stock zenoh, which has no such member, is handed
+    /// none.
     pub fn to_json5(&self) -> String {
         let mut out = String::from("{\n");
         out.push_str("  \"mode\": ");
@@ -2363,9 +2369,71 @@ impl ZenohNodeConfig {
             }
             out.push_str("] }");
         }
+        push_wz_member(&self.policies, &mut out);
         out.push_str("\n}\n");
         out
     }
+}
+
+/// The [`WZ_MEMBER`] that states `policies` again, written after the members already in `out`, or
+/// nothing when every value is the build default.
+///
+/// It is written as a document states it, the layers named rather than flattened: the profile
+/// that set a value is named as `wz/profile`, and only the values a later layer set are written
+/// under `wz/policies`. Read back by the same build, the profile sets what it set before and the
+/// statements override it where they did, so the snapshot and the origin of each value come back
+/// equal. A profile every value of which a later layer overrode set nothing in the snapshot, and
+/// is not named. A document has no layer for the open's overrides ([`Origin::Api`]), so a value
+/// one of them set is written as the document's own statement and reads back as the document's.
+///
+/// [`Origin::Api`]: crate::policy_document::Origin::Api
+fn push_wz_member(policies: &crate::policy_document::Resolved, out: &mut String) {
+    use crate::policy_document::Origin;
+
+    let profile = policies
+        .provenance
+        .iter()
+        .find_map(|(_, origin)| match origin {
+            Origin::Profile(id) => Some(id),
+            _ => None,
+        });
+    let stated: Vec<(&'static str, &'static str)> = policies
+        .provenance
+        .iter()
+        .filter(|(_, origin)| match origin {
+            Origin::BuildDefault => false,
+            Origin::Profile(id) => Some(*id) != profile,
+            Origin::Document | Origin::Api => true,
+        })
+        .map(|(entry, _)| (entry.id(), entry.value_in(&policies.policy)))
+        .collect();
+    if profile.is_none() && stated.is_empty() {
+        return;
+    }
+    out.push_str(",\n  ");
+    escape_into(WZ_MEMBER, out);
+    out.push_str(": {");
+    if let Some(id) = profile {
+        out.push_str(" \"profile\": ");
+        escape_into(id, out);
+        if !stated.is_empty() {
+            out.push(',');
+        }
+    }
+    if !stated.is_empty() {
+        out.push_str(" \"policies\": {");
+        for (index, (policy, value)) in stated.iter().enumerate() {
+            if index > 0 {
+                out.push(',');
+            }
+            out.push(' ');
+            escape_into(policy, out);
+            out.push_str(": ");
+            escape_into(value, out);
+        }
+        out.push_str(" }");
+    }
+    out.push_str(" }");
 }
 
 /// Upstream's `transport/link/tx/queue/batching/time_limit`, in milliseconds, which a file that
@@ -4501,7 +4569,16 @@ pub enum ConfigKeyDisposition {
 /// honoured lists and [`UNHONOURED_UPSTREAM_CONFIG_KEYS`] are DISJOINT;
 /// `a_key_is_never_both_honoured_and_declared_unhonoured` holds the invariant
 /// this order silently depends on.
+///
+/// One arm stands before it, and it is not a second spelling of that predicate: the paths of the
+/// document's [`WZ_MEMBER`] that the open reads ([`wz_member_path_is_read`]). That member is wz's
+/// own document, resolved whole at the open, and no list of zenoh's keys holds it. It stays out of
+/// [`honours_config_key`] because that predicate is also the vocabulary of the admin config write,
+/// and a running node does not take a change of its policies there.
 pub fn config_key_disposition(path: &str) -> ConfigKeyDisposition {
+    if wz_member_path_is_read(path) {
+        return ConfigKeyDisposition::Honoured;
+    }
     if honours_config_key(path) {
         // What wz honours, answered for the build asked: a capability's key is honoured only by a
         // build that has the capability.
@@ -4980,8 +5057,34 @@ impl core::fmt::Display for ConfigIngestError {
 
 impl core::error::Error for ConfigIngestError {}
 
-/// The top-level member of a document that holds wz's own statements about the node.
-const WZ_MEMBER: &str = "wz";
+/// The top-level member of a document that holds wz's own statements about the node: the profile
+/// it names (`wz/profile`) and the policies it states (`wz/policies`). No key of zenoh's is
+/// spelled with it, so a store of zenoh keys that also holds this member tells the two apart by
+/// this name.
+pub const WZ_MEMBER: &str = "wz";
+
+/// Whether `path` is a part of the document's [`WZ_MEMBER`] that the open reads: the member
+/// itself, `wz/profile`, `wz/policies`, and `wz/policies/<id>` where `<id>` names a policy of
+/// the build. Any other path below the member is one the open refuses by name
+/// ([`ConfigIngestError::PoliciesRefused`]), and is no key wz honours.
+pub fn wz_member_path_is_read(path: &str) -> bool {
+    let Some(below) = path.strip_prefix(WZ_MEMBER) else {
+        return false;
+    };
+    if below.is_empty() {
+        return true;
+    }
+    let Some(below) = below.strip_prefix('/') else {
+        return false;
+    };
+    match below.split_once('/') {
+        None => matches!(below, "profile" | "policies"),
+        Some(("policies", policy)) => crate::policy::POLICIES
+            .iter()
+            .any(|entry| entry.id() == policy),
+        Some(_) => false,
+    }
+}
 
 /// The top-level `wz` members of a document, taken out of `members` and gathered, in their order,
 /// as the members of a document of their own, which is what [`policies_of`] resolves.
@@ -14882,8 +14985,10 @@ mod tests {
 #[cfg(test)]
 mod wz_member_tests {
     use super::*;
-    use crate::policy::{SessionPolicy, SubscriberOverload};
-    use crate::policy_document::{Origin, Resolved, MAX_REPORTED};
+    use crate::policy::{SessionPolicy, SubscriberOverload, POLICIES};
+    use crate::policy_document::{
+        resolve, Layer, Origin, Profile, Resolved, Statement, MAX_REPORTED,
+    };
     use wz_session_core::policy_binding::PolicyValue;
 
     /// A value of `subscriber-overload` other than the build default that the build's domain
@@ -15017,6 +15122,148 @@ mod wz_member_tests {
             Err(ConfigIngestError::UnknownKey {
                 path: String::from("colour")
             })
+        );
+    }
+
+    /// Whether the build's domain allows every value the `upstream` profile states; an image
+    /// whose domain leaves one out refuses the profile.
+    fn the_upstream_profile_is_allowed() -> bool {
+        Profile::find("upstream").is_some_and(|profile| {
+            profile.statements.iter().all(|statement| {
+                POLICIES
+                    .iter()
+                    .find(|entry| entry.id() == statement.policy)
+                    .is_some_and(|entry| entry.domain().contains(statement.value))
+            })
+        })
+    }
+
+    /// The paths of the member the open reads are keys wz honours; every other path below it is
+    /// one the open refuses, and no key the admin config write takes.
+    #[test]
+    fn the_paths_of_the_member_the_open_reads_are_honoured_and_no_others() {
+        for path in [
+            "wz",
+            "wz/profile",
+            "wz/policies",
+            "wz/policies/key-set",
+            "wz/policies/subscriber-overload",
+        ] {
+            assert!(wz_member_path_is_read(path), "{path}");
+            assert_eq!(
+                config_key_disposition(path),
+                ConfigKeyDisposition::Honoured,
+                "{path}"
+            );
+            assert!(!honours_config_key(path), "{path} is no admin write");
+            assert!(!wz_accepts(path), "{path} is no admin write");
+        }
+        for path in [
+            "wz/colour",
+            "wz/limits",
+            "wz/limits/max",
+            "wz/policies/no-such-policy",
+            "wz/policies/key-set/open",
+            "wz/profile/upstream",
+            "wz/",
+            "wzx",
+            "wzx/profile",
+        ] {
+            assert!(!wz_member_path_is_read(path), "{path}");
+            assert_eq!(
+                config_key_disposition(path),
+                ConfigKeyDisposition::Unknown,
+                "{path}"
+            );
+        }
+    }
+
+    /// A node whose document states nothing of wz's is emitted without the member.
+    #[test]
+    fn the_export_of_a_node_that_states_nothing_has_no_member() {
+        for document in ["{}", "{ wz: {} }", "{ wz: null }"] {
+            let read = ZenohNodeConfig::from_json5(document).expect("it reads");
+            let export = read.config.to_json5();
+            let tree = wz_session_core::json5::parse(&export).expect("the emitter writes JSON5");
+            assert_eq!(tree.get(WZ_MEMBER), None, "{document}: {export}");
+        }
+    }
+
+    /// The export names the profile as a profile and writes only what the document stated over
+    /// it, and the export read back is the same snapshot with the same origin of every value.
+    #[test]
+    fn the_export_reads_back_to_an_equal_snapshot_and_provenance() {
+        let value = a_chosen_overload();
+        let allowed = the_upstream_profile_is_allowed();
+        let profile = if allowed {
+            r#"profile: "upstream", "#
+        } else {
+            ""
+        };
+        let document = format!(
+            r#"{{ mode: "peer", wz: {{ {profile}policies: {{ "subscriber-overload": "{value}" }} }} }}"#
+        );
+        let read = ZenohNodeConfig::from_json5(&document)
+            .expect("the member resolves")
+            .config;
+        let export = read.to_json5();
+        let back = ZenohNodeConfig::from_json5(&export)
+            .unwrap_or_else(|error| panic!("{error}: {export}"))
+            .config;
+        assert_eq!(back.policies, read.policies, "{export}");
+
+        let tree = wz_session_core::json5::parse(&export).expect("the emitter writes JSON5");
+        assert_eq!(
+            tree.get("wz/policies/subscriber-overload"),
+            Some(&Json5Value::String(String::from(value))),
+            "{export}"
+        );
+        if allowed {
+            assert_eq!(
+                tree.get("wz/profile"),
+                Some(&Json5Value::String(String::from("upstream"))),
+                "{export}"
+            );
+            // The profile's values are not flattened into the document's statements.
+            assert_eq!(tree.get("wz/policies/key-set"), None, "{export}");
+            assert_eq!(
+                back.policies.provenance.origin("key-set"),
+                Some(Origin::Profile("upstream"))
+            );
+        } else {
+            assert_eq!(tree.get("wz/profile"), None, "{export}");
+        }
+    }
+
+    /// A document has no layer for the open's overrides: a value one of them set is written as
+    /// the document's own statement, so the value comes back and its origin is the document's.
+    #[test]
+    fn a_value_the_opens_overrides_set_is_exported_as_the_documents() {
+        let value = a_chosen_overload();
+        let stated = [Statement::new("subscriber-overload", value)];
+        let node = ZenohNodeConfig {
+            policies: resolve(
+                SessionPolicy::defaults(),
+                &[Layer {
+                    origin: Origin::Api,
+                    statements: &stated,
+                }],
+            )
+            .expect("a value the build allows"),
+            ..ZenohNodeConfig::default()
+        };
+        let export = node.to_json5();
+        let back = ZenohNodeConfig::from_json5(&export)
+            .unwrap_or_else(|error| panic!("{error}: {export}"))
+            .config;
+        assert_eq!(back.policies.policy, node.policies.policy, "{export}");
+        assert_eq!(
+            back.policies.provenance.origin("subscriber-overload"),
+            Some(Origin::Document)
+        );
+        assert_eq!(
+            back.policies.provenance.origin("key-set"),
+            Some(Origin::BuildDefault)
         );
     }
 }
