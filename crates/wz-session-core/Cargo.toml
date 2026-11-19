@@ -112,6 +112,14 @@ bounded-heapless = []
 # build with it and an open policy starts with an open gate and may be given a closed one.
 key-set-closed = []
 
+# `shared-key-ids` compiles in the key ids every node of a deployment shares (`shared_key_ids`): a
+# dictionary an open is given, the forms of the `key-wire-form` policy that send a key by its id
+# without a declaration, and the receive path's reading of an id that only the dictionary holds.
+# The dictionary is held on the heap and shared between a session's links, so it needs `alloc`.
+# Without it a build has none of this: no dictionary on a session, and the policy's values other
+# than `declared` are refused by the engine that opens the session.
+shared-key-ids = ["alloc"]
+
 # §5.23 — the admin space (`adminspace-core`, `-fixed`, `-write`, `-metrics`,
 # `-introspection-handlers`, `-plugins-handlers`, `-config-hotreload`,
 # `-router-linkstate`) is the wz-admin crate's since the server-layer split (steps 6

@@ -225,6 +225,11 @@ pub mod key_allowance;
 #[cfg_attr(not(feature = "key-set-closed"), path = "key_gate_open.rs")]
 pub mod key_gate;
 
+// The key ids every node of a deployment shares (`shared-key-ids`), documented from inside for the
+// reason the closed key set's modules are.
+#[cfg(feature = "shared-key-ids")]
+pub mod shared_key_ids;
+
 /// The pace of a paced declaration replay: [`replay_pacing::ReplayPacing`], the burst and the
 /// interval between turns, and the pace a session's snapshot states through the
 /// `declaration-sync-pacing` policy. A value and not a clock, so the heap runtime and the slot

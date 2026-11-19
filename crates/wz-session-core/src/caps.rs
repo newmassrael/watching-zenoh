@@ -286,6 +286,12 @@ pub const MAX_INBOUND_SUB_INTERESTS: usize = generated::MAX_INBOUND_SUB_INTEREST
 /// `tests/it/files/session_slot_pool_deploy.rs` holds the two equal.
 pub const MAX_PEER_KEYEXPR_ALIASES: usize = generated::MAX_PEER_KEYEXPR_ALIASES;
 
+/// Maximum number of entries of the key-id dictionary every node of a deployment shares
+/// (`shared-key-ids`, the `shared_key_ids` module): a dictionary of more is refused when it is
+/// given, before any session holds it. The dictionary lives on the heap and is shared by every
+/// link of the session, so this bounds what an open may be handed rather than sizing a table.
+pub const MAX_SHARED_KEY_IDS: usize = generated::MAX_SHARED_KEY_IDS;
+
 /// Maximum number of declarations of ONE kind (subscribers, queryables, liveliness
 /// tokens) a peer may hold open to this session at a time (the deploy `limits`
 /// key `remote_decls`). Bounds each of [`crate::id_map::DeclaredKeys`] and
