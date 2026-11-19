@@ -390,6 +390,10 @@ transport-link-unixpipe,transport-link-ws|"
     # half behind `peer` too). The doors have no unit tests of their own, so the file is the
     # feature's whole population.
     "wz-capi-pico|hook|segment-sender,peer|--test=segment_sender_doors"
+    # Reception supervision per stream driven from C (`wz_ext_stream_supervisor_*`): the unit
+    # tests of the module and the file that drives the doors on a model clock, its task half with
+    # the default `multi-thread` (`stream_supervision_doors`, whose module is behind the feature).
+    "wz-capi-pico|hook|e2e-supervision|"
     # The declaration watch driven from C (`wz_ext_decl_watch_*`): the unit tests of the module and
     # the target that watches a peer's subscriber, queryable and token come and go over loopback
     # (`decl_watch_doors`, compiled with either capability). Both capabilities, where each event
@@ -637,6 +641,7 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         deferred-fire,\
         dissect,\
         dissect-serde,\
+        e2e-supervision,\
         ext-pubsub-group-membership,\
         ext-pubsub-serde-codec,\
         keyexpr-prefix,\

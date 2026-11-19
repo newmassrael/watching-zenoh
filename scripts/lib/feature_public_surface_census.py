@@ -509,11 +509,18 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # `wz_ext_decl_watch_declare` and `wz_ext_decl_watch_drop`, the event struct, the owned
         # watch and the constants they take, declared in `wz_ext.h`, off by default as the
         # observation plane's doors are.
+        # `e2e-supervision` gates `pub mod stream_supervision`, whose public items are wz's own
+        # doors `wz_ext_stream_supervisor_new`, `_add`, `_received`, `_set_condition`,
+        # `_set_sender_present`, `_set_callback`, `_poll`, `_stream_errors`, `_node_errors`,
+        # `_phase`, `_notify`, `_start_task`, `_stop_task`, `_loan`, `_move`, `_drop` and the two
+        # `wz_ext_internal_*` doors, and the types and constants they take, declared in
+        # `wz_ext.h`; off by default, as upstream has no such doors.
         frozenset(
             {
                 "admin-space",
                 "clock-source",
                 "declarations-synced-event",
+                "e2e-supervision",
                 "event-ring",
                 "remote-declaration-watch",
                 "resource-snapshot",

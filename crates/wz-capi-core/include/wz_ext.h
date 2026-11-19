@@ -413,6 +413,204 @@ void wz_ext_internal_segment_sender_null(wz_ext_owned_segment_sender_t *this_);
 bool wz_ext_internal_segment_sender_check(
     const wz_ext_owned_segment_sender_t *this_);
 
+/* Reception supervision per stream: whether each periodic stream a program
+ * receives keeps arriving. Part of the unstable surface, and present only in a
+ * build with the e2e-supervision capability.
+ *
+ * A stream is one message, of one instance, from one sender. The program adds
+ * each with its period and a factor, and its deadline is their product: a
+ * stream not received for longer than that is LOST. A loss is told once to the
+ * program's callback (an edge, not a level), and the stream's error count and
+ * the node's each go up by one, stopping at 255.
+ *
+ * WHEN ANYTHING IS JUDGED. Nothing is judged until start_delay_ms has passed
+ * since the first poll that had a clock, and then only while the program's
+ * condition holds (wz_ext_stream_supervisor_set_condition; it holds until the
+ * program says otherwise). Each time the two come to hold together, every
+ * stream that can time out has its deadline counted again from that poll and
+ * every error count is reset to 0, so a stream that never arrived is lost one
+ * deadline after the activation. An awaited stream can time out from the
+ * start; one that is not is supervised from its first reception. A poll
+ * without a clock judges nothing and the next poll with one activates again.
+ *
+ * ABSENT SENDERS. A sender the program marks absent has none of its streams
+ * judged, and a loss one was in is withdrawn without being told, until it is
+ * marked present again, which counts their deadlines from that moment. The
+ * sender is a number of the program's own, given with each stream.
+ *
+ * STORAGE. The table is the program's: an array of wz_ext_stream_slot_t, one
+ * per stream, and under the build's e2e-supervision-notify policy last-value a
+ * byte area of one cell per slot, where the last payload of each stream is
+ * kept for the loss to hand back. The supervisor writes both when it is made
+ * and owns them until it is dropped. How many streams one supervisor holds is
+ * at most the build's E2E_SUPERVISED_STREAMS.
+ *
+ * TIME is milliseconds in 32 bits that wrap: the program's clock, given at
+ * creation, or the library's monotonic clock when it gives none.
+ *
+ * THE POLL is the program's to call on its own cadence, which is how a
+ * single-threaded program and the cooperative engine drive it; a build with
+ * tasks can have the library poll on a task of its own.
+ *
+ * THREADS. One supervisor may be called from several threads, each door under
+ * its lock. The clock and the callback run inside that lock on the thread that
+ * polls, so neither may call a door of its own supervisor. */
+
+/* One row of the program's table, owned by the supervisor while it lives. */
+typedef struct wz_ext_stream_slot_t {
+  uint32_t _opaque[5];
+} wz_ext_stream_slot_t;
+
+/* The program's clock: writes the milliseconds of a monotonic source and
+ * returns 0, or returns anything else when it cannot say what time it is. */
+typedef int8_t wz_ext_stream_clock_fn(void *context, uint32_t *now_ms);
+
+/* One loss, as the callback reads it: 32 bytes on a 64-bit target, 24 on a
+ * 32-bit one. It and the value it points to are valid only for the call. */
+typedef struct wz_ext_stream_loss_t {
+  uint32_t stream;      /* the number wz_ext_stream_supervisor_add gave it */
+  uint32_t sender;      /* the sender it was added with */
+  uint8_t errors;       /* the stream's error count, this loss included */
+  uint8_t node_errors;  /* the node's error count, this loss included */
+  uint16_t reserved;
+  uint32_t reserved2;
+  const uint8_t *value; /* under last-value the stream's last payload; NULL
+                           under status-only or when none was kept */
+  size_t value_len;
+} wz_ext_stream_loss_t;
+
+typedef void wz_ext_stream_loss_fn(void *context,
+                                   const wz_ext_stream_loss_t *loss);
+
+/* Where the two gates stand. */
+#define WZ_EXT_STREAM_UNCLOCKED 0 /* no poll has had a clock */
+#define WZ_EXT_STREAM_DELAYING 1  /* the start delay runs */
+#define WZ_EXT_STREAM_INACTIVE 2  /* the condition does not hold */
+#define WZ_EXT_STREAM_ACTIVE 3    /* every poll judges the streams */
+#define WZ_EXT_STREAM_NO_SUPERVISOR 255
+
+/* What a loss carries: the build's e2e-supervision-notify policy. */
+#define WZ_EXT_STREAM_NOTIFY_STATUS_ONLY 0
+#define WZ_EXT_STREAM_NOTIFY_LAST_VALUE 1
+
+typedef struct wz_ext_owned_stream_supervisor_t {
+  void *_handle;
+} wz_ext_owned_stream_supervisor_t;
+typedef struct wz_ext_loaned_stream_supervisor_t {
+  void *_handle;
+} wz_ext_loaned_stream_supervisor_t;
+typedef struct wz_ext_moved_stream_supervisor_t {
+  wz_ext_owned_stream_supervisor_t _this;
+} wz_ext_moved_stream_supervisor_t;
+
+/* A supervisor of no stream yet over slot_count rows at slots and, under
+ * last-value, slot_count cells of value_cell bytes at values (not read under
+ * status-only, where it may be NULL). clock may be NULL. this_ holds the null
+ * state on every error.
+ *
+ * Z_OK; Z_ERR_NULL for a NULL this_ or slots, or a NULL values under
+ * last-value; Z_ERR_INVALID for a slot_count of 0 or past 2^32 - 1, a start
+ * delay past 2147483647, or under last-value a value_cell of 0. */
+z_result_t wz_ext_stream_supervisor_new(
+    wz_ext_owned_stream_supervisor_t *this_, wz_ext_stream_slot_t *slots,
+    size_t slot_count, uint8_t *values, size_t value_cell,
+    uint32_t start_delay_ms, wz_ext_stream_clock_fn *clock,
+    void *clock_context);
+
+/* Supervise a stream of period_ms that may miss factor periods, from sender,
+ * and write its number to out_stream (which may be NULL). An awaited stream can
+ * time out before its first reception. A stream of a sender marked absent is
+ * absent with it.
+ *
+ * Z_OK; Z_ERR_NULL for a NULL or dropped supervisor; Z_ERR_INVALID for a
+ * period or factor of 0, or a deadline past 2147483646 ms; Z_ERR_OVERFLOW when
+ * the table is full. */
+z_result_t wz_ext_stream_supervisor_add(
+    const wz_ext_loaned_stream_supervisor_t *this_, uint32_t period_ms,
+    uint16_t factor, uint32_t sender, bool awaited, uint32_t *out_stream);
+
+/* The stream was received now, carrying payload (NULL with 0 for none), which
+ * is kept under last-value. A loss it was in is over.
+ *
+ * Z_OK; Z_ERR_NULL for a NULL or dropped supervisor, or a NULL payload with a
+ * length; Z_ERR_INVALID for a stream there is none of; Z_ERR_OVERFLOW under
+ * last-value for a payload longer than the cell: the reception counts, the
+ * value is not kept. */
+z_result_t wz_ext_stream_supervisor_received(
+    const wz_ext_loaned_stream_supervisor_t *this_, uint32_t stream,
+    const uint8_t *payload, size_t len);
+
+/* Whether the program's condition holds. Z_OK; Z_ERR_NULL for a NULL or
+ * dropped supervisor. */
+z_result_t wz_ext_stream_supervisor_set_condition(
+    const wz_ext_loaned_stream_supervisor_t *this_, bool holds);
+
+/* Mark a sender present or absent. The error counts are left as they are.
+ * Z_OK, also when it already was; Z_ERR_NULL for a NULL or dropped supervisor;
+ * Z_ERR_INVALID when no stream was added with that sender. */
+z_result_t wz_ext_stream_supervisor_set_sender_present(
+    const wz_ext_loaned_stream_supervisor_t *this_, uint32_t sender,
+    bool present);
+
+/* Set the callback, or clear it with NULL; a loss is counted either way. The
+ * callback must be safe to call from the thread that polls, and context must
+ * stay valid, for as long as it is set. Z_OK; Z_ERR_NULL for a NULL or dropped
+ * supervisor. */
+z_result_t wz_ext_stream_supervisor_set_callback(
+    const wz_ext_loaned_stream_supervisor_t *this_, wz_ext_stream_loss_fn *call,
+    void *context);
+
+/* Look at every stream now and tell the callback once for each newly lost;
+ * out_told (which may be NULL) receives how many. Z_OK; Z_ERR_NULL for a NULL
+ * or dropped supervisor. */
+z_result_t wz_ext_stream_supervisor_poll(
+    const wz_ext_loaned_stream_supervisor_t *this_, size_t *out_told);
+
+/* The stream's error count. Z_OK; Z_ERR_NULL for a NULL or dropped supervisor
+ * or a NULL out; Z_ERR_INVALID for a stream there is none of. */
+z_result_t wz_ext_stream_supervisor_stream_errors(
+    const wz_ext_loaned_stream_supervisor_t *this_, uint32_t stream,
+    uint8_t *out);
+
+/* The node's error count since the last activation; 0 for a NULL supervisor. */
+uint8_t wz_ext_stream_supervisor_node_errors(
+    const wz_ext_loaned_stream_supervisor_t *this_);
+
+/* One of WZ_EXT_STREAM_UNCLOCKED, _DELAYING, _INACTIVE, _ACTIVE, or
+ * WZ_EXT_STREAM_NO_SUPERVISOR. */
+uint8_t wz_ext_stream_supervisor_phase(
+    const wz_ext_loaned_stream_supervisor_t *this_);
+
+/* WZ_EXT_STREAM_NOTIFY_STATUS_ONLY or _LAST_VALUE, or
+ * WZ_EXT_STREAM_NO_SUPERVISOR. */
+uint8_t wz_ext_stream_supervisor_notify(
+    const wz_ext_loaned_stream_supervisor_t *this_);
+
+/* The library polls every period_ms on a task of its own until stopped or
+ * dropped; the callback then runs on that task. Z_OK; Z_ERR_NULL for a NULL or
+ * dropped supervisor; Z_ERR_INVALID for a period of 0 or a task already
+ * running; Z_ERR_GENERIC when the host gave no thread. Stopping waits for the
+ * task, and is refused with Z_ERR_GENERIC from the task itself. Declared in the
+ * multi-threaded arm only, as the tasks of the drop-in are. */
+#if defined(Z_FEATURE_MULTI_THREAD) && Z_FEATURE_MULTI_THREAD == 1
+z_result_t wz_ext_stream_supervisor_start_task(
+    const wz_ext_loaned_stream_supervisor_t *this_, uint32_t period_ms);
+z_result_t wz_ext_stream_supervisor_stop_task(
+    const wz_ext_loaned_stream_supervisor_t *this_);
+#endif
+
+const wz_ext_loaned_stream_supervisor_t *wz_ext_stream_supervisor_loan(
+    const wz_ext_owned_stream_supervisor_t *this_);
+wz_ext_moved_stream_supervisor_t *wz_ext_stream_supervisor_move(
+    wz_ext_owned_stream_supervisor_t *this_);
+/* Stops the task first; the storage is the program's again once it returns.
+ * Not from the callback or the clock. */
+void wz_ext_stream_supervisor_drop(wz_ext_moved_stream_supervisor_t *this_);
+void wz_ext_internal_stream_supervisor_null(
+    wz_ext_owned_stream_supervisor_t *this_);
+bool wz_ext_internal_stream_supervisor_check(
+    const wz_ext_owned_stream_supervisor_t *this_);
+
 /* wz's own result codes of the doors below, outside zenoh-pico's own codes
  * (-128 to -65), so a later zenoh-pico code cannot take them. */
 #define WZ_EXT_ERR_POLICY_OFF (-2)  /* the build's policy does not allow what

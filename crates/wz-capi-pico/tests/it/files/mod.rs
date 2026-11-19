@@ -38,6 +38,7 @@ mod reply_options_roundtrip;
 mod segment_sender_doors;
 mod serial_link_roundtrip;
 mod session_check;
+mod stream_supervision_doors;
 mod teardown_drain;
 mod tls_coop_roundtrip;
 mod unixpipe_listen_multiclient;
