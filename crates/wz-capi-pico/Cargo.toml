@@ -540,6 +540,13 @@ required-features = ["resource-snapshot", "admin-space", "peer", "query"]
 name = "clock_source_stamps"
 required-features = ["engine-tokio", "peer", "clock-source"]
 
+# The stress run of Layer S: threads calling while sessions close and open again, over a transport
+# the program supplies that injects faults. An executable of its own because it counts the
+# process's allocations with a `#[global_allocator]`; every test in it is `#[ignore]`d.
+[[test]]
+name = "stability"
+required-features = ["app-transport", "peer", "query", "queryable", "liveliness", "link-udp"]
+
 # The node that `client_only_dials_a_listener` dials: a build that cannot listen needs one of
 # the full build to talk to. It asks queries and answers them, so the build has both ends of one.
 [[example]]
