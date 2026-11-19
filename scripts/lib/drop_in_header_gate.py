@@ -60,37 +60,15 @@ EXT_PREFIX = "wz_ext_"
 NEEDS_A_LIBRARY = {
     "Z_FEATURE_LINK_TLS": "link/transport/tls_stream.h includes Mbed TLS (mbedtls/ssl.h)",
 }
-CMAKE_FALSE = {"", "0", "OFF", "NO", "FALSE", "N", "IGNORE", "NOTFOUND"}
 KEYWORDS = {"return", "sizeof", "if", "while", "for", "switch", "else", "do", "case",
             "_Static_assert", "static_assert", "defined", "__attribute__", "__typeof__", "typeof"}
 DECL_RE = re.compile(r"(?:\b([A-Za-z_]\w*)\s*\**|\*)\s*\b([A-Za-z_]\w*)\s*\(")
 
-
-def cmake_defaults(cmake: str) -> dict[str, str]:
-    """`set(NAME value CACHE ...)`, the defaults a configure starts from: the FIRST definition of a
-    name, as a configure keeps it. `cmake` is the text `usm.pico_cmake_text` joins (up to 1.10.1 the
-    CMakeLists alone; from 1.10.2 `cmake/feature_config.cmake` too, where the definitions moved)."""
-    found = re.findall(r'^\s*set\((\w+)\s+("[^"]*"|[^\s)]+)\s+CACHE\b', cmake, re.M)
-    out: dict[str, str] = {}
-    for name, value in found:
-        out.setdefault(name, value.strip('"'))
-    return out
-
-
-def render_config(template: str, values: dict[str, str]) -> str:
-    """`config.h.in` as CMake's `configure_file` renders it for `values`."""
-    out = []
-    for line in template.splitlines():
-        directive = re.match(r"#cmakedefine\s+(\w+)(.*)$", line)
-        if directive:
-            name, rest = directive.groups()
-            if values.get(name, "").upper() in CMAKE_FALSE:
-                out.append(f"/* #undef {name} */")
-            else:
-                out.append(f"#define {name}" + re.sub(r"@(\w+)@", lambda m: values.get(m.group(1), ""), rest))
-            continue
-        out.append(re.sub(r"@(\w+)@", lambda m: values.get(m.group(1), ""), line))
-    return "\n".join(out) + "\n"
+# The CMake defaults and the `configure_file` rendering are the switch map's, which
+# `wz_config.py --pico-config-h` renders a wz build's header with as well: one rendering, so the
+# header this gate reads and the one a C program compiles against cannot disagree on a rule.
+cmake_defaults = usm.cmake_defaults
+render_config = usm.render_config
 
 
 def declared_functions(preprocessed: str) -> set[str]:

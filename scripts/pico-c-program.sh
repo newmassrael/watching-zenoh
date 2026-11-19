@@ -8,8 +8,9 @@
 #   scripts/pico-c-program.sh <source.c> <what the program shows>
 #
 # The program is compiled against zenoh-pico's OWN headers for the host (the ones the
-# vendored library's build installs, with the generated config), linked against the wz
-# library in place of libzenohpico, and run. It is the evidence a platform tag needs
+# vendored library's build installs), with the config.h of the wz library's arm in place of
+# the vendored default one (`wz_config.py --pico-config-h`, from the same feature list the
+# library is built with), linked against the wz library in place of libzenohpico, and run. It is the evidence a platform tag needs
 # that a pico program, not only a Rust test through the exported symbols, sees the
 # layout and the behaviour pico's headers promise.
 #
@@ -20,8 +21,9 @@
 # job (`capi-examples`) runs on Linux and Windows.
 #
 # The library is built in the caller's environment, so a build default the caller states
-# there (a `WZ_POLICY_<NAME>`, a `WZ_LIMIT_<NAME>`) is the library's; a source file given
-# with a feature list is linked against the library with those features.
+# there (a `WZ_POLICY_<NAME>`, a `WZ_LIMIT_<NAME>`) is the library's, and a limit stated
+# there is the value of the rendered header's switch too; a source file given with a feature
+# list is linked against the library with those features.
 #
 # Reads RUNNER_OS and RUNNER_TEMP, which the Actions runner sets, and appends its verdict
 # to GITHUB_STEP_SUMMARY when that is set. Exit status 0 means the program built, ran and
@@ -77,7 +79,12 @@ if ! (cd crates && cargo build --message-format=json-render-diagnostics -p zenoh
     exit 1
 fi
 
-py="$(command -v python3 || command -v python || true)"
+# On Windows `python` first: a `python3` there may be the store's launcher stub, which runs nothing.
+if [ "$os" = Windows ]; then
+    py="$(command -v python || command -v python3 || true)"
+else
+    py="$(command -v python3 || command -v python || true)"
+fi
 if [ -z "$py" ]; then
     say "pico-program-probe on ${os}: no python to read cargo's build report NOT-MEASURED"
     exit 1
@@ -110,6 +117,26 @@ if command -v cygpath > /dev/null 2>&1 && [ -n "${RUNNER_TEMP:-}" ]; then
 else
     temp="${RUNNER_TEMP:-$(mktemp -d)}"
 fi
+
+# The vendored library installs the config.h of pico's DEFAULT configuration (no unstable API, no
+# advanced plane, no connectivity events), and the wz library this program links is the arm its
+# feature list builds: the default build has all three. Against the vendored header a program
+# allocates the option structs of the other arm and the library's `*_options_default` writes past
+# them. So the program is compiled against the header of the library's own arm, rendered from the
+# same feature list (`wz_config.py --pico-config-h`). It is a copy of the installed tree with that
+# one file replaced, and the only include directory of pico's: a header found beside another
+# vendored header first (MSVC searches the directories of the open includes before /I) would
+# otherwise still be the vendored one.
+arm_inc="$temp/pico-arm-include-$(basename "${src%.c}")"
+rm -rf "$arm_inc"
+mkdir -p "$arm_inc"
+cp -R "$inc"/. "$arm_inc"/
+if ! "$py" scripts/lib/wz_config.py --pico-config-h "$features" > "$arm_inc/zenoh-pico/config.h"; then
+    say "pico-program-probe on ${os}: the header of the library's arm did not render NOT-MEASURED"
+    exit 1
+fi
+inc="$arm_inc"
+echo "pico headers of this build's arm: $inc"
 exe="$temp/$(basename "${src%.c}")"
 compiled=FAIL
 compiler=none

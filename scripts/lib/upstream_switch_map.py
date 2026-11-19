@@ -268,6 +268,37 @@ def pico_cmake_text(source: Path) -> str:
     return "\n".join(parts)
 
 
+# What CMake reads as false in the variable of a `#cmakedefine`.
+CMAKE_FALSE = {"", "0", "OFF", "NO", "FALSE", "N", "IGNORE", "NOTFOUND"}
+
+
+def cmake_defaults(cmake: str) -> dict[str, str]:
+    """`set(NAME value CACHE ...)`, the defaults a configure starts from: the FIRST definition of a
+    name, as a configure keeps it. `cmake` is the text `pico_cmake_text` joins (up to 1.10.1 the
+    CMakeLists alone; from 1.10.2 `cmake/feature_config.cmake` too, where the definitions moved)."""
+    found = re.findall(r'^\s*set\((\w+)\s+("[^"]*"|[^\s)]+)\s+CACHE\b', cmake, re.M)
+    out: dict[str, str] = {}
+    for name, value in found:
+        out.setdefault(name, value.strip('"'))
+    return out
+
+
+def render_config(template: str, values: dict[str, str]) -> str:
+    """`config.h.in` as CMake's `configure_file` renders it for `values`."""
+    out = []
+    for line in template.splitlines():
+        directive = re.match(r"#cmakedefine\s+(\w+)(.*)$", line)
+        if directive:
+            name, rest = directive.groups()
+            if values.get(name, "").upper() in CMAKE_FALSE:
+                out.append(f"/* #undef {name} */")
+            else:
+                out.append(f"#define {name}" + re.sub(r"@(\w+)@", lambda m: values.get(m.group(1), ""), rest))
+            continue
+        out.append(re.sub(r"@(\w+)@", lambda m: values.get(m.group(1), ""), line))
+    return "\n".join(out) + "\n"
+
+
 def pico_value_defaults(source: Path) -> dict[str, str]:
     """Each VALUE switch of a zenoh-pico source tree (the CMake variables its config template
     substitutes, `wz_config.pico_value_macros`) to the text of its first definition in the

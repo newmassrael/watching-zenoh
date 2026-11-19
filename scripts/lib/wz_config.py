@@ -50,6 +50,15 @@ itself (their Kconfig symbol, default and help). This tool is everything that de
                                   select the tokio engine (its drive threads, the groups, gossip)
                                   are left out and `engine-coop` is named, so the build is the
                                   header arm's drop-in with the engine under it changed
+    --pico-config-h [--engine coop] FEATURES
+                                  the reverse: print the zenoh-pico `config.h` of the wz-capi-pico
+                                  build of FEATURES (a comma list, empty for none) on the default
+                                  features, or with --engine coop on `engine-coop` alone, rendered
+                                  from the pinned config.h.in: every Z_FEATURE_* switch as the
+                                  build carries it, every value switch a limit maps to at the
+                                  WZ_LIMIT_<ID> the environment states, pico's defaults for the
+                                  rest. A C program compiled against it allocates the structs
+                                  that build's library writes
     --resolve-features ABI PRESET...
                                   merge presets onto the defaults (kconfiglib) and print the cargo
                                   arguments of ABI
@@ -162,6 +171,7 @@ Usage:
     wz_config.py --conformance-statement c HEADER
     wz_config.py --resolve-conformance-statement pico|c|core PRESET...
     wz_config.py --original-conformance-statement zenoh-pico|zenoh-c|zenoh
+    wz_config.py --pico-config-h [--engine coop] FEATURES
     wz_config.py --features pico|c|core CONFIG
         CONFIG is a Kconfig `.config` (CONFIG_WZ_CAP_X=y) or a pico header of
         `#define Z_FEATURE_X 0|1` lines; a capability the file does not mention is OFF.
@@ -1936,6 +1946,74 @@ def pico_reference(decl: dict, enabled: set[str]) -> dict[str, int]:
         elif cls == "maps":
             out[row["switch"]] = int(row["anchor"].removeprefix(PICO_DROP_IN) in enabled)
     return out
+
+
+PICO_SOURCE = ROOT / "vendor" / "zenoh-pico"
+
+
+def pico_build_features(engine: str, asked: list[str], table: dict) -> set[str]:
+    """The wz-capi-pico features a build turns on, as cargo resolves them: the default features and
+    `asked` for the tokio engine (`cargo build -p wz-capi-pico --features ...`), or `engine-coop`
+    and `asked` alone for the cooperative one (`--no-default-features --features engine-coop,...`).
+    A name the package lacks is a `KeyError`."""
+    start = (["default"] if engine == "tokio" else ["engine-coop"]) + [f for f in asked if f]
+    return enabled_features(table, start)
+
+
+def pico_config_values(decl: dict, enabled: set[str], defaults: dict[str, str],
+                       env: dict[str, str]) -> dict[str, str]:
+    """The CMake variables zenoh-pico's `config.h.in` is rendered with for a wz-capi-pico build of
+    the features `enabled`: pico's own defaults (`defaults`), every `Z_FEATURE_*` switch as the
+    build carries it (`pico_reference`), and each value switch a limit maps to at the number the
+    build reads from `env` (`WZ_LIMIT_<ID>`), where it states one."""
+    values = dict(defaults)
+    values.update({switch: str(on) for switch, on in pico_reference(decl, enabled).items()})
+    for switch, lid in limit_rows(decl):
+        stated = env.get(f"WZ_LIMIT_{lid}")
+        if stated is not None:
+            values[switch] = stated
+    return values
+
+
+def render_pico_config(template: str, values: dict[str, str]) -> str:
+    """`template` (zenoh-pico's `config.h.in`) rendered with `values` as CMake's `configure_file`
+    renders it (`upstream_switch_map.render_config`, the rendering `drop_in_header_gate.py` reads
+    the upstream header with). A `@NAME@` outside a `#cmakedefine` with no value is a `ValueError`:
+    it would define a macro to nothing, which a program's arithmetic on it reads as an error far
+    from here, or not at all. A `#cmakedefine` without one is CMake's `#undef`."""
+    # Imported here: the switch map imports this module.
+    import upstream_switch_map as usm
+
+    plain = "\n".join(line for line in template.splitlines()
+                      if not re.match(r"\s*#cmakedefine\b", line))
+    missing = sorted(set(re.findall(r"@(\w+)@", plain)) - set(values))
+    if missing:
+        raise ValueError(f"no value for {', '.join(missing)} in the pico config template")
+    return usm.render_config(template, values)
+
+
+def pico_config_header(decl: dict, enabled: set[str], env: dict[str, str],
+                       source: pathlib.Path = PICO_SOURCE) -> str:
+    """The `zenoh-pico/config.h` of a wz-capi-pico build of the features `enabled`: the header a C
+    program compiled against that build's library must see, so that every struct it allocates has
+    the size the library writes. The vendored pico's own build installs the header of pico's
+    DEFAULT configuration (no unstable API, no advanced plane, no connectivity events), which is
+    not the arm of wz's default build. This is the reverse of `--features pico CONFIG`."""
+    import upstream_switch_map as usm
+
+    template = (source / "include" / "zenoh-pico" / "config.h.in").read_text(encoding="utf-8")
+    defaults = usm.cmake_defaults(usm.pico_cmake_text(source))
+    return render_pico_config(template, pico_config_values(decl, enabled, defaults, env))
+
+
+def pico_header_features(decl: dict) -> set[str]:
+    """The wz-capi-pico capabilities a pico header states: those a zenoh-pico `Z_FEATURE_*` switch
+    maps to. They are what a rendered header must give back, since `--features pico` reads only
+    them; a capability no switch reaches is not in a header to be read."""
+    return {row["anchor"].removeprefix(PICO_DROP_IN) for row in decl["switches"]
+            if row.get("original") == "zenoh-pico" and row.get("class") == "maps"
+            and row["switch"].startswith("Z_FEATURE_")
+            and row["anchor"].removeprefix(PICO_DROP_IN) in decl["caps"]}
 
 
 # ---------------------------------------------------------------------------------------------
@@ -4234,6 +4312,58 @@ def cmd_selftest() -> int:
     header = "".join(f"#define {s} {v}\n" for s, v in pico_reference(decl, built).items())
     expect("the reference reads back as the build it was derived from",
            read_config(decl, header) == closure(decl["caps"], {"peer"}))
+    # --pico-config-h: a value outside a #cmakedefine with nothing to render is refused; a
+    # #cmakedefine without one is CMake's #undef; a limit the environment states is the value.
+    try:
+        render_pico_config("#define A @A@\n", {})
+        expect("a template value with no value is refused", False)
+    except ValueError:
+        pass
+    expect("a #cmakedefine with no value renders as its #undef",
+           render_pico_config('#cmakedefine P "@P@"\n#define A @A@\n', {"A": "1"})
+           == '/* #undef P */\n#define A 1\n')
+    stated_limits = limit_rows(decl)
+    if stated_limits:
+        switch0, lid0 = stated_limits[0]
+        expect("a limit the environment states is its value switch's value",
+               pico_config_values(decl, set(), {switch0: "1"}, {f"WZ_LIMIT_{lid0}": "7"})[switch0] == "7"
+               and pico_config_values(decl, set(), {switch0: "1"}, {})[switch0] == "1")
+    # The round trip, on the pinned template and the real manifest: the header of a build reads
+    # back, through `--features pico` (`--engine coop` for a cooperative one), as a build with the
+    # same header-stated capabilities, and the build's arm switches are what it was built with.
+    pico_table = manifest_features(MANIFESTS["pico"])
+    header_caps = pico_header_features(decl)
+    for engine, asked in (("tokio", []), ("tokio", ["app-transport", "e2e-sender", "local-subscriber"]),
+                          ("coop", ["query", "queryable"]), ("coop", ["peer", "multi-thread", "liveliness"])):
+        label = f"{engine} {','.join(asked) or 'defaults'}"
+        enabled = pico_build_features(engine, asked, pico_table)
+        try:
+            rendered = pico_config_header(decl, enabled, {})
+        except (OSError, ValueError) as exc:
+            expect(f"the header of the {label} build renders ({exc})", False)
+            continue
+        expect(f"the header of the {label} build states no capability against another",
+               pico_header_conflicts(decl, "pico", rendered) == [])
+        back = features_for(decl, "pico", read_config(decl, rendered))
+        if engine == "coop":
+            back = coop_features(back, pico_table)
+        expect(f"the header of the {label} build reads back as that build",
+               enabled_features(pico_table, back) & header_caps == enabled & header_caps)
+        flags_on, flags_off = pico_flag_states(rendered)
+        expect(f"the header of the {label} build states its threading arm and the unstable API",
+               ("Z_FEATURE_MULTI_THREAD" in flags_on) == ("multi-thread" in enabled)
+               and ("Z_FEATURE_UNSTABLE_API" in flags_on) == ("unstable-api" in enabled)
+               and "Z_FEATURE_UNSTABLE_API" in flags_on | flags_off)
+        if engine == "tokio" and not asked:
+            # The defect this mode exists for: the vendored library installs pico's default arm,
+            # which has no unstable API, under a library whose default build has it.
+            expect("the default build's header has the unstable API and the advanced plane",
+                   {"Z_FEATURE_UNSTABLE_API", "Z_FEATURE_ADVANCED_PUBLICATION"} <= flags_on)
+    try:
+        pico_build_features("tokio", ["no-such-feature"], pico_table)
+        expect("a feature the pico crate lacks is refused", False)
+    except KeyError:
+        pass
     expect("cargo args of nothing", cargo_args(decl, "c", set()) == "--no-default-features")
     expect("cargo args name the base then the closure",
            cargo_args(decl, "pico", {"peer"}).endswith("rx-busy-poll,link-udp,scout,peer"))
@@ -5788,6 +5918,28 @@ def main(argv: list[str]) -> int:
         if doc is None:
             return 1
         print_statement(doc)
+        return 0
+    coop_header = len(argv) == 5 and argv[1:4] == ["--pico-config-h", "--engine", "coop"]
+    if coop_header or (len(argv) == 3 and argv[1] == "--pico-config-h"):
+        decl = load_decl()
+        try:
+            enabled = pico_build_features("coop" if coop_header else "tokio", argv[-1].split(","),
+                                          manifest_features(MANIFESTS["pico"]))
+            header = pico_config_header(decl, enabled, dict(os.environ))
+        except KeyError as exc:
+            print(f"  wz-config FAIL: {argv[-1]}: {exc.args[0]}", file=sys.stderr)
+            return 1
+        except (ValueError, OSError) as exc:
+            print(f"  wz-config FAIL: {exc}", file=sys.stderr)
+            return 1
+        # The header must read back as the build: a capability a switch of it states off and a
+        # capability it states on implies would be a build `--features pico` refuses.
+        conflicts = pico_header_conflicts(decl, "pico", header)
+        for conflict in conflicts:
+            print(f"  wz-config FAIL: {argv[-1]}: {conflict}", file=sys.stderr)
+        if conflicts:
+            return 1
+        sys.stdout.write(header)
         return 0
     print(__doc__, file=sys.stderr)
     return 2

@@ -618,6 +618,14 @@ jobs:
             crates -> target
             vendor/sce -> target
 
+      # scripts/pico-c-program.sh reads cargo's build report and renders the header of the
+      # library's arm (`wz_config.py --pico-config-h`) in python, the version the repository pins.
+      - name: Set up Python (the pico C programs' header is rendered in python)
+        if: ${{ env.WZ_HOST_SELECTED == 'true' }}
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: .github/python-version
+
       - name: the C ABI crates on this host, gated (one verdict line per question)
         if: ${{ env.WZ_HOST_SELECTED == 'true' }}
         timeout-minutes: 35
@@ -924,6 +932,12 @@ jobs:
       # The vendored pico library's bindings are generated through libclang. The Linux
       # runner image carries one with its clang packages; it is installed only when none
       # is found, so the step costs nothing where it is there.
+      - name: Set up Python (the pico C programs' header is rendered in python)
+        if: ${{ env.WZ_HOST_SELECTED == 'true' }}
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: .github/python-version
+
       - name: libclang for the pico bindings, where the image has none
         if: ${{ env.WZ_HOST_SELECTED == 'true' && runner.os == 'Linux' }}
         shell: bash
