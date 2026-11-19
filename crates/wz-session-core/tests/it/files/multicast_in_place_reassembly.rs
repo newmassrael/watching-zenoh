@@ -56,6 +56,7 @@ fn params(zid: &[u8]) -> MulticastParams {
         link_rx: LinkRxConf::default(),
         join_rule: GroupJoinRule::Pico,
         max_sessions: None,
+        policy: wz_session_core::policy::SessionPolicy::defaults(),
     }
 }
 

@@ -3270,7 +3270,7 @@ impl LinkDriver for TcpDriver {
         // `OwnedReadHalf`).
         match self.stream.as_mut() {
             // TcpDriver is the unified acceptor/adapter driver; the lowlatency
-            // open helpers wire via `wire_dialed_link` -> `StreamReadDriver`, not
+            // open helpers wire via `wire_dialed_link_with_rx` -> `StreamReadDriver`, not
             // this path, so it always reads the universal 2-byte prefix.
             Some(stream) => {
                 // R2740 — this driver's OWN per-link arena, which is where
@@ -4482,19 +4482,6 @@ impl McastSocketConfig<'_> {
     }
 }
 
-/// [`McastSocketConfig::of_policy`] under the build defaults, for a caller that does not yet hold
-/// the snapshot of its node.
-#[cfg(any(
-    feature = "scouting-active",
-    feature = "scouting-responder",
-    feature = "transport-multicast"
-))]
-impl Default for McastSocketConfig<'_> {
-    fn default() -> Self {
-        Self::of_policy(&wz_session_core::policy::SessionPolicy::defaults())
-    }
-}
-
 #[cfg(any(
     feature = "scouting-active",
     feature = "scouting-responder",
@@ -4600,19 +4587,6 @@ impl McastGroupOptions {
     }
 }
 
-/// [`McastGroupOptions::of_policy`] under the build defaults, for a caller that does not yet hold
-/// the snapshot of its node.
-#[cfg(any(
-    feature = "scouting-active",
-    feature = "scouting-responder",
-    feature = "transport-multicast"
-))]
-impl Default for McastGroupOptions {
-    fn default() -> Self {
-        Self::of_policy(&wz_session_core::policy::SessionPolicy::defaults())
-    }
-}
-
 /// R311y832 — the UDP multicast locator config surface
 /// (zenoh `zenoh-link-udp/src/lib.rs:108-112`: `iface` / `join` / `ttl`).
 #[cfg(all(test, feature = "transport-multicast", feature = "transport-link-udp"))]
@@ -4631,7 +4605,7 @@ mod udp_multicast_config_tests {
     #[tokio::test]
     #[cfg(target_os = "linux")]
     async fn an_unpinned_link_socket_leaves_by_the_chosen_interface() {
-        let d = UdpDriver::bind_multicast(GROUP, 0, McastSocketConfig::default())
+        let d = UdpDriver::bind_multicast(GROUP, 0, defaults())
             .await
             .expect("bind the group");
         let sock = d.socket.as_ref().expect("bound");
@@ -4653,7 +4627,7 @@ mod udp_multicast_config_tests {
     /// the driver writes to `group:port` of its bound socket, as the locator it lists says.
     #[tokio::test]
     async fn a_link_named_with_port_zero_is_addressed_by_the_port_it_was_given() {
-        let link = UdpDriver::bind_multicast_link(GROUP, 0, McastSocketConfig::default())
+        let link = UdpDriver::bind_multicast_link(GROUP, 0, defaults())
             .await
             .expect("bind the link");
         let bound = link
@@ -4670,6 +4644,12 @@ mod udp_multicast_config_tests {
 
     /// The snapshot's `multicast-link-requires-iface` value, or `None` where the build's domain
     /// leaves `value` out.
+    /// The config of a node of the build defaults. These cases are about the socket keys; each
+    /// case about a policy selects its own snapshot.
+    fn defaults() -> McastSocketConfig<'static> {
+        McastSocketConfig::of_policy(&crate::policy::SessionPolicy::defaults())
+    }
+
     fn requiring_iface(
         value: crate::policy::MulticastLinkRequiresIface,
     ) -> Option<crate::policy::SessionPolicy> {
@@ -4750,7 +4730,7 @@ mod udp_multicast_config_tests {
             0,
             McastSocketConfig {
                 iface: Some(&named),
-                ..McastSocketConfig::default()
+                ..defaults()
             },
         )
         .await
@@ -4769,7 +4749,7 @@ mod udp_multicast_config_tests {
     #[tokio::test]
     #[cfg(target_os = "linux")]
     async fn an_unpinned_links_send_socket_leaves_by_the_chosen_interface() {
-        let link = UdpDriver::bind_multicast_link(GROUP, 0, McastSocketConfig::default())
+        let link = UdpDriver::bind_multicast_link(GROUP, 0, defaults())
             .await
             .expect("bind the link");
         let send = link.send_socket.as_ref().expect("a link has a send half");
@@ -4786,7 +4766,7 @@ mod udp_multicast_config_tests {
             .unwrap_or(std::net::Ipv4Addr::UNSPECIFIED);
         assert_eq!(egress, expected);
 
-        let scout_like = UdpDriver::bind_multicast_tx(GROUP, 0, McastSocketConfig::default())
+        let scout_like = UdpDriver::bind_multicast_tx(GROUP, 0, defaults())
             .await
             .expect("bind a plain sender");
         let plain = socket2::SockRef::from(&**scout_like.socket.as_ref().expect("bound"))
@@ -4807,7 +4787,7 @@ mod udp_multicast_config_tests {
         // (`zenoh-link-udp/src/multicast.rs:355-374`, `set_multicast_ttl_v4` on
         // the sending socket); wz called `set_multicast_ttl_v4` NOWHERE, so no
         // wz deployment could reach past its own subnet by any route.
-        let d = UdpDriver::bind_multicast(GROUP, 0, McastSocketConfig::default())
+        let d = UdpDriver::bind_multicast(GROUP, 0, defaults())
             .await
             .expect("bind the group");
         let sock = d.socket.as_ref().expect("bound");
@@ -4822,7 +4802,7 @@ mod udp_multicast_config_tests {
             0,
             McastSocketConfig {
                 ttl: Some(8),
-                ..Default::default()
+                ..defaults()
             },
         )
         .await
@@ -4867,7 +4847,7 @@ mod udp_multicast_config_tests {
             .collect();
         let crowded = || McastSocketConfig {
             extra_joins: &extra,
-            ..Default::default()
+            ..defaults()
         };
         assert!(
             UdpDriver::bind_multicast(GROUP, 0, crowded())
@@ -4893,7 +4873,7 @@ mod udp_multicast_config_tests {
             7446,
             McastSocketConfig {
                 ttl: Some(5),
-                ..Default::default()
+                ..defaults()
             },
         )
         .await
@@ -4927,7 +4907,7 @@ mod udp_multicast_config_tests {
             7446,
             McastSocketConfig {
                 iface: Some("lo"),
-                ..Default::default()
+                ..defaults()
             },
         )
         .await
@@ -4947,7 +4927,7 @@ mod udp_multicast_config_tests {
     #[tokio::test]
     #[cfg(target_os = "linux")]
     async fn the_commons_socket_keys_reach_the_multicast_sockets() {
-        let d = UdpDriver::bind_multicast_tx(GROUP, 7446, McastSocketConfig::default())
+        let d = UdpDriver::bind_multicast_tx(GROUP, 7446, defaults())
             .await
             .expect("bind a sender");
         let unasked = d
@@ -4976,7 +4956,7 @@ mod udp_multicast_config_tests {
             7446,
             McastSocketConfig {
                 bind: Some("127.0.0.1:0"),
-                ..Default::default()
+                ..defaults()
             },
         )
         .await
@@ -5000,7 +4980,7 @@ mod udp_multicast_config_tests {
         for marked in [false, true] {
             let cfg = McastSocketConfig {
                 dscp: marked.then_some(0x28),
-                ..Default::default()
+                ..defaults()
             };
             let want = if marked { 0x28 } else { 0 };
             let tx = UdpDriver::bind_multicast_tx(GROUP, 7446, cfg)
@@ -5049,7 +5029,7 @@ mod udp_multicast_config_tests {
             7446,
             McastSocketConfig {
                 bind: Some("[::1]:0"),
-                ..Default::default()
+                ..defaults()
             },
         )
         .await
@@ -5079,7 +5059,7 @@ mod udp_multicast_config_tests {
         const GROUP_V6: std::net::Ipv6Addr =
             std::net::Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0x7a7a, 0x4e10);
 
-        let d = UdpDriver::bind_multicast_tx(GROUP_V6, 7470, McastSocketConfig::default())
+        let d = UdpDriver::bind_multicast_tx(GROUP_V6, 7470, defaults())
             .await
             .expect("bind an IPv6 multicast sender");
         let sock = d.socket.as_ref().expect("bound");
@@ -5101,7 +5081,7 @@ mod udp_multicast_config_tests {
             7470,
             McastSocketConfig {
                 ttl: Some(8),
-                ..Default::default()
+                ..defaults()
             },
         )
         .await
@@ -5146,7 +5126,7 @@ mod udp_multicast_config_tests {
             0,
             McastSocketConfig {
                 iface: Some("lo"),
-                ..Default::default()
+                ..defaults()
             },
         )
         .await
@@ -5204,7 +5184,7 @@ mod udp_multicast_config_tests {
                 0,
                 McastSocketConfig {
                     extra_joins: joins,
-                    ..Default::default()
+                    ..defaults()
                 },
             )
             .await
@@ -5233,7 +5213,7 @@ mod udp_multicast_config_tests {
             0,
             McastSocketConfig {
                 extra_joins: &joins,
-                ..Default::default()
+                ..defaults()
             },
         )
         .await
@@ -5261,13 +5241,13 @@ mod udp_multicast_config_tests {
             port,
             McastSocketConfig {
                 extra_joins: &joins,
-                ..Default::default()
+                ..defaults()
             },
         )
         .await
         .expect("bind with an extra join");
 
-        let tx = UdpDriver::bind_multicast_tx(EXTRA, port, McastSocketConfig::default())
+        let tx = UdpDriver::bind_multicast_tx(EXTRA, port, defaults())
             .await
             .expect("bind a sender");
         let sock = rx.socket.as_ref().expect("bound");

@@ -14,15 +14,17 @@
 use std::io;
 use std::net::IpAddr;
 
+use wz_runtime_tokio::policy::SessionPolicy;
 pub use wz_runtime_tokio::scouting_responder::LateLocators;
 use wz_runtime_tokio::scouting_responder::{
     bind_reply_sockets, serve, ResponderIdentity, ScoutingResponder,
 };
 use wz_runtime_tokio::session_open::BoundListener;
-use wz_runtime_tokio::{McastSocketConfig, UdpDriver};
+use wz_runtime_tokio::UdpDriver;
 
 use crate::scouting_node::{
-    group_join_interface, join_beyond_the_first, named_interface_addresses, ScoutingPlan,
+    group_join_interface, group_socket_config, join_beyond_the_first, named_interface_addresses,
+    ScoutingPlan,
 };
 
 /// How a node is reached, as a Hello says it: the locator list for a scouter on this host and the
@@ -168,12 +170,15 @@ impl Responder {
 ///
 /// R3089 -- `late` is where the listeners that bind after the responder started are told to it:
 /// the next Hello names each, as it names the ones bound before.
+///
+/// `policy` is the node's snapshot, which the group socket is opened under.
 pub async fn bind_responder(
     plan: &ScoutingPlan,
     whatami: wz_runtime_tokio::session_glue::WhatAmI,
     zid: &[u8],
     advertised: Advertised,
     late: LateLocators,
+    policy: &SessionPolicy,
 ) -> io::Result<Option<Responder>> {
     if !plan.answers {
         return Ok(None);
@@ -187,11 +192,7 @@ pub async fn bind_responder(
         .map(named_interface_addresses)
         .unwrap_or_default();
     let join = group_join_interface(plan, &named);
-    let config = McastSocketConfig {
-        iface: join.as_deref(),
-        ttl: plan.ttl,
-        ..McastSocketConfig::default()
-    };
+    let config = group_socket_config(plan, join.as_deref(), policy);
     let group_socket = UdpDriver::bind_scouting_group(plan.group, plan.port, config).await?;
     join_beyond_the_first(&group_socket, plan.group, &named);
     let replies = match plan.interface {

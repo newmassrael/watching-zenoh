@@ -1697,6 +1697,7 @@ async fn drive_dial(
         &zid,
         &listeners,
         late.locators(),
+        &link_conf.policy,
     )
     .await
     {
@@ -1787,6 +1788,8 @@ async fn drive_dial(
 /// once it has connected (see [`Responder`]). The started responder is held by the role's drive
 /// for the session's life and dropped with it. A bind that fails is an open failure, as the
 /// listener's is: a session that was told to be findable is never silently not.
+///
+/// `policy` is the session's snapshot, which the responder's group socket is opened under.
 #[cfg(feature = "peer")]
 async fn bound_responder(
     plan: Option<&ScoutingPlan>,
@@ -1794,13 +1797,21 @@ async fn bound_responder(
     zid: &[u8],
     listeners: &[&BoundListener],
     late: LateLocators,
+    policy: &SessionPolicy,
 ) -> Result<Option<Responder>, ()> {
     let Some(plan) = plan else {
         return Ok(None);
     };
-    bind_responder(plan, whatami, zid, Advertised::of_all(listeners), late)
-        .await
-        .map_err(|_| ())
+    bind_responder(
+        plan,
+        whatami,
+        zid,
+        Advertised::of_all(listeners),
+        late,
+        policy,
+    )
+    .await
+    .map_err(|_| ())
 }
 
 /// A client with nothing to dial: scout the group and open a session to the first node that
@@ -1810,15 +1821,18 @@ async fn bound_responder(
 /// that connects ends the search, and a search that outlives `scouting/timeout` fails the open.
 /// The scouting stops when this returns, as upstream's does: a client does not autoconnect to a
 /// second node.
+///
+/// `policy` is the session's snapshot, which the scouting sockets are opened under.
 #[cfg(feature = "scout")]
 async fn connect_first(
     plan: &ScoutingPlan,
     zid: &[u8],
     dialer: &Dialer,
+    policy: &SessionPolicy,
 ) -> Result<OpenedSession, ()> {
     // A bind that fails fails the open, as upstream's `connect_first` is reached only after its
     // multicast bind succeeded.
-    let link = ScoutLink::bind(plan).await.map_err(|_| ())?;
+    let link = ScoutLink::bind(plan, policy).await.map_err(|_| ())?;
     let (intents_tx, mut intents) = tokio::sync::mpsc::unbounded_channel();
     let scouting = link.autoconnect(plan, zid, &intents_tx);
     tokio::pin!(scouting);
@@ -1896,7 +1910,7 @@ async fn drive_client(
     #[cfg(feature = "scout")]
     let scouted = match &scouting {
         Some((plan, zid)) => Some(
-            connect_first(plan, zid, &dialer)
+            connect_first(plan, zid, &dialer, shared.session_policy())
                 .await
                 .map_err(|e| log_open_failure("scouted connect", &e)),
         ),
@@ -2230,6 +2244,8 @@ async fn drive_peer(
     stop: Arc<AtomicBool>,
     gate: Arc<ReadGate>,
 ) {
+    // The session's snapshot, which the scouting sockets are opened under.
+    let session_policy = *shared.session_policy();
     let (closing_tx, closing_rx) = tokio::sync::watch::channel(false);
     let window = Arc::new(StartWindow::default());
     let local = tokio::task::LocalSet::new();
@@ -2347,7 +2363,7 @@ async fn drive_peer(
                 // joined fails the open with no task of this half running.
                 let mut scout = None;
                 if let Some(plan) = scouting {
-                    match ScoutLink::bind(&plan).await {
+                    match ScoutLink::bind(&plan, &session_policy).await {
                         Ok(link) => scout = Some((plan, link)),
                         Err(_) => {
                             cause = OpenError::DriveFailed;
@@ -3605,6 +3621,7 @@ async fn drive_listen(
         &zid,
         &listeners,
         late.locators(),
+        &link_conf.policy,
     )
     .await
     {
@@ -3677,6 +3694,7 @@ async fn drive_idle(whatami: WhatAmI, ctx: DriveContext) {
         &zid,
         &[],
         LateLocators::default(),
+        shared.session_policy(),
     )
     .await
     {
@@ -3709,6 +3727,9 @@ struct GroupSetup {
     /// The session's receive half, which bounds what each group rejoins from fragments as it
     /// bounds the unicast links.
     link_rx: LinkRxConf,
+    /// The session's snapshot, which each group's parameters carry to its drive loop and its
+    /// sockets are opened under, as the unicast links are.
+    policy: SessionPolicy,
     /// Where a group that cannot be joined reports the open as failed, before the role
     /// reports anything.
     opened: OpenReport,
@@ -3747,14 +3768,18 @@ impl ResolvedGroup {
     /// family, with the socket keys of its metadata, or, in a build with the raweth transport,
     /// a `reth/` endpoint as zenoh-pico reads one. `None` is an endpoint that names no group,
     /// which fails the open.
+    ///
+    /// `policy` is the session's snapshot: the group's parameters carry it, and its sockets are
+    /// opened under its link policies.
     fn resolve(
         join: &GroupJoin,
         zid: SessionZid,
         whatami: WhatAmI,
         tx_queue: TxQueueConf,
         link_rx: LinkRxConf,
+        policy: &SessionPolicy,
     ) -> Option<Self> {
-        let link = Self::link_of(&join.endpoint)?;
+        let link = Self::link_of(&join.endpoint, policy)?;
         let GroupProfile {
             lease_ms,
             join_interval_ms,
@@ -3785,12 +3810,14 @@ impl ResolvedGroup {
                 link_rx,
                 join_rule,
                 max_sessions,
+                policy: *policy,
             },
         })
     }
 
-    /// The link `endpoint` names, or `None` (logged) for one that names no group.
-    fn link_of(endpoint: &str) -> Option<GroupLinkSpec> {
+    /// The link `endpoint` names, or `None` (logged) for one that names no group. A UDP
+    /// group's sockets take the two link policies as `policy` holds them.
+    fn link_of(endpoint: &str, policy: &SessionPolicy) -> Option<GroupLinkSpec> {
         use wz_runtime_tokio::locator::{parse_locator, Proto};
 
         #[cfg(all(feature = "raweth-transport", target_os = "linux"))]
@@ -3816,8 +3843,7 @@ impl ResolvedGroup {
                 joins: parsed.mcast_join,
                 bind: parsed.socket.as_ref().and_then(|s| s.bind.clone()),
                 dscp: parsed.socket.as_ref().and_then(|s| s.dscp),
-                loopback: Default::default(),
-                ..wz_runtime_tokio::McastGroupOptions::default()
+                ..wz_runtime_tokio::McastGroupOptions::of_policy(policy)
             },
         })
     }
@@ -3840,6 +3866,7 @@ async fn serve_beside_groups(setup: GroupSetup, role: impl Future<Output = ()>) 
         whatami,
         tx_queue,
         link_rx,
+        policy,
         opened,
     } = setup;
     if joins.is_empty() {
@@ -3848,7 +3875,7 @@ async fn serve_beside_groups(setup: GroupSetup, role: impl Future<Output = ()>) 
     }
     let Some(groups) = joins
         .iter()
-        .map(|join| ResolvedGroup::resolve(join, zid, whatami, tx_queue, link_rx))
+        .map(|join| ResolvedGroup::resolve(join, zid, whatami, tx_queue, link_rx, &policy))
         .collect::<Option<Vec<_>>>()
     else {
         // An endpoint that names no group this build can join: pico's listen of it finds no
@@ -4689,6 +4716,7 @@ pub fn open_blocking(
                 whatami: dial_whatami,
                 tx_queue: link_conf.tx.queue,
                 link_rx: link_conf.rx,
+                policy: link_conf.policy,
                 opened: tx.clone(),
             };
             let ctx = DriveContext {
@@ -6194,7 +6222,8 @@ mod multicast_face_tests {
     use wz_runtime_tokio_test_support::multicast_bus::GroupBus;
 
     use super::{
-        serve_group, GroupDeclarations, GroupLabel, GroupLinkSpec, ResolvedGroup, WhatAmI,
+        serve_group, GroupDeclarations, GroupJoin, GroupLabel, GroupLinkSpec, GroupProfile,
+        LinkRxConf, ResolvedGroup, SessionPolicy, TxQueueConf, WhatAmI,
     };
     use crate::faces::{QueryableSink, SharedSession, SubscriberSink};
 
@@ -6205,15 +6234,16 @@ mod multicast_face_tests {
     /// endpoint the raw Ethernet group pico reads it as (its own MAC, its interface).
     #[test]
     fn an_endpoint_names_the_link_of_its_group() {
+        let policy = SessionPolicy::defaults();
         assert!(matches!(
-            ResolvedGroup::link_of(ENDPOINT),
+            ResolvedGroup::link_of(ENDPOINT, &policy),
             Some(GroupLinkSpec::Udp { port: 7447, .. })
         ));
-        assert!(ResolvedGroup::link_of("udp/127.0.0.1:7447").is_none());
+        assert!(ResolvedGroup::link_of("udp/127.0.0.1:7447", &policy).is_none());
         #[cfg(all(feature = "raweth-transport", target_os = "linux"))]
         {
             let Some(GroupLinkSpec::RawEth(reth)) =
-                ResolvedGroup::link_of("reth/02:00:00:00:00:01#iface=eth9")
+                ResolvedGroup::link_of("reth/02:00:00:00:00:01#iface=eth9", &policy)
             else {
                 panic!("a reth/ endpoint is a raw Ethernet group");
             };
@@ -6221,7 +6251,86 @@ mod multicast_face_tests {
             assert_eq!(reth.interface, "eth9");
         }
         #[cfg(not(all(feature = "raweth-transport", target_os = "linux")))]
-        assert!(ResolvedGroup::link_of("reth/02:00:00:00:00:01").is_none());
+        assert!(ResolvedGroup::link_of("reth/02:00:00:00:00:01", &policy).is_none());
+    }
+
+    /// A group of a session is resolved under the session's snapshot and not the build's: its
+    /// parameters carry the snapshot to the drive loop, and its sockets take the two link
+    /// policies from it. Each value of `multicast-loopback` that sets the socket is selected
+    /// where the domain allows it, and so is `multicast-link-requires-iface` on.
+    #[test]
+    fn a_group_is_resolved_under_the_sessions_snapshot() {
+        use wz_runtime_tokio::policy::{MulticastLinkRequiresIface, MulticastLoopback};
+        let join = GroupJoin {
+            endpoint: ENDPOINT.to_owned(),
+            profile: GroupProfile {
+                lease_ms: 10_000,
+                join_interval_ms: 100,
+                max_sessions: None,
+                seq_num_res: 0x02,
+                req_id_res: 0x02,
+                batch_size: 2_048,
+                is_qos: false,
+                compression: false,
+                join_rule: wz_runtime_tokio::multicast_glue::GroupJoinRule::Zenoh,
+            },
+            is_shm: false,
+            declarations: GroupDeclarations::None,
+        };
+        for value in [MulticastLoopback::On, MulticastLoopback::Off] {
+            let mut policy = SessionPolicy::defaults();
+            if policy.select_multicast_loopback(value).is_err() {
+                continue;
+            }
+            let requires = policy
+                .select_multicast_link_requires_iface(MulticastLinkRequiresIface::On)
+                .is_ok();
+            let group = ResolvedGroup::resolve(
+                &join,
+                wz_session_core::multicast_params::zid_vec(&[0x0A]),
+                WhatAmI::Peer,
+                TxQueueConf::of_policy(&policy),
+                LinkRxConf::default(),
+                &policy,
+            )
+            .expect("a udp multicast endpoint names a group");
+            assert_eq!(group.params.policy, policy, "{value:?}");
+            let opts = match group.link {
+                GroupLinkSpec::Udp { opts, .. } => opts,
+                // The raweth variant exists only in a build with that transport.
+                #[allow(unreachable_patterns)]
+                _ => panic!("a udp/ endpoint is a UDP group"),
+            };
+            assert_eq!(opts.loopback, value);
+            assert_eq!(opts.link_requires_iface, requires);
+        }
+    }
+
+    /// A group's session is made with the node's snapshot and not the build's: each value of
+    /// `subscriber-overload` the domain allows is selected into the node and read back from the
+    /// group's session, whose declarations read it.
+    #[tokio::test]
+    async fn a_group_session_holds_the_nodes_snapshot() {
+        use wz_runtime_tokio::multicast_glue::{McastGroupMembership, MulticastTxProducer};
+        use wz_runtime_tokio::policy::SubscriberOverload;
+        for value in [
+            SubscriberOverload::Block,
+            SubscriberOverload::Reject,
+            SubscriberOverload::KeepLatest,
+        ] {
+            let mut policy = SessionPolicy::defaults();
+            if policy.select_subscriber_overload(value).is_err() {
+                continue;
+            }
+            let shared = SharedSession::new(TokioTime::new(), [0x0B; 16].into(), policy)
+                .expect("test host entropy");
+            let face = shared.new_mcast_face_session(
+                MulticastTxProducer::new(),
+                &McastGroupMembership::new(),
+                false,
+            );
+            assert_eq!(*face.policy(), policy, "{value:?}");
+        }
     }
 
     /// A peer's beacon, every 100 ms.
@@ -6240,6 +6349,7 @@ mod multicast_face_tests {
             link_rx: Default::default(),
             join_rule: wz_runtime_tokio::multicast_glue::GroupJoinRule::Zenoh,
             max_sessions: None,
+            policy: wz_runtime_tokio::policy::SessionPolicy::defaults(),
         }
     }
 

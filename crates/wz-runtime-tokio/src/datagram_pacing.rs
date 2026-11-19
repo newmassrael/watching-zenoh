@@ -229,13 +229,6 @@ const ALLOWS_ON: bool =
 /// writers then hold as their session's snapshot says.
 pub type OfBuild = <Allowed<{ ALLOWS_OFF }, { ALLOWS_ON }> as Select>::Pacing;
 
-/// [`OfBuild`] under the build defaults, for the multicast writer, whose group parameters carry no
-/// snapshot yet.
-#[cfg(feature = "transport-multicast")]
-pub(crate) fn of_build_defaults() -> OfBuild {
-    OfBuild::of_policy(&SessionPolicy::defaults())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -117,13 +117,6 @@ pub(crate) fn reassembly_config(policy: &SessionPolicy) -> ReassemblyConfig {
     .with_pool_overflow(PoolOverflow::of_policy(policy.reassembly_pool_overflow()))
 }
 
-/// [`reassembly_config`] under the build defaults, for the multicast drive loop, whose group
-/// parameters carry no snapshot yet.
-#[cfg(feature = "transport-multicast")]
-pub(crate) fn reassembly_config_of_build() -> ReassemblyConfig {
-    reassembly_config(&SessionPolicy::defaults())
-}
-
 #[cfg(all(
     test,
     any(feature = "transport-unicast", feature = "transport-multicast")

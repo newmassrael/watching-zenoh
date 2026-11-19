@@ -56,6 +56,7 @@ use std::task::Poll;
 use wz_session_core::link::{LinkEvent, LostCause, TxFrame};
 use wz_session_core::reliability::Reliability;
 
+use crate::policy::SessionPolicy;
 use crate::{LinkDriver, McastSocketConfig, UdpDriver};
 
 /// Every multicast-capable interface's address, or `None` when this build
@@ -114,11 +115,15 @@ pub fn scout_interface_addresses() -> Option<Vec<IpAddr>> {
 /// per-interface filter is the `ok()` of this same setsockopt — and the send
 /// rule is what absorbs it: [`ScoutFanOut`] succeeds when at least one socket
 /// sent.
+///
+/// `policy` is the snapshot of the node that scouts: each socket sets
+/// `IP_MULTICAST_LOOP` as its `multicast-loopback` value says.
 pub async fn bind_scout_sockets(
     group: IpAddr,
     port: u16,
     locals: &[IpAddr],
     ttl: Option<u32>,
+    policy: &SessionPolicy,
 ) -> (Vec<UdpDriver>, Vec<(IpAddr, io::Error)>) {
     let mut bound = Vec::new();
     let mut refused = Vec::new();
@@ -139,7 +144,7 @@ pub async fn bind_scout_sockets(
             extra_joins: &[],
             bind: None,
             dscp: None,
-            loopback: Default::default(),
+            loopback: policy.multicast_loopback(),
             // A scouting socket is not a link, which is all the policy governs.
             link_requires_iface: false,
         };
@@ -163,7 +168,7 @@ pub async fn bind_scout_sockets(
             extra_joins: &[],
             bind: None,
             dscp: None,
-            loopback: Default::default(),
+            loopback: policy.multicast_loopback(),
             // A scouting socket is not a link, which is all the policy governs.
             link_requires_iface: false,
         };
@@ -402,6 +407,9 @@ mod tests {
     /// The group every scouting socket in this tree uses.
     const GROUP: IpAddr = IpAddr::V4(Ipv4Addr::new(224, 0, 0, 224));
 
+    /// The snapshot of a node of the build defaults, for the cases that are not about a policy.
+    const DEFAULTS: SessionPolicy = SessionPolicy::defaults();
+
     /// An address of the OTHER family from the group above.
     ///
     /// This is the refusal that is real and deterministic: the `#iface=`
@@ -428,7 +436,7 @@ mod tests {
     /// Layer M. These arms assert how the SET is composed, which the join does
     /// not enter into; delivery is the Layer M leg's subject.
     async fn stand_in_group_socket() -> UdpDriver {
-        UdpDriver::bind_multicast_tx(GROUP, 7446, McastSocketConfig::default())
+        UdpDriver::bind_multicast_tx(GROUP, 7446, McastSocketConfig::of_policy(&DEFAULTS))
             .await
             .expect("stand-in group socket")
     }
@@ -441,8 +449,14 @@ mod tests {
     /// enumerated, the pre-R2611 floor, and it asks), and neither, which is no window.
     #[tokio::test]
     async fn a_window_without_a_group_socket_is_a_window_when_something_can_ask() {
-        let (ask, refused) =
-            bind_scout_sockets(GROUP, 7446, &[IpAddr::V4(Ipv4Addr::LOCALHOST)], None).await;
+        let (ask, refused) = bind_scout_sockets(
+            GROUP,
+            7446,
+            &[IpAddr::V4(Ipv4Addr::LOCALHOST)],
+            None,
+            &DEFAULTS,
+        )
+        .await;
         let (fan, shape) =
             ScoutFanOut::over_optional(None, ask, refused).expect("an ask socket alone is a set");
         assert_eq!(fan.members(), 1);
@@ -476,7 +490,7 @@ mod tests {
             IpAddr::V4(Ipv4Addr::LOCALHOST),
             IpAddr::V4(Ipv4Addr::LOCALHOST),
         ];
-        let (ask, refused) = bind_scout_sockets(GROUP, 7446, &locals, None).await;
+        let (ask, refused) = bind_scout_sockets(GROUP, 7446, &locals, None, &DEFAULTS).await;
         assert!(refused.is_empty(), "loopback must bind: {refused:?}");
         assert_eq!(ask.len(), 2, "one ask socket per offered address");
 
@@ -513,7 +527,7 @@ mod tests {
     #[tokio::test]
     async fn an_address_that_cannot_be_a_pin_is_refused_by_name() {
         let locals = vec![IpAddr::V4(Ipv4Addr::LOCALHOST), OTHER_FAMILY];
-        let (ask, refused) = bind_scout_sockets(GROUP, 7446, &locals, None).await;
+        let (ask, refused) = bind_scout_sockets(GROUP, 7446, &locals, None, &DEFAULTS).await;
         assert_eq!(ask.len(), 1, "the address that can pin still binds");
         assert_eq!(refused.len(), 1, "and the one that cannot is reported");
         assert_eq!(refused[0].0, OTHER_FAMILY, "named, not counted");
@@ -550,7 +564,7 @@ mod tests {
     #[tokio::test]
     async fn each_ask_socket_leaves_by_the_interface_it_was_given() {
         let local = IpAddr::V4(Ipv4Addr::LOCALHOST);
-        let (ask, refused) = bind_scout_sockets(GROUP, 7446, &[local], None).await;
+        let (ask, refused) = bind_scout_sockets(GROUP, 7446, &[local], None, &DEFAULTS).await;
         assert!(refused.is_empty(), "loopback must bind: {refused:?}");
         assert_eq!(ask.len(), 1);
         assert_eq!(
@@ -573,6 +587,33 @@ mod tests {
         );
     }
 
+    /// Each ask socket sets `IP_MULTICAST_LOOP` as the snapshot it is handed says, not as the
+    /// build does: each value that sets the socket is selected where the domain allows it, and
+    /// the kernel's value is read back from the socket the Scout leaves from.
+    #[cfg(feature = "locator-iface")]
+    #[tokio::test]
+    async fn each_ask_socket_loops_back_as_its_snapshot_says() {
+        use crate::policy::MulticastLoopback;
+        for (value, on) in [
+            (MulticastLoopback::On, true),
+            (MulticastLoopback::Off, false),
+        ] {
+            let mut policy = SessionPolicy::defaults();
+            if policy.select_multicast_loopback(value).is_err() {
+                continue;
+            }
+            let local = IpAddr::V4(Ipv4Addr::LOCALHOST);
+            let (ask, refused) = bind_scout_sockets(GROUP, 7446, &[local], None, &policy).await;
+            assert!(refused.is_empty(), "loopback must bind: {refused:?}");
+            assert_eq!(ask.len(), 1);
+            let sending = ask[0].sending_socket().expect("the ask socket sends");
+            let looped = socket2::SockRef::from(sending)
+                .multicast_loop_v4()
+                .expect("read back IP_MULTICAST_LOOP");
+            assert_eq!(looped, on, "{value:?}");
+        }
+    }
+
     /// An empty offer binds upstream's floor: ONE unpinned ask socket on an ephemeral port, and
     /// not the group's port.
     ///
@@ -584,7 +625,7 @@ mod tests {
     /// shape must say that nothing fell back to the group socket.
     #[tokio::test]
     async fn an_empty_offer_binds_one_unpinned_ask_socket_of_its_own() {
-        let (ask, refused) = bind_scout_sockets(GROUP, 7446, &[], None).await;
+        let (ask, refused) = bind_scout_sockets(GROUP, 7446, &[], None, &DEFAULTS).await;
         assert!(refused.is_empty(), "the floor binds: {refused:?}");
         assert_eq!(ask.len(), 1, "one socket asks");
         let local = ask[0].local_addr().expect("the ask socket's own address");

@@ -93,7 +93,7 @@ use wz_runtime_tokio::{McastSocketConfig, UdpDriver};
 fn loopback_on() -> McastSocketConfig<'static> {
     McastSocketConfig {
         loopback: MulticastLoopback::On,
-        ..McastSocketConfig::default()
+        ..McastSocketConfig::of_policy(&wz_runtime_tokio::policy::SessionPolicy::defaults())
     }
 }
 use wz_runtime_tokio_test_support::fixture_session_init_params;

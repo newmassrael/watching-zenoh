@@ -88,7 +88,7 @@ async fn a_datagram_sent_to_the_group_reaches_a_member_on_the_same_host() {
     let cfg = McastSocketConfig {
         iface: host_iface(),
         loopback: MulticastLoopback::On,
-        ..McastSocketConfig::default()
+        ..McastSocketConfig::of_policy(&wz_runtime_tokio::policy::SessionPolicy::defaults())
     };
 
     let mut member = UdpDriver::bind_multicast(GROUP, PORT, cfg)
@@ -145,7 +145,7 @@ async fn a_sender_whose_loopback_is_off_is_not_heard_by_a_member_on_its_host() {
     let member_cfg = McastSocketConfig {
         iface: host_iface(),
         loopback: MulticastLoopback::On,
-        ..McastSocketConfig::default()
+        ..McastSocketConfig::of_policy(&wz_runtime_tokio::policy::SessionPolicy::defaults())
     };
     let mut member = UdpDriver::bind_multicast(GROUP, PORT_LOOPBACK_OFF, member_cfg)
         .await

@@ -531,7 +531,10 @@ pub unsafe extern "C" fn z_scout(
             return Z_EINVAL;
         };
 
-        run_scout(group, port, what, asker, budget_ms, |hello| {
+        // The scout's snapshot, resolved as an open resolves its own: the scout reads no node
+        // document of its config, so the open's resolution of none.
+        let policy = wz_capi_core::open_plan::resolve_policy(None);
+        run_scout(group, port, what, asker, budget_ms, &policy, |hello| {
             let Some(call) = user_call else {
                 return;
             };

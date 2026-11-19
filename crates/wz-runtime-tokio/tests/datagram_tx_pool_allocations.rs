@@ -793,6 +793,7 @@ mod multicast {
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
             join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
             max_sessions: None,
+            policy: wz_session_core::policy::SessionPolicy::defaults(),
         }
     }
 

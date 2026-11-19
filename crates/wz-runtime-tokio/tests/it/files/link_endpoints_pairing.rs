@@ -136,9 +136,15 @@ fn assert_mirrored(dialer: &LinkEndpoints, acceptor: &LinkEndpoints, what: &str)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn udp_dial_and_demux_faces_report_mirrored_endpoints() {
     use wz_runtime_tokio::session_open::{
-        bind_endpoint, dial_locator, wire_dialed_link, DialConfig,
+        bind_endpoint, dial_locator, wire_dialed_link_with_rx, DialConfig,
     };
     use wz_runtime_tokio::Reliability;
+    use wz_session_core::policy::SessionPolicy;
+    use wz_session_core::session_init_params::LinkRxConf;
+
+    // Both faces wire as a session of the build defaults would: the test is about the endpoints
+    // a face reports, which no policy and no receive block changes.
+    let policy = SessionPolicy::defaults();
 
     let mut bound = bind_endpoint("udp/127.0.0.1:0")
         .await
@@ -152,7 +158,8 @@ async fn udp_dial_and_demux_faces_report_mirrored_endpoints() {
     let dialed = dial_locator(locator, &DialConfig::default())
         .await
         .expect("dial the udp listener");
-    let (_dial_in, dial_out, _dial_h) = wire_dialed_link(dialed);
+    let (_dial_in, dial_out, _dial_h) =
+        wire_dialed_link_with_rx(dialed, LinkRxConf::default(), &policy);
 
     // UDP has no `accept()`: the demux pump learns a peer only from a datagram, so
     // the dialer must speak before the acceptor exists.
@@ -174,11 +181,13 @@ async fn udp_dial_and_demux_faces_report_mirrored_endpoints() {
     .await
     .expect("the demux pump surfaces the new src within 5s")
     .expect("accept_raw yields the demux face");
-    let (_acc_in, acc_out, _acc_h) = wire_dialed_link(
+    let (_acc_in, acc_out, _acc_h) = wire_dialed_link_with_rx(
         accepted
             .handshake()
             .await
             .expect("a udp demux face needs no post-accept handshake"),
+        LinkRxConf::default(),
+        &policy,
     );
 
     let dial_pair = dial_out
@@ -229,7 +238,7 @@ async fn quic_datagram_link_pair(
         accept_quic_datagram_on, bind_quic_datagram, dial_quic_datagram, wire_quic_datagram,
     };
     // A concrete write driver, so the trait must be in scope to call through it (the
-    // udp leg needs no such import: `wire_dialed_link` hands back a trait object).
+    // udp leg needs no such import: `wire_dialed_link_with_rx` hands back a trait object).
     use wz_session_core::link::BoxedLinkDriver;
 
     // Self-signed `localhost` cert through the production config builders — the

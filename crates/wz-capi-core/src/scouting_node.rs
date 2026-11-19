@@ -39,6 +39,7 @@ use std::time::Duration;
 use wz_codecs::whatami::{WhatAmI, WhatAmIMatcher};
 use wz_routing_graph::{AutoConnect, AutoConnectStrategies, Zid};
 use wz_runtime_tokio::accept_loop::DialIntentSender;
+use wz_runtime_tokio::policy::SessionPolicy;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::scouting_autoconnect::{autoconnect_verdict, AutoconnectVerdict};
 use wz_runtime_tokio::scouting_fanout::{
@@ -251,6 +252,22 @@ pub(crate) fn join_beyond_the_first(group_socket: &UdpDriver, group: IpAddr, nam
     }
 }
 
+/// The config of a node's scouting group socket for `plan`: joined on `join`
+/// ([`group_join_interface`]), with the plan's hop limit, and the two link policies as `policy`,
+/// the node's snapshot, holds them. Shared by the socket a node scouts on and the one it answers
+/// on, so the two are opened alike.
+pub(crate) fn group_socket_config<'a>(
+    plan: &ScoutingPlan,
+    join: Option<&'a str>,
+    policy: &SessionPolicy,
+) -> McastSocketConfig<'a> {
+    McastSocketConfig {
+        iface: join,
+        ttl: plan.ttl,
+        ..McastSocketConfig::of_policy(policy)
+    }
+}
+
 /// The addresses a Scout leaves by when the config names `interface`, read as upstream's
 /// `get_interfaces` reads it: a comma-separated list, each part trimmed, an ADDRESS LITERAL being
 /// that address of either family whether or not this host holds it
@@ -276,9 +293,9 @@ pub struct ScoutLink {
 }
 
 impl ScoutLink {
-    /// Join `plan`'s group and bind its ask sockets.
-    pub async fn bind(plan: &ScoutingPlan) -> io::Result<Self> {
-        let (group_socket, ask, refused) = Self::sockets(plan).await;
+    /// Join `plan`'s group and bind its ask sockets, under `policy`, the node's snapshot.
+    pub async fn bind(plan: &ScoutingPlan, policy: &SessionPolicy) -> io::Result<Self> {
+        let (group_socket, ask, refused) = Self::sockets(plan, policy).await;
         let (driver, _shape) = ScoutFanOut::over(group_socket?, ask, refused);
         Ok(Self { driver })
     }
@@ -288,16 +305,18 @@ impl ScoutLink {
     /// (`zenoh/src/api/scouting.rs` @ `Runtime::bind_ucast_port(iface, multicast_ttl).ok()`), so a
     /// group that cannot be joined costs it nothing, and a scout with no socket at all is a scout
     /// that finds nobody and is not an error (`ScoutInner { scout_task: None }`). `None` is that.
-    pub async fn bind_for_scout(plan: &ScoutingPlan) -> Option<Self> {
-        let (group_socket, ask, refused) = Self::sockets(plan).await;
+    pub async fn bind_for_scout(plan: &ScoutingPlan, policy: &SessionPolicy) -> Option<Self> {
+        let (group_socket, ask, refused) = Self::sockets(plan, policy).await;
         ScoutFanOut::over_optional(group_socket.ok(), ask, refused)
             .map(|(driver, _shape)| Self { driver })
     }
 
     /// The group socket (bound and joined, or the error that kept it from being) and the ask
-    /// sockets of `plan`, with the addresses that refused.
+    /// sockets of `plan`, with the addresses that refused, each opened under `policy`, the
+    /// snapshot of the node that scouts.
     async fn sockets(
         plan: &ScoutingPlan,
+        policy: &SessionPolicy,
     ) -> (
         io::Result<UdpDriver>,
         Vec<UdpDriver>,
@@ -311,11 +330,7 @@ impl ScoutLink {
             .map(named_interface_addresses)
             .unwrap_or_default();
         let join = group_join_interface(plan, &named);
-        let config = McastSocketConfig {
-            iface: join.as_deref(),
-            ttl: plan.ttl,
-            ..McastSocketConfig::default()
-        };
+        let config = group_socket_config(plan, join.as_deref(), policy);
         let group_socket = UdpDriver::bind_scouting_group(group, plan.port, config).await;
         if let Ok(socket) = &group_socket {
             join_beyond_the_first(socket, group, &named);
@@ -327,7 +342,7 @@ impl ScoutLink {
             Some(_) => named,
             None => scout_interface_addresses().unwrap_or_default(),
         };
-        let (ask, refused) = bind_scout_sockets(group, plan.port, &locals, plan.ttl).await;
+        let (ask, refused) = bind_scout_sockets(group, plan.port, &locals, plan.ttl, policy).await;
         (group_socket, ask, refused)
     }
 
@@ -486,8 +501,11 @@ impl ScoutStream {
     /// Each Scout names no asker: upstream's scout a program asks for writes `zid: None`
     /// whatever its config states (`zenoh/src/net/runtime/orchestrator.rs` @ `zid: None,`, in
     /// `pub(crate) async fn scout`).
+    ///
+    /// `policy` is the snapshot the scout's creator resolved, which its sockets are opened under.
     pub fn start(
         plan: ScoutingPlan,
+        policy: SessionPolicy,
         what: u8,
         mut each: impl FnMut(ScoutedHello) + Send + 'static,
     ) -> io::Result<Self> {
@@ -502,7 +520,7 @@ impl ScoutStream {
             .name("wz-scout".to_owned())
             .spawn(move || {
                 runtime.block_on(caller.carry(async move {
-                    let Some(link) = ScoutLink::bind_for_scout(&plan).await else {
+                    let Some(link) = ScoutLink::bind_for_scout(&plan, &policy).await else {
                         return;
                     };
                     tokio::select! {
@@ -717,6 +735,26 @@ mod tests {
             ScoutingPlan::for_scout(&node, 2).err(),
             Some(ScoutingConfigError::Address(String::from("not-an-address")))
         );
+    }
+
+    /// A node's scouting group socket is opened under the node's snapshot and not the build's:
+    /// each value of `multicast-loopback` that sets the socket is selected where the domain
+    /// allows it and reaches the socket's config, beside the plan's hop limit and the interface
+    /// the group is joined on.
+    #[test]
+    fn a_group_socket_is_opened_under_the_nodes_snapshot() {
+        use wz_runtime_tokio::policy::MulticastLoopback;
+        let mut plan = ScoutingPlan::for_scout(&ZenohNodeConfig::default(), 2).expect("a plan");
+        plan.ttl = Some(4);
+        for value in [MulticastLoopback::On, MulticastLoopback::Off] {
+            let mut policy = SessionPolicy::defaults();
+            if policy.select_multicast_loopback(value).is_err() {
+                continue;
+            }
+            let config = group_socket_config(&plan, Some("lo"), &policy);
+            assert_eq!(config.loopback, value);
+            assert_eq!((config.iface, config.ttl), (Some("lo"), Some(4)));
+        }
     }
 
     /// A window hands each Hello over once, as it arrives, in arrival order, and leaves out one

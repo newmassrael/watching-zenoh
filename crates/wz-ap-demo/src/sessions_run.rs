@@ -594,7 +594,8 @@ async fn run_group(
     // One bind for the first join and every re-join, so a re-join installs
     // exactly the membership the first one did. Each join's session binds it
     // when it asks for its link.
-    // The node's snapshot decides the two link policies of the group's sockets.
+    // The node's snapshot: the two link policies of the group's sockets, and what the group's
+    // parameters carry to its loop and its session.
     let snapshot = crate::args::resolve_policy();
     let bind = || {
         UdpDriver::bind_multicast(
@@ -622,8 +623,8 @@ async fn run_group(
 
 /// The group profile a router's face advertises (`router_group_params`), as a
 /// peer: version 0x09, 2-bit resolutions, a 2048-byte batch, no per-priority
-/// offer, upstream's queue under the node's snapshot `policy`. The two
-/// intervals are the document's.
+/// offer, the queue of the node's snapshot `policy`, which the parameters also carry to the
+/// group's drive loop and session. The two intervals are the document's.
 #[cfg(feature = "transport-multicast")]
 fn group_params(
     zid: SessionZid,
@@ -648,6 +649,7 @@ fn group_params(
         // A sessions document states no cap on a group's members, as pico has none: the table's
         // rows are the bound.
         max_sessions: None,
+        policy: *policy,
     }
 }
 
@@ -740,15 +742,15 @@ where
 
     let producer = MulticastTxProducer::new();
     let clock = Arc::new(TokioTime::new());
-    // The node's snapshot, which the session's declarations read.
+    // The node's snapshot the group's parameters carry, which the session's declarations read.
     let session = TokioMulticastSession::new_multicast(
         Arc::new(wz::runtime_tokio::sync::PlainMutex::new(
             ApplicationLayerObserver::new(),
         )),
         clock.clone(),
+        params.policy,
         producer.clone(),
-    )
-    .with_policy(crate::args::resolve_policy());
+    );
     // The policy this session is held to, when the document asks for one: installed once, read
     // by the group's egress check and by the ingress gate every dispatcher below carries.
     #[cfg(feature = "access-acl-multicast")]
@@ -939,12 +941,12 @@ mod group_rejoin_tests {
 
     use super::{group_params, serve_group, SessionEnd, SessionZid};
 
-    const ENDPOINT: &str = "udp/224.0.0.224:7446";
+    /// The snapshot of a node of the build defaults: these cases are about re-joining a group,
+    /// which no policy changes.
+    const DEFAULTS: wz::runtime_tokio::policy::SessionPolicy =
+        wz::runtime_tokio::policy::SessionPolicy::defaults();
 
-    /// The snapshot of a node that resolved the build defaults.
-    fn defaults() -> wz::runtime_tokio::policy::SessionPolicy {
-        wz::runtime_tokio::policy::SessionPolicy::defaults()
-    }
+    const ENDPOINT: &str = "udp/224.0.0.224:7446";
 
     /// A group's queue carries the queue policies of the snapshot the node hands it, not the
     /// build's: each value of `tx-no-progress-deadline` the domain allows is selected, and the
@@ -953,7 +955,7 @@ mod group_rejoin_tests {
     fn a_groups_queue_carries_the_policies_of_the_nodes_snapshot() {
         use wz::runtime_tokio::policy::TxNoProgressDeadline;
         for value in [TxNoProgressDeadline::On, TxNoProgressDeadline::Off] {
-            let mut policy = defaults();
+            let mut policy = DEFAULTS;
             if policy.select_tx_no_progress_deadline(value).is_err() {
                 continue;
             }
@@ -1024,7 +1026,7 @@ mod group_rejoin_tests {
             async move {
                 serve_group(
                     ENDPOINT,
-                    &group_params(zid_a, 100, 1_000, &defaults()),
+                    &group_params(zid_a, 100, 1_000, &DEFAULTS),
                     bind_a,
                     None,
                     &mut stop,
@@ -1048,7 +1050,7 @@ mod group_rejoin_tests {
             async move {
                 serve_group(
                     ENDPOINT,
-                    &group_params(zid_b, 100, 1_000, &defaults()),
+                    &group_params(zid_b, 100, 1_000, &DEFAULTS),
                     bind_b,
                     None,
                     &mut stop,
@@ -1131,7 +1133,7 @@ mod group_rejoin_tests {
             async move {
                 serve_group(
                     ENDPOINT,
-                    &group_params(zid_a, 100, 1_000, &defaults()),
+                    &group_params(zid_a, 100, 1_000, &DEFAULTS),
                     bind_a,
                     None,
                     &mut stop,
@@ -1154,7 +1156,7 @@ mod group_rejoin_tests {
             async move {
                 serve_group(
                     ENDPOINT,
-                    &group_params(zid_b, 100, 1_000, &defaults()),
+                    &group_params(zid_b, 100, 1_000, &DEFAULTS),
                     bind_b,
                     None,
                     &mut stop,
@@ -1215,7 +1217,7 @@ mod group_rejoin_tests {
             async move {
                 let end = serve_group(
                     ENDPOINT,
-                    &group_params(SessionZid::from([0xC3]), 100, 1_000, &defaults()),
+                    &group_params(SessionZid::from([0xC3]), 100, 1_000, &DEFAULTS),
                     bind,
                     None,
                     &mut stop,
@@ -1259,7 +1261,7 @@ mod group_rejoin_tests {
         let binds = Cell::new(0u16);
         let end = serve_group(
             ENDPOINT,
-            &group_params(SessionZid::from([0xD4]), 100, 1_000, &defaults()),
+            &group_params(SessionZid::from([0xD4]), 100, 1_000, &DEFAULTS),
             || {
                 binds.set(binds.get() + 1);
                 std::future::ready(Err::<GroupBusLink, _>(io::Error::other(
@@ -1295,17 +1297,19 @@ mod group_access_tests {
 
     /// A group session over a tapped pipeline, and the tap that sees what it sends.
     fn session_and_tap() -> (TokioMulticastSession, MulticastTxTap) {
-        let (producer, tap) = MulticastTxTap::attach(&group_params(
+        let params = group_params(
             SessionZid::from([0xAA, 0xBB, 0xCC, 0xDD]),
             100,
             1_000,
             &wz::runtime_tokio::policy::SessionPolicy::defaults(),
-        ));
+        );
+        let (producer, tap) = MulticastTxTap::attach(&params);
         let session = TokioMulticastSession::new_multicast(
             Arc::new(wz::runtime_tokio::sync::PlainMutex::new(
                 ApplicationLayerObserver::new(),
             )),
             Arc::new(TokioTime::new()),
+            params.policy,
             producer,
         );
         (session, tap)

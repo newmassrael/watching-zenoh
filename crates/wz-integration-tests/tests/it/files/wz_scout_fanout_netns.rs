@@ -78,6 +78,9 @@ async fn arrives(rx: &mut UdpDriver, budget: Duration) -> Option<Vec<u8>> {
 #[ignore = "needs a network namespace; Layer M runs via --ignored after probing for one"]
 async fn in_a_netns_the_fan_out_reaches_an_interface_the_default_route_does_not() {
     let _ns = NetnsPair::up("scoutfan", HOST_CIDR, PEER_CIDR);
+    // The scouting node's snapshot: the leg is about the egress interface, which no policy
+    // changes.
+    let policy = wz_runtime_tokio::policy::SessionPolicy::defaults();
 
     // The receiver joins the group ONLY through the veth host address, so it
     // hears a datagram only if that datagram left by the veth.
@@ -102,9 +105,10 @@ async fn in_a_netns_the_fan_out_reaches_an_interface_the_default_route_does_not(
 
     // CONTROL, and it is the pre-R2611 product: one group socket, egress by the
     // kernel's default route.
-    let mut single = UdpDriver::bind_multicast_tx(GROUP, PORT, McastSocketConfig::default())
-        .await
-        .expect("bind the single-socket control");
+    let mut single =
+        UdpDriver::bind_multicast_tx(GROUP, PORT, McastSocketConfig::of_policy(&policy))
+            .await
+            .expect("bind the single-socket control");
     single
         .send(
             &TxFrame {
@@ -129,10 +133,11 @@ async fn in_a_netns_the_fan_out_reaches_an_interface_the_default_route_does_not(
         "the veth must be IN the enumeration or this leg is not testing the \
          fan-out; got {locals:?}"
     );
-    let (ask, refused) = bind_scout_sockets(IpAddr::V4(GROUP), PORT, &locals, None).await;
-    let group_socket = UdpDriver::bind_multicast_tx(GROUP, PORT, McastSocketConfig::default())
-        .await
-        .expect("bind the fan-out's group member");
+    let (ask, refused) = bind_scout_sockets(IpAddr::V4(GROUP), PORT, &locals, None, &policy).await;
+    let group_socket =
+        UdpDriver::bind_multicast_tx(GROUP, PORT, McastSocketConfig::of_policy(&policy))
+            .await
+            .expect("bind the fan-out's group member");
     let (mut fan, shape) = ScoutFanOut::over(group_socket, ask, refused);
     assert!(
         !shape.fell_back_to_group,

@@ -101,6 +101,7 @@ fn wz_mc_params() -> MulticastParams {
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
         max_sessions: None,
+        policy: wz_session_core::policy::SessionPolicy::defaults(),
     }
 }
 
@@ -189,7 +190,7 @@ async fn multicast_extra_join_is_what_delivers_a_foreign_group_across_a_namespac
     let (unjoined, _) = receive(
         McastSocketConfig {
             iface: Some(&host_iface),
-            ..Default::default()
+            ..McastSocketConfig::of_policy(&wz_mc_params().policy)
         },
         SILENT_BUDGET,
     )
@@ -203,7 +204,7 @@ async fn multicast_extra_join_is_what_delivers_a_foreign_group_across_a_namespac
     let (unpinned, _) = receive(
         McastSocketConfig {
             extra_joins: &extra,
-            ..Default::default()
+            ..McastSocketConfig::of_policy(&wz_mc_params().policy)
         },
         SILENT_BUDGET,
     )
@@ -219,7 +220,7 @@ async fn multicast_extra_join_is_what_delivers_a_foreign_group_across_a_namespac
         McastSocketConfig {
             iface: Some(&host_iface),
             extra_joins: &extra,
-            ..Default::default()
+            ..McastSocketConfig::of_policy(&wz_mc_params().policy)
         },
         DELIVERY_BUDGET,
     )

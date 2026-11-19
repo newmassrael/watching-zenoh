@@ -104,12 +104,7 @@ ALLOWED: tuple[tuple[str, str, str], ...] = (
     ("crates/wz-node-time/src/event_log.rs", "resolve_policy", "creator: resolves the snapshot (build defaults until a run-time document is read)"),
     ("crates/wz-replay/src/live.rs", "resolve_policy", "creator: resolves the snapshot (build defaults until a run-time document is read)"),
     ("crates/wz-runtime-tokio-test-support/src/lib.rs", "fixture_policy", "creator: resolves the snapshot (build defaults until a run-time document is read); a test fixture"),
-    ("crates/wz-runtime-tokio/src/datagram_pacing.rs", "of_build_defaults", WRAPPER + " (Pacing::of_policy); the multicast writer's, until MulticastParams carries a snapshot"),
-    ("crates/wz-runtime-tokio/src/lib.rs", "default", WRAPPER + " (McastSocketConfig::of_policy and McastGroupOptions::of_policy)"),
-    ("crates/wz-runtime-tokio/src/reassembly.rs", "reassembly_config_of_build", WRAPPER + " (reassembly_config); the multicast drive loop's, until MulticastParams carries a snapshot"),
     ("crates/wz-runtime-tokio/src/router_forward.rs", "resolve_policy", "creator: resolves the snapshot (build defaults until a run-time document is read)"),
-    ("crates/wz-runtime-tokio/src/session/mod.rs", "new_multicast", WRAPPER + " (Session::with_policy); until MulticastParams carries a snapshot"),
-    ("crates/wz-runtime-tokio/src/session_open.rs", "wire_dialed_link", WRAPPER + " (wire_dialed_link_with_rx)"),
 )
 
 #: The items a read can be in. A `const fn` is a `fn`; `const` and `static` are named by the

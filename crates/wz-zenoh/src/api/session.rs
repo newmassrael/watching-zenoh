@@ -2048,7 +2048,9 @@ mod tokio_engine {
             .fold(0u8, |bits, role| bits | role as u8);
         let plan = ScoutingPlan::for_scout(&node, asked)
             .map_err(|error| zerror!("the configuration cannot be scouted with: {error:?}"))?;
-        let stream = ScoutStream::start(plan, asked, move |hello| {
+        // The scout's snapshot, resolved from its configuration as an open resolves one.
+        let policy = wz_capi_core::open_plan::resolve_policy(Some(&node));
+        let stream = ScoutStream::start(plan, policy, asked, move |hello| {
             let whatami = match hello.whatami.map(|role| role.to_api()) {
                 Some(1) => WhatAmI::Router,
                 Some(2) => WhatAmI::Peer,

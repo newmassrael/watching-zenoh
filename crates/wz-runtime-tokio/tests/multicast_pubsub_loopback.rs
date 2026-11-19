@@ -51,7 +51,7 @@ use wz_session_core::multicast_dispatch::{MulticastConfig, MulticastDispatcher};
 fn loopback_on() -> McastSocketConfig<'static> {
     McastSocketConfig {
         loopback: MulticastLoopback::On,
-        ..McastSocketConfig::default()
+        ..McastSocketConfig::of_policy(&wz_runtime_tokio::policy::SessionPolicy::defaults())
     }
 }
 
@@ -59,7 +59,7 @@ fn loopback_on() -> McastSocketConfig<'static> {
 fn group_options_on() -> McastGroupOptions {
     McastGroupOptions {
         loopback: MulticastLoopback::On,
-        ..McastGroupOptions::default()
+        ..McastGroupOptions::of_policy(&wz_runtime_tokio::policy::SessionPolicy::defaults())
     }
 }
 use wz_session_core::multicast_params::MulticastParams;
@@ -99,6 +99,7 @@ fn router_profile(zid: Vec<u8>) -> wz_runtime_tokio::multicast_glue::RouterGroup
         },
         join_rule: wz_runtime_tokio::multicast_glue::GroupJoinRule::Pico,
         max_sessions: None,
+        policy: wz_session_core::policy::SessionPolicy::defaults(),
     }
 }
 
@@ -129,6 +130,7 @@ fn mc_params(zid_byte: u8) -> MulticastParams {
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
         max_sessions: None,
+        policy: wz_session_core::policy::SessionPolicy::defaults(),
     }
 }
 
@@ -387,6 +389,7 @@ async fn qos_group_publish_qos_reaches_subscriber() {
             ApplicationLayerObserver::new(),
         )),
         clock.clone(),
+        params_a.policy,
         producer_a.clone(),
     );
 
@@ -516,6 +519,7 @@ async fn qos_publisher_refused_by_non_qos_subscriber() {
             ApplicationLayerObserver::new(),
         )),
         clock.clone(),
+        params_a.policy,
         producer_a.clone(),
     );
 

@@ -478,7 +478,14 @@ async fn join_group(
     let Some(ResolvedGroup {
         link: GroupLinkSpec::Udp { group, port, opts },
         ..
-    }) = ResolvedGroup::resolve(join, zid, WhatAmI::Router, link_conf.tx.queue, link_conf.rx)
+    }) = ResolvedGroup::resolve(
+        join,
+        zid,
+        WhatAmI::Router,
+        link_conf.tx.queue,
+        link_conf.rx,
+        &link_conf.policy,
+    )
     else {
         log_open_failure(
             &format!("group {}", join.endpoint),
@@ -520,6 +527,7 @@ async fn join_group(
             // The rule of the preset that opened the node.
             join_rule: join.profile.join_rule,
             max_sessions: join.profile.max_sessions,
+            policy: link_conf.policy,
         },
         opts,
         None,
@@ -917,6 +925,7 @@ async fn run_router(
         &zid,
         &listeners,
         late.locators(),
+        &link_conf.policy,
     )
     .await
     {
@@ -938,7 +947,7 @@ async fn run_router(
         scouting.as_ref().filter(|plan| plan.scouts()),
         scout_intents,
     ) {
-        (Some(plan), Some(intents)) => match ScoutLink::bind(plan).await {
+        (Some(plan), Some(intents)) => match ScoutLink::bind(plan, &link_conf.policy).await {
             Ok(link) => Some((plan, link, intents)),
             Err(error) => {
                 log_open_failure("the scouting of the node", &error);

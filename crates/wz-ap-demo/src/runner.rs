@@ -6863,6 +6863,7 @@ async fn run_router_hat_until(
                 // `--multicast-max-sessions`, which a document's `transport/multicast/max_sessions`
                 // expands to.
                 max_sessions: multicast_max_sessions,
+                policy: params.policy,
             },
             mcast_opts.clone(),
             node_stats.clone(),

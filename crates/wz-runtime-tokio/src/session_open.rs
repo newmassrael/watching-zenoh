@@ -726,7 +726,7 @@ impl QuicAcceptConfig {
 
 /// A dialed raw transport — the mode-agnostic dial seam's output, a union
 /// spanning every link transport (R311ez TCP/UDP; R311nv serial).
-/// [`wire_dialed_link`] consumes it into the uniform
+/// [`wire_dialed_link_with_rx`] consumes it into the uniform
 /// `(InboundLink, Arc<dyn BoxedLinkDriver>, writer-handle)` triple regardless
 /// of which arm it carries, so [`connect_and_open_session`] drives a TCP
 /// stream session, a UDP datagram session, and a serial tty session through
@@ -2055,7 +2055,7 @@ impl AcceptedLink {
             // `serial_pipeline::accept_serial` exactly -- that one-call form stays
             // for callers holding their own endpoint; this seam needs the halves
             // apart. Yields the SAME `DialedLink::Serial` the dial side produces, so
-            // `wire_dialed_link` is shared.
+            // `wire_dialed_link_with_rx` is shared.
             #[cfg(feature = "transport-link-serial")]
             AcceptedLink::Serial {
                 mut stream,
@@ -2198,7 +2198,7 @@ pub const NOT_COMPILED_IN_MARKER: &str = "requires the transport-link-";
 /// seam, dispatching on the locator's scheme.
 ///
 /// `Ip(Proto::Tcp)` returns a connected [`TcpStream`] (split downstream by
-/// [`wire_dialed_link`] via `wire_tcp_stream`, per the R311et raw-dial
+/// [`wire_dialed_link_with_rx`] via `wire_tcp_stream`, per the R311et raw-dial
 /// decision: the stream is dialed once and the split shape is chosen by the
 /// consumer, not buried inside a unified driver).
 ///
@@ -4065,27 +4065,9 @@ impl LinkDriver for InboundLink {
 /// writer-task join handle. TCP splits the stream (`wire_tcp_stream`); UDP
 /// shares the socket ([`wire_udp_socket`]).
 ///
-/// No session parameters reach this form, so its link reads with upstream's
-/// default `transport/link/rx` block and the build defaults of the link
-/// policies; a caller that opens a session wires with that session's block
-/// and snapshot instead ([`wire_dialed_link_with_rx`]).
-pub fn wire_dialed_link(
-    dialed: DialedLink,
-) -> (
-    InboundLink,
-    Arc<dyn BoxedLinkDriver + Send + Sync>,
-    WriterHandle,
-) {
-    wire_dialed_link_with_rx(
-        dialed,
-        LinkRxConf::default(),
-        &wz_session_core::policy::SessionPolicy::defaults(),
-    )
-}
-
-/// [`wire_dialed_link`] for a link whose session reads `link_rx` and whose
-/// snapshot is `policy`: `link_rx.buffer_size` is the read storage a stream
-/// link pools, and `policy` holds the policies a link's writer reads.
+/// `link_rx` and `policy` are the session's, the one the link belongs to:
+/// `link_rx.buffer_size` is the read storage a stream link pools, and `policy`
+/// holds the policies a link's writer reads, so a link never reads the build.
 pub fn wire_dialed_link_with_rx(
     dialed: DialedLink,
     link_rx: LinkRxConf,
@@ -4846,7 +4828,7 @@ pub(crate) async fn drive_open_loop_within(
 }
 
 /// Dial `locator`, wire the connection into the link pipeline ([`DialedLink`]
-/// -> [`wire_dialed_link`]: a stream splits into read/write halves, a
+/// -> [`wire_dialed_link_with_rx`]: a stream splits into read/write halves, a
 /// datagram socket is shared), wire the unicast session FSM in the Initiator
 /// role, and drive the inbound handshake (peer InitAck -> OpenSyn -> peer
 /// OpenAck) until the FSM records Established.
@@ -5842,7 +5824,7 @@ pub(crate) async fn initiator_open(
 /// The caller owns the listener and hands the accepted connection in as a
 /// [`DialedLink`] (`DialedLink::Tcp(stream)` from a `TcpListener::accept`
 /// result; the datagram acceptor is test-only). This wires it through the same
-/// [`wire_dialed_link`] -> `wire_session_engine` path the dial side uses,
+/// [`wire_dialed_link_with_rx`] -> `wire_session_engine` path the dial side uses,
 /// activates the FSM in the Accepting role (`inbound.start` ->
 /// `Accepting.AwaitingInitSyn`), and drives the 4-way handshake (peer InitSyn
 /// -> our InitAck -> peer OpenSyn -> our OpenAck) to Established.
@@ -6947,8 +6929,7 @@ mod tests {
     /// pool of the link it wires, divided by the batch the link settles at
     /// Established: nothing is pooled before that, three widest batches of
     /// storage pool three buffers on a link of the widest batch, two widest
-    /// batches pool eight on a link of 16000, the default pools upstream's one,
-    /// and a link wired with no session parameters takes that default too.
+    /// batches pool eight on a link of 16000, and the default pools upstream's one.
     #[cfg(not(feature = "runtime-zero-copy"))]
     #[tokio::test]
     async fn a_sessions_rx_buffer_size_sizes_the_pool_of_the_link_it_wires() {
@@ -6997,11 +6978,6 @@ mod tests {
         let dialed = dial_endpoint(&endpoint, &cfg).await.expect("dials");
         let (inbound, outbound, _writer) =
             wire_dialed_link_with_rx(dialed, LinkRxConf::default(), &policy);
-        established(&outbound, WIDEST);
-        assert_eq!(pooled(&inbound), 1);
-
-        let dialed = dial_endpoint(&endpoint, &cfg).await.expect("dials");
-        let (inbound, outbound, _writer) = wire_dialed_link(dialed);
         established(&outbound, WIDEST);
         assert_eq!(pooled(&inbound), 1);
         drop(listener);

@@ -170,8 +170,9 @@ impl GroupTiming {
     };
 }
 
-/// The parameters a node of zenoh id `zid` advertises on the group, with `timing`, and the
-/// queue its session is made with under `policy`, the node's snapshot.
+/// The parameters a node of zenoh id `zid` advertises on the group, with `timing`, under
+/// `policy`, the node's snapshot: the parameters carry it to the group's drive loop, and the
+/// queue its session is made with is made from it.
 fn group_params(zid: &[u8], timing: &GroupTiming, policy: &SessionPolicy) -> MulticastParams {
     MulticastParams {
         whatami: WhatAmI::Peer,
@@ -190,6 +191,7 @@ fn group_params(zid: &[u8], timing: &GroupTiming, policy: &SessionPolicy) -> Mul
         // zenoh-pico states no cap on a group's members; the table the image declares
         // (`MEMBERS`) is the bound.
         max_sessions: None,
+        policy: *policy,
     }
 }
 

@@ -204,6 +204,12 @@ pub struct MulticastParams {
     /// session state `None` and their table's rows are the bound. A host builds its dispatcher's
     /// cap from this (`MulticastConfig::with_max_sessions`).
     pub max_sessions: Option<usize>,
+    /// The value of every policy the group's machines read: the snapshot the group's creator
+    /// resolved for it, as [`SessionInitParams::policy`](crate::session_init_params::SessionInitParams::policy)
+    /// is a unicast session's. The drive loop, its writer and the group's session read a policy
+    /// here and never from the build. A target with no operating system that widens no domain
+    /// holds the snapshot in no byte, so a slot that holds these parameters does not grow.
+    pub policy: crate::policy::SessionPolicy,
 }
 
 /// Whose rule a node judges the Join of a group member by. Both upstreams admit an unknown

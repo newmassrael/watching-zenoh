@@ -1444,6 +1444,7 @@ mod qos_emit_tests {
             link_rx: crate::session_init_params::LinkRxConf::default(),
             join_rule: crate::multicast_params::GroupJoinRule::Pico,
             max_sessions: None,
+            policy: crate::policy::SessionPolicy::defaults(),
         }
     }
 
@@ -1540,6 +1541,7 @@ mod push_tests {
             link_rx: crate::session_init_params::LinkRxConf::default(),
             join_rule: crate::multicast_params::GroupJoinRule::Pico,
             max_sessions: None,
+            policy: crate::policy::SessionPolicy::defaults(),
         }
     }
 
@@ -1933,6 +1935,7 @@ mod lend_tests {
             link_rx: crate::session_init_params::LinkRxConf::default(),
             join_rule: crate::multicast_params::GroupJoinRule::Pico,
             max_sessions: None,
+            policy: crate::policy::SessionPolicy::defaults(),
         }
     }
 
@@ -2141,6 +2144,7 @@ mod lent_emit_tests {
             link_rx: crate::session_init_params::LinkRxConf::default(),
             join_rule: crate::multicast_params::GroupJoinRule::Pico,
             max_sessions: None,
+            policy: crate::policy::SessionPolicy::defaults(),
         }
     }
 

@@ -1114,6 +1114,18 @@ where
     outcome
 }
 
+/// The reassembly of a group's drive loop: the AP pool's quota, what a full pool does as the
+/// group's snapshot says (`reassembly-pool-overflow`), and its chains bounded by the group's
+/// `transport/link/rx/max_message_size`, as one `defrag_buff_size` bounds every upstream
+/// multicast peer's.
+#[cfg(feature = "reassembly")]
+fn group_reassembly_config(
+    params: &MulticastParams,
+) -> wz_session_core::reassembly_dispatch::ReassemblyConfig {
+    crate::reassembly::reassembly_config(&params.policy)
+        .with_max_message_bytes(params.link_rx.max_message_size)
+}
+
 /// The loop itself: receive, beacon, sweep, and queue what goes out on `tx`.
 #[allow(clippy::too_many_arguments)]
 async fn drive_multicast_session_running<
@@ -1211,10 +1223,7 @@ where
     // `transport/link/rx/max_message_size` bounds its chains, as one
     // `defrag_buff_size` bounds every upstream multicast peer's.
     #[cfg(feature = "reassembly")]
-    let mut reasm = crate::reassembly::TokioReassembly::new(
-        crate::reassembly::reassembly_config_of_build()
-            .with_max_message_bytes(params.link_rx.max_message_size),
-    );
+    let mut reasm = crate::reassembly::TokioReassembly::new(group_reassembly_config(params));
 
     // §5.21 router-multicast-faces (I3b) — last relayed on-group ROUTER member
     // set, for the snapshot-diff at the loop tail (relay to the forwarder only
@@ -1637,6 +1646,7 @@ fn router_group_params(
             },
         join_rule,
         max_sessions,
+        policy,
     } = profile;
     wz_session_core::multicast_params::MulticastParams {
         whatami: wz_session_core::WhatAmI::Router,
@@ -1652,6 +1662,7 @@ fn router_group_params(
         link_rx,
         join_rule,
         max_sessions,
+        policy,
     }
 }
 
@@ -1712,6 +1723,9 @@ pub struct RouterGroupProfile {
     /// (`transport/multicast/max_sessions`), or `None` for no cap of the node's own
     /// ([`MulticastParams::max_sessions`]).
     pub max_sessions: Option<usize>,
+    /// The node's snapshot of its policies, which the face's drive loop, its writer and its
+    /// session read ([`MulticastParams::policy`]).
+    pub policy: wz_session_core::policy::SessionPolicy,
 }
 
 /// The future a group face's bind returns, borrowing the face's options.
@@ -2844,6 +2858,7 @@ mod tests {
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
             join_rule: GroupJoinRule::Pico,
             max_sessions: None,
+            policy: wz_session_core::policy::SessionPolicy::defaults(),
         }
     }
 
@@ -3052,6 +3067,7 @@ mod tests {
             },
             join_rule: GroupJoinRule::Pico,
             max_sessions: None,
+            policy: wz_session_core::policy::SessionPolicy::defaults(),
         });
         assert_eq!(group.tx_queue, operator);
         assert!(group.is_qos);
@@ -3084,6 +3100,7 @@ mod tests {
             beacon,
             join_rule: GroupJoinRule::Zenoh,
             max_sessions: Some(9),
+            policy: wz_session_core::policy::SessionPolicy::defaults(),
         });
         assert_eq!(group.join_rule, GroupJoinRule::Zenoh);
         assert_eq!(group.max_sessions, Some(9), "the node's member cap");
@@ -3097,6 +3114,70 @@ mod tests {
             ),
             (10_000, 2_500, 0x01, 0x03, 8_192)
         );
+    }
+
+    /// A router's group face carries the node's snapshot to its drive loop, its writer and its
+    /// session, not the build's: each value of `multicast-loopback` that sets the socket, and so
+    /// is not upstream's, is selected into the profile where the domain allows it and read back
+    /// from the group's parameters.
+    #[cfg(all(feature = "transport-multicast", feature = "transport-link-udp"))]
+    #[test]
+    fn a_router_group_face_carries_the_nodes_snapshot() {
+        use wz_session_core::policy::{MulticastLoopback, SessionPolicy};
+        for value in [MulticastLoopback::On, MulticastLoopback::Off] {
+            let mut policy = SessionPolicy::defaults();
+            if policy.select_multicast_loopback(value).is_err() {
+                continue;
+            }
+            let group = router_group_params(RouterGroupProfile {
+                zid: [0x0C].into(),
+                qos: false,
+                compression: false,
+                tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(&policy),
+                link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
+                beacon: GroupBeacon {
+                    lease_ms: 5_000,
+                    join_interval_ms: 100,
+                    seq_num_res: 0x02,
+                    req_id_res: 0x02,
+                    batch_size: 2_048,
+                },
+                join_rule: GroupJoinRule::Pico,
+                max_sessions: None,
+                policy,
+            });
+            assert_eq!(group.policy, policy, "{value:?}");
+            assert_eq!(group.policy.multicast_loopback(), value);
+        }
+    }
+
+    /// A group's drive loop builds its reassembly from the snapshot its parameters carry, not
+    /// from the build: each value of `reassembly-pool-overflow` the domain allows is selected
+    /// into the parameters and is what a full pool does, and the group's
+    /// `transport/link/rx/max_message_size` bounds its chains.
+    #[cfg(feature = "reassembly")]
+    #[test]
+    fn a_group_reassembles_as_its_snapshot_says() {
+        use wz_session_core::policy::ReassemblyPoolOverflow;
+        use wz_session_core::reassembly_dispatch::PoolOverflow;
+        for value in [
+            ReassemblyPoolOverflow::Reject,
+            ReassemblyPoolOverflow::DiagnosticEvent,
+            ReassemblyPoolOverflow::OldestWins,
+        ] {
+            let mut group = params(&[0xAA, 0xBB]);
+            if group.policy.select_reassembly_pool_overflow(value).is_err() {
+                continue;
+            }
+            group.link_rx.max_message_size = 4_096;
+            let cfg = group_reassembly_config(&group);
+            assert_eq!(
+                cfg.pool_overflow,
+                PoolOverflow::of_policy(value),
+                "{value:?}"
+            );
+            assert_eq!(cfg.max_message_bytes, 4_096);
+        }
     }
 
     /// R2376 — a LOST group face is worth re-joining, and the wait grows.
@@ -6364,8 +6445,8 @@ mod tests {
         use crate::session::{PublishOptions, TokioMulticastSession};
         use std::sync::Arc;
 
-        let (producer, mut tap) =
-            crate::multicast_pipeline::MulticastTxTap::attach(&params(&[0xAA, 0xBB, 0xCC, 0xDD]));
+        let group = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
+        let (producer, mut tap) = crate::multicast_pipeline::MulticastTxTap::attach(&group);
         // R311nf — `TokioMulticastSession` is the typestate alias for
         // `Session<TokioRuntime, TokioTime, Multicast>`. In a both-transport build
         // this is distinct from `TokioSession` (= `Session<_,_,Unicast>`) at the
@@ -6374,6 +6455,7 @@ mod tests {
         let session: TokioMulticastSession = TokioMulticastSession::new_multicast(
             Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new())),
             Arc::new(TokioTime::new()),
+            group.policy,
             producer,
         );
 
@@ -6442,11 +6524,12 @@ mod tests {
     ) {
         use crate::observer::ApplicationLayerObserver;
         use std::sync::Arc;
-        let (producer, tap) =
-            crate::multicast_pipeline::MulticastTxTap::attach(&params(&[0xAA, 0xBB, 0xCC, 0xDD]));
+        let group = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
+        let (producer, tap) = crate::multicast_pipeline::MulticastTxTap::attach(&group);
         let session = crate::session::TokioMulticastSession::new_multicast(
             Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new())),
             Arc::new(TokioTime::new()),
+            group.policy,
             producer,
         );
         (session, tap)
