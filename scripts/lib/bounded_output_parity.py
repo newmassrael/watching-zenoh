@@ -80,6 +80,12 @@ CAPI_SESSION_TESTS = ROOT / "crates" / "wz-capi-dissect" / "src" / "tests" / "se
 GROUP = "dropped_by_limits"
 GROUP_KEY = r"\"dropped_by_limits\""
 
+# The same key written through a document writer (`wz_session_core::doc_out`),
+# whose JSON and CBOR forms are one document: `out.key("dropped_by_limits")`.
+# Still the quoted KEY the document carries, and not the emitter function's
+# name, so the R311y887 reading above holds for this spelling too.
+GROUP_WRITER_KEY = re.compile(r"\.key\(\s*\"dropped_by_limits\"\s*\)")
+
 # The constructors that build a dissection under caps. A function calling one
 # of these is a door this gate has an opinion about.
 BOUNDED_CTORS = ("from_capture_bounded", "from_capture_declaring_bounded")
@@ -177,7 +183,13 @@ EMITTERS = {
     # lesson the note above draws is now measured twice — a renderer this table
     # names by function name WILL be refactored out from under it, and the gate
     # failing is the mechanism working rather than a false alarm.
-    CAPTURE_FIELDS: ("fields_json_selected", "the field document"),
+    #
+    # A THIRD TIME, when the row-facts document gained a CBOR form: the field
+    # document and the row-facts document are now written by one generic body,
+    # `document_selected::<W: DocOut>`, and `fields_json_selected` hands it the
+    # JSON writer. The body that renders is the generic one, and it writes the
+    # key through the writer (`GROUP_WRITER_KEY`).
+    CAPTURE_FIELDS: ("document_selected", "the field document"),
     CAPTURE_SESSIONS: ("session_table_json", "the session table document"),
 }
 
@@ -238,7 +250,8 @@ def _fn_body(src: str, name: str) -> str | None:
     shape: a text-driven check contented by a comment about the thing rather
     than the thing.
     """
-    m = re.search(rf"\bfn {re.escape(name)}\s*\(", src)
+    # A generic fn names its parameters between its name and its `(`.
+    m = re.search(rf"\bfn {re.escape(name)}\s*(?:<[^>{{}}]*>)?\s*\(", src)
     if m is None:
         return None
     rest = src[m.end() :]
@@ -349,7 +362,7 @@ def main() -> int:
                 f"`{fn}` is not in {path.name}, so {what} has no emitter this "
                 f"gate can read"
             )
-        elif GROUP_KEY not in body:
+        elif GROUP_KEY not in body and not GROUP_WRITER_KEY.search(body):
             findings.append(
                 f"`{fn}` in {path.name} does not render the `{GROUP}` KEY, so "
                 f"{what} cannot say what a ceiling cost however many doors are "
