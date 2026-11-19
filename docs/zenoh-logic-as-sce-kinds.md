@@ -222,7 +222,7 @@ Recorded here, not changed: this document changes no code.
   it refuses every codec with an unbounded `tlv-chain`. A measurement must name
   the binary's revision (`sce-codegen --version`).
 
-### 7.1 What has been done about them (2026-11-19)
+### 7.1 What has been done about them (2026-11-19, Rounds 4527 and after)
 
 The list above is the census as taken. This list records what changed since.
 
@@ -243,14 +243,17 @@ The list above is the census as taken. This list records what changed since.
   gate read a binary the build never wrote. The library now states the place
   once and the two scripts read it. A hand run uses the binary
   `scripts/build-sce.sh` leaves and names its `--version`.
-- **W7, open.** One implementation of the grammar belongs with the other
-  selector parameters in `wz-session-core` (`selector_params.rs` holds the
-  `_time` name), which is `no_std`, so the instant is held as seconds and
-  nanoseconds and resolved against a `now` the caller gives;
-  `wz-ext-pubsub` and the upstream-shaped `wz-zenoh-util` type read through it.
-  The two differ today on a fixed start with a negative `;` duration
-  (`wz-zenoh-util` accepts it with an end before the start, `wz-ext-pubsub`
-  refuses it, upstream panics).
+- **W7, fixed.** The grammar, the RFC3339 reader (humantime's, with its three
+  refusals), the resolution and the membership test are
+  `crates/wz-session-core/src/time_range.rs`, `no_std` and generic over the
+  caller's instant type (a `Clock`), so every sum is that type's own checked
+  arithmetic. `wz-ext-pubsub` reads it in wall-clock time; `wz-zenoh-util` keeps
+  upstream's types and rebuilds upstream's error texts from the grammar's
+  refusal, and the E18 differential test against upstream zenoh-util passes on
+  every string of its grid and its seeded draws. The two had differed on a fixed
+  start with a negative `;` duration (upstream panics): it now moves the start
+  back, as upstream moves a `now()` start, and the range holds nothing. In a
+  query that form cannot arrive, since a parameter list splits on `;`.
 - **W1, open.** S2 row 1 and S6 row 1 are K: the matcher becomes an algorithm
   over chunk offsets with a bottom-up table. Its frames are under the stack gate
   and it is on the query path the kit measures, so it lands with those readings.
