@@ -6547,8 +6547,11 @@ layer_c1u_cargo_test_tls() {
     # both transports' legs run (C1v counts the same file, and moves with this one). PRINTED.
     # 9 -> 11: the two cases of `drive_against_peer`, the bound on a reconnect's peer wait, in
     # the same file and under no link feature, so C1v moves with it.
+    # 11 -> 12: Round 4521's `the_replay_pace_is_the_opening_snapshots`, under no link feature,
+    # which landed while an earlier guard of the same job was red; hosted run 44434030103 printed
+    # 12, and so did a build host. C1v moves with it.
     wz_test_args wz-runtime-tokio session_reconnect_e2e
-    _runci_guarded_test C1u 11 cargo test -p wz-runtime-tokio --features transport-link-tls "${WZ_TEST_ARGS[@]}" --quiet \
+    _runci_guarded_test C1u 12 cargo test -p wz-runtime-tokio --features transport-link-tls "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     # R3463 — 6 -> 8. The two witnesses of decision D9 of
     # docs/session-lifecycle-intent.md: over mutual TLS a peer that claims the zid its
@@ -6613,8 +6616,9 @@ layer_c1v_cargo_test_ws() {
     # R311y801 — 6 -> 7 with C1u, same commit, same reason (see C1u's note).
     # f0676600a -- 7 -> 9, with C1u, same commit, same reason. PRINTED.
     # 9 -> 11, with C1u, same commit, same reason.
+    # 11 -> 12, with C1u, same commit, same reason.
     wz_test_args wz-runtime-tokio session_reconnect_e2e
-    _runci_guarded_test C1v 11 cargo test -p wz-runtime-tokio --features transport-link-ws "${WZ_TEST_ARGS[@]}" --quiet \
+    _runci_guarded_test C1v 12 cargo test -p wz-runtime-tokio --features transport-link-ws "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     # R2355 — the MULTI-PEER ws accept, which no lane ran until now. The
     # `transport-link-ws` registry entry carried "the multi-peer `--router ws/`
@@ -13618,7 +13622,9 @@ layer_c1m_session_lwip() {
     # the run (the tokens leg below is the same number).
     # 29 -> 31: the peers a command line holds by their zid (`LaunchedPeers`), a cell set once
     # and read as the list the node holds, and its refusals.
-    _runci_guarded_test "C1m mcu slot node" 31 \
+    # 31 -> 32: Round 4521's `the_sessions_the_node_makes_carry_the_snapshot_it_is_handed`;
+    # hosted run 44434030103 printed 32, and so did a build host.
+    _runci_guarded_test "C1m mcu slot node" 32 \
         cargo test -p wz-session-mcu --features client-slot --lib slot_node --quiet || return 1
     # The same tests of a node built with `declare-token`: the number is the same, and what two of
     # them assert is the other half (a token is declared, and is not refused).
