@@ -195,11 +195,12 @@ mod the_node_clock_lent_as_uhlc {
         let mut rng = Rng(seed | 1);
         NANOS.with(|c| c.set(1_700_000_000u64 * 1_000_000_000));
         let id = [0x5au8, 0x01];
-        let node = NodeHlc::for_node_over_source(
+        let node = NodeHlc::for_node_over_source_by(
             &id,
             WhatAmI::Peer,
             TimestampingEnabled::all(true),
             TraceEpoch,
+            &wz_session_core::policy::SessionPolicy::defaults(),
         );
         let reference = uhlc::HLCBuilder::new()
             .with_clock(trace_clock)
@@ -272,11 +273,12 @@ mod the_node_clock_lent_as_uhlc {
 
     #[test]
     fn a_node_whose_role_does_not_stamp_lends_no_clock() {
-        let node = NodeHlc::for_node_over_source(
+        let node = NodeHlc::for_node_over_source_by(
             &[0x5a],
             WhatAmI::Peer,
             TimestampingEnabled::default(),
             TraceEpoch,
+            &wz_session_core::policy::SessionPolicy::defaults(),
         );
         assert_eq!(node.next_word(), None);
         assert_eq!(node.absorb_word(1), None);

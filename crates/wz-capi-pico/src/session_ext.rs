@@ -85,8 +85,9 @@ impl PicoSessionExt {
         policy: SessionPolicy,
         #[cfg(feature = "connectivity")] engine: &Arc<dyn SessionEngine>,
     ) -> Self {
-        // Only a door a policy governs reads the snapshot, and a build without `query` has none.
-        #[cfg(not(feature = "query"))]
+        // The snapshot is read by the clock and by a door a policy governs: a build with neither
+        // a clock nor `query` reads none of it.
+        #[cfg(not(any(feature = "query", feature = "advanced", feature = "clock-source")))]
         let _ = policy;
         #[cfg(feature = "connectivity")]
         let connectivity = Connectivity::new();
@@ -102,7 +103,7 @@ impl PicoSessionExt {
         #[cfg(not(any(feature = "advanced", feature = "clock-source")))]
         let _ = zid;
         #[cfg(any(feature = "advanced", feature = "clock-source"))]
-        let hlc = NodeHlc::for_node(zid, mode, TimestampingEnabled::all(true));
+        let hlc = NodeHlc::for_node_by(zid, mode, TimestampingEnabled::all(true), &policy);
         #[cfg(any(feature = "advanced", feature = "clock-source"))]
         let time = crate::last_timestamp::SessionTime::new().learned_by(hlc.clone());
         #[cfg(not(any(feature = "advanced", feature = "clock-source")))]
@@ -149,5 +150,64 @@ impl Drop for PicoSessionExt {
         let (engine, id) = &self.watch;
         engine.unwatch_faces(*id);
         self.connectivity.shutdown();
+    }
+}
+
+#[cfg(all(
+    test,
+    feature = "engine-tokio",
+    any(feature = "advanced", feature = "clock-source")
+))]
+mod tests {
+    use super::*;
+    #[cfg(feature = "connectivity")]
+    use wz_capi_core::faces::SharedSession;
+    #[cfg(feature = "connectivity")]
+    use wz_capi_core::runtime::runtime_impl::TokioTime;
+    use wz_node_time::node_clock::DataStamp;
+    use wz_session_core::policy::ClockQualityStamping;
+
+    const ZID: [u8; 16] = [0x2d; 16];
+
+    /// The session's pico state under `policy`, as its open makes it.
+    fn ext_under(policy: SessionPolicy) -> PicoSessionExt {
+        #[cfg(feature = "connectivity")]
+        {
+            let shared = Arc::new(
+                SharedSession::new(TokioTime::new(), ZID.into(), policy)
+                    .expect("test host entropy"),
+            );
+            PicoSessionExt::new(WhatAmI::Peer, &ZID, policy, &shared.as_engine())
+        }
+        #[cfg(not(feature = "connectivity"))]
+        {
+            PicoSessionExt::new(WhatAmI::Peer, &ZID, policy)
+        }
+    }
+
+    /// The session's clock stamps by the `clock-quality-stamping` value of the snapshot its open
+    /// resolved: no reference is reported for it, so it withholds the stamp of data exactly when
+    /// the value is `trusted-only`.
+    #[test]
+    fn the_sessions_clock_stamps_by_the_snapshot_it_is_handed() {
+        let mut built = 0;
+        for value in [
+            ClockQualityStamping::Always,
+            ClockQualityStamping::TrustedOnly,
+        ] {
+            let mut policy = SessionPolicy::defaults();
+            if policy.select_clock_quality_stamping(value).is_err() {
+                continue;
+            }
+            let ext = ext_under(policy);
+            assert_eq!(
+                ext.hlc.data_stamp() == DataStamp::Withheld,
+                value == ClockQualityStamping::TrustedOnly,
+                "{}",
+                value.id()
+            );
+            built += 1;
+        }
+        assert!(built >= 1, "the build's domain holds at least its default");
     }
 }

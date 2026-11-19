@@ -4589,8 +4589,8 @@ pub(crate) fn config_keys_the_demo_drops() -> Vec<&'static str> {
     // the flag that reaches it.
     //
     // MEASURED. `--timestamping` parses in every build and threads all the way
-    // to `RouterForwarder::with_timestamping`, which hands it to
-    // `NodeHlc::for_node` — and without
+    // to `RouterForwarder::for_node`, which hands it to
+    // `NodeHlc::for_node_by` — and without
     // `time-hlc` that type is ZERO-SIZED and `is_stamping()` returns `false`
     // unconditionally (`node_clock.rs`). So the flag is honoured, reported
     // APPLIED, and does NOTHING: the relayed Put comes out bare either way. The
@@ -9655,7 +9655,7 @@ mod stock_config_tests {
     ///
     /// R2203 (open-debt item 220) — and all three arms are now BUILD-SPLIT,
     /// because R2112's claim was only ever half true. `--timestamping` is
-    /// parsed in every build and reaches `NodeHlc::for_node`, which without
+    /// parsed in every build and reaches `NodeHlc::for_node_by`, which without
     /// `time-hlc` is a zero-sized type whose `is_stamping()` is false: the flag
     /// arrives and NOTHING stamps. Measured by the wire sweep, which read `bare`
     /// for both documents on a lane that had every other feature this key needs.

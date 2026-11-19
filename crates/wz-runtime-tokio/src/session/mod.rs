@@ -4134,11 +4134,12 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         // unchanged; the inputs are exactly zenoh's
         // (`enabled().get(whatami).then(|| ..)`, runtime/mod.rs:147), so a
         // peer / client session gets the non-stamping handle and only a
-        // router-role one gets a clock.
-        let node_hlc = crate::node_clock::NodeHlc::for_node(
+        // router-role one gets a clock. Its `clock-quality-stamping` policy is the snapshot's.
+        let node_hlc = crate::node_clock::NodeHlc::for_node_by(
             &zid,
             actions.params.whatami,
             crate::node_clock::TimestampingEnabled::default(),
+            &policy,
         );
         let local_live = R::with_mutex_mut(&observer, |o| o.subscribers.local_live());
         let session = Self::from_inner(SessionInner {
@@ -4267,10 +4268,11 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     {
         // The read of `transport.params` is taken BEFORE the mutable borrow so
         // the two do not overlap.
-        let hlc = crate::node_clock::NodeHlc::for_node(
+        let hlc = crate::node_clock::NodeHlc::for_node_by(
             &self.transport.params.zid,
             self.transport.params.whatami,
             enabled,
+            self.policy(),
         );
         self.with_node_clock(hlc)
     }

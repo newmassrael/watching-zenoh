@@ -960,7 +960,7 @@ The citations, at the pin:
   asked the gateways from each peer-hat block, which on a node with a south peer region sent
   the router the query twice. It changes what a peer node with a partition sends as well.
 - **Removed:** `RouterForwarder::as_client_of_north` and the `north_is_client` field. A client
-  node is built by `RouterForwarder::client_with_timestamping`, and `Tables::north_is_client`
+  node is built by `RouterForwarder::for_node` at node mode Client, and `Tables::north_is_client`
   answers from the node mode.
 
 The rules are held by `router_forward/client_hat_tests.rs`, each with the peer node as the

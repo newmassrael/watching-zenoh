@@ -484,11 +484,12 @@ fn a_session_with_no_time_left_refuses_the_sample_and_takes_no_sequence_number()
 
 /// A node clock under the `trusted-only` policy (`true`) or `always` (`false`).
 fn node_clock(trusted_only: bool) -> NodeHlc {
-    NodeHlc::for_node_over_source(
+    NodeHlc::for_node_over_source_by(
         &[0x01],
         wz_session_core::WhatAmI::Peer,
         wz_node_time::node_clock::TimestampingEnabled::all(true),
         wz_node_time::timestamp_source::SystemEpoch,
+        &wz_session_core::policy::SessionPolicy::defaults(),
     )
     .with_trusted_only_stamping(trusted_only)
 }

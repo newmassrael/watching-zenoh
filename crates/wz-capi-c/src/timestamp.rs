@@ -287,11 +287,12 @@ mod tests {
         use wz_runtime_tokio::timestamp_source::SystemEpoch;
 
         let zid = [0x5a; Z_ID_SIZE];
-        let hlc = NodeHlc::for_node_over_source(
+        let hlc = NodeHlc::for_node_over_source_by(
             &zid,
             WhatAmI::Router,
             TimestampingEnabled::all(true),
             SystemEpoch,
+            &wz_runtime_tokio::policy::SessionPolicy::defaults(),
         )
         .with_trusted_only_stamping(true);
         assert!(

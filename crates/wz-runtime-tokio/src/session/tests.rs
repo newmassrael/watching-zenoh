@@ -7599,10 +7599,11 @@ fn a_queryable_declared_not_to_stamp_refuses_a_stamped_reply_and_stages_nothing(
 fn plain_reply_stamp_seen_by(options: QueryableOptions) -> (Option<Vec<u8>>, Vec<u8>) {
     let (session, _driver) = build_session();
     let zid = session.zid().to_vec();
-    let hlc = crate::node_clock::NodeHlc::for_node(
+    let hlc = crate::node_clock::NodeHlc::for_node_by(
         &zid,
         wz_codecs::whatami::WhatAmI::Router,
         crate::node_clock::TimestampingEnabled::default(),
+        &wz_session_core::policy::SessionPolicy::defaults(),
     );
     let session = session.with_node_clock(hlc);
     let _queryable = session.declare_queryable("home/temp", options, |_query, out| {
@@ -17802,4 +17803,47 @@ fn declaring_an_offloaded_subscriber_off_a_runtime_is_refused() {
         .declare_subscriber_offloaded("demo/**", SubscribeOptions::default(), |_| {})
         .err();
     assert_eq!(refused, Some(OffloadError::NoRuntime));
+}
+
+/// A session's node clock stamps by the `clock-quality-stamping` value of the snapshot in its
+/// params, as the session is made and as a host rebuilds the clock from its own map: no reference
+/// is reported for the clock, so it withholds the stamp of data exactly when the value is
+/// `trusted-only`.
+#[cfg(feature = "time-hlc")]
+#[test]
+fn a_sessions_clock_stamps_by_the_clock_quality_of_its_snapshot() {
+    use crate::node_clock::{DataStamp, TimestampingEnabled};
+    use wz_session_core::policy::ClockQualityStamping;
+    let mut opened = 0;
+    for value in [
+        ClockQualityStamping::Always,
+        ClockQualityStamping::TrustedOnly,
+    ] {
+        let mut params = fixture_session_init_params();
+        if params.policy.select_clock_quality_stamping(value).is_err() {
+            continue;
+        }
+        // A router holds a clock under the shipped map.
+        params.whatami = wz_codecs::whatami::WhatAmI::Router;
+        let (actions, _driver) = recording_actions_with_params(params);
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
+        let session = TokioSession::new(actions, observer, Arc::new(TokioTime::new()));
+        let trusted_only = value == ClockQualityStamping::TrustedOnly;
+        assert!(session.node_hlc().is_stamping(), "{}", value.id());
+        assert_eq!(
+            session.node_hlc().data_stamp() == DataStamp::Withheld,
+            trusted_only,
+            "made: {}",
+            value.id()
+        );
+        let session = session.with_timestamping(TimestampingEnabled::all(true));
+        assert_eq!(
+            session.node_hlc().data_stamp() == DataStamp::Withheld,
+            trusted_only,
+            "rebuilt: {}",
+            value.id()
+        );
+        opened += 1;
+    }
+    assert!(opened >= 1, "the build's domain holds at least its default");
 }

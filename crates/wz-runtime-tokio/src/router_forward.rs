@@ -2910,7 +2910,7 @@ fn local_face_event(msg: NetworkMessage) -> Option<LocalFaceEvent> {
 /// A [`FaceForwarder`] that maintains zenoh's DUAL router meshes — `routers_net`
 /// (Router-tier) and `linkstatepeers_net` (Peer-tier) — from the face lifecycle
 /// and inbound `OAM_LINKSTATE` topology. It is the peer node's forwarder too, built
-/// by [`peer_with_timestamping`](Self::peer_with_timestamping). Slice 1a owns
+/// by [`for_node`](Self::for_node) at Peer. Slice 1a owns
 /// the topology STATE; see the module docs for the deferred slices.
 pub struct RouterForwarder {
     /// The routing tables: the hats, the faces and the stores a declaration writes, in one
@@ -4682,43 +4682,34 @@ impl RouterForwarder {
         Self::with_clock(self_zid, Box::new(Instant::now))
     }
 
-    /// As [`new`](Self::new), but with the `timestamping.enabled` map a HOST
-    /// read out of its config document rather than zenoh's shipped default.
+    /// The forwarder of a node of role `node_mode`, whose machines read `policy`, the snapshot
+    /// the node's creator resolved from its configuration.
     ///
-    /// R2112 (open-debt item 102) — until this round every construction path
-    /// here passed
-    /// [`TimestampingEnabled::default`](crate::node_clock::TimestampingEnabled::default)
-    /// literally, so the one key
-    /// upstream consults to decide whether a router stamps
-    /// (`config.timestamping().enabled().get(whatami)`,
-    /// `zenoh/src/net/runtime/mod.rs:147`) could be READ by wz's config reader
-    /// and then had nowhere to go. A document saying `timestamping: { enabled:
-    /// false }` — an ordinary operator choice when the publishers already stamp
-    /// — produced a wz router that stamped anyway, which is a
-    /// foreign-observable divergence: a pico subscriber prints `with timestamp:`
-    /// for a sample a real zenohd would have relayed bare.
+    /// The role decides the hats the node runs:
     ///
-    /// The map is taken WHOLE rather than as the resolved boolean because the
-    /// gate is evaluated against this forwarder's own role, and that role is
-    /// [`WhatAmI::Router`] by construction (both nets are seeded with it). A
-    /// host that resolved the boolean itself would be asserting the role a
-    /// second time, and the two assertions could drift.
-    pub fn with_timestamping(
-        self_zid: Zid,
-        timestamping: crate::node_clock::TimestampingEnabled,
-    ) -> Self {
-        Self::for_node(
-            WhatAmI::Router,
-            self_zid,
-            timestamping,
-            &Self::resolve_policy(),
-        )
-    }
-
-    /// The forwarder of a node of role `node_mode` (a router, a peer or a client: the hats each
-    /// role runs are [`Self::with_timestamping`]'s, [`Self::peer_with_timestamping`]'s and
-    /// [`Self::client_with_timestamping`]'s), whose machines read `policy`, the snapshot the
-    /// node's creator resolved from its configuration.
+    /// - A router runs the router hat in both meshes.
+    /// - A peer runs the hats the pin builds for a peer, which is the peer hat in `North` and a
+    ///   broker hat for the clients south of it
+    ///   (`zenoh/src/net/routing/gateway.rs` @ `GatewaySouthConf::Preset(GatewayPresetConf::Auto) => match mode {`),
+    ///   with its faces placed by [`region_of`] at node mode Peer. A peer node has no other
+    ///   forwarder: its planes and its own surfaces are held to the pin by the network gates
+    ///   (`docs/peer-region-hats.md`).
+    /// - A client that keeps a south apart ([`with_south_partition`](Self::with_south_partition))
+    ///   runs the pin's client hat in `North`, whose one face is the node the client is attached
+    ///   to, and the hats of its subregions south of it
+    ///   (`zenoh/src/net/routing/gateway.rs` @ `match (region.bound(), region.mode().unwrap_or(mode)) {`),
+    ///   with its faces placed by [`region_of`] at node mode Client. The node it is attached to
+    ///   tells a client only what the client asked for, so the client hat sends north every
+    ///   interest its south makes and every declaration its south holds, and every message whose
+    ///   source is south unless the north face finalized its interest in the resource
+    ///   (`zenoh/src/net/routing/hat/client/pubsub.rs` @ `fn compute_data_route`).
+    ///
+    /// `timestamping` is the `timestamping.enabled` map a host read out of its config document
+    /// (upstream's `config.timestamping().enabled().get(whatami)`,
+    /// `zenoh/src/net/runtime/mod.rs:147`). It is taken WHOLE rather than as the resolved boolean
+    /// because the gate is evaluated here against `node_mode`, the role both nets are seeded
+    /// with: a host that resolved the boolean itself would assert the role a second time, and
+    /// the two assertions could drift.
     pub fn for_node(
         node_mode: WhatAmI,
         self_zid: Zid,
@@ -4734,9 +4725,9 @@ impl RouterForwarder {
         )
     }
 
-    /// The snapshot a forwarder made by a constructor that is handed none resolves: the build
-    /// defaults, until a run-time document is read here. A node whose creator holds its own
-    /// snapshot uses [`Self::for_node`].
+    /// The snapshot a forwarder made by [`new`](Self::new) or [`with_clock`](Self::with_clock),
+    /// which are handed none, resolves: the build defaults, until a run-time document is read
+    /// here. A node whose creator holds its own snapshot is made by [`Self::for_node`].
     fn resolve_policy() -> wz_session_core::policy::SessionPolicy {
         wz_session_core::policy::SessionPolicy::defaults()
     }
@@ -4987,63 +4978,21 @@ impl RouterForwarder {
         )
     }
 
-    /// A forwarder for a PEER node: the same hats the pin builds for a peer, which
-    /// is the peer hat in `North` and a broker hat for the clients south of it
-    /// (`zenoh/src/net/routing/gateway.rs` @ `GatewaySouthConf::Preset(GatewayPresetConf::Auto) => match mode {`),
-    /// with its faces placed by [`region_of`] at node mode Peer.
-    ///
-    /// Public because a peer node has no other forwarder: its publish and subscribe,
-    /// query, token and interest planes and its own surfaces are held to the pin by
-    /// the network gates (`docs/peer-region-hats.md`).
-    /// `timestamping` is the `timestamping.enabled` map a
-    /// host read out of its config document, resolved against Peer here, as
-    /// [`with_timestamping`](Self::with_timestamping) does against Router.
-    pub fn peer_with_timestamping(
-        self_zid: Zid,
-        timestamping: crate::node_clock::TimestampingEnabled,
-    ) -> Self {
-        Self::for_node(
-            WhatAmI::Peer,
-            self_zid,
-            timestamping,
-            &Self::resolve_policy(),
-        )
-    }
-
-    /// A forwarder for a CLIENT node that keeps a south apart
-    /// ([`with_south_partition`](Self::with_south_partition)): the pin's client hat in `North`,
-    /// whose one face is the node the client is attached to, and the hats of its subregions south
-    /// of it (`zenoh/src/net/routing/gateway.rs` @ `match (region.bound(), region.mode().unwrap_or(mode)) {`),
-    /// with its faces placed by [`region_of`] at node mode Client.
-    ///
-    /// The node it is attached to tells a client only what the client asked for, so the client
-    /// hat sends north every interest its south makes and every declaration its south holds,
-    /// and every message whose source is south unless the north face finalized its interest in
-    /// the resource (`zenoh/src/net/routing/hat/client/pubsub.rs` @ `fn compute_data_route`).
-    /// `timestamping` is resolved against Client, as
-    /// [`peer_with_timestamping`](Self::peer_with_timestamping) resolves it against Peer.
-    pub fn client_with_timestamping(
-        self_zid: Zid,
-        timestamping: crate::node_clock::TimestampingEnabled,
-    ) -> Self {
-        Self::for_node(
-            WhatAmI::Client,
-            self_zid,
-            timestamping,
-            &Self::resolve_policy(),
-        )
-    }
-
     #[cfg(test)]
     fn peer(self_zid: Zid) -> Self {
         Self::peer_with_clock(self_zid, Box::new(Instant::now))
     }
 
-    /// [`client_with_timestamping`](Self::client_with_timestamping) with the shipped
-    /// `timestamping.enabled` map.
+    /// The forwarder of a client node ([`for_node`](Self::for_node) at Client) with the shipped
+    /// `timestamping.enabled` map and the build's snapshot.
     #[cfg(test)]
     fn client(self_zid: Zid) -> Self {
-        Self::client_with_timestamping(self_zid, crate::node_clock::TimestampingEnabled::default())
+        Self::for_node(
+            WhatAmI::Client,
+            self_zid,
+            crate::node_clock::TimestampingEnabled::default(),
+            &wz_session_core::policy::SessionPolicy::defaults(),
+        )
     }
 
     /// [`peer`](Self::peer) with an injected monotonic clock, for a test that
@@ -5106,11 +5055,12 @@ impl RouterForwarder {
             // enables, which is why the stamp is live on a router by default.
             // R2112 (open-debt item 102) — and the map is now the HOST's, so a
             // config document that says otherwise reaches the gate instead of
-            // stopping at the reader.
-            node_hlc: crate::node_clock::NodeHlc::for_node(
+            // stopping at the reader. Its `clock-quality-stamping` policy is the node's snapshot's.
+            node_hlc: crate::node_clock::NodeHlc::for_node_by(
                 self_zid.as_slice(),
                 node_mode,
                 timestamping,
+                policy,
             ),
             #[cfg(feature = "pubsub-ts-stack")]
             interception_source: std::sync::OnceLock::new(),
@@ -24398,7 +24348,12 @@ mod tests {
     fn relay_bare_put_through_router(
         map: crate::node_clock::TimestampingEnabled,
     ) -> Option<wz_session_core::sample::TimestampHint> {
-        let fwd = RouterForwarder::with_timestamping(zid(0x01), map);
+        let fwd = RouterForwarder::for_node(
+            WhatAmI::Router,
+            zid(0x01),
+            map,
+            &wz_session_core::policy::SessionPolicy::defaults(),
+        );
         let (client, _sc) = face(zid(0xAA), WIRE_CLIENT);
         let (peer_sub, sink_peer) = face(zid(0xBB), WIRE_PEER);
         fwd.register(FaceId(0), &client);
@@ -24480,9 +24435,11 @@ mod tests {
     #[cfg(feature = "time-hlc")]
     #[test]
     fn a_relayed_put_carries_one_timestamp_across_every_tier_net() {
-        let fwd = RouterForwarder::with_timestamping(
+        let fwd = RouterForwarder::for_node(
+            WhatAmI::Router,
             zid(0x01),
             crate::node_clock::TimestampingEnabled::default(),
+            &wz_session_core::policy::SessionPolicy::defaults(),
         );
         let (client, _sc) = face(zid(0xAA), WIRE_CLIENT); // publishing client
         let (peer_sub, sink_peer) = face(zid(0xCC), WIRE_PEER); // peers_net subscriber
@@ -24546,11 +24503,12 @@ mod tests {
     #[cfg(all(feature = "time-hlc", feature = "pubsub-timestamp"))]
     fn relay_a_put_ahead_of_the_clock(subscribed: bool) -> (u64, u64, usize) {
         let mut fwd = RouterForwarder::new(zid(0x01));
-        fwd.node_hlc = crate::node_clock::NodeHlc::for_node_over_source(
+        fwd.node_hlc = crate::node_clock::NodeHlc::for_node_over_source_by(
             zid(0x01).as_slice(),
             WhatAmI::Router,
             crate::node_clock::TimestampingEnabled::default(),
             FrozenEpoch,
+            &wz_session_core::policy::SessionPolicy::defaults(),
         )
         // The policy that stamps whatever the build states: under `trusted-only` an
         // unreferenced clock judges nothing, and neither arm would absorb.

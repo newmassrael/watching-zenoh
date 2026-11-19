@@ -4771,7 +4771,7 @@ pub struct ZenohConfigIngest {
 
 impl ZenohConfigIngest {
     /// R3064 -- the `timestamping.enabled` map this document means, for building a node's clock
-    /// ([`crate::node_clock::NodeHlc::for_node`]).
+    /// ([`crate::node_clock::NodeHlc::for_node_by`]).
     ///
     /// A document that NAMES the key states ONE role's entry, the one this node plays, so that
     /// entry is replaced and the other two stay at zenoh's shipped values
