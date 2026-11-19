@@ -449,15 +449,17 @@ impl<'a> ReplaySubscriber<'a> {
         Ok(self.next_ask(now))
     }
 
-    /// The publisher declared under `declaration` undeclared its replay queryable at `now`. One
-    /// that waited to be asked is forgotten; one being asked, or answered, is asked again when it
-    /// comes back. A declaration no row holds changes nothing.
-    pub fn gone(&mut self, declaration: u64, now: Option<u32>) {
-        let Some(index) = self
-            .slots
-            .iter()
-            .position(|row| row.state != FREE && row.declaration == declaration)
-        else {
+    /// The node `zid` undeclared, at `now`, the replay queryable it declared under `declaration`
+    /// (an id is the declaring node's own, so two nodes may use one; an empty `zid`, a node the
+    /// watch could not name, matches the id alone). One that waited to be asked is forgotten; one
+    /// being asked, or answered, is asked again when it comes back. A declaration no row holds
+    /// changes nothing.
+    pub fn gone(&mut self, zid: &[u8], declaration: u64, now: Option<u32>) {
+        let Some(index) = self.slots.iter().position(|row| {
+            row.state != FREE
+                && row.declaration == declaration
+                && (zid.is_empty() || row.zid() == zid)
+        }) else {
             return;
         };
         let row = &mut self.slots[index];
@@ -757,7 +759,13 @@ mod tests {
         sub.query_ended(1, Some(101));
         assert_eq!(sub.phase(), Phase::Live);
 
-        sub.gone(1, Some(102));
+        sub.gone(B, 1, Some(102));
+        assert_eq!(
+            sub.appeared(A, 1, Some(102)),
+            Ok(None),
+            "the id is the declaring node's own: B's undeclaration of 1 is not A's"
+        );
+        sub.gone(A, 1, Some(102));
         assert_eq!(sub.appeared(A, 3, Some(103)), Ok(Some(0)), "A came back");
         assert_eq!(sub.phase(), Phase::Asking);
         sub.query_ended(0, Some(104));
@@ -778,8 +786,12 @@ mod tests {
         assert_eq!(sub.appeared(B, 2, Some(0)), Err(AppearRefused::Full));
         assert_eq!(sub.counts().table_full, 1);
         sub.query_ended(0, Some(1));
-        sub.gone(1, Some(2));
-        assert_eq!(sub.appeared(B, 3, Some(3)), Ok(Some(0)));
+        sub.gone(&[], 1, Some(2));
+        assert_eq!(
+            sub.appeared(B, 3, Some(3)),
+            Ok(Some(0)),
+            "an unnamed node's undeclaration matches the id alone"
+        );
         assert_eq!(sub.zid(0), B);
     }
 
@@ -802,7 +814,7 @@ mod tests {
         let mut sub = store.subscriber(0, 1, LiveBeforeAnswer::Deliver);
         sub.appeared(A, 1, Some(0)).unwrap();
         assert_eq!(sub.appeared(B, 2, Some(0)), Ok(None));
-        sub.gone(2, Some(1));
+        sub.gone(B, 2, Some(1));
         assert_eq!(sub.zid(1), &[] as &[u8]);
         assert_eq!(sub.query_ended(0, Some(2)), None);
         assert_eq!(sub.phase(), Phase::Live);
