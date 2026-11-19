@@ -140,6 +140,17 @@ ACCOUNTING = (
 # excuse another crate's site.
 ALLOWED = [
     (
+        "wz-capture/tcp_facts.rs",
+        "peer.pending.pop_front();",
+        "A direction's small segment leaves the queue of segments awaiting their "
+        "acknowledgement when an acknowledgement covers it (round 4535): it was "
+        "queued only to time that answer, and the gap is kept in `gaps` or "
+        "counted in `gaps_more` beside the removal. Two answers give no gap: an "
+        "acknowledgement stamped before its segment, a capture clock that stepped "
+        "back, and an acknowledging packet the capture gave no time; neither is a "
+        "time of the connection.",
+    ),
+    (
         "wz-capture/segment_chain.rs",
         "let _ = self.closed.remove(&key);",
         "The segment chain lets go of what a query's final closed, kept for the "

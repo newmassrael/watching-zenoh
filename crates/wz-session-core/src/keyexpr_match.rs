@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! The keyexpr wildcard matcher: whether two key expressions share a key ([`keyexpr_intersects`]),
-//! whether one covers every key of another ([`keyexpr_includes`]), and whether a pattern matches a
+//! whether one covers every key of another (`keyexpr_includes`), and whether a pattern matches a
 //! key read as a literal ([`keyexpr_matches`]). Every subscriber, queryable, liveliness, routing,
 //! ACL and interceptor scan in wz asks one of these three.
 //!
@@ -41,8 +41,9 @@
 //! When a toggle is off its token **is a literal chunk** (a pattern `home/**` matches only the
 //! literal key `home/**`): the same compile-flag elision zenoh-pico makes. The arguments are
 //! constants of the build, so the compiler folds the branches of an absent wildcard away.
-//! `keyexpr-includes` gates [`keyexpr_includes`], the directional relation the ACL and routing
-//! coverage scans ask.
+//! `keyexpr-includes` gates `keyexpr_includes`, the directional relation the ACL and routing
+//! coverage scans ask. It is named here as code and not linked: a link from these docs would not
+//! resolve in a build without the feature, which is a build these docs are also read in.
 //!
 //! ## @verbatim (R311y543)
 //!
