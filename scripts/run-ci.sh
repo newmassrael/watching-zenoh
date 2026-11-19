@@ -13374,11 +13374,14 @@ layer_c1q_multicast_glue() {
     # 36/40/42 -> 42/46/48, the group face's recorded member bound, the multicast
     # max_sessions key, the preset's Join rule and the configured beacon profile (f129e1303d,
     # d5413a2231, c018e7390d, e42fc67341), printed by each run on pc5.
-    _runci_guarded_test C1q 42 cargo test -p wz-runtime-tokio --features transport-multicast --lib multicast_glue --quiet \
+    # 42/46/48 -> 43/48/50, step 3c of the staged policy binding: a router's group face carries
+    # the node's snapshot (every arm) and a group reassembles as its snapshot says (the arms with
+    # reassembly), printed by each run on a build host.
+    _runci_guarded_test C1q 43 cargo test -p wz-runtime-tokio --features transport-multicast --lib multicast_glue --quiet \
         || return 1
-    _runci_guarded_test C1q 46 cargo test -p wz-runtime-tokio --features transport-multicast,reassembly --lib multicast_glue --quiet \
+    _runci_guarded_test C1q 48 cargo test -p wz-runtime-tokio --features transport-multicast,reassembly --lib multicast_glue --quiet \
         || return 1
-    _runci_guarded_test C1q 48 cargo test -p wz-runtime-tokio --features transport-multicast,transport-fragmentation --lib multicast_glue --quiet \
+    _runci_guarded_test C1q 50 cargo test -p wz-runtime-tokio --features transport-multicast,transport-fragmentation --lib multicast_glue --quiet \
         || return 1
     # R311y832 — the UDP multicast locator config surface (`ttl` / `join`, the
     # two keys of zenoh's `zenoh-link-udp` config module wz lacked). A NEW leg
