@@ -955,49 +955,49 @@ jobs:
         timeout-minutes: 50
         continue-on-error: true
         shell: bash
-        run: bash scripts/pico-c-program.sh crates/wz-capi-pico/examples/c/profiles.c "example: pub/sub and query under the upstream profile" "$WZ_EXAMPLE_FEATURES"
+        run: bash scripts/pico-c-program.sh crates/wz-capi-pico/examples/c/profiles.c "example of pub/sub and query under the upstream profile" "$WZ_EXAMPLE_FEATURES"
 
       - name: example, tcp, udp and a group over the system's sockets (observed)
         if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
         timeout-minutes: 15
         continue-on-error: true
         shell: bash
-        run: bash scripts/pico-c-program.sh crates/wz-capi-pico/examples/c/transports.c "example: tcp, udp and a group over the system's sockets" "$WZ_EXAMPLE_FEATURES"
+        run: bash scripts/pico-c-program.sh crates/wz-capi-pico/examples/c/transports.c "example of tcp, udp and a group over the system's sockets" "$WZ_EXAMPLE_FEATURES"
 
       - name: example, tcp, udp and a group over a transport the program supplies (observed)
         if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
         timeout-minutes: 15
         continue-on-error: true
         shell: bash
-        run: bash scripts/pico-c-program.sh crates/wz-capi-pico/tests/c/pico_app_transport.c "example: tcp, udp and a group over a transport the program supplies" "$WZ_EXAMPLE_FEATURES"
+        run: bash scripts/pico-c-program.sh crates/wz-capi-pico/tests/c/pico_app_transport.c "example of tcp, udp and a group over a transport the program supplies" "$WZ_EXAMPLE_FEATURES"
 
       - name: example, batching on and off with a flush (observed)
         if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
         timeout-minutes: 15
         continue-on-error: true
         shell: bash
-        run: bash scripts/pico-c-program.sh crates/wz-capi-pico/examples/c/batching.c "example: batching on and off with a flush" "$WZ_EXAMPLE_FEATURES"
+        run: bash scripts/pico-c-program.sh crates/wz-capi-pico/examples/c/batching.c "example of batching on and off with a flush" "$WZ_EXAMPLE_FEATURES"
 
       - name: example, end-to-end protection across a session (observed)
         if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
         timeout-minutes: 15
         continue-on-error: true
         shell: bash
-        run: bash scripts/pico-c-program.sh crates/wz-capi-pico/examples/c/e2e.c "example: end-to-end protection across a session" "$WZ_EXAMPLE_FEATURES"
+        run: bash scripts/pico-c-program.sh crates/wz-capi-pico/examples/c/e2e.c "example of end-to-end protection across a session" "$WZ_EXAMPLE_FEATURES"
 
       - name: example, supervision of a periodic stream (observed)
         if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
         timeout-minutes: 15
         continue-on-error: true
         shell: bash
-        run: bash scripts/pico-c-program.sh crates/wz-capi-pico/examples/c/supervision.c "example: supervision of a periodic stream" "$WZ_EXAMPLE_FEATURES"
+        run: bash scripts/pico-c-program.sh crates/wz-capi-pico/examples/c/supervision.c "example of supervision of a periodic stream" "$WZ_EXAMPLE_FEATURES"
 
       - name: example, a program's own periodic task (observed)
         if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
         timeout-minutes: 15
         continue-on-error: true
         shell: bash
-        run: bash scripts/pico-c-program.sh crates/wz-capi-pico/examples/c/periodic.c "example: a program's own periodic task" "$WZ_EXAMPLE_FEATURES"
+        run: bash scripts/pico-c-program.sh crates/wz-capi-pico/examples/c/periodic.c "example of a program's own periodic task" "$WZ_EXAMPLE_FEATURES"
 
       # The platform exports the periodic task stands on (its timer, lock, task and event
       # wait), on the Linux row too, which the `capi` job does not run.
@@ -1017,7 +1017,7 @@ jobs:
         shell: bash
         env:
           WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN: "on"
-        run: bash scripts/pico-c-program.sh crates/wz-capi-pico/examples/c/profiles.c "example: pub/sub and query under the entity-timestamp-opt-in profile" "$WZ_EXAMPLE_FEATURES"
+        run: bash scripts/pico-c-program.sh crates/wz-capi-pico/examples/c/profiles.c "example of pub/sub and query under the entity-timestamp-opt-in profile" "$WZ_EXAMPLE_FEATURES"
 
   # The superseded generations of this workflow's two saved classes, deleted as
   # soon as the savers finish. The why, the least-privilege argument and the
