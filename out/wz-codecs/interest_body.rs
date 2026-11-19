@@ -134,7 +134,7 @@ impl<S: InterestBodyStorage> InterestBodyIn<S> {
             _v
         };
         if (header & 0x10u8) != 0 {
-            ::sce_forge_runtime::codec::note_capacity(WireexprOwned::<S>::decode_into(cursor, _out.keyexpr.insert(WireexprOwned::<S>::default()), (header >> 5) & 0x1, 0x1u8), &mut _over)?;
+            ::sce_forge_runtime::codec::note_capacity(WireexprOwned::<S>::decode_into(cursor, _out.keyexpr.insert(WireexprOwned::<S>::default()), (header >> 5) & 0x1, (header >> 6) & 0x1), &mut _over)?;
         } else {
             _out.keyexpr = None;
         }
@@ -296,8 +296,6 @@ pub struct InterestBodyOverrides {
     pub header_qu: Option<bool>,
     /// The `TO` flag of `header`, when a parent sets it.
     pub header_to: Option<bool>,
-    /// The `M` flag of `header`, when a parent sets it.
-    pub header_m: Option<bool>,
     /// The `AG` flag of `header`, when a parent sets it.
     pub header_ag: Option<bool>,
 }
@@ -326,12 +324,6 @@ impl InterestBodyOverrides {
     #[allow(clippy::needless_update)]
     pub fn header_to(value: bool) -> Self {
         Self { header_to: Some(value), ..Self::default() }
-    }
-
-    /// Sets `M` of `header` and nothing else.
-    #[allow(clippy::needless_update)]
-    pub fn header_m(value: bool) -> Self {
-        Self { header_m: Some(value), ..Self::default() }
     }
 
     /// Sets `AG` of `header` and nothing else.
@@ -431,7 +423,8 @@ impl InterestBodyWire {
         let _p_header_r_0: bool = src.keyexpr().is_some();
         let _n_d_header_n_0: usize = src.keyexpr().map_or(0, |_b| usize::from(super::wireexpr::WireexprWire::input_n(_b)));
         let _f_d_header_n: Option<usize> = if src.keyexpr().is_some() { Some(_n_d_header_n_0) } else { None };
-        let mut _c_header: u8 = (src.header() & !0x10) | (u8::from(_p_header_r_0) << 4);
+        let _d_header_m: u8 = match src.keyexpr() { Some(_x) => match super::wireexpr::WireexprSource::body(_x) { super::wireexpr::WireexprVariantSource::WireexprNonlocal(_) => 0, super::wireexpr::WireexprVariantSource::WireexprLocal(_) => 1 }, None => 0 };
+        let mut _c_header: u8 = (((src.header() & !0x10) | (u8::from(_p_header_r_0) << 4)) & !0x40) | (_d_header_m << 6);
         if let Some(_n) = _f_d_header_n {
             _c_header = (_c_header & !0x20) | ((_n as u8) << 5);
         }
@@ -446,9 +439,6 @@ impl InterestBodyWire {
         }
         if let Some(_o) = over.header_to {
             _c_header = (_c_header & !0x8) | (u8::from(_o) << 3);
-        }
-        if let Some(_o) = over.header_m {
-            _c_header = (_c_header & !0x40) | (u8::from(_o) << 6);
         }
         if let Some(_o) = over.header_ag {
             _c_header = (_c_header & !0x80) | (u8::from(_o) << 7);
@@ -557,7 +547,7 @@ impl<'a> InterestBodyView<'a> {
             _v
         };
         if (header & 0x10u8) != 0 {
-            WireexprView::decode_into(cursor, _out.keyexpr.insert(WireexprView::default()), (header >> 5) & 0x1, 0x1u8)?;
+            WireexprView::decode_into(cursor, _out.keyexpr.insert(WireexprView::default()), (header >> 5) & 0x1, (header >> 6) & 0x1)?;
         } else {
             _out.keyexpr = None;
         }

@@ -4332,8 +4332,13 @@ int main(void) {
      * 25: the document gains `observed` (`messages`, `trimmed`, `unobserved`
      * and the packet `interval` they span), and a live handle's census goes
      * on across a front trim, counting what its planes folded since they
-     * began. */
-    revisioned[0].revision = 25;
+     * began.
+     * 26: an Interest's restricted key is read in the table its options
+     * byte's M bit names. Values move under stationary keys.
+     * 27: an unresolved alias says where it first missed and whether it was
+     * declared after; the exchange plane gains `maybe_other_link`; a reply
+     * pairs with its request across a named session's links. */
+    revisioned[0].revision = 27;
     revisioned[0].doc = NULL;
     rc = wz_dissect_pcap_census(pcap, sizeof pcap, &revisioned[0].doc);
     CHECK(rc == WZ_DISSECT_OK, "census rc=%d", rc);
@@ -4626,8 +4631,25 @@ int main(void) {
      * 71: a record's `e2e` block is the payload plane's judgement, in capture
      * order over the whole capture; a slot over two flows reads each frame
      * against the one the tap took before it. Values move under stationary
-     * keys. */
-    revisioned[2].revision = 71;
+     * keys.
+     * 72: an Interest's restricted key is read in the table bit 6 of its
+     * options byte names; it was always read in the sender's. Values move
+     * under stationary keys.
+     * 73: each flow gains `foreign_zenoh`, whether the flow is zenoh of a
+     * version this library does not read, with `recognized_by` and its
+     * `witnesses`. Four keys and two families arrive; nothing retires.
+     * 74: each context gains `shm`, the handshake's shared memory message by
+     * message and how each Open's extension was encoded. Six keys and two
+     * families arrive; nothing retires.
+     * 75: a reply pairs with its request across a named session's links.
+     * Values move under stationary keys.
+     * 76: each flow gains `icmp_errors` and the document `membership`, the
+     * ICMP, ICMPv6, IGMP and MLD messages about the capture's flows and
+     * groups. Nine keys and two families arrive; nothing retires.
+     * 77: each flow gains `network`, its IP headers' and frames' facts per
+     * direction, and the document `capture_interfaces`. Twenty-three keys
+     * arrive; no family. */
+    revisioned[2].revision = 77;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

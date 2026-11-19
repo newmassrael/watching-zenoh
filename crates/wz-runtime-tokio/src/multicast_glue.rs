@@ -13,9 +13,13 @@
 //!
 //! ## What the loop owns (the §3.1 Running parallel concerns)
 //!
-//! §3.1 describes Running as three parallel regions; the SCE surface has no
-//! `<parallel>`, so (as the dispatcher's module docs record) the host loop
-//! realises them. The JOIN wire functions themselves (encode / decode /
+//! §3.1 describes Running as three parallel regions. SCE has `<parallel>` (a
+//! core construct of the pinned SCE's accepted subset, and the engine-free
+//! Rust runtime carries the parallel procedures), but
+//! `session_fsm_multicast.scxml` keeps Running a leaf and this host loop
+//! realises the three regions (as the dispatcher's module docs record).
+//! Moving them into the document is row 47 of slice S5 of
+//! `docs/zenoh-logic-as-sce-kinds.md`. The JOIN wire functions themselves (encode / decode /
 //! validate) are NOT here — R311kt hoisted them to
 //! [`wz_session_core::multicast_join`] (pure, shared with the MCU
 //! profile, the multicast sibling of `handshake_encode`); this loop owns

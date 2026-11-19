@@ -925,7 +925,10 @@ PICO_BARE_BUDGET = 126
 #: no `git ls-files` path ends in (530 `.c`, 280 `.h`, 378 `.rs`). Tracking a
 #: new file whose name one of them uses moves that token out of this count; the
 #: refusal says so, and the number moves down with it.
-BASENAME_LINE_BUDGET = 1187
+#: 1187 -> 1186: the interest body codec's note that bits 5 and 6 were pico's
+#: CURRENT and FUTURE went with the claim, which was wrong, and its line
+#: citation of pico's network header with it.
+BASENAME_LINE_BUDGET = 1186
 
 #: A LIVE invocation of the RESOLUTION arm. R2242 split this gate in two and,
 #: in doing so, made `--resolve` a flag someone can simply stop passing: delete

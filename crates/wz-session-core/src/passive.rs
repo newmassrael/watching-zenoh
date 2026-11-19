@@ -256,6 +256,9 @@ pub struct FlowContext {
     /// Whether a `Shm` (`0x2`) extension rode either Init — a payload may
     /// carry a descriptor into a segment the observer cannot map.
     pub shm_offered: bool,
+    /// Which of the four handshake messages carried a `Shm` extension, and how
+    /// each Open's was encoded: see [`ShmHandshake`].
+    pub shm: ShmHandshake,
     /// Whether a `MultiLink` (`0x4`) extension rode either Init: this session
     /// may span more flows than the one being read.
     pub multilink_offered: bool,
@@ -777,6 +780,7 @@ impl Default for FlowContext {
             patch: None,
             auth_offered: false,
             shm_offered: false,
+            shm: ShmHandshake::UNSEEN,
             multilink_offered: false,
             caps: None,
             joined_caps: [None; 2],
@@ -1152,6 +1156,124 @@ fn has_any_ext_id(extensions: &[ExtEntryOwned], id: u8) -> bool {
     extensions
         .iter()
         .any(|e| crate::ext_header::ext_id(e.header) == id)
+}
+
+/// How a handshake message's `Shm` (`0x2`) extension was encoded: the two bits
+/// of its header that say what body follows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShmExtEncoding {
+    /// No body.
+    Unit,
+    /// One integer.
+    Z64,
+    /// A length and bytes.
+    ZBuf,
+    /// The fourth value of the two bits, which no encoding names.
+    Reserved,
+}
+
+impl ShmExtEncoding {
+    fn of(header: u8) -> Self {
+        match header & crate::ext_header::EXT_ENC_MASK {
+            crate::ext_header::EXT_ENC_UNIT => ShmExtEncoding::Unit,
+            crate::ext_header::EXT_ENC_Z64 => ShmExtEncoding::Z64,
+            crate::ext_header::EXT_ENC_ZBUF => ShmExtEncoding::ZBuf,
+            _ => ShmExtEncoding::Reserved,
+        }
+    }
+}
+
+/// WHAT A SESSION'S HANDSHAKE SAID ABOUT SHARED MEMORY, message by message.
+///
+/// zenoh sets up shared memory inside the four handshake messages, each
+/// carrying a `Shm` (`0x2`) extension or not
+/// (`io/zenoh-transport/src/unicast/establishment/ext/shm/auth.rs` @ `impl<'a> OpenFsm for &'a ShmFsm<'a> {`):
+/// the opener names its segment in the InitSyn; the acceptor answers in the
+/// InitAck only when it could open that segment, with a challenge and its own
+/// segment; the opener answers that challenge in the OpenSyn only when it could
+/// open the acceptor's; the acceptor acknowledges in the OpenAck only when the
+/// challenge held. A session uses shared memory when the exchange went all the
+/// way, and a capture of it shows where it stopped.
+///
+/// THE OPEN'S EXTENSION IS ALSO WHAT TELLS TWO RELEASES APART, under one
+/// protocol version. Release 1.9.0 declares it an integer
+/// (zenoh-protocol 1.9.0, `open::ext::Shm` as `zextz64!(0x2, false)`), the
+/// challenge in the OpenSyn and `1` in the OpenAck; the pinned release declares
+/// it a buffer (`commons/zenoh-protocol/src/transport/open.rs` @ `pub type Shm = zextzbuf!(0x2, false);`)
+/// holding the challenge and the handoff counters. The Init's extension is a
+/// buffer in both and does not tell them apart. So each Open's encoding is
+/// kept as the wire wrote it, and two that differ are two releases that cannot
+/// set up shared memory together.
+///
+/// Each message is recorded once, the first of its kind the observer reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShmHandshake {
+    /// Whether the InitSyn carried the extension; `None` until one was read.
+    pub init_syn: Option<bool>,
+    /// Whether the InitAck carried it; `None` until one was read.
+    pub init_ack: Option<bool>,
+    /// The OpenSyn's extension, `Some(None)` when it carried none; `None` until
+    /// one was read.
+    pub open_syn: Option<Option<ShmExtEncoding>>,
+    /// The OpenAck's, as [`Self::open_syn`].
+    pub open_ack: Option<Option<ShmExtEncoding>>,
+}
+
+impl ShmHandshake {
+    /// Nothing read yet.
+    pub const UNSEEN: ShmHandshake = ShmHandshake {
+        init_syn: None,
+        init_ack: None,
+        open_syn: None,
+        open_ack: None,
+    };
+
+    fn extension(extensions: &[ExtEntryOwned]) -> Option<ShmExtEncoding> {
+        extensions
+            .iter()
+            .find(|e| crate::ext_header::ext_id(e.header) == est_ext::SHM)
+            .map(|e| ShmExtEncoding::of(e.header))
+    }
+
+    fn fold_init(&mut self, is_ack: bool, extensions: &[ExtEntryOwned]) {
+        let slot = if is_ack {
+            &mut self.init_ack
+        } else {
+            &mut self.init_syn
+        };
+        if slot.is_none() {
+            *slot = Some(Self::extension(extensions).is_some());
+        }
+    }
+
+    fn fold_open(&mut self, is_ack: bool, extensions: &[ExtEntryOwned]) {
+        let slot = if is_ack {
+            &mut self.open_ack
+        } else {
+            &mut self.open_syn
+        };
+        if slot.is_none() {
+            *slot = Some(Self::extension(extensions));
+        }
+    }
+
+    /// Whether the session set up shared memory: `Some(true)` when both Opens
+    /// carried the extension in one encoding, `Some(false)` when a message of
+    /// the exchange carried none or the two Opens' encodings differ, `None`
+    /// while the messages read so far leave it open.
+    pub fn established(&self) -> Option<bool> {
+        if self.init_syn == Some(false)
+            || self.init_ack == Some(false)
+            || self.open_syn == Some(None)
+            || self.open_ack == Some(None)
+        {
+            return Some(false);
+        }
+        match (self.open_syn, self.open_ack) {
+            (Some(Some(a)), Some(Some(b))) => Some(a == b),
+            _ => None,
+        }
+    }
 }
 
 /// R2206 (open-debt item 561) — WHICH COORDINATE [`PassiveFrame::stream_offset`]
@@ -1546,6 +1668,41 @@ pub struct PassiveFrame {
     /// message that opens a unit of arbitrary bytes and happens to decode is not
     /// followed by more messages that end where the unit ends.
     pub unit_read_whole: bool,
+    /// For a message refused as [`InboundParseError::ForeignVersion`], what the
+    /// decode read of it before the refusal: which message, its zid, and
+    /// whether it took its whole unit alone. `None` for every other message.
+    /// See [`crate::foreign_version`].
+    pub foreign_version: Option<crate::foreign_version::ForeignVersionMessage>,
+}
+
+/// The facts [`PassiveFrame::foreign_version`] keeps of `frame`, decoded under
+/// this reader's layout and announcing `version`. `None` for a message that
+/// carries no version.
+fn foreign_version_message(
+    frame: &InboundFrame,
+    version: u8,
+    whole: bool,
+) -> Option<crate::foreign_version::ForeignVersionMessage> {
+    use crate::foreign_version::{ForeignVersionMessage, VersionBearing};
+    let (kind, zid) = match frame {
+        InboundFrame::Init { is_ack, body, .. } => (
+            if *is_ack {
+                VersionBearing::InitAck
+            } else {
+                VersionBearing::InitSyn
+            },
+            body.zid.as_slice().to_vec(),
+        ),
+        #[cfg(feature = "codec-join")]
+        InboundFrame::Join { body, .. } => (VersionBearing::Join, body.zid.as_slice().to_vec()),
+        _ => return None,
+    };
+    Some(ForeignVersionMessage {
+        version,
+        kind,
+        zid: Some(zid),
+        whole,
+    })
 }
 
 /// R311y609 (C12) — what the observer makes of ONE data frame's sequence
@@ -3708,6 +3865,7 @@ impl FlowContext {
                 }
                 self.init_seen[idx] = true;
                 self.fold_init(extensions);
+                self.shm.fold_init(*is_ack, extensions);
                 self.fold_version(*is_ack, body.version);
                 // R311y583 (A5) — the ACK's size parameters ARE the session's.
                 // See `FlowContext::caps` for why this is an assignment and
@@ -3724,12 +3882,15 @@ impl FlowContext {
                     SessionPhase::HalfInit
                 };
             }
-            InboundFrame::Open { .. } => {
+            InboundFrame::Open {
+                is_ack, extensions, ..
+            } => {
                 // R2789 (open debt 812) — the DIRECTION's own transition. The
                 // phase below is the session's and still moves on the first
                 // Open; the width does not, because the peer is still narrow
                 // until it carries its own.
                 self.open_seen[usize::from(direction == Direction::B)] = true;
+                self.shm.fold_open(*is_ack, extensions);
                 if self.phase == SessionPhase::InitComplete {
                     self.phase = SessionPhase::Established;
                 }
@@ -4154,6 +4315,7 @@ fn walk_unit(
                     reserved_header_bits: 0,
                     decompressed: None,
                     unit_read_whole: false,
+                    foreign_version: None,
                 }];
             }
         }
@@ -4195,9 +4357,14 @@ fn walk_unit(
         // An Init or a Join announcing another protocol version is not read past
         // that byte: see `InboundParseError::ForeignVersion`. It takes the
         // decode-error path from here, so it names nobody, folds nothing and,
-        // past the front of the unit, stops the walk.
+        // past the front of the unit, stops the walk. What the decode read of it
+        // is kept as one fact, whether it took the whole unit alone: see
+        // `crate::foreign_version`.
+        let mut foreign_version = None;
         let parsed = parsed.and_then(|(f, n)| match f.announced_version() {
             Some(version) if version != wz_codecs::wire_const::PROTOCOL_VERSION => {
+                let whole = pos == front && n == rest.len();
+                foreign_version = foreign_version_message(&f, version, whole);
                 Err(InboundParseError::ForeignVersion { version })
             }
             _ => Ok((f, n)),
@@ -4312,6 +4479,7 @@ fn walk_unit(
             decompressed: own,
             // Stamped below once the walk has ended.
             unit_read_whole: false,
+            foreign_version,
         });
         batch_index += 1;
         if consumed == 0 {
@@ -7027,7 +7195,44 @@ mod tests {
             );
             assert_eq!(s.context().version, None);
             assert_eq!(s.context().phase, SessionPhase::Unseen);
+            // What the decode read of it before the refusal is kept as one
+            // fact: an InitSyn of that version, its zid, alone in its unit.
+            let foreign = frame
+                .foreign_version
+                .as_ref()
+                .expect("the refused message's facts");
+            assert_eq!(foreign.version, version);
+            assert_eq!(
+                foreign.kind,
+                crate::foreign_version::VersionBearing::InitSyn
+            );
+            assert!(foreign.zid.is_some());
+            assert!(foreign.whole, "the Init is its unit's only message");
         }
+    }
+
+    /// A message of THIS reader's version carries no foreign facts, and a
+    /// foreign Init that does not take its whole unit is not alone in it.
+    #[test]
+    fn foreign_facts_belong_to_a_refused_message_alone_in_its_unit() {
+        let mut s = PassiveSession::new();
+        s.push(
+            Direction::A,
+            &framed(&init_wire_versioned(false, 0x09, vec![]), 2),
+        );
+        let own = s.next_frame(Direction::A).expect("a record");
+        assert!(own.frame.is_ok() && own.foreign_version.is_none());
+
+        let mut unit = init_wire_versioned(false, 0x08, vec![]);
+        unit.push(wz_codecs::wire_const::T_MID_KEEP_ALIVE);
+        let mut s = PassiveSession::new();
+        s.push(Direction::A, &framed(&unit, 2));
+        let front = s.next_frame(Direction::A).expect("the Init at the front");
+        assert!(
+            front.foreign_version.as_ref().is_some_and(|f| !f.whole),
+            "a byte follows it in its unit: {:?}",
+            front.foreign_version
+        );
     }
 
     /// An acceptor's answer seen FIRST is not replaced by a claim seen after

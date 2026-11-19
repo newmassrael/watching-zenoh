@@ -2554,13 +2554,12 @@ pub fn walk_interest_body(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecErr
     ];
     if (header & 0x10) != 0 {
         let n = (header >> 5) & 0x1;
-        // ⚠ NOT YET THE WIRE'S BIT. This options byte has an M bit (bit 6, which
-        // upstream names `InterestOptions::MAPPING`) and the generated
-        // `interest_body` decoder ignores it, passing the `WireexprLocal` arm as
-        // a literal; the planes that resolve an Interest's restricted key read
-        // that arm, so reading the bit here alone would make this document
-        // disagree with them. The header states the exception.
-        out.push(c.nested("keyexpr", move |c| walk_wireexpr(c, n, Some(0x1)))?);
+        // The options byte's M bit (bit 6, upstream's `InterestOptions::MAPPING`)
+        // chooses the table, as the M bit of a Push header does, and the
+        // generated `interest_body` decoder dispatches its wireexpr arm on the
+        // same bit, so this node and the planes that resolve the key agree.
+        let m = (header >> 6) & 0x1;
+        out.push(c.nested("keyexpr", move |c| walk_wireexpr(c, n, Some(m)))?);
     }
     Ok(out)
 }
@@ -7119,6 +7118,35 @@ mod tests {
                 walk_response,
             );
             assert_eq!(bits_of(&f, "mapping"), want, "Response M={m}");
+
+            // An Interest's restricted key: the M bit is bit 6 of the body's
+            // options byte, not of the Interest header (whose bit 6 is FUTURE),
+            // and upstream reads it the same way
+            // (`commons/zenoh-codec/src/network/interest.rs` @ `we.mapping = if options.mapping() {`).
+            let interest = concat(&[
+                alloc::vec![0x19u8 | 0x20],
+                vle(5),
+                alloc::vec![0x01u8 | 0x10 | 0x20 | (m << 6)],
+                wireexpr(7, Some("k")),
+            ]);
+            let f = agree(
+                "Interest",
+                &interest,
+                |b| {
+                    let mut c = SceCursor::new(b);
+                    let i = wz_codecs::lent::Interest::decode(&mut c).expect("codec rejected");
+                    let Some(wz_codecs::interest::InterestHeaderCOrF::C { body }) =
+                        &i.header_c_or_f
+                    else {
+                        panic!("C set: the C arm holds the body");
+                    };
+                    let keyexpr = body.keyexpr.as_ref().expect("R set: a key");
+                    assert_eq!(is_local(keyexpr), m == 1, "Interest M={m}: the codec's arm");
+                    b.len() - c.remaining()
+                },
+                walk_interest,
+            );
+            assert_eq!(bits_of(&f, "mapping"), want, "Interest M={m}");
 
             for (sub_mid, name) in [(2u8, "subscriber"), (4, "queryable"), (6, "token")] {
                 let bytes = concat(&[

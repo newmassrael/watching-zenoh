@@ -986,10 +986,15 @@
  * table only: `null` for a scope that only the other side held, and a literal
  * for one that both held differently.
  *
- * ⚠ ONE KEY EXPRESSION IS NOT YET HELD TO THIS: the restricted key of an
- * Interest. Its options byte has an M bit like the messages above, but its
- * `mapping` reads `1` whatever that bit holds, so do not take the value there
- * as the wire's.
+ * The restricted key of an Interest is held to it too, at field-document
+ * revision 72: its `mapping` is bit 6 of the Interest's options byte (the byte
+ * after `interest_id`, which holds `restricted` and `n` -- not the Interest
+ * header, whose bit 6 is `future`), the bit upstream names
+ * `InterestOptions::MAPPING`. Until revision 72 it read `1` whatever that bit
+ * held, and the key was resolved in the sender's table even when the bit named
+ * the receiver's, so a `keyexpr` the capture reported for such an Interest
+ * (a `carried` entry's, the census's) could be `null` or another key's. An
+ * Interest whose bit is set reads as it did.
  *
  * WHICH HALF IS `a`. Wherever a document or a record says `direction` -- a
  * row's, a record's, a `halves` entry's, a conduit's, a selector's `dir` -- the
@@ -1427,6 +1432,42 @@
  *     `phase` is one of `unseen`, `half_init`, `init_complete`,
  *     `established`, `closed`.
  *
+ *     Since field-document revision 74 (row_facts 14) the context says, after
+ *     `version`, what the handshake said about SHARED MEMORY, message by
+ *     message:
+ *
+ *       "shm":{"init_syn":bool|null,"init_ack":bool|null,
+ *              "open_syn":W|null,"open_ack":W|null,"established":bool|null}
+ *
+ *     zenoh sets shared memory up inside the four handshake messages, each
+ *     carrying a `Shm` extension (id 0x2) or not: the opener names its segment
+ *     in the InitSyn, the acceptor answers in the InitAck only when it could
+ *     open that segment, the opener answers the acceptor's challenge in the
+ *     OpenSyn only when it could open the acceptor's segment, and the acceptor
+ *     acknowledges in the OpenAck only when the challenge held. `init_syn` and
+ *     `init_ack` say whether that Init carried the extension. `open_syn` and
+ *     `open_ack` say how that Open's was encoded, `W` one of `absent` (it
+ *     carried none), `unit`, `z64`, `zbuf` or `reserved`. Each is `null` until
+ *     the first such message was read, which is the only one recorded.
+ *
+ *     The Open's encoding is what tells two releases of one protocol version
+ *     apart: release 1.9.0 declares the Open's extension an integer, written
+ *     `z64`, and the release this library is pinned to a buffer, written
+ *     `zbuf`. The Init's extension is a buffer in both and does not tell them
+ *     apart. `established` is `true` when both Opens carried the extension in
+ *     one encoding, `false` when a message of the exchange carried none or the
+ *     two Opens' encodings differ (two releases that cannot set shared memory
+ *     up together), and `null` while the messages read leave it open.
+ *
+ *     Whether one message's payload IS a descriptor into shared memory is said
+ *     per message, by the `shm_descriptor` of its `carried` entry's `payload`:
+ *     the Put or Err carried the body extension that marks it. A descriptor
+ *     sent without that mark reads as payload bytes, and nothing on the wire
+ *     tells it from data.
+ *
+ * @values fields open_syn
+ * @values fields open_ack
+ *
  *     Since field-document revision 26 -- WHAT `negotiated` MEANS, and what a
  *     flow that did not see its handshake says. `negotiated` is `true` once
  *     BOTH Inits of the handshake were observed, the InitSyn and the InitAck,
@@ -1690,7 +1731,7 @@
  *
  * SO THE DOCUMENT CARRIES THE LIST. Its envelope reads
  *
- *     {"document":{"name":"census","revision":25,
+ *     {"document":{"name":"census","revision":27,
  *                  "planes":["exchanges","interests","keyexprs","nodes",
  *                            "payloads"]}, ...}
  *
@@ -1736,13 +1777,13 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":71,"key":"kind","values":[...],
+ *     {"name":"fields","revision":77,"key":"kind","values":[...],
  *      "carries":[{"word":"bits",
  *                  "shapes":[["end","name","selector_path","start","value"]]},
  *                 {"word":"opaque",
  *                  "shapes":[["end","name","selector_path","start"]]}, ...]}
  *
- *     {"name":"census","revision":25,"key":"mode","values":[...],
+ *     {"name":"census","revision":27,"key":"mode","values":[...],
  *      "carries":null}
  *
  * `null` is a VALUE here and not an absence: it says the word is a PASSENGER --
@@ -1789,12 +1830,15 @@
  * @carries fields link passenger
  * @carries fields message passenger
  * @carries fields offset_space discriminant
+ * @carries fields open_ack passenger
+ * @carries fields open_syn passenger
  * @carries fields outcome passenger
  * @carries fields phase passenger
  * @carries fields place passenger
  * @carries fields priority passenger
  * @carries fields q_basis passenger
  * @carries fields reason passenger
+ * @carries fields recognized_by passenger
  * @carries fields request_kind passenger
  * @carries fields selected passenger
  * @carries fields size_verdict passenger
@@ -1805,7 +1849,10 @@
  * @carries fields unjoined passenger
  * @carries fields unjudged_reason passenger
  * @carries fields unopened_reason discriminant
+ * @carries fields unreachable passenger
  * @carries fields verdict passenger
+ * @carries fields what passenger
+ * @carries fields witness passenger
  * @carries fields wrong passenger
  * @carries fields zenoh passenger
  *
@@ -1914,6 +1961,39 @@
  * you — those two are indistinguishable, and the consumer report that asked
  * for this had derived exactly that: the acceptance is not that multilink
  * resolves, it is that what STILL does not resolve says which of the two it is.
+ *
+ * A KEY ID USED BEFORE ITS DECLARATION (census revision 27). Each row also says
+ * where its first miss went past and whether the id was declared after it:
+ *
+ *     {"space":"a","id":7,"references":1,"cause":"no_declaration",
+ *      "first_reference_packet":4,"declared_at_packet":5}
+ *
+ * `first_reference_packet` is the capture-global packet of the first reference
+ * that missed. `declared_at_packet` is the packet of the first declaration of
+ * that id, in that space, that went past AFTER it, and `null` while none did.
+ * A number there is a use seen before its declaration: the shape a session
+ * over two links shows when a reference on one link overtakes the declaration
+ * sent on the other, or a reconnection reuses an id before declaring it again.
+ * The reference stays unresolved, because a declaration does not name a
+ * reference that came before it, so `cause` reads as it did. The packets name
+ * the links: each packet is of one flow.
+ *
+ * A REQUEST ID IS THE SESSION'S (census revision 27, field document 75). A
+ * session over several links mints one sequence of request ids, so the
+ * `Response` to a `Request` sent on one link may come back on another. On a
+ * session the capture names, every link reaches the same open exchange, and
+ * such a reply pairs with its request where it was an orphan before:
+ * `orphan_responses` and `unclosed` fall by those, the latency samples gain
+ * them, and the field document's `answers` and the reply's and the final's
+ * entries name the request. Where a flow's session is not named the exchange
+ * stays scoped to the flow, and the exchange plane counts what that leaves
+ * unpaired:
+ *
+ *     "maybe_other_link":{"orphan_responses":N,"unclosed":M}
+ *
+ * the replies and finals whose request was not found, and the requests never
+ * seen closed, on such flows: their other end may be on another link of the
+ * session. A part of `gaps.orphan_responses` and of `unclosed`.
  *
  * wz_dissect_transport_message is the one door with no such revision, and
  * deliberately: its document is a FIELD TREE whose keys are the walkers' own
@@ -3028,6 +3108,119 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  * @values fields strength
  * @values fields q_basis
  * @values fields eps_basis
+ *
+ * ZENOH OF ANOTHER VERSION (field-document revision 73, row_facts 13). The
+ * test above rejects zenoh of THIS wire, so a zenoh 0.x deployment (protocol
+ * version 0x08: a DDS bridge of an older release, a router never upgraded)
+ * reads `foreign` in `announced_version` and `undecided` or `no` in `zenoh`,
+ * like bytes that are not zenoh at all. Every flow object of the field
+ * document carries, after `zenoh_evidence`, the answer to that other question:
+ *
+ *   `foreign_zenoh`  null, or
+ *       {"version":8,"recognized_by":"answered",
+ *        "witnesses":[{"witness":"init_syn","direction":"a","packet":3},
+ *                     {"witness":"init_ack","direction":"b","packet":4}]}
+ *
+ * The Init, Join, Scout and Hello of version 0x08 have the layout of 0x09's and
+ * differ in their extensions, which state their own length, so this library
+ * reads such a message to its end and keeps one fact of it: whether it took
+ * its whole framing unit alone. Nothing of it is folded, as before. One such
+ * message is never enough, and the flow is recognised by the first of four
+ * exchanges it shows, which latches (`recognized_by`):
+ *
+ *   `answered`        an InitSyn of version V in one direction, then an
+ *                     InitAck of V in the other;
+ *   `refused`         an InitSyn of V in one direction, then a Close read whole
+ *                     in the other: an acceptor refusing an offer of a version
+ *                     not its own (the Close says nothing about the version of
+ *                     the side that sent it);
+ *   `answered_scout`  a Hello of V on a datagram addressed to an endpoint the
+ *                     capture saw send a Scout; its one witness is the Hello,
+ *                     the Scout being a message of another flow;
+ *   `repeated`        a Join, or a Scout naming its asker, of V twice from the
+ *                     same zid in the same direction.
+ *
+ * `version` is V. `witnesses` are the exchange's messages on this flow in
+ * arrival order: `witness` is `init_syn`, `init_ack`, `join`, `scout`, `hello`
+ * or `close`, `direction` the half it travelled and `packet` its capture-global
+ * packet index. `null` says no exchange was seen, which is also what a flow of
+ * another version joined after its handshake reads. Recognition only: no body
+ * of another version is decoded, and `zenoh` is not moved by it. Counted at
+ * ingest, so a retention ceiling does not move it.
+ *
+ * @values fields recognized_by
+ * @values fields witness
+ *
+ * THE NETWORK'S WORD ABOUT A FLOW (field-document revision 76, row_facts 16).
+ * ICMP, ICMPv6 and IGMP packets are not a transport, and `health.skips` still
+ * counts them under `not_transport`; what they say about the flows is read
+ * beside that count. Every flow object carries, after `foreign_zenoh`,
+ *
+ *   "icmp_errors":{"errors":[{"unreachable":"port","packet":12,
+ *                             "from":"10.0.0.2","mtu":null}],"more":0}
+ *
+ * the ICMP and ICMPv6 destination-unreachable and packet-too-big errors whose
+ * quote names a packet of this flow, in capture order: `unreachable` is
+ * `port`, `host`, `network`, `protocol`, `fragmentation_needed`, `prohibited`
+ * or `other`; `packet` the capture-global packet that carried the error;
+ * `from` its sender (the host for a closed port, a router on the way for the
+ * others); `mtu` the MTU a `fragmentation_needed` stated, `null` otherwise. The
+ * first 64 are listed and `more` counts the rest. An error whose quote is too
+ * short to name both ports names no flow and lands on none. The document
+ * carries, after `reassembly`,
+ *
+ *   "membership":{"events":[{"what":"query","packet":3,"from":"10.0.0.1",
+ *                            "groups":[]}],"more":0}
+ *
+ * the IGMP and MLD messages in capture order (`events`, and not `messages`,
+ * which names a flow's zenoh messages): `what` is `query`, `report` or
+ * `leave`; `groups` the groups it names, none for a general query and each
+ * group record's for a version 3 report. A switch that stops forwarding a
+ * multicast group is how scouting on 224.0.0.224 fails without a word from
+ * zenoh, and these say whether a querier asked and whether members answered.
+ * `more` counts the control messages, errors and membership alike, past the
+ * capture's bound of 1024.
+ *
+ * @values fields unreachable
+ * @values fields what
+ *
+ * WHAT THE IP HEADERS AND THE FRAMES SAID (field-document revision 77,
+ * row_facts 17). Every flow object carries, after `icmp_errors`, one entry per
+ * direction, `a` then `b`:
+ *
+ *   "network":[{"direction":"a","packets":40,"ttl":{"min":64,"max":64},
+ *               "rst_ttl":null,"vlan_ids":[10],"interface_ids":[0],
+ *               "ids_more":false,
+ *               "ip_checksum":{"valid":40,"invalid":0,"absent":0},
+ *               "transport_checksum":{"valid":40,"invalid":0,"absent":0,
+ *                                     "partial":0},
+ *               "reassembled":0,"over_mtu":0},{"direction":"b",...}]
+ *
+ * `ttl` is the range of the TTL (IPv4) or hop limit (IPv6) over the direction's
+ * packets, read from the innermost IP header of a tunnelled one, and `rst_ttl`
+ * the range over its TCP segments that carried RST: a reset whose TTL is not
+ * the peer's came from something between the two. Each is `null` with no such
+ * packet; a datagram reassembled from IP fragments has no one header and
+ * gives no TTL. `vlan_ids` are the VLAN ids of the outermost 802.1Q or 802.1ad
+ * tags and `interface_ids` the capture interfaces the packets were read off,
+ * four of each at most, `ids_more` saying either list left one out. The two
+ * checksum objects count each packet's verdict, as `health.streams` counts the
+ * capture's (`partial` is a transport checksum left to the sender's offload).
+ * `reassembled` counts the datagrams that arrived as IP fragments; `over_mtu`
+ * the packets whose IP header stated more than 1500 bytes, which a capture
+ * taken on the sending host before segmentation offload shows. Counted at
+ * ingest. The document carries, after `membership`,
+ *
+ *   "capture_interfaces":[{"section":0,"id":0,"link_type":1,"name":"eth0",
+ *                          "ts_resolution":6,"ts_offset_s":0}]
+ *
+ * every interface a pcapng capture's IDBs describe, in file order: `section`
+ * counts Section Header Blocks from 0 and `id` restarts in each; `name` is
+ * `if_name` or `null`; `ts_resolution` the raw `if_tsresol` byte (a power of
+ * ten, or of two with the high bit set; 6 is microseconds); `ts_offset_s` the
+ * `if_tsoffset` seconds. Empty for a classic pcap. A frame snapped shorter than
+ * it was sent is counted capture-wide only, in `health.skips.truncated` when it
+ * could not be read at all.
  *
  * A message of the four announcing another version is not read past that byte
  * (since field-document revision 41 and session_table revision 3): its row is a
@@ -6154,7 +6347,7 @@ int wz_dissect_transport_layout_e2e(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":71,"key":"state",
+ *     "value_families":[{"name":"fields","revision":77,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
@@ -7912,12 +8105,15 @@ int wz_dissect_live_field_values_since_window(wz_dissect_live *h,
  * @values row_facts link
  * @values row_facts message
  * @values row_facts offset_space
+ * @values row_facts open_ack
+ * @values row_facts open_syn
  * @values row_facts outcome
  * @values row_facts phase
  * @values row_facts place
  * @values row_facts priority
  * @values row_facts q_basis
  * @values row_facts reason
+ * @values row_facts recognized_by
  * @values row_facts request_kind
  * @values row_facts selected
  * @values row_facts size_verdict
@@ -7928,7 +8124,10 @@ int wz_dissect_live_field_values_since_window(wz_dissect_live *h,
  * @values row_facts unjoined
  * @values row_facts unjudged_reason
  * @values row_facts unopened_reason
+ * @values row_facts unreachable
  * @values row_facts verdict
+ * @values row_facts what
+ * @values row_facts witness
  * @values row_facts wrong
  * @values row_facts zenoh
  * @carries row_facts announced_version passenger
@@ -7951,12 +8150,15 @@ int wz_dissect_live_field_values_since_window(wz_dissect_live *h,
  * @carries row_facts link passenger
  * @carries row_facts message passenger
  * @carries row_facts offset_space discriminant
+ * @carries row_facts open_ack passenger
+ * @carries row_facts open_syn passenger
  * @carries row_facts outcome passenger
  * @carries row_facts phase passenger
  * @carries row_facts place passenger
  * @carries row_facts priority passenger
  * @carries row_facts q_basis passenger
  * @carries row_facts reason passenger
+ * @carries row_facts recognized_by passenger
  * @carries row_facts request_kind passenger
  * @carries row_facts selected passenger
  * @carries row_facts size_verdict passenger
@@ -7967,7 +8169,10 @@ int wz_dissect_live_field_values_since_window(wz_dissect_live *h,
  * @carries row_facts unjoined passenger
  * @carries row_facts unjudged_reason passenger
  * @carries row_facts unopened_reason discriminant
+ * @carries row_facts unreachable passenger
  * @carries row_facts verdict passenger
+ * @carries row_facts what passenger
+ * @carries row_facts witness passenger
  * @carries row_facts wrong passenger
  * @carries row_facts zenoh passenger */
 int wz_dissect_live_row_facts_since(wz_dissect_live *h,

@@ -2167,6 +2167,11 @@ fn document_selected<W: DocOut>(
     // dissection books them at.
     out.key("reassembly");
     crate::report::write_reassembly(d, out);
+    // Revision 76 — the IGMP and MLD membership messages the capture carried,
+    // capture-wide because a multicast group is not one flow's.
+    write_membership(d.control(), out);
+    // Revision 77 — the interfaces a flow's `network.interface_ids` name.
+    write_capture_interfaces(capture, out);
     // R311y875 — the run's misbound rules, AFTER every row producer, for the
     // reason `wz-analyze` places its unbound-declaration note there: this is a
     // fact about what the capture turned out to hold, and both producers above
@@ -2361,6 +2366,9 @@ fn push_stream_flow<W: DocOut>(
     write_flow(&flow.flow, out);
     push_flow_number(tags.flow_id, out);
     write_zenoh(flow.ingest.versions(), &flow.zenoh_evidence(), out);
+    write_foreign_zenoh(flow.ingest.foreign_zenoh(), out);
+    write_icmp_errors(flow.ingest.control_errors(), out);
+    write_network(flow.ingest.ip_facts(), out);
     write_unit_readings(flow.ingest.readings(), out);
     write_context(
         &flow.session.context(),
@@ -2738,6 +2746,9 @@ fn push_datagram_flow<W: DocOut>(
     write_flow(&flow.flow, out);
     push_flow_number(tags.flow_id, out);
     write_zenoh(flow.ingest.versions(), &flow.zenoh_evidence(), out);
+    write_foreign_zenoh(flow.ingest.foreign_zenoh(), out);
+    write_icmp_errors(flow.ingest.control_errors(), out);
+    write_network(flow.ingest.ip_facts(), out);
     write_unit_readings(flow.ingest.readings(), out);
     write_context(
         &flow.session.context(),
@@ -5538,6 +5549,270 @@ pub(crate) fn push_unit_readings(
     JsonOut::members_onto(out, |out| write_unit_readings(readings, out));
 }
 
+/// The flow's `foreign_zenoh` member (field document revision 73): whether the
+/// flow is zenoh of a protocol version this reader does not read, a zenoh 0.x
+/// deployment being the case it answers ([`crate::foreign_zenoh`]).
+///
+/// `null` while no exchange recognised it, which says nothing either way: a
+/// flow of this reader's version reads `null`, and so does a flow of another
+/// version the capture joined after its handshake. Otherwise
+///
+/// ```text
+/// {"version":8,"recognized_by":"answered",
+///  "witnesses":[{"witness":"init_syn","direction":"a","packet":3},
+///               {"witness":"init_ack","direction":"b","packet":4}]}
+/// ```
+///
+/// `version` is the version the messages announced; `recognized_by` is
+/// `answered`, `refused`, `answered_scout` or `repeated`; `witnesses` are the
+/// messages of that exchange on this flow in arrival order, each `witness` a
+/// word of `init_syn`, `init_ack`, `join`, `scout`, `hello` or `close`, its
+/// `direction` and its capture-global `packet`. Beside `zenoh`, which is the
+/// verdict of this reader's version alone and is left as it reads. Counted at
+/// ingest, so a retention ceiling does not move it.
+pub(crate) fn write_foreign_zenoh<W: DocOut>(
+    recognition: Option<&crate::foreign_zenoh::Recognition>,
+    out: &mut W,
+) {
+    out.key("foreign_zenoh");
+    let Some(r) = recognition else {
+        out.null();
+        return;
+    };
+    out.open_map();
+    out.key("version");
+    out.uint(u64::from(r.version));
+    out.key("recognized_by");
+    out.text(r.recognized_by.name());
+    out.key("witnesses");
+    out.open_array();
+    for w in &r.witnesses {
+        out.open_map();
+        out.key("witness");
+        out.text(w.kind.name());
+        out.key("direction");
+        out.text(dir_name(w.direction));
+        out.key("packet");
+        out.uint(w.packet);
+        out.close_map();
+    }
+    out.close_array();
+    out.close_map();
+}
+
+/// The flow's `icmp_errors` member (field document revision 76): the ICMP and
+/// ICMPv6 errors whose quote names a packet of this flow, in capture order
+/// ([`crate::control`]).
+///
+/// ```text
+/// "icmp_errors":{"errors":[{"unreachable":"port","packet":12,
+///                           "from":"10.0.0.2","mtu":null}],"more":0}
+/// ```
+///
+/// `unreachable` is why the packet was refused: `port`, `host`, `network`,
+/// `protocol`, `fragmentation_needed`, `prohibited` or `other`. `packet` is the
+/// capture-global packet that carried the error, `from` who sent it (the host
+/// for a closed port, a router on the way for the others), `mtu` the MTU a
+/// `fragmentation_needed` stated and `null` otherwise. The list holds the first
+/// 64; `more` counts the rest. Counted at ingest.
+pub(crate) fn write_icmp_errors<W: DocOut>(errors: &crate::control::FlowErrors, out: &mut W) {
+    out.key("icmp_errors");
+    out.open_map();
+    out.key("errors");
+    out.open_array();
+    for e in errors.errors() {
+        out.open_map();
+        out.key("unreachable");
+        out.text(e.why.name());
+        out.key("packet");
+        out.uint(e.packet as u64);
+        out.key("from");
+        out.text(&e.from.ip_text());
+        out.key("mtu");
+        out.opt_uint(e.mtu.map(u64::from));
+        out.close_map();
+    }
+    out.close_array();
+    out.key("more");
+    out.uint(errors.more());
+    out.close_map();
+}
+
+/// The flow's `network` member (field document revision 77): what its IP
+/// headers and frames said beside the transport, one entry per direction, `a`
+/// then `b` ([`crate::ip_facts`]).
+///
+/// ```text
+/// "network":[{"direction":"a","packets":40,"ttl":{"min":64,"max":64},
+///             "rst_ttl":null,"vlan_ids":[10],"interface_ids":[0],
+///             "ids_more":false,
+///             "ip_checksum":{"valid":40,"invalid":0,"absent":0},
+///             "transport_checksum":{"valid":40,"invalid":0,"absent":0,
+///                                   "partial":0},
+///             "reassembled":0,"over_mtu":0}, {"direction":"b",...}]
+/// ```
+///
+/// `ttl` is the range of the TTL (IPv4) or hop limit (IPv6) over the
+/// direction's packets, of the innermost IP header for a tunnelled one, and
+/// `rst_ttl` the range over its TCP segments that carried RST: a reset whose
+/// TTL is not the peer's came from something between the two. Each is `null`
+/// with no such packet. `vlan_ids` are the outermost tags' VLAN ids and
+/// `interface_ids` the capture interfaces the packets were read off (the
+/// document's `capture_interfaces` names them), four of each at most, and
+/// `ids_more` is `true` when either list left an id out. The two checksum
+/// objects count each packet's verdict. `reassembled` counts the datagrams
+/// that arrived as IP fragments, `over_mtu` the packets whose IP header
+/// stated more than 1500 bytes, which a capture taken on the sending host
+/// before segmentation offload shows. Counted at ingest.
+fn write_network<W: DocOut>(facts: &crate::ip_facts::FlowFacts, out: &mut W) {
+    out.key("network");
+    out.open_array();
+    for (direction, half) in [Direction::A, Direction::B].iter().zip(facts.halves()) {
+        out.open_map();
+        out.key("direction");
+        out.text(dir_name(*direction));
+        out.key("packets");
+        out.uint(half.packets);
+        for (key, range) in [("ttl", half.ttl), ("rst_ttl", half.rst_ttl)] {
+            out.key(key);
+            match range {
+                Some(r) => {
+                    out.open_map();
+                    out.key("min");
+                    out.uint(u64::from(r.min));
+                    out.key("max");
+                    out.uint(u64::from(r.max));
+                    out.close_map();
+                }
+                None => out.null(),
+            }
+        }
+        for (key, ids) in [
+            ("vlan_ids", &half.vlans),
+            ("interface_ids", &half.interfaces),
+        ] {
+            out.key(key);
+            out.open_array();
+            for id in &ids.held {
+                out.uint(u64::from(*id));
+            }
+            out.close_array();
+        }
+        out.key("ids_more");
+        out.bool(half.vlans.more || half.interfaces.more);
+        out.key("ip_checksum");
+        out.open_map();
+        for (key, n) in ["valid", "invalid", "absent"].iter().zip(half.ip_checksum) {
+            out.key(key);
+            out.uint(n);
+        }
+        out.close_map();
+        out.key("transport_checksum");
+        out.open_map();
+        for (key, n) in ["valid", "invalid", "absent", "partial"]
+            .iter()
+            .zip(half.transport_checksum)
+        {
+            out.key(key);
+            out.uint(n);
+        }
+        out.close_map();
+        out.key("reassembled");
+        out.uint(half.reassembled);
+        out.key("over_mtu");
+        out.uint(half.over_mtu);
+        out.close_map();
+    }
+    out.close_array();
+}
+
+/// The document's `capture_interfaces` member (revision 77): every interface a
+/// pcapng capture's IDBs describe, in file order, so a flow's
+/// `network.interface_ids` can be named and each interface's clock read.
+///
+/// ```text
+/// "capture_interfaces":[{"section":0,"id":0,"link_type":1,"name":"eth0",
+///                        "ts_resolution":6,"ts_offset_s":0}]
+/// ```
+///
+/// `section` counts Section Header Blocks from 0, and `id` restarts in each, so
+/// the pair names an interface. `name` is `if_name`, `null` when unstated.
+/// `ts_resolution` is the raw `if_tsresol` byte (a power of ten, or of two with
+/// the high bit set; 6 is microseconds), `ts_offset_s` the `if_tsoffset`
+/// seconds every timestamp of the interface is shifted by. Empty for a classic
+/// pcap, whose one interface is the file's own link type.
+fn write_capture_interfaces<W: DocOut>(capture: &[u8], out: &mut W) {
+    out.key("capture_interfaces");
+    out.open_array();
+    for i in crate::pcapng::interface_descriptions(capture) {
+        out.open_map();
+        out.key("section");
+        out.uint(i.section as u64);
+        out.key("id");
+        out.uint(u64::from(i.id));
+        out.key("link_type");
+        out.uint(u64::from(i.link_type));
+        out.key("name");
+        out.opt_text(i.name.as_deref());
+        out.key("ts_resolution");
+        out.uint(u64::from(i.ts_resol));
+        out.key("ts_offset_s");
+        out.int(i.ts_offset);
+        out.close_map();
+    }
+    out.close_array();
+}
+
+/// The document's `membership` member (revision 76): the IGMP and MLD messages
+/// the capture carried, in capture order ([`crate::control`]). A switch that
+/// stops forwarding a multicast group to a port is how scouting on
+/// `224.0.0.224` fails without a word from zenoh, and these are what show it:
+/// whether a querier asked, and whether the members answered.
+///
+/// ```text
+/// "membership":{"events":[{"what":"query","packet":3,"from":"10.0.0.1",
+///                          "groups":[]}],"more":0}
+/// ```
+///
+/// `events` and not `messages`, which names a flow's zenoh messages: these are
+/// not zenoh's, and a reader of one key must not have to know which object it
+/// is under to know which it holds.
+///
+/// `what` is `query`, `report` or `leave`; `groups` the groups it names, none
+/// for a general query and every group record's for a version 3 report.
+/// `more` counts the control messages (these and the ICMP errors) past the
+/// capture's bound of 1024, so a `0` says the list is every one.
+fn write_membership<W: DocOut>(control: &crate::control::ControlPlane, out: &mut W) {
+    use crate::control::ControlKind;
+    out.key("membership");
+    out.open_map();
+    out.key("events");
+    out.open_array();
+    for m in control.messages() {
+        let ControlKind::Membership { what, groups } = &m.kind else {
+            continue;
+        };
+        out.open_map();
+        out.key("what");
+        out.text(what.name());
+        out.key("packet");
+        out.uint(m.packet as u64);
+        out.key("from");
+        out.text(&m.from.ip_text());
+        out.key("groups");
+        out.open_array();
+        for group in groups {
+            out.text(&crate::link::Endpoint::new(group, 0).ip_text());
+        }
+        out.close_array();
+        out.close_map();
+    }
+    out.close_array();
+    out.key("more");
+    out.uint(control.more());
+    out.close_map();
+}
+
 /// [`push_unit_readings`]' member, written through any [`DocOut`].
 pub(crate) fn write_unit_readings<W: DocOut>(
     readings: wz_session_core::passive::ReadingEvidence,
@@ -5629,8 +5904,94 @@ pub(crate) fn write_context<W: DocOut>(
     out.opt_uint(context.batch_size().map(u64::from));
     out.key("version");
     out.opt_uint(context.version.map(u64::from));
+    write_shm(&context.shm, out);
     push_parameters(context, compression, out);
     out.close_map();
+}
+
+/// Revision 74 — the context's `shm`: what the session's handshake said about
+/// shared memory, message by message
+/// ([`wz_session_core::passive::ShmHandshake`]).
+///
+/// ```text
+/// "shm":{"init_syn":true,"init_ack":true,"open_syn":"zbuf",
+///        "open_ack":"zbuf","established":true}
+/// ```
+///
+/// `init_syn` and `init_ack` say whether that Init carried a `Shm` extension,
+/// `null` until it was read. `open_syn` and `open_ack` say how that Open's was
+/// encoded, a word of [`ShmExtWord`], `absent` when it carried none and `null`
+/// until it was read: release 1.9.0 writes `z64` there and the pinned release
+/// `zbuf`. `established` is `true` when both Opens carried it in one encoding,
+/// `false` when a message of the exchange carried none or the two encodings
+/// differ, and `null` while the messages read leave it open.
+fn write_shm<W: DocOut>(shm: &wz_session_core::passive::ShmHandshake, out: &mut W) {
+    out.key("shm");
+    out.open_map();
+    out.key("init_syn");
+    out.opt_bool(shm.init_syn);
+    out.key("init_ack");
+    out.opt_bool(shm.init_ack);
+    for (key, open) in [("open_syn", shm.open_syn), ("open_ack", shm.open_ack)] {
+        out.key(key);
+        out.opt_text(open.map(|e| ShmExtWord::of(e).name()));
+    }
+    out.key("established");
+    out.opt_bool(shm.established());
+    out.close_map();
+}
+
+/// The word an Open's `Shm` extension is written as: how it was encoded, or
+/// `absent`. The closed set of `open_syn` and `open_ack` (revision 74).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShmExtWord {
+    Absent,
+    Unit,
+    Z64,
+    ZBuf,
+    Reserved,
+}
+
+impl ShmExtWord {
+    fn of(encoding: Option<wz_session_core::passive::ShmExtEncoding>) -> Self {
+        use wz_session_core::passive::ShmExtEncoding;
+        match encoding {
+            None => ShmExtWord::Absent,
+            Some(ShmExtEncoding::Unit) => ShmExtWord::Unit,
+            Some(ShmExtEncoding::Z64) => ShmExtWord::Z64,
+            Some(ShmExtEncoding::ZBuf) => ShmExtWord::ZBuf,
+            Some(ShmExtEncoding::Reserved) => ShmExtWord::Reserved,
+        }
+    }
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            ShmExtWord::Absent => "absent",
+            ShmExtWord::Unit => "unit",
+            ShmExtWord::Z64 => "z64",
+            ShmExtWord::ZBuf => "zbuf",
+            ShmExtWord::Reserved => "reserved",
+        }
+    }
+
+    /// Every word, sorted, from an exhaustive walk: what the vocabulary gate
+    /// holds `open_syn` and `open_ack` to.
+    #[cfg(test)]
+    pub(crate) fn names() -> Vec<&'static str> {
+        use wz_session_core::passive::ShmExtEncoding;
+        let mut words: Vec<&'static str> = [
+            None,
+            Some(ShmExtEncoding::Unit),
+            Some(ShmExtEncoding::Z64),
+            Some(ShmExtEncoding::ZBuf),
+            Some(ShmExtEncoding::Reserved),
+        ]
+        .into_iter()
+        .map(|e| ShmExtWord::of(e).name())
+        .collect();
+        words.sort_unstable();
+        words
+    }
 }
 
 /// What the bytes of a session say about its parameters beside what its
@@ -9365,6 +9726,69 @@ mod tests {
             push_context(&context, &ParameterGrounds::of_context(&context), &mut out);
             arms.push(out);
         }
+        // Revision 76 — every `unreachable` word on a flow's errors, and every
+        // `what` word in the document's membership.
+        {
+            use crate::control::{
+                ControlKind, ControlMessage, ControlPlane, FlowError, FlowErrors, Membership,
+                Unreachable,
+            };
+            let at = crate::link::Endpoint::new(&[10, 0, 0, 1], 0);
+            let mut errors = FlowErrors::default();
+            for why in Unreachable::all() {
+                errors.observe(FlowError {
+                    why,
+                    packet: 1,
+                    from: at,
+                    mtu: Some(1400),
+                });
+            }
+            arms.push(members(|out| write_icmp_errors(&errors, out)));
+            let mut plane = ControlPlane::default();
+            for what in [Membership::Query, Membership::Report, Membership::Leave] {
+                plane.observe(ControlMessage {
+                    from: at,
+                    to: at,
+                    packet: 2,
+                    kind: ControlKind::Membership {
+                        what,
+                        groups: alloc::vec![alloc::vec![224, 0, 0, 224]],
+                    },
+                });
+            }
+            arms.push(members(|out| write_membership(&plane, out)));
+        }
+        // Revision 77 — a pcapng capture's interfaces, which a classic pcap
+        // fixture leaves an empty list.
+        {
+            let pcapng = crate::pcapng::write(&[(crate::link::LINKTYPE_ETHERNET, 6)], &[]);
+            arms.push(members(|out| write_capture_interfaces(&pcapng, out)));
+        }
+        // Revision 74 — every `open_syn` and `open_ack` word, on a context.
+        {
+            use wz_session_core::passive::{ShmExtEncoding, ShmHandshake};
+            let mut words = alloc::collections::BTreeSet::new();
+            for open in [
+                None,
+                Some(ShmExtEncoding::Unit),
+                Some(ShmExtEncoding::Z64),
+                Some(ShmExtEncoding::ZBuf),
+                Some(ShmExtEncoding::Reserved),
+            ] {
+                let mut context = FlowContext::default();
+                context.shm = ShmHandshake {
+                    init_syn: Some(true),
+                    init_ack: Some(true),
+                    open_syn: Some(open),
+                    open_ack: Some(open),
+                };
+                words.insert(ShmExtWord::of(open).name());
+                let mut out = String::new();
+                push_context(&context, &ParameterGrounds::of_context(&context), &mut out);
+                arms.push(out);
+            }
+            assert_eq!(words.into_iter().collect::<Vec<_>>(), ShmExtWord::names());
+        }
         // Every `batch_header` word, on a half.
         for header in [
             wz_session_core::passive::BatchHeader::Absent,
@@ -9473,6 +9897,40 @@ mod tests {
             assert_eq!(
                 version_words.into_iter().collect::<Vec<_>>(),
                 AnnouncedVersion::names()
+            );
+        }
+        // Revision 73 — `foreign_zenoh` null, and once per exchange, with every
+        // witness word among the witnesses.
+        {
+            use crate::foreign_zenoh::{Recognition, RecognizedBy, Witness, WitnessKind};
+            use wz_session_core::foreign_version::VersionBearing;
+            arms.push(members(|out| write_foreign_zenoh(None, out)));
+            let mut kinds = VersionBearing::all()
+                .into_iter()
+                .map(WitnessKind::Message)
+                .chain([WitnessKind::Close]);
+            let mut witness_words = alloc::collections::BTreeSet::new();
+            for recognized_by in RecognizedBy::all() {
+                let witnesses: Vec<Witness> = kinds
+                    .by_ref()
+                    .take(2)
+                    .map(|kind| Witness {
+                        kind,
+                        direction: Direction::A,
+                        packet: 0,
+                    })
+                    .collect();
+                witness_words.extend(witnesses.iter().map(|w| w.kind.name()));
+                let r = Recognition {
+                    version: 0x08,
+                    recognized_by,
+                    witnesses,
+                };
+                arms.push(members(|out| write_foreign_zenoh(Some(&r), out)));
+            }
+            assert_eq!(
+                witness_words.into_iter().collect::<Vec<_>>(),
+                WitnessKind::names()
             );
         }
         arms.push(members(|out| {
@@ -9838,17 +10296,19 @@ mod tests {
     }
 
     /// The FLAT cells of each flow's `context` object in `doc`, exactly as
-    /// written and closed as an object: every key ahead of the `parameters`
-    /// object revision 45 added, which restates them with their basis and is
-    /// held by its own tests (`context_parameters`).
+    /// written and closed as an object: every key ahead of the `shm` object
+    /// revision 74 added, which is held by its own tests
+    /// (`session_table_tests`), and of the `parameters` object revision 45
+    /// added after it, which restates them with their basis and is held by its
+    /// own tests (`context_parameters`).
     fn context_objects(doc: &str) -> Vec<String> {
         const KEY: &str = "\"context\":";
         doc.match_indices(KEY)
             .map(|(at, _)| {
                 let rest = &doc[at + KEY.len()..];
                 let flat = rest
-                    .find(",\"parameters\":")
-                    .expect("a context object carries its parameters");
+                    .find(",\"shm\":")
+                    .expect("a context object carries its shared memory");
                 alloc::format!("{}}}", &rest[..flat])
             })
             .collect()
@@ -11224,7 +11684,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 100] = [
+        let live: [(&str, &str, Vec<&'static str>); 106] = [
             // The node a `payload` range is the span of: the walk over the
             // closed set its writer's word comes from.
             (
@@ -11255,6 +11715,28 @@ mod tests {
                 "initial_sn_derivation",
                 DerivationWord::names(),
             ),
+            // Whether a flow is zenoh of another version: the exchange and the
+            // witness, each an exhaustive match.
+            (
+                rev::FIELDS,
+                "recognized_by",
+                crate::foreign_zenoh::RecognizedBy::names(),
+            ),
+            (
+                rev::FIELDS,
+                "witness",
+                crate::foreign_zenoh::WitnessKind::names(),
+            ),
+            // How each Open's `Shm` extension was encoded (revision 74).
+            (rev::FIELDS, "open_syn", ShmExtWord::names()),
+            (rev::FIELDS, "open_ack", ShmExtWord::names()),
+            // The network's word about a flow (revision 76).
+            (
+                rev::FIELDS,
+                "unreachable",
+                crate::control::Unreachable::names(),
+            ),
+            (rev::FIELDS, "what", crate::control::Membership::names()),
             (rev::FIELDS, "phase", PhaseWord::names()),
             // The band's NAME is `Priority::name`, an exhaustive match over the
             // eight variants; `from_wire` is total over the 3-bit field, so the

@@ -9037,6 +9037,7 @@ mod message_name_tests {
             names_no_zid: false,
             decompressed: None,
             unit_read_whole: false,
+            foreign_version: None,
         };
         let name = message_name(&frame);
         assert!(
@@ -9084,6 +9085,7 @@ mod message_name_tests {
             names_no_zid: false,
             decompressed: None,
             unit_read_whole: true,
+            foreign_version: None,
         }
     }
 

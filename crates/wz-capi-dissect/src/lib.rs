@@ -15487,14 +15487,14 @@ mod tests {
             out.extend_from_slice(message);
             out
         };
-        // The context's flat cells, closed as an object: the `parameters`
-        // object field revision 45 added after them restates them with a
-        // basis, and the field document's own tests hold it.
+        // The context's flat cells, closed as an object: the `shm` object field
+        // revision 74 added after them and the `parameters` object revision 45
+        // added after that are held by the field document's own tests.
         let context_of = |doc: &str| -> String {
             let at = doc.find("\"context\":").expect("a flow carries a context") + 10;
             let flat = doc[at..]
-                .find(",\"parameters\":")
-                .expect("a context carries its parameters");
+                .find(",\"shm\":")
+                .expect("a context carries its shared memory");
             format!("{}}}", &doc[at..at + flat])
         };
         let pcap_of = |packets: &[Vec<u8>]| {
@@ -15556,14 +15556,14 @@ mod tests {
             out.extend_from_slice(message);
             out
         };
-        // The context's flat cells, closed as an object: the `parameters`
-        // object field revision 45 added after them restates them with a
-        // basis, and the field document's own tests hold it.
+        // The context's flat cells, closed as an object: the `shm` object field
+        // revision 74 added after them and the `parameters` object revision 45
+        // added after that are held by the field document's own tests.
         let context_of = |doc: &str| -> String {
             let at = doc.find("\"context\":").expect("a flow carries a context") + 10;
             let flat = doc[at..]
-                .find(",\"parameters\":")
-                .expect("a context carries its parameters");
+                .find(",\"shm\":")
+                .expect("a context carries its shared memory");
             format!("{}}}", &doc[at..at + flat])
         };
         let both_doors = |syn_ext: &[u8], ack_ext: &[u8]| {

@@ -309,6 +309,15 @@ mod row_facts_tests;
 // tables on every build. The document is gated on `dissect` with the field
 // document whose phase words it reuses.
 pub mod session_table;
+// Whether a flow is zenoh of a version this reader does not read, taken at
+// ingest beside the session table's version evidence and as ungated.
+pub mod foreign_zenoh;
+// ICMP, ICMPv6 and IGMP messages: the network's word about a flow, read off
+// packets the transport path skips. Ungated, as the skip census is.
+pub mod control;
+// What a flow's IP headers and frames said, per direction, taken at ingest
+// beside the other per-flow facts and as ungated.
+pub mod ip_facts;
 #[cfg(feature = "dissect")]
 pub mod session_table_json;
 #[cfg(all(test, feature = "dissect"))]
@@ -646,7 +655,9 @@ use wz_session_core::passive::NANOS_PER_MILLI;
 pub use wz_session_core::passive::{
     Direction, FlowContext, PassiveFrame, PassiveSession, PassiveStall,
 };
-use wz_session_core::scouting_message::{parse_scouting_observed, ScoutingFrame};
+use wz_session_core::scouting_message::{
+    parse_scouting_observed, parse_scouting_observed_keeping, ScoutingFrame,
+};
 
 use crate::link::{FlowKey, SkipReason, Transport};
 use crate::tcp::StreamAssembler;
@@ -5283,6 +5294,8 @@ mod message_list_census {
             // ── does not ──
             skipped: _,
             skip_census: _,
+            // ICMP and IGMP messages, which are not zenoh messages.
+            control: _,
             limits: _,
             drops: _,
             declared_quic_ports: _,
@@ -6449,6 +6462,9 @@ pub struct Dissection {
     /// R311y643 (§1.1e) — the by-reason census, counted at the door rather than
     /// folded from `skipped` above, which is capped.
     skip_census: SkipCensus,
+    /// The ICMP, ICMPv6 and IGMP messages read off packets skipped as not a
+    /// transport, bounded: see [`control`].
+    control: control::ControlPlane,
     /// R311y594b — what this dissection may accumulate.
     limits: DissectionLimits,
     /// What the limits have cost so far.
@@ -6697,6 +6713,7 @@ impl Default for Dissection {
             datagram_flows: exit::FlowTable::default(),
             skipped: Vec::new(),
             skip_census: SkipCensus::default(),
+            control: control::ControlPlane::default(),
             declared_quic_ports: Vec::new(),
             declared_serial_linktypes: Vec::new(),
             serial: None,
@@ -7011,13 +7028,18 @@ impl Dissection {
                 // packet `done.packet_index` places the datagram at: a datagram
                 // reassembled from pieces is positioned and timed by the one
                 // packet at which a reader could first have seen it whole.
-                Ok(Transport::Udp(d) | Transport::RawEth(d)) => {
-                    // Reassembled from pieces: no one packet holds the payload.
+                Ok(Transport::Udp(mut d) | Transport::RawEth(mut d)) => {
+                    // Reassembled from pieces: no one packet holds the payload,
+                    // and no one IP header speaks for it.
+                    d.ip.reassembled = true;
+                    d.ip.interface = Some(interface_id);
                     self.push_datagram(d, ts_nanos, DatagramLink::Udp, None);
                     return;
                 }
-                Ok(Transport::Tcp(s)) => {
+                Ok(Transport::Tcp(mut s)) => {
                     // Reassembled from pieces: no one packet holds the payload.
+                    s.ip.reassembled = true;
+                    s.ip.interface = Some(interface_id);
                     self.push_segment(s, ts_nanos, tcp::PayloadAt::Here);
                     return;
                 }
@@ -8635,6 +8657,13 @@ impl Dissection {
         &self.skip_census
     }
 
+    /// The ICMP, ICMPv6 and IGMP messages this capture carried: the network's
+    /// word about its flows. Each was also counted as skipped, since none is a
+    /// transport. See [`control`].
+    pub fn control(&self) -> &control::ControlPlane {
+        &self.control
+    }
+
     /// The flow matching `key`, if the capture carried one.
     pub fn flow(&self, key: &FlowKey) -> Option<&FlowDissection> {
         self.flows.find(key)
@@ -9118,7 +9147,7 @@ impl Dissection {
                 None => ts,
             });
         }
-        let segment = match link::decapsulate(link_type, packet_index, bytes) {
+        let mut segment = match link::decapsulate(link_type, packet_index, bytes) {
             Ok(Transport::Tcp(s)) => s,
             // R311y597 — raweth joins the datagram path rather than getting
             // one of its own, and the reason is measured, not assumed: pico
@@ -9133,13 +9162,15 @@ impl Dissection {
             // handshake whatever its destination MAC says (see
             // [`link_handshake`]), and its `Endpoint` is a MAC that no address
             // rule downstream can read.
-            Ok(Transport::Udp(d)) => {
+            Ok(Transport::Udp(mut d)) => {
                 let at = lent_place(in_container, bytes, d.payload);
+                d.ip.interface = Some(interface_id);
                 self.push_datagram(d, ts_nanos, DatagramLink::Udp, at);
                 return;
             }
-            Ok(Transport::RawEth(d)) => {
+            Ok(Transport::RawEth(mut d)) => {
                 let at = lent_place(in_container, bytes, d.payload);
+                d.ip.interface = Some(interface_id);
                 self.push_datagram(d, ts_nanos, DatagramLink::RawEth, at);
                 return;
             }
@@ -9161,13 +9192,40 @@ impl Dissection {
                 return;
             }
             Err(reason) => {
+                // Still a skip, and counted as one: an ICMP error or an IGMP
+                // report is not a transport. What it says about the flows is
+                // read beside the count.
+                if let SkipReason::NotTransport(proto) = reason {
+                    if control::reads(proto) {
+                        if let Some(m) = link::control_message(link_type, packet_index, bytes) {
+                            self.attach_control_error(&m);
+                            self.control.observe(m);
+                        }
+                    }
+                }
                 self.note_skip(packet_index, interface_id, reason);
                 return;
             }
         };
         let at = lent_place(in_container, bytes, segment.payload)
             .map_or(tcp::PayloadAt::Here, tcp::PayloadAt::Container);
+        segment.ip.interface = Some(interface_id);
         self.push_segment(segment, ts_nanos, at);
+    }
+
+    /// An ICMP or ICMPv6 error that quotes a packet of a flow this capture holds
+    /// is kept on that flow ([`session_table::LinkIngest::control_errors`]). The
+    /// flow exists already when the error is about a packet it sent; one that
+    /// quotes a flow the capture holds no packet of is in the plane alone.
+    fn attach_control_error(&mut self, message: &control::ControlMessage) {
+        let Some((key, error)) = message.about() else {
+            return;
+        };
+        if let Some(i) = self.flows.position(key) {
+            self.flows[i].ingest.observe_control_error(error);
+        } else if let Some(i) = self.datagram_flows.position(key) {
+            self.datagram_flows[i].ingest.observe_control_error(error);
+        }
     }
 
     /// Feed one TCP segment to its flow's assembler and the observer behind it.
@@ -9200,6 +9258,12 @@ impl Dissection {
         // still stamps its frames.
         self.touch(Touched::Stream(segment.flow));
         self.flows[idx].ingest.begin_packet(packet_index as u64);
+        self.flows[idx].ingest.observe_ip(
+            segment.from_low,
+            &segment.ip,
+            &segment.checksums,
+            segment.rst,
+        );
         self.advance_clock(idx, ts_nanos, FlowKind::Stream);
         let flow = &mut self.flows[idx];
         // Item 252 — recorded for every segment, a pure ACK included: a
@@ -9540,6 +9604,8 @@ impl Dissection {
             // exists, so there is no carrier for one to have arrived inside;
             // if that ever stops being true this line is where it shows.
             tunnel: link::Tunnel::none(),
+            // AF_VSOCK has no IP header.
+            ip: link::IpFacts::default(),
         };
         let at_ns = flow.session.observed_at_nanos();
         let before = flow.assembler(direction).len();
@@ -9606,6 +9672,10 @@ impl Dissection {
         // answer depends on an exchange that spans two DIFFERENT flows: the
         // SCOUT's key is (asker, group) and the HELLO's is (asker, responder).
         let scouting = self.datagram_namespace(&d);
+        // A unicast Hello is read as scouting only when it was addressed to an
+        // endpoint that scouted (`datagram_namespace`): it answers that Scout.
+        let answers_a_scout = scouting == Some(wz_session_core::wire_const::S_MID_HELLO)
+            && !d.destination().is_ip_multicast();
         if scouting == Some(wz_session_core::wire_const::S_MID_SCOUT) {
             // Recorded on the ROUTING decision, not on a successful decode: a
             // build with `codec-hello` and without `codec-scout` still has to
@@ -9619,6 +9689,9 @@ impl Dissection {
         self.datagram_flows[idx]
             .ingest
             .begin_packet(d.packet_index as u64);
+        self.datagram_flows[idx]
+            .ingest
+            .observe_ip(d.from_low, &d.ip, &d.checksums, false);
         self.advance_clock(idx, ts_nanos, FlowKind::Datagram);
         let flow = &mut self.datagram_flows[idx];
         flow.last_activity = d.packet_index;
@@ -9714,11 +9787,15 @@ impl Dissection {
             // are fed. A scouting datagram advances no session, which is a
             // different question from whether anything read it.
             flow.residue.fed += d.payload.len() as u64;
-            let read = parse_scouting_observed(d.payload);
+            let (read, foreign) = parse_scouting_observed_keeping(d.payload);
             let whole = matches!(&read, Ok((_, n)) if *n == d.payload.len());
             let frame = read.map(|(frame, _)| frame);
             flow.ingest
                 .observe_scouting(&frame, whole, d.payload.len(), d.checksums.integrity());
+            if let Some(foreign) = &foreign {
+                flow.ingest
+                    .observe_foreign_scouting(foreign, direction, answers_a_scout);
+            }
             // Open-debt item 924, step 4c — the payload is logged (or named by
             // its place in the container) and the message is read again from
             // it. The clock was advanced for this datagram above, before the

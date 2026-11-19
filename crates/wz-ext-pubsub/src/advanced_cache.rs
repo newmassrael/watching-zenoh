@@ -36,7 +36,7 @@
 //! zenoh's cache applies a `_time` time-range filter in both query branches
 //! (zenoh-ext advanced_cache.rs:264-272, :308-316): a sample is replied only
 //! if its timestamp falls in the query's `_time` range. wz mirrors this —
-//! `answer_from_ring` parses the `_time` selector ([`TimeRange::parse`])
+//! `answer_from_ring` parses the `_time` selector ([`time_range::parse`])
 //! and drops out-of-range samples. The "now" the relative `now(-age)` bounds
 //! resolve against is the NTP64 word the host's clock function answers at query
 //! time (the same wall-clock base the publisher stamps each cached sample with),
@@ -54,7 +54,7 @@ use wz_session_core::qos::{CongestionControl, Priority};
 use wz_session_core::query_sink::{QueryView, ReplyMeta, ReplyOut};
 use wz_session_core::sample::{EncodingHint, QosLevel, SampleKind, SourceInfo, TimestampHint};
 
-use crate::time_range::{ntp64_to_system_time, TimeRange};
+use crate::time_range::{self, contains_ntp64, ntp64_to_system_time, TimeRange};
 
 /// One sample retained in the cache ring for recovery / history replies.
 /// `source_info` carries the sample's `(zid, eid, sn)`; the `_sn` range
@@ -415,8 +415,8 @@ fn answer_from_ring(
     // rejects, leaves this `None` = unfiltered, which is what upstream does with
     // a range it cannot read.
     let time_range = param_value(params, "_time")
-        .and_then(TimeRange::parse)
-        .map(|r| r.resolve_at(ntp64_to_system_time(now_ntp64)));
+        .and_then(time_range::parse)
+        .map(|r| time_range::resolve(r, ntp64_to_system_time(now_ntp64)));
 
     let mut matched: Vec<&CachedSample> = ring
         .iter()
@@ -539,7 +539,7 @@ fn sample_matches_sn(sample_sn: Option<u32>, range: Option<(Option<u32>, Option<
 /// Whether a sample's NTP64 timestamp satisfies the resolved `_time` range.
 /// No range (absent, or a value zenoh's parser rejects) matches every sample.
 fn sample_matches_time(sample_time: u64, range: Option<TimeRange<SystemTime>>) -> bool {
-    range.map_or(true, |r| r.contains_ntp64(sample_time))
+    range.map_or(true, |r| contains_ntp64(&r, sample_time))
 }
 
 #[cfg(test)]

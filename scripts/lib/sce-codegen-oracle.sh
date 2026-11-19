@@ -99,8 +99,15 @@ source "$(dirname "${BASH_SOURCE[0]}")/artifact-root.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/build-evidence.sh"
 
 WZ_SCE_DIR="vendor/sce"
-WZ_SCE_CODEGEN_BIN="vendor/sce/target/release/sce-codegen"
-WZ_SCE_CODEGEN_STAMP="vendor/sce/target/release/.sce-codegen.pin"
+# Where the binary and its stamp are is the artifact-root rule's answer for vendor/sce, the place
+# scripts/build-sce.sh writes them (its cargo runs under the root's shim) and the Rust door
+# (`wz_codegen_build::sce_codegen_binary`) reads them. This was the literal
+# `vendor/sce/target/release` until 2026-11-19: under a WZ_ARTIFACT_ROOT the gate read a binary
+# and a stamp the build never wrote, so `sce_codegen_ensure` rebuilt on every call and refused
+# after each rebuild, and verify-codegen ran whatever was left in the checkout. Absolute, so a
+# caller does not prefix it with its root.
+WZ_SCE_CODEGEN_BIN="$(wz_artifact_dir "$_wz_ar_checkout_l/vendor/sce")/target/release/sce-codegen"
+WZ_SCE_CODEGEN_STAMP="$(wz_artifact_dir "$_wz_ar_checkout_l/vendor/sce")/target/release/.sce-codegen.pin"
 # What sce-codegen prints on stderr when it parsed a document without validating
 # it. The Rust door carries the same text (XSD_NOT_VALIDATED in
 # crates/wz-codegen-build/src/spawn.rs); scripts/lib/sce_codegen_spawn_lint.py

@@ -5097,6 +5097,166 @@
       "carry_forward_bullets": [
         "Step 4b: limits as quotas under `wz/limits`, which 4a refuses by name. Step 5: the config doors of the three ABIs (pico's key/value config, the Rust `Config`, an API override layer), and a document round trip that keeps the member (`ZenohNodeConfig::to_json5` and the zenoh-c config export drop it today; a flat key store also folds a member stated twice). Capability cost (C1cs) and the Zephyr kit lane (Qzk), red since Round 4506, wait for a hosted reading of this tree."
       ]
+    },
+    "Round 4527": {
+      "decision_summary": "Three of the eight wz-side divergences the logic-to-SCE census recorded (docs/zenoh-logic-as-sce-kinds.md section 7) are repaid. W2: the keyexpr matcher's facts scan, which docs/query-answer-path.md L0 named as an SCE algorithm that never existed, is now sources/algorithms/key_facts.scxml returning the record of key_facts_schema.scxml, and KeyFacts::of calls the generated function. W6: three places said SCE has no <parallel>; the pinned SCE has it, and the multicast Running leaf is a choice of the document. W8: the stale generator the census ran was a hand run, and reading the provenance gate found that the shell gate and verify-codegen named the binary at the checkout path while build-sce.sh and the Rust door place it by the artifact-root rule; the oracle library now states the place once. W1, W3 and W7 stay open with the next step named; W4 and W5 are recorded as gaps of SCE kinds.",
+      "changes_bullets": [
+        "`sources/algorithms/key_facts.scxml`, `key_facts_schema.scxml` (new); `out/wz-session-core/key_facts.rs`, `key_facts_schema.rs` (generated); `crates/wz-session-core/src/keyexpr_match.rs`: `KeyFacts::of` calls the generated scan, the oracle test gains two multi-byte keys; `crates/wz-codegen-build/src/lib.rs`: `Codegen::emit_event_schema`; `xtask/src/main.rs`: the two emits.",
+        "`crates/wz-runtime-tokio/src/multicast_glue.rs`, `crates/wz-session-core/src/multicast_dispatch.rs`, `sources/session/session_fsm_multicast.scxml`: the `<parallel>` sentences; `out/wz-session-core/*_sm.rs`, `tick_elapsed.rs`, `tick_until_due.rs`: source hash and line maps regenerated.",
+        "`scripts/lib/sce-codegen-oracle.sh`: `WZ_SCE_CODEGEN_BIN` and `WZ_SCE_CODEGEN_STAMP` by `wz_artifact_dir`, absolute; `scripts/build-sce.sh`, `scripts/verify-codegen.sh` read them.",
+        "`docs/query-answer-path.md` L0 as built; `docs/zenoh-logic-as-sce-kinds.md` section 7.1."
+      ],
+      "verification_bullets": [
+        "The generator was built at the pin and reports it (`sce-codegen --version`); `verify-codegen.sh` emits both new documents on all six backends. `scripts/regen-codegen.sh` regenerated `out/`, and Layer B2 reads the committed `out/` equal to a fresh regeneration. wz-session-core `keyexpr_match` tests: 25 with the default features and 14 without (the fixed backing, where the depth bound is judged), the facts oracle test among them. clippy -D warnings of wz-session-core (all targets), wz-codegen-build, wz-runtime-tokio and xtask. Layer 0 (shellcheck 75 files, actionlint), Layer B (key_facts and key_facts_schema OK), the hook's 150 round-fed static gates, the upstream citation anchors and the guarded-count gate over the range (5 of 5). The oracle library resolves the binary to the checkout path with no artifact root and under the root with one."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.a-new-kind-algorithm",
+        "session-fsm--prose-level-sketch/3-1-multicast-session-level-states",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage"
+      ],
+      "carry_forward_bullets": [
+        "W7: one `_time` grammar in wz-session-core `selector_params` (no_std, instant as seconds and nanoseconds, resolved against a given now), read by wz-ext-pubsub and the upstream-shaped wz-zenoh-util type; the two disagree today on a fixed start with a negative `;` duration. W1: the keyexpr matcher as an algorithm over chunk offsets, landed with the stack gate and the kit's query-path reading. W3: the hand copy of the upstream codec, not yet scoped. W4 and W5: a pool's run-time lend contract and a link that lends its transmit slot, for the SCE session to judge as catalogue entries. The text of the fixed images with the generated scan is read by hosted Layer C1cs."
+      ]
+    },
+    "Round 4528": {
+      "decision_summary": "W7 of the logic-to-SCE census is repaid: the `_time` selector grammar was written twice, in wz-zenoh-util (upstream's TimeRange, humantime) and in wz-ext-pubsub (a hand copy), and the two disagreed on a fixed start with a negative `;` duration. The grammar, humantime's RFC3339 reader with its three refusals, the resolution and the membership test are now wz_session_core::time_range, no_std and generic over the caller's instant type through a Clock, so every sum is that type's own checked arithmetic. wz-ext-pubsub reads it on SystemTime; wz-zenoh-util keeps upstream's types and rebuilds upstream's error texts from the grammar's refusal. The negative step moves the start back, as upstream moves a now() start, so the range holds nothing. Also repaid: C1bz red from Round 4525, an outer doc on `pub mod doc_out` that made rustdoc resolve the module's inner links in the parent scope; its author agreed.",
+      "changes_bullets": [
+        "`crates/wz-session-core/src/time_range.rs` (new): `Clock`, `add_secs`, `Edge`, `TimeExpr`, `TimeRange` (`resolve_at`, `contains`), `parse_range`, `parse_time`, `parse_duration`, `parse_rfc3339_weak`, and the refusals `RangeError`, `TimeError`, `TimeCause`, `DurationError`, `Rfc3339Error`.",
+        "`crates/wz-ext-pubsub/src/time_range.rs`: the `Wall` clock, `parse`, `resolve`, `contains_ntp64`, `of_parameters`, `ntp64_to_system_time` over the core types; `advanced_cache.rs` and its tests, `crates/wz-capi-c/src/zenoh_ext.rs` call them.",
+        "`crates/wz-zenoh-util/src/time_range.rs`: `FromStr` of `TimeRange` and `TimeExpr` parse through the core and map its refusal to upstream's `zerror!` texts; `checked_add`, `checked_sub`, `checked_resolve_at` use `add_secs`; the depends-on line in `Cargo.toml`; three lockfiles.",
+        "`crates/wz-session-core/src/lib.rs`: the `doc_out` declaration's doc is a comment. `docs/zenoh-logic-as-sce-kinds.md` 7.1: W7 fixed."
+      ],
+      "verification_bullets": [
+        "Layer E18's zenoh-util time range differential test against upstream: 8 of 8, the grid and the seeded draws parsed alike to the same range or the same error text but for the two classes where upstream panics. wz-session-core `time_range` tests: 8 with the default features and 8 without. wz-ext-pubsub lib tests, the cache filter and the wall-clock adapter among them. zenoh-util `time_range` tests (upstream's own). clippy -D warnings of wz-session-core (all targets, and the lib without default features), wz-ext-pubsub, zenoh-util and wz-capi-c. Layer C1bz on wz-session-core, wz-ext-pubsub, zenoh-util and wz-runtime-tokio (the session core read 10 broken links before the doc_out repair, none after). Layer L (lockfiles), the hook's 150 round-fed static gates, the upstream citation anchors and the guarded-count gate over the range."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-18-time"
+      ],
+      "carry_forward_bullets": [
+        "W1: the keyexpr matcher as an algorithm over chunk offsets, landed with the stack gate and the kit's query-path reading. W3: the hand copy of the upstream codec, not yet scoped. W4 and W5: a pool's run-time lend contract and a link that lends its transmit slot, sent to the SCE session to judge as catalogue entries. The full Layer C1bz (the stale-budget-line half) is read by the hosted run."
+      ]
+    },
+    "Round 4529": {
+      "decision_summary": "An Interest's restricted key is read in the table bit 6 of its options byte names, as a Push's key is read in the table its header's M bit names: the interest body codec now dispatches its wireexpr arm on that bit, which upstream names InterestOptions::MAPPING, where it passed the Local arm whatever the bit held. The field tree's mapping on that key is the bit, and the ABI header's stated exception for it goes. The field document moves to revision 72, row_facts to 12 and the census to 26; values move under stationary keys.",
+      "changes_bullets": [
+        "sources/codecs/interest_body.scxml declares the M dispatch on its wireexpr import, and the regenerated out/wz-codecs/interest_body.rs reads the arm from bit 6 on decode and writes bit 6 from the arm on encode; every builder in the tree writes the Local arm and so the same byte as before.",
+        "The dissection walker's Interest body records mapping from bit 6, and its mapping test reads an Interest at both settings of the bit beside Push, Request, Response and the three declarations.",
+        "The interest plane's census resolves an Interest whose bit is clear in the receiver's table; a new test holds that, with the same bytes and the bit set as its control.",
+        "The field document's revision 72, row_facts revision 12 and census revision 26 rows, the ABI header's mapping paragraph and its examples, and the C consumer's revision pins.",
+        "The upstream citation gate's basename budget moves from 1187 to 1186 with the wrong codec note it counted."
+      ],
+      "verification_bullets": [
+        "The session core's library tests, 1042 passed by default and 1667 with dissect; the capture crate's library tests with dissect and fixtures, 1826 passed and 6 ignored; the dissection crate's tests, 259 and 4 passed; the tokio runtime's library tests, 742 passed.",
+        "Red-first: with the regenerated decoder's two dispatch arguments put back to the Local arm, the capture test and the walker's mapping test each fail at the clear bit, and pass with them restored.",
+        "fmt; clippy with warnings denied of wz-session-core with dissect, wz-capture and wz-codecs, one crate per run; the rustdoc lane over the four touched crates; the upstream citation anchor gate."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/5-network-routing-layer"
+      ],
+      "carry_forward_bullets": [
+        "The tokio runtime's integration tests were not run for this change; the routers that relay an Interest now see the Nonlocal arm when the bit is clear, and their library tests pass.",
+        "The consumer's request continues with recognising zenoh of another protocol version, the facts of shared-memory payloads and pairing across a session's links."
+      ]
+    },
+    "Round 4530": {
+      "decision_summary": "A flow of a protocol version this reader does not read, a zenoh 0.x deployment of version 0x08 being the case, is recognised as zenoh of that version and said so on its own key, foreign_zenoh, beside the zenoh verdict, which is the frozen sequential test of version 0x09 and is left exactly as it reads. The Init, Join, Scout and Hello of 0x08 have 0x09's layout and differ in their extensions, so a message refused for its version is read to its end and keeps one fact: whether it took its whole framing unit alone. One such message is never enough: the flow is recognised by the first of four exchanges, latched, an InitSyn answered by an InitAck of its version, an InitSyn answered by a Close, a Hello addressed to an endpoint that scouted, or a Join or a named Scout repeated by its zid. The field document moves to revision 73 and row_facts to 13; four keys and two families arrive, nothing retires.",
+      "changes_bullets": [
+        "The session core's foreign_version module names the version-bearing messages and the facts kept of one refused for its version; the passive walk keeps them on the refused record, and the scouting reader returns them beside its refusal.",
+        "The capture's foreign_zenoh plane holds the first sightings, bounded at eight, and latches the first exchange met; the flow ingest feeds it refused messages, Closes read whole, and scouting messages with whether their datagram answered a Scout.",
+        "The field document's flow writers write foreign_zenoh after zenoh_evidence, null or the version, the exchange and its witnesses; revision 73 and row_facts revision 13 rows and tables, the vocabulary gate's two families, the ABI header's section and tags, and the C consumer's revision pin."
+      ],
+      "verification_bullets": [
+        "The capture crate's library tests with dissect and fixtures, 1837 passed and 6 ignored, among them a 0x08 handshake recognised as answered from either end, a refused offer recognised, a lone offer and an offer closed from its own side not recognised, a session of this version reading null in the document, the document's object for a recognised flow, and three hundred random datagrams of which none is recognised; the session core's library tests with dissect, 1668 passed; the dissection crate's tests, 259 and 4 passed; the analyzer crate's library tests, 72 passed.",
+        "Red-first: with the walk keeping no facts of a refused message, the three end-to-end tests that expect a recognition fail and the control passes.",
+        "fmt; clippy with warnings denied of wz-session-core with dissect, wz-capture and wz-analyze, one crate per run; wz-capture with no default features builds; the rustdoc lane over the four touched crates; the upstream citation anchor gate; the integer-cell gate."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/4-transport-session-layer"
+      ],
+      "carry_forward_bullets": [
+        "No capture of a real zenoh 0.x deployment was read; the fixtures write 0x08 messages by changing the version byte of this reader's own, which the layout comparison with the zenoh-codec crate of release 0.11.0 says is what 0.x writes, and the consumer's capture is the measurement still to come.",
+        "The scouting and Join exchanges are held by the plane's unit tests and not by a capture end to end."
+      ]
+    },
+    "Round 4531": {
+      "decision_summary": "A flow's context says what its handshake said about shared memory, message by message: whether each Init carried a Shm extension, how each Open's was encoded, and whether the exchange went all the way, because zenoh sets shared memory up inside the four handshake messages and a capture shows where it stopped. The Open's encoding is kept as the wire wrote it because it is what tells two releases of one protocol version apart, release 1.9.0 declaring it an integer and the pinned release a buffer, while the Init's is a buffer in both; two Opens of different encodings are two releases that cannot set shared memory up together. Whether one message's payload is a descriptor was already said by its carried entry; a descriptor sent without the body's mark is not told from data, and the documents say so. The field document moves to revision 74 and row_facts to 14; six keys and two families arrive, nothing retires.",
+      "changes_bullets": [
+        "The session core's passive context gains ShmHandshake, folded from the first InitSyn, InitAck, OpenSyn and OpenAck it reads, with each Open's extension encoding and whether the exchange was established.",
+        "The field document's context writes shm after version, with the closed set of the Opens' words; revision 74 and row_facts revision 14 rows and tables, the vocabulary gate's two families, the ABI header's paragraph and tags, and the C consumer's revision pin.",
+        "The flat-context goldens of the capture and dissection crates end their slice at shm, which the new tests hold."
+      ],
+      "verification_bullets": [
+        "The capture crate's library tests with dissect and fixtures, 1839 passed and 6 ignored, among them five handshakes read message by message (the pinned release's buffer on both Opens, release 1.9.0's integer on both, a buffer answered by none, a buffer answered by an integer, an InitAck without the extension) and the document's object for a session that set shared memory up and for one with none; the session core's library tests with dissect, 1668 passed; the dissection crate's tests, 259 and 4 passed.",
+        "Red-first: with the Open's extension chain withheld from the fold, both new tests fail.",
+        "fmt; clippy with warnings denied of wz-session-core with dissect, wz-capture and wz-capi-dissect, one crate per run; wz-capture with no default features builds; the rustdoc lane over the three touched crates; the upstream citation anchor gate; the integer-cell gate."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/4-4-transport-extensions"
+      ],
+      "carry_forward_bullets": [
+        "No capture of a real shared-memory session was read; the fixtures put Shm extensions of the two encodings on this reader's own handshake messages, and the encodings each release writes were read from the zenoh-protocol crates of 1.9.0 and 1.10.2.",
+        "Which release first wrote the buffer, and whether releases before 1.9.0 wrote the integer, was not read."
+      ]
+    },
+    "Round 4532": {
+      "decision_summary": "A request id is the session's and not the link's: a session over several links is one transport, its sender mints one sequence of ids, and a reply may come back on another link than its request went out on. So an exchange is keyed by the two zids where the capture names the flow's session, and by the list where it cannot; the ends that leaves unpaired on flows with no named session are counted as maybe on another link, a part of the orphans and the unclosed. A key id used before its declaration is said as a fact on the unresolved alias row: the packet of its first miss and the packet of the first declaration of that id in that space after it, the reference staying unresolved because a declaration does not name a reference that came before it. The census moves to revision 27 with three keys, the field document to 75 and row_facts to 15 with values only.",
+      "changes_bullets": [
+        "The exchange plane keys open exchanges by ExchangeScope, the asker's and the answerer's zids for a named session or the list and the asker's direction otherwise, and counts in WithoutSession the orphan responses and unclosed requests a list scope leaves; the census writes it as maybe_other_link.",
+        "The throughput plane's unresolved alias keeps the packet of its first miss, its space's owner, and the packet of the first later declaration of its id in that space, which the census writes beside cause.",
+        "A two-link session fixture with chosen records in the throughput plane's tests; census revision 27 with its key set, field document 75 and row_facts 15 rows, the ABI header's paragraphs and pins, and the C consumer's census and field revision pins."
+      ],
+      "verification_bullets": [
+        "The capture crate's library tests with dissect and fixtures, 1842 passed and 6 ignored, among them a request on one link of a two-link session answered and closed on the other, paired and with nothing counted as maybe on another link, with the same records on one link as its control; an orphan reply and an unclosed request on a flow with no session counted as maybe on another link; and the reference to id 7 on one link before its declaration on the other, naming packets 4 and 5, against an id never declared that names none. The dissection crate's tests, 259 and 4 passed.",
+        "Red-first: with every exchange scoped by its list and the late declaration not recorded, the cross-link pairing test and the use-before-declaration test fail and the unnamed-flow test passes.",
+        "fmt; clippy with warnings denied of wz-capture; wz-capture with no default features builds; the rustdoc lane over the two touched crates; the upstream citation anchor gate; the integer-cell gate."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/5-network-routing-layer"
+      ],
+      "carry_forward_bullets": [
+        "The interest plane still correlates an Interest with its answers within one list; whether a sibling link of a named session answers it is the same question this round answered for exchanges, and it is left open there.",
+        "A link of a named session that the capture joined after its handshake is not attributed to the session, so its exchanges stay scoped to the list and are counted as maybe on another link."
+      ]
+    },
+    "Round 4533": {
+      "decision_summary": "The network's own word about a flow is read: an ICMP or ICMPv6 destination-unreachable or packet-too-big error quotes the start of the packet it refuses, so it is put on the flow that quote names, with why, the packet that carried it, its sender and the MTU it stated; and the IGMP and MLD queries, reports and leaves are kept capture-wide with the groups they name, because a switch that stops forwarding a multicast group is how multicast scouting fails without a word from zenoh. These packets stay skipped and counted under not_transport, since none is a transport; the facts are read beside the count, through the same link entry and IP chain walk. Each flow holds its first 64 errors and the capture its first 1024 control messages, each with a count of the rest. The field document moves to revision 76 and row_facts to 16; nine keys and two families arrive, nothing retires.",
+      "changes_bullets": [
+        "A capture module, control, reads ICMP type 3, ICMPv6 types 1 and 2, IGMP queries, reports of the three versions and leaves, and MLD queries, reports of both versions and done, into ControlMessage; it bounds what a capture and a flow hold.",
+        "The link layer gains control_message, reading a packet through the link entry and IP chain walk decapsulate uses; the dissection reads it for a packet skipped as one of those protocols, attaches an error to the stream or datagram flow its quote names, and keeps every message in its plane.",
+        "The field document writes each flow's icmp_errors and the document's membership; revision 76 and row_facts revision 16 rows and tables, the vocabulary gate's two families, the ABI header's section and tags, and the C consumer's revision pin."
+      ],
+      "verification_bullets": [
+        "The capture crate's library tests with dissect and fixtures, 1848 passed and 6 ignored, among them a port-unreachable that names the UDP flow it quotes, a fragmentation-needed with its MTU and a short quote that names none, the IGMP general and group queries, reports of versions 1 to 3 and a leave, the ICMPv6 port-unreachable, packet-too-big and an MLD query, and a capture of a datagram, the host's error about it and an IGMP query, whose error lands on the flow and whose query in the document's membership while both stay counted as skipped. The dissection crate's tests, 259 and 4 passed.",
+        "Red-first: with the error kept off its flow, the end-to-end test fails and the parser tests pass.",
+        "fmt; clippy with warnings denied of wz-capture; wz-capture with no default features builds; the rustdoc lane over the two touched crates; the upstream citation anchor gate; the integer-cell gate."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "carry_forward_bullets": [
+        "No real capture of a closed port or of an IGMP querier was read; the messages are built from the RFCs' layouts. An ICMPv6 quote whose packet begins with an extension header names no flow, and an error that quotes a flow the capture holds no packet of stays in the plane and on no flow, where no document writes it yet."
+      ]
+    },
+    "Round 4534": {
+      "decision_summary": "What a flow's IP headers and frames said beside its transport is kept per direction: the TTL or hop limit range of the innermost IP header, the range over the TCP segments that carried RST apart from it so a reset from something between the peers shows, the outermost VLAN ids and the capture interfaces (four of each, with a mark when more were seen), every packet's IP and transport checksum verdict counted, the datagrams reassembled from IP fragments and the packets whose stated IP length passes the Ethernet MTU. The facts ride on the segment and the datagram the decapsulation hands back, stamped where the IP header was read, so a tunnelled flow reads its own header and a reassembled datagram claims none. A pcapng capture's interfaces are named with their clocks by scanning its IDBs at document time. The field document moves to revision 77 and row_facts to 17; twenty-three keys arrive and no family.",
+      "changes_bullets": [
+        "The link layer's IP header parses keep the TTL and the stated length, decapsulate stamps them and the outermost VLAN tag on the segment or datagram as IpFacts, and the dissection adds the capture interface and, on the reassembly path, the reassembled mark.",
+        "A capture module, ip_facts, folds each packet into its flow's direction; both flow kinds' ingest call it beside their other per-packet facts.",
+        "The pcapng module gains interface_descriptions, a scan of the IDBs for if_name, if_tsresol and if_tsoffset by section; the field document writes each flow's network and the document's capture_interfaces; revision 77 and row_facts revision 17 rows and key sets, the ABI header's section and pins, and the C consumer's revision pin."
+      ],
+      "verification_bullets": [
+        "The capture crate's library tests with dissect and fixtures, 1852 passed and 6 ignored, among them a direction's TTL and reset TTL ranges, ids, verdicts and counts folded from four packets, the bounded ids, three IDBs over two sections named with their clocks, and a pcapng of two interfaces whose tagged SYN, answer and reset at another TTL land on their flow's two directions while the document names the interfaces. The dissection crate's tests, 259 and 4 passed.",
+        "Red-first: with the stream path not folding its segments, the end-to-end test fails and the three unit tests pass.",
+        "fmt; clippy with warnings denied of wz-capture; wz-capture with no default features builds; the rustdoc lane over the two touched crates; the upstream citation anchor gate; the integer-cell gate."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "carry_forward_bullets": [
+        "A frame snapped shorter than it was sent is still counted capture-wide only: the packet's original length does not reach the dissection, and a per-flow count needs it carried there. The IP pieces of a datagram never reassembled are counted capture-wide too, because a later piece names no ports and so no flow.",
+        "No real capture with VLANs or several interfaces was read; the fixtures are built from the formats."
+      ]
     }
   },
   "inventory_entries": {

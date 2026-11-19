@@ -75,7 +75,7 @@ use std::ffi::c_void;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
-use wz_runtime_tokio::time_range::{of_parameters, TimeRange};
+use wz_runtime_tokio::time_range::{contains_ntp64, of_parameters, TimeRange};
 
 use crate::fetching::Fetching;
 
@@ -466,7 +466,7 @@ unsafe extern "C" fn cache_on_query(query: *mut z_loaned_query_t, context: *mut 
             // sample has a timestamp (`publication_cache.rs:321-325`); a sample
             // without one is replied to every query.
             if let (Some(range), Some(timestamp)) = (&time_range, &sample.timestamp) {
-                if !range.contains_ntp64(timestamp._time) {
+                if !contains_ntp64(range, timestamp._time) {
                     continue;
                 }
             }

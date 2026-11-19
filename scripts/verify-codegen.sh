@@ -81,7 +81,11 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SCE_CODEGEN="$ROOT/vendor/sce/target/release/sce-codegen"
+# The library says where the binary and its stamp are (the artifact-root rule, the place
+# scripts/build-sce.sh writes them), and how to read the stamp.
+# shellcheck source=scripts/lib/sce-codegen-oracle.sh
+source "$ROOT/scripts/lib/sce-codegen-oracle.sh"
+SCE_CODEGEN="$WZ_SCE_CODEGEN_BIN"
 
 if [[ $# -lt 1 || $# -gt 2 ]]; then
     echo "usage: $0 <scxml> [<sce-upstream-fixture>]" >&2
@@ -111,10 +115,8 @@ fi
 # prints is a claim about the pinned SCE. A foreign binary makes those verdicts
 # claims about a different one — measured at R114 as spurious rust+cpp
 # mismatches on msg_del/query/request. See scripts/lib/sce-codegen-oracle.sh.
-# shellcheck source=scripts/lib/sce-codegen-oracle.sh
-source "$ROOT/scripts/lib/sce-codegen-oracle.sh"
 _vc_want="$(sce_codegen_source_token "$ROOT/vendor/sce" || true)"
-_vc_have="$(sce_codegen_stamped_token "$ROOT/$WZ_SCE_CODEGEN_STAMP" || true)"
+_vc_have="$(sce_codegen_stamped_token "$WZ_SCE_CODEGEN_STAMP" || true)"
 if [[ -n "$_vc_want" && "$_vc_have" != "$_vc_want" ]]; then
     echo "verify-codegen: sce-codegen is not the pinned build." >&2
     echo "  built from: ${_vc_have:-<unstamped, predates the provenance gate>}" >&2

@@ -362,6 +362,11 @@ pub mod decl_sink;
 // and what left the same bug live in the REST bridge one crate away.
 pub mod selector_params;
 
+// The grammar of the `_time` selector parameter, its resolution against "now" and its
+// membership test: the one reading wz-zenoh-util's upstream-shaped `TimeRange` and
+// wz-ext-pubsub's cache filter both go through. No clock here; the caller names its instant type.
+pub mod time_range;
+
 /// R311y833 — the requester-side reply-keyexpr contract
 /// ([`reply_acceptance::ReplyKeyExpr`] + the acceptance policy a pending z_get
 /// registers with). zenoh states it as a GUARANTEE of `get()` itself and both
@@ -928,12 +933,14 @@ pub mod zid_hex;
 #[cfg(feature = "storage-profile")]
 pub mod json;
 
-/// One document, two encodings: the structured writer ([`doc_out::DocOut`]) a
-/// dissection document is written through, with a JSON and a CBOR encoding
-/// behind it that are the same document (RFC 8949 §6.2). Gated on `alloc` and
-/// not on `dissect`: the capture layer writes documents that need no walker
-/// (the census, the frame-check documents, the envelope every document opens
-/// with) through it too, in builds that have no walker.
+// One document, two encodings: the structured writer (`doc_out::DocOut`) a
+// dissection document is written through, with a JSON and a CBOR encoding
+// behind it that are the same document (RFC 8949 §6.2). Gated on `alloc` and
+// not on `dissect`: the capture layer writes documents that need no walker
+// (the census, the frame-check documents, the envelope every document opens
+// with) through it too, in builds that have no walker. A comment and not an
+// outer `///` doc: a module with both has its inner `//!` doc's links resolved
+// from this scope, where `DocOut`, `JsonOut`, `CborOut` and `cbor` are not.
 #[cfg(feature = "alloc")]
 pub mod doc_out;
 
@@ -1445,6 +1452,13 @@ pub mod unit_ext;
 /// and where the reassembly Router's chain-boundary rules anchor.
 #[cfg(any(feature = "reassembly", feature = "transport-fragmentation"))]
 pub mod extfragment;
+
+// A version-bearing message of another protocol version, as far as the layout
+// this reader shares with it reads (an Init, a Join, a Scout or a Hello the
+// observer refuses as a foreign version). A comment and not an outer `///` doc,
+// so the module's own `//!` doc resolves its links in its own scope.
+#[cfg(feature = "alloc")]
+pub mod foreign_version;
 
 // R311y578 (G2) — the PASSIVE session-context tracker: the observer-side
 // counterpart to `session_actions`'s participant state. Folds BOTH sides'

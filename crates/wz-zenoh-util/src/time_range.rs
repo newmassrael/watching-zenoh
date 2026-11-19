@@ -23,15 +23,31 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use humantime::{format_rfc3339, parse_rfc3339_weak};
-use zenoh_result::{bail, zerror, ZError};
+use humantime::format_rfc3339;
+use wz_session_core::time_range as grammar;
+use zenoh_result::{zerror, ZError};
 
-const U_TO_SECS: f64 = 0.000001;
-const MS_TO_SECS: f64 = 0.001;
-const M_TO_SECS: f64 = 60.0;
-const H_TO_SECS: f64 = M_TO_SECS * 60.0;
-const D_TO_SECS: f64 = H_TO_SECS * 24.0;
-const W_TO_SECS: f64 = D_TO_SECS * 7.0;
+// The grammar (the range, the time, the duration and the RFC3339 timestamp) is
+// `wz_session_core::time_range`, the one reading every wz crate makes of the `_time` parameter.
+// What stays here is upstream's API over it: these types, their conversions, `Display` and `Add`,
+// and upstream's error texts, rebuilt from the grammar's refusal with the same nesting of
+// `zerror!` upstream builds, so a refused text reads as upstream's.
+
+/// The wall clock's instant type and its checked arithmetic, for the grammar.
+enum Wall {}
+
+impl grammar::Clock for Wall {
+    type Instant = SystemTime;
+    fn from_unix(since_epoch: Duration) -> SystemTime {
+        SystemTime::UNIX_EPOCH + since_epoch
+    }
+    fn checked_add(at: SystemTime, by: Duration) -> Option<SystemTime> {
+        at.checked_add(by)
+    }
+    fn checked_sub(at: SystemTime, by: Duration) -> Option<SystemTime> {
+        at.checked_sub(by)
+    }
+}
 
 /// The structural representation of the Zenoh Time DSL, which may adopt one of two syntax:
 /// - the "range" syntax: `<ldel: '[' | ']'><start: TimeExpr?>..<end: TimeExpr?><rdel: '[' | ']'>`
@@ -161,65 +177,80 @@ impl Display for TimeRange<SystemTime> {
 impl FromStr for TimeRange<TimeExpr> {
     type Err = ZError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        // minimum str size is 4: "[..]"
-        let len = s.len();
-        if len < 4 {
-            bail!("Invalid TimeRange: {}", s);
+        // The end of a `;` range is the start moved by the duration. Upstream adds with the `Add`
+        // operator, which panics for a duration that is negative, not a number, infinite or past
+        // what a `SystemTime` holds, whatever the user wrote after the ';'. The grammar moves a
+        // start back by a negative duration, as upstream moves a `now()` start, and refuses the
+        // sums no `SystemTime` holds.
+        let range = grammar::parse_range::<Wall>(s).map_err(|refusal| range_error(s, refusal))?;
+        Ok(TimeRange {
+            start: range.start.into(),
+            end: range.end.into(),
+        })
+    }
+}
+
+impl From<grammar::TimeExpr<SystemTime>> for TimeExpr {
+    fn from(value: grammar::TimeExpr<SystemTime>) -> Self {
+        match value {
+            grammar::TimeExpr::Fixed(t) => TimeExpr::Fixed(t),
+            grammar::TimeExpr::Now { offset_secs } => TimeExpr::Now { offset_secs },
         }
+    }
+}
 
-        let mut chars = s.chars();
-        let inclusive_start = match chars.next().unwrap() {
-            '[' => true,
-            ']' => false,
-            _ => bail!("Invalid TimeRange (must start with '[' or ']'): {}", s),
-        };
-        let inclusive_end = match chars.last().unwrap() {
-            ']' => true,
-            '[' => false,
-            _ => bail!("Invalid TimeRange (must end with '[' or ']'): {}", s),
-        };
+impl From<grammar::Edge<grammar::TimeExpr<SystemTime>>> for TimeBound<TimeExpr> {
+    fn from(value: grammar::Edge<grammar::TimeExpr<SystemTime>>) -> Self {
+        match value {
+            grammar::Edge::Inclusive(t) => TimeBound::Inclusive(t.into()),
+            grammar::Edge::Exclusive(t) => TimeBound::Exclusive(t.into()),
+            grammar::Edge::Unbounded => TimeBound::Unbounded,
+        }
+    }
+}
 
-        let s = &s[1..len - 1];
-        if let Some((start, end)) = s.split_once("..") {
-            Ok(TimeRange {
-                start: parse_time_bound(start, inclusive_start)?,
-                end: parse_time_bound(end, inclusive_end)?,
-            })
-        } else if let Some((start, duration)) = s.split_once(';') {
-            let start_bound = parse_time_bound(start, inclusive_start)?;
-            let duration = parse_duration(duration)?;
-            let end_bound = match &start_bound {
-                TimeBound::Inclusive(time) | TimeBound::Exclusive(time) => {
-                    // The end is the start moved by the duration. Upstream adds with the `Add`
-                    // operator, which panics for a duration that is negative, not a number, infinite
-                    // or past what a `SystemTime` holds, whatever the user wrote after the ';'; the
-                    // checked sum answers `None` for the ones nothing can hold.
-                    let Some(end) = time.checked_add(duration) else {
-                        bail!(
-                            "Invalid TimeRange (the end of a start and a duration cannot be represented): {}",
-                            s
-                        )
-                    };
-                    if inclusive_end {
-                        TimeBound::Inclusive(end)
-                    } else {
-                        TimeBound::Exclusive(end)
-                    }
-                }
-                TimeBound::Unbounded => bail!(
-                    r#"Invalid TimeRange (';' must contain a time and a duration)"): {}"#,
-                    s
-                ),
-            };
-            Ok(TimeRange {
-                start: start_bound,
-                end: end_bound,
-            })
-        } else {
-            bail!(
-                r#"Invalid TimeRange (must contain ".." or ";" as separator)"): {}"#,
-                s
-            )
+/// Upstream's error for a refused range `s`: the text upstream's parser builds at the check the
+/// grammar refused at.
+fn range_error(s: &str, refusal: grammar::RangeError<'_>) -> ZError {
+    use grammar::RangeError;
+    match refusal {
+        RangeError::TooShort => zerror!("Invalid TimeRange: {}", s),
+        RangeError::BadStart => zerror!("Invalid TimeRange (must start with '[' or ']'): {}", s),
+        RangeError::BadEnd => zerror!("Invalid TimeRange (must end with '[' or ']'): {}", s),
+        RangeError::Time(refusal) => time_error(refusal),
+        RangeError::Duration(refusal) => duration_error(refusal),
+        RangeError::NoStart { inner } => zerror!(
+            r#"Invalid TimeRange (';' must contain a time and a duration)"): {}"#,
+            inner
+        ),
+        RangeError::EndUnrepresentable { inner } => zerror!(
+            "Invalid TimeRange (the end of a start and a duration cannot be represented): {}",
+            inner
+        ),
+        RangeError::NoSeparator { inner } => zerror!(
+            r#"Invalid TimeRange (must contain ".." or ";" as separator)"): {}"#,
+            inner
+        ),
+    }
+}
+
+/// Upstream's error for a refused time: the cause's own error, inside the time's.
+fn time_error(refusal: grammar::TimeError<'_>) -> ZError {
+    let cause = match refusal.cause {
+        grammar::TimeCause::Duration(refusal) => duration_error(refusal),
+        grammar::TimeCause::Instant(refusal) => zerror!(refusal),
+    };
+    zerror!(r#"Invalid time "{}" ({})"#, refusal.text, cause)
+}
+
+/// Upstream's error for a refused duration.
+fn duration_error(refusal: grammar::DurationError<'_>) -> ZError {
+    match refusal {
+        grammar::DurationError::Empty => zerror!(
+            r#"Invalid duration: "" (expected format: <f64> (in seconds) or <f64><unit>. Accepted units: u, ms, s, m, h, d or w.)"#
+        ),
+        grammar::DurationError::Float { text, error } => {
+            zerror!(r#"Invalid duration "{}" ({})"#, text, error)
         }
     }
 }
@@ -310,7 +341,7 @@ impl TimeExpr {
     pub fn checked_resolve_at(&self, now: SystemTime) -> Option<SystemTime> {
         match self {
             TimeExpr::Fixed(t) => Some(*t),
-            TimeExpr::Now { offset_secs } => checked_duration_add(now, *offset_secs),
+            TimeExpr::Now { offset_secs } => grammar::add_secs::<Wall>(now, *offset_secs),
         }
     }
     /// Adds `duration` to `self`, returning `None` if `self` is a `Fixed(SystemTime)` and adding the duration is not possible
@@ -318,7 +349,7 @@ impl TimeExpr {
     /// Otherwise returns `Some(time_expr)`.
     pub fn checked_add(&self, duration: f64) -> Option<Self> {
         match self {
-            Self::Fixed(time) => checked_duration_add(*time, duration).map(Self::Fixed),
+            Self::Fixed(time) => grammar::add_secs::<Wall>(*time, duration).map(Self::Fixed),
             Self::Now { offset_secs } => Some(Self::Now {
                 offset_secs: offset_secs + duration,
             }),
@@ -329,7 +360,7 @@ impl TimeExpr {
     /// Otherwise returns `Some(time_expr)`.
     pub fn checked_sub(&self, duration: f64) -> Option<Self> {
         match self {
-            Self::Fixed(time) => checked_duration_add(*time, -duration).map(Self::Fixed),
+            Self::Fixed(time) => grammar::add_secs::<Wall>(*time, -duration).map(Self::Fixed),
             Self::Now { offset_secs } => Some(Self::Now {
                 offset_secs: offset_secs - duration,
             }),
@@ -357,22 +388,9 @@ impl Display for TimeExpr {
 impl FromStr for TimeExpr {
     type Err = ZError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.starts_with("now(") && s.ends_with(')') {
-            let s = &s[4..s.len() - 1];
-            if s.is_empty() {
-                Ok(TimeExpr::Now { offset_secs: 0.0 })
-            } else {
-                match s.chars().next().unwrap() {
-                    '-' => parse_duration(&s[1..]).map(|f| TimeExpr::Now { offset_secs: -f }),
-                    _ => parse_duration(s).map(|f| TimeExpr::Now { offset_secs: f }),
-                }
-            }
-        } else {
-            parse_rfc3339_weak(s)
-                .map_err(|e| zerror!(e))
-                .map(TimeExpr::Fixed)
-        }
-        .map_err(|e| zerror!(r#"Invalid time "{}" ({})"#, s, e))
+        grammar::parse_time::<Wall>(s)
+            .map(TimeExpr::from)
+            .map_err(time_error)
     }
 }
 
@@ -400,59 +418,11 @@ impl Add<f64> for &TimeExpr {
     }
 }
 
-fn checked_duration_add(t: SystemTime, duration: f64) -> Option<SystemTime> {
-    if duration >= 0.0 {
-        Duration::try_from_secs_f64(duration)
-            .ok()
-            .and_then(|d| t.checked_add(d))
-    } else {
-        Duration::try_from_secs_f64(-duration)
-            .ok()
-            .and_then(|d| t.checked_sub(d))
-    }
-}
-
-fn parse_time_bound(s: &str, inclusive: bool) -> Result<TimeBound<TimeExpr>, ZError> {
-    if s.is_empty() {
-        Ok(TimeBound::Unbounded)
-    } else if inclusive {
-        Ok(TimeBound::Inclusive(s.parse()?))
-    } else {
-        Ok(TimeBound::Exclusive(s.parse()?))
-    }
-}
-
-/// Parses a &str as a Duration.
-/// Expected format is a f64 in seconds, or "<f64><unit>" where <unit> is:
-///  - 'u'  => microseconds
-///  - "ms" => milliseconds
-///  - 's' => seconds
-///  - 'm' => minutes
-///  - 'h' => hours
-///  - 'd' => days
-///  - 'w' => weeks
+/// Upstream's private duration reader, which upstream's tests below call: the grammar's, with
+/// upstream's error.
+#[cfg(test)]
 fn parse_duration(s: &str) -> Result<f64, ZError> {
-    if s.is_empty() {
-        bail!(
-            r#"Invalid duration: "" (expected format: <f64> (in seconds) or <f64><unit>. Accepted units: u, ms, s, m, h, d or w.)"#
-        );
-    }
-    let mut it = s.bytes().enumerate().rev();
-    match it.next().unwrap() {
-        (i, b'u') => s[..i].parse::<f64>().map(|u| U_TO_SECS * u),
-        // A lone "s" has nothing before the unit: upstream asks the iterator for it and panics.
-        (_, b's') => match it.next() {
-            Some((i, b'm')) => s[..i].parse::<f64>().map(|ms| MS_TO_SECS * ms),
-            Some((i, _)) => s[..i + 1].parse::<f64>(),
-            None => s.parse::<f64>(),
-        },
-        (i, b'm') => s[..i].parse::<f64>().map(|m| M_TO_SECS * m),
-        (i, b'h') => s[..i].parse::<f64>().map(|h| H_TO_SECS * h),
-        (i, b'd') => s[..i].parse::<f64>().map(|d| D_TO_SECS * d),
-        (i, b'w') => s[..i].parse::<f64>().map(|w| W_TO_SECS * w),
-        _ => s.parse::<f64>(),
-    }
-    .map_err(|e| zerror!(r#"Invalid duration "{}" ({})"#, s, e))
+    grammar::parse_duration(s).map_err(duration_error)
 }
 
 #[cfg(test)]
