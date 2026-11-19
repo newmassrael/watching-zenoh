@@ -1354,6 +1354,25 @@ abis = ["core", "pico"]
 implies = ["unstable-api"]
 help = "Supervise the reception of periodic streams: a deadline per stream, a loss told once, saturating error counts, a start delay, an application condition and absent senders (wz_ext_stream_supervisor_*, wz-own doors)."
 
+# The replay cache: a publisher keeps the frames it last sent of each instance of a message, as it
+# sent them, and answers them on the message's key plus a suffix the application states; a
+# subscriber asks each publisher as its suffixed queryable appears and judges the answers in the
+# receive path of its live samples. Off by default: neither zenoh-c nor zenoh-pico has such doors.
+# The pico ABI's doors are wz_ext_* and part of its unstable surface; the ring, the serving gate and
+# the subscriber's round are wz-session-core's. How deep a ring is is the REPLAY_DEPTH_MAX limit;
+# the answer's shape, whether serving holds the message's sends and whether live samples wait for
+# the replay are the three replay-* policies. The subscriber hears a publisher's queryable through
+# the declaration watch and asks it with a get, so the capability implies both ends of a query.
+[[capability]]
+id = "replay-cache"
+kconfig = "WZ_CAP_REPLAY_CACHE"
+default = "off"
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = ["unstable-api", "query", "queryable", "remote-declaration-watch"]
+help = "Replay what each publisher last sent to a subscriber that arrives later: a ring of sent frames per instance, answered on a suffixed key, asked of each publisher as it appears and merged with live data in one stated order (wz_ext_replay_*, wz-own doors)."
+
 [[capability]]
 id = "app-transport"
 kconfig = "WZ_CAP_APP_TRANSPORT"
@@ -3451,6 +3470,71 @@ with every sample. Decided when the supervisor is made, and fixed for its life.
 '''
 
 [[policy]]
+id = "replay-reply-shape"
+kind = "choice"
+kconfig = "WZ_POLICY_REPLAY_REPLY_SHAPE"
+choices = ["frame-per-sample", "segmented"]
+default = "frame-per-sample"
+upstream = "Keeps no ring of sent frames, so there is no replay to answer and no shape to give it; a queryable the application declares answers whatever it replies."
+scope = "message"
+binding = "open"
+mutability = "fixed"
+wire = "visible"
+since = 2
+help = '''
+How a publisher's replay cache answers a query. `frame-per-sample` answers one
+reply per sample of the ring, each the frame exactly as it was sent, then the
+final. `segmented` answers each sample as the pieces of the message's declared
+segment profile, every sample under the next transfer number, for a message
+whose frames are larger than a deployment puts in one sample. Decided when the
+cache starts serving, and fixed while it serves.
+'''
+
+[[policy]]
+id = "replay-serve-holds-sends"
+kind = "bool"
+kconfig = "WZ_POLICY_REPLAY_SERVE_HOLDS_SENDS"
+default = "off"
+upstream = "Keeps no ring of sent frames and answers no replay, so a send is never held back for one."
+scope = "message"
+binding = "open"
+mutability = "fixed"
+wire = "timing"
+since = 2
+help = '''
+Whether a publisher's sends of a message wait while its replay cache answers a
+query. Off, a send goes out at once, and a subscriber may see a newer frame
+before the replay that precedes it. On, a periodic send is held and only the
+latest of each instance goes out once the answer is over, and an event send is
+deferred to a queue of max(1, depth/2) frames that gives up the oldest when it
+is full; the held frames go out in the order they were sent, before any later
+send. Decided when the cache starts serving, and fixed while it serves.
+'''
+
+[[policy]]
+id = "replay-live-before-answer"
+kind = "choice"
+kconfig = "WZ_POLICY_REPLAY_LIVE_BEFORE_ANSWER"
+choices = ["deliver", "hold-back"]
+default = "deliver"
+upstream = "Asks no publisher for what it sent before, so a live sample is delivered as it arrives and there is no replay to order it against."
+scope = "message"
+binding = "open"
+mutability = "fixed"
+wire = "none"
+since = 2
+help = '''
+How a subscriber that asks for a replay orders its live samples against it.
+`deliver` hands each live sample on as it arrives, so live samples and replies
+interleave and the receiving judge drops a reply that is behind what it has
+seen. `hold-back` holds the live samples, in a store the application sizes,
+until the first round of replies is over or abandoned by its deadline (or the
+store is full), then hands them on after every reply of that round, so the
+application never sees a newer sample before the replay that precedes it.
+Decided when the subscriber is made, and fixed for its life.
+'''
+
+[[policy]]
 id = "event-ring-full"
 kind = "choice"
 kconfig = "WZ_POLICY_EVENT_RING_FULL"
@@ -3756,6 +3840,9 @@ key-set = "open"
 sn-resolution = "bits-32"
 supervision-after-expiry = "latch"
 e2e-supervision-notify = "status-only"
+replay-reply-shape = "frame-per-sample"
+replay-serve-holds-sends = "off"
+replay-live-before-answer = "deliver"
 event-ring-full = "overwrite-oldest"
 clock-quality-stamping = "always"
 routing-face-drive = "task-per-face"

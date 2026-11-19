@@ -242,6 +242,11 @@ segment-sender = []
 # (`wz-capi-pico/e2e-supervision`), so this feature only carries the capability's name, as
 # `e2e-sender`'s does.
 e2e-supervision = []
+# The replay cache. The model has nothing behind it: the ring, the serving gate and the
+# subscriber's round are `wz-session-core`'s (`replay_publisher`, `replay_round`) and the doors are
+# the pico ABI's own (`wz-capi-pico/replay-cache`), so this feature only carries the capability's
+# name, as `e2e-sender`'s does.
+replay-cache = []
 # A transport the program supplies: every link a session opens goes over the program's own network
 # stack, through the calls of its port, and over no socket of the system's. The model threads the
 # transport from the stance to each dial and listen config (`OpenStance::app_transport`); the
