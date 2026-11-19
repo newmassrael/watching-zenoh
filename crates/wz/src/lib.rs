@@ -266,6 +266,35 @@ pub use wz_runtime_core as runtime_core;
 ///
 /// The Rust compatibility surface carries upstream's names only, as the drop-in C headers do,
 /// so a program that reaches for something here says by its path that it is not portable to
-/// zenoh. Empty until the first switch that exposes a Rust door of its own (a watch on a remote
-/// declaration, a pool's monitor); the C doors of the same switches are `wz_ext_*`.
-pub mod ext {}
+/// zenoh. The C doors of the same behaviour are `wz_ext_*`.
+pub mod ext {
+    /// Tell the peer of `session` everything the session holds again: its subscriptions,
+    /// queryables, tokens and interests, as the session tells a peer whose link has just come up.
+    /// Nothing the session holds changes; each entity keeps its id and its route. For a program
+    /// that holds that the peer lost declarations the session made. The count of declarations
+    /// sent, or why none was: a build without `session-reconnect` keeps no record of them
+    /// (`FeatureDisabled`), and a refused send stops the telling where it was. The C door is
+    /// `wz_ext_redeclare`.
+    #[cfg(all(feature = "runtime-tokio", feature = "transport-unicast"))]
+    pub fn redeclare(
+        session: &crate::runtime_tokio::session::TokioSession,
+    ) -> Result<usize, crate::runtime_tokio::session_glue::ReplayDeclarationsError> {
+        session.actions().replay_declarations()
+    }
+
+    #[cfg(all(test, feature = "runtime-tokio", feature = "transport-unicast"))]
+    mod tests {
+        /// The door is the session's own replay, under the types a program names it by: a
+        /// change of either the session type or the error it answers fails here.
+        #[test]
+        fn the_redeclare_door_takes_a_session_and_answers_the_replays_result() {
+            let door: fn(
+                &crate::runtime_tokio::session::TokioSession,
+            ) -> Result<
+                usize,
+                crate::runtime_tokio::session_glue::ReplayDeclarationsError,
+            > = super::redeclare;
+            let _ = door;
+        }
+    }
+}

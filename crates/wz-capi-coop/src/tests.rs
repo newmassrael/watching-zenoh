@@ -1058,6 +1058,25 @@ fn a_session_that_redials_none_ends_with_its_link() {
     assert!(SessionDrive::read(&*engine, false).is_err());
 }
 
+/// The redeclare door: an open session tells the peer of its one link everything it holds again
+/// and answers the count of links, and a closed one answers that it is closed.
+#[test]
+fn a_session_redeclares_over_each_link_that_is_up_and_a_closed_one_refuses() {
+    use wz_capi_port::RedeclareRefusal;
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    assert_eq!(SessionEngine::redeclare(&*engine), Ok(1), "the dial link");
+    router.send(Command::Close);
+    drop(router);
+    until(&engine, "the session to end", || {
+        SessionDrive::is_closed(&*engine)
+    });
+    assert_eq!(
+        SessionEngine::redeclare(&*engine),
+        Err(RedeclareRefusal::Closed)
+    );
+}
+
 /// `zid-derivation = address-ports`: the zid is the first listen endpoint's own address, the
 /// lowest tcp and udp ports and the eight bytes the source gives, in the wire form; a session
 /// whose listeners name no address of the node is refused with the reason, and a source that

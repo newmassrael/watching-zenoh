@@ -175,6 +175,9 @@ pub mod clock_source;
 pub mod decl_watch;
 #[cfg(feature = "unstable-api")]
 pub mod device_requires;
+// `wz_ext_redeclare`: tell a session's peers what it holds again.
+#[cfg(feature = "unstable-api")]
+pub mod redeclare;
 // The node's event log, written and read from C: wz doors (`wz_ext.h`) of the unstable surface
 // (the event ring of the observation plane).
 pub mod encoding;

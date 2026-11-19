@@ -1144,6 +1144,23 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         self.bring_up(at, wire, now_us);
     }
 
+    /// Tell the peer of every face whose link is up everything the session holds again, as a link
+    /// that has just come up is told (`begin_replay`), at the session's pace; the count of faces.
+    /// What the application asks for when it holds that a peer lost declarations the session made.
+    fn redeclare(&mut self) -> usize {
+        let now_ms = self.clock.now_us() / 1000;
+        let mut told = 0;
+        for at in 0..self.faces.len() {
+            let actions = match &self.faces[at].link {
+                Link::Up(wire) => Rc::clone(&wire.actions),
+                _ => continue,
+            };
+            self.begin_replay(at, &actions, now_ms);
+            told += 1;
+        }
+        told
+    }
+
     /// The link of the face at `at` is `wire`, up: what the session holds is declared over it from
     /// here on, and the watchers of the faces are told it came up.
     fn bring_up(&mut self, at: usize, wire: Wire<C>, now_us: u64) {
@@ -2388,6 +2405,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 .ups()
                 .any(|actions| actions.peer_whatami_wire() == Some(0))
         })
+    }
+
+    fn redeclare(&self) -> Result<usize, wz_capi_port::RedeclareRefusal> {
+        let mut core = self.live().ok_or(wz_capi_port::RedeclareRefusal::Closed)?;
+        Ok(core.0.redeclare())
     }
 
     fn publish_on_wire_all(
