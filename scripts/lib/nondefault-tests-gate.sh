@@ -401,6 +401,16 @@ transport-link-unixpipe,transport-link-ws|"
     # by name. The doors have no unit tests of their own; the mechanism's are `wz-app-frame`'s.
     "wz-capi-pico|hook|e2e-sender,e2e-sender-demux|--test=e2e_doors"
     "wz-capi-pico|hook|e2e-sender,e2e-receiver|--test=e2e_doors"
+    # Instance keys (`wz_app_frame::instance_key`): the model tests of the keyer, its last values
+    # and its two stream doors, with the tests of the schema reader's tokenizer and parser, which
+    # moved to this crate with the reader and compile only with `proto` (which this implies).
+    "wz-app-frame|hook|instance-key|"
+    # The keyer driven from C (`wz_ext_instance_keyer_*`): alone, where the file indexes, keeps
+    # the last values and counts the drops; and with both end-to-end doors, the receiver's sender
+    # slots and the event log, where it also judges and protects in the stream of an instance,
+    # refuses a receiver kept per sender, and reads a report of drops back as an event.
+    "wz-capi-pico|hook|instance-key|--test=instance_key_doors"
+    "wz-capi-pico|hook|instance-key,e2e-sender,e2e-sender-demux,event-ring|--test=instance_key_doors"
     # The declaration watch driven from C (`wz_ext_decl_watch_*`): the unit tests of the module and
     # the target that watches a peer's subscriber, queryable and token come and go over loopback
     # (`decl_watch_doors`, compiled with either capability). Both capabilities, where each event
