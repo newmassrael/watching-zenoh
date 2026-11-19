@@ -947,7 +947,42 @@ unsafe fn ask(session: &z_owned_session_t, key: &CStr) -> Vec<Vec<u8>> {
             return got;
         }
         assert!(Instant::now() < deadline, "no get was ever answered");
+        // A get that found no target completed at once; the next is asked after a pause.
+        std::thread::sleep(Duration::from_millis(200));
     }
+}
+
+unsafe extern "C" fn on_peer(_id: *const wz_capi_pico::zid::z_id_t, context: *mut c_void) {
+    (*(context as *const AtomicUsize)).fetch_add(1, Ordering::SeqCst);
+}
+
+/// Wait until `session` knows a peer, as `z_info_peers_zid` lists them. A group member knows
+/// another only from the other's JOIN, which zenoh-pico sends every `Z_JOIN_INTERVAL` (2500 ms)
+/// and not in answer to a new member's own, and a get asked while no peer is known completes at
+/// once with no reply (`vendor/zenoh-pico/src/net/primitives.c` @ `if (remaining_finals == 0) {`).
+/// A client of a pair knows its peer from its open, so this returns at once there.
+unsafe fn wait_for_peer(session: &z_owned_session_t) {
+    use wz_capi_pico::zid::{z_closure_zid, z_closure_zid_move, z_info_peers_zid};
+    let peers = AtomicUsize::new(0);
+    wait_until(
+        "the asking session to know a peer",
+        Duration::from_secs(10),
+        || {
+            peers.store(0, Ordering::SeqCst);
+            let mut closure = std::mem::zeroed();
+            assert_eq!(
+                z_closure_zid(
+                    &mut closure,
+                    Some(on_peer),
+                    None,
+                    &peers as *const AtomicUsize as *mut c_void,
+                ),
+                Z_OK
+            );
+            let _ = z_info_peers_zid(z_session_loan(session), z_closure_zid_move(&mut closure));
+            peers.load(Ordering::SeqCst) > 0
+        },
+    );
 }
 
 /// A session opened on `locator` under `key` over `transport`.
@@ -977,6 +1012,7 @@ unsafe fn put_and_get(listener: &z_owned_session_t, dialler: &z_owned_session_t)
     let (heard, mut subscriber) = subscribe(listener, c"demo/pipe/**");
     let mut queryable = serve(listener, c"demo/ask");
     converge(dialler, c"demo/pipe/probe", &heard, "probe");
+    wait_for_peer(dialler);
     assert_eq!(
         ask(dialler, c"demo/ask"),
         [b"answer-over-the-pipe".to_vec()],

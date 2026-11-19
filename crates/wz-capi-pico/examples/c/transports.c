@@ -56,6 +56,29 @@ static void on_reply_drop(void *arg) {
     reply_done = 1;
 }
 
+static void on_peer(const z_id_t *id, void *arg) {
+    (void)id;
+    (*(int *)arg)++;
+}
+
+/* Wait until `session` knows a peer, as z_info_peers_zid lists them; 1 when it does. A group
+ * member knows another only from the other's JOIN, which zenoh-pico sends every
+ * Z_JOIN_INTERVAL (2500 ms by default) and not in answer to a new member's own, and a get
+ * a session asks while it knows no peer completes at once with no reply
+ * (src/net/primitives.c, _z_query: remaining_finals == 0). A client of a pair knows its
+ * peer from its open, so this returns at once there. */
+static int wait_for_peer(const z_loaned_session_t *session) {
+    for (int i = 0; i < 1000; i++) {
+        int peers = 0;
+        z_owned_closure_zid_t closure;
+        z_closure_zid(&closure, on_peer, NULL, &peers);
+        z_info_peers_zid(session, z_closure_zid_move(&closure));
+        if (peers > 0) return 1;
+        z_sleep_ms(10);
+    }
+    return 0;
+}
+
 static int ask(const z_loaned_session_t *session) {
     for (int attempt = 0; attempt < 15; attempt++) {
         reply_done = 0;
@@ -71,6 +94,8 @@ static int ask(const z_loaned_session_t *session) {
         }
         for (int i = 0; i < 500 && !reply_done; i++) z_sleep_ms(10);
         if (ex_counter_get(&replies) > 0) return 1;
+        /* A get that found no target completed at once; the next is asked after a pause. */
+        z_sleep_ms(200);
     }
     return 0;
 }
@@ -103,6 +128,7 @@ static void exchange(const char *what, z_owned_session_t *one, z_owned_session_t
         z_sleep_ms(25);
     }
     CHECK(ex_counter_get(&heard) > 0, "%s: the subscriber was never handed a put", what);
+    CHECK(wait_for_peer(z_session_loan(two)), "%s: the asking session never knew a peer", what);
     CHECK(ask(z_session_loan(two)), "%s: no get was answered", what);
     CHECK(strcmp(reply_text, "answer-over-the-link") == 0, "%s: the reply was '%s'", what, reply_text);
 
