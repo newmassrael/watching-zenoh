@@ -295,7 +295,7 @@ impl StreamSender {
             .as_ref()
             .filter(|c| c.frame[header..] == *payload);
         let (bytes, from_cache) = match hit {
-            Some(cached) => (self.from_cache(cached, counter), true),
+            Some(cached) => (self.rebuild_cached(cached, counter), true),
             None => (self.full(stream, counter, payload)?, false),
         };
         self.streams[stream].next = self.after(counter);
@@ -328,7 +328,7 @@ impl StreamSender {
 
     /// The frame for the cached payload with `counter`: the kept frame with the
     /// counter written in, its CRC resumed from the kept register.
-    fn from_cache(&self, cached: &Cached, counter: u64) -> Vec<u8> {
+    fn rebuild_cached(&self, cached: &Cached, counter: u64) -> Vec<u8> {
         let fields = self.profile.fields();
         let mut bytes = cached.frame.clone();
         let field = &fields[self.counter_field];
