@@ -658,9 +658,11 @@ fn with_the_node<T>(open: impl FnOnce() -> T) -> T {
 #[cfg(feature = "engine-tokio")]
 impl Engine {
     /// Open a session on this engine, from the document the configuration is, and the id the
-    /// session stands on.
+    /// session stands on, under `policy`, the snapshot the open resolved
+    /// (`Config::resolve_policies`).
     fn open(
         config: &Config,
+        policy: Policy,
         #[cfg(feature = "shared-memory")] shm_clients: Option<
             Arc<zenoh_shm::api::client_storage::ShmClientStorage>,
         >,
@@ -679,7 +681,9 @@ impl Engine {
         };
         let document = tokio_engine::document_of(&expanded, role, &zid)?;
         tokio_engine::refuse_repeated_ids(&document)?;
-        let plan = OpenPlan::resolve(role, stated, Some(&document.to_string()))
+        // The document is zenoh's configuration alone: the `wz` member was resolved with the
+        // open's own layer before this, and the plan runs under that snapshot.
+        let plan = OpenPlan::resolve_under(role, stated, Some(&document.to_string()), |_| policy)
             .map_err(tokio_engine::refusal_error)?;
         // Subregions of `gateway/south` are placed by a node alone: a shape that fits none is
         // refused by the key's name and not opened as the registry of faces, which has no south.
@@ -2049,7 +2053,7 @@ mod tokio_engine {
         let plan = ScoutingPlan::for_scout(&node, asked)
             .map_err(|error| zerror!("the configuration cannot be scouted with: {error:?}"))?;
         // The scout's snapshot, resolved from its configuration as an open resolves one.
-        let policy = wz_capi_core::open_plan::resolve_policy(Some(&node));
+        let policy = config.resolve_policies()?.policy;
         let stream = ScoutStream::start(plan, policy, asked, move |hello| {
             let whatami = match hello.whatami.map(|role| role.to_api()) {
                 Some(1) => WhatAmI::Router,
@@ -4288,6 +4292,10 @@ pub(crate) struct SessionInner {
     callbacks_drop_sync_group: SyncGroup,
     /// How long a query waits for its replies when it does not say, from the configuration.
     queries_default_timeout: Duration,
+    /// The policies the node was opened under, with the layer each value came from
+    /// ([`Session::resolved_policies`]).
+    #[cfg(feature = "open-policies")]
+    policies: wz_session_core::policy_document::Resolved,
     /// The configuration the session was opened with, as the application reads it
     /// ([`Session::config`]), and as the runtime admin space reads and writes it, which every
     /// build on the engine hosts ([`WeakSession::config_notifier`]).
@@ -5313,6 +5321,8 @@ impl Session {
             zid: core.zid,
             callbacks_drop_sync_group: SyncGroup::default(),
             queries_default_timeout: core.queries_default_timeout,
+            #[cfg(feature = "open-policies")]
+            policies: core.policies,
             #[cfg(any(feature = "unstable", feature = "engine-tokio"))]
             config: core.config,
             #[cfg(feature = "unstable")]
@@ -5358,6 +5368,9 @@ pub(crate) struct RuntimeCore {
     engine: Arc<Engine>,
     zid: ZenohId,
     queries_default_timeout: Duration,
+    /// The policies the node was opened under, with the layer each value came from.
+    #[cfg(feature = "open-policies")]
+    policies: wz_session_core::policy_document::Resolved,
     #[cfg(any(feature = "unstable", feature = "engine-tokio"))]
     config: crate::api::config::Notifier<zenoh_config::ExpandedConfig>,
     #[cfg(feature = "unstable")]
@@ -5411,8 +5424,13 @@ impl RuntimeCore {
             Arc<zenoh_shm::api::client_storage::ShmClientStorage>,
         >,
     ) -> ZResult<RuntimeCore> {
+        // The one place an open of this crate decides its policies; a refusal opens nothing.
+        #[cfg(feature = "engine-tokio")]
+        let policies = config.resolve_policies()?;
         let (engine, zid) = Engine::open(
             config,
+            #[cfg(feature = "engine-tokio")]
+            policies.policy,
             #[cfg(feature = "shared-memory")]
             shm_clients.clone(),
         )?;
@@ -5461,6 +5479,8 @@ impl RuntimeCore {
             engine: Arc::new(engine),
             zid,
             queries_default_timeout,
+            #[cfg(feature = "open-policies")]
+            policies,
             #[cfg(any(feature = "unstable", feature = "engine-tokio"))]
             config: crate::api::config::Notifier::new(config.0.clone().expanded()),
             #[cfg(feature = "unstable")]
@@ -5476,6 +5496,17 @@ impl RuntimeCore {
             #[cfg(feature = "shared-memory")]
             shm_clients,
         })
+    }
+}
+
+/// The door to the policies of an open, wz's beyond upstream's surface.
+#[cfg(feature = "open-policies")]
+impl Session {
+    /// The policies the session's node was opened under, and the layer each value came from: the
+    /// build defaults, a profile, the configuration's `wz` member or the open's own statements
+    /// ([`Config::state_policy`](crate::config::Config::state_policy)).
+    pub fn resolved_policies(&self) -> crate::config::Resolved {
+        self.0.policies
     }
 }
 
@@ -7053,6 +7084,137 @@ mod tests {
         let session = open(peer("a1b2c3")).wait().expect("a peer opens alone");
         assert_eq!(session.zid(), ZenohId::from_str("a1b2c3").expect("an id"));
         assert!(!session.is_closed());
+    }
+
+    /// A value of `subscriber-overload` other than the build's default that the build allows, if
+    /// any: what a configuration can state and a session be seen to run under.
+    fn another_overload() -> Option<&'static str> {
+        let entry = wz_session_core::policy::POLICIES
+            .iter()
+            .find(|entry| entry.id() == "subscriber-overload")?;
+        let held = entry.value_in(&wz_session_core::policy::SessionPolicy::defaults());
+        entry
+            .values()
+            .iter()
+            .copied()
+            .find(|value| *value != held && entry.domain().contains(value))
+    }
+
+    /// The peer `peer` makes, with a `wz` member that states `subscriber-overload`.
+    fn peer_stating_overload(id: &str, value: &str) -> Config {
+        Config::from_json5(&format!(
+            r#"{{ id: "{id}", mode: "peer",
+                  listen: {{ endpoints: ["tcp/127.0.0.1:0"] }},
+                  scouting: {{ multicast: {{ enabled: false }} }},
+                  wz: {{ policies: {{ "subscriber-overload": "{value}" }} }} }}"#
+        ))
+        .expect("the member is held beside zenoh's configuration")
+    }
+
+    /// The `wz` member of the configuration is what the session runs under, and a configuration
+    /// with none runs under the build defaults.
+    #[test]
+    fn a_session_runs_under_the_policies_its_wz_member_states() {
+        let Some(value) = another_overload() else {
+            // The build allows one value: there is nothing to state but the default.
+            return;
+        };
+        let session = open(peer_stating_overload("c8a1a1", value))
+            .wait()
+            .expect("the member resolves");
+        assert_eq!(
+            session.0.engine.session_policy().subscriber_overload().id(),
+            value
+        );
+        #[cfg(feature = "open-policies")]
+        assert_eq!(
+            session
+                .resolved_policies()
+                .provenance
+                .origin("subscriber-overload"),
+            Some(crate::config::Origin::Document)
+        );
+        let plain = open(peer("c8a1a2")).wait().expect("opens");
+        assert_eq!(
+            *plain.0.engine.session_policy(),
+            wz_session_core::policy::SessionPolicy::defaults()
+        );
+    }
+
+    /// A member the build refuses fails the open with every refusal named, and opens nothing.
+    #[test]
+    fn a_refused_wz_member_fails_the_open_naming_each_refusal() {
+        let config = Config::from_json5(
+            r#"{ id: "c8a1b1", mode: "peer",
+                 listen: { endpoints: ["tcp/127.0.0.1:0"] },
+                 scouting: { multicast: { enabled: false } },
+                 wz: { profile: "no-such-profile", policies: { "key-set": "ajar" } } }"#,
+        )
+        .expect("the member is judged at the open, not when it is read");
+        let error = open(config).wait().map(|_| ()).unwrap_err().to_string();
+        assert!(error.contains("the `wz` member is refused"), "{error}");
+        assert!(
+            error.contains("names the profile `no-such-profile`"),
+            "{error}"
+        );
+        assert!(error.contains("`key-set` has no value `ajar`"), "{error}");
+    }
+
+    /// What the open states over the document wins, and the session says which layer each value
+    /// came from.
+    #[cfg(feature = "open-policies")]
+    #[test]
+    fn the_opens_own_statement_wins_over_the_document_and_says_so() {
+        use crate::config::Origin;
+
+        let Some(value) = another_overload() else {
+            return;
+        };
+        let default = wz_session_core::policy::SessionPolicy::defaults()
+            .subscriber_overload()
+            .id();
+        let mut config = peer_stating_overload("c8a1c1", value);
+        config
+            .state_policy("subscriber-overload", default)
+            .expect("the build's own value");
+        let session = open(config).wait().expect("opens");
+        let resolved = session.resolved_policies();
+        assert_eq!(resolved.policy.subscriber_overload().id(), default);
+        assert_eq!(resolved.policy, *session.0.engine.session_policy());
+        assert_eq!(
+            resolved.provenance.origin("subscriber-overload"),
+            Some(Origin::Api)
+        );
+        assert_eq!(
+            resolved.provenance.origin("key-set"),
+            Some(Origin::BuildDefault)
+        );
+    }
+
+    /// The profile the open names is the layer below the document's own policies.
+    #[cfg(feature = "open-policies")]
+    #[test]
+    fn the_profile_the_open_names_is_read_below_the_document() {
+        use crate::config::Origin;
+
+        let Some(value) = another_overload() else {
+            return;
+        };
+        let mut config = peer_stating_overload("c8a1d1", value);
+        if config.state_profile("upstream").is_err() {
+            // The build leaves a value of the profile out of a domain: refused when stated.
+            return;
+        }
+        let session = open(config).wait().expect("opens");
+        let resolved = session.resolved_policies();
+        assert_eq!(
+            resolved.provenance.origin("subscriber-overload"),
+            Some(Origin::Document)
+        );
+        assert_eq!(
+            resolved.provenance.origin("key-set"),
+            Some(Origin::Profile("upstream"))
+        );
     }
 
     /// A session takes the node's next entity id, and a node with none left refuses the session

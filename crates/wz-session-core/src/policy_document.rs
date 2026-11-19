@@ -32,8 +32,9 @@
 //!
 //! With `alloc`, `statements_from_json5` reads the `wz` member of a parsed JSON5 document (the
 //! zenoh configuration a node is opened with) into the profile it names and its statements, and
-//! `resolve_document` resolves them over a base. `wz/limits` is refused by name: the limits a
-//! document may state are not read at the open by this build.
+//! `resolve_document` resolves them over a base. `resolve_document_under` adds what the open's
+//! caller states beside the document ([`Overrides`]), the same way for every ABI. `wz/limits` is
+//! refused by name: the limits a document may state are not read at the open by this build.
 
 use core::fmt;
 
@@ -87,6 +88,17 @@ pub struct Layer<'s, 'a> {
     /// Where the statements come from; the origin of each value they set.
     pub origin: Origin,
     /// What the layer states.
+    pub statements: &'s [Statement<'a>],
+}
+
+/// What the open's caller states beside the document ([`Origin::Api`]): a profile that stands in
+/// for the one the document names, and statements over the document's own. The default states
+/// nothing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Overrides<'s, 'a> {
+    /// The id of the profile the caller names, if it names one.
+    pub profile: Option<&'a str>,
+    /// What the caller states, each policy once.
     pub statements: &'s [Statement<'a>],
 }
 
@@ -479,14 +491,64 @@ fn apply<'a>(
     }
 }
 
+/// `base` with what a caller states and no document: the profile `overrides` names, then its
+/// statements ([`Origin::Api`]). It answers what `resolve_document_under` answers for a document
+/// with no `wz` member, without reading a document, so a build that is handed none links no
+/// reader of one.
+// The refusals are held inline because the core has no heap to box them in.
+#[allow(clippy::result_large_err)]
+pub fn resolve_under<'a>(
+    base: SessionPolicy,
+    overrides: Overrides<'_, 'a>,
+) -> Result<Resolved, Refusals<'a>> {
+    let mut refusals = Refusals::new();
+    let stated = find_profile(overrides.profile, Origin::Api, &mut refusals);
+    let api = Layer {
+        origin: Origin::Api,
+        statements: overrides.statements,
+    };
+    let resolved = match stated {
+        Some(profile) => compose(&POLICIES, base, &[profile.layer(), api], &mut refusals),
+        None => compose(&POLICIES, base, &[api], &mut refusals),
+    };
+    if refusals.is_empty() {
+        Ok(resolved)
+    } else {
+        Err(refusals)
+    }
+}
+
+/// The profile of the build whose id is `id`, or `None` when `id` is; an id the build has no
+/// profile for is refused in `layer`, the layer that named it.
+fn find_profile<'a>(
+    id: Option<&'a str>,
+    layer: Origin,
+    refusals: &mut Refusals<'a>,
+) -> Option<&'static Profile> {
+    let id = id?;
+    let found = Profile::find(id);
+    if found.is_none() {
+        refusals.push(Refusal {
+            layer,
+            reason: Reason::UnknownProfile { profile: id },
+        });
+    }
+    found
+}
+
 #[cfg(feature = "alloc")]
-pub use from_json5::{resolve_document, statements_from_json5, DocumentStatements};
+pub use from_json5::{
+    resolve_document, resolve_document_under, statements_from_json5, DocumentStatements,
+};
 
 #[cfg(feature = "alloc")]
 mod from_json5 {
     use alloc::vec::Vec;
 
-    use super::{compose, Layer, Origin, Profile, Reason, Refusal, Refusals, Resolved, Statement};
+    use super::{
+        compose, find_profile, Layer, Origin, Overrides, Reason, Refusal, Refusals, Resolved,
+        Statement,
+    };
     use crate::json5::Json5Value;
     use crate::policy::{SessionPolicy, POLICIES, POLICY_COUNT};
     use crate::policy_binding::PolicyEntry;
@@ -530,7 +592,22 @@ mod from_json5 {
         base: SessionPolicy,
         tree: &Json5Value,
     ) -> Result<Resolved, Refusals<'_>> {
-        resolve_document_in(&POLICIES, base, tree)
+        resolve_document_in(&POLICIES, base, tree, Overrides::default())
+    }
+
+    /// [`resolve_document`] with what the open's caller states over the document: the profile
+    /// `overrides` names stands in for the one the document names, and its statements are the
+    /// last layer ([`Origin::Api`]). A profile either names that the build does not have is
+    /// refused in the layer that named it, the document's one too when `overrides` names
+    /// another: the document is judged whole whatever is stated over it.
+    // The refusals are held inline because the core has no heap to box them in.
+    #[allow(clippy::result_large_err)]
+    pub fn resolve_document_under<'a>(
+        base: SessionPolicy,
+        tree: &'a Json5Value,
+        overrides: Overrides<'_, 'a>,
+    ) -> Result<Resolved, Refusals<'a>> {
+        resolve_document_in(&POLICIES, base, tree, overrides)
     }
 
     // The policies are a parameter so a test can resolve with a policy the build does not have.
@@ -539,23 +616,28 @@ mod from_json5 {
         table: &[PolicyEntry; POLICY_COUNT],
         base: SessionPolicy,
         tree: &'a Json5Value,
+        overrides: Overrides<'_, 'a>,
     ) -> Result<Resolved, Refusals<'a>> {
         let mut refusals = Refusals::new();
         let read = read_wz(tree, &mut refusals);
-        let profile = read.profile.and_then(|id| {
-            let found = Profile::find(id);
-            if found.is_none() {
-                refuse(&mut refusals, Reason::UnknownProfile { profile: id });
-            }
-            found
-        });
+        let named = find_profile(read.profile, Origin::Document, &mut refusals);
+        let stated = find_profile(overrides.profile, Origin::Api, &mut refusals);
         let document = Layer {
             origin: Origin::Document,
             statements: &read.statements,
         };
-        let resolved = match profile {
-            Some(profile) => compose(table, base, &[profile.layer(), document], &mut refusals),
-            None => compose(table, base, &[document], &mut refusals),
+        let api = Layer {
+            origin: Origin::Api,
+            statements: overrides.statements,
+        };
+        let resolved = match stated.or(named) {
+            Some(profile) => compose(
+                table,
+                base,
+                &[profile.layer(), document, api],
+                &mut refusals,
+            ),
+            None => compose(table, base, &[document, api], &mut refusals),
         };
         if refusals.is_empty() {
             Ok(resolved)
@@ -1346,15 +1428,225 @@ mod tests {
             ));
         }
 
+        /// Whether the build's domains allow every value the `upstream` profile states, so that
+        /// a resolution that reads the profile is not refused for it.
+        fn upstream_allowed() -> bool {
+            let upstream = Profile::find("upstream").expect("declared");
+            upstream.statements.iter().all(|statement| {
+                POLICIES
+                    .iter()
+                    .find(|entry| entry.id() == statement.policy)
+                    .is_some_and(|entry| entry.domain().contains(statement.value))
+            })
+        }
+
+        /// The open's statements are the last layer: over the document's own, each value they
+        /// set recorded as the API's, and a policy neither states keeps the build default.
+        #[test]
+        fn the_overrides_are_read_over_the_documents_policies() {
+            let Some(ring) = another::<EventRingFull>() else {
+                return;
+            };
+            let text = format!(
+                r#"{{ wz: {{ policies: {{ "event-ring-full": "{}" }} }} }}"#,
+                id_of(ring)
+            );
+            let tree = parse(&text).unwrap();
+            let base = SessionPolicy::defaults();
+            let document = resolve_document_under(base, &tree, Overrides::default())
+                .expect("the document alone");
+            assert_eq!(document.policy.event_ring_full(), ring);
+            assert_eq!(
+                document.provenance.origin("event-ring-full"),
+                Some(Origin::Document)
+            );
+            let stated = [Statement::new(
+                "event-ring-full",
+                id_of(EventRingFull::DEFAULT),
+            )];
+            let overrides = Overrides {
+                profile: None,
+                statements: &stated,
+            };
+            let resolved = resolve_document_under(base, &tree, overrides).expect("allowed");
+            assert_eq!(resolved.policy.event_ring_full(), EventRingFull::DEFAULT);
+            assert_eq!(
+                resolved.provenance.origin("event-ring-full"),
+                Some(Origin::Api)
+            );
+            assert_eq!(
+                resolved.provenance.origin("key-set"),
+                Some(Origin::BuildDefault)
+            );
+        }
+
+        /// A caller handed no document resolves as one handed a document with no `wz` member:
+        /// `resolve_under` and the reader answer the same snapshot, the same provenance and the
+        /// same refusals, for no statement, a statement, a profile and a profile the build does
+        /// not have. Turned red by a path that composes the caller's layers apart from the
+        /// reader's.
+        #[test]
+        fn no_document_resolves_as_a_document_with_no_wz_member() {
+            let empty = parse("{}").unwrap();
+            let base = SessionPolicy::defaults();
+            let ring = another::<EventRingFull>().unwrap_or(EventRingFull::DEFAULT);
+            let stated = [Statement::new("event-ring-full", id_of(ring))];
+            let cases = [
+                Overrides::default(),
+                Overrides {
+                    profile: None,
+                    statements: &stated,
+                },
+                Overrides {
+                    profile: Some("upstream"),
+                    statements: &[],
+                },
+                Overrides {
+                    profile: Some("no-such-profile"),
+                    statements: &stated,
+                },
+            ];
+            for overrides in cases {
+                let through_reader = resolve_document_under(base, &empty, overrides);
+                let without = super::super::resolve_under(base, overrides);
+                assert_eq!(
+                    through_reader.as_ref().ok(),
+                    without.as_ref().ok(),
+                    "{overrides:?}"
+                );
+                assert_eq!(
+                    through_reader.err().map(|refused| format!("{refused}")),
+                    without.err().map(|refused| format!("{refused}")),
+                    "{overrides:?}"
+                );
+            }
+        }
+
+        /// The profile the open names is read below the document's policies, as the document's
+        /// own would be.
+        #[test]
+        fn the_profile_the_overrides_name_is_read_below_the_document() {
+            let tree = parse(r#"{ wz: { policies: { "key-set": "open" } } }"#).unwrap();
+            let overrides = Overrides {
+                profile: Some("upstream"),
+                statements: &[],
+            };
+            let resolved = resolve_document_under(SessionPolicy::defaults(), &tree, overrides);
+            if !upstream_allowed() {
+                assert!(resolved.is_err());
+                return;
+            }
+            let resolved = resolved.expect("every upstream value allowed");
+            let origin = |policy| resolved.provenance.origin(policy);
+            assert_eq!(origin("key-set"), Some(Origin::Document));
+            assert_eq!(origin("event-ring-full"), Some(Origin::Profile("upstream")));
+        }
+
+        /// The open's profile stands in for the document's, so it is the one looked up: an
+        /// unknown one is refused in the open's layer even where the document names a profile
+        /// the build has.
+        #[test]
+        fn a_profile_the_overrides_name_and_the_build_does_not_have_is_refused_as_theirs() {
+            let tree = parse(r#"{ wz: { profile: "upstream" } }"#).unwrap();
+            let overrides = Overrides {
+                profile: Some("no-such-profile"),
+                statements: &[],
+            };
+            let refusals =
+                resolve_document_under(SessionPolicy::defaults(), &tree, overrides).unwrap_err();
+            let refusal = only(&refusals);
+            assert_eq!(refusal.layer, Origin::Api);
+            assert_eq!(
+                refusal.reason,
+                Reason::UnknownProfile {
+                    profile: "no-such-profile"
+                }
+            );
+            assert!(
+                format!("{refusal}").starts_with(
+                    "the open's overrides names the profile `no-such-profile`, and the build \
+                     has no such profile"
+                ),
+                "{refusal}"
+            );
+        }
+
+        /// The document is judged whole whatever the open states over it: a profile it names
+        /// that the build does not have is refused although the open names another.
+        #[test]
+        fn the_documents_unknown_profile_is_refused_though_the_overrides_name_one() {
+            let tree = parse(r#"{ wz: { profile: "no-such-profile" } }"#).unwrap();
+            let overrides = Overrides {
+                profile: Some("upstream"),
+                statements: &[],
+            };
+            let refusals =
+                resolve_document_under(SessionPolicy::defaults(), &tree, overrides).unwrap_err();
+            let reasons: Vec<_> = refusals
+                .iter()
+                .map(|refusal| (refusal.layer, refusal.reason))
+                .collect();
+            assert_eq!(
+                reasons[0],
+                (
+                    Origin::Document,
+                    Reason::UnknownProfile {
+                        profile: "no-such-profile"
+                    }
+                )
+            );
+        }
+
+        /// The open's layer states a policy once, as every layer does.
+        #[test]
+        fn a_policy_the_overrides_state_twice_is_refused() {
+            let tree = parse(r#"{ mode: "peer" }"#).unwrap();
+            let default = id_of(KeySet::DEFAULT);
+            let stated = [
+                Statement::new("key-set", default),
+                Statement::new("key-set", default),
+            ];
+            let overrides = Overrides {
+                profile: None,
+                statements: &stated,
+            };
+            let refusals =
+                resolve_document_under(SessionPolicy::defaults(), &tree, overrides).unwrap_err();
+            let refusal = only(&refusals);
+            assert_eq!(refusal.layer, Origin::Api);
+            assert_eq!(
+                refusal.reason,
+                Reason::StatedTwice {
+                    policy: "key-set",
+                    value: default
+                }
+            );
+        }
+
+        /// No override is the document alone: [`resolve_document`] is the same resolution.
+        #[test]
+        fn no_override_is_the_document_alone() {
+            let tree = parse(r#"{ wz: { policies: { "key-set": "open" } } }"#).unwrap();
+            let base = SessionPolicy::defaults();
+            assert_eq!(
+                resolve_document_under(base, &tree, Overrides::default()),
+                resolve_document(base, &tree)
+            );
+        }
+
         /// The policies of `resolve_document_in` are its parameter: a policy only the build
         /// decides is refused from the document as from any layer.
         #[test]
         fn a_document_that_states_a_policy_only_the_build_decides_is_refused() {
             let table = table_with(PolicyEntry::of::<BuildOnly>());
             let tree = parse(r#"{ wz: { policies: { "test-build-only": "on" } } }"#).unwrap();
-            let refusals =
-                from_json5::resolve_document_in(&table, SessionPolicy::defaults(), &tree)
-                    .unwrap_err();
+            let refusals = from_json5::resolve_document_in(
+                &table,
+                SessionPolicy::defaults(),
+                &tree,
+                Overrides::default(),
+            )
+            .unwrap_err();
             assert_eq!(
                 only(&refusals).reason,
                 Reason::BuildBound {

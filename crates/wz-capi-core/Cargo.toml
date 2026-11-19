@@ -270,6 +270,9 @@ rx-callback-offload = []
 # unconditionally (`SharedSession`'s `*_on_links`, the options of a publish and a query), so this
 # feature only carries the capability's name, as `lifecycle-doors` does.
 switch-doors = []
+# The JSON5 document a pico config is handed for its policies (`wz-capi-pico/config-document`): the
+# reader of the document is session-core's, so this feature only carries the capability's name.
+config-document = []
 # The batch compression a session offers and accepts, and the capability that names it in the
 # declaration (zenoh-c's own feature name). The runtime's feature is the mechanism.
 transport_compression = ["wz-runtime-tokio/session-extcompression"]

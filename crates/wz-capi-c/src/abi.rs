@@ -2064,6 +2064,18 @@ mod config_disposition_tests {
         assert_eq!(ask("mode"), (Z_OK, WZ_CAPI_C_CONFIG_HONOURED));
     }
 
+    /// The paths of the document's `wz` member that the open reads are keys this library
+    /// honours; a path below the member that the open refuses is not.
+    #[test]
+    fn the_door_honours_the_paths_of_the_wz_member_the_open_reads() {
+        for path in ["wz", "wz/profile", "wz/policies", "wz/policies/key-set"] {
+            assert_eq!(ask(path), (Z_OK, WZ_CAPI_C_CONFIG_HONOURED), "{path}");
+        }
+        for path in ["wz/colour", "wz/limits", "wz/policies/no-such-policy"] {
+            assert_eq!(ask(path), (Z_OK, WZ_CAPI_C_CONFIG_UNKNOWN), "{path}");
+        }
+    }
+
     /// Every key the enumeration door reports must come back `Honoured` from
     /// the predicate door. The two doors are one answer asked twice; a
     /// disagreement means the finite half has drifted out of the chain.

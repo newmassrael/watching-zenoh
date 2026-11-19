@@ -266,8 +266,21 @@ pub use wz_runtime_core as runtime_core;
 ///
 /// The Rust compatibility surface carries upstream's names only, as the drop-in C headers do,
 /// so a program that reaches for something here says by its path that it is not portable to
-/// zenoh. The C doors of the same behaviour are `wz_ext_*`.
+/// zenoh. The C doors of the same switches and behaviour are `wz_ext_*`.
 pub mod ext {
+    /// The open's own layer of policies and what an open resolved, through the Rust API.
+    ///
+    /// A configuration states the policies an open runs under in its `wz` member (`wz/profile`,
+    /// `wz/policies`), as the zenoh-c and zenoh-pico ABIs read the same document. Over it,
+    /// `Config::state_policy` and `Config::state_profile` state the open's own layer
+    /// ([`Origin::Api`]), and `Session::resolved_policies` answers the snapshot the open resolved
+    /// with the layer each value came from ([`Resolved`], [`Provenance`]). The methods are the
+    /// `open-policies` door of the compatibility crate, which this module turns on.
+    #[cfg(feature = "api-compat-rust")]
+    pub mod policies {
+        pub use zenoh::config::{Origin, Provenance, Resolved};
+    }
+
     /// Tell the peer of `session` everything the session holds again: its subscriptions,
     /// queryables, tokens and interests, as the session tells a peer whose link has just come up.
     /// Nothing the session holds changes; each entity keeps its id and its route. For a program

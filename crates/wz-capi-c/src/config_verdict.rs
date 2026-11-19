@@ -1182,6 +1182,49 @@ pub(crate) mod tests {
     /// agrees with itself. Whether a REAL zenohd reads it is
     /// `wz_capi_c_config_to_json5_starts_a_real_zenohd`, in this crate's
     /// `tests/`.
+    /// The resolved emit writes the `wz` member a config states, its profile named as a profile,
+    /// and wz's reader reads it back to the snapshot and provenance the same member resolves to
+    /// read whole.
+    #[test]
+    fn the_resolved_emit_keeps_the_wz_member_the_config_states() {
+        use wz_runtime_tokio::json5;
+        use wz_runtime_tokio::policy::SessionPolicy;
+        use wz_runtime_tokio::policy_document::resolve_document;
+
+        // A value of the one policy the build allows whatever its domain: its own default.
+        let value = SessionPolicy::defaults().subscriber_overload().id();
+        let quoted = format!("\"{value}\"");
+        let stated = format!(
+            r#"{{ "wz": {{ "profile": "upstream", "policies": {{ "subscriber-overload": "{value}" }} }} }}"#
+        );
+        let want = resolve_document(
+            SessionPolicy::defaults(),
+            &json5::parse(&stated).expect("a JSON5 document"),
+        )
+        .ok();
+        // SAFETY: a fixture config and a stack out slot.
+        let (rc, emitted) = unsafe {
+            ask(
+                wz_capi_c_config_to_json5,
+                &[
+                    ("mode", "\"peer\""),
+                    ("wz/profile", "\"upstream\""),
+                    ("wz/policies/subscriber-overload", quoted.as_str()),
+                ],
+            )
+        };
+        let Some(want) = want else {
+            // The build's domain leaves out a value of the profile: the door refuses the config.
+            assert_ne!(rc, Z_OK, "{emitted}");
+            return;
+        };
+        assert_eq!(rc, Z_OK, "the door refused: {emitted}");
+        let back = ZenohNodeConfig::from_json5(&emitted).expect("wz reads its own emit");
+        assert_eq!(back.config.policies, want, "{emitted}");
+        let tree = json5::parse(&emitted).expect("the emit is JSON5");
+        assert!(tree.get("wz/profile").is_some(), "{emitted}");
+    }
+
     #[test]
     fn the_emitted_document_round_trips_through_wzs_own_reader() {
         // SAFETY: a fixture config and a stack out slot.

@@ -381,14 +381,17 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "subscription of the configuration's notifier. Held to `FAMILY_GRADED` below rather "
         "than to this sentence. `admission-retry`, `atomic-publish`, `link-restriction` and "
         "`targeted-query` are wz's own additions beyond upstream's surface, each the Rust "
-        "door of a default-off policy switch, and are held to `WZ_EXTENSION` below: no "
-        "upstream arm, and a leg of the non-default tests gate runs the crate with each on",
+        "door of a default-off policy switch, and `open-policies` is the Rust door of the "
+        "open's own layer of policies and of the snapshot an open resolved; all five are held "
+        "to `WZ_EXTENSION` below: no upstream arm, and a leg of the non-default tests gate "
+        "runs the crate with each on",
         frozenset(
             {
                 "admission-retry",
                 "atomic-publish",
                 "internal",
                 "link-restriction",
+                "open-policies",
                 "plugins",
                 "shared-memory",
                 "targeted-query",
@@ -546,6 +549,9 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # `shared-key-ids` gates the doors `wz_ext_config_key_ids` and
         # `wz_ext_config_key_wire_form_for` of `pub mod key_ids`, declared in `wz_ext.h`; off by
         # default, as upstream has no such doors.
+        # `config-document` gates the door `wz_ext_config_document` of `pub mod config_policy`
+        # (its two siblings are in every build), declared in `wz_ext.h`; off by default, as
+        # zenoh-pico reads no document and the door links a JSON5 reader.
         # `replay-cache` gates `pub mod replay_publisher` and `pub mod replay_subscriber`, whose
         # public items are wz's own doors `wz_ext_replay_publisher_storage_size`, `_new`,
         # `_record`, `_put`, `_serve`, `_phase`, `_counts`, `_loan`, `_move`, `_drop`,
@@ -571,6 +577,7 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "admin-space",
                 "app-transport",
                 "clock-source",
+                "config-document",
                 "declarations-synced-event",
                 "e2e-receiver",
                 "e2e-sender",
@@ -1491,13 +1498,21 @@ FAMILY_GRADED: dict[str, frozenset[str]] = {
 # member (else it belongs in `FAMILY_GRADED`), and a leg of `nondefault-tests-gate.sh` runs
 # the package with it on, so the tests that exercise what it gates are RUN before a push and
 # not only compiled. Each is a default-off switch of the policy catalogue, stated through
-# the Rust API of the crate; the policy decides what a build does with a statement.
+# the Rust API of the crate; the policy decides what a build does with a statement. One is the
+# door of the open's own layer of policies (`open-policies`), whose statements the build's
+# domains decide in the same way.
 #
 # A row covered half by `FAMILY_GRADED` and half by this table is covered ENTIRELY: the row is
 # exactly the union, so neither predicate leaves a feature excused by prose.
 WZ_EXTENSION: dict[str, frozenset[str]] = {
     "zenoh": frozenset(
-        {"admission-retry", "atomic-publish", "link-restriction", "targeted-query"}
+        {
+            "admission-retry",
+            "atomic-publish",
+            "link-restriction",
+            "open-policies",
+            "targeted-query",
+        }
     ),
 }
 
