@@ -571,8 +571,8 @@ pub(crate) mod tests {
     /// Connections that between them write every key and every word of a
     /// flow's `tcp`: an answered handshake with a zero window, each kind of
     /// retransmission and a small segment's gap; a refused attempt after a
-    /// retried SYN; and an attempt nothing answered, reusing the port. Its one reader is the
-    /// document's test (`fields_json`), which is behind `dissect`.
+    /// retried SYN; and an attempt nothing answered, reusing the port. For
+    /// the field document's vocabulary gate, which only a `dissect` build has.
     #[cfg(feature = "dissect")]
     pub(crate) fn every_word() -> alloc::vec::Vec<TcpFacts> {
         let mut answered = TcpFacts::default();

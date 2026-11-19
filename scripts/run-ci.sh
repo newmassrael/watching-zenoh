@@ -2368,6 +2368,14 @@ layer_c0_test_discipline() {
     # checkout is in Layer Z, which provisions one.
     _runci_leg family_notice_gate.selftest -- python3 scripts/lib/family_notice_gate.py --selftest
     _runci_leg family_notice_gate --after family_notice_gate.selftest -- python3 scripts/lib/family_notice_gate.py --check
+    # The logic census's COVERAGE gate. `docs/zenoh-logic-as-sce-kinds.md` classifies the
+    # hand-written protocol logic slice by slice, and its first six slices were scoped by hand:
+    # the cooperative engine's C ABI, the MCU network stacks and more were outside it with
+    # nothing saying so. Every tracked crate must have a row in the census's crate table, read
+    # by a slice that names it or excluded with a kind and a reason. Enforcement MEASURED by
+    # deleting one row of the real table.
+    _runci_leg logic_census_coverage_gate.selftest -- python3 scripts/lib/logic_census_coverage_gate.py --selftest
+    _runci_leg logic_census_coverage_gate --after logic_census_coverage_gate.selftest -- python3 scripts/lib/logic_census_coverage_gate.py --check
     # R311y621 (§7.14) — the SOLO-PLANE-PAGE gate. R311y618 severed one leg of
     # `CaptureReport::is_complete` and all 229 tests stayed green: the pages
     # that should have caught it attached TWO planes, and the other plane
