@@ -152,7 +152,7 @@ mod alloc_impl {
     // R2662 — the one-sided matcher is gone from this module: `dispatch` was
     // its last caller, so a literal read of an arriving key cannot return here
     // without the import being re-added on purpose.
-    use crate::keyexpr_match::keyexpr_intersects_target;
+    use crate::keyexpr_match::keyexpr_intersects;
     use crate::network_message::NetworkMessage;
     use crate::reliability::Reliability;
     use crate::sample_kind::SampleKind;
@@ -168,13 +168,13 @@ mod alloc_impl {
     /// `wz-switchboard.yaml` sidecar; the [`EventInjector`] port takes
     /// `&str`, so the same dispatch serves the MCU `&'static` case.
     pub struct SwitchboardEntry {
-        /// Canonicalized pattern, pre-split on `/` — same stored form as
+        /// Canonicalized pattern text — same stored form as
         /// [`crate::pubsub::SubscriberRegistry`], so a wz subscriber and a
         /// switchboard entry on the same keyexpr agree byte-for-byte with
         /// the peer's `Declare(DeclKexpr)` wire form.
-        pattern_chunks: Vec<String>,
+        pattern: String,
         /// The SCXML domain event injected when an inbound sample's
-        /// resolved keyexpr matches `pattern_chunks`.
+        /// resolved keyexpr matches `pattern`.
         event_name: String,
         /// Routing kind. The registry stores only the *kind* — the codec ↔
         /// event binding lives in the generated value injector (ACL boundary),
@@ -225,8 +225,8 @@ mod alloc_impl {
         /// Map a keyexpr pattern to a **signal** domain event (empty
         /// `_event.data`). Pattern syntax matches zenoh chunk wildcards (`*`
         /// single chunk, `**` zero-or-more chunks, `$*` intra-chunk substring);
-        /// the pattern is canonicalized (so the stored chunks agree with the
-        /// wire form a peer emits) before being split. A structurally invalid
+        /// the pattern is canonicalized (so the stored text agrees with the
+        /// wire form a peer emits) before being stored. A structurally invalid
         /// pattern is stored raw with a `log::warn!`, matching
         /// [`crate::pubsub::SubscriberRegistry::register_sink`] — the
         /// matcher still operates, the build-time cross-check is the
@@ -275,7 +275,7 @@ mod alloc_impl {
         }
 
         /// Shared row constructor: canonicalize (raw-fallback with a warn),
-        /// split into chunks, push with the routing kind.
+        /// push with the routing kind.
         fn push_entry(
             &mut self,
             keyexpr_pattern: impl Into<String>,
@@ -283,23 +283,21 @@ mod alloc_impl {
             kind: SwitchboardRowKind,
         ) {
             let raw = keyexpr_pattern.into();
-            // R311gb — `canonize_keyexpr` now returns a `BoundedString`;
-            // bind both arms to `&str` for the backing-agnostic split.
-            let canonical = crate::keyexpr_canon::canonize_keyexpr(&raw);
-            let canonical_str: &str = match &canonical {
-                Ok(canon) => canon.as_str(),
+            // R311gb — `canonize_keyexpr` returns a `BoundedString`; the row
+            // owns its text as a `String` whichever arm is taken.
+            let pattern = match crate::keyexpr_canon::canonize_keyexpr(&raw) {
+                Ok(canon) => String::from(canon.as_str()),
                 Err(err) => {
                     log::warn!(
                         "SwitchboardRegistry::register: keyexpr `{raw}` is not canonical \
                          ({err}); storing raw form. The matcher still operates but the \
                          stored chunks may drift from the canonical form a peer emits."
                     );
-                    raw.as_str()
+                    raw
                 }
             };
-            let pattern_chunks: Vec<String> = canonical_str.split('/').map(String::from).collect();
             self.entries.push(SwitchboardEntry {
-                pattern_chunks,
+                pattern,
                 event_name: event_name.into(),
                 kind,
             });
@@ -373,20 +371,18 @@ mod alloc_impl {
         /// `dispatch_switchboard`'s per-arm semantics, so the AP dynamic and
         /// MCU static paths agree (one guard semantics across profiles).
         pub fn dispatch(&self, sample: &dyn SampleView, injector: &mut dyn EventInjector) -> usize {
-            // R2662 (open-debt item 763) — INTERSECTION, and the arriving key is
-            // split ONCE for the whole scan. The prior
-            // `keyexpr_pattern_matches(&chunks, target)` read `target` as a
-            // literal, so a switchboard row on `demo/data` never fired for a
-            // `demo/*` sample even though such samples reach this node (a real
-            // zenoh-pico `z_put` sends them, and the storage plane applies
-            // them). The QUERY plane made this same move first — `query.rs`
-            // @ `fn matches` — and its argument carries over verbatim: for a
-            // CONCRETE arriving key this is identical to the prior match.
-            let target: Vec<&str> = sample.keyexpr().split('/').collect();
+            // R2662 (open-debt item 763) — INTERSECTION. A one-sided match that
+            // reads the arriving key as a literal would never fire a row on
+            // `demo/data` for a `demo/*` sample, even though such samples reach
+            // this node (a real zenoh-pico `z_put` sends them, and the storage
+            // plane applies them). The QUERY plane made this same move first —
+            // `query.rs` @ `fn matches` — and its argument carries over
+            // verbatim: for a CONCRETE arriving key intersection is the
+            // one-sided match.
+            let target = sample.keyexpr();
             let mut injected: usize = 0;
             for entry in &self.entries {
-                let pattern = entry.pattern_chunks.join("/");
-                if !keyexpr_intersects_target(&pattern, &target) {
+                if !keyexpr_intersects(&entry.pattern, target) {
                     continue;
                 }
                 match entry.kind {

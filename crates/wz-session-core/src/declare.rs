@@ -116,34 +116,26 @@ pub type DeclEpoch = alloc::sync::Arc<core::sync::atomic::AtomicU64>;
 /// any currently-declared peer keyexpr intersect `keyexpr`? A free fn
 /// (not a registry method) so the watch-list sweep can consult the
 /// membership table while the watch list itself is mutably borrowed —
-/// disjoint-field borrows inside one registry. Splits the published
-/// target ONCE, then tests each declared candidate via the shared
-/// keyexpr-scan SSOT [`crate::keyexpr_match::keyexpr_intersects_target`]
-/// — the same per-candidate membership test the routing layer's
-/// linkstate-peer `matching_peers` scan uses.
+/// disjoint-field borrows inside one registry. Tests each declared
+/// candidate against the published target via the shared keyexpr-scan
+/// SSOT [`crate::keyexpr_match::keyexpr_intersects`] — the same
+/// per-candidate membership test the routing layer's linkstate-peer
+/// `matching_peers` scan uses.
 ///
 /// S9a — over a [`DeclaredKeys`](crate::id_map::DeclaredKeys), the table in the
-/// shape the build keeps it, and the target split into a bounded chunk view
-/// instead of a `Vec`: a keyexpr deeper than
+/// shape the build keeps it. On the fixed backing a keyexpr deeper than
 /// [`MAX_KEYEXPR_CHUNKS`](crate::keyexpr_match::MAX_KEYEXPR_CHUNKS) matches
-/// nothing, the conservative answer every sibling scan gives an over-deep key.
+/// nothing, the conservative answer every sibling scan gives an over-deep key;
+/// the matcher applies that bound itself.
 #[cfg(feature = "storage-profile")]
 pub(crate) fn declared_intersects<M, K>(declared: &M, keyexpr: &str) -> bool
 where
     M: crate::id_map::IdMap<K>,
     K: AsRef<str>,
 {
-    use crate::bounded::BoundedVec;
-    let mut target_chunks: BoundedVec<&str, { crate::keyexpr_match::MAX_KEYEXPR_CHUNKS }> =
-        BoundedVec::new();
-    for chunk in keyexpr.split('/') {
-        if target_chunks.push(chunk).is_err() {
-            return false;
-        }
-    }
-    declared.entries().any(|(_, candidate)| {
-        crate::keyexpr_match::keyexpr_intersects_target(candidate.as_ref(), &target_chunks)
-    })
+    declared
+        .entries()
+        .any(|(_, candidate)| crate::keyexpr_match::keyexpr_intersects(candidate.as_ref(), keyexpr))
 }
 
 // R311kh — matching-listener watch machinery (pico Z_FEATURE_MATCHING

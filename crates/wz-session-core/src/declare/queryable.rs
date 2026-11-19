@@ -9,7 +9,7 @@
 //! R311dp / di-16 — migrated to wz-session-core (was
 //! `wz-runtime-tokio::declare::queryable`). `has_matching` is an
 //! inherent method on the registry calling
-//! [`crate::keyexpr_match::keyexpr_intersect_patterns`] directly —
+//! [`crate::keyexpr_match::keyexpr_intersects`] directly —
 //! no extension-trait split (R311dn-pre lift made this possible).
 
 // R311gb (Track 2) — String / Vec back the `alloc` wire side (the dispatch
@@ -221,7 +221,6 @@ where
     M: IdMap<V>,
     V: DeclaredRow,
 {
-    use crate::bounded::BoundedVec;
     // R311y797 — the querier's own locality gates this half BEFORE the
     // membership is consulted at all: a `Locality::SessionLocal` querier
     // is not answered by any peer, so no peer declaration can make it
@@ -230,24 +229,15 @@ where
     if !locality.allows_remote() {
         return false;
     }
-    // S9a — split into a bounded chunk view, not a `Vec`; a keyexpr deeper than
-    // the bound matches nothing, as the sibling scans answer an over-deep key.
-    let mut target_chunks: BoundedVec<&str, { crate::keyexpr_match::MAX_KEYEXPR_CHUNKS }> =
-        BoundedVec::new();
-    for chunk in keyexpr.split('/') {
-        if target_chunks.push(chunk).is_err() {
-            return false;
-        }
-    }
+    // On the fixed backing a keyexpr deeper than the chunk bound matches
+    // nothing, as the sibling scans answer an over-deep key; the matcher
+    // applies that bound itself, on both arms below.
     if complete_required || remote_includes {
         #[cfg(feature = "keyexpr-includes")]
         {
             declared.entries().any(|(_, candidate)| {
                 (candidate.complete() || !complete_required)
-                    && crate::keyexpr_match::keyexpr_includes_target(
-                        candidate.keyexpr(),
-                        &target_chunks,
-                    )
+                    && crate::keyexpr_match::keyexpr_includes(candidate.keyexpr(), keyexpr)
             })
         }
         // `session-matching` forwards `keyexpr-includes` (Cargo.toml), and
@@ -261,7 +251,7 @@ where
         }
     } else {
         declared.entries().any(|(_, candidate)| {
-            crate::keyexpr_match::keyexpr_intersects_target(candidate.keyexpr(), &target_chunks)
+            crate::keyexpr_match::keyexpr_intersects(candidate.keyexpr(), keyexpr)
         })
     }
 }
@@ -502,7 +492,7 @@ impl<P: Storage> RemoteQueryablePeer<P> {
     /// wildcard-vs-wildcard intersection). Returns `true` iff at
     /// least one currently-declared peer queryable's keyexpr
     /// intersects `query_keyexpr` under
-    /// [`crate::keyexpr_match::keyexpr_intersect_patterns`] — i.e.
+    /// [`crate::keyexpr_match::keyexpr_intersects`] — i.e.
     /// there exists at least one literal `/`-separated keyexpr that
     /// both sides match.
     ///
@@ -511,7 +501,7 @@ impl<P: Storage> RemoteQueryablePeer<P> {
     /// * both literals — intersect iff byte-equal,
     /// * one-side pattern covering the other-side literal (any
     ///   `**` / `*` / `$*` shape) — intersect via the asymmetric
-    ///   pattern-vs-literal walk inside `keyexpr_intersect_patterns`,
+    ///   pattern-vs-literal walk inside `keyexpr_intersects`,
     /// * two-pattern overlap where neither contains the other
     ///   (e.g. `home/*/temp` vs `*/sensor/temp` share
     ///   `home/sensor/temp`) — intersect via the two-side
