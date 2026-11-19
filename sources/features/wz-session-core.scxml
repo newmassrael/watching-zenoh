@@ -87,6 +87,7 @@
   <sce:feature name="query-timeout" requires="query-get"/>
   <sce:feature name="query-value"/>
   <sce:feature name="reassembly" requires="codec-frame"/>
+  <sce:feature name="replay-cache"/>
   <sce:feature name="reply-source-info"/>
   <sce:feature name="request-put-del"/>
   <sce:feature name="resource-snapshot"/>

@@ -402,7 +402,8 @@ fn regen_codec_deployment(
 ///   wz-session-core  : reassembly_slot, scouting, session_fsm_unicast,
 ///                      session_fsm_multicast, multicast_peer,
 ///                      peer_connection, clock_quality, supervision,
-///                      stream_activation, app_link (statecharts);
+///                      stream_activation, app_link, replay_round,
+///                      replay_serving (statecharts);
 ///                      tick_elapsed, tick_until_due, key_facts (algorithms);
 ///                      key_facts_schema (the event-schema key_facts returns)
 ///   wz-runtime-tokio : reassembly_pool_ap, session_rx_pool_ap,
@@ -444,6 +445,10 @@ fn regen_statecharts_and_pools(root: &Path) {
         "stream_activation",
         // The lifecycle of one link over a transport the program supplies.
         "app_link",
+        // The replay cache: a subscriber's round of asking the publishers, and whether a
+        // publisher is answering one (and so holding its message's sends).
+        "replay_round",
+        "replay_serving",
     ] {
         codegen.emit_statechart(stem, &session, &sc_out);
     }
@@ -490,7 +495,13 @@ fn regen_statecharts_and_pools(root: &Path) {
     // a counter from its baseline in the counter's own width, and what that step is.
     let app_frame_out = root.join("out/wz-app-frame");
     mkdir(&app_frame_out);
-    for stem in ["e2e_counter_step", "e2e_counter_verdict"] {
+    // The replay cache's admission of a reply to that judge (wz-app-frame `replay_admission`):
+    // whether a reply is judged, a duplicate of the baseline, or a frame the judge has passed.
+    for stem in [
+        "e2e_counter_step",
+        "e2e_counter_verdict",
+        "replay_reply_admission",
+    ] {
         codegen.emit_algorithm(stem, &algorithms, &app_frame_out);
     }
 
@@ -535,7 +546,7 @@ fn regen_statecharts_and_pools(root: &Path) {
     }
 
     println!(
-        "xtask: regenerated 9 statecharts + 2 algorithms + {} buffer-pools into out/{{wz-session-core,wz-runtime-tokio,wz-runtime-coop,wz-link-lwip}}",
+        "xtask: regenerated 12 statecharts + 2 algorithms + {} buffer-pools into out/{{wz-session-core,wz-runtime-tokio,wz-runtime-coop,wz-link-lwip}}",
         pools.len()
     );
 }
