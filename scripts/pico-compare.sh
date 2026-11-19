@@ -588,7 +588,7 @@ perf_probe_build() {
 perf_matrix() {
     local reps="${1:-3}" sizes="${2:-8,64,1024}" dir="$out/perf" run rc
     if [ "${PICO_CMP_NO_BUILD:-0}" != 1 ]; then
-        rm -rf "$dir/bin"
+        rm -rf "${dir:?}/bin"
         mkdir -p "$dir/bin"
         bash scripts/provision-kconfiglib.sh >"$dir/build-kconfiglib.log" 2>&1 \
             || perf_fail "kconfiglib did not install (see $dir/build-kconfiglib.log)"
