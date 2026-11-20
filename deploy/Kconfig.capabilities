@@ -411,6 +411,22 @@ config WZ_CAP_TIME_BASE
 	  A time base the program supplies in place of the system's clock: the timers of a session opened from a config that names it (lease, keep-alive, handshake and the other deadlines) run on the program's time, which the program reads to the library and says when it has moved on (wz_ext_time_base_* and wz_ext_config_time_base, wz_capi_c_time_base_* and wz_capi_c_config_time_base, wz-own doors).
 	  Exported by: pico, c.
 
+config WZ_CAP_OBJECT_POOL
+	bool "object-pool"
+	default n
+	select WZ_CAP_UNSTABLE_API
+	help
+	  Fixed pools, one per slot size, that the objects behind the owned handles (sessions, publishers, subscribers, queryables, liveliness tokens and subscribers, owned samples, replies, queries and payloads) are taken from in place of the heap once the program reserves them; a full pool refuses the object with _Z_ERR_SYSTEM_OUT_OF_MEMORY (wz_ext_object_pool_*, wz-own doors).
+	  Exported by: pico.
+
+config WZ_CAP_OBJECT_POOL_REGION
+	bool "object-pool-region"
+	default n
+	select WZ_CAP_OBJECT_POOL
+	help
+	  The object pools laid over memory the program hands over in place of one heap allocation (wz_ext_object_pool_place, a wz-own door).
+	  Exported by: pico.
+
 config WZ_CAP_SHARED_KEY_IDS
 	bool "shared-key-ids"
 	default n

@@ -72,6 +72,8 @@ pub const CAPABILITIES: &[(&str, &[&str])] = &[
     ("message-payload", &["core", "pico"]),
     ("app-transport", &["core", "pico"]),
     ("time-base", &["core", "pico", "c"]),
+    ("object-pool", &["core", "pico"]),
+    ("object-pool-region", &["core", "pico"]),
     ("shared-key-ids", &["core", "pico", "c"]),
     ("rx-callback-offload", &["core", "c"]),
     ("switch-doors", &["core", "c"]),
