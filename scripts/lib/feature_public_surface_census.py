@@ -433,7 +433,9 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "own sockets, which `host_group`'s unit tests run and Layer M runs over a real group; "
         "`transport-stats` gates `CoopEngine::transport_stats`, the session's transport "
         "counters, a Rust surface neither C ABI reports, which the crate's own "
-        "`tests::congestion` reads",
+        "`tests::congestion` reads; `time-base` gates `ClockMoves`, the word of a clock the "
+        "program moves that ends a read's wait, which the pico ABI's time base hands the engine "
+        "and the crate's own `clock_moves_tests` run",
         frozenset(
             {
                 "app-transport",
@@ -442,6 +444,7 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "scout",
                 "scout-datagram",
                 "shared-key-ids",
+                "time-base",
                 "tls-mbedtls",
                 "transport-stats",
             }

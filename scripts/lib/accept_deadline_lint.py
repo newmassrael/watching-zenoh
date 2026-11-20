@@ -42,11 +42,20 @@ A site passes when `timeout` or `deadline` appears within the six lines above
 it (inclusive) — the two shapes this tree actually uses: the async
 `tokio::time::timeout(D, listener.accept())`, and the blocking non-blocking
 poll loop that compares against an `Instant` deadline.
+
+A third shape passes for the same reason: a NON-BLOCKING listener polled in a
+loop its owner ends with a stop flag (`while !stop.load(..)` within the window,
+and the file puts a listener into `set_nonblocking(true)`), the relay a test
+puts between its spawned partner and the peer. A partner that never dials
+leaves that loop polling until the owner drops it; it does not hold the test.
+Both halves are required: a stop flag over a BLOCKING accept is checked only
+after an accept returns, so it never ends a wait the partner never ends.
 """
 
 from __future__ import annotations
 
 import pathlib
+import re
 import sys
 
 import test_sources
@@ -54,6 +63,10 @@ import test_sources
 WINDOW = 6
 SPAWN_MARKERS = ("Command::new", "CARGO_BIN_EXE")
 DEADLINE_MARKERS = ("timeout", "deadline")
+# The owner-stopped poll loop (module doc): a `while !<flag>.load(` head in the window over a
+# listener the file makes non-blocking.
+STOP_LOOP = re.compile(r"while\s+!\s*[\w.]+\.load\(")
+NONBLOCKING_MARKER = "set_nonblocking(true)"
 
 # Anti-vacuity floors. A lint that silently matches nothing is a lint that
 # reports green forever; these are the shapes that would produce that here — a
@@ -65,7 +78,9 @@ MIN_SPAWNING_SITES = 10
 
 def has_deadline(lines: list[str], index: int) -> bool:
     window = "\n".join(lines[max(0, index - WINDOW) : index + 1])
-    return any(marker in window for marker in DEADLINE_MARKERS)
+    if any(marker in window for marker in DEADLINE_MARKERS):
+        return True
+    return bool(STOP_LOOP.search(window)) and any(NONBLOCKING_MARKER in line for line in lines)
 
 
 def scan(root: pathlib.Path):
@@ -176,7 +191,25 @@ def selftest() -> int:
         + "let (s, _) = listener.accept().unwrap();\n"
     )
 
+    polled = (
+        'Command::new("x");\n'
+        "listener.set_nonblocking(true).unwrap();\n"
+        "while !shared.stop.load(Ordering::SeqCst) {\n"
+        "    let client = match listener.accept() {\n"
+    )
+    blocking_stop = polled.replace("listener.set_nonblocking(true).unwrap();\n", "")
+
     ok = True
+    if not verdict(polled, True):
+        print("selftest FAIL: a non-blocking accept under a stop flag was rejected", file=sys.stderr)
+        ok = False
+    if verdict(blocking_stop, True):
+        print(
+            "selftest FAIL: a stop flag over a blocking accept was accepted -- it never ends "
+            "a wait the partner never ends",
+            file=sys.stderr,
+        )
+        ok = False
     if verdict(bare, True):
         print("selftest FAIL: a bare accept in a spawning file was accepted", file=sys.stderr)
         ok = False
