@@ -180,9 +180,10 @@ fn a_clients_connect_budget_on_a_time_base_is_a_budget_of_the_programs_time() {
 
 /// A scout from a config that names a time base surveys for a budget of the program's time: its
 /// window does not end while that time stands still, though the wall clock runs three budgets past
-/// it, and it ends once the time passes the budget and the program says so. The default group is
-/// scouted: a Hello another node on the host sends does not end a survey's window, only its budget
-/// does.
+/// it, and it ends once the time passes the budget and the program says so. The scout is on a
+/// group of this test's own, apart from those of `session_roles.rs` and `scouting_open.rs` (7478
+/// to 7499), `scouting_ttl.rs` (7640 on) and `scouting_autoconnect.rs` (7660 on), so no other
+/// node's Hello reaches its window.
 #[cfg(feature = "scout")]
 #[test]
 fn a_scout_on_a_time_base_surveys_for_a_budget_of_the_programs_time() {
@@ -191,8 +192,12 @@ fn a_scout_on_a_time_base_surveys_for_a_budget_of_the_programs_time() {
 
     let time = program_time();
     let mut time_base = time_base_over(time);
+    let own_group = [(
+        "scouting/multicast/address",
+        String::from("\"224.0.0.231:7701\""),
+    )];
     // SAFETY: the time base is live.
-    let handed = Handed(unsafe { config_with(&[], Some(&time_base)) });
+    let handed = Handed(unsafe { config_with(&own_group, Some(&time_base)) });
     let budget_ms = u64::try_from(BUDGET.as_millis()).unwrap();
     let scouting = std::thread::spawn(move || {
         let mut cfg = handed.into_config();

@@ -44,9 +44,10 @@ pub(crate) const CONNECT_KEY: &str = "connect/endpoints";
 /// `listen/endpoints` (`Z_CONFIG_LISTEN_KEY`, `:25`).
 pub(crate) const LISTEN_KEY: &str = "listen/endpoints";
 /// `scouting/multicast/address` (`Z_CONFIG_MULTICAST_IPV4_ADDRESS_KEY`, `:30`) —
-/// the group `z_scout` beacons onto.
+/// the group `z_scout` beacons onto: a socket address, as zenoh's config types it, and not a
+/// zenoh-pico locator.
 #[cfg(any(test, feature = "scout"))]
-pub(crate) const MULTICAST_LOCATOR_KEY: &str = "scouting/multicast/address";
+pub(crate) const MULTICAST_ADDRESS_KEY: &str = "scouting/multicast/address";
 /// `scouting/timeout` (`Z_CONFIG_SCOUTING_TIMEOUT_KEY`, `:32`).
 #[cfg(any(test, feature = "scout"))]
 pub(crate) const SCOUTING_TIMEOUT_KEY: &str = "scouting/timeout";
@@ -1849,7 +1850,7 @@ mod tests {
             (MODE_KEY, "\"client\""),
             (CONNECT_KEY, "[\"tcp/127.0.0.1:17447\"]"),
             (LISTEN_KEY, "[\"tcp/127.0.0.1:17448\"]"),
-            (MULTICAST_LOCATOR_KEY, "\"224.0.0.224:7446\""),
+            (MULTICAST_ADDRESS_KEY, "\"224.0.0.224:7446\""),
             (SCOUTING_TIMEOUT_KEY, "1234"),
             // No leading `0`: zenoh refuses one at the insert, so a fixture that
             // wrote `0102030405` was inserting a value the real config would not
@@ -1977,7 +1978,7 @@ mod tests {
             config_of(&[
                 (CONNECT_KEY, "[\"tcp/127.0.0.1:17447\"]"),
                 (SCOUTING_TIMEOUT_KEY, "1234"),
-                (MULTICAST_LOCATOR_KEY, "\"224.0.0.224:7446\""),
+                (MULTICAST_ADDRESS_KEY, "\"224.0.0.224:7446\""),
             ])
         };
         // The exact leaf.
@@ -2045,7 +2046,7 @@ mod tests {
             (CONNECT_KEY, "[\"tcp/127.0.0.1:17447\"]"),
             (LISTEN_KEY, "[\"tcp/127.0.0.1:17448\"]"),
             (SCOUTING_TIMEOUT_KEY, "1234"),
-            (MULTICAST_LOCATOR_KEY, "\"224.0.0.224:7446\""),
+            (MULTICAST_ADDRESS_KEY, "\"224.0.0.224:7446\""),
         ];
         let multi = cases.iter().filter(|(k, _)| k.contains('/')).count();
         assert!(

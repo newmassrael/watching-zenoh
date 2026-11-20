@@ -2525,6 +2525,32 @@ pub const UPSTREAM_OPEN_TIMEOUT_MS: u64 = 10_000;
 /// (`commons/zenoh-config/src/defaults.rs` @ `max_sessions: Some(1000),`).
 pub const UPSTREAM_MULTICAST_MAX_SESSIONS: usize = 1_000;
 
+/// Upstream's `scouting/multicast/address`, the group and port a config that states none scouts
+/// on (`commons/zenoh-config/src/defaults.rs` @
+/// `pub const address: ([u8; 4], u16) = ([224, 0, 0, 224], 7446);`).
+pub const UPSTREAM_SCOUT_MULTICAST_ADDRESS: std::net::SocketAddr = std::net::SocketAddr::V4(
+    std::net::SocketAddrV4::new(std::net::Ipv4Addr::new(224, 0, 0, 224), 7446),
+);
+
+/// The socket `scouting/multicast/address` names: the text `stated`, upstream's default
+/// ([`UPSTREAM_SCOUT_MULTICAST_ADDRESS`]) where the config states none, or the text itself
+/// (`Err`) where it names no socket, which a reader refuses rather than scouting somewhere the
+/// config did not ask about.
+///
+/// The one reading of the key, for every reader of it: the ingest of a node's document, the
+/// scouting of a session the open plans, and the zenoh-c ABI's `z_scout`. Upstream types the
+/// field as a socket address (`commons/zenoh-config/src/lib.rs` @ `address: Option<SocketAddr>,`)
+/// and its own scout reads it so (`zenoh/src/api/scouting.rs` @
+/// `let default_addr = SocketAddr::from(zenoh_config::defaults::scouting::multicast::address);`):
+/// `<ipv4>:<port>` or `[<ipv6>]:<port>`, and not the `udp/<ip>:<port>` locator a zenoh-pico
+/// config names its group by, which is another library's key.
+pub fn scout_multicast_socket(stated: Option<&str>) -> Result<std::net::SocketAddr, &str> {
+    match stated {
+        None => Ok(UPSTREAM_SCOUT_MULTICAST_ADDRESS),
+        Some(text) => text.parse().map_err(|_| text),
+    }
+}
+
 /// R2925 — upstream's `transport/link/tx/queue/size` leaves, each with the
 /// `Priority` wire byte whose queue it sizes, as upstream's transport manager
 /// maps them (`io/zenoh-transport/src/manager.rs` @
@@ -8452,7 +8478,7 @@ impl ZenohNodeConfig {
         // failure mode of accepting `"224.0.0.224"` (no port) is a node that
         // starts, reports the key honoured, and joins nothing.
         if let Some(v) = want_string(&doc, "scouting/multicast/address", "an <ip>:<port> socket")? {
-            if v.parse::<std::net::SocketAddr>().is_err() {
+            if scout_multicast_socket(Some(v.as_str())).is_err() {
                 return Err(ConfigIngestError::WrongType {
                     path: "scouting/multicast/address",
                     expected: "an <ip>:<port> socket",
@@ -10530,6 +10556,8 @@ mod tests {
             r#"{ "scouting": { "multicast": { "address": "224.0.0.99" } } }"#,
             r#"{ "scouting": { "multicast": { "address": "not-an-address" } } }"#,
             r#"{ "scouting": { "multicast": { "address": "" } } }"#,
+            // A zenoh-pico locator, which names its group under another key of another library.
+            r#"{ "scouting": { "multicast": { "address": "udp/224.0.0.99:7999" } } }"#,
         ] {
             let err = ZenohNodeConfig::from_json5(bad).unwrap_err();
             assert!(
@@ -10568,6 +10596,30 @@ mod tests {
             r#"{ "scouting": { "multicast": { "address": "ff05::231:7999" } } }"#,
         )
         .is_err());
+    }
+
+    /// The one reading of `scouting/multicast/address` every reader of the key shares: a socket in
+    /// upstream's form, upstream's default where none is stated, and the text itself handed back
+    /// where it names no socket, a zenoh-pico locator among them.
+    #[test]
+    fn the_scouting_address_is_read_as_upstreams_socket_or_its_default() {
+        let socket = |text: &str| text.parse::<std::net::SocketAddr>().expect("a socket");
+        assert_eq!(
+            scout_multicast_socket(None),
+            Ok(socket("224.0.0.224:7446")),
+            "upstream's default"
+        );
+        assert_eq!(
+            scout_multicast_socket(Some("224.0.0.231:7511")),
+            Ok(socket("224.0.0.231:7511"))
+        );
+        assert_eq!(
+            scout_multicast_socket(Some("[ff05::231]:7511")),
+            Ok(socket("[ff05::231]:7511"))
+        );
+        for refused in ["udp/224.0.0.231:7511", "224.0.0.231", "ff05::231:7511", ""] {
+            assert_eq!(scout_multicast_socket(Some(refused)), Err(refused));
+        }
     }
 
     /// Every entry of [`HONOURED_CONFIG_KEYS`] is genuinely READ.

@@ -21689,8 +21689,12 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     # R3362 -- 8 -> 9: `scouting/multicast/enabled: false` takes a peer off the group, shown as a
     # pair on one group (found without the key, not found with it). 9 = the number the lint read
     # off the file's `#[ignore]`d tests and the run printed.
+    #
+    # 9 -> 10: `z_scout` hears the node answering on the group its config's
+    # `scouting/multicast/address` names, read in zenoh's socket form. 10 = the file's `#[ignore]`d
+    # tests, counted off the file.
     wz_test_args wz-capi-c scouting_open
-    _runci_guarded_test "M a C ABI session scouts and is found" 9 \
+    _runci_guarded_test "M a C ABI session scouts and is found" 10 \
         cargo test -p wz-capi-c "${WZ_TEST_ARGS[@]}" -- --ignored --test-threads=1 || return 1
     # R3362 -- two config keys read off the datagrams a scouting session sends and the nodes it
     # dials, each as a pair with a control: the IP TTL of a Scout is the key's (and 1 without it),
