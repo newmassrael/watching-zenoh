@@ -20872,9 +20872,13 @@ layer_p_throughput_differential() {
 #      every thread's state when one stops; the runtime's lock-order checker stops a thread that
 #      takes two locks in both orders; every closure's drop is counted, and the process's
 #      allocations are held to what they were before the storm.
-#   2. The sequential test again, a few pairs, under valgrind's memcheck: a definitely lost block
+#   2. The sequential test again, 16 pairs, under valgrind's memcheck: a definitely lost block
 #      or an invalid access is an error. Its waits are stretched by the time scale, valgrind being
-#      that much slower.
+#      that much slower. 16 and not fewer: the test holds the SECOND half of its pairs to a bound
+#      and reads the first as what is made once, and what is made once takes seven pairs here
+#      (measured on one build host, at main and at the fourth PoC landing alike: +4 allocations
+#      a pair for seven pairs, then flat, then fewer as idle threads end; six pairs read
+#      [140, 144, 148, 152, 152, 156] and failed the bound of 8 with nothing leaked).
 #
 # The seed is printed; `WZ_STABILITY_SEED` set to it runs the same mix again. With none set the lane
 # takes one from the clock, so successive runs explore different mixes.
@@ -20948,7 +20952,7 @@ print(found[0])')" || [[ -z "$bin" ]]; then
         return 1
     fi
     local out
-    if ! out="$(WZ_STABILITY_CYCLES="${WZ_STABILITY_VALGRIND_CYCLES:-6}" WZ_STABILITY_TIME_SCALE=20 \
+    if ! out="$(WZ_STABILITY_CYCLES="${WZ_STABILITY_VALGRIND_CYCLES:-16}" WZ_STABILITY_TIME_SCALE=20 \
         valgrind --error-exitcode=97 --leak-check=full --errors-for-leak-kinds=definite \
         --show-leak-kinds=definite "$bin" --ignored --nocapture --test-threads=1 --exact \
         sessions_opened_and_closed_in_sequence_leave_no_allocation_behind 2>&1 | tee /dev/stderr)"; then
