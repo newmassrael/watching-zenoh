@@ -495,6 +495,10 @@ def selftest() -> int:
     assert not any("qemu-user" in p or "qemu-arm" == p for progs in merged.values() for p in progs), (
         "qemu-user is asked again, though no file of the tree runs a qemu user-mode emulator"
     )
+    # The 32-bit lane's compiler mode is a package and not a program: every machine has `cc`, and
+    # one without `gcc-multilib` fails the lane's own probe, so the unit has to ask for it.
+    assert merged["C1p32"] == ["cc"] and "gcc-multilib" in LANE_PACKAGES["C1p32"], (
+        merged.get("C1p32"), LANE_PACKAGES.get("C1p32"))
     cases += 1
     a = hosted["A"]
     assert a.env == {"WZ_DECLINED_EXPECT": "", "RUST_BACKTRACE": "1", "WZ_PICO_REQUIRE": "1"}, (
