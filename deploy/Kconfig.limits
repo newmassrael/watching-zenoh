@@ -526,8 +526,10 @@ config WZ_LIMIT_CLOCK_MAX_FORWARD_STEP_MS
 	  UHLC_MAX_DELTA_MS. A refused timestamp is not taken into the clock, and the
 	  data carrying it is stamped afresh or dropped as the timestamping settings say.
 	  A host that sets the environment variable UHLC_MAX_DELTA_MS to a whole number of
-	  milliseconds overrides this at start, as it does zenoh's own bound. 0 refuses
-	  any timestamp ahead of the clock.
+	  milliseconds overrides this at start, as it does zenoh's own bound. A value
+	  that is not a whole number of milliseconds, or one the build does not allow, is
+	  refused by name: the open fails with that reason, where zenoh panics. 0
+	  refuses any timestamp ahead of the clock.
 
 config WZ_LIMIT_DECLARATION_SYNC_BURST_MESSAGES
 	int "DECLARATION_SYNC_BURST_MESSAGES"
