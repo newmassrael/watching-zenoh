@@ -1099,6 +1099,13 @@ round_fed_gates=(
     # rules, with a synthetic file for every refusal). A text read, no build; the entry itself builds
     # its subject and is run by Layers C1st and C1sp, not here.
     "wz_package.py --selftest"
+    # The Windows package of the pico library: its selftest. Round-fed because it names the
+    # tracked files a package copies (the licences, the usage notes, the catalog sample and the
+    # schemas). The selftest holds the notice derivation, the manifest and its verify, the
+    # deterministic zip and the extraction's refusals on synthetic trees in a scratch directory; a
+    # text read, no build, 0.09s measured. The build and the package's test need the MSVC
+    # toolchain and are the Platform workflow's `package-windows` job, not this hook's.
+    "pico_windows_package.py --selftest"
     # The facility oracle (docs/target-build-contract.md T9): each facility's witness observed
     # alone on a probe compiled here, the empty baseline, and the closed classes (name resolution
     # and a forked process are findings). Round-fed by scripts/lib/facility_trace.py, its shim and
