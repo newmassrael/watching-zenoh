@@ -1255,7 +1255,10 @@ typedef struct wz_ext_replay_publisher_counts_t {
 
 /* Under segmented: the segment profile and the program's values of its
  * fields (JSON, BORROWED for the call), the first transfer number and the
- * size of a piece's chunk. Not read under frame-per-sample. */
+ * size of a piece's chunk. Not read under frame-per-sample. Every frame
+ * answered after the first, in the same answer or a later one, carries the
+ * next number: answers are numbered on, back to first_transfer only past the
+ * largest number the field holds. */
 typedef struct wz_ext_replay_serve_options_t {
   const char *segment_profile;
   const char *segment_values;
@@ -1421,7 +1424,11 @@ void wz_ext_replay_subscriber_options_default(
  * _Z_ERR_CONFIG_INVALID_VALUE for one refused; otherwise what declaring the
  * subscription or the watch answers. Under segmented every payload, live or
  * replied, is joined from its pieces before it is judged; a frame with a
- * piece missing is given up and counted. */
+ * piece missing is given up and counted. The replies to each query are
+ * joined apart from every other query's, so a publisher may number the
+ * transfers of each answer from the same first number or on from its last
+ * answer: both are joined alike, and a frame two answers carry is told by
+ * its counter, never by its transfer number. */
 z_result_t wz_ext_replay_subscriber_new(
     wz_ext_owned_replay_subscriber_t *this_, const z_loaned_session_t *session,
     const z_loaned_keyexpr_t *keyexpr, const char *suffix,

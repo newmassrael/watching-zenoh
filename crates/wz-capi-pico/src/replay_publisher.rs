@@ -116,6 +116,11 @@ pub struct wz_ext_replay_publisher_counts_t {
 /// program's values of its fields (NUL-terminated JSON, BORROWED for the call), the transfer
 /// number the first answered frame carries, and the size of a piece's chunk. Not read under
 /// `frame-per-sample`.
+///
+/// Every frame answered after the first, in the same answer or a later one, carries the next
+/// number: the answers are numbered on, not each from `first_transfer`, which the numbering goes
+/// back to only past the largest number the field holds. A subscriber joins either way of
+/// numbering alike (`wz_app_frame::replay_pieces`).
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct wz_ext_replay_serve_options_t {
