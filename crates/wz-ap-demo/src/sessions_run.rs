@@ -765,7 +765,7 @@ where
     // face's, so the two hold their members to one decision.
     let new_dispatcher = || {
         #[cfg_attr(not(feature = "access-acl-multicast"), allow(unused_mut))]
-        let mut dispatcher = group_face_dispatcher(params);
+        let mut dispatcher = group_face_dispatcher(params, false);
         #[cfg(feature = "access-acl-multicast")]
         session.install_ingress_gate(&mut dispatcher);
         dispatcher

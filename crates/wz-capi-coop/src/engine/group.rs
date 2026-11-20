@@ -8,8 +8,9 @@
 //! the members it admits, its lease sweep, the per-member order of what they send and the framing
 //! of what it sends are that session's, and every rule they follow is the session core's
 //! (`multicast_dispatch`, `multicast_rx`, `multicast_tx`). The dispatcher keeps each member's
-//! declarations apart from the moment it is built (`MulticastConfig::scoping_members`), as the
-//! tokio engine's group face does, since two members number their entities alike.
+//! declarations apart from the moment it is built (`MulticastConfig::of_group`, the config the
+//! tokio engine's group face builds its dispatcher from too), since two members number their
+//! entities alike.
 //!
 //! What this module adds is the hosting: the group's tables in the session's registry, where what
 //! a member sends is dispatched as a peer's frames are; the queue the session puts its own
@@ -245,9 +246,9 @@ impl GroupFace {
         let members: Rc<RefCell<Vec<MulticastMember>>> = Rc::new(RefCell::new(Vec::new()));
         let took = Rc::new(Cell::new(false));
         let stop = Rc::new(Cell::new(false));
-        let config = MulticastConfig::new(params.lease_ms)
-            .with_max_sessions(params.max_sessions)
-            .scoping_members();
+        // The session core's config for a group, the tokio engine's group face's too, with each
+        // member's declarations kept apart: the group's events feed one session's tables.
+        let config = MulticastConfig::of_group(&params, true);
         let seed: MulticastSessionSeed<Watched, GROUP_MEMBERS> = MulticastSessionSeed::new(
             config,
             Watched {
