@@ -996,6 +996,12 @@ mod congested {
 
         let took = put_with(&member, CongestionControl::Drop);
         assert_eq!(member.group_congestion_drops(Priority::DEFAULT), 2);
+        #[cfg(feature = "transport-stats")]
+        assert_eq!(
+            member.transport_stats().tx.n_dropped,
+            2,
+            "the group's drops are the transport's, as the tokio group counts them"
+        );
         assert!(
             took < DROP_WAIT,
             "the lane's mark drops a put at once, not after {took:?}"
@@ -1030,6 +1036,50 @@ mod congested {
         assert_eq!(member.rooms().within(1_000), Room::Congested);
         writable(&stack, &transport);
         assert_eq!(member.rooms().within(1_000), Room::Free);
+        SessionDrive::close(&*member);
+    }
+
+    /// Under the pico profile a droppable put that finds the session held, here by a blocking put
+    /// waiting for room on the full group, is dropped at once and its caller is told, as pico's
+    /// put fails when its held transmit lock drops the message: the group's leg reports the held
+    /// session as a link's does.
+    #[test]
+    fn under_the_pico_profile_a_put_behind_a_held_group_session_is_told() {
+        let (member, stack, _transport) = open_filling();
+        stack.full.store(true, Ordering::SeqCst);
+        for _ in 0..3 {
+            put_with(&member, CongestionControl::Drop);
+        }
+        let blocking = {
+            let member = Arc::clone(&member);
+            std::thread::spawn(move || put_with(&member, CongestionControl::Block))
+        };
+        // Long enough for the blocking put to take the session, well inside its wait.
+        std::thread::sleep(CLOSE_WAIT / 3);
+        let started = Instant::now();
+        let dropped = member.publish_on_wire_all(
+            "demo/group/full",
+            &WireKey::literal(),
+            b"behind",
+            &PublishOptions::put()
+                .with_locality(Locality::Remote)
+                .with_congestion_control(CongestionControl::Drop),
+        );
+        assert_eq!(dropped, Err(wz_capi_port::FanoutError::HeldConduit));
+        assert!(
+            started.elapsed() < CLOSE_WAIT / 3,
+            "the droppable put waited {:?}",
+            started.elapsed()
+        );
+        assert!(
+            !blocking.is_finished(),
+            "the blocking put still holds the session"
+        );
+        let waited = blocking.join().expect("the blocking put");
+        assert!(
+            waited >= CLOSE_WAIT,
+            "the blocking put returned after {waited:?}"
+        );
         SessionDrive::close(&*member);
     }
 

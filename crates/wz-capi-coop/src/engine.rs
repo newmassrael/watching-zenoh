@@ -2361,6 +2361,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             for actions in core.0.ups() {
                 report.absorb(&actions.stats_report());
             }
+            // A group charges what its queue dropped for congestion where the tokio engine's
+            // group charges it, the transport's dropped messages; it leaves with the group's join.
+            #[cfg(feature = "group")]
+            for group in &core.0.groups {
+                report.tx.n_dropped = report.tx.n_dropped.saturating_add(
+                    usize::try_from(group.congestion_drops_total()).unwrap_or(usize::MAX),
+                );
+            }
         }
         let unsent = self.unsent_drops.load(Ordering::Relaxed);
         report.tx.n_dropped = report

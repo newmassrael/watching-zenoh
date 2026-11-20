@@ -442,6 +442,15 @@ impl GroupFace {
         self.tx.drops(priority)
     }
 
+    /// How many messages the session put on the group were dropped for want of room, of every
+    /// priority (`transport-stats`).
+    #[cfg(feature = "transport-stats")]
+    pub(super) fn congestion_drops_total(&self) -> u32 {
+        (0..Priority::NUM)
+            .map(|at| self.tx.drops(Priority::from_wire(at as u8)))
+            .fold(0u32, u32::saturating_add)
+    }
+
     /// Ask the group's session for its JOIN at its next step, between two beacons, as the tokio
     /// engine's group sends one when it is asked (zenoh-pico's `zp_send_join`): whether the group
     /// was asked, which one whose session ended is not.
