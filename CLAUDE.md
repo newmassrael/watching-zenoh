@@ -1,7 +1,7 @@
 # watching-zenoh — AI Agent Operating Guide
 
-Auto-read at every session start. Defines the **Mnemosyne SSOT operating rules**
-for the 12 design docs registered in `mnemosyne.toml`. Detail that matters only
+Auto-read at every session start. Defines the operating rules for the Mnemosyne
+atomic store, the project's SSOT. Detail that matters only
 for one action (push, license header, upstream citation, pin bump) lives in
 `docs/agent-reference.md` — read the named section when you take that action.
 
@@ -18,14 +18,14 @@ primitives, never through `Edit` / `Write` on the sidecar JSON: a typed
 primitive validates against tier rules (T1 cross-ref orphan, frozen ledger)
 before persisting, while a regex `Edit` silently drifts structure.
 
-The former member docs (ARCHITECTURE.md, README.md, docs/*.md) are ordinary
-human-readable design notes since R408: not parsed, not validated, may drift
+ARCHITECTURE.md, README.md and docs/*.md are ordinary
+human-readable design notes: not parsed, not validated, may drift
 from the store. Edit them directly. Read the SSOT with `mnemosyne-cli query` /
 `query_section`. There is no `GENERATED.md` and no NarrativeSection /
 `prose_blocks` escape hatch (`anti-patterns` #9); un-decomposable prose means
 restructure the prose. Background: `docs/agent-reference.md` § Atomic store.
 
-## Before any action on a registered doc
+## Before mutating the atomic store
 
 1. Read the Mnemosyne concepts not yet read this session, in order
    (`anti-patterns` is must-read second): `mnemosyne://concepts/` `overview`,
@@ -100,7 +100,7 @@ One-time per clone: `git config core.hooksPath .githooks`. Requires
 Source-available, non-commercial or commercial:
 `LicenseRef-watching-zenoh-NonCommercial-1.0` OR
 `LicenseRef-watching-zenoh-Commercial` (see `LICENSE`, `LICENSE-COMMERCIAL.md`).
-The free tier was AGPL-3.0-or-later before 2026-10-18. Author-side source files carry this header:
+Author-side source files carry this header:
 
 ```
 SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
@@ -116,9 +116,8 @@ inherit `LICENSE`. `scripts/lib/relicense_spdx.py` requires an explicit mode
 
 ## Hard prohibitions
 
-- Do not `Edit` / `Write` `mnemosyne.toml` to bypass validation (e.g. removing a
-  doc from `workspace.docs` to silence its orphans). If a doc genuinely cannot
-  be carried, raise it explicitly.
+- Do not `Edit` / `Write` `mnemosyne.toml` to bypass validation. If a violation
+  genuinely cannot be fixed, raise it explicitly.
 - Do not retroactively rewrite an existing changelog entry body — frozen-ledger
   anti-pattern. Corrections arrive as new entries.
 - Do not drive T3 warn / T4 info counts to zero by mass prose rewrite — the
