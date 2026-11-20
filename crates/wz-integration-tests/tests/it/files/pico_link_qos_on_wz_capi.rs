@@ -51,7 +51,10 @@
 //!
 //! A red of the subject means: `full` false, a `Block` put did not wait on a full link; a long
 //! `Drop` put, a dropping put waited for the link; every `Drop` sample delivered, nothing was
-//! dropped; a `Block` sample missing, out of order or failed, the waiting put did not deliver.
+//! dropped; a `Drop` put whose answer was neither `Z_OK` nor `_Z_ERR_TRANSPORT_TX_FAILED`, or a
+//! count of `Z_OK` answers other than the count of samples delivered, a put did not tell its
+//! caller whether it sent the sample as zenoh-pico's does; a `Block` sample missing, out of order
+//! or failed, the waiting put did not deliver.
 //!
 //! ## Reliability on a lossy group and across a cut stream
 //!
@@ -164,6 +167,10 @@ const PROBE_SRC: &str = r##"
 /* A blocking put that has been in the call this long is waiting for the link. */
 #define FULL_US 300000ULL
 #define SLOW_US 100000ULL
+/* What a put answers for a send that failed, as its held transmit lock fails a dropping one:
+   `_Z_ERR_TRANSPORT_TX_FAILED` of zenoh-pico's `utils/result.h`, spelled by value so that both
+   header arms read it alike. */
+#define TX_FAILED (-100)
 
 static const char *const STREAM_KEY[STREAMS] = {"qos/cc/drop", "qos/cc/block", "qos/rel", "qos/be"};
 static const char *const STREAM_NAME[STREAMS] = {"drop", "block", "rel", "be"};
@@ -504,7 +511,7 @@ static void fill(unsigned long long timeout_ms) {
 }
 
 static void drop_for(unsigned long long duration_ms, unsigned long long interval_us) {
-    unsigned long long sent = 0, ok = 0, err = 0, max = 0, slow = 0;
+    unsigned long long sent = 0, ok = 0, err = 0, tx_failed = 0, max = 0, slow = 0;
     unsigned long long deadline = now_us() + duration_ms * 1000ULL;
     while (now_us() < deadline) {
         unsigned long long start = now_us();
@@ -515,6 +522,9 @@ static void drop_for(unsigned long long duration_ms, unsigned long long interval
             ok++;
         } else {
             err++;
+            if (rc == TX_FAILED) {
+                tx_failed++;
+            }
         }
         if (took > max) {
             max = took;
@@ -526,8 +536,8 @@ static void drop_for(unsigned long long duration_ms, unsigned long long interval
             sleep_us(interval_us);
         }
     }
-    printf("drop sent=%llu ok=%llu err=%llu max_us=%llu slow=%llu next=%llu\n", sent, ok, err, max, slow,
-           next_seq[DROP_S]);
+    printf("drop sent=%llu ok=%llu err=%llu tx_failed=%llu max_us=%llu slow=%llu next=%llu\n", sent, ok, err,
+           tx_failed, max, slow, next_seq[DROP_S]);
 }
 
 static void unfill(unsigned long long timeout_ms) {
@@ -1153,6 +1163,8 @@ struct Congestion {
     fill_after_ms: u64,
     drop_sent: u64,
     drop_ok: u64,
+    /// The `Drop` puts that answered `_Z_ERR_TRANSPORT_TX_FAILED`.
+    drop_tx_failed: u64,
     drop_max_us: u64,
     /// `Drop` samples of the full-link phase that reached the subscriber.
     drop_delivered: u64,
@@ -1233,6 +1245,7 @@ fn congestion_run(exe: &Path, library: &str, mode: &str) -> Result<Congestion, S
         fill_after_ms: need(&fill, "after_ms")?,
         drop_sent: need(&dropped, "sent")?,
         drop_ok: need(&dropped, "ok")?,
+        drop_tx_failed: need(&dropped, "tx_failed")?,
         drop_max_us: need(&dropped, "max_us")?,
         drop_delivered: report.drop.received.saturating_sub(warm.drop.received),
         drop_disorder: report.drop.disorder,
@@ -1274,6 +1287,26 @@ fn congestion_findings(o: &Congestion) -> Vec<String> {
             "all {} Drop samples put while the link was full were delivered ({} puts answered \
              Z_OK): none was dropped",
             o.drop_sent, o.drop_ok
+        ));
+    }
+    // A put tells its caller whether it sent the sample: zenoh-pico's answers
+    // `_Z_ERR_TRANSPORT_TX_FAILED` for a send that failed (`vendor/zenoh-pico/src/net/primitives.c`
+    // @ `if (_z_send_n_msg(zn, &msg, reliability, cong_ctrl, NULL) != _Z_RES_OK) {`), as its
+    // dropping send fails on a held transmit lock (`vendor/zenoh-pico/src/transport/common/tx.c`
+    // @ `_Z_INFO("Dropping zenoh message because of congestion control");`).
+    if o.drop_ok + o.drop_tx_failed != o.drop_sent {
+        found.push(format!(
+            "{} of {} Drop puts answered a code that is neither Z_OK nor \
+             _Z_ERR_TRANSPORT_TX_FAILED",
+            o.drop_sent.saturating_sub(o.drop_ok + o.drop_tx_failed),
+            o.drop_sent
+        ));
+    }
+    if o.drop_delivered != o.drop_ok {
+        found.push(format!(
+            "{} Drop samples reached the subscriber and {} puts answered Z_OK ({} answered \
+             _Z_ERR_TRANSPORT_TX_FAILED): a put's answer did not say whether its sample was sent",
+            o.drop_delivered, o.drop_ok, o.drop_tx_failed
         ));
     }
     if o.drop_disorder != 0 {
