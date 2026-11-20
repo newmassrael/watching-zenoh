@@ -1762,6 +1762,26 @@ a stress run of seconds, run by Layer S with --ignored (3 passed guarded); this 
 a stress run of seconds, run by Layer S with --ignored (3 passed guarded); this table never passes --ignored"
     "wz-capi-pico|sessions_opened_and_closed_in_sequence_leave_no_allocation_behind|\
 a stress run of seconds, run by Layer S with --ignored (3 passed guarded); this table never passes --ignored"
+    # The pico ABI's memory legs (`tests/allocation_faults.rs`, needs `app-transport`): `#[ignore]`
+    # because each sweep starts a process for every point of its call, and the traffic counts read
+    # the process's allocations, so a leg of this table would run none of them. Layer S runs the
+    # eight with --ignored on each engine, 8 passed guarded each time.
+    "wz-capi-pico|z_open_meets_a_failed_allocation_at_every_point_of_its_call|\
+a memory leg of Layer S, run by it with --ignored on each engine (8 passed guarded); this table never passes --ignored"
+    "wz-capi-pico|z_declare_subscriber_meets_a_failed_allocation_at_every_point_of_its_call|\
+a memory leg of Layer S, run by it with --ignored on each engine (8 passed guarded); this table never passes --ignored"
+    "wz-capi-pico|z_declare_queryable_meets_a_failed_allocation_at_every_point_of_its_call|\
+a memory leg of Layer S, run by it with --ignored on each engine (8 passed guarded); this table never passes --ignored"
+    "wz-capi-pico|z_declare_publisher_meets_a_failed_allocation_at_every_point_of_its_call|\
+a memory leg of Layer S, run by it with --ignored on each engine (8 passed guarded); this table never passes --ignored"
+    "wz-capi-pico|z_put_meets_a_failed_allocation_at_every_point_of_its_call|\
+a memory leg of Layer S, run by it with --ignored on each engine (8 passed guarded); this table never passes --ignored"
+    "wz-capi-pico|z_get_meets_a_failed_allocation_at_every_point_of_its_call|\
+a memory leg of Layer S, run by it with --ignored on each engine (8 passed guarded); this table never passes --ignored"
+    "wz-capi-pico|puts_between_open_sessions_are_counted_for_their_allocations|\
+a memory leg of Layer S, run by it with --ignored on each engine (8 passed guarded); this table never passes --ignored"
+    "wz-capi-pico|gets_between_open_sessions_are_counted_for_their_allocations|\
+a memory leg of Layer S, run by it with --ignored on each engine (8 passed guarded); this table never passes --ignored"
 )
 
 if [[ ${#LEGS[@]} -eq 0 ]]; then

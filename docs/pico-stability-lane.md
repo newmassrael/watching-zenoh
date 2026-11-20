@@ -22,6 +22,7 @@ WZ_S_REQUIRE=1 bash scripts/run-ci.sh --layer S          # fail where valgrind i
 | `WZ_STABILITY_STALL_SECONDS` | 30 | how long a thread may make no progress before the watchdog stops the run |
 | `WZ_STABILITY_TIME_SCALE` | 1 | every wait of the suite is this many times longer |
 | `WZ_STABILITY_VALGRIND_CYCLES` | 6 | how many pairs the valgrind leg runs |
+| `WZ_ALLOC_FAULT_JOBS` | the machine's parallelism | how many runs of a memory leg's sweep go at once (1 to 64) |
 
 The hosted run (job `pico-client-only`) is the short bound: ten seconds a storm, no valgrind. The
 build host runs it as long as the question asks, for example
@@ -99,6 +100,49 @@ neither received nor reported missed, the loss went unreported; a sample out of 
 the receiver took a stale frame; the fence or the samples after the re-dial missing, delivery did
 not resume; "measured nothing", the relay found no frame of the publisher's to impair.
 
+## The memory legs
+
+The third suite (`crates/wz-capi-pico/tests/allocation_faults.rs`) asks what the library does when
+memory runs out, and how much memory its traffic takes. It is an executable of its own, because its
+global allocator counts every allocation and fails one on request, and it runs on each engine: the
+tokio engine (the default build with `app-transport`) and the cooperative one
+(`--no-default-features --features engine-coop,app-transport,peer,query,queryable,multi-thread`).
+The two sessions are joined by an in-memory pipe as in the storm, one stream pair, without faults;
+nothing the pipe or the test's closures do on a message's path allocates, so every allocation a
+window counts is the library's.
+
+1. **A failed allocation at every point of a call.** For `z_open` (the dialling session, with the
+   listening one up), `z_declare_subscriber`, `z_declare_queryable`, `z_declare_publisher`, `z_put`
+   and `z_get` (the dialling session open, its route to the listener made and a get answered
+   first): a run with no failure counts the allocations the process makes while the call runs. Then
+   every point from 1 fails in a run of its own, until a run past that count makes fewer
+   allocations than its point (the count moves a little from run to run, with the threads). A run
+   is a process of its own, this executable started again on one test with `WZ_ALLOC_FAULT_RUN` set
+   to `<call>:<point>`, because a failed allocation may end the process and the process is then
+   judged from outside. Runs go `WZ_ALLOC_FAULT_JOBS` at a time (the machine's parallelism by
+   default); one may take a minute.
+2. **Traffic between open sessions.** After twenty puts (and, in the second test, twenty gets) have
+   made the routes and grown the buffers, two hundred more are counted: the allocations the process
+   made for them and the bytes those asked for.
+
+A run ends one of three ways: the call returned, and it prints its code, whether the failing
+allocation was reached, and, once both sessions are closed, whether every closure the library was
+handed was dropped, both transports were let go and how many allocations the process still holds;
+the process ended in Rust's allocation-failure handler (its abort is caught in the run and ends the
+process at once, so thousands of runs leave no core dump); or anything else, a signal, a failed
+assertion, no verdict or no end within a minute.
+
+| Build | The sweep is held to | The traffic is held to |
+|---|---|---|
+| any | no run ends in any third way; no panic; a call that returned after its failure answered `Z_OK` or a named allocation error (`Z_ERR_SYSTEM_OUT_OF_MEMORY`), and left every closure dropped, both transports let go and no more allocations held than the run with no failure; a run that never reached its point returned `Z_OK` | no panic; every closure dropped and both transports let go |
+| a heap build (both engines today) | the run with no failure counts at least one allocation, so the counter is known to see them; a run that ends in the handler is counted and printed | at least one allocation is counted; the count is printed |
+| a build that takes a session's memory at `z_open` | no run ends in the handler | no allocation at all |
+
+Which row a build is held to is the constant `MEMORY_TAKEN_AT_OPEN` at the top of the file, which a
+fixed-memory build sets from its feature. A heap build's answer to every point it reaches is the
+handler, since Rust's allocator API aborts on a failure the caller does not take as a result; the
+sweep shows where those points are and how many, call by call and engine by engine.
+
 ## What it detects
 
 | Defect | How |
@@ -123,16 +167,12 @@ not resume; "measured nothing", the relay found no frame of the publisher's to i
 
 ## What it does not cover
 
-- **Allocation failure.** The pico ABI has no allocation hook to fail. `z_malloc` is the host's
-  `malloc`, and the library's own allocations go through Rust's global allocator, which aborts the
-  process when an allocation fails rather than returning an error to the caller. A failing allocator
-  installed by this suite would therefore only show that abort. Exercising the failure as a handled
-  case needs two things the library does not have: a door that lets the program supply the
-  allocator the library allocates from, and allocation on the session's paths (the session tables,
-  the receive and transmit queues, the closures) that reports failure as a named error and leaves
-  the session usable. Until both exist the suite does not inject allocation failure.
-- **The cooperative engine.** The suite runs the tokio engine, the default build's. The cooperative
-  engine's client (`engine-coop`) is a separate build of the same ABI.
+- **Allocation failure outside the six calls.** The memory legs fail an allocation inside one call
+  at a time. A failure on a session's own threads between calls (a sample received, a timer) is
+  reached only when it falls inside a call's window. `z_malloc` is the host's `malloc`, which the
+  suite does not fail.
+- **The cooperative engine, in the storm.** The storm runs the tokio engine, the default build's;
+  the memory legs run both.
 - **Real sockets, in the storm.** The storm's faults are the program transport's. The link legs
   put a stall, a loss and a cut on the system's sockets, between two processes, but for the
   default build's tokio engine only, and with no fault on the program's own transport there, which

@@ -594,6 +594,14 @@ required-features = ["engine-tokio", "peer", "clock-source"]
 name = "stability"
 required-features = ["app-transport", "peer", "query", "queryable", "liveliness", "link-udp"]
 
+# The memory legs of Layer S: a failed allocation at every point of a call, each run a process of
+# its own, and the allocations of traffic between open sessions. An executable of its own because
+# its `#[global_allocator]` counts and fails allocations; every test in it is `#[ignore]`d. The
+# sessions are stepped by their own threads, so a cooperative build needs `multi-thread`.
+[[test]]
+name = "allocation_faults"
+required-features = ["app-transport", "peer", "query", "queryable", "multi-thread"]
+
 # The node that `client_only_dials_a_listener` dials: a build that cannot listen needs one of
 # the full build to talk to. It asks queries and answers them, so the build has both ends of one.
 [[example]]

@@ -20864,7 +20864,7 @@ layer_p_throughput_differential() {
 # What it covers and how to read a red: docs/pico-stability-lane.md.
 #
 # Two legs over the stress executable of wz-capi-pico (`tests/stability.rs`, whose three tests are
-# `#[ignore]`d so that no default sweep runs them):
+# `#[ignore]`d so that no default sweep runs them), the memory legs and the link legs:
 #
 #   1. The three tests in a debug build. Worker threads put, get and declare while a chaos thread
 #      closes and reopens the sessions under them, over a transport the program supplies that
@@ -20898,6 +20898,24 @@ layer_s_pico_stability() {
     echo "Layer S: seed ${WZ_STABILITY_SEED} (WZ_STABILITY_SEED=${WZ_STABILITY_SEED} runs this mix again)"
     wz_test_args wz-capi-pico stability
     _runci_guarded_test S 3 cargo test -p wz-capi-pico --features "$features" \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --nocapture --test-threads=1 || return 1
+
+    # The memory legs (`tests/allocation_faults.rs`, an executable of its own for its allocator),
+    # on each engine: for z_open, the three declarations, z_put and z_get, a run with no failure
+    # counts the allocations of the call, and then every point of it fails in a run of its own (a
+    # process started from the test, `WZ_ALLOC_FAULT_JOBS` at once); and the allocations of puts
+    # and gets between open sessions are counted. A heap build is held to what every build owes
+    # (no run ends but by returning or in the allocation-failure handler, no panic, nothing left
+    # behind by a call that returned) and prints its counts; a build that takes its memory at open
+    # is held to a named error at every point and to traffic that allocates nothing. One test at a
+    # time: each sweep runs its own processes in parallel. Count-guarded: every test is `#[ignore]`.
+    wz_test_args wz-capi-pico allocation_faults
+    _runci_guarded_test "S allocation faults, tokio engine" 8 \
+        cargo test -p wz-capi-pico --features "$features" \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --nocapture --test-threads=1 || return 1
+    _runci_guarded_test "S allocation faults, cooperative engine" 8 \
+        cargo test -p wz-capi-pico --no-default-features \
+        --features engine-coop,app-transport,peer,query,queryable,multi-thread \
         "${WZ_TEST_ARGS[@]}" -- --ignored --nocapture --test-threads=1 || return 1
 
     # The link legs (`crates/wz-integration-tests/tests/it/files/pico_link_qos_on_wz_capi.rs`): one
