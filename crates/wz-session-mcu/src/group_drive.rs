@@ -149,6 +149,7 @@
 ))]
 use alloc::rc::Rc;
 use core::mem::MaybeUninit;
+use wz_runtime_coop::group_transport::GroupSend;
 pub use wz_runtime_coop::group_transport::GroupTransport;
 
 #[cfg(feature = "reassembly")]
@@ -842,6 +843,71 @@ const TX_SCRATCH_BYTES: usize = 1500 - 20 - 8;
 #[cfg(feature = "alloc")]
 const TX_SCRATCH_BYTES: usize = 0;
 
+/// What the data emit of a pump could not hand its socket: on the heap profile the datagrams the
+/// socket had no room for, kept in order for the next step, as the tokio group's writer keeps
+/// what its socket has not taken; and the count of the datagrams that were lost, to a send that
+/// failed or, where nothing is kept, to a socket with no room.
+struct TxBacklog {
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    held: alloc::collections::VecDeque<alloc::vec::Vec<u8>>,
+    lost: u32,
+}
+
+impl TxBacklog {
+    const fn new() -> Self {
+        Self {
+            #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+            held: alloc::collections::VecDeque::new(),
+            lost: 0,
+        }
+    }
+
+    /// Offer the socket what it had no room for before, in order, until it has none again:
+    /// whether something is still held back.
+    fn offer_held<T: GroupTransport>(&mut self, transport: &mut T) -> bool {
+        #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+        while let Some(datagram) = self.held.front() {
+            match transport.try_send_to_group(datagram) {
+                GroupSend::Sent => {}
+                GroupSend::Full => return true,
+                GroupSend::Failed => self.lost = self.lost.saturating_add(1),
+            }
+            self.held.pop_front();
+        }
+        #[cfg(not(all(feature = "alloc", not(feature = "session-slot"))))]
+        let _ = transport;
+        false
+    }
+
+    /// Offer the socket one datagram of the emit, behind any held back (`full`): whether the
+    /// socket is full from here on in this step.
+    fn send<T: GroupTransport>(&mut self, transport: &mut T, datagram: &[u8], full: bool) -> bool {
+        // A socket already full is not offered more, so the datagrams leave in their order.
+        let sent = if full {
+            GroupSend::Full
+        } else {
+            transport.try_send_to_group(datagram)
+        };
+        match sent {
+            GroupSend::Sent => false,
+            GroupSend::Full => {
+                #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+                self.held.push_back(datagram.to_vec());
+                // Nowhere to keep it: the datagram is lost, and counted.
+                #[cfg(not(all(feature = "alloc", not(feature = "session-slot"))))]
+                {
+                    self.lost = self.lost.saturating_add(1);
+                }
+                true
+            }
+            GroupSend::Failed => {
+                self.lost = self.lost.saturating_add(1);
+                false
+            }
+        }
+    }
+}
+
 /// One MCU multicast session, ready to be advanced one iteration at a time.
 ///
 /// Open-debt item 900 — one program holding SEVERAL sessions (a client session
@@ -872,6 +938,9 @@ pub struct MulticastPump<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS:
     // datagram at a time (`multicast_tx_emit_offer`); empty on the heap profile,
     // which frames into vectors of its own.
     tx_scratch: [u8; TX_SCRATCH_BYTES],
+    // What the data emit could not hand the socket: the datagrams a full socket left for the
+    // next step, and the count of those that were lost.
+    tx_backlog: TxBacklog,
     next_join_ms: u64,
     next_sweep_ms: u64,
     iter: usize,
@@ -967,6 +1036,7 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
             pass,
             tx_sn,
             tx_scratch: [0; TX_SCRATCH_BYTES],
+            tx_backlog: TxBacklog::new(),
             next_join_ms,
             next_sweep_ms,
             iter: 0,
@@ -985,6 +1055,12 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
     /// The peer table the pump drives, for a caller that reports its group.
     pub fn dispatcher(&self) -> &MulticastDispatcher<MAX_PEERS> {
         self.dispatcher
+    }
+
+    /// How many datagrams of the data emit were lost since the pump was made: to a send the stack
+    /// failed, and, on a build that keeps none back, to a socket with no room for them.
+    pub fn tx_lost(&self) -> u32 {
+        self.tx_backlog.lost
     }
 
     /// Advance the session by one iteration. `Some(outcome)` means the session
@@ -1022,6 +1098,7 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
         let clock = &self.clock;
         let tx_sn = &mut self.tx_sn;
         let tx_scratch = &mut self.tx_scratch[..];
+        let tx_backlog = &mut self.tx_backlog;
         let next_join_ms = &mut self.next_join_ms;
         let next_sweep_ms = &mut self.next_sweep_ms;
         let iter = &mut self.iter;
@@ -1123,8 +1200,12 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
         }
 
         let now = clock.now_monotonic_ms();
+        // What the socket had no room for at an earlier step goes first. A JOIN waits behind it:
+        // the beacon advertises the sequence numbers those datagrams carry as sent, and a member
+        // that read it first would drop them as stale when they came.
+        let mut full = tx_backlog.offer_held(&mut *transport);
         // JoinEmit: multicast the self-advertising JOIN beacon when due.
-        if now >= *next_join_ms {
+        if now >= *next_join_ms && !full {
             // R311y227 — the DEFAULT conduit's live SNs (the single-conduit
             // beacon); a qos group additionally advertises per-priority ext_qos (C2).
             // Written into an array on the stack (`encode_join_into_slice` is the
@@ -1141,16 +1222,23 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
         // through the shared multicast_tx_emit_offer SSOT (the same the AP loop
         // calls the heap form of) and multicasting it to the group. Drained right
         // after the JOIN beacon so the datagrams ride THIS iteration's
-        // run_until_idle. send_to_group is best-effort (multicast UDP); the SSOT's
+        // run_until_idle. The send is best-effort (multicast UDP); the SSOT's
         // per-variant reliability flag is inert here (the MCU group socket takes
         // no reliability arg). Every forwarded variant — Push, queryable
         // Response / ResponseFinal, liveliness DeclareReply — routes through the
         // one SSOT, so this drain is variant-agnostic (the item carries which).
         // With no TX body codec the offer is uninhabited, so `next_tx` can only
         // yield `None` and the loop body is never entered.
-        while let Some(offer) = next_tx() {
+        //
+        // A socket with no room ends the drain for this step: what it did not take waits for
+        // the next one (`TxBacklog`), and what is still queued stays queued, where a sender
+        // whose message finds the queue full waits for room as it would on the tokio group's.
+        while !full {
+            let Some(offer) = next_tx() else {
+                break;
+            };
             multicast_tx_emit_offer(offer, tx_sn, params, tx_scratch, &mut |datagram| {
-                transport.send_to_group(datagram)
+                full = tx_backlog.send(&mut *transport, datagram, full);
             });
         }
 
@@ -1812,6 +1900,12 @@ impl<C: ClockSource + 'static, T: GroupTransport + 'static, const MAX_PEERS: usi
         unsafe { (*self.cell.pump.get()).assume_init_mut() }
     }
 
+    /// How many datagrams of the session's data emit were lost ([`MulticastPump::tx_lost`]): this
+    /// profile keeps none back, so one its socket had no room for is among them.
+    pub fn tx_lost(&mut self) -> u32 {
+        self.pump().tx_lost()
+    }
+
     /// Copy the peer table's count of turned-away JOINs to where the table's owner reads it
     /// ([`MulticastSlots::join_refusals`]); a step changes it by at most one datagram's worth, so
     /// the copy is made after each step and takes the critical section only when the count moved.
@@ -1920,4 +2014,192 @@ where
     local
         .spawn_local_with(move || multicast_pump_task(pump, on_event, next_tx, should_stop))
         .map_err(MulticastSpawnRefused::Task)
+}
+
+#[cfg(all(
+    test,
+    feature = "alloc",
+    feature = "codec-push",
+    not(feature = "session-slot")
+))]
+mod tests {
+    use alloc::collections::VecDeque;
+    use alloc::rc::Rc;
+    use alloc::vec::Vec;
+    use core::cell::RefCell;
+    use core::net::SocketAddr;
+
+    use wz_runtime_coop::{ClockSource, CoopRuntime};
+    use wz_session_core::driver_loop::IterationEvent;
+    use wz_session_core::multicast_dispatch::{MulticastConfig, MulticastDispatcher};
+    use wz_session_core::multicast_params::{
+        zid_vec, GroupJoinRule, MulticastDriveConfig, MulticastParams,
+    };
+    use wz_session_core::multicast_tx::{multicast_put_literal, MulticastTxItem};
+    use wz_session_core::policy::SessionPolicy;
+    use wz_session_core::session_init_params::{LinkRxConf, TxQueueConf};
+    use wz_session_core::wire_const::T_MID_JOIN;
+    use wz_session_core::WhatAmI;
+
+    use super::{GroupSend, GroupTransport, MulticastPump};
+
+    /// A clock that never moves: the beacon, due at every step, is what moves the test.
+    #[derive(Clone, Default)]
+    struct Frozen;
+
+    impl ClockSource for Frozen {
+        fn now_us(&self) -> u64 {
+            0
+        }
+    }
+
+    /// The payloads the test puts on the group, by which a datagram is told apart.
+    const PAYLOADS: [&str; 4] = ["first", "second", "third", "fourth"];
+
+    /// What the group's socket took, in order, and what it takes next.
+    #[derive(Default)]
+    struct Wire {
+        seen: Vec<Vec<u8>>,
+        /// How many more datagrams it takes before it is full.
+        room: usize,
+        /// The next datagram offered fails.
+        fail: bool,
+    }
+
+    struct Socket(Rc<RefCell<Wire>>);
+
+    impl GroupTransport for Socket {
+        fn open(&mut self) -> bool {
+            true
+        }
+
+        fn close(&mut self) {}
+
+        fn service(&self) {}
+
+        fn carrier_up(&self) -> bool {
+            true
+        }
+
+        // The beacon leaves this way, whatever room there is: where it falls among the data is
+        // what is read.
+        fn send_to_group(&mut self, datagram: &[u8]) {
+            self.0.borrow_mut().seen.push(datagram.to_vec());
+        }
+
+        fn try_send_to_group(&mut self, datagram: &[u8]) -> GroupSend {
+            let mut wire = self.0.borrow_mut();
+            if core::mem::take(&mut wire.fail) {
+                return GroupSend::Failed;
+            }
+            if wire.room == 0 {
+                return GroupSend::Full;
+            }
+            wire.room -= 1;
+            wire.seen.push(datagram.to_vec());
+            GroupSend::Sent
+        }
+
+        fn recv_with(&mut self, _f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
+            false
+        }
+    }
+
+    /// A group whose beacon is due at every step.
+    fn params() -> MulticastParams {
+        MulticastParams {
+            whatami: WhatAmI::Peer,
+            zid: zid_vec(&[0xAA, 0xBB, 0xCC, 0xDD]),
+            lease_ms: 5_000,
+            join_interval_ms: 0,
+            seq_num_res: 0x02,
+            req_id_res: 0x02,
+            batch_size: 2_048,
+            is_qos: false,
+            compression: false,
+            tx_queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
+            link_rx: LinkRxConf::default(),
+            join_rule: GroupJoinRule::Pico,
+            max_sessions: None,
+            policy: SessionPolicy::defaults(),
+        }
+    }
+
+    fn put(payload: &str) -> MulticastTxItem {
+        multicast_put_literal("demo/backlog", payload.as_bytes()).expect("a put")
+    }
+
+    /// What the socket took, each as `join` or the payload of the put it carried.
+    fn taken(wire: &RefCell<Wire>) -> Vec<&'static str> {
+        wire.borrow()
+            .seen
+            .iter()
+            .map(|datagram| {
+                if datagram.first().is_some_and(|h| h & 0x1f == T_MID_JOIN) {
+                    return "join";
+                }
+                PAYLOADS
+                    .into_iter()
+                    .find(|payload| datagram.ends_with(payload.as_bytes()))
+                    .unwrap_or("other")
+            })
+            .collect()
+    }
+
+    /// A datagram the socket has no room for is kept and offered again at the next step, ahead
+    /// of everything, and the beacon waits behind it; what is still queued is not taken while the
+    /// socket is full. A datagram whose send fails is lost and counted, and not offered again.
+    #[test]
+    fn a_datagram_the_socket_has_no_room_for_waits_and_the_beacon_waits_behind_it() {
+        let wire = Rc::new(RefCell::new(Wire {
+            room: 1,
+            ..Wire::default()
+        }));
+        let mut socket = Socket(Rc::clone(&wire));
+        let params = params();
+        let runtime = CoopRuntime::new(Frozen);
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let queue: RefCell<VecDeque<MulticastTxItem>> =
+            RefCell::new(PAYLOADS[..3].iter().copied().map(put).collect());
+        let mut next_tx = || queue.borrow_mut().pop_front();
+        let mut quiet = |_event: IterationEvent<'_, '_>| {};
+        let mut pump = MulticastPump::new(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &params,
+                tick_ms: 5,
+                max_iters: None,
+            },
+            &SessionPolicy::defaults(),
+            &runtime,
+            &mut socket,
+        );
+
+        // The beacon, then the first put, which takes the room there is; the second finds none
+        // and is kept, and the third stays queued.
+        assert!(pump.step(&mut quiet, &mut next_tx, None).is_none());
+        assert_eq!(taken(&wire), ["join", "first"]);
+        assert_eq!(queue.borrow().len(), 1, "what is queued stays queued");
+
+        // Still no room: the beacon that is due waits behind the datagram kept.
+        assert!(pump.step(&mut quiet, &mut next_tx, None).is_none());
+        assert_eq!(taken(&wire), ["join", "first"]);
+
+        // Room: the kept datagram leaves first, then the beacon, then what was queued.
+        wire.borrow_mut().room = 8;
+        assert!(pump.step(&mut quiet, &mut next_tx, None).is_none());
+        assert_eq!(taken(&wire), ["join", "first", "second", "join", "third"]);
+        assert_eq!(pump.tx_lost(), 0, "nothing was lost to a full socket");
+
+        // A send the stack fails loses its datagram: counted, and not offered again.
+        queue.borrow_mut().push_back(put("fourth"));
+        wire.borrow_mut().fail = true;
+        assert!(pump.step(&mut quiet, &mut next_tx, None).is_none());
+        assert_eq!(pump.tx_lost(), 1);
+        assert!(pump.step(&mut quiet, &mut next_tx, None).is_none());
+        assert_eq!(
+            taken(&wire),
+            ["join", "first", "second", "join", "third", "join", "join"]
+        );
+    }
 }
