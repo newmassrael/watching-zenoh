@@ -13645,8 +13645,9 @@ layer_c1m_session_lwip() {
         cargo test -p wz-session-mcu --features client-slot,declare-token --lib slot_node --quiet || return 1
     # The same tests of a node that binds the lifecycle verbs in band (`client-verbs`, what a
     # declaration that names a commander builds), and one more: the verbs are declared under the
-    # node's own key once named, and refused unnamed.
-    _runci_guarded_test "C1m mcu slot node with verbs" 32 \
+    # node's own key once named, and refused unnamed. 32 -> 33: Round 4521's snapshot test, which
+    # moved the two legs above and not this one; hosted run 44646497313 printed 33.
+    _runci_guarded_test "C1m mcu slot node with verbs" 33 \
         cargo test -p wz-session-mcu --features client-verbs,lifecycle-close,lifecycle-reset,lifecycle-status \
         --lib slot_node --quiet || return 1
     # The client that answers queries and subscribes to nothing (`client-slot-queryable`, what
