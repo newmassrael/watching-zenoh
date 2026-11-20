@@ -43,6 +43,7 @@
 //! | `message_catalog` | the reader and judge of a message catalog, and the senders, receivers and supervision rows made from it | `alloc` |
 //! | `proto_schema` | the `.proto` schema reader: files read, imports resolved, names linked, the field tree walked | `proto` |
 //! | `proto_decode` | a protobuf payload read by the types its schema gives it | `proto` |
+//! | `message_payload` | one message set and read field by field at paths, its protobuf bytes encoded and decoded | `message-payload` |
 //! | `proto_lex`, `proto_parse` | the tokenizer and the parser behind the schema reader | `proto` |
 //! | `instance_key` | the instance of a message a sample is, read from payload fields; a stream and a last value per instance | `instance-key` |
 //!
@@ -86,6 +87,11 @@ pub mod instance_key;
 mod instance_key_tests;
 #[cfg(feature = "alloc")]
 pub mod message_catalog;
+#[cfg(feature = "message-payload")]
+pub mod message_payload;
+// The model tests of the message payload, on a synthetic schema.
+#[cfg(all(test, feature = "message-payload"))]
+mod message_payload_tests;
 #[cfg(feature = "proto")]
 pub mod proto_decode;
 #[cfg(feature = "proto")]

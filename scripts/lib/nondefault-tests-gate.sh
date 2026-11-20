@@ -441,6 +441,9 @@ transport-link-unixpipe,transport-link-ws|"
     # and its two stream doors, with the tests of the schema reader's tokenizer and parser, which
     # moved to this crate with the reader and compile only with `proto` (which this implies).
     "wz-app-frame|hook|instance-key|"
+    # The message payload (`wz_app_frame::message_payload`): the model tests of a message set and
+    # read by path, its bytes laid by hand, decoded, merged and kept, on a synthetic schema.
+    "wz-app-frame|hook|message-payload|message_payload_tests::"
     # The keyer driven from C (`wz_ext_instance_keyer_*`): alone, where the file indexes, keeps
     # the last values and counts the drops; and with both end-to-end doors, the receiver's sender
     # slots and the event log, where it also judges and protects in the stream of an instance,
