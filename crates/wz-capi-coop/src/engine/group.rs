@@ -443,13 +443,22 @@ impl GroupFace {
         self.tx.drops(priority)
     }
 
-    /// How many messages the session put on the group were dropped for want of room, of every
-    /// priority (`transport-stats`).
+    /// How many messages the group dropped before they reached its socket (`transport-stats`):
+    /// the session's own, of every priority, that found no room on their lane, and the replies its
+    /// dispatch staged past the reply limit (`MulticastReplyQueue::dropped`), as the tokio engine's
+    /// group counts every message it drops, a reply among them, as the transport's.
     #[cfg(feature = "transport-stats")]
-    pub(super) fn congestion_drops_total(&self) -> u32 {
+    pub(super) fn drops_total(&self) -> u32 {
         (0..Priority::NUM)
             .map(|at| self.tx.drops(Priority::from_wire(at as u8)))
-            .fold(0u32, u32::saturating_add)
+            .fold(self.tx.dropped(), u32::saturating_add)
+    }
+
+    /// The group's queue, as its dispatch stages a reply on it. Read only by
+    /// `CoopEngine::stage_group_replies`, and compiled where it is.
+    #[cfg(all(test, feature = "app-transport", feature = "transport-stats"))]
+    pub(super) fn reply_queue(&self) -> &MulticastReplyQueue {
+        &self.tx
     }
 
     /// Ask the group's session for its JOIN at its next step, between two beacons, as the tokio

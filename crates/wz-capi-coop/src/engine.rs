@@ -2373,6 +2373,30 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         })
     }
 
+    /// Stage `count` replies that `reply` makes on each group the session joined, as a group's
+    /// dispatch stages what a member asked for, with no step of the session between them. Compiled
+    /// where its readers are: the tests of a group's drops (`tests::group`, `transport-stats`).
+    #[cfg(all(
+        test,
+        feature = "group",
+        feature = "app-transport",
+        feature = "transport-stats"
+    ))]
+    pub(crate) fn stage_group_replies(
+        &self,
+        count: usize,
+        reply: impl Fn() -> wz_session_core::multicast_tx::MulticastTxItem,
+    ) {
+        use wz_session_core::multicast_reply_sink::MulticastReplyEnqueue;
+        if let Some(core) = self.live() {
+            for group in &core.0.groups {
+                for _ in 0..count {
+                    group.reply_queue().enqueue(reply());
+                }
+            }
+        }
+    }
+
     /// The endpoints the session listens on, as bound: a port the config named as 0 is the one
     /// the stack chose. Empty once the session is closed (`listen`).
     #[cfg(feature = "listen")]
@@ -2504,13 +2528,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             for actions in core.0.ups() {
                 report.absorb(&actions.stats_report());
             }
-            // A group charges what its queue dropped for congestion where the tokio engine's
-            // group charges it, the transport's dropped messages; it leaves with the group's join.
+            // A group charges what its queue dropped, for want of room or past the reply limit,
+            // where the tokio engine's group charges it, the transport's dropped messages; it
+            // leaves with the group's join.
             #[cfg(feature = "group")]
             for group in &core.0.groups {
-                report.tx.n_dropped = report.tx.n_dropped.saturating_add(
-                    usize::try_from(group.congestion_drops_total()).unwrap_or(usize::MAX),
-                );
+                report.tx.n_dropped = report
+                    .tx
+                    .n_dropped
+                    .saturating_add(usize::try_from(group.drops_total()).unwrap_or(usize::MAX));
             }
         }
         let unsent = self.unsent_drops.load(Ordering::Relaxed);
