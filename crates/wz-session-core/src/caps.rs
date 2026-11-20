@@ -352,6 +352,23 @@ const _: () = assert!(
     "an admin reply is staged as a reply, so its bound cannot exceed the reply payload bound"
 );
 
+// A CURRENT interest is answered by one chain, a declaration for each match and a final, staged
+// in the session's declare stage whole or refused. A match-all interest matches every row of the
+// table it asks about, so where capacity is enforced a stage shorter than the longest chain that
+// table can make refuses that interest every time it is asked.
+#[cfg(feature = "declare-subscriber")]
+const _: () = assert!(
+    !crate::bounded::ENFORCES_CAPACITY || MAX_PENDING_DECLARES > MAX_SUBSCRIPTIONS,
+    "MAX_PENDING_DECLARES is at least MAX_SUBSCRIPTIONS + 1 on a fixed-capacity build: a \
+     match-all subscriber interest is answered by every subscription and a final, staged whole"
+);
+#[cfg(feature = "liveliness-token")]
+const _: () = assert!(
+    !crate::bounded::ENFORCES_CAPACITY || MAX_PENDING_DECLARES > MAX_LOCAL_TOKENS,
+    "MAX_PENDING_DECLARES is at least MAX_LOCAL_TOKENS + 1 on a fixed-capacity build: a \
+     match-all token interest is answered by every local token and a final, staged whole"
+);
+
 /// Maximum number of listening locators a node with no allocator reports in its
 /// admin `local_data` (the deploy `session_pool.process.admin_locators` key). The
 /// node's identity holds that many locator rows of [`MAX_LOCATOR_LEN`] bytes; one
