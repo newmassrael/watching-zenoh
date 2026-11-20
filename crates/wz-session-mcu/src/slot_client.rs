@@ -31,7 +31,7 @@ use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::ClockSource;
 use wz_session_core::bounded::{BoundedVec, CapacityFull};
 use wz_session_core::encoding::PACKED_APPLICATION_JSON;
-use wz_session_core::link::BoxedLinkDriver;
+use wz_session_core::link::{BoxedLinkDriver, LinkDropCause};
 use wz_session_core::locality::Locality;
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::pubsub::SubscriberTable;
@@ -41,6 +41,7 @@ use wz_session_core::registry_error::RegisterError;
 use wz_session_core::replay_cursor::ReplayCursor;
 use wz_session_core::replay_pacing::{RefusalStep, ReplayPacing};
 use wz_session_core::sample_kind::SampleKind;
+use wz_session_core::send_declare_error::SendDeclareError;
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::slot_observer::{NoSink, ObserverSinks};
 use wz_session_core::wire_id::{listed_entity_id, EntityId};
@@ -366,37 +367,68 @@ enum AfterTurn {
     Due,
     /// The next turn sends no sooner than this time, in the node's milliseconds.
     At(u64),
-    /// The pace gave the replay up on a turn the stage refused: the session ends, and its peer is
-    /// told everything again over the next one.
+    /// The replay was given up on a send the stage refused: the session ends, and its peer is told
+    /// everything again over the next one.
     EndsSession,
 }
 
+/// Why the session's stage did not take a declaration of a turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Refusal {
+    /// It had no room for it now: the link had no slot to lend the frame (the slot profile builds
+    /// no frame on the heap) or the fragment budget was spent. The same send finds room once the
+    /// link has written what it holds, so this is the cooperative form of the send upstream's
+    /// reopen blocks on (`vendor/zenoh-pico/src/net/session.c` @
+    /// `ret = _z_send_n_msg(s, n_msg, Z_RELIABILITY_RELIABLE, Z_CONGESTION_CONTROL_BLOCK, NULL);`).
+    Busy,
+    /// The link is gone, or the declaration cannot be made at all: no later try on this session
+    /// takes it, as upstream's blocking send failing is a transport that failed.
+    Failed,
+}
+
+impl Refusal {
+    /// What `error`, the stage's answer to one declaration, says of the session.
+    fn of(error: &SendDeclareError) -> Self {
+        match error {
+            SendDeclareError::LinkRefused(LinkDropCause::NoTxSlot)
+            | SendDeclareError::FragmentTxBudgetExhausted => Self::Busy,
+            // A declaration past the link's budget, with no heap to cut it up in, is past it on
+            // every try; and a link whose writer is gone takes nothing more.
+            _ => Self::Failed,
+        }
+    }
+}
+
 /// What follows a turn at `now_ms` that left the replay `finished` or not, and in which the
-/// session's stage `refused` a send, `last_progress_ms` being when the replay last told the peer a
-/// declaration or began. A paced turn the stage took whole waits the interval; one it refused is
-/// answered as the pace answers a refusal ([`ReplayPacing::after_refusal`]), as the tokio host
-/// answers it: tried again after the pace's own retry wait, or, with no retry wait or once no
-/// declaration has gone out for the no-progress bound, given up with the session. A node that is
-/// not paced asks again on its next tick, as it tells everything in one turn.
+/// session's stage `refused` a send or none, `last_progress_ms` being when the replay last told the
+/// peer a declaration or began.
+///
+/// A send refused as [`Refusal::Failed`] gives the replay up with the session, paced or not, as
+/// zenoh-pico clears a transport its reopen could not send a declaration over and opens again
+/// (`vendor/zenoh-pico/src/net/session.c` @ `_z_transport_clear(&s->_tp);`). A send refused as
+/// [`Refusal::Busy`] is asked again: on the next tick by a node that is not paced, and by a paced
+/// one as the pace answers a refusal ([`ReplayPacing::after_refusal`]), as the tokio host answers
+/// it, after the pace's own retry wait, or, with no retry wait or once no declaration has gone out
+/// for the no-progress bound, given up with the session. A paced turn the stage took whole waits
+/// the interval.
 fn after_turn(
     pacing: Option<ReplayPacing>,
     finished: bool,
-    refused: bool,
+    refused: Option<Refusal>,
     last_progress_ms: u64,
     now_ms: u64,
 ) -> AfterTurn {
-    let Some(pace) = pacing else {
-        return AfterTurn::Due;
-    };
     if finished {
         return AfterTurn::Due;
     }
-    if !refused {
-        return AfterTurn::At(now_ms.saturating_add(pace.interval_ms()));
-    }
-    match pace.after_refusal(last_progress_ms, now_ms) {
-        RefusalStep::RetryIn(wait_ms) => AfterTurn::At(now_ms.saturating_add(wait_ms)),
-        RefusalStep::EndsLink => AfterTurn::EndsSession,
+    match (refused, pacing) {
+        (Some(Refusal::Failed), _) => AfterTurn::EndsSession,
+        (None | Some(Refusal::Busy), None) => AfterTurn::Due,
+        (None, Some(pace)) => AfterTurn::At(now_ms.saturating_add(pace.interval_ms())),
+        (Some(Refusal::Busy), Some(pace)) => match pace.after_refusal(last_progress_ms, now_ms) {
+            RefusalStep::RetryIn(wait_ms) => AfterTurn::At(now_ms.saturating_add(wait_ms)),
+            RefusalStep::EndsLink => AfterTurn::EndsSession,
+        },
     }
 }
 
@@ -406,11 +438,10 @@ fn after_turn(
 /// declaration it sees twice under one id as the first, so a repeat was harmless on the wire and
 /// wasted a frame each, and a node with many declarations on a busy stage could repeat them for as
 /// long as the stage stayed busy. A paced node sends a burst a turn and leaves the interval between
-/// turns, and does nothing at all at a time before the session's next turn. A refused turn the
-/// pace gives up on ends the session with no Close, as zenoh-pico clears a transport its reopen
-/// could not send its declarations over (`vendor/zenoh-pico/src/net/session.c` @
-/// `_z_transport_clear(&s->_tp);`): the connect manager dials a dialled one again and the accept
-/// pass frees the row of an accepted one, and the next session's peer is told from the start.
+/// turns, and does nothing at all at a time before the session's next turn. A replay given up on
+/// a refused send ([`after_turn`]) ends the session with no Close, as zenoh-pico clears the
+/// transport: the connect manager dials a dialled one again and the accept pass frees the row of
+/// an accepted one, and the next session's peer is told from the start.
 fn replay_declarations<C: ClockSource + 'static, D: BoxedLinkDriver + ?Sized + 'static>(
     session: &SlotSession<C, D>,
     declarations: &[Declaration],
@@ -422,7 +453,12 @@ fn replay_declarations<C: ClockSource + 'static, D: BoxedLinkDriver + ?Sized + '
     }
     let mut cursor = session.replay(declarations.len(), now_ms);
     let turn = replay_turn(&mut cursor, replay_burst(pacing), |at| {
-        listed_entity_id(at).is_some_and(|id| declare(session.actions(), id, &declarations[at]))
+        match listed_entity_id(at) {
+            Some(id) => declare(session.actions(), id, &declarations[at])
+                .map_err(|error| Refusal::of(&error)),
+            // A place past the ids a list can name is a declaration no session can make.
+            None => Err(Refusal::Failed),
+        }
     });
     if turn.told {
         session.note_progress(now_ms);
@@ -445,12 +481,12 @@ fn replay_declarations<C: ClockSource + 'static, D: BoxedLinkDriver + ?Sized + '
     session.set_replay(cursor);
 }
 
-/// What one turn of a replay did: whether the stage took any declaration of it, and whether it
-/// refused one.
+/// What one turn of a replay did: whether the stage took any declaration of it, and why it
+/// refused one, if it did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Turn {
     told: bool,
-    refused: bool,
+    refused: Option<Refusal>,
 }
 
 /// One turn of a replay: ask `send` for each entry of the turn in order, and on the first it
@@ -458,22 +494,22 @@ struct Turn {
 fn replay_turn(
     cursor: &mut ReplayCursor,
     burst: usize,
-    mut send: impl FnMut(usize) -> bool,
+    mut send: impl FnMut(usize) -> Result<(), Refusal>,
 ) -> Turn {
     let mut told = false;
     for at in cursor.turn(burst) {
-        if !send(at) {
+        if let Err(refusal) = send(at) {
             cursor.refused(at);
             return Turn {
                 told,
-                refused: true,
+                refused: Some(refusal),
             };
         }
         told = true;
     }
     Turn {
         told,
-        refused: false,
+        refused: None,
     }
 }
 
@@ -483,7 +519,7 @@ mod tests {
     use alloc::vec::Vec;
 
     /// Run turns of `burst` until the cursor finishes or `limit` turns pass, `refuse` naming the
-    /// sends the stage refuses (each once); every entry offered, in order.
+    /// sends the stage refuses for want of room (each once); every entry offered, in order.
     fn replay(total: usize, burst: usize, mut refuse: Vec<usize>, limit: usize) -> Vec<usize> {
         let mut cursor = ReplayCursor::begin(total);
         let mut offered = Vec::new();
@@ -496,9 +532,9 @@ mod tests {
                 match refuse.iter().position(|&r| r == at) {
                     Some(found) => {
                         refuse.remove(found);
-                        false
+                        Err(Refusal::Busy)
                     }
-                    None => true,
+                    None => Ok(()),
                 }
             });
         }
@@ -531,7 +567,7 @@ mod tests {
             let mut turn = Vec::new();
             replay_turn(&mut cursor, 2, |at| {
                 turn.push(at);
-                true
+                Ok(())
             });
             turns.push(turn);
         }
@@ -588,29 +624,89 @@ mod tests {
         let pace = ReplayPacing::new(3, 10);
         // Mid-replay, the stage having taken the whole turn: the next turn is an interval on.
         assert_eq!(
-            after_turn(pace, false, false, 1_000, 1_000),
+            after_turn(pace, false, None, 1_000, 1_000),
             AfterTurn::At(1_010)
         );
         // Everything told: nothing to wait for, and the session is not asked again.
-        assert_eq!(after_turn(pace, true, false, 1_000, 1_000), AfterTurn::Due);
-        // Not paced: never a wait, whatever the cursor or the stage says.
-        assert_eq!(after_turn(None, false, false, 1_000, 1_000), AfterTurn::Due);
-        assert_eq!(after_turn(None, false, true, 0, 1_000), AfterTurn::Due);
+        assert_eq!(after_turn(pace, true, None, 1_000, 1_000), AfterTurn::Due);
         // A clock at the end of its range does not wrap into the past and release the wait.
         assert_eq!(
-            after_turn(pace, false, false, u64::MAX, u64::MAX),
+            after_turn(pace, false, None, u64::MAX, u64::MAX),
             AfterTurn::At(u64::MAX)
         );
     }
 
-    /// With no retry wait, the pace a policy states by default, a turn the stage refused gives
-    /// the replay up and ends the session, as the tokio host's does: it is not tried again at the
-    /// turn interval.
+    /// A node that is not paced asks a stage that had no room again on its next tick, without a
+    /// wait, as upstream's reopen waits on its blocking send; a send that failed for any other
+    /// reason gives the replay up with the session, as upstream clears the transport and opens
+    /// again, and is not asked again on this session.
+    #[test]
+    fn an_unpaced_node_asks_a_busy_stage_again_and_ends_the_session_on_a_failed_send() {
+        assert_eq!(after_turn(None, false, None, 1_000, 1_000), AfterTurn::Due);
+        assert_eq!(
+            after_turn(None, false, Some(Refusal::Busy), 0, 1_000),
+            AfterTurn::Due
+        );
+        assert_eq!(
+            after_turn(None, false, Some(Refusal::Failed), 0, 1_000),
+            AfterTurn::EndsSession
+        );
+        // Everything told: a refusal of a later live send is not the replay's to answer.
+        assert_eq!(
+            after_turn(None, true, Some(Refusal::Failed), 0, 1_000),
+            AfterTurn::Due
+        );
+    }
+
+    /// A paced node ends the session on a failed send at once too, whatever its pace: the pace
+    /// answers only a stage that had no room.
+    #[test]
+    fn a_paced_node_ends_the_session_on_a_failed_send_whatever_its_pace() {
+        let patient = ReplayPacing::new(3, 10).map(|pace| pace.with_refusal(4, 0));
+        assert_eq!(
+            after_turn(patient, false, Some(Refusal::Failed), 1_000, 1_000),
+            AfterTurn::EndsSession
+        );
+        assert_eq!(
+            after_turn(patient, false, Some(Refusal::Busy), 1_000, 1_000),
+            AfterTurn::At(1_004)
+        );
+    }
+
+    /// The stage's answers are told apart by what they say of the session: no slot to lend and a
+    /// spent fragment budget pass, everything else is a send no later try on it makes.
+    #[test]
+    fn a_stage_without_room_is_busy_and_any_other_refusal_failed() {
+        assert_eq!(
+            Refusal::of(&SendDeclareError::LinkRefused(LinkDropCause::NoTxSlot)),
+            Refusal::Busy
+        );
+        assert_eq!(
+            Refusal::of(&SendDeclareError::LinkRefused(LinkDropCause::Oversize)),
+            Refusal::Failed
+        );
+        assert_eq!(
+            Refusal::of(&SendDeclareError::FragmentTxBudgetExhausted),
+            Refusal::Busy
+        );
+        assert_eq!(
+            Refusal::of(&SendDeclareError::TransportUnavailable),
+            Refusal::Failed
+        );
+        assert_eq!(
+            Refusal::of(&SendDeclareError::MissingKeyexpr),
+            Refusal::Failed
+        );
+    }
+
+    /// With no retry wait, the pace a policy states by default, a turn the stage refused for want
+    /// of room gives the replay up and ends the session, as the tokio host's does: it is not tried
+    /// again at the turn interval.
     #[test]
     fn a_refused_turn_ends_the_session_when_the_pace_retries_nothing() {
         let pace = ReplayPacing::new(3, 10);
         assert_eq!(
-            after_turn(pace, false, true, 1_000, 1_000),
+            after_turn(pace, false, Some(Refusal::Busy), 1_000, 1_000),
             AfterTurn::EndsSession
         );
     }
@@ -620,37 +716,42 @@ mod tests {
     #[test]
     fn a_refused_turn_is_retried_at_the_retry_wait_until_no_progress_ends_the_session() {
         let pace = ReplayPacing::new(3, 10).map(|pace| pace.with_refusal(4, 50));
+        let busy = Some(Refusal::Busy);
         assert_eq!(
-            after_turn(pace, false, true, 1_000, 1_020),
+            after_turn(pace, false, busy, 1_000, 1_020),
             AfterTurn::At(1_024),
             "the retry wait (4 ms), not the turn interval (10 ms)"
         );
         assert_eq!(
-            after_turn(pace, false, true, 1_000, 1_049),
+            after_turn(pace, false, busy, 1_000, 1_049),
             AfterTurn::At(1_053)
         );
         assert_eq!(
-            after_turn(pace, false, true, 1_000, 1_050),
+            after_turn(pace, false, busy, 1_000, 1_050),
             AfterTurn::EndsSession,
             "50 ms with nothing told"
         );
         let patient = ReplayPacing::new(3, 10).map(|pace| pace.with_refusal(4, 0));
         assert_eq!(
-            after_turn(patient, false, true, 0, u64::MAX),
+            after_turn(patient, false, busy, 0, u64::MAX),
             AfterTurn::At(u64::MAX)
         );
     }
 
-    /// A turn reports whether the stage took any declaration and whether it refused one, which
-    /// is what starts the no-progress stretch again and what asks the pace about a refusal.
+    /// A turn reports whether the stage took any declaration and why it refused one, which is
+    /// what starts the no-progress stretch again and what decides the refusal's answer.
     #[test]
     fn a_turn_reports_what_the_stage_took_and_refused() {
         let mut cursor = ReplayCursor::begin(5);
         assert_eq!(
-            replay_turn(&mut cursor, 3, |at| at != 1),
+            replay_turn(&mut cursor, 3, |at| if at == 1 {
+                Err(Refusal::Busy)
+            } else {
+                Ok(())
+            }),
             Turn {
                 told: true,
-                refused: true
+                refused: Some(Refusal::Busy)
             }
         );
         assert_eq!(
@@ -659,39 +760,37 @@ mod tests {
             "the next turn starts at the refused entry"
         );
         assert_eq!(
-            replay_turn(&mut cursor, 3, |_| false),
+            replay_turn(&mut cursor, 3, |_| Err(Refusal::Failed)),
             Turn {
                 told: false,
-                refused: true
+                refused: Some(Refusal::Failed)
             }
         );
         assert_eq!(
-            replay_turn(&mut cursor, 3, |_| true),
+            replay_turn(&mut cursor, 3, |_| Ok(())),
             Turn {
                 told: true,
-                refused: false
+                refused: None
             }
         );
     }
 }
 
-/// Send one declaration under `id`: `true` once it went out.
+/// Send one declaration under `id`: `Ok` once it went out, and why the stage refused it otherwise.
 fn declare<C: ClockSource + 'static, D: BoxedLinkDriver + ?Sized + 'static>(
     actions: &SessionHandle<C, D>,
     id: EntityId,
     declaration: &Declaration,
-) -> bool {
+) -> Result<(), SendDeclareError> {
     // `complete: false` is upstream's `QueryableInfoType::DEFAULT`.
     match declaration.kind {
-        DeclarationKind::Queryable => actions
-            .send_declare_queryable(id, 0, Some(declaration.key), false)
-            .is_ok(),
-        DeclarationKind::Subscriber => actions
-            .send_declare_subscriber(id, 0, Some(declaration.key))
-            .is_ok(),
-        DeclarationKind::Token => actions
-            .send_declare_token(id, 0, Some(declaration.key))
-            .is_ok(),
+        DeclarationKind::Queryable => {
+            actions.send_declare_queryable(id, 0, Some(declaration.key), false)
+        }
+        DeclarationKind::Subscriber => {
+            actions.send_declare_subscriber(id, 0, Some(declaration.key))
+        }
+        DeclarationKind::Token => actions.send_declare_token(id, 0, Some(declaration.key)),
     }
 }
 
