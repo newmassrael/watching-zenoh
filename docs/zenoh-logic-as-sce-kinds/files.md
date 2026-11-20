@@ -213,6 +213,8 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-core/src/scouting_responder.rs` | S7 | |
 | `crates/wz-capi-core/src/session_defaults.rs` | S7 | |
 | `crates/wz-capi-pico/src/abi.rs` | S7 | |
+| `crates/wz-capi-pico/src/additional.rs` | S12 | |
+| `crates/wz-capi-pico/src/additional_view_tests.rs` | excluded: test | test-only by its name: the core's tests of the doors' library's view of the core (`crates/wz-capi-pico-ext/src/core_view.rs`) |
 | `crates/wz-capi-pico/src/admin_space.rs` | S7 | |
 | `crates/wz-capi-pico/src/advanced.rs` | S7 | |
 | `crates/wz-capi-pico/src/advanced_forms.rs` | S7 | |
