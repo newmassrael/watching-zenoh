@@ -6,7 +6,9 @@
 //! `wait_before_close`; a droppable one beside it asks the links for room itself, with nothing of
 //! the session held, and is dropped within its own `wait_before_drop`, as zenoh bounds the two
 //! (`commons/zenoh-config/src/defaults.rs` @ `wait_before_drop: 1000,` and
-//! `commons/zenoh-config/src/defaults.rs` @ `wait_before_close: 5000000,`).
+//! `commons/zenoh-config/src/defaults.rs` @ `wait_before_close: 5000000,`). It is dropped on the
+//! faces the holder waits on and on no other, as each of zenoh's transports drops on its own
+//! queue: the session's other faces are still sent it.
 
 use std::sync::{Arc, Mutex};
 
@@ -34,9 +36,9 @@ fn answer(room: bool) -> Arc<Answer> {
     })
 }
 
-fn held(rooms: &LinkRooms, wait: &Arc<Answer>) {
+fn held(rooms: &LinkRooms, face: u64, wait: &Arc<Answer>) {
     let wait: Arc<dyn LinkWritability> = wait.clone();
-    rooms.hold(&wait);
+    rooms.hold(face, &wait);
 }
 
 /// A session none of whose links gives a wait cannot be asked: the publish waits for the session.
@@ -51,7 +53,7 @@ fn a_session_whose_links_give_no_wait_is_not_asked() {
 fn each_link_is_asked_and_one_without_room_is_congestion() {
     let rooms = LinkRooms::default();
     let free = answer(true);
-    held(&rooms, &free);
+    held(&rooms, 1, &free);
     assert_eq!(
         rooms.within(1_234),
         Room::Free,
@@ -60,8 +62,8 @@ fn each_link_is_asked_and_one_without_room_is_congestion() {
     assert_eq!(*free.asked.lock().unwrap(), [1_234]);
 
     let full = answer(false);
-    held(&rooms, &full);
-    assert_eq!(rooms.within(1_234), Room::Congested);
+    held(&rooms, 2, &full);
+    assert_eq!(rooms.within(1_234), Room::Congested(vec![2]));
     assert_eq!(
         *full.asked.lock().unwrap(),
         [1_234],
@@ -69,23 +71,50 @@ fn each_link_is_asked_and_one_without_room_is_congestion() {
     );
 }
 
-/// Under the pico profile a publish that finds the session held by another publish sending on it
-/// is a congestion drop at once, as pico's try-lock drops the message behind a transmit lock
-/// another send holds: no link is asked for room, though one has room to give. A session held by
-/// what is not a send (a read step, a timer) is waited for, with nothing asked either. Under
-/// zenoh's profile the same publish asks the link.
+/// The congestion is the faces without room and no other: a face with room beside a full one is
+/// not dropped on. The first face without room spends the wait, and the faces asked after it are
+/// asked without one, so the publish spends one deadline however many faces the session has.
+#[test]
+fn only_the_faces_without_room_are_the_congestion() {
+    let rooms = LinkRooms::default();
+    let full = answer(false);
+    let free = answer(true);
+    let also_full = answer(false);
+    held(&rooms, 1, &full);
+    held(&rooms, 2, &free);
+    held(&rooms, 3, &also_full);
+    assert_eq!(rooms.within(1_000), Room::Congested(vec![1, 3]));
+    assert_eq!(
+        *full.asked.lock().unwrap(),
+        [1_000],
+        "the first spends the wait"
+    );
+    assert_eq!(
+        *free.asked.lock().unwrap(),
+        [0],
+        "a face asked after the wait was spent is asked without one"
+    );
+    assert_eq!(*also_full.asked.lock().unwrap(), [0]);
+}
+
+/// Under the pico profile a publish that finds the session held by another publish sending on a
+/// face is a congestion drop at once on that face, as pico's try-lock drops the message behind a
+/// transmit lock another send holds: no link is asked for room, though one has room to give, and
+/// the drop names the face the holder sends on and no other. A session held by what is not a send
+/// (a read step, a timer) is waited for, with nothing asked either. Under zenoh's profile the same
+/// publish asks the link.
 #[test]
 fn under_the_pico_profile_a_held_session_drops_without_asking() {
     use wz_session_core::session_init_params::HeldDrop;
     let rooms = LinkRooms::default();
     let free = answer(true);
-    held(&rooms, &free);
+    held(&rooms, 1, &free);
     assert_eq!(
-        rooms.for_held(HeldDrop::DropAtOnce, true, 1_000),
-        Room::Held
+        rooms.for_held(HeldDrop::DropAtOnce, Some(7), 1_000),
+        Room::Held(7)
     );
     assert_eq!(
-        rooms.for_held(HeldDrop::DropAtOnce, false, 1_000),
+        rooms.for_held(HeldDrop::DropAtOnce, None, 1_000),
         Room::Free,
         "a holder that is not sending is waited for"
     );
@@ -94,7 +123,7 @@ fn under_the_pico_profile_a_held_session_drops_without_asking() {
         "the link was asked for room"
     );
     assert_eq!(
-        rooms.for_held(HeldDrop::WaitForRoom, false, 1_000),
+        rooms.for_held(HeldDrop::WaitForRoom, None, 1_000),
         Room::Free,
         "CONTROL: zenoh's profile asks the link"
     );
@@ -107,10 +136,10 @@ fn under_the_pico_profile_a_held_session_drops_without_asking() {
 fn a_link_that_has_gone_is_not_asked() {
     let rooms = LinkRooms::default();
     let full = answer(false);
-    held(&rooms, &full);
+    held(&rooms, 1, &full);
     assert_eq!(
         rooms.within(1_000),
-        Room::Congested,
+        Room::Congested(vec![1]),
         "CONTROL: while it is up"
     );
     drop(full);
@@ -217,38 +246,15 @@ mod stalled_link {
         }
     }
 
-    /// Fill the link of a publisher whose queue is `tx_queue` with blocking publishes until one
-    /// holds the session waiting for room, publish one droppable sample beside it, then wait for
-    /// the blocking one to end and for the session to close after it.
-    fn behind_a_blocking_publish(tx_queue: TxQueueConf) -> Behind {
-        let peer = open_with(CoopConfig {
-            whatami: WhatAmI::Peer,
-            zid: Some(vec![0xa7; 4]),
-            listen: vec!["tcp/127.0.0.1:0".to_owned()],
-            ..client_config()
-        });
-        let endpoint = peer.listening().pop().expect("one port is bound");
-        SessionDrive::start_read_task(&*peer).expect("the peer's read task starts");
-        let publisher = open_with(CoopConfig {
-            endpoints: vec![endpoint],
-            zid: Some(vec![0xb7; 4]),
-            tx_queue,
-            ..client_config()
-        });
-        let started = Instant::now();
-        while peer.faces_up() == 0 {
-            assert!(
-                started.elapsed() < Duration::from_secs(5),
-                "the peer never held the publisher's face"
-            );
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        // From here the peer reads nothing: its connection is held, and fills.
-        SessionDrive::stop_read_task(&*peer).expect("the peer's read task stops");
-
+    /// Publish blocking samples from a thread of their own until one holds `publisher`'s session
+    /// waiting for room on a full link, and return once it does: the thread ends with how long the
+    /// publish that waited took.
+    fn hold_with_a_blocking_publish(
+        publisher: &Arc<super::super::Engine>,
+    ) -> std::thread::JoinHandle<Option<Duration>> {
         let progress = Arc::new(AtomicUsize::new(0));
         let blocking = {
-            let publisher = Arc::clone(&publisher);
+            let publisher = Arc::clone(publisher);
             let progress = Arc::clone(&progress);
             std::thread::spawn(move || {
                 let payload = vec![0x5a; PAYLOAD];
@@ -283,9 +289,41 @@ mod stalled_link {
             if now != seen.0 {
                 seen = (now, Instant::now());
             } else if seen.1.elapsed() >= QUIET {
-                break;
+                return blocking;
             }
         }
+    }
+
+    /// Fill the link of a publisher whose queue is `tx_queue` with blocking publishes until one
+    /// holds the session waiting for room, publish one droppable sample beside it, then wait for
+    /// the blocking one to end and for the session to close after it.
+    fn behind_a_blocking_publish(tx_queue: TxQueueConf) -> Behind {
+        let peer = open_with(CoopConfig {
+            whatami: WhatAmI::Peer,
+            zid: Some(vec![0xa7; 4]),
+            listen: vec!["tcp/127.0.0.1:0".to_owned()],
+            ..client_config()
+        });
+        let endpoint = peer.listening().pop().expect("one port is bound");
+        SessionDrive::start_read_task(&*peer).expect("the peer's read task starts");
+        let publisher = open_with(CoopConfig {
+            endpoints: vec![endpoint],
+            zid: Some(vec![0xb7; 4]),
+            tx_queue,
+            ..client_config()
+        });
+        let started = Instant::now();
+        while peer.faces_up() == 0 {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the peer never held the publisher's face"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        // From here the peer reads nothing: its connection is held, and fills.
+        SessionDrive::stop_read_task(&*peer).expect("the peer's read task stops");
+
+        let blocking = hold_with_a_blocking_publish(&publisher);
 
         let started = Instant::now();
         let dropped = publisher.publish_on_wire_all(
@@ -401,6 +439,163 @@ mod stalled_link {
         assert_eq!(
             seen.unsent_drops, 1,
             "the dropped publish is counted as the transport's drop"
+        );
+    }
+
+    /// What a droppable publish did while a blocking one held the session, waiting for room on the
+    /// full link of the first of its two faces, and what the peer of the other face heard of it.
+    struct Beside {
+        /// The droppable publish's answer, and how long it took to give it.
+        dropped: Result<usize, FanoutError>,
+        took: Duration,
+        /// Whether the blocking publish was still waiting when the droppable one returned.
+        blocking_still_waiting: bool,
+        /// How many times the peer whose face's link has room heard the droppable publish, once
+        /// the blocking one ended.
+        heard_beside: usize,
+    }
+
+    /// A publisher whose queue is `tx_queue` listens, and two clients dial it: the first reads
+    /// nothing once it is up, so its link fills, and the second reads and subscribes to what the
+    /// droppable sample is put on. Blocking publishes fill the first link until one holds the
+    /// session waiting for room on it, the droppable sample is published beside it, and the
+    /// second client is listened to until the blocking publish has ended.
+    fn beside_a_blocking_publish(tx_queue: TxQueueConf) -> Beside {
+        use wz_session_core::sink::SampleView;
+
+        let publisher = open_with(CoopConfig {
+            whatami: WhatAmI::Peer,
+            zid: Some(vec![0xb8; 4]),
+            listen: vec!["tcp/127.0.0.1:0".to_owned()],
+            tx_queue: stalling(tx_queue),
+            ..client_config()
+        });
+        let endpoint = publisher.listening().pop().expect("one port is bound");
+        SessionDrive::start_read_task(&*publisher).expect("the publisher's read task starts");
+        // Dialled first, so its face comes before the reading client's, and is never stepped once
+        // it is open: what is sent to it fills its connection.
+        let stalled = open_with(CoopConfig {
+            endpoints: vec![endpoint.clone()],
+            zid: Some(vec![0xa8; 4]),
+            ..client_config()
+        });
+        let reading = open_with(CoopConfig {
+            endpoints: vec![endpoint],
+            zid: Some(vec![0xc8; 4]),
+            ..client_config()
+        });
+        let heard = Arc::new(AtomicUsize::new(0));
+        let into = Arc::clone(&heard);
+        reading.declare_subscriber_on_wire(
+            "demo/beside".to_owned(),
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            Arc::new(move || {
+                let into = Arc::clone(&into);
+                Box::new(move |sample: &dyn SampleView| {
+                    if sample.payload() == b"beside" {
+                        into.fetch_add(1, Ordering::SeqCst);
+                    }
+                })
+            }),
+        );
+        SessionDrive::start_read_task(&*reading).expect("the reading client's read task starts");
+        let started = Instant::now();
+        while publisher.faces_up() < 2 {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the publisher never held both clients' faces"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+
+        let blocking = hold_with_a_blocking_publish(&publisher);
+        let started = Instant::now();
+        let dropped = publisher.publish_on_wire_all(
+            "demo/beside",
+            &WireKey::literal(),
+            b"beside",
+            &publish(CongestionControl::Drop),
+        );
+        let took = started.elapsed();
+        let blocking_still_waiting = !blocking.is_finished();
+        blocking
+            .join()
+            .expect("the blocking publisher")
+            .expect("a blocking publish waited for room");
+        // Once the blocking publish lets go of the session, what it was handed leaves on the
+        // reading client's face; a second is never sent, and is not waited for past this.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while heard.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        std::thread::sleep(QUIET);
+        let heard_beside = heard.load(Ordering::SeqCst);
+        SessionDrive::close(&*reading);
+        SessionDrive::close(&*stalled);
+        SessionDrive::close(&*publisher);
+        Beside {
+            dropped,
+            took,
+            blocking_still_waiting,
+            heard_beside,
+        }
+    }
+
+    /// Under zenoh's profile a droppable publish beside a blocking one that holds the session,
+    /// waiting for room on one face's full link, is dropped on that face alone, as each of zenoh's
+    /// transports drops on its own queue: the other face, whose link has room, is still sent it,
+    /// once, after the blocking publish. The publish itself returns within a second, with
+    /// success, while the blocking one still waits.
+    #[test]
+    fn a_droppable_publish_is_dropped_on_the_full_face_alone() {
+        let seen = beside_a_blocking_publish(TxQueueConf {
+            wait_before_drop_us: DROP_WAIT_US,
+            held_drop: HeldDrop::WaitForRoom,
+            ..client_config().tx_queue
+        });
+        assert_eq!(
+            seen.dropped,
+            Ok(0),
+            "a dropped put succeeds, as zenoh's does"
+        );
+        assert!(
+            seen.took < Duration::from_secs(1),
+            "a droppable publish waited {:?} behind a blocking one",
+            seen.took
+        );
+        assert!(
+            seen.blocking_still_waiting,
+            "CONTROL: the droppable publish returned while the blocking one held the session"
+        );
+        assert_eq!(
+            seen.heard_beside, 1,
+            "the face whose link has room is sent the droppable publish, once"
+        );
+    }
+
+    /// Under the pico profile a droppable publish beside a blocking one that is sending on one
+    /// face is dropped at once on that face, and its caller is told, as pico's put fails when its
+    /// held transmit lock drops the message; the session's other face is still sent it, once,
+    /// after the blocking publish, as the tokio engine sends a put the other faces of a held one.
+    #[test]
+    fn under_the_pico_profile_a_publish_held_on_one_face_still_reaches_the_other() {
+        let seen =
+            beside_a_blocking_publish(TxQueueConf::pico_of_policy(&SessionPolicy::defaults()));
+        assert_eq!(seen.dropped, Err(FanoutError::HeldConduit));
+        assert!(
+            seen.took < Duration::from_secs(1),
+            "the droppable publish took {:?}",
+            seen.took
+        );
+        assert!(
+            seen.blocking_still_waiting,
+            "CONTROL: the droppable publish returned while the blocking one held the session"
+        );
+        assert_eq!(
+            seen.heard_beside, 1,
+            "the face no publish held is sent the droppable publish, once"
         );
     }
 }

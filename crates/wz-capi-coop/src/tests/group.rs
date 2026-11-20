@@ -1070,7 +1070,10 @@ mod congested {
         for _ in 0..3 {
             put_with(&member, CongestionControl::Drop);
         }
-        assert_eq!(member.rooms().within(1_000), Room::Congested);
+        assert!(
+            matches!(member.rooms().within(1_000), Room::Congested(faces) if faces.len() == 1),
+            "the group's socket is the congestion, and the session's only face"
+        );
         writable(&stack, &transport);
         assert_eq!(member.rooms().within(1_000), Room::Free);
         SessionDrive::close(&*member);
