@@ -5823,6 +5823,37 @@
         "Round 3 states limits in the document (`wz/limits`, `[[limit]] upstream` from the pinned source, named refusals, `LimitsNotRead` removed); round 4 opens the three ABI doors, each with a test that the same document gives the same snapshot.",
         "`wz-runtime-tokio`'s build-time refusal of `bounded-heapless` stays while the queryable declare and the other registries' closure wrappers still treat a registration as infallible; it goes with the last of them."
       ]
+    },
+    "Round 4562": {
+      "decision_summary": "The third set of the PoC's generic, default-off work lands, with the reds it found on main. An acceptor can send a configured handshake cookie and keep the pending accept's state itself (`handshake-cookie = fixed`, default `stateless` as upstream), so a connector that echoes no cookie can open. A config document's `wz/key-ids` member is read into the shared key-id dictionary. The pico C ABI's cooperative engine runs on a Windows host, and the pico library is packaged for Windows x64 from one preset with its notices, a manifest and a check program. An opt-in stress lane (Layer S) drives the pico ABI over a faulty program transport from many threads; it found two waits for link room under the application observer's lock, and the observer now only decides what a drain or a retraction owes, which is sent after it is let go under one declaration-order lock both share. Three measured performance gaps against zenoh-pico close: a batch stop writes from the caller's thread, a lone datagram is written by the thread that sends it, and a multicast group gets pico's batch window. A host benchmark harness, an external interop lane runner and the PoC's tests of the program transport, key ids and config doors join the non-default legs. Paid from main: seven doc links the reduced builds broke, the size budgets three images had outgrown, a silent skip in the policy tests and the census rows of the config doors.",
+      "changes_bullets": [
+        "`deploy/wz-config.toml`: policy `handshake-cookie` (`stateless`, `fixed`; `upstream` profile `stateless`); generated outputs regenerated.",
+        "`wz-session-core`: the fixed-cookie accept in `session_actions.rs` (`fixed_cookie_echoed`), `owed_replies.rs` (what an observer owes, sent after it is let go), the multicast batch window in `multicast_tx.rs` (`MulticastBatch`, `multicast_tx_push_batched`), a batch stop that writes from the caller's thread, the `wz/key-ids` member of a document.",
+        "`wz-runtime-tokio`: the declaration-order lock and the teardown and drive paths that send after the observer; the datagram inline write (`writer_queue`, `udp_pipeline`, `multicast_pipeline`); the group's batch window; the watchdog's thread line.",
+        "`wz-runtime-posix`: a Windows host (Winsock sockets, links, clock and entropy); `wz-capi-coop` on it; `wz-capi-pico`: the key-ids document door and test; `wz-capi-c`, `zenoh`: the session state held boxed in the handle enums.",
+        "`crates/wz-capi-pico/tests/stability.rs` and Layer S in `scripts/run-ci.sh`; `scripts/lib/pico_windows_package.py` (gate 2z runs its selftest), the `host-peer-ext` preset, the Platform `package-windows` and `capi-coop` jobs (observed); `scripts/host-bench/` (perf matrix and probe); `scripts/app-plane-oracle.sh`.",
+        "`scripts/pico-c-program.sh` compiles with `-std=gnu11` as zenoh-pico's own build does; `scripts/lib/nondefault-tests-gate.sh` legs for the program transport, the key ids, the config doors and the owed replies; `scripts/lib/capability_cost_gate.py` 18 budgets; census rows (S3 row 28, S7 row 107, S9 rows 23-24), reason pins, doc links."
+      ],
+      "verification_bullets": [
+        "On the build hosts at the integration tip, each run read from its own log: `wz-runtime-tokio` lib 754 and `it` 284; `wz-session-core` 1,062 and its owed-replies, multicast and reply-stage set 40; `wz-capi-core` with the multicast transport; `wz-capi-c`; `wz-capi-pico` lib and `it` with every PoC capability; `wz-runtime-posix`; clippy `--all-targets -D warnings` per crate on each feature set, the reduced set included.",
+        "Layer S under `WZ_LOCK_ORDER=panic`: 3 of 3 storms pass after the observer fix, which failed with the lock-order panic before it. The single-threaded cooperative C program and the session loopback program through the script; Layer G and Layer C2m; the reduced-docs lane (C1bzr) in its three shards, each passing.",
+        "The size lane measured for main `cd240d4b4` and for the tip on one machine; the 18 budget moves are those deltas, with `pico-default`'s growth taken apart by symbol; `capability_cost_gate.py --selftest` 26 of 26.",
+        "The non-default census and every round-fed static gate of the pre-push hook run locally, each passing; `wz_config.py --check` and `--selftest`; the logic census and reason-pin gates.",
+        "The interop lane against a deployed implementation built outside this repository: frames, verdicts and history answers identical both ways on the literal and the shared-id wire, with a connector that echoes the cookie."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr",
+        "wire-spec-subset--watching-zenoh-mvp/4-transport-session-layer",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The interop lane with a connector that echoes no cookie under `handshake-cookie = fixed` is not run yet.",
+        "The Windows package and the cooperative engine on Windows are built and tested only by the observed Platform jobs, which run after this lands.",
+        "The performance matrix is not re-measured after the three gap fixes; the perf harness's stall report is new and unread.",
+        "Interests under the literal key form, an E2E stream with no timeout and history numbering that continues across queries differ from a deployed peer and are open."
+      ]
     }
   },
   "inventory_entries": {
