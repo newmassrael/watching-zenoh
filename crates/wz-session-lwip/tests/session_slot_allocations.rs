@@ -33,7 +33,11 @@
 //! AP run today) the creation and handshake windows must cost it something, and
 //! that half is the instrument's own control: a count that read zero on the
 //! state that is known to hold vectors, boxes and reference counts would prove
-//! nothing about the state that is meant not to.
+//! nothing about the state that is meant not to. A Put, like an idle turn, costs
+//! the heap nothing on EVERY profile: it is delivered where it lies, and the
+//! subscriber matcher reads the key and the pattern as text (the SCE documents of
+//! `keyexpr_match`); until 2026-11-19 the heap profile paid one allocation per
+//! Put there, the chunk list the matcher split the key into.
 //!
 //! The count is ATTRIBUTED to the measurement's own thread, as `tx_allocations`
 //! does: a measurement owns a tally, its thread works for it, and an allocation
@@ -482,10 +486,9 @@ struct Costs {
 impl Costs {
     /// A window that must cost the heap nothing on the slot profile and
     /// something on the heap profile (the control: the profile of every shipped
-    /// image holds a session in boxes, vectors and reference counts, copies a
-    /// handshake, KeepAlive or Close off the link, and matches a received Put
-    /// against its subscribers with growable scratch lists, so a zero there means
-    /// the instrument cannot see them, and a zero on the slot profile would mean
+    /// image holds a session in boxes, vectors and reference counts, and copies a
+    /// handshake, KeepAlive or Close off the link, so a zero there means the
+    /// instrument cannot see them, and a zero on the slot profile would mean
     /// nothing).
     fn check(&mut self, what: &str, allocations: usize) {
         println!("{what}: {allocations} allocation(s)");
@@ -507,7 +510,7 @@ impl Costs {
     }
 
     /// A window that costs the heap nothing on EVERY profile: an idle turn, which
-    /// no step has had to change.
+    /// no step has had to change, and a Put, which the matcher reads as text.
     fn check_free(&mut self, what: &str, allocations: usize) {
         println!("{what}: {allocations} allocation(s)");
         if allocations != 0 {
@@ -630,7 +633,7 @@ fn a_session_costs_the_heap_nothing_from_its_slot_to_its_close() {
         });
         sent.0.expect("the initiator's Put leaves");
         sent.1.expect("the acceptor's Put leaves");
-        costs.check(&format!("a Put of {len} bytes each way"), n);
+        costs.check_free(&format!("a Put of {len} bytes each way"), n);
         assert_eq!(
             acceptor.seen.puts.load(Ordering::SeqCst),
             a_before + 1,
