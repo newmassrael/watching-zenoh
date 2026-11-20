@@ -1594,8 +1594,10 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         interests: &mut InterestSide<P>,
         new_id: SubscriptionId,
     ) {
-        let mut hits: BoundedVec<(u64, bool), { caps::MAX_INBOUND_SUB_INTERESTS }> =
-            BoundedVec::new();
+        // Of the interest table's own policy: it holds every row the table can, so the loop
+        // below stops only where the table itself would.
+        let mut hits: BoundedVec<(u64, bool), { caps::MAX_INBOUND_SUB_INTERESTS }, P> =
+            BoundedVec::default();
         {
             // The new subscription's pattern is read back out of the table
             // rather than passed in: `register_sink` has already MOVED it into
@@ -1656,7 +1658,9 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     /// the red that keeps this line honest; the wire tests are not.
     #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
     fn stage_emptied_aggregate_retracts(&self, interests: &mut InterestSide<P>) {
-        let mut hits: BoundedVec<u64, { caps::MAX_INBOUND_SUB_INTERESTS }> = BoundedVec::new();
+        // Of the interest table's own policy, as in `stage_future_subscriber_pushes`.
+        let mut hits: BoundedVec<u64, { caps::MAX_INBOUND_SUB_INTERESTS }, P> =
+            BoundedVec::default();
         for row in interests.rows.iter() {
             if row.aggregate
                 && row.announced
@@ -7963,5 +7967,75 @@ mod match_memo_position_tests {
             3,
             "the key is matched by the scan each time, never answered from a slot"
         );
+    }
+}
+
+/// The announcements a heap table stages, in any build and a fixed one too: the lists the two
+/// stagers gather matching interest rows into are of the table's own storage policy, so a heap
+/// table holding more rows than `MAX_INBOUND_SUB_INTERESTS` announces to every one of them,
+/// where a list of the build's fixed policy would stop at that many without counting the rest.
+#[cfg(all(
+    test,
+    feature = "alloc",
+    feature = "declare-subscriber",
+    any(feature = "keyexpr-wildcard-double", feature = "declare-undeclare")
+))]
+mod heap_table_interest_staging_tests {
+    use super::*;
+    use crate::bounded::Heap;
+    use crate::locality::Locality;
+
+    struct Noop;
+    impl SampleSink for Noop {
+        fn deliver(&mut self, _sample: &dyn SampleView) {}
+    }
+
+    /// One interest more than a table of the fixed policy holds.
+    const INTERESTS: u64 = caps::MAX_INBOUND_SUB_INTERESTS as u64 + 1;
+
+    /// A match-all FUTURE interest is stored under `**`, so a subscription matches it only
+    /// where the matcher reads `**` as a wildcard.
+    #[cfg(feature = "keyexpr-wildcard-double")]
+    #[test]
+    fn a_new_subscription_is_announced_to_every_future_interest_of_a_heap_table() {
+        let mut reg: SubscriberRegistry<Noop, Heap> = SubscriberRegistry::default();
+        for interest in 0..INTERESTS {
+            reg.respond_to_subscriber_interest_borrowed(interest, None, false, false, true);
+        }
+        assert_eq!(reg.peer().interest_count() as u64, INTERESTS);
+        reg.register_sink("t/0", Locality::Any, Noop)
+            .expect("a heap table grows");
+        let staged = reg.take_staged_sub_interest_replies();
+        assert_eq!(staged.len() as u64, INTERESTS, "one announcement each");
+        assert!(staged
+            .iter()
+            .all(|item| matches!(item, SubInterestReply::Concrete { .. })));
+        assert_eq!(
+            reg.peer().interest_staging_refusals(),
+            SubInterestRefusals::default()
+        );
+    }
+
+    #[cfg(feature = "declare-undeclare")]
+    #[test]
+    fn a_retirement_retracts_every_announced_aggregate_of_a_heap_table() {
+        let mut reg: SubscriberRegistry<Noop, Heap> = SubscriberRegistry::default();
+        let id = reg
+            .register_sink("t/0", Locality::Any, Noop)
+            .expect("a heap table grows");
+        for interest in 0..INTERESTS {
+            reg.respond_to_subscriber_interest_borrowed(interest, None, true, false, true);
+            reg.mark_aggregate_announced(interest);
+        }
+        assert!(
+            reg.take_staged_sub_interest_replies().is_empty(),
+            "a FUTURE-only interest stages nothing when it arrives"
+        );
+        assert!(reg.unregister(id));
+        let staged = reg.take_staged_sub_interest_replies();
+        assert_eq!(staged.len() as u64, INTERESTS, "one retraction each");
+        assert!(staged
+            .iter()
+            .all(|item| matches!(item, SubInterestReply::AggregateRetract { .. })));
     }
 }
