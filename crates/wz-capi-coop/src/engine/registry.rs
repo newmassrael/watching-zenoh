@@ -119,10 +119,11 @@ struct Split<'a> {
 }
 
 impl Registry {
-    /// A session that holds nothing and has been told nothing, with its dial face.
-    pub(super) fn new() -> Self {
+    /// A session that holds nothing and has been told nothing, with its dial face, its tables
+    /// held to the session limits its open resolved.
+    pub(super) fn new(limits: &wz_session_core::limits::SessionLimits) -> Self {
         Self {
-            app: SlotObserver::new(),
+            app: SlotObserver::with_limits(limits),
             faces: vec![FaceTables::new(DIAL_FACE)],
             #[cfg(feature = "local-queryable")]
             local: Gets::new(),

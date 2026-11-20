@@ -117,19 +117,22 @@ async fn run_pubsub(
     {
         let fired = fired.clone();
         let expect = payload.clone();
-        observer.subscribers.register(sub_ke, move |sample| {
-            assert_eq!(
-                sample.keyexpr(),
-                sub_ke,
-                "delivery carries the RELATIVE (namespace-stripped) keyexpr"
-            );
-            assert_eq!(
-                sample.payload(),
-                &expect[..],
-                "payload survives the round-trip"
-            );
-            fired.fetch_add(1, Ordering::SeqCst);
-        });
+        observer
+            .subscribers
+            .register(sub_ke, move |sample| {
+                assert_eq!(
+                    sample.keyexpr(),
+                    sub_ke,
+                    "delivery carries the RELATIVE (namespace-stripped) keyexpr"
+                );
+                assert_eq!(
+                    sample.payload(),
+                    &expect[..],
+                    "payload survives the round-trip"
+                );
+                fired.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
     }
 
     let publisher = TokioSession::new(

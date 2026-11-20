@@ -1093,6 +1093,11 @@ round_fed_gates=(
     # generated policy module. A text read, no build.
     "policy_read_gate.py --selftest"
     "policy_read_gate.py --check"
+    # The same for the limits: a read of `caps::<LIMIT>` outside storage sizing is refused unless
+    # its limit is pending or the site is allowed. Round-fed by every crate source and the
+    # generated limits module. A text read, no build.
+    "limit_read_gate.py --selftest"
+    "limit_read_gate.py --check"
     "sce_feature_model.py --check"
     # R3521 -- the package entry's selftest. Round-fed by deploy/wz-config.toml (it loads the
     # declaration and holds its artifact, role, platform and runtime-feature rows to the entry's own

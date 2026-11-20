@@ -148,15 +148,18 @@ async fn unicast_oversize_put_fragments_on_tx_and_reassembles_on_rx() {
     {
         let fired = fired.clone();
         let expect = payload.clone();
-        observer.subscribers.register(KEYEXPR, move |sample| {
-            assert_eq!(sample.keyexpr(), KEYEXPR);
-            assert_eq!(
-                sample.payload(),
-                &expect[..],
-                "the reassembled payload matches the oversize Put byte-for-byte"
-            );
-            fired.fetch_add(1, Ordering::SeqCst);
-        });
+        observer
+            .subscribers
+            .register(KEYEXPR, move |sample| {
+                assert_eq!(sample.keyexpr(), KEYEXPR);
+                assert_eq!(
+                    sample.payload(),
+                    &expect[..],
+                    "the reassembled payload matches the oversize Put byte-for-byte"
+                );
+                fired.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
     }
 
     // ── Publisher session over the initiator's bundle (fresh observer — the
@@ -353,15 +356,18 @@ async fn an_exhausted_fragment_budget_abandons_the_chain_and_says_so_on_the_wire
     {
         let fired = fired.clone();
         let expect = payload.clone();
-        observer.subscribers.register(KEYEXPR, move |sample| {
-            assert_eq!(sample.keyexpr(), KEYEXPR);
-            assert_eq!(
-                sample.payload(),
-                &expect[..],
-                "the control arm's payload arrives byte-for-byte"
-            );
-            fired.fetch_add(1, Ordering::SeqCst);
-        });
+        observer
+            .subscribers
+            .register(KEYEXPR, move |sample| {
+                assert_eq!(sample.keyexpr(), KEYEXPR);
+                assert_eq!(
+                    sample.payload(),
+                    &expect[..],
+                    "the control arm's payload arrives byte-for-byte"
+                );
+                fired.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
     }
 
     let publisher = TokioSession::new(
@@ -720,9 +726,12 @@ async fn two_nodes_with_different_rx_bounds_answer_one_message_apart() {
     let observer_into = |got: &Arc<Mutex<Vec<usize>>>| {
         let got = got.clone();
         let mut observer = ApplicationLayerObserver::new();
-        observer.subscribers.register(KEYEXPR, move |sample| {
-            got.lock().unwrap().push(sample.payload().len());
-        });
+        observer
+            .subscribers
+            .register(KEYEXPR, move |sample| {
+                got.lock().unwrap().push(sample.payload().len());
+            })
+            .expect("no quota is stated on this table");
         observer
     };
     let mut small_observer = observer_into(&small_got);

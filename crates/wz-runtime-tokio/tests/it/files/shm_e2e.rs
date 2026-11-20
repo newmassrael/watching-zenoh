@@ -111,15 +111,18 @@ async fn shm_negotiates_and_delivers_put_zero_copy_over_real_tcp() {
     {
         let fired = fired.clone();
         let expect = data.clone();
-        observer.subscribers.register(KEYEXPR, move |sample| {
-            assert_eq!(sample.keyexpr(), KEYEXPR);
-            assert_eq!(
-                sample.payload(),
-                &expect[..],
-                "the subscriber reads the publisher's bytes off the shared segment"
-            );
-            fired.fetch_add(1, Ordering::SeqCst);
-        });
+        observer
+            .subscribers
+            .register(KEYEXPR, move |sample| {
+                assert_eq!(sample.keyexpr(), KEYEXPR);
+                assert_eq!(
+                    sample.payload(),
+                    &expect[..],
+                    "the subscriber reads the publisher's bytes off the shared segment"
+                );
+                fired.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
     }
 
     // The publisher writes the payload into a /dev/shm segment; it MUST outlive
@@ -359,7 +362,8 @@ fn an_unnegotiated_peer_cannot_make_this_node_map_its_segment() {
             .subscribers
             .register("demo/shm/enforce", move |sample| {
                 seen.lock().unwrap().push(sample.payload().to_vec());
-            });
+            })
+            .expect("no quota is stated on this table");
     }
 
     // ── Arm A: SHM was NOT negotiated with this peer ──────────────────────

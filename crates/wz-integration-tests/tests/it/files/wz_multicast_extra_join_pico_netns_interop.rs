@@ -117,13 +117,16 @@ async fn receive(cfg: McastSocketConfig<'_>, budget: Duration) -> (usize, usize)
     let mut observer = ApplicationLayerObserver::new();
     {
         let fired = fired.clone();
-        observer.subscribers.register(KEY, move |sample| {
-            assert!(
-                String::from_utf8_lossy(sample.payload()).ends_with(VALUE),
-                "a decoded Push carries pico's value"
-            );
-            fired.fetch_add(1, Ordering::SeqCst);
-        });
+        observer
+            .subscribers
+            .register(KEY, move |sample| {
+                assert!(
+                    String::from_utf8_lossy(sample.payload()).ends_with(VALUE),
+                    "a decoded Push carries pico's value"
+                );
+                fired.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
     }
     let producer = wz_runtime_tokio::multicast_glue::MulticastTxProducer::new();
     let clock = TokioTime::new();

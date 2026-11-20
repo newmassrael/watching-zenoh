@@ -25,13 +25,14 @@
 //! `bounded-heapless`, the fixed backing an MCU build selects while still
 //! linking an allocator ([`crate::bounded::ENFORCES_CAPACITY`]).
 
-/// Failure modes of a bounded registry registration on the fixed
-/// backing. Shared across [`crate::pubsub`], [`crate::query`],
+/// Failure modes of a bounded registry registration, on every backing.
+/// Shared across [`crate::pubsub`], [`crate::query`],
 /// [`crate::reply`], and the [`crate::declare`] registries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegisterError {
-    /// The registry's backing table is at its declared
-    /// [`crate::caps`] capacity.
+    /// The registry holds as many entries as it admits: its fixed backing is
+    /// at its declared [`crate::caps`] capacity, or it holds the quota its
+    /// creator stated in the session's limits ([`crate::limits`]).
     TableFull,
     /// A stored keyexpr exceeds [`crate::caps::MAX_KEYEXPR_BYTES`].
     /// Produced by registries that store a keyexpr pattern
@@ -59,7 +60,9 @@ pub enum RegisterError {
 impl core::fmt::Display for RegisterError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::TableFull => f.write_str("registry backing table at declared capacity"),
+            Self::TableFull => {
+                f.write_str("registry table full: at its capacity or at its stated quota")
+            }
             Self::KeyexprTooLong => f.write_str("registry keyexpr exceeds declared capacity"),
             Self::KeyNotInSet => f.write_str("keyexpr is not declared in the image's key set"),
             Self::IdsExhausted => {

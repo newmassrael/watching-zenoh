@@ -111,14 +111,17 @@ async fn unicast_put_metadata_propagates_over_the_wire() {
     let mut observer = ApplicationLayerObserver::new();
     {
         let captured = captured.clone();
-        observer.subscribers.register(KEYEXPR, move |sample| {
-            assert_eq!(sample.keyexpr(), KEYEXPR);
-            let mut c = captured.lock().unwrap();
-            c.encoding = sample.encoding().cloned();
-            c.attachment = sample.attachment().map(<[u8]>::to_vec);
-            c.timestamp = sample.timestamp().cloned();
-            c.fired += 1;
-        });
+        observer
+            .subscribers
+            .register(KEYEXPR, move |sample| {
+                assert_eq!(sample.keyexpr(), KEYEXPR);
+                let mut c = captured.lock().unwrap();
+                c.encoding = sample.encoding().cloned();
+                c.attachment = sample.attachment().map(<[u8]>::to_vec);
+                c.timestamp = sample.timestamp().cloned();
+                c.fired += 1;
+            })
+            .expect("no quota is stated on this table");
     }
 
     let publisher = TokioSession::new(

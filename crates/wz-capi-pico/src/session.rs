@@ -1161,6 +1161,9 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             #[cfg(not(feature = "shared-key-ids"))]
             session_defaults: wz_capi_core::session_defaults::SessionDefaults::default(),
             session_policy: policy,
+            // pico's config states no session limit this ABI reads yet, so its session runs
+            // under the build's.
+            session_limits: wz_session_core::limits::SessionLimits::defaults(),
             #[cfg(feature = "app-transport")]
             app_transport,
         },

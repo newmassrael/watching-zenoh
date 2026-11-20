@@ -414,15 +414,18 @@ async fn wz_to_wz_handshakes_and_delivers_push_over(
     {
         let fired = fired.clone();
         let expect = payload.clone();
-        observer.subscribers.register(KEYEXPR, move |sample| {
-            assert_eq!(sample.keyexpr(), KEYEXPR);
-            assert_eq!(
-                sample.payload(),
-                &expect[..],
-                "the serial-delivered Push payload matches byte-for-byte"
-            );
-            fired.fetch_add(1, Ordering::SeqCst);
-        });
+        observer
+            .subscribers
+            .register(KEYEXPR, move |sample| {
+                assert_eq!(sample.keyexpr(), KEYEXPR);
+                assert_eq!(
+                    sample.payload(),
+                    &expect[..],
+                    "the serial-delivered Push payload matches byte-for-byte"
+                );
+                fired.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
     }
 
     // ── Publisher on the initiator side (fresh observer — no local
@@ -573,15 +576,18 @@ async fn wz_to_wz_fragments_and_reassembles_an_oversize_put_over(
     {
         let fired = fired.clone();
         let expect = payload.clone();
-        observer.subscribers.register(KEYEXPR, move |sample| {
-            assert_eq!(sample.keyexpr(), KEYEXPR);
-            assert_eq!(
-                sample.payload(),
-                &expect[..],
-                "the reassembled serial payload matches the oversize Put byte-for-byte"
-            );
-            fired.fetch_add(1, Ordering::SeqCst);
-        });
+        observer
+            .subscribers
+            .register(KEYEXPR, move |sample| {
+                assert_eq!(sample.keyexpr(), KEYEXPR);
+                assert_eq!(
+                    sample.payload(),
+                    &expect[..],
+                    "the reassembled serial payload matches the oversize Put byte-for-byte"
+                );
+                fired.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
     }
 
     // ── Publisher on the initiator side (fresh observer — no local
@@ -1454,15 +1460,18 @@ async fn wz_acceptor_binds_a_serial_listen_string_and_delivers_a_push() {
     {
         let fired = fired.clone();
         let expect = payload.clone();
-        observer.subscribers.register(KEYEXPR, move |sample| {
-            assert_eq!(sample.keyexpr(), KEYEXPR);
-            assert_eq!(
-                sample.payload(),
-                &expect[..],
-                "the Push delivered over the LISTENED serial link matches byte-for-byte"
-            );
-            fired.fetch_add(1, Ordering::SeqCst);
-        });
+        observer
+            .subscribers
+            .register(KEYEXPR, move |sample| {
+                assert_eq!(sample.keyexpr(), KEYEXPR);
+                assert_eq!(
+                    sample.payload(),
+                    &expect[..],
+                    "the Push delivered over the LISTENED serial link matches byte-for-byte"
+                );
+                fired.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
     }
 
     let publisher = TokioSession::new(

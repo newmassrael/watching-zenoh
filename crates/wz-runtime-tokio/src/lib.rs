@@ -34,13 +34,14 @@ use tokio::net::UdpSocket;
 #[cfg(feature = "transport-link-tcp")]
 use wz_codecs::stream_envelope::StreamEnvelope;
 
-// The AP runtime keeps growable collections: its registrations
-// (`register_sink(..).expect(..)`, the closure-taking registry wrappers) are
-// infallible only on that backing. `wz-session-core/bounded-heapless` selects
-// the fixed one for MCU builds; a build graph that unified it into this crate
-// would turn each of those sites into a panic at the first full table, or fail
-// to find the wrappers it compiles out. Refused here, at build time, with the
-// reason.
+// The AP runtime keeps growable collections: the registrations it has not yet
+// made fallible (`register_sink(..).expect(..)` of the queryable declare, and
+// the registries whose closure wrappers are still compiled out of a fixed
+// build) hold only on that backing. A subscriber registration returns its
+// refusal on every backing. `wz-session-core/bounded-heapless` selects the
+// fixed one for MCU builds; a build graph that unified it into this crate would
+// turn each remaining site into a panic at the first full table, or fail to find
+// the wrappers it compiles out. Refused here, at build time, with the reason.
 const _: () = assert!(
     !wz_session_core::bounded::ENFORCES_CAPACITY,
     "wz-runtime-tokio needs the growable bounded backing; \

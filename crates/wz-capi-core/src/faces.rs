@@ -122,6 +122,7 @@ use wz_runtime_tokio::sync::PlainMutex as WzMutex;
 use wz_runtime_tokio::Reliability;
 use wz_session_core::admission_retry::AdmissionRetry;
 use wz_session_core::atomic_tx::{decide, AllOrNone, LegRoom};
+use wz_session_core::limits::SessionLimits;
 use wz_session_core::link_restriction::{LinkRestriction, LinkSlot};
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::wire_id::{next_u32_id, EntityId, ExprId};
@@ -2183,6 +2184,8 @@ pub struct SharedSession {
     session_zid: SessionZid,
     /// The policies the node runs under — see [`SharedSession::session_policy`].
     session_policy: SessionPolicy,
+    /// The session limits the node runs under — see [`SharedSession::session_limits`].
+    session_limits: SessionLimits,
     /// The node's links to each remote node, from the handshake that names it until the link is
     /// gone: the node's say on a second link to a node it holds, asked while the link is still
     /// being established ([`CApiForwarder::link_admission`]). A node that listens and dials runs
@@ -2416,6 +2419,10 @@ pub struct SessionResources {
     /// every face session is handed them, and the node's admission of a second link orders zids
     /// by their `link-tie-order`.
     pub session_policy: SessionPolicy,
+    /// The session limits the node runs under, as its open resolved them: the observer of the
+    /// plane, where the program declares, is held to them. A face's and a group's observers
+    /// mirror what the plane admitted and are not held again.
+    pub session_limits: SessionLimits,
     /// The key ids every node of the deployment shares and the key-wire form of each face, which
     /// every face session is handed for its link (`shared-key-ids`).
     #[cfg(feature = "shared-key-ids")]
@@ -2509,7 +2516,7 @@ pub struct GossipSetup {
 impl SessionResources {
     /// No clock, the default reader and the executor's thread for a local delivery, no
     /// initial interest and no gossip: what a node was before it could be given any of them,
-    /// under the policies `session_policy`.
+    /// under the policies `session_policy` and the build's session limits.
     pub fn under(session_policy: SessionPolicy) -> Self {
         Self {
             node_hlc: NodeHlc::disabled(),
@@ -2525,6 +2532,7 @@ impl SessionResources {
             namespace: None,
             aggregation: DeclarationAggregation::none(),
             session_policy,
+            session_limits: SessionLimits::defaults(),
             #[cfg(feature = "shared-key-ids")]
             key_ids: KeyIdPlan::none(session_policy.key_wire_form()),
         }
@@ -2601,6 +2609,12 @@ impl SharedSession {
         &self.session_policy
     }
 
+    /// The session limits the node runs under, as its creator resolved them: what the observer
+    /// of its plane is held to, never the build.
+    pub fn session_limits(&self) -> &SessionLimits {
+        &self.session_limits
+    }
+
     /// R311y820 — FALLIBLE, because the params builder it shares with both
     /// drive roles now draws the cookie signing key from OS entropy. The local
     /// plane never handshakes, so this key never reaches a wire cookie — but it
@@ -2658,6 +2672,7 @@ impl SharedSession {
             namespace,
             aggregation,
             session_policy,
+            session_limits,
             #[cfg(feature = "shared-key-ids")]
             key_ids,
         } = resources;
@@ -2700,7 +2715,9 @@ impl SharedSession {
             },
         )?;
         let actions = new_session_actions(driver, params, clock);
-        let observer = Arc::new(WzMutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(WzMutex::new(ApplicationLayerObserver::with_limits(
+            &session_limits,
+        )));
         // R2932 — the plane's wake is handed to the plane itself, so a loopback
         // publish this file does not make (a group's keep-alive beacon, on its
         // own task) still wakes `drive_local_plane`. The explicit notifies after
@@ -2762,6 +2779,7 @@ impl SharedSession {
             zid: zid_bytes,
             session_zid: zid,
             session_policy,
+            session_limits,
             #[cfg(feature = "peer")]
             links: Arc::new(wz_runtime_tokio::link_registry::LinkRegistry::with_order(
                 &zid_bytes,
@@ -3192,6 +3210,9 @@ impl SharedSession {
         actions: &Arc<SessionLinkActions>,
         dialled: bool,
     ) -> Option<LinkAnnounced> {
+        // A face's tables mirror what the plane admitted (the replay declares each of the
+        // plane's entities on it), so the limits are the plane's to hold, once, where the
+        // program declares; a mirror held to them again could refuse what the node admitted.
         let observer = Arc::new(WzMutex::new(ApplicationLayerObserver::new()));
         // R311y554 — THE hand-off that makes `allowed_destination` honourable.
         //

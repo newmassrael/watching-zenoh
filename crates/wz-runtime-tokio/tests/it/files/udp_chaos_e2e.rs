@@ -227,10 +227,13 @@ async fn udp_lossy_fragment_chain_aborts_then_channel_recovers() {
     let mut observer = ApplicationLayerObserver::new();
     {
         let delivered = delivered.clone();
-        observer.subscribers.register(KEYEXPR, move |sample| {
-            assert_eq!(sample.keyexpr(), KEYEXPR);
-            delivered.lock().unwrap().push(sample.payload().to_vec());
-        });
+        observer
+            .subscribers
+            .register(KEYEXPR, move |sample| {
+                assert_eq!(sample.keyexpr(), KEYEXPR);
+                delivered.lock().unwrap().push(sample.payload().to_vec());
+            })
+            .expect("no quota is stated on this table");
     }
 
     // ── Count the lossy-chain abort the acceptor's drive loop reports.
@@ -462,10 +465,13 @@ async fn udp_duplicate_fragment_strands_then_channel_recovers() {
     let mut observer = ApplicationLayerObserver::new();
     {
         let delivered = delivered.clone();
-        observer.subscribers.register(KEYEXPR, move |sample| {
-            assert_eq!(sample.keyexpr(), KEYEXPR);
-            delivered.lock().unwrap().push(sample.payload().to_vec());
-        });
+        observer
+            .subscribers
+            .register(KEYEXPR, move |sample| {
+                assert_eq!(sample.keyexpr(), KEYEXPR);
+                delivered.lock().unwrap().push(sample.payload().to_vec());
+            })
+            .expect("no quota is stated on this table");
     }
 
     // ── Count the channel SN-gate rejection the duplicate fragment triggers
@@ -680,10 +686,13 @@ async fn udp_reordered_fragment_aborts_then_channel_recovers() {
     let mut observer = ApplicationLayerObserver::new();
     {
         let delivered = delivered.clone();
-        observer.subscribers.register(KEYEXPR, move |sample| {
-            assert_eq!(sample.keyexpr(), KEYEXPR);
-            delivered.lock().unwrap().push(sample.payload().to_vec());
-        });
+        observer
+            .subscribers
+            .register(KEYEXPR, move |sample| {
+                assert_eq!(sample.keyexpr(), KEYEXPR);
+                delivered.lock().unwrap().push(sample.payload().to_vec());
+            })
+            .expect("no quota is stated on this table");
     }
 
     // ── Count the strict-in-order abort the reordered fragment triggers.

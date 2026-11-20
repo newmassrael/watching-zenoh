@@ -5100,11 +5100,14 @@ mod tests {
         let mut observer = ApplicationLayerObserver::new();
         {
             let fired = fired.clone();
-            observer.subscribers.register("demo/mc", move |sample| {
-                assert_eq!(sample.keyexpr(), "demo/mc");
-                assert_eq!(sample.payload(), b"over-multicast");
-                fired.fetch_add(1, Ordering::SeqCst);
-            });
+            observer
+                .subscribers
+                .register("demo/mc", move |sample| {
+                    assert_eq!(sample.keyexpr(), "demo/mc");
+                    assert_eq!(sample.payload(), b"over-multicast");
+                    fired.fetch_add(1, Ordering::SeqCst);
+                })
+                .expect("no quota is stated on this table");
         }
 
         let outcome = drive_multicast_session(
@@ -5342,11 +5345,14 @@ mod tests {
         {
             let fired = fired.clone();
             // The app names the RELATIVE keyexpr; the namespace is transparent.
-            observer.subscribers.register("demo/mc", move |sample| {
-                assert_eq!(sample.keyexpr(), "demo/mc");
-                assert_eq!(sample.payload(), b"in-ns");
-                fired.fetch_add(1, Ordering::SeqCst);
-            });
+            observer
+                .subscribers
+                .register("demo/mc", move |sample| {
+                    assert_eq!(sample.keyexpr(), "demo/mc");
+                    assert_eq!(sample.payload(), b"in-ns");
+                    fired.fetch_add(1, Ordering::SeqCst);
+                })
+                .expect("no quota is stated on this table");
         }
 
         let outcome = drive_multicast_session(
@@ -5709,9 +5715,12 @@ mod tests {
         let mut observer = ApplicationLayerObserver::new();
         {
             let fired = fired.clone();
-            observer.subscribers.register("demo/mc", move |_| {
-                fired.fetch_add(1, Ordering::SeqCst);
-            });
+            observer
+                .subscribers
+                .register("demo/mc", move |_| {
+                    fired.fetch_add(1, Ordering::SeqCst);
+                })
+                .expect("no quota is stated on this table");
         }
 
         drive_multicast_session(
@@ -5952,10 +5961,13 @@ mod tests {
             let mut observer = ApplicationLayerObserver::new();
             {
                 let fired = fired.clone();
-                observer.subscribers.register("demo/mc", move |sample| {
-                    assert_eq!(sample.payload(), expect_payload);
-                    fired.fetch_add(1, Ordering::SeqCst);
-                });
+                observer
+                    .subscribers
+                    .register("demo/mc", move |sample| {
+                        assert_eq!(sample.payload(), expect_payload);
+                        fired.fetch_add(1, Ordering::SeqCst);
+                    })
+                    .expect("no quota is stated on this table");
             }
             (observer, fired)
         }
@@ -6382,10 +6394,13 @@ mod tests {
             {
                 let fired = fired.clone();
                 let expect = payload.clone();
-                observer.subscribers.register("demo/mc", move |sample| {
-                    assert_eq!(sample.payload(), &expect[..]);
-                    fired.fetch_add(1, Ordering::SeqCst);
-                });
+                observer
+                    .subscribers
+                    .register("demo/mc", move |sample| {
+                        assert_eq!(sample.payload(), &expect[..]);
+                        fired.fetch_add(1, Ordering::SeqCst);
+                    })
+                    .expect("no quota is stated on this table");
             }
 
             drive_multicast_session(
@@ -6772,7 +6787,8 @@ mod tests {
                 .subscribers
                 .register("**", move |sample| {
                     delivered.lock().unwrap().push(sample.keyexpr().to_owned());
-                });
+                })
+                .expect("no quota is stated on this table");
         }
         assert!(session.set_group_link_subject(udp_group_link()));
         session.set_interceptors(config);

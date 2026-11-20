@@ -25,6 +25,71 @@ mod generated;
 
 pub use generated::*;
 
+/// Each bound a table enforces, read through the door its creator uses: with nothing stated the
+/// table admits what it admitted while it read the build's constant, and a stated quota refuses
+/// the next entry with the path's own refusal and changes nothing. Two tests per bound.
+#[cfg(all(test, feature = "alloc"))]
+mod enforcement {
+    use super::*;
+    use crate::caps;
+    use crate::limit_binding::{LimitSpec, Quota};
+    use crate::observer::ApplicationLayerObserver;
+    use crate::registry_error::RegisterError;
+
+    /// `MAX_SUBSCRIPTIONS` with nothing stated: the heap grows the table past the declared count,
+    /// as it did, and a fixed table holds its capacity.
+    #[test]
+    fn max_subscriptions_with_nothing_stated_admits_what_the_build_admitted() {
+        let mut observer = ApplicationLayerObserver::with_limits(&SessionLimits::defaults());
+        let admitted = if crate::bounded::ENFORCES_CAPACITY {
+            caps::MAX_SUBSCRIPTIONS
+        } else {
+            caps::MAX_SUBSCRIPTIONS + 1
+        };
+        for index in 0..admitted {
+            observer
+                .subscribers
+                .register(&std::format!("bound/sub/{index}"), |_| {})
+                .expect("no quota is stated");
+        }
+        assert_eq!(observer.subscribers.len(), admitted);
+    }
+
+    /// `MAX_SUBSCRIPTIONS` stated as two: the third registration is refused as a full table, and
+    /// the refusal takes no declaration id.
+    #[test]
+    fn max_subscriptions_stated_refuses_the_next_and_takes_no_id() {
+        let mut limits = SessionLimits::defaults();
+        let stated = limits.select_max_subscriptions(Quota::at_most(2));
+        if MaxSubscriptions::DOMAIN.is_singleton() {
+            // A build that keeps the build's value alone refuses the statement itself.
+            assert!(stated.is_err());
+            return;
+        }
+        stated.expect("two is inside the domain");
+        let mut observer = ApplicationLayerObserver::with_limits(&limits);
+        let first = observer
+            .subscribers
+            .register("bound/a", |_| {})
+            .expect("under the quota");
+        let second = observer
+            .subscribers
+            .register("bound/b", |_| {})
+            .expect("under the quota");
+        assert_eq!(
+            observer.subscribers.register("bound/c", |_| {}),
+            Err(RegisterError::TableFull)
+        );
+        assert_eq!(observer.subscribers.len(), 2);
+        assert!(observer.subscribers.unregister(first));
+        let third = observer
+            .subscribers
+            .register("bound/c", |_| {})
+            .expect("a place is free under the quota");
+        assert_eq!(third.entity_id(), second.entity_id() + 1);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

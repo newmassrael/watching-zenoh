@@ -415,10 +415,13 @@ async fn a_rel_one_locator_opens_a_session_over_reliable_udp_from_the_strings_al
     {
         let fired = fired.clone();
         let expect = payload.clone();
-        observer.subscribers.register(KEYEXPR, move |sample| {
-            assert_eq!(sample.payload(), &expect[..]);
-            fired.fetch_add(1, Ordering::SeqCst);
-        });
+        observer
+            .subscribers
+            .register(KEYEXPR, move |sample| {
+                assert_eq!(sample.payload(), &expect[..]);
+                fired.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
     }
     let publisher = TokioSession::new(
         opened_init.actions.clone(),
