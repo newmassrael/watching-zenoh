@@ -483,3 +483,17 @@ fn a_traffic_class_is_set_in_the_option_of_the_groups_family() {
         assert_eq!(v6.tclass_v6().expect("IPV6_TCLASS reads back"), 0x28);
     }
 }
+
+/// A datagram socket whose send buffer has room is writable at once: the wait answers `true`
+/// long before the time it was given is up.
+#[test]
+fn a_socket_with_room_is_writable_at_once() {
+    let socket = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("a socket");
+    let started = std::time::Instant::now();
+    assert!(wait_writable(&socket, 5_000_000), "a socket with room");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "the wait took {:?}",
+        started.elapsed()
+    );
+}

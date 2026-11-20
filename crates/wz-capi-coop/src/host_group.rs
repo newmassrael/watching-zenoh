@@ -23,10 +23,10 @@ use std::io;
 use std::net::{SocketAddr, UdpSocket};
 
 use wz_host_net::multicast::{
-    bind_joined, bind_sender, mark_traffic_class, Loopback, RxBind, SocketConfig,
+    bind_joined, bind_sender, mark_traffic_class, wait_writable, Loopback, RxBind, SocketConfig,
 };
-use wz_runtime_coop::group_transport::{GroupJoiner, GroupTransport};
-use wz_runtime_coop::session_drive::LinkOpenError;
+use wz_runtime_coop::group_transport::{GroupJoiner, GroupSend, GroupTransport};
+use wz_runtime_coop::session_drive::{LinkOpenError, LinkWritability};
 use wz_runtime_coop::udp_link::UDP_RX_CAPACITY;
 use wz_session_core::locator::{parse_locator, ParsedLocator, Proto};
 use wz_session_core::policy::{MulticastLoopback, SessionPolicy};
@@ -153,6 +153,17 @@ impl HostGroupTransport {
     }
 }
 
+/// The send socket's room asked by a thread other than the session's: a handle of its own to the
+/// socket, so a wait made after the group was left asks a socket that is still open and never a
+/// descriptor its close gave to something else.
+struct SendRoom(UdpSocket);
+
+impl LinkWritability for SendRoom {
+    fn wait_writable(&self, timeout_us: u64) -> bool {
+        wait_writable(&self.0, timeout_us)
+    }
+}
+
 impl GroupTransport for HostGroupTransport {
     fn open(&mut self) -> bool {
         self.read.is_some() && self.write.is_some()
@@ -177,6 +188,39 @@ impl GroupTransport for HostGroupTransport {
         if let Some(socket) = &self.write {
             let _ = socket.send_to(datagram, self.group);
         }
+    }
+
+    // The send socket does not block: one with no room in its buffer refuses the datagram with
+    // nothing sent, which is a full socket and not a lost datagram, and so is a send a signal cut
+    // short. Anything else lost it.
+    fn try_send_to_group(&mut self, datagram: &[u8]) -> GroupSend {
+        let Some(socket) = &self.write else {
+            return GroupSend::Failed;
+        };
+        match socket.send_to(datagram, self.group) {
+            Ok(sent) if sent == datagram.len() => GroupSend::Sent,
+            Ok(_) => GroupSend::Failed,
+            Err(e) => match e.kind() {
+                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted => GroupSend::Full,
+                _ => {
+                    log::warn!("group {}: its socket failed a send: {e}", self.group);
+                    GroupSend::Failed
+                }
+            },
+        }
+    }
+
+    fn wait_for_room(&self, timeout_us: u64) -> bool {
+        match &self.write {
+            Some(socket) => wait_writable(socket, timeout_us),
+            // Released: the send that follows fails.
+            None => true,
+        }
+    }
+
+    fn writability(&self) -> Option<Box<dyn LinkWritability>> {
+        let socket = self.write.as_ref()?.try_clone().ok()?;
+        Some(Box::new(SendRoom(socket)))
     }
 
     fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
@@ -254,6 +298,40 @@ mod tests {
                 policy.multicast_link_requires_iface()
             );
         }
+    }
+
+    /// The send socket's room is the group's: a datagram it takes is sent and the socket has room,
+    /// asked by the session's loop or from outside it; a group that was left fails its send, has
+    /// room at once for the send to fail on, and gives no wait to ask. A send socket aimed at a
+    /// loopback port stands in for one joined to a group, which needs a multicast route.
+    #[test]
+    fn the_send_sockets_room_is_the_groups() {
+        let peer = UdpSocket::bind("127.0.0.1:0").expect("a peer");
+        let write = UdpSocket::bind("127.0.0.1:0").expect("a send socket");
+        write.set_nonblocking(true).expect("non-blocking");
+        let mut transport = HostGroupTransport {
+            read: None,
+            write: Some(write),
+            group: peer.local_addr().expect("the peer's port"),
+            rx: Vec::new(),
+            failed: false,
+        };
+        let outside = transport.writability().expect("a wait from outside");
+        assert_eq!(transport.try_send_to_group(b"datagram"), GroupSend::Sent);
+        let mut got = [0u8; 16];
+        let (len, _) = peer.recv_from(&mut got).expect("the datagram arrived");
+        assert_eq!(&got[..len], b"datagram");
+        assert!(transport.wait_for_room(1_000));
+        assert!(outside.wait_writable(1_000));
+
+        transport.close();
+        assert_eq!(transport.try_send_to_group(b"left"), GroupSend::Failed);
+        assert!(transport.wait_for_room(1_000));
+        assert!(transport.writability().is_none());
+        assert!(
+            outside.wait_writable(1_000),
+            "a wait made after the leave asks a socket still open"
+        );
     }
 
     /// Two members of one group on this host: what one sends reaches the other, from the port of

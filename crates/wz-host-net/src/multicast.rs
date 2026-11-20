@@ -810,5 +810,55 @@ fn mark_v6(_socket: &Socket, _dscp: u32) -> io::Result<()> {
     Ok(())
 }
 
+/// Wait up to `timeout_us` microseconds for `socket` to take another datagram: `true` once the
+/// platform says it is writable, or reports an error on it, which the send that follows meets;
+/// `false` when the time is up first, or when the wait itself failed. The sockets built here do
+/// not block, so a send that found one full asks this when to offer the datagram again; the
+/// tokio runtime's sockets wait in their own send.
+#[cfg(unix)]
+pub fn wait_writable(socket: &std::net::UdpSocket, timeout_us: u64) -> bool {
+    use std::os::fd::AsRawFd;
+    let timeout_ms = libc::c_int::try_from(timeout_us.div_ceil(1_000)).unwrap_or(libc::c_int::MAX);
+    let mut pfd = libc::pollfd {
+        fd: socket.as_raw_fd(),
+        events: libc::POLLOUT,
+        revents: 0,
+    };
+    loop {
+        // SAFETY: one live `pollfd`, for a descriptor `socket` keeps open for the call; the
+        // timeout bounds the wait.
+        let ready = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+        if ready < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+            continue;
+        }
+        return ready > 0 && pfd.revents != 0;
+    }
+}
+
+/// See the unix form of this function: `WSAPoll` for `POLLWRNORM`.
+#[cfg(windows)]
+pub fn wait_writable(socket: &std::net::UdpSocket, timeout_us: u64) -> bool {
+    use std::os::windows::io::AsRawSocket;
+    use windows_sys::Win32::Networking::WinSock as ws;
+    let timeout_ms = i32::try_from(timeout_us.div_ceil(1_000)).unwrap_or(i32::MAX);
+    let mut fd = ws::WSAPOLLFD {
+        fd: socket.as_raw_socket() as ws::SOCKET,
+        events: ws::POLLWRNORM,
+        revents: 0,
+    };
+    // SAFETY: one live `WSAPOLLFD`, for a socket `socket` keeps open for the call; the timeout
+    // bounds the wait.
+    let ready = unsafe { ws::WSAPoll(&mut fd, 1, timeout_ms) };
+    ready > 0 && fd.revents != 0
+}
+
+/// See the unix form of this function: a platform with no wait to ask has room at once, and the
+/// send that follows says whether it had.
+#[cfg(not(any(unix, windows)))]
+pub fn wait_writable(socket: &std::net::UdpSocket, timeout_us: u64) -> bool {
+    let _ = (socket, timeout_us);
+    true
+}
+
 #[cfg(test)]
 mod tests;
