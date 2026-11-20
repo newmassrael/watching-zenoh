@@ -1356,3 +1356,148 @@ mod cut {
         );
     }
 }
+
+/// What wakes a read of a session that holds a group: the group's next datagram, which the read
+/// waits on beside the session's links, and the group's session being due with nothing arriving,
+/// and nothing else.
+mod woken {
+    use wz_runtime_coop::ClockSource;
+
+    use super::*;
+
+    /// A clock that stands still, far from where it started.
+    #[derive(Clone)]
+    struct Stopped;
+
+    impl ClockSource for Stopped {
+        fn now_us(&self) -> u64 {
+            1_000_000_000_000
+        }
+    }
+
+    /// A member's stack alone on the group: it joins [`GROUP`] and keeps each datagram its session
+    /// sends; what the members send is what the test hands in.
+    #[derive(Default)]
+    struct Alone {
+        sent: Mutex<Vec<Vec<u8>>>,
+        link: Mutex<Option<LinkHandle>>,
+    }
+
+    struct AlonePort(Arc<Alone>);
+
+    impl AppPort for AlonePort {
+        fn open(&self, link: LinkHandle, kind: AppLinkKind, locator: &str) -> ProgramOpen {
+            if kind != AppLinkKind::Group || locator != GROUP {
+                return ProgramOpen::Refused;
+            }
+            *self.0.link.lock().unwrap() = Some(link);
+            ProgramOpen::Up
+        }
+
+        fn send(&self, _link: LinkHandle, bytes: &[u8]) -> ProgramSend {
+            self.0.sent.lock().unwrap().push(bytes.to_vec());
+            ProgramSend::Wrote(bytes.len())
+        }
+
+        fn close(&self, _link: LinkHandle) {}
+    }
+
+    /// A member whose beacon is due a minute after its open and whose read waits at most
+    /// `idle_wait_ms` for input, alone on the group over a stack of its own, on `clock`.
+    fn open_alone<C: ClockSource + Clone + 'static>(
+        clock: C,
+        idle_wait_ms: u32,
+    ) -> (Arc<CoopEngine<AppLinks, C>>, Arc<Alone>, Arc<AppTransport>) {
+        let mut config = member_config(1, GROUP);
+        config.groups[0].profile.lease_ms = 180_000;
+        config.groups[0].profile.join_interval_ms = 60_000;
+        config.idle_wait_ms = idle_wait_ms;
+        let stack = Arc::new(Alone::default());
+        let transport = Arc::new(AppTransport::new(
+            Box::new(Table(Mutex::new(AppLinkTable::new()))),
+            Box::new(AlonePort(Arc::clone(&stack))),
+        ));
+        let engine = CoopEngine::open(
+            AppLinks::new(Arc::clone(&transport)),
+            clock,
+            PosixEntropy,
+            config,
+        )
+        .expect("the member joins");
+        (engine, stack, transport)
+    }
+
+    /// With nothing arriving and a clock that does not move, each read waits its whole idle wait
+    /// on the group's socket and on the session's next beacon, which such a clock never reaches:
+    /// the reads do not spin.
+    #[test]
+    fn a_quiet_group_on_a_stopped_clock_is_not_read_without_end() {
+        let (member, _stack, _transport) = open_alone(Stopped, 100);
+        let started = Instant::now();
+        let mut reads = 0usize;
+        while started.elapsed() < Duration::from_millis(600) {
+            SessionDrive::read(&*member, false).expect("the session is open");
+            reads += 1;
+        }
+        assert!(reads <= 20, "{reads} reads in 600 ms: a read did not wait");
+        SessionDrive::close(&*member);
+    }
+
+    /// A read with nothing due for five seconds waits on the group's socket: no tick ends it, and
+    /// the datagram handed in does, long before its wait is out.
+    #[test]
+    fn a_datagram_handed_in_wakes_a_read_that_waits_on_the_group() {
+        let (member, stack, transport) = open_alone(PosixClock, 5_000);
+        let link = stack.link.lock().unwrap().expect("the group was joined");
+        let reading = {
+            let member = Arc::clone(&member);
+            std::thread::spawn(move || {
+                SessionDrive::read(&*member, false).expect("the session is open");
+                Instant::now()
+            })
+        };
+        std::thread::sleep(Duration::from_millis(300));
+        let handed_in = Instant::now();
+        transport
+            .received(link, &[0u8; 4], Some(source(9).as_str()))
+            .expect("handed in");
+        let returned = reading.join().expect("the read");
+        assert!(
+            returned >= handed_in,
+            "the read returned {:?} before the datagram came",
+            handed_in.duration_since(returned)
+        );
+        assert!(
+            returned.duration_since(handed_in) < Duration::from_millis(2_500),
+            "woken by the datagram, not the end of its wait: {:?}",
+            returned.duration_since(handed_in)
+        );
+        SessionDrive::close(&*member);
+    }
+
+    /// A put the session pushed onto its group before a read is written by that read without
+    /// waiting: only a step of the group writes it, so it makes the group due at once.
+    #[test]
+    fn a_put_pushed_before_a_read_is_written_by_it_without_waiting() {
+        let (member, stack, _transport) = open_alone(PosixClock, 5_000);
+        let written = || {
+            stack
+                .sent
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|datagram| datagram.ends_with(b"pushed-before-the-read"))
+        };
+        put(&member, "demo/group/now", b"pushed-before-the-read");
+        assert!(!written(), "pushed, and not yet written");
+        let started = Instant::now();
+        SessionDrive::read(&*member, false).expect("the session is open");
+        assert!(
+            started.elapsed() < Duration::from_millis(2_500),
+            "the read waited {:?}",
+            started.elapsed()
+        );
+        assert!(written(), "the read wrote it");
+        SessionDrive::close(&*member);
+    }
+}

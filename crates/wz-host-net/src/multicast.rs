@@ -860,5 +860,73 @@ pub fn wait_writable(socket: &std::net::UdpSocket, timeout_us: u64) -> bool {
     true
 }
 
+/// The platform's handle for `socket` as a wait over several sockets names it ([`wait_readable`]):
+/// its descriptor. `None` where the platform has no wait to name it to.
+#[cfg(unix)]
+pub fn raw_handle(socket: &std::net::UdpSocket) -> Option<usize> {
+    use std::os::fd::AsRawFd;
+    usize::try_from(socket.as_raw_fd()).ok()
+}
+
+/// See the unix form of this function: the `SOCKET`.
+#[cfg(windows)]
+pub fn raw_handle(socket: &std::net::UdpSocket) -> Option<usize> {
+    use std::os::windows::io::AsRawSocket;
+    usize::try_from(socket.as_raw_socket()).ok()
+}
+
+/// See the unix form of this function: a platform with no wait has no handle to give.
+#[cfg(not(any(unix, windows)))]
+pub fn raw_handle(socket: &std::net::UdpSocket) -> Option<usize> {
+    let _ = socket;
+    None
+}
+
+/// Wait up to `timeout_ms` milliseconds for any of the sockets `handles` names ([`raw_handle`]) to
+/// have a datagram to read, returning at once when one has. A wait that fails, or that a signal
+/// cuts short, returns early: the read that follows finds what there is. The caller keeps each
+/// socket open for the call.
+#[cfg(unix)]
+pub fn wait_readable(handles: &[usize], timeout_ms: u32) {
+    let mut fds: Vec<libc::pollfd> = handles
+        .iter()
+        .filter_map(|handle| libc::c_int::try_from(*handle).ok())
+        .map(|fd| libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        })
+        .collect();
+    let timeout = libc::c_int::try_from(timeout_ms).unwrap_or(libc::c_int::MAX);
+    // SAFETY: `fds` is live for the call and its length is the count passed; every descriptor is
+    // one the caller holds open for the call, and the timeout bounds the wait.
+    unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) };
+}
+
+/// See the unix form of this function: `WSAPoll` for `POLLRDNORM`.
+#[cfg(windows)]
+pub fn wait_readable(handles: &[usize], timeout_ms: u32) {
+    use windows_sys::Win32::Networking::WinSock as ws;
+    let mut fds: Vec<ws::WSAPOLLFD> = handles
+        .iter()
+        .map(|handle| ws::WSAPOLLFD {
+            fd: *handle,
+            events: ws::POLLRDNORM,
+            revents: 0,
+        })
+        .collect();
+    let timeout = i32::try_from(timeout_ms).unwrap_or(i32::MAX);
+    // SAFETY: `fds` is live for the call and its length is the count passed; every socket is one
+    // the caller holds open for the call, and the timeout bounds the wait.
+    unsafe { ws::WSAPoll(fds.as_mut_ptr(), fds.len() as u32, timeout) };
+}
+
+/// See the unix form of this function: a platform with no wait returns at once, and the read that
+/// follows finds what there is.
+#[cfg(not(any(unix, windows)))]
+pub fn wait_readable(handles: &[usize], timeout_ms: u32) {
+    let _ = (handles, timeout_ms);
+}
+
 #[cfg(test)]
 mod tests;

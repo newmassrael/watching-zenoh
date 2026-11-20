@@ -244,6 +244,11 @@ impl GroupTxStage {
         sn::mask_from_res(self.inner.params.seq_num_res)
     }
 
+    /// Whether nothing is queued on the stage for the group's pump to write.
+    pub fn is_empty(&self) -> bool {
+        self.inner.lanes.borrow().queued.is_empty() && self.inner.deferred.borrow().is_empty()
+    }
+
     /// How many messages of `priority` the stage dropped for want of room on their lane; a reply
     /// dropped for want of a slot is not among them ([`Self::dropped`]).
     pub fn drops(&self, priority: Priority) -> u32 {
@@ -373,6 +378,11 @@ impl StageWriter {
     /// stops pulling when it has none, so what the seam holds waits there, under its own bound.
     pub(super) fn takes_offer(&self) -> bool {
         self.stage.has_reply_slot()
+    }
+
+    /// Whether the writer holds a datagram its socket had no room for.
+    pub(super) fn holds(&self) -> bool {
+        self.held.is_some()
     }
 
     /// Put `item`, an offer of the pump's pull seam, on the stage as a reply is put on it, so its
@@ -706,7 +716,9 @@ mod tests {
             other => other,
         };
 
+        assert!(stage.is_empty());
         assert_eq!(stage.push(best_effort(fill()), &host), PushOutcome::Pushed);
+        assert!(!stage.is_empty(), "a datagram queued for the pump");
         assert_eq!(
             stage.push(best_effort(fill()), &host),
             PushOutcome::Pushed,

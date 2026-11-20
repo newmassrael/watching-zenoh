@@ -965,6 +965,18 @@ impl TxBacklog {
         }
     }
 
+    /// Whether a datagram the socket had no room for is kept for the next step.
+    fn holds(&self) -> bool {
+        #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+        {
+            !self.held.is_empty()
+        }
+        #[cfg(not(all(feature = "alloc", not(feature = "session-slot"))))]
+        {
+            false
+        }
+    }
+
     /// Offer the socket what it had no room for before, in order, until it has none again:
     /// whether something is still held back.
     fn offer_held<T: GroupTransport>(&mut self, transport: &mut T) -> bool {
@@ -1185,6 +1197,39 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
     /// The peer table the pump drives, for a caller that reports its group.
     pub fn dispatcher(&self) -> &MulticastDispatcher<MAX_PEERS> {
         self.dispatcher
+    }
+
+    /// When the pump next has work that no datagram brings, as a reading of its runtime's clock
+    /// in microseconds: its JOIN beacon, and its sweep tick while the group holds a member or the
+    /// socket holds back a datagram of the data emit. A sweep evicts members, and each step offers
+    /// the socket what it refused; a group with neither has nothing to do on the tick. A host that
+    /// waits for the group's input waits no longer than this.
+    pub fn next_due_us(&self) -> u64 {
+        let ticks = self.dispatcher.active_peers() > 0 || self.tx_held();
+        let due_ms = if ticks {
+            self.next_join_ms.min(self.next_sweep_ms)
+        } else {
+            self.next_join_ms
+        };
+        let left_ms = due_ms.saturating_sub(self.clock.now_monotonic_ms());
+        self.runtime
+            .clock()
+            .now_us()
+            .saturating_add(left_ms.saturating_mul(1_000))
+    }
+
+    /// Whether the socket had no room for a datagram of the data emit that the pump holds for its
+    /// next step.
+    pub fn tx_held(&self) -> bool {
+        #[cfg(all(
+            feature = "alloc",
+            not(feature = "session-slot"),
+            feature = "codec-push"
+        ))]
+        if self.staged.as_ref().is_some_and(stage::StageWriter::holds) {
+            return true;
+        }
+        self.tx_backlog.holds()
     }
 
     /// How many datagrams of the data emit were lost since the pump was made: to a send the stack
@@ -1577,25 +1622,35 @@ where
         on_event,
         next_tx,
         should_stop,
-        // A session spawned whole has no holder that asks for a JOIN between its beacons, and
-        // frames what its pull seam yields.
-        || false,
-        #[cfg(all(
-            feature = "alloc",
-            not(feature = "session-slot"),
-            feature = "codec-push"
-        ))]
-        None,
+        // A session spawned whole has no holder: nothing asks it for a JOIN between its beacons
+        // or reads when it is due, and it frames what its pull seam yields.
+        GroupHolding::default(),
     )
     .await
 }
 
+/// What the holder of a group session shares with the session's task on the heap profile: the
+/// JOIN it asks for between two beacons, the stage its producers push onto, and where the task
+/// says when it is next due. Empty on the slot profile, whose image steps its group itself.
+#[derive(Default)]
+struct GroupHolding {
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    join_ask: Option<JoinAsk>,
+    #[cfg(all(
+        feature = "alloc",
+        not(feature = "session-slot"),
+        feature = "codec-push"
+    ))]
+    tx_stage: Option<GroupTxStage>,
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    due: Option<GroupDue>,
+}
+
 /// The loop of a multicast session task over a dispatcher it is lent: the part of
 /// [`multicast_session_task`] and [`multicast_session_task_seeded`] that does not depend on where
-/// the dispatcher was built. `asks_join` says, before each step, whether the session's holder
-/// asked for a JOIN since the last one.
+/// the dispatcher was built. What `holding` holds is read, and written, around each step.
 #[allow(clippy::too_many_arguments)]
-async fn drive_group_session<'g, C, T, F, G, H, J, const MAX_PEERS: usize>(
+async fn drive_group_session<'g, C, T, F, G, H, const MAX_PEERS: usize>(
     runtime: CoopRuntime<C>,
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
     mut transport: T,
@@ -1606,13 +1661,7 @@ async fn drive_group_session<'g, C, T, F, G, H, J, const MAX_PEERS: usize>(
     mut on_event: F,
     mut next_tx: G,
     mut should_stop: H,
-    mut asks_join: J,
-    #[cfg(all(
-        feature = "alloc",
-        not(feature = "session-slot"),
-        feature = "codec-push"
-    ))]
-    tx_stage: Option<GroupTxStage>,
+    holding: GroupHolding,
 ) -> MulticastOutcome
 where
     C: ClockSource,
@@ -1620,8 +1669,19 @@ where
     F: FnMut(IterationEvent<'_, '_>),
     G: FnMut() -> Option<MulticastTxOffer<'g>>,
     H: FnMut() -> bool,
-    J: FnMut() -> bool,
 {
+    let GroupHolding {
+        #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+        join_ask,
+        #[cfg(all(
+            feature = "alloc",
+            not(feature = "session-slot"),
+            feature = "codec-push"
+        ))]
+        tx_stage,
+        #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+        due,
+    } = holding;
     let mut pump = MulticastPump::new(
         dispatcher,
         MulticastDriveConfig {
@@ -1643,11 +1703,17 @@ where
     }
     loop {
         // A JOIN the session's holder asked for is sent at this step.
-        if asks_join() {
+        #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+        if join_ask.as_ref().is_some_and(JoinAsk::take) {
             pump.join_now();
         }
         if let Some(outcome) = pump.step(&mut on_event, &mut next_tx, Some(&mut should_stop)) {
             return outcome;
+        }
+        // The holder waits for the group's input no longer than this.
+        #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+        if let Some(due) = &due {
+            due.publish(pump.next_due_us(), pump.tx_held());
         }
         yield_now().await;
     }
@@ -1669,18 +1735,9 @@ pub struct MulticastSessionSeed<T: GroupTransport, const MAX_PEERS: usize> {
     policy: SessionPolicy,
     tick_ms: u64,
     max_iters: Option<usize>,
-    /// The JOIN the session's holder asks for between two beacons, when it keeps the other
-    /// half of the ask ([`Self::with_join_ask`]).
-    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    join_ask: Option<JoinAsk>,
-    /// The stage the group's producers push onto, which the session writes from
-    /// ([`Self::with_tx_stage`]).
-    #[cfg(all(
-        feature = "alloc",
-        not(feature = "session-slot"),
-        feature = "codec-push"
-    ))]
-    tx_stage: Option<GroupTxStage>,
+    /// What the session's holder shares with it ([`Self::with_join_ask`],
+    /// [`Self::with_tx_stage`], [`Self::with_due`]).
+    holding: GroupHolding,
 }
 
 impl<T: GroupTransport, const MAX_PEERS: usize> MulticastSessionSeed<T, MAX_PEERS> {
@@ -1700,14 +1757,7 @@ impl<T: GroupTransport, const MAX_PEERS: usize> MulticastSessionSeed<T, MAX_PEER
             policy,
             tick_ms,
             max_iters: None,
-            #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-            join_ask: None,
-            #[cfg(all(
-                feature = "alloc",
-                not(feature = "session-slot"),
-                feature = "codec-push"
-            ))]
-            tx_stage: None,
+            holding: GroupHolding::default(),
         }
     }
 
@@ -1721,7 +1771,16 @@ impl<T: GroupTransport, const MAX_PEERS: usize> MulticastSessionSeed<T, MAX_PEER
     /// the holder keeps a clone of `ask` and asks through it.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     pub fn with_join_ask(mut self, ask: JoinAsk) -> Self {
-        self.join_ask = Some(ask);
+        self.holding.join_ask = Some(ask);
+        self
+    }
+
+    /// The session publishes in `due`, after each of its steps, when it is next due with nothing
+    /// arriving on it: the holder keeps a clone of `due` and waits for the group's input no longer
+    /// than that.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    pub fn with_due(mut self, due: GroupDue) -> Self {
+        self.holding.due = Some(due);
         self
     }
 
@@ -1734,7 +1793,7 @@ impl<T: GroupTransport, const MAX_PEERS: usize> MulticastSessionSeed<T, MAX_PEER
         feature = "codec-push"
     ))]
     pub fn with_tx_stage(mut self, stage: GroupTxStage) -> Self {
-        self.tx_stage = Some(stage);
+        self.holding.tx_stage = Some(stage);
         self
     }
 }
@@ -1757,6 +1816,43 @@ impl JoinAsk {
     /// Whether a JOIN was asked since the last look; the ask is answered by the look.
     fn take(&self) -> bool {
         self.0.replace(false)
+    }
+}
+
+/// When a group session is next due with nothing arriving on it ([`MulticastPump::next_due_us`]),
+/// and whether its socket had no room for a datagram it holds, as of the session's last step: what
+/// the session's holder waits for the group's input no longer than, beside that input. One clone is
+/// the holder's and one the session's ([`MulticastSessionSeed::with_due`]).
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+#[derive(Clone, Debug, Default)]
+pub struct GroupDue(alloc::rc::Rc<DueCell>);
+
+/// What a [`GroupDue`] holds.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+#[derive(Debug, Default)]
+struct DueCell {
+    due_us: core::cell::Cell<Option<u64>>,
+    tx_held: core::cell::Cell<bool>,
+}
+
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+impl GroupDue {
+    /// When the session is next due, as a reading of its runtime's clock in microseconds; `None`
+    /// until it has stepped, which makes it due at once.
+    pub fn due_us(&self) -> Option<u64> {
+        self.0.due_us.get()
+    }
+
+    /// Whether, at its last step, the session's socket had no room for a datagram it holds: what
+    /// the session's producers queue since then waits behind it.
+    pub fn tx_held(&self) -> bool {
+        self.0.tx_held.get()
+    }
+
+    /// The session's step published when it is next due and whether its socket holds it back.
+    fn publish(&self, due_us: u64, tx_held: bool) {
+        self.0.due_us.set(Some(due_us));
+        self.0.tx_held.set(tx_held);
     }
 }
 
@@ -1811,19 +1907,8 @@ where
         policy,
         tick_ms,
         max_iters,
-        #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-        join_ask,
-        #[cfg(all(
-            feature = "alloc",
-            not(feature = "session-slot"),
-            feature = "codec-push"
-        ))]
-        tx_stage,
+        holding,
     } = seed;
-    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    let asks_join = move || join_ask.as_ref().is_some_and(JoinAsk::take);
-    #[cfg(not(all(feature = "alloc", not(feature = "session-slot"))))]
-    let asks_join = || false;
     // A local that lives across the await below lies in the future's state, so this slot is
     // where the dispatcher is stored for as long as the task runs.
     let mut slot = MaybeUninit::uninit();
@@ -1839,13 +1924,7 @@ where
         on_event,
         next_tx,
         should_stop,
-        asks_join,
-        #[cfg(all(
-            feature = "alloc",
-            not(feature = "session-slot"),
-            feature = "codec-push"
-        ))]
-        tx_stage,
+        holding,
     )
     .await
 }
@@ -2285,12 +2364,14 @@ mod tests {
     use wz_runtime_coop::{ClockSource, CoopRuntime};
     use wz_session_core::driver_loop::IterationEvent;
     use wz_session_core::multicast_dispatch::{MulticastConfig, MulticastDispatcher};
+    use wz_session_core::multicast_join::{encode_join_into_slice, JOIN_MAX_BYTES};
     use wz_session_core::multicast_params::{
         zid_vec, GroupJoinRule, MulticastDriveConfig, MulticastParams,
     };
     use wz_session_core::multicast_tx::{multicast_put_literal, MulticastTxItem};
     use wz_session_core::policy::SessionPolicy;
     use wz_session_core::session_init_params::{LinkRxConf, TxQueueConf};
+    use wz_session_core::sn::{mask_from_res, MulticastTxConduits};
     use wz_session_core::wire_const::T_MID_JOIN;
     use wz_session_core::WhatAmI;
 
@@ -2320,6 +2401,8 @@ mod tests {
         room: usize,
         /// The next datagram offered fails.
         fail: bool,
+        /// What the group's members sent, read a datagram a step.
+        inbound: VecDeque<Vec<u8>>,
     }
 
     struct Socket(Rc<RefCell<Wire>>);
@@ -2356,8 +2439,15 @@ mod tests {
             GroupSend::Sent
         }
 
-        fn recv_with(&mut self, _f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
-            false
+        fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
+            let next = self.0.borrow_mut().inbound.pop_front();
+            match next {
+                Some(datagram) => {
+                    f(&datagram, SocketAddr::from(([192, 0, 2, 7], 7447)));
+                    true
+                }
+                None => false,
+            }
         }
     }
 
@@ -2535,5 +2625,64 @@ mod tests {
             ),
             "the reply let on after the drop is queued behind the others"
         );
+    }
+
+    /// The pump is due at its beacon, and on its sweep tick only while the group holds a member
+    /// or the socket holds back a datagram of the data emit: a group with neither has nothing to
+    /// do on the tick. Read on a clock that stands at 0, so the reading is what is left.
+    #[test]
+    fn the_pump_is_due_at_its_beacon_and_on_its_tick_only_with_a_member_or_a_held_datagram() {
+        let wire = Rc::new(RefCell::new(Wire::default()));
+        let mut socket = Socket(Rc::clone(&wire));
+        let mut params = params();
+        params.join_interval_ms = 1_000;
+        let runtime = CoopRuntime::new(Frozen);
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let queue: RefCell<VecDeque<MulticastTxItem>> = RefCell::new(VecDeque::new());
+        let mut next_tx = || queue.borrow_mut().pop_front();
+        let mut quiet = |_event: IterationEvent<'_, '_>| {};
+        let mut pump = MulticastPump::new(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &params,
+                tick_ms: 5,
+                max_iters: None,
+            },
+            &SessionPolicy::defaults(),
+            &runtime,
+            &mut socket,
+        );
+
+        assert!(pump.step(&mut quiet, &mut next_tx, None).is_none());
+        assert_eq!(
+            pump.next_due_us(),
+            1_000_000,
+            "nothing to sweep: the beacon, a second on"
+        );
+
+        // A put the socket has no room for is held, and the tick offers it again.
+        queue.borrow_mut().push_back(put("first"));
+        assert!(pump.step(&mut quiet, &mut next_tx, None).is_none());
+        assert!(pump.tx_held());
+        assert_eq!(pump.next_due_us(), 5_000);
+        wire.borrow_mut().room = 1;
+        assert!(pump.step(&mut quiet, &mut next_tx, None).is_none());
+        assert!(!pump.tx_held());
+        assert_eq!(pump.next_due_us(), 1_000_000, "CONTROL: nothing held");
+
+        // A member's JOIN admits it, and the tick sweeps its lease.
+        let mut theirs = params.clone();
+        theirs.zid = zid_vec(&[0x01, 0x02, 0x03, 0x04]);
+        let mut join = [0u8; JOIN_MAX_BYTES];
+        let len = encode_join_into_slice(
+            &theirs,
+            &MulticastTxConduits::new(mask_from_res(theirs.seq_num_res)),
+            &mut join,
+        )
+        .expect("a JOIN");
+        wire.borrow_mut().inbound.push_back(join[..len].to_vec());
+        assert!(pump.step(&mut quiet, &mut next_tx, None).is_none());
+        assert_eq!(pump.dispatcher().active_peers(), 1, "the member admitted");
+        assert_eq!(pump.next_due_us(), 5_000);
     }
 }

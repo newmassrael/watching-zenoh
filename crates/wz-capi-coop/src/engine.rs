@@ -2028,16 +2028,24 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             Some(due_ms) => self.wait_until(most, due_ms),
             None => most,
         };
-        // And so is a group's turn: its task looks at its beacon, its lease sweep and what its
-        // members sent each time the session is stepped, and takes one datagram a step, so a group
-        // that took one is stepped again at once and one that took none within a tick.
+        // And so is a group's turn: its task takes one datagram a step, so a group that took one
+        // is stepped again at once; one that took none is stepped when its next datagram comes,
+        // which the read waits on below, or when its session is next due with nothing arriving
+        // (its beacon, its sweep, what the session pushed onto it, its join again). A group whose
+        // stack gives no wait for its input is looked at on its tick.
         #[cfg(feature = "group")]
-        let most = if self.groups.is_empty() {
-            most
-        } else if self.groups.iter().any(GroupFace::took_input) {
+        let most = if self.groups.iter().any(GroupFace::took_input) {
             0
         } else {
-            most.min(group::GROUP_TICK_MS)
+            let most = match self.groups.iter().filter_map(GroupFace::due_us).min() {
+                Some(due_us) => self.wait_until(most, due_us.div_ceil(1_000)),
+                None => most,
+            };
+            if self.groups.iter().any(GroupFace::unwaited) {
+                most.min(group::GROUP_TICK_MS)
+            } else {
+                most
+            }
         };
         if most == 0 {
             return IdleWait::None;
@@ -2083,6 +2091,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 None => unwaited_port = true,
             }
         }
+        // And the input of every group whose stack gives a wait for it, after the links': a wait
+        // over several is made by the first, and a link's names a group's socket to the platform
+        // beside its own.
+        #[cfg(feature = "group")]
+        waits.extend(self.groups.iter().filter_map(GroupFace::input).cloned());
         let most = match dial_left_ms {
             Some(left) => u32::try_from(left).map_or(most, |left| left.min(most)),
             None => most,

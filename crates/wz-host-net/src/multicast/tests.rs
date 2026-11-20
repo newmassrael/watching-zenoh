@@ -497,3 +497,35 @@ fn a_socket_with_room_is_writable_at_once() {
         started.elapsed()
     );
 }
+
+/// A wait for input over two sockets is waited out while neither has a datagram, and returns long
+/// before its time once one of them has.
+#[cfg(any(unix, windows))]
+#[test]
+fn a_wait_for_input_returns_once_any_socket_has_a_datagram() {
+    use std::time::{Duration, Instant};
+    let quiet = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("a socket");
+    let reader = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("a socket");
+    let handles = [
+        raw_handle(&quiet).expect("a handle"),
+        raw_handle(&reader).expect("a handle"),
+    ];
+    let started = Instant::now();
+    wait_readable(&handles, 50);
+    assert!(
+        started.elapsed() >= Duration::from_millis(40),
+        "nothing to read: the wait took {:?}",
+        started.elapsed()
+    );
+
+    quiet
+        .send_to(b"datagram", reader.local_addr().expect("its address"))
+        .expect("sent");
+    let started = Instant::now();
+    wait_readable(&handles, 5_000);
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "a datagram queued: the wait took {:?}",
+        started.elapsed()
+    );
+}

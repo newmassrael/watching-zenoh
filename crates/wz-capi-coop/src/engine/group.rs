@@ -28,7 +28,7 @@ use alloc::sync::Arc;
 use wz_capi_port::group::{GroupDeclarations, GroupJoin};
 use wz_capi_port::{FanoutError, FilterId, FilterPlane, WireKey};
 use wz_runtime_coop::group_transport::{GroupSend, GroupTransport};
-use wz_runtime_coop::session_drive::LinkWritability;
+use wz_runtime_coop::session_drive::{LinkReadiness, LinkWritability};
 use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet};
 use wz_session_core::declare_build::{
     build_declare_kexpr, build_group_announcement, build_group_retraction, build_undeclare_kexpr,
@@ -52,7 +52,8 @@ use wz_session_core::sample::SampleKind;
 use wz_session_core::tx_deadline::PushOutcome;
 use wz_session_core::wire_id::{EntityId, ExprId};
 use wz_session_mcu::group_drive::{
-    spawn_multicast_session_seeded, GroupTxPace, GroupTxStage, JoinAsk, MulticastSessionSeed,
+    spawn_multicast_session_seeded, GroupDue, GroupTxPace, GroupTxStage, JoinAsk,
+    MulticastSessionSeed,
 };
 #[cfg(feature = "connectivity")]
 use {
@@ -77,9 +78,10 @@ use super::registry::{FaceId, Registry};
 /// face starts from the same count of rows and grows past it, and zenoh-pico states no cap.
 pub(super) const GROUP_MEMBERS: usize = 32;
 
-/// How often a group's task looks at its beacon, its lease sweep and its stop when nothing
-/// arrives, in milliseconds, and so the longest a read waits while the session holds a group: the
-/// tick of the tokio engine's group face, shorter than any beacon interval an ABI advertises.
+/// The tick of a group's lease sweep, in milliseconds, which its task is due on while it holds a
+/// member (and while its socket holds back a datagram), and the longest a read waits for a group
+/// whose stack gives no wait for its input: the tick of the tokio engine's group face, shorter
+/// than any beacon interval an ABI advertises.
 pub(super) const GROUP_TICK_MS: u32 = 50;
 
 /// What a group's dispatch hands what it staged to: the group's stage, which its task writes.
@@ -183,6 +185,10 @@ impl GroupTransport for Watched {
         self.inner.writability()
     }
 
+    fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
+        self.inner.readiness()
+    }
+
     fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
         let took = self.inner.recv_with(f);
         if took {
@@ -252,6 +258,11 @@ pub(super) struct GroupFace {
     /// The group socket's wait for room, asked from outside its task; `None` for a stack that
     /// gives none.
     room: Option<Arc<dyn LinkWritability>>,
+    /// The group socket's wait for input, which a read waits on beside the session's links;
+    /// `None` for a stack that gives none, whose group is looked at on its tick.
+    input: Option<Arc<dyn LinkReadiness>>,
+    /// When the group's session is next due with nothing arriving on it, as its last step said.
+    due: GroupDue,
     members: Rc<RefCell<Vec<MulticastMember>>>,
     took: Rc<Cell<bool>>,
     stop: Rc<Cell<bool>>,
@@ -313,6 +324,8 @@ impl GroupFace {
         // of the group's batch, one lane when it runs no QoS.
         let tx = GroupTxStage::new(&params);
         let room = transport.writability().map(Arc::from);
+        let input = transport.readiness().map(Arc::from);
+        let due = GroupDue::default();
         let members: Rc<RefCell<Vec<MulticastMember>>> = Rc::new(RefCell::new(Vec::new()));
         let took = Rc::new(Cell::new(false));
         let stop = Rc::new(Cell::new(false));
@@ -331,7 +344,8 @@ impl GroupFace {
             u64::from(GROUP_TICK_MS),
         )
         .with_join_ask(join_ask.clone())
-        .with_tx_stage(tx.clone());
+        .with_tx_stage(tx.clone())
+        .with_due(due.clone());
         let keyexprs = Rc::new(RefCell::new(GroupKeyexprAnswers::default()));
         let on_event = answering_asks(
             noting_members(
@@ -367,6 +381,8 @@ impl GroupFace {
             tx,
             pace,
             room,
+            input,
+            due,
             members,
             took,
             stop,
@@ -545,6 +561,35 @@ impl GroupFace {
     /// Whether the group's task took a datagram since this was last asked.
     pub(super) fn took_input(&self) -> bool {
         self.took.replace(false)
+    }
+
+    /// The wait for the group socket's next datagram, while the group's session runs and its stack
+    /// gives one.
+    pub(super) fn input(&self) -> Option<&Arc<dyn LinkReadiness>> {
+        if self.has_ended() {
+            return None;
+        }
+        self.input.as_ref()
+    }
+
+    /// Whether the group's session runs over a stack that gives no wait for its input, so that it
+    /// is looked at on its tick.
+    pub(super) fn unwaited(&self) -> bool {
+        !self.has_ended() && self.input.is_none()
+    }
+
+    /// When the group must next be looked at, on the session's clock in microseconds, with nothing
+    /// arriving on it: its session's next beacon or sweep, as its last step said, or at once when
+    /// it has not stepped yet, when it ended and its end is still to be read, or when the session
+    /// pushed onto its stage what its socket has room for, which only a step writes; once its end
+    /// was read, when it is joined again. `None`: nothing is due.
+    pub(super) fn due_us(&self) -> Option<u64> {
+        match &self.task {
+            Some(task) if task.is_finished() => Some(0),
+            Some(_) if !self.tx.is_empty() && !self.due.tx_held() => Some(0),
+            Some(_) => Some(self.due.due_us().unwrap_or(0)),
+            None => self.rejoin_at_us,
+        }
     }
 
     /// Ask the group's session to stop: at its next step it tells the group it leaves and lets
