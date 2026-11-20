@@ -115,8 +115,9 @@ mod query;
 mod group;
 #[cfg(feature = "group")]
 use {
-    group::{GroupFace, GroupJoining, GroupPut},
+    group::{GroupEntity, GroupFace, GroupJoining, GroupPut},
     wz_capi_port::group::GroupJoin,
+    wz_session_core::declare_form::GroupDeclaration,
 };
 
 mod registry;
@@ -1511,6 +1512,24 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         Ok(face)
     }
 
+    /// Tell each group the session joined of an entity it declared, as each group's declarations
+    /// say (`group`).
+    #[cfg(feature = "group")]
+    fn announce_to_groups(&self, entity: GroupEntity<'_>) {
+        for group in &self.groups {
+            group.announce(entity);
+        }
+    }
+
+    /// Tell each group the session joined that the entity `entity` it was told of is retracted
+    /// (`group`).
+    #[cfg(feature = "group")]
+    fn retract_from_groups(&self, entity: EntityId) {
+        for group in &self.groups {
+            group.retract(entity);
+        }
+    }
+
     /// Move each group on. A group whose session ended on its own (its link was lost) takes with
     /// it what its members declared and the gets asked of them, as a lost link does, and is
     /// joined again `redial_ms` later, and again after each attempt that fails, as zenoh-pico's
@@ -2885,6 +2904,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             wire,
         };
         core.announce(Kind::Subscriber, |actions| entry.declare(actions));
+        #[cfg(feature = "group")]
+        core.announce_to_groups(GroupEntity {
+            what: GroupDeclaration::Subscriber,
+            entity: id,
+            keyexpr: &entry.keyexpr,
+            wire: &entry.wire,
+            retraction: entry.retraction.as_ref(),
+            allowed_origin,
+        });
         core.subscribers.push(entry);
         // A matching listener that counts the session's own subscribers may now match: it is
         // told, outside the lock.
@@ -2927,6 +2955,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let at = core.subscribers.iter().position(|s| s.id == id)?;
             let links = core.retract(Kind::Subscriber, at);
             let entry = core.subscribers.remove(at);
+            #[cfg(feature = "group")]
+            core.retract_from_groups(id);
             core.registry
                 .borrow_mut()
                 .app
@@ -3340,6 +3370,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             complete,
         };
         core.announce(Kind::Queryable, |actions| entry.declare(actions));
+        #[cfg(feature = "group")]
+        core.announce_to_groups(GroupEntity {
+            what: GroupDeclaration::Queryable {
+                complete: entry.complete,
+            },
+            entity: id,
+            keyexpr: &entry.keyexpr,
+            wire: &entry.wire,
+            retraction: entry.retraction.as_ref(),
+            allowed_origin,
+        });
         core.queryables.push(entry);
         // A matching listener that counts the session's own queryables may now match: it is told,
         // outside the lock.
@@ -3683,6 +3724,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let at = core.queryables.iter().position(|q| q.id == id)?;
             let links = core.retract(Kind::Queryable, at);
             let entry = core.queryables.remove(at);
+            #[cfg(feature = "group")]
+            core.retract_from_groups(id);
             core.registry
                 .borrow_mut()
                 .app
@@ -3727,6 +3770,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             retraction,
         };
         core.announce(Kind::Token, |actions| entry.declare(actions));
+        // A token takes no traffic of its own, so every group that is told tokens is told it.
+        #[cfg(feature = "group")]
+        core.announce_to_groups(GroupEntity {
+            what: GroupDeclaration::Token,
+            entity: id,
+            keyexpr: &entry.keyexpr,
+            wire: &entry.wire,
+            retraction: entry.retraction.as_ref(),
+            allowed_origin: Locality::Any,
+        });
         core.tokens.push(entry);
         Some(id)
     }
@@ -3738,6 +3791,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let at = core.tokens.iter().position(|t| t.id == id)?;
             let links = core.retract(Kind::Token, at);
             let entry = core.tokens.remove(at);
+            #[cfg(feature = "group")]
+            core.retract_from_groups(id);
             core.registry
                 .borrow_mut()
                 .app

@@ -9,7 +9,12 @@
 
 use alloc::string::String;
 
+use wz_session_core::declare_form::{GroupDeclaration, GroupKey, RetractionKey};
+use wz_session_core::locality::Locality;
 use wz_session_core::multicast_params::MulticastParams;
+use wz_session_core::wire_id::EntityId;
+
+use crate::WireKey;
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::session_init_params::{LinkRxConf, TxQueueConf};
 use wz_session_core::session_zid::SessionZid;
@@ -102,6 +107,67 @@ impl GroupDeclarations {
     /// every reply it already has until then.
     pub fn asks_queries(self) -> bool {
         matches!(self, Self::Entities | Self::Mapped)
+    }
+
+    /// The id the group is told an entity of kind `what` and id `id` by, or `None` when it is
+    /// told nothing of it: zenoh announces its subscribers alone, each as id 0, and zenoh-pico
+    /// every subscriber, queryable and token by its entity id. An entity that takes its own
+    /// session's traffic alone (`allowed_origin` session-local) is told to no group: neither
+    /// upstream declares it to the network. The id is a declaration's, 64 bits wide.
+    pub fn announced_id(
+        self,
+        what: GroupDeclaration,
+        id: EntityId,
+        allowed_origin: Locality,
+    ) -> Option<u64> {
+        if allowed_origin == Locality::SessionLocal {
+            return None;
+        }
+        match (self, what) {
+            (Self::Subscribers, GroupDeclaration::Subscriber) => Some(0),
+            (Self::Entities | Self::Mapped, _) => Some(u64::from(id)),
+            _ => None,
+        }
+    }
+
+    /// Whether the group is told an entity it was told of is retracted: with [`Self::Entities`]
+    /// and [`Self::Mapped`]. zenoh retracts nothing on a group, its announcement being a
+    /// subscriber the group keeps.
+    pub fn retracts(self) -> bool {
+        matches!(self, Self::Entities | Self::Mapped)
+    }
+
+    /// How the group is told the key of an entity declared on `keyexpr` and named to the peers
+    /// as `wire`: by that declaration only when the group is told the session's keyexprs
+    /// ([`Self::declares_keyexprs`]), and by the literal otherwise, as zenoh-pico names a key on
+    /// a multicast transport at its default.
+    pub fn key<'a>(self, keyexpr: &'a str, wire: &'a WireKey) -> GroupKey<'a> {
+        if self.declares_keyexprs() && wire.mapping_id != 0 {
+            GroupKey {
+                mapping_id: wire.mapping_id,
+                suffix: wire.suffix.as_deref(),
+            }
+        } else {
+            GroupKey::literal(keyexpr)
+        }
+    }
+
+    /// The key a retraction names on the group: the entity's own key the declaring ABI retracts
+    /// by (`retraction`), when the group is told the session's keyexprs and the ABI names one,
+    /// and else the key it was announced on ([`Self::key`]).
+    pub fn retraction_key<'a>(
+        self,
+        keyexpr: &'a str,
+        wire: &'a WireKey,
+        retraction: Option<&'a RetractionKey>,
+    ) -> GroupKey<'a> {
+        match retraction {
+            Some(own) if self.declares_keyexprs() && own.mapping_id != 0 => GroupKey {
+                mapping_id: own.mapping_id,
+                suffix: Some(own.suffix.as_str()),
+            },
+            _ => self.key(keyexpr, wire),
+        }
     }
 }
 
@@ -197,6 +263,70 @@ mod tests {
             assert_eq!(told.declares_keyexprs(), keyexprs, "{told:?}");
             assert_eq!(told.asks_for_filters(), filters, "{told:?}");
         }
+    }
+
+    /// What a group is told of an entity, by every way a session tells it: the id (zenoh's 0 for
+    /// a subscriber alone, zenoh-pico's entity id for each kind, nothing for a session-local
+    /// entity), whether its retraction is told, and the key, a declaration only where the group is
+    /// told the session's keyexprs.
+    #[test]
+    fn what_a_group_is_told_of_an_entity_follows_how_it_is_told() {
+        use alloc::string::ToString;
+        let remote = Locality::Any;
+        let sub = GroupDeclaration::Subscriber;
+        let qbl = GroupDeclaration::Queryable { complete: true };
+        assert_eq!(GroupDeclarations::None.announced_id(sub, 7, remote), None);
+        assert_eq!(
+            GroupDeclarations::Subscribers.announced_id(sub, 7, remote),
+            Some(0)
+        );
+        assert_eq!(
+            GroupDeclarations::Subscribers.announced_id(qbl, 7, remote),
+            None
+        );
+        for told in [GroupDeclarations::Entities, GroupDeclarations::Mapped] {
+            assert_eq!(told.announced_id(qbl, 7, remote), Some(7), "{told:?}");
+            assert_eq!(
+                told.announced_id(GroupDeclaration::Token, 7, remote),
+                Some(7)
+            );
+            assert_eq!(
+                told.announced_id(sub, 7, Locality::SessionLocal),
+                None,
+                "a session-local entity is told to no group"
+            );
+            assert!(told.retracts());
+        }
+        assert!(!GroupDeclarations::Subscribers.retracts());
+        assert!(!GroupDeclarations::None.retracts());
+
+        let wire = WireKey::aliased(3, Some("rest".to_string()));
+        let own = RetractionKey {
+            mapping_id: 5,
+            suffix: "own".to_string(),
+        };
+        assert_eq!(
+            GroupDeclarations::Entities.key("demo/a", &wire),
+            GroupKey::literal("demo/a")
+        );
+        assert_eq!(
+            GroupDeclarations::Mapped.key("demo/a", &wire),
+            GroupKey {
+                mapping_id: 3,
+                suffix: Some("rest")
+            }
+        );
+        assert_eq!(
+            GroupDeclarations::Entities.retraction_key("demo/a", &wire, Some(&own)),
+            GroupKey::literal("demo/a")
+        );
+        assert_eq!(
+            GroupDeclarations::Mapped.retraction_key("demo/a", &wire, Some(&own)),
+            GroupKey {
+                mapping_id: 5,
+                suffix: Some("own")
+            }
+        );
     }
 
     /// The parameters a profile gives a group session carry every field of the profile and the

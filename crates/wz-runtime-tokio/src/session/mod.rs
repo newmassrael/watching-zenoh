@@ -774,47 +774,13 @@ impl GroupKeyexprs {
 }
 
 /// Open-debt item 913 — the kind of entity a group session announces or retracts
-/// ([`Session::announce`], [`Session::retract`]).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum GroupDeclaration {
-    /// A subscriber.
-    Subscriber,
-    /// A queryable, with whether it answers a query completely.
-    Queryable {
-        /// The queryable's completeness, which its declaration carries.
-        complete: bool,
-    },
-    /// A liveliness token.
-    Token,
-}
+/// ([`Session::announce`], [`Session::retract`]), and how it names a key on the group: the
+/// session core's, which every engine that joins groups names.
+pub use wz_session_core::declare_form::{GroupDeclaration, GroupKey};
 
 /// The declaration kinds an Interest asks for — what [`Session::ask`] takes.
 #[cfg(feature = "declare-interest")]
 pub use wz_session_core::interest_build::InterestKinds;
-
-/// Open-debt item 913 — how a group session names a key on the group: a keyexpr it declared to
-/// the group (`mapping_id`, never 0) followed by `suffix`, or the literal (`mapping_id` 0 and
-/// the whole key as `suffix`). zenoh-pico names a key by a declaration on its group only when
-/// its multicast declarations are on, and by the literal otherwise
-/// (`vendor/zenoh-pico/src/session/keyexpr.c` @ `#if Z_FEATURE_MULTICAST_DECLARATIONS == 0`).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct GroupKey<'a> {
-    /// The declaration the key starts with, `0` for none.
-    pub mapping_id: wz_session_core::wire_id::ExprId,
-    /// What follows the declaration; the whole key when `mapping_id` is 0, `None` when the
-    /// declaration covers the whole key.
-    pub suffix: Option<&'a str>,
-}
-
-impl<'a> GroupKey<'a> {
-    /// The literal `keyexpr`, no declaration.
-    pub const fn literal(keyexpr: &'a str) -> Self {
-        Self {
-            mapping_id: 0,
-            suffix: Some(keyexpr),
-        }
-    }
-}
 
 /// The Push a publish sends on the wire, as `wire` names its key: the Put or Del of `kind`, by the
 /// literal `keyexpr` (`wire.mapping_id` 0) or by the declaration and the rest of the key. The one
@@ -3610,56 +3576,15 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
     /// whatever it declared. `Err` for a key past the codec's bound, or a kind this build cannot
     /// declare.
     #[cfg(all(feature = "codec-push", feature = "codec-declare"))]
-    // A build with none of the three kinds has only the refusing arm, which reads neither the id
-    // nor the key (Layer C1y's `access-acl-multicast` build is one).
-    #[cfg_attr(
-        not(any(
-            feature = "declare-subscriber",
-            feature = "declare-queryable",
-            feature = "liveliness-token"
-        )),
-        allow(unused_variables)
-    )]
     pub fn announce(
         &self,
         what: GroupDeclaration,
         id: u64,
         key: GroupKey<'_>,
     ) -> Result<(), wz_session_core::send_wire_error::SendWireError> {
-        use wz_session_core::send_wire_error::SendWireError;
-        let GroupKey { mapping_id, suffix } = key;
-        // Typed, and the last arm a value rather than a `return`: a build with none of the
-        // three kinds has that arm alone, and must still know what the match makes.
-        let declare: Result<
-            wz_session_core::transport_profile::owned::DeclareOwned,
-            SendWireError,
-        > = match what {
-            #[cfg(feature = "declare-subscriber")]
-            GroupDeclaration::Subscriber => {
-                wz_session_core::declare_build::build_declare_subscriber(id, mapping_id, suffix)
-                    .map_err(SendWireError::Codec)
-            }
-            #[cfg(feature = "declare-queryable")]
-            GroupDeclaration::Queryable { complete } => {
-                wz_session_core::declare_build::build_declare_queryable(id, mapping_id, suffix)
-                    .and_then(|mut declare| {
-                        wz_session_core::declare_build::set_declare_queryable_info(
-                            &mut declare,
-                            wz_session_core::queryable_info::QueryableInfo::local(complete),
-                        )?;
-                        Ok(declare)
-                    })
-                    .map_err(SendWireError::Codec)
-            }
-            #[cfg(feature = "liveliness-token")]
-            GroupDeclaration::Token => {
-                wz_session_core::declare_build::build_declare_token(id, mapping_id, suffix)
-                    .map_err(SendWireError::Codec)
-            }
-            #[allow(unreachable_patterns)]
-            _ => Err(SendWireError::FeatureDisabled),
-        };
-        self.send_declare_to_group(declare?)
+        // The session core's builder, which the cooperative engine's groups announce by too.
+        let declare = wz_session_core::declare_build::build_group_announcement(what, id, key)?;
+        self.send_declare_to_group(declare)
     }
 
     /// Open-debt item 913 — retract the entity `what` the session announced: an `Undeclare` of
@@ -3667,53 +3592,15 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
     /// (`vendor/zenoh-pico/src/net/primitives.c` @
     /// `declaration = _z_make_undecl_subscriber(sub->_entity_id, &expr);`).
     #[cfg(all(feature = "codec-push", feature = "codec-declare"))]
-    // The same as `announce`: with none of the three kinds the id and the key go unread.
-    #[cfg_attr(
-        not(any(
-            feature = "declare-subscriber",
-            feature = "declare-queryable",
-            feature = "liveliness-token"
-        )),
-        allow(unused_variables)
-    )]
     pub fn retract(
         &self,
         what: GroupDeclaration,
         id: u64,
         key: GroupKey<'_>,
     ) -> Result<(), wz_session_core::send_wire_error::SendWireError> {
-        use wz_session_core::send_wire_error::SendWireError;
-        let (mapping_id, suffix) = (key.mapping_id, key.suffix.unwrap_or(""));
-        // Typed with a value for the last arm, for the reason `announce` states.
-        let declare: Result<
-            wz_session_core::transport_profile::owned::DeclareOwned,
-            SendWireError,
-        > = match what {
-            #[cfg(feature = "declare-subscriber")]
-            GroupDeclaration::Subscriber => {
-                wz_session_core::declare_build::build_undeclare_subscriber_on_wire(
-                    id, mapping_id, suffix,
-                )
-                .map_err(SendWireError::Codec)
-            }
-            #[cfg(feature = "declare-queryable")]
-            GroupDeclaration::Queryable { .. } => {
-                wz_session_core::declare_build::build_undeclare_queryable_on_wire(
-                    id, mapping_id, suffix,
-                )
-                .map_err(SendWireError::Codec)
-            }
-            #[cfg(feature = "liveliness-token")]
-            GroupDeclaration::Token => {
-                wz_session_core::declare_build::build_undeclare_token_on_wire(
-                    id, mapping_id, suffix,
-                )
-                .map_err(SendWireError::Codec)
-            }
-            #[allow(unreachable_patterns)]
-            _ => Err(SendWireError::FeatureDisabled),
-        };
-        self.send_declare_to_group(declare?)
+        // The session core's builder, which the cooperative engine's groups retract by too.
+        let declare = wz_session_core::declare_build::build_group_retraction(what, id, key)?;
+        self.send_declare_to_group(declare)
     }
 
     /// Open-debt item 913 — declare `keyexpr` to the group as `mapping_id`, as zenoh-pico

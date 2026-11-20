@@ -1118,6 +1118,93 @@ pub fn build_declare_final_reply(interest_id: u64) -> DeclareOwned {
     declare
 }
 
+/// Open-debt item 913 — the `Declare` a session announces the entity `what` by on a multicast
+/// group, with id `id`, naming `key`: a zenoh-pico peer declares each of its entities over the
+/// multicast transport it holds (`vendor/zenoh-pico/src/net/primitives.c` @
+/// `z_result_t _z_send_declare(`). One builder for every engine that joins groups.
+/// [`SendWireError::FeatureDisabled`](crate::send_wire_error::SendWireError::FeatureDisabled)
+/// for a kind this build has no declaration plane of.
+#[cfg_attr(
+    not(any(
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "liveliness-token"
+    )),
+    allow(unused_variables, unused_imports)
+)]
+pub fn build_group_announcement(
+    what: crate::declare_form::GroupDeclaration,
+    id: u64,
+    key: crate::declare_form::GroupKey<'_>,
+) -> Result<DeclareOwned, crate::send_wire_error::SendWireError> {
+    use crate::declare_form::GroupDeclaration;
+    use crate::send_wire_error::SendWireError;
+    let crate::declare_form::GroupKey { mapping_id, suffix } = key;
+    match what {
+        #[cfg(feature = "declare-subscriber")]
+        GroupDeclaration::Subscriber => {
+            build_declare_subscriber(id, mapping_id, suffix).map_err(SendWireError::Codec)
+        }
+        #[cfg(feature = "declare-queryable")]
+        GroupDeclaration::Queryable { complete } => build_declare_queryable(id, mapping_id, suffix)
+            .and_then(|mut declare| {
+                set_declare_queryable_info(
+                    &mut declare,
+                    crate::queryable_info::QueryableInfo::local(complete),
+                )?;
+                Ok(declare)
+            })
+            .map_err(SendWireError::Codec),
+        #[cfg(feature = "liveliness-token")]
+        GroupDeclaration::Token => {
+            build_declare_token(id, mapping_id, suffix).map_err(SendWireError::Codec)
+        }
+        #[allow(unreachable_patterns)]
+        _ => Err(SendWireError::FeatureDisabled),
+    }
+}
+
+/// Open-debt item 913 — the `Undeclare` a session retracts the entity `what` it announced on a
+/// group by: id `id`, naming `key`, as a zenoh-pico peer retracts one
+/// (`vendor/zenoh-pico/src/net/primitives.c` @
+/// `declaration = _z_make_undecl_subscriber(sub->_entity_id, &expr);`). One builder for every
+/// engine that joins groups;
+/// [`SendWireError::FeatureDisabled`](crate::send_wire_error::SendWireError::FeatureDisabled)
+/// for a kind this build has no declaration plane of.
+#[cfg_attr(
+    not(any(
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "liveliness-token"
+    )),
+    allow(unused_variables, unused_imports)
+)]
+pub fn build_group_retraction(
+    what: crate::declare_form::GroupDeclaration,
+    id: u64,
+    key: crate::declare_form::GroupKey<'_>,
+) -> Result<DeclareOwned, crate::send_wire_error::SendWireError> {
+    use crate::declare_form::GroupDeclaration;
+    use crate::send_wire_error::SendWireError;
+    let (mapping_id, suffix) = (key.mapping_id, key.suffix.unwrap_or(""));
+    match what {
+        #[cfg(feature = "declare-subscriber")]
+        GroupDeclaration::Subscriber => {
+            build_undeclare_subscriber_on_wire(id, mapping_id, suffix).map_err(SendWireError::Codec)
+        }
+        #[cfg(feature = "declare-queryable")]
+        GroupDeclaration::Queryable { .. } => {
+            build_undeclare_queryable_on_wire(id, mapping_id, suffix).map_err(SendWireError::Codec)
+        }
+        #[cfg(feature = "liveliness-token")]
+        GroupDeclaration::Token => {
+            build_undeclare_token_on_wire(id, mapping_id, suffix).map_err(SendWireError::Codec)
+        }
+        #[allow(unreachable_patterns)]
+        _ => Err(SendWireError::FeatureDisabled),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

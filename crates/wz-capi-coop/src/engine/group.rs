@@ -22,10 +22,13 @@ use core::cell::{Cell, RefCell};
 use core::net::SocketAddr;
 
 use wz_capi_port::group::{GroupDeclarations, GroupJoin};
-use wz_capi_port::FanoutError;
+use wz_capi_port::{FanoutError, WireKey};
 use wz_runtime_coop::group_transport::GroupTransport;
 use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet};
+use wz_session_core::declare_build::{build_group_announcement, build_group_retraction};
+use wz_session_core::declare_form::{GroupDeclaration, GroupKey, RetractionKey};
 use wz_session_core::driver_loop::IterationEvent;
+use wz_session_core::locality::Locality;
 use wz_session_core::metadata::PushMetadata;
 use wz_session_core::multicast_dispatch::MulticastConfig;
 use wz_session_core::multicast_dispatch::MulticastMember;
@@ -36,6 +39,7 @@ use wz_session_core::policy::SessionPolicy;
 use wz_session_core::push_build;
 use wz_session_core::qos::Priority;
 use wz_session_core::sample::SampleKind;
+use wz_session_core::wire_id::{EntityId, ExprId};
 use wz_session_mcu::group_drive::{
     spawn_multicast_session_seeded, MulticastReplyQueue, MulticastSessionSeed,
 };
@@ -194,6 +198,8 @@ pub(super) struct GroupFace {
     members: Rc<RefCell<Vec<MulticastMember>>>,
     took: Rc<Cell<bool>>,
     stop: Rc<Cell<bool>>,
+    /// The entities this join of the group was told of, which their retractions are told by.
+    announced: RefCell<Vec<Announced>>,
     /// What the session's watchers of its faces are told of the members (`connectivity`).
     #[cfg(feature = "connectivity")]
     events: Rc<MemberEvents>,
@@ -283,6 +289,7 @@ impl GroupFace {
             members,
             took,
             stop,
+            announced: RefCell::new(Vec::new()),
             #[cfg(feature = "connectivity")]
             events,
         }
@@ -434,6 +441,66 @@ impl GroupFace {
             .collect()
     }
 
+    /// Tell the group of `entity`, which the session declared, as the group's declarations say
+    /// (the port's rules: `GroupDeclarations::announced_id`, `key`, `retraction_key`, the tokio
+    /// engine's groups' too), the `Declare` built by the session core's builder
+    /// (`build_group_announcement`) and queued for the group's task. What a later retraction
+    /// names is kept when the group is told retractions. Best effort, as a put on the group is:
+    /// a key past the codec's bound is announced nowhere, and a group whose session ended is told
+    /// nothing.
+    pub(super) fn announce(&self, entity: GroupEntity<'_>) {
+        if self.has_ended() {
+            return;
+        }
+        let told = self.join.declarations;
+        let Some(id) = told.announced_id(entity.what, entity.entity, entity.allowed_origin) else {
+            return;
+        };
+        if let Ok(declare) =
+            build_group_announcement(entity.what, id, told.key(entity.keyexpr, entity.wire))
+        {
+            self.tx.enqueue(MulticastTxItem::Declare {
+                declare: alloc::boxed::Box::new(declare),
+            });
+        }
+        if told.retracts() {
+            let key = told.retraction_key(entity.keyexpr, entity.wire, entity.retraction);
+            self.announced.borrow_mut().push(Announced {
+                entity: entity.entity,
+                what: entity.what,
+                id,
+                mapping_id: key.mapping_id,
+                suffix: key.suffix.map(String::from),
+            });
+        }
+    }
+
+    /// Tell the group that the entity `entity` it was told of is retracted
+    /// (`build_group_retraction`); an entity it was not told of, or a group that is told no
+    /// retraction, is told nothing.
+    pub(super) fn retract(&self, entity: EntityId) {
+        let announced = {
+            let mut announced = self.announced.borrow_mut();
+            let at = announced.iter().position(|told| told.entity == entity);
+            at.map(|at| announced.remove(at))
+        };
+        let Some(announced) = announced else {
+            return;
+        };
+        if self.has_ended() {
+            return;
+        }
+        let key = GroupKey {
+            mapping_id: announced.mapping_id,
+            suffix: announced.suffix.as_deref(),
+        };
+        if let Ok(declare) = build_group_retraction(announced.what, announced.id, key) {
+            self.tx.enqueue(MulticastTxItem::Declare {
+                declare: alloc::boxed::Box::new(declare),
+            });
+        }
+    }
+
     /// Put a publication on the group, naming its key in full: the group is told no keyexpr the
     /// session declares unless its declarations say so (`GroupDeclarations::declares_keyexprs`),
     /// which a group whose session tells it its entities, or less, does not. Built by the session
@@ -500,6 +567,29 @@ where
         }
         dispatch(event, &replies);
     }
+}
+
+/// One entity the session declared, as a group is told of it: its kind, its entity id, the key
+/// it is declared on and how that key is named to the peers, the key its retraction names, and
+/// the traffic it takes.
+#[derive(Clone, Copy)]
+pub(super) struct GroupEntity<'a> {
+    pub(super) what: GroupDeclaration,
+    pub(super) entity: EntityId,
+    pub(super) keyexpr: &'a str,
+    pub(super) wire: &'a WireKey,
+    pub(super) retraction: Option<&'a RetractionKey>,
+    pub(super) allowed_origin: Locality,
+}
+
+/// An entity the group was told of, and what its retraction is told by: the id it was announced
+/// under and the key its retraction names.
+struct Announced {
+    entity: EntityId,
+    what: GroupDeclaration,
+    id: u64,
+    mapping_id: ExprId,
+    suffix: Option<String>,
 }
 
 /// One publication the session puts on its groups.

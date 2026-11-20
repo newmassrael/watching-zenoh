@@ -76,7 +76,7 @@ use super::{
     WireKey,
 };
 use crate::drive::GroupDeclarations;
-use wz_runtime_tokio::session::{GroupDeclaration, GroupKey, InterestKinds, RetractionKey};
+use wz_runtime_tokio::session::{GroupDeclaration, InterestKinds, RetractionKey};
 use wz_session_core::face::GroupMemberLink;
 use wz_session_core::wire_id::EntityId;
 
@@ -246,65 +246,6 @@ impl Inner {
     }
 }
 
-/// How a group is told the key of an entity declared on `keyexpr` and named to the peers as
-/// `wire`: by that declaration only when the group is told the session's keyexprs
-/// ([`GroupDeclarations::Mapped`]), and by the literal otherwise, as zenoh-pico names a key on
-/// a multicast transport at its default.
-fn group_key<'a>(
-    declarations: GroupDeclarations,
-    keyexpr: &'a str,
-    wire: &'a WireKey,
-) -> GroupKey<'a> {
-    if declarations.declares_keyexprs() && wire.mapping_id != 0 {
-        GroupKey {
-            mapping_id: wire.mapping_id,
-            suffix: wire.suffix.as_deref(),
-        }
-    } else {
-        GroupKey::literal(keyexpr)
-    }
-}
-
-/// The key a retraction names on a group: the entity's own key the declaring ABI retracts by
-/// (`retraction`), when the group is told the session's keyexprs and the ABI names one, and
-/// else the key it was announced on ([`group_key`]).
-fn retraction_key<'a>(
-    declarations: GroupDeclarations,
-    keyexpr: &'a str,
-    wire: &'a WireKey,
-    retraction: Option<&'a RetractionKey>,
-) -> GroupKey<'a> {
-    match retraction {
-        Some(own) if declarations.declares_keyexprs() && own.mapping_id != 0 => GroupKey {
-            mapping_id: own.mapping_id,
-            suffix: Some(own.suffix.as_str()),
-        },
-        _ => group_key(declarations, keyexpr, wire),
-    }
-}
-
-/// The id a group is told an entity by under `declarations`, or `None` when the group is told
-/// nothing of `what`: zenoh announces its subscribers alone, each as id 0, and zenoh-pico every
-/// subscriber, queryable and token by its entity id. An entity that takes its own session's
-/// traffic alone is told to no group: neither upstream declares it to the network.
-///
-/// The id is answered as the group's session takes a declaration's, which is 64 bits wide.
-fn announced_id(
-    declarations: GroupDeclarations,
-    what: GroupDeclaration,
-    id: EntityId,
-    allowed_origin: wz_runtime_tokio::locality::Locality,
-) -> Option<u64> {
-    if allowed_origin == wz_runtime_tokio::locality::Locality::SessionLocal {
-        return None;
-    }
-    match (declarations, what) {
-        (GroupDeclarations::Subscribers, GroupDeclaration::Subscriber) => Some(0),
-        (GroupDeclarations::Entities | GroupDeclarations::Mapped, _) => Some(u64::from(id)),
-        _ => None,
-    }
-}
-
 /// An entity as a group is told of it: its kind, its id, the key it is declared on and how
 /// that key is named to the peers, the key its retraction names, and the traffic it takes.
 struct Told<'a> {
@@ -316,12 +257,13 @@ struct Told<'a> {
     allowed_origin: wz_runtime_tokio::locality::Locality,
 }
 
-/// Tell the group `session` reaches of `entity` as `declarations` says. Best effort, as the
-/// group's put is: a key past the codec's bound is announced nowhere, and the entity still
-/// serves the group.
+/// Tell the group `session` reaches of `entity` as `declarations` says, by the port's rules
+/// (`GroupDeclarations::announced_id`, `key`), which the cooperative engine's groups follow too.
+/// Best effort, as the group's put is: a key past the codec's bound is announced nowhere, and the
+/// entity still serves the group.
 fn announce_on(session: &TokioMulticastSession, declarations: GroupDeclarations, entity: &Told) {
     if let Some(announced) =
-        announced_id(declarations, entity.what, entity.id, entity.allowed_origin)
+        declarations.announced_id(entity.what, entity.id, entity.allowed_origin)
     {
         // The token is held before it is announced, so that a member that asks right after it
         // hears the announcement finds it held.
@@ -329,28 +271,25 @@ fn announce_on(session: &TokioMulticastSession, declarations: GroupDeclarations,
         if entity.what == GroupDeclaration::Token {
             session.hold_token(announced, entity.keyexpr);
         }
-        let key = group_key(declarations, entity.keyexpr, entity.wire);
+        let key = declarations.key(entity.keyexpr, entity.wire);
         let _ = session.announce(entity.what, announced, key);
     }
 }
 
 /// Retract from the group the entity [`announce_on`] told it of. zenoh retracts nothing on a
-/// group: its announcement is a subscriber the group keeps.
+/// group: its announcement is a subscriber the group keeps (`GroupDeclarations::retracts`).
 fn retract_on(session: &TokioMulticastSession, declarations: GroupDeclarations, entity: &Told) {
-    if !matches!(
-        declarations,
-        GroupDeclarations::Entities | GroupDeclarations::Mapped
-    ) {
+    if !declarations.retracts() {
         return;
     }
     if let Some(announced) =
-        announced_id(declarations, entity.what, entity.id, entity.allowed_origin)
+        declarations.announced_id(entity.what, entity.id, entity.allowed_origin)
     {
         #[cfg(feature = "liveliness")]
         if entity.what == GroupDeclaration::Token {
             session.release_token(announced);
         }
-        let key = retraction_key(declarations, entity.keyexpr, entity.wire, entity.retraction);
+        let key = declarations.retraction_key(entity.keyexpr, entity.wire, entity.retraction);
         let _ = session.retract(entity.what, announced, key);
     }
 }
@@ -444,7 +383,7 @@ fn listen_on(
             InterestKinds::TOKENS,
             history,
             /*future=*/ true,
-            Some(group_key(declarations, keyexpr, wire)),
+            Some(declarations.key(keyexpr, wire)),
         );
     }
     subscriber
@@ -956,7 +895,7 @@ impl SharedSession {
                     kinds,
                     /*current=*/ true,
                     /*future=*/ false,
-                    Some(group_key(face.declarations, keyexpr, wire)),
+                    Some(face.declarations.key(keyexpr, wire)),
                 );
                 face.filters.insert(filter, interest_id);
             }

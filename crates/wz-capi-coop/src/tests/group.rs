@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use wz_capi_port::group::{GroupDeclarations, GroupJoin, GroupProfile};
-use wz_capi_port::{SessionDrive, SessionEngine, WireKey};
+use wz_capi_port::{FilterPlane, SessionDrive, SessionEngine, WireKey};
 use wz_runtime_posix::{PosixClock, PosixEntropy};
 use wz_session_core::app_link_table::{
     AppLinkKind, AppLinkTable, LinkHandle, ProgramEvent, ProgramOpen, ProgramSend,
@@ -331,6 +331,52 @@ fn a_member_whose_group_link_is_lost_joins_the_group_again() {
             .any(|payload| payload == b"after-the-loss")
     });
     assert_eq!(network.joins_of(2), 2, "joined again once, and only once");
+    SessionDrive::close(&*second);
+    SessionDrive::close(&*first);
+}
+
+/// A subscriber a member declares is announced on the group, as zenoh-pico declares its entities
+/// over a multicast transport (`GroupDeclarations::Entities`), and retracted from it when it is
+/// undeclared: the other member's write filter, which counts what its peers declare, opens on the
+/// announcement and shuts on the retraction. The CONTROL is the filter before any declaration.
+#[test]
+fn a_members_subscriber_is_announced_on_the_group_and_retracted_from_it() {
+    let network = Arc::new(Network::default());
+    let first = open_member(&network, 1, member_config(1, GROUP)).expect("the first joins");
+    let second = open_member(&network, 2, member_config(2, GROUP)).expect("the second joins");
+    SessionDrive::start_read_task(&*first).expect("the first's read task starts");
+    SessionDrive::start_read_task(&*second).expect("the second's read task starts");
+    until_members_know_each_other(&first, &second);
+
+    let filter = first
+        .declare_write_filter(
+            FilterPlane::Subscribers,
+            "demo/group/x".to_owned(),
+            &WireKey::literal(),
+            None,
+            false,
+        )
+        .expect("a session with ids left declares");
+    assert!(
+        first.write_filter_active(filter),
+        "CONTROL: no member holds a subscriber yet"
+    );
+    let subscriber = second
+        .declare_subscriber_on_wire(
+            "demo/group/**".to_owned(),
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            Arc::new(|| Box::new(|_: &dyn SampleView| {})),
+        )
+        .expect("a session with ids left declares");
+    eventually("the announcement to open the first's filter", || {
+        !first.write_filter_active(filter)
+    });
+    second.undeclare_subscriber(subscriber);
+    eventually("the retraction to shut the first's filter", || {
+        first.write_filter_active(filter)
+    });
     SessionDrive::close(&*second);
     SessionDrive::close(&*first);
 }
