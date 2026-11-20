@@ -294,7 +294,10 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
 # Its own crate so a node builds and judges frames without linking this one. At
 # its defaults (`alloc`), which this crate's documents and planes all read, and
 # with its `.proto` schema reader and typed payload reader (`proto`), re-exported
-# at `crate::proto_schema` and `crate::proto_decode`.
+# at `crate::proto_schema` and `crate::proto_decode`, the nanopb options and
+# integer ranges re-exported at `crate::proto_nanopb` and `crate::proto_range`,
+# and the one protobuf wire writer the value writer (`crate::proto_encode`)
+# writes through.
 wz-app-frame = { path = "../wz-app-frame", features = ["proto"] }
 
 # `filter-regex`'s engine, and only it: see that feature. `alloc` without `std`,
@@ -330,9 +333,11 @@ path = "../wz-session-wire-fixtures"
 # profile lived here; across the crate boundary it is `wz-app-frame`'s
 # `fixtures` feature, which the tests here use with their own `fixtures`
 # feature on or off. It is a dev-dependency: a consumer's build is charged nothing.
+# `message-payload` is a program's payload set field by field, which a test
+# holds to the value writer here byte for byte: the two write through one writer.
 [dev-dependencies.wz-app-frame]
 path = "../wz-app-frame"
-features = ["fixtures"]
+features = ["fixtures", "message-payload"]
 
 # R2107 (open-debt item 527) — `wire_const::T_MID_KEEP_ALIVE`, so the decode
 # bench's payload is REAL zenoh session traffic rather than filler. Its first

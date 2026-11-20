@@ -1135,3 +1135,81 @@ fn what_is_written_is_read_back_under_the_names_the_schema_declares() {
         .collect();
     assert_eq!(got, want);
 }
+
+// ---- one writer -------------------------------------------------------------
+
+/// The values a program sets field by field (`wz_app_frame::message_payload`,
+/// narrowed as this writer narrows) and the same values given as JSON here come
+/// out as the same bytes, because both are written by `wz_app_frame::proto_write`;
+/// and both are the bytes the encoding rules give, laid out by hand below.
+#[test]
+fn the_json_writer_and_a_programs_payload_write_one_message_alike() {
+    use wz_app_frame::message_payload::{Given, Payload};
+    use wz_app_frame::proto_decode::SchemaSet;
+    use wz_app_frame::proto_write::Narrowing;
+
+    let schema = format!(
+        "{P3}package syn.same;\n\
+         message Inner {{ sint32 x = 1; }}\n\
+         message M {{\n\
+           uint32 small = 1 [(nanopb).int_size = IS_8];\n\
+           int32 offset = 2;\n\
+           repeated sint64 steps = 3;\n\
+           string label = 4;\n\
+           optional uint32 zero = 5;\n\
+           Inner at = 6;\n\
+           double weight = 7;\n\
+           repeated string words = 8;\n\
+         }}\n"
+    );
+    let values = r#"{"small":200,"offset":-3,"steps":[1,-2],"label":"hi","zero":0,
+                     "at":{"x":-1},"weight":-0.0,"words":["a",""]}"#;
+    let from_json = run("syn.same.M", &schema, values).expect("the values encode");
+    assert_eq!(
+        hex(&from_json),
+        concat!(
+            "08c801",                 // small: 200
+            "10fdffffffffffffffff01", // offset: -3, ten bytes
+            "1a020203",               // steps: packed, zigzagged
+            "22026869",               // label
+            "2800",                   // zero: present, so written at 0
+            "32020801",               // at.x: -1, zigzagged
+            "390000000000000080",     // weight: -0.0 is not the default
+            "420161",                 // words[0]
+            "4200",                   // words[1]: an element, written empty
+        )
+    );
+
+    let pairs = [("a.proto", schema.as_str())];
+    let list = files(&pairs);
+    let set = SchemaSet::read(&list).expect("the schema reads");
+    let found = set
+        .message("syn.same.M")
+        .expect("the message is in the schema");
+    let mut payload = Payload::narrowed(&set, found, Narrowing::NanopbIntSize);
+    for (path, value) in [
+        ("small", Given::Unsigned(200)),
+        ("offset", Given::Signed(-3)),
+        ("steps[0]", Given::Signed(1)),
+        ("steps[1]", Given::Signed(-2)),
+        ("label", Given::Text("hi")),
+        ("zero", Given::Unsigned(0)),
+        ("at.x", Given::Signed(-1)),
+        ("weight", Given::Real(-0.0)),
+        ("words[0]", Given::Text("a")),
+        ("words[1]", Given::Text("")),
+    ] {
+        payload
+            .set(path, value)
+            .unwrap_or_else(|why| panic!("{path}: {why}"));
+    }
+    let from_payload = payload.encode().expect("the payload encodes");
+    assert_eq!(hex(&from_payload), hex(&from_json));
+
+    // Both hold `small` to the C integer nanopb stores it in.
+    assert!(matches!(
+        run("syn.same.M", &schema, r#"{"small":256}"#),
+        Err(EncodeError::Value(_))
+    ));
+    assert!(payload.set("small", Given::Unsigned(256)).is_err());
+}
