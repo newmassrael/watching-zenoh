@@ -552,6 +552,11 @@ where
     }
 }
 
+/// The listener [`TlsDial::listen_counted`] hands out: a secure listener over the dial's own
+/// listener, kept boxed as the trait's `listen` keeps it, and typed so its counts can be read.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+pub type CountedTlsListener<S, A> = TlsListener<alloc::boxed::Box<dyn StreamListen<Stream = S>>, A>;
+
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 impl<D: StreamDial, A: AcceptTimer + 'static> TlsDial<D, A>
 where
@@ -563,10 +568,7 @@ where
     pub fn listen_counted(
         &self,
         at: SocketAddr,
-    ) -> Result<
-        TlsListener<alloc::boxed::Box<dyn StreamListen<Stream = D::Stream>>, A>,
-        LinkOpenError,
-    > {
+    ) -> Result<CountedTlsListener<D::Stream, A>, LinkOpenError> {
         // Checked before the port is bound, so a dial that cannot accept does not take the port.
         if self.accept.is_none() {
             return Err(LinkOpenError::Unsupported);
