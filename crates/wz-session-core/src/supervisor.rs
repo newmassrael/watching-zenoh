@@ -54,6 +54,24 @@ pub use crate::wrapping_ticks::{elapsed, MAX_TIMEOUT_TICKS};
 /// it again on the feed.
 pub use crate::policy::SupervisionAfterExpiry as AfterExpiry;
 
+/// The most checkpoints one supervisor watches: a [`Check`] reports the expiries of one pass in one
+/// 64-bit word, a bit per checkpoint.
+pub const MAX_CHECKPOINTS: usize = 64;
+
+/// Stops the compilation of a supervisor of `checkpoints` checkpoints unless it has one to
+/// [`MAX_CHECKPOINTS`]. [`Supervisor::new`] evaluates it in a `const` block, so the count is judged
+/// for each `N` a program names, when the program is compiled, and never at run time.
+const fn assert_checkpoint_count(checkpoints: usize) {
+    assert!(
+        checkpoints >= 1,
+        "a supervisor of no checkpoint is never healthy, so it would never feed a watchdog"
+    );
+    assert!(
+        checkpoints <= MAX_CHECKPOINTS,
+        "the expiry set of a check is one 64-bit word"
+    );
+}
+
 /// The supervisor a build has: `SUPERVISION_CHECKPOINTS` checkpoints.
 pub type BuildSupervisor = Supervisor<{ crate::caps::SUPERVISION_CHECKPOINTS }>;
 
@@ -95,7 +113,7 @@ pub struct Check {
 impl Check {
     /// Whether checkpoint `index` expired and its hook is to run.
     pub const fn hook(self, index: usize) -> bool {
-        index < 64 && self.expired & (1 << index) != 0
+        index < MAX_CHECKPOINTS && self.expired & (1 << index) != 0
     }
 
     /// Whether no checkpoint expired.
@@ -173,9 +191,10 @@ pub struct Supervisor<const N: usize> {
 }
 
 impl<const N: usize> Supervisor<N> {
-    /// `N` checkpoints, none supervised, and what an expired one does on the next feed.
+    /// `N` checkpoints, none supervised, and what an expired one does on the next feed. A program
+    /// that names an `N` of 0 or past [`MAX_CHECKPOINTS`] does not compile.
     pub fn new(after_expiry: AfterExpiry) -> Self {
-        assert!(N <= 64, "the expiry set of a check is one 64-bit word");
+        const { assert_checkpoint_count(N) };
         Self {
             checkpoints: core::array::from_fn(|_| Checkpoint::new()),
             after_expiry,
@@ -322,6 +341,39 @@ mod tests {
                 rule.id()
             );
         }
+    }
+
+    /// The ends of the count a supervisor compiles with: one checkpoint, and as many as a check
+    /// reports, the last of which reports its expiry in the last bit of the word.
+    #[test]
+    fn a_supervisor_of_one_checkpoint_and_one_of_the_most_are_built() {
+        const { assert_checkpoint_count(1) };
+        const { assert_checkpoint_count(MAX_CHECKPOINTS) };
+        let mut one = Supervisor::<1>::new(AfterExpiry::Latch);
+        one.start(0, 0, 5).unwrap();
+        assert!(one.is_healthy());
+
+        let last = MAX_CHECKPOINTS - 1;
+        let mut most = Supervisor::<MAX_CHECKPOINTS>::new(AfterExpiry::Latch);
+        most.start(last, 0, 5).unwrap();
+        let check = most.check(5);
+        assert!(check.hook(last) && !check.hook(0));
+        assert_eq!(most.state(MAX_CHECKPOINTS), None);
+    }
+
+    /// The count `Supervisor::new` judges when it is compiled, judged here at run time to show
+    /// which counts it refuses: none, which is never healthy.
+    #[test]
+    #[should_panic(expected = "never healthy")]
+    fn a_supervisor_of_no_checkpoint_is_refused() {
+        assert_checkpoint_count(core::hint::black_box(0));
+    }
+
+    /// And more than the one word of a check holds.
+    #[test]
+    #[should_panic(expected = "one 64-bit word")]
+    fn a_supervisor_of_more_checkpoints_than_a_check_reports_is_refused() {
+        assert_checkpoint_count(core::hint::black_box(MAX_CHECKPOINTS + 1));
     }
 
     #[test]

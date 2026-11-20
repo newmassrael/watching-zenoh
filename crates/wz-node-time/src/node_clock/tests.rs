@@ -160,16 +160,23 @@ fn own_standing() -> StandingHome {
     StandingHome::Own(Box::default())
 }
 
+/// The bound a node runs with when the environment states none: the build's.
+#[cfg(feature = "time-hlc")]
+fn build_bound() -> wz_session_core::ntp64::Ntp64 {
+    max_delta_from(Err(std::env::VarError::NotPresent)).expect("the build's own bound is honoured")
+}
+
 /// A stamping node whose physical clock is frozen.
 #[cfg(feature = "time-hlc")]
 fn frozen_node(zid: &[u8]) -> NodeHlc {
-    let clock = build_clock(zid, FrozenEpoch, own_standing());
+    let clock = build_clock(zid, FrozenEpoch, own_standing(), build_bound());
     NodeHlc {
         #[cfg(feature = "pubsub-ts-stack")]
         interception_clock: Some(clock.clone()),
         clock: Some(clock),
         drop_future_timestamp: false,
         trusted_only: false,
+        clock_refused: None,
     }
 }
 
@@ -401,13 +408,14 @@ fn a_node_with_no_clock_has_no_standing_to_report() {
 #[cfg(feature = "time-hlc")]
 #[test]
 fn a_node_whose_source_cannot_say_the_time_stamps_nothing() {
-    let clock = build_clock(&[0x01], UnsetEpoch, own_standing());
+    let clock = build_clock(&[0x01], UnsetEpoch, own_standing(), build_bound());
     let node = NodeHlc {
         #[cfg(feature = "pubsub-ts-stack")]
         interception_clock: Some(clock.clone()),
         clock: Some(clock),
         drop_future_timestamp: false,
         trusted_only: false,
+        clock_refused: None,
     };
     #[cfg(feature = "pubsub-ts-stack")]
     assert!(
@@ -421,16 +429,127 @@ fn a_node_whose_source_cannot_say_the_time_stamps_nothing() {
     assert!(node.stamp().is_none());
 }
 
+/// Absent, the bound is the build's; stated, it is the number stated when the build allows it for
+/// `CLOCK_MAX_FORWARD_STEP_MS`, and otherwise refused by that limit's own reason.
 #[cfg(feature = "time-hlc")]
 #[test]
-fn the_bound_is_zenohs_unless_the_variable_says_a_whole_number_of_milliseconds() {
+fn the_bound_is_the_builds_unless_the_variable_states_one_the_build_allows() {
+    use wz_session_core::limit_binding::{LimitSpec, LimitValue};
+    use wz_session_core::limits::ClockMaxForwardStepMs;
     use wz_session_core::ntp64::Ntp64;
     let ms = |n: u64| Ntp64::from_duration(core::time::Duration::from_millis(n));
-    assert_eq!(max_delta_from(None), ms(DEFAULT_MAX_DELTA_MS));
-    assert_eq!(max_delta_from(Some("20")), ms(20));
-    assert_eq!(max_delta_from(Some(" 3000 ")), ms(3000));
-    assert_eq!(max_delta_from(Some("soon")), ms(DEFAULT_MAX_DELTA_MS));
-    assert_eq!(max_delta_from(Some("-5")), ms(DEFAULT_MAX_DELTA_MS));
+    let stated = |text: &str| max_delta_from(Ok(String::from(text)));
+    assert_eq!(
+        max_delta_from(Err(std::env::VarError::NotPresent)),
+        Ok(ms(DEFAULT_MAX_DELTA_MS))
+    );
+    assert_eq!(
+        stated(&DEFAULT_MAX_DELTA_MS.to_string()),
+        Ok(ms(DEFAULT_MAX_DELTA_MS)),
+        "the build's own value is allowed by every build"
+    );
+    let allows = |n: usize| ClockMaxForwardStepMs::DOMAIN.contains(LimitValue::Integer(n));
+    for n in [0usize, 20, 3000, u32::MAX as usize] {
+        match stated(&n.to_string()) {
+            Ok(bound) => {
+                assert!(allows(n), "{n} is taken although the build refuses it");
+                assert_eq!(bound, ms(n as u64));
+            }
+            Err(MaxDeltaRefused::OutsideDomain(outside)) => {
+                assert!(!allows(n), "{n} is refused although the build allows it");
+                assert_eq!(outside.limit, "CLOCK_MAX_FORWARD_STEP_MS");
+            }
+            Err(other) => panic!("{n} is refused as {other:?}"),
+        }
+    }
+    assert!(
+        matches!(
+            stated("4294967296"),
+            Err(MaxDeltaRefused::OutsideDomain(_) | MaxDeltaRefused::TooLarge { .. })
+        ),
+        "past the limit's domain on every build"
+    );
+}
+
+/// A stated value that is not a whole number of milliseconds is refused by name, never replaced
+/// by the build's: the values `uhlc`'s `s.parse()` into a `u64` panics on, including one with
+/// spaces around it, and one that is not Unicode.
+#[cfg(feature = "time-hlc")]
+#[test]
+fn a_bound_that_is_not_a_whole_number_of_milliseconds_is_refused_and_not_defaulted() {
+    for text in ["soon", "-5", " 3000 ", "", "1.5", "18446744073709551616"] {
+        assert_eq!(
+            max_delta_from(Ok(String::from(text))),
+            Err(MaxDeltaRefused::NotMilliseconds {
+                stated: String::from(text)
+            }),
+            "`{text}`"
+        );
+    }
+    let not_unicode = max_delta_from(Err(std::env::VarError::NotUnicode(
+        std::ffi::OsString::from("x"),
+    )));
+    assert_eq!(not_unicode, Err(MaxDeltaRefused::NotUnicode));
+    let refusal = max_delta_from(Ok(String::from("soon"))).unwrap_err();
+    assert!(
+        refusal.to_string().contains("UHLC_MAX_DELTA_MS") && refusal.to_string().contains("soon"),
+        "the refusal names the variable and the value: {refusal}"
+    );
+}
+
+/// A node whose stated bound is refused is built without the clock it was to have, and says why;
+/// a node that builds no clock is not refused for a bound it would not use.
+#[cfg(feature = "time-hlc")]
+#[test]
+fn a_node_whose_stated_bound_is_refused_holds_no_clock_and_says_why() {
+    let refused = max_delta_from(Ok(String::from("soon"))).unwrap_err();
+    let stamping = SessionPolicy::defaults().clock_quality_stamping();
+    let node = |whatami: WhatAmI, bound| {
+        NodeHlc::over_source_bounded(
+            &[0x01],
+            whatami,
+            TimestampingEnabled::default(),
+            FrozenEpoch,
+            own_standing(),
+            stamping,
+            bound,
+        )
+    };
+
+    let router = node(WhatAmI::Router, Err(refused.clone()));
+    assert_eq!(router.clock_refused(), Some(&refused));
+    assert!(!router.is_stamping());
+    assert_eq!(router.data_stamp(), DataStamp::NoClock);
+    assert_eq!(router.max_delta_word(), None);
+    #[cfg(feature = "pubsub-ts-stack")]
+    assert!(router.interception_timestamp().is_none());
+
+    let peer = node(WhatAmI::Peer, Err(refused.clone()));
+    assert!(!peer.is_stamping());
+    assert_eq!(
+        peer.clock_refused().is_some(),
+        cfg!(feature = "pubsub-ts-stack"),
+        "a peer builds a clock only to record interceptions"
+    );
+
+    let honoured = node(WhatAmI::Router, Ok(build_bound()));
+    assert_eq!(honoured.clock_refused(), None);
+    assert!(honoured.is_stamping());
+    assert_eq!(honoured.max_delta_word(), Some(build_bound().as_word()));
+}
+
+/// A node of a build without the clock reads no bound, so it never refuses one.
+#[test]
+fn a_node_built_by_its_creator_reports_no_refusal_when_the_variable_is_unset_or_unread() {
+    let node = NodeHlc::for_node_by(
+        &[0x01],
+        WhatAmI::Router,
+        TimestampingEnabled::default(),
+        &SessionPolicy::defaults(),
+    );
+    if std::env::var_os(MAX_DELTA_VARIABLE).is_none() || cfg!(not(feature = "time-hlc")) {
+        assert_eq!(node.clock_refused(), None);
+    }
 }
 
 #[cfg(feature = "time-hlc")]

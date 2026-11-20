@@ -29,7 +29,8 @@
 //! 13 ns where `uhlc` costs 78 ns because it formats a message that nobody here reads. Two
 //! behaviours differ and are stated where they happen: a source that cannot say what time it is
 //! stamps nothing (`uhlc`'s clock had no way to say so), and the bound reads `UHLC_MAX_DELTA_MS`
-//! itself since the crate that read it is no longer in the path.
+//! itself since the crate that read it is no longer in the path; a value there that `uhlc` panics
+//! on leaves the node without a clock and says why ([`MaxDeltaRefused`]).
 //!
 //! ## The zenoh shape this mirrors
 //!
@@ -216,9 +217,15 @@ pub struct NodeHlc {
     /// The clock the interceptions of a timestamp stack are recorded with: this node's own when
     /// its role stamps, and otherwise a clock of its own over the same source and the same
     /// identity, which is upstream's lazy HLC seeded with the zid (`get_ts_stack_timestamp`).
-    /// `None` only for a node built with no identity ([`Self::disabled`]).
+    /// `None` for a node built with no identity ([`Self::disabled`]) and for one whose clock was
+    /// refused (`clock_refused`).
     #[cfg(feature = "pubsub-ts-stack")]
     interception_clock: Option<std::sync::Arc<NodeClock>>,
+    /// Why the node holds no clock although it was to have one, for its creator to read
+    /// ([`Self::clock_refused`]): the bound `UHLC_MAX_DELTA_MS` states is one the node does not
+    /// honour. `None` for every node whose clock was built, and for one that was to have none.
+    #[cfg(feature = "time-hlc")]
+    clock_refused: Option<MaxDeltaRefused>,
 }
 
 /// R2626 — what `NodeHlc::treat_timestamp` (with `codec-push`) tells its caller to do with the
@@ -251,8 +258,9 @@ pub enum DataStamp {
     /// The `clock-quality-stamping` policy is `trusted-only` and the clock is not trusted: the
     /// node stamps no data with it.
     Withheld,
-    /// The node holds no clock (its role does not stamp, or the build has none), or its source
-    /// cannot say what time it is. A caller falls back as it does for a node with no clock.
+    /// The node holds no clock (its role does not stamp, the build has none, or the clock was
+    /// refused: [`NodeHlc::clock_refused`]), or its source cannot say what time it is. A caller
+    /// falls back as it does for a node with no clock.
     NoClock,
 }
 
@@ -314,17 +322,94 @@ impl wz_session_core::epoch::EpochSource for NodeEpoch {
 #[cfg(feature = "time-hlc")]
 const DEFAULT_MAX_DELTA_MS: u64 = wz_session_core::caps::CLOCK_MAX_FORWARD_STEP_MS as u64;
 
-/// The bound, from the value of `UHLC_MAX_DELTA_MS` (or its absence). `uhlc` reads that variable
-/// on its `std` profile and a zenoh node therefore honours it; the same variable moves this
-/// node's bound, so an operator's setting means the same on both. A value that is not a whole
-/// number of milliseconds is ignored in favour of the default: refusing to start a node over a
-/// clock tolerance would be worse than running with zenoh's own.
+/// The environment variable that states the bound, as `uhlc` names it.
+const MAX_DELTA_VARIABLE: &str = "UHLC_MAX_DELTA_MS";
+
+/// Why a node holds no clock although it was to have one: `UHLC_MAX_DELTA_MS` states a bound the
+/// node does not honour ([`NodeHlc::clock_refused`]).
+///
+/// `uhlc` panics on such a value when its first clock is built
+/// (`uhlc-0.8.2/src/lib.rs` @ `Ok(s) => s.parse().unwrap_or_else(|e| panic!(`, and for a value
+/// that is not Unicode @ `Err(e) => panic!(`), so a zenoh node does not start with it. A library
+/// does not end its program over a setting, so the node is built without the clock, and this
+/// says why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MaxDeltaRefused {
+    /// The variable is set to bytes that are not Unicode.
+    NotUnicode,
+    /// The variable is set to a text that is not a whole number of milliseconds, read as `uhlc`
+    /// reads it: no sign but an optional `+`, and no space around the digits.
+    NotMilliseconds {
+        /// The text, as the environment holds it.
+        stated: String,
+    },
+    /// A whole number of milliseconds the build does not allow for `CLOCK_MAX_FORWARD_STEP_MS`:
+    /// outside the limit's domain, or another value than the build's where the build keeps its own
+    /// alone.
+    OutsideDomain(wz_session_core::limit_binding::OutsideLimitDomain),
+    /// A whole number of milliseconds larger than this target's word, which no domain holds.
+    TooLarge {
+        /// The number stated.
+        stated_ms: u64,
+    },
+}
+
+impl core::fmt::Display for MaxDeltaRefused {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NotUnicode => write!(
+                f,
+                "`{MAX_DELTA_VARIABLE}` is set to bytes that are not Unicode, so it states no bound"
+            ),
+            Self::NotMilliseconds { stated } => write!(
+                f,
+                "`{MAX_DELTA_VARIABLE}` is `{stated}`, which is not a whole number of milliseconds"
+            ),
+            Self::OutsideDomain(outside) => write!(
+                f,
+                "`{MAX_DELTA_VARIABLE}` states a bound this build does not allow: {outside}"
+            ),
+            Self::TooLarge { stated_ms } => write!(
+                f,
+                "`{MAX_DELTA_VARIABLE}` is {stated_ms} ms, more than this target can hold"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for MaxDeltaRefused {}
+
+/// The bound, from what the environment holds for `UHLC_MAX_DELTA_MS` (`std::env::var`'s answer).
+/// `uhlc` reads that variable on its `std` profile and a zenoh node therefore honours it; the same
+/// variable moves this node's bound, so an operator's setting means the same on both. Absent, the
+/// bound is the build's. Stated, it is read as `uhlc` reads it (`s.parse()` into a `u64`) and
+/// selected as the `CLOCK_MAX_FORWARD_STEP_MS` of a runtime's limits, so a value the build does
+/// not allow is refused as any selection of that limit is.
 #[cfg(feature = "time-hlc")]
-fn max_delta_from(raw: Option<&str>) -> wz_session_core::ntp64::Ntp64 {
-    let ms = raw
-        .and_then(|text| text.trim().parse::<u64>().ok())
-        .unwrap_or(DEFAULT_MAX_DELTA_MS);
-    wz_session_core::ntp64::Ntp64::from_duration(core::time::Duration::from_millis(ms))
+fn max_delta_from(
+    stated: Result<String, std::env::VarError>,
+) -> Result<wz_session_core::ntp64::Ntp64, MaxDeltaRefused> {
+    let ms = match stated {
+        Err(std::env::VarError::NotPresent) => DEFAULT_MAX_DELTA_MS,
+        Err(std::env::VarError::NotUnicode(_)) => return Err(MaxDeltaRefused::NotUnicode),
+        Ok(text) => {
+            let ms = match text.parse::<u64>() {
+                Ok(ms) => ms,
+                Err(_) => return Err(MaxDeltaRefused::NotMilliseconds { stated: text }),
+            };
+            let Ok(value) = usize::try_from(ms) else {
+                return Err(MaxDeltaRefused::TooLarge { stated_ms: ms });
+            };
+            let mut limits = wz_session_core::limits::RuntimeLimits::defaults();
+            limits
+                .select_clock_max_forward_step_ms(value)
+                .map_err(MaxDeltaRefused::OutsideDomain)?;
+            limits.clock_max_forward_step_ms() as u64
+        }
+    };
+    Ok(wz_session_core::ntp64::Ntp64::from_duration(
+        core::time::Duration::from_millis(ms),
+    ))
 }
 
 impl NodeHlc {
@@ -345,6 +430,11 @@ impl NodeHlc {
     ///
     /// `policy` is the snapshot the node's creator resolved: the node's `clock-quality-stamping`
     /// policy is the one it holds, read once, here.
+    ///
+    /// The clock's bound is the build's `CLOCK_MAX_FORWARD_STEP_MS` unless `UHLC_MAX_DELTA_MS`
+    /// states another. A stated bound the node does not honour is refused: the node is built
+    /// without the clock, and [`Self::clock_refused`] says why, so its creator can refuse to go
+    /// on with it.
     #[cfg_attr(not(feature = "time-hlc"), allow(unused_variables))]
     pub fn for_node_by(
         zid: &[u8],
@@ -432,19 +522,74 @@ impl NodeHlc {
         standing: StandingHome,
         stamping: wz_session_core::policy::ClockQualityStamping,
     ) -> Self {
-        let own = build_clock(zid, source, standing);
-        let clock = enabled.get(whatami).then(|| own.clone());
+        Self::over_source_bounded(
+            zid,
+            whatami,
+            enabled,
+            source,
+            standing,
+            stamping,
+            max_delta_from(std::env::var(MAX_DELTA_VARIABLE)),
+        )
+    }
+
+    /// [`Self::over_source`] with the bound already resolved: the clock's bound, or why the stated
+    /// one is refused.
+    ///
+    /// The bound matters only to a node that builds a clock: one whose role stamps, or, with
+    /// `pubsub-ts-stack`, any node, which records interceptions with a clock of its own. Upstream
+    /// likewise meets the variable only when it builds an HLC. A node that builds none is not
+    /// refused for a bound it would never use.
+    #[cfg(feature = "time-hlc")]
+    fn over_source_bounded(
+        zid: &[u8],
+        whatami: WhatAmI,
+        enabled: TimestampingEnabled,
+        source: impl wz_session_core::epoch::EpochSource + Send + Sync + 'static,
+        standing: StandingHome,
+        stamping: wz_session_core::policy::ClockQualityStamping,
+        max_delta: Result<wz_session_core::ntp64::Ntp64, MaxDeltaRefused>,
+    ) -> Self {
+        let stamps = enabled.get(whatami);
+        let (own, clock_refused) = if stamps || cfg!(feature = "pubsub-ts-stack") {
+            match max_delta {
+                Ok(max_delta) => (Some(build_clock(zid, source, standing, max_delta)), None),
+                Err(refused) => (None, Some(refused)),
+            }
+        } else {
+            (None, None)
+        };
+        let clock = own.as_ref().filter(|_| stamps).cloned();
         // Upstream's shipped default; `with_drop_future_timestamp` is how a
         // host that read the key states otherwise.
         Self {
             clock,
             #[cfg(feature = "pubsub-ts-stack")]
-            interception_clock: Some(own),
+            interception_clock: own,
             drop_future_timestamp: false,
             trusted_only: matches!(
                 stamping,
                 wz_session_core::policy::ClockQualityStamping::TrustedOnly
             ),
+            clock_refused,
+        }
+    }
+
+    /// Why the node holds no clock although it was to have one: the bound `UHLC_MAX_DELTA_MS`
+    /// states is one it does not honour. `None` for a node whose clock was built, for one that was
+    /// to have none, and on every build without `time-hlc`, which reads no bound.
+    ///
+    /// A creator that can fail (an open that returns an error) refuses with this; one that cannot
+    /// still runs a node that stamps nothing with an HLC, as a node whose role does not stamp,
+    /// rather than one whose bound silently differs from what was stated.
+    pub fn clock_refused(&self) -> Option<&MaxDeltaRefused> {
+        #[cfg(feature = "time-hlc")]
+        {
+            self.clock_refused.as_ref()
+        }
+        #[cfg(not(feature = "time-hlc"))]
+        {
+            None
         }
     }
 
@@ -989,6 +1134,7 @@ impl core::fmt::Debug for NodeHlc {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("NodeHlc")
             .field("stamping", &self.is_stamping())
+            .field("clock_refused", &self.clock_refused())
             .finish()
     }
 }
@@ -1013,8 +1159,8 @@ fn build_clock(
     zid: &[u8],
     source: impl wz_session_core::epoch::EpochSource + Send + Sync + 'static,
     standing: StandingHome,
+    max_delta: wz_session_core::ntp64::Ntp64,
 ) -> std::sync::Arc<NodeClock> {
-    let max_delta = max_delta_from(std::env::var("UHLC_MAX_DELTA_MS").ok().as_deref());
     std::sync::Arc::new(NodeClock {
         hlc: wz_session_core::hlc::Hlc::new(NodeEpoch(Box::new(source)), max_delta),
         zid: zid.to_vec(),

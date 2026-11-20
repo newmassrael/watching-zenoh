@@ -167,18 +167,34 @@ const fn lap_of<const SLOTS: usize>(sequence: u64) -> u32 {
     (sequence / SLOTS as u64) as u32
 }
 
+/// The most slots a ring has: a `gen` is `2 * lap + 2` in 32 bits, compared modulo 2^32, so the
+/// laps of a ring of `2^30` slots or more no longer tell one record from the one a lap before it.
+pub const MAX_SLOTS: usize = (1 << 30) - 1;
+
+/// The most arguments a record carries: their count is one byte of the record's meta word.
+pub const MAX_ARGS: usize = 255;
+
+/// Stops the compilation of a ring of `slots` slots of `args` arguments unless it has one to
+/// [`MAX_SLOTS`] slots and at most [`MAX_ARGS`] arguments. [`EventRing::new`] evaluates it in a
+/// `const` block, so the shape is judged for each ring a program names, when the program is
+/// compiled, whether the ring is built in a `static` or at run time.
+const fn assert_ring_shape(slots: usize, args: usize) {
+    assert!(slots > 0, "a ring with no slot holds nothing");
+    assert!(
+        slots <= MAX_SLOTS,
+        "a ring this large cannot tell a lap from the lap before it"
+    );
+    assert!(
+        args <= MAX_ARGS,
+        "the argument count is one byte of the record's meta word"
+    );
+}
+
 impl<const SLOTS: usize, const ARGS: usize> EventRing<SLOTS, ARGS> {
-    /// An empty ring.
+    /// An empty ring. A program that names a ring of no slot, of more than [`MAX_SLOTS`] slots or
+    /// of more than [`MAX_ARGS`] arguments does not compile.
     pub const fn new(policy: FullPolicy) -> Self {
-        assert!(SLOTS > 0, "a ring with no slot holds nothing");
-        assert!(
-            SLOTS < (1 << 30),
-            "a ring this large cannot tell a lap from the lap before it"
-        );
-        assert!(
-            ARGS <= 255,
-            "the argument count is one byte of the record's meta word"
-        );
+        const { assert_ring_shape(SLOTS, ARGS) };
         Self {
             slots: [const { Slot::new() }; SLOTS],
             next_lo: AtomicU32::new(0),
@@ -537,6 +553,48 @@ mod tests {
                 Read::Empty => unreachable!(),
             })
             .collect()
+    }
+
+    /// The ends of the shape a ring compiles with, and the build's own shape: one slot of no
+    /// argument, the most slots of the most arguments, and `EVENT_RING_SLOTS` of
+    /// `EVENT_RECORD_ARGS`. A ring of one slot of no argument is also built and holds a record.
+    #[test]
+    fn a_ring_of_one_slot_and_one_of_the_most_slots_and_arguments_are_allowed() {
+        const { assert_ring_shape(1, 0) };
+        const { assert_ring_shape(MAX_SLOTS, MAX_ARGS) };
+        const {
+            assert_ring_shape(
+                crate::caps::EVENT_RING_SLOTS,
+                crate::caps::EVENT_RECORD_ARGS,
+            )
+        };
+        let mut ring = EventRing::<1, 0>::new(FullPolicy::OverwriteOldest);
+        let (mut producer, _consumer, observer) = ring.split();
+        assert_eq!(producer.push(1, 2, 3, &[]), Pushed::Stored(0));
+        let mut reader = observer.reader();
+        assert!(matches!(reader.poll(), Read::Record(record) if record.sequence == 0));
+    }
+
+    /// The shape `EventRing::new` judges when it is compiled, judged here at run time to show
+    /// which shapes it refuses: a ring of no slot.
+    #[test]
+    #[should_panic(expected = "holds nothing")]
+    fn a_ring_of_no_slot_is_refused() {
+        assert_ring_shape(core::hint::black_box(0), 0);
+    }
+
+    /// A ring too large for its laps to be told apart.
+    #[test]
+    #[should_panic(expected = "cannot tell a lap")]
+    fn a_ring_whose_laps_cannot_be_told_apart_is_refused() {
+        assert_ring_shape(core::hint::black_box(MAX_SLOTS + 1), 0);
+    }
+
+    /// A record of more arguments than one byte counts.
+    #[test]
+    #[should_panic(expected = "one byte of the record's meta word")]
+    fn a_record_of_more_arguments_than_a_byte_counts_is_refused() {
+        assert_ring_shape(1, core::hint::black_box(MAX_ARGS + 1));
     }
 
     #[test]

@@ -28,7 +28,9 @@
 //! period is periodic, one without is sent on an event. `protection` names an e2e profile and
 //! gives the header values (every field but the CRC, the length and the counter). `senders` binds
 //! a receiver's slots to the listed publishers' sender identities. `instance_key` names the
-//! payload fields that tell instances apart and the values each may take; it is carried as data.
+//! payload fields that tell instances apart and the values each may take, at most
+//! `INSTANCE_KEY_FIELDS` fields making at most `INSTANCES_PER_MESSAGE` instances; it is carried
+//! as data.
 //! `replay_depth` is how many of its last frames a publisher keeps; `supervision` the factor of
 //! the reception deadline, and the catalog's `supervision.start_delay_ms` the start delay every
 //! supervisor of the deployment has. `segment_profile` names the profile a sample larger than a
@@ -138,6 +140,11 @@ pub enum RefusalKind {
     InstanceKeyWithSenders,
     /// A field of an instance key, or a value of one field, stated twice.
     DuplicateInstanceKey,
+    /// An instance key of more fields than the build's `INSTANCE_KEY_FIELDS`.
+    TooManyKeyFields,
+    /// An instance key whose lists of values make more instances than the build's
+    /// `INSTANCES_PER_MESSAGE`.
+    TooManyInstances,
     /// An e2e profile the profile reader refuses.
     E2eProfileInvalid,
     /// A segment profile the segment profile reader refuses.
@@ -151,7 +158,7 @@ pub enum RefusalKind {
 
 impl RefusalKind {
     /// Every refusal, in the order of the schema's `x-wz-refusals`.
-    pub const ALL: [Self; 30] = [
+    pub const ALL: [Self; 32] = [
         Self::Syntax,
         Self::UnknownField,
         Self::DuplicateField,
@@ -178,6 +185,8 @@ impl RefusalKind {
         Self::TooManySenders,
         Self::InstanceKeyWithSenders,
         Self::DuplicateInstanceKey,
+        Self::TooManyKeyFields,
+        Self::TooManyInstances,
         Self::E2eProfileInvalid,
         Self::SegmentProfileInvalid,
         Self::ValuesInvalid,
@@ -213,6 +222,8 @@ impl RefusalKind {
             Self::TooManySenders => "too_many_senders",
             Self::InstanceKeyWithSenders => "instance_key_with_senders",
             Self::DuplicateInstanceKey => "duplicate_instance_key",
+            Self::TooManyKeyFields => "too_many_key_fields",
+            Self::TooManyInstances => "too_many_instances",
             Self::E2eProfileInvalid => "e2e_profile_invalid",
             Self::SegmentProfileInvalid => "segment_profile_invalid",
             Self::ValuesInvalid => "values_invalid",
@@ -960,7 +971,7 @@ impl Catalog {
             None => Vec::new(),
         };
         let instance_key = match get(body, "instance_key") {
-            Some(value) => read_instance_key(value, &child(path, "instance_key"))?,
+            Some(value) => read_instance_key(value, &child(path, "instance_key"), limits)?,
             None => Vec::new(),
         };
         let replay_depth = match get(body, "replay_depth") {
@@ -1372,13 +1383,31 @@ fn read_supervision(value: &Json5Value, path: &str) -> Result<Supervision, Refus
     Ok(Supervision { factor, awaited })
 }
 
-fn read_instance_key(value: &Json5Value, path: &str) -> Result<Vec<KeyField>, Refusal> {
+/// The instance key at `path`, within the build's `INSTANCE_KEY_FIELDS` and
+/// `INSTANCES_PER_MESSAGE` as `limits` states them: the bounds a keyer of the message is made
+/// under, so a catalog cannot declare an instance key its nodes would refuse to key by.
+fn read_instance_key(
+    value: &Json5Value,
+    path: &str,
+    limits: Limits,
+) -> Result<Vec<KeyField>, Refusal> {
     let items = array(value, path)?;
     if items.is_empty() {
         return Err(refuse(
             RefusalKind::Empty,
             path,
             "the instance key names no field",
+        ));
+    }
+    if items.len() > limits.key_fields {
+        return Err(refuse(
+            RefusalKind::TooManyKeyFields,
+            path,
+            format!(
+                "{} fields, and the build's INSTANCE_KEY_FIELDS is {}",
+                items.len(),
+                limits.key_fields
+            ),
         ));
     }
     let mut out: Vec<KeyField> = Vec::with_capacity(items.len());
@@ -1427,6 +1456,21 @@ fn read_instance_key(value: &Json5Value, path: &str) -> Result<Vec<KeyField>, Re
             ));
         }
         out.push(KeyField { field, values });
+    }
+    let instances = out
+        .iter()
+        .try_fold(1usize, |product, f| product.checked_mul(f.values.len()))
+        .filter(|&product| product <= limits.instances);
+    if instances.is_none() {
+        return Err(refuse(
+            RefusalKind::TooManyInstances,
+            path,
+            format!(
+                "the lists of values make more instances than the build's \
+                 INSTANCES_PER_MESSAGE, {}",
+                limits.instances
+            ),
+        ));
     }
     Ok(out)
 }
@@ -1631,12 +1675,14 @@ fn table_message(table: &Table, row: &MessageRow, path: &str) -> Result<Json5Val
     Ok(Json5Value::Object(entries))
 }
 
-/// The bounds of this build: its `MESSAGE_CATALOG_ENTRIES`, `REPLAY_DEPTH_MAX` and
-/// `E2E_SENDER_SLOTS`.
+/// The bounds of this build: its `MESSAGE_CATALOG_ENTRIES`, `REPLAY_DEPTH_MAX`,
+/// `E2E_SENDER_SLOTS`, `INSTANCE_KEY_FIELDS` and `INSTANCES_PER_MESSAGE`.
 pub fn build_limits() -> Limits {
     Limits {
         messages: wz_session_core::caps::MESSAGE_CATALOG_ENTRIES,
         replay_depth_max: wz_session_core::caps::REPLAY_DEPTH_MAX,
         sender_slots: wz_session_core::caps::E2E_SENDER_SLOTS,
+        key_fields: wz_session_core::caps::INSTANCE_KEY_FIELDS,
+        instances: wz_session_core::caps::INSTANCES_PER_MESSAGE,
     }
 }

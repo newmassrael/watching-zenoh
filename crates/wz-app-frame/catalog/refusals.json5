@@ -6,7 +6,7 @@
 // Every catalog in `accepted` is accepted by both. `limits` are the bounds every case is read
 // against unless the case states its own. All values are synthetic.
 {
-  limits: {messages: 4, replay_depth_max: 5, sender_slots: 2},
+  limits: {messages: 4, replay_depth_max: 5, sender_slots: 2, key_fields: 2, instances: 6},
   accepted: [
     {nodes: [{name: 'a'}, {name: 'b'}],
      messages: [{key_expr: 'k/one', id: 1, publishers: ['a'], subscribers: ['b']}]},
@@ -32,6 +32,10 @@
                  supervision: {factor: 3, awaited: false}, replay_depth: 5},
                 {key_expr: 'k/three', id: 3, publishers: ['c'], subscribers: [],
                  instance_key: [{field: 'zone', values: [1, 2, 'far']}]}]},
+    {nodes: [{name: 'a'}],
+     messages: [{key_expr: 'k/one', id: 1, publishers: ['a'], subscribers: [],
+                 instance_key: [{field: 'zone', values: [1, 2, 3]},
+                                {field: 'side', values: ['l', 'r']}]}]},
   ],
   cases: [
     {refusal: 'syntax', at: '', text: '{nodes: ['},
@@ -205,6 +209,21 @@
                messages: [{key_expr: 'k/one', id: 1, publishers: ['a'], subscribers: [],
                            instance_key: [{field: 'zone', values: [1]},
                                           {field: 'zone', values: [2]}]}]}},
+    {refusal: 'too_many_key_fields', at: '/messages/0/instance_key',
+     catalog: {nodes: [{name: 'a'}],
+               messages: [{key_expr: 'k/one', id: 1, publishers: ['a'], subscribers: [],
+                           instance_key: [{field: 'zone', values: [1]},
+                                          {field: 'side', values: [1]},
+                                          {field: 'lane', values: [1]}]}]}},
+    {refusal: 'too_many_instances', at: '/messages/0/instance_key',
+     catalog: {nodes: [{name: 'a'}],
+               messages: [{key_expr: 'k/one', id: 1, publishers: ['a'], subscribers: [],
+                           instance_key: [{field: 'zone', values: [1, 2, 3]},
+                                          {field: 'side', values: ['l', 'r', 'c']}]}]}},
+    {refusal: 'too_many_instances', at: '/messages/0/instance_key', limits: {instances: 2},
+     catalog: {nodes: [{name: 'a'}],
+               messages: [{key_expr: 'k/one', id: 1, publishers: ['a'], subscribers: [],
+                           instance_key: [{field: 'zone', values: [1, 2, 3]}]}]}},
     {refusal: 'e2e_profile_invalid', at: '/e2e_profiles/p',
      catalog: {nodes: [{name: 'a'}], e2e_profiles: {p: {name: 'p'}}, messages: []}},
     {refusal: 'segment_profile_invalid', at: '/segment_profiles/s',

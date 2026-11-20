@@ -182,12 +182,18 @@ mod the_node_clock_lent_as_uhlc {
     }
 
     /// The bound a node runs with, by the rule a node reads it with: `UHLC_MAX_DELTA_MS`, else the
-    /// limit's default.
+    /// limit's default. A stated value the node refuses leaves it with no clock to compare, so this
+    /// test is not run under one.
     fn node_bound() -> Duration {
-        let ms = std::env::var("UHLC_MAX_DELTA_MS")
-            .ok()
-            .and_then(|text| text.trim().parse::<u64>().ok())
-            .unwrap_or(wz_session_core::caps::CLOCK_MAX_FORWARD_STEP_MS as u64);
+        let ms = match std::env::var("UHLC_MAX_DELTA_MS") {
+            Err(std::env::VarError::NotPresent) => {
+                wz_session_core::caps::CLOCK_MAX_FORWARD_STEP_MS as u64
+            }
+            stated => stated
+                .ok()
+                .and_then(|text| text.parse::<u64>().ok())
+                .expect("UHLC_MAX_DELTA_MS is a whole number of milliseconds"),
+        };
         Duration::from_millis(ms)
     }
 
