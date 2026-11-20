@@ -3636,33 +3636,25 @@ impl SubscriberTable<BoxedSink> {
     }
 
     /// [`SubscriberRegistry::register`] for a table: the closure is boxed and
-    /// registered under [`Locality::Any`](crate::locality::Locality).
-    ///
-    /// GROWABLE BACKING ONLY, for the reason
+    /// registered under [`Locality::Any`](crate::locality::Locality). It refuses
+    /// as [`register_sink`](Self::register_sink) does, for the reason
     /// [`SubscriberRegistry::register`] gives.
-    #[cfg(any(test, doc, not(feature = "bounded-heapless")))]
     pub fn register(
         &mut self,
-        keyexpr_pattern: impl Into<String>,
+        keyexpr_pattern: &str,
         callback: impl FnMut(&dyn SampleView) + Send + 'static,
-    ) -> SubscriptionId {
+    ) -> Result<SubscriptionId, RegisterError> {
         self.register_with_locality(keyexpr_pattern, crate::locality::Locality::Any, callback)
     }
 
     /// [`SubscriberRegistry::register_with_locality`] for a table.
-    ///
-    /// GROWABLE BACKING ONLY, for the reason
-    /// [`SubscriberRegistry::register`] gives.
-    #[cfg(any(test, doc, not(feature = "bounded-heapless")))]
     pub fn register_with_locality(
         &mut self,
-        keyexpr_pattern: impl Into<String>,
+        keyexpr_pattern: &str,
         allowed_origin: crate::locality::Locality,
         callback: impl FnMut(&dyn SampleView) + Send + 'static,
-    ) -> SubscriptionId {
-        let pattern = keyexpr_pattern.into();
-        self.register_sink(&pattern, allowed_origin, BoxedSink::new(callback))
-            .expect("register on the alloc backing never exceeds declared capacity")
+    ) -> Result<SubscriptionId, RegisterError> {
+        self.register_sink(keyexpr_pattern, allowed_origin, BoxedSink::new(callback))
     }
 }
 
@@ -3698,20 +3690,18 @@ impl SubscriberRegistry<BoxedSink> {
     /// closure. Use [`register_with_locality`](Self::register_with_locality)
     /// to restrict to one origin class.
     ///
-    /// GROWABLE BACKING ONLY. This wrapper's infallible signature is true
-    /// only where the table grows; under `bounded-heapless` the table is
-    /// fixed and the `.expect` inside would be a panic at the first full
-    /// table, so the wrapper is not compiled there (except for this crate's
-    /// own tests and docs). A fixed-backing build registers through
-    /// [`register_sink`](SubscriberRegistry::register_sink) with
-    /// `BoxedSink::new(callback)` and handles
-    /// [`RegisterError::TableFull`].
-    #[cfg(any(test, doc, not(feature = "bounded-heapless")))]
+    /// Admission to a bounded resource is a partial operation, so this
+    /// returns what [`register_sink`](SubscriberRegistry::register_sink)
+    /// returns on every backing. No backing makes it total: a fixed backing
+    /// fills, and a growable one is held to the quota its creator stated
+    /// ([`SubscriberTable::limit_to`]), which is a value the open path reads at
+    /// run time and no type can see. A caller that knows its table admits the
+    /// registration says so where it calls, with the reason it knows.
     pub fn register(
         &mut self,
-        keyexpr_pattern: impl Into<String>,
+        keyexpr_pattern: &str,
         callback: impl FnMut(&dyn SampleView) + Send + 'static,
-    ) -> SubscriptionId {
+    ) -> Result<SubscriptionId, RegisterError> {
         self.register_with_locality(keyexpr_pattern, crate::locality::Locality::Any, callback)
     }
 
@@ -3727,21 +3717,14 @@ impl SubscriberRegistry<BoxedSink> {
     /// round wires up loopback; this is the correct
     /// surface-mirrors-zenoh-pico shape, not a bug.
     ///
-    /// GROWABLE BACKING ONLY, for the reason [`register`](Self::register)
-    /// gives.
-    #[cfg(any(test, doc, not(feature = "bounded-heapless")))]
+    /// It refuses as [`register`](Self::register) does.
     pub fn register_with_locality(
         &mut self,
-        keyexpr_pattern: impl Into<String>,
+        keyexpr_pattern: &str,
         allowed_origin: crate::locality::Locality,
         callback: impl FnMut(&dyn SampleView) + Send + 'static,
-    ) -> SubscriptionId {
-        let pattern = keyexpr_pattern.into();
-        // AP backing: `register_sink` is infallible here (the BoundedVec
-        // table + BoundedString pattern grow past the advisory `N`), so
-        // the convenience wrapper keeps its `SubscriptionId` signature.
-        self.register_sink(&pattern, allowed_origin, BoxedSink::new(callback))
-            .expect("register on the alloc backing never exceeds declared capacity")
+    ) -> Result<SubscriptionId, RegisterError> {
+        self.register_sink(keyexpr_pattern, allowed_origin, BoxedSink::new(callback))
     }
 }
 
