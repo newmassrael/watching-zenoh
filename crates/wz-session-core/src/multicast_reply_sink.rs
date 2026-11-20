@@ -308,7 +308,9 @@ impl GroupKeyexprAnswers {
                 None => None,
                 Some(WireexprOwnedVariant::WireexprLocal(local)) if local.id == 0 => {
                     match local.suffix.as_ref() {
-                        Some(suffix) => Some(alloc::string::ToString::to_string(suffix)),
+                        Some(suffix) => {
+                            Some(alloc::string::String::from(suffix.as_text().into_inner()))
+                        }
                         None => continue,
                     }
                 }
