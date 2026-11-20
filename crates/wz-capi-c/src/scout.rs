@@ -18,6 +18,7 @@
 
 use std::ffi::{c_int, c_void};
 
+use wz_capi_core::runtime::runtime_impl::TokioTime;
 use wz_capi_core::scouting::{
     parse_multicast_locator, run_scout, MULTICAST_LOCATOR_DEFAULT, SCOUTING_TIMEOUT_DEFAULT_MS,
     SCOUTING_WHAT_DEFAULT,
@@ -78,6 +79,25 @@ impl ScoutRequest {
             asker: None,
         }
     }
+}
+
+/// The clock a scout's window is timed by, and the hold that keeps it read: the time base the
+/// scout's config names (`wz_capi_c_config_time_base`), which the window then runs on as a session
+/// opened from that config does, or the system's clock and no hold. A window is a deadline of its
+/// own, and a program that runs its sessions on its time runs their discovery on it too.
+#[cfg(feature = "time-base")]
+fn window_clock(
+    cfg: Option<&ConfigState>,
+) -> (
+    TokioTime,
+    Option<wz_capi_core::runtime::time_base::TimeBaseHold>,
+) {
+    let held = cfg.and_then(|cfg| cfg.time_base.clone());
+    let clock = match &held {
+        Some(time_base) => TokioTime::on_time_base(time_base.time()),
+        None => TokioTime::new(),
+    };
+    (clock, held)
 }
 
 /// `Z_WHATAMI_ROUTER` = 1.
@@ -518,6 +538,12 @@ pub unsafe extern "C" fn z_scout(
         };
         // SAFETY: the caller's contract: `options` is null or a valid struct.
         let request = ScoutRequest::read(cfg.as_deref(), unsafe { options.as_ref() });
+        // The window's clock. The hold keeps a time base the config names read for the whole
+        // window, after the config itself is gone.
+        #[cfg(feature = "time-base")]
+        let (clock, _held) = window_clock(cfg.as_deref());
+        #[cfg(not(feature = "time-base"))]
+        let clock = TokioTime::new();
         drop(cfg);
         let ScoutRequest {
             what,
@@ -534,28 +560,37 @@ pub unsafe extern "C" fn z_scout(
         // The scout's snapshot, resolved as an open resolves its own: the scout reads no node
         // document of its config, so the open's resolution of none.
         let policy = wz_capi_core::open_plan::resolve_policy(None);
-        run_scout(group, port, what, asker, budget_ms, &policy, |hello| {
-            let Some(call) = user_call else {
-                return;
-            };
-            let mut state = HelloState::new(
-                z_id_t::from_wire(&hello.zid),
-                hello
-                    .whatami
-                    .map_or(Z_WHATAMI_PEER, |w| c_int::from(w.to_api())),
-                hello.locators.clone(),
-            );
-            // Bound where it stays: the callback's argument is the state itself, the first word
-            // of which is its address (`crate::loan_at`).
-            state.bind();
-            let loaned = &state as *const HelloState as *mut z_loaned_hello_t;
-            // SAFETY: `call` is the C callback and `state` outlives it; the
-            // borrowed hello is valid only for its duration. An unwind across
-            // the C boundary is UB, so it is caught.
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-                call(loaned, user_ctx);
-            }));
-        });
+        run_scout(
+            clock,
+            group,
+            port,
+            what,
+            asker,
+            budget_ms,
+            &policy,
+            |hello| {
+                let Some(call) = user_call else {
+                    return;
+                };
+                let mut state = HelloState::new(
+                    z_id_t::from_wire(&hello.zid),
+                    hello
+                        .whatami
+                        .map_or(Z_WHATAMI_PEER, |w| c_int::from(w.to_api())),
+                    hello.locators.clone(),
+                );
+                // Bound where it stays: the callback's argument is the state itself, the first word
+                // of which is its address (`crate::loan_at`).
+                state.bind();
+                let loaned = &state as *const HelloState as *mut z_loaned_hello_t;
+                // SAFETY: `call` is the C callback and `state` outlives it; the
+                // borrowed hello is valid only for its duration. An unwind across
+                // the C boundary is UB, so it is caught.
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+                    call(loaned, user_ctx);
+                }));
+            },
+        );
 
         run_drop();
         Z_OK

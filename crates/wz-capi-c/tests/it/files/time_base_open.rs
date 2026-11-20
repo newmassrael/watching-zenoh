@@ -8,11 +8,13 @@
 //! The client leg is the timer this ABI's opens wait on: a connect budget with a retry schedule,
 //! dialled at a port the test holds and nothing listens on (`refusing_port`: a released number
 //! could be taken by a listener of a test beside it), so the open can end only by the budget. The
-//! program's
-//! time stands still while the wall clock runs three budgets past it, and the open must not end;
-//! the program then moves its time past the budget and says so, and the open must end, refused as
-//! a budget that ran out is. A build whose connect wait read the system's clock would end the open
-//! after one budget of the wall clock, which the first assertion reads as red.
+//! program's time stands still while the wall clock runs three budgets past it, and the open must
+//! not end; the program then moves its time past the budget and says so, and the open must end,
+//! refused as a budget that ran out is. A build whose connect wait read the system's clock would
+//! end the open after one budget of the wall clock, which the first assertion reads as red.
+//!
+//! The scout leg is the same assertion of `z_scout`'s window, which a config's time base times as
+//! it times the session opened from that config.
 //!
 //! The node leg is the refusal: a node that forwards between its faces is not timed by a time
 //! base, so its open from a config that names one is refused, and the same config without one
@@ -168,32 +170,86 @@ fn a_clients_connect_budget_on_a_time_base_is_a_budget_of_the_programs_time() {
         close(session);
         rc
     });
-
-    std::thread::sleep(BUDGET * 3);
-    assert!(
-        !opening.is_finished(),
-        "the wall clock ended a connect budget of the program's time"
-    );
-    let budget_ns = u64::try_from(BUDGET.as_nanos()).unwrap();
-    time.store(budget_ns + 1_000_000, Ordering::SeqCst);
-    // SAFETY: the time base is live.
-    assert_eq!(
-        unsafe { wz_capi_c_time_base_advanced(wz_capi_c_time_base_loan(&time_base)) },
-        Z_OK
-    );
-    let told = Instant::now();
-    while !opening.is_finished() {
-        assert!(
-            told.elapsed() < Duration::from_secs(5),
-            "the open did not end once the program's time passed its budget"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    assert_eq!(opening.join().expect("the opening thread"), Z_ENETWORK);
+    let rc = ends_only_when_the_programs_time_passes(time, &time_base, opening, "the open");
+    assert_eq!(rc, Z_ENETWORK);
     // SAFETY: the program's own reference, dropped once.
     unsafe { wz_capi_c_time_base_drop(wz_capi_c_time_base_move(&mut time_base)) };
     // Held to here, so the number refused every dial of the open.
     drop(dead);
+}
+
+/// A scout from a config that names a time base surveys for a budget of the program's time: its
+/// window does not end while that time stands still, though the wall clock runs three budgets past
+/// it, and it ends once the time passes the budget and the program says so. The default group is
+/// scouted: a Hello another node on the host sends does not end a survey's window, only its budget
+/// does.
+#[cfg(feature = "scout")]
+#[test]
+fn a_scout_on_a_time_base_surveys_for_a_budget_of_the_programs_time() {
+    use wz_capi_c::abi::{z_moved_closure_hello_t, z_owned_closure_hello_t};
+    use wz_capi_c::scout::{z_closure_hello, z_scout, z_scout_options_t, Z_WHATAMI_PEER};
+
+    let time = program_time();
+    let mut time_base = time_base_over(time);
+    // SAFETY: the time base is live.
+    let handed = Handed(unsafe { config_with(&[], Some(&time_base)) });
+    let budget_ms = u64::try_from(BUDGET.as_millis()).unwrap();
+    let scouting = std::thread::spawn(move || {
+        let mut cfg = handed.into_config();
+        // SAFETY: a zeroed owned closure is the gravestone `z_closure_hello` overwrites.
+        let mut callback: z_owned_closure_hello_t = unsafe { std::mem::zeroed() };
+        // SAFETY: a writable slot; with no call and no drop, the context is never read.
+        unsafe { z_closure_hello(&mut callback, None, None, std::ptr::null_mut()) };
+        let options = z_scout_options_t {
+            timeout_ms: budget_ms,
+            what: Z_WHATAMI_PEER,
+        };
+        // SAFETY: the config and the closure are live and consumed here; the options are a local
+        // that outlives the call.
+        unsafe {
+            z_scout(
+                (&mut cfg as *mut z_owned_config_t).cast::<z_moved_config_t>(),
+                (&mut callback as *mut z_owned_closure_hello_t).cast::<z_moved_closure_hello_t>(),
+                &options,
+            )
+        }
+    });
+    let rc = ends_only_when_the_programs_time_passes(time, &time_base, scouting, "the scout");
+    assert_eq!(rc, Z_OK);
+    // SAFETY: the program's own reference, dropped once.
+    unsafe { wz_capi_c_time_base_drop(wz_capi_c_time_base_move(&mut time_base)) };
+}
+
+/// Hold `waiting` to the program's time: it must not end while that time stands still and the
+/// wall clock runs three budgets past it, and it must end within five seconds of the program's
+/// moving its time one millisecond past the budget and saying so. What it answered.
+fn ends_only_when_the_programs_time_passes(
+    time: &AtomicU64,
+    time_base: &wz_capi_c_owned_time_base_t,
+    waiting: std::thread::JoinHandle<i8>,
+    what: &str,
+) -> i8 {
+    std::thread::sleep(BUDGET * 3);
+    assert!(
+        !waiting.is_finished(),
+        "the wall clock ended {what}'s budget of the program's time"
+    );
+    let budget_ns = u64::try_from(BUDGET.as_nanos()).unwrap();
+    time.store(budget_ns + 1_000_000, Ordering::SeqCst);
+    // SAFETY: the caller's time base is live.
+    assert_eq!(
+        unsafe { wz_capi_c_time_base_advanced(wz_capi_c_time_base_loan(time_base)) },
+        Z_OK
+    );
+    let told = Instant::now();
+    while !waiting.is_finished() {
+        assert!(
+            told.elapsed() < Duration::from_secs(5),
+            "{what} did not end once the program's time passed its budget"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    waiting.join().expect("the waiting thread")
 }
 
 /// A node that forwards between its faces is not timed by a time base: its open from a config that
