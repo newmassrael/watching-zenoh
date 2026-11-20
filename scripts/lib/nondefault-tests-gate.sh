@@ -424,12 +424,14 @@ transport-link-unixpipe,transport-link-ws|"
     # file behind its feature on top of the default peer, query and queryable.
     "wz-capi-pico|hook|app-transport|--test=app_transport_doors"
     "wz-capi-pico|hook|shared-key-ids|--test=key_ids_tokio"
-    # A time base the program supplies (`wz_ext_time_base_*`, `time_base::`): the doors' refusals
-    # and ownership, and a listening session that runs on the program's time with its control on
-    # the system's, first on the tokio engine (5) and then on the cooperative one, where the
-    # session's clock itself and a silent inbound link held to the accept timeout of the
-    # program's time (`files::time_base_accept::`) run too (7).
-    "wz-capi-pico|hook|time-base|time_base::"
+    # A time base the program supplies (`wz_ext_time_base_*`): the doors' refusals and ownership
+    # and a listening session that runs on the program's time with its control on the system's
+    # (`time_base::`), a silent inbound link held to the accept timeout of the program's time
+    # (`files::time_base_accept::`) and, on the tokio engine, a get held to a timeout of the
+    # program's time (`files::get_roundtrip::c_get_on_a_time_base_...`): every name says
+    # `time_base`, which is the filter. The tokio engine first (7), then the cooperative one,
+    # where the session's clock itself and its read's wake run too.
+    "wz-capi-pico|hook|time-base|time_base"
     "wz-capi-pico|hook|-default,engine-coop,peer,multi-thread,link-udp,connectivity,time-base|time_base"
     # Whether a reply of a replay reaches the receiving judge (`replay_admission`, behind `replay`):
     # its model tests on a synthetic profile, and the receiver's baseline CRC they read.

@@ -1023,8 +1023,9 @@ pub async fn sweep_mcast_face(session: &TokioMulticastSession, revised: &Notify)
         match session.next_reply_deadline_ms() {
             Some(due) => {
                 let wait = due.saturating_sub(session.clock().now_monotonic_ms());
+                // On the session's clock, which the deadline is of.
                 tokio::select! {
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(wait)) => {}
+                    _ = session.clock().sleep(wait) => {}
                     _ = revised.notified() => {}
                 }
             }

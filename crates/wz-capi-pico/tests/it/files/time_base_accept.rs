@@ -1,18 +1,18 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! A listening session of the cooperative engine opened on a time base the program supplies
-//! (`wz_ext_time_base_*`) gives an inbound link the accept timeout the build states of the
-//! PROGRAM's time, not of the wall clock: a client that connects and says nothing is kept for as
-//! long as the program's time stands still, however long the wall clock runs, and dropped once the
-//! program's time passes the bound and the program says so. `accept_timeout` is the same link
-//! on the system's clock, dropped at the bound of the wall clock.
+//! A listening session opened on a time base the program supplies (`wz_ext_time_base_*`) gives
+//! an inbound link the accept timeout the build states of the PROGRAM's time, not of the wall
+//! clock: a client that connects and says nothing is kept for as long as the program's time stands
+//! still, however long the wall clock runs, and dropped once the program's time passes the bound
+//! and the program says so. `accept_timeout` is the same link on the system's clock, dropped at the
+//! bound of the wall clock.
 //!
-//! The cooperative engine only: its accept deadline is the session's (`CoopConfig::timeouts`, on
-//! the engine's clock), where the tokio engine's accept loop bounds a handshake with tokio's own
-//! timer, which a time base does not reach yet.
+//! Either engine: the cooperative engine's accept deadline is the session's
+//! (`CoopConfig::timeouts`, on the engine's clock), and the tokio engine's accept loop bounds the
+//! link's own handshake and the session's on the session's clock.
 
-#![cfg(all(feature = "time-base", feature = "peer", not(feature = "engine-tokio")))]
+#![cfg(all(feature = "time-base", feature = "peer"))]
 
 use std::ffi::{c_void, CString};
 use std::io::Read;

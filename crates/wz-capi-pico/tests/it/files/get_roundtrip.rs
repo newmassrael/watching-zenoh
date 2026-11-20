@@ -1119,3 +1119,124 @@ unsafe fn z_session_loan_mut_of(
 ) -> *mut wz_capi_pico::z_loaned_session_t {
     wz_capi_pico::z_session_loan_mut(zs)
 }
+
+/// The program's time in nanoseconds, which the test sets and the library reads through the
+/// time base's door.
+#[cfg(feature = "time-base")]
+unsafe extern "C" fn program_now_ns(context: *mut c_void) -> u64 {
+    (*(context as *const std::sync::atomic::AtomicU64)).load(Ordering::SeqCst)
+}
+
+/// [`c_get_completes_at_its_timeout_when_the_peer_never_finals`] on a session opened on a time
+/// base the program supplies: the get's 500 ms timeout is of the program's time, so the get is
+/// not ended while that time stands still, though the wall clock runs three times past it, and
+/// it ends once the program's time passes it and the program says so.
+#[cfg(feature = "time-base")]
+#[test]
+fn c_get_on_a_time_base_completes_only_when_the_programs_time_passes_its_timeout() {
+    use std::sync::atomic::AtomicU64;
+    use wz_capi_pico::time_base::{
+        wz_ext_config_time_base, wz_ext_owned_time_base_t, wz_ext_time_base_advanced,
+        wz_ext_time_base_drop, wz_ext_time_base_loan, wz_ext_time_base_move, wz_ext_time_base_new,
+        wz_ext_time_base_t,
+    };
+
+    let port = free_port();
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+    const ANSWER: &str = "answer-before-going-silent";
+    let time = Box::new(AtomicU64::new(0));
+
+    unsafe {
+        let mut time_base: wz_ext_owned_time_base_t = std::mem::zeroed();
+        let calls = wz_ext_time_base_t {
+            context: &*time as *const AtomicU64 as *mut c_void,
+            now_ns: Some(program_now_ns),
+            drop: None,
+        };
+        assert_eq!(wz_ext_time_base_new(&mut time_base, &calls), Z_OK);
+        let listen = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
+        let mut cfg: z_owned_config_t = std::mem::zeroed();
+        assert_eq!(z_config_default(&mut cfg), Z_OK);
+        assert_eq!(
+            zp_config_insert(
+                z_config_loan_mut(&mut cfg),
+                Z_CONFIG_LISTEN_KEY,
+                listen.as_ptr()
+            ),
+            Z_OK
+        );
+        assert_eq!(
+            wz_ext_config_time_base(
+                z_config_loan_mut(&mut cfg),
+                wz_ext_time_base_loan(&time_base)
+            ),
+            Z_OK
+        );
+        let mut zs: z_owned_session_t = std::mem::zeroed();
+        assert_eq!(
+            z_open(&mut zs, z_config_move(&mut cfg), std::ptr::null()),
+            Z_OK
+        );
+
+        let go_silent = Arc::new(tokio::sync::Notify::new());
+        let go_silent_peer = go_silent.clone();
+        let die = Arc::new(tokio::sync::Notify::new());
+        let die_peer = die.clone();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let peer = std::thread::spawn(move || {
+            native_peer(
+                endpoint,
+                PeerBehaviour::AnswerThenGoSilent {
+                    answer: ANSWER.to_owned(),
+                    go_silent: go_silent_peer,
+                    die: die_peer,
+                },
+                ready_tx,
+            )
+        });
+        ready_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the native peer must declare its queryable");
+        // Answered gets end by their final, so the convergence needs no time to pass.
+        converge_face_up(z_session_loan(&zs), ANSWER);
+        go_silent.notify_one();
+        std::thread::sleep(Duration::from_millis(200));
+
+        let issued_at = Instant::now();
+        let probe = issue_get(z_session_loan(&zs), 500);
+        assert!(
+            probe
+                .await_completion(issued_at, Duration::from_millis(1_500))
+                .is_none(),
+            "the wall clock ended a get whose timeout is of the program's time"
+        );
+
+        time.store(600_000_000, Ordering::SeqCst);
+        assert_eq!(
+            wz_ext_time_base_advanced(wz_ext_time_base_loan(&time_base)),
+            Z_OK
+        );
+        let told_at = Instant::now();
+        let after = probe
+            .await_completion(told_at, Duration::from_secs(5))
+            .expect("the get ends once the program's time passes its timeout");
+        probe.assert_no_callback_errors();
+        assert!(probe.replies().is_empty(), "a silent peer sends no reply");
+        assert_eq!(probe.completions.load(Ordering::SeqCst), 1);
+        assert!(
+            after < Duration::from_millis(1_000),
+            "the program's word ends the wait at once, not at the next keepalive wake \
+             (took {after:?})"
+        );
+
+        assert_eq!(
+            z_close(z_session_loan_mut_of(&mut zs), std::ptr::null()),
+            Z_OK
+        );
+        z_session_drop(z_session_move(&mut zs));
+        die.notify_one();
+        let _ = peer.join();
+        wz_ext_time_base_drop(wz_ext_time_base_move(&mut time_base));
+    }
+    drop(time);
+}
