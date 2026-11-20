@@ -29,6 +29,10 @@
 //! the advanced plane's heartbeat, periodic re-ask and retention sweep are; the plane itself is
 //! the neutral `wz-ext-pubsub`'s, hosted over the engine's port.
 //!
+//! With `group` it also joins multicast groups: each group `CoopConfig::groups` names is a face of
+//! its own, whose session is the session shell's group session hosted as a task of the session's
+//! local set, over the group the network stack joins.
+//!
 //! With `listen` it also listens: the ports `CoopConfig::listen` names take inbound `tcp/` links,
 //! each a face of its own beside the dial role's (`docs/capi-pico-on-coop-engine.md`, step L3).
 //! What it does not do yet, a later step of the note: `udp/` and `tls/` faces, and the C ABI's

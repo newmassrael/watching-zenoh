@@ -563,6 +563,11 @@ transport-link-unixpipe,transport-link-ws|"
     # 14), compiled with `shared-key-ids` beside `listen`, `query` and `queryable`, the four the
     # module's `cfg` names; the rest of the crate's tests are the leg above's.
     "wz-capi-coop|hook|listen,query,queryable,shared-key-ids|tests::shared_key_ids::"
+    # The multicast groups a session joins (`tests::group::`), compiled with `group` beside
+    # `app-transport`, whose links over a transport the program supplies are what the module's
+    # members join their group over: two members learn each other by their JOINs, a put crosses
+    # the group and a close leaves it, and a group the stack does not join fails the open.
+    "wz-capi-coop|hook|app-transport,group|tests::group::"
     # What a hosted OS tells a node about its network, and the multicast sockets built from it,
     # which the tokio runtime and the cooperative host both open. The `#iface=` honor (the v4 and
     # v6 interface selectors and the tests that read them off the loopback) is compiled only with

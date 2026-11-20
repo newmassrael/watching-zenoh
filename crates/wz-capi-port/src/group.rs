@@ -9,6 +9,12 @@
 
 use alloc::string::String;
 
+use wz_session_core::multicast_params::MulticastParams;
+use wz_session_core::policy::SessionPolicy;
+use wz_session_core::session_init_params::{LinkRxConf, TxQueueConf};
+use wz_session_core::session_zid::SessionZid;
+use wz_session_core::WhatAmI;
+
 /// Open-debt item 913 — a multicast group a session joins: the endpoint that names it, and
 /// what the session advertises on it.
 #[derive(Clone, Debug)]
@@ -127,6 +133,49 @@ pub struct GroupProfile {
     pub join_rule: wz_session_core::multicast_params::GroupJoinRule,
 }
 
+impl GroupProfile {
+    /// The parameters a group session runs with: this profile as its beacon advertises it, for
+    /// the session `zid` of role `whatami`, with the session's transmit model, what it rejoins
+    /// from fragments and the snapshot of its policies. One conversion for every engine, so the
+    /// beacons the two engines send for one profile, and the members they admit, are the same.
+    pub fn params(
+        self,
+        whatami: WhatAmI,
+        zid: SessionZid,
+        tx_queue: TxQueueConf,
+        link_rx: LinkRxConf,
+        policy: SessionPolicy,
+    ) -> MulticastParams {
+        let Self {
+            lease_ms,
+            join_interval_ms,
+            max_sessions,
+            seq_num_res,
+            req_id_res,
+            batch_size,
+            is_qos,
+            compression,
+            join_rule,
+        } = self;
+        MulticastParams {
+            whatami,
+            zid,
+            lease_ms,
+            join_interval_ms,
+            seq_num_res,
+            req_id_res,
+            batch_size,
+            is_qos,
+            compression,
+            tx_queue,
+            link_rx,
+            join_rule,
+            max_sessions,
+            policy,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,5 +197,48 @@ mod tests {
             assert_eq!(told.declares_keyexprs(), keyexprs, "{told:?}");
             assert_eq!(told.asks_for_filters(), filters, "{told:?}");
         }
+    }
+
+    /// The parameters a profile gives a group session carry every field of the profile and the
+    /// session's own identity, role and snapshot as they were handed in.
+    #[test]
+    fn a_profile_gives_the_group_session_its_every_field() {
+        use wz_session_core::multicast_params::{zid_vec, GroupJoinRule};
+        let profile = GroupProfile {
+            lease_ms: 7_000,
+            join_interval_ms: 300,
+            max_sessions: Some(5),
+            seq_num_res: 0x01,
+            req_id_res: 0x03,
+            batch_size: 1_500,
+            is_qos: true,
+            compression: true,
+            join_rule: GroupJoinRule::Zenoh,
+        };
+        let policy = SessionPolicy::defaults();
+        let zid = zid_vec(&[0x5a, 0x5b, 0x5c]);
+        let params = profile.params(
+            WhatAmI::Router,
+            zid,
+            TxQueueConf::of_policy(&policy),
+            LinkRxConf::default(),
+            policy,
+        );
+        assert_eq!(params.whatami, WhatAmI::Router);
+        assert_eq!(params.zid, zid);
+        assert_eq!(
+            (
+                params.lease_ms,
+                params.join_interval_ms,
+                params.max_sessions
+            ),
+            (7_000, 300, Some(5))
+        );
+        assert_eq!((params.seq_num_res, params.req_id_res), (0x01, 0x03));
+        assert_eq!(params.batch_size, 1_500);
+        assert!(params.is_qos && params.compression);
+        assert_eq!(params.join_rule, GroupJoinRule::Zenoh);
+        assert_eq!(params.link_rx, LinkRxConf::default());
+        assert_eq!(params.policy, policy);
     }
 }

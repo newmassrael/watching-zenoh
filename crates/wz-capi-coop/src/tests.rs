@@ -581,6 +581,7 @@ fn client_config() -> CoopConfig {
         listen: Vec::new(),
         accept_pending: crate::DEFAULT_ACCEPT_PENDING,
         max_faces: crate::DEFAULT_MAX_FACES,
+        groups: Vec::new(),
     }
 }
 
@@ -1242,6 +1243,47 @@ fn a_key_wire_form_but_declared_is_refused_in_a_build_without_shared_key_ids() {
     assert_eq!(open(KeyWireForm::Declared), Some(OpenError::NoEndpoint));
 }
 
+/// A build without groups refuses a session that names one by name, before it dials anything,
+/// and opens no group instead of it: the session would be missing the group it was told to join.
+#[cfg(not(feature = "group"))]
+#[test]
+fn a_build_without_groups_refuses_a_session_that_joins_one() {
+    use crate::OpenError;
+    use wz_capi_port::group::{GroupDeclarations, GroupJoin, GroupProfile};
+
+    let refused = Engine::open(
+        PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        PosixClock,
+        PosixEntropy,
+        CoopConfig {
+            groups: vec![GroupJoin {
+                endpoint: "udp/239.7.7.7:7447#iface=lan7".to_owned(),
+                profile: GroupProfile {
+                    lease_ms: 10_000,
+                    join_interval_ms: 2_500,
+                    max_sessions: None,
+                    seq_num_res: 0x02,
+                    req_id_res: 0x02,
+                    batch_size: 2_048,
+                    is_qos: false,
+                    compression: false,
+                    join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
+                },
+                is_shm: false,
+                declarations: GroupDeclarations::Entities,
+            }],
+            ..client_config()
+        },
+    )
+    .err();
+    assert_eq!(
+        refused,
+        Some(OpenError::Group(
+            "udp/239.7.7.7:7447#iface=lan7: joining a group is not built".to_owned()
+        ))
+    );
+}
+
 #[cfg(all(feature = "ticker", feature = "query", feature = "liveliness"))]
 mod advanced;
 mod decl_watch;
@@ -1251,6 +1293,8 @@ mod face_table;
 mod faces;
 #[cfg(feature = "query")]
 mod get;
+#[cfg(all(feature = "group", feature = "app-transport"))]
+mod group;
 mod link_sets;
 #[cfg(all(feature = "listen", feature = "query", feature = "queryable"))]
 mod listen;

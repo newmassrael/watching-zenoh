@@ -169,6 +169,16 @@ listen = ["wz-runtime-coop/session-unicast-accept"]
 # A transport the program supplies: the session shell's links over the program's own network
 # stack (`wz_runtime_coop::app_link`), re-exported for the ABI that opens the engine over them.
 app-transport = ["wz-runtime-coop/app-link"]
+# The multicast groups a session joins (`CoopConfig::groups`), each a face of the session beside
+# its links: the session shell's group session (`wz-session-mcu`'s `group_drive`, the one an MCU
+# image runs) hosted as a task of the session's local set, over the group the stack joins
+# (`SessionLinks::open_group`). Its JOIN, its members and the framing of what it sends are the
+# session core's; the Push items the session puts on the group share the queue its replies take
+# (`codec-push`). Off, a config that names a group is refused by name and the text has none of it.
+group = [
+    "wz-session-mcu/transport-multicast",
+    "wz-session-mcu/codec-push",
+]
 # The `tls/` link on a host (`tls::HostTls`): the secure channel `wz-tls-mbedtls` runs, made from
 # the PEM material a C ABI resolved, for both roles. The library is built from the pinned
 # submodules (`vendored`), and every call into it is under one lock (`host-lock`), because the

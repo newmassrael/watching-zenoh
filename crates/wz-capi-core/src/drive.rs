@@ -3844,38 +3844,15 @@ impl ResolvedGroup {
         policy: &SessionPolicy,
     ) -> Option<Self> {
         let link = Self::link_of(&join.endpoint, policy)?;
-        let GroupProfile {
-            lease_ms,
-            join_interval_ms,
-            max_sessions,
-            seq_num_res,
-            req_id_res,
-            batch_size,
-            is_qos,
-            compression,
-            join_rule,
-        } = join.profile;
         Some(Self {
             endpoint: join.endpoint.clone(),
             is_shm: join.is_shm,
             declarations: join.declarations,
             link,
-            params: wz_runtime_tokio::multicast_glue::MulticastParams {
-                whatami,
-                zid,
-                lease_ms,
-                join_interval_ms,
-                seq_num_res,
-                req_id_res,
-                batch_size,
-                is_qos,
-                compression,
-                tx_queue,
-                link_rx,
-                join_rule,
-                max_sessions,
-                policy: *policy,
-            },
+            // The port's conversion, which the cooperative engine's groups take too.
+            params: join
+                .profile
+                .params(whatami, zid, tx_queue, link_rx, *policy),
         })
     }
 

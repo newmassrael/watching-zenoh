@@ -110,6 +110,11 @@ use {
 #[cfg(feature = "queryable")]
 mod query;
 
+#[cfg(feature = "group")]
+mod group;
+#[cfg(feature = "group")]
+use group::{GroupFace, GroupJoining, GroupPut};
+
 mod registry;
 #[cfg(feature = "local-queryable")]
 use registry::LOCAL_FACE;
@@ -208,6 +213,12 @@ pub struct CoopConfig {
     /// past it is closed unread. `transport/unicast/max_sessions` of zenoh,
     /// [`DEFAULT_MAX_FACES`] by default (`listen`).
     pub max_faces: usize,
+    /// The multicast groups the session joins, each a face of its own beside its links, joined
+    /// before anything is dialled: what each advertises and what the session tells it of its
+    /// declarations is the ABI's (`wz_capi_port::group`). A session that dials nothing and joins
+    /// a group is open once the group is joined (`group`; a build without it refuses a group
+    /// with [`OpenError::Group`]).
+    pub groups: Vec<wz_capi_port::group::GroupJoin>,
 }
 
 /// Inbound links in their handshake at once, when the config states none: zenoh's
@@ -235,6 +246,10 @@ pub enum OpenError {
     /// listener for its protocol, or the port is taken. The endpoint and the reason; a build
     /// without `listen` answers every listen endpoint this way.
     Listen(String),
+    /// A group to join could not be: the network joins no group for its endpoint, or the group's
+    /// link did not open. The endpoint and the reason; a build without `group` answers every
+    /// group this way.
+    Group(String),
     /// No endpoint could be dialled: each was refused, unreachable or did not complete the
     /// handshake in time. The last endpoint's reason.
     Unreachable(String),
@@ -567,6 +582,9 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// The ports the session takes inbound links from (`listen`).
     #[cfg(feature = "listen")]
     listeners: Vec<Listening<L::Pump>>,
+    /// The multicast groups the session joined, each a face of its own (`group`).
+    #[cfg(feature = "group")]
+    groups: Vec<GroupFace>,
     /// Each handshake's cookie key and nonce come from here.
     entropy: SharedEntropy,
     config: CoopConfig,
@@ -1380,6 +1398,77 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         Ok(())
     }
 
+    /// Join every group the config lists, each a face of its own whose session is a task of the
+    /// session's local set, stepped once here so that its first JOIN leaves now.
+    /// [`OpenError::Group`] for the first the network joins no group for, or whose session ended
+    /// at its first step (its link did not open); a build without `group` answers every group so.
+    fn join_groups(&mut self) -> Result<(), OpenError> {
+        #[cfg(feature = "group")]
+        for join in self.config.groups.clone() {
+            let transport = self
+                .links
+                .open_group(&join.endpoint)
+                .map_err(|why| OpenError::Group(format!("{}: {why:?}", join.endpoint)))?;
+            let id = self.next_face;
+            // The tables first: the group's task dispatches to them from its first step.
+            self.registry.borrow_mut().add_face(id);
+            // An id of the key ids every node shares is read on the group as on a link.
+            #[cfg(feature = "shared-key-ids")]
+            if let Some(ids) = &self.key_ids {
+                self.registry
+                    .borrow_mut()
+                    .install_shared_key_ids(id, ids.clone());
+            }
+            let params = join.profile.params(
+                self.config.whatami,
+                self.wire_zid,
+                self.config.tx_queue,
+                self.config.link_rx,
+                self.policy,
+            );
+            // A member's query is held under the group's own generation, as a link's is under its.
+            #[cfg(feature = "queryable")]
+            let dispatch = group::dispatch(
+                self.registry.clone(),
+                id,
+                self.policy,
+                self.plane.clone(),
+                self.plane.generation.fetch_add(1, Ordering::AcqRel) + 1,
+            );
+            #[cfg(not(feature = "queryable"))]
+            let dispatch = group::dispatch(self.registry.clone(), id);
+            let face = GroupFace::join(
+                &self.local,
+                GroupJoining {
+                    id,
+                    declarations: join.declarations,
+                    transport,
+                    params,
+                    policy: self.policy,
+                },
+                dispatch,
+            );
+            self.local.run_until_idle();
+            if face.has_ended() {
+                self.registry.borrow_mut().remove_face(id);
+                return Err(OpenError::Group(format!(
+                    "{}: the group's link did not open",
+                    join.endpoint
+                )));
+            }
+            self.next_face += 1;
+            self.groups.push(face);
+        }
+        #[cfg(not(feature = "group"))]
+        if let Some(join) = self.config.groups.first() {
+            return Err(OpenError::Group(format!(
+                "{}: joining a group is not built",
+                join.endpoint
+            )));
+        }
+        Ok(())
+    }
+
     /// Take the connections waiting on every port the session listens on, each as a face of its
     /// own whose handshake is run as the acceptor's. A port the platform has no descriptor or
     /// buffer for just now is looked at again on the next step, and one that is broken for good
@@ -1594,6 +1683,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             Some(due_ms) => self.wait_until(most, due_ms),
             None => most,
         };
+        // And so is a group's turn: its task looks at its beacon, its lease sweep and what its
+        // members sent each time the session is stepped, and takes one datagram a step, so a group
+        // that took one is stepped again at once and one that took none within a tick.
+        #[cfg(feature = "group")]
+        let most = if self.groups.is_empty() {
+            most
+        } else if self.groups.iter().any(GroupFace::took_input) {
+            0
+        } else {
+            most.min(group::GROUP_TICK_MS)
+        };
         if most == 0 {
             return IdleWait::None;
         }
@@ -1673,6 +1773,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // The ports are let go of first, so no connection is taken while the faces are ended.
         #[cfg(feature = "listen")]
         self.listeners.clear();
+        // Each group's session is asked to stop, and its next step, taken here, tells the group it
+        // leaves and lets the group's link go; its tables go with it.
+        #[cfg(feature = "group")]
+        if !self.groups.is_empty() {
+            for group in &self.groups {
+                group.stop();
+            }
+            self.local.run_until_idle();
+            let mut registry = self.registry.borrow_mut();
+            for group in self.groups.drain(..) {
+                registry.remove_face(group.id());
+            }
+        }
         for face in &mut self.faces {
             face.replay.discard();
             let link = core::mem::replace(&mut face.link, Link::Waiting { at_us: u64::MAX });
@@ -1765,6 +1878,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             links,
             #[cfg(feature = "listen")]
             listeners: Vec::new(),
+            #[cfg(feature = "group")]
+            groups: Vec::new(),
             entropy,
             config,
             policy,
@@ -1809,12 +1924,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let gets = core.gets.clone();
         #[cfg(feature = "connectivity")]
         let faces = core.watchers.clone();
-        // The ports are bound before anything is dialled: a session that cannot listen where it was
-        // told to does not open.
+        // The ports are bound and the groups joined before anything is dialled: a session that
+        // cannot listen, or join a group, where it was told to does not open.
         core.listen_on_config()?;
-        // A session that only listens is open once it is bound; one that dials is open once a
-        // link completes its handshake.
-        if !(core.config.endpoints.is_empty() && core.listens()) {
+        core.join_groups()?;
+        // A session that only listens, or only joins groups, is open once it is bound and joined;
+        // one that dials is open once a link completes its handshake.
+        if !(core.config.endpoints.is_empty() && (core.listens() || !core.config.groups.is_empty()))
+        {
             core.faces[0].link = core.dial_from(0, OpenError::NoEndpoint)?;
             // Open once the dial's link is up, or once the node it reached is held by a face that
             // came first (a peer that listens and dials its own listener's peer).
@@ -2158,6 +2275,21 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                     Err(_) => Err(FanoutError::ExceedsCapacity),
                 }
             };
+            if sent.is_err() {
+                outcome = sent;
+            }
+        }
+        // And each group the session joined, which its task frames and sends.
+        #[cfg(feature = "group")]
+        for group in &core.0.groups {
+            let sent = group.publish(GroupPut {
+                keyexpr,
+                payload,
+                kind: opts.kind,
+                meta: &meta,
+                reliable,
+                priority,
+            });
             if sent.is_err() {
                 outcome = sent;
             }
@@ -2568,7 +2700,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let Some(core) = self.live() else {
             return Vec::new();
         };
-        core.0
+        let links = core
+            .0
             .ups()
             .filter(|actions| actions.is_established())
             .filter_map(
@@ -2576,8 +2709,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                     (Some(zid), Some(role)) => Some((zid, role)),
                     _ => None,
                 },
-            )
-            .collect()
+            );
+        // And each member a group's JOINs admitted, as zenoh-pico lists the peers of its
+        // multicast transport.
+        #[cfg(feature = "group")]
+        let links = links.chain(core.0.groups.iter().flat_map(GroupFace::member_identities));
+        links.collect()
     }
 
     #[cfg(feature = "connectivity")]
@@ -2955,7 +3092,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     }
 
     fn write_filter_holds_back(&self, id: FilterId) -> bool {
-        // A unicast session has no group a write must reach regardless.
+        // A group the filter does not ask is sent a write whatever the filter says, as the tokio
+        // engine sends one (`GroupDeclarations::asks_for_filters`): on such a group zenoh-pico
+        // sends what its filter would hold back. Without a group no write must reach anyone
+        // regardless.
+        #[cfg(feature = "group")]
+        if self.live().is_some_and(|core| {
+            core.0
+                .groups
+                .iter()
+                .any(|group| !group.declarations().asks_for_filters())
+        }) {
+            return false;
+        }
         self.write_filter_active(id)
     }
 
@@ -3006,6 +3155,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let Some(core) = self.live() else {
             return FilteredPut::Sent(Ok(0));
         };
+        // A group is sent a put by the general publish, which puts it on the group's queue.
+        #[cfg(feature = "group")]
+        if !core.0.groups.is_empty() {
+            return FilteredPut::NotPlain;
+        }
         // Asked of every link before any is sent to, so the put goes plain to all of them or to
         // none: a link that rewrites what it originates (a routing namespace) takes the general
         // publish for the whole of it. Its namespace is installed before the session sends

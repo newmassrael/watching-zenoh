@@ -141,6 +141,7 @@
     not(feature = "session-slot"),
     feature = "alloc",
     any(
+        feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
         feature = "liveliness-token"
@@ -190,6 +191,7 @@ use wz_session_core::multicast_rx::{
 #[cfg(all(
     feature = "alloc",
     any(
+        feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
         feature = "liveliness-token"
@@ -211,6 +213,7 @@ use wz_session_core::sn::{self, MulticastTxConduits};
     not(feature = "session-slot"),
     feature = "alloc",
     any(
+        feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
         feature = "liveliness-token"
@@ -220,6 +223,7 @@ use alloc::collections::VecDeque;
 #[cfg(all(
     feature = "alloc",
     any(
+        feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
         feature = "liveliness-token"
@@ -229,6 +233,7 @@ use core::cell::RefCell;
 #[cfg(all(
     feature = "alloc",
     any(
+        feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
         feature = "liveliness-token"
@@ -261,12 +266,15 @@ use wz_session_core::multicast_reply_sink::MulticastReplyEnqueue;
 /// [`MulticastReplySink<Q>`](wz_session_core::multicast_reply_sink::MulticastReplySink)
 /// SSOT, so this backing names no wz_codecs type — the wz-codecs dep R311mb added
 /// here is gone, and the duplicated AP/MCU impls collapsed to one. The backing
-/// exists when any reply variant inhabits `MulticastTxItem` (the codec-response /
-/// codec-response-final / liveliness-token union).
+/// exists when any variant inhabits `MulticastTxItem` (the codec-push / codec-response /
+/// codec-response-final / liveliness-token union): a host that puts its own Push items on the
+/// group queues them here beside the replies, so what it sends leaves in the order it was asked
+/// for.
 #[cfg(all(
     not(feature = "session-slot"),
     feature = "alloc",
     any(
+        feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
         feature = "liveliness-token"
@@ -281,6 +289,7 @@ pub struct MulticastReplyQueue {
     not(feature = "session-slot"),
     feature = "alloc",
     any(
+        feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
         feature = "liveliness-token"
@@ -308,6 +317,7 @@ impl MulticastReplyQueue {
     not(feature = "session-slot"),
     feature = "alloc",
     any(
+        feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
         feature = "liveliness-token"
@@ -355,6 +365,7 @@ impl MulticastReplyEnqueue for MulticastReplyQueue {
     feature = "session-slot",
     feature = "alloc",
     any(
+        feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
         feature = "liveliness-token"
@@ -372,6 +383,7 @@ pub struct MulticastReplyQueue<const N: usize> {
     feature = "session-slot",
     feature = "alloc",
     any(
+        feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
         feature = "liveliness-token"
@@ -383,6 +395,7 @@ unsafe impl<const N: usize> Sync for MulticastReplyQueue<N> {}
     feature = "session-slot",
     feature = "alloc",
     any(
+        feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
         feature = "liveliness-token"
@@ -441,6 +454,7 @@ impl<const N: usize> MulticastReplyQueue<N> {
     feature = "session-slot",
     feature = "alloc",
     any(
+        feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
         feature = "liveliness-token"
@@ -458,6 +472,7 @@ impl<const N: usize> Default for MulticastReplyQueue<N> {
     feature = "session-slot",
     feature = "alloc",
     any(
+        feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
         feature = "liveliness-token"

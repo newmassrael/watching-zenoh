@@ -71,6 +71,7 @@ fn base_config() -> CoopConfig {
         listen: Vec::new(),
         accept_pending: DEFAULT_ACCEPT_PENDING,
         max_faces: DEFAULT_MAX_FACES,
+        groups: Vec::new(),
     }
 }
 

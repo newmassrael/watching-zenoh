@@ -86,8 +86,9 @@ impl<Q> MulticastReplySink<Q> {
 // the terminal rid; the sink wraps each in the matching `MulticastTxItem` and
 // enqueues it. `send_response` is the one place a `wz_codecs` owned type is
 // named — here in wz-session-core (which already deps wz-codecs), not in the
-// backing crates.
-#[cfg(any(feature = "codec-response", feature = "codec-response-final"))]
+// backing crates. Every method is gated by its own codec, so a build with neither
+// reply codec has a sink with nothing to send: a host that drains a group's whole
+// observer through one sink (`SlotObserver::flush_pending`) names it in every build.
 impl<Q: MulticastReplyEnqueue> crate::response_sink::ResponseSink for MulticastReplySink<Q> {
     #[cfg(feature = "codec-response")]
     fn send_response(&self, response: crate::wire::ResponseOwned) {
@@ -190,5 +191,53 @@ impl<Q: MulticastReplyEnqueue> crate::response_sink::DeclareReplySink for Multic
                 subscriber_id,
             )),
         });
+    }
+}
+
+// A group keeps no cache of the interests a session asks again after it reconnects: a group has
+// no reconnect (a member that joins again is a new member), so a liveliness get that ended has
+// nothing to prune here, which is the trait's own body where no cache exists. With it a host that
+// drains its observer through one sink, the shape `SlotObserver::flush_pending` takes, drains a
+// group's through this one.
+impl<Q> crate::response_sink::LivelinessGetPrune for MulticastReplySink<Q> {
+    #[cfg(feature = "liveliness-get")]
+    fn prune_liveliness_get_interest(&self, interest_id: u64) {
+        let _ = interest_id;
+    }
+}
+
+// The sink is a `DeclareReplySink` where a declare reply exists, which is what the test reads.
+#[cfg(all(
+    test,
+    any(feature = "liveliness-token", feature = "declare-subscriber")
+))]
+mod tests {
+    use super::*;
+    use crate::response_sink::{DeclareReplySink, LivelinessGetPrune, ResponseSink};
+    use alloc::vec::Vec;
+    use core::cell::RefCell;
+
+    /// What a sink enqueued, in order.
+    struct Recorded(RefCell<Vec<MulticastTxItem>>);
+
+    impl MulticastReplyEnqueue for &Recorded {
+        fn enqueue(&self, item: MulticastTxItem) {
+            self.0.borrow_mut().push(item);
+        }
+    }
+
+    /// Compiles only for a sink a whole observer drain takes.
+    fn drains_a_whole_observer<S: ResponseSink + DeclareReplySink + LivelinessGetPrune>(_: &S) {}
+
+    /// A group's sink is one a whole observer drain takes, in a build with no reply codec as in
+    /// one with them, and a liveliness get that ended prunes nothing from it.
+    #[test]
+    fn a_group_sink_takes_a_whole_drain_and_prunes_nothing() {
+        let recorded = Recorded(RefCell::new(Vec::new()));
+        let sink = MulticastReplySink::new(&recorded);
+        drains_a_whole_observer(&sink);
+        #[cfg(feature = "liveliness-get")]
+        sink.prune_liveliness_get_interest(7);
+        assert!(recorded.0.borrow().is_empty());
     }
 }
