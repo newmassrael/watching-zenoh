@@ -6871,20 +6871,29 @@ mod tests {
             let mut streams = Vec::new();
             for _ in 0..peers {
                 let mut stream = TcpStream::connect(addr).await.expect("connect");
+                // Whether the peer could say its message. The loop closes a link past its bound
+                // at once, and when that close arrives before the message is written the write
+                // fails (a broken pipe or a reset): that is the close this reports, not a defect
+                // of the peer, so it is recorded as closed rather than ending the test.
+                let mut spoke = true;
                 if !said.is_empty() {
                     // A stream link frames each message behind its length, two bytes LE.
                     let len = u16::try_from(said.len()).expect("a short message");
-                    stream.write_all(&len.to_le_bytes()).await.expect("write");
-                    stream.write_all(said).await.expect("write");
+                    spoke = stream.write_all(&len.to_le_bytes()).await.is_ok()
+                        && stream.write_all(said).await.is_ok();
                 }
-                streams.push(stream);
+                streams.push((stream, spoke));
                 // One at a time, so the order the loop sees them in is the order they are
                 // counted in, and the refused one is the last.
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
             tokio::time::sleep(after).await;
             let mut closed = Vec::new();
-            for stream in &mut streams {
+            for (stream, spoke) in &mut streams {
+                if !*spoke {
+                    closed.push(true);
+                    continue;
+                }
                 let mut byte = [0u8; 1];
                 // A closed link reads end-of-stream at once; an open and silent one has nothing
                 // to read, so the read is still pending when the short bound elapses.
