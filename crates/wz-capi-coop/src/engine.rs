@@ -84,7 +84,7 @@ use wz_session_core::qos::CongestionControl;
 use wz_session_core::sample::{QosLevel, Sample, SampleKind};
 use wz_session_core::send_wire_error::SendWireError;
 use wz_session_core::session_init_params::{
-    KeepAliveConf, LinkRxConf, SessionInitParams, SessionZid, TxQueueConf, ZidError,
+    HeldDrop, KeepAliveConf, LinkRxConf, SessionInitParams, SessionZid, TxQueueConf, ZidError,
 };
 use wz_session_core::session_timeouts::SessionTimeouts;
 #[cfg(feature = "shared-key-ids")]
@@ -405,10 +405,12 @@ pub(crate) fn derived_zid(
 pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> {
     core: Mutex<Confined<Core<L, C>>>,
     /// The waits for room of the links that are up, asked by a publish that may be dropped while
-    /// another holds the session ([`Self::live_to_publish`]), and how long it waits:
-    /// `congestion_control/drop/wait_before_drop`.
+    /// another holds the session ([`Self::live_to_publish`]), how long it waits
+    /// (`congestion_control/drop/wait_before_drop`), and whether the queue profile has it ask at
+    /// all (`TxQueueConf::held_drop`).
     rooms: Arc<LinkRooms>,
     wait_before_drop_us: u64,
+    held_drop: HeldDrop,
     /// What the session delivered under the lock, handed out after it: the samples for its
     /// subscribers, in the order they arrived, and the changes of its matching statuses. Two
     /// queues and not one of an enum, so a sample is queued as it was built and a matching flip
@@ -475,6 +477,16 @@ impl LinkRooms {
         let mut waits = lock(&self.0);
         waits.retain(|held| held.strong_count() > 0);
         waits.push(Arc::downgrade(wait));
+    }
+
+    /// What a droppable publish that found the session held is told, by the queue profile's
+    /// `held_drop`: zenoh's asks the links for room within `wait_us` ([`Self::within`]); pico's is
+    /// a congestion drop at once and asks nothing, as pico's try-lock drops the message.
+    pub(crate) fn for_held(&self, held_drop: HeldDrop, wait_us: u64) -> Room {
+        match held_drop {
+            HeldDrop::WaitForRoom => self.within(wait_us),
+            HeldDrop::DropAtOnce => Room::Congested,
+        }
     }
 
     /// Ask each link that is up for room, for at most `wait_us` each; one that takes none within
@@ -1871,6 +1883,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let faces = core.watchers.clone();
         let rooms = core.rooms.clone();
         let wait_before_drop_us = core.config.tx_queue.wait_before_drop_us;
+        let held_drop = core.config.tx_queue.held_drop;
         // The ports are bound before anything is dialled: a session that cannot listen where it was
         // told to does not open.
         core.listen_on_config()?;
@@ -1890,6 +1903,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             core: Mutex::new(Confined(core)),
             rooms,
             wait_before_drop_us,
+            held_drop,
             samples: Arc::new(Mutex::new(VecDeque::new())),
             matching: Arc::new(Mutex::new(VecDeque::new())),
             targets: Mutex::new(Vec::new()),
@@ -2020,7 +2034,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// for room with nothing of the session held. No room within `wait_before_drop` is the
     /// congestion drop, which zenoh answers the put with success; room means the holder is not
     /// waiting on a link, and the session is tried again. A session whose links give no wait to
-    /// ask is waited for. `None` once the session is closed, or when the publish was dropped.
+    /// ask is waited for. Under the pico profile a held session is a congestion drop at once,
+    /// with nothing asked ([`LinkRooms::for_held`]). `None` once the session is closed, or when
+    /// the publish was dropped.
     fn live_to_publish(&self, droppable: bool) -> Option<MutexGuard<'_, Confined<Core<L, C>>>> {
         if !droppable {
             return self.live();
@@ -2036,7 +2052,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 }
                 return Some(guard);
             }
-            match self.rooms.within(self.wait_before_drop_us) {
+            match self
+                .rooms
+                .for_held(self.held_drop, self.wait_before_drop_us)
+            {
                 Room::Free => core::hint::spin_loop(),
                 Room::Congested => return None,
                 Room::Unasked => return self.live(),

@@ -69,6 +69,28 @@ fn each_link_is_asked_and_one_without_room_is_congestion() {
     );
 }
 
+/// Under the pico profile a publish that finds the session held is a congestion drop at once, as
+/// pico's try-lock drops the message: no link is asked for room, though one has room to give.
+/// Under zenoh's the same publish asks it.
+#[test]
+fn under_the_pico_profile_a_held_session_drops_without_asking() {
+    use wz_session_core::session_init_params::HeldDrop;
+    let rooms = LinkRooms::default();
+    let free = answer(true);
+    held(&rooms, &free);
+    assert_eq!(rooms.for_held(HeldDrop::DropAtOnce, 1_000), Room::Congested);
+    assert!(
+        free.asked.lock().unwrap().is_empty(),
+        "the link was asked for room"
+    );
+    assert_eq!(
+        rooms.for_held(HeldDrop::WaitForRoom, 1_000),
+        Room::Free,
+        "CONTROL: zenoh's profile asks the link"
+    );
+    assert_eq!(*free.asked.lock().unwrap(), [1_000]);
+}
+
 /// A link that has gone is not asked: its wait goes with its wire, and what is left is a session
 /// with no wait to ask.
 #[test]
@@ -97,7 +119,7 @@ mod stalled_link {
     use wz_session_core::locality::Locality;
     use wz_session_core::publish_options::PublishOptions;
     use wz_session_core::qos::CongestionControl;
-    use wz_session_core::session_init_params::TxQueueConf;
+    use wz_session_core::session_init_params::{HeldDrop, TxQueueConf};
     use wz_session_core::WhatAmI;
 
     use super::super::{client_config, open_with, until};
@@ -138,13 +160,15 @@ mod stalled_link {
             endpoints: vec![endpoint],
             zid: Some(vec![0xb7; 4]),
             // Each message is written as it is sent, so what fills the stream is what was
-            // published, whether or not the session is stepped.
+            // published, whether or not the session is stepped. zenoh's profile: a droppable
+            // publish behind the held session asks the link for room.
             tx_queue: TxQueueConf {
                 wait_before_drop_us: DROP_WAIT_US,
                 wait_before_close_us: CLOSE_WAIT.as_micros() as u64,
                 no_progress_us: None,
                 expiry_keeps_session: false,
                 batching: false,
+                held_drop: HeldDrop::WaitForRoom,
                 ..client_config().tx_queue
             },
             ..client_config()
