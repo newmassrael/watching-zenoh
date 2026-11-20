@@ -1409,6 +1409,22 @@ abis = ["core", "pico"]
 implies = ["unstable-api"]
 help = "A deployment's messages declared once, as data, and read at run time: the entry of each message, and the e2e sender, receiver and supervision rows made from it (wz_ext_message_catalog_*, wz-own doors)."
 
+# The payload of a catalog message, set and read field by field at paths under `.proto` files the
+# program hands over when it runs, and its protobuf bytes encoded and decoded: what a host program
+# that knows its messages by name and its fields by path needs when no code is generated for them.
+# Made for a message of the catalog, so it implies the catalog. Off by default: neither zenoh-pico
+# nor zenoh-c has such doors. The pico ABI's doors are wz_ext_* and part of its unstable surface;
+# the payload is wz-app-frame's and the schema is read by its one `.proto` reader.
+[[capability]]
+id = "message-payload"
+kconfig = "WZ_CAP_MESSAGE_PAYLOAD"
+default = "off"
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = ["unstable-api", "message-catalog"]
+help = "The payload of a catalog message set and read field by field, by path, under .proto files read at run time, and its protobuf bytes encoded and decoded (wz_ext_payload_schema_*, wz_ext_message_payload_*, wz-own doors)."
+
 [[capability]]
 id = "app-transport"
 kconfig = "WZ_CAP_APP_TRANSPORT"

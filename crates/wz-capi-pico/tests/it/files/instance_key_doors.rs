@@ -17,6 +17,7 @@
 use std::ffi::CString;
 
 use wz_capi_pico::instance_key::*;
+use wz_capi_pico::proto_file::wz_ext_proto_file_t;
 use wz_capi_pico::result::{
     ZResult, Z_EINVAL, Z_ERR_CONFIG_INVALID_VALUE, Z_ERR_NULL, Z_ERR_OVERFLOW, Z_OK,
     Z_RES_CHANNEL_NODATA,

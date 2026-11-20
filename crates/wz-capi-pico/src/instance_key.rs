@@ -23,13 +23,13 @@ use core::ffi::{c_char, c_void};
 use core::ptr::NonNull;
 
 use wz_app_frame::instance_key::{Dropped, Keyer, LastValues, Limits, Refusal, Report};
-use wz_app_frame::proto_schema::ProtoFile;
 
 use crate::abi::z_owned_string_t;
 use crate::e2e::{
     adopt, behind, bytes_arg, clear_refusal, locked, release, utf8_arg, write_refusal,
 };
 use crate::ffi::{guard_val, guarded};
+use crate::proto_file::{proto_files, wz_ext_proto_file_t};
 use crate::result::{
     ZResult, Z_EINVAL, Z_ERR_CONFIG_INVALID_VALUE, Z_ERR_NULL, Z_ERR_OVERFLOW, Z_OK,
     Z_RES_CHANNEL_NODATA,
@@ -52,15 +52,6 @@ pub const WZ_EXT_INSTANCE_KEY_LAST_RECORDED: u8 = 1;
 pub const WZ_EXT_INSTANCE_KEY_LAST_NOT_INTACT: u8 = 2;
 /// The payload is longer than an instance's room, so its last value is the one before.
 pub const WZ_EXT_INSTANCE_KEY_LAST_TOO_LONG: u8 = 3;
-
-/// One `.proto` file, as the program hands it over: the name other files import it by and its
-/// text, both NUL-terminated UTF-8, BORROWED for the call.
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct wz_ext_proto_file_t {
-    pub name: *const c_char,
-    pub text: *const c_char,
-}
 
 /// An owned keyer: the handle in its one word, null for the gravestone. `Debug` shows the word,
 /// so a test can unwrap the refusal of a door that answers one or the other.
@@ -257,27 +248,13 @@ pub unsafe extern "C" fn wz_ext_instance_keyer_new(
             return Z_ERR_NULL;
         }
         (*this_).handle = core::ptr::null_mut();
-        if description.is_null() || (files.is_null() && file_count != 0) {
+        if description.is_null() {
             return Z_ERR_NULL;
         }
-        let given: &[wz_ext_proto_file_t] = if file_count == 0 {
-            &[]
-        } else {
-            core::slice::from_raw_parts(files, file_count)
+        let proto = match proto_files(files, file_count) {
+            Ok(proto) => proto,
+            Err(code) => return code,
         };
-        let mut proto: Vec<ProtoFile<'_>> = Vec::with_capacity(given.len());
-        for file in given {
-            if file.name.is_null() || file.text.is_null() {
-                return Z_ERR_NULL;
-            }
-            let (Some(name), Some(text)) = (utf8_arg(file.name), utf8_arg(file.text)) else {
-                return Z_EINVAL;
-            };
-            proto.push(ProtoFile {
-                name,
-                text: text.as_bytes(),
-            });
-        }
         let Some(description) = utf8_arg(description) else {
             return Z_EINVAL;
         };

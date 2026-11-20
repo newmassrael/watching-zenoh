@@ -183,11 +183,13 @@ pub mod decl_watch;
 #[cfg(feature = "unstable-api")]
 pub mod device_requires;
 // End-to-end protection of an application's payload: what the sending and the receiving doors
-// share, and the instance keys' doors with them, in a build with any of the three capabilities.
+// share, and the instance keys' and the message payloads' doors with them, in a build with any of
+// the four capabilities.
 #[cfg(any(
     feature = "e2e-sender",
     feature = "e2e-receiver",
-    feature = "instance-key"
+    feature = "instance-key",
+    feature = "message-payload"
 ))]
 mod e2e;
 // The receiving judge of end-to-end protected frames: wz doors (`wz_ext.h`) of the unstable
@@ -235,9 +237,17 @@ pub mod matching;
 // unstable surface, over the reader of `wz-app-frame`.
 #[cfg(feature = "message-catalog")]
 pub mod message_catalog;
+// A catalog message's payload set and read field by field under the program's `.proto` files:
+// wz doors (`wz_ext.h`) of the unstable surface, over the message payload of `wz-app-frame`.
+#[cfg(feature = "message-payload")]
+pub mod message_payload;
 mod option_fields;
 mod os;
 pub mod platform;
+// One `.proto` file as a program hands it over (`wz_ext_proto_file_t`, `wz_ext.h`), for the doors
+// that read a schema: the instance keys' and the message payloads'.
+#[cfg(any(feature = "instance-key", feature = "message-payload"))]
+pub mod proto_file;
 pub mod pubsub;
 pub mod qos;
 #[cfg(feature = "query")]

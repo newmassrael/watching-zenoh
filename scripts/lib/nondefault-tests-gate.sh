@@ -437,6 +437,12 @@ transport-link-unixpipe,transport-link-ws|"
     "wz-capi-pico|hook|message-catalog|--test=message_catalog_doors"
     "wz-capi-pico|hook|message-catalog,e2e-sender,e2e-receiver,e2e-supervision|--test=message_catalog_doors"
     "wz-capi-pico|hook|message-catalog,e2e-sender,e2e-sender-demux|--test=message_catalog_doors"
+    # A catalog message's payload driven from C (`wz_ext_payload_schema_*`,
+    # `wz_ext_message_payload_*`): the file that makes a schema and a payload, sets, encodes,
+    # decodes and reads back, and refuses each misuse by its own code (`message_payload_doors`,
+    # whose module is behind the feature). The payload's own tests are `wz-app-frame`'s, a leg
+    # below.
+    "wz-capi-pico|hook|message-payload|--test=message_payload_doors"
     # Instance keys (`wz_app_frame::instance_key`): the model tests of the keyer, its last values
     # and its two stream doors, with the tests of the schema reader's tokenizer and parser, which
     # moved to this crate with the reader and compile only with `proto` (which this implies).
