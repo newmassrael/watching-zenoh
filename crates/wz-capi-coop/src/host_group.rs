@@ -23,10 +23,11 @@ use std::io;
 use std::net::{SocketAddr, UdpSocket};
 
 use wz_host_net::multicast::{
-    bind_joined, bind_sender, mark_traffic_class, wait_writable, Loopback, RxBind, SocketConfig,
+    bind_joined, bind_sender, mark_traffic_class, raw_handle, wait_readable, wait_writable,
+    Loopback, RxBind, SocketConfig,
 };
 use wz_runtime_coop::group_transport::{GroupJoiner, GroupSend, GroupTransport};
-use wz_runtime_coop::session_drive::{LinkOpenError, LinkWritability};
+use wz_runtime_coop::session_drive::{LinkOpenError, LinkReadiness, LinkWritability};
 use wz_runtime_coop::udp_link::UDP_RX_CAPACITY;
 use wz_session_core::locator::{parse_locator, ParsedLocator, Proto};
 use wz_session_core::policy::{MulticastLoopback, SessionPolicy};
@@ -164,6 +165,38 @@ impl LinkWritability for SendRoom {
     }
 }
 
+/// The joined socket's input waited for by a thread other than the session's: a handle of its own
+/// to the socket, as [`SendRoom`] is to the send socket, which the platform's wait names by its
+/// descriptor beside the session's other links.
+struct GroupInput(UdpSocket);
+
+impl LinkReadiness for GroupInput {
+    fn wait_readable(&self, timeout_ms: u32) {
+        if let Some(handle) = self.handle() {
+            wait_readable(&[handle], timeout_ms);
+        }
+    }
+
+    fn handle(&self) -> Option<usize> {
+        raw_handle(&self.0)
+    }
+
+    #[cfg(target_has_atomic = "ptr")]
+    fn wait_readable_among(&self, others: &[std::sync::Arc<dyn LinkReadiness>], timeout_ms: u32) {
+        let mut handles = Vec::with_capacity(others.len() + 1);
+        handles.extend(self.handle());
+        for other in others {
+            match other.handle() {
+                Some(handle) => handles.push(handle),
+                // A wait this cannot name to the platform: the bounded look, so it is not starved
+                // behind a wait on the others.
+                None => return self.wait_readable(timeout_ms.min(1)),
+            }
+        }
+        wait_readable(&handles, timeout_ms);
+    }
+}
+
 impl GroupTransport for HostGroupTransport {
     fn open(&mut self) -> bool {
         self.read.is_some() && self.write.is_some()
@@ -221,6 +254,14 @@ impl GroupTransport for HostGroupTransport {
     fn writability(&self) -> Option<Box<dyn LinkWritability>> {
         let socket = self.write.as_ref()?.try_clone().ok()?;
         Some(Box::new(SendRoom(socket)))
+    }
+
+    // The joined socket's input, on a platform that has a wait to name it to; a group that was
+    // left gives none.
+    fn readiness(&self) -> Option<Box<dyn LinkReadiness>> {
+        let socket = self.read.as_ref()?.try_clone().ok()?;
+        raw_handle(&socket)?;
+        Some(Box::new(GroupInput(socket)))
     }
 
     fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
@@ -332,6 +373,58 @@ mod tests {
             outside.wait_writable(1_000),
             "a wait made after the leave asks a socket still open"
         );
+    }
+
+    /// The joined socket's input is waited for from outside the session's loop: the wait is waited
+    /// out while nothing is queued and returns long before its time once a datagram is, whether it
+    /// waits on the group alone or beside another socket; a group that was left gives no wait. A
+    /// socket on a loopback port stands in for one joined to a group, which needs a multicast
+    /// route.
+    #[test]
+    fn the_joined_sockets_input_is_waited_for_from_outside_the_loop() {
+        use std::time::{Duration, Instant};
+        let read = UdpSocket::bind("127.0.0.1:0").expect("a joined socket");
+        let to = read.local_addr().expect("its port");
+        let peer = UdpSocket::bind("127.0.0.1:0").expect("a peer");
+        let other = UdpSocket::bind("127.0.0.1:0").expect("another link's socket");
+        let mut transport = HostGroupTransport {
+            read: Some(read),
+            write: None,
+            group: to,
+            rx: Vec::new(),
+            failed: false,
+        };
+        let ready = transport.readiness().expect("a wait from outside");
+        let started = Instant::now();
+        ready.wait_readable(50);
+        assert!(
+            started.elapsed() >= Duration::from_millis(40),
+            "nothing queued: {:?}",
+            started.elapsed()
+        );
+        let beside: std::sync::Arc<dyn LinkReadiness> = std::sync::Arc::new(GroupInput(other));
+        let started = Instant::now();
+        ready.wait_readable_among(&[std::sync::Arc::clone(&beside)], 50);
+        assert!(
+            started.elapsed() >= Duration::from_millis(40),
+            "nothing queued on either: {:?}",
+            started.elapsed()
+        );
+
+        peer.send_to(b"member", to).expect("sent");
+        let started = Instant::now();
+        ready.wait_readable_among(&[beside], 5_000);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "a datagram queued: {:?}",
+            started.elapsed()
+        );
+        let started = Instant::now();
+        ready.wait_readable(5_000);
+        assert!(started.elapsed() < Duration::from_secs(2));
+
+        transport.close();
+        assert!(transport.readiness().is_none(), "a group left gives none");
     }
 
     /// Two members of one group on this host: what one sends reaches the other, from the port of

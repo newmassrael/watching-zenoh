@@ -895,6 +895,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-mcu/src/dial.rs` | S5 | |
 | `crates/wz-session-mcu/src/get_mailbox.rs` | S5 | |
 | `crates/wz-session-mcu/src/group_drive.rs` | S5 | |
+| `crates/wz-session-mcu/src/group_drive/stage.rs` | S5 | |
 | `crates/wz-session-mcu/src/latest.rs` | S10 | |
 | `crates/wz-session-mcu/src/lib.rs` | S5, S10 | |
 | `crates/wz-session-mcu/src/memory.rs` | S5 | |

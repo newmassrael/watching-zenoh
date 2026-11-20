@@ -5,7 +5,7 @@
 //!
 //! A group's session is the session shell's (`wz_session_mcu::group_drive`), the one an MCU image
 //! runs, hosted as a task of the session's local set as each link's session is: its JOIN beacon,
-//! the members it admits, its lease sweep, the per-member order of what they send and the framing
+//! the members it admits, its lease sweep, the per-member order of what they send and the writing
 //! of what it sends are that session's, and every rule they follow is the session core's
 //! (`multicast_dispatch`, `multicast_rx`, `multicast_tx`). The dispatcher keeps each member's
 //! declarations apart from the moment it is built (`MulticastConfig::of_group`, the config the
@@ -13,10 +13,11 @@
 //! entities alike.
 //!
 //! What this module adds is the hosting: the group's tables in the session's registry, where what
-//! a member sends is dispatched as a peer's frames are; the queue the session puts its own
-//! messages on, which the group's task drains with the replies its dispatch stages; the members
-//! the group's JOINs admitted; and the stop the session's close asks for, after which the task
-//! tells the group it leaves.
+//! a member sends is dispatched as a peer's frames are; the stage the session pushes its own
+//! messages onto, framed and numbered as the tokio engine's group producer pushes them, beside the
+//! replies its dispatch stages, which the group's task writes from; the members the group's JOINs
+//! admitted; and the stop the session's close asks for, after which the task tells the group it
+//! leaves.
 
 use alloc::rc::Rc;
 use core::cell::{Cell, RefCell};
@@ -27,7 +28,7 @@ use alloc::sync::Arc;
 use wz_capi_port::group::{GroupDeclarations, GroupJoin};
 use wz_capi_port::{FanoutError, FilterId, FilterPlane, WireKey};
 use wz_runtime_coop::group_transport::{GroupSend, GroupTransport};
-use wz_runtime_coop::session_drive::LinkWritability;
+use wz_runtime_coop::session_drive::{LinkReadiness, LinkWritability};
 use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet};
 use wz_session_core::declare_build::{
     build_declare_kexpr, build_group_announcement, build_group_retraction, build_undeclare_kexpr,
@@ -35,7 +36,6 @@ use wz_session_core::declare_build::{
 use wz_session_core::declare_form::{GroupDeclaration, GroupKey, RetractionKey};
 use wz_session_core::driver_loop::IterationEvent;
 use wz_session_core::interest_build::{build_interest_exact, build_interest_final, InterestKinds};
-use wz_session_core::link::LinkRoom;
 use wz_session_core::locality::Locality;
 use wz_session_core::metadata::PushMetadata;
 use wz_session_core::multicast_dispatch::MulticastConfig;
@@ -44,15 +44,16 @@ use wz_session_core::multicast_params::{MulticastOutcome, MulticastParams};
 use wz_session_core::multicast_reply_sink::{
     asks_for_declarations, GroupKeyexprAnswers, MulticastReplyEnqueue, MulticastReplySink,
 };
-use wz_session_core::multicast_tx::{multicast_tx_droppable, MulticastTxItem};
+use wz_session_core::multicast_tx::MulticastTxItem;
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::push_build;
 use wz_session_core::qos::Priority;
 use wz_session_core::sample::SampleKind;
-use wz_session_core::tx_deadline::{PushDeadline, PushOutcome};
+use wz_session_core::tx_deadline::PushOutcome;
 use wz_session_core::wire_id::{EntityId, ExprId};
 use wz_session_mcu::group_drive::{
-    spawn_multicast_session_seeded, JoinAsk, MulticastReplyQueue, MulticastSessionSeed,
+    spawn_multicast_session_seeded, GroupDue, GroupTxPace, GroupTxStage, JoinAsk,
+    MulticastSessionSeed,
 };
 #[cfg(feature = "connectivity")]
 use {
@@ -77,13 +78,14 @@ use super::registry::{FaceId, Registry};
 /// face starts from the same count of rows and grows past it, and zenoh-pico states no cap.
 pub(super) const GROUP_MEMBERS: usize = 32;
 
-/// How often a group's task looks at its beacon, its lease sweep and its stop when nothing
-/// arrives, in milliseconds, and so the longest a read waits while the session holds a group: the
-/// tick of the tokio engine's group face, shorter than any beacon interval an ABI advertises.
+/// The tick of a group's lease sweep, in milliseconds, which its task is due on while it holds a
+/// member (and while its socket holds back a datagram), and the longest a read waits for a group
+/// whose stack gives no wait for its input: the tick of the tokio engine's group face, shorter
+/// than any beacon interval an ABI advertises.
 pub(super) const GROUP_TICK_MS: u32 = 50;
 
-/// What a group's dispatch hands what it staged to: the group's queue, which its task drains.
-pub(super) type GroupReplies = MulticastReplySink<MulticastReplyQueue>;
+/// What a group's dispatch hands what it staged to: the group's stage, which its task writes.
+pub(super) type GroupReplies = MulticastReplySink<GroupTxStage>;
 
 /// How the session reports a member of a group as a transport of its own: the group's locator,
 /// which this node's end of the member's link is labelled by too (the address the program's stack
@@ -183,6 +185,10 @@ impl GroupTransport for Watched {
         self.inner.writability()
     }
 
+    fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
+        self.inner.readiness()
+    }
+
     fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
         let took = self.inner.recv_with(f);
         if took {
@@ -192,7 +198,7 @@ impl GroupTransport for Watched {
     }
 }
 
-/// What a message of the session waits with when the group's queue has no room for it: a pass of
+/// What a message of the session waits with when the group's stage has no room for it: a pass of
 /// the session's tasks, in which the group's own task writes what the group's socket takes, and
 /// the session's clock, which the wait is spent on.
 pub(super) trait Pace {
@@ -244,15 +250,19 @@ pub(super) struct GroupFace {
     task: Option<CoopLocalJoinHandle<MulticastOutcome>>,
     /// When the group, whose session ended on its own, is joined again.
     rejoin_at_us: Option<u64>,
-    /// The group's queue, bounded by its lanes, which its task drains.
-    tx: MulticastReplyQueue,
-    /// The group's parameters: its lanes, and the waits a message of the session spends on them.
-    params: MulticastParams,
-    /// What a message of the session waits with on a full queue ([`Self::push`]).
+    /// The group's stage, which the session's messages and the group's replies are pushed onto,
+    /// framed and numbered, and which its task writes.
+    tx: GroupTxStage,
+    /// What a message of the session waits with on a full lane ([`Self::push`]).
     pace: Rc<dyn Pace>,
     /// The group socket's wait for room, asked from outside its task; `None` for a stack that
     /// gives none.
     room: Option<Arc<dyn LinkWritability>>,
+    /// The group socket's wait for input, which a read waits on beside the session's links;
+    /// `None` for a stack that gives none, whose group is looked at on its tick.
+    input: Option<Arc<dyn LinkReadiness>>,
+    /// When the group's session is next due with nothing arriving on it, as its last step said.
+    due: GroupDue,
     members: Rc<RefCell<Vec<MulticastMember>>>,
     took: Rc<Cell<bool>>,
     stop: Rc<Cell<bool>>,
@@ -312,9 +322,10 @@ impl GroupFace {
         });
         // Bounded as the tokio engine bounds its group's pipeline: the queue's sizes, in batches
         // of the group's batch, one lane when it runs no QoS.
-        let tx = MulticastReplyQueue::bounded(&params);
-        let tx_params = params.clone();
+        let tx = GroupTxStage::new(&params);
         let room = transport.writability().map(Arc::from);
+        let input = transport.readiness().map(Arc::from);
+        let due = GroupDue::default();
         let members: Rc<RefCell<Vec<MulticastMember>>> = Rc::new(RefCell::new(Vec::new()));
         let took = Rc::new(Cell::new(false));
         let stop = Rc::new(Cell::new(false));
@@ -332,7 +343,9 @@ impl GroupFace {
             policy,
             u64::from(GROUP_TICK_MS),
         )
-        .with_join_ask(join_ask.clone());
+        .with_join_ask(join_ask.clone())
+        .with_tx_stage(tx.clone())
+        .with_due(due.clone());
         let keyexprs = Rc::new(RefCell::new(GroupKeyexprAnswers::default()));
         let on_event = answering_asks(
             noting_members(
@@ -347,15 +360,13 @@ impl GroupFace {
             tx.clone(),
         );
         let keyexpr_ask_owed = Cell::new(join.declarations.declares_keyexprs());
-        let next_tx = {
-            let tx = tx.clone();
-            move || tx.pop()
-        };
         let should_stop = {
             let stop = Rc::clone(&stop);
             move || stop.get()
         };
-        let task = spawn_multicast_session_seeded(local, seed, on_event, next_tx, should_stop);
+        // Everything the group sends is pushed onto its stage, which the task writes from: the
+        // task's pull seam yields nothing.
+        let task = spawn_multicast_session_seeded(local, seed, on_event, || None, should_stop);
         Self {
             id,
             join,
@@ -368,9 +379,10 @@ impl GroupFace {
             #[cfg(feature = "query")]
             next_request: Cell::new(0),
             tx,
-            params: tx_params,
             pace,
             room,
+            input,
+            due,
             members,
             took,
             stop,
@@ -384,50 +396,20 @@ impl GroupFace {
         }
     }
 
-    /// Put `item`, a message of the session, on the group's queue by the stage rule the tokio
-    /// engine's group follows (`MulticastTxProducer::push`): the lane of its conduit is asked for
-    /// room ([`MulticastReplyQueue::room_at_once`]) within the message's deadline, its
-    /// `wait_before_drop` when it may be dropped and its `wait_before_close` when it may not
-    /// ([`PushDeadline`]); while the lane is full, the session's tasks are run, in which the
-    /// group's own writes what its socket takes, and the socket is waited on for room. A message
-    /// that finds none within its deadline is a congestion drop, counted on its lane, blocking or
-    /// not: a multicast transport closes nothing on one, where a unicast one closes its link
+    /// Push `item`, a message of the session, onto the group's stage as the tokio engine's group
+    /// producer pushes it (`MulticastTxProducer::push`), through the same session core walk
+    /// (`multicast_tx_push`, [`GroupTxStage::push`]): its lane is asked for room before its
+    /// sequence number is minted and again before each further fragment, within the message's
+    /// `wait_before_drop` when it may be dropped and its `wait_before_close` when it may not; while
+    /// the lane is full, the session's tasks are run, in which the group's own writes what its
+    /// socket takes, and the socket is waited on for room. A message that finds none is a
+    /// congestion drop, counted on its lane, blocking or not, and a chain that runs out of room
+    /// between two fragments is stopped by the drop marker: a multicast transport closes nothing on
+    /// one, where a unicast one closes its link
     /// (`io/zenoh-transport/src/multicast/tx.rs` @ `fn schedule_on_link(&self, msg: NetworkMessageRef) -> ZResult<bool> {`).
-    /// A group whose session ended takes nothing.
+    /// What is pushed while the group's session ends is lost with its link.
     fn push(&self, item: MulticastTxItem) -> PushOutcome {
-        let mut deadline = PushDeadline::new(
-            multicast_tx_droppable(&item, &self.params),
-            &self.params.tx_queue,
-        );
-        loop {
-            match self.tx.room_at_once(&item, deadline.ask()) {
-                Some(LinkRoom::Free) => {
-                    self.tx.enqueue_admitted(item);
-                    return PushOutcome::Pushed;
-                }
-                Some(LinkRoom::Congested | LinkRoom::Gone) => {
-                    self.tx.congestion_drop(&item);
-                    return PushOutcome::Congested;
-                }
-                None => {}
-            }
-            // Nothing drains the queue of a group whose session ended.
-            if self.has_ended() {
-                return PushOutcome::Congested;
-            }
-            let wait_us = deadline.ask().wait_us();
-            let started = self.pace.now_us();
-            self.pace.pass();
-            // Room the pass made is answered by the next ask; a socket that has none is waited on,
-            // and one that stays full spends the whole wait.
-            let room = self.tx.has_room(&item)
-                || match &self.room {
-                    Some(room) => room.wait_writable(wait_us),
-                    None => true,
-                };
-            let waited = self.pace.now_us().saturating_sub(started);
-            deadline.spend(if room { waited } else { waited.max(wait_us) });
-        }
+        self.tx.push(item, self)
     }
 
     /// The group socket's wait for room, which a message of the session that finds the session
@@ -470,7 +452,7 @@ impl GroupFace {
         self.generation == generation && !self.has_ended()
     }
 
-    /// The sink a member's query is answered through: the group's queue (`queryable`).
+    /// The sink a member's query is answered through: the group's stage (`queryable`).
     #[cfg(feature = "queryable")]
     pub(super) fn replies(&self) -> &GroupReplies {
         &self.replies
@@ -498,8 +480,8 @@ impl GroupFace {
     /// `meta` states. The key is named as a put on the group names it: by the declaration the
     /// group was told when it is told the session's keyexprs, and in full otherwise
     /// (`GroupDeclarations::key`). Built by the session core's request builder, as a link's
-    /// query is, and sent reliably by the group's task, as zenoh-pico sends one on its multicast
-    /// transport. `false` when the query cannot be built, and nothing is queued.
+    /// query is, and sent reliably on the group, as zenoh-pico sends one on its multicast
+    /// transport. `false` when the query cannot be built, and nothing is pushed.
     #[cfg(feature = "query")]
     pub(super) fn ask(
         &self,
@@ -581,6 +563,35 @@ impl GroupFace {
         self.took.replace(false)
     }
 
+    /// The wait for the group socket's next datagram, while the group's session runs and its stack
+    /// gives one.
+    pub(super) fn input(&self) -> Option<&Arc<dyn LinkReadiness>> {
+        if self.has_ended() {
+            return None;
+        }
+        self.input.as_ref()
+    }
+
+    /// Whether the group's session runs over a stack that gives no wait for its input, so that it
+    /// is looked at on its tick.
+    pub(super) fn unwaited(&self) -> bool {
+        !self.has_ended() && self.input.is_none()
+    }
+
+    /// When the group must next be looked at, on the session's clock in microseconds, with nothing
+    /// arriving on it: its session's next beacon or sweep, as its last step said, or at once when
+    /// it has not stepped yet, when it ended and its end is still to be read, or when the session
+    /// pushed onto its stage what its socket has room for, which only a step writes; once its end
+    /// was read, when it is joined again. `None`: nothing is due.
+    pub(super) fn due_us(&self) -> Option<u64> {
+        match &self.task {
+            Some(task) if task.is_finished() => Some(0),
+            Some(_) if !self.tx.is_empty() && !self.due.tx_held() => Some(0),
+            Some(_) => Some(self.due.due_us().unwrap_or(0)),
+            None => self.rejoin_at_us,
+        }
+    }
+
     /// Ask the group's session to stop: at its next step it tells the group it leaves and lets
     /// the group's link go.
     pub(super) fn stop(&self) {
@@ -617,7 +628,7 @@ impl GroupFace {
     /// Tell the group of `entity`, which the session declared, as the group's declarations say
     /// (the port's rules: `GroupDeclarations::announced_id`, `key`, `retraction_key`, the tokio
     /// engine's groups' too), the `Declare` built by the session core's builder
-    /// (`build_group_announcement`) and queued for the group's task. What a later retraction
+    /// (`build_group_announcement`) and pushed onto the group's stage. What a later retraction
     /// names is kept when the group is told retractions. Best effort, as a put on the group is:
     /// a key past the codec's bound is announced nowhere, and a group whose session ended is told
     /// nothing.
@@ -823,8 +834,8 @@ impl GroupFace {
     /// Put a publication on the group, naming its key by the declaration the group was told when
     /// it is told the session's keyexprs (`GroupDeclarations::declares_keyexprs`), and in full
     /// otherwise, as a group whose session tells it its entities, or less, is. Built by the session
-    /// core's Push builders, as a link's is, and framed by the group's task with the sequence
-    /// number of its channel. A group whose session ended is sent nothing.
+    /// core's Push builders, as a link's is, and framed with the sequence number of its channel as
+    /// it is pushed onto the group's stage. A group whose session ended is sent nothing.
     pub(super) fn publish(&self, put: GroupPut<'_>) -> Result<usize, FanoutError> {
         if self.has_ended() {
             return Ok(0);
@@ -859,6 +870,30 @@ impl GroupFace {
     }
 }
 
+/// A message of the session that waits for room on the group's stage runs the session's tasks, in
+/// which the group's own writes what its socket takes, waits on the group's socket, and spends the
+/// session's clock; a group whose session ended has nothing to wait for.
+impl GroupTxPace for GroupFace {
+    fn pass(&self) {
+        self.pace.pass();
+    }
+
+    fn now_us(&self) -> u64 {
+        self.pace.now_us()
+    }
+
+    fn wait_writable(&self, wait_us: u64) -> bool {
+        match &self.room {
+            Some(room) => room.wait_writable(wait_us),
+            None => true,
+        }
+    }
+
+    fn ended(&self) -> bool {
+        self.has_ended()
+    }
+}
+
 /// The `on_event` of a group's session, around `inner`: a member's interest in what is declared
 /// now asks the group for a JOIN first, as zenoh-pico pushes one (`asks_for_declarations`), and a
 /// member's ask for the session's keyexprs is answered ahead of the session's other declarations
@@ -867,7 +902,7 @@ fn answering_asks<E>(
     mut inner: E,
     keyexprs: Rc<RefCell<GroupKeyexprAnswers>>,
     join_ask: JoinAsk,
-    tx: MulticastReplyQueue,
+    tx: GroupTxStage,
 ) -> impl FnMut(IterationEvent<'_, '_>) + 'static
 where
     E: FnMut(IterationEvent<'_, '_>) + 'static,

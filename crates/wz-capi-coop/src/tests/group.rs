@@ -1116,3 +1116,388 @@ mod congested {
         SessionDrive::close(&*member);
     }
 }
+
+/// A put whose fragment chain finds its lane full part of the way: the session pushes a chain onto
+/// the group's stage fragment by fragment, as the tokio engine's group producer pushes it, so a
+/// chain whose lane stays full between two fragments is stopped by the drop marker, and the other
+/// member drops what it had of it; and each JOIN the member sends advertises the sequence number
+/// its socket takes next, not one numbered ahead of it.
+mod cut {
+    use std::sync::atomic::AtomicBool;
+
+    use wz_session_core::inbound::{parse_inbound, InboundFrame};
+    use wz_session_core::join_decode::decode_join;
+    use wz_session_core::qos::{CongestionControl, Priority};
+    use wz_session_core::session_init_params::TxQueueConf;
+
+    use super::*;
+
+    /// A payload whose put is a chain of several more fragments than a lane of one batch holds.
+    const LARGE: [u8; 12_000] = [0x6c; 12_000];
+    /// The group's batch, which every fragment of a chain fits.
+    const BATCH: usize = 2_048;
+
+    /// A member's stack whose group socket can be made full: while it is, the socket takes nothing
+    /// and answers would-block; otherwise it is the member's stack. It keeps each datagram it
+    /// takes, in order.
+    struct Gated {
+        stack: MemberStack,
+        full: Arc<AtomicBool>,
+        wire: Arc<Mutex<Vec<Vec<u8>>>>,
+        link: Arc<Mutex<Option<LinkHandle>>>,
+    }
+
+    impl AppPort for Gated {
+        fn open(&self, link: LinkHandle, kind: AppLinkKind, locator: &str) -> ProgramOpen {
+            let opened = self.stack.open(link, kind, locator);
+            if matches!(opened, ProgramOpen::Up) {
+                *self.link.lock().unwrap() = Some(link);
+            }
+            opened
+        }
+
+        fn send(&self, link: LinkHandle, bytes: &[u8]) -> ProgramSend {
+            if self.full.load(Ordering::SeqCst) {
+                return ProgramSend::WouldBlock;
+            }
+            self.wire.lock().unwrap().push(bytes.to_vec());
+            self.stack.send(link, bytes)
+        }
+
+        fn close(&self, link: LinkHandle) {
+            self.stack.close(link);
+        }
+    }
+
+    /// A member over a [`Gated`] stack, whose lanes hold one batch each.
+    struct GatedMember {
+        engine: Arc<Engine>,
+        transport: Arc<AppTransport>,
+        full: Arc<AtomicBool>,
+        wire: Arc<Mutex<Vec<Vec<u8>>>>,
+        link: Arc<Mutex<Option<LinkHandle>>>,
+    }
+
+    impl GatedMember {
+        fn open(network: &Arc<Network>, member: u8) -> Self {
+            let own = Arc::new(Mutex::new(Weak::new()));
+            let full = Arc::new(AtomicBool::new(false));
+            let wire = Arc::new(Mutex::new(Vec::new()));
+            let link = Arc::new(Mutex::new(None));
+            let transport = Arc::new(AppTransport::new(
+                Box::new(Table(Mutex::new(AppLinkTable::new()))),
+                Box::new(Gated {
+                    stack: MemberStack {
+                        network: Arc::clone(network),
+                        member,
+                        transport: Arc::clone(&own),
+                    },
+                    full: Arc::clone(&full),
+                    wire: Arc::clone(&wire),
+                    link: Arc::clone(&link),
+                }),
+            ));
+            *own.lock().unwrap() = Arc::downgrade(&transport);
+            let config = CoopConfig {
+                tx_queue: TxQueueConf {
+                    sizes: [1; Priority::NUM],
+                    wait_before_drop_us: 20_000,
+                    no_progress_us: None,
+                    ..client_config().tx_queue
+                },
+                ..member_config(member, GROUP)
+            };
+            let engine = Engine::open(
+                AppLinks::new(Arc::clone(&transport)),
+                PosixClock,
+                PosixEntropy,
+                config,
+            )
+            .expect("the member joins");
+            Self {
+                engine,
+                transport,
+                full,
+                wire,
+                link,
+            }
+        }
+
+        /// The stack takes datagrams again and says so.
+        fn writable(&self) {
+            self.full.store(false, Ordering::SeqCst);
+            let link = self.link.lock().unwrap().expect("the group was joined");
+            let _ = self.transport.event(link, ProgramEvent::Writable);
+        }
+    }
+
+    /// The sequence number of a datagram on the reliable channel: a frame's, or a fragment's.
+    fn reliable_sn(datagram: &[u8]) -> Option<u64> {
+        match parse_inbound(datagram) {
+            Ok(InboundFrame::Frame {
+                reliable: true, sn, ..
+            })
+            | Ok(InboundFrame::Fragment {
+                reliable: true, sn, ..
+            }) => Some(sn),
+            _ => None,
+        }
+    }
+
+    /// The first member's socket is full when it puts a chain: the first fragment is queued, the
+    /// group's writer takes it and finds no room, the second takes the room that made, and the
+    /// third finds the lane full for the whole of the put's wait, so the chain is cut with the
+    /// drop marker and the put counted as a congestion drop. Once the socket takes datagrams
+    /// again, the second member reads two fragments and the marker, and drops the chain: it hears
+    /// the put that follows and never the large one. Every JOIN the first sent advertises the
+    /// sequence number of the next reliable datagram its socket took, the one asked for while the
+    /// socket was full among them.
+    #[test]
+    fn a_chain_the_lane_has_no_room_for_is_cut_with_the_drop_marker_and_dropped() {
+        let network = Arc::new(Network::default());
+        let second = open_member(&network, 2, member_config(2, GROUP)).expect("the second joins");
+        SessionDrive::start_read_task(&*second).expect("the second's read task starts");
+        let heard = subscribe(&second, "demo/group/**");
+        // The first's JOIN at its open admits it at the second, which reads its frames from then.
+        let first = GatedMember::open(&network, 1);
+        eventually("the second to list the first", || {
+            second.group_member_zids() == [vec![1u8; 4]]
+        });
+
+        first.full.store(true, Ordering::SeqCst);
+        let sent = first.engine.publish_on_wire_all(
+            "demo/group/large",
+            &WireKey::literal(),
+            &LARGE,
+            &PublishOptions::put()
+                .with_locality(Locality::Remote)
+                .with_congestion_control(CongestionControl::Drop),
+        );
+        assert_eq!(sent, Ok(0), "a dropped put succeeds, as zenoh's does");
+        assert_eq!(
+            first.engine.group_congestion_drops(Priority::DEFAULT),
+            1,
+            "the chain found no room for a fragment"
+        );
+
+        // A JOIN asked while the socket is full waits for it, behind what the writer holds.
+        assert_eq!(first.engine.send_join_on_groups(), 1);
+        first.writable();
+        put(&first.engine, "demo/group/small", b"after-the-cut");
+        SessionDrive::start_read_task(&*first.engine).expect("the first's read task starts");
+        eventually("the second to hear the put after the cut", || {
+            heard
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|payload| payload == b"after-the-cut")
+        });
+        assert!(
+            !heard
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|payload| payload.len() == LARGE.len()),
+            "the second dropped the chain that was cut"
+        );
+        SessionDrive::close(&*first.engine);
+        SessionDrive::close(&*second);
+
+        let wire = first.wire.lock().unwrap().clone();
+        // The chain as the socket took it: fragments that say more follows, then the marker.
+        let fragments: Vec<(u64, bool, bool)> = wire
+            .iter()
+            .filter_map(|datagram| match parse_inbound(datagram) {
+                Ok(InboundFrame::Fragment {
+                    sn, more, markers, ..
+                }) => Some((sn, more, markers.dropped)),
+                _ => None,
+            })
+            .collect();
+        let (marker, run) = fragments
+            .split_last()
+            .expect("the chain's fragments were sent");
+        assert!(
+            marker.2 && marker.1,
+            "the chain ends with the drop marker: {fragments:?}"
+        );
+        assert!(
+            !run.is_empty() && run.iter().all(|(_, more, dropped)| *more && !*dropped),
+            "{fragments:?}"
+        );
+        assert!(
+            run.len() < LARGE.len() / BATCH,
+            "the chain was cut, not sent whole: {fragments:?}"
+        );
+        assert!(
+            fragments.windows(2).all(|pair| pair[1].0 == pair[0].0 + 1),
+            "one sequence number after another, the marker's too: {fragments:?}"
+        );
+
+        let mut joins = 0;
+        for (at, datagram) in wire.iter().enumerate() {
+            let Some(join) = decode_join(datagram) else {
+                continue;
+            };
+            if let Some(next) = wire[at + 1..]
+                .iter()
+                .find_map(|later| reliable_sn(later.as_slice()))
+            {
+                assert_eq!(
+                    join.next_sn_reliable, next,
+                    "the JOIN at {at} advertises the next reliable datagram written"
+                );
+                joins += 1;
+            }
+        }
+        assert!(
+            joins >= 2,
+            "the JOIN of the open and the one asked during the cut: {joins}"
+        );
+    }
+}
+
+/// What wakes a read of a session that holds a group: the group's next datagram, which the read
+/// waits on beside the session's links, and the group's session being due with nothing arriving,
+/// and nothing else.
+mod woken {
+    use wz_runtime_coop::ClockSource;
+
+    use super::*;
+
+    /// A clock that stands still, far from where it started.
+    #[derive(Clone)]
+    struct Stopped;
+
+    impl ClockSource for Stopped {
+        fn now_us(&self) -> u64 {
+            1_000_000_000_000
+        }
+    }
+
+    /// A member's stack alone on the group: it joins [`GROUP`] and keeps each datagram its session
+    /// sends; what the members send is what the test hands in.
+    #[derive(Default)]
+    struct Alone {
+        sent: Mutex<Vec<Vec<u8>>>,
+        link: Mutex<Option<LinkHandle>>,
+    }
+
+    struct AlonePort(Arc<Alone>);
+
+    impl AppPort for AlonePort {
+        fn open(&self, link: LinkHandle, kind: AppLinkKind, locator: &str) -> ProgramOpen {
+            if kind != AppLinkKind::Group || locator != GROUP {
+                return ProgramOpen::Refused;
+            }
+            *self.0.link.lock().unwrap() = Some(link);
+            ProgramOpen::Up
+        }
+
+        fn send(&self, _link: LinkHandle, bytes: &[u8]) -> ProgramSend {
+            self.0.sent.lock().unwrap().push(bytes.to_vec());
+            ProgramSend::Wrote(bytes.len())
+        }
+
+        fn close(&self, _link: LinkHandle) {}
+    }
+
+    /// A member whose beacon is due a minute after its open and whose read waits at most
+    /// `idle_wait_ms` for input, alone on the group over a stack of its own, on `clock`.
+    fn open_alone<C: ClockSource + Clone + 'static>(
+        clock: C,
+        idle_wait_ms: u32,
+    ) -> (Arc<CoopEngine<AppLinks, C>>, Arc<Alone>, Arc<AppTransport>) {
+        let mut config = member_config(1, GROUP);
+        config.groups[0].profile.lease_ms = 180_000;
+        config.groups[0].profile.join_interval_ms = 60_000;
+        config.idle_wait_ms = idle_wait_ms;
+        let stack = Arc::new(Alone::default());
+        let transport = Arc::new(AppTransport::new(
+            Box::new(Table(Mutex::new(AppLinkTable::new()))),
+            Box::new(AlonePort(Arc::clone(&stack))),
+        ));
+        let engine = CoopEngine::open(
+            AppLinks::new(Arc::clone(&transport)),
+            clock,
+            PosixEntropy,
+            config,
+        )
+        .expect("the member joins");
+        (engine, stack, transport)
+    }
+
+    /// With nothing arriving and a clock that does not move, each read waits its whole idle wait
+    /// on the group's socket and on the session's next beacon, which such a clock never reaches:
+    /// the reads do not spin.
+    #[test]
+    fn a_quiet_group_on_a_stopped_clock_is_not_read_without_end() {
+        let (member, _stack, _transport) = open_alone(Stopped, 100);
+        let started = Instant::now();
+        let mut reads = 0usize;
+        while started.elapsed() < Duration::from_millis(600) {
+            SessionDrive::read(&*member, false).expect("the session is open");
+            reads += 1;
+        }
+        assert!(reads <= 20, "{reads} reads in 600 ms: a read did not wait");
+        SessionDrive::close(&*member);
+    }
+
+    /// A read with nothing due for five seconds waits on the group's socket: no tick ends it, and
+    /// the datagram handed in does, long before its wait is out.
+    #[test]
+    fn a_datagram_handed_in_wakes_a_read_that_waits_on_the_group() {
+        let (member, stack, transport) = open_alone(PosixClock, 5_000);
+        let link = stack.link.lock().unwrap().expect("the group was joined");
+        let reading = {
+            let member = Arc::clone(&member);
+            std::thread::spawn(move || {
+                SessionDrive::read(&*member, false).expect("the session is open");
+                Instant::now()
+            })
+        };
+        std::thread::sleep(Duration::from_millis(300));
+        let handed_in = Instant::now();
+        transport
+            .received(link, &[0u8; 4], Some(source(9).as_str()))
+            .expect("handed in");
+        let returned = reading.join().expect("the read");
+        assert!(
+            returned >= handed_in,
+            "the read returned {:?} before the datagram came",
+            handed_in.duration_since(returned)
+        );
+        assert!(
+            returned.duration_since(handed_in) < Duration::from_millis(2_500),
+            "woken by the datagram, not the end of its wait: {:?}",
+            returned.duration_since(handed_in)
+        );
+        SessionDrive::close(&*member);
+    }
+
+    /// A put the session pushed onto its group before a read is written by that read without
+    /// waiting: only a step of the group writes it, so it makes the group due at once.
+    #[test]
+    fn a_put_pushed_before_a_read_is_written_by_it_without_waiting() {
+        let (member, stack, _transport) = open_alone(PosixClock, 5_000);
+        let written = || {
+            stack
+                .sent
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|datagram| datagram.ends_with(b"pushed-before-the-read"))
+        };
+        put(&member, "demo/group/now", b"pushed-before-the-read");
+        assert!(!written(), "pushed, and not yet written");
+        let started = Instant::now();
+        SessionDrive::read(&*member, false).expect("the session is open");
+        assert!(
+            started.elapsed() < Duration::from_millis(2_500),
+            "the read waited {:?}",
+            started.elapsed()
+        );
+        assert!(written(), "the read wrote it");
+        SessionDrive::close(&*member);
+    }
+}
