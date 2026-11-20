@@ -42,8 +42,9 @@ use crate::result::{ZResult, Z_EINVAL, Z_ENETWORK, Z_ENULL, Z_OK};
 /// the ones it carries through [`session_handle`] and `Z_EUNAVAILABLE` to the rest
 /// ([`not_a_registry`]), so that a node is never taken for a handle that is not there.
 pub(crate) enum SessionHandle {
-    /// The registry of faces: it joins no two of the faces it holds.
-    Registry(SessionState),
+    /// The registry of faces: it joins no two of the faces it holds. Boxed, as the node is behind
+    /// its `Arc`: the handle is one pointer whatever the session's state grows to hold.
+    Registry(Box<SessionState>),
     /// A node that forwards between the faces it holds.
     #[cfg(feature = "router-node")]
     Node(std::sync::Arc<RouterState>),
@@ -574,7 +575,7 @@ pub(crate) unsafe fn open_session(
                 shm_keys.transport_optimization,
                 shm_keys.pool_size,
             ));
-            let h = Box::into_raw(Box::new(SessionHandle::Registry(state))) as Handle;
+            let h = Box::into_raw(Box::new(SessionHandle::Registry(Box::new(state)))) as Handle;
             unsafe { *this_ = z_owned_session_t::from_handle(h) };
             Z_OK
         }

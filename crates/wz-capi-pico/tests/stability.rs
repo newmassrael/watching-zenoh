@@ -1336,8 +1336,8 @@ unsafe fn declare_probe(session: &z_owned_session_t, tallies: &Tallies) -> Probe
 }
 
 /// Close a session (again, if it was), undeclare its probe and free it.
-unsafe fn release(held: Box<Held>) {
-    let Held { mut session, probe } = *held;
+unsafe fn release(held: Held) {
+    let Held { mut session, probe } = held;
     if let Some(mut probe) = probe {
         z_undeclare_subscriber(z_subscriber_move(&mut probe.subscriber));
         z_undeclare_queryable(z_queryable_move(&mut probe.queryable));
@@ -1631,8 +1631,8 @@ fn quiet_pair(shape: Shape, run: &Run, watch: &Watch, beat: &Beat) {
             Z_OK
         );
         beat.mark(Op::Teardown);
-        release(dialler);
-        release(listener);
+        release(*dialler);
+        release(*listener);
     }
     beat.mark(Op::Teardown);
     pipe.stop(teller);
@@ -1788,7 +1788,7 @@ fn chaos(storm: &Storm, seed: u64, beat: &Beat) {
         });
         beat.mark(Op::Release);
         if let Some(held) = slot.take() {
-            unsafe { release(held) };
+            unsafe { release(*held) };
         }
         beat.mark(Op::Open);
         match unsafe { open_side(&storm.pipe, side, &storm.tallies) } {
@@ -1884,7 +1884,7 @@ fn storm(shape: Shape, run: &Run, watch: &Watch, main: &Beat, beats: &[Arc<Beat>
             ));
         }
         if let Some(held) = storm.slots.dialling.take() {
-            release(held);
+            release(*held);
         }
         storm.slots.dialling.put(open_until(
             &pipe,
@@ -1925,7 +1925,7 @@ fn storm(shape: Shape, run: &Run, watch: &Watch, main: &Beat, beats: &[Arc<Beat>
     main.mark(Op::Teardown);
     for side in [Side::Dialling, Side::Listening] {
         if let Some(held) = storm.slots.of(side).take() {
-            unsafe { release(held) };
+            unsafe { release(*held) };
         }
     }
     pipe.stop(teller);

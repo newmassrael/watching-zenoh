@@ -395,8 +395,10 @@ pub(crate) struct QuerierDeclaration<'a> {
 /// One engine is selected by a feature of the build (decision D5). A build that selects none has no
 /// engine to open a session on, and its [`Session::open`] says so; the type is then empty.
 enum Engine {
+    /// Boxed, as the router is: the engine is one pointer whatever the session's state grows to
+    /// hold.
     #[cfg(feature = "engine-tokio")]
-    Tokio(wz_capi_core::drive::SessionState),
+    Tokio(Box<wz_capi_core::drive::SessionState>),
     /// A router node, which forwards between the sessions that dial it. What a program does
     /// through it is owed (the router session of `docs/zenoh-api-on-the-engine.md`), and each
     /// operation that is not carried says so by name.
@@ -793,7 +795,7 @@ impl Engine {
         let state = arguments
             .run()
             .map_err(|error| tokio_engine::open_error(error, scope))?;
-        Ok((Engine::Tokio(state), zid))
+        Ok((Engine::Tokio(Box::new(state)), zid))
     }
 
     fn is_closed(&self) -> bool {
