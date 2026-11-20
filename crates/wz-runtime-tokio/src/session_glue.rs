@@ -5136,6 +5136,80 @@ mod batch_tx_tests {
         );
         assert_eq!(frames, [1, 1, 1], "each message left as a frame of its own");
     }
+
+    /// On a link that pulls what the session stages, the caller's window asks the link for
+    /// nothing while it is open, and its stop asks the link to pull before the session hands a
+    /// frame over itself: the link can then write the window from the stopping thread, where a
+    /// frame handed over is queued for its writer. A put inside the window asking for a pull
+    /// is a flush of nothing, which on a real link stamps the link as just flushed and makes
+    /// the stop's frame wait for the writer.
+    #[test]
+    fn a_callers_window_asks_a_pulling_link_for_its_flush_at_the_stop_alone() {
+        let (actions, driver) = crate::test_fixtures::recording_actions();
+        actions.set_auto_batching(true);
+        actions.batch_start().expect("batch_start");
+        for payload in [b"one".as_slice(), b"two"] {
+            actions
+                .send_push_literal("home/batch", payload, true)
+                .expect("push");
+        }
+        assert_eq!(
+            driver.staged_requests(),
+            Vec::<usize>::new(),
+            "a put inside the caller's window asks the link for no pull"
+        );
+        assert_eq!(driver.frame_count(), 0, "the window holds both puts");
+        actions.batch_stop().expect("batch_stop");
+        assert_eq!(
+            driver.staged_requests(),
+            [0],
+            "the stop asked the link to pull once, before any frame was handed over"
+        );
+        assert_eq!(
+            driver.frame_count(),
+            1,
+            "what the link did not pull, the stop's own drain handed over as one frame"
+        );
+        let (_, messages) = decode_frame(&driver.frame_bytes(0));
+        assert_eq!(messages.len(), 2, "the frame carries both puts");
+    }
+
+    /// CONTROL for the test above: with only the link's window open, every put still asks the
+    /// link to pull, because the link's flush is what sends it.
+    #[test]
+    fn without_a_callers_window_each_put_asks_a_pulling_link_to_pull() {
+        let (actions, driver) = crate::test_fixtures::recording_actions();
+        actions.set_auto_batching(true);
+        for payload in [b"one".as_slice(), b"two"] {
+            actions
+                .send_push_literal("home/batch", payload, true)
+                .expect("push");
+        }
+        assert_eq!(
+            driver.staged_requests(),
+            [0, 0],
+            "each put asked the link to pull"
+        );
+        assert_eq!(driver.frame_count(), 0, "the link's window holds both puts");
+    }
+
+    /// A link that does not pull is asked for nothing by the caller's stop: the stop's drain is
+    /// how its window leaves, as it always was.
+    #[test]
+    fn a_callers_stop_asks_a_link_that_does_not_pull_for_nothing() {
+        let (actions, driver) = crate::test_fixtures::recording_actions();
+        actions.batch_start().expect("batch_start");
+        actions
+            .send_push_literal("home/batch", b"one", true)
+            .expect("push");
+        actions.batch_stop().expect("batch_stop");
+        assert_eq!(
+            driver.staged_requests(),
+            Vec::<usize>::new(),
+            "no pull was asked of a link that does not pull"
+        );
+        assert_eq!(driver.frame_count(), 1, "the stop's drain sent the window");
+    }
 }
 
 /// R2919 — every frame reaches the link seam carrying the priority its

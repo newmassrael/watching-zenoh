@@ -57,6 +57,9 @@ pub(crate) struct RecordingLinkDriver {
     /// Each time the session raised the link's fence ([`BoxedLinkDriver::tx_fence`]), the number
     /// of frames it had handed over by then.
     fences: Mutex<Vec<usize>>,
+    /// Each time the session asked the link to pull what it staged ([`BoxedLinkDriver::tx_staged`]),
+    /// the number of frames it had handed over by then. The recorder pulls nothing itself.
+    staged: Mutex<Vec<usize>>,
     /// R2943 — the link this recorder stands for, when a test needs one:
     /// egress selection reads a link's intrinsic reliability class off its
     /// kind. `None` (the default) is a driver that names no kind.
@@ -116,6 +119,20 @@ impl RecordingLinkDriver {
             .clone()
     }
 
+    /// The number of frames handed over at each request to pull what was staged, in order. Gated
+    /// like its consumers, the tests of the caller's batch window on a link that pulls.
+    #[cfg(all(
+        feature = "transport-batching",
+        feature = "codec-push",
+        feature = "codec-frame"
+    ))]
+    pub(crate) fn staged_requests(&self) -> Vec<usize> {
+        self.staged
+            .lock()
+            .expect("recording driver mutex poisoned")
+            .clone()
+    }
+
     /// Discard all recorded frames — lets a test ignore set-up emits (e.g. a
     /// register-time bootstrap flood) so a later `frame_count()` counts only
     /// the frames the operation under test produced. Gated like its consumers
@@ -149,6 +166,13 @@ impl BoxedLinkDriver for RecordingLinkDriver {
     fn tx_fence(&self) {
         let handed = self.frame_count();
         self.fences
+            .lock()
+            .expect("recording driver mutex poisoned")
+            .push(handed);
+    }
+    fn tx_staged(&self) {
+        let handed = self.frame_count();
+        self.staged
             .lock()
             .expect("recording driver mutex poisoned")
             .push(handed);
@@ -226,6 +250,7 @@ pub(crate) fn recording_driver_over(
     Arc::new(RecordingLinkDriver {
         frames: Mutex::new(Vec::new()),
         fences: Mutex::new(Vec::new()),
+        staged: Mutex::new(Vec::new()),
         subject: Some(wz_session_core::link::LinkSubject {
             kind: Some(kind),
             ..wz_session_core::link::LinkSubject::UNKNOWN
@@ -265,6 +290,7 @@ pub(crate) fn recording_driver() -> Arc<RecordingLinkDriver> {
     Arc::new(RecordingLinkDriver {
         frames: Mutex::new(Vec::new()),
         fences: Mutex::new(Vec::new()),
+        staged: Mutex::new(Vec::new()),
         subject: None,
         length_prefixed: false,
         best_effort_mtu: None,
@@ -281,6 +307,7 @@ pub(crate) fn recording_actions_length_prefixed(
     let driver = Arc::new(RecordingLinkDriver {
         frames: Mutex::new(Vec::new()),
         fences: Mutex::new(Vec::new()),
+        staged: Mutex::new(Vec::new()),
         subject: None,
         length_prefixed: true,
         best_effort_mtu: None,
@@ -301,6 +328,7 @@ pub(crate) fn recording_actions_with_datagram_companion(
     let driver = Arc::new(RecordingLinkDriver {
         frames: Mutex::new(Vec::new()),
         fences: Mutex::new(Vec::new()),
+        staged: Mutex::new(Vec::new()),
         subject: None,
         length_prefixed: true,
         best_effort_mtu: Some(best_effort_mtu),
@@ -376,19 +404,28 @@ pub(crate) fn refusing_actions(
     (actions, driver)
 }
 
-/// R2290 (open-debt item 626) — a link driver that answers ONE question per
-/// emitted frame: was the session's observer mutex LOCKABLE at the instant
-/// those bytes left?
+/// R2290 (open-debt item 626) — a link driver that answers, per emitted frame,
+/// whether the session's observer mutex was LOCKABLE at the instant those
+/// bytes left and, when it was, whether the entity under test was still in its
+/// registry; and, per ask for room, whether the observer was lockable then.
 ///
-/// A handle's teardown emits its wire retraction and then retires its local
-/// registry entry. Between those two the registry still holds an entity the
-/// peer has already been told is gone, and the drive thread's
-/// `drain_declare_replies` reads exactly those registries — under this same
-/// mutex — to answer a peer's Interest. So the pair has to be ONE transition,
-/// and "the retract was emitted while this thread held the observer mutex" is
-/// the property that says so. A same-thread `try_with` on the session's
+/// The drive thread's `drain_declare_replies` reads the subscriber and token
+/// registries under the observer mutex to answer a peer's Interest, so a
+/// retraction must not leave while the registry still holds what it retracts:
+/// a drain in that window would announce the entity after its retraction. The
+/// teardown therefore retires the entity first, under the observer, and emits
+/// the retraction after letting the observer go, because the emit may wait for
+/// room on a full link and nothing that waits for an event may hold the
+/// observer (the drive thread needs it to go on). "Emitted with the observer
+/// free and the entity already gone" is the property, and the room ask is
+/// where the wait would be. A same-thread `try_with` on the session's
 /// non-reentrant [`crate::sync::PlainMutex`] answers `None`, which is what
-/// makes `false` here mean "held" rather than "contended".
+/// makes "not lockable" mean "held by this thread" rather than "contended".
+///
+/// The room ask also waits on a condition variable for no time at all, as a
+/// full link's queue does for real: under the lock-order checker of a debug
+/// build that wait is refused when any lock but a conduit's is held, which is
+/// how the stability suite found the observer held across it.
 ///
 /// Deliberately a link driver rather than a probe wired into one handle: the
 /// retract reaches the wire the same way on every plane (subscriber, token,
@@ -408,14 +445,31 @@ pub(crate) fn refusing_actions(
     feature = "liveliness-token"
 ))]
 pub(crate) struct ObserverProbeLinkDriver {
-    /// The observer to probe, installed AFTER the session exists (a driver is
-    /// built before the session it belongs to). `None` = not yet armed, and an
-    /// unarmed frame records nothing, which is how set-up emits are kept out
-    /// of the population.
-    armed: Mutex<Option<Arc<crate::sync::PlainMutex<ApplicationLayerObserver>>>>,
-    /// One entry per frame emitted while armed: `true` = the observer mutex
-    /// was free, i.e. the emit was NOT inside the acquisition.
-    lockable: Mutex<Vec<bool>>,
+    /// The observer to probe and the question that says whether the entity under test is still
+    /// registered in it, installed AFTER the session exists (a driver is built before the session
+    /// it belongs to). `None` = not yet armed, and an unarmed frame records nothing, which is how
+    /// set-up emits are kept out of the population.
+    armed: Mutex<Option<ObserverProbe>>,
+    /// One entry per frame emitted while armed: `None` = the observer mutex was held (the emit
+    /// was inside the acquisition), `Some(registered)` = it was free, and whether the entity
+    /// under test was still registered at that instant.
+    emitted: Mutex<Vec<Option<bool>>>,
+    /// One entry per ask for room while armed: whether the observer mutex was free then.
+    room_asks: Mutex<Vec<bool>>,
+    /// The lock and the condition variable of the probe's own queue, which the ask for room
+    /// waits on for no time, as a full link's queue waits on its own.
+    room_lock: crate::sync::PlainMutex<()>,
+    room: crate::sync::PlainCondvar,
+}
+
+/// What [`ObserverProbeLinkDriver::arm`] installs.
+#[cfg(any(
+    all(feature = "declare-subscriber", feature = "declare-undeclare"),
+    feature = "liveliness-token"
+))]
+struct ObserverProbe {
+    observer: Arc<crate::sync::PlainMutex<ApplicationLayerObserver>>,
+    registered: Box<dyn Fn(&ApplicationLayerObserver) -> bool + Send + Sync>,
 }
 
 #[cfg(any(
@@ -423,15 +477,31 @@ pub(crate) struct ObserverProbeLinkDriver {
     feature = "liveliness-token"
 ))]
 impl ObserverProbeLinkDriver {
-    /// Start probing against `observer`. Call after the set-up emits so the
-    /// recorded population is exactly the frames under test.
-    pub(crate) fn arm(&self, observer: Arc<crate::sync::PlainMutex<ApplicationLayerObserver>>) {
-        *self.armed.lock().expect("probe arm mutex poisoned") = Some(observer);
+    /// Start probing against `observer`, reading whether the entity under test is still
+    /// registered with `registered`. Call after the set-up emits so the recorded population is
+    /// exactly the frames under test.
+    pub(crate) fn arm(
+        &self,
+        observer: Arc<crate::sync::PlainMutex<ApplicationLayerObserver>>,
+        registered: impl Fn(&ApplicationLayerObserver) -> bool + Send + Sync + 'static,
+    ) {
+        *self.armed.lock().expect("probe arm mutex poisoned") = Some(ObserverProbe {
+            observer,
+            registered: Box::new(registered),
+        });
     }
 
-    /// One flag per frame emitted since [`Self::arm`], in emit order.
-    pub(crate) fn lockable_flags(&self) -> Vec<bool> {
-        self.lockable
+    /// One entry per frame emitted since [`Self::arm`], in emit order (see `emitted`).
+    pub(crate) fn emits(&self) -> Vec<Option<bool>> {
+        self.emitted
+            .lock()
+            .expect("probe log mutex poisoned")
+            .clone()
+    }
+
+    /// One flag per ask for room since [`Self::arm`]: whether the observer was free.
+    pub(crate) fn room_asks(&self) -> Vec<bool> {
+        self.room_asks
             .lock()
             .expect("probe log mutex poisoned")
             .clone()
@@ -445,16 +515,39 @@ impl ObserverProbeLinkDriver {
 impl BoxedLinkDriver for ObserverProbeLinkDriver {
     fn send_blocking(&self, _bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
         let armed = self.armed.lock().expect("probe arm mutex poisoned");
-        if let Some(observer) = armed.as_ref() {
+        if let Some(probe) = armed.as_ref() {
             // The probe holds the observer only for the closure, so it never
             // holds it past the measurement.
-            let lockable = observer.try_with(|_| ()).is_some();
-            self.lockable
+            let seen = probe.observer.try_with(|obs| (probe.registered)(obs));
+            self.emitted
                 .lock()
                 .expect("probe log mutex poisoned")
-                .push(lockable);
+                .push(seen);
         }
         LinkSendOutcome::Sent
+    }
+    fn wait_for_room(
+        &self,
+        priority: wz_session_core::qos::Priority,
+        wait: wz_session_core::link::RoomWait,
+    ) -> wz_session_core::link::RoomAnswer {
+        let _ = (priority, wait);
+        {
+            let armed = self.armed.lock().expect("probe arm mutex poisoned");
+            if let Some(probe) = armed.as_ref() {
+                let free = probe.observer.try_with(|_| ()).is_some();
+                self.room_asks
+                    .lock()
+                    .expect("probe log mutex poisoned")
+                    .push(free);
+            }
+        }
+        let waited = self
+            .room
+            .wait_timeout(self.room_lock.guard(), std::time::Duration::ZERO)
+            .expect("never poisoned");
+        drop(waited);
+        wz_session_core::link::RoomAnswer::at_once(wz_session_core::link::LinkRoom::Free)
     }
     fn open_blocking(&self) {}
     fn close_blocking(&self) {}
@@ -470,7 +563,10 @@ impl BoxedLinkDriver for ObserverProbeLinkDriver {
 pub(crate) fn probing_actions() -> (Arc<SessionLinkActions>, Arc<ObserverProbeLinkDriver>) {
     let driver = Arc::new(ObserverProbeLinkDriver {
         armed: Mutex::new(None),
-        lockable: Mutex::new(Vec::new()),
+        emitted: Mutex::new(Vec::new()),
+        room_asks: Mutex::new(Vec::new()),
+        room_lock: crate::sync::PlainMutex::new(()),
+        room: crate::sync::PlainCondvar::new(),
     });
     let actions = new_session_actions(
         driver.clone(),

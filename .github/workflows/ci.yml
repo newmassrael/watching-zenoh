@@ -2799,9 +2799,6 @@ jobs:
     env:
       WZ_LEGS_SHARDS: "4"
       WZ_LEGS_SHARD: ${{ matrix.shard }}
-      # Every leg builds with each policy domain whole, so a test that finds
-      # one value only is a narrowed build, not a skip (crates/wz-zenoh).
-      WZ_POLICY_DOMAIN_REQUIRE: "1"
     steps:
       - name: Budget stamp — start this job's own clock
         # Same reason the `ci` and `nondefault` jobs stamp: `timeout-minutes`

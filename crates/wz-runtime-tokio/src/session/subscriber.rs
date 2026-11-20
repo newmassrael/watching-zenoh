@@ -442,8 +442,9 @@ impl<R: SessionRuntime> Subscriber<R> {
     /// lock-step by hand). Idempotent via `armed`: the first caller
     /// kills the deferred cell FIRST (suppressing a sample staged before
     /// this call but not yet drained, so the callback never observes a
-    /// post-undeclare sample) then unregisters the staging sink under
-    /// the observer lock and disarms; a second call is a no-op. Returns
+    /// post-undeclare sample), unregisters the staging sink under the
+    /// observer lock, and only then, with the lock let go, sends the
+    /// wire retraction; a second call is a no-op. Returns
     /// whether THIS call removed the registry entry. `unregister` is
     /// panic-free (boolean return), so the worst-case observable outcome
     /// on a corrupted observer is "id stays registered" — caller can
@@ -455,42 +456,44 @@ impl<R: SessionRuntime> Subscriber<R> {
         self.armed = false;
         self.cell.kill();
         // R311ou — emit the wire `Declare(UndeclSubscriber)` for a ROUTED
-        // subscriber BEFORE the local unregister, mirroring zenoh-pico's
-        // `_z_undeclare_subscriber` (`_z_send_undeclare` then
-        // `_z_unregister_subscription`, `vendor/zenoh-pico/src/net/primitives.c:300-307`).
+        // subscriber, as zenoh-pico's `_z_undeclare_subscriber` does
+        // (`_z_send_undeclare` and `_z_unregister_subscription`,
+        // `vendor/zenoh-pico/src/net/primitives.c:300-307`), after the local
+        // unregister for the reason below.
         // `Some` exactly when `declare_subscriber` announced this subscription
         // to the router; a session-local / multicast subscriber has `None` and
         // skips the wire emit, the same gating pico applies via
         // `_z_locality_allows_remote`. `take()` so a hypothetical second
         // teardown (already guarded by `armed`) cannot double-emit.
         //
-        // R2290 (open-debt item 626) — the emit and the local retirement are
-        // ONE transition, and the emit now happens INSIDE the observer
-        // acquisition below rather than before it. pico's order is preserved
-        // (send, then unregister); what is removed is the WINDOW between them,
-        // which on wz is not empty: the drive thread drains the staged
-        // interest-response chain under this same mutex and resolves each
-        // staged reply against `observer.subscribers`. A drain landing in that
-        // window read a table still holding this subscription and emitted a
-        // `Declare(DeclSubscriber)` for it — AFTER the `UndeclSubscriber` this
-        // call had already put on the wire. The peer then re-inserts the
-        // remote subscriber it was just told to drop, and its matching verdict
-        // is stuck `true` for the rest of the link's life. Measured as a 1-2%
-        // `wz-capi-pico::matching_multiface` failure delivering
-        // `[true, false, true, false]`.
+        // R2290 (open-debt item 626) — the subscription is RETIRED before its
+        // retraction leaves, and the retraction is emitted after the observer
+        // is let go. The drive thread drains the staged interest-response
+        // chain under the observer mutex and resolves each staged reply
+        // against `observer.subscribers`: a retraction that left while the
+        // table still held this subscription let a drain emit a
+        // `Declare(DeclSubscriber)` for it AFTER the `UndeclSubscriber`, and the
+        // peer re-inserted the remote subscriber it was just told to drop
+        // (measured as a 1-2% `wz-capi-pico::matching_multiface` failure
+        // delivering `[true, false, true, false]`). Retired first, a drain
+        // either ran before the retirement, and staged its declaration ahead
+        // of this retraction on the same Control conduit, or runs after it and
+        // finds nothing to announce.
         //
-        // Taken out of `self` FIRST so the closure captures a local rather
-        // than reborrowing `self` across `&self.observer`.
-        let mut retract = self.retraction.take();
+        // Not inside the observer acquisition: the emit asks the link for
+        // room and waits for it when the link is full, and a thread that waits
+        // for an event while it holds the observer stops the drive thread,
+        // which needs the observer to deliver anything at all. pico's order
+        // (send, then unregister, `vendor/zenoh-pico/src/net/primitives.c:300-307`)
+        // holds no lock across its send; what the reversed order changes is
+        // only that a sample arriving in between is not delivered, which the
+        // killed cell above already guarantees.
         let id = self.id;
         // R311de — observer access via R::with_mutex_mut closure form;
         // per-profile poison-recovery lives inside the runtime impl (AP:
         // PoisonError::into_inner; MCU: no poison concept under panic =
         // abort).
-        R::with_mutex_mut(&self.observer, |observer| {
-            if let Some(retract) = retract.as_mut() {
-                retract();
-            }
+        let removed = R::with_mutex_mut(&self.observer, |observer| {
             let removed = observer.subscribers.unregister(id);
             // R311y788 — the undeclare twin of the declare-side
             // re-evaluation (pico `_z_write_filter_ctx_remove_local_match`,
@@ -508,7 +511,11 @@ impl<R: SessionRuntime> Subscriber<R> {
                 });
             }
             removed
-        })
+        });
+        if let Some(mut retract) = self.retraction.take() {
+            retract();
+        }
+        removed
     }
 }
 
