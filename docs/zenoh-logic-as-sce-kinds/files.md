@@ -230,6 +230,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-pico/src/get.rs` | S7 | |
 | `crates/wz-capi-pico/src/get_to_peer.rs` | S7 | |
 | `crates/wz-capi-pico/src/handlers.rs` | S7 | |
+| `crates/wz-capi-pico/src/header_internals.rs` | S7 | |
 | `crates/wz-capi-pico/src/instance_key.rs` | S12 | |
 | `crates/wz-capi-pico/src/key_ids.rs` | S12 | |
 | `crates/wz-capi-pico/src/keyexpr.rs` | S7 | |
