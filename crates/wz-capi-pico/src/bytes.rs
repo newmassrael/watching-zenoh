@@ -467,7 +467,7 @@ fn box_bytes(buf: ByteBuf) -> Option<*mut ByteBuf> {
 /// Place `buf` in a slot of its own; `None` when the pool of payloads is full.
 #[cfg(feature = "object-pool")]
 fn box_bytes(buf: ByteBuf) -> Option<*mut ByteBuf> {
-    crate::object_slot::Slot::take().map(|slot| slot.fill(buf))
+    crate::object_slot::Slot::take(crate::object_slot::Kind::Bytes).map(|slot| slot.fill(buf))
 }
 
 /// Take the payload out of a place made by [`box_bytes`] (or by `Box::new`: the two have the same

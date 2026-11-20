@@ -376,7 +376,7 @@ unsafe fn clone_sample_marshal(src: *const z_loaned_sample_t) -> Result<*mut c_v
         return Err(crate::result::Z_ERR_GENERIC);
     }
     let marshal = &*(src as *const SampleMarshal);
-    let Some(slot) = crate::object_slot::Slot::take() else {
+    let Some(slot) = crate::object_slot::Slot::take(crate::object_slot::Kind::Sample) else {
         return Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY);
     };
     let owned = slot.fill(marshal.deep_copy());
@@ -2210,7 +2210,7 @@ pub unsafe extern "C" fn z_declare_publisher(
         };
         // The publisher's place is taken before it is declared, so a full pool refuses the
         // declaration and nothing is declared.
-        let Some(slot) = crate::object_slot::Slot::take() else {
+        let Some(slot) = crate::object_slot::Slot::take(crate::object_slot::Kind::Publisher) else {
             return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
         };
         let core = match PlainPublisher::declare(
@@ -2459,7 +2459,8 @@ pub unsafe extern "C" fn z_declare_subscriber(
         }
         // The subscriber's place is taken before anything is declared, so a full pool refuses
         // the declaration and declares nothing; the closure runs its drop as on every refusal.
-        let Some(slot) = crate::object_slot::Slot::take() else {
+        let Some(slot) = crate::object_slot::Slot::take(crate::object_slot::Kind::Subscriber)
+        else {
             return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
         };
 

@@ -7,7 +7,7 @@
 //! Each such object is placed with [`Slot::take`] and [`Slot::fill`], and let go with [`release`].
 //! Without the `object-pool` capability a slot is the heap's: the same allocation the `Box` it
 //! replaces made, so a build without the capability is the build it was. With it, a slot comes from
-//! the fixed pool the program reserved for the object's size (`crate::object_pool`), and a pool
+//! the fixed pool the program reserved for the object's kind (`crate::object_pool`), and a pool
 //! with no room refuses the object; the call that wanted it answers `_Z_ERR_SYSTEM_OUT_OF_MEMORY`
 //! and has declared or opened nothing, because each caller takes its slot before it does either.
 //!
@@ -21,16 +21,42 @@ use core::ptr::NonNull;
 
 use crate::prelude::*;
 
+/// Which object a place is for. With the pools reserved each kind has a pool of its own, so the
+/// count the program stated for one kind is never spent by another of the same size; a kind a
+/// build has none of is not a variant of it, and each keeps its number in every build.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Kind {
+    Session = 0,
+    Publisher = 1,
+    Subscriber = 2,
+    #[cfg(feature = "queryable")]
+    Queryable = 3,
+    #[cfg(feature = "liveliness")]
+    LivelinessToken = 4,
+    #[cfg(feature = "liveliness")]
+    LivelinessSubscriber = 5,
+    Sample = 6,
+    #[cfg(feature = "query")]
+    Reply = 7,
+    #[cfg(feature = "queryable")]
+    Query = 8,
+    Bytes = 9,
+}
+
 /// The place of one `T`, taken and not yet filled. Dropped unfilled, it is given back.
 pub(crate) struct Slot<T> {
     place: NonNull<MaybeUninit<T>>,
 }
 
 impl<T> Slot<T> {
-    /// A place for one `T`, or `None` when the pool the program reserved for its size is full.
-    pub(crate) fn take() -> Option<Self> {
+    /// A place for one `T` of `kind`, or `None` when the pool the program reserved for that kind
+    /// is full.
+    pub(crate) fn take(kind: Kind) -> Option<Self> {
+        // Without the pools every place is the heap's, whatever its kind.
+        #[cfg(not(feature = "object-pool"))]
+        let _ = kind;
         #[cfg(feature = "object-pool")]
-        match crate::object_pool::take::<T>() {
+        match crate::object_pool::take::<T>(kind) {
             crate::object_pool::Taken::Pooled(place) => {
                 return Some(Self {
                     place: place.cast(),
@@ -115,7 +141,7 @@ mod tests {
     #[test]
     fn a_filled_slot_holds_its_value_and_a_release_drops_it_once() {
         let drops = core::cell::Cell::new(0);
-        let object = Slot::take()
+        let object = Slot::take(Kind::Sample)
             .expect("the heap has room")
             .fill(Counted(&drops));
         assert_eq!(drops.get(), 0, "filling drops nothing");

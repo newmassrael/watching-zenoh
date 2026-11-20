@@ -445,7 +445,7 @@ time-base = [
     "wz-capi-core?/time-base",
     "wz-capi-coop?/time-base",
 ]
-# `object-pool`: fixed pools, one per slot size, that the objects behind the owned handles (a
+# `object-pool`: fixed pools, one per kind of object, that the objects behind the owned handles (a
 # session, a publisher, a subscriber, a queryable, a liveliness token, an owned sample, reply or
 # query, a payload) are taken from in place of the heap once the program reserves them
 # (`wz_ext_object_pool_*`), each count held to the bound of the session limit that bounds the

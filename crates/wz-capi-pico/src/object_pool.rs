@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! `wz_ext_object_pool_*`: fixed pools, one per slot size, that the objects behind this ABI's
-//! owned handles are taken from in place of the heap, so that a program which reserved them makes
+//! `wz_ext_object_pool_*`: fixed pools, one per kind of object, that the objects behind this
+//! ABI's owned handles are taken from in place of the heap, so that a program which reserved them makes
 //! no allocation for them while it runs: its sessions, publishers, subscribers, queryables,
 //! liveliness tokens and liveliness subscribers, and the samples, replies, queries and payloads it
 //! holds.
@@ -33,7 +33,11 @@
 //!
 //! # Running
 //!
-//! An object takes the smallest slot that holds it. A pool with no free slot refuses the object:
+//! Each kind of object has a pool of its own, of as many slots as its count, each the smallest
+//! slot size that holds the object: the pool of one kind never lends a slot to another, so each
+//! holds what the program stated for it and no more, whatever another kind of the same size has
+//! free. The pools are reported by slot size (`wz_ext_object_pool_class`), the kinds of one size
+//! together. A pool with no free slot refuses the object:
 //! the call answers `_Z_ERR_SYSTEM_OUT_OF_MEMORY` having declared or opened nothing, and the
 //! refusal is counted (`wz_ext_object_pool_class`). Once the pools are reserved nothing falls back
 //! to the heap. An object let go frees its slot for the next one. Before the reservation the
@@ -59,12 +63,13 @@ use wz_capi_port::sync::Lock;
 use wz_session_core::limits::SessionLimits;
 
 use crate::ffi::guarded;
+use crate::object_slot::Kind;
 use crate::result::{
     ZResult, Z_EINVAL, Z_ERR_CONFIG_INVALID_VALUE, Z_ERR_NULL, Z_ERR_SYSTEM_OUT_OF_MEMORY, Z_OK,
 };
 
-/// How many pools there are: one per slot size, the smallest 16 bytes and each one twice the one
-/// before, up to 16 KiB.
+/// How many slot sizes there are, the smallest 16 bytes and each one twice the one before, up to
+/// 16 KiB: the classes the pools are reported by.
 pub const WZ_EXT_OBJECT_POOL_CLASSES: usize = 11;
 
 /// The slots of the smallest pool, in bytes.
@@ -105,7 +110,8 @@ pub struct wz_ext_object_pool_counts_t {
     pub bytes: usize,
 }
 
-/// One pool as `wz_ext_object_pool_class` reports it.
+/// The pools of one slot size, the kinds of that size together, as `wz_ext_object_pool_class`
+/// reports them.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct wz_ext_object_pool_class_t {
@@ -121,13 +127,13 @@ pub struct wz_ext_object_pool_class_t {
     pub refused: usize,
 }
 
-/// The bytes of each slot of pool `class`.
+/// The bytes of each slot of size class `class`.
 const fn slot_bytes(class: usize) -> usize {
     SMALLEST_SLOT << class
 }
 
-/// The pool an object of `size` bytes aligned to `align` takes its slot from: the smallest whose
-/// slot holds it, or none.
+/// The size class of an object of `size` bytes aligned to `align`: the smallest slot that holds
+/// it, or none.
 const fn class_of(size: usize, align: usize) -> Option<usize> {
     if align > SLOT_ALIGN {
         return None;
@@ -142,7 +148,7 @@ const fn class_of(size: usize, align: usize) -> Option<usize> {
     None
 }
 
-/// The pool of a `T`. Evaluated when the build is compiled, so an object no slot holds fails the
+/// The size class of a `T`. Evaluated when the build is compiled, so an object no slot holds fails the
 /// build rather than a reservation.
 const fn class_for<T>() -> usize {
     match class_of(core::mem::size_of::<T>(), core::mem::align_of::<T>()) {
@@ -240,33 +246,42 @@ pub(crate) fn resolve(
     })
 }
 
-/// How many slots each pool has.
+/// How many kinds of object have a pool: the variants of `Kind`, those a build has none of
+/// included, so each keeps its index in every build.
+const KINDS: usize = 10;
+
+/// Each kind's pool: its slots, and the size class of its object.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Plan {
-    slots: [usize; WZ_EXT_OBJECT_POOL_CLASSES],
+    slots: [usize; KINDS],
+    classes: [usize; KINDS],
 }
 
 impl Plan {
-    /// The slots `objects` take, each object in the pool of its size.
+    /// The pools `objects` make: one per kind, each slot of the size class of that kind's object.
     pub(crate) fn of(objects: &wz_ext_object_pool_counts_t) -> Result<Self, Unplanned> {
         let mut plan = Self {
-            slots: [0; WZ_EXT_OBJECT_POOL_CLASSES],
+            slots: [0; KINDS],
+            classes: [0; KINDS],
         };
-        plan.add::<crate::session::PicoSessionHandle>(objects.sessions)?;
-        plan.add::<crate::pubsub::PublisherState>(objects.publishers)?;
-        plan.add::<crate::pubsub::SubscriberState>(objects.subscribers)?;
+        plan.add::<crate::session::PicoSessionHandle>(Kind::Session, objects.sessions);
+        plan.add::<crate::pubsub::PublisherState>(Kind::Publisher, objects.publishers);
+        plan.add::<crate::pubsub::SubscriberState>(Kind::Subscriber, objects.subscribers);
         #[cfg(feature = "queryable")]
-        plan.add::<crate::query::QueryableState>(objects.queryables)?;
+        plan.add::<crate::query::QueryableState>(Kind::Queryable, objects.queryables);
         #[cfg(feature = "liveliness")]
-        plan.add::<crate::liveliness::TokenState>(objects.liveliness_tokens)?;
+        plan.add::<crate::liveliness::TokenState>(Kind::LivelinessToken, objects.liveliness_tokens);
         #[cfg(feature = "liveliness")]
-        plan.add::<crate::pubsub::SubscriberState>(objects.liveliness_subscribers)?;
-        plan.add::<crate::pubsub::SampleMarshal>(objects.samples)?;
+        plan.add::<crate::pubsub::SubscriberState>(
+            Kind::LivelinessSubscriber,
+            objects.liveliness_subscribers,
+        );
+        plan.add::<crate::pubsub::SampleMarshal>(Kind::Sample, objects.samples);
         #[cfg(feature = "query")]
-        plan.add::<crate::get::ReplyMarshal>(objects.replies)?;
+        plan.add::<crate::get::ReplyMarshal>(Kind::Reply, objects.replies);
         #[cfg(feature = "queryable")]
-        plan.add::<crate::query::QueryMarshal>(objects.queries)?;
-        plan.add::<crate::bytes::ByteBuf>(objects.bytes)?;
+        plan.add::<crate::query::QueryMarshal>(Kind::Query, objects.queries);
+        plan.add::<crate::bytes::ByteBuf>(Kind::Bytes, objects.bytes);
         if plan.slots.iter().all(|&slots| slots == 0) {
             return Err(Unplanned::Empty);
         }
@@ -274,19 +289,16 @@ impl Plan {
         Ok(plan)
     }
 
-    /// `count` more slots in the pool of a `T`.
-    fn add<T>(&mut self, count: usize) -> Result<(), Unplanned> {
-        let class = const { class_for::<T>() };
-        self.slots[class] = self.slots[class]
-            .checked_add(count)
-            .ok_or(Unplanned::TooLarge)?;
-        Ok(())
+    /// The pool of `kind`: `count` slots of the size class of a `T`.
+    fn add<T>(&mut self, kind: Kind, count: usize) {
+        self.slots[kind as usize] = count;
+        self.classes[kind as usize] = const { class_for::<T>() };
     }
 
     /// The bytes every pool's slots take together.
     pub(crate) fn bytes(&self) -> Result<usize, Unplanned> {
         let mut total: usize = 0;
-        for (class, &slots) in self.slots.iter().enumerate() {
+        for (&slots, &class) in self.slots.iter().zip(self.classes.iter()) {
             total = slots
                 .checked_mul(slot_bytes(class))
                 .and_then(|bytes| total.checked_add(bytes))
@@ -320,25 +332,32 @@ impl Origin {
     }
 }
 
-/// One pool: where its slots start, its free slots linked through their first word, and what it
-/// has done.
+/// The pool of one kind: where its slots start, their size class, and its free slots linked
+/// through their first word.
 #[derive(Clone, Copy, Debug)]
 struct Pool {
     /// The offset of its first slot from the start of the memory.
     start: usize,
     slots: usize,
+    class: usize,
     free: Option<NonNull<u8>>,
+}
+
+/// What the pools of one size class have done together, as `wz_ext_object_pool_class` reports it.
+#[derive(Clone, Copy, Debug, Default)]
+struct ClassCount {
     in_use: usize,
     high_water: usize,
     refused: usize,
 }
 
-/// Every pool, laid out over one memory: each pool's slots after the one before.
+/// Every kind's pool, laid out over one memory: each pool's slots after the one before.
 pub(crate) struct Pools {
     base: NonNull<u8>,
     bytes: usize,
     origin: Origin,
-    pools: [Pool; WZ_EXT_OBJECT_POOL_CLASSES],
+    pools: [Pool; KINDS],
+    counts: [ClassCount; WZ_EXT_OBJECT_POOL_CLASSES],
 }
 
 impl Pools {
@@ -351,16 +370,15 @@ impl Pools {
         let mut pools = [Pool {
             start: 0,
             slots: 0,
+            class: 0,
             free: None,
-            in_use: 0,
-            high_water: 0,
-            refused: 0,
-        }; WZ_EXT_OBJECT_POOL_CLASSES];
+        }; KINDS];
         let mut at = 0;
-        for (class, pool) in pools.iter_mut().enumerate() {
-            let size = slot_bytes(class);
+        for (kind, pool) in pools.iter_mut().enumerate() {
+            pool.class = plan.classes[kind];
+            let size = slot_bytes(pool.class);
             pool.start = at;
-            pool.slots = plan.slots[class];
+            pool.slots = plan.slots[kind];
             // Linked from the last slot to the first, so the lowest is taken first.
             for index in (0..pool.slots).rev() {
                 let slot = base.as_ptr().add(at + index * size);
@@ -374,21 +392,29 @@ impl Pools {
             bytes: at,
             origin,
             pools,
+            counts: [ClassCount::default(); WZ_EXT_OBJECT_POOL_CLASSES],
         }
     }
 
-    /// A free slot of pool `class`, or `None`, counted, when it has none.
-    fn take(&mut self, class: usize) -> Option<NonNull<u8>> {
-        let pool = &mut self.pools[class];
+    /// A free slot of the pool of `kind`, whose objects are of size class `class`, or `None`,
+    /// counted, when it has none. Only that pool is asked: a slot of another kind's pool is never
+    /// taken, so each kind holds what the program stated for it and no more.
+    fn take(&mut self, kind: Kind, class: usize) -> Option<NonNull<u8>> {
+        let pool = &mut self.pools[kind as usize];
+        debug_assert!(
+            pool.slots == 0 || pool.class == class,
+            "an object is taken from the pool of its own kind"
+        );
+        let count = &mut self.counts[class];
         let Some(slot) = pool.free else {
-            pool.refused = pool.refused.saturating_add(1);
+            count.refused = count.refused.saturating_add(1);
             return None;
         };
         // SAFETY: the first word of a free slot is the link to the next free one, written when it
         // was laid out or given back.
         pool.free = unsafe { slot.as_ptr().cast::<Option<NonNull<u8>>>().read() };
-        pool.in_use += 1;
-        pool.high_water = pool.high_water.max(pool.in_use);
+        count.in_use += 1;
+        count.high_water = count.high_water.max(count.in_use);
         Some(slot)
     }
 
@@ -398,16 +424,15 @@ impl Pools {
         if at >= self.bytes {
             return false;
         }
-        let Some((class, pool)) = self
+        let Some(pool) = self
             .pools
             .iter_mut()
-            .enumerate()
-            .find(|(class, pool)| at < pool.start + pool.slots * slot_bytes(*class))
+            .find(|pool| at < pool.start + pool.slots * slot_bytes(pool.class))
         else {
             return false;
         };
         debug_assert_eq!(
-            (at - pool.start) % slot_bytes(class),
+            (at - pool.start) % slot_bytes(pool.class),
             0,
             "a place given back is the start of a slot"
         );
@@ -420,24 +445,29 @@ impl Pools {
                 .write(pool.free)
         };
         pool.free = Some(place);
-        pool.in_use -= 1;
+        self.counts[pool.class].in_use -= 1;
         true
     }
 
     /// How many objects the pools hold now.
     fn held(&self) -> usize {
-        self.pools.iter().map(|pool| pool.in_use).sum()
+        self.counts.iter().map(|count| count.in_use).sum()
     }
 
-    /// Pool `class` as `wz_ext_object_pool_class` reports it.
+    /// The pools of size class `class` together, as `wz_ext_object_pool_class` reports them.
     fn report(&self, class: usize) -> wz_ext_object_pool_class_t {
-        let pool = &self.pools[class];
+        let count = &self.counts[class];
         wz_ext_object_pool_class_t {
             slot_bytes: slot_bytes(class),
-            slots: pool.slots,
-            in_use: pool.in_use,
-            high_water: pool.high_water,
-            refused: pool.refused,
+            slots: self
+                .pools
+                .iter()
+                .filter(|pool| pool.class == class)
+                .map(|pool| pool.slots)
+                .sum(),
+            in_use: count.in_use,
+            high_water: count.high_water,
+            refused: count.refused,
         }
     }
 }
@@ -460,20 +490,20 @@ static RESERVED: Lock<Reserved> = Lock::new(Reserved(None));
 
 /// What [`take`] found for an object.
 pub(crate) enum Taken {
-    /// A free slot of the object's pool.
+    /// A free slot of the pool of the object's kind.
     Pooled(NonNull<u8>),
-    /// The object's pool has no free slot.
+    /// The pool of the object's kind has no free slot.
     Full,
     /// No pool is reserved: the object is the heap's.
     Unreserved,
 }
 
-/// A slot for a `T`, from the pool of its size.
-pub(crate) fn take<T>() -> Taken {
+/// A slot for a `T` of `kind`, from that kind's pool.
+pub(crate) fn take<T>(kind: Kind) -> Taken {
     let class = const { class_for::<T>() };
     RESERVED.with(|reserved| match reserved.0.as_mut() {
         None => Taken::Unreserved,
-        Some(pools) => pools.take(class).map_or(Taken::Full, Taken::Pooled),
+        Some(pools) => pools.take(kind, class).map_or(Taken::Full, Taken::Pooled),
     })
 }
 
@@ -613,9 +643,9 @@ pub unsafe extern "C" fn wz_ext_object_pool_place(
     })
 }
 
-/// Pool `class` (`0` to `WZ_EXT_OBJECT_POOL_CLASSES - 1`, the slot of each twice the one
-/// before's), in `out`: its slot size, and while pools are reserved its slots, those in use, the
-/// most in use at once and the objects it refused. `Z_OK`; `Z_ERR_NULL` for a NULL `out`;
+/// The pools of size class `class` together (`0` to `WZ_EXT_OBJECT_POOL_CLASSES - 1`, the slot of
+/// each twice the one before's), in `out`: its slot size, and while pools are reserved their
+/// slots, those in use, the most in use at once and the objects they refused. `Z_OK`; `Z_ERR_NULL` for a NULL `out`;
 /// `Z_EINVAL` for a `class` past the last.
 #[no_mangle]
 pub unsafe extern "C" fn wz_ext_object_pool_class(
@@ -791,9 +821,11 @@ mod tests {
         assert_eq!(resolve(&stated, &BOUNDED), Err(Unplanned::TooLarge));
         assert_eq!(Unplanned::TooLarge.code(), Z_ERR_SYSTEM_OUT_OF_MEMORY);
         let mut plan = Plan {
-            slots: [0; WZ_EXT_OBJECT_POOL_CLASSES],
+            slots: [0; KINDS],
+            classes: [0; KINDS],
         };
-        plan.slots[WZ_EXT_OBJECT_POOL_CLASSES - 1] = usize::MAX;
+        plan.slots[Kind::Bytes as usize] = usize::MAX;
+        plan.classes[Kind::Bytes as usize] = WZ_EXT_OBJECT_POOL_CLASSES - 1;
         assert_eq!(plan.bytes(), Err(Unplanned::TooLarge));
     }
 
@@ -804,18 +836,62 @@ mod tests {
         assert_eq!(Unplanned::Empty.code(), Z_ERR_CONFIG_INVALID_VALUE);
     }
 
-    /// Each object lands in the pool of its size, and the bytes are the slots times their size.
+    /// Each kind has a pool of its own, of slots of its object's size class, and the bytes are
+    /// the slots times their size.
     #[test]
-    fn each_object_lands_in_the_pool_of_its_size() {
+    fn each_kind_has_a_pool_of_its_own_size_class() {
         let objects = wz_ext_object_pool_counts_t {
+            sessions: 1,
             bytes: 3,
             ..counts()
         };
-        let plan = Plan::of(&objects).expect("three payloads");
-        let class = class_for::<crate::bytes::ByteBuf>();
-        assert_eq!(plan.slots[class], 3);
-        assert_eq!(plan.slots.iter().sum::<usize>(), 3);
-        assert_eq!(plan.bytes(), Ok(3 * slot_bytes(class)));
+        let plan = Plan::of(&objects).expect("a session and three payloads");
+        let bytes_class = class_for::<crate::bytes::ByteBuf>();
+        let session_class = class_for::<crate::session::PicoSessionHandle>();
+        assert_eq!(plan.slots[Kind::Bytes as usize], 3);
+        assert_eq!(plan.classes[Kind::Bytes as usize], bytes_class);
+        assert_eq!(plan.slots[Kind::Session as usize], 1);
+        assert_eq!(plan.classes[Kind::Session as usize], session_class);
+        assert_eq!(plan.slots.iter().sum::<usize>(), 4);
+        assert_eq!(
+            plan.bytes(),
+            Ok(3 * slot_bytes(bytes_class) + slot_bytes(session_class))
+        );
+    }
+
+    /// Two kinds whose objects share a size class keep the counts stated for each: a full pool
+    /// of one refuses its object while the other's has a free slot of the same size.
+    #[test]
+    fn a_kind_never_takes_a_slot_of_another_kind_of_the_same_size() {
+        let mut memory = Memory([0; 512]);
+        let mut plan = Plan {
+            slots: [0; KINDS],
+            classes: [0; KINDS],
+        };
+        plan.slots[Kind::Bytes as usize] = 1;
+        plan.slots[Kind::Publisher as usize] = 1;
+        let base = NonNull::new(memory.0.as_mut_ptr()).expect("an array");
+        // SAFETY: the memory is aligned, long enough and used by nothing else.
+        let mut pools = unsafe { Pools::over(base, &plan, Origin::Program) };
+
+        let payload = pools.take(Kind::Bytes, 0).expect("the one payload slot");
+        assert_eq!(
+            pools.take(Kind::Bytes, 0),
+            None,
+            "the payload pool is full, whatever the publisher pool holds"
+        );
+        let publisher = pools
+            .take(Kind::Publisher, 0)
+            .expect("the publisher's own slot");
+        assert_ne!(payload, publisher);
+        let report = pools.report(0);
+        assert_eq!((report.slots, report.in_use, report.refused), (2, 2, 1));
+        assert!(pools.give_back(publisher));
+        assert_eq!(pools.take(Kind::Bytes, 0), None, "still none of its own");
+        assert!(pools.give_back(payload));
+        assert_eq!(pools.take(Kind::Bytes, 0), Some(payload));
+        assert!(pools.give_back(payload));
+        assert_eq!(pools.held(), 0);
     }
 
     /// The slots of a pool lie inside the memory, apart and aligned; a full pool refuses and
@@ -824,20 +900,26 @@ mod tests {
     fn a_full_pool_refuses_and_a_slot_given_back_is_taken_again() {
         let mut memory = Memory([0; 512]);
         let mut plan = Plan {
-            slots: [0; WZ_EXT_OBJECT_POOL_CLASSES],
+            slots: [0; KINDS],
+            classes: [0; KINDS],
         };
-        plan.slots[0] = 2;
-        plan.slots[2] = 3;
+        plan.slots[Kind::Session as usize] = 2;
+        plan.slots[Kind::Bytes as usize] = 3;
+        plan.classes[Kind::Bytes as usize] = 2;
         let bytes = plan.bytes().expect("small");
         assert_eq!(bytes, 2 * 16 + 3 * 64);
         let base = NonNull::new(memory.0.as_mut_ptr()).expect("an array");
         // SAFETY: the memory is aligned, long enough and used by nothing else.
         let mut pools = unsafe { Pools::over(base, &plan, Origin::Program) };
 
-        let first = pools.take(0).expect("a free slot");
-        let second = pools.take(0).expect("a free slot");
+        let first = pools.take(Kind::Session, 0).expect("a free slot");
+        let second = pools.take(Kind::Session, 0).expect("a free slot");
         assert_ne!(first, second);
-        assert_eq!(pools.take(0), None, "two slots and both are held");
+        assert_eq!(
+            pools.take(Kind::Session, 0),
+            None,
+            "two slots and both are held"
+        );
         let report = pools.report(0);
         assert_eq!(
             (
@@ -849,7 +931,9 @@ mod tests {
             (2, 2, 2, 1)
         );
 
-        let large: alloc::vec::Vec<_> = (0..3).map(|_| pools.take(2).expect("free")).collect();
+        let large: alloc::vec::Vec<_> = (0..3)
+            .map(|_| pools.take(Kind::Bytes, 2).expect("free"))
+            .collect();
         for slot in large.iter().chain([first, second].iter()) {
             let at = slot.as_ptr() as usize - base.as_ptr() as usize;
             assert!(at < bytes, "inside the memory");
@@ -859,7 +943,7 @@ mod tests {
 
         assert!(pools.give_back(second));
         assert_eq!(
-            pools.take(0),
+            pools.take(Kind::Session, 0),
             Some(second),
             "the slot given back is taken again"
         );

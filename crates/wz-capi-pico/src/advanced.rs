@@ -1463,7 +1463,9 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers(
         // so it gets that call's whole-key declaration and interest on it.
         // The subscriber's place is taken before anything is declared, so a full pool refuses
         // the declaration and declares nothing.
-        let Some(slot) = crate::object_slot::Slot::take() else {
+        let Some(slot) =
+            crate::object_slot::Slot::take(crate::object_slot::Kind::LivelinessSubscriber)
+        else {
             return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
         };
         let engine = state.engine.clone();

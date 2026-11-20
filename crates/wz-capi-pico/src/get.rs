@@ -339,7 +339,7 @@ unsafe fn clone_reply_marshal(src: *const z_loaned_reply_t) -> Result<*mut c_voi
     let Some(marshal) = reply_marshal(src) else {
         return Err(crate::result::Z_ERR_GENERIC);
     };
-    let Some(slot) = crate::object_slot::Slot::take() else {
+    let Some(slot) = crate::object_slot::Slot::take(crate::object_slot::Kind::Reply) else {
         return Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY);
     };
     let owned = slot.fill(marshal.deep_copy());
@@ -1742,7 +1742,7 @@ pub unsafe extern "C" fn z_reply_err_clone(
         // A deep copy of the WHOLE marshal, not just the error blob: the owned
         // value has to answer `z_reply_err_payload` AND `z_reply_err_encoding`
         // after the callback frame is gone, and both read the marshal.
-        let Some(slot) = crate::object_slot::Slot::take() else {
+        let Some(slot) = crate::object_slot::Slot::take(crate::object_slot::Kind::Reply) else {
             return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
         };
         let owned = slot.fill(marshal.deep_copy());

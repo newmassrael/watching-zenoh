@@ -1860,9 +1860,12 @@ bool wz_ext_internal_time_base_check(const wz_ext_owned_time_base_t *this_);
  * present only in a build with the object-pool capability;
  * wz_ext_object_pool_place also needs object-pool-region.
  *
- * THE POOLS. One per slot size: WZ_EXT_OBJECT_POOL_CLASSES pools, the
- * smallest slot 16 bytes and each one twice the one before. An object takes
- * the smallest slot that holds it.
+ * THE POOLS. One per kind of object, of as many slots as its count, each
+ * slot the smallest of WZ_EXT_OBJECT_POOL_CLASSES sizes that holds the
+ * object (16 bytes, then each twice the one before). The pool of one kind
+ * never lends a slot to another, so each kind holds what was stated for it
+ * and no more. wz_ext_object_pool_class reports the pools by slot size, the
+ * kinds of one size together.
  *
  * THE COUNTS. The program states how many of each object it holds at once.
  * The entity counts (publishers to liveliness_subscribers) are per session
@@ -1934,9 +1937,9 @@ z_result_t wz_ext_object_pool_reserve(const wz_ext_object_pool_counts_t *counts)
 z_result_t wz_ext_object_pool_place(void *base, size_t len,
                                     const wz_ext_object_pool_counts_t *counts);
 
-/* Pool class (0 to WZ_EXT_OBJECT_POOL_CLASSES - 1), in out: its slot size,
- * and while pools are reserved its slots, those in use, the most in use at
- * once and the objects it refused. Z_OK; _Z_ERR_NULL for a NULL out;
+/* The pools of slot size class (0 to WZ_EXT_OBJECT_POOL_CLASSES - 1)
+ * together, in out: the slot size, and while pools are reserved their slots,
+ * those in use, the most in use at once and the objects they refused. Z_OK; _Z_ERR_NULL for a NULL out;
  * Z_EINVAL for a class past the last. */
 z_result_t wz_ext_object_pool_class(size_t class_index,
                                     wz_ext_object_pool_class_t *out);

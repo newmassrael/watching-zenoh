@@ -213,7 +213,8 @@ pub unsafe extern "C" fn z_liveliness_declare_token(
         };
         // The token's place is taken before it is declared, so a full pool refuses the
         // declaration and declares nothing.
-        let Some(slot) = crate::object_slot::Slot::take() else {
+        let Some(slot) = crate::object_slot::Slot::take(crate::object_slot::Kind::LivelinessToken)
+        else {
             return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
         };
         let state = match TokenState::declare(&PicoSession::of(handle), ke, declared_of(keyexpr)) {
@@ -357,7 +358,9 @@ pub unsafe extern "C" fn z_liveliness_declare_subscriber(
         let history = !options.is_null() && (*options).history;
         // The subscriber's place is taken before anything is declared, so a full pool refuses
         // the declaration and declares nothing.
-        let Some(slot) = crate::object_slot::Slot::take() else {
+        let Some(slot) =
+            crate::object_slot::Slot::take(crate::object_slot::Kind::LivelinessSubscriber)
+        else {
             return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
         };
         let engine = engine_of(handle);

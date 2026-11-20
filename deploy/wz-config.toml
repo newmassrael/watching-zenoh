@@ -1470,7 +1470,7 @@ os_needs = []
 upstream_off = ["zenoh-pico"]
 abis = ["core", "pico"]
 implies = ["unstable-api"]
-help = "Fixed pools, one per slot size, that the objects behind the owned handles (sessions, publishers, subscribers, queryables, liveliness tokens and subscribers, owned samples, replies, queries and payloads) are taken from in place of the heap once the program reserves them; a full pool refuses the object with _Z_ERR_SYSTEM_OUT_OF_MEMORY (wz_ext_object_pool_*, wz-own doors)."
+help = "Fixed pools, one per kind of object, that the objects behind the owned handles (sessions, publishers, subscribers, queryables, liveliness tokens and subscribers, owned samples, replies, queries and payloads) are taken from in place of the heap once the program reserves them; a full pool refuses the object with _Z_ERR_SYSTEM_OUT_OF_MEMORY (wz_ext_object_pool_*, wz-own doors)."
 
 [[capability]]
 id = "object-pool-region"

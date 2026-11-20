@@ -703,7 +703,7 @@ unsafe fn clone_query_marshal(src: *const z_loaned_query_t) -> Result<*mut c_voi
     };
     // The place is taken before the hold, so a full pool refuses the escape and holds nothing
     // open.
-    let Some(slot) = crate::object_slot::Slot::take() else {
+    let Some(slot) = crate::object_slot::Slot::take(crate::object_slot::Kind::Query) else {
         return Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY);
     };
     // R2953 — the hold is taken HERE, inside the C callback: the handler job
@@ -1296,7 +1296,7 @@ pub unsafe extern "C" fn z_declare_queryable(
         }
         // The queryable's place is taken before it is declared, so a full pool refuses the
         // declaration and declares nothing; the closure is consumed as on every refusal.
-        let Some(slot) = crate::object_slot::Slot::take() else {
+        let Some(slot) = crate::object_slot::Slot::take(crate::object_slot::Kind::Queryable) else {
             z_closure_query_drop(callback);
             return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
         };

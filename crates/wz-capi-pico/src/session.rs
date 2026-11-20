@@ -731,7 +731,7 @@ pub unsafe extern "C" fn z_open(
         // called it a follow-up. Its role is a peer's: `open_config` reads a listen config so.
         // The handle's place is taken before anything opens, so a full pool refuses the open and
         // the open leaves nothing behind.
-        let Some(slot) = crate::object_slot::Slot::take() else {
+        let Some(slot) = crate::object_slot::Slot::take(crate::object_slot::Kind::Session) else {
             return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
         };
         let request = OpenRequest {
