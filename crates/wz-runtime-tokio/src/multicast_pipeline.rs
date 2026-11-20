@@ -59,6 +59,15 @@ struct Stage {
         any(feature = "liveliness-token", feature = "declare-subscriber")
     ))]
     sn: wz_session_core::sn::TxSn,
+    /// The conduit's open frame while the group's batch window is open
+    /// ([`MulticastTxProducer::batch_start`]), under the lock that mints its SN.
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        any(feature = "liveliness-token", feature = "declare-subscriber")
+    ))]
+    window: wz_session_core::multicast_tx::MulticastBatch,
     queued: Queued,
 }
 
@@ -79,6 +88,13 @@ impl Stage {
                 any(feature = "liveliness-token", feature = "declare-subscriber")
             ))]
             sn: wz_session_core::sn::TxSn::new(mask),
+            #[cfg(any(
+                feature = "codec-push",
+                feature = "codec-response",
+                feature = "codec-response-final",
+                any(feature = "liveliness-token", feature = "declare-subscriber")
+            ))]
+            window: wz_session_core::multicast_tx::MulticastBatch::new(),
             queued: VecDeque::new(),
         })
     }
@@ -166,6 +182,11 @@ struct Shared {
     join_now: tokio::sync::Notify,
     /// What runs right after each JOIN is queued ([`MulticastTxProducer::set_after_join`]).
     after_join: RwLock<Option<AfterJoin>>,
+    /// Whether the batch window is open ([`MulticastTxProducer::batch_start`]): the producer's,
+    /// not the link's, so a group face that rejoins keeps it. Read by a push under its conduit's
+    /// lock, which is what lets the window's close flush every conduit with nothing left open
+    /// behind it (see [`MulticastTxProducer::batch_stop`]).
+    window_open: std::sync::atomic::AtomicBool,
 }
 
 /// What a group's loop runs right after it queues a JOIN, on the loop's own thread
@@ -219,8 +240,50 @@ impl MulticastTxProducer {
                 linked,
                 join_now: tokio::sync::Notify::new(),
                 after_join: RwLock::new(None),
+                window_open: std::sync::atomic::AtomicBool::new(false),
             }),
         }
+    }
+
+    /// Open the batch window (zenoh-pico `zp_batch_start` on a multicast transport): from now on
+    /// a message joins its conduit's open frame instead of leaving as a datagram of its own,
+    /// until the frame fills, an express message takes it, or the window is flushed or closed
+    /// (`vendor/zenoh-pico/src/transport/common/tx.c` @ `static z_result_t _z_transport_tx_send_n_msg_inner(`).
+    /// Opening an open window changes nothing.
+    pub fn batch_start(&self) {
+        self.shared
+            .window_open
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Send every conduit's open frame now and keep the window open (zenoh-pico
+    /// `zp_batch_flush`).
+    pub fn batch_flush(&self) {
+        if let Some(link) = self.attached() {
+            link.flush_window();
+        }
+    }
+
+    /// Close the batch window and send every conduit's open frame (zenoh-pico `zp_batch_stop`).
+    ///
+    /// Closed BEFORE the flush, as pico stops batching before it sends the batch: a push reads
+    /// the window under its conduit's lock, so one that read it open had its message in that
+    /// conduit's frame before the flush below takes the lock, and one that takes the lock after
+    /// the flush reads it closed and sends its message alone.
+    pub fn batch_stop(&self) {
+        self.shared
+            .window_open
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        self.batch_flush();
+    }
+
+    /// The attached link's pipeline, read and let go of at once (see [`Self::push`]).
+    fn attached(&self) -> Option<Arc<Link>> {
+        self.shared
+            .link
+            .read()
+            .expect("multicast producer poisoned")
+            .clone()
     }
 
     /// Whether a link's pipeline is attached right now.
@@ -312,7 +375,7 @@ impl MulticastTxProducer {
             .expect("multicast producer poisoned")
             .clone();
         match link {
-            Some(link) => link.push(item),
+            Some(link) => link.push(item, &self.shared.window_open),
             None => {
                 log::trace!("multicast message dropped: the group has no link");
                 Err(MulticastTxRefused::Unlinked)
@@ -376,9 +439,11 @@ impl Link {
     fn push(
         &self,
         item: MulticastTxItem,
+        window_open: &std::sync::atomic::AtomicBool,
     ) -> Result<wz_session_core::tx_deadline::PushOutcome, MulticastTxRefused> {
         use wz_session_core::multicast_tx::{
-            multicast_tx_conduit, multicast_tx_push, MulticastTxConduit, MulticastTxTally,
+            multicast_tx_conduit, multicast_tx_push, multicast_tx_push_batched, MulticastTxConduit,
+            MulticastTxTally,
         };
         #[cfg_attr(not(feature = "routing-namespace"), allow(unused_mut))]
         let mut item = item;
@@ -397,23 +462,66 @@ impl Link {
         let mut stage = self.stages[band as usize]
             .lock()
             .expect("multicast stage poisoned");
-        let Stage { sn, queued } = &mut *stage;
-        let outcome = multicast_tx_push(
-            item,
-            &mut MulticastTxConduit::new(band, sn),
-            &self.params,
-            &self.params.tx_queue,
-            &mut StageQueue {
-                lanes: &self.lanes,
-                queued,
-            },
-        );
+        let Stage { sn, window, queued } = &mut *stage;
+        let mut queue = StageQueue {
+            lanes: &self.lanes,
+            queued,
+        };
+        // Read under the conduit's lock: see `Shared::window_open`.
+        let outcome = if window_open.load(std::sync::atomic::Ordering::SeqCst) {
+            multicast_tx_push_batched(
+                item,
+                &mut MulticastTxConduit::new(band, sn),
+                &self.params,
+                &self.params.tx_queue,
+                &mut queue,
+                window,
+            )
+        } else {
+            // A frame a window left open leaves ahead of the message, which keeps its order.
+            window.flush(band, &self.params, &mut queue);
+            multicast_tx_push(
+                item,
+                &mut MulticastTxConduit::new(band, sn),
+                &self.params,
+                &self.params.tx_queue,
+                &mut queue,
+            )
+        };
         drop(stage);
         if let Some(pushed) = self.pushed.as_ref() {
             let _ = pushed.send((tally, outcome));
         }
         Ok(outcome)
     }
+
+    /// Put every conduit's open frame on the lanes, each under its own conduit's lock, the
+    /// most urgent conduit first, as the unicast window drains.
+    fn flush_window(&self) {
+        for (index, stage) in self.stages.iter().enumerate() {
+            let mut stage = stage.lock().expect("multicast stage poisoned");
+            let Stage { window, queued, .. } = &mut *stage;
+            window.flush(
+                Priority::from_wire(index as u8),
+                &self.params,
+                &mut StageQueue {
+                    lanes: &self.lanes,
+                    queued,
+                },
+            );
+        }
+    }
+}
+
+/// No TX body codec: no message is ever pushed, so no window frame is ever open.
+#[cfg(not(any(
+    feature = "codec-push",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    any(feature = "liveliness-token", feature = "declare-subscriber")
+)))]
+impl Link {
+    fn flush_window(&self) {}
 }
 
 /// One conduit's lane, as [`multicast_tx_push`](wz_session_core::multicast_tx::multicast_tx_push)
@@ -769,6 +877,10 @@ impl MulticastTxPlane {
         let Some(link) = self.link.as_ref() else {
             return;
         };
+        // The frames a batch window holds open leave first, as zenoh-pico sends its batch
+        // before a transport message
+        // (`vendor/zenoh-pico/src/transport/common/tx.c` @ `static z_result_t _z_transport_tx_send_t_msg_inner(`).
+        link.flush_window();
         let control = Priority::Control;
         let mut stage = self.stages[control as usize]
             .lock()
@@ -1128,6 +1240,73 @@ mod tests {
             request_id: 1,
             qos: QosLevel::from_parts(priority, congestion, false),
         }
+    }
+
+    /// The number of network messages in one `T_MID_FRAME` datagram.
+    fn messages_in(datagram: &[u8]) -> usize {
+        let wz_session_core::inbound::InboundFrame::Frame { payload, .. } =
+            wz_session_core::inbound::parse_inbound(datagram).expect("a frame")
+        else {
+            panic!("the datagram is a T_MID_FRAME");
+        };
+        wz_session_core::network_message::parse_frame_payload(&payload)
+            .expect("its messages")
+            .len()
+    }
+
+    /// While the producer's batch window is open, the messages of one conduit are held in one
+    /// frame and leave as ONE datagram when the window closes; with it closed, each message is
+    /// a datagram of its own.
+    #[test]
+    fn a_window_sends_a_conduits_messages_as_one_datagram_when_it_closes() {
+        let (producer, mut tap) = MulticastTxTap::attach(&params(false));
+        producer.batch_start();
+        for _ in 0..3 {
+            assert_eq!(
+                producer.push(terminal(Priority::DEFAULT, CongestionControl::Drop)),
+                Ok(PushOutcome::Pushed)
+            );
+        }
+        assert!(tap.try_next().is_none(), "held while the window is open");
+
+        producer.batch_stop();
+
+        let datagram = tap.try_next().expect("the window's frame");
+        assert_eq!(messages_in(&datagram), 3, "all three, in one frame");
+        assert!(tap.try_next().is_none(), "one datagram");
+
+        assert_eq!(
+            producer.push(terminal(Priority::DEFAULT, CongestionControl::Drop)),
+            Ok(PushOutcome::Pushed)
+        );
+        let alone = tap.try_next().expect("sent at once with the window closed");
+        assert_eq!(messages_in(&alone), 1);
+    }
+
+    /// A flush sends the window's frame and keeps the window open: the next message waits for
+    /// the next flush.
+    #[test]
+    fn a_flush_sends_the_open_frame_and_keeps_the_window() {
+        let (producer, mut tap) = MulticastTxTap::attach(&params(false));
+        producer.batch_start();
+        assert_eq!(
+            producer.push(terminal(Priority::DEFAULT, CongestionControl::Drop)),
+            Ok(PushOutcome::Pushed)
+        );
+
+        producer.batch_flush();
+
+        assert_eq!(messages_in(&tap.try_next().expect("flushed")), 1);
+        assert_eq!(
+            producer.push(terminal(Priority::DEFAULT, CongestionControl::Drop)),
+            Ok(PushOutcome::Pushed)
+        );
+        assert!(tap.try_next().is_none(), "the window is still open");
+        producer.batch_stop();
+        assert!(
+            tap.try_next().is_some(),
+            "and its frame leaves when it closes"
+        );
     }
 
     /// Push droppable messages at `priority` until one finds no room.

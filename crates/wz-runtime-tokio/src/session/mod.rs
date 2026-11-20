@@ -3768,6 +3768,45 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
         self.publish_named(keyexpr, key, payload, opts, band)
     }
 
+    /// zenoh-pico `zp_batch_start` on a multicast transport: open the group's batch window
+    /// ([`MulticastTxProducer::batch_start`](crate::multicast_pipeline::MulticastTxProducer::batch_start)),
+    /// so what this session sends on the group leaves in as few datagrams as fit. The unicast
+    /// twin is `Session::<_, _, Unicast>::batch_start`. Without `transport-batching`, or with no
+    /// codec that sends on a group, it rejects with `SendWireError::FeatureDisabled`.
+    pub fn batch_start(&self) -> Result<(), wz_session_core::send_wire_error::SendWireError> {
+        #[cfg(all(feature = "transport-batching", feature = "codec-push"))]
+        {
+            self.transport.tx.batch_start();
+            Ok(())
+        }
+        #[cfg(not(all(feature = "transport-batching", feature = "codec-push")))]
+        Err(wz_session_core::send_wire_error::SendWireError::FeatureDisabled)
+    }
+
+    /// zenoh-pico `zp_batch_flush` on a multicast transport: send the open frames now and keep
+    /// the window open.
+    pub fn batch_flush(&self) -> Result<(), wz_session_core::send_wire_error::SendWireError> {
+        #[cfg(all(feature = "transport-batching", feature = "codec-push"))]
+        {
+            self.transport.tx.batch_flush();
+            Ok(())
+        }
+        #[cfg(not(all(feature = "transport-batching", feature = "codec-push")))]
+        Err(wz_session_core::send_wire_error::SendWireError::FeatureDisabled)
+    }
+
+    /// zenoh-pico `zp_batch_stop` on a multicast transport: close the window and send the open
+    /// frames.
+    pub fn batch_stop(&self) -> Result<(), wz_session_core::send_wire_error::SendWireError> {
+        #[cfg(all(feature = "transport-batching", feature = "codec-push"))]
+        {
+            self.transport.tx.batch_stop();
+            Ok(())
+        }
+        #[cfg(not(all(feature = "transport-batching", feature = "codec-push")))]
+        Err(wz_session_core::send_wire_error::SendWireError::FeatureDisabled)
+    }
+
     /// transport-shm -- make this group's transports shared-memory ones: what the group
     /// delivers is read as shared memory where it names a segment, as upstream reads every
     /// message of a multicast transport that holds a shared-memory context
