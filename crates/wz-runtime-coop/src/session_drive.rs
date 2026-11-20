@@ -437,6 +437,21 @@ pub trait SessionLinks {
         let _ = at;
         Err(LinkOpenError::Unsupported)
     }
+
+    /// The multicast group `endpoint` names, joined: the
+    /// [`GroupTransport`](crate::group_transport::GroupTransport) a group session runs over,
+    /// opened as the session's link when the session takes it. The endpoint is the text the
+    /// config states (a `udp/` locator naming an interface), which each stack reads as it reads
+    /// a group. A stack that joins no group, or not the one named, is
+    /// [`LinkOpenError::Unsupported`]: the default, so a stack without groups writes nothing here.
+    #[cfg(feature = "alloc")]
+    fn open_group(
+        &self,
+        endpoint: &str,
+    ) -> Result<Box<dyn crate::group_transport::GroupTransport>, LinkOpenError> {
+        let _ = endpoint;
+        Err(LinkOpenError::Unsupported)
+    }
 }
 
 /// The accepting end of a stream protocol: a port a node listens on, and the links of the

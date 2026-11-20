@@ -101,6 +101,35 @@ pub trait GroupTransport {
     fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool;
 }
 
+/// A transport a stack handed out boxed (`SessionLinks::open_group` on the heap profile) is the
+/// transport it boxes, so the group loop runs over it as over the stack's own type.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+impl<T: GroupTransport + ?Sized> GroupTransport for alloc::boxed::Box<T> {
+    fn open(&mut self) -> bool {
+        (**self).open()
+    }
+
+    fn close(&mut self) {
+        (**self).close()
+    }
+
+    fn service(&self) {
+        (**self).service()
+    }
+
+    fn carrier_up(&self) -> bool {
+        (**self).carrier_up()
+    }
+
+    fn send_to_group(&mut self, datagram: &[u8]) {
+        (**self).send_to_group(datagram)
+    }
+
+    fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
+        (**self).recv_with(f)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

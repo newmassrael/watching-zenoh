@@ -46,7 +46,8 @@ use core::ffi::c_int;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use wz_session_core::app_link_table::{
-    AcceptRead, AppLinkKind, DatagramRead, LinkHandle, OpenProgress, SendGate, SendStep, StreamRead,
+    kind_for_locator, AcceptRead, AppLinkKind, DatagramRead, LinkHandle, OpenProgress, SendGate,
+    SendStep, StreamRead,
 };
 use wz_session_core::app_transport::AppTransport;
 
@@ -581,8 +582,9 @@ impl GroupTransport for AppGroupTransport {
 }
 
 /// The session shell's links over the program's transport: a `tcp/` dial and listen open
-/// streams through the program, a `udp/` dial a datagram link and a `udp/` listen a datagram
-/// listener, and nothing is a socket of the system's. A `tls/` locator is not carried.
+/// streams through the program, a `udp/` dial a datagram link, a `udp/` listen a datagram
+/// listener and a `udp/` listen naming an interface a group the program joins, and nothing is a
+/// socket of the system's. A `tls/` locator is not carried.
 pub struct AppLinks {
     transport: Arc<AppTransport>,
     dial: AppStreamDial,
@@ -667,6 +669,19 @@ impl SessionLinks for AppLinks {
             }
             LinkProto::Tls => Err(LinkOpenError::Unsupported),
         }
+    }
+
+    /// The group the program joins for `endpoint`: a `udp/` listen locator naming an interface,
+    /// which is what the table opens as a group. Any other endpoint is no group the program's
+    /// transport carries, and is refused before the program is asked.
+    fn open_group(&self, endpoint: &str) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
+        if kind_for_locator(endpoint, true) != Some(AppLinkKind::Group) {
+            return Err(LinkOpenError::Unsupported);
+        }
+        Ok(Box::new(AppGroupTransport::join(
+            &self.transport,
+            endpoint,
+        )?))
     }
 }
 
@@ -1071,6 +1086,54 @@ mod tests {
         assert_eq!(
             dialled.try_recv(&mut buf),
             Ok(Some((2, SocketAddr::from(([203, 0, 113, 7], 9)))))
+        );
+    }
+
+    #[test]
+    fn the_links_join_a_group_through_the_program_and_refuse_what_names_none() {
+        let (script, transport) = transport(64);
+        let links = AppLinks::new(Arc::clone(&transport));
+        // Neither a datagram listen nor another scheme names a group: refused, with nothing asked
+        // of the program.
+        for endpoint in ["udp/192.0.2.9:7447", "tcp/239.7.7.7:7447#iface=lan7"] {
+            assert!(
+                matches!(links.open_group(endpoint), Err(LinkOpenError::Unsupported)),
+                "{endpoint}"
+            );
+        }
+        assert!(script.opens.lock().unwrap().is_empty());
+        let mut group = links
+            .open_group("udp/239.7.7.7:7447#iface=lan7")
+            .expect("a group the program joins");
+        let (handle, kind, locator) = script.opens.lock().unwrap()[0].clone();
+        assert_eq!(
+            (kind, locator.as_str()),
+            (AppLinkKind::Group, "udp/239.7.7.7:7447#iface=lan7"),
+            "the program is asked to join the group the endpoint names"
+        );
+        // The boxed transport is the group's: taken as the session's link, sent to, read by
+        // member, left.
+        assert!(group.open());
+        assert!(group.carrier_up());
+        group.send_to_group(b"beacon");
+        assert_eq!(script.sent.lock().unwrap().as_slice(), b"beacon");
+        transport
+            .received(handle, b"member", Some("udp/198.51.100.20:7447"))
+            .unwrap();
+        let mut seen = Vec::new();
+        assert!(group.recv_with(&mut |bytes, src| seen.push((bytes.to_vec(), src))));
+        assert_eq!(
+            seen,
+            [(
+                b"member".to_vec(),
+                SocketAddr::from(([198, 51, 100, 20], 7447))
+            )]
+        );
+        group.close();
+        assert_eq!(
+            script.closes.lock().unwrap().as_slice(),
+            [handle],
+            "the leave"
         );
     }
 }

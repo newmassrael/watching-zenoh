@@ -1385,6 +1385,18 @@ mod tests {
         ));
     }
 
+    /// A stack that joins no group answers a group endpoint as unsupported, the seam's default,
+    /// which is the refusal a session over it names the group by.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[test]
+    fn heap_links_that_join_no_group_refuse_a_group_endpoint() {
+        let links = IpLinks::<Datagrams, Dial>::new(NODE, Dial);
+        assert!(matches!(
+            links.open_group("udp/239.1.2.3:7447#iface=lo"),
+            Err(LinkOpenError::Unsupported)
+        ));
+    }
+
     /// An IPv6 locator dials over a socket of its family on a node whose own address is IPv4:
     /// the datagram link binds the unspecified IPv6 address and names its ends in brackets, the
     /// stream link names its peer the same way. A stack without IPv6 refuses the datagram dial as
