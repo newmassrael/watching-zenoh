@@ -110,8 +110,9 @@ PROCESS_WRITE = re.compile(r"\benv::(set_var|remove_var)\s*\(|\bset_current_dir\
 # plane's clock source, event log, supervisor, resource sampler and snapshot are statics of the C
 # ABI library (`wz_ext_*` doors of `wz-capi-pico`), so two files that read or set them in one
 # executable read each other's state. Measured 2026-11-06: exactly the seven files that had been
-# kept by hand call them, and no other file of the C ABI crates does.
-PROCESS_REGISTRY = re.compile(r"\bwz_ext_(?:clock|event|supervision|snapshot|resource)_\w+")
+# kept by hand call them, and no other file of the C ABI crates does. The object pools
+# (`wz_ext_object_pool_*`) are the process's too: a neighbour's objects would be taken from them.
+PROCESS_REGISTRY = re.compile(r"\bwz_ext_(?:clock|event|supervision|snapshot|resource|object_pool)_\w+")
 # The mbedtls channel library (`wz-tls-mbedtls`) is started ONCE per process on one arena, and its
 # key store, arena peak and error state are statics of that process: a file that names the channel
 # or includes the crate's shared test helper starts it (or reads what it measured), and two such

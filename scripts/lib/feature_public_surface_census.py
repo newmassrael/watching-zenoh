@@ -616,6 +616,11 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # default, as upstream has no such doors. It and `instance-key` each gate
         # `pub mod proto_file` (either one is enough), whose one public item is the
         # `wz_ext_proto_file_t` struct both take, declared in `wz_ext.h`.
+        # `object-pool` gates `pub mod object_pool`, whose public items are wz's own doors
+        # `wz_ext_object_pool_bytes`, `_reserve`, `_class` and `_release`, the
+        # `WZ_EXT_OBJECT_POOL_CLASSES` constant and the two structs they take, declared in
+        # `wz_ext.h`; `object-pool-region` gates its `wz_ext_object_pool_place` door inside it. Off
+        # by default, as upstream has no such doors.
         # Each of `e2e-sender`, `e2e-receiver`, `e2e-supervision`, `instance-key`,
         # `message-catalog` and `replay-cache` also gates `pub mod ext_interface`, the versioned
         # interface the doors of those capabilities reach the core through, whose public items are
@@ -636,6 +641,8 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "instance-key",
                 "message-catalog",
                 "message-payload",
+                "object-pool",
+                "object-pool-region",
                 "remote-declaration-watch",
                 "replay-cache",
                 "resource-snapshot",

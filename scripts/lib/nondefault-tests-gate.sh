@@ -468,6 +468,15 @@ transport-link-unixpipe,transport-link-ws|"
     # whose module is behind the feature). The payload's own tests are `wz-app-frame`'s, a leg
     # below.
     "wz-capi-pico|hook|message-payload|--test=message_payload_doors"
+    # The object pools (`wz_ext_object_pool_*`): the unit tests of the pools' plan and layout and
+    # of the place an object is taken from, and the file that reserves, exhausts, reuses and
+    # releases the pools through the doors, a process of its own (`object_pool_doors`, which
+    # `Cargo.toml` requires the feature for); with the region door, the same file lays the pools
+    # over the program's memory too.
+    "wz-capi-pico|hook|object-pool|object_pool::"
+    "wz-capi-pico|hook|object-pool|object_slot::"
+    "wz-capi-pico|hook|object-pool|--test=object_pool_doors"
+    "wz-capi-pico|hook|object-pool-region|--test=object_pool_doors"
     # Instance keys (`wz_app_frame::instance_key`): the model tests of the keyer, its last values
     # and its two stream doors, with the tests of the schema reader's tokenizer and parser, which
     # moved to this crate with the reader and compile only with `proto` (which this implies).
