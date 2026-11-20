@@ -373,7 +373,9 @@ impl DialFailure {
 /// Deliberately NOT a `z_result_t`: the two C ABIs wz exports both typedef that
 /// to `int8_t` and then disagree about the VALUES, so shared code returning one
 /// ABI's constant would be a wrong-code bug in the other. Each shim maps this.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Not `Copy`: a refusal carries its reason ([`Self::ClockRefused`]), which the caller reports.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OpenError {
     /// The drive thread could not be spawned, its runtime could not be built,
     /// or the session did not reach Established.
@@ -385,6 +387,11 @@ pub enum OpenError {
     /// An endpoint names a scheme no link of this build serves: zenoh-pico's
     /// `_Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN` (`ret = _Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN;`).
     SchemeUnknown,
+    /// The node was to have a clock and its clock was refused: `UHLC_MAX_DELTA_MS` states a bound
+    /// the clock does not honour, carried here as the clock's own reason. Upstream's node does not
+    /// start on such a value, and a node opened without the clock it was asked for would stamp
+    /// nothing in silence.
+    ClockRefused(wz_runtime_tokio::node_clock::MaxDeltaRefused),
 }
 
 impl OpenError {
@@ -3335,6 +3342,21 @@ fn log_open_failure(what: &str, why: &dyn core::fmt::Debug) {
     }
 }
 
+/// Fail the open of a node whose clock was refused (`NodeHlc::clock_refused`): the bound
+/// `UHLC_MAX_DELTA_MS` states is one the clock does not honour, so the node has no clock where
+/// it was to have one. Both opens of this crate, the registry's and the router node's, build the
+/// node's clock and ask this before any thread or socket exists; the refusal goes back to the
+/// caller as [`OpenError::ClockRefused`], which each ABI maps.
+fn refuse_a_refused_clock(node_hlc: &NodeHlc) -> Result<(), OpenError> {
+    match node_hlc.clock_refused() {
+        None => Ok(()),
+        Some(refused) => {
+            log_open_failure("node clock", &format_args!("{refused}"));
+            Err(OpenError::ClockRefused(refused.clone()))
+        }
+    }
+}
+
 /// One attempt to bind `endpoint`, as the runtime's phase drivers ask for it: the listener, or
 /// nothing.
 #[cfg(feature = "peer")]
@@ -4789,6 +4811,10 @@ pub fn open_blocking(
     // role, which is zenoh's own answer (`enabled().get(whatami)`) and the shipped one for a peer
     // or client. Its `clock-quality-stamping` policy is the snapshot the open resolved.
     let node_hlc = NodeHlc::for_node_by(&wire_zid, dial_whatami, timestamping, &session_policy);
+    // A bound `UHLC_MAX_DELTA_MS` states that the clock does not honour leaves the node without
+    // the clock it was to have; the open fails with the reason rather than run a session that
+    // stamps nothing, as upstream's node does not start on such a value.
+    refuse_a_refused_clock(&node_hlc)?;
     // The key ids every node shares and the form of each face, from the endpoints in the order
     // the faces are numbered by. A form the session cannot honour (`shared` with no dictionary,
     // an endpoint stated twice) fails the open before any thread or socket exists.
@@ -6277,6 +6303,132 @@ mod tests {
             opened += 1;
         }
         assert!(opened >= 1, "the build's domain holds at least its default");
+    }
+
+    /// Set on a child process of this test binary that a clock-bound test starts: the child
+    /// opens what its test opens and prints what came of it.
+    #[cfg(feature = "peer")]
+    const CLOCK_BOUND_CHILD: &str = "WZ_CAPI_CORE_CLOCK_BOUND_CHILD";
+
+    /// What the open of the test `test` came to in a process of its own whose `UHLC_MAX_DELTA_MS`
+    /// is `stated`: `refused` or `opened`. A process of its own because the variable is the
+    /// process's: set in this one, it would refuse the clock of every test running beside it.
+    #[cfg(feature = "peer")]
+    fn open_under_stated_bound(test: &str, stated: &str) -> String {
+        let output = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+            .args(["--exact", test, "--nocapture", "--test-threads=1"])
+            .env(CLOCK_BOUND_CHILD, "1")
+            .env("UHLC_MAX_DELTA_MS", stated)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("run the open in a process of its own");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "the child under `{stated}` failed:\n{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // The test harness prints the child's line after the test's own name on the same line,
+        // so the mark is looked for anywhere in a line.
+        stdout
+            .lines()
+            .find_map(|line| {
+                line.split_once("CLOCK-BOUND-OPEN ")
+                    .map(|(_, verdict)| verdict)
+            })
+            .map(str::to_owned)
+            .unwrap_or_else(|| panic!("the child under `{stated}` ran no open:\n{stdout}"))
+    }
+
+    /// The child's half of a clock-bound test: print what `opened` came to.
+    #[cfg(feature = "peer")]
+    fn report_clock_bound_open<S>(opened: Result<S, OpenError>, close: impl FnOnce(S)) {
+        let verdict = match opened {
+            Ok(state) => {
+                close(state);
+                "opened"
+            }
+            // The reason the caller is given is the clock's own, naming the variable.
+            Err(OpenError::ClockRefused(refused)) => {
+                assert!(
+                    refused.to_string().contains("UHLC_MAX_DELTA_MS"),
+                    "{refused}"
+                );
+                "refused"
+            }
+            Err(other) => panic!("the open failed otherwise: {other:?}"),
+        };
+        std::println!("CLOCK-BOUND-OPEN {verdict}");
+    }
+
+    /// An open whose node is to have a clock fails when `UHLC_MAX_DELTA_MS` states a bound the
+    /// clock does not honour, and opens under one it does: a session that stamps nothing in place
+    /// of the clock it was asked for would be a silent fallback.
+    #[cfg(feature = "peer")]
+    #[test]
+    fn an_open_whose_stated_clock_bound_is_refused_fails() {
+        const NAME: &str = "drive::tests::an_open_whose_stated_clock_bound_is_refused_fails";
+        if std::env::var_os(CLOCK_BOUND_CHILD).is_some() {
+            let opened = open_blocking(
+                Vec::new(),
+                Vec::new(),
+                CapiTlsConfig::default(),
+                WhatAmI::Peer,
+                DialPhase::ONCE,
+                OpenStance {
+                    // A peer holds a clock only when its map says so.
+                    timestamping: TimestampingEnabled::all(true),
+                    ..peer_stance()
+                },
+            );
+            report_clock_bound_open(opened, |state| state.close());
+            return;
+        }
+        assert_eq!(open_under_stated_bound(NAME, "soon"), "refused");
+        assert_eq!(
+            open_under_stated_bound(
+                NAME,
+                &wz_session_core::caps::CLOCK_MAX_FORWARD_STEP_MS.to_string()
+            ),
+            "opened",
+            "the control: the build's own bound"
+        );
+    }
+
+    /// The router node's open, which builds its clock in its forwarder, fails the same way.
+    #[cfg(feature = "router-node")]
+    #[test]
+    fn a_router_node_whose_stated_clock_bound_is_refused_fails_to_open() {
+        const NAME: &str =
+            "drive::tests::a_router_node_whose_stated_clock_bound_is_refused_fails_to_open";
+        if std::env::var_os(CLOCK_BOUND_CHILD).is_some() {
+            let listen = vec![format!(
+                "tcp/127.0.0.1:{}",
+                wz_runtime_tokio_test_support::free_port()
+            )];
+            let opened = open_router_blocking(
+                NodeRole::Router,
+                Vec::new(),
+                listen,
+                CapiTlsConfig::default(),
+                DialPhase::ONCE,
+                OpenStance {
+                    timestamping: TimestampingEnabled::all(true),
+                    ..peer_stance()
+                },
+            );
+            report_clock_bound_open(opened, |state| state.close());
+            return;
+        }
+        assert_eq!(open_under_stated_bound(NAME, "soon"), "refused");
+        assert_eq!(
+            open_under_stated_bound(
+                NAME,
+                &wz_session_core::caps::CLOCK_MAX_FORWARD_STEP_MS.to_string()
+            ),
+            "opened",
+            "the control: the build's own bound"
+        );
     }
 
     /// The `seq_num_res` code of the first InitSyn a session dialling `stance` puts on the wire,

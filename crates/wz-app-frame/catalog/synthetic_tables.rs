@@ -16,6 +16,8 @@ pub mod catalog_tables {
         messages: 64,
         replay_depth_max: 32,
         sender_slots: 8,
+        key_fields: 2,
+        instances: 32,
     };
 
     /// The catalog.

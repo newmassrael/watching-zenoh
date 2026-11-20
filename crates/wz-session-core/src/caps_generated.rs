@@ -26,6 +26,8 @@ pub(super) const DELIVERY_LANE_CALLBACKS: usize =
 pub(super) const MAX_QUERYABLES: usize = limit(option_env!("WZ_LIMIT_MAX_QUERYABLES"), 16);
 pub(super) const MAX_PENDING_QUERIES: usize =
     limit(option_env!("WZ_LIMIT_MAX_PENDING_QUERIES"), 16);
+pub(super) const LINK_NOTED_REQUESTS: usize =
+    limit(option_env!("WZ_LIMIT_LINK_NOTED_REQUESTS"), 16);
 pub(super) const MAX_DECL_OBSERVERS: usize = limit(option_env!("WZ_LIMIT_MAX_DECL_OBSERVERS"), 8);
 pub(super) const MAX_LIVELINESS_SUBSCRIPTIONS: usize =
     limit(option_env!("WZ_LIMIT_MAX_LIVELINESS_SUBSCRIPTIONS"), 8);

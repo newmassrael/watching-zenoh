@@ -8,10 +8,13 @@
 //! scopes that each hold one value, the latest stage each storage profile decides it at, and what
 //! a peer sees of it. The limit's value is the constant of the same name in `crate::caps`.
 
-use crate::policy_binding::{Binding, LimitBinding, Scope, Storage, Wire};
+use crate::policy_binding::{Binding, Driven, LimitBinding, LimitKind, Scope, Storage, Wire};
 
 /// Where [`super::MAX_KEYEXPR_BYTES`] is bound.
 pub const MAX_KEYEXPR_BYTES: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
     storage: Storage::Both,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
@@ -21,6 +24,9 @@ pub const MAX_KEYEXPR_BYTES: LimitBinding = LimitBinding {
 
 /// Where [`super::MAX_SUBSCRIPTIONS`] is bound.
 pub const MAX_SUBSCRIPTIONS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
     storage: Storage::Both,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
@@ -30,6 +36,9 @@ pub const MAX_SUBSCRIPTIONS: LimitBinding = LimitBinding {
 
 /// Where [`super::MATCH_MEMO_SLOTS`] is bound.
 pub const MATCH_MEMO_SLOTS: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((0, 4294967295)),
     storage: Storage::Quota,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
@@ -39,6 +48,9 @@ pub const MATCH_MEMO_SLOTS: LimitBinding = LimitBinding {
 
 /// Where [`super::MATCH_MEMO_FIXED_SLOTS`] is bound.
 pub const MATCH_MEMO_FIXED_SLOTS: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((0, 4294967295)),
     storage: Storage::Capacity,
     scope: &[Scope::Session],
     binding_heap: None,
@@ -48,6 +60,9 @@ pub const MATCH_MEMO_FIXED_SLOTS: LimitBinding = LimitBinding {
 
 /// Where [`super::MATCH_MEMO_KEY_BYTES`] is bound.
 pub const MATCH_MEMO_KEY_BYTES: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((0, 4294967295)),
     storage: Storage::Capacity,
     scope: &[Scope::Session],
     binding_heap: None,
@@ -57,6 +72,9 @@ pub const MATCH_MEMO_KEY_BYTES: LimitBinding = LimitBinding {
 
 /// Where [`super::DELIVERY_LANE_EVENTS`] is bound.
 pub const DELIVERY_LANE_EVENTS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
     storage: Storage::Both,
     scope: &[Scope::Entity],
     binding_heap: Some(Binding::Open),
@@ -66,6 +84,9 @@ pub const DELIVERY_LANE_EVENTS: LimitBinding = LimitBinding {
 
 /// Where [`super::DELIVERY_LANE_BYTES`] is bound.
 pub const DELIVERY_LANE_BYTES: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((1, 4294967295)),
     storage: Storage::Quota,
     scope: &[Scope::Entity],
     binding_heap: Some(Binding::Open),
@@ -75,6 +96,9 @@ pub const DELIVERY_LANE_BYTES: LimitBinding = LimitBinding {
 
 /// Where [`super::DELIVERY_LANE_CALLBACKS`] is bound.
 pub const DELIVERY_LANE_CALLBACKS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
     storage: Storage::Quota,
     scope: &[Scope::Entity],
     binding_heap: Some(Binding::Live),
@@ -84,6 +108,9 @@ pub const DELIVERY_LANE_CALLBACKS: LimitBinding = LimitBinding {
 
 /// Where [`super::MAX_QUERYABLES`] is bound.
 pub const MAX_QUERYABLES: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
     storage: Storage::Both,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
@@ -93,6 +120,9 @@ pub const MAX_QUERYABLES: LimitBinding = LimitBinding {
 
 /// Where [`super::MAX_PENDING_QUERIES`] is bound.
 pub const MAX_PENDING_QUERIES: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
     storage: Storage::Both,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
@@ -100,8 +130,23 @@ pub const MAX_PENDING_QUERIES: LimitBinding = LimitBinding {
     wire: Wire::None,
 };
 
+/// Where [`super::LINK_NOTED_REQUESTS`] is bound.
+pub const LINK_NOTED_REQUESTS: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((1, 4294967295)),
+    storage: Storage::Quota,
+    scope: &[Scope::Link],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Open),
+    wire: Wire::None,
+};
+
 /// Where [`super::MAX_DECL_OBSERVERS`] is bound.
 pub const MAX_DECL_OBSERVERS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
     storage: Storage::Both,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
@@ -111,6 +156,9 @@ pub const MAX_DECL_OBSERVERS: LimitBinding = LimitBinding {
 
 /// Where [`super::MAX_LIVELINESS_SUBSCRIPTIONS`] is bound.
 pub const MAX_LIVELINESS_SUBSCRIPTIONS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
     storage: Storage::Both,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
@@ -120,6 +168,9 @@ pub const MAX_LIVELINESS_SUBSCRIPTIONS: LimitBinding = LimitBinding {
 
 /// Where [`super::MAX_LOCAL_TOKENS`] is bound.
 pub const MAX_LOCAL_TOKENS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
     storage: Storage::Both,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
@@ -129,6 +180,9 @@ pub const MAX_LOCAL_TOKENS: LimitBinding = LimitBinding {
 
 /// Where [`super::MAX_PENDING_LIVELINESS_GETS`] is bound.
 pub const MAX_PENDING_LIVELINESS_GETS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
     storage: Storage::Both,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
@@ -138,6 +192,9 @@ pub const MAX_PENDING_LIVELINESS_GETS: LimitBinding = LimitBinding {
 
 /// Where [`super::MAX_PENDING_DECLARES`] is bound.
 pub const MAX_PENDING_DECLARES: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
     storage: Storage::Both,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
@@ -147,6 +204,9 @@ pub const MAX_PENDING_DECLARES: LimitBinding = LimitBinding {
 
 /// Where [`super::MAX_INBOUND_SUB_INTERESTS`] is bound.
 pub const MAX_INBOUND_SUB_INTERESTS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
     storage: Storage::Both,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
@@ -156,6 +216,9 @@ pub const MAX_INBOUND_SUB_INTERESTS: LimitBinding = LimitBinding {
 
 /// Where [`super::MAX_PEER_KEYEXPR_ALIASES`] is bound.
 pub const MAX_PEER_KEYEXPR_ALIASES: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
     storage: Storage::Both,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
@@ -165,6 +228,9 @@ pub const MAX_PEER_KEYEXPR_ALIASES: LimitBinding = LimitBinding {
 
 /// Where [`super::MAX_SHARED_KEY_IDS`] is bound.
 pub const MAX_SHARED_KEY_IDS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
     storage: Storage::Quota,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
@@ -174,6 +240,9 @@ pub const MAX_SHARED_KEY_IDS: LimitBinding = LimitBinding {
 
 /// Where [`super::MAX_REMOTE_DECLS`] is bound.
 pub const MAX_REMOTE_DECLS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
     storage: Storage::Both,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
@@ -183,6 +252,9 @@ pub const MAX_REMOTE_DECLS: LimitBinding = LimitBinding {
 
 /// Where [`super::MAX_PENDING_REPLIES`] is bound.
 pub const MAX_PENDING_REPLIES: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
     storage: Storage::Both,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
@@ -192,6 +264,9 @@ pub const MAX_PENDING_REPLIES: LimitBinding = LimitBinding {
 
 /// Where [`super::MAX_PENDING_FINALS`] is bound.
 pub const MAX_PENDING_FINALS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
     storage: Storage::Both,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
@@ -201,6 +276,9 @@ pub const MAX_PENDING_FINALS: LimitBinding = LimitBinding {
 
 /// Where [`super::MAX_REPLY_PAYLOAD_BYTES`] is bound.
 pub const MAX_REPLY_PAYLOAD_BYTES: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
     storage: Storage::Both,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
@@ -210,6 +288,9 @@ pub const MAX_REPLY_PAYLOAD_BYTES: LimitBinding = LimitBinding {
 
 /// Where [`super::MAX_ADMIN_REPLY_BYTES`] is bound.
 pub const MAX_ADMIN_REPLY_BYTES: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
     storage: Storage::Capacity,
     scope: &[Scope::Runtime],
     binding_heap: None,
@@ -219,6 +300,9 @@ pub const MAX_ADMIN_REPLY_BYTES: LimitBinding = LimitBinding {
 
 /// Where [`super::MAX_ADMIN_LOCATORS`] is bound.
 pub const MAX_ADMIN_LOCATORS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
     storage: Storage::Capacity,
     scope: &[Scope::Runtime],
     binding_heap: None,
@@ -228,6 +312,9 @@ pub const MAX_ADMIN_LOCATORS: LimitBinding = LimitBinding {
 
 /// Where [`super::MAX_ADMIN_SESSION_LINKS`] is bound.
 pub const MAX_ADMIN_SESSION_LINKS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
     storage: Storage::Capacity,
     scope: &[Scope::Session],
     binding_heap: None,
@@ -237,15 +324,21 @@ pub const MAX_ADMIN_SESSION_LINKS: LimitBinding = LimitBinding {
 
 /// Where [`super::MAX_MULTICAST_REPLIES`] is bound.
 pub const MAX_MULTICAST_REPLIES: LimitBinding = LimitBinding {
-    storage: Storage::Capacity,
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
+    storage: Storage::Both,
     scope: &[Scope::Session],
-    binding_heap: None,
+    binding_heap: Some(Binding::Open),
     binding_fixed: Some(Binding::Build),
     wire: Wire::None,
 };
 
 /// Where [`super::MAX_TASKS`] is bound.
 pub const MAX_TASKS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
     storage: Storage::Capacity,
     scope: &[Scope::Runtime],
     binding_heap: None,
@@ -255,6 +348,9 @@ pub const MAX_TASKS: LimitBinding = LimitBinding {
 
 /// Where [`super::MAX_TIMERS`] is bound.
 pub const MAX_TIMERS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
     storage: Storage::Capacity,
     scope: &[Scope::Runtime],
     binding_heap: None,
@@ -264,6 +360,9 @@ pub const MAX_TIMERS: LimitBinding = LimitBinding {
 
 /// Where [`super::MAX_LOCATOR_LEN`] is bound.
 pub const MAX_LOCATOR_LEN: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
     storage: Storage::Both,
     scope: &[Scope::Runtime, Scope::Link],
     binding_heap: Some(Binding::Open),
@@ -273,6 +372,9 @@ pub const MAX_LOCATOR_LEN: LimitBinding = LimitBinding {
 
 /// Where [`super::MAX_STATIC_CONNECT`] is bound.
 pub const MAX_STATIC_CONNECT: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
     storage: Storage::Both,
     scope: &[Scope::Runtime],
     binding_heap: Some(Binding::Open),
@@ -282,6 +384,9 @@ pub const MAX_STATIC_CONNECT: LimitBinding = LimitBinding {
 
 /// Where [`super::MAX_PEER_NODES`] is bound.
 pub const MAX_PEER_NODES: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
     storage: Storage::Capacity,
     scope: &[Scope::Runtime],
     binding_heap: None,
@@ -291,6 +396,9 @@ pub const MAX_PEER_NODES: LimitBinding = LimitBinding {
 
 /// Where [`super::QUERIER_MAX_PENDING_QUERIES`] is bound.
 pub const QUERIER_MAX_PENDING_QUERIES: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
     storage: Storage::Quota,
     scope: &[Scope::Entity],
     binding_heap: Some(Binding::Live),
@@ -300,6 +408,9 @@ pub const QUERIER_MAX_PENDING_QUERIES: LimitBinding = LimitBinding {
 
 /// Where [`super::TX_NO_PROGRESS_WINDOW_US`] is bound.
 pub const TX_NO_PROGRESS_WINDOW_US: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((1, 5000000)),
     storage: Storage::Quota,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Live),
@@ -309,6 +420,9 @@ pub const TX_NO_PROGRESS_WINDOW_US: LimitBinding = LimitBinding {
 
 /// Where [`super::TX_EXPIRY_CLOSE_AFTER`] is bound.
 pub const TX_EXPIRY_CLOSE_AFTER: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: Some((0, 65535)),
     storage: Storage::Quota,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Live),
@@ -318,6 +432,9 @@ pub const TX_EXPIRY_CLOSE_AFTER: LimitBinding = LimitBinding {
 
 /// Where [`super::DATAGRAM_FRAGMENT_BURST`] is bound.
 pub const DATAGRAM_FRAGMENT_BURST: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((1, 4294967295)),
     storage: Storage::Quota,
     scope: &[Scope::Link],
     binding_heap: Some(Binding::Live),
@@ -327,6 +444,9 @@ pub const DATAGRAM_FRAGMENT_BURST: LimitBinding = LimitBinding {
 
 /// Where [`super::DATAGRAM_FRAGMENT_GAP_US`] is bound.
 pub const DATAGRAM_FRAGMENT_GAP_US: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((1, 1000000)),
     storage: Storage::Quota,
     scope: &[Scope::Link],
     binding_heap: Some(Binding::Live),
@@ -336,6 +456,9 @@ pub const DATAGRAM_FRAGMENT_GAP_US: LimitBinding = LimitBinding {
 
 /// Where [`super::QUERY_PARAMETERS_MAX_BYTES`] is bound.
 pub const QUERY_PARAMETERS_MAX_BYTES: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
     storage: Storage::Quota,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Live),
@@ -345,6 +468,9 @@ pub const QUERY_PARAMETERS_MAX_BYTES: LimitBinding = LimitBinding {
 
 /// Where [`super::QUERY_ATTACHMENT_MAX_BYTES`] is bound.
 pub const QUERY_ATTACHMENT_MAX_BYTES: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
     storage: Storage::Quota,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Live),
@@ -354,6 +480,9 @@ pub const QUERY_ATTACHMENT_MAX_BYTES: LimitBinding = LimitBinding {
 
 /// Where [`super::HANDSHAKE_COOKIE_BYTES`] is bound.
 pub const HANDSHAKE_COOKIE_BYTES: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
     storage: Storage::Capacity,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
@@ -363,6 +492,9 @@ pub const HANDSHAKE_COOKIE_BYTES: LimitBinding = LimitBinding {
 
 /// Where [`super::PICO_TX_QUEUE_SIZE`] is bound.
 pub const PICO_TX_QUEUE_SIZE: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((1, 16)),
     storage: Storage::Quota,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
@@ -372,6 +504,9 @@ pub const PICO_TX_QUEUE_SIZE: LimitBinding = LimitBinding {
 
 /// Where [`super::SNAPSHOT_PERIOD_MS`] is bound.
 pub const SNAPSHOT_PERIOD_MS: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((1, 2147483)),
     storage: Storage::Quota,
     scope: &[Scope::Runtime],
     binding_heap: Some(Binding::Live),
@@ -381,6 +516,9 @@ pub const SNAPSHOT_PERIOD_MS: LimitBinding = LimitBinding {
 
 /// Where [`super::SNAPSHOT_HISTOGRAM_BUCKETS`] is bound.
 pub const SNAPSHOT_HISTOGRAM_BUCKETS: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((1, 32)),
     storage: Storage::Both,
     scope: &[Scope::Runtime, Scope::Session],
     binding_heap: Some(Binding::Open),
@@ -390,6 +528,9 @@ pub const SNAPSHOT_HISTOGRAM_BUCKETS: LimitBinding = LimitBinding {
 
 /// Where [`super::SUPERVISION_CHECKPOINTS`] is bound.
 pub const SUPERVISION_CHECKPOINTS: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((1, 64)),
     storage: Storage::Both,
     scope: &[Scope::Runtime],
     binding_heap: Some(Binding::Open),
@@ -399,6 +540,9 @@ pub const SUPERVISION_CHECKPOINTS: LimitBinding = LimitBinding {
 
 /// Where [`super::E2E_SUPERVISED_STREAMS`] is bound.
 pub const E2E_SUPERVISED_STREAMS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
     storage: Storage::Quota,
     scope: &[Scope::Runtime],
     binding_heap: Some(Binding::Open),
@@ -408,6 +552,9 @@ pub const E2E_SUPERVISED_STREAMS: LimitBinding = LimitBinding {
 
 /// Where [`super::APP_LINK_QUEUE_BYTES`] is bound.
 pub const APP_LINK_QUEUE_BYTES: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
     storage: Storage::Quota,
     scope: &[Scope::Link],
     binding_heap: Some(Binding::Open),
@@ -417,6 +564,9 @@ pub const APP_LINK_QUEUE_BYTES: LimitBinding = LimitBinding {
 
 /// Where [`super::EVENT_RING_SLOTS`] is bound.
 pub const EVENT_RING_SLOTS: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((1, 1073741823)),
     storage: Storage::Both,
     scope: &[Scope::Runtime],
     binding_heap: Some(Binding::Open),
@@ -426,6 +576,9 @@ pub const EVENT_RING_SLOTS: LimitBinding = LimitBinding {
 
 /// Where [`super::EVENT_RECORD_ARGS`] is bound.
 pub const EVENT_RECORD_ARGS: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((0, 255)),
     storage: Storage::Capacity,
     scope: &[Scope::Runtime],
     binding_heap: Some(Binding::Build),
@@ -435,6 +588,9 @@ pub const EVENT_RECORD_ARGS: LimitBinding = LimitBinding {
 
 /// Where [`super::CLOCK_SOURCES`] is bound.
 pub const CLOCK_SOURCES: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
     storage: Storage::Quota,
     scope: &[Scope::Runtime],
     binding_heap: Some(Binding::Open),
@@ -444,6 +600,9 @@ pub const CLOCK_SOURCES: LimitBinding = LimitBinding {
 
 /// Where [`super::E2E_SENDER_SLOTS`] is bound.
 pub const E2E_SENDER_SLOTS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
     storage: Storage::Both,
     scope: &[Scope::Entity],
     binding_heap: Some(Binding::Open),
@@ -453,6 +612,9 @@ pub const E2E_SENDER_SLOTS: LimitBinding = LimitBinding {
 
 /// Where [`super::REPLAY_DEPTH_MAX`] is bound.
 pub const REPLAY_DEPTH_MAX: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
     storage: Storage::Both,
     scope: &[Scope::Entity],
     binding_heap: Some(Binding::Open),
@@ -462,6 +624,9 @@ pub const REPLAY_DEPTH_MAX: LimitBinding = LimitBinding {
 
 /// Where [`super::MESSAGE_CATALOG_ENTRIES`] is bound.
 pub const MESSAGE_CATALOG_ENTRIES: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
     storage: Storage::Both,
     scope: &[Scope::Runtime],
     binding_heap: Some(Binding::Open),
@@ -471,6 +636,9 @@ pub const MESSAGE_CATALOG_ENTRIES: LimitBinding = LimitBinding {
 
 /// Where [`super::INSTANCE_KEY_FIELDS`] is bound.
 pub const INSTANCE_KEY_FIELDS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
     storage: Storage::Both,
     scope: &[Scope::Entity],
     binding_heap: Some(Binding::Open),
@@ -480,6 +648,9 @@ pub const INSTANCE_KEY_FIELDS: LimitBinding = LimitBinding {
 
 /// Where [`super::INSTANCES_PER_MESSAGE`] is bound.
 pub const INSTANCES_PER_MESSAGE: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
     storage: Storage::Both,
     scope: &[Scope::Entity],
     binding_heap: Some(Binding::Open),
@@ -489,6 +660,9 @@ pub const INSTANCES_PER_MESSAGE: LimitBinding = LimitBinding {
 
 /// Where [`super::CLOCK_MAX_FORWARD_STEP_MS`] is bound.
 pub const CLOCK_MAX_FORWARD_STEP_MS: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((0, 4294967295)),
     storage: Storage::Quota,
     scope: &[Scope::Runtime],
     binding_heap: Some(Binding::Live),
@@ -498,6 +672,9 @@ pub const CLOCK_MAX_FORWARD_STEP_MS: LimitBinding = LimitBinding {
 
 /// Where [`super::DECLARATION_SYNC_BURST_MESSAGES`] is bound.
 pub const DECLARATION_SYNC_BURST_MESSAGES: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((1, 4294967295)),
     storage: Storage::Quota,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Live),
@@ -507,6 +684,9 @@ pub const DECLARATION_SYNC_BURST_MESSAGES: LimitBinding = LimitBinding {
 
 /// Where [`super::DECLARATION_SYNC_FINAL_TIMEOUT_MS`] is bound.
 pub const DECLARATION_SYNC_FINAL_TIMEOUT_MS: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((1, 4294967295)),
     storage: Storage::Quota,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Live),
@@ -516,15 +696,21 @@ pub const DECLARATION_SYNC_FINAL_TIMEOUT_MS: LimitBinding = LimitBinding {
 
 /// Where [`super::DECLARATION_SYNC_INTERVAL_MS`] is bound.
 pub const DECLARATION_SYNC_INTERVAL_MS: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((1, 4294967295)),
     storage: Storage::Quota,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Live),
-    binding_fixed: None,
+    binding_fixed: Some(Binding::Open),
     wire: Wire::Timing,
 };
 
 /// Where [`super::DECLARATION_SYNC_RX_NO_PROGRESS_MS`] is bound.
 pub const DECLARATION_SYNC_RX_NO_PROGRESS_MS: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((0, 4294967295)),
     storage: Storage::Quota,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
@@ -534,24 +720,33 @@ pub const DECLARATION_SYNC_RX_NO_PROGRESS_MS: LimitBinding = LimitBinding {
 
 /// Where [`super::DECLARATION_SYNC_RETRY_INTERVAL_MS`] is bound.
 pub const DECLARATION_SYNC_RETRY_INTERVAL_MS: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((0, 4294967295)),
     storage: Storage::Quota,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
-    binding_fixed: None,
+    binding_fixed: Some(Binding::Open),
     wire: Wire::Timing,
 };
 
 /// Where [`super::DECLARATION_SYNC_TX_NO_PROGRESS_MS`] is bound.
 pub const DECLARATION_SYNC_TX_NO_PROGRESS_MS: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((0, 4294967295)),
     storage: Storage::Quota,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
-    binding_fixed: None,
+    binding_fixed: Some(Binding::Open),
     wire: Wire::None,
 };
 
 /// Where [`super::PICO_UNICAST_BATCH_BYTES`] is bound.
 pub const PICO_UNICAST_BATCH_BYTES: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((1, 65535)),
     storage: Storage::Quota,
     scope: &[Scope::Link],
     binding_heap: Some(Binding::Open),
@@ -561,6 +756,9 @@ pub const PICO_UNICAST_BATCH_BYTES: LimitBinding = LimitBinding {
 
 /// Where [`super::PICO_MULTICAST_BATCH_BYTES`] is bound.
 pub const PICO_MULTICAST_BATCH_BYTES: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((1, 65535)),
     storage: Storage::Quota,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
@@ -570,6 +768,9 @@ pub const PICO_MULTICAST_BATCH_BYTES: LimitBinding = LimitBinding {
 
 /// Where [`super::PICO_LEASE_MS`] is bound.
 pub const PICO_LEASE_MS: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((1, 4294967295)),
     storage: Storage::Quota,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
@@ -579,6 +780,9 @@ pub const PICO_LEASE_MS: LimitBinding = LimitBinding {
 
 /// Where [`super::PICO_SOCKET_TIMEOUT_MS`] is bound.
 pub const PICO_SOCKET_TIMEOUT_MS: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((0, 4294967295)),
     storage: Storage::Quota,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
@@ -588,6 +792,9 @@ pub const PICO_SOCKET_TIMEOUT_MS: LimitBinding = LimitBinding {
 
 /// Where [`super::PICO_CONNECT_TIMEOUT_MS`] is bound.
 pub const PICO_CONNECT_TIMEOUT_MS: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((1, 4294967295)),
     storage: Storage::Quota,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
@@ -597,6 +804,9 @@ pub const PICO_CONNECT_TIMEOUT_MS: LimitBinding = LimitBinding {
 
 /// Where [`super::PICO_FRAG_MAX_BYTES`] is bound.
 pub const PICO_FRAG_MAX_BYTES: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
     storage: Storage::Quota,
     scope: &[Scope::Link],
     binding_heap: Some(Binding::Open),
@@ -606,6 +816,9 @@ pub const PICO_FRAG_MAX_BYTES: LimitBinding = LimitBinding {
 
 /// Where [`super::PICO_ACCEPT_TIMEOUT_MS`] is bound.
 pub const PICO_ACCEPT_TIMEOUT_MS: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((1, 4294967295)),
     storage: Storage::Quota,
     scope: &[Scope::Link],
     binding_heap: Some(Binding::Open),
@@ -615,6 +828,9 @@ pub const PICO_ACCEPT_TIMEOUT_MS: LimitBinding = LimitBinding {
 
 /// Where [`super::PICO_KEEPALIVES_PER_LEASE`] is bound.
 pub const PICO_KEEPALIVES_PER_LEASE: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((1, 4294967295)),
     storage: Storage::Quota,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),

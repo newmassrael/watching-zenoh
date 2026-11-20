@@ -886,8 +886,9 @@ pub fn form_in_domain(form: KeyWireForm) -> bool {
 
 /// How many queries of a link a node remembers the key form of at once, for the replies that
 /// mirror it: a query that is never ended gives way to the newest, so a peer cannot grow the
-/// table.
-const NOTED_REQUESTS: usize = crate::caps::MAX_PENDING_QUERIES;
+/// table. The peer's queries, not this node's, so its own limit and not `MAX_PENDING_QUERIES`;
+/// at least 1, as the declaration's range holds it.
+const NOTED_REQUESTS: usize = crate::caps::LINK_NOTED_REQUESTS;
 
 /// The key form a request arrived under, kept until its `Final` for the replies that mirror it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -946,7 +947,7 @@ impl LinkKeys {
     /// Keep the key form of the request `rid` that arrived as `(id, suffix)` with the mapping bit
     /// `sender_mapping`, when a reply to it may mirror it: the link's form is `shared`, the peer
     /// is no router and the id is one of the dictionary's. The oldest kept gives way once the
-    /// link keeps as many as the session tracks pending queries (`MAX_PENDING_QUERIES`).
+    /// link keeps `LINK_NOTED_REQUESTS` of them.
     pub fn note_request(
         &mut self,
         rid: crate::wire_id::RequestId,
@@ -962,7 +963,7 @@ impl LinkKeys {
             return;
         }
         self.requests.retain(|(noted, _)| *noted != rid);
-        if self.requests.len() >= NOTED_REQUESTS.max(1) {
+        if self.requests.len() >= NOTED_REQUESTS {
             self.requests.remove(0);
         }
         self.requests.push((

@@ -261,9 +261,9 @@ pub enum DriverLoopOutcome {
     /// first sent; the step goes on waiting under the deadline it had.
     #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
     HandshakeStrayReplayed,
-    /// The same repeat, with no answer held to send again (it was longer than
-    /// `HELD_ANSWER_MAX`, or the link took no slot for it): the message is dropped as under
-    /// `ignore`, and this names that the replay did not happen.
+    /// The same repeat, with no answer held to send again (it was longer than the
+    /// `HELD_ANSWER_MAX` a `session-slot` build holds, or the link took no slot for it): the
+    /// message is dropped as under `ignore`, and this names that the replay did not happen.
     #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
     HandshakeStrayNotReplayed,
     /// An InitSyn announced a protocol version other than

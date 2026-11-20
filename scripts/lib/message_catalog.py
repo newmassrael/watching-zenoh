@@ -14,7 +14,8 @@ rules the host reader judges it by.
                                                write them to RS
     message_catalog.py --selftest              every rule on the shared corpus, then --check
 
-`--limit NAME=VALUE` (MESSAGE_CATALOG_ENTRIES, REPLAY_DEPTH_MAX, E2E_SENDER_SLOTS) states an
+`--limit NAME=VALUE` (MESSAGE_CATALOG_ENTRIES, REPLAY_DEPTH_MAX, E2E_SENDER_SLOTS,
+INSTANCE_KEY_FIELDS, INSTANCES_PER_MESSAGE) states an
 image's own bound in place of the declaration's default; a catalog over a bound is refused, so no
 table longer than its limit is written.
 
@@ -80,6 +81,8 @@ LIMITS = (
     ("MESSAGE_CATALOG_ENTRIES", "messages"),
     ("REPLAY_DEPTH_MAX", "replay_depth_max"),
     ("E2E_SENDER_SLOTS", "sender_slots"),
+    ("INSTANCE_KEY_FIELDS", "key_fields"),
+    ("INSTANCES_PER_MESSAGE", "instances"),
 )
 
 # Every refusal word this script raises. The selftest holds it equal to the schema's words less the
@@ -111,6 +114,8 @@ RAISED = (
     "too_many_senders",
     "instance_key_with_senders",
     "duplicate_instance_key",
+    "too_many_key_fields",
+    "too_many_instances",
 )
 
 
@@ -670,6 +675,13 @@ class Judge:
                         raise Refused("duplicate_instance_key", child(here, "field"),
                                       f"the field `{name}` is named twice")
                     instance_key.append((name, values))
+                instances = 1
+                for _, listed in instance_key:
+                    instances *= len(listed)
+                if instances > self.limit("INSTANCES_PER_MESSAGE"):
+                    raise Refused("too_many_instances", child(p, "instance_key"),
+                                  "the lists of values make more instances than the build's "
+                                  f"INSTANCES_PER_MESSAGE, {self.limit('INSTANCES_PER_MESSAGE')}")
 
             depth = uint(m.get("replay_depth"), "") if m.has("replay_depth") else None
             watch = None

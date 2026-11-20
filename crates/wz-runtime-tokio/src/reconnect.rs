@@ -292,6 +292,32 @@ pub struct ReconnectingSession {
 /// [`ReplayPacing::of_policy`].
 pub use wz_session_core::replay_pacing::{RefusalStep, ReplayPacing};
 
+/// What a declaration replay that did not complete leaves of the connection it ran on, paced or
+/// not.
+#[derive(Debug)]
+enum ReplayEnd {
+    /// The transport did not take a declaration: the link is going down. The connection is taken
+    /// as lost, and the session opens again and replays from the start, as zenoh-pico's reopen
+    /// task clears a transport it could not send a declaration over and runs again
+    /// (`vendor/zenoh-pico/src/net/session.c` @ `_z_transport_clear(&s->_tp);`, then
+    /// `return _z_fut_fn_result_continue();`).
+    ConnectionLost,
+    /// A builder rejected a declaration it accepted when it was made: an invariant breach, which
+    /// identical inputs would repeat on every connection, so the supervisor gives up on it.
+    Breach(ReplayDeclarationsError),
+}
+
+impl ReplayEnd {
+    /// What `error`, the replay's failure, leaves of the connection.
+    fn of(error: ReplayDeclarationsError) -> Self {
+        if error.is_transport_refusal() {
+            Self::ConnectionLost
+        } else {
+            Self::Breach(error)
+        }
+    }
+}
+
 /// R311py — the handles [`ReconnectingSession::into_teardown`] hands back: the
 /// surviving [`SessionLinkActions`] bundle (the last sink clone — the writer
 /// task's sender lives behind it) and the writer-task join handle of the last
@@ -346,8 +372,12 @@ impl ReconnectingSession {
     /// this one task, so the drive is never starved by a wait and the replay is not run from a
     /// task nobody can return its error from: a turn that fails ends the drive with that error.
     ///
-    /// A refused send (the link is going down) is such an error too, and the reopen that follows
-    /// begins the replay again from the start, the next peer holding nothing.
+    /// A turn the transport refused (`ReplayDeclarationsError::is_transport_refusal`, the link
+    /// going down) is answered as the pace says ([`ReplayPacing::after_refusal`]): tried again
+    /// from the declaration it refused after the pace's retry wait, or, when the pace gives it up,
+    /// returned as the error. [`Self::drive`] takes that error as the end of the connection and
+    /// opens again, the replay beginning from the start for a peer that holds nothing
+    /// ([`ReplayEnd`]). A turn a builder rejected is returned at once, and `drive` gives up on it.
     async fn drive_with_paced_replay<F>(
         &mut self,
         pacing: ReplayPacing,
@@ -593,43 +623,53 @@ impl ReconnectingSession {
     where
         F: FnMut(IterationEvent<'_, '_>),
     {
+        // Set when the replay over a connection just opened found its transport gone: that
+        // connection is lost before it was driven, so the next pass goes straight to the reopen.
+        let mut replay_lost_connection = false;
         loop {
             let clock = self.opened.clock;
-            let outcome = match self.replay_pacing {
-                // A paced replay is owed: serve the session while its turns are sent, so the
-                // waits between turns do not stop the keepalives or the reading.
-                Some(pacing) if self.actions.paced_replay_running() => {
-                    match self
-                        .drive_with_paced_replay(
-                            pacing,
-                            timeouts,
+            let outcome = if core::mem::take(&mut replay_lost_connection) {
+                DriverOutcome::Terminated
+            } else {
+                match self.replay_pacing {
+                    // A paced replay is owed: serve the session while its turns are sent, so the
+                    // waits between turns do not stop the keepalives or the reading.
+                    Some(pacing) if self.actions.paced_replay_running() => {
+                        match self
+                            .drive_with_paced_replay(
+                                pacing,
+                                timeouts,
+                                max_iters_per_connection,
+                                &mut on_event,
+                            )
+                            .await
+                        {
+                            Ok(outcome) => outcome,
+                            Err(err) => match ReplayEnd::of(err) {
+                                ReplayEnd::ConnectionLost => DriverOutcome::Terminated,
+                                // The same breach as an unpaced replay's reject, found later:
+                                // the builders accepted these arguments once and now refuse them.
+                                ReplayEnd::Breach(err) => {
+                                    return ReconnectDriveOutcome::GaveUp {
+                                        attempts: 0,
+                                        last: ReconnectError::Replay(err),
+                                    };
+                                }
+                            },
+                        }
+                    }
+                    _ => {
+                        drive_session_until_terminal(
+                            &mut self.opened.inbound,
+                            &self.actions,
+                            &mut self.opened.engine,
                             max_iters_per_connection,
+                            &clock,
+                            timeouts,
                             &mut on_event,
                         )
                         .await
-                    {
-                        Ok(outcome) => outcome,
-                        // The same breach as an unpaced replay's reject, found later: the
-                        // builders accepted these arguments once and now refuse them.
-                        Err(err) => {
-                            return ReconnectDriveOutcome::GaveUp {
-                                attempts: 0,
-                                last: ReconnectError::Replay(err),
-                            };
-                        }
                     }
-                }
-                _ => {
-                    drive_session_until_terminal(
-                        &mut self.opened.inbound,
-                        &self.actions,
-                        &mut self.opened.engine,
-                        max_iters_per_connection,
-                        &clock,
-                        timeouts,
-                        &mut on_event,
-                    )
-                    .await
                 }
             };
             match outcome {
@@ -769,8 +809,10 @@ impl ReconnectingSession {
                         }
                     };
                     // pico parity: the reopen task replays the declaration
-                    // cache right after `_z_open` succeeds; a replay reject
-                    // is an invariant breach, not a retryable condition.
+                    // cache right after `_z_open` succeeds. A replay the
+                    // transport refused loses the connection and opens again,
+                    // as pico's reopen task does; a builder's reject is an
+                    // invariant breach, not a retryable condition ([`ReplayEnd`]).
                     //
                     // Under the `declaration-sync-pacing` policy the replay only BEGINS here: its
                     // turns are sent from the steady-state loop below, between the session's own
@@ -778,10 +820,19 @@ impl ReconnectingSession {
                     match self.replay_pacing {
                         None => {
                             if let Err(err) = self.actions.replay_declarations() {
-                                return ReconnectDriveOutcome::GaveUp {
-                                    attempts,
-                                    last: ReconnectError::Replay(err),
-                                };
+                                match ReplayEnd::of(err) {
+                                    // Not a reconnect survived: the next pass opens again.
+                                    ReplayEnd::ConnectionLost => {
+                                        replay_lost_connection = true;
+                                        continue;
+                                    }
+                                    ReplayEnd::Breach(err) => {
+                                        return ReconnectDriveOutcome::GaveUp {
+                                            attempts,
+                                            last: ReconnectError::Replay(err),
+                                        };
+                                    }
+                                }
                             }
                         }
                         Some(_) => self.actions.begin_paced_replay(),
@@ -950,6 +1001,44 @@ pub async fn reconnect_endpoint(
         tick_interval_ms,
     )
     .await
+}
+
+#[cfg(test)]
+mod replay_end_tests {
+    use super::*;
+    use wz_session_core::send_declare_error::SendDeclareError;
+    use wz_session_core::send_wire_error::SendWireError;
+
+    /// A replay the transport refused, paced or not, loses the connection and the session opens
+    /// again, as zenoh-pico's reopen task does; one a builder rejected is a breach the supervisor
+    /// gives up on, as identical inputs would reject on every connection.
+    #[test]
+    fn a_replay_the_transport_refused_opens_again_and_a_rejected_one_gives_up() {
+        assert!(matches!(
+            ReplayEnd::of(ReplayDeclarationsError::Declare(
+                SendDeclareError::TransportUnavailable
+            )),
+            ReplayEnd::ConnectionLost
+        ));
+        assert!(matches!(
+            ReplayEnd::of(ReplayDeclarationsError::Interest(
+                SendWireError::TransportUnavailable
+            )),
+            ReplayEnd::ConnectionLost
+        ));
+        assert!(matches!(
+            ReplayEnd::of(ReplayDeclarationsError::Declare(
+                SendDeclareError::MissingKeyexpr
+            )),
+            ReplayEnd::Breach(ReplayDeclarationsError::Declare(
+                SendDeclareError::MissingKeyexpr
+            ))
+        ));
+        assert!(matches!(
+            ReplayEnd::of(ReplayDeclarationsError::FeatureDisabled),
+            ReplayEnd::Breach(ReplayDeclarationsError::FeatureDisabled)
+        ));
+    }
 }
 
 #[cfg(test)]

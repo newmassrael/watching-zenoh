@@ -727,12 +727,21 @@ CASES: tuple[Case, ...] = (
     # +522); the multicast member table's strategy type nets to nothing (`multicast_glue`
     # +1,564, `multicast_dispatch` -1,606). Chosen growth; the hosted reading and 3,500.
     # 2026-11-19 -- step 3b, as pico-client's note of this day says: +26,704 on pc2.
-    Case("pico-default", "wz-capi-pico", "libwz_capi_pico.so", None, 4_647_000,
+    # 2026-11-20 -- the three pico internals clang emits calls to into every program of the unstable
+    # arm (`header_internals`): +465 of text on pc2 (`2df58c881` 4,681,351 against the fix's
+    # 4,681,816), and the symbol diff is those three functions alone (+149: `_z_cancellation_
+    # token_clear` 123, `_remove_on_cancel_handler` 14, `_z_sync_group_notifier_drop` 12). Chosen
+    # growth; the budget moves by it, to the hundred.
+    Case("pico-default", "wz-capi-pico", "libwz_capi_pico.so", None, 4_647_500,
          forbid=(SINGLE_THREADED,),
          require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
                   CONNECTIVITY, MULTICAST),
-         exports=808,
-         note="every capability on: the symbol count is the drop-in's. 808 with the config "
+         exports=811,
+         note="every capability on: the symbol count is the drop-in's. 811 with the three pico "
+              "internals clang emits calls to into every program of the unstable arm "
+              "(`header_internals`: `_z_cancellation_token_clear`, "
+              "`_z_cancellation_token_remove_on_cancel_handler`, `_z_sync_group_notifier_drop`). "
+              "808 with the config "
               "doors of the open's policies (`wz_ext_config_policy`, `wz_ext_config_profile`; "
               "`wz_ext_config_document` is behind `config-document`, off). 806 with the door that "
               "tells a session's peers its declarations again (`wz_ext_redeclare`, unstable "

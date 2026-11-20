@@ -125,8 +125,11 @@ use crate::session_open::{
 // its re-dial waits by it, and this module's fixtures name it.
 #[cfg(any(test, feature = "transport-multilink"))]
 use crate::session_open::MeshDialKey;
+use wz_session_core::caps::MAX_LOCATOR_LEN;
 use wz_session_core::locator::AnyLocator;
-use wz_session_core::locator_directory::{DirectoryZid, Lifetime, LocatorDirectory, LocatorSource};
+use wz_session_core::locator_directory::{
+    DirectoryRefusal, DirectoryZid, Lifetime, LocatorDirectory, LocatorSource,
+};
 /// The `routing-face-drive` policy [`peer_loop_shared`] takes; its `Default` is the build's
 /// value.
 #[cfg(feature = "routing-peer")]
@@ -399,8 +402,19 @@ pub fn learn_locators(
         directory.withdraw(zid, LocatorSource::Linkstate);
     }
     for locator in locators {
-        if let Err(why) = directory.confirm(*zid, locator, source, now_ms, lifetime) {
-            log::debug!("directory: `{locator}` not taken for a node ({why:?})");
+        match directory.confirm(*zid, locator, source, now_ms, lifetime) {
+            Ok(()) => {}
+            // The directory counts every refusal; this one is also said where an operator sees
+            // it, because it is a mismatch the deployment can mend: a peer advertises a locator
+            // that crossed the wire and the decoder whole (the decode bound is longer than the
+            // storage one) and this node's own limit is too short to keep it, so the node cannot
+            // dial that peer at it.
+            Err(DirectoryRefusal::LocatorTooLong) => log::warn!(
+                "directory: a {source:?} locator of {} bytes is longer than this node's \
+                 MAX_LOCATOR_LEN ({MAX_LOCATOR_LEN}) and is not kept: `{locator}`",
+                locator.len()
+            ),
+            Err(why) => log::debug!("directory: `{locator}` not taken for a node ({why:?})"),
         }
     }
 }
@@ -5821,6 +5835,36 @@ mod tests {
             candidate_locators(&directory, &zid, 10 + HELLO_LIFETIME_MS),
             ["tcp/127.0.0.1:7103"],
             "the Hello's hint ends; the flood's lasts until the graph replaces it"
+        );
+    }
+
+    /// A link-state locator one byte past this node's `MAX_LOCATOR_LEN` (which the producer's
+    /// decode bound lets through) is refused and counted by the directory, never kept cut short,
+    /// and the node's other locators are still taken.
+    #[test]
+    fn a_locator_past_the_nodes_limit_is_refused_and_counted_and_the_rest_taken() {
+        let wrapping = "tcp/:7447".len();
+        let long = format!("tcp/{}:7447", "h".repeat(MAX_LOCATOR_LEN + 1 - wrapping));
+        assert_eq!(long.len(), MAX_LOCATOR_LEN + 1);
+        let short = "tcp/127.0.0.1:7447".to_owned();
+        let mut directory = Box::new(LoopDirectory::new());
+        let zid = [0xAA; 16];
+        learn_locators(
+            &mut directory,
+            &zid,
+            &[long, short.clone()],
+            LocatorSource::Linkstate,
+            0,
+        );
+        assert_eq!(
+            directory.refused(),
+            1,
+            "the long one is refused and counted"
+        );
+        assert_eq!(
+            candidate_locators(&directory, &zid, 0),
+            [short],
+            "only the locator that fits is a candidate"
         );
     }
 

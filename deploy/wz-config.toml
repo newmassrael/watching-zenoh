@@ -1835,7 +1835,7 @@ original = "zenoh-pico"
 switch = "Z_TRANSPORT_CONNECT_TIMEOUT"
 class = "maps"
 anchor = "limit:PICO_CONNECT_TIMEOUT_MS"
-note = "how long the cooperative engine's open waits for the session to be established"
+note = "how long each open of an endpoint waits for its dial and handshake, on either engine"
 
 [[upstream_switch]]
 original = "zenoh-pico"
@@ -2001,6 +2001,9 @@ note = "the per-link transport counters; zenoh-c has no C door for them and neit
 [[limit]]
 id = "MAX_KEYEXPR_BYTES"
 kconfig = "WZ_LIMIT_MAX_KEYEXPR_BYTES"
+kind = "bound"
+driven = "remote"
+on_heap = "capacity"
 default = 256
 storage = "both"
 scope = "session"
@@ -2018,6 +2021,9 @@ Every table that stores keys sizes its rows by this.
 [[limit]]
 id = "MAX_SUBSCRIPTIONS"
 kconfig = "WZ_LIMIT_MAX_SUBSCRIPTIONS"
+kind = "bound"
+driven = "local"
+on_heap = "advisory"
 default = 16
 storage = "both"
 scope = "session"
@@ -2032,6 +2038,8 @@ while the table is full.
 [[limit]]
 id = "MATCH_MEMO_SLOTS"
 kconfig = "WZ_LIMIT_MATCH_MEMO_SLOTS"
+kind = "parameter"
+range = [0, 4294967295]
 default = 8
 storage = "quota"
 scope = "session"
@@ -2053,6 +2061,8 @@ whether used or not, a heap's only as it fills.
 [[limit]]
 id = "MATCH_MEMO_FIXED_SLOTS"
 kconfig = "WZ_LIMIT_MATCH_MEMO_FIXED_SLOTS"
+kind = "parameter"
+range = [0, 4294967295]
 default = 0
 storage = "capacity"
 scope = "session"
@@ -2073,6 +2083,8 @@ cache for the keys of its table.
 [[limit]]
 id = "MATCH_MEMO_KEY_BYTES"
 kconfig = "WZ_LIMIT_MATCH_MEMO_KEY_BYTES"
+kind = "parameter"
+range = [0, 4294967295]
 default = 64
 storage = "capacity"
 scope = "session"
@@ -2088,6 +2100,9 @@ Read only where MATCH_MEMO_FIXED_SLOTS is above 0.
 [[limit]]
 id = "DELIVERY_LANE_EVENTS"
 kconfig = "WZ_LIMIT_DELIVERY_LANE_EVENTS"
+kind = "bound"
+driven = "remote"
+on_heap = "capacity"
 default = 64
 storage = "both"
 scope = "entity"
@@ -2103,6 +2118,8 @@ on. A sample past this is refused and counted. It must be at least 1.
 [[limit]]
 id = "DELIVERY_LANE_BYTES"
 kconfig = "WZ_LIMIT_DELIVERY_LANE_BYTES"
+kind = "parameter"
+range = [1, 4294967295]
 default = 65536
 storage = "quota"
 scope = "entity"
@@ -2119,6 +2136,8 @@ does not fit is refused and counted. It must be at least 1.
 [[limit]]
 id = "DELIVERY_LANE_CALLBACKS"
 kconfig = "WZ_LIMIT_DELIVERY_LANE_CALLBACKS"
+kind = "bound"
+driven = "remote"
 default = 256
 storage = "quota"
 scope = "entity"
@@ -2136,6 +2155,9 @@ least 1.
 [[limit]]
 id = "MAX_QUERYABLES"
 kconfig = "WZ_LIMIT_MAX_QUERYABLES"
+kind = "bound"
+driven = "local"
+on_heap = "advisory"
 default = 16
 storage = "both"
 scope = "session"
@@ -2150,6 +2172,9 @@ while the table is full.
 [[limit]]
 id = "MAX_PENDING_QUERIES"
 kconfig = "WZ_LIMIT_MAX_PENDING_QUERIES"
+kind = "bound"
+driven = "local"
+on_heap = "advisory"
 default = 16
 storage = "both"
 scope = "session"
@@ -2162,8 +2187,32 @@ Issuing one more is refused while the table is full.
 '''
 
 [[limit]]
+id = "LINK_NOTED_REQUESTS"
+kconfig = "WZ_LIMIT_LINK_NOTED_REQUESTS"
+kind = "parameter"
+range = [1, 4294967295]
+default = 16
+storage = "quota"
+scope = "link"
+binding_heap = "open"
+binding_fixed = "open"
+# `wire` is none: a reply whose request's key form was let go names its key in the link's own form,
+# which the peer reads as it reads any reply.
+wire = "none"
+help = '''
+How many queries a peer sent over one link the node remembers the key form of
+at once, so that its replies name the key as the query did, when the link names
+keys by the shared key ids. A query never ended gives way to the newest, so a
+peer cannot grow the table. It sizes a memory, not a bound: a query past it is
+still answered.
+'''
+
+[[limit]]
 id = "MAX_DECL_OBSERVERS"
 kconfig = "WZ_LIMIT_MAX_DECL_OBSERVERS"
+kind = "bound"
+driven = "local"
+on_heap = "advisory"
 default = 8
 storage = "both"
 scope = "session"
@@ -2180,6 +2229,9 @@ needed; one more is refused.
 [[limit]]
 id = "MAX_LIVELINESS_SUBSCRIPTIONS"
 kconfig = "WZ_LIMIT_MAX_LIVELINESS_SUBSCRIPTIONS"
+kind = "bound"
+driven = "local"
+on_heap = "advisory"
 default = 8
 storage = "both"
 scope = "session"
@@ -2194,6 +2246,9 @@ is refused while the table is full.
 [[limit]]
 id = "MAX_LOCAL_TOKENS"
 kconfig = "WZ_LIMIT_MAX_LOCAL_TOKENS"
+kind = "bound"
+driven = "local"
+on_heap = "advisory"
 default = 8
 storage = "both"
 scope = "session"
@@ -2210,6 +2265,9 @@ Declaring one more is refused while the table is full.
 [[limit]]
 id = "MAX_PENDING_LIVELINESS_GETS"
 kconfig = "WZ_LIMIT_MAX_PENDING_LIVELINESS_GETS"
+kind = "bound"
+driven = "local"
+on_heap = "advisory"
 default = 8
 storage = "both"
 scope = "session"
@@ -2225,6 +2283,9 @@ few are waiting together; one more is refused while the table is full.
 [[limit]]
 id = "MAX_PENDING_DECLARES"
 kconfig = "WZ_LIMIT_MAX_PENDING_DECLARES"
+kind = "bound"
+driven = "remote"
+on_heap = "advisory"
 default = 32
 storage = "both"
 scope = "session"
@@ -2243,6 +2304,9 @@ counted, never sent in part.
 [[limit]]
 id = "MAX_INBOUND_SUB_INTERESTS"
 kconfig = "WZ_LIMIT_MAX_INBOUND_SUB_INTERESTS"
+kind = "bound"
+driven = "remote"
+on_heap = "advisory"
 default = 16
 storage = "both"
 scope = "session"
@@ -2261,6 +2325,9 @@ the subscribers of the moment, not the later ones.
 [[limit]]
 id = "MAX_PEER_KEYEXPR_ALIASES"
 kconfig = "WZ_LIMIT_MAX_PEER_KEYEXPR_ALIASES"
+kind = "bound"
+driven = "remote"
+on_heap = "advisory"
 default = 16
 storage = "both"
 scope = "session"
@@ -2278,6 +2345,8 @@ that names it is dropped, as one naming an undeclared id is.
 [[limit]]
 id = "MAX_SHARED_KEY_IDS"
 kconfig = "WZ_LIMIT_MAX_SHARED_KEY_IDS"
+kind = "bound"
+driven = "local"
 default = 256
 # A quota of the heap profile: the dictionary is handed to the open and held on the heap, and an
 # image with no allocator has none yet.
@@ -2296,6 +2365,9 @@ refused when it is handed over, and no session holds it.
 [[limit]]
 id = "MAX_REMOTE_DECLS"
 kconfig = "WZ_LIMIT_MAX_REMOTE_DECLS"
+kind = "bound"
+driven = "remote"
+on_heap = "advisory"
 default = 16
 storage = "both"
 scope = "session"
@@ -2311,6 +2383,9 @@ counted, and the application is not told of it.
 [[limit]]
 id = "MAX_PENDING_REPLIES"
 kconfig = "WZ_LIMIT_MAX_PENDING_REPLIES"
+kind = "bound"
+driven = "remote"
+on_heap = "advisory"
 default = 8
 storage = "both"
 scope = "session"
@@ -2326,6 +2401,9 @@ told.
 [[limit]]
 id = "MAX_PENDING_FINALS"
 kconfig = "WZ_LIMIT_MAX_PENDING_FINALS"
+kind = "bound"
+driven = "remote"
+on_heap = "advisory"
 default = 8
 storage = "both"
 scope = "session"
@@ -2344,6 +2422,9 @@ waiting until its own timeout.
 [[limit]]
 id = "MAX_REPLY_PAYLOAD_BYTES"
 kconfig = "WZ_LIMIT_MAX_REPLY_PAYLOAD_BYTES"
+kind = "bound"
+driven = "local"
+on_heap = "advisory"
 default = 1024
 storage = "both"
 scope = "session"
@@ -2358,6 +2439,8 @@ beside it. A larger reply is refused, never cut short.
 [[limit]]
 id = "MAX_ADMIN_REPLY_BYTES"
 kconfig = "WZ_LIMIT_MAX_ADMIN_REPLY_BYTES"
+kind = "bound"
+driven = "local"
 default = 1024
 storage = "capacity"
 scope = "runtime"
@@ -2373,6 +2456,8 @@ the largest reply payload (WZ_LIMIT_MAX_REPLY_PAYLOAD_BYTES).
 [[limit]]
 id = "MAX_ADMIN_LOCATORS"
 kconfig = "WZ_LIMIT_MAX_ADMIN_LOCATORS"
+kind = "bound"
+driven = "local"
 default = 4
 storage = "capacity"
 scope = "runtime"
@@ -2387,6 +2472,8 @@ space. One more is refused when the node starts, never dropped.
 [[limit]]
 id = "MAX_ADMIN_SESSION_LINKS"
 kconfig = "WZ_LIMIT_MAX_ADMIN_SESSION_LINKS"
+kind = "bound"
+driven = "local"
 default = 2
 storage = "capacity"
 scope = "session"
@@ -2401,21 +2488,26 @@ has one; a row with more is refused and counted, not listed in part.
 [[limit]]
 id = "MAX_MULTICAST_REPLIES"
 kconfig = "WZ_LIMIT_MAX_MULTICAST_REPLIES"
+kind = "bound"
+driven = "remote"
 default = 8
-storage = "capacity"
+on_heap = "quota"
+storage = "both"
 scope = "session"
-binding_heap = "none"
+binding_heap = "open"
 binding_fixed = "build"
 wire = "none"
 help = '''
-The replies a node without an allocator holds for a multicast group before
-it sends them. One more is dropped and counted: a group is best effort, and
-an asker whose reply was dropped asks again.
+The replies a node holds for a multicast group before it sends them, with or
+without an allocator. One more is dropped and counted: a group is best
+effort, and an asker whose reply was dropped asks again.
 '''
 
 [[limit]]
 id = "MAX_TASKS"
 kconfig = "WZ_LIMIT_MAX_TASKS"
+kind = "bound"
+driven = "local"
 default = 8
 storage = "capacity"
 scope = "runtime"
@@ -2431,6 +2523,8 @@ it compiles.
 [[limit]]
 id = "MAX_TIMERS"
 kconfig = "WZ_LIMIT_MAX_TIMERS"
+kind = "bound"
+driven = "local"
 default = 16
 storage = "capacity"
 scope = "runtime"
@@ -2445,6 +2539,9 @@ the timer table the image declares, checked as the task ceiling is.
 [[limit]]
 id = "MAX_LOCATOR_LEN"
 kconfig = "WZ_LIMIT_MAX_LOCATOR_LEN"
+kind = "bound"
+driven = "remote"
+on_heap = "capacity"
 default = 64
 storage = "both"
 scope = ["runtime", "link"]
@@ -2461,6 +2558,9 @@ scheme and port.
 [[limit]]
 id = "MAX_STATIC_CONNECT"
 kconfig = "WZ_LIMIT_MAX_STATIC_CONNECT"
+kind = "bound"
+driven = "local"
+on_heap = "capacity"
 default = 8
 storage = "both"
 scope = "runtime"
@@ -2475,6 +2575,8 @@ at the limit; a fixed deployment names a few peers.
 [[limit]]
 id = "MAX_PEER_NODES"
 kconfig = "WZ_LIMIT_MAX_PEER_NODES"
+kind = "bound"
+driven = "local"
 default = 0
 storage = "capacity"
 scope = "runtime"
@@ -2494,6 +2596,9 @@ is refused.
 [[limit]]
 id = "QUERIER_MAX_PENDING_QUERIES"
 kconfig = "WZ_LIMIT_QUERIER_MAX_PENDING_QUERIES"
+kind = "bound"
+driven = "local"
+zero_unbounded = true
 default = 0
 storage = "quota"
 scope = "entity"
@@ -2506,13 +2611,15 @@ refused until a pending one ends. A query ends when its final arrives, its
 deadline passes, or its handle is unregistered. The bound is per querier,
 not per session, so one busy querier cannot starve another. 0 is no bound,
 which is upstream's behaviour. Unlike the other limits this one sizes no
-table: it only refuses the one more. It binds the Rust session API; the C
-ABIs and the cooperative engine do not hold to it yet.
+table: it only refuses the one more. It binds the queriers of the Rust session
+API and the replay subscriber of the zenoh-pico interface.
 '''
 
 [[limit]]
 id = "TX_NO_PROGRESS_WINDOW_US"
 kconfig = "WZ_LIMIT_TX_NO_PROGRESS_WINDOW_US"
+kind = "parameter"
+range = [1, 5000000]
 default = 1000000
 storage = "quota"
 scope = "session"
@@ -2529,6 +2636,11 @@ than the total wait before the session is closed, which is set as before.
 [[limit]]
 id = "TX_EXPIRY_CLOSE_AFTER"
 kconfig = "WZ_LIMIT_TX_EXPIRY_CLOSE_AFTER"
+kind = "bound"
+driven = "remote"
+zero_unbounded = true
+# A session counts the run of expiries in 16 bits.
+most = 65535
 default = 0
 storage = "quota"
 scope = "session"
@@ -2540,12 +2652,15 @@ How many blocking messages in a row may find no room within their deadline
 before the session is closed as unresponsive, when the tx-expiry-keeps-session
 policy is on. A blocking message that does find room ends the run. 0 never
 closes the session, which is the policy as it was before this limit. At most
-65535: a larger value counts as 65535. It is read only when that policy is on.
+65535, the count a session holds: a build that states more does not compile.
+It is read only when that policy is on.
 '''
 
 [[limit]]
 id = "DATAGRAM_FRAGMENT_BURST"
 kconfig = "WZ_LIMIT_DATAGRAM_FRAGMENT_BURST"
+kind = "parameter"
+range = [1, 4294967295]
 default = 8
 storage = "quota"
 scope = "link"
@@ -2561,6 +2676,8 @@ DATAGRAM_FRAGMENT_GAP_US. At least 1. It is read only when that policy is on.
 [[limit]]
 id = "DATAGRAM_FRAGMENT_GAP_US"
 kconfig = "WZ_LIMIT_DATAGRAM_FRAGMENT_GAP_US"
+kind = "parameter"
+range = [1, 1000000]
 default = 1000
 storage = "quota"
 scope = "link"
@@ -2579,6 +2696,9 @@ millisecond. It is read only when that policy is on.
 [[limit]]
 id = "QUERY_PARAMETERS_MAX_BYTES"
 kconfig = "WZ_LIMIT_QUERY_PARAMETERS_MAX_BYTES"
+kind = "bound"
+driven = "remote"
+zero_unbounded = true
 default = 0
 storage = "quota"
 scope = "session"
@@ -2597,6 +2717,9 @@ session is not bounded: the caller already holds what it passed.
 [[limit]]
 id = "QUERY_ATTACHMENT_MAX_BYTES"
 kconfig = "WZ_LIMIT_QUERY_ATTACHMENT_MAX_BYTES"
+kind = "bound"
+driven = "remote"
+zero_unbounded = true
 default = 0
 storage = "quota"
 scope = "session"
@@ -2614,6 +2737,8 @@ limit.
 [[limit]]
 id = "HANDSHAKE_COOKIE_BYTES"
 kconfig = "WZ_LIMIT_HANDSHAKE_COOKIE_BYTES"
+kind = "bound"
+driven = "remote"
 default = 128
 storage = "capacity"
 scope = "session"
@@ -2637,6 +2762,8 @@ does not read it.
 [[limit]]
 id = "PICO_TX_QUEUE_SIZE"
 kconfig = "WZ_LIMIT_PICO_TX_QUEUE_SIZE"
+kind = "parameter"
+range = [1, 16]
 default = 8
 storage = "quota"
 scope = "session"
@@ -2659,6 +2786,8 @@ costs memory only under a peer that does not drain.
 [[limit]]
 id = "SNAPSHOT_PERIOD_MS"
 kconfig = "WZ_LIMIT_SNAPSHOT_PERIOD_MS"
+kind = "parameter"
+range = [1, 2147483]
 default = 1000
 storage = "quota"
 scope = "runtime"
@@ -2675,6 +2804,9 @@ passed since the last. At least 1 and at most 2147483 (about 35 minutes).
 [[limit]]
 id = "SNAPSHOT_HISTOGRAM_BUCKETS"
 kconfig = "WZ_LIMIT_SNAPSHOT_HISTOGRAM_BUCKETS"
+kind = "parameter"
+range = [1, 32]
+on_heap = "capacity"
 default = 24
 storage = "both"
 scope = ["runtime", "session"]
@@ -2694,6 +2826,9 @@ snapshot longer. At least 1 and at most 32.
 [[limit]]
 id = "SUPERVISION_CHECKPOINTS"
 kconfig = "WZ_LIMIT_SUPERVISION_CHECKPOINTS"
+kind = "parameter"
+range = [1, 64]
+on_heap = "capacity"
 default = 4
 storage = "both"
 scope = "runtime"
@@ -2709,6 +2844,8 @@ supervised has been fed in time. At least 1 and at most 64.
 [[limit]]
 id = "E2E_SUPERVISED_STREAMS"
 kconfig = "WZ_LIMIT_E2E_SUPERVISED_STREAMS"
+kind = "bound"
+driven = "local"
 default = 32
 storage = "quota"
 scope = "runtime"
@@ -2725,6 +2862,8 @@ stream added past it is refused. At least 1.
 [[limit]]
 id = "APP_LINK_QUEUE_BYTES"
 kconfig = "WZ_LIMIT_APP_LINK_QUEUE_BYTES"
+kind = "bound"
+driven = "remote"
 default = 262144
 storage = "quota"
 scope = "link"
@@ -2745,6 +2884,9 @@ app-transport capability.
 [[limit]]
 id = "EVENT_RING_SLOTS"
 kconfig = "WZ_LIMIT_EVENT_RING_SLOTS"
+kind = "parameter"
+range = [1, 1073741823]
+on_heap = "capacity"
 default = 64
 storage = "both"
 scope = "runtime"
@@ -2761,6 +2903,8 @@ number times that size. At least 1.
 [[limit]]
 id = "EVENT_RECORD_ARGS"
 kconfig = "WZ_LIMIT_EVENT_RECORD_ARGS"
+kind = "parameter"
+range = [0, 255]
 default = 4
 storage = "capacity"
 scope = "runtime"
@@ -2777,6 +2921,8 @@ first of them. At most 255.
 [[limit]]
 id = "CLOCK_SOURCES"
 kconfig = "WZ_LIMIT_CLOCK_SOURCES"
+kind = "bound"
+driven = "local"
 default = 1
 storage = "quota"
 scope = "runtime"
@@ -2794,6 +2940,9 @@ none, which leaves the system clock as the only source.
 [[limit]]
 id = "E2E_SENDER_SLOTS"
 kconfig = "WZ_LIMIT_E2E_SENDER_SLOTS"
+kind = "bound"
+driven = "remote"
+on_heap = "quota"
 default = 8
 storage = "both"
 # One receiving judge of the e2e-sender-demux capability: the program sizes its slots when it makes
@@ -2813,6 +2962,9 @@ At least 1.
 [[limit]]
 id = "REPLAY_DEPTH_MAX"
 kconfig = "WZ_LIMIT_REPLAY_DEPTH_MAX"
+kind = "bound"
+driven = "local"
+on_heap = "quota"
 default = 32
 storage = "both"
 # The deepest ring of sent frames one message, or one instance of it, keeps for a subscriber that
@@ -2832,6 +2984,9 @@ is refused when the message is declared. At least 1.
 [[limit]]
 id = "MESSAGE_CATALOG_ENTRIES"
 kconfig = "WZ_LIMIT_MESSAGE_CATALOG_ENTRIES"
+kind = "bound"
+driven = "local"
+on_heap = "quota"
 default = 64
 storage = "both"
 # A host reads a catalog at run time and allocates its entries then, refusing one with more; the
@@ -2849,6 +3004,9 @@ the generator of a fixed-memory image refuses to write its tables. At least 1.
 [[limit]]
 id = "INSTANCE_KEY_FIELDS"
 kconfig = "WZ_LIMIT_INSTANCE_KEY_FIELDS"
+kind = "bound"
+driven = "local"
+on_heap = "quota"
 default = 2
 storage = "both"
 # One keyer of the instance-key capability: the program names its key fields when it makes the
@@ -2868,6 +3026,9 @@ names more fields is refused. At least 1.
 [[limit]]
 id = "INSTANCES_PER_MESSAGE"
 kconfig = "WZ_LIMIT_INSTANCES_PER_MESSAGE"
+kind = "bound"
+driven = "local"
+on_heap = "quota"
 default = 32
 storage = "both"
 # One keyer of the instance-key capability: the product of the lengths of its value lists, which
@@ -2887,6 +3048,8 @@ description whose lists make more is refused. At least 1.
 [[limit]]
 id = "CLOCK_MAX_FORWARD_STEP_MS"
 kconfig = "WZ_LIMIT_CLOCK_MAX_FORWARD_STEP_MS"
+kind = "parameter"
+range = [0, 4294967295]
 default = 500
 storage = "quota"
 scope = "runtime"
@@ -2899,13 +3062,17 @@ node may be before the node's hybrid logical clock refuses it, as zenoh's
 UHLC_MAX_DELTA_MS. A refused timestamp is not taken into the clock, and the
 data carrying it is stamped afresh or dropped as the timestamping settings say.
 A host that sets the environment variable UHLC_MAX_DELTA_MS to a whole number of
-milliseconds overrides this at start, as it does zenoh's own bound. 0 refuses
-any timestamp ahead of the clock.
+milliseconds overrides this at start, as it does zenoh's own bound. A value
+that is not a whole number of milliseconds, or one the build does not allow, is
+refused by name: the open fails with that reason, where zenoh panics. 0
+refuses any timestamp ahead of the clock.
 '''
 
 [[limit]]
 id = "DECLARATION_SYNC_BURST_MESSAGES"
 kconfig = "WZ_LIMIT_DECLARATION_SYNC_BURST_MESSAGES"
+kind = "parameter"
+range = [1, 4294967295]
 default = 8
 storage = "quota"
 scope = "session"
@@ -2921,6 +3088,8 @@ It must be at least 1: a turn that sends nothing would never finish.
 [[limit]]
 id = "DECLARATION_SYNC_FINAL_TIMEOUT_MS"
 kconfig = "WZ_LIMIT_DECLARATION_SYNC_FINAL_TIMEOUT_MS"
+kind = "parameter"
+range = [1, 4294967295]
 default = 1000
 storage = "quota"
 scope = "session"
@@ -2938,22 +3107,26 @@ or not the declaration-sync-pacing policy is on, and must be at least 1.
 [[limit]]
 id = "DECLARATION_SYNC_INTERVAL_MS"
 kconfig = "WZ_LIMIT_DECLARATION_SYNC_INTERVAL_MS"
+kind = "parameter"
+range = [1, 4294967295]
 default = 10
 storage = "quota"
 scope = "session"
 binding_heap = "live"
-binding_fixed = "none"
+binding_fixed = "open"
 wire = "timing"
 help = '''
 How long, in milliseconds, a paced declaration replay waits between two of its
 turns, when the declaration-sync-pacing policy is on. The session keeps being
-served during the wait. It is read only when that policy is on, and must be at
-least 1.
+served during the wait. Waiting for the declarations to be stable steps by it
+whether or not that policy is on. Must be at least 1.
 '''
 
 [[limit]]
 id = "DECLARATION_SYNC_RX_NO_PROGRESS_MS"
 kconfig = "WZ_LIMIT_DECLARATION_SYNC_RX_NO_PROGRESS_MS"
+kind = "parameter"
+range = [0, 4294967295]
 default = 0
 storage = "quota"
 scope = "session"
@@ -2975,11 +3148,13 @@ end of the peer's declarations.
 [[limit]]
 id = "DECLARATION_SYNC_RETRY_INTERVAL_MS"
 kconfig = "WZ_LIMIT_DECLARATION_SYNC_RETRY_INTERVAL_MS"
+kind = "parameter"
+range = [0, 4294967295]
 default = 0
 storage = "quota"
 scope = "session"
 binding_heap = "open"
-binding_fixed = "none"
+binding_fixed = "open"
 wire = "timing"
 help = '''
 How long, in milliseconds, a paced declaration replay waits before it tries
@@ -2988,24 +3163,28 @@ declaration-sync-pacing policy is on. The wait is its own and not
 DECLARATION_SYNC_INTERVAL_MS, and the turn starts again at the declaration the
 link refused. 0 tries nothing again: a refused turn ends the replay and the
 link, and a reconnecting session replays again on the next one, as before this
-limit. Only the tokio engine reads it.
+limit. The tokio engine, the cooperative engine and the fixed-memory slot
+client read it alike.
 '''
 
 [[limit]]
 id = "DECLARATION_SYNC_TX_NO_PROGRESS_MS"
 kconfig = "WZ_LIMIT_DECLARATION_SYNC_TX_NO_PROGRESS_MS"
+kind = "parameter"
+range = [0, 4294967295]
 default = 0
 storage = "quota"
 scope = "session"
 binding_heap = "open"
-binding_fixed = "none"
+binding_fixed = "open"
 wire = "none"
 help = '''
 How long, in milliseconds, a paced declaration replay that retries refused
 turns (DECLARATION_SYNC_RETRY_INTERVAL_MS not 0) goes on with no declaration
 sent before it gives up, which ends the link as a refused turn does without
 retries. Each declaration sent starts the stretch again. 0 gives up only when
-the link itself ends. Only the tokio engine reads it.
+the link itself ends. The tokio engine, the cooperative engine and the
+fixed-memory slot client read it alike.
 '''
 
 # The numbers of zenoh-pico's value switches (the `maps` rows above that anchor to a limit), as the
@@ -3015,6 +3194,8 @@ the link itself ends. Only the tokio engine reads it.
 [[limit]]
 id = "PICO_UNICAST_BATCH_BYTES"
 kconfig = "WZ_LIMIT_PICO_UNICAST_BATCH_BYTES"
+kind = "parameter"
+range = [1, 65535]
 default = 2048
 storage = "quota"
 scope = "link"
@@ -3024,12 +3205,15 @@ wire = "negotiated"
 help = '''
 The batch size, in bytes, a session of the zenoh-pico interface advertises when
 it opens a unicast session, as zenoh-pico's BATCH_UNICAST_SIZE. The two sides
-send frames no larger than the smaller of the two sizes. At most 65535.
+send frames no larger than the smaller of the two sizes. At least 1 and at most
+65535: a batch of no byte carries no frame.
 '''
 
 [[limit]]
 id = "PICO_MULTICAST_BATCH_BYTES"
 kconfig = "WZ_LIMIT_PICO_MULTICAST_BATCH_BYTES"
+kind = "parameter"
+range = [1, 65535]
 default = 2048
 storage = "quota"
 scope = "session"
@@ -3041,12 +3225,14 @@ help = '''
 The batch size, in bytes, a session of the zenoh-pico interface advertises in
 the Join of a multicast group, as zenoh-pico's BATCH_MULTICAST_SIZE. zenoh-pico
 refuses a member whose Join states another size, so every member of a group
-states the same. At most 65535.
+states the same. At least 1 and at most 65535.
 '''
 
 [[limit]]
 id = "PICO_LEASE_MS"
 kconfig = "WZ_LIMIT_PICO_LEASE_MS"
+kind = "parameter"
+range = [1, 4294967295]
 default = 10000
 storage = "quota"
 scope = "session"
@@ -3062,6 +3248,8 @@ peer that hears nothing from the session for this long closes it.
 [[limit]]
 id = "PICO_SOCKET_TIMEOUT_MS"
 kconfig = "WZ_LIMIT_PICO_SOCKET_TIMEOUT_MS"
+kind = "parameter"
+range = [0, 4294967295]
 default = 100
 storage = "quota"
 scope = "session"
@@ -3071,12 +3259,15 @@ wire = "timing"
 help = '''
 How long, in milliseconds, one read step of the cooperative zenoh-pico session
 waits on its link before it returns with nothing, as zenoh-pico's
-Z_CONFIG_SOCKET_TIMEOUT.
+Z_CONFIG_SOCKET_TIMEOUT. The tokio engine has no such wait: its read is woken
+by what arrives.
 '''
 
 [[limit]]
 id = "PICO_CONNECT_TIMEOUT_MS"
 kconfig = "WZ_LIMIT_PICO_CONNECT_TIMEOUT_MS"
+kind = "parameter"
+range = [1, 4294967295]
 default = 10000
 storage = "quota"
 scope = "session"
@@ -3084,14 +3275,16 @@ binding_heap = "open"
 binding_fixed = "none"
 wire = "timing"
 help = '''
-How long, in milliseconds, opening a cooperative zenoh-pico session waits for
-the session to be established before the open fails, as zenoh-pico's
-Z_TRANSPORT_CONNECT_TIMEOUT.
+How long, in milliseconds, each open of an endpoint by a zenoh-pico session
+waits for the dial and the handshake before it fails, on either engine, as
+zenoh-pico's Z_TRANSPORT_CONNECT_TIMEOUT.
 '''
 
 [[limit]]
 id = "PICO_FRAG_MAX_BYTES"
 kconfig = "WZ_LIMIT_PICO_FRAG_MAX_BYTES"
+kind = "bound"
+driven = "remote"
 default = 4096
 storage = "quota"
 scope = "link"
@@ -3109,6 +3302,8 @@ measured against it.
 [[limit]]
 id = "PICO_ACCEPT_TIMEOUT_MS"
 kconfig = "WZ_LIMIT_PICO_ACCEPT_TIMEOUT_MS"
+kind = "parameter"
+range = [1, 4294967295]
 default = 1000
 storage = "quota"
 scope = "link"
@@ -3126,6 +3321,8 @@ interface reads it from transport/unicast/accept_timeout.
 [[limit]]
 id = "PICO_KEEPALIVES_PER_LEASE"
 kconfig = "WZ_LIMIT_PICO_KEEPALIVES_PER_LEASE"
+kind = "parameter"
+range = [1, 4294967295]
 default = 3
 storage = "quota"
 scope = "session"

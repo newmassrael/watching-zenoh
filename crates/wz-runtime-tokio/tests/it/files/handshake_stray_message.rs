@@ -296,6 +296,64 @@ async fn a_repeated_init_ack_is_answered_with_the_open_syn_sent_first() {
     assert_eq!(actions.held_answer_len(), 0, "the establishment is over");
 }
 
+/// [`craft_initack_wire`] with a cookie of any length: the same message, its cookie length a
+/// VLE of as many bytes as the length takes.
+fn init_ack_with_cookie(cookie: &[u8]) -> Vec<u8> {
+    let empty = craft_initack_wire(&[]);
+    // The fixture's last byte is the one-byte length of its empty cookie.
+    let mut wire = empty[..empty.len() - 1].to_vec();
+    let mut len = cookie.len();
+    loop {
+        let low = (len & 0x7f) as u8;
+        len >>= 7;
+        if len == 0 {
+            wire.push(low);
+            break;
+        }
+        wire.push(low | 0x80);
+    }
+    wire.extend_from_slice(cookie);
+    wire
+}
+
+/// `ignore-and-replay`, initiator, on the heap profile, which keeps a peer's cookie at any
+/// length: an OpenSyn echoing a cookie longer than `HANDSHAKE_COOKIE_BYTES` is held whole and
+/// replayed as it went out, as one with a short cookie is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_open_syn_echoing_a_long_cookie_is_held_whole_and_replayed() {
+    use wz_session_core::session_actions::HELD_ANSWER_MAX;
+    let Some((driver, actions, mut engine)) =
+        recording_session_under(HandshakeStrayMessage::IgnoreAndReplay)
+    else {
+        return;
+    };
+    let cookie = vec![0x66; HELD_ANSWER_MAX + 1];
+    engine.process_event(E::OutboundStart);
+    engine.process_event(E::LinkOpened);
+    let _ = deliver(&actions, &mut engine, init_ack_with_cookie(&cookie)).await;
+    assert_eq!(engine.get_current_state(), S::GotInitAck);
+    let sent = driver.snapshot().sends;
+    let open_syn = sent.last().expect("the OpenSyn went out").0.clone();
+    assert!(
+        open_syn.len() > HELD_ANSWER_MAX,
+        "the cookie is echoed whole"
+    );
+    assert_eq!(actions.held_answer_len(), open_syn.len(), "held whole");
+
+    let outcome = deliver(&actions, &mut engine, init_ack_with_cookie(&cookie)).await;
+    assert!(
+        matches!(outcome, DriverLoopOutcome::HandshakeStrayReplayed),
+        "{outcome:?}"
+    );
+    let resent = driver.snapshot().sends;
+    assert_eq!(resent.len(), sent.len() + 1, "one message more, the replay");
+    assert_eq!(
+        resent.last().expect("the replay").0,
+        open_syn,
+        "the same bytes"
+    );
+}
+
 /// `ignore-and-replay`, acceptor: an InitSyn repeated after the InitAck went out is answered
 /// with the very InitAck bytes sent first (the cookie in it is the one already issued), and the
 /// acceptor still awaits the OpenSyn.

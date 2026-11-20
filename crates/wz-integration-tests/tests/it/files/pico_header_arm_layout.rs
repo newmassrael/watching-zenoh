@@ -28,7 +28,9 @@ use std::path::Path;
 use std::process::Command;
 
 use wz_integration_tests::bounded::BoundedOutput as _;
-use wz_integration_tests::common::{compile_pico_source, PicoHeaderArm};
+use wz_integration_tests::common::{
+    baked_library_dir, compile_pico_source, zenoh_pico_library_dir, PicoHeaderArm,
+};
 
 const PROBE: &str = r#"
 #include <stdio.h>
@@ -215,5 +217,125 @@ fn each_header_arm_is_written_inside_of_by_its_own_build() {
             "{headers:?} headers against the reference build ran clean, so the probe \
              cannot see an overrun:\n{text}"
         );
+    }
+}
+
+/// A program that includes pico's header and does nothing else.
+const EMPTY: &str = "#include \"zenoh-pico.h\"\nint main(void) { return 0; }\n";
+
+/// The clang the link closure is measured with: `WZ_CLANG`, or `clang` on `PATH`.
+fn clang() -> String {
+    std::env::var("WZ_CLANG").unwrap_or_else(|_| "clang".to_owned())
+}
+
+/// Compile [`EMPTY`] with clang against `headers` and link it to `-l<link>` in `libdir`.
+/// Returns the object's undefined symbols, and the link's diagnostics when it failed.
+fn link_empty(
+    headers: PicoHeaderArm,
+    libdir: &Path,
+    link: &str,
+    dir: &Path,
+) -> (Vec<String>, Result<(), String>) {
+    let out_dir = dir.join(format!("empty-{headers:?}-{link}"));
+    std::fs::create_dir_all(&out_dir).expect("empty program build dir");
+    let src = out_dir.join("wz_pico_empty.c");
+    std::fs::write(&src, EMPTY).expect("write the empty program");
+    let obj = out_dir.join("wz_pico_empty.o");
+    let clang = clang();
+    let mut compile = Command::new(&clang);
+    // gnu11, the standard pico's own build compiles under: `CMAKE_C_STANDARD 11` with CMake's
+    // extensions left on (`vendor/zenoh-pico/CMakeLists.txt` @ `set(CMAKE_C_STANDARD 11)`). Under
+    // strict c11 the single-threaded arm's `z_clock_t` (`struct timespec`) is incomplete.
+    compile
+        .args(["-std=gnu11", "-O0", "-DZENOH_LINUX", "-c"])
+        .arg(&src);
+    for inc in headers.include_dirs() {
+        compile.arg(format!("-I{}", inc.display()));
+    }
+    let out = compile
+        .arg("-o")
+        .arg(&obj)
+        .output_bounded()
+        .unwrap_or_else(|e| panic!("spawn {clang:?} (set WZ_CLANG to a clang): {e}"));
+    assert!(
+        out.status.success(),
+        "{clang} did not compile the empty program against the {headers:?} headers:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let nm = Command::new("nm")
+        .arg("-u")
+        .arg(&obj)
+        .output_bounded()
+        .unwrap_or_else(|e| panic!("spawn nm: {e}"));
+    assert!(nm.status.success(), "nm -u {} failed", obj.display());
+    let undefined = String::from_utf8_lossy(&nm.stdout)
+        .lines()
+        .filter_map(|l| l.split_whitespace().last().map(str::to_owned))
+        .collect();
+    let exe = out_dir.join(format!("wz_pico_empty_on_{link}"));
+    let out = Command::new(&clang)
+        .arg(&obj)
+        .arg("-o")
+        .arg(&exe)
+        .arg(format!("-L{}", libdir.display()))
+        .arg(format!("-l{link}"))
+        .arg(baked_library_dir(libdir))
+        .output_bounded()
+        .unwrap_or_else(|e| panic!("spawn {clang:?}: {e}"));
+    let linked = if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).into_owned())
+    };
+    (undefined, linked)
+}
+
+/// pico's `session.h` defines `_z_pending_query_cancellation_data_clear` `static inline` and then
+/// declares it without `inline`, and clang emits it into every object that includes the unstable
+/// arm's header (gcc does not). What it calls is in pico's library, so the program links only
+/// against a library that exports it: the hosted macOS C programs failed to link wz's for that
+/// reason (`_z_cancellation_token_clear`, `_z_cancellation_token_remove_on_cancel_handler`,
+/// `_z_sync_group_notifier_drop`; `crates/wz-capi-pico/src/header_internals.rs`).
+///
+/// Each arm's empty program, compiled by clang, links against that arm's wz build. The controls:
+/// the reference arm's object does reference pico internals (a compiler that emitted nothing
+/// would pass the check without testing it), and it links against upstream's library built from
+/// that arm (the program itself is linkable, so a wz failure is wz's).
+#[test]
+#[ignore = "compiles against the CMake-configured pico headers of every arm with clang and links \
+            every wz build; run by run-ci Layer E"]
+fn an_empty_program_of_each_arm_links_when_clang_compiles_it() {
+    let dir = tempfile::tempdir().expect("tempdir for the empty programs");
+    for arm in [
+        PicoHeaderArm::MultiThreaded,
+        PicoHeaderArm::SingleThreaded,
+        PicoHeaderArm::UpstreamDefault,
+        PicoHeaderArm::Local,
+    ] {
+        let cdylib = arm.wz_cdylib();
+        let libdir = cdylib.parent().expect("cdylib has a parent");
+        let (undefined, linked) = link_empty(arm, libdir, "wz_capi_pico", dir.path());
+        if let Err(diag) = linked {
+            panic!(
+                "{arm:?}: an empty program clang compiled against this arm's header does not \
+                 link wz's build of it; it references {undefined:?}\n{diag}"
+            );
+        }
+    }
+
+    let reference = PicoHeaderArm::MultiThreaded;
+    let (undefined, linked) = link_empty(
+        reference,
+        &zenoh_pico_library_dir(),
+        "zenohpico",
+        dir.path(),
+    );
+    assert!(
+        undefined.iter().any(|s| s.starts_with("_z_")),
+        "clang emitted no reference to a pico internal into the {reference:?} empty program \
+         ({undefined:?}), so the links above test no closure"
+    );
+    if let Err(diag) = linked {
+        panic!("the {reference:?} empty program does not link upstream's library either:\n{diag}");
     }
 }

@@ -1824,7 +1824,8 @@ typedef struct wz_ext_message_entry_t {
 } wz_ext_message_entry_t;
 
 /* Read and judge the catalog text, against the build's
- * MESSAGE_CATALOG_ENTRIES, REPLAY_DEPTH_MAX and E2E_SENDER_SLOTS. this_ holds
+ * MESSAGE_CATALOG_ENTRIES, REPLAY_DEPTH_MAX, E2E_SENDER_SLOTS,
+ * INSTANCE_KEY_FIELDS and INSTANCES_PER_MESSAGE. this_ holds
  * the null state on every error; refusal may be NULL and, on
  * _Z_ERR_CONFIG_INVALID_VALUE (-89), holds why: the refusal's word (the
  * schema's x-wz-refusals, such as duplicate_id or replay_depth_out_of_range),

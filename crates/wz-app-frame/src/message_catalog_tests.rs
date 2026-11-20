@@ -20,7 +20,8 @@ use crate::e2e_receiver::{Keying, Receiver, Status, Verdict};
 use crate::e2e_stream_sender::{SenderOptions, StreamSender};
 use crate::message_catalog::{Catalog, HandleError, RefusalKind, StreamRow, SHAPES};
 use crate::message_catalog_table::{
-    Limits, MessageRow, NodeRow, ProtectionRow, SupervisionRow, Table,
+    KeyFieldRow, KeyValue as KeyValueRow, Limits, MessageRow, NodeRow, ProtectionRow,
+    SupervisionRow, Table,
 };
 
 const SYNTHETIC: &str = include_str!("../catalog/synthetic.json5");
@@ -319,6 +320,124 @@ fn a_catalog_over_the_builds_message_limit_is_refused() {
     assert_eq!(refusal.path, "/messages");
 }
 
+/// An instance key is read within the bounds the catalog is read against: up to `key_fields`
+/// fields whose lists make up to `instances` instances. One more of either is refused by its name,
+/// at the key.
+#[test]
+fn an_instance_key_past_the_limits_it_is_read_against_is_refused_at_the_key() {
+    let catalog = |fields: &str| {
+        format!(
+            "{{nodes: [{{name: 'a'}}], messages: [{{key_expr: 'k/one', id: 1, \
+             publishers: ['a'], subscribers: [], instance_key: [{fields}]}}]}}"
+        )
+    };
+    let limits = Limits {
+        key_fields: 2,
+        instances: 6,
+        ..LIMITS
+    };
+    let two_by_three = "{field: 'zone', values: [1, 2, 3]}, {field: 'side', values: ['l', 'r']}";
+    let read = Catalog::parse(&catalog(two_by_three), limits).expect("at both limits");
+    assert_eq!(read.messages()[0].instance_key.len(), 2);
+
+    let three_fields =
+        "{field: 'zone', values: [1]}, {field: 'side', values: [1]}, {field: 'lane', values: [1]}";
+    let refusal = Catalog::parse(&catalog(three_fields), limits).unwrap_err();
+    assert_eq!(refusal.kind, RefusalKind::TooManyKeyFields);
+    assert_eq!(refusal.path, "/messages/0/instance_key");
+
+    let one_field = Limits {
+        key_fields: 1,
+        ..limits
+    };
+    let refusal = Catalog::parse(&catalog(two_by_three), one_field).unwrap_err();
+    assert_eq!(refusal.kind, RefusalKind::TooManyKeyFields);
+
+    let five_instances = Limits {
+        instances: 5,
+        ..limits
+    };
+    let refusal = Catalog::parse(&catalog(two_by_three), five_instances).unwrap_err();
+    assert_eq!(refusal.kind, RefusalKind::TooManyInstances);
+    assert_eq!(refusal.path, "/messages/0/instance_key");
+}
+
+/// A table is held to the same bounds: an image cannot link an instance key its own build's
+/// keyer would refuse.
+#[test]
+fn a_table_whose_instance_key_is_past_the_limits_is_refused() {
+    const KEY: &[KeyFieldRow] = &[
+        KeyFieldRow {
+            field: "zone",
+            values: &[KeyValueRow::Number(1), KeyValueRow::Number(2)],
+        },
+        KeyFieldRow {
+            field: "side",
+            values: &[KeyValueRow::Text("l"), KeyValueRow::Text("r")],
+        },
+    ];
+    const MESSAGES: &[MessageRow] = &[MessageRow {
+        key_expr: "demo/x",
+        id: 1,
+        publishers: &[0],
+        subscribers: &[],
+        period_ms: None,
+        protection: None,
+        senders: &[],
+        instance_key: KEY,
+        replay_depth: None,
+        supervision: None,
+        segment_profile: None,
+    }];
+    const NODES: &[NodeRow] = &[NodeRow {
+        name: "only",
+        address: None,
+    }];
+    let table = Table {
+        nodes: NODES,
+        e2e_profiles: &[],
+        segment_profiles: &[],
+        supervision_start_delay_ms: 0,
+        messages: MESSAGES,
+    };
+    let limits = Limits {
+        key_fields: 2,
+        instances: 4,
+        ..LIMITS
+    };
+    assert!(Catalog::from_table(&table, limits).is_ok());
+    let refusal = Catalog::from_table(
+        &table,
+        Limits {
+            key_fields: 1,
+            ..limits
+        },
+    )
+    .unwrap_err();
+    assert_eq!(refusal.kind, RefusalKind::TooManyKeyFields);
+    let refusal = Catalog::from_table(
+        &table,
+        Limits {
+            instances: 3,
+            ..limits
+        },
+    )
+    .unwrap_err();
+    assert_eq!(refusal.kind, RefusalKind::TooManyInstances);
+    assert_eq!(refusal.path, "/messages/0/instance_key");
+}
+
+/// The build's own bounds are the build's limits of the same names.
+#[test]
+fn the_builds_limits_carry_the_instance_key_bounds() {
+    let build = crate::message_catalog::build_limits();
+    assert_eq!(build.key_fields, wz_session_core::caps::INSTANCE_KEY_FIELDS);
+    assert_eq!(
+        build.instances,
+        wz_session_core::caps::INSTANCES_PER_MESSAGE
+    );
+}
+
 #[test]
 fn a_table_that_numbers_a_node_it_does_not_have_is_refused() {
     const NODES: &[NodeRow] = &[NodeRow {
@@ -431,6 +550,8 @@ fn limits_of(value: Option<&Json5Value>, base: Limits) -> Limits {
         messages: read("messages", base.messages),
         replay_depth_max: read("replay_depth_max", base.replay_depth_max),
         sender_slots: read("sender_slots", base.sender_slots),
+        key_fields: read("key_fields", base.key_fields),
+        instances: read("instances", base.instances),
     }
 }
 

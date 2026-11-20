@@ -28,6 +28,11 @@ pub struct Limits {
     pub replay_depth_max: usize,
     /// How many senders one message may bind receiver slots to (`E2E_SENDER_SLOTS`).
     pub sender_slots: usize,
+    /// How many fields one message's instance key names (`INSTANCE_KEY_FIELDS`).
+    pub key_fields: usize,
+    /// How many instances one message's instance key tells apart, the product of the lengths of
+    /// its fields' lists of values (`INSTANCES_PER_MESSAGE`).
+    pub instances: usize,
 }
 
 /// One node of the deployment.

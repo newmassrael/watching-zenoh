@@ -2549,6 +2549,34 @@ pub const TX_QUEUE_SIZE_KEYS: [(&str, &str, u8); 8] = [
     ("transport/link/tx/queue/size/background", "background", 7),
 ];
 
+/// The queue a document describes, refused as upstream's config validator refuses the section:
+/// by the queue's own rule ([`TxQueueConf::validate`]), at the key that breaks it.
+///
+/// [`TxQueueConf::validate`]: wz_session_core::session_init_params::TxQueueConf::validate
+fn validate_tx_queue(
+    queue: &wz_session_core::session_init_params::TxQueueConf,
+) -> Result<(), ConfigIngestError> {
+    use wz_session_core::session_init_params::TxQueueConfError;
+    match queue.validate() {
+        Ok(()) => Ok(()),
+        Err(TxQueueConfError::SizeOutOfRange(size)) => Err(ConfigIngestError::OutOfRange {
+            path: TX_QUEUE_SIZE_KEYS
+                .iter()
+                .find(|(_, _, byte)| *byte == size.priority_byte)
+                .map_or("transport/link/tx/queue/size", |(path, _, _)| *path),
+            value: size.size.to_string(),
+        }),
+        // A document states no window (it is the `tx-no-progress-deadline` policy's, which a
+        // session takes from its snapshot), so the total wait it states is what is too short.
+        Err(TxQueueConfError::NoProgressWindow { total_us, .. }) => {
+            Err(ConfigIngestError::OutOfRange {
+                path: "transport/link/tx/queue/congestion_control/block/wait_before_close",
+                value: total_us.to_string(),
+            })
+        }
+    }
+}
+
 /// Every upstream config leaf path [`ZenohNodeConfig::from_json5`] HONOURS,
 /// in the order `to_json5` emits them.
 ///
@@ -8660,16 +8688,13 @@ impl ZenohNodeConfig {
             named.push("transport/link/tx/keep_alive");
         }
         // R2925 — the queue sizes, each refused outside upstream's `1..=16` at
-        // its own key, as upstream's config validator refuses the section.
+        // its own key, as upstream's config validator refuses the section. The
+        // range is the queue's own rule (`TxQueueConf::validate`), asked once the
+        // section is read.
         for (path, _, byte) in TX_QUEUE_SIZE_KEYS {
             if let Some(v) = want_u64(&doc, path)? {
-                let size = usize::try_from(v).ok().filter(|n| {
-                    (wz_session_core::link::TxQueueShape::MIN_SIZE
-                        ..=wz_session_core::link::TxQueueShape::MAX_SIZE)
-                        .contains(n)
-                });
                 out.tx_queue.sizes[byte as usize] =
-                    size.ok_or_else(|| ConfigIngestError::OutOfRange {
+                    usize::try_from(v).map_err(|_| ConfigIngestError::OutOfRange {
                         path,
                         value: v.to_string(),
                     })?;
@@ -8727,6 +8752,7 @@ impl ZenohNodeConfig {
             })?;
             named.push(ALLOCATION);
         }
+        validate_tx_queue(&out.tx_queue)?;
         // The largest message a session rejoins from fragments. Any `usize` is
         // accepted, as upstream's `usize` field accepts it; the build's
         // reassembly slot bounds what a session applies.

@@ -216,6 +216,10 @@ pub mod get;
 #[cfg(feature = "query")]
 pub mod get_to_peer;
 pub mod handlers;
+// The pico internals the unstable arm's headers call from code clang emits into every program
+// that includes them (`_z_pending_query_cancellation_data_clear`).
+#[cfg(feature = "unstable-api")]
+pub mod header_internals;
 // The instance of a message a sample is, read from fields of its payload: wz doors (`wz_ext.h`)
 // of the unstable surface.
 #[cfg(feature = "instance-key")]

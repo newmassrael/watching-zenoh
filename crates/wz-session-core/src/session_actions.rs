@@ -777,18 +777,31 @@ const SYNC_BEGUN: u8 = 2;
 #[cfg(feature = "alloc")]
 const SYNC_QUIET: u8 = 4;
 
-/// The longest establishment answer a session holds for `handshake-stray-message =
-/// ignore-and-replay`: an InitAck with the widest cookie this node issues and room for its
-/// extension chain, or an OpenSyn echoing a cookie of that width. An answer longer than this is
-/// not held, and the step it answers is then not replayed (`HandshakeStrayNotReplayed`).
+/// The longest establishment answer a `session-slot` session holds for
+/// `handshake-stray-message = ignore-and-replay`: an InitAck with the widest cookie this node
+/// issues and room for its extension chain, or an OpenSyn echoing a cookie of that width. There
+/// an answer longer than this is not held, and the step it answers is then not replayed
+/// (`HandshakeStrayNotReplayed`). Every other profile keeps the peer's cookie at any length
+/// ([`crate::session_init_params::SessionBytes`]), so its hold grows to the answer, as long as
+/// that is.
 pub const HELD_ANSWER_MAX: usize = 256 + crate::session_init_params::COOKIE_MAX;
 
-/// One held establishment answer.
+/// One held establishment answer, of the same profile as the cookie it may echo: in the
+/// session's own storage of [`HELD_ANSWER_MAX`] bytes on `session-slot`, and growing to the
+/// answer on every other profile.
 #[cfg(all(
     any(feature = "codec-init-body", feature = "codec-open-body"),
-    any(feature = "session-unicast-open", feature = "session-unicast-accept")
+    any(feature = "session-unicast-open", feature = "session-unicast-accept"),
+    feature = "session-slot"
 ))]
-type HeldAnswer = crate::bounded::BoundedVec<u8, HELD_ANSWER_MAX>;
+type HeldAnswer = crate::bounded::BoundedVec<u8, HELD_ANSWER_MAX, crate::bounded::Static>;
+/// See the `session-slot` form of this alias.
+#[cfg(all(
+    any(feature = "codec-init-body", feature = "codec-open-body"),
+    any(feature = "session-unicast-open", feature = "session-unicast-accept"),
+    not(feature = "session-slot")
+))]
+type HeldAnswer = crate::bounded::BoundedVec<u8, HELD_ANSWER_MAX, crate::bounded::Heap>;
 
 /// How many establishment answers a session holds: one where the build's domain of
 /// `handshake-stray-message` allows `ignore-and-replay`, and none where it leaves it out, so a
@@ -9299,8 +9312,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// Hold `bytes`, the establishment answer this session just sent, for a replay
     /// ([`Self::resend_held_answer`]). Nothing is held in a build whose domain leaves
-    /// `ignore-and-replay` out, nor for a session that runs under another value; an answer
-    /// past [`HELD_ANSWER_MAX`] leaves the hold empty.
+    /// `ignore-and-replay` out, nor for a session that runs under another value; on
+    /// `session-slot` an answer past [`HELD_ANSWER_MAX`] leaves the hold empty, and on every
+    /// other profile the hold takes the answer whole.
     #[cfg(all(
         any(feature = "codec-init-body", feature = "codec-open-body"),
         any(feature = "session-unicast-open", feature = "session-unicast-accept")
@@ -9315,7 +9329,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         for slot in &self.held_answer {
             R::with_mutex_mut(slot, |held| {
                 held.clear();
-                if bytes.len() > HELD_ANSWER_MAX || held.extend_from_slice(bytes).is_err() {
+                // Refused whole only by the fixed hold of `session-slot`; a growing hold takes
+                // any answer.
+                if held.extend_from_slice(bytes).is_err() {
                     held.clear();
                 }
             });
@@ -9346,9 +9362,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// Send the held establishment answer again, the very bytes that went out: `false` when
-    /// none is held (the build holds none, the answer was too long to hold, or the link took no
-    /// slot for it). The bytes are copied out of the hold before the send, which takes locks of
-    /// its own.
+    /// none is held (the build holds none, the answer was too long for the hold of a
+    /// `session-slot` build, or the link took no slot for it). The bytes are copied out of the
+    /// hold before the send, which takes locks of its own.
     #[cfg(all(
         any(feature = "codec-init-body", feature = "codec-open-body"),
         any(feature = "session-unicast-open", feature = "session-unicast-accept")
@@ -9361,24 +9377,23 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let Some(slot) = self.held_answer.first() else {
             return false;
         };
-        let mut copy = [0u8; HELD_ANSWER_MAX];
-        let len = R::with_mutex_mut(slot, |held| {
-            let len = held.len().min(HELD_ANSWER_MAX);
-            copy[..len].copy_from_slice(&held[..len]);
-            len
-        });
-        if len == 0 {
+        // A copy of the hold's own type takes whatever the hold has: the session's storage on
+        // `session-slot`, and a buffer as long as the answer on every other profile.
+        let mut copy = HeldAnswer::default();
+        let copied = R::with_mutex_mut(slot, |held| copy.extend_from_slice(&held[..]).is_ok());
+        let len = copy.len();
+        if !copied || len == 0 {
             return false;
         }
         #[cfg(not(feature = "tx-lend-only"))]
         {
-            self.send_wire(&copy[..len], Reliability::Reliable, HANDSHAKE_LANE);
+            self.send_wire(&copy[..], Reliability::Reliable, HANDSHAKE_LANE);
             true
         }
         #[cfg(feature = "tx-lend-only")]
         {
             self.send_control_lent(Reliability::Reliable, HANDSHAKE_LANE, len, |buf| {
-                buf.append(&copy[..len])
+                buf.append(&copy[..])
             })
             .is_ok()
         }

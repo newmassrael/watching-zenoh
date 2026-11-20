@@ -26,8 +26,9 @@
 //! (`crate::caps::binding`). The types here are written by hand, so the generator emits only one
 //! row per policy and per limit. Each policy's value type also implements [`PolicyField`], and the
 //! generated `POLICIES` holds its [`PolicyEntry`], the row a reader that names the policy by its id
-//! (the open-stage document, `crate::policy_document`) dispatches on. The words of [`Scope`],
-//! [`Binding`], [`Mutability`], [`Wire`] and [`Storage`] are the declaration's
+//! (the open-stage document, `crate::policy_document`) dispatches on. A limit's value, its domain
+//! and its snapshot are `crate::limit_binding`'s. The words of [`Scope`], [`Binding`],
+//! [`Mutability`], [`Wire`], [`Storage`], [`LimitKind`] and [`Driven`] are the declaration's
 //! (`deploy/wz-config.toml`, "Where a value is bound"), and `scripts/lib/wz_config.py --check`
 //! holds the variants here to them.
 
@@ -157,10 +158,56 @@ impl Storage {
     }
 }
 
+/// What a limit's value is to the code that reads it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LimitKind {
+    /// A count or a size past which something is refused, which a build with no capacity of it
+    /// may leave unbounded.
+    Bound,
+    /// A number the code runs with, inside a declared range, and never unbounded.
+    Parameter,
+}
+
+impl LimitKind {
+    /// The kind as the declaration spells it.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Bound => "bound",
+            Self::Parameter => "parameter",
+        }
+    }
+}
+
+/// Who makes the table a bound limits grow.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Driven {
+    /// The program's own calls on this node: its declarations, its queries, what it hands in.
+    Local,
+    /// A peer's messages: its declarations, its queries, its interests, its fragments.
+    Remote,
+}
+
+impl Driven {
+    /// The word as the declaration spells it.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Remote => "remote",
+        }
+    }
+}
+
 /// Where a limit is bound, as the declaration states it. The limit's value is the constant of the
 /// same name in [`crate::caps`]; this is what may decide it, and when.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LimitBinding {
+    /// A bound or a parameter.
+    pub kind: LimitKind,
+    /// Who makes the table a bound limits grow; `None` for a parameter.
+    pub driven: Option<Driven>,
+    /// The values the code holds, `(least, most)`: a parameter's range, or `(0, most)` for a bound
+    /// whose code holds its count in a narrower type; `None` for a bound limited by nothing else.
+    pub range: Option<(usize, usize)>,
     /// Whether it sizes storage, bounds storage already there, or both.
     pub storage: Storage,
     /// The scopes that each hold one value, widest first.
@@ -800,6 +847,8 @@ mod tests {
         assert_eq!(Mutability::Quiescent.id(), "quiescent");
         assert_eq!(Wire::Negotiated.id(), "negotiated");
         assert_eq!(Storage::Both.id(), "both");
+        assert_eq!(LimitKind::Parameter.id(), "parameter");
+        assert_eq!(Driven::Remote.id(), "remote");
         assert_eq!(Pinned::BOUNDARY, Some("the next time the link opens"));
         assert_eq!(Mode::BOUNDARY, None);
     }

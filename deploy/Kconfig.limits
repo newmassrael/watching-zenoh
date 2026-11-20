@@ -25,6 +25,7 @@ config WZ_LIMIT_MAX_SUBSCRIPTIONS
 
 config WZ_LIMIT_MATCH_MEMO_SLOTS
 	int "MATCH_MEMO_SLOTS"
+	range 0 4294967295
 	default 8
 	help
 	  How many distinct keys the receive match cache remembers at once: the keys
@@ -39,6 +40,7 @@ config WZ_LIMIT_MATCH_MEMO_SLOTS
 
 config WZ_LIMIT_MATCH_MEMO_FIXED_SLOTS
 	int "MATCH_MEMO_FIXED_SLOTS"
+	range 0 4294967295
 	default 0
 	help
 	  MATCH_MEMO_SLOTS for a build whose tables are fixed in size (no allocator,
@@ -52,6 +54,7 @@ config WZ_LIMIT_MATCH_MEMO_FIXED_SLOTS
 
 config WZ_LIMIT_MATCH_MEMO_KEY_BYTES
 	int "MATCH_MEMO_KEY_BYTES"
+	range 0 4294967295
 	default 64
 	help
 	  The longest key, in bytes, the receive match cache of a fixed-size build
@@ -68,6 +71,7 @@ config WZ_LIMIT_DELIVERY_LANE_EVENTS
 
 config WZ_LIMIT_DELIVERY_LANE_BYTES
 	int "DELIVERY_LANE_BYTES"
+	range 1 4294967295
 	default 65536
 	help
 	  How many bytes of copied samples a delivery lane holds at once: the key, the
@@ -98,6 +102,17 @@ config WZ_LIMIT_MAX_PENDING_QUERIES
 	help
 	  The queries (gets) a session has waiting for their replies at once.
 	  Issuing one more is refused while the table is full.
+
+config WZ_LIMIT_LINK_NOTED_REQUESTS
+	int "LINK_NOTED_REQUESTS"
+	range 1 4294967295
+	default 16
+	help
+	  How many queries a peer sent over one link the node remembers the key form of
+	  at once, so that its replies name the key as the query did, when the link names
+	  keys by the shared key ids. A query never ended gives way to the newest, so a
+	  peer cannot grow the table. It sizes a memory, not a bound: a query past it is
+	  still answered.
 
 config WZ_LIMIT_MAX_DECL_OBSERVERS
 	int "MAX_DECL_OBSERVERS"
@@ -222,9 +237,9 @@ config WZ_LIMIT_MAX_MULTICAST_REPLIES
 	int "MAX_MULTICAST_REPLIES"
 	default 8
 	help
-	  The replies a node without an allocator holds for a multicast group before
-	  it sends them. One more is dropped and counted: a group is best effort, and
-	  an asker whose reply was dropped asks again.
+	  The replies a node holds for a multicast group before it sends them, with or
+	  without an allocator. One more is dropped and counted: a group is best
+	  effort, and an asker whose reply was dropped asks again.
 
 config WZ_LIMIT_MAX_TASKS
 	int "MAX_TASKS"
@@ -278,11 +293,12 @@ config WZ_LIMIT_QUERIER_MAX_PENDING_QUERIES
 	  deadline passes, or its handle is unregistered. The bound is per querier,
 	  not per session, so one busy querier cannot starve another. 0 is no bound,
 	  which is upstream's behaviour. Unlike the other limits this one sizes no
-	  table: it only refuses the one more. It binds the Rust session API; the C
-	  ABIs and the cooperative engine do not hold to it yet.
+	  table: it only refuses the one more. It binds the queriers of the Rust session
+	  API and the replay subscriber of the zenoh-pico interface.
 
 config WZ_LIMIT_TX_NO_PROGRESS_WINDOW_US
 	int "TX_NO_PROGRESS_WINDOW_US"
+	range 1 5000000
 	default 1000000
 	help
 	  How long, in microseconds, a blocking message may wait with no progress
@@ -292,16 +308,19 @@ config WZ_LIMIT_TX_NO_PROGRESS_WINDOW_US
 
 config WZ_LIMIT_TX_EXPIRY_CLOSE_AFTER
 	int "TX_EXPIRY_CLOSE_AFTER"
+	range 0 65535
 	default 0
 	help
 	  How many blocking messages in a row may find no room within their deadline
 	  before the session is closed as unresponsive, when the tx-expiry-keeps-session
 	  policy is on. A blocking message that does find room ends the run. 0 never
 	  closes the session, which is the policy as it was before this limit. At most
-	  65535: a larger value counts as 65535. It is read only when that policy is on.
+	  65535, the count a session holds: a build that states more does not compile.
+	  It is read only when that policy is on.
 
 config WZ_LIMIT_DATAGRAM_FRAGMENT_BURST
 	int "DATAGRAM_FRAGMENT_BURST"
+	range 1 4294967295
 	default 8
 	help
 	  How many fragments of a message a UDP link's writer writes in a row when the
@@ -310,6 +329,7 @@ config WZ_LIMIT_DATAGRAM_FRAGMENT_BURST
 
 config WZ_LIMIT_DATAGRAM_FRAGMENT_GAP_US
 	int "DATAGRAM_FRAGMENT_GAP_US"
+	range 1 1000000
 	default 1000
 	help
 	  How long, in microseconds, must pass after the last fragment was written
@@ -356,6 +376,7 @@ config WZ_LIMIT_HANDSHAKE_COOKIE_BYTES
 
 config WZ_LIMIT_PICO_TX_QUEUE_SIZE
 	int "PICO_TX_QUEUE_SIZE"
+	range 1 16
 	default 8
 	help
 	  How many batches each priority's outbound queue holds for the pico C ABI, in
@@ -371,6 +392,7 @@ config WZ_LIMIT_PICO_TX_QUEUE_SIZE
 
 config WZ_LIMIT_SNAPSHOT_PERIOD_MS
 	int "SNAPSHOT_PERIOD_MS"
+	range 1 2147483
 	default 1000
 	help
 	  How often, in milliseconds, the node takes a snapshot of itself: what it spends
@@ -380,6 +402,7 @@ config WZ_LIMIT_SNAPSHOT_PERIOD_MS
 
 config WZ_LIMIT_SNAPSHOT_HISTOGRAM_BUCKETS
 	int "SNAPSHOT_HISTOGRAM_BUCKETS"
+	range 1 32
 	default 24
 	help
 	  How many buckets the snapshot's message-interval histogram has, each 8 bytes.
@@ -391,6 +414,7 @@ config WZ_LIMIT_SNAPSHOT_HISTOGRAM_BUCKETS
 
 config WZ_LIMIT_SUPERVISION_CHECKPOINTS
 	int "SUPERVISION_CHECKPOINTS"
+	range 1 64
 	default 4
 	help
 	  How many checkpoints the node's supervisor watches. Each is a deadline an
@@ -419,6 +443,7 @@ config WZ_LIMIT_APP_LINK_QUEUE_BYTES
 
 config WZ_LIMIT_EVENT_RING_SLOTS
 	int "EVENT_RING_SLOTS"
+	range 1 1073741823
 	default 64
 	help
 	  How many event records the node's event ring holds. When the ring is full,
@@ -428,6 +453,7 @@ config WZ_LIMIT_EVENT_RING_SLOTS
 
 config WZ_LIMIT_EVENT_RECORD_ARGS
 	int "EVENT_RECORD_ARGS"
+	range 0 255
 	default 4
 	help
 	  How many integer arguments one event record carries, each 8 bytes. A record
@@ -494,6 +520,7 @@ config WZ_LIMIT_INSTANCES_PER_MESSAGE
 
 config WZ_LIMIT_CLOCK_MAX_FORWARD_STEP_MS
 	int "CLOCK_MAX_FORWARD_STEP_MS"
+	range 0 4294967295
 	default 500
 	help
 	  How far ahead of the node's clock, in milliseconds, a timestamp from another
@@ -501,11 +528,14 @@ config WZ_LIMIT_CLOCK_MAX_FORWARD_STEP_MS
 	  UHLC_MAX_DELTA_MS. A refused timestamp is not taken into the clock, and the
 	  data carrying it is stamped afresh or dropped as the timestamping settings say.
 	  A host that sets the environment variable UHLC_MAX_DELTA_MS to a whole number of
-	  milliseconds overrides this at start, as it does zenoh's own bound. 0 refuses
-	  any timestamp ahead of the clock.
+	  milliseconds overrides this at start, as it does zenoh's own bound. A value
+	  that is not a whole number of milliseconds, or one the build does not allow, is
+	  refused by name: the open fails with that reason, where zenoh panics. 0
+	  refuses any timestamp ahead of the clock.
 
 config WZ_LIMIT_DECLARATION_SYNC_BURST_MESSAGES
 	int "DECLARATION_SYNC_BURST_MESSAGES"
+	range 1 4294967295
 	default 8
 	help
 	  How many declarations one turn of a paced declaration replay sends, when the
@@ -514,6 +544,7 @@ config WZ_LIMIT_DECLARATION_SYNC_BURST_MESSAGES
 
 config WZ_LIMIT_DECLARATION_SYNC_FINAL_TIMEOUT_MS
 	int "DECLARATION_SYNC_FINAL_TIMEOUT_MS"
+	range 1 4294967295
 	default 1000
 	help
 	  How long, in milliseconds, a node waits for the peer's answer to an interest it
@@ -524,15 +555,17 @@ config WZ_LIMIT_DECLARATION_SYNC_FINAL_TIMEOUT_MS
 
 config WZ_LIMIT_DECLARATION_SYNC_INTERVAL_MS
 	int "DECLARATION_SYNC_INTERVAL_MS"
+	range 1 4294967295
 	default 10
 	help
 	  How long, in milliseconds, a paced declaration replay waits between two of its
 	  turns, when the declaration-sync-pacing policy is on. The session keeps being
-	  served during the wait. It is read only when that policy is on, and must be at
-	  least 1.
+	  served during the wait. Waiting for the declarations to be stable steps by it
+	  whether or not that policy is on. Must be at least 1.
 
 config WZ_LIMIT_DECLARATION_SYNC_RX_NO_PROGRESS_MS
 	int "DECLARATION_SYNC_RX_NO_PROGRESS_MS"
+	range 0 4294967295
 	default 0
 	help
 	  How long, in milliseconds, a session waits for the next of its peer's initial
@@ -547,6 +580,7 @@ config WZ_LIMIT_DECLARATION_SYNC_RX_NO_PROGRESS_MS
 
 config WZ_LIMIT_DECLARATION_SYNC_RETRY_INTERVAL_MS
 	int "DECLARATION_SYNC_RETRY_INTERVAL_MS"
+	range 0 4294967295
 	default 0
 	help
 	  How long, in milliseconds, a paced declaration replay waits before it tries
@@ -555,37 +589,44 @@ config WZ_LIMIT_DECLARATION_SYNC_RETRY_INTERVAL_MS
 	  DECLARATION_SYNC_INTERVAL_MS, and the turn starts again at the declaration the
 	  link refused. 0 tries nothing again: a refused turn ends the replay and the
 	  link, and a reconnecting session replays again on the next one, as before this
-	  limit. Only the tokio engine reads it.
+	  limit. The tokio engine, the cooperative engine and the fixed-memory slot
+	  client read it alike.
 
 config WZ_LIMIT_DECLARATION_SYNC_TX_NO_PROGRESS_MS
 	int "DECLARATION_SYNC_TX_NO_PROGRESS_MS"
+	range 0 4294967295
 	default 0
 	help
 	  How long, in milliseconds, a paced declaration replay that retries refused
 	  turns (DECLARATION_SYNC_RETRY_INTERVAL_MS not 0) goes on with no declaration
 	  sent before it gives up, which ends the link as a refused turn does without
 	  retries. Each declaration sent starts the stretch again. 0 gives up only when
-	  the link itself ends. Only the tokio engine reads it.
+	  the link itself ends. The tokio engine, the cooperative engine and the
+	  fixed-memory slot client read it alike.
 
 config WZ_LIMIT_PICO_UNICAST_BATCH_BYTES
 	int "PICO_UNICAST_BATCH_BYTES"
+	range 1 65535
 	default 2048
 	help
 	  The batch size, in bytes, a session of the zenoh-pico interface advertises when
 	  it opens a unicast session, as zenoh-pico's BATCH_UNICAST_SIZE. The two sides
-	  send frames no larger than the smaller of the two sizes. At most 65535.
+	  send frames no larger than the smaller of the two sizes. At least 1 and at most
+	  65535: a batch of no byte carries no frame.
 
 config WZ_LIMIT_PICO_MULTICAST_BATCH_BYTES
 	int "PICO_MULTICAST_BATCH_BYTES"
+	range 1 65535
 	default 2048
 	help
 	  The batch size, in bytes, a session of the zenoh-pico interface advertises in
 	  the Join of a multicast group, as zenoh-pico's BATCH_MULTICAST_SIZE. zenoh-pico
 	  refuses a member whose Join states another size, so every member of a group
-	  states the same. At most 65535.
+	  states the same. At least 1 and at most 65535.
 
 config WZ_LIMIT_PICO_LEASE_MS
 	int "PICO_LEASE_MS"
+	range 1 4294967295
 	default 10000
 	help
 	  The lease, in milliseconds, a session of the zenoh-pico interface advertises,
@@ -594,19 +635,22 @@ config WZ_LIMIT_PICO_LEASE_MS
 
 config WZ_LIMIT_PICO_SOCKET_TIMEOUT_MS
 	int "PICO_SOCKET_TIMEOUT_MS"
+	range 0 4294967295
 	default 100
 	help
 	  How long, in milliseconds, one read step of the cooperative zenoh-pico session
 	  waits on its link before it returns with nothing, as zenoh-pico's
-	  Z_CONFIG_SOCKET_TIMEOUT.
+	  Z_CONFIG_SOCKET_TIMEOUT. The tokio engine has no such wait: its read is woken
+	  by what arrives.
 
 config WZ_LIMIT_PICO_CONNECT_TIMEOUT_MS
 	int "PICO_CONNECT_TIMEOUT_MS"
+	range 1 4294967295
 	default 10000
 	help
-	  How long, in milliseconds, opening a cooperative zenoh-pico session waits for
-	  the session to be established before the open fails, as zenoh-pico's
-	  Z_TRANSPORT_CONNECT_TIMEOUT.
+	  How long, in milliseconds, each open of an endpoint by a zenoh-pico session
+	  waits for the dial and the handshake before it fails, on either engine, as
+	  zenoh-pico's Z_TRANSPORT_CONNECT_TIMEOUT.
 
 config WZ_LIMIT_PICO_FRAG_MAX_BYTES
 	int "PICO_FRAG_MAX_BYTES"
@@ -620,6 +664,7 @@ config WZ_LIMIT_PICO_FRAG_MAX_BYTES
 
 config WZ_LIMIT_PICO_ACCEPT_TIMEOUT_MS
 	int "PICO_ACCEPT_TIMEOUT_MS"
+	range 1 4294967295
 	default 1000
 	help
 	  How long, in milliseconds, a listening session of the zenoh-pico interface gives
@@ -630,6 +675,7 @@ config WZ_LIMIT_PICO_ACCEPT_TIMEOUT_MS
 
 config WZ_LIMIT_PICO_KEEPALIVES_PER_LEASE
 	int "PICO_KEEPALIVES_PER_LEASE"
+	range 1 4294967295
 	default 3
 	help
 	  How many keepalives a session of the zenoh-pico interface sends in one lease,

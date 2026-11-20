@@ -230,6 +230,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-pico/src/get.rs` | S7 | |
 | `crates/wz-capi-pico/src/get_to_peer.rs` | S7 | |
 | `crates/wz-capi-pico/src/handlers.rs` | S7 | |
+| `crates/wz-capi-pico/src/header_internals.rs` | S7 | |
 | `crates/wz-capi-pico/src/instance_key.rs` | S12 | |
 | `crates/wz-capi-pico/src/key_ids.rs` | S12 | |
 | `crates/wz-capi-pico/src/keyexpr.rs` | S7 | |
@@ -713,6 +714,9 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/lifecycle_node.rs` | S1 | |
 | `crates/wz-session-core/src/lifecycle_query.rs` | S2 | |
 | `crates/wz-session-core/src/lifecycle_wire.rs` | S1 | |
+| `crates/wz-session-core/src/limit_binding.rs` | S10 | |
+| `crates/wz-session-core/src/limits.rs` | S10 | |
+| `crates/wz-session-core/src/limits_generated.rs` | S10 | |
 | `crates/wz-session-core/src/link.rs` | S1 | |
 | `crates/wz-session-core/src/link_admission.rs` | S1 | |
 | `crates/wz-session-core/src/link_restriction.rs` | S1 | |

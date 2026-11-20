@@ -134,6 +134,20 @@ use crate::shutdown::shutdown_signal;
 use crate::tasks::{liveliness_get_task, publisher_task, query_task, QueryAnswerLog};
 use crate::teardown;
 
+/// Fail a run whose node clock was refused: the bound `UHLC_MAX_DELTA_MS` states is one the clock
+/// does not honour, so the node holds no clock where it was to have one. The error is the clock's
+/// own reason, naming the variable and the value, which `main` prints before it exits; upstream's
+/// node does not start on such a value either. Each run mode asks this once its clock is built.
+fn refuse_a_refused_clock(hlc: &wz::runtime_tokio::node_clock::NodeHlc) -> io::Result<()> {
+    match hlc.clock_refused() {
+        None => Ok(()),
+        Some(refused) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            refused.to_string(),
+        )),
+    }
+}
+
 /// RAII keepers for the local Session-level declarations
 /// ([`Subscriber`], [`LivelinessSubscriber`], [`Queryable`]). Held
 /// at `run_demo` scope so each handle's `Drop` fires after the
@@ -3427,6 +3441,7 @@ pub(crate) async fn run_demo(
     // entry of the map applies.
     let session = TokioSession::new(actions.clone(), observer.clone(), Arc::new(session_clock))
         .with_timestamping(timestamping.map_for(node_whatami));
+    refuse_a_refused_clock(session.node_hlc())?;
     // `aggregation/{subscribers,publishers}`: set before the first declaration
     // below, since a declaration keeps the key it was made under.
     session.set_declaration_aggregation(declare_spec.aggregation.clone());
@@ -4660,6 +4675,7 @@ async fn run_peer_until(
         // rebuilds them, so a mode chosen first would be lost, and the hats a face joins are the
         // ones it keeps. The face loop reads it back off the forwarder for every session it opens.
         .with_south_partition(opts.south_partition.clone());
+    refuse_a_refused_clock(&forwarder.node_hlc())?;
     // `--peer-mode` (zenoh `routing.peer.mode`). Set BEFORE any face registers,
     // because the mode governs how the very first inbound flood is ingested; a
     // node that learned one flood in the wrong mode has already mis-shaped its
@@ -6584,6 +6600,7 @@ async fn run_router_hat_until(
         .with_drop_future_timestamp(opts.timestamping.drop_future_timestamp())
         .with_south_partition(opts.south_partition.clone()),
     );
+    refuse_a_refused_clock(&forwarder.node_hlc())?;
 
     // R2634 — the ONE live `WzConfig` this host runs on, built before the first
     // face so the weights it carries are what the first flood advertises. R2633
