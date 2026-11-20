@@ -376,7 +376,6 @@ mod tests {
         );
     }
 
-    #[test]
     /// Whether a session opens from `state` under `form`, or the code `z_open` answers.
     fn admits(state: &ConfigState, form: KeyWireForm) -> Result<(), ZResult> {
         admit_at_open(state, &policy_of(form)).map(|_| ())
