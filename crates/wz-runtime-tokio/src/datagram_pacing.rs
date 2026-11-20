@@ -59,6 +59,11 @@ pub trait Pacing: Send + 'static {
 
     /// Note that the datagram waited for last has been written.
     fn wrote(&mut self);
+
+    /// Whether this writer may make a datagram wait at all. A writer that never does lets a
+    /// sender write its own datagram from its own thread (`InlineWrite::datagrams`); one that
+    /// may keeps every datagram for itself, since the wait is its own.
+    fn paces(&self) -> bool;
 }
 
 /// Datagrams written as fast as the socket takes them, as upstream writes them.
@@ -83,6 +88,11 @@ impl Pacing for Unpaced {
 
     #[inline]
     fn wrote(&mut self) {}
+
+    #[inline]
+    fn paces(&self) -> bool {
+        false
+    }
 }
 
 /// The fragments of a message written in bursts, a gap apart, on tokio's clock.
@@ -131,6 +141,10 @@ impl Pacing for Paced {
     fn wrote(&mut self) {
         let now = self.now_us();
         self.pacer.wrote(now);
+    }
+
+    fn paces(&self) -> bool {
+        true
     }
 }
 
@@ -191,6 +205,10 @@ impl Pacing for ByPolicy {
         if let Some(paced) = self.0.as_mut() {
             paced.wrote();
         }
+    }
+
+    fn paces(&self) -> bool {
+        self.is_paced()
     }
 }
 

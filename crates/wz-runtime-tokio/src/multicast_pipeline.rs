@@ -536,6 +536,48 @@ impl wz_session_core::multicast_tx::MulticastTxQueue for StageQueue<'_> {
 /// would drop that data as stale when it came. So each stage keeps, in queue
 /// order, the SN each queued datagram carries, and [`Self::on_wire`] moves as
 /// the transmit task reports each one written.
+/// What a group's writers note of each datagram they are done with: its priority, and its size
+/// when it was written (`None` when the write failed). The transmit task notes each one it
+/// writes and a producer each one it writes from its own thread ([`GroupInline`]), through this
+/// one function, so the plane counts and advertises the conduits from one record however a
+/// datagram left. The plane pops its record of the oldest datagram queued at the priority for
+/// each note, so what a note says is how many left, never which.
+#[derive(Clone)]
+struct GroupWrites {
+    report: tokio::sync::mpsc::UnboundedSender<(Priority, Option<usize>)>,
+}
+
+impl GroupWrites {
+    fn written(&self, priority: Priority, len: Option<usize>) {
+        // The plane is gone with its link: there is nobody to count for.
+        let _ = self.report.send((priority, len));
+    }
+}
+
+/// A group link's own way to write one datagram from a producer's thread
+/// ([`MulticastLinkDriver::inline_sender`](crate::multicast_glue::MulticastLinkDriver::inline_sender)),
+/// noting each datagram it writes as the transmit task notes its own ([`GroupWrites`]). A
+/// datagram it cannot write now, or whose write fails, is left to the transmit task, which
+/// writes it, or fails it, and notes it.
+struct GroupInline {
+    sink: Arc<dyn crate::writer_queue::InlineWrite>,
+    writes: GroupWrites,
+}
+
+impl crate::writer_queue::InlineWrite for GroupInline {
+    fn try_write(&self, buf: &[u8]) -> std::io::Result<usize> {
+        self.sink.try_write(buf)
+    }
+
+    fn datagrams(&self) -> bool {
+        true
+    }
+
+    fn wrote(&self, priority: Priority, len: usize) {
+        self.writes.written(priority, Some(len));
+    }
+}
+
 pub(crate) struct MulticastTxPlane {
     producer: MulticastTxProducer,
     /// The attached pipeline's lanes; dropped at [`Self::finish`] so the
@@ -601,7 +643,22 @@ impl MulticastTxPlane {
             }
         };
         let (report, written) = tokio::sync::mpsc::unbounded_channel();
+        let writes = GroupWrites { report };
         let mut pacing = group_writer_pacing::<crate::datagram_pacing::OfBuild>(params);
+        // A producer writes its own datagram from its own thread when the link has a way to
+        // (`MulticastLinkDriver::inline_sender`) and the writer paces nothing: a paced writer's
+        // wait is its own, and a datagram written past it would pass the pace.
+        {
+            use crate::datagram_pacing::Pacing;
+            if !pacing.paces() {
+                if let Some(sink) = driver.inline_sender() {
+                    lanes.set_inline_write(Arc::new(GroupInline {
+                        sink,
+                        writes: writes.clone(),
+                    }));
+                }
+            }
+        }
         let writer = crate::runtime_pool::WzRuntime::Tx.spawn(async move {
             // R3264 — a pooled datagram is a slot of the link's transmit pool:
             // started as the send begins, home through the completion edge once
@@ -629,7 +686,7 @@ impl MulticastTxPlane {
                     // Dropped: a refused send has ended too (completed, failed).
                     drop(datagram);
                 }
-                let _ = report.send((priority, wrote.then_some(len)));
+                writes.written(priority, wrote.then_some(len));
             }
         });
         let mask = sn::mask_from_res(params.seq_num_res);
@@ -938,6 +995,47 @@ impl Drop for MulticastTxPlane {
 /// writer's in production; a test names the pacing it observes.
 fn group_writer_pacing<P: crate::datagram_pacing::Pacing>(params: &MulticastParams) -> P {
     P::of_policy(&params.policy)
+}
+
+#[cfg(test)]
+mod inline_write_tests {
+    use super::*;
+    use crate::writer_queue::InlineWrite;
+
+    /// A link that takes every datagram whole, at once.
+    struct TakesAll;
+
+    impl InlineWrite for TakesAll {
+        fn try_write(&self, buf: &[u8]) -> std::io::Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn datagrams(&self) -> bool {
+            true
+        }
+    }
+
+    /// A datagram a producer writes from its own thread is noted to the plane as the transmit
+    /// task notes each datagram it writes: its priority and its size, through the one
+    /// [`GroupWrites`] the plane reads.
+    #[test]
+    fn a_datagram_written_by_its_producer_is_noted_as_the_transmit_task_notes_one() {
+        let (lanes, _queued) = pipeline_lanes();
+        let (report, mut written) = tokio::sync::mpsc::unbounded_channel();
+        lanes.set_inline_write(Arc::new(GroupInline {
+            sink: Arc::new(TakesAll),
+            writes: GroupWrites { report },
+        }));
+
+        lanes.send(Priority::Data, vec![7u8; 5]).expect("open");
+
+        assert_eq!(
+            written.try_recv().ok(),
+            Some((Priority::Data, Some(5))),
+            "written on the producer's thread and noted at once"
+        );
+        assert!(written.try_recv().is_err(), "once");
+    }
 }
 
 #[cfg(test)]

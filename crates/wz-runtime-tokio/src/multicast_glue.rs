@@ -563,6 +563,16 @@ pub trait MulticastLinkDriver: LinkDriver {
     fn frame_budget(&self) -> Option<u16> {
         None
     }
+
+    /// A way for a producer to write one datagram to the group from its own thread, without
+    /// waiting and without the transmit task ([`InlineWrite`](crate::writer_queue::InlineWrite),
+    /// answering `true` to `datagrams`), or `None` for a link that writes only from its
+    /// transmit task. The transmit side wraps it so that a datagram written through it is noted
+    /// as the transmit task notes each one it writes. The default is a link with none: every
+    /// datagram is the transmit task's, as it always was.
+    fn inline_sender(&self) -> Option<std::sync::Arc<dyn crate::writer_queue::InlineWrite>> {
+        None
+    }
 }
 
 /// R2929 — the send half of a [`MulticastLinkDriver`], owned by the transmit
@@ -589,6 +599,13 @@ impl MulticastLinkDriver for crate::UdpDriver {
         })?;
         let src = self.source_addr()?;
         Ok((format!("udp/{src}"), format!("udp/{group}")))
+    }
+
+    // A duplicate of the socket the group's datagrams leave from, addressed to the group, as
+    // the send half the transmit task writes through is.
+    #[cfg(unix)]
+    fn inline_sender(&self) -> Option<std::sync::Arc<dyn crate::writer_queue::InlineWrite>> {
+        self.group_inline_socket()
     }
 }
 

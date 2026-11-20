@@ -783,6 +783,10 @@ pub fn wire_udp_socket(
     let (fault, watch) = DatagramWriteFault::channel();
     let inbound = UdpReadDriver::from_socket(socket.clone(), watch);
     let (tx, rx) = crate::writer_queue::datagram_outbound_channel();
+    #[cfg(unix)]
+    if let Some(sink) = udp_inline_write(&socket, peer, &policy) {
+        tx.set_inline_write(sink);
+    }
     let writer_handle = WriterHandle::spawn(rx, |queue| {
         udp_writer_task(socket, peer, queue, fault, policy)
     });
@@ -822,6 +826,10 @@ pub fn wire_udp_demuxed(
     let (fault, watch) = DatagramWriteFault::channel();
     let inbound = UdpReadDriver::from_demux(inbound_rx, peer, pump, watch);
     let (tx, rx) = crate::writer_queue::datagram_outbound_channel();
+    #[cfg(unix)]
+    if let Some(sink) = udp_inline_write(&send_socket, peer, &policy) {
+        tx.set_inline_write(sink);
+    }
     let writer_handle = WriterHandle::spawn(rx, |queue| {
         udp_writer_task(send_socket, peer, queue, fault, policy)
     });
@@ -1366,6 +1374,71 @@ pub async fn udp_writer_task(
     udp_writer_task_paced(socket, peer, queue, fault, OfBuild::of_policy(&policy)).await;
 }
 
+/// A duplicate of a UDP link's socket that a sender writes its own datagram through, from its
+/// own thread, without waking the link's writer ([`crate::writer_queue::InlineWrite`]). A
+/// duplicate shares the socket's open file description, so it is non-blocking as tokio made
+/// the socket; it addresses each datagram as [`udp_writer_task_paced`] does, by the socket's
+/// own connectedness.
+#[cfg(unix)]
+struct UdpInlineSocket {
+    socket: std::net::UdpSocket,
+    peer: SocketAddr,
+    connected: bool,
+}
+
+#[cfg(unix)]
+impl crate::writer_queue::InlineWrite for UdpInlineSocket {
+    fn try_write(&self, buf: &[u8]) -> io::Result<usize> {
+        if self.connected {
+            self.socket.send(buf)
+        } else {
+            self.socket.send_to(buf, self.peer)
+        }
+    }
+
+    fn datagrams(&self) -> bool {
+        true
+    }
+}
+
+/// The inline write of a UDP link over `socket` to `peer`, or `None`: when the link's writer
+/// paces its fragments (`datagram-fragment-pacing`), whose wait is the writer's own and which a
+/// datagram written from another thread would pass, and when the socket cannot be duplicated.
+/// With `None` every datagram goes through the writer, as it always did.
+#[cfg(unix)]
+fn udp_inline_write(
+    socket: &UdpSocket,
+    peer: SocketAddr,
+    policy: &wz_session_core::policy::SessionPolicy,
+) -> Option<Arc<dyn crate::writer_queue::InlineWrite>> {
+    use crate::datagram_pacing::{OfBuild, Pacing};
+    if OfBuild::of_policy(policy).paces() {
+        return None;
+    }
+    udp_inline_socket(socket, peer)
+}
+
+/// A duplicate of `socket` a sender writes one datagram to `peer` through
+/// ([`UdpInlineSocket`]), or `None` when the socket cannot be duplicated. Whether the writer of
+/// the link paces is its caller's to ask first (see [`udp_inline_write`]).
+// LINK-SOCKET-SEAM-NOT-APPLICABLE: `socket` is the socket the link was wired with, whose
+// options the seam already applied. A duplicate shares the socket, and a socket option belongs
+// to the socket, so every option is set on the copy and there is nothing left to apply.
+#[cfg(unix)]
+pub(crate) fn udp_inline_socket(
+    socket: &UdpSocket,
+    peer: SocketAddr,
+) -> Option<Arc<dyn crate::writer_queue::InlineWrite>> {
+    use std::os::fd::AsFd;
+    let connected = socket.peer_addr().is_ok();
+    let duplicate = socket.as_fd().try_clone_to_owned().ok()?;
+    Some(Arc::new(UdpInlineSocket {
+        socket: std::net::UdpSocket::from(duplicate),
+        peer,
+        connected,
+    }))
+}
+
 /// [`udp_writer_task`] with the pacing of its fragments named: the build's type
 /// ([`crate::datagram_pacing::OfBuild`]) in production, the one a test chose otherwise. A
 /// fragment past the burst waits in [`OutboundQueue::pause`], which a seal ends, so teardown
@@ -1432,6 +1505,31 @@ mod tests {
 
     /// A fragment's datagram, by its header.
     const FRAGMENT: [u8; 2] = [0x46, 0];
+
+    /// A UDP link's inline write is a datagram link's: it sends one datagram, whole, to the
+    /// link's peer, from the calling thread and without waiting, through a duplicate of the
+    /// link's own socket.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_udp_links_inline_write_sends_one_whole_datagram_to_its_peer() {
+        use crate::writer_queue::InlineWrite;
+        let receiver = UdpSocket::bind("127.0.0.1:0").await.expect("bind receiver");
+        let to = receiver.local_addr().expect("receiver addr");
+        let sender = UdpSocket::bind("127.0.0.1:0").await.expect("bind sender");
+        let sink = udp_inline_socket(&sender, to).expect("the socket duplicates");
+        assert!(sink.datagrams(), "a datagram link's inline write");
+
+        assert_eq!(sink.try_write(b"datagram").expect("sent"), 8);
+
+        let mut buf = [0u8; 32];
+        let (n, from) = receiver.recv_from(&mut buf).await.expect("received");
+        assert_eq!(&buf[..n], b"datagram", "one whole datagram");
+        assert_eq!(
+            from,
+            sender.local_addr().expect("sender addr"),
+            "from the link's socket"
+        );
+    }
 
     /// Write `datagrams` through a paced UDP writer to a loopback receiver, and say how long
     /// after they were queued each arrived, on the real clock. Only a LOWER bound of such a
