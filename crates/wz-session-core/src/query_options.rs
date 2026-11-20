@@ -662,14 +662,20 @@ impl QueryOptions {
     /// Gated on `query-get`, the capability its callers have.
     #[cfg(feature = "query-get")]
     pub fn expected_finals(&self, remote_targets: u32) -> u32 {
-        let mut n = 0u32;
+        self.remote_finals(remote_targets) + u32::from(self.allowed_destination.allows_local())
+    }
+
+    /// The Finals the peers' branch of the query owes: `remote_targets` when its destination
+    /// admits a peer, none when it does not. [`Self::expected_finals`] is this and the loopback's
+    /// one; an engine that registers the session's own leg apart from the peers' registers each
+    /// peer leg with this, so that both count a group's members by the one rule.
+    #[cfg(feature = "query-get")]
+    pub fn remote_finals(&self, remote_targets: u32) -> u32 {
         if self.allowed_destination.allows_remote() {
-            n += remote_targets;
+            remote_targets
+        } else {
+            0
         }
-        if self.allowed_destination.allows_local() {
-            n += 1;
-        }
-        n
     }
 
     /// R311y317 — the three runtime-only atoms' slots as every consumer must
@@ -965,5 +971,30 @@ impl QueryOptions {
             wz_codecs::request::RequestOwnedVariant::CodecZenohQuery(query) => query,
             _ => unreachable!("build_request_query_with_meta always produces a Query body"),
         }
+    }
+}
+
+#[cfg(all(test, feature = "query-get"))]
+mod tests {
+    use super::*;
+
+    /// The peers' branch owes one Final a peer when the destination admits peers and none when
+    /// it does not, and the whole query owes that and the loopback's one: a group of three
+    /// members is owed three by its leg, whatever the session's own leg is owed.
+    #[test]
+    fn the_peers_branch_owes_a_final_a_peer_and_the_whole_adds_the_loopbacks() {
+        for (destination, remote, whole) in [
+            (Locality::Remote, 3, 3),
+            (Locality::Any, 3, 4),
+            (Locality::SessionLocal, 0, 1),
+        ] {
+            let mut opts = QueryOptions::get();
+            opts.allowed_destination = destination;
+            assert_eq!(opts.remote_finals(3), remote, "{destination:?}");
+            assert_eq!(opts.expected_finals(3), whole, "{destination:?}");
+        }
+        let mut opts = QueryOptions::get();
+        opts.allowed_destination = Locality::Remote;
+        assert_eq!(opts.remote_finals(0), 0, "a group with no member owes none");
     }
 }

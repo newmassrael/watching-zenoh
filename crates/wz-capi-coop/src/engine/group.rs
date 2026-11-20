@@ -40,6 +40,12 @@ use wz_session_core::WhatAmI;
 use wz_session_mcu::group_drive::{
     spawn_multicast_session_seeded, MulticastReplyQueue, MulticastSessionSeed,
 };
+#[cfg(feature = "query")]
+use {
+    wz_session_core::metadata::QueryMetadata,
+    wz_session_core::request_build::build_request_query_with_meta,
+    wz_session_core::wire_id::RequestId,
+};
 
 #[allow(unused_imports)]
 use crate::prelude::*;
@@ -113,6 +119,9 @@ pub(super) struct GroupJoining {
     pub(super) transport: alloc::boxed::Box<dyn GroupTransport>,
     pub(super) params: MulticastParams,
     pub(super) policy: SessionPolicy,
+    /// The generation a member's query is held and answered under (`queryable`).
+    #[cfg(feature = "queryable")]
+    pub(super) generation: u64,
 }
 
 /// One group of the session: its face, its task, its queue, its members and its stop.
@@ -124,6 +133,16 @@ pub(super) struct GroupFace {
     members: Rc<RefCell<Vec<Member>>>,
     took: Rc<Cell<bool>>,
     stop: Rc<Cell<bool>>,
+    /// The generation a member's query is held and answered under, and the sink its answers are
+    /// queued through (`queryable`).
+    #[cfg(feature = "queryable")]
+    generation: u64,
+    #[cfg(feature = "queryable")]
+    replies: GroupReplies,
+    /// The request id the group's next get is asked under: the group's own, as each link's are
+    /// its own, so a member's answer names it on this face alone (`query`).
+    #[cfg(feature = "query")]
+    next_request: Cell<RequestId>,
 }
 
 impl GroupFace {
@@ -142,6 +161,8 @@ impl GroupFace {
             transport,
             params,
             policy,
+            #[cfg(feature = "queryable")]
+            generation,
         } = joining;
         let tx = MulticastReplyQueue::new();
         let members: Rc<RefCell<Vec<Member>>> = Rc::new(RefCell::new(Vec::new()));
@@ -178,10 +199,64 @@ impl GroupFace {
             id,
             declarations,
             task,
+            #[cfg(feature = "queryable")]
+            generation,
+            #[cfg(feature = "queryable")]
+            replies: MulticastReplySink::new(tx.clone()),
+            #[cfg(feature = "query")]
+            next_request: Cell::new(0),
             tx,
             members,
             took,
             stop,
+        }
+    }
+
+    /// Whether a query that came in under `generation` came on this group, whose session has
+    /// not ended: where its answer goes (`queryable`).
+    #[cfg(feature = "queryable")]
+    pub(super) fn answers_as(&self, generation: u64) -> bool {
+        self.generation == generation && !self.has_ended()
+    }
+
+    /// The sink a member's query is answered through: the group's queue (`queryable`).
+    #[cfg(feature = "queryable")]
+    pub(super) fn replies(&self) -> &GroupReplies {
+        &self.replies
+    }
+
+    /// How many members the group holds now, each of which owes a get asked of the group one
+    /// Final, as the tokio engine's group counts them (`query`).
+    #[cfg(feature = "query")]
+    pub(super) fn member_count(&self) -> u32 {
+        if self.has_ended() {
+            return 0;
+        }
+        u32::try_from(self.members.borrow().len()).unwrap_or(u32::MAX)
+    }
+
+    /// The request id the group's next get is asked under (`query`).
+    #[cfg(feature = "query")]
+    pub(super) fn alloc_request_id(&self) -> RequestId {
+        let rid = self.next_request.get();
+        self.next_request.set(rid.wrapping_add(1));
+        rid
+    }
+
+    /// Ask the group the query `rid` on `keyexpr`, naming the key in full as a put does here,
+    /// with the slots `meta` states: built by the session core's request builder, as a link's
+    /// query is, and sent reliably by the group's task, as zenoh-pico sends one on its multicast
+    /// transport. `false` when the query cannot be built, and nothing is queued.
+    #[cfg(feature = "query")]
+    pub(super) fn ask(&self, rid: RequestId, keyexpr: &str, meta: &QueryMetadata) -> bool {
+        match build_request_query_with_meta(rid, 0, Some(keyexpr), meta) {
+            Ok(request) => {
+                self.tx.enqueue(MulticastTxItem::Request {
+                    request: alloc::boxed::Box::new(request),
+                });
+                true
+            }
+            Err(_) => false,
         }
     }
 

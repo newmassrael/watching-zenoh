@@ -188,10 +188,7 @@ fn two_members_learn_each_other_by_their_joins_and_a_put_crosses_the_group() {
 
     // Each member is known to the other from the other's JOIN alone, by its zid and its role
     // (1, a peer).
-    eventually("each member to list the other", || {
-        first.peer_identities() == [(vec![2u8; 4], 1u8)]
-            && second.peer_identities() == [(vec![1u8; 4], 1u8)]
-    });
+    until_members_know_each_other(&first, &second);
 
     let heard = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
     let into = Arc::clone(&heard);
@@ -256,4 +253,127 @@ fn a_group_the_stack_does_not_join_fails_the_open_by_name() {
         network.joined.lock().unwrap().is_empty(),
         "no member joined a group"
     );
+}
+
+/// Wait until the two members each list the other, which is when a member reads what the other
+/// sends: a group admits a member's frames only once it heard that member's JOIN.
+fn until_members_know_each_other(first: &Engine, second: &Engine) {
+    eventually("each member to list the other", || {
+        first.peer_identities() == [(vec![2u8; 4], 1u8)]
+            && second.peer_identities() == [(vec![1u8; 4], 1u8)]
+    });
+}
+
+/// The asking and the answering end over the group: a get asked of the group is answered by a
+/// member's queryable, its reply and its Final going back on the group, and a get asked while the
+/// group holds no member reaches nobody.
+#[cfg(all(feature = "query", feature = "queryable"))]
+mod asked {
+    use std::sync::{Arc, Mutex};
+
+    use wz_capi_port::{
+        QueryCallback, QueryHolder, ReplyCallback, SessionDrive, SessionEngine, WireKey,
+    };
+    use wz_session_core::locality::Locality;
+    use wz_session_core::query_options::QueryOptions;
+    use wz_session_core::query_sink::{QueryView, ReplyOut};
+    use wz_session_core::reply_sink::{ReplyKind, ReplyView};
+
+    use super::{
+        eventually, member_config, open_member, until_members_know_each_other, Engine, Network,
+        GROUP,
+    };
+
+    /// What the legs of a get saw: each reply as its kind, key and payload, and whether every
+    /// leg's callback is gone, which is when the get is over.
+    #[derive(Default)]
+    struct Seen {
+        replies: Vec<(ReplyKind, String, Vec<u8>)>,
+        open: usize,
+        ended: bool,
+    }
+
+    /// Owned by a leg's callback: the get is over when the last one is dropped.
+    struct Ends(Arc<Mutex<Seen>>);
+
+    impl Drop for Ends {
+        fn drop(&mut self) {
+            let mut seen = self.0.lock().unwrap();
+            seen.open -= 1;
+            seen.ended = seen.open == 0;
+        }
+    }
+
+    /// Ask the peers of `engine` on `keyexpr`, with a deadline long past the test's waits.
+    fn ask(engine: &Engine, keyexpr: &str) -> (Option<usize>, Arc<Mutex<Seen>>) {
+        let mut opts = QueryOptions::get();
+        opts.allowed_destination = Locality::Remote;
+        opts.timeout_ms = 3_000;
+        let seen = Arc::new(Mutex::new(Seen::default()));
+        let into = Arc::clone(&seen);
+        let issued = engine.get_on_wire(keyexpr, &WireKey::literal(), &opts, None, &mut || {
+            into.lock().unwrap().open += 1;
+            let ends = Ends(Arc::clone(&into));
+            Box::new(move |view: &dyn ReplyView| {
+                ends.0.lock().unwrap().replies.push((
+                    view.kind(),
+                    view.keyexpr().to_owned(),
+                    view.payload().to_vec(),
+                ));
+            }) as ReplyCallback
+        });
+        (issued, seen)
+    }
+
+    /// Declare a queryable on `keyexpr` of `engine` that answers each query with `payload`.
+    fn serve(engine: &Engine, keyexpr: &str, payload: &'static [u8]) {
+        engine
+            .declare_queryable_on_wire(
+                keyexpr.to_owned(),
+                WireKey::literal(),
+                false,
+                Locality::Remote,
+                None,
+                Arc::new(move |_holder: Arc<dyn QueryHolder>| {
+                    Box::new(move |query: &dyn QueryView, out: &mut dyn ReplyOut| {
+                        out.reply_keyed(query.keyexpr(), payload)
+                            .expect("a reply on the query's own key");
+                    }) as QueryCallback
+                }),
+            )
+            .expect("the engine has queryables in this build");
+    }
+
+    #[test]
+    fn a_get_of_the_group_is_answered_by_a_members_queryable_and_ends_with_its_final() {
+        let network = Arc::new(Network::default());
+        let first = open_member(&network, 1, member_config(1, GROUP)).expect("the first joins");
+        SessionDrive::start_read_task(&*first).expect("the first's read task starts");
+
+        // Alone in the group: the group is owed no Final, so the get asks nobody.
+        let (issued, seen) = ask(&first, "demo/group/ask");
+        assert_eq!(issued, Some(0), "a group with no member is asked nothing");
+        assert!(seen.lock().unwrap().replies.is_empty());
+
+        let second = open_member(&network, 2, member_config(2, GROUP)).expect("the second joins");
+        SessionDrive::start_read_task(&*second).expect("the second's read task starts");
+        serve(&second, "demo/group/**", b"answer-over-the-group");
+        until_members_know_each_other(&first, &second);
+
+        // One leg, owed one Final by the one member: the reply and the Final come back on the
+        // group, long before the deadline would end the leg with a timeout.
+        let (issued, seen) = ask(&first, "demo/group/ask");
+        assert_eq!(issued, Some(1), "one leg: the group");
+        eventually("the leg to end", || seen.lock().unwrap().ended);
+        assert_eq!(
+            seen.lock().unwrap().replies,
+            vec![(
+                ReplyKind::Put,
+                "demo/group/ask".to_owned(),
+                b"answer-over-the-group".to_vec()
+            )]
+        );
+        SessionDrive::close(&*second);
+        SessionDrive::close(&*first);
+    }
 }

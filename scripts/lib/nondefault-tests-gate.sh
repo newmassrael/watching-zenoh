@@ -568,6 +568,10 @@ transport-link-unixpipe,transport-link-ws|"
     # members join their group over: two members learn each other by their JOINs, a put crosses
     # the group and a close leaves it, and a group the stack does not join fails the open.
     "wz-capi-coop|hook|app-transport,group|tests::group::"
+    # The same module with the two ends of a query (`tests::group::asked::`, compiled with `query`
+    # and `queryable`): a get of the group is answered by a member's queryable and ends with its
+    # Final, and one asked while the group holds no member asks nobody.
+    "wz-capi-coop|hook|app-transport,group,query,queryable|tests::group::"
     # What a hosted OS tells a node about its network, and the multicast sockets built from it,
     # which the tokio runtime and the cooperative host both open. The `#iface=` honor (the v4 and
     # v6 interface selectors and the tests that read them off the loopback) is compiled only with

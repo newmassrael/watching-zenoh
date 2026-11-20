@@ -105,6 +105,7 @@ use {
     wz_session_core::query::QueryableId,
     wz_session_core::query_sink::BoxedQuerySink,
     wz_session_core::reply_stage::ReplyStage,
+    wz_session_core::response_sink::ResponseSink,
 };
 
 #[cfg(feature = "queryable")]
@@ -978,12 +979,23 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         })
     }
 
-    /// The actions of the face whose link is up and is the link of `generation`: where an answer
-    /// to a query that came in on that link goes.
+    /// Where an answer to a query that came in under `generation` goes: the link of that
+    /// generation while it is up, or the group the query came on while its session runs
+    /// (`group`). Either is the sink a reply and a Final are sent through.
     #[cfg(feature = "queryable")]
-    fn up_as(&self, generation: u64) -> Option<&Rc<McuActions<C>>> {
+    fn answer_route(&self, generation: u64) -> Option<&dyn ResponseSink> {
+        #[cfg(feature = "group")]
+        if let Some(group) = self
+            .groups
+            .iter()
+            .find(|group| group.answers_as(generation))
+        {
+            return Some(group.replies() as &dyn ResponseSink);
+        }
         self.faces.iter().find_map(|face| match &face.link {
-            Link::Up(wire) if wire.generation == generation => Some(&wire.actions),
+            Link::Up(wire) if wire.generation == generation => {
+                Some(&*wire.actions as &dyn ResponseSink)
+            }
             _ => None,
         })
     }
@@ -1426,14 +1438,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 self.config.link_rx,
                 self.policy,
             );
-            // A member's query is held under the group's own generation, as a link's is under its.
+            // A member's query is held, and answered, under the group's own generation, as a
+            // link's is under its.
+            #[cfg(feature = "queryable")]
+            let generation = self.plane.generation.fetch_add(1, Ordering::AcqRel) + 1;
             #[cfg(feature = "queryable")]
             let dispatch = group::dispatch(
                 self.registry.clone(),
                 id,
                 self.policy,
                 self.plane.clone(),
-                self.plane.generation.fetch_add(1, Ordering::AcqRel) + 1,
+                generation,
             );
             #[cfg(not(feature = "queryable"))]
             let dispatch = group::dispatch(self.registry.clone(), id);
@@ -1445,6 +1460,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     transport,
                     params,
                     policy: self.policy,
+                    #[cfg(feature = "queryable")]
+                    generation,
                 },
                 dispatch,
             );
@@ -2397,18 +2414,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             self.deliver();
             return;
         }
-        let actions = core.0.up_as(generation);
-        if let Some(actions) = actions {
+        let route = core.0.answer_route(generation);
+        if let Some(route) = route {
             for reply in replies {
                 if let Ok(response) = reply.into_response() {
-                    actions.send_response(response);
+                    route.send_response(response);
                 }
             }
         }
         if release {
             let due = lock(&self.plane.holds).release(generation, rid);
-            if let (Some(qos), Some(actions)) = (due, actions) {
-                actions.send_response_final(rid, qos);
+            if let (Some(qos), Some(route)) = (due, route) {
+                route.send_response_final(rid, qos);
             }
         }
     }
@@ -3375,6 +3392,86 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             drop(guard);
             issued += 1;
             // A fan cancelled while the legs are issued stops the issuing.
+            if !self.cancelling(fan, leg_id) {
+                return Some(issued);
+            }
+        }
+        // And one leg for each group the session asks queries of
+        // (`GroupDeclarations::asks_queries`), owed a Final by each member it holds when the get
+        // is asked: the shared count (`QueryOptions::remote_finals`) over the members the
+        // group's JOINs admitted, as the tokio engine's group counts them. A member that leaves
+        // before its Final is not taken off the count, there as here: the leg ends at its
+        // deadline.
+        #[cfg(feature = "group")]
+        let groups: Vec<FaceId> = match self.live() {
+            Some(guard) if opts.allowed_destination.allows_remote() => guard
+                .0
+                .groups
+                .iter()
+                .filter(|group| group.declarations().asks_queries())
+                .map(GroupFace::id)
+                .collect(),
+            _ => Vec::new(),
+        };
+        #[cfg(feature = "group")]
+        for face in groups {
+            let leg_id = self.next_local_id();
+            let Some(mut guard) = self.live() else {
+                return Some(issued);
+            };
+            let core = &mut guard.0;
+            let Some(group) = core.groups.iter().find(|group| group.id() == face) else {
+                continue;
+            };
+            let finals = opts.remote_finals(group.member_count());
+            // A group that holds no member reaches nobody, as zenoh-pico's get with no peer does.
+            if finals == 0 {
+                continue;
+            }
+            // A request id the group allocates, so a member's answer names it on this face.
+            let rid = group.alloc_request_id();
+            let timeout_ms = opts.effective_timeout_ms();
+            let deadline_ms = (timeout_ms > 0)
+                .then(|| core.clock.now_us().div_ceil(1000) + u64::from(timeout_ms));
+            let sink = ConsolidatingSink::new(
+                opts.resolved_consolidation(),
+                get::reply_sink(leg_id, &self.gets),
+            );
+            // Registered before the query is queued, as a link's leg is before it is sent.
+            let registered = core
+                .registry
+                .borrow_mut()
+                .face_mut(face)
+                .map(|tables| {
+                    tables.gets.replies.register_sink(
+                        rid,
+                        finals,
+                        deadline_ms,
+                        ReplyAcceptance::for_query(keyexpr, opts.effective_accept_replies()),
+                        sink,
+                    )
+                })
+                .is_some_and(|registered| registered.is_ok());
+            if !registered {
+                continue;
+            }
+            self.hold_leg(leg_id, leg());
+            if !group.ask(rid, keyexpr, &opts.query_metadata()) {
+                // Nothing was queued: the entry and the leg go, and the leg is over.
+                if let Some(tables) = core.registry.borrow_mut().face_mut(face) {
+                    tables.gets.replies.unregister(rid);
+                }
+                drop(guard);
+                drop(self.take_target(TargetKey::Reply(leg_id)));
+                continue;
+            }
+            core.pending_gets.push(PendingGet {
+                face,
+                leg: leg_id,
+                kind: GetKind::Query(rid),
+            });
+            drop(guard);
+            issued += 1;
             if !self.cancelling(fan, leg_id) {
                 return Some(issued);
             }
