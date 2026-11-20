@@ -86,6 +86,10 @@ enum Command {
     PushReceiverAlias(wz_session_core::wire_id::ExprId, &'static [u8]),
     /// Close the session and stop, as a router that goes away does.
     Close,
+    /// Read nothing and send nothing from now on, the socket held open until the router is let
+    /// go of, as a node that hangs: no Close reaches the session and no error from the socket,
+    /// so only the session's lease can end it.
+    Freeze,
     /// Ask a query of request id `.0` on the key.
     #[cfg(feature = "queryable")]
     Query(wz_session_core::wire_id::RequestId, &'static str),
@@ -454,6 +458,12 @@ fn run_router(
             Ok(Command::Close) => {
                 actions.send_close_with_reason(CloseReason::Generic);
                 local.run_until_idle();
+                return;
+            }
+            Ok(Command::Freeze) => {
+                // Unstepped, so nothing is read or sent; the session's task, and with it the
+                // socket, lives until the test lets go of the router.
+                while inbox.recv().is_ok() {}
                 return;
             }
             #[cfg(feature = "queryable")]
@@ -1262,6 +1272,7 @@ mod local;
 mod local_query;
 #[cfg(all(feature = "listen", feature = "query", feature = "queryable"))]
 mod one_face;
+mod program_clock;
 #[cfg(feature = "queryable")]
 mod queryable;
 mod replay;
