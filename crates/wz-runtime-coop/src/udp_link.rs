@@ -830,6 +830,53 @@ mod tests {
         assert_eq!(ends.dst.as_str(), "udp/[::1]:7447");
     }
 
+    /// The floor the locator bound is held to (at compile time, beside [`Locator::text`]) is the
+    /// text of the widest IPv4 end, and the longest IP locator is the widest IPv6 end with a
+    /// scope, for every scheme; so every IPv4 end is named whole.
+    #[test]
+    fn the_locator_floor_is_the_widest_ipv4_end_and_every_ipv4_end_fits() {
+        use crate::session_drive::{LONGEST_IPV4_LOCATOR_LEN, LONGEST_IP_LOCATOR_LEN};
+        use core::net::SocketAddrV6;
+        let widest_v4 = SocketAddr::from(([255, 255, 255, 255], 65535));
+        let widest_v6 = SocketAddr::V6(SocketAddrV6::new(
+            Ipv6Addr::new(
+                0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff,
+            ),
+            65535,
+            0,
+            u32::MAX,
+        ));
+        for proto in [LinkProto::Udp, LinkProto::Tcp, LinkProto::Tls] {
+            let v4 = std::format!(
+                "{}",
+                Locator {
+                    proto,
+                    at: widest_v4
+                }
+            );
+            let v6 = std::format!(
+                "{}",
+                Locator {
+                    proto,
+                    at: widest_v6
+                }
+            );
+            assert_eq!(v4.len(), LONGEST_IPV4_LOCATOR_LEN, "{v4}");
+            assert_eq!(v6.len(), LONGEST_IP_LOCATOR_LEN, "{v6}");
+            assert_eq!(
+                Locator {
+                    proto,
+                    at: widest_v4
+                }
+                .text()
+                .finish(),
+                Ok(v4.as_str())
+            );
+        }
+        let ends = link_endpoints(LinkProto::Udp, widest_v4, widest_v4);
+        assert_eq!(ends.dst.as_str(), "udp/255.255.255.255:65535");
+    }
+
     /// A dial binds the node's own address when the peer is of its family, and the unspecified
     /// address of the peer's family when it is not, on a port the stack picks either way.
     #[test]
