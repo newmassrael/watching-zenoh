@@ -82,7 +82,6 @@ mod wait_parked {
     extern crate std;
 
     use alloc::sync::Arc;
-    use core::future::Future;
     use core::task::{Context, Waker};
     use std::task::Wake;
     use std::thread::Thread;
