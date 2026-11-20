@@ -53,19 +53,59 @@
 //! `Drop` put, a dropping put waited for the link; every `Drop` sample delivered, nothing was
 //! dropped; a `Block` sample missing, out of order or failed, the waiting put did not deliver.
 //!
+//! ## Reliability on a lossy group and across a cut stream
+//!
+//! zenoh's transport does not retransmit. A frame's sequence number must follow the last one
+//! taken, and any forward jump is taken (`io/zenoh-transport/src/common/seq_num.rs` @
+//! `if (gap != 0) && ((gap & !(self.mask >> 1)) == 0) {`); a frame that does not follow is
+//! dropped, on the reliable and the best-effort channel alike
+//! (`io/zenoh-transport/src/multicast/rx.rs` @ `with invalid SN dropped`). Reliable delivery
+//! rests on a reliable link, and what zenoh defines on a lossy one is that samples arrive in
+//! order and never twice, and that a sample missed is reported: an advanced subscriber tells its
+//! miss listener how many samples of a sequenced publisher it missed
+//! (`zenoh-ext/src/advanced_subscriber.rs` @ `"Sample missed: missed {} samples from {:?}.",`),
+//! as zenoh-pico's does (`vendor/zenoh-pico/src/api/advanced_subscriber.c` @
+//! `__unsafe_ze_advanced_subscriber_trigger_miss_handler_callbacks(&states->_miss_handlers, &id,`).
+//! Best effort is allowed to lose; it is held to order only.
+//!
+//! zenoh-pico has no UDP unicast listener (`vendor/zenoh-pico/src/link/transport/udp/udp_posix.c`
+//! @ `static z_result_t _z_udp_posix_listen(`), so the datagram path between two of its sessions
+//! is a multicast group. Each member joins a group of its own on the loopback interface and a
+//! relay carries datagrams between the two groups, losing, delaying and so reordering only the
+//! publisher's frames while it impairs; the joins pass untouched. Each stream is put through the
+//! impairment and then a fence through the clear relay, and the subscriber must account for every
+//! reliable sample from the first it received to the fence: received, or reported missed.
+//!
+//! A stream link that breaks takes its transport with it
+//! (`io/zenoh-transport/src/unicast/universal/link.rs` @
+//! `tracing::debug!("RX task failed: {}", e);`): a session that dials again opens a new one,
+//! and what the old one had not written is gone. zenoh defines the same here as on a lossy link,
+//! and nothing put once the new transport carries may be lost. A zenoh-pico client opens a lost
+//! session again by itself (`vendor/zenoh-pico/src/net/session.c` @
+//! `_z_fut_fn_result_t _z_client_reopen_task_fn(void *ztc_arg, _z_executor_t *executor) {`); the
+//! relay cuts both sockets of the stream mid-run and carries the next dial.
+//!
+//! Both are repeated, `WZ_LINK_QOS_REPEATS` times (3 when unset), and the rate at which a
+//! departure reproduced is printed for each library; the group runs use the relay seeds
+//! `WZ_LINK_QOS_SEED`, `WZ_LINK_QOS_SEED` + 1, and so on (the clock when unset), the same for
+//! both libraries. A red of the subject means: a reliable or best-effort sample out of order or
+//! twice; a reliable sample neither received nor reported missed; the fence or the samples after
+//! the re-dial not delivered; the publisher not dialling again.
+//!
 //! The probe's environment is held to the reference header arm (`PicoHeaderArm::MultiThreaded`),
 //! whose wz build is the crate's default one.
 
-use std::collections::VecDeque;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, VecDeque};
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
-use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, Shutdown, SocketAddr, SocketAddrV4, TcpListener, TcpStream, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use wz_integration_tests::common::{
     compile_pico_source, zenoh_pico_include_dirs, zenoh_pico_library_dir, ChildGuard, PicoHeaderArm,
@@ -332,14 +372,24 @@ static int wait_peer(unsigned long long timeout_ms) {
     return 0;
 }
 
+static int matched_now(int stream) {
+    z_matching_status_t status;
+    if (stream == REL_S) {
+        return rel_pub_declared &&
+               ze_advanced_publisher_get_matching_status(ze_advanced_publisher_loan(&rel_pub), &status) == Z_OK &&
+               status.matching;
+    }
+    return pub_declared[stream] && z_publisher_get_matching_status(z_publisher_loan(&pubs[stream]), &status) == Z_OK &&
+           status.matching;
+}
+
 static int wait_match(int stream, unsigned long long timeout_ms) {
-    if (stream < 0 || stream == REL_S || !pub_declared[stream]) {
+    if (stream < 0) {
         return 0;
     }
     unsigned long long deadline = now_us() + timeout_ms * 1000ULL;
     do {
-        z_matching_status_t status;
-        if (z_publisher_get_matching_status(z_publisher_loan(&pubs[stream]), &status) == Z_OK && status.matching) {
+        if (matched_now(stream)) {
             return 1;
         }
         sleep_us(10000);
@@ -794,37 +844,89 @@ fn need<T: std::str::FromStr>(line: &str, key: &str) -> Result<T, String> {
     field(line, key).ok_or_else(|| format!("`{line}` carries no `{key}=`"))
 }
 
+/// The number of the last sample of a stream the publisher put `sent` samples on, -1 for none.
+fn last_number(sent: u64) -> i64 {
+    i64::try_from(sent).unwrap_or(i64::MAX) - 1
+}
+
+/// The publisher's `stream` matches the subscriber within 15 seconds; an error naming `run`
+/// when it does not.
+fn expect_match(publisher: &mut Probe, stream: &str, run: &str) -> Result<(), String> {
+    let line = publisher.ask(
+        &format!("match {stream} 15000"),
+        "match",
+        Duration::from_secs(20),
+    )?;
+    if line.ends_with(" 1") {
+        Ok(())
+    } else {
+        Err(format!(
+            "{run}: the {stream} publisher never matched the subscriber (`{line}`)"
+        ))
+    }
+}
+
 /// What a subscriber received on one stream.
 #[derive(Clone, Copy, Debug, Default)]
 struct Rx {
     received: u64,
+    first: i64,
     last: i64,
     /// Samples whose number was not above the last one received: a duplicate or a reorder.
     disorder: u64,
+    gaps: u64,
+    /// The number of the first sample after the latest gap, -1 for none.
+    last_gap_at: i64,
+}
+
+impl Rx {
+    /// How many samples the subscriber should account for, from the first it received to the
+    /// last: each one received or reported missed.
+    fn span(&self) -> i64 {
+        if self.received == 0 {
+            0
+        } else {
+            self.last - self.first + 1
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
 struct Report {
     drop: Rx,
     block: Rx,
+    rel: Rx,
+    be: Rx,
+    /// What the `rel` subscriber's sample-miss listener was told, in samples and in calls.
+    missed: u64,
+    miss_events: u64,
 }
 
 impl Report {
     fn parse(lines: &[String]) -> Result<Self, String> {
         let mut report = Self::default();
         for line in lines {
+            if line.starts_with("missed ") {
+                report.missed = need(line, "total")?;
+                report.miss_events = need(line, "events")?;
+                continue;
+            }
             let Some(rest) = line.strip_prefix("stream ") else {
                 continue;
             };
             let rx = Rx {
                 received: need(line, "received")?,
+                first: need(line, "first")?,
                 last: need(line, "last")?,
                 disorder: need(line, "disorder")?,
+                gaps: need(line, "gaps")?,
+                last_gap_at: need(line, "last_gap_at")?,
             };
             match rest.split_whitespace().next() {
                 Some("drop") => report.drop = rx,
                 Some("block") => report.block = rx,
-                Some("rel" | "be") => {}
+                Some("rel") => report.rel = rx,
+                Some("be") => report.be = rx,
                 _ => return Err(format!("a report line of no stream: `{line}`")),
             }
         }
@@ -833,7 +935,11 @@ impl Report {
 
     /// Everything counted, so a report that moved is told from one that did not.
     fn total(&self) -> u64 {
-        self.drop.received + self.block.received
+        self.drop.received
+            + self.block.received
+            + self.rel.received
+            + self.be.received
+            + self.missed
     }
 }
 
@@ -926,14 +1032,25 @@ impl StreamProxy {
     fn stall(&self, stalled: bool) {
         self.shared.stalled.store(stalled, Ordering::SeqCst);
     }
+
+    /// Close both sockets of every connection carried so far, as a link that breaks does; the
+    /// relay keeps accepting, so a dialler that dials again is carried again.
+    fn cut(&self) {
+        for socket in self.shared.live.lock().expect("the relay lock").drain(..) {
+            let _ = socket.shutdown(Shutdown::Both);
+        }
+    }
+
+    /// How many connections the relay has carried.
+    fn accepted(&self) -> usize {
+        self.shared.accepted.load(Ordering::SeqCst)
+    }
 }
 
 impl Drop for StreamProxy {
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::SeqCst);
-        for socket in self.shared.live.lock().expect("the relay lock").drain(..) {
-            let _ = socket.shutdown(Shutdown::Both);
-        }
+        self.cut();
         if let Some(acceptor) = self.acceptor.take() {
             let _ = acceptor.join();
         }
@@ -1065,18 +1182,8 @@ fn congestion_run(exe: &Path, library: &str, mode: &str) -> Result<Congestion, S
         ],
         format!("{run} publisher"),
     )?;
-    for stream in ["drop", "block"] {
-        let line = publisher.ask(
-            &format!("match {stream} 15000"),
-            "match",
-            Duration::from_secs(20),
-        )?;
-        if !line.ends_with(" 1") {
-            return Err(format!(
-                "{run}: the {stream} publisher never matched the subscriber (`{line}`)"
-            ));
-        }
-    }
+    expect_match(&mut publisher, "drop", &run)?;
+    expect_match(&mut publisher, "block", &run)?;
     publisher.ask("put drop 1 0", "put drop", Duration::from_secs(10))?;
     publisher.ask("put block 1 0", "put block", Duration::from_secs(10))?;
     let warm = wait_until(
@@ -1099,7 +1206,7 @@ fn congestion_run(exe: &Path, library: &str, mode: &str) -> Result<Congestion, S
     };
     let unfill = publisher.ask("unfill 15000", "unfill", Duration::from_secs(20))?;
     let block_next: u64 = need(&unfill, "next")?;
-    let wanted_last = i64::try_from(block_next).unwrap_or(i64::MAX) - 1;
+    let wanted_last = last_number(block_next);
     let report = settle(
         &mut sub,
         |r| r.block.last >= wanted_last,
@@ -1252,4 +1359,738 @@ fn link_qos_drop_and_block_on_a_full_stream_in_peer_mode() {
     let subject = congestion_run(&probes.wz, "wz", "peer").unwrap_or_else(|e| panic!("wz: {e}"));
     println!("subject: {subject:#?}");
     assert_congestion_holds(&subject, "wz");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Reliability: a lossy, reordering group, and a stream cut in the middle.
+
+/// The group the publisher of a relayed run joins, and the subscriber's. Two groups, so nothing
+/// reaches one member from the other but through the relay.
+const GROUP_OF_PUBLISHER: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 243);
+const GROUP_OF_SUBSCRIBER: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 244);
+
+/// The relay's impairment of the publisher's frames: per million datagrams lost, and how long
+/// each other one is held, a fixed part and a uniform jitter wider than the gap between two puts,
+/// so datagrams are reordered as well.
+const LOSS_PER_MILLION: u64 = 50_000;
+const DELAY_MIN_US: u64 = 1_000;
+const DELAY_JITTER_US: u64 = 6_000;
+
+/// How many samples of each stream go through the impaired relay, and how far apart; then the
+/// fence, put through it unimpaired, so a loss at the tail is reported too.
+const IMPAIRED_SAMPLES: u64 = 400;
+const IMPAIRED_INTERVAL_US: u64 = 2_000;
+const FENCE_SAMPLES: u64 = 5;
+const FENCE_INTERVAL_US: u64 = 20_000;
+
+/// The re-dial run: samples put before the cut, while the link is down, and once it carries
+/// again, and how far apart.
+const BEFORE_CUT: u64 = 150;
+const DURING_CUT: u64 = 50;
+const AFTER_REDIAL: u64 = 150;
+const REDIAL_INTERVAL_US: u64 = 10_000;
+
+/// How long the publisher has to dial again and carry a sample after the cut. zenoh-pico opens a
+/// lost client session again at once and then once a second.
+const REDIAL_WITHIN: Duration = Duration::from_secs(45);
+
+/// A number from the environment, `default` when the variable is unset. A value that is not a
+/// number stops the run: a mistyped bound would otherwise run some other bound.
+fn env_number(name: &str, default: u64) -> u64 {
+    match std::env::var(name) {
+        Ok(text) => text
+            .trim()
+            .parse()
+            .unwrap_or_else(|_| panic!("{name}={text:?} is not a number")),
+        Err(_) => default,
+    }
+}
+
+/// How many times each library's run is repeated (`WZ_LINK_QOS_REPEATS`, 3 when unset).
+fn repeats() -> u64 {
+    env_number("WZ_LINK_QOS_REPEATS", 3).max(1)
+}
+
+/// The relay's first seed (`WZ_LINK_QOS_SEED`, the clock when unset); run `i` uses this plus `i`,
+/// the same for both libraries.
+fn first_seed() -> u64 {
+    let clock = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| {
+            since.as_secs().rotate_left(32) ^ u64::from(since.subsec_nanos())
+        });
+    env_number("WZ_LINK_QOS_SEED", clock)
+}
+
+/// SplitMix64: one 64-bit state and the same sequence for the same seed on every platform.
+struct SplitMix(u64);
+
+impl SplitMix {
+    fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    /// A number in `0..n`, 0 for an empty range.
+    fn below(&mut self, n: u64) -> u64 {
+        if n == 0 {
+            0
+        } else {
+            self.next_u64() % n
+        }
+    }
+}
+
+/// Whether a datagram opens with a frame or a fragment, the transport messages that carry
+/// samples (`commons/zenoh-protocol/src/transport/mod.rs` @ `pub const FRAME: u8 = 0x05;`). The
+/// relay passes every other one untouched, so the joins through which members learn each other
+/// keep the members joined and only the samples meet the faults.
+fn is_data_frame(datagram: &[u8]) -> bool {
+    const FRAME: u8 = 0x05;
+    const FRAGMENT: u8 = 0x06;
+    datagram
+        .first()
+        .is_some_and(|header| matches!(header & 0x1f, FRAME | FRAGMENT))
+}
+
+/// A socket that hears `group` on the loopback interface, beside the member bound to the same
+/// port (`SO_REUSEADDR`, as the member sets it).
+fn group_receiver(group: SocketAddrV4) -> UdpSocket {
+    let raw = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::DGRAM,
+        Some(socket2::Protocol::UDP),
+    )
+    .expect("a UDP socket");
+    raw.set_reuse_address(true).expect("SO_REUSEADDR");
+    raw.bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, group.port()).into())
+        .expect("bind the group's port");
+    let socket: UdpSocket = raw.into();
+    socket
+        .join_multicast_v4(group.ip(), &Ipv4Addr::LOCALHOST)
+        .expect("join the group on the loopback interface");
+    socket
+        .set_read_timeout(Some(Duration::from_millis(1)))
+        .expect("a read timeout, so the relay hands on what is due");
+    socket
+}
+
+/// A socket that sends to a group out of the loopback interface, from an address of its own.
+fn group_sender() -> UdpSocket {
+    let raw = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::DGRAM,
+        Some(socket2::Protocol::UDP),
+    )
+    .expect("a UDP socket");
+    raw.bind(&SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0).into())
+        .expect("bind a loopback address");
+    raw.set_multicast_if_v4(&Ipv4Addr::LOCALHOST)
+        .expect("send groups out of the loopback interface");
+    raw.set_multicast_loop_v4(true)
+        .expect("loop group datagrams back to this host");
+    raw.set_multicast_ttl_v4(1).expect("a group TTL of one");
+    raw.into()
+}
+
+/// What the relay did to the publisher's frames.
+#[derive(Clone, Copy, Debug, Default)]
+struct RelayStats {
+    /// Datagrams the impairment was applied to.
+    impaired: u64,
+    lost: u64,
+    /// Datagrams handed on after one that arrived after them.
+    reordered: u64,
+    forwarded: u64,
+}
+
+struct RelayShared {
+    impair: AtomicBool,
+    stop: AtomicBool,
+    stats: Mutex<RelayStats>,
+}
+
+/// One direction of the relay.
+struct Leg {
+    from: UdpSocket,
+    /// The relay's own socket that sends into `from`'s group: what comes from it is the relay's.
+    own: SocketAddr,
+    out: UdpSocket,
+    to: SocketAddrV4,
+    impairable: bool,
+    seed: u64,
+}
+
+/// A relay between two multicast groups on the loopback interface: what the publisher's member
+/// sends to its group is handed to the subscriber's group, impaired while `impair` is on, and
+/// what the subscriber's member sends is handed back untouched.
+struct GroupRelay {
+    shared: Arc<RelayShared>,
+    legs: Vec<JoinHandle<()>>,
+}
+
+impl GroupRelay {
+    fn start(publisher: SocketAddrV4, subscriber: SocketAddrV4, seed: u64) -> Self {
+        let into_publisher = group_sender();
+        let into_subscriber = group_sender();
+        let into_publisher_from = into_publisher.local_addr().expect("the sender's address");
+        let into_subscriber_from = into_subscriber.local_addr().expect("the sender's address");
+        let shared = Arc::new(RelayShared {
+            impair: AtomicBool::new(false),
+            stop: AtomicBool::new(false),
+            stats: Mutex::new(RelayStats::default()),
+        });
+        let legs = [
+            Leg {
+                from: group_receiver(publisher),
+                own: into_publisher_from,
+                out: into_subscriber,
+                to: subscriber,
+                impairable: true,
+                seed,
+            },
+            Leg {
+                from: group_receiver(subscriber),
+                own: into_subscriber_from,
+                out: into_publisher,
+                to: publisher,
+                impairable: false,
+                seed: !seed,
+            },
+        ];
+        let legs = legs
+            .into_iter()
+            .map(|leg| {
+                let shared = Arc::clone(&shared);
+                std::thread::spawn(move || relay_leg(&leg, &shared))
+            })
+            .collect();
+        Self { shared, legs }
+    }
+
+    fn impair(&self, on: bool) {
+        self.shared.impair.store(on, Ordering::SeqCst);
+    }
+
+    fn stats(&self) -> RelayStats {
+        *self.shared.stats.lock().expect("the relay's counts")
+    }
+}
+
+impl Drop for GroupRelay {
+    fn drop(&mut self) {
+        self.shared.stop.store(true, Ordering::SeqCst);
+        for leg in self.legs.drain(..) {
+            let _ = leg.join();
+        }
+    }
+}
+
+/// Hand each datagram of `leg.from` on to `leg.to` when it is due: at once, or, for a frame of
+/// the publisher's while the impairment is on, after a delay or never.
+fn relay_leg(leg: &Leg, shared: &RelayShared) {
+    let mut rng = SplitMix(leg.seed);
+    let mut queue: BinaryHeap<Reverse<(Instant, u64, Vec<u8>)>> = BinaryHeap::new();
+    let mut buf = [0u8; 65_536];
+    let mut arrivals = 0u64;
+    let mut latest_sent: Option<u64> = None;
+    while !shared.stop.load(Ordering::SeqCst) {
+        match leg.from.recv_from(&mut buf) {
+            Ok((n, source)) if source != leg.own => {
+                let index = arrivals;
+                arrivals += 1;
+                let datagram = buf[..n].to_vec();
+                let mut due = Instant::now();
+                if leg.impairable
+                    && shared.impair.load(Ordering::SeqCst)
+                    && is_data_frame(&datagram)
+                {
+                    let mut stats = shared.stats.lock().expect("the relay's counts");
+                    stats.impaired += 1;
+                    if rng.below(1_000_000) < LOSS_PER_MILLION {
+                        stats.lost += 1;
+                        continue;
+                    }
+                    due += Duration::from_micros(DELAY_MIN_US + rng.below(DELAY_JITTER_US));
+                }
+                queue.push(Reverse((due, index, datagram)));
+            }
+            Ok(_) => {}
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted
+                ) => {}
+            Err(_) => break,
+        }
+        let now = Instant::now();
+        while queue.peek().is_some_and(|Reverse((due, _, _))| *due <= now) {
+            let Some(Reverse((_, index, datagram))) = queue.pop() else {
+                break;
+            };
+            let mut stats = shared.stats.lock().expect("the relay's counts");
+            if latest_sent.is_some_and(|latest| index < latest) {
+                stats.reordered += 1;
+            } else {
+                latest_sent = Some(index);
+            }
+            stats.forwarded += 1;
+            let _ = leg.out.send_to(&datagram, leg.to);
+        }
+    }
+}
+
+/// Put one sample of `stream` at a time, until the subscriber has one: the first sample of the
+/// stream it accounts from.
+fn warm_up(
+    publisher: &mut Probe,
+    sub: &mut Probe,
+    stream: &str,
+    arrived: impl Fn(&Report) -> bool,
+) -> Result<(), String> {
+    for _ in 0..20 {
+        publisher.ask(
+            &format!("put {stream} 1 0"),
+            &format!("put {stream}"),
+            Duration::from_secs(10),
+        )?;
+        if wait_until(sub, &arrived, Duration::from_millis(500)).is_ok() {
+            return Ok(());
+        }
+    }
+    Err(format!(
+        "{}: no {stream} sample crossed the unimpaired link in 20 puts",
+        publisher.label
+    ))
+}
+
+/// Each run of `runs`, the departures each showed, and the rate at which one reproduced. The
+/// departures of the runs that showed one, each named with its run and its seed.
+fn repeated<T: std::fmt::Debug>(
+    who: &str,
+    runs: u64,
+    seed: u64,
+    run: impl Fn(u64) -> Result<T, String>,
+    findings: impl Fn(&T) -> Vec<String>,
+) -> Vec<String> {
+    let mut departed = Vec::new();
+    for index in 0..runs {
+        let run_seed = seed.wrapping_add(index);
+        match run(run_seed) {
+            Ok(outcome) => {
+                let found = findings(&outcome);
+                let verdict = if found.is_empty() { "held" } else { "departed" };
+                println!(
+                    "{who}, run {} of {runs}: {verdict}\n{outcome:#?}",
+                    index + 1
+                );
+                if !found.is_empty() {
+                    departed.push(format!(
+                        "run {} (seed {run_seed}):\n    {}",
+                        index + 1,
+                        found.join("\n    ")
+                    ));
+                }
+            }
+            Err(e) => {
+                println!("{who}, run {} of {runs}: could not be measured", index + 1);
+                departed.push(format!(
+                    "run {} (seed {run_seed}) could not be measured: {e}",
+                    index + 1
+                ));
+            }
+        }
+    }
+    let reproduced = departed.len() as u64;
+    println!(
+        "{who}: the definition held in {} of {runs} runs; a departure reproduced in \
+         {reproduced} of {runs} ({}%)",
+        runs - reproduced,
+        reproduced * 100 / runs
+    );
+    departed
+}
+
+/// What one run over the impaired group measured.
+#[derive(Debug, Default)]
+struct Lossy {
+    /// How many samples of each stream the publisher put, the first warm-up one included.
+    rel_sent: u64,
+    be_sent: u64,
+    report: Report,
+    relay: RelayStats,
+}
+
+/// A subscriber and a publisher, each on a group of its own, joined by the relay; a first sample
+/// of each stream crosses it unimpaired, then each stream is put through the impairment, then a
+/// fence of each through it unimpaired.
+fn lossy_run(exe: &Path, library: &str, seed: u64) -> Result<Lossy, String> {
+    let run = format!("{library}, relay seed {seed}");
+    let port = wz_runtime_tokio_test_support::free_port;
+    let publisher_group = SocketAddrV4::new(GROUP_OF_PUBLISHER, port());
+    let subscriber_group = SocketAddrV4::new(GROUP_OF_SUBSCRIBER, port());
+    let relay = GroupRelay::start(publisher_group, subscriber_group, seed);
+    let mut sub = Probe::spawn(
+        exe,
+        &[
+            "sub",
+            "peer",
+            "listen",
+            &format!("udp/{subscriber_group}#iface=lo"),
+        ],
+        format!("{run} subscriber"),
+    )?;
+    let mut publisher = Probe::spawn(
+        exe,
+        &[
+            "pub",
+            "peer",
+            "listen",
+            &format!("udp/{publisher_group}#iface=lo"),
+        ],
+        format!("{run} publisher"),
+    )?;
+    // A member learns another only from its join, carried here by the relay.
+    for probe in [&mut sub, &mut publisher] {
+        let line = probe.ask("peer 20000", "peer", Duration::from_secs(25))?;
+        if line != "peer 1" {
+            return Err(format!(
+                "{}: learned no member through the relay (`{line}`)",
+                probe.label
+            ));
+        }
+    }
+    warm_up(&mut publisher, &mut sub, "rel", |r| r.rel.received >= 1)?;
+    warm_up(&mut publisher, &mut sub, "be", |r| r.be.received >= 1)?;
+
+    relay.impair(true);
+    let paced =
+        Duration::from_micros(IMPAIRED_SAMPLES * IMPAIRED_INTERVAL_US) + Duration::from_secs(30);
+    for stream in ["rel", "be"] {
+        publisher.ask(
+            &format!("put {stream} {IMPAIRED_SAMPLES} {IMPAIRED_INTERVAL_US}"),
+            &format!("put {stream}"),
+            paced,
+        )?;
+    }
+    relay.impair(false);
+    // What the relay still holds is handed on before the fence, which would overtake it.
+    std::thread::sleep(Duration::from_micros(DELAY_MIN_US + DELAY_JITTER_US) * 4);
+    let rel_fence = publisher.ask(
+        &format!("put rel {FENCE_SAMPLES} {FENCE_INTERVAL_US}"),
+        "put rel",
+        Duration::from_secs(30),
+    )?;
+    let be_fence = publisher.ask(
+        &format!("put be {FENCE_SAMPLES} {FENCE_INTERVAL_US}"),
+        "put be",
+        Duration::from_secs(30),
+    )?;
+    let rel_sent: u64 = need(&rel_fence, "next")?;
+    let be_sent: u64 = need(&be_fence, "next")?;
+    let (rel_last, be_last) = (last_number(rel_sent), last_number(be_sent));
+    let report = settle(
+        &mut sub,
+        |r| r.rel.last >= rel_last && r.be.last >= be_last,
+        Duration::from_secs(15),
+    )?;
+    let outcome = Lossy {
+        rel_sent,
+        be_sent,
+        report,
+        relay: relay.stats(),
+    };
+    publisher.quit();
+    sub.quit();
+    Ok(outcome)
+}
+
+/// Every reliable sample of the publisher's accounted for: received, or reported missed by the
+/// advanced subscriber's listener, from the first one received to the last one put.
+fn accounting_finding(rel: &Rx, missed: u64, miss_events: u64) -> Option<String> {
+    let accounted = i64::try_from(rel.received + missed).unwrap_or(i64::MAX);
+    (accounted != rel.span()).then(|| {
+        format!(
+            "{} reliable samples arrived (over {} gaps) and the miss listener reported {} in {} \
+             calls, where {} were put from the first one received: {} were neither received \
+             nor reported missed",
+            rel.received,
+            rel.gaps,
+            missed,
+            miss_events,
+            rel.span(),
+            rel.span() - accounted
+        )
+    })
+}
+
+/// Each way a lossy run departs from zenoh's definition of reliability on a datagram link.
+fn lossy_findings(o: &Lossy) -> Vec<String> {
+    let (rel, be, relay) = (&o.report.rel, &o.report.be, &o.relay);
+    let mut found = Vec::new();
+    if relay.lost == 0 || relay.reordered == 0 {
+        found.push(format!(
+            "the relay lost {} and reordered {} of the {} frames it impaired ({} datagrams handed \
+             on): the run measured nothing",
+            relay.lost, relay.reordered, relay.impaired, relay.forwarded
+        ));
+    }
+    if rel.disorder != 0 {
+        found.push(format!(
+            "{} reliable samples arrived out of order or twice",
+            rel.disorder
+        ));
+    }
+    if rel.last != last_number(o.rel_sent) {
+        found.push(format!(
+            "the last reliable sample to arrive is numbered {} of {}: the fence put after the \
+             impairment did not arrive",
+            rel.last,
+            last_number(o.rel_sent)
+        ));
+    }
+    found.extend(accounting_finding(
+        rel,
+        o.report.missed,
+        o.report.miss_events,
+    ));
+    if be.disorder != 0 {
+        found.push(format!(
+            "{} best-effort samples arrived out of order or twice",
+            be.disorder
+        ));
+    }
+    if be.last != last_number(o.be_sent) {
+        found.push(format!(
+            "the last best-effort sample to arrive is numbered {} of {}: the fence did not arrive",
+            be.last,
+            last_number(o.be_sent)
+        ));
+    }
+    found
+}
+
+/// What one run across a cut stream measured.
+#[derive(Debug, Default)]
+struct Redial {
+    accepted_before_cut: usize,
+    accepted_after: usize,
+    /// From the cut until a sample crossed the relay again.
+    carried_again_after_ms: u64,
+    /// The number of the first reliable sample put once the link carried again and the
+    /// publisher matched the subscriber again.
+    after_from: u64,
+    rel_sent: u64,
+    report: Report,
+}
+
+/// A client publisher that dials a listening subscriber through the relay puts reliable samples;
+/// the relay cuts the stream in the middle and the publisher goes on putting while it is down;
+/// once it has dialled again and a sample crosses, it puts the rest.
+fn redial_run(exe: &Path, library: &str) -> Result<Redial, String> {
+    let run = format!("{library} client");
+    let sub_port = wz_runtime_tokio_test_support::free_port();
+    let mut sub = Probe::spawn(
+        exe,
+        &[
+            "sub",
+            "peer",
+            "listen",
+            &format!("tcp/127.0.0.1:{sub_port}"),
+        ],
+        format!("{run} subscriber"),
+    )?;
+    let proxy = StreamProxy::start(sub_port);
+    let mut publisher = Probe::spawn(
+        exe,
+        &[
+            "pub",
+            "client",
+            "connect",
+            &format!("tcp/127.0.0.1:{}", proxy.port),
+        ],
+        format!("{run} publisher"),
+    )?;
+    expect_match(&mut publisher, "rel", &run)?;
+    expect_match(&mut publisher, "be", &run)?;
+    warm_up(&mut publisher, &mut sub, "rel", |r| r.rel.received >= 1)?;
+    let paced =
+        |count: u64| Duration::from_micros(count * REDIAL_INTERVAL_US) + Duration::from_secs(30);
+    publisher.ask(
+        &format!("put rel {BEFORE_CUT} {REDIAL_INTERVAL_US}"),
+        "put rel",
+        paced(BEFORE_CUT),
+    )?;
+    let accepted_before_cut = proxy.accepted();
+    let be_before = sub.report()?.be.received;
+    proxy.cut();
+    let cut_at = Instant::now();
+    publisher.ask(
+        &format!("put rel {DURING_CUT} {REDIAL_INTERVAL_US}"),
+        "put rel",
+        paced(DURING_CUT),
+    )?;
+    // The link carries again once a best-effort probe put now crosses it.
+    loop {
+        publisher.ask("put be 1 0", "put be", Duration::from_secs(10))?;
+        std::thread::sleep(Duration::from_millis(500));
+        if proxy.accepted() > accepted_before_cut && sub.report()?.be.received > be_before {
+            break;
+        }
+        if cut_at.elapsed() > REDIAL_WITHIN {
+            return Err(format!(
+                "{run}: no sample crossed again within {REDIAL_WITHIN:?} of the cut (the relay \
+                 carried {} connection(s))",
+                proxy.accepted()
+            ));
+        }
+    }
+    let carried_again_after_ms = u64::try_from(cut_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+    expect_match(&mut publisher, "rel", &run)?;
+    let after = publisher.ask(
+        &format!("put rel {AFTER_REDIAL} {REDIAL_INTERVAL_US}"),
+        "put rel",
+        paced(AFTER_REDIAL),
+    )?;
+    let rel_sent: u64 = need(&after, "next")?;
+    let rel_last = last_number(rel_sent);
+    let report = settle(
+        &mut sub,
+        |r| r.rel.last >= rel_last,
+        Duration::from_secs(20),
+    )?;
+    let outcome = Redial {
+        accepted_before_cut,
+        accepted_after: proxy.accepted(),
+        carried_again_after_ms,
+        after_from: rel_sent.saturating_sub(AFTER_REDIAL),
+        rel_sent,
+        report,
+    };
+    publisher.quit();
+    sub.quit();
+    Ok(outcome)
+}
+
+/// Each way a run across the cut departs from zenoh's definition of reliable delivery.
+fn redial_findings(o: &Redial) -> Vec<String> {
+    let rel = &o.report.rel;
+    let mut found = Vec::new();
+    if o.accepted_after <= o.accepted_before_cut {
+        found.push("the publisher never dialled the relay again after the cut".to_owned());
+    }
+    if rel.disorder != 0 {
+        found.push(format!(
+            "{} reliable samples arrived out of order or twice across the cut",
+            rel.disorder
+        ));
+    }
+    if rel.last != last_number(o.rel_sent) {
+        found.push(format!(
+            "the last reliable sample to arrive is numbered {} of {}: delivery did not resume \
+             after the re-dial ({} ms after the cut)",
+            rel.last,
+            last_number(o.rel_sent),
+            o.carried_again_after_ms
+        ));
+    }
+    let after_from = i64::try_from(o.after_from).unwrap_or(i64::MAX);
+    if rel.last_gap_at > after_from {
+        found.push(format!(
+            "a reliable sample put after the link carried again was lost: the latest gap ends at \
+             {}, the samples put after the re-dial start at {after_from}",
+            rel.last_gap_at
+        ));
+    }
+    found.extend(accounting_finding(
+        rel,
+        o.report.missed,
+        o.report.miss_events,
+    ));
+    found
+}
+
+/// Reliable samples over a group whose relay loses, delays and reorders the publisher's frames
+/// arrive in order and are each received or reported missed, and best-effort ones arrive in
+/// order: on the real zenoh-pico first, then on wz, each repeated with the same relay seeds.
+#[test]
+#[ignore = "runs real zenoh-pico and wz processes on two groups of the loopback interface \
+            joined by an impairing relay; Layer S runs via --ignored"]
+fn link_qos_reliable_samples_over_a_lossy_group_arrive_in_order_or_are_reported_missed() {
+    let probes = Probes::build();
+    let (runs, seed) = (repeats(), first_seed());
+    println!(
+        "relay seed {seed} (WZ_LINK_QOS_SEED={seed} replays the same faults), {runs} runs a \
+         library (WZ_LINK_QOS_REPEATS)"
+    );
+    let control = repeated(
+        "CONTROL, the real zenoh-pico",
+        runs,
+        seed,
+        |run_seed| lossy_run(&probes.pico, "zenoh-pico", run_seed),
+        lossy_findings,
+    );
+    assert!(
+        control.is_empty(),
+        "CONTROL: the real zenoh-pico departed in {} of {runs} runs, so this host or the harness \
+         cannot carry the measurement and nothing is said about wz:\n{}",
+        control.len(),
+        control.join("\n")
+    );
+    let subject = repeated(
+        "wz",
+        runs,
+        seed,
+        |run_seed| lossy_run(&probes.wz, "wz", run_seed),
+        lossy_findings,
+    );
+    assert!(
+        subject.is_empty(),
+        "wz departed from zenoh's reliability over a lossy, reordering group in {} of {runs} \
+         runs:\n{}",
+        subject.len(),
+        subject.join("\n")
+    );
+}
+
+/// A client's reliable samples across a stream that is cut and dialled again arrive in order and
+/// never twice, each lost one is reported missed, and nothing put once the link carries again is
+/// lost: on the real zenoh-pico first, then on wz, each repeated.
+#[test]
+#[ignore = "runs real zenoh-pico and wz processes through a relay that cuts the stream; Layer S \
+            runs via --ignored"]
+fn link_qos_reliable_delivery_across_a_cut_and_redialled_stream() {
+    let probes = Probes::build();
+    let (runs, seed) = (repeats(), first_seed());
+    let control = repeated(
+        "CONTROL, the real zenoh-pico",
+        runs,
+        seed,
+        |_| redial_run(&probes.pico, "zenoh-pico"),
+        redial_findings,
+    );
+    assert!(
+        control.is_empty(),
+        "CONTROL: the real zenoh-pico departed in {} of {runs} runs, so this host or the harness \
+         cannot carry the measurement and nothing is said about wz:\n{}",
+        control.len(),
+        control.join("\n")
+    );
+    let subject = repeated(
+        "wz",
+        runs,
+        seed,
+        |_| redial_run(&probes.wz, "wz"),
+        redial_findings,
+    );
+    assert!(
+        subject.is_empty(),
+        "wz departed from zenoh's reliable delivery across a cut and re-dialled stream in {} of \
+         {runs} runs:\n{}",
+        subject.len(),
+        subject.join("\n")
+    );
 }

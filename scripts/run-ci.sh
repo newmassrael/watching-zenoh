@@ -332,8 +332,9 @@
 #              close and reopen over a transport that injects faults, a
 #              stall watchdog, the lock-order checker, closure and
 #              allocation counts, a sequential run under valgrind, and
-#              the link legs: what congestion control does on a full
-#              stream, the real zenoh-pico first as the control.
+#              the link legs: congestion control on a full stream and
+#              reliability on a lossy group and across a cut stream,
+#              the real zenoh-pico first as the control.
 #              Opt-in via `--layer S` or `WZ_RUN_LAYER_S=1`; the build
 #              host runs it long (docs/pico-stability-lane.md).
 #
@@ -19264,9 +19265,9 @@ layer_e_ap_demo_round_trip() {
     # checkout ("OLDER than the wz-capi-c sources it links", fleet run of 2026-11-08). The gate
     # names the `wz_capi_c_*` resolvers now, and this token removes exactly those 56.
     # `link_qos`, the module and every fn of `pico_link_qos_on_wz_capi.rs`: they measure what a
-    # stalled, lossy or cut link does to the real zenoh-pico and to the drop-in, and the timing of
-    # a stall is what they read, so they run one at a time in Layer S and not in this parallel
-    # sweep.
+    # stalled, lossy or cut link does to the real zenoh-pico and to the drop-in, read the timing
+    # of a stall and join multicast groups, so they run one at a time in Layer S and not in this
+    # parallel sweep.
     (cd crates && cargo test -p wz-integration-tests --quiet -- --ignored \
         --skip wz_e2e_ --skip multicast --skip zenohd --skip wz_router --skip wz_peer \
         --skip wz_storage_host --skip zenoh_ext --skip inert --skip apfull \
@@ -20776,17 +20777,22 @@ layer_s_pico_stability() {
 
     # The link legs (`crates/wz-integration-tests/tests/it/files/pico_link_qos_on_wz_capi.rs`): one
     # C probe compiled against the real zenoh-pico and against the drop-in, two processes of one
-    # build joined through a relay in the test that stalls the link, and the real zenoh-pico's
-    # run first in each test as the control. Congestion control on a full stream, client and
-    # peer. The drop-in is the default build (the reference header arm's) and is built here
-    # because the leg above left its own feature set's library in the target directory; the
-    # build script makes the real library and its headers. One test at a time, since the timing
-    # of a stall is what is measured. Count-guarded: the legs are `#[ignore]`, so a rename
+    # build joined through a relay in the test that stalls, impairs or cuts the link, and the
+    # real zenoh-pico's run first in each test as the control. Congestion control on a full
+    # stream, client and peer; reliable and best-effort samples over two multicast groups of the
+    # loopback interface joined by a relay that loses, delays and reorders the publisher's
+    # frames; reliable samples across a stream the relay cuts and the client dials again. The
+    # last two repeat `WZ_LINK_QOS_REPEATS` times (3) and print the rate a departure reproduced;
+    # `WZ_LINK_QOS_SEED` replays the relay's faults. The drop-in is the default build (the
+    # reference header arm's) and is built here because the leg above left its own feature
+    # set's library in the target directory; the build script makes the real library and its
+    # headers. One test at a time, since the timing of a stall is what is measured and the
+    # group legs join groups of their own. Count-guarded: the legs are `#[ignore]`, so a rename
     # would select nothing and pass.
     (cd crates && cargo build -p wz-capi-pico --quiet) || return 1
     bash scripts/build-zenoh-pico-cli.sh || return 1
     wz_test_args wz-integration-tests pico_link_qos_on_wz_capi
-    _runci_guarded_test "S link qos against the real zenoh-pico" 2 \
+    _runci_guarded_test "S link qos against the real zenoh-pico" 4 \
         cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" \
         -- --ignored --nocapture --test-threads=1 || return 1
 
