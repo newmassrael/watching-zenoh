@@ -928,22 +928,9 @@ impl<R: SessionRuntime> TxConduits<R> {
     }
 
     /// The link pulls the staged frames itself (the `auto` field). Read where
-    /// [`Self::is_active`] is, by the emit chokepoint only.
-    #[cfg(all(
-        feature = "transport-batching",
-        any(
-            feature = "codec-push",
-            feature = "codec-request",
-            feature = "codec-response",
-            feature = "codec-response-final",
-            feature = "declare-keyexpr",
-            feature = "declare-subscriber",
-            feature = "declare-queryable",
-            feature = "declare-token",
-            feature = "declare-interest",
-            feature = "liveliness-token",
-        )
-    ))]
+    /// [`Self::is_active`] is, by the emit chokepoint, and by the caller's stop
+    /// ([`SessionLinkActions::batch_stop`]), which asks such a link for the flush.
+    #[cfg(feature = "transport-batching")]
     fn is_auto(&self) -> bool {
         self.auto.load(core::sync::atomic::Ordering::Relaxed)
     }
@@ -10951,7 +10938,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // this sender, done with its conduit, is who tells it to come back. A send that
             // was dropped for congestion, or refused, has staged nothing, but may have
             // been holding the lock of a conduit with a frame still open.
-            self.own_link().link_driver().tx_staged();
+            //
+            // Not while the caller's window is open: the writer's flush sends nothing then
+            // ([`Self::flush_staged`]), so the wake would cost the writer a turn, or this
+            // sender a flush of nothing, for every message of the window. Worse, a flush of
+            // nothing on this thread counts as the link's last flush, and the stop that
+            // follows it within microseconds then finds the link too recently flushed to
+            // write from this thread, and leaves its frame to the writer. The window's
+            // frames leave by its stop ([`Self::batch_stop`]), which asks for the flush; a
+            // sender that read the window open let go of its conduit before the stop's
+            // drain, which waits for each conduit's lock.
+            if !self.tx_conduits.caller_window_open() {
+                self.own_link().link_driver().tx_staged();
+            }
         }
         match push {
             // R2923 — upstream's `handle_push_result`
@@ -11649,10 +11648,25 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// (the `api.c` order: `_z_transport_stop_batching` then
     /// `_z_send_n_batch`) so a send racing the stop goes out directly
     /// rather than landing in a window that is closing.
+    ///
+    /// On a link whose writer pulls what the conduits stage
+    /// ([`Self::set_auto_batching`]), the link is asked for the flush first
+    /// ([`BoxedLinkDriver::tx_staged`]): such a link writes the window's frames
+    /// from this thread when its writer is not mid-write, as pico's stop writes
+    /// its batch on the caller's thread
+    /// (`vendor/zenoh-pico/src/transport/common/tx.c` @ `static z_result_t _z_transport_tx_flush_buffer(`).
+    /// A frame the drain below hands over is queued for the writer instead,
+    /// which a caller that opens and closes a window around each message pays
+    /// as a thread hop in every round trip. The drain still runs: it waits for
+    /// a conduit a sender holds, which the link's flush skips, so the window is
+    /// empty when this returns.
     pub fn batch_stop(&self) -> Result<(), SendWireError> {
         #[cfg(feature = "transport-batching")]
         {
             self.tx_conduits.set_active(false);
+            if self.tx_conduits.is_auto() {
+                self.own_link().link_driver().tx_staged();
+            }
             self.flush_open_batch();
             Ok(())
         }
