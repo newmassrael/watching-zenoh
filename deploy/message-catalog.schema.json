@@ -117,10 +117,12 @@
           "x-wz-refusal-items": "too_many_senders"
         },
         "instance_key": {
-          "description": "The payload fields that tell the message's instances apart, and the values each may take. Exclusive with senders.",
+          "description": "The payload fields that tell the message's instances apart, and the values each may take: at most INSTANCE_KEY_FIELDS fields, whose lists of values make at most INSTANCES_PER_MESSAGE instances. Exclusive with senders.",
           "type": "array",
           "minItems": 1,
-          "items": {"$ref": "#/$defs/key_field"}
+          "items": {"$ref": "#/$defs/key_field"},
+          "x-wz-limit-items": "INSTANCE_KEY_FIELDS",
+          "x-wz-refusal-items": "too_many_key_fields"
         },
         "replay_depth": {
           "description": "How many of its last frames a publisher keeps for a subscriber that arrives later, 1 to REPLAY_DEPTH_MAX.",
@@ -221,6 +223,8 @@
     "too_many_senders": "More senders than E2E_SENDER_SLOTS.",
     "instance_key_with_senders": "An instance key and senders on one message, which keeps its streams by one or the other.",
     "duplicate_instance_key": "A field of an instance key, or a value of one field, stated twice.",
+    "too_many_key_fields": "An instance key of more fields than INSTANCE_KEY_FIELDS.",
+    "too_many_instances": "An instance key whose lists of values make more instances than INSTANCES_PER_MESSAGE.",
     "e2e_profile_invalid": "An e2e profile the profile reader refuses.",
     "segment_profile_invalid": "A segment profile the segment profile reader refuses.",
     "values_invalid": "Header values the profile refuses for a node that publishes or subscribes to the message.",
