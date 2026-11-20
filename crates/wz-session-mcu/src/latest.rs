@@ -20,6 +20,12 @@
 //! that number, so a payload longer than the subscription asked for is cut where the declaration
 //! said and not where the largest neighbour allowed.
 //!
+//! A key is never cut: a cell keeps a key of up to `MAX_KEYEXPR_BYTES` bytes whole, and a sample
+//! whose key is longer is refused (the cell keeps what it had, its count does not move) and counted
+//! once for the whole storage ([`LatestSlots::refused_keys`]), since the key limit is the node's and
+//! not one subscription's. A key cut short would be a different key, and a reader of the cell could
+//! not tell it from one that arrived that way.
+//!
 //! The cells are written by the session's dispatch and read by the loop and by a query's answer:
 //! all on the one thread that drives the node (the profile's rule), never at the same moment, and
 //! no read hands out a reference that outlives its closure.
@@ -35,7 +41,7 @@ use wz_session_core::sink::{SampleSink, SampleView};
 /// What a cell holds, as a reader sees it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Latest<'a> {
-    /// The key the sample arrived under (cut to the node's key limit).
+    /// The key the sample arrived under, whole.
     pub key: &'a str,
     /// The payload as kept: the first `capacity` bytes.
     pub payload: &'a [u8],
@@ -52,7 +58,12 @@ pub struct Latest<'a> {
 /// trait object, so they do not carry the size of the storage.
 pub trait LatestSlots: Sync {
     /// Keep a sample in cell `index`, cutting the payload to `capacity` bytes (and to the cell's own).
+    /// A key longer than `MAX_KEYEXPR_BYTES` is refused: the cell is left as it was and the refusal
+    /// is counted in [`refused_keys`](Self::refused_keys).
     fn put(&self, index: usize, capacity: usize, key: &str, payload: &[u8], kind: SampleKind);
+
+    /// How many samples any cell refused because their key was longer than `MAX_KEYEXPR_BYTES`.
+    fn refused_keys(&self) -> u32;
 
     /// Read cell `index`: `read` is called once with what it holds, or with `None` when nothing
     /// reached it yet (or `index` is outside the storage).
@@ -88,26 +99,33 @@ impl<const N: usize> LatestCell<N> {
         }
     }
 
-    fn put(&self, capacity: usize, key: &str, payload: &[u8], kind: SampleKind) {
-        let keep = payload.len().min(capacity).min(N);
-        // The longest prefix of the key that is still whole characters: a key cut inside one would
-        // not be text.
-        let mut key_len = key.len().min(MAX_KEYEXPR_BYTES);
-        while !key.is_char_boundary(key_len) {
-            key_len -= 1;
+    /// Keep the sample, or refuse it whole when its key does not fit the cell's key storage. The
+    /// check comes before any write, so a refused sample leaves the previous one intact.
+    fn put(
+        &self,
+        capacity: usize,
+        key: &str,
+        payload: &[u8],
+        kind: SampleKind,
+    ) -> Result<(), KeyTooLong> {
+        let key_len = key.len();
+        if key_len > MAX_KEYEXPR_BYTES {
+            return Err(KeyTooLong);
         }
+        let keep = payload.len().min(capacity).min(N);
         // SAFETY: one thread drives the node and `with` hands out nothing that outlives its call, so
         // no reference into either array exists while this writes.
         unsafe {
             let (cell_payload, cell_key) = (&mut *self.payload.get(), &mut *self.key.get());
             cell_payload[..keep].copy_from_slice(&payload[..keep]);
-            cell_key[..key_len].copy_from_slice(&key.as_bytes()[..key_len]);
+            cell_key[..key_len].copy_from_slice(key.as_bytes());
         }
         self.stored.set(keep);
         self.key_len.set(key_len);
         self.received.set(payload.len());
         self.deleted.set(matches!(kind, SampleKind::Del));
         self.sequence.set(self.sequence.get().wrapping_add(1));
+        Ok(())
     }
 
     fn with(&self, read: &mut dyn FnMut(Option<Latest<'_>>)) {
@@ -118,8 +136,8 @@ impl<const N: usize> LatestCell<N> {
         // this closure runs.
         let (payload, key) = unsafe { (&*self.payload.get(), &*self.key.get()) };
         read(Some(Latest {
-            // `put` stored whole characters of a `&str`, so this is text; an empty key stands in
-            // for the impossible case rather than panicking in the node's loop.
+            // `put` stored a whole `&str`, so this is text; an empty key stands in for the
+            // impossible case rather than panicking in the node's loop.
             key: core::str::from_utf8(&key[..self.key_len.get()]).unwrap_or(""),
             payload: &payload[..self.stored.get()],
             received_len: self.received.get(),
@@ -139,9 +157,13 @@ impl<const N: usize> Default for LatestCell<N> {
     }
 }
 
+/// A sample's key was longer than the cell's key storage.
+struct KeyTooLong;
+
 /// `K` cells of `N` bytes: the storage of a node's subscriptions, in one `static`.
 pub struct LatestCells<const K: usize, const N: usize> {
     cells: [LatestCell<N>; K],
+    refused_keys: Cell<u32>,
 }
 
 impl<const K: usize, const N: usize> LatestCells<K, N> {
@@ -149,6 +171,7 @@ impl<const K: usize, const N: usize> LatestCells<K, N> {
     pub const fn new() -> Self {
         Self {
             cells: [const { LatestCell::new() }; K],
+            refused_keys: Cell::new(0),
         }
     }
 }
@@ -163,11 +186,22 @@ impl<const K: usize, const N: usize> Default for LatestCells<K, N> {
 // cells; each cell is `Sync` by the same rule.
 unsafe impl<const N: usize> Sync for LatestCell<N> {}
 
+// SAFETY: the same rule: the refusal count is written by `put` and read by `refused_keys`, both on
+// the one thread that drives the node.
+unsafe impl<const K: usize, const N: usize> Sync for LatestCells<K, N> {}
+
 impl<const K: usize, const N: usize> LatestSlots for LatestCells<K, N> {
     fn put(&self, index: usize, capacity: usize, key: &str, payload: &[u8], kind: SampleKind) {
         if let Some(cell) = self.cells.get(index) {
-            cell.put(capacity, key, payload, kind);
+            if cell.put(capacity, key, payload, kind).is_err() {
+                self.refused_keys
+                    .set(self.refused_keys.get().saturating_add(1));
+            }
         }
+    }
+
+    fn refused_keys(&self) -> u32 {
+        self.refused_keys.get()
     }
 
     fn with(&self, index: usize, read: &mut dyn FnMut(Option<Latest<'_>>)) {
@@ -379,14 +413,48 @@ mod tests {
     }
 
     #[test]
-    fn a_key_over_the_limit_is_cut_at_a_character() {
+    fn a_key_at_the_limit_is_kept_whole() {
         let cells = slots();
         let mut sink = LatestSink::new(cells, 0, 8);
-        // A two-byte character straddling the limit: the cut falls before it.
-        let key = format!("{}é", "k".repeat(MAX_KEYEXPR_BYTES - 1));
+        let key = "k".repeat(MAX_KEYEXPR_BYTES);
         sink.deliver(&sample(&key, b"x", SampleKind::Put));
-        let (kept, ..) = read(cells, 0).unwrap();
-        assert_eq!(kept, "k".repeat(MAX_KEYEXPR_BYTES - 1));
+        assert_eq!(
+            read(cells, 0),
+            Some((key, b"x".to_vec(), 1, SampleKind::Put, 1))
+        );
+        assert_eq!(cells.refused_keys(), 0);
+    }
+
+    #[test]
+    fn a_key_over_the_limit_is_refused_and_counted_never_cut() {
+        let cells = slots();
+        let mut sink = LatestSink::new(cells, 0, 8);
+        sink.deliver(&sample("lab/in/a", b"1", SampleKind::Put));
+        // One byte over, and a two-byte character straddling the limit: neither is kept in part.
+        let one_over = "k".repeat(MAX_KEYEXPR_BYTES + 1);
+        let straddling = format!("{}é", "k".repeat(MAX_KEYEXPR_BYTES - 1));
+        sink.deliver(&sample(&one_over, b"2", SampleKind::Put));
+        sink.deliver(&sample(&straddling, b"3", SampleKind::Del));
+        assert_eq!(
+            read(cells, 0),
+            Some(("lab/in/a".into(), b"1".to_vec(), 1, SampleKind::Put, 1)),
+            "the cell keeps the sample it had, and its count does not move"
+        );
+        assert_eq!(cells.refused_keys(), 2, "each refusal is counted");
+        assert_eq!(cells.sequence(0), 1);
+    }
+
+    #[test]
+    fn a_refused_key_into_an_empty_cell_leaves_it_empty() {
+        let cells = slots();
+        let mut sink = LatestSink::new(cells, 1, 8);
+        sink.deliver(&sample(
+            &"k".repeat(MAX_KEYEXPR_BYTES + 1),
+            b"x",
+            SampleKind::Put,
+        ));
+        assert_eq!(read(cells, 1), None, "nothing reached the cell");
+        assert_eq!(cells.refused_keys(), 1);
     }
 
     #[test]
