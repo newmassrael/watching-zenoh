@@ -632,7 +632,9 @@ fn asks_for_declarations(event: &wz_session_core::driver_loop::IterationEvent<'_
 /// for keyexprs with a declaration of each key it holds that meets the interest's, ahead of its
 /// other declarations and the final (`vendor/zenoh-pico/src/session/interest.c` @
 /// `ret = _z_interest_send_decl_resource(zn, id, NULL, restr_key_opt);`); the session sends it
-/// from the hook that runs after the JOIN the interest asked for, ahead of the observer's.
+/// from the hook that runs after the JOIN the interest asked for, ahead of the observer's. The
+/// rule is the session core's (`GroupKeyexprAnswers`), which the cooperative engine's group
+/// answers by too; this is its lock.
 #[cfg(all(
     feature = "transport-multicast",
     feature = "codec-push",
@@ -640,35 +642,7 @@ fn asks_for_declarations(event: &wz_session_core::driver_loop::IterationEvent<'_
 ))]
 #[derive(Default)]
 pub(crate) struct GroupKeyexprs {
-    state: std::sync::Mutex<GroupKeyexprState>,
-}
-
-#[cfg(all(
-    feature = "transport-multicast",
-    feature = "codec-push",
-    any(feature = "liveliness-token", feature = "declare-subscriber")
-))]
-#[derive(Default)]
-struct GroupKeyexprState {
-    declared: std::collections::BTreeMap<wz_session_core::wire_id::ExprId, String>,
-    owed: Vec<OwedKeyexprs>,
-}
-
-/// One interest's claim on a group session's keyexprs.
-#[cfg(all(
-    feature = "transport-multicast",
-    feature = "codec-push",
-    any(feature = "liveliness-token", feature = "declare-subscriber")
-))]
-struct OwedKeyexprs {
-    interest_id: u64,
-    /// The key the interest names, `None` for every key. A key the member named by a declaration
-    /// of its own arrives here as the literal it declared, the group's dispatch having resolved
-    /// it per member (`MulticastDispatcher::apply_declared_aliases`).
-    restriction: Option<String>,
-    /// Whether this answer ends the interest: it asks for no other kind, so nothing else stages
-    /// its final.
-    ends: bool,
+    state: std::sync::Mutex<wz_session_core::multicast_reply_sink::GroupKeyexprAnswers>,
 }
 
 #[cfg(all(
@@ -677,7 +651,9 @@ struct OwedKeyexprs {
     any(feature = "liveliness-token", feature = "declare-subscriber")
 ))]
 impl GroupKeyexprs {
-    fn state(&self) -> std::sync::MutexGuard<'_, GroupKeyexprState> {
+    fn state(
+        &self,
+    ) -> std::sync::MutexGuard<'_, wz_session_core::multicast_reply_sink::GroupKeyexprAnswers> {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -685,90 +661,24 @@ impl GroupKeyexprs {
 
     /// The session declared `keyexpr` to the group as `mapping_id`.
     fn declared(&self, mapping_id: wz_session_core::wire_id::ExprId, keyexpr: &str) {
-        self.state().declared.insert(mapping_id, keyexpr.to_owned());
+        self.state().declared(mapping_id, keyexpr);
     }
 
     /// The session retracted declaration `mapping_id`.
     fn retracted(&self, mapping_id: wz_session_core::wire_id::ExprId) {
-        self.state().declared.remove(&mapping_id);
+        self.state().retracted(mapping_id);
     }
 
     /// Note each interest in `event` that asks for keyexprs now.
     fn asked(&self, event: &wz_session_core::driver_loop::IterationEvent<'_, '_>) {
-        use wz_codecs::wireexpr::WireexprOwnedVariant;
-        use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
-        use wz_session_core::network_message::NetworkMessage;
-        let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event else {
-            return;
-        };
-        let mut state = self.state();
-        for message in messages.iter() {
-            let NetworkMessage::Interest(interest) = message else {
-                continue;
-            };
-            let Some(body) =
-                wz_session_core::interest_build::interest_body(&interest.header_c_or_f)
-            else {
-                continue;
-            };
-            if !interest.c() || !body.ke() {
-                continue;
-            }
-            // A key the dispatch could not make literal names a declaration the member never
-            // made: zenoh-pico answers such an interest with nothing, not even its final
-            // (`vendor/zenoh-pico/src/session/interest.c` @
-            // `_Z_RETURN_IF_ERR(_z_get_keyexpr_from_wireexpr(zn, &restr_key, wireexpr, peer, true));`),
-            // and the session's other answers to it drop it alike.
-            let restriction = match body.keyexpr.as_ref().map(|wire| &wire.body) {
-                None => None,
-                Some(WireexprOwnedVariant::WireexprLocal(local)) if local.id == 0 => {
-                    match local.suffix.as_ref() {
-                        Some(suffix) => Some(suffix.to_string()),
-                        None => continue,
-                    }
-                }
-                Some(_) => continue,
-            };
-            state.owed.push(OwedKeyexprs {
-                interest_id: interest.interest_id,
-                restriction,
-                ends: !(body.su() || body.qu() || body.to()),
-            });
-        }
+        self.state().asked(event);
     }
 
-    /// Send every owed answer through `producer`: each declared keyexpr that meets the
-    /// interest's key, then the final when nothing else ends the interest.
+    /// Send every owed answer through `producer`, with the lock let go: a push may wait for room.
     fn answer(&self, producer: &crate::multicast_pipeline::MulticastTxProducer) {
-        use wz_session_core::multicast_tx::MulticastTxItem;
-        let (owed, declared) = {
-            let mut state = self.state();
-            (core::mem::take(&mut state.owed), state.declared.clone())
-        };
-        for ask in owed {
-            for (mapping_id, keyexpr) in &declared {
-                if ask.restriction.as_deref().is_some_and(|restriction| {
-                    !wz_session_core::keyexpr_match::keyexpr_intersects_text(restriction, keyexpr)
-                }) {
-                    continue;
-                }
-                if let Ok(declare) = wz_session_core::declare_build::build_declare_kexpr_reply(
-                    ask.interest_id,
-                    *mapping_id,
-                    keyexpr,
-                ) {
-                    let _ = producer.push(MulticastTxItem::DeclareReply {
-                        declare: Box::new(declare),
-                    });
-                }
-            }
-            if ask.ends {
-                let _ = producer.push(MulticastTxItem::DeclareReply {
-                    declare: Box::new(wz_session_core::declare_build::build_declare_final_reply(
-                        ask.interest_id,
-                    )),
-                });
-            }
+        let answers = self.state().take_answers();
+        for item in answers {
+            let _ = producer.push(item);
         }
     }
 }
