@@ -523,6 +523,7 @@ PY
         ok "$key" "the stack gate holds the image ($(grep -a 'stack-chain: OK' "$out/stack-gate.log" | head -n 1 | cut -c1-120))"
     else
         bad "$key" "the stack gate refuses the image ($out/stack-gate.log)"
+        grep -a -v -E '^ *\+ +[0-9]+ ' "$out/stack-gate.log" | head -n 40 >&2
     fi
     # The stack bound with the calls through a register followed, held to the rows of deploy/resource_budget.json
     # that commit one; it is the figure the quarter of free stack applies to, and the kit's reading lies under it.
@@ -535,6 +536,10 @@ PY
             ok "$key" "the stack bound holds the image ($(grep -a 'stack-bound: OK' "$out/stack-bound.log" | head -n 1 | cut -c1-120))"
         else
             bad "$key" "the stack bound refuses the image ($out/stack-bound.log)"
+            # The log stays on the host that built the image; its verdict goes into this run's own
+            # output, which is the only copy a remote caller reads.
+            # Its verdict lines, without the frames of each chain it lists.
+            grep -a -v -E '^ *\+ +[0-9]+ ' "$out/stack-bound.log" | head -n 40 >&2
         fi
     fi
     # The text of the image told by who owns it, held to the rows of deploy/text_budget.json; an image
