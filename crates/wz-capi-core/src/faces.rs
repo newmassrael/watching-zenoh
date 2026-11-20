@@ -5786,6 +5786,7 @@ impl SharedSession {
             {
                 return None;
             }
+            let mut dropped = false;
             for session in sessions.iter() {
                 if session.peer_wants_no_put_on(keyexpr) {
                     continue;
@@ -5795,8 +5796,15 @@ impl SharedSession {
                     // Per-face and transient, as in the general fan-out: the surviving faces
                     // still receive the sample.
                     Err(PublishError::TransportUnavailable) => {}
+                    // Dropped behind another sender of that face, as the general fan-out's
+                    // `Leg::Dropped`: the other faces are sent it, and the put is answered as
+                    // dropped.
+                    Err(PublishError::HeldConduit) => dropped = true,
                     Err(_) => return Some(Err(FanoutError::ExceedsCapacity)),
                 }
+            }
+            if dropped {
+                return Some(Err(FanoutError::HeldConduit));
             }
         }
         // The loopback leg ran for nobody (nothing here wants the put), as the general
