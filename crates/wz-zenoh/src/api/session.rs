@@ -7096,16 +7096,33 @@ mod tests {
 
     /// A value of `subscriber-overload` other than the build's default that the build allows, if
     /// any: what a configuration can state and a session be seen to run under.
+    ///
+    /// A build whose domain holds one value has nothing else to state, and the test that asks
+    /// steps over its subject. That is said, and `WZ_POLICY_DOMAIN_REQUIRE` (set by the hosted
+    /// job that runs every leg, whose builds keep every domain whole) makes it a failure.
     fn another_overload() -> Option<&'static str> {
-        let entry = wz_session_core::policy::POLICIES
+        let found = wz_session_core::policy::POLICIES
             .iter()
-            .find(|entry| entry.id() == "subscriber-overload")?;
-        let held = entry.value_in(&wz_session_core::policy::SessionPolicy::defaults());
-        entry
-            .values()
-            .iter()
-            .copied()
-            .find(|value| *value != held && entry.domain().contains(value))
+            .find(|entry| entry.id() == "subscriber-overload")
+            .and_then(|entry| {
+                let held = entry.value_in(&wz_session_core::policy::SessionPolicy::defaults());
+                entry
+                    .values()
+                    .iter()
+                    .copied()
+                    .find(|value| *value != held && entry.domain().contains(value))
+            });
+        if found.is_none() {
+            let required = std::env::var("WZ_POLICY_DOMAIN_REQUIRE").is_ok_and(|v| !v.is_empty());
+            assert!(
+                !required,
+                "this build allows one value of `subscriber-overload`, and \
+                 WZ_POLICY_DOMAIN_REQUIRE says its domain should be whole"
+            );
+            eprintln!("skip: this build allows one value of `subscriber-overload`");
+            return None;
+        }
+        found
     }
 
     /// The peer `peer` makes, with a `wz` member that states `subscriber-overload`.
