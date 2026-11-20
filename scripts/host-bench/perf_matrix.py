@@ -58,9 +58,11 @@ nothing and still counts the put. Both arms run the same arguments.
 
 A cell is VALID only when the pinned CPUs were used by nothing else while it ran (nodrop.py's rule: their
 busy time less the CPU of the two processes, over the CPU seconds the cell had, at most 10 percent); a
-disturbed cell is run again, up to six times. A cell whose program did not give its figures is LOST with
-the reason, once: a transport an arm cannot open is a fact of the arm, and running it again would only
-say so again. The order of the arms alternates by repetition (P W, W P, ...) so a drift of the host over
+disturbed cell is run again, up to six times, and a cell disturbed in all six is run once more after the
+last repetition (`second_pass` in its record), since a shared host is busy in stretches. A cell whose
+program did not give its figures is LOST with the reason, once: a transport an arm cannot open is a fact of
+the arm, and running it again would only say so again. A throughput cell that delivered nothing says which
+side stopped (`stall_note`: the publisher's lost match and peers, the subscriber's last growth). The order of the arms alternates by repetition (P W, W P, ...) so a drift of the host over
 the run falls on both alike.
 
 The run directory holds `cells.jsonl` (one line per cell, written as it ends), `perf.json` (the record,
@@ -138,6 +140,39 @@ PING_KEYS = ("round_trips", "lost", "aborted", "p50_ns", "p90_ns", "p99_ns", "mi
 PONG_KEYS = ("answered", "cpu_ns", "stopped_by")
 PUB_KEYS = ("sent", "failed", "elapsed_ns", "cpu_ns", "start_ns", "end_ns")
 SUB_KEYS = ("received", "bytes", "window_ns", "cpu_ns", "start_ns", "end_ns")
+SUB_END_KEYS = ("total", "last_growth_ns", "peers")
+
+
+class Disturbed(Lost):
+    """A cell whose pinned CPUs something else used in every run: the host's state at that time, which a
+    later pass may not meet."""
+
+
+def stall_note(pub: dict[str, str], sub_end: dict[str, str] | None) -> str:
+    """Which side stopped, in a throughput cell that delivered nothing in its window, from the publisher's
+    line and the subscriber's last one. A publisher that lost its match, or listed no peer at its end, put
+    into nothing: a zenoh-pico put that has no subscriber, or no peer, returns success and sends nothing. A
+    publisher that kept both while the subscriber's count stopped growing means the subscriber stopped
+    taking what was sent."""
+    start = int(pub["start_ns"])
+    facts = [f"{pub.get('batch_cycles', '?')} batch window(s)", f"{pub['failed']} put(s) failed"]
+    lost_match = int(pub.get("lost_match_ns", "0"))
+    if lost_match:
+        facts.append(f"the publisher matched no subscriber from {(lost_match - start) / 1e9:.2f} s into its loop")
+    facts.append(f"the publisher listed {pub.get('peers_at_end', '?')} peer(s) at its end")
+    if sub_end is not None:
+        grew = int(sub_end["last_growth_ns"])
+        when = f"{(grew - start) / 1e9:.2f} s into the publisher's loop" if grew else "never"
+        facts.append(f"the subscriber received {sub_end['total']} in all, its count last grew {when}, and it "
+                     f"listed {sub_end['peers']} peer(s) at its end")
+    if lost_match or pub.get("peers_at_end") == "0":
+        side = "the sending side lost the subscriber, and its puts went nowhere"
+    elif pub.get("matched_at_end") == "1" and sub_end is not None:
+        side = ("the publisher still matched its subscriber at its end, so what stopped is on the receiving "
+                "side or the link between")
+    else:
+        side = "which side stopped is not told by these lines"
+    return f"{side} ({'; '.join(facts)})"
 
 
 # -- the readers ------------------------------------------------------------------------------------------
@@ -337,6 +372,12 @@ def cmd_idle_cpus(seconds: float, per_side: int) -> int:
     return 0
 
 
+def second_pass(cells: list[dict]) -> list[int]:
+    """The cells to run once more at the end: those lost because the host was busy, and no other (a cell
+    that failed on its own would fail the same way again)."""
+    return [i for i, cell in enumerate(cells) if cell["status"] == "lost" and cell.get("disturbed")]
+
+
 def numbers(figures: dict) -> dict[str, float]:
     return {k: v for k, v in figures.items()
             if isinstance(v, (int, float)) and not isinstance(v, bool)}
@@ -433,7 +474,7 @@ class Matrix:
                 return figures, foreign
             shares.append(f"{foreign * 100:.0f}%")
             time.sleep(5)
-        raise Lost(f"the pinned CPUs were used by something else in {MAX_RUNS} runs ({', '.join(shares)})")
+        raise Disturbed(f"the pinned CPUs were used by something else in {MAX_RUNS} runs ({', '.join(shares)})")
 
     def rtt(self, binary: str, transport: str, batching: bool, size: int, tag: str) -> tuple[dict, float]:
         args = self.args
@@ -495,7 +536,10 @@ class Matrix:
                 raise Lost(f"pub gave no result; it said: {last_words(pub.text())}")
             if got is None:
                 raise Lost(f"sub gave no window; it said: {last_words(sub.text())}")
-            return thr_figures(put, got, usage_of(pub), usage_of(sub)), [pub, sub]
+            try:
+                return thr_figures(put, got, usage_of(pub), usage_of(sub)), [pub, sub]
+            except Lost as why:
+                raise Lost(f"{why}; {stall_note(put, fields(sub.text(), 'sub', SUB_END_KEYS))}") from None
 
         return self.timed(body)
 
@@ -511,6 +555,8 @@ class Matrix:
             run = self.rtt if workload == "rtt" else self.thr
             figures, foreign = run(binary, transport, batching, size, tag)
             cell.update(status="measured", figures=figures, foreign_share=foreign)
+        except Disturbed as why:
+            cell.update(status="lost", why=str(why), figures={}, disturbed=True)
         except Lost as why:
             cell.update(status="lost", why=str(why), figures={})
         return cell
@@ -573,27 +619,41 @@ def cmd_run(args: argparse.Namespace) -> int:
     record = host_record(args)
     record["started"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     matrix = Matrix(args, run)
-    cells = []
+    plan = [(rep, transport, batching, size, workload, arm)
+            for rep in range(1, args.reps + 1)
+            for transport in transports
+            for batching in batchings
+            for size in sizes
+            for workload in workloads
+            for arm in (ARMS if rep % 2 else ARMS[::-1])]
     print(f"perf-matrix: {args.reps} repetition(s) of {', '.join(transports)} x batching {', '.join(batchings)} "
           f"x {', '.join(workloads)} x {', '.join(map(str, sizes))} B, arms P and W; client side on "
           f"{args.client_cpus}, server side on {args.server_cpus}", flush=True)
     with (run / "cells.jsonl").open("w", encoding="utf-8") as log:
-        for rep in range(1, args.reps + 1):
-            order = ARMS if rep % 2 else ARMS[::-1]
-            for transport in transports:
-                for batching in batchings:
-                    for size in sizes:
-                        for workload in workloads:
-                            for arm in order:
-                                cell = matrix.cell(arm, transport, batching == "on", workload, size, rep)
-                                cells.append(cell)
-                                log.write(json.dumps(cell, sort_keys=True) + "\n")
-                                log.flush()
-                                shown = cell.get("why") or ", ".join(
-                                    f"{k} {v:.4g}" for k, v in sorted(numbers(cell["figures"]).items())
-                                    if k in ("rtt_p50_us", "rtt_p99_us", "msgs_per_s", "cpu_ns_per_msg"))
-                                print(f"  r{rep} {arm} {transport} batching={batching} {workload} {size} B: "
-                                      f"{cell['status']}: {shown}", flush=True)
+
+        def run_one(spec: tuple, again: bool) -> dict:
+            rep, transport, batching, size, workload, arm = spec
+            cell = matrix.cell(arm, transport, batching == "on", workload, size, rep)
+            if again:
+                cell["second_pass"] = True
+            log.write(json.dumps(cell, sort_keys=True) + "\n")
+            log.flush()
+            shown = cell.get("why") or ", ".join(
+                f"{k} {v:.4g}" for k, v in sorted(numbers(cell["figures"]).items())
+                if k in ("rtt_p50_us", "rtt_p99_us", "msgs_per_s", "cpu_ns_per_msg"))
+            print(f"  {'again ' if again else ''}r{rep} {arm} {transport} batching={batching} {workload} {size} B: "
+                  f"{cell['status']}: {shown}", flush=True)
+            return cell
+
+        cells = [run_one(spec, False) for spec in plan]
+        # A shared host is busy in stretches: a cell disturbed in every run of its first turn is run once
+        # more at the end, when the stretch may be over, and the later result is the cell's.
+        deferred = second_pass(cells)
+        if deferred:
+            print(f"perf-matrix: {len(deferred)} cell(s) were disturbed by the host; one more pass over them",
+                  flush=True)
+        for index in deferred:
+            cells[index] = run_one(plan[index], True)
     record["finished"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     rows = summarize(cells)
     doc = {"schema": SCHEMA, "record": record, "metrics": METRICS, "cells": cells, "summary": rows}
@@ -771,6 +831,22 @@ def cmd_selftest() -> int:
     expect("a side is filled with whole cores until it has enough CPUs, and the sides share no core",
            suggest_pinning(busy, core_of, 3) == ([1, 2, 5, 6], [0, 3, 4, 7]))
     expect("a host with too few cores for both sides is refused", suggest_pinning(busy, core_of, 5) is None)
+
+    stalled_pub = {"sent": "9", "failed": "0", "start_ns": "1000000000", "batch_cycles": "5",
+                   "lost_match_ns": "3500000000", "matched_at_end": "0", "peers_at_end": "0"}
+    sub_end = {"total": "40", "last_growth_ns": "3400000000", "peers": "0"}
+    note = stall_note(stalled_pub, sub_end)
+    expect("a publisher that lost its match put into nothing, and the note says when",
+           note.startswith("the sending side lost the subscriber") and "from 2.50 s into its loop" in note
+           and "last grew 2.40 s into" in note)
+    kept = dict(stalled_pub, lost_match_ns="0", matched_at_end="1", peers_at_end="1")
+    expect("a publisher that kept its subscriber points at the receiving side",
+           stall_note(kept, sub_end).startswith("the publisher still matched its subscriber"))
+    expect("without the subscriber's last line the note does not guess",
+           stall_note(kept, None).startswith("which side stopped is not told"))
+    expect("only a cell the host disturbed is run again",
+           second_pass([{"status": "lost", "disturbed": True}, {"status": "lost"}, {"status": "measured"},
+                        {"status": "not-applicable"}]) == [0])
     print(f"  perf-matrix selftest: {ok}/{ok + bad} arm(s) pass")
     return 0 if bad == 0 else 1
 
