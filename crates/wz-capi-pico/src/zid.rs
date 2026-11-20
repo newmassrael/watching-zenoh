@@ -305,12 +305,8 @@ unsafe fn enumerate_peers(
             // router, its routers being a client's alone.
             #[cfg(feature = "multicast-transport")]
             if !routers {
-                // The group is the tokio engine's alone so far: the port carries no multicast.
-                for zid in state
-                    .tokio()
-                    .into_iter()
-                    .flat_map(|s| s.shared.group_member_zids())
-                {
+                // Either engine's groups, through the port.
+                for zid in crate::session::engine_ref(state).group_member_zids() {
                     let id = z_id_t::from_wire(&zid);
                     call(&id, taken.context);
                 }

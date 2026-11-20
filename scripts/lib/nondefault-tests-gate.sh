@@ -425,8 +425,9 @@ transport-link-unixpipe,transport-link-ws|"
     "wz-capi-pico|hook|app-transport|--test=app_transport_doors"
     # The same transport on the cooperative engine, with no tokio engine in the build: the
     # library's unit tests of the door and the file of sessions over the pipe, whose datagram pair
-    # this engine carries too. `multi-thread` gives each session the read task that steps it while
-    # the test thread waits. The filter names both module paths.
+    # and two-member group (`multicast-transport`) this engine carries too. `multi-thread` gives
+    # each session the read task that steps it while the test thread waits. The filter names both
+    # module paths.
     "wz-capi-pico|hook|\
         -default,\
         engine-coop,\
@@ -434,7 +435,8 @@ transport-link-unixpipe,transport-link-ws|"
         peer,\
         query,\
         queryable,\
-        multi-thread\
+        multi-thread,\
+        multicast-transport\
         |app_transport"
     "wz-capi-pico|hook|shared-key-ids|--test=key_ids_tokio"
     # Whether a reply of a replay reaches the receiving judge (`replay_admission`, behind `replay`):
@@ -576,7 +578,8 @@ transport-link-unixpipe,transport-link-ws|"
     # its own, which a watcher of the faces is told of as it comes and as it goes.
     "wz-capi-coop|hook|app-transport,group,connectivity|tests::group::"
     # And with `liveliness` (`tests::group::alive::`): a liveliness subscriber asks the group for
-    # its members' tokens, which a member answers from the tokens its session holds.
+    # its members' tokens, which a member answers from the tokens its session holds. Each of the
+    # four runs the module's own tests too, a JOIN asked between two beacons among them.
     "wz-capi-coop|hook|app-transport,group,liveliness|tests::group::"
     # The groups joined on the host's own sockets (`host_group::`, compiled with `group-host`):
     # only a `udp/` endpoint that names a multicast group is joined, and the session's two link

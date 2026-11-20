@@ -1169,9 +1169,10 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
 /// over the sockets of the system the build runs on (`crate::coop_host`), and with `peer` one that listens on the `tcp/` endpoint of its
 /// `listen` key as well, opened on this thread before `z_open` returns, as the tokio engine's is.
 /// A listener is open once its port is bound, as pico's `z_open(listen)` returns, and takes each
-/// inbound link as a face of the session (`wz-capi-coop`'s `listen`). A group (a `udp/` endpoint
-/// with an interface) is the tokio engine's alone: a build that joins one selects that engine, so
-/// this one answers it as a build without the multicast transport does.
+/// inbound link as a face of the session (`wz-capi-coop`'s `listen`). With `multicast-transport` a
+/// group (a `udp/` endpoint with an interface) is joined as the session's one transport, on the
+/// host's sockets or over the program's transport, as the tokio engine's open joins it; a build
+/// without it refuses that endpoint.
 ///
 /// What zenoh-pico's client advertises, as the tokio engine's open does: zenoh's default batch
 /// size (`transport/link/tx/batch_size`, 65535, which the link's own capacity caps), pico's lease
@@ -1191,25 +1192,59 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     // before this.
     #[cfg(not(feature = "peer"))]
     debug_assert!(request.listen.is_none());
+    // A listen endpoint that names a group is joined as the session's one transport, and a
+    // connect locator beside it opens nothing, as the tokio engine's open reads it (pico adds a
+    // peer to a unicast transport only). A build without the multicast transport refuses it.
     #[cfg(feature = "peer")]
-    if request.listen.as_deref().is_some_and(is_group_endpoint) {
+    let joins_a_group = request.listen.as_deref().is_some_and(is_group_endpoint);
+    #[cfg(all(feature = "peer", not(feature = "multicast-transport")))]
+    if joins_a_group {
         return crate::result::Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN;
     }
     let dial_whatami = request.dial_whatami;
-    let connect = request.connect;
     let policy = request.policy;
     let (tx_queue, sn_resolution) = pico_link_policy(&policy);
     // The engine takes the id as the config states it, up to sixteen bytes: the form an INIT
     // carries.
     let zid = request.zid;
-    // pico's config carries ONE listen locator, so the set is that one or none.
-    let listen: Vec<String> = request.listen.into_iter().collect();
     // The locator pico's one transport is opened on, which its admin space reports as the
-    // transport's link: the listen locator when there is one, the first connect locator
-    // otherwise (`vendor/zenoh-pico/src/net/session.c` @
+    // transport's link: the listen locator when there is one, a group's included, the first
+    // connect locator otherwise (`vendor/zenoh-pico/src/net/session.c` @
     // `// First, try to open the optional listen locator.`).
     #[cfg(feature = "admin-space")]
-    let transport_endpoint = listen.first().or_else(|| connect.first()).cloned();
+    let transport_endpoint = request
+        .listen
+        .clone()
+        .or_else(|| request.connect.first().cloned());
+    // pico's config carries ONE listen locator, so the set is that one or none, unless it names
+    // the group the session joins.
+    #[cfg(feature = "multicast-transport")]
+    let (listen, connect, groups): (Vec<String>, Vec<String>, Vec<_>) = match request.listen {
+        Some(endpoint) if joins_a_group => (
+            Vec::new(),
+            Vec::new(),
+            vec![wz_capi_port::group::GroupJoin {
+                endpoint,
+                profile: pico_group(sn_resolution),
+                is_shm: false,
+                // pico declares its entities over whatever transport it holds, a group too;
+                // its keyexprs and write filters on a group (`multicast-declarations`) are the
+                // tokio engine's, which that switch selects.
+                declarations: wz_capi_port::group::GroupDeclarations::Entities,
+            }],
+        ),
+        listen => (listen.into_iter().collect(), request.connect, Vec::new()),
+    };
+    #[cfg(not(feature = "multicast-transport"))]
+    let (listen, connect, groups): (
+        Vec<String>,
+        Vec<String>,
+        Vec<wz_capi_port::group::GroupJoin>,
+    ) = (
+        request.listen.into_iter().collect(),
+        request.connect,
+        Vec::new(),
+    );
     // A datagram link reads into a buffer of the batch the session advertises, as pico's UDP link
     // reads into one of its `BATCH_UNICAST_SIZE`: no peer's batch is larger once the two have
     // negotiated, and a node pays its batch for each link and not the largest datagram.
@@ -1228,6 +1263,10 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         Ok(tls) => links.with_tls(tls),
         Err(_) => return crate::result::Z_ERR_INVALID,
     };
+    // A group is joined on the host's sockets, under the session's two link policies, as the
+    // tokio engine's group sockets are.
+    #[cfg(feature = "multicast-transport")]
+    let links = links.with_groups(wz_capi_coop::host_group::HostGroups::of_policy(&policy));
     let config = wz_capi_coop::CoopConfig {
         endpoints: connect,
         whatami: dial_whatami,
@@ -1267,8 +1306,8 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         listen,
         accept_pending: wz_capi_coop::DEFAULT_ACCEPT_PENDING,
         max_faces: wz_capi_coop::DEFAULT_MAX_FACES,
-        // A group endpoint was refused above, so the engine is handed no group.
-        groups: Vec::new(),
+        // The group the listen endpoint names, when it names one.
+        groups,
     };
     // A config that carries the program's transport opens the engine over its links, and over no
     // socket of the host's; `z_open` has refused a locator the transport does not carry. Either
@@ -1676,10 +1715,11 @@ pub unsafe extern "C" fn zp_send_join(
 ) -> ZResult {
     guarded(|| {
         let live = live_session_result(zs);
+        // Either engine's groups, through the port.
         #[cfg(feature = "multicast-transport")]
         if live == Z_OK {
-            if let Some(state) = session_state(zs) {
-                state.shared.send_join_on_groups();
+            if let Some(handle) = session_handle(zs) {
+                engine_ref(handle).send_join_on_groups();
             }
         }
         live

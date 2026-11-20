@@ -136,7 +136,17 @@ peer = ["scout", "wz-capi-core?/peer", "wz-capi-coop?/listen"]
 # that group as the session's one transport, as pico's listen of a UDP endpoint with an
 # interface does (`vendor/zenoh-pico/src/link/multicast/udp.c` @
 # `z_result_t _z_endpoint_udp_multicast_valid(`). A build without it refuses that config.
-multicast-transport = ["engine-tokio", "link-udp", "peer", "wz-capi-core/multicast-transport"]
+#
+# Both engines join one, so it selects neither: the tokio engine's group face, and the
+# cooperative engine's (`wz-capi-coop`'s `group-host`), on the host's sockets or, when the config
+# carries the program's transport, over it. Either sends a JOIN on `zp_send_join` and lists the
+# members on `z_info_peers_zid` through the port.
+multicast-transport = [
+    "link-udp",
+    "peer",
+    "wz-capi-core?/multicast-transport",
+    "wz-capi-coop?/group-host",
+]
 # Open-debt item 913 — pico's `Z_FEATURE_MULTICAST_DECLARATIONS` (vendor default 0), off here
 # as there.
 multicast-declarations = [

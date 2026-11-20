@@ -566,7 +566,7 @@ pub(crate) fn refused_open(connect: Option<&str>, listen: Option<&str>) -> Optio
 /// source the program tells apart in every build.
 const DATAGRAMS_CARRIED: bool = cfg!(feature = "link-udp") || !cfg!(feature = "engine-tokio");
 
-/// Whether this build joins groups: the multicast transport, the tokio engine's.
+/// Whether this build joins groups: the multicast transport, either engine's.
 const GROUPS_CARRIED: bool = cfg!(feature = "multicast-transport");
 
 #[cfg(test)]
