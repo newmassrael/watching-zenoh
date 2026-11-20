@@ -619,28 +619,23 @@ if [[ -z "$ONLY_LAYER" ]]; then
     fi
 fi
 
-# ─── footprint build normalisation (SSOT) ──────────────────────────
+# ─── footprint build normalisation ─────────────────────────────────
 #
 # The rustc flags that make a footprint-gated binary's .text/.rodata
 # independent of WHERE it was built. Consumed by Layer Q (which exports them
 # for every MCU build) and re-asserted per measurement by
-# scripts/check-footprint.sh, which FAILs if either prefix still appears in the
+# scripts/check-footprint.sh, which FAILs if a prefix still appears in the
 # ELF — so a binary built without these cannot be silently footprint-gated.
 #
-# The two prefixes are the only absolute paths rustc embeds: the workspace
-# (panic `Location` strings for local crates + the OUT_DIR generated sources)
-# and $CARGO_HOME (registry dependency sources). rustc already canonicalises
-# std/core to /rustc/<hash>. The replacement strings are arbitrary but must be
-# FIXED — their length is what the baseline encodes.
-#
-# Under an artifact root the OUT_DIR sources sit under `$WZ_ARTIFACTS`, not the
-# workspace; the root takes the workspace's replacement, so the generated path
-# reads `/wz/<tree path>` in both modes and the baseline holds for either.
+# The rule (the prefixes, their fixed replacements, their order) is
+# scripts/lib/build_normalization.py, which every lane that measures bytes
+# reads; this passes it the checkout and the artifact root this script has
+# already resolved, so the two cannot disagree. It prints the flags Layer Q
+# has always exported, byte for byte (its selftest holds that), and exits
+# non-zero with the reason for a prefix it refuses.
 footprint_remap_rustflags() {
-    local cargo_home="${CARGO_HOME:-$HOME/.cargo}"
-    local artifacts=""
-    [[ "$WZ_ARTIFACTS" != "$repo_root" ]] && artifacts=" --remap-path-prefix=${WZ_ARTIFACTS}=/wz"
-    echo "--remap-path-prefix=${repo_root}=/wz${artifacts} --remap-path-prefix=${cargo_home}=/cargo"
+    python3 scripts/lib/build_normalization.py --rustflags \
+        --repo-root "$repo_root" --artifacts "$WZ_ARTIFACTS"
 }
 
 # ─── unreached-leg reporting (R2255, open-debt item 597) ─────────────────────
@@ -2478,6 +2473,13 @@ layer_c0_test_discipline() {
     _runci_leg artifact_reap.selftest --after artifact_filenames.selftest -- python3 scripts/lib/artifact_reap.py --selftest
     _runci_leg artifact_root_lint.selftest -- python3 scripts/lib/artifact_root_lint.py --selftest >/dev/null
     _runci_leg artifact_root_lint --after artifact_root_lint.selftest -- python3 scripts/lib/artifact_root_lint.py
+    # WHERE AND WHEN A BUILD RAN STAY OUT OF ITS BYTES (scripts/lib/build_normalization.py).
+    # Every lane that holds a binary to a byte figure builds under that one rule: its
+    # prefix maps (the order when one prefix starts with another, the refusals) and the
+    # environment it adds to are driven here on synthetic paths, and the workflows are
+    # read for an epoch of their own, which the rule sets from the commit.
+    _runci_leg build_normalization.selftest -- python3 scripts/lib/build_normalization.py --selftest
+    _runci_leg build_normalization.workflows --after build_normalization.selftest -- python3 scripts/lib/build_normalization.py --check-workflows
     # R2343 (no register item) — WHO CAN ATTACH A MULTICAST EGRESS GROUP. This
     # holds a WITHDRAWAL, not a rule: `router-multicast-faces` carried a residual
     # saying its egress core is gated on the broad `transport-multicast` feature
@@ -12623,7 +12625,9 @@ layer_c1cf_reduced_features() {
 # artifact in the target directory of its profile. Each library must also carry the conformance
 # digest of its statement. Two more dev builds in a target directory of their own (the statement
 # cases) state a limit and a policy and turn the zenoh-c shared-memory arm on, which no size case
-# does, and are graded on that digest alone.
+# does, and are graded on that digest alone. Every build, and the zenoh-pico reference, runs under
+# scripts/lib/build_normalization.py, so a reading carries no path or build time of the host that
+# made it, and a library that still holds a build path fails the lane.
 layer_c1cs_capability_cost() {
     python3 scripts/lib/capability_cost_gate.py --check || return 1
 }
@@ -20052,7 +20056,10 @@ layer_q_qemu_mcu_e2e() {
     # `cargo:rustc-link-arg`, and those config entries are documented
     # duplicates of exactly that (see deploy/mcu-noheap-probe/.cargo/config.toml).
     local RUSTFLAGS
-    RUSTFLAGS="$(footprint_remap_rustflags)"
+    RUSTFLAGS="$(footprint_remap_rustflags)" || {
+        echo "  Q FAIL — the build normalisation refused this host's paths (its reason is above)" >&2
+        return 1
+    }
     export RUSTFLAGS
 
     local installed

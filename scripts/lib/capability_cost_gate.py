@@ -44,6 +44,23 @@ choosing it is what this gate exists to refuse. The sizes are `size` text on the
 (`rust-toolchain.toml`) and are comparable only to themselves: a different compiler moves them,
 which is why the margin is a percentage and not a byte count.
 
+## Where and when the build ran
+
+Every build here (the size cases, the statement cases and the pico reference) runs in the
+environment `build_normalization.py` gives: rustc and the C compiler map the checkout, the
+artifact root and the cargo home to fixed names, and the epoch is the commit's. A path left in a
+library makes its text measure the host's directory names as well as the code, and two hosts
+reading one commit then disagree by the difference in their path lengths. So after each size case
+is built, and after each pico reference, the library is searched for the three prefixes, and one
+that holds any is a failure, with `--measure` too: a figure read from such a library is not one a
+budget can be set from.
+
+The rustc flags reach cargo through the variable the rule adds them to, after any flags the
+caller exported; no case sets rustc flags of its own, and the only configuration-file flags of
+the workspace are for windows-msvc. What the rule does not remove is the toolchain: a host with
+another C compiler or linker builds other bytes from the same tree, and its reading is comparable
+only to readings made with that toolchain.
+
 ## The denominator
 
 A pico case is also measured against zenoh-pico built as the SAME build: the pinned submodule,
@@ -73,10 +90,12 @@ import re
 import subprocess
 import sys
 import tarfile
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import wz_config  # noqa: E402  (the one declaration, and its resolver)
+import build_normalization  # noqa: E402  (the one rule that keeps paths and time out of bytes)
 from artifact_root import artifact  # noqa: E402  (a sibling: where products are)
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -86,7 +105,10 @@ PICO_SOURCE = ROOT / "vendor" / "zenoh-pico"
 # same build again reads it instead of building it. Products, so under the artifact root when one
 # is set (scripts/lib/artifact-root.sh), like the cargo target directory below.
 PICO_BUILDS = artifact("crates/target/pico-reference")
-# A case's library is under the directory of the cargo profile it was built with.
+# A case's library is under the directory of the cargo profile it was built with. The size cases
+# name it to cargo rather than inherit one: a target directory outside the checkout and the
+# artifact root would put paths no mapping covers into the library, and the gate would read a
+# library from here that cargo wrote elsewhere.
 TARGET = artifact("crates/target")
 
 # The features every pico build has, read from the one place that states them, the declaration's
@@ -1195,6 +1217,8 @@ class Measured:
     # Every distinct NUL-terminated `sha256:<64 hex>` string in the binary: the conformance
     # digest is one, and a binary that holds none or two cannot say which build it is.
     digests: tuple[str, ...] = ()
+    # The build path prefixes the library still holds (build_normalization.leaked).
+    leaked: tuple[str, ...] = ()
 
 
 # The conformance digest as the library stores it: a C string, so the NUL is part of the match and
@@ -1257,20 +1281,21 @@ STATEMENT_CASES: tuple[StatementCase, ...] = (
 )
 
 
-def statement_env(case: StatementCase) -> dict[str, str]:
-    """The environment a statement case builds in: the caller's, with every limit and policy it
-    states removed, and the case's added. Otherwise a value the shell happened to export would
-    build another library than the case names, and the statement would still match it."""
-    env = {k: v for k, v in os.environ.items()
+def statement_env(case: StatementCase, base: Mapping[str, str]) -> dict[str, str]:
+    """The environment a statement case builds in: `base` (the gate's, see `build_env`), with
+    every limit and policy it states removed, and the case's added. Otherwise a value the shell
+    happened to export would build another library than the case names, and the statement would
+    still match it."""
+    env = {k: v for k, v in base.items()
            if not k.startswith(("WZ_LIMIT_", "WZ_POLICY_"))}
     return {**env, **dict(case.env)}
 
 
-def build_statement_case(case: StatementCase) -> tuple[str, ...]:
+def build_statement_case(case: StatementCase, base: Mapping[str, str]) -> tuple[str, ...]:
     """Build a statement case and return the conformance digests its library carries."""
     subprocess.run(["cargo", "build", "-p", case.package, "--quiet", "--no-default-features",
                     "--features", case.features, "--target-dir", str(STATEMENT_TARGET)],
-                   cwd=CRATES, env=statement_env(case), check=True)
+                   cwd=CRATES, env=statement_env(case, base), check=True)
     return digests_in((STATEMENT_TARGET / "debug" / case.lib).read_bytes())
 
 
@@ -1335,13 +1360,35 @@ def grade(case: Case, got: Measured, stated: str | None = None) -> list[str]:
     return findings
 
 
-def build(case: Case) -> Measured:
-    cmd = ["cargo", "build", "--profile", case.profile, "-p", case.package, "--quiet"]
+def purity_findings(subject: str, leaked: tuple[str, ...]) -> list[str]:
+    """The finding for a library that still holds a build path prefix; empty when it holds none."""
+    if not leaked:
+        return []
+    return [
+        f"{subject}: the library holds the build path prefix(es) {', '.join(leaked)}, so its text "
+        f"measures where it was built as well as what it is, and no other host can read the same "
+        f"figure. Something reached the library outside scripts/lib/build_normalization.py: a C "
+        f"build that does not read CFLAGS, a directory outside the mapped prefixes, or a path the "
+        f"code holds as a string (env! of a directory) rather than as a source location."
+    ]
+
+
+def build_env() -> tuple[dict[str, str], build_normalization.Prefixes]:
+    """The environment every build of this gate runs in, and the prefixes it maps: the caller's
+    environment under the rule of `build_normalization.py`, dated by this tree's HEAD."""
+    prefixes = build_normalization.resolve_prefixes()
+    epoch = build_normalization.source_date_epoch(prefixes.workspace)
+    return build_normalization.normalized_env(os.environ, prefixes, epoch), prefixes
+
+
+def build(case: Case, env: Mapping[str, str], prefixes: build_normalization.Prefixes) -> Measured:
+    cmd = ["cargo", "build", "--profile", case.profile, "-p", case.package, "--quiet",
+           "--target-dir", str(TARGET)]
     if case.features is not None:
         cmd += ["--no-default-features"]
         if case.features:
             cmd += ["--features", case.features]
-    subprocess.run(cmd, cwd=CRATES, check=True)
+    subprocess.run(cmd, cwd=CRATES, env=env, check=True)
     lib = TARGET / case.profile / case.lib
     size_out = subprocess.run(["size", str(lib)], capture_output=True, text=True, check=True).stdout
     text = int(size_out.splitlines()[1].split()[0])
@@ -1353,7 +1400,9 @@ def build(case: Case) -> Measured:
         ["nm", "-D", "--defined-only", str(lib)], capture_output=True, text=True, check=True
     ).stdout.splitlines()
     exports = sum(1 for line in dynamic if len(line.split()) == 3 and line.split()[1] == "T")
-    return Measured(text=text, symbols=symbols, exports=exports, digests=digests_in(lib.read_bytes()))
+    data = lib.read_bytes()
+    return Measured(text=text, symbols=symbols, exports=exports, digests=digests_in(data),
+                    leaked=tuple(build_normalization.leaked(data, prefixes)))
 
 
 @dataclass(frozen=True)
@@ -1365,6 +1414,7 @@ class Reference:
     pin: str
     toolchain: str
     refused: tuple[str, ...]
+    leaked: tuple[str, ...] = ()
 
 
 def case_features(case: Case) -> set[str]:
@@ -1378,10 +1428,10 @@ def first_line(cmd: list[str]) -> str:
     return subprocess.run(cmd, capture_output=True, text=True, check=True).stdout.splitlines()[0]
 
 
-def run_quiet(cmd: list[str]) -> None:
+def run_quiet(cmd: list[str], env: Mapping[str, str]) -> None:
     """Run a build step with its output held, and show the end of it if the step fails: a
     reference that could not be built is a failure of this gate, and it says why."""
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
     if proc.returncode != 0:
         tail = "\n".join((proc.stdout + proc.stderr).splitlines()[-20:])
         raise RuntimeError(f"`{' '.join(cmd)}` exited {proc.returncode}:\n{tail}")
@@ -1396,15 +1446,23 @@ def refused_switches(asked: dict[str, int], header: str) -> list[str]:
     return sorted(s for s, v in asked.items() if (s in on) != bool(v))
 
 
-def pico_reference_build(asked: dict[str, int]) -> Reference:
+def reference_key(pin: str, toolchain: str, flags: list[str], env: Mapping[str, str]) -> str:
+    """The directory of a reference build: one per pin, toolchain and switches, and per the C flags
+    and epoch of the rule it was built under, so a run never reads back a build made otherwise
+    (CMake takes the C flags only when it first configures a directory)."""
+    parts = [pin, toolchain, *flags, env.get("CFLAGS", ""), env.get(build_normalization.EPOCH, "")]
+    return hashlib.sha256("\n".join(parts).encode()).hexdigest()[:16]
+
+
+def pico_reference_build(asked: dict[str, int], env: Mapping[str, str],
+                         prefixes: build_normalization.Prefixes) -> Reference:
     """Build zenoh-pico with `asked` set, from an export of the pinned submodule (pico's CMake
     writes a header into its source tree, which must not dirty the submodule), and measure it."""
     pin = subprocess.run(["git", "-C", str(PICO_SOURCE), "rev-parse", "HEAD"], capture_output=True,
                          text=True, check=True).stdout.strip()
     toolchain = f"{first_line(['cc', '--version'])}; {first_line(['cmake', '--version'])}"
     flags = [f"-D{s}={v}" for s, v in sorted(asked.items())]
-    key = hashlib.sha256("\n".join([pin, toolchain, *flags]).encode()).hexdigest()[:16]
-    work = PICO_BUILDS / key
+    work = PICO_BUILDS / reference_key(pin, toolchain, flags, env)
     lib = work / "build" / "lib" / "libzenohpico.so"
     if not lib.exists():
         archive = subprocess.run(["git", "-C", str(PICO_SOURCE), "archive", "--format=tar", "HEAD"],
@@ -1413,29 +1471,34 @@ def pico_reference_build(asked: dict[str, int]) -> Reference:
             tar.extractall(work / "src", filter="data")
         run_quiet(["cmake", "-S", str(work / "src"), "-B", str(work / "build"),
                    "-DCMAKE_BUILD_TYPE=Release", "-DBUILD_SHARED_LIBS=ON",
-                   "-DBUILD_EXAMPLES=OFF", "-DBUILD_TESTING=OFF", *flags])
-        run_quiet(["cmake", "--build", str(work / "build"), "--parallel", str(os.cpu_count() or 1)])
+                   "-DBUILD_EXAMPLES=OFF", "-DBUILD_TESTING=OFF", *flags], env)
+        run_quiet(["cmake", "--build", str(work / "build"), "--parallel", str(os.cpu_count() or 1)],
+                  env)
     header = (work / "build" / "include" / "zenoh-pico" / "config.h").read_text()
     size_out = subprocess.run(["size", str(lib)], capture_output=True, text=True, check=True).stdout
     return Reference(text=int(size_out.splitlines()[1].split()[0]), pin=pin[:12],
-                     toolchain=toolchain, refused=tuple(refused_switches(asked, header)))
+                     toolchain=toolchain, refused=tuple(refused_switches(asked, header)),
+                     leaked=tuple(build_normalization.leaked(lib.read_bytes(), prefixes)))
 
 
-def report_reference(case: Case, got: Measured) -> None:
-    """Print the case's size against zenoh-pico built as the same build. Only the pico ABI's
-    cases have one here: zenoh-c's original is a Rust build of its own the lanes that install the
-    oracle provision, and this lane does not."""
+def report_reference(case: Case, got: Measured, env: Mapping[str, str],
+                     prefixes: build_normalization.Prefixes) -> list[str]:
+    """Print the case's size against zenoh-pico built as the same build, and return the finding
+    for a reference that holds a build path. Only the pico ABI's cases have one here: zenoh-c's
+    original is a Rust build of its own the lanes that install the oracle provision, and this lane
+    does not."""
     if case.package != "wz-capi-pico":
         print(f"  capability-cost: {case.id}: no same-build reference in this lane (zenoh-c's is "
               f"provisioned only where the oracle is installed)")
-        return
+        return []
     asked = wz_config.pico_reference(wz_config.load_decl(), case_features(case))
-    ref = pico_reference_build(asked)
+    ref = pico_reference_build(asked, env, prefixes)
     print(f"  capability-cost: {case.id}: zenoh-pico {ref.pin} as the same build: text "
           f"{ref.text}; wz is {got.text / ref.text:.2f} times it ({ref.toolchain})")
     if ref.refused:
         print(f"  capability-cost: {case.id}: pico built {', '.join(ref.refused)} otherwise than "
               f"asked, so the two builds differ there")
+    return purity_findings(f"{case.id} (its zenoh-pico reference)", ref.leaked)
 
 
 def cmd_check(measure_only: bool, only: list[str]) -> int:
@@ -1444,15 +1507,24 @@ def cmd_check(measure_only: bool, only: list[str]) -> int:
         print(f"  capability-cost: no such case: {unknown}", file=sys.stderr)
         return 2
     rc = 0
+    try:
+        env, prefixes = build_env()
+    except ValueError as e:
+        print(f"  capability-cost: {e}", file=sys.stderr)
+        return 2
     for case in CASES:
         if only and case.id not in only:
             continue
-        got = build(case)
+        got = build(case, env, prefixes)
         stated = stated_digest(case, case_features(case))
         print(f"  capability-cost: {case.id}: text {got.text} of {case.max_text} "
               f"({100 * got.text // case.max_text}%), {got.exports} exports, conformance digest "
               f"{', '.join(got.digests) or 'none'} (statement {stated})")
-        report_reference(case, got)
+        # In either mode: a figure read from a library that holds a path is no figure.
+        impure = purity_findings(case.id, got.leaked) + report_reference(case, got, env, prefixes)
+        for finding in impure:
+            print(f"  capability-cost FAIL: {finding}", file=sys.stderr)
+            rc = 1
         if measure_only:
             continue
         for finding in grade(case, got, stated):
@@ -1464,7 +1536,7 @@ def cmd_check(measure_only: bool, only: list[str]) -> int:
             continue
         statements += 1
         features = case_features(case)
-        got = build_statement_case(case)
+        got = build_statement_case(case, env)
         stated = stated_digest(case, features)
         unstated = wz_config.env_statement(wz_config.load_decl(), case_abi(case), sorted(features),
                                            {}, {})["digest"]
@@ -1596,14 +1668,24 @@ def cmd_selftest() -> int:
            grade_statement(s0, (a,), a, b) == [] and len(grade_statement(s0, (b,), a, b)) == 1
            and len(grade_statement(s0, (), a, b)) == 1
            and len(grade_statement(s0, (a,), a, a)) == 1)
-    os.environ["WZ_LIMIT_MAX_KEYEXPR_BYTES"] = "999"
-    try:
-        leaked = statement_env(s0)
-    finally:
-        del os.environ["WZ_LIMIT_MAX_KEYEXPR_BYTES"]
-    expect("a statement case builds with its own limits and policies, none of the shell's",
-           "WZ_LIMIT_MAX_KEYEXPR_BYTES" not in leaked
-           and all(leaked[k] == v for k, v in s0.env))
+    inherited = statement_env(s0, {"WZ_LIMIT_MAX_KEYEXPR_BYTES": "999", "RUSTFLAGS": "-Cx"})
+    expect("a statement case builds with its own limits and policies, none of the shell's, in "
+           "the environment it was handed",
+           "WZ_LIMIT_MAX_KEYEXPR_BYTES" not in inherited and inherited["RUSTFLAGS"] == "-Cx"
+           and all(inherited[k] == v for k, v in s0.env))
+    # Where and when the build ran: a library that holds a build path is a finding, and a
+    # reference built under other C flags or another epoch is never read back as this one.
+    expect("a library holding a build path is a finding that names the prefix",
+           purity_findings("t", ()) == []
+           and len(purity_findings("t", ("/srv/tree",))) == 1
+           and "/srv/tree" in purity_findings("t", ("/srv/tree",))[0])
+    ref_env = {"CFLAGS": "-ffile-prefix-map=/srv/tree=/wz", build_normalization.EPOCH: "1"}
+    key = reference_key("pin", "cc", ["-DZ=1"], ref_env)
+    other_epoch = {**ref_env, build_normalization.EPOCH: "2"}
+    expect("a pico reference is keyed by the C flags and the epoch it was built under",
+           key != reference_key("pin", "cc", ["-DZ=1"], {**ref_env, "CFLAGS": ""})
+           and key != reference_key("pin", "cc", ["-DZ=1"], other_epoch)
+           and key == reference_key("pin", "cc", ["-DZ=1"], dict(ref_env)) and len(key) == 16)
     expect("every case's profile is one crates/Cargo.toml defines",
            {c.profile for c in CASES} <= {"release"} | set(
                re.findall(r"^\[profile\.([\w-]+)\]", (CRATES / "Cargo.toml").read_text(), re.M)))
