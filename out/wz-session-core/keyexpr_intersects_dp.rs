@@ -1,5 +1,6 @@
 // SCE-GENERATED — DO NOT EDIT
-// source-hash: efe483b8c23efdefdaa54278e5db4cf384518b44642a21e3544dccee9803aa15
+// source-hash: 7ecd5ef717e8ce8738d701433d924f5e837cee1e93f5ec2fcb0ac0e89df19b9a
+// source: keyexpr_intersects_dp.scxml
 // SCE-MAP: keyexpr_intersects_dp.scxml:23 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="algorithm")
@@ -19,7 +20,6 @@ use super::keyexpr_chunk_intersects;
 pub fn keyexpr_intersects_dp(r: &[u8], c: &[u8], wild_single: bool, wild_dsl: bool) -> bool {
     let rn: u32 = (r).len() as u32;
     let cn: u32 = (c).len() as u32;
-    let one: u64 = 1;
     let mut prev: u64 = 1;
     let mut m: u32 = 0;
     let mut cs0: u32 = 0;
@@ -32,8 +32,8 @@ pub fn keyexpr_intersects_dp(r: &[u8], c: &[u8], wild_single: bool, wild_dsl: bo
         m = m + 1;
         if keyexpr_chunk_kind::keyexpr_chunk_kind(c, cs0, ce0) == 2 {
             let below0: u32 = m - 1;
-            if prev >> below0 as u64 & 1 == 1 {
-                prev = prev | one << m as u64;
+            if prev >> below0 & 1 == 1 {
+                prev = prev | 1u64 << m;
             }
         }
         if ce0 < cn {
@@ -58,9 +58,9 @@ pub fn keyexpr_intersects_dp(r: &[u8], c: &[u8], wild_single: bool, wild_dsl: bo
             let ce: u32 = keyexpr_chunk_end::keyexpr_chunk_end(c, cs);
             let ckind: u8 = keyexpr_chunk_kind::keyexpr_chunk_kind(c, cs, ce);
             let jb: u32 = j + 1;
-            let up: bool = prev >> jb as u64 & 1 == 1;
-            let left: bool = cur >> j as u64 & 1 == 1;
-            let diag: bool = prev >> j as u64 & 1 == 1;
+            let up: bool = prev >> jb & 1 == 1;
+            let left: bool = cur >> j & 1 == 1;
+            let diag: bool = prev >> j & 1 == 1;
             let mut v: bool = false;
             if rkind == 2 {
                 v = up || ckind != 3 && left;
@@ -74,7 +74,7 @@ pub fn keyexpr_intersects_dp(r: &[u8], c: &[u8], wild_single: bool, wild_dsl: bo
                 }
             }
             if v {
-                cur = cur | one << jb as u64;
+                cur = cur | 1u64 << jb;
             }
             j = jb;
             if ce < cn {
@@ -90,5 +90,5 @@ pub fn keyexpr_intersects_dp(r: &[u8], c: &[u8], wild_single: bool, wild_dsl: bo
             rmore = false;
         }
     }
-    return prev >> m as u64 & 1 == 1;
+    return prev >> m & 1 == 1;
 }

@@ -1,5 +1,6 @@
 // SCE-GENERATED — DO NOT EDIT
-// source-hash: efe483b8c23efdefdaa54278e5db4cf384518b44642a21e3544dccee9803aa15
+// source-hash: 7fbed236ec84d6afbe391e7b49a8e0d3b32a26faafa2549a7743d364ece1ca3e
+// source: keyexpr_includes_dp.scxml
 // SCE-MAP: keyexpr_includes_dp.scxml:26 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="algorithm")
@@ -23,7 +24,6 @@ pub fn keyexpr_includes_dp(a: &[u8], b: &[u8], rows_b: bool, wild_single: bool, 
         rn = (b).len() as u32;
         cn = (a).len() as u32;
     }
-    let one: u64 = 1;
     let mut prev: u64 = 1;
     let mut m: u32 = 0;
     let mut cs0: u32 = 0;
@@ -43,8 +43,8 @@ pub fn keyexpr_includes_dp(a: &[u8], b: &[u8], rows_b: bool, wild_single: bool, 
         m = m + 1;
         if rows_b && kind0 == 2 {
             let below0: u32 = m - 1;
-            if prev >> below0 as u64 & 1 == 1 {
-                prev = prev | one << m as u64;
+            if prev >> below0 & 1 == 1 {
+                prev = prev | 1u64 << m;
             }
         }
         if ce0 < cn {
@@ -83,9 +83,9 @@ pub fn keyexpr_includes_dp(a: &[u8], b: &[u8], rows_b: bool, wild_single: bool, 
                 ckind = keyexpr_chunk_kind::keyexpr_chunk_kind(b, cs, ce);
             }
             let jb: u32 = j + 1;
-            let up: bool = prev >> jb as u64 & 1 == 1;
-            let left: bool = cur >> j as u64 & 1 == 1;
-            let diag: bool = prev >> j as u64 & 1 == 1;
+            let up: bool = prev >> jb & 1 == 1;
+            let left: bool = cur >> j & 1 == 1;
+            let diag: bool = prev >> j & 1 == 1;
             let mut akind: u8 = rkind;
             let mut bkind: u8 = ckind;
             if rows_b {
@@ -109,7 +109,7 @@ pub fn keyexpr_includes_dp(a: &[u8], b: &[u8], rows_b: bool, wild_single: bool, 
                 }
             }
             if v {
-                cur = cur | one << jb as u64;
+                cur = cur | 1u64 << jb;
             }
             j = jb;
             if ce < cn {
@@ -125,5 +125,5 @@ pub fn keyexpr_includes_dp(a: &[u8], b: &[u8], rows_b: bool, wild_single: bool, 
             rmore = false;
         }
     }
-    return prev >> m as u64 & 1 == 1;
+    return prev >> m & 1 == 1;
 }
