@@ -926,8 +926,11 @@ fn end_at_once_on_abort() {
         // SAFETY: `_exit` is async-signal-safe and ends the process without running anything.
         unsafe { libc::_exit(ABORT_EXIT) }
     }
+    // The handler's address, through a function pointer: a function item is not cast to an
+    // integer directly.
+    let handler: extern "C" fn(libc::c_int) = on_abort;
     // SAFETY: the handler calls one async-signal-safe function.
-    unsafe { libc::signal(libc::SIGABRT, on_abort as libc::sighandler_t) };
+    unsafe { libc::signal(libc::SIGABRT, handler as libc::sighandler_t) };
 }
 
 #[cfg(not(unix))]
