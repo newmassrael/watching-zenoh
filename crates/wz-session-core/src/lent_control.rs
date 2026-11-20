@@ -67,12 +67,12 @@ use wz_codecs::lent::{
     ExtEntry, ExtEntryVariant, Interest, InterestBody, Wireexpr, WireexprLocal, WireexprVariant,
 };
 
-#[cfg(feature = "declare-final")]
-use wz_codecs::lent::DeclFinal;
+#[cfg(feature = "codec-declare")]
+use wz_codecs::declare::{DeclareSource, DeclareVariantSource};
 #[cfg(feature = "codec-declare")]
 use wz_codecs::lent::{
-    DeclKexpr, DeclQueryable, DeclSubscriber, DeclToken, Declare, DeclareVariant, ExtZbuf,
-    UndeclKexpr, UndeclQueryable, UndeclSubscriber, UndeclToken, WireexprNonlocal,
+    DeclFinal, DeclKexpr, DeclQueryable, DeclSubscriber, DeclToken, Declare, DeclareVariant,
+    ExtZbuf, UndeclKexpr, UndeclQueryable, UndeclSubscriber, UndeclToken, WireexprNonlocal,
 };
 #[cfg(feature = "codec-declare")]
 use wz_codecs::wire_const;
@@ -193,15 +193,153 @@ impl NamedKeyexpr {
 /// `ext_qos` entry of [`QOS_DECLARE`].
 #[cfg(feature = "codec-declare")]
 fn envelope<'a>(interest_id: Option<u64>, body: DeclareVariant<'a>) -> Declare<'a> {
+    Declare {
+        header: envelope_header(interest_id),
+        interest_id,
+        extensions: Some(envelope_chain()),
+        body,
+    }
+}
+
+/// The `Declare` envelope's header: `N_MID_DECLARE | Z`, plus `I` when it answers the
+/// interest `interest_id`.
+#[cfg(feature = "codec-declare")]
+fn envelope_header(interest_id: Option<u64>) -> u8 {
     let mut header = crate::declare_ext_qos::DECLARE_ENVELOPE_HEADER;
     if interest_id.is_some() {
         header |= wire_const::FLAG_N_DECLARE_I;
     }
-    Declare {
-        header,
-        interest_id,
-        extensions: Some(chain_of(qos_entry(QOS_DECLARE))),
-        body,
+    header
+}
+
+/// The `Declare` envelope's extension chain, in the list the lent `Declare` holds it in.
+#[cfg(feature = "codec-declare")]
+type EnvelopeChain<'a> = Bounded<HeaplessVec<ExtEntry<'a>, 8>, { usize::MAX }, 1>;
+
+/// The one `ext_qos` entry of [`QOS_DECLARE`] every `Declare` envelope carries.
+#[cfg(feature = "codec-declare")]
+fn envelope_chain<'a>() -> EnvelopeChain<'a> {
+    chain_of(qos_entry(QOS_DECLARE))
+}
+
+/// The arm of the `Declare` variant, over the lent body of each kind of declaration.
+#[cfg(feature = "codec-declare")]
+type LentArm<'s, 'a> = DeclareVariantSource<
+    's,
+    DeclKexpr<'a>,
+    UndeclKexpr<'a>,
+    DeclSubscriber<'a>,
+    UndeclSubscriber<'a>,
+    DeclQueryable<'a>,
+    UndeclQueryable<'a>,
+    DeclToken<'a>,
+    UndeclToken<'a>,
+    DeclFinal<'a>,
+    DeclFinal<'a>,
+>;
+
+/// The body of one kind of declaration, and the arm of the `Declare` variant it is.
+#[cfg(feature = "codec-declare")]
+pub trait DeclarationBody<'a> {
+    /// This body as its arm.
+    fn arm(&self) -> LentArm<'_, 'a>;
+}
+
+#[cfg(feature = "codec-declare")]
+impl<'a> DeclarationBody<'a> for DeclSubscriber<'a> {
+    fn arm(&self) -> LentArm<'_, 'a> {
+        DeclareVariantSource::CodecZenohDeclSubscriber(self)
+    }
+}
+
+#[cfg(feature = "codec-declare")]
+impl<'a> DeclarationBody<'a> for DeclQueryable<'a> {
+    fn arm(&self) -> LentArm<'_, 'a> {
+        DeclareVariantSource::CodecZenohDeclQueryable(self)
+    }
+}
+
+#[cfg(feature = "codec-declare")]
+impl<'a> DeclarationBody<'a> for DeclToken<'a> {
+    fn arm(&self) -> LentArm<'_, 'a> {
+        DeclareVariantSource::CodecZenohDeclToken(self)
+    }
+}
+
+#[cfg(feature = "codec-declare")]
+impl<'a> DeclarationBody<'a> for DeclFinal<'a> {
+    fn arm(&self) -> LentArm<'_, 'a> {
+        DeclareVariantSource::CodecZenohDeclFinal(self)
+    }
+}
+
+/// A `Declare` whose body is of the one kind `B`, as the codec's writer reads it
+/// (`wz_codecs::declare::DeclareWire`): the envelope `envelope` makes, around a body
+/// of that kind.
+///
+/// The lent [`Declare`] holds its body as the variant of every kind, so whatever one
+/// a sender builds, its writer holds the encoder of each kind and a build links all of
+/// them. This form names the kind in its type, so the writer of each is the encoder of
+/// that kind alone, and a build links the encoders of the kinds it sends. The bytes are
+/// the lent `Declare`'s, which the tests hold.
+#[cfg(feature = "codec-declare")]
+pub struct DeclarationOf<'a, B> {
+    header: u8,
+    interest_id: Option<u64>,
+    extensions: Option<EnvelopeChain<'a>>,
+    body: B,
+}
+
+#[cfg(feature = "codec-declare")]
+impl<'a, B: DeclarationBody<'a>> DeclarationOf<'a, B> {
+    /// `body` in the envelope, answering the interest `interest_id` when there is one.
+    pub fn new(interest_id: Option<u64>, body: B) -> Self {
+        Self {
+            header: envelope_header(interest_id),
+            interest_id,
+            extensions: Some(envelope_chain()),
+            body,
+        }
+    }
+}
+
+// The signatures are the codec's trait's.
+#[allow(clippy::type_complexity)]
+#[cfg(feature = "codec-declare")]
+impl<'a, B: DeclarationBody<'a>> DeclareSource for DeclarationOf<'a, B> {
+    fn header(&self) -> u8 {
+        self.header
+    }
+    fn interest_id(&self) -> Option<u64> {
+        self.interest_id
+    }
+    fn extensions(
+        &self,
+    ) -> Option<
+        sce_forge_runtime::codec::BoundedIter<
+            impl Iterator<Item = impl wz_codecs::ext_entry::ExtEntrySource> + Clone,
+            { usize::MAX },
+            1,
+        >,
+    > {
+        self.extensions.as_ref().map(|chain| chain.list_iter())
+    }
+    fn body(
+        &self,
+    ) -> DeclareVariantSource<
+        '_,
+        impl wz_codecs::decl_kexpr::DeclKexprSource,
+        impl wz_codecs::undecl_kexpr::UndeclKexprSource,
+        impl wz_codecs::decl_subscriber::DeclSubscriberSource,
+        impl wz_codecs::undecl_subscriber::UndeclSubscriberSource,
+        impl wz_codecs::decl_queryable::DeclQueryableSource,
+        impl wz_codecs::undecl_queryable::UndeclQueryableSource,
+        impl wz_codecs::decl_token::DeclTokenSource,
+        impl wz_codecs::undecl_token::UndeclTokenSource,
+        impl wz_codecs::decl_final::DeclFinalSource,
+        impl wz_codecs::decl_final::DeclFinalSource,
+    > {
+        self.body.arm()
     }
 }
 
@@ -283,13 +421,40 @@ pub fn declare_subscriber(
 ) -> Result<Declare<'_>, CodecError> {
     Ok(envelope(
         None,
-        DeclareVariant::CodecZenohDeclSubscriber(DeclSubscriber {
-            header: wire_const::D_MID_SUBSCRIBER | n_flag(keyexpr_suffix),
-            id: subscriber_id,
-            keyexpr: local(keyexpr_mapping_id, keyexpr_suffix)?,
-            extensions: None,
-        }),
+        DeclareVariant::CodecZenohDeclSubscriber(subscriber_body(
+            subscriber_id,
+            keyexpr_mapping_id,
+            keyexpr_suffix,
+        )?),
     ))
+}
+
+/// [`declare_subscriber`] as a declaration of that one kind ([`DeclarationOf`]).
+#[cfg(feature = "codec-declare")]
+pub fn subscriber_declaration(
+    subscriber_id: u64,
+    keyexpr_mapping_id: crate::wire_id::ExprId,
+    keyexpr_suffix: Option<&str>,
+) -> Result<DeclarationOf<'_, DeclSubscriber<'_>>, CodecError> {
+    Ok(DeclarationOf::new(
+        None,
+        subscriber_body(subscriber_id, keyexpr_mapping_id, keyexpr_suffix)?,
+    ))
+}
+
+/// The body of [`declare_subscriber`].
+#[cfg(feature = "codec-declare")]
+fn subscriber_body(
+    subscriber_id: u64,
+    keyexpr_mapping_id: crate::wire_id::ExprId,
+    keyexpr_suffix: Option<&str>,
+) -> Result<DeclSubscriber<'_>, CodecError> {
+    Ok(DeclSubscriber {
+        header: wire_const::D_MID_SUBSCRIBER | n_flag(keyexpr_suffix),
+        id: subscriber_id,
+        keyexpr: local(keyexpr_mapping_id, keyexpr_suffix)?,
+        extensions: None,
+    })
 }
 
 /// `Declare(DeclQueryable)` on `(keyexpr_mapping_id, keyexpr_suffix)`, carrying
@@ -304,6 +469,39 @@ pub fn declare_queryable(
     keyexpr_suffix: Option<&str>,
     info: crate::queryable_info::QueryableInfo,
 ) -> Result<Declare<'_>, CodecError> {
+    Ok(envelope(
+        None,
+        DeclareVariant::CodecZenohDeclQueryable(queryable_body(
+            queryable_id,
+            keyexpr_mapping_id,
+            keyexpr_suffix,
+            info,
+        )?),
+    ))
+}
+
+/// [`declare_queryable`] as a declaration of that one kind ([`DeclarationOf`]).
+#[cfg(feature = "codec-declare")]
+pub fn queryable_declaration(
+    queryable_id: u64,
+    keyexpr_mapping_id: crate::wire_id::ExprId,
+    keyexpr_suffix: Option<&str>,
+    info: crate::queryable_info::QueryableInfo,
+) -> Result<DeclarationOf<'_, DeclQueryable<'_>>, CodecError> {
+    Ok(DeclarationOf::new(
+        None,
+        queryable_body(queryable_id, keyexpr_mapping_id, keyexpr_suffix, info)?,
+    ))
+}
+
+/// The body of [`declare_queryable`].
+#[cfg(feature = "codec-declare")]
+fn queryable_body(
+    queryable_id: u64,
+    keyexpr_mapping_id: crate::wire_id::ExprId,
+    keyexpr_suffix: Option<&str>,
+    info: crate::queryable_info::QueryableInfo,
+) -> Result<DeclQueryable<'_>, CodecError> {
     let mut header = wire_const::D_MID_QUERYABLE | n_flag(keyexpr_suffix);
     let packed = crate::queryable_info::pack(info);
     let extensions = (packed != 0).then(|| {
@@ -313,15 +511,12 @@ pub fn declare_queryable(
             body: ExtEntryVariant::CodecZenohExtZint(ExtZint { value: packed }),
         })
     });
-    Ok(envelope(
-        None,
-        DeclareVariant::CodecZenohDeclQueryable(DeclQueryable {
-            header,
-            id: queryable_id,
-            keyexpr: local(keyexpr_mapping_id, keyexpr_suffix)?,
-            extensions,
-        }),
-    ))
+    Ok(DeclQueryable {
+        header,
+        id: queryable_id,
+        keyexpr: local(keyexpr_mapping_id, keyexpr_suffix)?,
+        extensions,
+    })
 }
 
 /// `Declare(DeclToken)` on `(keyexpr_mapping_id, keyexpr_suffix)`.
@@ -334,13 +529,40 @@ pub fn declare_token(
 ) -> Result<Declare<'_>, CodecError> {
     Ok(envelope(
         None,
-        DeclareVariant::CodecZenohDeclToken(DeclToken {
-            header: wire_const::D_MID_TOKEN | n_flag(keyexpr_suffix),
-            id: token_id,
-            keyexpr: local(keyexpr_mapping_id, keyexpr_suffix)?,
-            extensions: None,
-        }),
+        DeclareVariant::CodecZenohDeclToken(token_body(
+            token_id,
+            keyexpr_mapping_id,
+            keyexpr_suffix,
+        )?),
     ))
+}
+
+/// [`declare_token`] as a declaration of that one kind ([`DeclarationOf`]).
+#[cfg(feature = "codec-declare")]
+pub fn token_declaration(
+    token_id: u64,
+    keyexpr_mapping_id: crate::wire_id::ExprId,
+    keyexpr_suffix: Option<&str>,
+) -> Result<DeclarationOf<'_, DeclToken<'_>>, CodecError> {
+    Ok(DeclarationOf::new(
+        None,
+        token_body(token_id, keyexpr_mapping_id, keyexpr_suffix)?,
+    ))
+}
+
+/// The body of [`declare_token`].
+#[cfg(feature = "codec-declare")]
+fn token_body(
+    token_id: u64,
+    keyexpr_mapping_id: crate::wire_id::ExprId,
+    keyexpr_suffix: Option<&str>,
+) -> Result<DeclToken<'_>, CodecError> {
+    Ok(DeclToken {
+        header: wire_const::D_MID_TOKEN | n_flag(keyexpr_suffix),
+        id: token_id,
+        keyexpr: local(keyexpr_mapping_id, keyexpr_suffix)?,
+        extensions: None,
+    })
 }
 
 /// `Declare(DeclSubscriber)` naming an id of the PEER's table (the `Nonlocal`
@@ -521,13 +743,16 @@ pub fn undeclare_token_naming(token_id: u64, key: &NamedKeyexpr) -> Declare<'_> 
 /// [`crate::declare_build::build_declare_final`], written in place.
 #[cfg(feature = "declare-final")]
 pub fn declare_final<'a>() -> Declare<'a> {
-    envelope(
-        None,
-        DeclareVariant::CodecZenohDeclFinal(DeclFinal {
-            header: wire_const::D_MID_FINAL,
-            extensions: None,
-        }),
-    )
+    envelope(None, DeclareVariant::CodecZenohDeclFinal(final_body()))
+}
+
+/// The body of [`declare_final`].
+#[cfg(feature = "declare-final")]
+fn final_body<'a>() -> DeclFinal<'a> {
+    DeclFinal {
+        header: wire_const::D_MID_FINAL,
+        extensions: None,
+    }
 }
 
 /// Stamp `declare` as the answer to the interest `interest_id`: the `I` flag and
@@ -588,6 +813,20 @@ pub fn declare_subscriber_reply_with_id(
     ))
 }
 
+/// [`declare_subscriber_reply_with_id`] as a declaration of that one kind
+/// ([`DeclarationOf`]).
+#[cfg(feature = "codec-declare")]
+pub fn subscriber_reply_declaration(
+    interest_id: u64,
+    subscriber_id: u64,
+    keyexpr: &str,
+) -> Result<DeclarationOf<'_, DeclSubscriber<'_>>, CodecError> {
+    Ok(DeclarationOf::new(
+        Some(interest_id),
+        subscriber_body(subscriber_id, 0, Some(keyexpr))?,
+    ))
+}
+
 /// The reply to a queryable interest: a `DeclQueryable` of id `0` on the literal
 /// `keyexpr`, carrying the queryable's `info`.
 /// [`crate::declare_build::build_declare_queryable_reply`].
@@ -623,6 +862,12 @@ pub fn declare_queryable_reply_with_id(
 #[cfg(feature = "declare-final")]
 pub fn declare_final_reply<'a>(interest_id: u64) -> Declare<'a> {
     answering(declare_final(), interest_id)
+}
+
+/// [`declare_final_reply`] as a declaration of that one kind ([`DeclarationOf`]).
+#[cfg(feature = "declare-final")]
+pub fn final_reply_declaration<'a>(interest_id: u64) -> DeclarationOf<'a, DeclFinal<'a>> {
+    DeclarationOf::new(Some(interest_id), final_body())
 }
 
 // ── Interest ─────────────────────────────────────────────────────────────────
@@ -811,6 +1056,111 @@ mod tests {
                 distance: 9,
             },
         ]
+    }
+
+    /// The bytes the codec's writer writes for a declaration of one kind, which its measure
+    /// counts, and the arm it presents.
+    fn one_kind<S: DeclareSource>(declaration: &S) -> (Vec<u8>, u8) {
+        use wz_codecs::declare::DeclareWire;
+        let mut window = [0u8; 256];
+        let len = DeclareWire::write_window(declaration, &mut window).expect("it fits");
+        assert_eq!(DeclareWire::measure(declaration).len(), len, "the measure");
+        (window[..len].to_vec(), DeclareWire::tag_of(declaration))
+    }
+
+    /// A declaration of one kind is the lent `Declare` of that kind, byte for byte, and
+    /// presents that kind's arm: the subscriber's, the queryable's and the token's, each with and
+    /// without the interest it answers, and the final of an interest's answer.
+    #[test]
+    fn a_declaration_of_one_kind_is_written_as_the_declare_of_it() {
+        const SUBSCRIBER: u8 = 2;
+        const QUERYABLE: u8 = 4;
+        const TOKEN: u8 = 6;
+        const FINAL: u8 = 26;
+        let mut compared = 0usize;
+        for id in IDS {
+            for (mapping, suffix) in keys() {
+                assert_eq!(
+                    one_kind(&subscriber_declaration(id, mapping, suffix).unwrap()),
+                    (
+                        declare_subscriber(id, mapping, suffix)
+                            .unwrap()
+                            .encode_to_vec(),
+                        SUBSCRIBER
+                    ),
+                    "subscriber {id} {mapping} {suffix:?}"
+                );
+                assert_eq!(
+                    one_kind(&token_declaration(id, mapping, suffix).unwrap()),
+                    (
+                        declare_token(id, mapping, suffix).unwrap().encode_to_vec(),
+                        TOKEN
+                    ),
+                    "token {id} {mapping} {suffix:?}"
+                );
+                for info in infos() {
+                    assert_eq!(
+                        one_kind(&queryable_declaration(id, mapping, suffix, info).unwrap()),
+                        (
+                            declare_queryable(id, mapping, suffix, info)
+                                .unwrap()
+                                .encode_to_vec(),
+                            QUERYABLE
+                        ),
+                        "queryable {id} {mapping} {suffix:?} {info:?}"
+                    );
+                    compared += 1;
+                }
+                compared += 2;
+            }
+            for keyexpr in ["a/b", "x/y/**"] {
+                assert_eq!(
+                    one_kind(&subscriber_reply_declaration(9, id, keyexpr).unwrap()),
+                    (
+                        declare_subscriber_reply_with_id(9, id, keyexpr)
+                            .unwrap()
+                            .encode_to_vec(),
+                        SUBSCRIBER
+                    ),
+                    "subscriber reply {id} {keyexpr:?}"
+                );
+                compared += 1;
+            }
+            assert_eq!(
+                one_kind(&final_reply_declaration(id)),
+                (declare_final_reply(id).encode_to_vec(), FINAL),
+                "final reply {id}"
+            );
+            compared += 1;
+        }
+        assert_eq!(
+            compared,
+            IDS.len() * (keys().len() * (2 + infos().len()) + 3)
+        );
+    }
+
+    /// A suffix past the protocol's `u16` length is refused by a declaration of one kind as by
+    /// the `Declare` of it.
+    #[test]
+    fn a_declaration_of_one_kind_refuses_what_the_declare_refuses() {
+        let past = "k".repeat(usize::from(u16::MAX) + 1);
+        let info = QueryableInfo::DEFAULT;
+        assert_eq!(
+            subscriber_declaration(1, 0, Some(&past)).err(),
+            declare_subscriber(1, 0, Some(&past)).err()
+        );
+        assert_eq!(
+            queryable_declaration(1, 0, Some(&past), info).err(),
+            Some(CodecError::LengthOutOfRange)
+        );
+        assert_eq!(
+            token_declaration(1, 0, Some(&past)).err(),
+            Some(CodecError::LengthOutOfRange)
+        );
+        assert_eq!(
+            subscriber_reply_declaration(1, 1, &past).err(),
+            Some(CodecError::LengthOutOfRange)
+        );
     }
 
     #[test]
