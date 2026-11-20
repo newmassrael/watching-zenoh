@@ -1,5 +1,6 @@
 // SCE-GENERATED — DO NOT EDIT
-// source-hash: 4bd2cb96153da515e52537ee9ee25d369aa258c9b3bb328a8906219a6a345897
+// source-hash: 5f937ef6cd787f0da0347875aae6cadd913932b7984b135df8cf7b1d715a2fc5
+// source: humidity_payload.scxml
 // SCE-MAP: humidity_payload.scxml:17 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="codec")

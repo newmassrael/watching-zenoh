@@ -502,6 +502,10 @@ impl<T: LinkstateSource + ?Sized> LinkstateSource for &T {
     }
 }
 
+/// The group `LinkstateOptionsH` as `LinkstateParts` holds it.
+#[allow(dead_code)]
+pub type LinkstateOptionsHParts<'a> = LinkstateOptionsH<::sce_forge_runtime::codec::Bounded<&'a [super::linkstate_link::LinkstateLinkParts], { usize::MAX }>, ::sce_forge_runtime::codec::Bounded<&'a [super::linkstate_weight::LinkstateWeightParts], { usize::MAX }>>;
+
 /// A value of `Linkstate` held in the types a caller already has: a source
 /// ([`LinkstateSource`]) whose lists are slices within their bounds and whose
 /// bodies are references.
@@ -521,7 +525,7 @@ pub struct LinkstateParts<'a> {
     /// The `locators` field.
     pub locators: Option<::sce_forge_runtime::codec::Bounded<&'a [super::locator::LocatorParts<'a>], { usize::MAX }>>,
     /// The fields `options.H` decides, held together (docs/adr/0065 §6 R4).
-    pub options_h: LinkstateOptionsH<::sce_forge_runtime::codec::Bounded<&'a [super::linkstate_link::LinkstateLinkParts], { usize::MAX }>, ::sce_forge_runtime::codec::Bounded<&'a [super::linkstate_weight::LinkstateWeightParts], { usize::MAX }>>,
+    pub options_h: LinkstateOptionsHParts<'a>,
 }
 
 impl<'a> LinkstateSource for LinkstateParts<'a> {
@@ -780,6 +784,10 @@ impl ListWalk<0> for LinkstateWeightsWalk {
     fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
 }
 
+/// The group `LinkstateOptionsH` as `LinkstateView` holds it.
+#[allow(dead_code)]
+pub type LinkstateOptionsHView<'a> = LinkstateOptionsH<Bounded<ListView<'a, LinkstateLinksWalk, 0>, { usize::MAX }>, Bounded<ListView<'a, LinkstateWeightsWalk, 0>, { usize::MAX }>>;
+
 #[allow(dead_code)]
 #[derive(Default, Debug, Clone, PartialEq)]
 pub struct LinkstateView<'a> {
@@ -792,7 +800,7 @@ pub struct LinkstateView<'a> {
     pub num_locators: Option<u64>,
     pub locators: Option<Bounded<ListView<'a, LinkstateLocatorsWalk, 0>, { usize::MAX }>>,
     pub links_len: u64,
-    pub options_h: LinkstateOptionsH<Bounded<ListView<'a, LinkstateLinksWalk, 0>, { usize::MAX }>, Bounded<ListView<'a, LinkstateWeightsWalk, 0>, { usize::MAX }>>,
+    pub options_h: LinkstateOptionsHView<'a>,
 }
 
 #[allow(dead_code)]

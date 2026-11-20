@@ -295,6 +295,10 @@ impl<T: QueryValueZbufSource + ?Sized> QueryValueZbufSource for &T {
     }
 }
 
+/// The group `QueryValueZbufAfterShm` as `QueryValueZbufParts` holds it.
+#[allow(dead_code)]
+pub type QueryValueZbufAfterShmParts<'a> = QueryValueZbufAfterShm<&'a super::encoding::EncodingParts<'a>, ::sce_forge_runtime::codec::Bounded<&'a [super::zbuf_slice::ZbufSliceParts<'a>], 4294967295>, ::sce_forge_runtime::codec::Bytes<'a, 4294967295>>;
+
 /// A value of `QueryValueZbuf` held in the types a caller already has: a source
 /// ([`QueryValueZbufSource`]) whose lists are slices within their bounds and whose
 /// bodies are references.
@@ -302,7 +306,7 @@ impl<T: QueryValueZbufSource + ?Sized> QueryValueZbufSource for &T {
 #[derive(Debug, Clone, Copy)]
 pub struct QueryValueZbufParts<'a> {
     /// The fields `after_shm` decides, held together (docs/adr/0065 §6 R4).
-    pub after_shm: QueryValueZbufAfterShm<&'a super::encoding::EncodingParts<'a>, ::sce_forge_runtime::codec::Bounded<&'a [super::zbuf_slice::ZbufSliceParts<'a>], 4294967295>, ::sce_forge_runtime::codec::Bytes<'a, 4294967295>>,
+    pub after_shm: QueryValueZbufAfterShmParts<'a>,
 }
 
 impl<'a> QueryValueZbufSource for QueryValueZbufParts<'a> {
@@ -458,10 +462,14 @@ impl ListWalk<0> for QueryValueZbufSlicesWalk {
     fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
 }
 
+/// The group `QueryValueZbufAfterShm` as `QueryValueZbufView` holds it.
+#[allow(dead_code)]
+pub type QueryValueZbufAfterShmView<'a> = QueryValueZbufAfterShm<EncodingView<'a>, Bounded<ListView<'a, QueryValueZbufSlicesWalk, 0>, 4294967295>, ::sce_forge_runtime::codec::Bytes<'a, 4294967295>>;
+
 #[allow(dead_code)]
 #[derive(Default, Debug, Clone, PartialEq)]
 pub struct QueryValueZbufView<'a> {
-    pub after_shm: QueryValueZbufAfterShm<EncodingView<'a>, Bounded<ListView<'a, QueryValueZbufSlicesWalk, 0>, 4294967295>, ::sce_forge_runtime::codec::Bytes<'a, 4294967295>>,
+    pub after_shm: QueryValueZbufAfterShmView<'a>,
     pub slice_count: Option<u32>,
 }
 

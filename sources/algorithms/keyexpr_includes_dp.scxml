@@ -49,9 +49,6 @@
       <sce:assign target="rn" expr="len(b)"/>
       <sce:assign target="cn" expr="len(a)"/>
     </sce:if>
-    <!-- one: the bit shifted into place, a uint64 local (see
-         keyexpr_intersects_dp). -->
-    <sce:var name="one" type="uint64" init="1"/>
     <!-- Row 0. Rows over a: I(0, j) holds for j = 0 alone. Rows over b: the bit
          of I(i, 0) holds while the first i chunks of a are all `**`. -->
     <sce:var name="prev" type="uint64" init="1"/>
@@ -75,7 +72,7 @@
       <sce:if cond="rows_b &amp;&amp; kind0 === 2">
         <sce:var name="below0" type="uint32" init="m - 1"/>
         <sce:if cond="((prev &gt;&gt; below0) &amp; 1) === 1">
-          <sce:assign target="prev" expr="prev | (one &lt;&lt; m)"/>
+          <sce:assign target="prev" expr="prev | (1 &lt;&lt; m)"/>
         </sce:if>
       </sce:if>
       <sce:if cond="ce0 &lt; cn">
@@ -155,7 +152,7 @@
           </sce:else>
         </sce:if>
         <sce:if cond="v">
-          <sce:assign target="cur" expr="cur | (one &lt;&lt; jb)"/>
+          <sce:assign target="cur" expr="cur | (1 &lt;&lt; jb)"/>
         </sce:if>
         <sce:assign target="j" expr="jb"/>
         <sce:if cond="ce &lt; cn">

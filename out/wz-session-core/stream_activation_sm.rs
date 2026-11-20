@@ -1,8 +1,9 @@
 // SCE-GENERATED — DO NOT EDIT
-// source-hash: 386ee16bf1fd70868dfbadf7b072865cd93db7c99cd7edeb407f598e42af4b00
+// source-hash: 7139e44cc9e281075ac01cb1533d20ea167ef461f7dba5ce08d58b58855b016c
+// source: stream_activation.scxml
 
 
-// SPDX-License-Identifier: AGPL-3.0-only WITH LicenseRef-SCE-Linking-Exception OR LicenseRef-SCE-Commercial
+// SPDX-License-Identifier: AGPL-3.0-only WITH AdditionRef-SCE-Linking-Exception OR LicenseRef-SCE-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 [Author of input SCXML file] (content derived from the input document)
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 newmassrael (content copied from SCE templates)
 //

@@ -3751,6 +3751,7 @@ dependencies = [
  "log",
  "lz4_flex 0.11.6",
  "sce-forge-runtime",
+ "sce-portable-bytes",
  "sce-rust-runtime",
  "sha2",
  "wz-codecs",

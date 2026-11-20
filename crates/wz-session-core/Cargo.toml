@@ -1216,6 +1216,11 @@ wz-switchboard-schema = { path = "../wz-switchboard-schema", optional = true }
 # declared direct so the import path `sce_forge_runtime::codec::CodecError`
 # resolves without going through wz-codecs's namespace.
 sce-forge-runtime = { path = "../../vendor/sce/backends/rust/forge-runtime", default-features = false }
+# The schema units this crate includes (`key_facts_schema`, `keyexpr_shape_schema`)
+# implement `::sce_portable_bytes::MapKey`, so a payload can key a map (SCE ADR 0108
+# D1). The crate is already in the graph through wz-codecs; declared direct so the
+# generated path resolves. No feature: `MapKey` needs no allocator.
+sce-portable-bytes = { path = "../../vendor/sce/backends/rust/portable-bytes", default-features = false }
 # R311di-13 — hashbrown for the resolve_wireexpr peer-keyexpr-table
 # lookup (HashMap<u64, String>). default-features = false stays
 # no_std-clean; the wz-runtime-tokio side already depends on hashbrown
