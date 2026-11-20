@@ -553,6 +553,9 @@ where
     // for the conduit it must hold (`multicast_tx_conduit`), so the conduit
     // locked and the conduit minted on cannot come from two readings.
     let meta = frame_meta(&item, params);
+    // What THIS message can encode to, as the unicast send reserves it, and not the codec's
+    // reserve hint for any message: the same reading a bounded group queue counts it by.
+    let worst_case = multicast_tx_bytes(&item);
     match item {
         // TxData: mint the channel SN, wrap in a T_MID_FRAME (frame_encode
         // SSOT), and let multicast_frame_or_fragments re-frame an oversize
@@ -564,9 +567,7 @@ where
         #[cfg(feature = "codec-push")]
         MulticastTxItem::Push { push, .. } => push_frame(
             meta,
-            // What THIS Push can encode to, as the unicast send reserves it, and not the codec's
-            // reserve hint for any message.
-            crate::frame_encode::push_capacity_hint(&push),
+            worst_case,
             crate::frame_encode::push_body(&push),
             tx_sn,
             params,
@@ -579,7 +580,7 @@ where
         #[cfg(all(feature = "codec-push", feature = "codec-request"))]
         MulticastTxItem::Request { request } => push_frame(
             meta,
-            wz_codecs::request::RequestWire::measure(&*request).len(),
+            worst_case,
             crate::frame_encode::request_body(&request),
             tx_sn,
             params,
@@ -595,7 +596,7 @@ where
         MulticastTxItem::Response { response } => push_frame(
             // `meta.reliable` is pinned true for a reply (`frame_meta`).
             meta,
-            wz_codecs::response::ResponseWire::measure(&*response).len(),
+            worst_case,
             crate::frame_encode::response_body(&response),
             tx_sn,
             params,
@@ -616,7 +617,7 @@ where
             let response_final = crate::response_final_build::build_response_final(request_id, qos);
             push_frame(
                 meta,
-                wz_codecs::response_final::ResponseFinalWire::measure(&response_final).len(),
+                worst_case,
                 crate::frame_encode::response_final_body(&response_final),
                 tx_sn,
                 params,
@@ -634,7 +635,7 @@ where
         // the frame `encode_frame_with_declare` writes.
         MulticastTxItem::DeclareReply { declare } => push_frame(
             meta,
-            wz_codecs::declare::DeclareWire::measure(&*declare).len(),
+            worst_case,
             crate::frame_encode::declare_body(&declare),
             tx_sn,
             params,
@@ -645,7 +646,7 @@ where
         #[cfg(all(feature = "codec-declare", feature = "codec-push"))]
         MulticastTxItem::Declare { declare } => push_frame(
             meta,
-            wz_codecs::declare::DeclareWire::measure(&*declare).len(),
+            worst_case,
             crate::frame_encode::declare_body(&declare),
             tx_sn,
             params,
@@ -656,7 +657,7 @@ where
         #[cfg(feature = "codec-push")]
         MulticastTxItem::Interest { interest } => push_frame(
             meta,
-            wz_codecs::interest::InterestWire::measure(&*interest).len(),
+            worst_case,
             crate::frame_encode::interest_body(&interest),
             tx_sn,
             params,
@@ -858,6 +859,147 @@ pub fn multicast_tx_droppable(
     params: &crate::multicast_params::MulticastParams,
 ) -> bool {
     frame_meta(item, params).droppable
+}
+
+/// The most bytes `item`'s network message encodes to: what its frame is reserved by when it is
+/// pushed, and what it counts for on a lane that bounds a group's queue ([`MulticastTxLanes`]).
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        any(feature = "liveliness-token", feature = "declare-subscriber")
+    )
+))]
+pub fn multicast_tx_bytes(item: &MulticastTxItem) -> usize {
+    match item {
+        #[cfg(feature = "codec-push")]
+        MulticastTxItem::Push { push, .. } => crate::frame_encode::push_capacity_hint(push),
+        #[cfg(all(feature = "codec-push", feature = "codec-request"))]
+        MulticastTxItem::Request { request } => {
+            wz_codecs::request::RequestWire::measure(&**request).len()
+        }
+        #[cfg(feature = "codec-response")]
+        MulticastTxItem::Response { response } => {
+            wz_codecs::response::ResponseWire::measure(&**response).len()
+        }
+        #[cfg(feature = "codec-response-final")]
+        MulticastTxItem::ResponseFinal { request_id, qos } => {
+            let response_final =
+                crate::response_final_build::build_response_final(*request_id, *qos);
+            wz_codecs::response_final::ResponseFinalWire::measure(&response_final).len()
+        }
+        #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
+        MulticastTxItem::DeclareReply { declare } => {
+            wz_codecs::declare::DeclareWire::measure(&**declare).len()
+        }
+        #[cfg(all(feature = "codec-declare", feature = "codec-push"))]
+        MulticastTxItem::Declare { declare } => {
+            wz_codecs::declare::DeclareWire::measure(&**declare).len()
+        }
+        #[cfg(feature = "codec-push")]
+        MulticastTxItem::Interest { interest } => {
+            wz_codecs::interest::InterestWire::measure(&**interest).len()
+        }
+    }
+}
+
+/// The bound of a multicast group's outbound queue, lane by lane, and zenoh's congestion mark on
+/// each lane: the lanes the tokio engine's group pipeline is shaped into, kept for a queue whose
+/// producers and writer take turns on one thread (the cooperative engine's group).
+///
+/// A lane holds `TxQueueConf::sizes` batches of the group's batch size, one lane for every
+/// priority when the group runs no QoS ([`TxQueueShape::lane_bytes`](crate::link::TxQueueShape::lane_bytes)),
+/// and a message is let on while the lane holds less than that, counted by the bytes it encodes to
+/// (`multicast_tx_bytes` on the heap profile). What a sender is answered before it waits is the
+/// one rule every bounded lane follows ([`lane_room_at_once`](crate::link::lane_room_at_once)); a
+/// wait that runs out raises the mark, and a message written lowers it, as zenoh's pipeline lowers
+/// it when a written batch returns to its pool.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MulticastTxLanes {
+    shape: crate::link::TxQueueShape,
+    /// Bytes each lane holds, by lane.
+    held: [usize; Priority::NUM],
+    /// The congestion mark of each lane.
+    congested: [bool; Priority::NUM],
+    /// Messages dropped for want of room, by their own priority.
+    dropped: [u32; Priority::NUM],
+}
+
+impl MulticastTxLanes {
+    /// Empty lanes of `shape`, no mark raised.
+    pub const fn new(shape: crate::link::TxQueueShape) -> Self {
+        Self {
+            shape,
+            held: [0; Priority::NUM],
+            congested: [false; Priority::NUM],
+            dropped: [0; Priority::NUM],
+        }
+    }
+
+    /// The lanes a group of `params` sends through: its queue's sizes in batches of its batch
+    /// size, one lane when it runs no QoS, as the tokio engine shapes its group's pipeline.
+    pub fn of_group(params: &crate::multicast_params::MulticastParams) -> Self {
+        let batch = usize::from(params.batch_size);
+        Self::new(params.tx_queue.shape(params.is_qos, batch, batch))
+    }
+
+    /// The lane a message of `priority` takes: its own on a QoS group, the DEFAULT one otherwise.
+    fn lane(&self, priority: Priority) -> usize {
+        let lane = if self.shape.qos {
+            priority
+        } else {
+            Priority::DEFAULT
+        };
+        usize::from(lane.wire_byte())
+    }
+
+    /// Whether `priority`'s lane holds less than its bound.
+    pub fn has_room(&self, priority: Priority) -> bool {
+        self.held[self.lane(priority)] < self.shape.lane_bytes(priority)
+    }
+
+    /// What a message of `priority` asking with `wait` is answered before it waits:
+    /// [`lane_room_at_once`](crate::link::lane_room_at_once) over its lane. `None` is a message
+    /// that has to wait for the writer.
+    pub fn room_at_once(
+        &mut self,
+        priority: Priority,
+        wait: crate::link::RoomWait,
+    ) -> Option<crate::link::LinkRoom> {
+        let has_room = self.has_room(priority);
+        let lane = self.lane(priority);
+        crate::link::lane_room_at_once(&mut self.congested[lane], has_room, wait)
+    }
+
+    /// A message of `priority` took `bytes` of its lane.
+    pub fn taken(&mut self, priority: Priority, bytes: usize) {
+        let lane = self.lane(priority);
+        self.held[lane] = self.held[lane].saturating_add(bytes);
+    }
+
+    /// A message of `priority` that took `bytes` of its lane left it for the wire: room is made,
+    /// and the lane's mark is lowered.
+    pub fn written(&mut self, priority: Priority, bytes: usize) {
+        let lane = self.lane(priority);
+        self.held[lane] = self.held[lane].saturating_sub(bytes);
+        self.congested[lane] = false;
+    }
+
+    /// A message of `priority` found no room within its wait and was dropped: its lane's mark is
+    /// raised, and the drop is counted by the message's own priority.
+    pub fn dropped(&mut self, priority: Priority) {
+        let lane = self.lane(priority);
+        self.congested[lane] = true;
+        let at = usize::from(priority.wire_byte());
+        self.dropped[at] = self.dropped[at].saturating_add(1);
+    }
+
+    /// How many messages of `priority` were dropped for want of room.
+    pub fn drops(&self, priority: Priority) -> u32 {
+        self.dropped[usize::from(priority.wire_byte())]
+    }
 }
 
 /// R2937 — where a push mints its sequence numbers: the whole set of a group's
@@ -1816,6 +1958,63 @@ mod push_tests {
             reliable,
             priority: Priority::DEFAULT,
         }
+    }
+
+    /// A lane lets messages on while it holds less than its bound, `sizes` batches of the group's
+    /// batch, and none past it; what is written makes room and lowers the mark a drop raised. A
+    /// group that runs no QoS bounds every priority by its one DEFAULT lane, and a drop is
+    /// counted by the message's own priority.
+    #[test]
+    fn a_group_lane_holds_its_batches_and_a_drop_marks_it() {
+        let mut params = params(100);
+        params.tx_queue.sizes = [2; Priority::NUM];
+        let mut lanes = MulticastTxLanes::of_group(&params);
+        let drop = RoomWait::Drop { wait_us: 1_000 };
+        assert_eq!(
+            lanes.room_at_once(Priority::DEFAULT, drop),
+            Some(LinkRoom::Free)
+        );
+        lanes.taken(Priority::DEFAULT, 150);
+        assert_eq!(
+            lanes.room_at_once(Priority::DEFAULT, drop),
+            Some(LinkRoom::Free),
+            "150 of 200 bytes"
+        );
+        lanes.taken(Priority::DEFAULT, 60);
+        assert!(!lanes.has_room(Priority::DEFAULT));
+        assert!(
+            !lanes.has_room(Priority::RealTime),
+            "a group without QoS has one lane"
+        );
+        assert_eq!(
+            lanes.room_at_once(Priority::DEFAULT, drop),
+            None,
+            "a wait for the writer"
+        );
+        lanes.dropped(Priority::RealTime);
+        assert_eq!(lanes.drops(Priority::RealTime), 1);
+        assert_eq!(lanes.drops(Priority::DEFAULT), 0);
+        assert_eq!(
+            lanes.room_at_once(Priority::DEFAULT, drop),
+            Some(LinkRoom::Congested),
+            "the mark answers a droppable ask at once"
+        );
+        lanes.written(Priority::DEFAULT, 150);
+        assert_eq!(
+            lanes.room_at_once(Priority::DEFAULT, drop),
+            Some(LinkRoom::Free),
+            "a write makes room and lowers the mark"
+        );
+    }
+
+    /// A message counts on a lane for what its frame is reserved by when it is pushed, so a
+    /// larger payload counts for at least its length more.
+    #[test]
+    fn a_message_counts_for_the_bytes_it_encodes_to() {
+        let small = multicast_tx_bytes(&put(true, b"v"));
+        let large = multicast_tx_bytes(&put(true, &[7u8; 300]));
+        assert!(small > 1, "{small}");
+        assert!(large >= small + 299, "{small} then {large}");
     }
 
     /// [`put`], marked express in its own `ext_qos`.

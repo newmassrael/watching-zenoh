@@ -723,6 +723,31 @@ impl RoomWait {
     }
 }
 
+/// What a bounded lane answers a sender that asks it for room, before anyone waits, as zenoh's
+/// pipeline answers it
+/// (`io/zenoh-transport/src/common/pipeline.rs` @ `if msg.is_droppable() && self.status.is_congested(priority) {`):
+/// a droppable message that meets the lane's congestion mark is `Congested` at once; a lane with
+/// room is `Free` and lowers the mark; a request that may not wait finds none, raises the mark and
+/// is `Congested`. `None` is a sender that has to wait for the lane's writer to make room.
+///
+/// `congested` is the lane's mark and `has_room` whether the lane holds less than its bound. The
+/// one rule for every queue that bounds a lane: the tokio engine's writer queue and the group
+/// queue a cooperative session's producers push onto.
+pub fn lane_room_at_once(congested: &mut bool, has_room: bool, wait: RoomWait) -> Option<LinkRoom> {
+    if wait.is_droppable() && *congested {
+        return Some(LinkRoom::Congested);
+    }
+    if has_room {
+        *congested = false;
+        return Some(LinkRoom::Free);
+    }
+    if wait.wait_us() == 0 {
+        *congested = true;
+        return Some(LinkRoom::Congested);
+    }
+    None
+}
+
 /// Synchronous outbound link-write seam the session FSM action layer
 /// drives. The FSM's link sink (`R::LinkSink`, resolved through
 /// [`SessionRuntime::link_driver`]) decouples the runtime-agnostic
@@ -2488,6 +2513,33 @@ pub enum LostCause {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A droppable ask meets the mark before anything else and lowers nothing; a lane with room
+    /// answers any ask and lowers the mark; a full lane raises it for an ask that may not wait,
+    /// and leaves an ask that may wait to the writer, with the mark as it was.
+    #[test]
+    fn a_lane_answers_at_once_by_its_mark_and_its_room() {
+        let drop = RoomWait::Drop { wait_us: 1_000 };
+        let block = RoomWait::Block { wait_us: 1_000 };
+        let mut mark = true;
+        assert_eq!(
+            lane_room_at_once(&mut mark, true, drop),
+            Some(LinkRoom::Congested)
+        );
+        assert!(mark, "a droppable ask lowers nothing");
+        assert_eq!(
+            lane_room_at_once(&mut mark, true, block),
+            Some(LinkRoom::Free)
+        );
+        assert!(!mark, "room lowers the mark");
+        assert_eq!(lane_room_at_once(&mut mark, false, drop), None);
+        assert!(!mark, "a wait left to the writer raises nothing");
+        assert_eq!(
+            lane_room_at_once(&mut mark, false, RoomWait::Block { wait_us: 0 }),
+            Some(LinkRoom::Congested)
+        );
+        assert!(mark, "an ask that may not wait raises it");
+    }
 
     /// A session aggregates links in a `transport-multilink` build and in no other, so the
     /// admin space's declaration of it moves with that feature and with nothing else.

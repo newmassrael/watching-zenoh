@@ -1445,21 +1445,18 @@ impl LaneState {
     }
 
     fn room_at_once(&mut self, lane: usize, wait: RoomWait) -> Option<Room> {
+        use wz_session_core::link::{lane_room_at_once, LinkRoom};
         if self.closed {
             return Some(Room::Closed);
         }
-        if wait.is_droppable() && self.congested[lane] {
-            return Some(Room::Congested);
-        }
-        if self.has_room(lane) {
-            self.congested[lane] = false;
-            return Some(Room::Free);
-        }
-        if wait.wait_us() == 0 {
-            self.congested[lane] = true;
-            return Some(Room::Congested);
-        }
-        None
+        // The mark and the room are the session core's rule, which the cooperative engine's group
+        // queue reads too.
+        let has_room = self.has_room(lane);
+        lane_room_at_once(&mut self.congested[lane], has_room, wait).map(|room| match room {
+            LinkRoom::Free => Room::Free,
+            LinkRoom::Congested => Room::Congested,
+            LinkRoom::Gone => Room::Closed,
+        })
     }
 
     fn release_in_flight(&mut self) -> bool {
