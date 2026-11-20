@@ -259,6 +259,13 @@ pub mod message_catalog;
 // wz doors (`wz_ext.h`) of the unstable surface, over the message payload of `wz-app-frame`.
 #[cfg(feature = "message-payload")]
 pub mod message_payload;
+// Fixed pools, one per slot size, that the objects behind the owned handles are taken from in
+// place of the heap: wz doors (`wz_ext.h`) of the unstable surface.
+#[cfg(feature = "object-pool")]
+pub mod object_pool;
+// Where the object behind an owned handle is placed and let go: a slot of the pools when the
+// program reserved them, the heap's otherwise.
+mod object_slot;
 mod option_fields;
 mod os;
 pub mod platform;
