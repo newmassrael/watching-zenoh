@@ -151,6 +151,17 @@ struct Link {
         any(feature = "liveliness-token", feature = "declare-subscriber")
     ))]
     stages: Arc<Stages>,
+    /// Per stage, whether a PUSH holds it ([`SenderInside`]): a stage is also held by what is not
+    /// one (the window's flush, a transmit report settling its records), which lets go once done,
+    /// and a profile that drops at once drops only behind a push, as pico's try-lock fails only
+    /// on a lock another send holds.
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        any(feature = "liveliness-token", feature = "declare-subscriber")
+    ))]
+    senders: [std::sync::atomic::AtomicBool; Priority::NUM],
     /// What each push did, for the plane to count: the stats recorder is the
     /// loop's, borrowed, and cannot be reached from a producer's thread.
     /// `None` on a [`MulticastTxTap`], where nothing counts.
@@ -466,8 +477,9 @@ impl Link {
         // dispatch's conduit would (`SessionLinkActions::dispatch_network_message_at`). What a
         // held stage costs it instead is the queue profile's (`droppable_stage`).
         let mut conf = self.params.tx_queue;
+        let sender = &self.senders[band as usize];
         let stage = if multicast_tx_droppable(&item, &self.params) {
-            droppable_stage(&self.stages[band as usize], &mut conf, |wait| {
+            droppable_stage(&self.stages[band as usize], sender, &mut conf, |wait| {
                 self.lanes.link_room(band, wait)
             })
         } else {
@@ -483,6 +495,7 @@ impl Link {
             }
             return Ok(PushOutcome::Congested);
         };
+        let inside = SenderInside::mark(sender);
         let Stage { sn, window, queued } = &mut *stage;
         let mut queue = StageQueue {
             lanes: &self.lanes,
@@ -509,6 +522,9 @@ impl Link {
                 &mut queue,
             )
         };
+        // Unmarked before the stage is let go: a push that then finds it held finds a holder
+        // that is not one and waits for it, where the other order would drop it behind none.
+        drop(inside);
         drop(stage);
         if let Some(pushed) = self.pushed.as_ref() {
             let _ = pushed.send((tally, outcome));
@@ -534,13 +550,48 @@ impl Link {
     }
 }
 
-/// The stage of a droppable push: taken when it is free. While another push holds it (a blocking
-/// one waiting for room), what the push does is the queue profile's (`TxQueueConf::held_drop`):
-/// zenoh's asks the lane for room itself with `ask`, without the stage and out of its
-/// `wait_before_drop`, and is a congestion drop (`None`) when there is none within it, while room
-/// means the holder is about to let go and the stage is tried again; pico's is dropped at once
-/// and asks nothing, as pico's try-lock drops it. What the waits spent comes off `conf`'s
-/// `wait_before_drop_us`, so the push spends one deadline in all.
+/// A push inside its stage, marked for as long as this lives.
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    any(feature = "liveliness-token", feature = "declare-subscriber")
+))]
+struct SenderInside<'a>(&'a std::sync::atomic::AtomicBool);
+
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    any(feature = "liveliness-token", feature = "declare-subscriber")
+))]
+impl<'a> SenderInside<'a> {
+    fn mark(flag: &'a std::sync::atomic::AtomicBool) -> Self {
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        Self(flag)
+    }
+}
+
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    any(feature = "liveliness-token", feature = "declare-subscriber")
+))]
+impl Drop for SenderInside<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// The stage of a droppable push: taken when it is free. While another holds it, what the push
+/// does is the queue profile's (`TxQueueConf::held_drop`): zenoh's asks the lane for room itself
+/// with `ask`, without the stage and out of its `wait_before_drop`, and is a congestion drop
+/// (`None`) when there is none within it, while room means the holder is about to let go and the
+/// stage is tried again; pico's is dropped at once, asking nothing, when the holder is another
+/// push (`sender`), as pico's try-lock fails only on a lock another send holds, and waits for a
+/// holder that is not one. What the waits spent comes off `conf`'s `wait_before_drop_us`, so the
+/// push spends one deadline in all.
 #[cfg(any(
     feature = "codec-push",
     feature = "codec-response",
@@ -549,6 +600,7 @@ impl Link {
 ))]
 fn droppable_stage<'a>(
     stage: &'a Mutex<Stage>,
+    sender: &std::sync::atomic::AtomicBool,
     conf: &mut wz_session_core::session_init_params::TxQueueConf,
     mut ask: impl FnMut(wz_session_core::link::RoomWait) -> wz_session_core::link::RoomAnswer,
 ) -> Option<std::sync::MutexGuard<'a, Stage>> {
@@ -561,7 +613,12 @@ fn droppable_stage<'a>(
             Err(std::sync::TryLockError::WouldBlock) => {}
         }
         if conf.held_drop == HeldDrop::DropAtOnce {
-            return None;
+            // Only behind another push (`sender`); a holder that is not one lets go once done.
+            if sender.load(std::sync::atomic::Ordering::SeqCst) {
+                return None;
+            }
+            std::hint::spin_loop();
+            continue;
         }
         let answer = ask(RoomWait::Drop {
             wait_us: conf.wait_before_drop_us,
@@ -889,6 +946,13 @@ impl MulticastTxPlane {
                 feature = "codec-response-final",
                 any(feature = "liveliness-token", feature = "declare-subscriber")
             ))]
+            senders: std::array::from_fn(|_| std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(any(
+                feature = "codec-push",
+                feature = "codec-response",
+                feature = "codec-response-final",
+                any(feature = "liveliness-token", feature = "declare-subscriber")
+            ))]
             pushed: Some(pushed_tx),
             #[cfg(feature = "routing-namespace")]
             namespace: namespace.cloned(),
@@ -1081,6 +1145,13 @@ impl MulticastTxTap {
                 any(feature = "liveliness-token", feature = "declare-subscriber")
             ))]
             stages: stages.clone(),
+            #[cfg(any(
+                feature = "codec-push",
+                feature = "codec-response",
+                feature = "codec-response-final",
+                any(feature = "liveliness-token", feature = "declare-subscriber")
+            ))]
+            senders: std::array::from_fn(|_| std::sync::atomic::AtomicBool::new(false)),
             #[cfg(any(
                 feature = "codec-push",
                 feature = "codec-response",
@@ -1468,22 +1539,27 @@ mod tests {
         use wz_session_core::policy::SessionPolicy;
         let stage = Stage::new(0xff);
         let _held = stage.lock().expect("stage");
+        // The holder is another push.
+        let sender = std::sync::atomic::AtomicBool::new(true);
         let mut asked = Vec::new();
 
         // Answered as congested, so a push that asked would end here too and show in `asked`.
         let mut pico = TxQueueConf::pico_of_policy(&SessionPolicy::defaults());
-        let taken = droppable_stage(&stage, &mut pico, |wait| {
+        let taken = droppable_stage(&stage, &sender, &mut pico, |wait| {
             asked.push(wait);
             RoomAnswer::at_once(LinkRoom::Congested)
         });
-        assert!(taken.is_none(), "a held stage drops the push at once");
+        assert!(
+            taken.is_none(),
+            "a stage another push holds drops the push at once"
+        );
         assert!(asked.is_empty(), "the lane was asked {asked:?}");
 
         let mut zenoh = TxQueueConf {
             wait_before_drop_us: 1_000,
             ..TxQueueConf::of_policy(&SessionPolicy::defaults())
         };
-        let taken = droppable_stage(&stage, &mut zenoh, |wait| {
+        let taken = droppable_stage(&stage, &sender, &mut zenoh, |wait| {
             asked.push(wait);
             RoomAnswer {
                 room: LinkRoom::Congested,
@@ -1496,6 +1572,52 @@ mod tests {
             [RoomWait::Drop { wait_us: 1_000 }],
             "CONTROL: zenoh's profile asks the lane, out of `wait_before_drop`"
         );
+    }
+
+    /// Under the pico profile a stage held by what is not a push (a flush, a transmit report) is
+    /// waited for, not dropped behind: pico's try-lock fails only on a lock another send holds.
+    /// The push takes the stage once the holder lets go, having asked the lane nothing.
+    #[test]
+    fn under_the_pico_profile_a_droppable_push_waits_for_a_holder_that_is_not_a_push() {
+        use wz_session_core::link::{LinkRoom, RoomAnswer};
+        use wz_session_core::policy::SessionPolicy;
+        let stage = std::sync::Arc::new(Stage::new(0xff));
+        let (taken_tx, taken_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = {
+            let stage = std::sync::Arc::clone(&stage);
+            std::thread::spawn(move || {
+                let _held = stage.lock().expect("stage");
+                taken_tx.send(()).expect("the test waits");
+                // Bounded, so a push that never returns cannot hold the test past it.
+                let _ = release_rx.recv_timeout(Duration::from_secs(3));
+            })
+        };
+        taken_rx.recv().expect("the holder took the stage");
+        let not_a_push = std::sync::atomic::AtomicBool::new(false);
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(CLOSE_WAIT / 6);
+            let _ = release_tx.send(());
+        });
+        let started = Instant::now();
+        let mut asked = 0usize;
+        let mut pico = TxQueueConf::pico_of_policy(&SessionPolicy::defaults());
+        let taken = droppable_stage(&stage, &not_a_push, &mut pico, |_| {
+            asked += 1;
+            RoomAnswer::at_once(LinkRoom::Congested)
+        });
+        assert!(
+            taken.is_some(),
+            "the push waited for the holder and took the stage"
+        );
+        assert!(
+            started.elapsed() >= CLOSE_WAIT / 12,
+            "the push did not wait for the holder"
+        );
+        drop(taken);
+        assert_eq!(asked, 0, "the lane was asked for room");
+        releaser.join().expect("the releaser");
+        holder.join().expect("the holder");
     }
 
     /// A held stage alone is not congestion: while its lane has room, a droppable push waits for
