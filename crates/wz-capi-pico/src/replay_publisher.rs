@@ -45,20 +45,24 @@ use wz_session_core::replay_publisher::{
 use crate::abi::{
     z_loaned_keyexpr_t, z_moved_bytes_t, z_owned_bytes_t, z_owned_string_t, z_view_keyexpr_t,
 };
-use crate::bytes::z_bytes_copy_from_buf;
-use crate::e2e::{bytes_arg, clear_refusal, locked, utf8_arg, write_refusal};
+use crate::bytes::{z_bytes_copy_from_buf, z_bytes_move};
+use crate::e2e::{
+    bytes_arg, clear_refusal, keyexpr_text, locked, session_facts, utf8_arg, write_refusal,
+    ReplayPolicies,
+};
 use crate::ffi::{guard_val, guarded};
-use crate::keyexpr::{keyexpr_str, z_view_keyexpr_from_substr, z_view_keyexpr_loan};
+use crate::keyexpr::{z_view_keyexpr_from_substr, z_view_keyexpr_loan};
 use crate::pubsub::{z_loaned_publisher_t, z_publisher_put};
 use crate::query::{
-    z_declare_queryable, z_loaned_query_t, z_moved_closure_query_t, z_owned_closure_query_t,
-    z_owned_queryable_t, z_query_keyexpr, z_query_reply, z_queryable_move, z_undeclare_queryable,
+    z_closure_query, z_closure_query_move, z_declare_queryable, z_loaned_query_t,
+    z_owned_closure_query_t, z_owned_queryable_t, z_query_keyexpr, z_query_reply, z_queryable_move,
+    z_undeclare_queryable,
 };
 use crate::result::{
-    ZResult, Z_EINVAL, Z_ERR_CONFIG_INVALID_VALUE, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SESSION_CLOSED,
-    Z_OK,
+    ZResult, WZ_EXT_ERR_UNSUPPORTED, Z_EINVAL, Z_ERR_CONFIG_INVALID_VALUE, Z_ERR_INVALID,
+    Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK,
 };
-use crate::session::{session_handle, z_loaned_session_t};
+use crate::session::z_loaned_session_t;
 
 /// A send of a message sent on a period: while sends are held, only the latest of its instance
 /// is kept.
@@ -253,13 +257,13 @@ fn phase_code(phase: Phase) -> u8 {
 /// # Safety
 /// `put` is a door that consumes the moved payload on every path.
 unsafe fn with_payload(bytes: &[u8], put: impl FnOnce(*mut z_moved_bytes_t) -> ZResult) -> ZResult {
-    let mut payload = z_owned_bytes_t::null_value();
+    // All zero is the gravestone.
+    let mut payload: z_owned_bytes_t = core::mem::zeroed();
     let copied = z_bytes_copy_from_buf(&mut payload, bytes.as_ptr(), bytes.len());
     if copied != Z_OK {
         return copied;
     }
-    let mut moved = z_moved_bytes_t { _this: payload };
-    put(&mut moved)
+    put(z_bytes_move(&mut payload))
 }
 
 impl Shared {
@@ -411,7 +415,9 @@ pub unsafe extern "C" fn wz_ext_replay_publisher_storage_size(
 ///
 /// Returns `Z_ERR_NULL` for a null `this_`, session, publisher, shape or storage;
 /// `Z_ERR_SESSION_CLOSED` for a closed session; `_Z_ERR_CONFIG_INVALID_VALUE` for a shape out of
-/// range or storage shorter than `wz_ext_replay_publisher_storage_size`; `Z_OK` otherwise.
+/// range or storage shorter than `wz_ext_replay_publisher_storage_size`; `WZ_EXT_ERR_UNSUPPORTED`
+/// for a session whose replay policy has a value this door does not know (a core of a later
+/// extension interface); `Z_OK` otherwise.
 ///
 /// # Safety
 /// `this_` is writable; `session` and `publisher` are null or loans of this library, kept until
@@ -436,16 +442,19 @@ pub unsafe extern "C" fn wz_ext_replay_publisher_new(
         if publisher.is_null() || shape.is_null() || storage.is_null() {
             return Z_ERR_NULL;
         }
-        let Some(handle) = session_handle(session) else {
-            return Z_ERR_NULL;
+        let facts = match session_facts(session) {
+            Ok(facts) => facts,
+            Err(code) => return code,
         };
-        if handle.is_closed() {
+        if facts.closed != 0 {
             return Z_ERR_SESSION_CLOSED;
         }
-        let policy = &handle.ext.policy;
+        let Some(policy) = ReplayPolicies::of(&facts) else {
+            return WZ_EXT_ERR_UNSUPPORTED;
+        };
         let shape = shape_of(&*shape);
         let area: &'static mut [u8] = core::slice::from_raw_parts_mut(storage, storage_len);
-        let cache = match ReplayPublisher::new(area, shape, policy.replay_serve_holds_sends()) {
+        let cache = match ReplayPublisher::new(area, shape, policy.serve_holds_sends) {
             Ok(cache) => cache,
             Err(why) => {
                 write_refusal(refusal, create_text(why));
@@ -457,19 +466,14 @@ pub unsafe extern "C" fn wz_ext_replay_publisher_new(
             segments: Mutex::new(None),
             live_segments: Mutex::new(None),
             chunk_bytes: Mutex::new(0),
-            shape: policy.replay_reply_shape(),
+            shape: policy.reply_shape,
             frame_max: shape.frame_max,
-            publisher: z_loaned_publisher_t {
-                handle: (*publisher).handle,
-                _pad: (*publisher)._pad,
-            },
+            // The loan's words, copied as a C program copies the struct its header declares.
+            publisher: core::ptr::read(publisher),
         });
         let handle = Box::new(Handle {
             shared,
-            session: z_loaned_session_t {
-                _val: (*session)._val,
-                _cnt: (*session)._cnt,
-            },
+            session: core::ptr::read(session),
             queryable: Mutex::new(None),
         });
         (*this_).handle = Box::into_raw(handle).cast::<c_void>();
@@ -628,7 +632,7 @@ pub unsafe extern "C" fn wz_ext_replay_publisher_serve(
         if keyexpr.is_null() || suffix.is_null() {
             return Z_ERR_NULL;
         }
-        let (Some(key), Some(suffix)) = (keyexpr_str(keyexpr), utf8_arg(suffix)) else {
+        let (Some(key), Some(suffix)) = (keyexpr_text(keyexpr), utf8_arg(suffix)) else {
             return Z_EINVAL;
         };
         let served = format!("{key}{suffix}");
@@ -677,15 +681,16 @@ pub unsafe extern "C" fn wz_ext_replay_publisher_serve(
         if made != Z_OK {
             return made;
         }
-        let mut closure = z_moved_closure_query_t {
-            _this: z_owned_closure_query_t {
-                context: Arc::into_raw(Arc::clone(shared))
-                    .cast_mut()
-                    .cast::<c_void>(),
-                call: Some(on_query),
-                drop: Some(on_query_drop),
-            },
-        };
+        let mut closure: z_owned_closure_query_t = core::mem::zeroed();
+        // The closure door refuses only a null closure.
+        z_closure_query(
+            &mut closure,
+            Some(on_query),
+            Some(on_query_drop),
+            Arc::into_raw(Arc::clone(shared))
+                .cast_mut()
+                .cast::<c_void>(),
+        );
         let mut declared: z_owned_queryable_t = core::mem::zeroed();
         // The closure is consumed on every path: a refusal runs its drop, which lets go of the
         // share handed to it above.
@@ -693,7 +698,7 @@ pub unsafe extern "C" fn wz_ext_replay_publisher_serve(
             &handle.session,
             &mut declared,
             z_view_keyexpr_loan(&view),
-            &mut closure,
+            z_closure_query_move(&mut closure),
             core::ptr::null(),
         );
         if code == Z_OK {

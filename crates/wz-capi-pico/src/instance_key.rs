@@ -175,14 +175,28 @@ fn write_report(out: &mut wz_ext_instance_key_t, due: Report) {
     out.dropped = due.dropped;
     #[cfg(feature = "event-ring")]
     {
-        use wz_capi_port::observation::events;
-        let (why, field) = match due.latest {
-            Refusal::Undecodable => (events::INSTANCE_KEY_UNDECODABLE, 0),
-            Refusal::Absent { field } => (events::INSTANCE_KEY_ABSENT, field),
-            Refusal::NotListed { field } => (events::INSTANCE_KEY_NOT_LISTED, field),
+        use crate::event_log::{
+            wz_ext_event_emit, WZ_EXT_EVENT_INSTANCE_KEY_ABSENT,
+            WZ_EXT_EVENT_INSTANCE_KEY_NOT_LISTED, WZ_EXT_EVENT_INSTANCE_KEY_UNDECODABLE,
+            WZ_EXT_EVENT_LEVEL_LIBRARY, WZ_EXT_EVENT_SOURCE_INSTANCE_KEY_DROPPED,
         };
-        let field = u64::try_from(field).unwrap_or(u64::MAX);
-        events::emit_instance_key_dropped(why, field, due.dropped);
+        let (why, field) = match due.latest {
+            Refusal::Undecodable => (WZ_EXT_EVENT_INSTANCE_KEY_UNDECODABLE, 0),
+            Refusal::Absent { field } => (WZ_EXT_EVENT_INSTANCE_KEY_ABSENT, field),
+            Refusal::NotListed { field } => (WZ_EXT_EVENT_INSTANCE_KEY_NOT_LISTED, field),
+        };
+        let args = [why, u64::try_from(field).unwrap_or(u64::MAX), due.dropped];
+        // A full log under `drop-newest` refuses the report and counts it, as it does any event;
+        // the keyer's own count in `out` stands either way.
+        // SAFETY: `args` is readable for its length for the call.
+        let _ = unsafe {
+            wz_ext_event_emit(
+                WZ_EXT_EVENT_LEVEL_LIBRARY,
+                WZ_EXT_EVENT_SOURCE_INSTANCE_KEY_DROPPED,
+                args.as_ptr(),
+                args.len(),
+            )
+        };
     }
 }
 
