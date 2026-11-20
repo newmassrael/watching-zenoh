@@ -40,6 +40,8 @@
 //! schedule exists to prevent. It is tried again only when the list is
 //! written again, since that is the only event that can change it.
 
+use core::convert::Infallible;
+
 use heapless::Vec as FixedVec;
 use wz_session_core::bounded::BoundedVec;
 use wz_session_core::caps::{MAX_LOCATOR_LEN, MAX_PEER_NODES, MAX_STATIC_CONNECT};
@@ -876,13 +878,67 @@ impl LifecyclePermits for WritePermit {
 /// in every action it asks for and in the sort of a `withdraw`, and the manager's frames hold a
 /// few of those actions at a time, on the stack of the thread that ticks it. The endpoint's text
 /// stays in its row, and a dial reads it there when it is made.
+///
+/// A build with no room for nodes (`MAX_PEER_NODES` of 0) names a node by a type with no value
+/// ([`NodeName`]): no row, action or table entry can be a node's, every path a node takes is one
+/// the compiler sees nothing reach and does not emit, and a name is the byte of a slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Key {
     /// The row of a configured endpoint, by its slot: the lowest not taken by another endpoint,
     /// so a slot freed by a rewrite of the list is the next endpoint's. The planner forgets a
     /// peer before its slot is reused (`reconcile`).
     Endpoint(u8),
-    Node(DirectoryZid),
+    Node(NodeName),
+}
+
+/// What the manager names a node by: its zid in a build with room for nodes, a type with no value
+/// in one with none. The build's limit chooses it, so the choice is the compiler's and no branch
+/// of the image.
+type NodeName = <NodeRoom<{ MAX_PEER_NODES != 0 }> as NodeSpace>::Name;
+
+/// Whether a build has room for nodes, as the type a node's name is chosen by. Never a value.
+enum NodeRoom<const HOLDS: bool> {}
+
+/// The name of a node in a build with room for nodes, and in one with none.
+trait NodeSpace {
+    type Name: NodeKey;
+}
+
+impl NodeSpace for NodeRoom<true> {
+    type Name = DirectoryZid;
+}
+
+impl NodeSpace for NodeRoom<false> {
+    type Name = Infallible;
+}
+
+/// A node's name in the manager's tables.
+trait NodeKey: Copy + Eq + Ord + core::fmt::Debug {
+    /// The name of the node `zid`, or `None` in a build with no room for nodes.
+    fn of(zid: DirectoryZid) -> Option<Self>;
+
+    /// The zid this names.
+    fn zid(&self) -> &DirectoryZid;
+}
+
+impl NodeKey for DirectoryZid {
+    fn of(zid: DirectoryZid) -> Option<Self> {
+        Some(zid)
+    }
+
+    fn zid(&self) -> &DirectoryZid {
+        self
+    }
+}
+
+impl NodeKey for Infallible {
+    fn of(_zid: DirectoryZid) -> Option<Self> {
+        None
+    }
+
+    fn zid(&self) -> &DirectoryZid {
+        match *self {}
+    }
 }
 
 /// How many peers the machines hold: the endpoints the control names and the nodes asked for.
@@ -1295,11 +1351,11 @@ impl<D: Dialer> PeerPorts<Key> for Ports<'_, D> {
                 }
                 Some(())
             }
-            (Key::Node(zid), _) => {
+            (Key::Node(name), _) => {
                 if !D::VERIFIES_NODES {
                     return None;
                 }
-                first_dialable(self.directory, zid, self.now_ms, D::classify).map(|_| ())
+                first_dialable(self.directory, name.zid(), self.now_ms, D::classify).map(|_| ())
             }
             // An endpoint's row always holds its text.
             (Key::Endpoint(_), None) => None,
@@ -1427,7 +1483,7 @@ impl<D: Dialer> ConnectManager<D> {
     /// Where every node asked for by its zid stands, in the order they were asked for.
     pub fn node_states(&self) -> impl Iterator<Item = (&DirectoryZid, NodeState)> + '_ {
         self.rows.iter().filter_map(|row| {
-            let Key::Node(zid) = &row.key else {
+            let Key::Node(name) = &row.key else {
                 return None;
             };
             let state = match self.standing(row) {
@@ -1437,7 +1493,7 @@ impl<D: Dialer> ConnectManager<D> {
                 Standing::NoLocator => NodeState::NoHint,
                 Standing::Mismatched => NodeState::Mismatched,
             };
-            Some((zid, state))
+            Some((name.zid(), state))
         })
     }
 
@@ -1479,7 +1535,7 @@ impl<D: Dialer> ConnectManager<D> {
         self.rows.iter().filter_map(|row| {
             let held = row.held.as_ref()?;
             match &row.key {
-                Key::Node(zid) => Some((zid, &held.session)),
+                Key::Node(name) => Some((name.zid(), &held.session)),
                 Key::Endpoint(_) => None,
             }
         })
@@ -1513,11 +1569,15 @@ impl<D: Dialer> ConnectManager<D> {
             t.now_ms = t.now_ms.max(now_ms);
             t.directory.confirm(zid, locator, source, now_ms, lifetime)
         })?;
+        // A build with no room for nodes holds none to start.
+        let Some(name) = NodeName::of(zid) else {
+            return Ok(());
+        };
         // A node that was opened before anything could be dialled for it waits in `NoLocator`,
         // which only a start leaves: the hint is what it waited for, so it starts again with no
         // second `open` (decision D15). Any other state is a node that is held or being reached,
         // and is left as it is.
-        let key = Key::Node(zid);
+        let key = Key::Node(name);
         if self.rows.iter().any(|row| row.key == key)
             && self.store.get().with(|t| t.planner.state(&key))
                 == Some(PeerConnectionState::NoLocator)
@@ -1603,13 +1663,16 @@ impl<D: Dialer> ConnectManager<D> {
         self.store.get().with(|t| {
             t.held.clear();
             for row in self.rows.iter() {
-                if let Key::Node(zid) = &row.key {
+                if let Key::Node(name) = &row.key {
                     // As many rows for nodes as the limit, which the mirror is sized by.
                     let passive = matches!(
                         t.planner.state(&row.key),
                         Some(PeerConnectionState::Passive | PeerConnectionState::PassiveUp)
                     );
-                    let _ = t.held.push(HeldNode { zid: *zid, passive });
+                    let _ = t.held.push(HeldNode {
+                        zid: *name.zid(),
+                        passive,
+                    });
                 }
             }
         });
@@ -1622,7 +1685,8 @@ impl<D: Dialer> ConnectManager<D> {
         self.store.get().with(|t| {
             t.held.clear();
             for row in self.rows.iter() {
-                if let Key::Node(zid) = &row.key {
+                if let Key::Node(name) = &row.key {
+                    let zid = name.zid();
                     let node = HeldNode {
                         zid: *zid,
                         passive: matches!(
@@ -1691,7 +1755,11 @@ impl<D: Dialer> ConnectManager<D> {
         if !D::VERIFIES_NODES {
             return Err(NodeRefusal::Unverifiable);
         }
-        let key = Key::Node(zid);
+        // A build with no room for nodes has no name for one.
+        let Some(name) = NodeName::of(zid) else {
+            return Err(NodeRefusal::NoRoom);
+        };
+        let key = Key::Node(name);
         if !self.rows.iter().any(|row| row.key == key) {
             let held = self
                 .rows
@@ -1756,11 +1824,17 @@ impl<D: Dialer> ConnectManager<D> {
     /// reached the same node, is hung up (decision D6: a lifecycle `close`), and the node is
     /// dialled no more. The hints stay: they are the directory's, and a later `open` uses them.
     pub fn close_node(&mut self, zid: &DirectoryZid, now_ms: u64) {
-        let key = Key::Node(*zid);
+        // A build with no room for nodes has no machine of the node's own: the endpoints that
+        // reached it are stopped all the same.
+        let key = NodeName::of(*zid).map(Key::Node);
         self.drive(now_ms, &mut |planner, ports, next_id, emit| {
             planner.withdraw(zid, key, ports, next_id, emit);
         });
-        if let Some(held) = self.row_mut(&key).and_then(|row| row.held.take()) {
+        let held = match key {
+            Some(key) => self.row_mut(&key).and_then(|row| row.held.take()),
+            None => None,
+        };
+        if let Some(held) = held {
             let face = held.face;
             self.dialer.hang_up(held.session);
             self.drive(now_ms, &mut |planner, ports, next_id, emit| {
@@ -1770,9 +1844,11 @@ impl<D: Dialer> ConnectManager<D> {
         // The machine's stop closed the session the node opened here, if it held one; a node that
         // leaves the table leaves no session behind it whatever state its machine was in.
         let _ = self.release_inbound(zid);
-        self.store.get().with(|t| t.planner.forget(&key));
-        self.periods.retain(|(k, _)| *k != key);
-        self.rows.retain(|row| row.key != key);
+        if let Some(key) = key {
+            self.store.get().with(|t| t.planner.forget(&key));
+            self.periods.retain(|(k, _)| *k != key);
+            self.rows.retain(|row| row.key != key);
+        }
         self.mirror_held();
     }
 
@@ -1782,8 +1858,13 @@ impl<D: Dialer> ConnectManager<D> {
     /// A node with no session is unchanged.
     #[cfg(feature = "lifecycle-reset")]
     pub fn reset_node(&mut self, zid: &DirectoryZid, now_ms: u64) {
-        let key = Key::Node(*zid);
-        if let Some(held) = self.row_mut(&key).and_then(|row| row.held.take()) {
+        let held = match NodeName::of(*zid) {
+            Some(name) => self
+                .row_mut(&Key::Node(name))
+                .and_then(|row| row.held.take()),
+            None => None,
+        };
+        if let Some(held) = held {
             let (face, up) = (held.face, held.up);
             self.dialer.hang_up(held.session);
             // As `observe` tells it: a session that was up is down, one still being dialled is a
@@ -1851,10 +1932,10 @@ impl<D: Dialer> ConnectManager<D> {
             });
         }
         for at in 0..self.rows.len() {
-            let Key::Node(zid) = self.rows[at].key else {
+            let Key::Node(name) = self.rows[at].key else {
                 continue;
             };
-            let key = Key::Node(zid);
+            let (key, zid) = (Key::Node(name), *name.zid());
             if !zids.contains(&zid)
                 || self.store.get().with(|t| t.planner.state(&key))
                     != Some(PeerConnectionState::Passive)
@@ -2011,7 +2092,8 @@ impl<D: Dialer> ConnectManager<D> {
                     .ok_or(DialFailed::Unreachable)?;
                 self.dialer.dial(endpoint)
             }
-            Key::Node(zid) => {
+            Key::Node(name) => {
+                let zid = name.zid();
                 // Read out of the critical section: a dial is not made inside one.
                 let locator: Option<EndpointText> = self.store.get().with(|t| {
                     first_dialable(&t.directory, zid, now_ms, D::classify)
@@ -2059,7 +2141,7 @@ impl<D: Dialer> ConnectManager<D> {
     fn observe(&mut self, now_ms: u64) {
         for at in 0..self.rows.len() {
             let node = match &self.rows[at].key {
-                Key::Node(zid) => Some(*zid),
+                Key::Node(name) => Some(*name.zid()),
                 Key::Endpoint(_) => None,
             };
             let Some(held) = self.rows[at].held.as_mut() else {
@@ -2823,6 +2905,51 @@ mod tests {
         std::assert!(
             m.dialer().dials_for.borrow().is_empty(),
             "a node that was closed is not started by a hint"
+        );
+    }
+
+    /// A build with no room for nodes names a peer by the byte of its slot alone: a node's name
+    /// has no value there, so no name, row or action can be a node's.
+    #[test]
+    fn a_name_is_the_slot_alone_where_the_build_holds_no_node() {
+        let expected = if MAX_PEER_NODES == 0 {
+            1
+        } else {
+            1 + CREDENTIAL_ZID_BYTES
+        };
+        std::assert_eq!(core::mem::size_of::<Key>(), expected);
+        std::assert_eq!(NodeName::of(NODE_A).is_some(), MAX_PEER_NODES != 0);
+    }
+
+    /// A close names a node: the endpoint whose session reached it is hung up and not dialled
+    /// again, whether or not the build has room to hold the node itself, and an endpoint that
+    /// reached another node is left as it was.
+    #[test]
+    fn a_close_hangs_up_the_endpoint_that_reached_the_node_in_every_build() {
+        static CONTROL: ConnectControl = ConnectControl::new(true);
+        static STORE: PeerStore = PeerStore::new();
+        let mut m = ConnectManager::in_static_store(&CONTROL, FakeDialer::default(), &STORE);
+        write(&CONTROL, &["udp/10.0.0.1:7447", "udp/10.0.0.2:7447"]);
+        m.tick(0);
+        std::assert_eq!(dials(&mut m), ["udp/10.0.0.1:7447", "udp/10.0.0.2:7447"]);
+        m.dialer()
+            .up
+            .push((String::from("udp/10.0.0.1:7447"), Some(NODE_A)));
+        m.dialer()
+            .up
+            .push((String::from("udp/10.0.0.2:7447"), Some(NODE_B)));
+        m.tick(1);
+
+        m.close_node(&NODE_A, 2);
+        std::assert_eq!(
+            m.dialer().hang_ups,
+            ["udp/10.0.0.1:7447"],
+            "the session that reached A, and not the one that reached B"
+        );
+        m.tick(60_000);
+        std::assert!(
+            dials(&mut m).is_empty(),
+            "a withdrawn endpoint waits for an open, and the other is still up"
         );
     }
 

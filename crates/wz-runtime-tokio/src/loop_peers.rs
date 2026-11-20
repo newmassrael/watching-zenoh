@@ -370,7 +370,7 @@ impl LoopPeers {
         next_id: &mut u64,
     ) -> Vec<PeerAction> {
         self.plan(cx, |planner, ports, emit| {
-            planner.withdraw(zid, PeerKey::Node(*zid), ports, next_id, emit)
+            planner.withdraw(zid, Some(PeerKey::Node(*zid)), ports, next_id, emit)
         })
         .1
     }

@@ -413,28 +413,30 @@ where
     }
 
     /// `close` for the node `zid` (decision D6): every machine that holds it, its own
-    /// (`node`) and that of each peer whose last session reached it, is stopped. A
-    /// session it holds is closed, a dial it runs is dropped and a wait it is in is
-    /// cancelled, and the peer is not dialled again until an `open` starts it. The
-    /// machine stays in the table, `Idle`.
+    /// (`node`, `None` for a host that holds no peer by that zid) and that of each peer
+    /// whose last session reached it, is stopped. A session it holds is closed, a dial it
+    /// runs is dropped and a wait it is in is cancelled, and the peer is not dialled again
+    /// until an `open` starts it. The machine stays in the table, `Idle`.
     pub fn withdraw<P: PeerPorts<K>>(
         &mut self,
         zid: &DirectoryZid,
-        node: K,
+        node: Option<K>,
         ports: &mut P,
         next_id: &mut u64,
         emit: &mut dyn FnMut(PeerAction<K, I, P::Target>),
     ) {
         let mut keys: Vec<K, N> = Vec::new();
         for (key, remote) in &self.remotes {
-            if remote == zid && *key != node {
+            if remote == zid && node.as_ref() != Some(key) {
                 // At most one row per peer, and `remotes` has `N` rows.
                 let _ = keys.push(key.clone());
             }
         }
         keys.sort_unstable();
         // The node's own machine last, with a table that has room for it or not.
-        let _ = keys.push(node);
+        if let Some(node) = node {
+            let _ = keys.push(node);
+        }
         for key in keys {
             self.stop(&key, ports, next_id, emit);
         }
@@ -874,7 +876,7 @@ mod tests {
         let two = dial_of(&actions(|e| {
             plan.open(2, &mut host, &mut next_id, e).unwrap()
         }));
-        let none = actions(|e| plan.withdraw(&B, 2, &mut host, &mut next_id, e));
+        let none = actions(|e| plan.withdraw(&B, Some(2), &mut host, &mut next_id, e));
         assert!(none.is_empty());
         assert_eq!(plan.state(&2), Some(S::Idle));
         let ended = actions(|e| {
@@ -967,7 +969,7 @@ mod tests {
                 &mut |_| {},
             );
         }
-        let closed = actions(|e| plan.withdraw(&A, 1, &mut host, &mut next_id, e));
+        let closed = actions(|e| plan.withdraw(&A, Some(1), &mut host, &mut next_id, e));
         let mut faces: Vector<Face> = closed
             .iter()
             .map(|action| match action {
@@ -987,6 +989,43 @@ mod tests {
             plan.state(&3),
             Some(S::Established),
             "another node's machine is untouched"
+        );
+    }
+
+    /// A host that holds no peer by the zid closed stops the machines whose session
+    /// reached it, and leaves every other one as it was.
+    #[test]
+    fn a_withdrawal_without_a_machine_of_the_node_stops_those_that_reached_it() {
+        let mut host = Host {
+            candidates: Vector::from([1, 2]),
+            ..Host::default()
+        };
+        let mut plan = Plan::new();
+        let mut next_id = 0;
+        for (key, remote) in [(1u8, A), (2, B)] {
+            let id = dial_of(&actions(|e| {
+                plan.open(key, &mut host, &mut next_id, e).unwrap()
+            }));
+            plan.dial_ended(
+                id,
+                DialEnd::Established {
+                    remote: Some(remote),
+                },
+                &mut host,
+                &mut next_id,
+                &mut |_| {},
+            );
+        }
+        let closed = actions(|e| plan.withdraw(&A, None, &mut host, &mut next_id, e));
+        assert!(
+            matches!(closed[..], [PeerAction::Close { id: Face(0) }]),
+            "the session of the one machine that reached A, got {closed:?}"
+        );
+        assert_eq!(plan.state(&1), Some(S::Idle));
+        assert_eq!(
+            plan.state(&2),
+            Some(S::Established),
+            "B's machine is untouched"
         );
     }
 
