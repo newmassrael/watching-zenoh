@@ -56,8 +56,8 @@ use wz_capi_port::{
 #[cfg(feature = "ticker")]
 use wz_capi_port::{Tick, TickerId};
 use wz_runtime_coop::session_drive::{
-    spawn_session, wait_any, LinkReadiness, OpenedLink, SessionDatagramLink, SessionDriveConfig,
-    SessionLinks, SessionRole,
+    spawn_session, wait_any, LinkReadiness, LinkWritability, OpenedLink, SessionDatagramLink,
+    SessionDriveConfig, SessionLinks, SessionRole,
 };
 #[cfg(feature = "listen")]
 use wz_runtime_coop::session_drive::{LinkListener, LinkOpenError};
@@ -80,7 +80,8 @@ use wz_session_core::policy::{SessionPolicy, SnResolution};
 use wz_session_core::publish_options::{PlainPutParams, PublishError, PublishOptions};
 use wz_session_core::pubsub::SubscriptionId;
 use wz_session_core::push_build;
-use wz_session_core::sample::{Sample, SampleKind};
+use wz_session_core::qos::CongestionControl;
+use wz_session_core::sample::{QosLevel, Sample, SampleKind};
 use wz_session_core::send_wire_error::SendWireError;
 use wz_session_core::session_init_params::{
     KeepAliveConf, LinkRxConf, SessionInitParams, SessionZid, TxQueueConf, ZidError,
@@ -132,7 +133,7 @@ use faces::FacePlane;
 use wz_session_core::face::FaceEventSink;
 use wz_session_core::face::{FaceEventKind, FaceSnapshot};
 #[cfg(feature = "local-queryable")]
-use wz_session_core::{query::QueryEnvelope, sample::QosLevel};
+use wz_session_core::query::QueryEnvelope;
 
 #[cfg(feature = "liveliness-get")]
 use wz_session_core::query_options::DEFAULT_QUERY_TIMEOUT_MS;
@@ -403,6 +404,11 @@ pub(crate) fn derived_zid(
 /// One session the program steps; see the module doc.
 pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> {
     core: Mutex<Confined<Core<L, C>>>,
+    /// The waits for room of the links that are up, asked by a publish that may be dropped while
+    /// another holds the session ([`Self::live_to_publish`]), and how long it waits:
+    /// `congestion_control/drop/wait_before_drop`.
+    rooms: Arc<LinkRooms>,
+    wait_before_drop_us: u64,
     /// What the session delivered under the lock, handed out after it: the samples for its
     /// subscribers, in the order they arrived, and the changes of its matching statuses. Two
     /// queues and not one of an enum, so a sample is queued as it was built and a matching flip
@@ -445,6 +451,47 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
 
 /// The session state no other thread may touch while one does; see the module doc.
 struct Confined<T>(T);
+
+/// The waits for room of the session's links that are up, kept outside [`Core`] so that a publish
+/// that finds the session held asks them with nothing of it held. Each wait belongs to its link's
+/// [`Wire`]; this holds it weakly, so a link that has gone drops out with its wire.
+#[derive(Default)]
+pub(crate) struct LinkRooms(Mutex<Vec<Weak<dyn LinkWritability>>>);
+
+/// What the links that are up answered a publish that asked them for room.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Room {
+    /// Every link asked takes bytes: whoever holds the session is not waiting on one of them.
+    Free,
+    /// A link took none within the wait.
+    Congested,
+    /// No link that is up gives a wait to ask.
+    Unasked,
+}
+
+impl LinkRooms {
+    /// Hold `wait` while its link lives, letting go of the waits of links that have gone.
+    pub(crate) fn hold(&self, wait: &Arc<dyn LinkWritability>) {
+        let mut waits = lock(&self.0);
+        waits.retain(|held| held.strong_count() > 0);
+        waits.push(Arc::downgrade(wait));
+    }
+
+    /// Ask each link that is up for room, for at most `wait_us` each; one that takes none within
+    /// it ends the asking. The waits are taken out of the lock first: a wait blocks, and a link
+    /// coming up must not wait behind it.
+    pub(crate) fn within(&self, wait_us: u64) -> Room {
+        let waits: Vec<Arc<dyn LinkWritability>> =
+            lock(&self.0).iter().filter_map(Weak::upgrade).collect();
+        if waits.is_empty() {
+            Room::Unasked
+        } else if waits.iter().all(|wait| wait.wait_writable(wait_us)) {
+            Room::Free
+        } else {
+            Room::Congested
+        }
+    }
+}
 
 // SAFETY: a `Confined` is reached only through the `Mutex` that holds it in `CoopEngine`, so one
 // thread at a time uses it. Its `Rc` handles and `RefCell` cells are all owned by the `Core`
@@ -557,6 +604,9 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// order they came. What is declared is declared over each of them, and a get is asked of
     /// each.
     faces: Vec<Face<C>>,
+    /// Where each link that comes up leaves its wait for room, for the publishes that find the
+    /// session held ([`CoopEngine::live_to_publish`]).
+    rooms: Arc<LinkRooms>,
     /// The face an accepted or attached link takes next, beneath the dial role's.
     next_face: FaceId,
     /// Where a face coming up or going down is reported (`connectivity`).
@@ -668,6 +718,9 @@ struct Wire<C: ClockSource + 'static> {
     task: CoopLocalJoinHandle<DriverOutcome>,
     link: Rc<dyn SessionDatagramLink>,
     readiness: Option<Arc<dyn LinkReadiness>>,
+    /// The wait for room on the link, held for as long as the wire is: the session's
+    /// [`LinkRooms`] holds it weakly once the face is up.
+    writability: Option<Arc<dyn LinkWritability>>,
     /// Opened when the face is brought up (`bring_up`); until then the link gives the session
     /// nothing past its handshake, so the watchers hear the face come up before anything its link
     /// carried.
@@ -1063,6 +1116,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         #[cfg(not(feature = "shared-key-ids"))]
         let _ = endpoint;
         let readiness = pump.readiness().map(Arc::from);
+        let writability = pump.writability().map(Arc::from);
         // The link gives the session nothing between its handshake and the face table's decision
         // (`admit`), so a link that is refused has put nothing in the tables.
         #[cfg(feature = "listen")]
@@ -1102,6 +1156,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             task,
             link,
             readiness,
+            writability,
             #[cfg(feature = "listen")]
             admitted,
             #[cfg(feature = "queryable")]
@@ -1324,6 +1379,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     fn bring_up(&mut self, at: usize, wire: Wire<C>, now_us: u64) {
         #[cfg(feature = "listen")]
         wire.admitted.grant();
+        // A publish goes to the links that are up, so theirs are the rooms it asks.
+        if let Some(wait) = &wire.writability {
+            self.rooms.hold(wait);
+        }
         self.begin_replay(at, &wire.actions, now_us / 1000);
         let snapshot = self.face_of(&wire.actions);
         self.faces[at].link = Link::Up(wire);
@@ -1759,6 +1818,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 link: Link::Waiting { at_us: u64::MAX },
                 replay: Replay::with_pacing(ReplayPacing::of_policy(&policy)),
             }],
+            rooms: Arc::new(LinkRooms::default()),
             next_face: 1,
             #[cfg(feature = "connectivity")]
             watchers: Arc::new(FacePlane::default()),
@@ -1809,6 +1869,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let gets = core.gets.clone();
         #[cfg(feature = "connectivity")]
         let faces = core.watchers.clone();
+        let rooms = core.rooms.clone();
+        let wait_before_drop_us = core.config.tx_queue.wait_before_drop_us;
         // The ports are bound before anything is dialled: a session that cannot listen where it was
         // told to does not open.
         core.listen_on_config()?;
@@ -1826,6 +1888,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         }
         Ok(Arc::new_cyclic(|this| Self {
             core: Mutex::new(Confined(core)),
+            rooms,
+            wait_before_drop_us,
             samples: Arc::new(Mutex::new(VecDeque::new())),
             matching: Arc::new(Mutex::new(VecDeque::new())),
             targets: Mutex::new(Vec::new()),
@@ -1943,6 +2007,41 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             return None;
         }
         Some(guard)
+    }
+
+    /// The session's state for a publish's leg to its links. A publish that may not be dropped
+    /// waits for it ([`Self::live`]). One that may is not held behind a send that holds the
+    /// session while it waits for room on a link, up to `wait_before_close` for a blocking one:
+    /// zenoh bounds a droppable message's wait by `wait_before_drop`
+    /// (`commons/zenoh-config/src/defaults.rs` @ `wait_before_drop: 1000,`), where its own pipeline
+    /// would queue it behind the blocking one on the stage that one holds
+    /// (`io/zenoh-transport/src/common/pipeline.rs` @ `let mut queue = zlock!(self.stage_in[idx]);`).
+    /// So it takes the session when it is free, and while it is held asks the links that are up
+    /// for room with nothing of the session held. No room within `wait_before_drop` is the
+    /// congestion drop, which zenoh answers the put with success; room means the holder is not
+    /// waiting on a link, and the session is tried again. A session whose links give no wait to
+    /// ask is waited for. `None` once the session is closed, or when the publish was dropped.
+    fn live_to_publish(&self, droppable: bool) -> Option<MutexGuard<'_, Confined<Core<L, C>>>> {
+        if !droppable {
+            return self.live();
+        }
+        loop {
+            if self.closed.load(Ordering::Acquire) {
+                return None;
+            }
+            if let Some(guard) = self.core.try_lock() {
+                // A close that took the session first is seen under it, as `live` sees it.
+                if self.closed.load(Ordering::Acquire) {
+                    return None;
+                }
+                return Some(guard);
+            }
+            match self.rooms.within(self.wait_before_drop_us) {
+                Room::Free => core::hint::spin_loop(),
+                Room::Congested => return None,
+                Room::Unasked => return self.live(),
+            }
+        }
     }
 
     /// Run the periodic jobs that are due, with no lock held: what a job does (a beacon is a
@@ -2103,11 +2202,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         if !opts.allowed_destination.allows_remote() {
             return Ok(0);
         }
-        let Some(core) = self.live() else {
-            return Ok(0);
-        };
         let meta = opts.push_metadata();
         let reliable = opts.reliable_bool();
+        // zenoh's `is_droppable`: a best-effort message, or one whose congestion control is `Drop`
+        // (`commons/zenoh-protocol/src/network/mod.rs` @ `!self.is_reliable() || self.congestion_control() == CongestionControl::Drop`).
+        // A message with no QoS of its own is sent with the default's, as the send reads it.
+        let congestion = meta.qos.unwrap_or(QosLevel::DEFAULT).congestion();
+        let droppable = !reliable || congestion == CongestionControl::Drop;
+        let Some(core) = self.live_to_publish(droppable) else {
+            return Ok(0);
+        };
         let express = meta.is_express();
         let priority = opts.priority_band();
         // Each face is sent the put, and one a face's link could not have carried is the one that

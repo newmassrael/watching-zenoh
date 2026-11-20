@@ -1244,6 +1244,7 @@ fn a_key_wire_form_but_declared_is_refused_in_a_build_without_shared_key_ids() {
 
 #[cfg(all(feature = "ticker", feature = "query", feature = "liveliness"))]
 mod advanced;
+mod congestion;
 mod decl_watch;
 #[cfg(all(feature = "query", feature = "queryable", feature = "local-queryable"))]
 mod face_table;
