@@ -227,6 +227,16 @@ use alloc::collections::VecDeque;
 ))]
 use core::cell::RefCell;
 #[cfg(all(
+    feature = "session-slot",
+    feature = "alloc",
+    any(
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    )
+))]
+use wz_session_core::caps::MAX_MULTICAST_REPLIES;
+#[cfg(all(
     feature = "alloc",
     any(
         feature = "codec-response",
@@ -320,8 +330,14 @@ impl MulticastReplyEnqueue for MulticastReplyQueue {
 }
 
 /// Fixed-memory step S9c -- the multicast reply backing of the `session-slot`
-/// profile: a queue of `N` items in a `static`, which REFUSES the reply it has no
-/// room for and COUNTS it, where the heap form above grows without bound.
+/// profile: a queue of [`MAX_MULTICAST_REPLIES`] items in a `static`, which REFUSES
+/// the reply it has no room for and COUNTS it, where the heap form above grows
+/// without bound.
+///
+/// Its size is the declared limit and nothing else (the deploy
+/// `session_pool.process.multicast_replies` key, bound at build): an image does not
+/// choose a number of its own, so the limit a deployment declares is the one every
+/// image that holds a reply queue is built with.
 ///
 /// The queue is the seam between the observer that stages a reply and the loop that
 /// frames and sends it, and the sender is a pump that gives the thread back
@@ -333,13 +349,13 @@ impl MulticastReplyEnqueue for MulticastReplyQueue {
 /// counted, typed-by-its-counter refusal every other table of the profile makes. A
 /// dropped reply is the loss multicast already allows (UDP to a group is best
 /// effort, and a querier whose reply never comes retries or times out), and the
-/// count is what tells the image its `N` is too small.
+/// count is what tells the deployment its declared limit is too small.
 ///
 /// Declared by the image, shared by the sink that fills it (`&'static` is a
 /// [`MulticastReplyEnqueue`]) and the loop's `next_tx` that drains it:
 ///
 /// ```text
-/// static REPLIES: MulticastReplyQueue<8> = MulticastReplyQueue::new();
+/// static REPLIES: MulticastReplyQueue = MulticastReplyQueue::new();
 /// let sink = MulticastReplySink::new(&REPLIES);
 /// // next_tx: || REPLIES.pop()
 /// ```
@@ -360,8 +376,8 @@ impl MulticastReplyEnqueue for MulticastReplyQueue {
         feature = "liveliness-token"
     )
 ))]
-pub struct MulticastReplyQueue<const N: usize> {
-    items: RefCell<heapless::Deque<MulticastTxItem, N>>,
+pub struct MulticastReplyQueue {
+    items: RefCell<heapless::Deque<MulticastTxItem, MAX_MULTICAST_REPLIES>>,
     dropped: core::cell::Cell<u32>,
 }
 
@@ -377,7 +393,7 @@ pub struct MulticastReplyQueue<const N: usize> {
         feature = "liveliness-token"
     )
 ))]
-unsafe impl<const N: usize> Sync for MulticastReplyQueue<N> {}
+unsafe impl Sync for MulticastReplyQueue {}
 
 #[cfg(all(
     feature = "session-slot",
@@ -388,7 +404,7 @@ unsafe impl<const N: usize> Sync for MulticastReplyQueue<N> {}
         feature = "liveliness-token"
     )
 ))]
-impl<const N: usize> MulticastReplyQueue<N> {
+impl MulticastReplyQueue {
     /// An empty queue, for a `static`.
     pub const fn new() -> Self {
         Self {
@@ -397,9 +413,9 @@ impl<const N: usize> MulticastReplyQueue<N> {
         }
     }
 
-    /// How many replies the queue holds at most.
+    /// How many replies the queue holds at most: [`MAX_MULTICAST_REPLIES`].
     pub const fn capacity(&self) -> usize {
-        N
+        MAX_MULTICAST_REPLIES
     }
 
     /// How many replies are waiting.
@@ -446,7 +462,7 @@ impl<const N: usize> MulticastReplyQueue<N> {
         feature = "liveliness-token"
     )
 ))]
-impl<const N: usize> Default for MulticastReplyQueue<N> {
+impl Default for MulticastReplyQueue {
     fn default() -> Self {
         Self::new()
     }
@@ -463,7 +479,7 @@ impl<const N: usize> Default for MulticastReplyQueue<N> {
         feature = "liveliness-token"
     )
 ))]
-impl<const N: usize> MulticastReplyEnqueue for &'static MulticastReplyQueue<N> {
+impl MulticastReplyEnqueue for &'static MulticastReplyQueue {
     fn enqueue(&self, item: MulticastTxItem) {
         self.push(item);
     }
