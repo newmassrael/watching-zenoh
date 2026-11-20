@@ -326,16 +326,22 @@ fn run_router(
         let declared = seen.clone();
         let undeclared = seen.clone();
         let mut observer = observer.borrow_mut();
-        observer.liveliness.on_token_declared(move |token| {
-            declared
-                .lock()
-                .unwrap()
-                .tokens
-                .push((token.id(), token.keyexpr().to_owned()));
-        });
-        observer.liveliness.on_token_undeclared(move |id| {
-            undeclared.lock().unwrap().tokens.retain(|(t, _)| *t != id);
-        });
+        observer
+            .liveliness
+            .on_token_declared(move |token| {
+                declared
+                    .lock()
+                    .unwrap()
+                    .tokens
+                    .push((token.id(), token.keyexpr().to_owned()));
+            })
+            .expect("no quota is stated on this table");
+        observer
+            .liveliness
+            .on_token_undeclared(move |id| {
+                undeclared.lock().unwrap().tokens.retain(|(t, _)| *t != id);
+            })
+            .expect("no quota is stated on this table");
     }
     #[cfg(feature = "query")]
     let answering = observer.clone();
