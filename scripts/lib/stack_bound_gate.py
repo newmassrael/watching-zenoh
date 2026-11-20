@@ -35,7 +35,10 @@ What it asserts of an image, in this order:
 
 What the bound still rests on, stated: the rules are written by a person and read against the code; other
 threads and interrupts are taken to run on their own stacks; the recursion the contract declares has the
-depth it declares; a panic path ends in an abort and is cold. The image has to be built with line tables
+depth it declares; a panic path ends in an abort and is cold; a tail call through a register (`bx rN`) is made
+with the caller's frame already popped, so its callee is counted from where the caller was entered (a direct
+branch to another function is still counted as a call, its frame kept, which overstates and never
+understates). The image has to be built with line tables
 (`CARGO_PROFILE_RELEASE_DEBUG=line-tables-only`, which the kit lane sets), whose text is the shipped one.
 
     stack_bound_gate.py --check KEY --elf ELF     the gate, for an image of stack_frame_gate.IMAGES
@@ -72,6 +75,9 @@ BUDGET = ROOT / "deploy" / "resource_budget.json"
 MARGIN_NUM, MARGIN_DEN = 3, 4
 
 SITE = re.compile(r"^\s*([0-9a-f]+):\s+" + g.REGISTER_CALL)
+#: The register calls that are tail calls: a `bx`, which leaves no return address, so the compiler
+#: emits it only once the frame is popped (the epilogue's `pop`/`ldmia sp!` or `add sp` comes first).
+TAIL = re.compile(r"^\s*[0-9a-f]+:\s+bx")
 INSN = re.compile(r"^\s*([0-9a-f]+):\s+\S")
 MOVW = re.compile(r"^\s*([0-9a-f]+):\s+movw\s+(r\d+|ip),\s*#(\d+)")
 MOVT = re.compile(r"^\s*([0-9a-f]+):\s+movt\s+(r\d+|ip),\s*#(\d+)")
@@ -93,6 +99,9 @@ class Func:
     calls: set[int] = field(default_factory=set)  # direct calls, to other functions
     sites: list[int] = field(default_factory=list)  # addresses of its calls by register
     insns: list[int] = field(default_factory=list)  # address of each of its instructions, in order
+    # The sites of `sites` that are tail calls (`bx rN`): the function's frame is popped before the
+    # branch, so the callee runs at the depth the function was entered at, not on top of its frame.
+    tails: set[int] = field(default_factory=set)
 
 
 #: The source of a line the line table names: `text(path, line)`, or None when this machine does not hold it.
@@ -214,6 +223,8 @@ def load(elf: str, entry: str) -> Model:
             site = SITE.match(line)
             if site:
                 fn.sites.append(int(site.group(1), 16))
+                if TAIL.match(line):
+                    fn.tails.add(int(site.group(1), 16))
         funcs[start] = fn
 
     # every word of every allocated section, and the addresses the code builds itself
@@ -441,8 +452,10 @@ def analyse(model: Model, contract: dict) -> Result:
     unclaimed: dict[int, list[str]] = defaultdict(list)
     empty: set[str] = set()
     libraries = contract.get("libraries")
+    tail_only: dict[int, set[int]] = {}
     for start, fn in model.funcs.items():
         out = set(fn.calls)
+        tailed: set[int] = set()
         for addr in fn.sites:
             where = model.where.get(addr)
             rule = _match_rule(rules, fn, where, model.text, libraries, res.drift)
@@ -470,8 +483,14 @@ def analyse(model: Model, contract: dict) -> Result:
                 got = {a for a, n in model.taken.items() if rx.search(n)}
             if not got:
                 empty.add(rule["id"])
-            out |= got
-        edges[start] = out
+            if addr in fn.tails:
+                tailed |= got
+            else:
+                out |= got
+        # A callee reached only by a tail call runs where the function was entered; one the function
+        # also calls is on top of its frame, the deeper of the two.
+        tail_only[start] = tailed - out
+        edges[start] = out | tailed
 
     roots_entry = [s for s, f in model.funcs.items() if model.entry in f.name and f.frame > 0]
     if not roots_entry:
@@ -511,6 +530,7 @@ def analyse(model: Model, contract: dict) -> Result:
     res.unused = sorted(r["id"] for r in rules if r["id"] not in used)
 
     memo: dict[int, tuple[int, tuple[int, ...]]] = {}
+    tail_entered: set[int] = set()  # functions whose deepest path leaves by a tail call: no frame on it
     stack: list[int] = []
     cycles: set[tuple[int, int]] = set()
 
@@ -519,6 +539,7 @@ def analyse(model: Model, contract: dict) -> Result:
             return memo[s]
         stack.append(s)
         best: tuple[int, tuple[int, ...]] = (0, ())
+        best_tail: tuple[int, tuple[int, ...]] = (0, ())
         for t in sorted(edges[s]):
             if t in cold:
                 continue
@@ -527,11 +548,20 @@ def analyse(model: Model, contract: dict) -> Result:
                     cycles.add((s, t))
                 continue
             below = deepest(t)
-            if below[0] > best[0]:
+            if t in tail_only[s]:
+                if below[0] > best_tail[0]:
+                    best_tail = below
+            elif below[0] > best[0]:
                 best = below
         stack.pop()
         mult = depth_of(model.funcs[s]) or 1
-        memo[s] = (model.funcs[s].frame * mult + best[0], (s, *best[1]))
+        called = model.funcs[s].frame * mult + best[0]
+        if best_tail[0] > called:
+            # the tail callee is deeper than anything under the frame: the frame is gone by then
+            tail_entered.add(s)
+            memo[s] = (best_tail[0], (s, *best_tail[1]))
+        else:
+            memo[s] = (called, (s, *best[1]))
         return memo[s]
 
     total, path = deepest(root)
@@ -539,7 +569,12 @@ def analyse(model: Model, contract: dict) -> Result:
         below_total, below_path = deepest(task)
         if model.funcs[root].frame + below_total > total:
             total, path = model.funcs[root].frame + below_total, (root, *below_path)
-    chain = [(model.funcs[s].frame, model.funcs[s].norm) for s in path]
+    chain = [
+        (0, f"{model.funcs[s].norm} (left by a tail call, its frame popped)")
+        if s in tail_entered
+        else (model.funcs[s].frame, model.funcs[s].norm)
+        for s in path
+    ]
     # What the thread's stack holds beneath the entry function the bound is rooted at: the kernel's
     # frames that run it (the contract names them) and what sits at the top of the stack before them.
     # A walk of the real stack of the plain client on the kit (2026-11-03) found the entry function
@@ -854,6 +889,18 @@ def selftest() -> int:
     res = analyse(_model(), base)
     eq("the register call reaches leaf_b and the frames below it", res.bound, 100 + 50 + 40 + 200)
     eq("nothing unclaimed", res.unclaimed, [])
+    # the same call made as a tail call: worker's frame is popped before it, so the callee is under main
+    tailed = _model()
+    tailed.funcs[0x200].tails.add(0x210)
+    tail_res = analyse(tailed, base)
+    eq("a tail call's callee runs where its caller was entered", tail_res.bound, 100 + 40 + 200)
+    eq("and the caller is on the chain with no frame", tail_res.chain[1][0], 0)
+    # a callee the function both calls and tail-calls is on top of its frame
+    both = _model()
+    both.funcs[0x200].sites.append(0x220)
+    both.funcs[0x200].tails.add(0x220)
+    both.where[0x220] = ("crates/x/src/lib.rs", 7)
+    eq("a callee also called normally keeps the frame under it", analyse(both, base).bound, 100 + 50 + 40 + 200)
     # the thread's entry frames and its top-of-stack bytes lie beneath the function the bound is rooted at
     entry_contract = {**base, "thread_entry": {"frames": ["worker"], "extra": 16, "why": "t"}}
     entered = analyse(_model(), entry_contract)

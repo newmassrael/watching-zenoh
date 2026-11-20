@@ -5,7 +5,8 @@
     "rustc": "2d8144b7880597b6e6d3dfd63a9a9efae3f533d3"
   },
   "cold": [
-    "^core::str::slice_error_fail"
+    "^core::str::slice_error_fail",
+    "^exit$"
   ],
   "thread_entry": {
     "frames": ["z_thread_entry", "bg_thread_main", "main"],
@@ -13,28 +14,29 @@
     "why": "the main thread's stack holds, beneath wz_app_main, the kernel's frames that run it (z_thread_entry, bg_thread_main and the app's main: 56 bytes in the images) and, at the top of the stack, the thread-local storage and the alignment (16 bytes with the 8 of .tbss). Read off the real stack of the plain client on the kit by walking its frame-pointer chain at the deepest write (2026-11-03): wz_app_main's entry was 72 bytes deep, and the bound that started at wz_app_main was 16 bytes under the kit's reading"
   },
   "site_pins": {
-    "engine-turn": {"zephyr-client-fixed": 35, "zephyr-client-heap": 35, "zephyr-client-fixed-batching": 35, "zephyr-client-fixed-get": 35, "zephyr-admin-fixed-tls": 35, "zephyr-client-fixed-tls": 35},
+    "engine-turn": {"zephyr-client-fixed": 40, "zephyr-client-heap": 40, "zephyr-client-fixed-batching": 40, "zephyr-client-fixed-get": 40, "zephyr-admin-fixed-tls": 40, "zephyr-client-fixed-tls": 40},
     "engine-inbox": {"zephyr-client-fixed": 4, "zephyr-client-heap": 4, "zephyr-client-fixed-batching": 4, "zephyr-client-fixed-get": 4, "zephyr-admin-fixed-tls": 4, "zephyr-client-fixed-tls": 4},
     "engine-host": {"zephyr-client-fixed": 4, "zephyr-client-heap": 4, "zephyr-client-fixed-batching": 4, "zephyr-client-fixed-get": 4, "zephyr-admin-fixed-tls": 4, "zephyr-client-fixed-tls": 4},
     "tx-encoder": {"zephyr-client-fixed": 1, "zephyr-client-heap": 1, "zephyr-client-fixed-batching": 3, "zephyr-client-fixed-get": 1, "zephyr-admin-fixed-tls": 1, "zephyr-client-fixed-tls": 1},
     "walk-entry-tables": {"zephyr-client-fixed": 4, "zephyr-client-heap": 4, "zephyr-client-fixed-batching": 4, "zephyr-client-fixed-get": 4, "zephyr-admin-fixed-tls": 4, "zephyr-client-fixed-tls": 4},
-    "engine-behaviour": {"zephyr-client-fixed": 11, "zephyr-client-heap": 11, "zephyr-client-fixed-batching": 11, "zephyr-client-fixed-get": 11, "zephyr-admin-fixed-tls": 11, "zephyr-client-fixed-tls": 11},
+    "engine-behaviour": {"zephyr-client-fixed": 15, "zephyr-client-heap": 15, "zephyr-client-fixed-batching": 15, "zephyr-client-fixed-get": 15, "zephyr-admin-fixed-tls": 15, "zephyr-client-fixed-tls": 15},
     "exec-drop": {"zephyr-client-fixed": 3, "zephyr-client-heap": 3, "zephyr-client-fixed-batching": 3, "zephyr-client-fixed-get": 3, "zephyr-admin-fixed-tls": 3, "zephyr-client-fixed-tls": 3},
-    "waker": {"zephyr-client-fixed": 8, "zephyr-client-heap": 8, "zephyr-client-fixed-batching": 8, "zephyr-client-fixed-get": 8, "zephyr-admin-fixed-tls": 7, "zephyr-client-fixed-tls": 8},
+    "waker": {"zephyr-client-fixed": 9, "zephyr-client-heap": 9, "zephyr-client-fixed-batching": 9, "zephyr-client-fixed-get": 9, "zephyr-admin-fixed-tls": 9, "zephyr-client-fixed-tls": 9},
     "planner-call": {"zephyr-client-fixed": 3, "zephyr-client-heap": 3, "zephyr-client-fixed-batching": 3, "zephyr-client-fixed-get": 3, "zephyr-admin-fixed-tls": 1, "zephyr-client-fixed-tls": 3},
     "planner-emit": {"zephyr-client-fixed": 3, "zephyr-client-heap": 3, "zephyr-client-fixed-batching": 3, "zephyr-client-fixed-get": 3, "zephyr-admin-fixed-tls": 3, "zephyr-client-fixed-tls": 3},
     "record": {"zephyr-client-fixed": 1, "zephyr-client-heap": 1, "zephyr-client-fixed-batching": 1, "zephyr-client-fixed-get": 3, "zephyr-admin-fixed-tls": 6, "zephyr-client-fixed-tls": 1},
     "own-mapping": {"zephyr-client-fixed": 0, "zephyr-client-heap": 0, "zephyr-client-fixed-batching": 0, "zephyr-client-fixed-get": 1, "zephyr-admin-fixed-tls": 2},
     "answer-reply": {"zephyr-client-fixed": 6, "zephyr-client-heap": 6, "zephyr-client-fixed-batching": 6, "zephyr-client-fixed-get": 6, "zephyr-client-fixed-tls": 6},
     "byte-cells": {"zephyr-client-fixed": 2, "zephyr-client-heap": 2, "zephyr-client-fixed-batching": 2, "zephyr-client-fixed-get": 2, "zephyr-admin-fixed-tls": 2, "zephyr-client-fixed-tls": 2},
-    "fmt-builders": {"zephyr-client-fixed": 0, "zephyr-client-heap": 0, "zephyr-client-fixed-batching": 0, "zephyr-client-fixed-get": 5},
+    "fmt-builders": {"zephyr-client-fixed": 0, "zephyr-client-heap": 0, "zephyr-client-fixed-batching": 0, "zephyr-client-fixed-get": 6},
     "app-main": {"zephyr-client-fixed": 0, "zephyr-client-heap": 0, "zephyr-client-fixed-batching": 0, "zephyr-client-fixed-get": 0, "zephyr-admin-fixed-tls": 6},
     "zsock-sendto": {"zephyr-client-fixed": 1, "zephyr-client-heap": 1, "zephyr-client-fixed-batching": 1, "zephyr-client-fixed-get": 1, "zephyr-admin-fixed-tls": 1, "zephyr-client-fixed-tls": 1},
     "zsock-recvfrom": {"zephyr-client-fixed": 1, "zephyr-client-heap": 1, "zephyr-client-fixed-batching": 1, "zephyr-client-fixed-get": 1, "zephyr-admin-fixed-tls": 1, "zephyr-client-fixed-tls": 1},
     "zsock-bind": {"zephyr-client-fixed": 1, "zephyr-client-heap": 1, "zephyr-client-fixed-batching": 1, "zephyr-client-fixed-get": 1, "zephyr-admin-fixed-tls": 1, "zephyr-client-fixed-tls": 1},
     "zsock-getsockname": {"zephyr-client-fixed": 1, "zephyr-client-heap": 1, "zephyr-client-fixed-batching": 1, "zephyr-client-fixed-get": 1, "zephyr-admin-fixed-tls": 1, "zephyr-client-fixed-tls": 1},
     "zsock-setsockopt": {"zephyr-client-fixed": 1, "zephyr-client-heap": 1, "zephyr-client-fixed-batching": 1, "zephyr-client-fixed-get": 1, "zephyr-admin-fixed-tls": 1, "zephyr-client-fixed-tls": 1},
-    "zsock-socket": {"zephyr-client-fixed": 1, "zephyr-client-heap": 1, "zephyr-client-fixed-batching": 1, "zephyr-client-fixed-get": 1, "zephyr-admin-fixed-tls": 1, "zephyr-client-fixed-tls": 1},
+    "zsock-socket": {"zephyr-client-fixed": 2, "zephyr-client-heap": 2, "zephyr-client-fixed-batching": 2, "zephyr-client-fixed-get": 2, "zephyr-admin-fixed-tls": 2, "zephyr-client-fixed-tls": 2},
+    "printk-hook": {"zephyr-client-fixed": 1, "zephyr-client-heap": 1, "zephyr-client-fixed-batching": 1, "zephyr-client-fixed-get": 1, "zephyr-admin-fixed-tls": 1, "zephyr-client-fixed-tls": 1},
     "zvfs-close": {"zephyr-client-fixed": 2, "zephyr-client-heap": 2, "zephyr-client-fixed-batching": 2, "zephyr-client-fixed-get": 2, "zephyr-admin-fixed-tls": 2, "zephyr-client-fixed-tls": 2},
     "zvfs-ioctl": {"zephyr-client-fixed": 2, "zephyr-client-heap": 2, "zephyr-client-fixed-batching": 2, "zephyr-client-fixed-get": 2, "zephyr-admin-fixed-tls": 2, "zephyr-client-fixed-tls": 2},
     "stdio-put": {"zephyr-client-fixed": 14, "zephyr-client-heap": 14, "zephyr-client-fixed-batching": 14, "zephyr-client-fixed-get": 14, "zephyr-admin-fixed-tls": 14, "zephyr-client-fixed-tls": 14},
@@ -54,25 +56,31 @@
     "zsock-listen": {"zephyr-admin-fixed-tls": 1},
     "zsock-accept": {"zephyr-admin-fixed-tls": 1},
     "zsock-getpeername": {"zephyr-admin-fixed-tls": 1, "zephyr-client-fixed-tls": 1},
-    "admin-text-out": {"zephyr-admin-fixed-tls": 15},
-    "json-text-out": {"zephyr-admin-fixed-tls": 11},
+    "admin-text-out": {"zephyr-admin-fixed-tls": 17},
+    "json-text-out": {"zephyr-admin-fixed-tls": 14},
+    "admin-config-array": {"zephyr-admin-fixed-tls": 1},
     "json5-text-out": {"zephyr-admin-fixed-tls": 4},
-    "tcp-send-hook": {"zephyr-admin-fixed-tls": 1, "zephyr-client-fixed-tls": 1},
+    "tcp-send-hook": {"zephyr-admin-fixed-tls": 2, "zephyr-client-fixed-tls": 2},
     "tcp-send-data-cb": {"zephyr-admin-fixed-tls": 1, "zephyr-client-fixed-tls": 1},
     "tcp-close-cb": {"zephyr-admin-fixed-tls": 2, "zephyr-client-fixed-tls": 2},
     "ssl-bio-recv": {"zephyr-admin-fixed-tls": 3, "zephyr-client-fixed-tls": 3},
     "ssl-bio-send": {"zephyr-admin-fixed-tls": 1, "zephyr-client-fixed-tls": 1},
-    "ssl-checksum": {"zephyr-admin-fixed-tls": 5, "zephyr-client-fixed-tls": 5},
+    "ssl-checksum": {"zephyr-admin-fixed-tls": 7, "zephyr-client-fixed-tls": 7},
     "ssl-server-step": {"zephyr-admin-fixed-tls": 2, "zephyr-client-fixed-tls": 2},
-    "ssl-timers": {"zephyr-admin-fixed-tls": 3, "zephyr-client-fixed-tls": 3},
-    "ssl-export-keys": {"zephyr-admin-fixed-tls": 3, "zephyr-client-fixed-tls": 3},
+    "ssl-timers": {"zephyr-admin-fixed-tls": 4, "zephyr-client-fixed-tls": 4},
+    "ssl-export-keys": {"zephyr-admin-fixed-tls": 4, "zephyr-client-fixed-tls": 4},
     "x509-ext-cb": {"zephyr-admin-fixed-tls": 2, "zephyr-client-fixed-tls": 2},
     "x509-verify-cb": {"zephyr-admin-fixed-tls": 1, "zephyr-client-fixed-tls": 1},
-    "pk-verify": {"zephyr-admin-fixed-tls": 1, "zephyr-client-fixed-tls": 1},
-    "pk-sign": {"zephyr-admin-fixed-tls": 1, "zephyr-client-fixed-tls": 1},
+    "pk-verify": {"zephyr-admin-fixed-tls": 2, "zephyr-client-fixed-tls": 2},
+    "pk-sign": {"zephyr-admin-fixed-tls": 2, "zephyr-client-fixed-tls": 2},
     "zeroize": {"zephyr-admin-fixed-tls": 2, "zephyr-client-fixed-tls": 2},
     "asn1-sequence-of": {"zephyr-admin-fixed-tls": 1, "zephyr-client-fixed-tls": 1},
-    "psa-entropy-init": {"zephyr-admin-fixed-tls": 1, "zephyr-client-fixed-tls": 1},
+    "psa-entropy-init": {"zephyr-admin-fixed-tls": 2, "zephyr-client-fixed-tls": 2},
+    "psa-status-fallback": {"zephyr-admin-fixed-tls": 2, "zephyr-client-fixed-tls": 2},
+    "mbedtls-calloc": {"zephyr-admin-fixed-tls": 1, "zephyr-client-fixed-tls": 1},
+    "mbedtls-free": {"zephyr-admin-fixed-tls": 1, "zephyr-client-fixed-tls": 1},
+    "mbedtls-arena-exit": {"zephyr-admin-fixed-tls": 6, "zephyr-client-fixed-tls": 6},
+    "stdio-fwrite": {"zephyr-admin-fixed-tls": 1, "zephyr-client-fixed-tls": 1},
     "drbg-entropy": {"zephyr-admin-fixed-tls": 2, "zephyr-client-fixed-tls": 2},
     "mpi-random": {"zephyr-admin-fixed-tls": 1, "zephyr-client-fixed-tls": 1},
     "ecp-modp": {"zephyr-admin-fixed-tls": 1, "zephyr-client-fixed-tls": 1},
@@ -245,14 +253,50 @@
     {
       "id": "txbuf-len",
       "where": {"file": "tx_buf.rs", "anchor": "self.inner.len()"},
-      "callees": "TxBuf>::len$",
-      "why": "the capped buffer asks the buffer it wraps for its length, in its own length and in each of the three checks of its cap (one call written four times, so one rule: a fifth would be the same call)"
+      "callees": "^<(?!wz_session_core::tx_buf::CappedTxBuf as ).* as wz_session_core::tx_buf::TxBuf>::len$",
+      "why": "the capped buffer asks the buffer it wraps for its length, in its own length and in each of the three checks of its cap (one call written four times, so one rule: a fifth would be the same call). The buffer it wraps is never a capped buffer: its five constructions (session_actions.rs twice, multicast_tx.rs, lent_response.rs twice) wrap a lent slot, a SliceTxBuf or a slice, so its own methods are not among the callees"
     },
     {
       "id": "txbuf-append-byte",
       "where": {"file": "tx_buf.rs", "anchor": "self.inner.append_byte("},
+      "callees": "^<(?!wz_session_core::tx_buf::CappedTxBuf as ).* as wz_session_core::tx_buf::TxBuf>::append_byte$",
+      "why": "the capped buffer appends to the buffer it wraps, never a capped buffer (txbuf-len)"
+    },
+    {
+      "id": "txbuf-inner-append",
+      "where": {"file": "tx_buf.rs", "anchor": "self.inner.append(bytes)"},
+      "callees": "^<(?!wz_session_core::tx_buf::CappedTxBuf as ).* as wz_session_core::tx_buf::TxBuf>::append$",
+      "why": "the capped buffer appends a slice to the buffer it wraps, never a capped buffer (txbuf-len); a tail call (bx), which the reader of register calls sees since 2026-11-21"
+    },
+    {
+      "id": "txbuf-inner-reserve",
+      "where": {"file": "tx_buf.rs", "anchor": "self.inner.reserve(n)"},
+      "callees": "^<(?!wz_session_core::tx_buf::CappedTxBuf as ).* as wz_session_core::tx_buf::TxBuf>::reserve$",
+      "why": "the capped buffer reserves in the buffer it wraps, never a capped buffer (txbuf-len); a tail call"
+    },
+    {
+      "id": "txbuf-inner-as-slice",
+      "where": {"file": "tx_buf.rs", "anchor": "self.inner.as_slice()"},
+      "callees": "^<(?!wz_session_core::tx_buf::CappedTxBuf as ).* as wz_session_core::tx_buf::TxBuf>::as_slice$",
+      "why": "the capped buffer's bytes are the buffer's it wraps, never a capped buffer (txbuf-len); a tail call"
+    },
+    {
+      "id": "txbuf-inner-truncate",
+      "where": {"file": "tx_buf.rs", "anchor": "self.inner.truncate(len)"},
+      "callees": "^<(?!wz_session_core::tx_buf::CappedTxBuf as ).* as wz_session_core::tx_buf::TxBuf>::truncate$",
+      "why": "the capped buffer truncates the buffer it wraps, never a capped buffer (txbuf-len); a tail call"
+    },
+    {
+      "id": "sink-vle-last-byte",
+      "where": {"file": "forge-runtime/src/codec.rs", "anchor": "while v >= 0x80 && n < cont_max {"},
       "callees": "TxBuf>::append_byte$",
-      "why": "the capped buffer appends to the buffer it wraps"
+      "why": "the last byte of a VLE (`self.write_u8(v as u8)` after the loop) through the sink's buffer, `&mut dyn TxBuf`, as txbuf-append-byte-sink; inlined into the codec's writer the line table names the loop's head. The call is `blx sl`, a register the reader of register calls names since 2026-11-21"
+    },
+    {
+      "id": "proven-query",
+      "where": {"file": "query_sink.rs", "anchor": "self.inner."},
+      "callees": "^<(?!wz_session_core::query_sink::ProvenQuery as ).* as wz_session_core::query_sink::QueryView>::",
+      "why": "a proven query answers every accessor from the query it wraps (`&dyn QueryView`), which is the received query and never a proven one: its one construction (query_sink.rs, `ProvenQuery { inner: view, peer }`) wraps the view the sink was handed; tail calls"
     },
     {
       "id": "txbuf-append-byte-sink",
@@ -301,6 +345,30 @@
       "where": {"file": "fmt/mod.rs", "line": 1849, "library": "rustc"},
       "callees": "core::fmt::Write>::(write_str|write_char)$",
       "why": "the writer a formatter writes to"
+    },
+    {
+      "id": "fmt-write-1633",
+      "where": {"file": "fmt/mod.rs", "line": 1633, "library": "rustc"},
+      "callees": "core::fmt::Write>::(write_str|write_char)$",
+      "why": "the writer a formatter writes to (`core::fmt::write`'s `output.write_str(s)` for a string with no arguments; a tail call)"
+    },
+    {
+      "id": "fmt-write-1851",
+      "where": {"file": "fmt/mod.rs", "line": 1851, "library": "rustc"},
+      "callees": "core::fmt::Write>::(write_str|write_char)$",
+      "why": "the writer a formatter writes to (`pad_integral`'s `write_prefix`, `f.buf.write_str(prefix)`; a tail call)"
+    },
+    {
+      "id": "fmt-write-1859",
+      "where": {"file": "fmt/mod.rs", "line": 1859, "library": "rustc"},
+      "callees": "core::fmt::Write>::(write_str|write_char)$",
+      "why": "the writer a formatter writes to (`pad_integral` with no width, `self.buf.write_str(buf)`; a tail call)"
+    },
+    {
+      "id": "fmt-write-1960",
+      "where": {"file": "fmt/mod.rs", "line": 1960, "library": "rustc"},
+      "callees": "core::fmt::Write>::(write_str|write_char)$",
+      "why": "the writer a formatter writes to (`pad`'s write with no padding, which the line table places at `padding`'s alignment; a tail call)"
     },
     {
       "id": "fmt-write-1867",
@@ -509,6 +577,12 @@
       "why": "the JSON writers write to a generic sink that the admin node instantiates as `dyn TextOut`, whose one implementor with an address in the image is FixedText"
     },
     {
+      "id": "admin-config-array",
+      "where": {"function": "ConfigView>::write_config_json$"},
+      "callees": "FixedText as (wz_session_core::text_out::TextOut|core::fmt::Write)>::(push_str|push|push_u64|push_hex_u128|write_str|write_char|write_fmt)$",
+      "why": "the opening `out.push('[')` of push_str_array (json.rs) into `&mut dyn TextOut`, inlined into the admin node's configuration document where the line table places it at the slice's pointer add (ptr/mut_ptr.rs); its other calls are admin-text-out's and json-text-out's, which come first. The call is `blx fp`, a register the reader of register calls names since 2026-11-21"
+    },
+    {
       "id": "json5-text-out",
       "where": {"file": "json5_lex.rs"},
       "callees": "core::fmt::Write>::(write_str|write_char)$",
@@ -540,9 +614,9 @@
     },
     {
       "id": "tcp-send-hook",
-      "where": {"function": "^tcp_send$"},
+      "where": {"function": "^(tcp_send|tcp_out_ext)$"},
       "callees": "NONE",
-      "why": "tcp_send_cb is the hook Zephyr's own TCP tests set (it is NULL and the call is guarded by it); nothing in the image stores to it, and no function with the hook's signature has its address taken"
+      "why": "tcp_send_cb is the hook Zephyr's own TCP tests set (it is NULL and the call is guarded by it); nothing in the image stores to it, and no function with the hook's signature has its address taken. tcp_out_ext calls it too (tcp.c, `if (tcp_send_cb) { ret = tcp_send_cb(pkt); goto out; }`), as a tail call"
     },
     {
       "id": "tcp-send-data-cb",
@@ -570,9 +644,9 @@
     },
     {
       "id": "ssl-checksum",
-      "where": {"function": "^mbedtls_ssl_(write_client_hello|write_handshake_msg_ext|add_hs_hdr_to_checksum|add_hs_msg_to_checksum|reset_transcript_for_hrr)$"},
+      "where": {"function": "^mbedtls_ssl_(write_client_hello|write_handshake_msg_ext|add_hs_hdr_to_checksum|add_hs_msg_to_checksum|reset_transcript_for_hrr|read_record)$"},
       "callees": "^ssl_update_checksum_(start|sha256)$",
-      "why": "handshake->update_checksum, which mbedtls_ssl_reset_checksum sets to the start function and then to the hash of the suite (SHA-384 is not built into the image: no ssl_update_checksum_sha384)"
+      "why": "handshake->update_checksum, which mbedtls_ssl_reset_checksum sets to the start function and then to the hash of the suite (SHA-384 is not built into the image: no ssl_update_checksum_sha384). mbedtls_ssl_read_record makes it as a tail call through the inlined mbedtls_ssl_update_handshake_status (ssl_msg.c, `ssl->handshake->update_checksum(ssl, ssl->in_msg, ssl->in_hslen)`)"
     },
     {
       "id": "ssl-server-step",
@@ -582,10 +656,10 @@
     },
     {
       "id": "ssl-timers",
-      "where": {"function": "^mbedtls_ssl_read$"},
+      "where": {"function": "^mbedtls_ssl_(read|set_timer)$"},
       "callees": "NONE",
       "absent_reached": "^mbedtls_ssl_set_timer_cb$",
-      "why": "its three calls by register are f_set_timer and f_get_timer (ssl + 84 and + 88), each guarded by a test for NULL, and only mbedtls_ssl_set_timer_cb sets them"
+      "why": "mbedtls_ssl_read's three calls by register are f_set_timer and f_get_timer (ssl + 84 and + 88), each guarded by a test for NULL, and only mbedtls_ssl_set_timer_cb sets them; mbedtls_ssl_set_timer's one is f_set_timer, guarded the same way, as a tail call"
     },
     {
       "id": "ssl-export-keys",
@@ -609,15 +683,15 @@
     },
     {
       "id": "pk-verify",
-      "where": {"function": "^mbedtls_pk_verify_ext$"},
+      "where": {"function": "^mbedtls_pk_verify_(ext|restartable)$"},
       "callees": "^ecdsa_(opaque_)?verify_wrap$",
-      "why": "pk_info->verify_func, among the wrappers the image holds the address of (the RSA wrapper is not built in)"
+      "why": "pk_info->verify_func, among the wrappers the image holds the address of (the RSA wrapper is not built in); mbedtls_pk_verify_restartable makes it as a tail call"
     },
     {
       "id": "pk-sign",
-      "where": {"function": "^mbedtls_pk_sign_ext$"},
+      "where": {"function": "^mbedtls_pk_sign_(ext|restartable)$"},
       "callees": "^(ecdsa|rsa)_opaque_sign_wrap$",
-      "why": "pk_info->sign_func, among the wrappers the image holds the address of (ecdsa_sign_wrap is an alias of the opaque one)"
+      "why": "pk_info->sign_func, among the wrappers the image holds the address of (ecdsa_sign_wrap is an alias of the opaque one); mbedtls_pk_sign_restartable makes it as a tail call"
     },
     {
       "id": "zeroize",
@@ -633,9 +707,45 @@
     },
     {
       "id": "psa-entropy-init",
-      "where": {"function": "^psa_random_internal_init$"},
+      "where": {"function": "^psa_random_internal_(init|free)$"},
       "callees": "^mbedtls_entropy_(init|free)$",
-      "why": "rng->entropy_init and rng->entropy_free, which psa_random_internal_init fills with the entropy module's own when no source was configured"
+      "why": "rng->entropy_init and rng->entropy_free, which psa_random_internal_init fills with the entropy module's own when no source was configured; psa_random_internal_free calls entropy_free as a tail call"
+    },
+    {
+      "id": "mbedtls-calloc",
+      "where": {"function": "^mbedtls_calloc$"},
+      "callees": "^(calloc|buffer_alloc_calloc)$",
+      "why": "mbedtls_calloc_func, which starts as the C library's calloc and which mbedtls_memory_buffer_alloc_init replaces with buffer_alloc_calloc (mbedtls_platform_set_calloc_free) for the TLS library's own arena; a tail call"
+    },
+    {
+      "id": "mbedtls-arena-exit",
+      "where": {"function": "^buffer_alloc_(calloc|free)$"},
+      "callees": "^exit$",
+      "why": "mbedtls_exit, the C library's exit (the platform layer's default; nothing in the image sets another), which the arena calls with 1 when it finds its chain broken or a free outside it (memory_buffer_alloc.c, `mbedtls_exit(1)`), after its message to stderr. `exit` is in `cold`: it ends the program, as a panic does, so what it runs (the fini array, `_exit`'s message) is no part of a run's peak"
+    },
+    {
+      "id": "stdio-fwrite",
+      "where": {"function": "^fwrite$"},
+      "callees": "^picolibc_put$|^__file_str_put$",
+      "why": "the stream's put function, as stdio-put: the image's one fwrite is the arena's message to stderr, whose put is picolibc_put"
+    },
+    {
+      "id": "mbedtls-free",
+      "where": {"function": "^mbedtls_free$"},
+      "callees": "^(free|buffer_alloc_free)$",
+      "why": "mbedtls_free_func, the C library's free until the arena's buffer_alloc_free replaces it (mbedtls-calloc); a tail call"
+    },
+    {
+      "id": "psa-status-fallback",
+      "where": {"function": "^psa_status_to_mbedtls$"},
+      "callees": "^psa_(generic|pk)_status_to_mbedtls$",
+      "why": "fallback_f, the translator a module's PSA_TO_MBEDTLS_ERR_LIST passes when no pair of its list matched (psa_util_internal.h): the generic one or the pk one, the two the image takes the address of; two tail calls"
+    },
+    {
+      "id": "printk-hook",
+      "where": {"function": "^char_out$"},
+      "callees": "^(console_out|arch_printk_char_out)$",
+      "why": "printk.c's _char_out, which starts as the weak arch_printk_char_out (does nothing) and __printk_hook_install sets to the console's console_out; a tail call"
     },
     {
       "id": "drbg-entropy",
