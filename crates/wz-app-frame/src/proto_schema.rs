@@ -473,11 +473,12 @@ impl<'f, 'a> Linker<'f, 'a> {
         Ok(linker)
     }
 
-    /// The type tables a link produced, given up by the linker that borrows the
-    /// files: what the typed reader needs to read a message after the files are
-    /// gone ([`crate::proto_decode::SchemaSet`]).
-    pub fn into_types(self) -> (Vec<Msg>, Vec<EnumInfo>) {
-        (self.msgs, self.enums)
+    /// The type tables a link produced and each file's own options, given up by
+    /// the linker that borrows the files: what the typed reader needs to read a
+    /// message after the files are gone, and what a writer that narrows by the
+    /// nanopb options reads them from ([`crate::proto_decode::SchemaSet`]).
+    pub fn into_types(self) -> (Vec<Msg>, Vec<EnumInfo>, Vec<Vec<FieldOption>>) {
+        (self.msgs, self.enums, self.file_options)
     }
 
     /// An empty linker over `files`, once the names are known to be distinct.
@@ -508,6 +509,22 @@ impl<'f, 'a> Linker<'f, 'a> {
             extensions: BTreeMap::new(),
             file_options: alloc::vec![Vec::new(); files.len()],
         })
+    }
+}
+
+/// The `option` statements of each file of a linked schema, by the file's index
+/// ([`Msg::file`]): the outermost level the nanopb options are merged from
+/// ([`crate::proto_nanopb`]). The linker a schema is read with and the schema set
+/// a payload keeps both answer it, so an option reads the same over either.
+pub trait FileOptions {
+    /// The options file `file` states, in the order written; none for an index
+    /// the schema has no file at.
+    fn options_of_file(&self, file: usize) -> &[FieldOption];
+}
+
+impl FileOptions for Linker<'_, '_> {
+    fn options_of_file(&self, file: usize) -> &[FieldOption] {
+        self.file_options.get(file).map_or(&[][..], Vec::as_slice)
     }
 }
 
