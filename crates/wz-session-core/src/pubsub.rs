@@ -2322,6 +2322,17 @@ struct MemoSlot<P: Storage> {
     hits: BoundedVec<u16, { caps::MAX_SUBSCRIPTIONS }, P>,
 }
 
+// A slot keeps a position in 16 bits. A table of a build that enforces capacity holds at most
+// `MAX_SUBSCRIPTIONS` rows, so where it has slots every position it can hold fits one, and no key
+// it matches is left out of the cache for the position of a match (`fire_into_memoized`).
+const _: () = assert!(
+    !crate::bounded::ENFORCES_CAPACITY
+        || caps::MATCH_MEMO_FIXED_SLOTS == 0
+        || caps::MAX_SUBSCRIPTIONS <= u16::MAX as usize + 1,
+    "MAX_SUBSCRIPTIONS is at most 65536 on a fixed-capacity build with MATCH_MEMO_FIXED_SLOTS: \
+     the receive match cache keeps a subscriber's position in a u16"
+);
+
 /// A small direct-mapped memory of which subscribers a key matched, so that the key arriving
 /// again (a stream's every message carries the same one) is delivered without splitting it and
 /// every subscription's pattern on `/` and intersecting them, which was the larger part of what
@@ -2434,12 +2445,25 @@ fn fire_into_memoized<C: SampleSink, P: Storage>(
     // that cannot be matched at all (deeper than the bound) delivers to nobody and is not
     // remembered.
     let mut hits: BoundedVec<u16, { caps::MAX_SUBSCRIPTIONS }, P> = BoundedVec::default();
+    let mut every_hit_noted = true;
     let Some(fired) = scan_subscribers(subscribers, key, is_remote, deliver, |position| {
-        // At most one position per subscriber, and the table holds `MAX_SUBSCRIPTIONS`.
-        let _ = hits.push(position as u16);
+        // A slot keeps a position in 16 bits. A heap table can grow past that, and a position
+        // cut to fit would name another subscriber, so a key that matched one there is
+        // delivered by this scan and not remembered (a table of a fixed-capacity build never
+        // holds one; see the assertion beside `MatchMemo`).
+        match u16::try_from(position) {
+            Ok(position) => {
+                // At most one position per subscriber, and the table holds `MAX_SUBSCRIPTIONS`.
+                let _ = hits.push(position);
+            }
+            Err(_) => every_hit_noted = false,
+        }
     }) else {
         return 0;
     };
+    if !every_hit_noted {
+        return fired;
+    }
     // A key longer than a fixed slot holds is delivered as matched and not remembered; the slot
     // it would have taken keeps what it had.
     let mut text: BoundedString<{ caps::MATCH_MEMO_KEY_BYTES }, P> = BoundedString::default();
@@ -7871,6 +7895,73 @@ mod entity_id_space_tests {
         assert!(
             spent.take_staged_sub_interest_replies().is_empty(),
             "no bare Final for a chain that could not be answered"
+        );
+    }
+}
+
+/// The receive match cache of a heap table that has grown past the 65536 positions a slot keeps
+/// in 16 bits: a key that matched a subscriber beyond them is delivered by the scan each time and
+/// never answered from a slot, where a position cut to 16 bits would name another subscriber.
+///
+/// The table is filled with real rows rather than a cache slot written by hand: 65537 rows of a
+/// short pattern cost a few megabytes and three scans of them a few milliseconds, and the test
+/// then goes through the same registration and delivery a session does.
+#[cfg(all(test, feature = "alloc"))]
+mod match_memo_position_tests {
+    use super::*;
+    use crate::bounded::Heap;
+    use crate::locality::Locality;
+    use crate::sample::{Reliability, SampleKind};
+    use crate::sink::BorrowedSample;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    /// Counts each delivery into the counter it shares.
+    struct Count(Arc<AtomicUsize>);
+    impl SampleSink for Count {
+        fn deliver(&mut self, _sample: &dyn SampleView) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn a_key_matched_past_the_16_bit_positions_is_scanned_each_time_and_not_remembered() {
+        let scans = || MATCH_SCANS.with(|count| count.get());
+        let elsewhere = Arc::new(AtomicUsize::new(0));
+        let target = Arc::new(AtomicUsize::new(0));
+        let mut table: SubscriberTable<Count, Heap> = SubscriberTable::default();
+        // Every position 16 bits can name holds a subscriber the key does not reach.
+        for _ in 0..=usize::from(u16::MAX) {
+            table
+                .register_sink("other/x", Locality::Any, Count(elsewhere.clone()))
+                .expect("a heap table grows");
+        }
+        // The one it reaches is at 65536, which is position 0 once cut to 16 bits.
+        table
+            .register_sink("k", Locality::Any, Count(target.clone()))
+            .expect("a heap table grows");
+        assert_eq!(table.len(), usize::from(u16::MAX) + 2);
+
+        let sample = BorrowedSample {
+            keyexpr: "k",
+            payload: b"x",
+            kind: SampleKind::Put,
+            reliability: Reliability::Reliable,
+        };
+        let start = scans();
+        for _ in 0..3 {
+            assert_eq!(table.dispatch_borrowed(&sample, false), 1);
+        }
+        assert_eq!(
+            target.load(Ordering::Relaxed),
+            3,
+            "each message reaches the subscriber the key matches"
+        );
+        assert_eq!(elsewhere.load(Ordering::Relaxed), 0, "and no other");
+        assert_eq!(
+            scans() - start,
+            3,
+            "the key is matched by the scan each time, never answered from a slot"
         );
     }
 }
