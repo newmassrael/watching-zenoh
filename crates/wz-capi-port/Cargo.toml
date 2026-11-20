@@ -56,6 +56,9 @@ resource-snapshot = ["std", "wz-session-core/resource-snapshot"]
 # that holds a dictionary answers how a key goes on the wire under the session's key-wire form.
 # The dictionary and the rule are session-core's; an engine that holds none answers nothing.
 shared-key-ids = ["wz-session-core/shared-key-ids"]
+# A time base the program supplies (`time_base`): the time base of `wz-node-time` made from the C
+# calls a door of either C ABI is handed. wz's own, so off by default as the reference builds are.
+time-base = ["std", "dep:wz-node-time", "wz-node-time/time-base"]
 
 [dependencies]
 # The lock of a build without `std` (src/sync.rs): the image links the implementation, as it does
@@ -73,8 +76,8 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
     "session-matching",
     "declare-interest",
 ] }
-# The node's clock registry and event ring, which the observation plane's doors act on. Optional:
-# only the `clock-source` and `event-ring` features name it.
+# The node's clock registry and event ring, which the observation plane's doors act on, and the
+# time base a program supplies. Optional: only `clock-source`, `event-ring` and `time-base` name it.
 wz-node-time = { path = "../wz-node-time", optional = true }
 
 [lints]

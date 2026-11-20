@@ -2205,6 +2205,12 @@ pub use wz_node_time::timestamp_source;
 /// path it has always had.
 pub use wz_node_time::node_clock;
 
+// The time base a program supplies, which a `runtime_impl::TokioTime` made over it reads and
+// waits on in place of tokio's clock. It lives in `wz-node-time`, beside the node's other times,
+// and is re-exported for the ABI model above this crate, which opens a session on it.
+#[cfg(feature = "program-time")]
+pub use wz_node_time::time_base;
+
 // R311uy — the storage service DRIVER (§5.11 storage, atom 3/4): the AP
 // tokio binding for the runtime-agnostic storage kernel. A
 // `storage_service::StorageService` declares a capture `Subscriber`

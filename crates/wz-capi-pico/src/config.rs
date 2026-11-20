@@ -106,6 +106,10 @@ pub(crate) struct ConfigState {
     /// the open hands the engine.
     #[cfg(feature = "shared-key-ids")]
     pub(crate) key_ids: wz_session_core::shared_key_ids::KeyIdsAtOpen,
+    /// The time base the program supplies (`wz_ext_config_time_base`), which the session opened
+    /// from this config times its deadlines by in place of the system's clock.
+    #[cfg(feature = "time-base")]
+    pub(crate) time_base: Option<wz_node_time::time_base::TimeBaseHold>,
 }
 
 impl ConfigState {

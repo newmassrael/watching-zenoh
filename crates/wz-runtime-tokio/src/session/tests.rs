@@ -18041,3 +18041,58 @@ fn a_sessions_clock_stamps_by_the_clock_quality_of_its_snapshot() {
     }
     assert!(opened >= 1, "the build's domain holds at least its default");
 }
+
+/// On a time base the program supplies, the wait for stable declarations runs on the program's
+/// time: an answer that is owed and never comes holds a wait of 50 ms for as long as that time
+/// stands still, however long the wall clock runs, and the wait gives up once the program's time
+/// passes its bound and the program says so. On the wall clock the first half ends in 50 ms.
+#[cfg(all(
+    feature = "program-time",
+    feature = "session-reconnect",
+    feature = "codec-declare",
+    feature = "declare-interest"
+))]
+#[tokio::test]
+async fn a_stable_declarations_wait_on_program_time_ends_only_when_that_time_passes() {
+    use std::sync::atomic::AtomicU64;
+    use wz_node_time::time_base::{ProgramTime, TimeBaseHold};
+
+    struct SetTime(Arc<AtomicU64>);
+    impl ProgramTime for SetTime {
+        fn now_ns(&self) -> u64 {
+            self.0.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    let now = Arc::new(AtomicU64::new(0));
+    let hold = TimeBaseHold::new(Box::new(SetTime(now.clone())));
+    let clock = TokioTime::on_time_base(hold.time());
+    // The actions on the same clock, so the owed answer's own stall bound stands still too.
+    let actions = crate::session_glue::new_session_actions(
+        crate::test_fixtures::recording_driver(),
+        fixture_session_init_params(),
+        clock,
+    );
+    let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
+    let session = TokioSession::new(actions, observer, Arc::new(clock));
+    session
+        .actions()
+        .send_interest_liveliness_get(14, 0, Some("home/get"))
+        .expect("liveliness get interest");
+
+    let wait = session.wait_declarations_stable(std::time::Duration::from_millis(50));
+    tokio::pin!(wait);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(1_500), &mut wait)
+            .await
+            .is_err(),
+        "the wall clock ended a wait of the program's time"
+    );
+    now.fetch_add(60_000_000, std::sync::atomic::Ordering::SeqCst);
+    hold.advanced();
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(5), &mut wait).await,
+        Ok(false),
+        "the owed answer does not come within the program's 50 ms"
+    );
+}

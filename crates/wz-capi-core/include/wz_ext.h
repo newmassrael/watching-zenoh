@@ -1766,6 +1766,82 @@ void wz_ext_transport_drop(wz_ext_moved_transport_t *this_);
 void wz_ext_internal_transport_null(wz_ext_owned_transport_t *this_);
 bool wz_ext_internal_transport_check(const wz_ext_owned_transport_t *this_);
 
+/* ================================================ a time base the program supplies
+ *
+ * The clock the timers of a session run on, in place of the system's
+ * monotonic clock: a program that runs its sessions on a time of its own (a
+ * network simulator's, paused, or faster or slower than the wall clock) hands
+ * the library a read of that time, and a session opened from a config given
+ * it times its lease, its keep-alive, its handshake and its other deadlines
+ * by it. A deadline then passes when the program's time passes it, however
+ * long the wall clock has run. Part of the unstable surface, and present only
+ * in a build with the time-base capability.
+ *
+ * THE READ. now_ns(context) answers the program's time in nanoseconds since
+ * an epoch of its choosing. It is called from whichever thread reads a
+ * session's clock, possibly several at once, and must be safe to call that
+ * way; it must not drop the time base. A reading below one already given is
+ * read as the one already given: the time never goes back.
+ *
+ * TELLING THE LIBRARY THE TIME MOVED. A cooperative build reads the time at
+ * each step the program has it take (zp_read, zp_spin_once, a pass of the
+ * read task), so a deadline the program's time has passed is acted on at the
+ * next step. A build whose sessions wait on threads of their own ends such a
+ * wait only when the program says its time has moved on:
+ * wz_ext_time_base_advanced. Call it each time the time moves on, whichever
+ * build the program links.
+ *
+ * WHO OWNS WHAT. The program makes the time base (wz_ext_time_base_new) and
+ * holds it. A config given it holds a reference, and so does a session opened
+ * from that config, for as long as the session runs; the program's own
+ * reference goes with wz_ext_time_base_drop. The program's drop(context),
+ * when it is not NULL, runs once, after the last read, when the last
+ * reference goes.
+ */
+
+/* The calls the program supplies. now_ns is required; drop may be NULL. */
+typedef struct wz_ext_time_base_t {
+  void *context;
+  uint64_t (*now_ns)(void *context);
+  void (*drop)(void *context);
+} wz_ext_time_base_t;
+
+typedef struct wz_ext_owned_time_base_t {
+  void *_handle;
+} wz_ext_owned_time_base_t;
+typedef struct wz_ext_loaned_time_base_t {
+  void *_handle;
+} wz_ext_loaned_time_base_t;
+typedef struct wz_ext_moved_time_base_t {
+  wz_ext_owned_time_base_t _this;
+} wz_ext_moved_time_base_t;
+
+/* A time base over the calls in time_base, which are copied. this_ holds the
+ * null state on every error. Z_OK; Z_ERR_NULL for a NULL this_ or time_base,
+ * or a NULL now_ns. */
+z_result_t wz_ext_time_base_new(wz_ext_owned_time_base_t *this_,
+                                const wz_ext_time_base_t *time_base);
+
+/* The session opened from config times its deadlines by time_base; a second
+ * call replaces the first. The config holds a reference of its own. Z_OK;
+ * Z_ERR_NULL for a NULL config, a NULL time base or the null state. */
+z_result_t wz_ext_config_time_base(z_loaned_config_t *config,
+                                   const wz_ext_loaned_time_base_t *time_base);
+
+/* The program's time has moved on: every wait of a session on time_base whose
+ * time has come by the program's reading now ends. Z_OK; Z_ERR_NULL for a
+ * NULL time base or the null state. */
+z_result_t wz_ext_time_base_advanced(
+    const wz_ext_loaned_time_base_t *time_base);
+
+const wz_ext_loaned_time_base_t *wz_ext_time_base_loan(
+    const wz_ext_owned_time_base_t *this_);
+wz_ext_moved_time_base_t *wz_ext_time_base_move(
+    wz_ext_owned_time_base_t *this_);
+void wz_ext_time_base_drop(wz_ext_moved_time_base_t *this_);
+void wz_ext_internal_time_base_null(wz_ext_owned_time_base_t *this_);
+bool wz_ext_internal_time_base_check(const wz_ext_owned_time_base_t *this_);
+
 /* ================================================ the message catalog
  *
  * A deployment's messages, declared once as data: one JSON5 text names the

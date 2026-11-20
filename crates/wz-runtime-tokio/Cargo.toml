@@ -1712,6 +1712,11 @@ clock-source = ["time-hlc", "wz-node-time/clock-source"]
 # The node's event log (the event ring of the observation plane): `wz-node-time`'s ring, forwarded
 # where the node is built.
 event-ring = ["wz-node-time/event-ring"]
+# A time base the program supplies (`TokioTime::on_time_base`): a clock made over it reads and waits
+# on the program's time in place of tokio's, so the timers of a session it times move only when the
+# program's time does. The time base is `wz-node-time`'s, re-exported as `time_base`. Off,
+# `TokioTime` is tokio's clock alone and holds no field for one.
+program-time = ["wz-node-time/time-base"]
 # The wall-clock NTP64 source alone (`timestamp_source::wall_clock_ntp64`), with none of the
 # stamper seams or the storage module the other features of that module bring: what a C ABI's
 # `z_timestamp_new` reads, in a build that holds no node clock and answers no query.

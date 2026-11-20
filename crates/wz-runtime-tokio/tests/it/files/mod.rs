@@ -71,6 +71,7 @@ mod session_keepalive_tx;
 mod session_multilink_deploy_e2e;
 mod session_multilink_e2e;
 mod session_multilink_readd_e2e;
+mod session_program_time;
 mod session_reconnect_e2e;
 mod shm_e2e;
 mod static_peer_faces;

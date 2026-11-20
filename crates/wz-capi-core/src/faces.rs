@@ -3056,8 +3056,13 @@ impl SharedSession {
         }
         drop(done);
         let mut waiting = asked.len();
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_millis(LINK_BARRIER_TIMEOUT_MS.into()),
+        // On the faces' clock, which is the session's and the one the gets' deadlines are of.
+        let Some(clock) = asked.first().map(|(session, _)| **session.clock()) else {
+            return;
+        };
+        let _ = wz_runtime_tokio::runtime_impl::timeout_on(
+            &clock,
+            LINK_BARRIER_TIMEOUT_MS.into(),
             async {
                 while waiting > 0 && answers.recv().await.is_some() {
                     waiting -= 1;
@@ -3119,11 +3124,13 @@ impl SharedSession {
                 }
                 if let Some(due) = self.local.next_reply_deadline_ms() {
                     use wz_runtime_core::TimeSource as _;
-                    let wait = due.saturating_sub(self.local.clock().now_monotonic_ms());
-                    // The wake or the deadline, whichever comes first; a wake that is not the
-                    // deadline sweeps nothing and sleeps again.
-                    let _ = tokio::time::timeout(
-                        std::time::Duration::from_millis(wait),
+                    let clock = self.local.clock();
+                    let wait = due.saturating_sub(clock.now_monotonic_ms());
+                    // The wake or the deadline, whichever comes first, on the clock the deadline
+                    // is of; a wake that is not the deadline sweeps nothing and sleeps again.
+                    let _ = wz_runtime_tokio::runtime_impl::timeout_on(
+                        &**clock,
+                        wait,
                         self.local_wake.notified(),
                     )
                     .await;

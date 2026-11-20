@@ -51,8 +51,10 @@
 use std::time::Duration;
 
 use wz_codecs::whatami::WhatAmI;
+use wz_runtime_core::TimeSource;
 
 use crate::retry_period::RetryPolicy;
+use crate::runtime_impl::{timeout_on, whole_ms, TokioTime};
 
 /// zenoh's `{connect,listen}.timeout_ms` — the budget the WHOLE phase gets,
 /// with upstream's three-way reading of one integer.
@@ -294,9 +296,26 @@ impl<E: std::fmt::Display> std::fmt::Display for PhaseFailed<E> {
 pub async fn drive_phase<T, E, F, Fut>(
     policy: PhasePolicy,
     schedule: RetryPolicy,
+    attempt: F,
+) -> Result<T, PhaseFailed<E>>
+where
+    F: FnMut(u32) -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
+    drive_phase_on(&TokioTime::new(), policy, schedule, attempt).await
+}
+
+/// [`drive_phase`] on `clock`, the clock of the session the phase opens for: its budget and the
+/// waits between its attempts are of that clock, so a session timed by a time base the program
+/// supplies retries on the program's time.
+pub async fn drive_phase_on<C, T, E, F, Fut>(
+    clock: &C,
+    policy: PhasePolicy,
+    schedule: RetryPolicy,
     mut attempt: F,
 ) -> Result<T, PhaseFailed<E>>
 where
+    C: TimeSource,
     F: FnMut(u32) -> Fut,
     Fut: std::future::Future<Output = Result<T, E>>,
 {
@@ -304,20 +323,24 @@ where
     let deadline = policy
         .budget
         .deadline()
-        .map(|d| tokio::time::Instant::now() + d);
+        .map(|d| clock.now_monotonic_ms().saturating_add(whole_ms(d)));
     let mut period = schedule.period();
     let mut last: Option<E> = None;
     let mut attempts: u32 = 0;
     loop {
         attempts += 1;
         // The remaining budget, or `None` for an untimed phase. A deadline
-        // already in the past yields an elapsed timer, which `timeout_at`
-        // resolves WITHOUT letting the future run to completion — so a spent
+        // already in the past leaves a bound of nothing, which ends the attempt
+        // after its first poll WITHOUT letting it run to completion — so a spent
         // budget cannot smuggle one more attempt through.
         let outcome = match deadline {
-            Some(at) => tokio::time::timeout_at(at, attempt(attempts))
-                .await
-                .map_err(|_| ()),
+            Some(at) => timeout_on(
+                clock,
+                at.saturating_sub(clock.now_monotonic_ms()),
+                attempt(attempts),
+            )
+            .await
+            .map_err(|_| ()),
             None => Ok(attempt(attempts).await),
         };
         match outcome {
@@ -329,16 +352,18 @@ where
         if !arm.retries() {
             break;
         }
-        let wait = Duration::from_millis(period.next_ms());
+        let wait = period.next_ms();
         match deadline {
             // Sleeping PAST the deadline would report the give-up late by
             // however long the last wait was, which is the number an operator
             // reads back as "my timeout_ms did not work".
-            Some(at) if tokio::time::Instant::now() + wait >= at => {
-                tokio::time::sleep_until(at).await;
+            Some(at) if clock.now_monotonic_ms().saturating_add(wait) >= at => {
+                clock
+                    .sleep(at.saturating_sub(clock.now_monotonic_ms()))
+                    .await;
                 break;
             }
-            _ => tokio::time::sleep(wait).await,
+            _ => clock.sleep(wait).await,
         }
     }
     Err(PhaseFailed {
@@ -399,6 +424,23 @@ where
     F: Fn(usize, u32) -> Fut,
     Fut: std::future::Future<Output = Result<T, E>>,
 {
+    drive_bind_phase_on(&TokioTime::new(), policy, schedule, endpoints, attempt).await
+}
+
+/// [`drive_bind_phase`] on `clock`, the clock of the session that binds: its budget and the waits
+/// between the attempts of an endpoint are of that clock.
+pub async fn drive_bind_phase_on<C, T, E, F, Fut>(
+    clock: &C,
+    policy: PhasePolicy,
+    schedule: RetryPolicy,
+    endpoints: &[String],
+    attempt: F,
+) -> Result<BindOutcome<T, E>, PhaseFailed<E>>
+where
+    C: TimeSource,
+    F: Fn(usize, u32) -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
     let mut outcome = BindOutcome {
         bound: Vec::new(),
         background: Vec::new(),
@@ -407,7 +449,7 @@ where
     let deadline = policy
         .budget
         .deadline()
-        .map(|d| tokio::time::Instant::now() + d);
+        .map(|d| clock.now_monotonic_ms().saturating_add(whole_ms(d)));
     let swallows_a_failure = deadline.is_some();
     let mut attempts: u32 = 0;
     let mut last: Option<E> = None;
@@ -426,16 +468,19 @@ where
             attempts += 1;
             let step = attempt(position, n);
             let result = match deadline {
-                Some(at) => match tokio::time::timeout_at(at, step).await {
-                    Ok(result) => result,
-                    Err(_) => {
-                        return Err(PhaseFailed {
-                            last,
-                            attempts,
-                            ends_startup: true,
-                        })
+                Some(at) => {
+                    match timeout_on(clock, at.saturating_sub(clock.now_monotonic_ms()), step).await
+                    {
+                        Ok(result) => result,
+                        Err(_) => {
+                            return Err(PhaseFailed {
+                                last,
+                                attempts,
+                                ends_startup: true,
+                            })
+                        }
                     }
-                },
+                }
                 None => step.await,
             };
             match result {
@@ -445,17 +490,19 @@ where
                 }
                 Err(e) if arm.retries() => {
                     last = Some(e);
-                    let wait = Duration::from_millis(period.next_ms());
+                    let wait = period.next_ms();
                     match deadline {
-                        Some(at) if tokio::time::Instant::now() + wait >= at => {
-                            tokio::time::sleep_until(at).await;
+                        Some(at) if clock.now_monotonic_ms().saturating_add(wait) >= at => {
+                            clock
+                                .sleep(at.saturating_sub(clock.now_monotonic_ms()))
+                                .await;
                             return Err(PhaseFailed {
                                 last,
                                 attempts,
                                 ends_startup: true,
                             });
                         }
-                        _ => tokio::time::sleep(wait).await,
+                        _ => clock.sleep(wait).await,
                     }
                 }
                 Err(e) => {
@@ -485,8 +532,23 @@ where
 ///
 /// `schedule` must wait between attempts ([`PhasePolicy::arm`] selects the background arm only
 /// for a schedule whose first wait is not zero), or this is a hot loop.
-pub async fn retry_until_bound<T, E, F, Fut>(schedule: RetryPolicy, mut attempt: F) -> T
+pub async fn retry_until_bound<T, E, F, Fut>(schedule: RetryPolicy, attempt: F) -> T
 where
+    F: FnMut(u32) -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
+    retry_until_bound_on(&TokioTime::new(), schedule, attempt).await
+}
+
+/// [`retry_until_bound`] on `clock`, the clock of the session that binds: the waits between its
+/// attempts are of that clock.
+pub async fn retry_until_bound_on<C, T, E, F, Fut>(
+    clock: &C,
+    schedule: RetryPolicy,
+    mut attempt: F,
+) -> T
+where
+    C: TimeSource,
     F: FnMut(u32) -> Fut,
     Fut: std::future::Future<Output = Result<T, E>>,
 {
@@ -497,7 +559,7 @@ where
         if let Ok(value) = attempt(n).await {
             return value;
         }
-        tokio::time::sleep(Duration::from_millis(period.next_ms())).await;
+        clock.sleep(period.next_ms()).await;
     }
 }
 
@@ -574,7 +636,25 @@ where
     F: Fn(&'e str, u32) -> Fut,
     Fut: std::future::Future<Output = Result<T, E>>,
 {
-    let deadline = budget.deadline().map(|d| tokio::time::Instant::now() + d);
+    drive_connect_phase_on(&TokioTime::new(), budget, endpoints, attempt).await
+}
+
+/// [`drive_connect_phase`] on `clock`, the clock of the session that connects: the phase's budget
+/// and the waits of each racing endpoint are of that clock.
+pub async fn drive_connect_phase_on<'e, C, T, E, F, Fut>(
+    clock: &C,
+    budget: PhaseBudget,
+    endpoints: &'e [(String, RetryPolicy)],
+    attempt: F,
+) -> Result<T, PhaseFailed<E>>
+where
+    C: TimeSource,
+    F: Fn(&'e str, u32) -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
+    let deadline = budget
+        .deadline()
+        .map(|d| clock.now_monotonic_ms().saturating_add(whole_ms(d)));
     let failed = |last, attempts| PhaseFailed {
         last,
         attempts,
@@ -595,7 +675,13 @@ where
         }
         attempts += 1;
         let outcome = match deadline {
-            Some(at) => tokio::time::timeout_at(at, attempt(endpoint, 1)).await.ok(),
+            Some(at) => timeout_on(
+                clock,
+                at.saturating_sub(clock.now_monotonic_ms()),
+                attempt(endpoint, 1),
+            )
+            .await
+            .ok(),
             None => Some(attempt(endpoint, 1).await),
         };
         match outcome {
@@ -611,11 +697,11 @@ where
     // them can outlive the phase.
     let left = match deadline {
         Some(at) => {
-            let rest = at.saturating_duration_since(tokio::time::Instant::now());
-            if rest.is_zero() {
+            let rest = at.saturating_sub(clock.now_monotonic_ms());
+            if rest == 0 {
                 return Err(failed(last, attempts));
             }
-            PhaseBudget::from_ms(rest.as_millis().max(1) as i64)
+            PhaseBudget::from_ms(i64::try_from(rest).unwrap_or(i64::MAX))
         }
         None => budget,
     };
@@ -625,7 +711,8 @@ where
     let mut legs: Vec<Leg<'_, T, E>> = retrying
         .into_iter()
         .map(|(endpoint, schedule)| {
-            let leg = drive_phase(
+            let leg = drive_phase_on(
+                clock,
                 PhasePolicy {
                     budget: left,
                     exit_on_failure: true,

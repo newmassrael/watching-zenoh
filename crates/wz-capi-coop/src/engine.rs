@@ -226,6 +226,35 @@ pub struct CoopConfig {
     /// a group is open once the group is joined (`group`; a build without it refuses a group
     /// with [`OpenError::Group`]).
     pub groups: Vec<wz_capi_port::group::GroupJoin>,
+    /// What tells a read that the session's clock moved on, for a clock the program moves (a time
+    /// base it supplies): a read that waits for its next dial waits on it, and one that waits on
+    /// its links waits on it beside them, so the program's word ends the wait. `None` for a clock
+    /// that moves by itself, whose waits the wall bounds.
+    pub clock_moves: Option<Arc<dyn ClockMoves>>,
+}
+
+/// The program's word that a clock it moves has moved on, as a read of this engine waits on it
+/// ([`CoopConfig::clock_moves`]).
+pub trait ClockMoves: Send + Sync {
+    /// A wait that is ready once the clock has moved on after this call.
+    fn moved(&self) -> Arc<dyn LinkReadiness>;
+}
+
+/// `wait`, ended also by the program's word that the clock moved on when `moves` gives one: a
+/// sleep becomes a wait on the word, and a wait on links waits on it too. With no word, or no
+/// wait, it is `wait` as it was.
+fn ended_by_clock_moves(wait: IdleWait, moves: Option<&Arc<dyn ClockMoves>>) -> IdleWait {
+    let Some(moves) = moves else {
+        return wait;
+    };
+    match wait {
+        IdleWait::None => IdleWait::None,
+        IdleWait::Sleep(ms) => IdleWait::Input(vec![moves.moved()], ms),
+        IdleWait::Input(mut waits, ms) => {
+            waits.push(moves.moved());
+            IdleWait::Input(waits, ms)
+        }
+    }
 }
 
 /// Inbound links in their handshake at once, when the config states none: zenoh's
@@ -1981,7 +2010,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let look_again = unwaited_port;
         #[cfg(not(feature = "listen"))]
         let look_again = false;
-        match (waits.is_empty(), look_again) {
+        let wait = match (waits.is_empty(), look_again) {
             // A port that gives no wait is looked at again after a bounded sleep.
             (true, true) if most > 0 => IdleWait::Sleep(most.min(1)),
             (true, _) => match dial_left_ms {
@@ -1999,7 +2028,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 IdleWait::Input(waits, most)
             }
             _ => IdleWait::None,
-        }
+        };
+        // The bounds above are the clock's time read as the wall's, which a clock the program
+        // moves is not: its word that the time moved on ends the wait as well.
+        ended_by_clock_moves(wait, self.config.clock_moves.as_ref())
     }
 
     /// End every face's link, whatever it is doing, telling an established peer so. The dial
@@ -4455,5 +4487,94 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopE
         // drop the handle it held. A session never closed is closed now; a closed one has no
         // link left to end.
         self.core.get_mut().0.end_links();
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod clock_moves_tests {
+    use super::*;
+    use std::sync::{Condvar, Mutex as StdMutex};
+    use std::time::{Duration, Instant};
+
+    /// A clock the test moves: a count of its moves and the word that it grew.
+    struct Moves {
+        count: StdMutex<u64>,
+        moved: Condvar,
+    }
+
+    /// A wait that ends once the count passes the one it was made at.
+    struct Since {
+        moves: Arc<Moves>,
+        seen: u64,
+    }
+
+    impl LinkReadiness for Since {
+        fn wait_readable(&self, timeout_ms: u32) {
+            let count = self.moves.count.lock().unwrap();
+            let bound = Duration::from_millis(timeout_ms.into());
+            let moved = &self.moves.moved;
+            let _ = moved.wait_timeout_while(count, bound, |count| *count == self.seen);
+        }
+    }
+
+    struct Word(Arc<Moves>);
+
+    impl ClockMoves for Word {
+        fn moved(&self) -> Arc<dyn LinkReadiness> {
+            let seen = *self.0.count.lock().unwrap();
+            Arc::new(Since {
+                moves: self.0.clone(),
+                seen,
+            })
+        }
+    }
+
+    fn word() -> (Arc<Moves>, Arc<dyn ClockMoves>) {
+        let moves = Arc::new(Moves {
+            count: StdMutex::new(0),
+            moved: Condvar::new(),
+        });
+        let word: Arc<dyn ClockMoves> = Arc::new(Word(moves.clone()));
+        (moves, word)
+    }
+
+    /// A read waiting five seconds for its next dial is let go by the program's word that the
+    /// clock moved on, long before its bound of the wall clock.
+    #[test]
+    fn a_wait_for_the_next_dial_ends_at_the_word_that_the_clock_moved() {
+        let (moves, word) = word();
+        let wait = ended_by_clock_moves(IdleWait::Sleep(5_000), Some(&word));
+        let waiting = std::thread::spawn(move || {
+            let started = Instant::now();
+            wait.wait();
+            started.elapsed()
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        *moves.count.lock().unwrap() += 1;
+        moves.moved.notify_all();
+        let took = waiting.join().expect("the waiting thread");
+        assert!(
+            took < Duration::from_millis(2_500),
+            "the read waited out its bound instead of the word ({took:?})"
+        );
+    }
+
+    /// A wait on links waits on the word beside them; no wait stays none; and a clock that moves
+    /// by itself leaves every wait as it was.
+    #[test]
+    fn the_word_joins_a_wait_and_makes_none_where_there_was_none() {
+        let (_moves, word) = word();
+        match ended_by_clock_moves(IdleWait::Input(Vec::new(), 9), Some(&word)) {
+            IdleWait::Input(waits, 9) => assert_eq!(waits.len(), 1),
+            _ => panic!("a wait on links keeps its bound and gains the word"),
+        }
+        assert!(matches!(
+            ended_by_clock_moves(IdleWait::None, Some(&word)),
+            IdleWait::None
+        ));
+        assert!(matches!(
+            ended_by_clock_moves(IdleWait::Sleep(7), None),
+            IdleWait::Sleep(7)
+        ));
     }
 }

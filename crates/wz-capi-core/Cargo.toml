@@ -439,6 +439,10 @@ clock-source = ["timestamping", "unstable-api", "wz-runtime-tokio/clock-source"]
 # The node's event log (`deploy/wz-config.toml`, off by default: wz's own doors). The ring is in
 # `wz-node-time`, so the model has it under both ABIs once the runtime does.
 event-ring = ["unstable-api", "wz-runtime-tokio/event-ring"]
+# A time base the program supplies (`deploy/wz-config.toml`, off by default: wz's own door, which no
+# upstream library has). A session whose defaults name one is timed by a clock made over it
+# (`TokioTime::on_time_base`), so its timers on that clock move only when the program's time does.
+time-base = ["unstable-api", "wz-runtime-tokio/program-time"]
 # The node's supervisor (`deploy/wz-config.toml`, off by default: wz's own doors). The supervisor
 # and its machine are in `wz-session-core`, which the model has either way. A feature here because
 # every capability is one of the core's.

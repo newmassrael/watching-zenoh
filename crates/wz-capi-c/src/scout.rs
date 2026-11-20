@@ -17,11 +17,11 @@
 //! invisible to a test that only checks the two single-bit values.
 
 use std::ffi::{c_int, c_void};
+use std::net::SocketAddr;
 
-use wz_capi_core::scouting::{
-    parse_multicast_locator, run_scout, MULTICAST_LOCATOR_DEFAULT, SCOUTING_TIMEOUT_DEFAULT_MS,
-    SCOUTING_WHAT_DEFAULT,
-};
+use wz_capi_core::runtime::runtime_impl::TokioTime;
+use wz_capi_core::runtime::zenoh_config::scout_multicast_socket;
+use wz_capi_core::scouting::{run_scout, SCOUTING_TIMEOUT_DEFAULT_MS, SCOUTING_WHAT_DEFAULT};
 use wz_session_core::session_zid::SessionZid;
 
 use crate::abi::{
@@ -40,7 +40,9 @@ use crate::zid::z_id_t;
 struct ScoutRequest {
     what: u8,
     budget_ms: u64,
-    locator: String,
+    /// The group `scouting/multicast/address` names, read as the open reads it; `None` for text
+    /// that names no socket, which the scout refuses rather than scouting elsewhere.
+    group: Option<SocketAddr>,
     asker: Option<SessionZid>,
 }
 
@@ -57,6 +59,10 @@ impl ScoutRequest {
     /// zenoh-c wraps writes `zid: None` (`zenoh/src/net/runtime/orchestrator.rs`
     /// @ `zid: None,`, in `pub(crate) async fn scout`). An `id` the reader
     /// refuses never reaches here: the config's insert doors refuse it.
+    ///
+    /// The group is the socket `scouting/multicast/address` names in zenoh's
+    /// form, by the one reader the open's scouting reads the key with
+    /// (`scout_multicast_socket`), and not a zenoh-pico locator.
     fn read(cfg: Option<&ConfigState>, options: Option<&z_scout_options_t>) -> Self {
         let cfg_get = |key: &str| -> Option<String> {
             cfg.and_then(|c| c.first(key)).map(|s| s.trim().to_string())
@@ -73,11 +79,30 @@ impl ScoutRequest {
         Self {
             what,
             budget_ms,
-            locator: cfg_get(crate::config::MULTICAST_LOCATOR_KEY)
-                .unwrap_or_else(|| MULTICAST_LOCATOR_DEFAULT.into()),
+            group: scout_multicast_socket(cfg_get(crate::config::MULTICAST_ADDRESS_KEY).as_deref())
+                .ok(),
             asker: None,
         }
     }
+}
+
+/// The clock a scout's window is timed by, and the hold that keeps it read: the time base the
+/// scout's config names (`wz_capi_c_config_time_base`), which the window then runs on as a session
+/// opened from that config does, or the system's clock and no hold. A window is a deadline of its
+/// own, and a program that runs its sessions on its time runs their discovery on it too.
+#[cfg(feature = "time-base")]
+fn window_clock(
+    cfg: Option<&ConfigState>,
+) -> (
+    TokioTime,
+    Option<wz_capi_core::runtime::time_base::TimeBaseHold>,
+) {
+    let held = cfg.and_then(|cfg| cfg.time_base.clone());
+    let clock = match &held {
+        Some(time_base) => TokioTime::on_time_base(time_base.time()),
+        None => TokioTime::new(),
+    };
+    (clock, held)
 }
 
 /// `Z_WHATAMI_ROUTER` = 1.
@@ -518,15 +543,21 @@ pub unsafe extern "C" fn z_scout(
         };
         // SAFETY: the caller's contract: `options` is null or a valid struct.
         let request = ScoutRequest::read(cfg.as_deref(), unsafe { options.as_ref() });
+        // The window's clock. The hold keeps a time base the config names read for the whole
+        // window, after the config itself is gone.
+        #[cfg(feature = "time-base")]
+        let (clock, _held) = window_clock(cfg.as_deref());
+        #[cfg(not(feature = "time-base"))]
+        let clock = TokioTime::new();
         drop(cfg);
         let ScoutRequest {
             what,
             budget_ms,
-            locator,
+            group,
             asker,
         } = request;
 
-        let Some((group, port)) = parse_multicast_locator(&locator) else {
+        let Some(group) = group else {
             run_drop();
             return Z_EINVAL;
         };
@@ -534,28 +565,37 @@ pub unsafe extern "C" fn z_scout(
         // The scout's snapshot, resolved as an open resolves its own: the scout reads no node
         // document of its config, so the open's resolution of none.
         let policy = wz_capi_core::open_plan::resolve_policy(None);
-        run_scout(group, port, what, asker, budget_ms, &policy, |hello| {
-            let Some(call) = user_call else {
-                return;
-            };
-            let mut state = HelloState::new(
-                z_id_t::from_wire(&hello.zid),
-                hello
-                    .whatami
-                    .map_or(Z_WHATAMI_PEER, |w| c_int::from(w.to_api())),
-                hello.locators.clone(),
-            );
-            // Bound where it stays: the callback's argument is the state itself, the first word
-            // of which is its address (`crate::loan_at`).
-            state.bind();
-            let loaned = &state as *const HelloState as *mut z_loaned_hello_t;
-            // SAFETY: `call` is the C callback and `state` outlives it; the
-            // borrowed hello is valid only for its duration. An unwind across
-            // the C boundary is UB, so it is caught.
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-                call(loaned, user_ctx);
-            }));
-        });
+        run_scout(
+            clock,
+            group.ip(),
+            group.port(),
+            what,
+            asker,
+            budget_ms,
+            &policy,
+            |hello| {
+                let Some(call) = user_call else {
+                    return;
+                };
+                let mut state = HelloState::new(
+                    z_id_t::from_wire(&hello.zid),
+                    hello
+                        .whatami
+                        .map_or(Z_WHATAMI_PEER, |w| c_int::from(w.to_api())),
+                    hello.locators.clone(),
+                );
+                // Bound where it stays: the callback's argument is the state itself, the first word
+                // of which is its address (`crate::loan_at`).
+                state.bind();
+                let loaned = &state as *const HelloState as *mut z_loaned_hello_t;
+                // SAFETY: `call` is the C callback and `state` outlives it; the
+                // borrowed hello is valid only for its duration. An unwind across
+                // the C boundary is UB, so it is caught.
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+                    call(loaned, user_ctx);
+                }));
+            },
+        );
 
         run_drop();
         Z_OK
@@ -613,6 +653,65 @@ mod tests {
         assert!(asker_of(None).is_none(), "no id stated");
         assert!(asker_of(Some("c11e47c11e49")).is_none(), "an id stated");
         assert!(ScoutRequest::read(None, None).asker.is_none(), "no config");
+    }
+
+    /// The group is the socket the config's `scouting/multicast/address` names in zenoh's form,
+    /// upstream's default where it names none, and no group (which `z_scout` refuses with
+    /// `Z_EINVAL`) for a zenoh-pico locator or a group with no port. The config is built through
+    /// the C doors, which take every one of these texts.
+    #[test]
+    fn a_scout_reads_its_group_as_the_socket_zenohs_config_names() {
+        use crate::abi::{z_moved_config_t, z_owned_config_t};
+        use crate::config::{
+            config_state, z_config_default, z_config_drop, z_config_loan_mut,
+            zc_config_insert_json5,
+        };
+
+        let group_of = |address: Option<&str>| {
+            // SAFETY: a zeroed owned config is the gravestone this ABI defines.
+            let mut cfg: z_owned_config_t = unsafe { std::mem::zeroed() };
+            // SAFETY: a writable owned slot.
+            assert_eq!(unsafe { z_config_default(&mut cfg) }, Z_OK);
+            if let Some(address) = address {
+                let key = std::ffi::CString::new("scouting/multicast/address").expect("no NUL");
+                let value = std::ffi::CString::new(format!("\"{address}\"")).expect("no NUL");
+                // SAFETY: a live config and two NUL-terminated strings.
+                let rc = unsafe {
+                    zc_config_insert_json5(
+                        z_config_loan_mut(&mut cfg),
+                        key.as_ptr(),
+                        value.as_ptr(),
+                    )
+                };
+                assert_eq!(rc, Z_OK, "the insert takes `{address}`");
+            }
+            // SAFETY: a live config.
+            let state = unsafe { config_state(z_config_loan_mut(&mut cfg)) }.expect("a config");
+            let group = ScoutRequest::read(Some(&*state), None).group;
+            // SAFETY: the owned config is live and dropped once.
+            unsafe {
+                z_config_drop((&mut cfg as *mut z_owned_config_t).cast::<z_moved_config_t>())
+            };
+            group
+        };
+        let socket = |text: &str| text.parse::<SocketAddr>().expect("a socket");
+        let default = Some(socket("224.0.0.224:7446"));
+        assert_eq!(group_of(None), default, "upstream's default");
+        assert_eq!(ScoutRequest::read(None, None).group, default, "no config");
+        assert_eq!(
+            group_of(Some("224.0.0.231:7493")),
+            Some(socket("224.0.0.231:7493"))
+        );
+        assert_eq!(
+            group_of(Some("[ff05::231]:7493")),
+            Some(socket("[ff05::231]:7493"))
+        );
+        assert_eq!(
+            group_of(Some("udp/224.0.0.231:7493")),
+            None,
+            "a zenoh-pico locator"
+        );
+        assert_eq!(group_of(Some("224.0.0.231")), None, "a group with no port");
     }
 
     /// The whatami map is an INDEXED BITMASK: 3 is "router|peer", not a third

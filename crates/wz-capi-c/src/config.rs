@@ -44,9 +44,10 @@ pub(crate) const CONNECT_KEY: &str = "connect/endpoints";
 /// `listen/endpoints` (`Z_CONFIG_LISTEN_KEY`, `:25`).
 pub(crate) const LISTEN_KEY: &str = "listen/endpoints";
 /// `scouting/multicast/address` (`Z_CONFIG_MULTICAST_IPV4_ADDRESS_KEY`, `:30`) —
-/// the group `z_scout` beacons onto.
+/// the group `z_scout` beacons onto: a socket address, as zenoh's config types it, and not a
+/// zenoh-pico locator.
 #[cfg(any(test, feature = "scout"))]
-pub(crate) const MULTICAST_LOCATOR_KEY: &str = "scouting/multicast/address";
+pub(crate) const MULTICAST_ADDRESS_KEY: &str = "scouting/multicast/address";
 /// `scouting/timeout` (`Z_CONFIG_SCOUTING_TIMEOUT_KEY`, `:32`).
 #[cfg(any(test, feature = "scout"))]
 pub(crate) const SCOUTING_TIMEOUT_KEY: &str = "scouting/timeout";
@@ -102,6 +103,11 @@ pub(crate) const SESSION_ZID_KEY: &str = "id";
 pub(crate) struct ConfigState {
     entries: BTreeMap<String, Json5Value>,
     wz: Vec<Json5Value>,
+    /// The time base the program supplies (`wz_capi_c_config_time_base`), which the session
+    /// opened from this config times its deadlines by in place of the system's clock. Not a key
+    /// of the document: the program's object, held by reference.
+    #[cfg(feature = "time-base")]
+    pub(crate) time_base: Option<wz_capi_core::runtime::time_base::TimeBaseHold>,
 }
 
 /// An insert below the [`WZ_MEMBER`] whose path runs through a value that is not an object: a
@@ -420,6 +426,9 @@ impl ConfigState {
         Self {
             entries: self.entries.clone(),
             wz: self.wz.clone(),
+            // A copy names the same time base, and holds it too.
+            #[cfg(feature = "time-base")]
+            time_base: self.time_base.clone(),
         }
     }
 
@@ -1035,6 +1044,9 @@ unsafe fn install_parsed(this_: *mut z_owned_config_t, text: &str) -> ZResult {
     let mut state = ConfigState {
         entries: BTreeMap::new(),
         wz: wz.into_iter().map(|(_, value)| value).collect(),
+        // A document names no time base: one is the program's object, given by its own door.
+        #[cfg(feature = "time-base")]
+        time_base: None,
     };
     let zenoh = Json5Value::Object(zenoh);
     for (path, leaf) in zenoh.leaf_entries() {
@@ -1838,7 +1850,7 @@ mod tests {
             (MODE_KEY, "\"client\""),
             (CONNECT_KEY, "[\"tcp/127.0.0.1:17447\"]"),
             (LISTEN_KEY, "[\"tcp/127.0.0.1:17448\"]"),
-            (MULTICAST_LOCATOR_KEY, "\"224.0.0.224:7446\""),
+            (MULTICAST_ADDRESS_KEY, "\"224.0.0.224:7446\""),
             (SCOUTING_TIMEOUT_KEY, "1234"),
             // No leading `0`: zenoh refuses one at the insert, so a fixture that
             // wrote `0102030405` was inserting a value the real config would not
@@ -1966,7 +1978,7 @@ mod tests {
             config_of(&[
                 (CONNECT_KEY, "[\"tcp/127.0.0.1:17447\"]"),
                 (SCOUTING_TIMEOUT_KEY, "1234"),
-                (MULTICAST_LOCATOR_KEY, "\"224.0.0.224:7446\""),
+                (MULTICAST_ADDRESS_KEY, "\"224.0.0.224:7446\""),
             ])
         };
         // The exact leaf.
@@ -2034,7 +2046,7 @@ mod tests {
             (CONNECT_KEY, "[\"tcp/127.0.0.1:17447\"]"),
             (LISTEN_KEY, "[\"tcp/127.0.0.1:17448\"]"),
             (SCOUTING_TIMEOUT_KEY, "1234"),
-            (MULTICAST_LOCATOR_KEY, "\"224.0.0.224:7446\""),
+            (MULTICAST_ADDRESS_KEY, "\"224.0.0.224:7446\""),
         ];
         let multi = cases.iter().filter(|(k, _)| k.contains('/')).count();
         assert!(

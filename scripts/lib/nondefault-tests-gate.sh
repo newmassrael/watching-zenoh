@@ -439,6 +439,16 @@ transport-link-unixpipe,transport-link-ws|"
         multicast-transport\
         |app_transport"
     "wz-capi-pico|hook|shared-key-ids|--test=key_ids_tokio"
+    # A time base the program supplies (`wz_ext_time_base_*`): the doors' refusals and ownership
+    # and a listening session that runs on the program's time with its control on the system's
+    # (`time_base::`), a silent inbound link held to the accept timeout of the program's time
+    # (`files::time_base_accept::`), an open's scouting window of the program's time
+    # (`files::open_scouts_for_a_locator::an_open_on_a_time_base_...`) and, on the tokio engine,
+    # a get held to a timeout of the program's time (`files::get_roundtrip::c_get_on_a_time_base_
+    # ...`): every name says `time_base`, which is the filter. The tokio engine first (8), then the
+    # cooperative one (8), where the session's clock itself and its read's word run too.
+    "wz-capi-pico|hook|time-base|time_base"
+    "wz-capi-pico|hook|-default,engine-coop,peer,multi-thread,link-udp,connectivity,time-base|time_base"
     # Whether a reply of a replay reaches the receiving judge (`replay_admission`, behind `replay`):
     # its model tests on a synthetic profile, and the receiver's baseline CRC they read.
     "wz-app-frame|hook|replay|"
@@ -471,7 +481,9 @@ transport-link-unixpipe,transport-link-ws|"
     "wz-capi-pico|hook|remote-declaration-watch|--test=decl_watch_doors"
     # What those doors do, once, in the port both C ABIs and both engines share
     # (`wz-capi-port`'s `observation`): the unit tests of the clock callback and of the refusals.
-    "wz-capi-port|hook|clock-source,event-ring,supervision,resource-snapshot|"
+    # `time-base` joins: the time base made from a door's C calls (`time_base::`), its read and the
+    # program's drop with the last hold.
+    "wz-capi-port|hook|clock-source,event-ring,supervision,resource-snapshot,time-base|"
     # The same four as the zenoh-c ABI's doors (`wz_capi_c_*`): the unit tests of each module, which
     # a build made as the reference is compiles none of.
     "wz-capi-c|hook|clock-source,event-ring,supervision,resource-snapshot,identity-make,lifecycle-doors,switch-doors,segment-sender,rx-callback-offload|"
@@ -483,6 +495,10 @@ transport-link-unixpipe,transport-link-ws|"
     # filter is the integration target, so a test added to it under the feature is claimed without
     # touching the row; the `cfg(not(..))` twin it replaces runs in the default build.
     "wz-capi-c|hook|router-node|--test=session_roles"
+    # A time base the program supplies, through this ABI's doors (`time-base`): the doors' unit
+    # tests (`time_base::tests`) and the integration file (`time_base_open`), an open whose connect
+    # budget is the program's time and a node refused on one. The filter is the shared word.
+    "wz-capi-c|hook|time-base|time_base"
     # The config's `wz/key-ids` through this ABI's doors, read into what the open hands its
     # session (`config::tests::wz_member`, its key-id tests built with `shared-key-ids`).
     "wz-capi-c|hook|shared-key-ids|config::tests::wz_member::"
@@ -529,6 +545,9 @@ transport-link-unixpipe,transport-link-ws|"
     # `router-node` too). The same module path, so the row's build adds one feature to the row
     # above and a test added there under the feature is claimed.
     "wz-capi-core|hook|router-node,scout,shared-key-ids|open_plan::"
+    # The node that refuses a time base the program supplies by name (`open_plan::`, its test built
+    # with `router-node` and `time-base`): the same module path, one feature added to the row above.
+    "wz-capi-core|hook|router-node,scout,time-base|open_plan::"
     # The span of the code that opens a session, carried onto the engine's tasks and threads
     # (`caller_span`, built with `tracing-instrument`), and the copy a session promotes a large
     # payload into (`session_defaults`, whose copy test is built with `transport-shm`). No leg
@@ -616,7 +635,10 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # that stamps no data, the `trusted-only` policy not refusing one, a node with no identity).
     # `event-ring` joins: the node's event log and its seven tests (a record's fields, a clock that
     # stamps and one that does not, the two full-ring policies, producers on four threads).
-    "wz-node-time|hook|clock-source,codec-push,event-ring,pubsub-timestamp,pubsub-ts-stack,time-hlc|"
+    # `time-base` joins: the time base a program supplies and its seven tests (a reading held
+    # monotonic, a wait woken on the program's word, a wait already due, a dropped wait, the read
+    # let go with the last hold, a thread let go by the word, a reference of an earlier lease).
+    "wz-node-time|hook|clock-source,codec-push,event-ring,pubsub-timestamp,pubsub-ts-stack,time-base,time-hlc|"
     # Open-debt item 913 -- the in-memory group every group test of the workspace runs over
     # (`multicast_bus`) holds a member's place while a send half of its link lives, as a socket
     # does, which the departure test of the group face depends on. The module exists only with
@@ -1297,6 +1319,9 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # module gated on `app-link` alone.
     "wz-session-core|hook|app-link|app_link_table::"
     "wz-session-core|hook|app-link|app_transport::"
+    # The cooperative engine's links over the program's transport (`app_link::`, `app-link`), with
+    # the host's parked waits (`host-lock`), which the open bounded by the session's clock is.
+    "wz-runtime-coop|hook|app-link,host-lock|app_link::"
     "wz-session-core|hook|declarations-synced-event|decl_sink::"
     # The key ids every node of a deployment shares and the reader of a document's `wz/key-ids`
     # (`shared_key_ids`, a module built with `shared-key-ids` alone). Pure functions over a
@@ -1588,6 +1613,12 @@ wz-session-core/query-reply-err|"
     # `transport-link-app`'s, its datagram tests `transport-link-udp`'s (a default) and its group
     # test `transport-multicast`'s.
     "wz-runtime-tokio|hook|transport-link-app,transport-multicast|app_link::"
+    # A `TokioTime` over a time base the program supplies (`program-time`): the integration file
+    # `tests/it/files/session_program_time.rs` (its readings, waits, timeouts and bounds on the
+    # program's time, a session's lease timed by it in the drive loop) and the session's own tests
+    # whose name says `program_time` (the wait for stable declarations). The filter is the name
+    # both share, so a test added to either is covered.
+    "wz-runtime-tokio|hook|program-time|program_time"
     # The router's routing events (`router_forward::routing_spans`, built with `routing-router-hat`
     # and `tracing-spans`) and the span a spawned task runs in (`runtime_pool::span_tests`, whose
     # claim is the `tracing-instrument` arm). The wide leg names neither tracing feature, so the

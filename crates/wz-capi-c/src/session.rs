@@ -513,6 +513,9 @@ pub(crate) unsafe fn open_session(
     };
     // Everything the document decides, and every refusal, before anything is bound or dialled.
     let plan = plan_of(cfg);
+    // The time base the config names, which the session holds from here on.
+    #[cfg(feature = "time-base")]
+    let time_base = cfg.time_base.clone();
     let handle = unsafe { (*config)._this.handle };
     // SAFETY: a live `Box<ConfigState>` this crate leaked; consumed here.
     drop(unsafe { Box::from_raw(handle as *mut ConfigState) });
@@ -533,9 +536,16 @@ pub(crate) unsafe fn open_session(
     #[cfg(feature = "router-node")]
     let node = plan.node_role(plan.role);
     let choices = abi_choices(shm_clients, &plan.session_policy);
-    // Mutable only where a shared-memory client set re-takes the stance below.
+    // Mutable only where a shared-memory client set or a time base re-takes the stance below.
     #[allow(unused_mut)]
     let mut arguments = plan.into_arguments(choices);
+    // A session on a time base the program supplies: its clock is made over it at the open. A node
+    // that forwards between its faces is not timed by one, and its open refuses it by name
+    // (`router_refusal`, `Z_EINVAL` below).
+    #[cfg(feature = "time-base")]
+    {
+        arguments.stance.session_defaults.time_base = time_base;
+    }
     // R3065 -- a session opened over a client storage advertises the protocols of THAT
     // reader: the stance takes both from the one set, so the list a peer's sender reads is
     // never wider than what the session resolves.

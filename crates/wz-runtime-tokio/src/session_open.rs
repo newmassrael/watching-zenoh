@@ -361,7 +361,24 @@ pub async fn open_within<T, F>(open_timeout: std::time::Duration, open: F) -> Re
 where
     F: core::future::Future<Output = Result<T, OpenError>>,
 {
-    match tokio::time::timeout(open_timeout, open).await {
+    open_within_on(&TokioTime::new(), open_timeout, open).await
+}
+
+/// [`open_within`] on `clock`, the clock of the session the open is for: a session timed by a
+/// time base the program supplies holds its open to the program's time, as it holds the
+/// handshake inside it.
+pub async fn open_within_on<C, T, F>(
+    clock: &C,
+    open_timeout: std::time::Duration,
+    open: F,
+) -> Result<T, OpenError>
+where
+    C: TimeSource,
+    F: core::future::Future<Output = Result<T, OpenError>>,
+{
+    match crate::runtime_impl::timeout_on(clock, crate::runtime_impl::whole_ms(open_timeout), open)
+        .await
+    {
         Ok(opened) => opened,
         Err(_) => Err(OpenError::OpenTimeout(open_timeout)),
     }
@@ -5093,7 +5110,7 @@ pub async fn connect_and_open_session(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
-    connect_within(locator, cfg, move |dialed, timeouts| {
+    connect_within(locator, cfg, clock, move |dialed, timeouts| {
         initiate_installing(
             dialed,
             params,
@@ -5108,18 +5125,19 @@ pub async fn connect_and_open_session(
 }
 
 /// One open of `locator` as upstream makes it: the dial and `open`, the handshake over the link
-/// the dial made, on the one clock of `cfg.open_timeout` ([`open_within`]), with `open` handed the
-/// handshake deadlines that hold it to the same bound.
+/// the dial made, on the one clock of `cfg.open_timeout` ([`open_within_on`], on the session's
+/// `clock`), with `open` handed the handshake deadlines that hold it to the same bound.
 async fn connect_within<O, Fut>(
     locator: AnyLocator,
     cfg: &DialConfig,
+    clock: TokioTime,
     open: O,
 ) -> Result<OpenedSession, OpenError>
 where
     O: FnOnce(DialedLink, SessionTimeouts) -> Fut,
     Fut: core::future::Future<Output = Result<OpenedSession, OpenError>>,
 {
-    open_within(cfg.open_timeout, async move {
+    open_within_on(&clock, cfg.open_timeout, async move {
         let dialed = dial_locator(locator, cfg).await.map_err(OpenError::Dial)?;
         open(dialed, cfg.handshake_timeouts()).await
     })
@@ -5141,7 +5159,7 @@ pub async fn connect_and_open_session_with_auth(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
-    connect_within(locator, cfg, move |dialed, timeouts| {
+    connect_within(locator, cfg, clock, move |dialed, timeouts| {
         initiate_installing(
             dialed,
             params,
@@ -5205,7 +5223,7 @@ pub async fn connect_and_open_session_with_offer(
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
     let offer = offer_for_endpoint(offer, &locator)?;
-    connect_within(locator, cfg, move |dialed, timeouts| {
+    connect_within(locator, cfg, clock, move |dialed, timeouts| {
         initiator_open_offering(
             dialed,
             params,
@@ -5396,7 +5414,7 @@ pub async fn connect_and_open_session_with_namespace(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
-    connect_within(locator, cfg, move |dialed, timeouts| {
+    connect_within(locator, cfg, clock, move |dialed, timeouts| {
         initiate_installing(
             dialed,
             params,
@@ -6829,7 +6847,7 @@ pub async fn open_session_static_config(
                 log::info!(
                     "wz session-open: static locator {locator:?} unreachable; retry in {wait_ms}ms"
                 );
-                tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                clock.sleep(wait_ms).await;
             }
         }
         Err(OpenError::NoReachableLocator)
@@ -6839,8 +6857,9 @@ pub async fn open_session_static_config(
     // skips the wrap entirely when the timeout is zero — which is why a zero is
     // never turned into an instantly-elapsed bound here. `None` is upstream's
     // `-1`: no wrap, wait forever.
+    // The walk and its retries are on the session's clock, as each open in it is.
     match retry.and_then(|r| r.timeout_ms).filter(|ms| *ms > 0) {
-        Some(ms) => tokio::time::timeout(std::time::Duration::from_millis(ms), dial)
+        Some(ms) => crate::runtime_impl::timeout_on(&clock, ms, dial)
             .await
             .unwrap_or(Err(OpenError::NoReachableLocator)),
         None => dial.await,

@@ -33,7 +33,7 @@
 
 use std::collections::BTreeSet;
 use std::io;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::IpAddr;
 use std::time::Duration;
 
 use wz_codecs::whatami::{WhatAmI, WhatAmIMatcher};
@@ -49,7 +49,7 @@ use wz_runtime_tokio::scouting_glue::{
     drive_scouting_until_resolved, new_scouting_engine, ScoutOutcome, ScoutParams, ScoutedHello,
     ScoutingActions,
 };
-use wz_runtime_tokio::zenoh_config::ZenohNodeConfig;
+use wz_runtime_tokio::zenoh_config::{scout_multicast_socket, ZenohNodeConfig};
 use wz_runtime_tokio::{McastSocketConfig, UdpDriver};
 use wz_session_core::session_zid::SessionZid;
 
@@ -64,9 +64,6 @@ const SCOUT_MAX_PERIOD_MS: u64 = 8_000;
 /// How often the answers of a running window are read.
 const HARVEST_PERIOD: Duration = Duration::from_millis(20);
 
-/// `scouting/multicast/address`'s default group and port.
-const GROUP_DEFAULT: IpAddr = IpAddr::V4(Ipv4Addr::new(224, 0, 0, 224));
-const PORT_DEFAULT: u16 = 7446;
 /// `scouting/delay` and `scouting/timeout` defaults, in milliseconds.
 const DELAY_DEFAULT_MS: u64 = 500;
 const TIMEOUT_DEFAULT_MS: u64 = 3000;
@@ -113,15 +110,12 @@ pub struct ScoutingPlan {
 }
 
 /// The group and port `scouting/multicast/address` names, zenoh's default for an unstated one, or
-/// the refusal of one that is not a socket address.
+/// the refusal of one that is not a socket address: the one reading of the key, which `z_scout`
+/// reads it by too (`wz_runtime_tokio::zenoh_config::scout_multicast_socket`).
 fn group_of(node: &ZenohNodeConfig) -> Result<(IpAddr, u16), ScoutingConfigError> {
-    match node.scout_multicast_address.as_deref() {
-        None => Ok((GROUP_DEFAULT, PORT_DEFAULT)),
-        Some(text) => match text.parse::<std::net::SocketAddr>() {
-            Ok(addr) => Ok((addr.ip(), addr.port())),
-            Err(_) => Err(ScoutingConfigError::Address(text.to_owned())),
-        },
-    }
+    scout_multicast_socket(node.scout_multicast_address.as_deref())
+        .map(|socket| (socket.ip(), socket.port()))
+        .map_err(|text| ScoutingConfigError::Address(text.to_owned()))
 }
 
 /// The group a config named is not one this node can scout on.
@@ -552,6 +546,7 @@ impl Drop for ScoutStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::Ipv4Addr;
     use wz_runtime_tokio::session_glue::WhatAmI as Role;
 
     fn resolved(node: &ZenohNodeConfig, role: Role) -> ScoutingPlan {

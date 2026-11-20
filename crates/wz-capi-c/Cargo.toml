@@ -338,6 +338,11 @@ clock-source = ["timestamping", "wz-capi-core/clock-source", "wz-capi-port/clock
 event-ring = ["wz-capi-core/event-ring", "wz-capi-port/event-ring"]
 supervision = ["wz-capi-core/supervision", "wz-capi-port/supervision"]
 resource-snapshot = ["wz-capi-core/resource-snapshot", "wz-capi-port/resource-snapshot"]
+# A time base the program supplies (`wz_capi_c_time_base_*`, `wz_capi_c_config_time_base`), which
+# the timers of a session opened from the config that names it run on in place of the system's
+# clock. wz's own, which zenoh-c has not, so off as the reference build is. The time base is made
+# by the port both C ABIs share (`wz-capi-port`) and the session's clock over it by the model.
+time-base = ["wz-capi-core/time-base", "wz-capi-port/time-base"]
 # The batch compression session extension. Off, a session neither offers nor accepts it, as a
 # zenoh-c built without `transport_compression` does.
 transport_compression = ["wz-capi-core/transport_compression"]

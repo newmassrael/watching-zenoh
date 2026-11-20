@@ -42,6 +42,7 @@
 use std::net::IpAddr;
 
 use wz_runtime_tokio::policy::SessionPolicy;
+use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::scouting_glue::ScoutedHello;
 use wz_session_core::session_zid::SessionZid;
 
@@ -71,8 +72,11 @@ pub const SCOUT_CYCLE_MS: u64 = 1000;
 /// knows the error code its caller reads.
 ///
 /// `policy` is the snapshot the ABI's scout resolved from its config, which the
-/// window's sockets are opened under.
+/// window's sockets are opened under. `clock` times the window: the system's, or the time base
+/// the program supplies that the scout's config names.
+#[allow(clippy::too_many_arguments)]
 pub fn run_scout(
+    clock: TokioTime,
     group: IpAddr,
     port: u16,
     what: u8,
@@ -82,7 +86,7 @@ pub fn run_scout(
     on_hello: impl FnMut(&ScoutedHello),
 ) -> usize {
     // The survey arm — report every responder, do not stop at one.
-    let hellos = scout_window(group, port, what, zid, budget_ms, false, policy);
+    let hellos = scout_window(clock, group, port, what, zid, budget_ms, false, policy);
     deliver_in_upstream_order(&hellos, on_hello)
 }
 
@@ -94,8 +98,9 @@ pub fn run_scout(
 /// whole answer. A bind failure is `None`, as a window nobody answers is.
 ///
 /// `policy` is the snapshot of the open that scouts, which the window's sockets are opened
-/// under.
+/// under; `clock` times the window, as [`run_scout`]'s does.
 pub fn scout_first(
+    clock: TokioTime,
     group: IpAddr,
     port: u16,
     what: u8,
@@ -103,15 +108,17 @@ pub fn scout_first(
     budget_ms: u64,
     policy: &SessionPolicy,
 ) -> Option<ScoutedHello> {
-    scout_window(group, port, what, zid, budget_ms, true, policy)
+    scout_window(clock, group, port, what, zid, budget_ms, true, policy)
         .into_iter()
         .next()
 }
 
 /// One scouting window: bind the group, send one Scout, and collect the Hellos that answer
-/// within `budget_ms`, in arrival order, ending at the first when `exit_on_first`. Every socket
-/// is opened under `policy`.
+/// within `budget_ms` of `clock`, in arrival order, ending at the first when `exit_on_first`.
+/// Every socket is opened under `policy`.
+#[allow(clippy::too_many_arguments)]
 fn scout_window(
+    clock: TokioTime,
     group: IpAddr,
     port: u16,
     what: u8,
@@ -179,7 +186,6 @@ fn scout_window(
             exit_on_first,
         });
         let mut engine = new_scouting_engine(&actions);
-        let clock = wz_runtime_tokio::runtime_impl::TokioTime::new();
 
         let _ = drive_scouting_until_resolved(
             &mut driver,

@@ -51,6 +51,11 @@ pub struct SessionDefaults {
     /// stated apart from the session's (`shared-key-ids`).
     #[cfg(feature = "shared-key-ids")]
     pub key_ids: wz_session_core::shared_key_ids::KeyIdsAtOpen,
+    /// The time base the program supplies (`time-base`): the session's clock reads and waits on
+    /// it in place of the system's, and the session holds it for as long as it runs. `None` times
+    /// the session by the system's clock.
+    #[cfg(feature = "time-base")]
+    pub time_base: Option<wz_runtime_tokio::time_base::TimeBaseHold>,
 }
 
 /// What a `qos/publication` rule sets on a publication: each field stated replaces what the

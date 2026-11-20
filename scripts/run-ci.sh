@@ -12514,8 +12514,9 @@ layer_c1ch_capi_c_config_surface() {
     # door behind a feature that no lane turned on would be graded by nothing. `identity-make` (the
     # identity a client makes, off by default for its size) is one more such door, and so are the
     # lifecycle doors (`lifecycle-doors`), the statement doors (`switch-doors`), the segment
-    # sender (`segment-sender`) and the offloaded subscriber (`rx-callback-offload`).
-    local plane="clock-source,event-ring,supervision,resource-snapshot,identity-make,lifecycle-doors,switch-doors,segment-sender,rx-callback-offload"
+    # sender (`segment-sender`), the offloaded subscriber (`rx-callback-offload`) and the time
+    # base a program supplies (`time-base`).
+    local plane="clock-source,event-ring,supervision,resource-snapshot,identity-make,lifecycle-doors,switch-doors,segment-sender,rx-callback-offload,time-base"
     # A leg ledger (open-debt item 938): the two gates read different builds,
     # so a red debug build does not hide what the release pin says, and each
     # build is a function defined here so the lane's text stays the lane's.
@@ -21738,8 +21739,12 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     # R3362 -- 8 -> 9: `scouting/multicast/enabled: false` takes a peer off the group, shown as a
     # pair on one group (found without the key, not found with it). 9 = the number the lint read
     # off the file's `#[ignore]`d tests and the run printed.
+    #
+    # 9 -> 10: `z_scout` hears the node answering on the group its config's
+    # `scouting/multicast/address` names, read in zenoh's socket form. 10 = the file's `#[ignore]`d
+    # tests, counted off the file.
     wz_test_args wz-capi-c scouting_open
-    _runci_guarded_test "M a C ABI session scouts and is found" 9 \
+    _runci_guarded_test "M a C ABI session scouts and is found" 10 \
         cargo test -p wz-capi-c "${WZ_TEST_ARGS[@]}" -- --ignored --test-threads=1 || return 1
     # R3362 -- two config keys read off the datagrams a scouting session sends and the nodes it
     # dials, each as a pair with a control: the IP TTL of a Scout is the key's (and 1 without it),
@@ -26057,9 +26062,9 @@ _runci_build_capi_c_for_oracle() {
     # of the doors (`c_observation_plane_consumer.c`) links the very library the arm selected.
     # `identity-make`, `lifecycle-doors` and `switch-doors` likewise: their C consumers
     # (`c_identity_consumer.c`, `c_lifecycle_consumer.c`, `c_switch_doors_consumer.c`) link this
-    # library. `segment-sender` and `rx-callback-offload` are in the plane for the same reason, so
-    # their doors are in the library the arm graded.
-    local plane="clock-source,event-ring,supervision,resource-snapshot,identity-make,lifecycle-doors,switch-doors,segment-sender,rx-callback-offload"
+    # library. `segment-sender`, `rx-callback-offload` and `time-base` are in the plane for the
+    # same reason, so their doors are in the library the arm graded.
+    local plane="clock-source,event-ring,supervision,resource-snapshot,identity-make,lifecycle-doors,switch-doors,segment-sender,rx-callback-offload,time-base"
     # shellcheck disable=SC2086 # the cargo arguments are words on purpose
     (cd crates && cargo build -p wz-capi-c $capi_c_args --features "$plane" --quiet)
 }

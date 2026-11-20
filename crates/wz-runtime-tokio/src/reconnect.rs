@@ -69,8 +69,8 @@ use crate::session_glue::{
     SessionLinkActions,
 };
 use crate::session_open::{
-    dial_locator, initiator_open, open_within, plan_endpoint, wire_dialed_link_with_rx, DialConfig,
-    OpenError, OpenedSession,
+    dial_locator, initiator_open, open_within_on, plan_endpoint, wire_dialed_link_with_rx,
+    DialConfig, OpenError, OpenedSession,
 };
 use crate::writer_queue::WriterHandle;
 
@@ -545,7 +545,7 @@ impl ReconnectingSession {
             // this stays behaviour-preserving for them. One candidate's dial and handshake
             // are one open, bounded by `transport/unicast/open_timeout` as upstream's
             // `open_transport_unicast` is.
-            let attempt = open_within(self.dial_config.open_timeout, async {
+            let attempt = open_within_on(&clock, self.dial_config.open_timeout, async {
                 let dialed = dial_locator(locator.into(), &self.dial_config)
                     .await
                     .map_err(OpenError::Dial)?;
@@ -916,7 +916,7 @@ pub async fn open_session_with_reconnect(
     // The replay pace is the session's `declaration-sync-pacing`, from the snapshot its creator
     // handed it in `params`.
     let replay_pacing = ReplayPacing::of_policy(&params.policy);
-    let (swappable, opened) = open_within(dial_config.open_timeout, async {
+    let (swappable, opened) = open_within_on(&clock, dial_config.open_timeout, async {
         let dialed = dial_locator(locator.clone().into(), &dial_config)
             .await
             .map_err(OpenError::Dial)?;

@@ -1459,7 +1459,7 @@ async fn open_face(
 ) -> Result<OpenedSession, OpenError> {
     let (params, stage) = template.into_parts(AuthRole::Accept, None);
     let started = clock.now_monotonic_ms();
-    match handshake_within(accepted, &bounds).await {
+    match handshake_within(accepted, &bounds, &clock).await {
         // R2095 — the loop's WHOLE capability offer rides the accept open, the
         // same value its dials carry. A declared QoS band still arms the
         // acceptor's subset containment against the initiator's `QoSLink`; what
@@ -1485,15 +1485,14 @@ async fn open_face(
 
 /// The accepted link's own handshake (the ws or tls server side), given at most the accept
 /// bound: upstream wraps its whole accept in the timeout, so a peer that stalls here is
-/// dropped by the same clock that bounds the session handshake after it. A bound that elapses
-/// is a failed link handshake, the error of a peer that never completed it.
-async fn handshake_within(accepted: AcceptedLink, bounds: &AcceptBounds) -> io::Result<DialedLink> {
-    match tokio::time::timeout(
-        std::time::Duration::from_millis(bounds.timeout_ms),
-        accepted.handshake(),
-    )
-    .await
-    {
+/// dropped by the same clock that bounds the session handshake after it, the session's `clock`.
+/// A bound that elapses is a failed link handshake, the error of a peer that never completed it.
+async fn handshake_within(
+    accepted: AcceptedLink,
+    bounds: &AcceptBounds,
+    clock: &TokioTime,
+) -> io::Result<DialedLink> {
+    match crate::runtime_impl::timeout_on(clock, bounds.timeout_ms, accepted.handshake()).await {
         Ok(link) => link,
         Err(_) => Err(io::Error::new(
             io::ErrorKind::TimedOut,
@@ -1549,7 +1548,7 @@ async fn dial_face(
         Err(e) => return (id, peer, Err(e)),
     };
     // The dial and the handshake are one open, bounded by `transport/unicast/open_timeout`.
-    let result = crate::session_open::open_within(dial_config.open_timeout, async {
+    let result = crate::session_open::open_within_on(&clock, dial_config.open_timeout, async {
         match dial_locator(target.locator, &dial_config).await {
             // R2095 (open-debt item 513) — THE seam the item names. Every capability
             // the node was configured with rides THIS InitSyn; before it a mesh dial
@@ -1631,7 +1630,7 @@ async fn open_face_multilink(
     // The deferred transport handshake runs here in the per-link handshake (never the
     // arm that accepts), same as the single-link [`open_face`] — a failed
     // ws/tls handshake is an isolated `FaceFailed`, not a loop stall.
-    match handshake_within(accepted, &bounds).await {
+    match handshake_within(accepted, &bounds, &clock).await {
         Ok(link) => {
             let spent = clock.now_monotonic_ms().saturating_sub(started);
             accept_multilink_with_staging(
@@ -1720,7 +1719,7 @@ async fn dial_face_multilink(
         Err(e) => return (id, peer, Err(e)),
     };
     // Bounded as `dial_face`'s open is.
-    let result = crate::session_open::open_within(dial_config.open_timeout, async {
+    let result = crate::session_open::open_within_on(&clock, dial_config.open_timeout, async {
         match dial_locator(target.locator, &dial_config).await {
             // R2096 (open-debt item 516) — THE seam the item names. R2095 wired the
             // SINGLE-link dial (`dial_face`) to the whole offer and this one kept a
@@ -1776,7 +1775,8 @@ async fn dial_face_multilink_after(
     clock: TokioTime,
     tick_interval_ms: u64,
 ) -> OpenResult {
-    tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+    // On the session's clock, as the dial after it is bounded.
+    clock.sleep(backoff_ms).await;
     dial_face_multilink(
         id,
         target,
@@ -1805,7 +1805,8 @@ async fn dial_face_after(
     clock: TokioTime,
     tick_interval_ms: u64,
 ) -> OpenResult {
-    tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+    // On the session's clock, as the dial after it is bounded.
+    clock.sleep(backoff_ms).await;
     dial_face(
         id,
         target,
@@ -2438,10 +2439,14 @@ impl PeerHost<'_> {
                     generation,
                     after_ms,
                     ..
-                } => self.retries.push(Box::pin(async move {
-                    tokio::time::sleep(Duration::from_millis(after_ms)).await;
-                    (key, generation)
-                })),
+                } => {
+                    // On the session's clock, as the peer's other deadlines are.
+                    let clock = self.clock;
+                    self.retries.push(Box::pin(async move {
+                        clock.sleep(after_ms).await;
+                        (key, generation)
+                    }))
+                }
                 // Only a peer's machine being stopped asks for it, and an AP loop stops
                 // a peer only for a lifecycle `close`, which is that seam's.
                 PeerAction::Close { id } => {

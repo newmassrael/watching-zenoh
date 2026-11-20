@@ -464,9 +464,18 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "call; each function in it is run by this crate's own tests and again through each ABI's "
         "doors (`wz-capi-pico`'s `observation_links` and `wz-capi-c`'s door tests). "
         "`shared-key-ids` gates `wire_on_link`, a key as one link's key-wire form names it, which "
-        "both engines call for each link and the cooperative engine's `shared_key_ids` tests run",
+        "both engines call for each link and the cooperative engine's `shared_key_ids` tests run; "
+        "`time-base` gates `time_base`, the time base a program supplies made from the C calls "
+        "both ABIs' doors are handed, which this crate's own test and each ABI's door tests run",
         frozenset(
-            {"clock-source", "event-ring", "resource-snapshot", "shared-key-ids", "supervision"}
+            {
+                "clock-source",
+                "event-ring",
+                "resource-snapshot",
+                "shared-key-ids",
+                "supervision",
+                "time-base",
+            }
         ),
     ),
     "wz-capi-c": (
@@ -491,6 +500,10 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # `rx-callback-offload` the same: it gates `pub mod offload`, whose public items are the
         # three `wz_capi_c_*offload*` doors and the structs and constants they take, declared in
         # `wz_capi_c.h`; off by default, as upstream runs a callback where the sample arrives.
+        # `time-base` the same: it gates `pub mod time_base`, whose public items are the
+        # `wz_capi_c_time_base_*` doors, `wz_capi_c_config_time_base` and the structs and function
+        # types they take, declared in `wz_capi_c.h`; off by default, as upstream times its sessions
+        # by the system's clock alone.
         frozenset(
             {
                 "clock-source",
@@ -502,6 +515,7 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "segment-sender",
                 "supervision",
                 "switch-doors",
+                "time-base",
                 "zenoh-c-no-unstable-api",
                 "zenoh-c-shared-memory",
             }
@@ -560,6 +574,10 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # `wz_ext_config_transport` and the two `wz_ext_internal_transport_*` doors, and the types
         # and constants they take, declared in `wz_ext.h`; off by default, as upstream has no such
         # doors.
+        # `time-base` gates `pub mod time_base`, whose public items are wz's own doors
+        # `wz_ext_time_base_new`, `_advanced`, `_loan`, `_move`, `_drop`,
+        # `wz_ext_config_time_base` and the two `wz_ext_internal_time_base_*` doors, and the types
+        # they take, declared in `wz_ext.h`; off by default, as upstream has no such doors.
         # `shared-key-ids` gates the doors `wz_ext_config_key_ids` and
         # `wz_ext_config_key_wire_form_for` of `pub mod key_ids`, declared in `wz_ext.h`; off by
         # default, as upstream has no such doors.
@@ -607,6 +625,7 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "segment-sender",
                 "shared-key-ids",
                 "supervision",
+                "time-base",
             }
         ),
     ),
@@ -699,8 +718,19 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "clock registry an application registers sources in, which the node clock then reads) "
         "and `pubsub-ts-stack` (the clock the interceptions of a timestamp stack are recorded "
         "with, which a forwarder takes a stamp from), and `event-ring` (the node's event log, "
-        "one ring the node writes events into, stamped with the node clock)",
-        frozenset({"clock-source", "codec-push", "event-ring", "pubsub-ts-stack", "time-hlc"}),
+        "one ring the node writes events into, stamped with the node clock), and `time-base` "
+        "(the time base a program supplies, which the tokio runtime's `program-time` re-exports "
+        "and the pico ABI's door makes, and which a session's timers then read and wait on)",
+        frozenset(
+            {
+                "clock-source",
+                "codec-push",
+                "event-ring",
+                "pubsub-ts-stack",
+                "time-base",
+                "time-hlc",
+            }
+        ),
     ),
     "wz-rest": (
         "the REST bridge: the facade re-exports the whole crate as `wz::rest` "

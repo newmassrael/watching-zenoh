@@ -19,8 +19,8 @@
 //! whim (`scripts/lib/platform_surface_matrix.py` and `multicast_host_roundtrip.rs` hold the
 //! measurements), so a row that needs delivery proves nothing there, and a row that asserts that
 //! nothing was found PASSES there for the wrong reason. R3070's first push ran them on both and
-//! they failed. The one that runs everywhere is a peer whose configured endpoint is live, which
-//! needs no delivery at all.
+//! they failed. Two run everywhere, needing no delivery at all: a peer whose configured endpoint is
+//! live, and the group `z_scout` reads off its config, whose result is the reading.
 //!
 //! The real library's rows for the same shapes are diffed in
 //! `wz-integration-tests/tests/zenoh_c_scouting_twice_and_diff.rs`; this file holds the rows
@@ -35,15 +35,17 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use wz_capi_c::abi::{
-    z_loaned_sample_t, z_moved_bytes_t, z_moved_closure_sample_t, z_moved_config_t,
-    z_moved_session_t, z_owned_bytes_t, z_owned_closure_sample_t, z_owned_config_t,
-    z_owned_session_t, z_owned_subscriber_t, z_view_keyexpr_t,
+    z_loaned_hello_t, z_loaned_sample_t, z_moved_bytes_t, z_moved_closure_hello_t,
+    z_moved_closure_sample_t, z_moved_config_t, z_moved_session_t, z_owned_bytes_t,
+    z_owned_closure_hello_t, z_owned_closure_sample_t, z_owned_config_t, z_owned_session_t,
+    z_owned_subscriber_t, z_view_keyexpr_t,
 };
 use wz_capi_c::bytes::z_bytes_copy_from_str;
 use wz_capi_c::config::{z_config_default, z_config_loan_mut, zc_config_insert_json5};
 use wz_capi_c::keyexpr::{z_view_keyexpr_from_str, z_view_keyexpr_loan};
 use wz_capi_c::put::z_put;
-use wz_capi_c::result::{Z_ENETWORK, Z_OK};
+use wz_capi_c::result::{Z_EINVAL, Z_ENETWORK, Z_OK};
+use wz_capi_c::scout::{z_closure_hello, z_scout, z_scout_options_t, Z_WHATAMI_PEER};
 use wz_capi_c::session::{z_close, z_open, z_session_drop, z_session_loan, z_session_loan_mut};
 use wz_capi_c::sub::{z_closure_sample, z_declare_subscriber};
 use wz_capi_c::zid::z_info_zid;
@@ -640,4 +642,93 @@ fn a_wz_peer_that_states_an_empty_listener_list_has_nothing_to_dial() {
         close_session(finder);
         close_session(bare);
     }
+}
+
+/// How many Hellos a `z_scout` callback was handed.
+unsafe extern "C" fn count_hello(_hello: *mut z_loaned_hello_t, context: *mut c_void) {
+    // SAFETY: the context is the test's counter, alive for the scout.
+    unsafe { (*(context as *const AtomicUsize)).fetch_add(1, Ordering::SeqCst) };
+}
+
+/// `z_scout` of a config whose `scouting/multicast/address` is `address`, for `budget_ms`,
+/// counting into `hellos`: the scout's result code.
+///
+/// # Safety
+/// `hellos` outlives the call.
+unsafe fn scout_with_address(address: &str, budget_ms: u64, hellos: &AtomicUsize) -> i8 {
+    // SAFETY: a zeroed owned config is the gravestone `z_config_default` overwrites.
+    let mut cfg: z_owned_config_t = unsafe { std::mem::zeroed() };
+    // SAFETY: as above.
+    assert_eq!(unsafe { z_config_default(&mut cfg) }, Z_OK);
+    let key = CString::new("scouting/multicast/address").unwrap();
+    let value = CString::new(address).unwrap();
+    // SAFETY: a live config and two C strings.
+    let rc = unsafe {
+        zc_config_insert_json5(z_config_loan_mut(&mut cfg), key.as_ptr(), value.as_ptr())
+    };
+    assert_eq!(rc, Z_OK, "the insert takes {address}");
+    // SAFETY: a zeroed owned closure is the gravestone `z_closure_hello` overwrites.
+    let mut callback: z_owned_closure_hello_t = unsafe { std::mem::zeroed() };
+    let context = hellos as *const AtomicUsize as *mut c_void;
+    // SAFETY: a writable slot; the context is the caller's counter.
+    unsafe { z_closure_hello(&mut callback, Some(count_hello), None, context) };
+    let options = z_scout_options_t {
+        timeout_ms: budget_ms,
+        what: Z_WHATAMI_PEER,
+    };
+    // SAFETY: the config and the closure are live and consumed here; the options are a local.
+    unsafe {
+        z_scout(
+            (&mut cfg as *mut z_owned_config_t).cast::<z_moved_config_t>(),
+            (&mut callback as *mut z_owned_closure_hello_t).cast::<z_moved_closure_hello_t>(),
+            &options,
+        )
+    }
+}
+
+/// `z_scout` reads `scouting/multicast/address` as zenoh's config types it, a socket address
+/// (`commons/zenoh-config/src/lib.rs` @ `address: Option<SocketAddr>,`), by the reader the open's
+/// scouting reads it with: a group in that form is scouted on, and a zenoh-pico locator or a
+/// group with no port is refused rather than scouted somewhere the config did not name. Needs no
+/// delivery: the window may hear nothing, and its result is the reading.
+#[test]
+fn z_scout_reads_its_group_as_zenohs_socket_and_refuses_a_pico_locator() {
+    let hellos = AtomicUsize::new(0);
+    let (_, port, group_text) = group(13);
+    // SAFETY: `hellos` outlives each scout.
+    unsafe {
+        assert_eq!(scout_with_address(&group_text, 100, &hellos), Z_OK);
+        assert_eq!(
+            scout_with_address(&format!("\"udp/224.0.0.231:{port}\""), 100, &hellos),
+            Z_EINVAL,
+            "a zenoh-pico locator is not zenoh's form of the key"
+        );
+        assert_eq!(
+            scout_with_address("\"224.0.0.231\"", 100, &hellos),
+            Z_EINVAL,
+            "a group with no port"
+        );
+    }
+}
+
+/// `z_scout` finds the node answering on the group its config's `scouting/multicast/address`
+/// names, and on that group alone no other node answers: what it hears is the group it read.
+#[test]
+#[ignore = "multicast loopback e2e; Layer M runs via --layer M / WZ_RUN_LAYER_M=1 --ignored"]
+fn z_scout_finds_the_node_answering_on_the_group_its_config_names() {
+    let (group_ip, group_port, group_text) = group(14);
+    let _responder = Responder::start(
+        group_ip,
+        group_port,
+        vec![0x3c; 8],
+        format!("tcp/127.0.0.1:{}", free_port()),
+    );
+    let hellos = AtomicUsize::new(0);
+    // SAFETY: `hellos` outlives the scout.
+    let rc = unsafe { scout_with_address(&group_text, 1000, &hellos) };
+    assert_eq!(rc, Z_OK);
+    assert!(
+        hellos.load(Ordering::SeqCst) >= 1,
+        "the responder on the configured group was not heard"
+    );
 }
