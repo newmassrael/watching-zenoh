@@ -107,6 +107,38 @@ fn a_link_that_has_gone_is_not_asked() {
     assert_eq!(rooms.within(1_000), Room::Unasked);
 }
 
+/// The session's counters are its links': puts it sent on the link it holds are counted there and
+/// reported through the engine, and a session that dropped nothing reports no drop.
+#[cfg(feature = "transport-stats")]
+#[test]
+fn the_sessions_counters_are_its_links_counters() {
+    use wz_capi_port::{SessionEngine, WireKey};
+    use wz_session_core::locality::Locality;
+    use wz_session_core::publish_options::PublishOptions;
+
+    let router = super::Router::start(super::CatchAll::None);
+    let engine = super::open(&router);
+    let before = engine.transport_stats();
+    for _ in 0..3 {
+        engine
+            .publish_on_wire_all(
+                "demo/stats",
+                &WireKey::literal(),
+                b"v",
+                &PublishOptions::put().with_locality(Locality::Remote),
+            )
+            .expect("a put the link carries");
+    }
+    let after = engine.transport_stats();
+    assert!(
+        after.tx.n_msgs_total() >= before.tx.n_msgs_total() + 3,
+        "three puts were counted on the link: {} before, {} after",
+        before.tx.n_msgs_total(),
+        after.tx.n_msgs_total()
+    );
+    assert_eq!(after.tx.n_dropped, 0, "nothing was dropped");
+}
+
 /// The engine over a link whose peer took the connection, brought the session up and then read
 /// nothing more: what the session sends fills the stream, and a blocking publish waits on it.
 #[cfg(feature = "listen")]
@@ -156,6 +188,10 @@ mod stalled_link {
         closed_by_the_drop: bool,
         /// How long the blocking publish took before it returned.
         waited: Duration,
+        /// The transport's drops the closed session reports: its links' counters left with
+        /// them, so these are the publishes the engine dropped before they reached a link.
+        #[cfg(feature = "transport-stats")]
+        unsent_drops: usize,
     }
 
     /// `tx_queue` with each message written as it is sent, so what fills the stream is what was
@@ -268,6 +304,8 @@ mod stalled_link {
             blocking_still_waiting,
             closed_by_the_drop,
             waited,
+            #[cfg(feature = "transport-stats")]
+            unsent_drops: publisher.transport_stats().tx.n_dropped,
         }
     }
 
@@ -304,6 +342,11 @@ mod stalled_link {
             seen.waited >= CLOSE_WAIT,
             "a blocking publish returned after {:?}, before its {CLOSE_WAIT:?}",
             seen.waited
+        );
+        #[cfg(feature = "transport-stats")]
+        assert_eq!(
+            seen.unsent_drops, 1,
+            "the dropped publish is counted as the transport's drop"
         );
     }
 
@@ -343,6 +386,11 @@ mod stalled_link {
             seen.waited >= CLOSE_WAIT,
             "a blocking publish returned after {:?}, before its {CLOSE_WAIT:?}",
             seen.waited
+        );
+        #[cfg(feature = "transport-stats")]
+        assert_eq!(
+            seen.unsent_drops, 1,
+            "the dropped publish is counted as the transport's drop"
         );
     }
 }

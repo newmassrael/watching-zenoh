@@ -545,7 +545,7 @@ transport-link-unixpipe,transport-link-ws|"
     # the pinned Mbed TLS from its submodules, which is why the feature is a leg of its own cost.
     # The sessions a host holds at once (`tests/tls_sessions.rs`, 1, compiled with the same
     # feature) starts the provider's own arena and so runs in a binary of its own.
-    "wz-capi-coop|hook|connectivity,listen,liveliness,liveliness-get,local-queryable,local-subscriber,query,queryable,scout,ticker,tls-mbedtls|"
+    "wz-capi-coop|hook|connectivity,listen,liveliness,liveliness-get,local-queryable,local-subscriber,query,queryable,scout,ticker,tls-mbedtls,transport-stats|"
     # The keys a session names by a dictionary it shares with its peers (`tests::shared_key_ids::`,
     # 14), compiled with `shared-key-ids` beside `listen`, `query` and `queryable`, the four the
     # module's `cfg` names; the rest of the crate's tests are the leg above's.

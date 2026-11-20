@@ -428,9 +428,19 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "`OpenKeyIds::new`, the dictionary and the endpoints' key-wire forms an open hands the "
         "session, which `tests/shared_key_ids.rs` runs over loopback; `app-transport` gates the "
         "`app_link` re-export of the runtime's links over a transport the program supplies, "
-        "which the pico ABI's `app_transport_doors` opens a session over",
+        "which the pico ABI's `app_transport_doors` opens a session over; `transport-stats` "
+        "gates `CoopEngine::transport_stats`, the session's transport counters, a Rust surface "
+        "neither C ABI reports, which the crate's own `tests::congestion` reads",
         frozenset(
-            {"app-transport", "listen", "scout", "scout-datagram", "shared-key-ids", "tls-mbedtls"}
+            {
+                "app-transport",
+                "listen",
+                "scout",
+                "scout-datagram",
+                "shared-key-ids",
+                "tls-mbedtls",
+                "transport-stats",
+            }
         ),
     ),
     "wz-tls-mbedtls": (
