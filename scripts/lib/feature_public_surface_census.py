@@ -450,9 +450,18 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "call; each function in it is run by this crate's own tests and again through each ABI's "
         "doors (`wz-capi-pico`'s `observation_links` and `wz-capi-c`'s door tests). "
         "`shared-key-ids` gates `wire_on_link`, a key as one link's key-wire form names it, which "
-        "both engines call for each link and the cooperative engine's `shared_key_ids` tests run",
+        "both engines call for each link and the cooperative engine's `shared_key_ids` tests run; "
+        "`time-base` gates `time_base`, the time base a program supplies made from the C calls "
+        "both ABIs' doors are handed, which this crate's own test and each ABI's door tests run",
         frozenset(
-            {"clock-source", "event-ring", "resource-snapshot", "shared-key-ids", "supervision"}
+            {
+                "clock-source",
+                "event-ring",
+                "resource-snapshot",
+                "shared-key-ids",
+                "supervision",
+                "time-base",
+            }
         ),
     ),
     "wz-capi-c": (

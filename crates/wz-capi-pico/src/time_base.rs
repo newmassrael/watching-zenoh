@@ -31,7 +31,7 @@
 
 use core::ffi::c_void;
 
-use wz_node_time::time_base::{ProgramTime, TimeBaseHold};
+use wz_node_time::time_base::TimeBaseHold;
 
 use crate::abi::z_loaned_config_t;
 use crate::config::ConfigState;
@@ -39,10 +39,10 @@ use crate::ffi::{guard_val, guarded};
 use crate::result::{ZResult, Z_ERR_NULL, Z_OK};
 
 /// The program's read of its time: nanoseconds since an epoch of its choosing.
-pub type wz_ext_time_base_now_fn = unsafe extern "C" fn(context: *mut c_void) -> u64;
+pub type wz_ext_time_base_now_fn = wz_capi_port::time_base::NowFn;
 
 /// The program's `drop(context)`, run once when the time base is gone.
-pub type wz_ext_time_base_drop_fn = unsafe extern "C" fn(context: *mut c_void);
+pub type wz_ext_time_base_drop_fn = wz_capi_port::time_base::DropFn;
 
 /// The calls the program supplies. `now_ns` is required; `drop` may be NULL.
 #[repr(C)]
@@ -74,36 +74,6 @@ impl wz_ext_owned_time_base_t {
     fn null_value() -> Self {
         Self {
             handle: core::ptr::null_mut(),
-        }
-    }
-}
-
-/// The program's read, as the time base's. The program's own `drop(context)` runs when this
-/// does, which is when the last hold of the time base goes.
-struct ProgramRead {
-    context: *mut c_void,
-    now_ns: wz_ext_time_base_now_fn,
-    drop: Option<wz_ext_time_base_drop_fn>,
-}
-
-// SAFETY: the context and the function pointers are the program's, and the header's threading
-// contract is the program's promise that its read may be made from any thread of the library.
-unsafe impl Send for ProgramRead {}
-// SAFETY: as above; the read holds no state of its own, so a shared reference adds nothing.
-unsafe impl Sync for ProgramRead {}
-
-impl ProgramTime for ProgramRead {
-    fn now_ns(&self) -> u64 {
-        // SAFETY: the program's read, with its own context.
-        unsafe { (self.now_ns)(self.context) }
-    }
-}
-
-impl Drop for ProgramRead {
-    fn drop(&mut self) {
-        if let Some(drop) = self.drop {
-            // SAFETY: the program's drop, once, after the last read.
-            unsafe { drop(self.context) }
         }
     }
 }
@@ -143,12 +113,13 @@ pub unsafe extern "C" fn wz_ext_time_base_new(
         let Some(now_ns) = calls.now_ns else {
             return Z_ERR_NULL;
         };
-        let read = ProgramRead {
-            context: calls.context,
+        // The program's drop runs when the last hold goes: the program's, a config's or a
+        // session's.
+        let hold = Box::new(wz_capi_port::time_base::over_calls(
+            calls.context,
             now_ns,
-            drop: calls.drop,
-        };
-        let hold = Box::new(TimeBaseHold::new(Box::new(read)));
+            calls.drop,
+        ));
         *this_ = wz_ext_owned_time_base_t {
             handle: Box::into_raw(hold) as *mut c_void,
         };
@@ -602,12 +573,10 @@ mod tests {
         use wz_capi_coop::ClockSource;
         let program = Program::default();
         program.now_ns.store(7_000_000, Ordering::SeqCst);
-        let program_read = ProgramRead {
-            context: &program as *const Program as *mut c_void,
-            now_ns: read,
-            drop: None,
-        };
-        let clock = session_clock(Some(TimeBaseHold::new(Box::new(program_read))));
+        let context = &program as *const Program as *mut c_void;
+        // SAFETY: `program` outlives the clock and every hold of its time base.
+        let time_base = unsafe { wz_capi_port::time_base::over_calls(context, read, None) };
+        let clock = session_clock(Some(time_base));
         assert_eq!(clock.now_us(), 7_000);
         std::thread::sleep(std::time::Duration::from_millis(20));
         assert_eq!(clock.now_us(), 7_000, "the wall clock moved it");

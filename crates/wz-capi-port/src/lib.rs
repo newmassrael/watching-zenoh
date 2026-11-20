@@ -76,6 +76,9 @@ pub mod observation;
 pub mod os;
 mod query;
 pub mod sync;
+// A time base the program supplies, made from the calls each C ABI's door is handed.
+#[cfg(feature = "time-base")]
+pub mod time_base;
 pub mod tls_material;
 pub use decl_watch::{DeclPlane, DeclWatchEvent, DeclWatchId, DeclWatchRefused, DeclWatchSink};
 pub use drive::{CalledFromReadTask, SessionClosed, SessionDrive};

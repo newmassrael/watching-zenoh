@@ -287,6 +287,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-port/src/os.rs` | S7 | |
 | `crates/wz-capi-port/src/query.rs` | S7 | |
 | `crates/wz-capi-port/src/sync.rs` | S7 | |
+| `crates/wz-capi-port/src/time_base.rs` | S7 | |
 | `crates/wz-capi-port/src/tls_material.rs` | S7 | |
 | `crates/wz-codecs/src/encoding_ids.rs` | S9 | |
 | `crates/wz-codecs/src/lib.rs` | S9 | |

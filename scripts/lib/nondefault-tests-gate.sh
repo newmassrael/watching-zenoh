@@ -466,7 +466,9 @@ transport-link-unixpipe,transport-link-ws|"
     "wz-capi-pico|hook|remote-declaration-watch|--test=decl_watch_doors"
     # What those doors do, once, in the port both C ABIs and both engines share
     # (`wz-capi-port`'s `observation`): the unit tests of the clock callback and of the refusals.
-    "wz-capi-port|hook|clock-source,event-ring,supervision,resource-snapshot|"
+    # `time-base` joins: the time base made from a door's C calls (`time_base::`), its read and the
+    # program's drop with the last hold.
+    "wz-capi-port|hook|clock-source,event-ring,supervision,resource-snapshot,time-base|"
     # The same four as the zenoh-c ABI's doors (`wz_capi_c_*`): the unit tests of each module, which
     # a build made as the reference is compiles none of.
     "wz-capi-c|hook|clock-source,event-ring,supervision,resource-snapshot,identity-make,lifecycle-doors,switch-doors,segment-sender,rx-callback-offload|"
