@@ -82,8 +82,12 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-app-frame/src/message_payload_tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-app-frame/src/proto_decode.rs` | S11 | |
 | `crates/wz-app-frame/src/proto_lex.rs` | S11 | |
+| `crates/wz-app-frame/src/proto_nanopb.rs` | S11 | |
 | `crates/wz-app-frame/src/proto_parse.rs` | S11 | |
+| `crates/wz-app-frame/src/proto_range.rs` | S11 | |
 | `crates/wz-app-frame/src/proto_schema.rs` | S11 | |
+| `crates/wz-app-frame/src/proto_write.rs` | S11 | |
+| `crates/wz-app-frame/src/proto_write_tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-app-frame/src/replay_admission.rs` | S11 | |
 | `crates/wz-app-frame/src/replay_pieces.rs` | S11 | |
 | `crates/wz-app-frame/src/segment_chain.rs` | S11 | |
