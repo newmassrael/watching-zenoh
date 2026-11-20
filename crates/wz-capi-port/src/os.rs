@@ -27,6 +27,7 @@
 //! ```c
 //! void *wz_os_mutex_new(void);                 /* a new unlocked mutex, NULL when none is left */
 //! void  wz_os_mutex_lock(void *mutex);         /* waits until it is this thread's */
+//! int   wz_os_mutex_try_lock(void *mutex);     /* 0 once it is this thread's; never waits */
 //! void  wz_os_mutex_unlock(void *mutex);
 //! void  wz_os_mutex_free(void *mutex);
 //! void *wz_os_condvar_new(void);               /* NULL when none is left */
@@ -105,6 +106,16 @@ mod host {
             self.0.lock().unwrap_or_else(PoisonError::into_inner)
         }
 
+        /// The mutex, when no thread holds it: `None` without waiting when one does. A poisoned
+        /// one is recovered, as [`Self::lock`] recovers it.
+        pub fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
+            match self.0.try_lock() {
+                Ok(guard) => Some(guard),
+                Err(std::sync::TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+                Err(std::sync::TryLockError::WouldBlock) => None,
+            }
+        }
+
         /// The value, through the only reference there is.
         pub fn get_mut(&mut self) -> &mut T {
             self.0.get_mut().unwrap_or_else(PoisonError::into_inner)
@@ -157,6 +168,7 @@ mod kernel {
     extern "C" {
         fn wz_os_mutex_new() -> *mut c_void;
         fn wz_os_mutex_lock(mutex: *mut c_void);
+        fn wz_os_mutex_try_lock(mutex: *mut c_void) -> c_int;
         fn wz_os_mutex_unlock(mutex: *mut c_void);
         fn wz_os_mutex_free(mutex: *mut c_void);
         fn wz_os_condvar_new() -> *mut c_void;
@@ -262,6 +274,18 @@ mod kernel {
             // SAFETY: `raw` is this mutex's, alive until it drops.
             unsafe { wz_os_mutex_lock(self.raw.as_ptr()) };
             MutexGuard { mutex: self }
+        }
+
+        /// The mutex, when the kernel gives it at once: `None` without waiting when another
+        /// thread holds it.
+        pub fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
+            // SAFETY: `raw` is this mutex's, alive until it drops; a 0 answer is the mutex taken,
+            // which the guard gives back.
+            if unsafe { wz_os_mutex_try_lock(self.raw.as_ptr()) } == 0 {
+                Some(MutexGuard { mutex: self })
+            } else {
+                None
+            }
         }
 
         /// The value, through the only reference there is.
@@ -397,6 +421,37 @@ mod tests {
         assert!(*ready, "the wait ends only once the flag is set");
         drop(ready);
         handle.join();
+    }
+
+    /// A mutex another thread holds is not waited for: the try answers at once, and takes it once
+    /// it is let go.
+    #[test]
+    fn a_held_mutex_is_tried_without_waiting() {
+        let shared = alloc::sync::Arc::new(Mutex::new(5));
+        assert_eq!(
+            shared.try_lock().map(|value| *value),
+            Some(5),
+            "CONTROL: a free mutex is taken"
+        );
+        let (taken, held) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let holder = alloc::sync::Arc::clone(&shared);
+        let thread = std::thread::spawn(move || {
+            let _guard = holder.lock();
+            taken.send(()).expect("the test waits");
+            // Bounded, so a try that waited cannot hold the test past it.
+            let _ = released.recv_timeout(std::time::Duration::from_secs(3));
+        });
+        held.recv().expect("the holder took the mutex");
+        let started = std::time::Instant::now();
+        assert!(shared.try_lock().is_none(), "a held mutex is not given");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "the try did not wait for the holder"
+        );
+        release.send(()).expect("the holder waits");
+        thread.join().expect("the holder");
+        assert!(shared.try_lock().is_some(), "and is taken once let go");
     }
 
     #[test]
