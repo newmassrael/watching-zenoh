@@ -296,6 +296,51 @@ pub(crate) fn session_clock(time_base: Option<TimeBaseHold>) -> SessionClock {
     }
 }
 
+/// A wait that ends at the program's word that its time moved on after the mark `seen`.
+#[cfg(not(feature = "engine-tokio"))]
+struct MovedSince {
+    time_base: TimeBaseHold,
+    seen: u64,
+}
+
+#[cfg(not(feature = "engine-tokio"))]
+impl wz_capi_coop::LinkReadiness for MovedSince {
+    fn wait_readable(&self, timeout_ms: u32) {
+        let _ = self.time_base.wait_moved(
+            self.seen,
+            core::time::Duration::from_millis(timeout_ms.into()),
+        );
+    }
+}
+
+/// The program's word, as the cooperative engine's reads wait on it.
+#[cfg(not(feature = "engine-tokio"))]
+struct TimeBaseMoves(TimeBaseHold);
+
+#[cfg(not(feature = "engine-tokio"))]
+impl wz_capi_coop::ClockMoves for TimeBaseMoves {
+    fn moved(&self) -> std::sync::Arc<dyn wz_capi_coop::LinkReadiness> {
+        std::sync::Arc::new(MovedSince {
+            seen: self.0.moves(),
+            time_base: self.0.clone(),
+        })
+    }
+}
+
+/// What tells a read of a cooperative session on `clock` that its clock moved on: the program's
+/// word, for a session on a time base; none for one on the host's clock, which moves by itself.
+#[cfg(not(feature = "engine-tokio"))]
+pub(crate) fn clock_moves(
+    clock: &SessionClock,
+) -> Option<std::sync::Arc<dyn wz_capi_coop::ClockMoves>> {
+    match clock {
+        SessionClock::Host(_) => None,
+        SessionClock::Program(time_base) => {
+            Some(std::sync::Arc::new(TimeBaseMoves(time_base.clone())))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -549,8 +594,16 @@ mod tests {
         assert_eq!(clock.now_us(), 7_000);
         std::thread::sleep(std::time::Duration::from_millis(20));
         assert_eq!(clock.now_us(), 7_000, "the wall clock moved it");
+        assert!(
+            clock_moves(&clock).is_some(),
+            "a session on a time base waits for the program's word"
+        );
 
         let host = session_clock(None);
+        assert!(
+            clock_moves(&host).is_none(),
+            "the host's clock moves by itself"
+        );
         let before = host.now_us();
         std::thread::sleep(std::time::Duration::from_millis(20));
         assert!(

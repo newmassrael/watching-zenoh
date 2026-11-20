@@ -87,10 +87,13 @@ pub use wz_runtime_coop::app_link;
 mod tests;
 
 pub use engine::{
-    CoopConfig, CoopEngine, KeyWireFormRefused, OpenError, OpenKeyIds, DEFAULT_ACCEPT_PENDING,
-    DEFAULT_MAX_FACES,
+    ClockMoves, CoopConfig, CoopEngine, KeyWireFormRefused, OpenError, OpenKeyIds,
+    DEFAULT_ACCEPT_PENDING, DEFAULT_MAX_FACES,
 };
 /// The clock a session of this engine runs on, which every timer of the session reads: an ABI
 /// opens the engine with its host's, or with one of its own (a time base the program supplies).
 pub use wz_runtime_coop::ClockSource;
+/// A wait a read of this engine makes, which an ABI gives for the word that a clock it moves has
+/// moved on ([`ClockMoves`]).
+pub use wz_runtime_coop::session_drive::LinkReadiness;
 }

@@ -587,9 +587,9 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # that stamps no data, the `trusted-only` policy not refusing one, a node with no identity).
     # `event-ring` joins: the node's event log and its seven tests (a record's fields, a clock that
     # stamps and one that does not, the two full-ring policies, producers on four threads).
-    # `time-base` joins: the time base a program supplies and its six tests (a reading held
+    # `time-base` joins: the time base a program supplies and its seven tests (a reading held
     # monotonic, a wait woken on the program's word, a wait already due, a dropped wait, the read
-    # let go with the last hold, a reference of an earlier lease).
+    # let go with the last hold, a thread let go by the word, a reference of an earlier lease).
     "wz-node-time|hook|clock-source,codec-push,event-ring,pubsub-timestamp,pubsub-ts-stack,time-base,time-hlc|"
     # Open-debt item 913 -- the in-memory group every group test of the workspace runs over
     # (`multicast_bus`) holds a member's place while a send half of its link lives, as a socket

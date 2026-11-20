@@ -591,6 +591,7 @@ fn client_config() -> CoopConfig {
         listen: Vec::new(),
         accept_pending: crate::DEFAULT_ACCEPT_PENDING,
         max_faces: crate::DEFAULT_MAX_FACES,
+        clock_moves: None,
     }
 }
 

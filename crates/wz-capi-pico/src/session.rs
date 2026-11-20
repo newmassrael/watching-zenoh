@@ -1291,6 +1291,12 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         listen,
         accept_pending: wz_capi_coop::DEFAULT_ACCEPT_PENDING,
         max_faces: wz_capi_coop::DEFAULT_MAX_FACES,
+        // A session on a time base waits for the program's word that its time moved on as well
+        // as for its links.
+        #[cfg(feature = "time-base")]
+        clock_moves: crate::time_base::clock_moves(&clock),
+        #[cfg(not(feature = "time-base"))]
+        clock_moves: None,
     };
     // A config that carries the program's transport opens the engine over its links, and over no
     // socket of the host's; `z_open` has refused a locator the transport does not carry. Either
