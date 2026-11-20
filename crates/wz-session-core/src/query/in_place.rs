@@ -14,7 +14,7 @@
 //! queryables are fired through the SAME fan-out the owned path takes
 //! ([`QueryableRegistry::fire_projection`]), over a projection of the lent query
 //! instead of the owned one. A queryable's contract was already a view borrowed
-//! for the call (`QuerySink::handle`), so no queryable changes; its replies are
+//! for the call (`QuerySinkOf::handle_typed`), so no queryable changes; its replies are
 //! staged as they always are.
 //!
 //! What it dispatches is what [`QueryableRegistry::dispatch_request`] dispatches
@@ -41,7 +41,6 @@ use wz_codecs::request::{RequestView, RequestViewVariant};
 
 use super::{DispatchOutcome, QueryEnvelope, QueryProjection, QueryableRegistry};
 use crate::ext_view::{walked, ExtEntryView};
-use crate::query_sink::QuerySink;
 use crate::reply_stage::{FinalStage, FinalStaging, ReplyStage};
 use crate::wireexpr_resolve::{
     resolve_wireexpr_viewed, KeyexprBuf, KeyexprPastBound, MappingSpaces,
@@ -143,7 +142,7 @@ fn lent_projection<'q, 'f: 'q>(query: &'q QueryView<'f>) -> QueryProjection<'q> 
     }
 }
 
-impl<C: QuerySink, P: crate::bounded::Storage> QueryableRegistry<C, P> {
+impl<C: super::ResponderSink, P: crate::bounded::Storage> QueryableRegistry<C, P> {
     /// Dispatch a Request the in-place receive path lent: the queryable side of
     /// [`IterationEvent::InPlace`](crate::driver_loop::IterationEvent::InPlace),
     /// staging replies into `pending_replies` and the Final it owes into

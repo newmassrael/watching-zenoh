@@ -335,10 +335,11 @@ pub mod switchboard;
 // dispatch a matched inbound query through one backing-agnostic seam
 // (model B: AP stores `BoxedQuerySink` heap closures, MCU stores a
 // consumer-supplied closed `enum`, §2.4 static-first dynamic-opt-in).
-// The queryable model-B seam: the registry is generic-over-`C: QuerySink`
+// The queryable model-B seam: the registry is generic over its sink `C`
 // (R311gb-3b), the reply accumulator `query::QueryResponder` impls
-// `ReplyOut` directly, and the dispatch builds a `BorrowedQuery` for the
-// inbound `QueryView` (R311gb-3b-cleanup retired the prior
+// `ReplyOut` directly, and the dispatch hands its view and that responder
+// to the sink as their own types (`QuerySinkOf`), which every `QuerySink`
+// takes as trait objects (R311gb-3b-cleanup retired the prior
 // `QueryEvent`/`ReplyEmitter` wrapper module).
 pub mod query_sink;
 
