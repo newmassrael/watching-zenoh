@@ -437,7 +437,8 @@ impl GroupFace {
     }
 
     /// How many messages of `priority` the session put on the group were dropped for want of room.
-    #[cfg(test)]
+    /// Read only by `CoopEngine::group_congestion_drops`, and compiled where it is.
+    #[cfg(all(test, feature = "app-transport"))]
     pub(super) fn congestion_drops(&self, priority: Priority) -> u32 {
         self.tx.drops(priority)
     }

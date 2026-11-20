@@ -2329,15 +2329,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         Ok(id)
     }
 
-    /// The waits for room a publish that finds the session held asks.
-    #[cfg(all(test, feature = "group"))]
+    /// The waits for room a publish that finds the session held asks. Compiled where its
+    /// readers are: the group tests over the program's transport (`tests::group`).
+    #[cfg(all(test, feature = "group", feature = "app-transport"))]
     pub(crate) fn rooms(&self) -> &LinkRooms {
         &self.rooms
     }
 
     /// How many messages of `priority` the session put on its groups were dropped for want of
-    /// room on the group's queue.
-    #[cfg(all(test, feature = "group"))]
+    /// room on the group's queue. Compiled where its readers are, as [`Self::rooms`] is.
+    #[cfg(all(test, feature = "group", feature = "app-transport"))]
     pub(crate) fn group_congestion_drops(&self, priority: wz_session_core::qos::Priority) -> u32 {
         self.live().map_or(0, |core| {
             core.0
