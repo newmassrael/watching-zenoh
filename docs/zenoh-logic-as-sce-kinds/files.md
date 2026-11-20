@@ -78,6 +78,8 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-app-frame/src/message_catalog.rs` | S11 | |
 | `crates/wz-app-frame/src/message_catalog_table.rs` | S11 | |
 | `crates/wz-app-frame/src/message_catalog_tests.rs` | excluded: test | Test-only file by its name. |
+| `crates/wz-app-frame/src/message_payload.rs` | S11 | |
+| `crates/wz-app-frame/src/message_payload_tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-app-frame/src/proto_decode.rs` | S11 | |
 | `crates/wz-app-frame/src/proto_lex.rs` | S11 | |
 | `crates/wz-app-frame/src/proto_parse.rs` | S11 | |
@@ -152,11 +154,13 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-coop/src/engine.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/faces.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/get.rs` | S7 | |
+| `crates/wz-capi-coop/src/engine/group.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/liveliness.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/query.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/registry.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/replay.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/ticker.rs` | S7 | |
+| `crates/wz-capi-coop/src/host_group.rs` | S7 | |
 | `crates/wz-capi-coop/src/lib.rs` | S7 | |
 | `crates/wz-capi-coop/src/scout.rs` | S7 | |
 | `crates/wz-capi-coop/src/scout/tests.rs` | excluded: test | Test-only file by its name. |
@@ -168,6 +172,8 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-coop/src/tests/face_table.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/faces.rs` | S7 | |
 | `crates/wz-capi-coop/src/tests/get.rs` | S7 | |
+| `crates/wz-capi-coop/src/tests/group.rs` | excluded: test | Test-only file by its name. |
+| `crates/wz-capi-coop/src/tests/host_group.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/link_sets.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/listen.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/liveliness.rs` | S7 | |
@@ -245,6 +251,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-pico/src/locality.rs` | S7 | |
 | `crates/wz-capi-pico/src/matching.rs` | S7 | |
 | `crates/wz-capi-pico/src/message_catalog.rs` | S12 | |
+| `crates/wz-capi-pico/src/message_payload.rs` | S12 | |
 | `crates/wz-capi-pico/src/option_fields.rs` | S12 | |
 | `crates/wz-capi-pico/src/os/arith.rs` | S12 | |
 | `crates/wz-capi-pico/src/os/mod.rs` | S7 | |
@@ -253,6 +260,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-pico/src/os/zephyr.rs` | S7 | |
 | `crates/wz-capi-pico/src/os/zephyr_arith.rs` | S12 | |
 | `crates/wz-capi-pico/src/platform.rs` | S7 | |
+| `crates/wz-capi-pico/src/proto_file.rs` | S12 | |
 | `crates/wz-capi-pico/src/pubsub.rs` | S7 | |
 | `crates/wz-capi-pico/src/qos.rs` | S7 | |
 | `crates/wz-capi-pico/src/querier.rs` | S7 | |
@@ -281,6 +289,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-port/src/decl_watch.rs` | S7 | |
 | `crates/wz-capi-port/src/drive.rs` | S7 | |
 | `crates/wz-capi-port/src/engine.rs` | S7 | |
+| `crates/wz-capi-port/src/group.rs` | S7 | |
 | `crates/wz-capi-port/src/lib.rs` | S7 | |
 | `crates/wz-capi-port/src/listeners.rs` | S7 | |
 | `crates/wz-capi-port/src/observation/clock.rs` | S7 | |
