@@ -122,19 +122,24 @@ What is wz's own is in `config\`:
 
 ## Examples
 
-Each example is one C file that includes `example_common.h` from the same directory, exchanges
-over the loopback between two sessions of one process, and exits 0 when every check held. Build
-one as above, for instance `cl /std:c11 /DZENOH_WINDOWS /I include examples\e2e.c release\lib\wz_capi_pico.lib`.
+Each example is one C file that exchanges between two sessions of one process, over the loopback
+or, in `own_transport.c` and `pico_app_transport.c`, over a stack the program implements, and
+exits 0 when every check held. Every example but `pico_app_transport.c` includes
+`example_common.h` from the same directory. Build one as above, for instance
+`cl /std:c11 /DZENOH_WINDOWS /I include examples\e2e.c release\lib\wz_capi_pico.lib`.
 
 | File | What it shows |
 |---|---|
 | `profiles.c` | publication, subscription and a query under the upstream profile |
 | `transports.c` | tcp, udp and a multicast group over the system's sockets; the group is joined only when `WZ_EXAMPLE_GROUP_IFACE` names an interface in `#iface=` form (on Windows, an adapter's interface GUID) |
-| `pico_app_transport.c` | the same three over a transport the program supplies, with partial sends and would-blocks |
+| `own_transport.c` | the same three over a network stack of the program's own, registered with `wz_ext_transport_*`: the guide to plugging in a TCP/IP stack that is not the system's, with partial sends, would-blocks, an asynchronous connect and a refused one |
+| `pico_app_transport.c` | the same three over a transport the program supplies, with partial sends and would-blocks injected |
 | `batching.c` | batching on and off, and a flush |
 | `e2e.c` | end-to-end protection across a session: a sender, a receiver and its verdicts |
 | `supervision.c` | supervision of a periodic stream that stops |
 | `periodic.c` | a program's own periodic task over the run API |
+| `keyed.c` | a keyed topic: two instances of one message on one key expression, told apart by a field of the payload, with the last value of each |
+| `history.c` | history for a late subscriber: the last frames a publisher sent, replayed oldest first, then the live ones, each judged by an end-to-end receiver |
 
 ## Checking the package
 

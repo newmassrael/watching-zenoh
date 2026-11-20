@@ -14,10 +14,12 @@
  * carry a group). The program takes it from WZ_EXAMPLE_GROUP_IFACE, in the form #iface=
  * reads on that host; without it the group is not joined and the program says so.
  *
- * The same three configs over a transport the program supplies, with no socket of the
- * system's, are the program tests/c/pico_app_transport.c: it builds against the library
- * with the app-transport capability and carries the same exchange over a stream pair, a
- * datagram pair and a two-member group of its own.
+ * The same three configs over a network stack the program supplies, with no socket of the
+ * system's, are the example own_transport.c, the guide to plugging in a stack of one's own:
+ * it builds against the library with the app-transport capability and carries a burst over a
+ * stream pair, a datagram pair and a two-member group of its own stack. The test program
+ * tests/c/pico_app_transport.c carries this example's exchange over such a transport with
+ * partial sends and would-blocks injected.
  */
 
 #define EXAMPLE_NAME "example-transports"
