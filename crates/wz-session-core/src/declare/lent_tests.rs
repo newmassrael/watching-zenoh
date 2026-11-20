@@ -95,15 +95,19 @@ fn a_lent_subscriber_declaration_reaches_the_remote_subscribers_as_the_owned_one
     let mut lent = RemoteSubscriberRegistry::new();
     for (registry, log) in [(&mut owned, &owned_log), (&mut lent, &lent_log)] {
         let seen = log.clone();
-        registry.on_subscriber_declared(move |d: &dyn DeclView| {
-            seen.lock()
-                .expect("not poisoned")
-                .push(format!("+{} {}", d.id(), d.keyexpr()));
-        });
+        registry
+            .on_subscriber_declared(move |d: &dyn DeclView| {
+                seen.lock()
+                    .expect("not poisoned")
+                    .push(format!("+{} {}", d.id(), d.keyexpr()));
+            })
+            .expect("no quota is stated on this table");
         let seen = log.clone();
-        registry.on_subscriber_undeclared(move |id| {
-            seen.lock().expect("not poisoned").push(format!("-{id}"));
-        });
+        registry
+            .on_subscriber_undeclared(move |id| {
+                seen.lock().expect("not poisoned").push(format!("-{id}"));
+            })
+            .expect("no quota is stated on this table");
     }
     let table: HashMap<u64, String> = HashMap::new();
     for declare in [
@@ -144,15 +148,19 @@ fn a_lent_queryable_declaration_carries_its_completeness_as_the_owned_one_does()
     let mut lent = RemoteQueryableRegistry::new();
     for (registry, log) in [(&mut owned, &owned_log), (&mut lent, &lent_log)] {
         let seen = log.clone();
-        registry.on_queryable_declared(move |d: &dyn DeclView| {
-            seen.lock()
-                .expect("not poisoned")
-                .push(format!("+{} {}", d.id(), d.keyexpr()));
-        });
+        registry
+            .on_queryable_declared(move |d: &dyn DeclView| {
+                seen.lock()
+                    .expect("not poisoned")
+                    .push(format!("+{} {}", d.id(), d.keyexpr()));
+            })
+            .expect("no quota is stated on this table");
         let seen = log.clone();
-        registry.on_queryable_undeclared(move |id| {
-            seen.lock().expect("not poisoned").push(format!("-{id}"));
-        });
+        registry
+            .on_queryable_undeclared(move |id| {
+                seen.lock().expect("not poisoned").push(format!("-{id}"));
+            })
+            .expect("no quota is stated on this table");
     }
     let table: HashMap<u64, String> = HashMap::new();
     let info = |complete| QueryableInfo {
@@ -207,15 +215,19 @@ fn a_lent_token_declaration_is_announced_as_the_owned_one_is() {
     let mut lent = LivelinessRegistry::new();
     for (registry, log) in [(&mut owned, &owned_log), (&mut lent, &lent_log)] {
         let seen = log.clone();
-        registry.on_token_declared(move |d: &dyn DeclView| {
-            seen.lock()
-                .expect("not poisoned")
-                .push(format!("+{} {}", d.id(), d.keyexpr()));
-        });
+        registry
+            .on_token_declared(move |d: &dyn DeclView| {
+                seen.lock()
+                    .expect("not poisoned")
+                    .push(format!("+{} {}", d.id(), d.keyexpr()));
+            })
+            .expect("no quota is stated on this table");
         let seen = log.clone();
-        registry.on_token_undeclared(move |id| {
-            seen.lock().expect("not poisoned").push(format!("-{id}"));
-        });
+        registry
+            .on_token_undeclared(move |id| {
+                seen.lock().expect("not poisoned").push(format!("-{id}"));
+            })
+            .expect("no quota is stated on this table");
     }
     let table: HashMap<u64, String> = HashMap::new();
     for declare in [
@@ -439,19 +451,21 @@ fn a_lent_response_final_ends_the_pending_get_as_the_owned_one_does() {
     let mut lent = ReplyRegistry::new();
     for (registry, log) in [(&mut owned, &owned_log), (&mut lent, &lent_log)] {
         let finals = log.clone();
-        registry.register(
-            7,
-            1,
-            None,
-            ReplyAcceptance::Any,
-            |_reply| {},
-            move |rid| {
-                finals
-                    .lock()
-                    .expect("not poisoned")
-                    .push(format!("final {rid}"));
-            },
-        );
+        registry
+            .register(
+                7,
+                1,
+                None,
+                ReplyAcceptance::Any,
+                |_reply| {},
+                move |rid| {
+                    finals
+                        .lock()
+                        .expect("not poisoned")
+                        .push(format!("final {rid}"));
+                },
+            )
+            .expect("no quota is stated on this table");
     }
     let table: HashMap<u64, String> = HashMap::new();
     // A final for a request nobody here asked is dropped, on both forms.

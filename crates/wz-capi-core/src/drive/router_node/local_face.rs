@@ -358,19 +358,32 @@ impl State {
                 accept,
                 timeout_ms,
                 mut on_reply,
-                mut on_final,
+                on_final,
             } => {
                 // A query that is not answered by its deadline ends with the reply that says
                 // so, then its end, as a query of a session does.
                 let deadline = (timeout_ms != 0).then(|| self.now_ms() + u64::from(timeout_ms));
-                self.queries.register(
+                // The end is held where both the registry and a refusal reach it: the getter
+                // returned before this thread read the command, so a query the registry refuses
+                // is told its end here, and the handlers it was held with are let go.
+                let on_final = std::sync::Arc::new(std::sync::Mutex::new(on_final));
+                let ended = std::sync::Arc::clone(&on_final);
+                let held = self.queries.register(
                     rid,
                     1,
                     deadline,
                     ReplyAcceptance::for_query(&keyexpr, accept),
                     move |reply| on_reply(reply),
-                    move |_| on_final(),
+                    move |_| (ended.lock().unwrap_or_else(|p| p.into_inner()))(),
                 );
+                if let Err(refusal) = held {
+                    if std::env::var_os("WZ_CAPI_LOG").is_some() {
+                        eprintln!(
+                            "wz-capi: the local face refused the query on `{keyexpr}`: {refusal}"
+                        );
+                    }
+                    (on_final.lock().unwrap_or_else(|p| p.into_inner()))();
+                }
             }
             // A router's answer to a tokens get of the face is the get's alone: it is told to the
             // get, once per key, and not counted as a token of the face, whose id is the router

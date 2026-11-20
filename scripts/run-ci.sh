@@ -14141,7 +14141,9 @@ layer_c1m_session_lwip() {
     # is at least what it holds): 5 = what that command PRINTED. Beside it, the
     # same file on the selectors the
     # slot is built from but without it, which is the instrument's control: there
-    # the same windows must cost the heap something, 1 = what that PRINTED.
+    # the creation, handshake, KeepAlive and Close windows must cost the heap
+    # something, and a Put and idle turns nothing on either profile (the matcher
+    # reads the key as text since 2026-11-19), 1 = what that PRINTED.
     wz_test_args wz-session-lwip session_slot_allocations
     _runci_guarded_test "C1m session slot alloc" 5 \
         cargo test -p wz-session-lwip \
@@ -14329,7 +14331,9 @@ layer_c1m_session_lwip() {
     # loop that was late makes up its puts a round at a time, as a session's publisher does; a body
     # made for each put is refused on the group and the round goes on; and the members follow the
     # arrivals and departures and never go below none: 4 = what that command PRINTED.
-    _runci_guarded_test "C1m mcu slot group" 4 \
+    # 4 -> 5: the group session is made with the snapshot it is handed (cd6f74c9a added
+    # the test and left this count).
+    _runci_guarded_test "C1m mcu slot group" 5 \
         cargo test -p wz-session-mcu --features group --lib slot_group:: --quiet || return 1
     # The replay of a node's declarations on a session (`slot_client`, the slot profile with
     # `client-slot`): each entry is offered once in order, a refused send resumes at the entry it failed

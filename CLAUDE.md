@@ -46,13 +46,14 @@ restructure the prose. Background: `docs/agent-reference.md` § Atomic store.
 - Section body edits → `set_section_*` / `add_section_*` (MCP or
   `mnemosyne-cli`). Never `Edit` / `Write` the sidecar JSON.
 - Changelog entries (atomic ledger and `rfc-open-questions-log.md::Change log`)
-  → **`bash scripts/append-round.sh`**, which takes the CLI's own arguments:
-  `--entry-id "Round N" --decision-file <path> --changes-file <path>
-  --verification-file <path> --impact <id>[,<id>...] --carry-file <path>`.
-  **`--impact` takes STORE SECTION IDS** (copy from `mnemosyne-cli query
-  --list-sections`), not the §-number you would say aloud. The wrapper resolves
-  them before the append; once an entry freezes, a bad ref costs a whole
-  re-citing round. Entry ids use the `Round ` prefix.
+  → pass `scripts/append-round.sh`'s arguments, without `--entry-id`, after
+  `--` to **`bash scripts/land.sh`**: `--decision-file <path> --changes-file
+  <path> --verification-file <path> --impact <id>[,<id>...] --carry-file
+  <path>`. The queue integrator files the round under the number the store
+  gives it (`scripts/file-round.sh`). **`--impact` takes STORE SECTION IDS**
+  (copy from `mnemosyne-cli query --list-sections`), not the §-number you
+  would say aloud. `land.sh` checks them before submitting; once an entry
+  freezes, a bad ref costs a whole re-citing round.
 - After every mutation → `validate_workspace`: orphan delta 0, T3 warn count
   not increased, entries/sections delta matches the call.
 - If a mutation references a section that does not exist yet, add the target
@@ -86,7 +87,7 @@ One-time per clone: `git config core.hooksPath .githooks`. Requires
   `WZ_PREPUSH_EXTENDED=1 bash scripts/land.sh` requests the extended sweep;
   `bash scripts/run-ci.sh` is the full local CI.
   Gate list, timings and opt-ins: `docs/agent-reference.md` § Local CI gates.
-- **Development speed first** (owner, 2026-10-09). Verification is batched. A
+- **Verification is batched** (owner, 2026-10-09). A
   worker on one item verifies only that item: its build, its tests, and clippy
   of the crates it touched (per crate; never two crates with `--all-features`
   in one command) — not the full gate array, Layer C0 family or count-guard

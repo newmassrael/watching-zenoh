@@ -2138,6 +2138,11 @@ pub enum QueryableInterestReply {
 /// separate `all(codec-request, alloc)` impl block below.
 pub struct QueryableRegistry<C: QuerySink, P: Storage = Profile> {
     queryables: BoundedVec<Queryable<C, P>, { caps::MAX_QUERYABLES }, P>,
+    /// The most queryables the registry admits (`MAX_QUERYABLES`): what the creator of the
+    /// registry resolved ([`Self::limit_to`]), the build's value until it does. A growable table
+    /// refuses nothing by its storage, so this is what bounds it; where the build fixes the
+    /// bound to the storage's capacity it is held in no byte and the storage refuses alone.
+    quota: crate::limits::MaxQueryablesHeld,
     /// The declaration id the next queryable takes, from 1. A `u64` only so
     /// that it can stand one past `u32::MAX`, which is how the registry knows
     /// every id has been handed out.
@@ -2170,6 +2175,7 @@ impl<C: QuerySink, P: Storage> Default for QueryableRegistry<C, P> {
     fn default() -> Self {
         Self {
             queryables: BoundedVec::default(),
+            quota: Default::default(),
             next_id: 1,
             requester: None,
             oversize_refused: 0,
@@ -2181,6 +2187,13 @@ impl<C: QuerySink, P: Storage> Default for QueryableRegistry<C, P> {
 }
 
 impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
+    /// Hold the registry to the `MAX_QUERYABLES` its creator resolved: a registration that would
+    /// leave more queryables than `quota` admits is refused ([`RegisterError::TableFull`]), and
+    /// the queryables already in are kept, as a lowered soft limit keeps what it holds.
+    pub fn limit_to(&mut self, quota: crate::limits::MaxQueryablesHeld) {
+        self.quota = quota;
+    }
+
     /// How many queries from a peer were refused for their size: not run by any queryable, and
     /// owed their final as a query that matched nobody is.
     pub fn oversize_refusals(&self) -> u32 {
@@ -2319,8 +2332,8 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
     /// capacity canonical form is rejected with
     /// [`RegisterError::KeyexprTooLong`] and a full table with
     /// [`RegisterError::TableFull`] (fail-fast, no silent
-    /// truncation). On the `alloc` backing neither branch is ever taken,
-    /// so the convenience wrappers `.expect()` the result.
+    /// truncation). On every backing a registration past the quota the
+    /// creator stated ([`Self::limit_to`]) is refused as a full table.
     ///
     /// Once the registry has handed out every `u32` declaration id it refuses
     /// with [`RegisterError::IdsExhausted`] on every backing, rather than wrap
@@ -2360,6 +2373,10 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
                     raw
                 }
             };
+        // The quota before an id is taken: a refused registration changes nothing.
+        if !self.quota.admits(self.queryables.len() + 1) {
+            return Err(RegisterError::TableFull);
+        }
         let id = QueryableId(u32::try_from(self.next_id).map_err(|_| RegisterError::IdsExhausted)?);
         let pattern_facts = crate::keyexpr_match::KeyFacts::of(&pattern);
         // Push first; only consume the id counter on success so a
@@ -3494,20 +3511,18 @@ impl QueryableRegistry<BoxedQuerySink> {
     /// use [`register_with_locality`](Self::register_with_locality)
     /// to restrict to one origin class.
     ///
-    /// GROWABLE BACKING ONLY, for the reason
-    /// [`crate::pubsub::SubscriberRegistry::register`] gives: a fixed-backing
-    /// build registers through
-    /// [`register_sink`](QueryableRegistry::register_sink) with
-    /// `BoxedQuerySink::new(handler)` and handles
-    /// [`RegisterError::TableFull`].
-    #[cfg(any(test, doc, not(feature = "bounded-heapless")))]
+    /// Admission is a partial operation, so this returns what
+    /// [`register_sink`](QueryableRegistry::register_sink) returns on every
+    /// backing, for the reason [`crate::pubsub::SubscriberRegistry::register`]
+    /// gives: a fixed backing fills, and a growable one is held to the quota
+    /// its creator stated ([`QueryableRegistry::limit_to`]).
     pub fn register(
         &mut self,
-        keyexpr_pattern: impl Into<String>,
+        keyexpr_pattern: &str,
         handler: impl FnMut(&dyn crate::query_sink::QueryView, &mut dyn crate::query_sink::ReplyOut)
             + Send
             + 'static,
-    ) -> QueryableId {
+    ) -> Result<QueryableId, RegisterError> {
         self.register_with_locality(keyexpr_pattern, crate::locality::Locality::Any, handler)
     }
 
@@ -3517,28 +3532,21 @@ impl QueryableRegistry<BoxedQuerySink> {
     /// for the dispatch-invariant rationale (every inbound Request
     /// is remote until self-publish loopback lands).
     ///
-    /// GROWABLE BACKING ONLY, for the reason [`register`](Self::register)
-    /// gives.
-    #[cfg(any(test, doc, not(feature = "bounded-heapless")))]
+    /// It refuses as [`register`](Self::register) does.
     pub fn register_with_locality(
         &mut self,
-        keyexpr_pattern: impl Into<String>,
+        keyexpr_pattern: &str,
         allowed_origin: crate::locality::Locality,
         handler: impl FnMut(&dyn crate::query_sink::QueryView, &mut dyn crate::query_sink::ReplyOut)
             + Send
             + 'static,
-    ) -> QueryableId {
-        let pattern = keyexpr_pattern.into();
-        // AP backing: `register_sink` is infallible here (the BoundedVec
-        // table + BoundedString pattern grow past the advisory `N`), so
-        // the convenience wrapper keeps its `QueryableId` signature.
+    ) -> Result<QueryableId, RegisterError> {
         self.register_sink(
-            &pattern,
+            keyexpr_pattern,
             allowed_origin,
             /*complete=*/ false,
             BoxedQuerySink::new(handler),
         )
-        .expect("register on the alloc backing never exceeds declared capacity")
     }
 }
 
@@ -3779,12 +3787,14 @@ mod tests {
         reg.register("ours/temp", move |_query, responder| {
             o.fetch_add(1, Ordering::SeqCst);
             responder.reply(b"42.0");
-        });
+        })
+        .expect("no quota is stated on this table");
         let t = theirs.clone();
         reg.register("theirs/temp", move |_query, responder| {
             t.fetch_add(1, Ordering::SeqCst);
             responder.reply(b"0.0");
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let mut peer = HashMap::new();
         peer.insert(7u64, "theirs/temp".to_string());
@@ -3819,12 +3829,14 @@ mod tests {
         reg.register("ours/temp", move |_q, r| {
             o.fetch_add(1, Ordering::SeqCst);
             r.reply(b"42.0");
-        });
+        })
+        .expect("no quota is stated on this table");
         let t = theirs.clone();
         reg.register("theirs/temp", move |_q, r| {
             t.fetch_add(1, Ordering::SeqCst);
             r.reply(b"0.0");
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let mut peer = HashMap::new();
         peer.insert(7u64, "theirs/temp".to_string());
@@ -3857,9 +3869,15 @@ mod tests {
     #[test]
     fn register_assigns_monotonic_ids_starting_from_one() {
         let mut reg = QueryableRegistry::new();
-        let id1 = reg.register("home/temp", |_q, _r| {});
-        let id2 = reg.register("home/temp", |_q, _r| {});
-        let id3 = reg.register("home/humid", |_q, _r| {});
+        let id1 = reg
+            .register("home/temp", |_q, _r| {})
+            .expect("no quota is stated on this table");
+        let id2 = reg
+            .register("home/temp", |_q, _r| {})
+            .expect("no quota is stated on this table");
+        let id3 = reg
+            .register("home/humid", |_q, _r| {})
+            .expect("no quota is stated on this table");
         assert_eq!(id1.as_u64(), 1);
         assert_eq!(id2.as_u64(), 2);
         assert_eq!(id3.as_u64(), 3);
@@ -3871,8 +3889,12 @@ mod tests {
     #[test]
     fn unregister_is_idempotent_and_removes_only_matching_id() {
         let mut reg = QueryableRegistry::new();
-        let id1 = reg.register("home/temp", |_q, _r| {});
-        let id2 = reg.register("home/humid", |_q, _r| {});
+        let id1 = reg
+            .register("home/temp", |_q, _r| {})
+            .expect("no quota is stated on this table");
+        let id2 = reg
+            .register("home/humid", |_q, _r| {})
+            .expect("no quota is stated on this table");
         assert!(reg.unregister(id1));
         assert!(
             !reg.unregister(id1),
@@ -3891,7 +3913,8 @@ mod tests {
         reg.register("home/temp", move |_query, responder| {
             counter.fetch_add(1, Ordering::SeqCst);
             responder.reply(b"42.0");
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let req = request_query(7, 0, Some("home/temp"));
         let mut replies = ReplyStage::new();
@@ -3922,7 +3945,8 @@ mod tests {
         reg.register("home/**", move |_q, responder| {
             counter.fetch_add(1, Ordering::SeqCst);
             responder.reply(b"ok");
-        });
+        })
+        .expect("no quota is stated on this table");
 
         // Three different keyexpr literals should all match `home/**`.
         let mut replies = ReplyStage::new();
@@ -3953,7 +3977,8 @@ mod tests {
         reg.register("@zid/100a0c/3912/aligner", move |_q, responder| {
             counter.fetch_add(1, Ordering::SeqCst);
             responder.reply(b"ok");
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let mut replies = ReplyStage::new();
         // A wildcard selector that INTERSECTS the concrete queryable → fires.
@@ -3990,7 +4015,8 @@ mod tests {
         let counter = invocations.clone();
         reg.register("sensors/temp", move |_q, _r| {
             counter.fetch_add(1, Ordering::SeqCst);
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let mut peer_table = HashMap::new();
         peer_table.insert(11u64, "sensors/temp".to_string());
@@ -4027,7 +4053,8 @@ mod tests {
         let cap_cb = captured.clone();
         reg.register("home/temp", move |event, _responder| {
             *cap_cb.lock().unwrap() = event.attachment().map(<[u8]>::to_vec);
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let req = request_query_with_attachment(11, Some("home/temp"), b"hello-att");
         let mut replies = ReplyStage::new();
@@ -4052,7 +4079,8 @@ mod tests {
         let cap_cb = captured.clone();
         reg.register("home/temp", move |event, _responder| {
             *cap_cb.lock().unwrap() = event.attachment().map(<[u8]>::to_vec);
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let req = request_query(7, 0, Some("home/temp"));
         let mut replies = ReplyStage::new();
@@ -4111,7 +4139,8 @@ mod tests {
         let cap_cb = captured.clone();
         reg.register("home/temp", move |event, _responder| {
             *cap_cb.lock().unwrap() = event.parameters().map(<[u8]>::to_vec);
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let req = request_query_with_parameters(13, "home/temp", b"key=value");
         let mut replies = ReplyStage::new();
@@ -4160,7 +4189,8 @@ mod tests {
         let seen = runs.clone();
         reg.register("home/temp", move |_event, _responder| {
             *seen.lock().unwrap() += 1;
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let req = request_query_with_parameters(21, "home/temp", &params);
         let mut replies = ReplyStage::new();
@@ -4249,7 +4279,8 @@ mod tests {
         let cap_cb = captured.clone();
         reg.register("home/temp", move |event, _responder| {
             *cap_cb.lock().unwrap() = event.source_info().cloned();
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let req = request_query_with_source_info(21, "home/temp", &[0xAA, 0xBB, 0xCC, 0xDD]);
         let mut replies = ReplyStage::new();
@@ -4273,7 +4304,8 @@ mod tests {
         let counter = invocations.clone();
         reg.register("home/temp", move |_q, _r| {
             counter.fetch_add(1, Ordering::SeqCst);
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let mut replies = ReplyStage::new();
         let put_req = request_put(1, "home/temp");
@@ -4297,7 +4329,8 @@ mod tests {
         let counter = invocations.clone();
         reg.register_with_locality("home/temp", Locality::Remote, move |_q, _r| {
             counter.fetch_add(1, Ordering::SeqCst);
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let req = request_query(1, 0, Some("home/temp"));
         let mut replies = ReplyStage::new();
@@ -4324,7 +4357,8 @@ mod tests {
         let counter = invocations.clone();
         reg.register_with_locality("home/temp", Locality::SessionLocal, move |_q, _r| {
             counter.fetch_add(1, Ordering::SeqCst);
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let req = request_query(1, 0, Some("home/temp"));
         let mut replies = ReplyStage::new();
@@ -4346,7 +4380,8 @@ mod tests {
         reg.register("demo/**", |_q, responder| {
             responder.reply_keyed("demo/a", b"v1").unwrap();
             responder.reply_keyed("demo/b", b"v2").unwrap();
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let mut replies = ReplyStage::new();
         reg.dispatch_request(
@@ -4530,7 +4565,8 @@ mod tests {
             responder
                 .reply_keyed_stamped("demo/a", b"v1", Some(&enc), &ts)
                 .unwrap();
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let mut replies = ReplyStage::new();
         reg.dispatch_request(
@@ -4593,7 +4629,8 @@ mod tests {
             responder
                 .reply_keyed_attached("@zid/aligner", b"stored-value", Some(&enc), b"align-reply")
                 .unwrap();
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let mut replies = ReplyStage::new();
         reg.dispatch_request(
@@ -4655,7 +4692,8 @@ mod tests {
         let mut reg = QueryableRegistry::new();
         reg.register("clear/me", |_q, responder| {
             responder.reply_del();
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let mut replies = ReplyStage::new();
         reg.dispatch_request(
@@ -4685,7 +4723,8 @@ mod tests {
         let mut reg = QueryableRegistry::new();
         reg.register("error/path", |_q, responder| {
             responder.reply_err(Some(4), Some(&b"schema_v1"[..]), b"oops");
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let mut replies = ReplyStage::new();
         reg.dispatch_request(
@@ -4719,7 +4758,8 @@ mod tests {
             responder.reply(b"sample-1");
             responder.reply(b"sample-2");
             responder.reply(b"sample-3");
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let mut replies = ReplyStage::new();
         reg.dispatch_request(
@@ -4761,7 +4801,8 @@ mod tests {
             responder.reply_del();
             responder.clear_responder();
             responder.reply(b"after-clear");
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let mut replies = ReplyStage::new();
         reg.dispatch_request(
@@ -4833,7 +4874,8 @@ mod tests {
         reg.register("error/path", |_q, responder| {
             responder.with_responder(&[0xCC; 2], 5);
             responder.reply_err(Some(4), Some(&b"schema_v1"[..]), b"oops");
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let mut replies = ReplyStage::new();
         reg.dispatch_request(
@@ -4869,7 +4911,8 @@ mod tests {
         reg.register("home/temp", |_q, responder| {
             responder.with_responder(&[0xBB; 1], 1);
             responder.reply(b"hello");
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let mut replies = ReplyStage::new();
         reg.dispatch_request(
@@ -4911,7 +4954,8 @@ mod tests {
             responder.with_ts_stack(&given);
             responder.reply(b"after");
             responder.reply_err(None, None, b"oops");
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let mut replies = ReplyStage::new();
         reg.dispatch_request(
@@ -4964,7 +5008,8 @@ mod tests {
             log.lock()
                 .unwrap()
                 .push((view.ts_stack().cloned(), view.is_local()));
-        });
+        })
+        .expect("no quota is stated on this table");
 
         // Over a link.
         let request = RequestQueryBuilder::new(42, 0, Some("home/temp"))
@@ -5101,7 +5146,8 @@ mod tests {
             responder
                 .reply_keyed_sourced("demo/data", b"v", None, &ts_cb, Some(&si_cb))
                 .unwrap();
-        });
+        })
+        .expect("no quota is stated on this table");
         let mut replies = ReplyStage::new();
         reg.dispatch_request(
             &request_query(7, 0, Some("demo/data")),
@@ -5141,7 +5187,8 @@ mod tests {
         let mut reg = QueryableRegistry::new();
         reg.register("demo/data", move |_q, responder| {
             responder.reply_del_sourced(Some(&si_cb));
-        });
+        })
+        .expect("no quota is stated on this table");
         let mut replies = ReplyStage::new();
         reg.dispatch_request(
             &request_query(7, 0, Some("demo/data")),
@@ -5205,7 +5252,8 @@ mod tests {
                     ReplyMeta::new().with_attachment(Some(&b"tombstone-meta"[..])),
                 )
                 .unwrap();
-        });
+        })
+        .expect("no quota is stated on this table");
         let mut replies = ReplyStage::new();
         reg.dispatch_request(
             &request_query(7, 0, Some("demo/**")),
@@ -5277,7 +5325,8 @@ mod tests {
             responder
                 .reply_keyed_del_sourced("demo/data", &ts_cb, Some(&si_cb))
                 .unwrap();
-        });
+        })
+        .expect("no quota is stated on this table");
         let mut replies = ReplyStage::new();
         reg.dispatch_request(
             &request_query(7, 0, Some("demo/**")),
@@ -5354,7 +5403,8 @@ mod tests {
                 "the schema-flagged encoding surfaced intact"
             );
             *observed_cb.lock().unwrap() = true;
-        });
+        })
+        .expect("no quota is stated on this table");
 
         // packed_id 0x0B = id 5 with the schema flag set; the schema string
         // sits between the id and the payload, so a correct surface requires
@@ -5430,7 +5480,8 @@ mod tests {
                     shared: read(q.attachment_shared().map(|s| s.as_slice())),
                 },
             });
-        });
+        })
+        .expect("no quota is stated on this table");
         let mut replies = ReplyStage::new();
         let outcome = reg.dispatch_request(request, &HashMap::new(), &mut replies);
         assert_eq!(outcome.matched, 1, "the demo/data queryable matched");
@@ -5625,7 +5676,8 @@ mod tests {
         let mut reg = QueryableRegistry::new();
         reg.register("home/temp", |_q, responder| {
             responder.reply(b"21.0");
-        });
+        })
+        .expect("no quota is stated on this table");
 
         // Two Query requests on the matched keyexpr + one that matches nobody.
         let messages = vec![
@@ -5670,7 +5722,8 @@ mod tests {
         let mut reg = QueryableRegistry::new();
         reg.register("home/temp", |_q, responder| {
             responder.reply(b"21.0");
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let messages = vec![NetworkMessage::Request(Box::new(request_query(
             7,
@@ -5704,7 +5757,8 @@ mod tests {
         // The plain `register` wrapper declares complete = false.
         reg.register("metrics/cpu", |_q, responder| {
             responder.reply(b"incomplete");
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let messages = vec![NetworkMessage::Request(Box::new(
             build_request_query_with_target(9, 0, Some("metrics/cpu"), QueryTarget::AllComplete)
@@ -5730,7 +5784,8 @@ mod tests {
         let mut reg = QueryableRegistry::new();
         reg.register("sensors/temp", |_q, responder| {
             responder.reply(b"21.0");
-        });
+        })
+        .expect("no quota is stated on this table");
 
         // mapping_id=99 not in peer table -> dispatch drops silently.
         let messages = vec![NetworkMessage::Request(Box::new(request_query(
@@ -5756,7 +5811,8 @@ mod tests {
         let mut reg = QueryableRegistry::new();
         reg.register("sensors/temp", |_q, responder| {
             responder.reply(b"21.0");
-        });
+        })
+        .expect("no quota is stated on this table");
         assert!(
             !reg.answers_unresolved_queries(),
             "a registry no session stated a value to answers as upstream does"
@@ -5820,7 +5876,8 @@ mod tests {
         let mut reg = QueryableRegistry::new();
         reg.register("home/temp", |_q, responder| {
             responder.reply(b"21.0");
-        });
+        })
+        .expect("no quota is stated on this table");
 
         // A resolvable keyexpr that WOULD match — the only thing withholding the
         // Final here is the body arm, so this cannot pass for the wrong reason.
@@ -5847,7 +5904,8 @@ mod tests {
         let counter = invocations.clone();
         reg.register("**", move |_q, _r| {
             counter.fetch_add(1, Ordering::SeqCst);
-        });
+        })
+        .expect("no quota is stated on this table");
 
         // A Request with a non-Query body arm (MsgPut) and a
         // hypothetical Push routed through this registry must not
@@ -5878,15 +5936,19 @@ mod tests {
         let mut reg = QueryableRegistry::new();
         let order = Arc::new(std::sync::Mutex::new(Vec::<u64>::new()));
         let order_a = order.clone();
-        let id_a = reg.register("metrics/cpu", move |_q, responder| {
-            order_a.lock().unwrap().push(1);
-            responder.reply(b"first");
-        });
+        let id_a = reg
+            .register("metrics/cpu", move |_q, responder| {
+                order_a.lock().unwrap().push(1);
+                responder.reply(b"first");
+            })
+            .expect("no quota is stated on this table");
         let order_b = order.clone();
-        let id_b = reg.register("metrics/cpu", move |_q, responder| {
-            order_b.lock().unwrap().push(2);
-            responder.reply(b"second");
-        });
+        let id_b = reg
+            .register("metrics/cpu", move |_q, responder| {
+                order_b.lock().unwrap().push(2);
+                responder.reply(b"second");
+            })
+            .expect("no quota is stated on this table");
         assert_ne!(id_a, id_b);
 
         let mut replies = ReplyStage::new();
@@ -5933,7 +5995,8 @@ mod tests {
             let mut seen = seen.lock().unwrap();
             seen.push(responder.reply_keyed("demo/inside", b"in"));
             seen.push(responder.reply_keyed("other/outside", b"out"));
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let mut replies = ReplyStage::new();
         let query = Query::default()
@@ -6044,7 +6107,8 @@ mod tests {
             responder
                 .reply_keyed("other/outside", b"out")
                 .expect("`_anyke` waives the gate, so nothing is refused");
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let mut replies = ReplyStage::new();
         let query = Query {
@@ -6083,7 +6147,8 @@ mod tests {
         reg.register("home/temp", move |_q, responder| {
             counter.fetch_add(1, Ordering::SeqCst);
             responder.reply(b"22.5");
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let mut replies = ReplyStage::new();
         let query = Query::default()
@@ -6132,7 +6197,8 @@ mod tests {
         reg.register_with_locality("home/temp", Locality::SessionLocal, move |_q, responder| {
             counter.fetch_add(1, Ordering::SeqCst);
             responder.reply(b"22.5");
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let mut replies = ReplyStage::new();
         let query = Query::default()
@@ -6169,7 +6235,8 @@ mod tests {
         let counter = invocations.clone();
         reg.register_with_locality("home/temp", Locality::Remote, move |_q, _responder| {
             counter.fetch_add(1, Ordering::SeqCst);
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let mut replies = ReplyStage::new();
         let query = Query::default()
@@ -6203,7 +6270,8 @@ mod tests {
         let counter = invocations.clone();
         reg.register("home/temp", move |_q, _responder| {
             counter.fetch_add(1, Ordering::SeqCst);
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let mut replies = ReplyStage::new();
         let query = Query::default()
@@ -6252,7 +6320,8 @@ mod tests {
         reg.register("home/temp", move |_q, responder| {
             ic.fetch_add(1, Ordering::SeqCst);
             responder.reply(b"incomplete");
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let query = Query::default()
             .try_into_owned_in::<crate::wire::WireStorage>()
@@ -6346,7 +6415,8 @@ mod tests {
         reg.register("metrics/cpu", move |_q, responder| {
             ic.fetch_add(1, Ordering::SeqCst);
             responder.reply(b"incomplete");
-        });
+        })
+        .expect("no quota is stated on this table");
 
         // AllComplete ext on the wire -> only the complete queryable matches.
         let mut replies = ReplyStage::new();
@@ -6394,7 +6464,8 @@ mod tests {
         reg.register("metrics/cpu", move |q, responder| {
             seen_cb.lock().unwrap().push(q.requester());
             responder.reply(b"put");
-        });
+        })
+        .expect("no quota is stated on this table");
         let ask = |reg: &mut QueryableRegistry<_>, rid: crate::wire_id::RequestId| {
             let mut replies = ReplyStage::new();
             reg.dispatch_request(
@@ -6442,7 +6513,8 @@ mod tests {
             responder.reply(b"put");
             responder.reply_del();
             responder.reply_err(None, None, b"err");
-        });
+        })
+        .expect("no quota is stated on this table");
         let arms = 2 + usize::from(cfg!(feature = "query-reply-err"));
 
         let block_data = QosLevel::from_parts(Priority::Data, CongestionControl::Block, false);
@@ -6521,7 +6593,8 @@ mod tests {
             move |_q, _responder| {
                 counter.fetch_add(1, Ordering::SeqCst);
             },
-        );
+        )
+        .expect("no quota is stated on this table");
 
         let req = request_query(1, 0, Some("home/temp"));
         let mut replies = ReplyStage::new();
@@ -6545,8 +6618,10 @@ mod tests {
     #[test]
     fn dispatch_borrowed_shares_one_reply_out_across_matched_queryables() {
         let mut reg = QueryableRegistry::new();
-        reg.register("a/**", |_q, r: &mut dyn ReplyOut| r.reply(b"from-wild"));
-        reg.register("a/b", |_q, r: &mut dyn ReplyOut| r.reply(b"from-exact"));
+        reg.register("a/**", |_q, r: &mut dyn ReplyOut| r.reply(b"from-wild"))
+            .expect("no quota is stated on this table");
+        reg.register("a/b", |_q, r: &mut dyn ReplyOut| r.reply(b"from-exact"))
+            .expect("no quota is stated on this table");
 
         let mut replies = ReplyStage::new();
         let mut responder = QueryResponder {
@@ -6694,7 +6769,8 @@ mod tests {
             if event.payload() == Some(&b"fixture-value"[..]) {
                 s.fetch_add(1, Ordering::SeqCst);
             }
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let encoding = crate::sample::EncodingHint {
             packed_id: 0x0B,
@@ -6801,7 +6877,8 @@ mod tests {
             if event.payload().is_some() || event.encoding().is_some() {
                 p.fetch_add(1, Ordering::SeqCst);
             }
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let encoding = crate::sample::EncodingHint {
             packed_id: 0x0B,
@@ -6953,7 +7030,8 @@ mod request_decode_isolation_tests {
         reg.register("home/temp", move |event, _responder| {
             f.fetch_add(1, Ordering::SeqCst);
             *a.lock().unwrap() = event.attachment().map(<[u8]>::to_vec);
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let req = request_query_with_attachment(11, "home/temp", b"hello-att");
         let mut replies = ReplyStage::new();
@@ -6981,7 +7059,8 @@ mod request_decode_isolation_tests {
         reg.register("home/temp", move |event, _responder| {
             f.fetch_add(1, Ordering::SeqCst);
             *p.lock().unwrap() = event.parameters().map(<[u8]>::to_vec);
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let req = request_query_with_parameters(12, "home/temp", b"key=value");
         let mut replies = ReplyStage::new();
@@ -7054,7 +7133,8 @@ mod request_decode_isolation_tests {
             if event.source_info().is_some() {
                 p.fetch_add(1, Ordering::SeqCst);
             }
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let req = request_query_with_source_info(14, "home/temp", &[0xAA, 0xBB, 0xCC, 0xDD]);
         let mut replies = ReplyStage::new();
@@ -7096,7 +7176,8 @@ mod local_matching_tests {
     #[test]
     fn has_local_matching_sees_a_session_local_queryable() {
         let mut reg = QueryableRegistry::new();
-        reg.register("home/temp", |_q, _r| {});
+        reg.register("home/temp", |_q, _r| {})
+            .expect("no quota is stated on this table");
         assert!(
             reg.has_local_matching("home/temp", /*require_complete=*/ false),
             "a queryable on this session answers this session's querier",
@@ -7117,14 +7198,16 @@ mod local_matching_tests {
     #[test]
     fn has_local_matching_ignores_a_remote_only_queryable() {
         let mut reg = QueryableRegistry::new();
-        reg.register_with_locality("home/temp", Locality::Remote, |_q, _r| {});
+        reg.register_with_locality("home/temp", Locality::Remote, |_q, _r| {})
+            .expect("no quota is stated on this table");
         assert!(
             !reg.has_local_matching("home/temp", false),
             "a Remote-only queryable declines the loopback origin",
         );
 
         let mut any = QueryableRegistry::new();
-        any.register_with_locality("home/temp", Locality::Any, |_q, _r| {});
+        any.register_with_locality("home/temp", Locality::Any, |_q, _r| {})
+            .expect("no quota is stated on this table");
         assert!(
             any.has_local_matching("home/temp", false),
             "the same declaration at Locality::Any DOES match — so the \
@@ -7138,7 +7221,8 @@ mod local_matching_tests {
     #[test]
     fn has_local_matching_is_a_two_pattern_intersection() {
         let mut reg = QueryableRegistry::new();
-        reg.register("home/*/temp", |_q, _r| {});
+        reg.register("home/*/temp", |_q, _r| {})
+            .expect("no quota is stated on this table");
         assert!(reg.has_local_matching("home/kitchen/**", false));
         assert!(
             !reg.has_local_matching("garden/kitchen/temp", false),
@@ -7154,7 +7238,8 @@ mod local_matching_tests {
         let mut reg = QueryableRegistry::new();
         // The convenience wrapper defaults `complete = false`, matching
         // zenoh's builder default.
-        reg.register("home/temp", |_q, _r| {});
+        reg.register("home/temp", |_q, _r| {})
+            .expect("no quota is stated on this table");
         assert!(reg.has_local_matching("home/temp", false));
         assert!(
             !reg.has_local_matching("home/temp", /*require_complete=*/ true),
@@ -7312,13 +7397,15 @@ mod shm_value_tests {
         let mut registry = QueryableRegistry::new();
         let seen: Arc<Mutex<Vec<Seen>>> = Arc::default();
         let sink = seen.clone();
-        registry.register("demo/example/**", move |event, _responder| {
-            sink.lock().expect("seen").push((
-                event.payload().map(<[u8]>::to_vec),
-                event.encoding().map(|e| e.packed_id),
-                event.attachment().map(<[u8]>::to_vec),
-            ));
-        });
+        registry
+            .register("demo/example/**", move |event, _responder| {
+                sink.lock().expect("seen").push((
+                    event.payload().map(<[u8]>::to_vec),
+                    event.encoding().map(|e| e.packed_id),
+                    event.attachment().map(<[u8]>::to_vec),
+                ));
+            })
+            .expect("no quota is stated on this table");
         let bands: Arc<Mutex<Vec<usize>>> = Arc::default();
         registry.set_shm_resolver_shared(resolver);
         registry.set_shm_negotiated(negotiated);
@@ -7442,14 +7529,16 @@ mod shm_value_tests {
         type Addresses = (Option<usize>, Option<usize>);
         let seen: Arc<Mutex<Vec<Addresses>>> = Arc::default();
         let sink = seen.clone();
-        registry.register("demo/example/**", move |event, _responder| {
-            sink.lock().expect("seen").push((
-                event.payload().map(|p| p.as_ptr() as usize),
-                event
-                    .payload_shared()
-                    .map(|shared| shared.as_slice().as_ptr() as usize),
-            ));
-        });
+        registry
+            .register("demo/example/**", move |event, _responder| {
+                sink.lock().expect("seen").push((
+                    event.payload().map(|p| p.as_ptr() as usize),
+                    event
+                        .payload_shared()
+                        .map(|shared| shared.as_slice().as_ptr() as usize),
+                ));
+            })
+            .expect("no quota is stated on this table");
         registry.set_shm_resolver_shared(Arc::new(crate::extshm::test_support::LendsStorage(
             storage.clone(),
         )));
@@ -7481,13 +7570,15 @@ mod shm_value_tests {
             QueryableRegistry::new();
         let seen: Arc<Mutex<Vec<Option<Vec<u8>>>>> = Arc::default();
         let sink = seen.clone();
-        registry.register("demo/example/**", move |event, _responder| {
-            sink.lock().expect("seen").push(
-                event
-                    .payload_shared()
-                    .map(|shared| shared.as_slice().to_vec()),
-            );
-        });
+        registry
+            .register("demo/example/**", move |event, _responder| {
+                sink.lock().expect("seen").push(
+                    event
+                        .payload_shared()
+                        .map(|shared| shared.as_slice().to_vec()),
+                );
+            })
+            .expect("no quota is stated on this table");
         registry.set_shm_resolver_shared(counting(&resolved));
         registry.set_shm_negotiated(true);
 
@@ -7613,7 +7704,8 @@ mod shm_reply_tests {
                     ReplyMeta::new().with_shared(Some(&shared)),
                 )
                 .expect("the reply is admitted");
-        });
+        })
+        .expect("no quota is stated on this table");
         let query = Query::default()
             .try_into_owned_in::<crate::wire::WireStorage>()
             .unwrap();
@@ -7909,7 +8001,10 @@ mod storage_policy_tests {
     }
 
     /// Fill to `MAX_QUERYABLES`, then register one more: refused with the table as it
-    /// was where the capacity is hard, taken where it is not.
+    /// was where the capacity is hard or the build's quota is the capacity, taken where
+    /// neither refuses. A fixed build states the capacity as every table's quota, so a
+    /// table it builds on the heap policy is held to it too: the bound is the session's,
+    /// and the storage is only how a table holds it.
     fn fill_to_n_then_refuse_at_n_plus_one<P: Storage>() {
         let mut reg: QueryableRegistry<Noop, P> = QueryableRegistry::default();
         for _ in 0..caps::MAX_QUERYABLES {
@@ -7917,8 +8012,10 @@ mod storage_policy_tests {
         }
         assert_eq!(reg.len(), caps::MAX_QUERYABLES);
 
+        let held_to_n = P::ENFORCES_CAPACITY
+            || !crate::limits::MaxQueryablesHeld::default().admits(caps::MAX_QUERYABLES + 1);
         let beyond = reg.register_sink("a/b", Locality::Any, false, Noop);
-        if P::ENFORCES_CAPACITY {
+        if held_to_n {
             assert_eq!(beyond.err(), Some(RegisterError::TableFull));
             assert_eq!(reg.len(), caps::MAX_QUERYABLES);
         } else {

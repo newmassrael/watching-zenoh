@@ -189,6 +189,12 @@ pub struct LivelinessSubscriberTable<C: LivelinessSampleSink, P: Storage = Profi
     /// `caps::MAX_LIVELINESS_SUBSCRIPTIONS` is small so the linear scan is
     /// cheaper than a no-alloc map).
     slots: BoundedVec<LivelinessSubscriberSlot<C, P>, { caps::MAX_LIVELINESS_SUBSCRIPTIONS }, P>,
+    /// The most liveliness subscribers the table admits (`MAX_LIVELINESS_SUBSCRIPTIONS`): what
+    /// the creator of the table resolved ([`Self::limit_to`]), the build's value until it does.
+    /// A growable table refuses nothing by its storage, so this is what bounds it; where the
+    /// build fixes the bound to the storage's capacity it is held in no byte and the storage
+    /// refuses alone.
+    quota: crate::limits::MaxLivelinessSubscriptionsHeld,
 }
 
 /// The tokens ONE peer has declared to this session: the table a peer writes.
@@ -351,6 +357,7 @@ impl<C: LivelinessSampleSink, P: Storage> Default for LivelinessSubscriberTable<
     fn default() -> Self {
         Self {
             slots: BoundedVec::default(),
+            quota: Default::default(),
         }
     }
 }
@@ -529,6 +536,14 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberTable<C, Profile> {
 }
 
 impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
+    /// Hold the table to the `MAX_LIVELINESS_SUBSCRIPTIONS` its creator resolved: a registration
+    /// that would leave more subscribers than `quota` admits is refused
+    /// ([`RegisterError::TableFull`]), and the subscribers already in are kept, as a lowered soft
+    /// limit keeps what it holds.
+    pub fn limit_to(&mut self, quota: crate::limits::MaxLivelinessSubscriptionsHeld) {
+        self.quota = quota;
+    }
+
     /// Register a subscriber slot keyed by `interest_id`. Returns
     /// `false` if `interest_id` is already registered — callers
     /// allocate fresh ids through
@@ -555,7 +570,8 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
     /// `Ok(true)` = newly registered, `Ok(false)` = duplicate
     /// `interest_id` (no-op), `Err(TableFull)` = slot table at capacity,
     /// `Err(KeyexprTooLong)` = keyexpr exceeds [`caps::MAX_KEYEXPR_BYTES`].
-    /// On the `alloc` backing the two `Err` arms are never returned.
+    /// On every backing a registration past the quota the creator stated
+    /// ([`Self::limit_to`]) is `Err(TableFull)`.
     ///
     /// S9a — `peer` is the registering session's peer side: a history subscriber
     /// is replayed the tokens THAT peer holds.
@@ -572,6 +588,9 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
         // `alloc_next_interest_id`, so a collision is a programming error.
         if self.slots.iter().any(|s| s.interest_id == interest_id) {
             return Ok(false);
+        }
+        if !self.quota.admits(self.slots.len() + 1) {
+            return Err(RegisterError::TableFull);
         }
         let mut pattern: BoundedString<{ caps::MAX_KEYEXPR_BYTES }, P> = BoundedString::default();
         pattern

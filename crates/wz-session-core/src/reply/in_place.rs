@@ -507,14 +507,16 @@ mod tests {
         let mut registry = Registry::new();
         let log = Arc::new(Mutex::new(Vec::new()));
         let into = log.clone();
-        registry.register(
-            RID,
-            1,
-            None,
-            crate::reply_acceptance::ReplyAcceptance::Any,
-            move |view| into.lock().expect("not poisoned").push(seen(view)),
-            |_| {},
-        );
+        registry
+            .register(
+                RID,
+                1,
+                None,
+                crate::reply_acceptance::ReplyAcceptance::Any,
+                move |view| into.lock().expect("not poisoned").push(seen(view)),
+                |_| {},
+            )
+            .expect("no quota is stated on this table");
         (registry, log)
     }
 

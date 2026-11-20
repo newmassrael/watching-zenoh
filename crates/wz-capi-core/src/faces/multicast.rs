@@ -266,10 +266,20 @@ fn announce_on(session: &TokioMulticastSession, declarations: GroupDeclarations,
         declarations.announced_id(entity.what, entity.id, entity.allowed_origin)
     {
         // The token is held before it is announced, so that a member that asks right after it
-        // hears the announcement finds it held.
+        // hears the announcement finds it held. A group whose registry refuses to hold it is not
+        // told of it, as a group that refuses a subscriber is not: the plane admitted the token,
+        // and only this group goes without it.
         #[cfg(feature = "liveliness")]
         if entity.what == GroupDeclaration::Token {
-            session.hold_token(announced, entity.keyexpr);
+            if let Err(refusal) = session.hold_token(announced, entity.keyexpr) {
+                if std::env::var_os("WZ_CAPI_LOG").is_some() {
+                    eprintln!(
+                        "wz-capi: a group refused to hold the token on `{}`: {refusal}",
+                        entity.keyexpr
+                    );
+                }
+                return;
+            }
         }
         let key = declarations.key(entity.keyexpr, entity.wire);
         let _ = session.announce(entity.what, announced, key);
@@ -359,24 +369,40 @@ fn subscribe_on(
 
 /// Declare the C queryable `entry` on a group's session, and tell the group of it as
 /// `declarations` says. Its handler is minted with the GROUP as the holder of an escaped query,
-/// so a query that came over the group is answered on the group.
+/// so a query that came over the group is answered on the group. `None` when the group's
+/// registry refused it, as [`subscribe_on`] is: the group is told nothing of it and answers
+/// nothing for it.
 #[cfg(feature = "queryable")]
 fn answer_on(
     session: &TokioMulticastSession,
     entry: &QblEntry,
     declarations: GroupDeclarations,
-) -> Queryable {
-    announce_on(session, declarations, &entry.told());
-    session.declare_queryable(
+) -> Option<Queryable> {
+    let queryable = match session.declare_queryable(
         entry.keyexpr.clone(),
         queryable_options(entry.complete, entry.allowed_origin),
         (entry.sink)(&TokioQueryHolder::Group(session.clone())),
-    )
+    ) {
+        Ok(queryable) => queryable,
+        Err(refusal) => {
+            if std::env::var_os("WZ_CAPI_LOG").is_some() {
+                std::eprintln!(
+                    "[wz-capi] a group refused the queryable on `{}` the node admitted \
+                     ({refusal}); it answers nothing from that group",
+                    entry.keyexpr
+                );
+            }
+            return None;
+        }
+    };
+    announce_on(session, declarations, &entry.told());
+    Some(queryable)
 }
 
 /// Declare a liveliness subscription on a group's session, under its C id, and ask the group
 /// for its members' tokens as `declarations` says: the current ones when `history` is set, and
-/// the ones declared later in any case, as zenoh-pico's `Interest` asks.
+/// the ones declared later in any case, as zenoh-pico's `Interest` asks. `None` when the
+/// group's table refused it, as [`subscribe_on`] is: the group is not asked.
 #[cfg(feature = "liveliness")]
 fn listen_on(
     session: &TokioMulticastSession,
@@ -386,13 +412,24 @@ fn listen_on(
     wire: &WireKey,
     sink: &LivelinessSink,
     declarations: GroupDeclarations,
-) -> GroupLivelinessSubscriber {
-    let subscriber = session.declare_group_liveliness_subscriber(
+) -> Option<GroupLivelinessSubscriber> {
+    let subscriber = match session.declare_group_liveliness_subscriber(
         u64::from(id),
         keyexpr,
         LivelinessSubscriberOptions::default().with_history(history),
         sink(),
-    );
+    ) {
+        Ok(subscriber) => subscriber,
+        Err(refusal) => {
+            if std::env::var_os("WZ_CAPI_LOG").is_some() {
+                std::eprintln!(
+                    "[wz-capi] a group refused the liveliness subscription on `{keyexpr}` the \
+                     node admitted ({refusal}); it hears no token from that group"
+                );
+            }
+            return None;
+        }
+    };
     if declarations.asks_for_liveliness() {
         let _ = session.ask(
             u64::from(id),
@@ -402,7 +439,7 @@ fn listen_on(
             Some(declarations.key(keyexpr, wire)),
         );
     }
-    subscriber
+    Some(subscriber)
 }
 
 impl SharedSession {
@@ -496,7 +533,9 @@ impl SharedSession {
             .qbls
             .iter()
             .filter(|entry| !entry.links.is_restricted())
-            .map(|entry| (entry.id, answer_on(session, entry, GroupDeclarations::None)))
+            .filter_map(|entry| {
+                answer_on(session, entry, GroupDeclarations::None).map(|qbl| (entry.id, qbl))
+            })
             .collect();
         // The liveliness subscriptions ask the group as they would have had the group been
         // there when they were declared: zenoh-pico's session holds its transport from its
@@ -506,19 +545,17 @@ impl SharedSession {
             .live_subs
             .iter()
             .filter(|entry| !entry.links.is_restricted())
-            .map(|entry| {
-                (
+            .filter_map(|entry| {
+                listen_on(
+                    session,
                     entry.id,
-                    listen_on(
-                        session,
-                        entry.id,
-                        &entry.keyexpr,
-                        entry.history,
-                        &entry.wire,
-                        &entry.sink,
-                        declarations,
-                    ),
+                    &entry.keyexpr,
+                    entry.history,
+                    &entry.wire,
+                    &entry.sink,
+                    declarations,
                 )
+                .map(|sub| (entry.id, sub))
             })
             .collect();
         // A group told the session's keyexprs is asked for its members' at once, with the
@@ -709,8 +746,9 @@ impl SharedSession {
     #[cfg(feature = "queryable")]
     pub(super) fn answer_on_groups(guard: &mut Inner, entry: &QblEntry) {
         for face in guard.mcast_faces.values_mut() {
-            let qbl = answer_on(&face.session, entry, face.declarations);
-            face.qbls.insert(entry.id, qbl);
+            if let Some(qbl) = answer_on(&face.session, entry, face.declarations) {
+                face.qbls.insert(entry.id, qbl);
+            }
         }
     }
 
@@ -754,7 +792,7 @@ impl SharedSession {
     ) -> Vec<TokioMulticastSession> {
         let mut staged = Vec::new();
         for face in guard.mcast_faces.values_mut() {
-            let sub = listen_on(
+            let Some(sub) = listen_on(
                 &face.session,
                 id,
                 keyexpr,
@@ -762,7 +800,9 @@ impl SharedSession {
                 wire,
                 sink,
                 face.declarations,
-            );
+            ) else {
+                continue;
+            };
             face.live_subs.insert(id, sub);
             if history {
                 staged.push(face.session.clone());

@@ -137,7 +137,16 @@ IMAGES = (
         # The pin move to 06f8147241 did not move it (the same figure before and after it); which
         # change since 0796630b67 shrank the receive path below this one is not separated, as no
         # hosted Layer Q decided between the two readings.
-        peak=7436,
+        #
+        # 2026-11-20 -- 7,652 bytes over 9 frames (+216), read by Layer Q on hosted run
+        # 44669791897 (main's cd240d4b4) and on a build host at main's e924c1792 alike, 5 calls
+        # through a register not followed. The same handshake chain, with one frame more:
+        # `SessionLinkActions::admit_open_syn` 320 is now its own frame between `decide_unit_in`
+        # (376 -> 256) and `decode_accept_cookie` (784 -> 792). The function grew the fixed-cookie
+        # branch and the held answer of that day's commits (`2c1b3d71e`, `bb3967754`,
+        # `19e545cd3`), the only ones to touch it since the last reading, and it is no longer
+        # inlined into `decide_unit_in`. `wz_task` is 5,376 (+8).
+        peak=7652,
     ),
     Image(
         key="frt2",

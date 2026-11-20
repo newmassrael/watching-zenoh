@@ -779,6 +779,9 @@ pub enum QueryableAliasError {
     /// mid-flight. Projected from
     /// [`QueryableError::FragmentChainAbandoned`].
     FragmentChainAbandoned,
+    /// The session's queryable registry refused the local registration, and
+    /// nothing was announced. Projected from [`QueryableError::Refused`].
+    Refused(RegisterError),
 }
 
 #[cfg(feature = "transport-unicast")]
@@ -790,6 +793,7 @@ impl From<QueryableError> for QueryableAliasError {
             QueryableError::FeatureDisabled => QueryableAliasError::FeatureDisabled,
             QueryableError::TransportUnavailable => QueryableAliasError::TransportUnavailable,
             QueryableError::FragmentChainAbandoned => QueryableAliasError::FragmentChainAbandoned,
+            QueryableError::Refused(refusal) => QueryableAliasError::Refused(refusal),
         }
     }
 }
@@ -827,6 +831,10 @@ impl std::fmt::Display for QueryableAliasError {
                  emitting this DECLARE's chain, so it was abandoned; nothing was \
                  cached — re-declare once the budget is refilled"
             ),
+            QueryableAliasError::Refused(refusal) => write!(
+                f,
+                "QueryableAliasError: the session refused the queryable: {refusal}"
+            ),
         }
     }
 }
@@ -837,8 +845,8 @@ impl std::error::Error for QueryableAliasError {}
 /// R311ow — typed error from the routed (emitting) [`Session::declare_queryable`].
 /// Mirrors zenoh-pico's `z_result_t` return from `_z_register_queryable`
 /// (`vendor/zenoh-pico/src/net/primitives.c:320`): the local registration
-/// always succeeds, but the wire `Declare(DeclQueryable)` that announces the
-/// queryable to the router can fail. The queryable sibling of
+/// can be refused ([`Self::Refused`]), and the wire `Declare(DeclQueryable)`
+/// that announces the queryable to the router can fail. The queryable sibling of
 /// [`SubscribeError`]. There is no `UnknownMapping` variant: the literal
 /// `declare_queryable` never resolves a mapping id (only
 /// [`Session::declare_queryable_aliased`] does, and a miss there maps to
@@ -886,6 +894,11 @@ pub enum QueryableError {
     /// discard them. Nothing was cached either way, so re-declaring once the
     /// budget is refilled is the repair.
     FragmentChainAbandoned,
+    /// The session's queryable registry refused the local registration
+    /// ([`RegisterError`]): it holds the quota its creator stated
+    /// (`MAX_QUERYABLES`) or its capacity, or the declaration ids are spent.
+    /// Nothing was registered and nothing announced.
+    Refused(RegisterError),
 }
 
 #[cfg(feature = "transport-unicast")]
@@ -917,6 +930,10 @@ impl std::fmt::Display for QueryableError {
                  emitting this DECLARE's chain, so it was abandoned (a 0x3 Drop \
                  stop fragment followed any fragments already sent); nothing was \
                  cached — re-declare once the budget is refilled"
+            ),
+            QueryableError::Refused(refusal) => write!(
+                f,
+                "QueryableError: the session refused the queryable: {refusal}"
             ),
         }
     }

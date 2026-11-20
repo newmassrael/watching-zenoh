@@ -639,14 +639,16 @@ fn large_allocations_to_a_kept_reply(wire: Vec<u8>) -> (Vec<usize>, Vec<usize>) 
     let kept = Arc::new(Mutex::new(None::<InboundReply>));
     let sink = Arc::clone(&kept);
     let mut registry = ReplyRegistry::new();
-    registry.register(
-        CENSUS_RID,
-        1,
-        None,
-        ReplyAcceptance::Any,
-        move |view| *sink.lock().unwrap() = Some(InboundReply::from_view(view)),
-        |_| {},
-    );
+    registry
+        .register(
+            CENSUS_RID,
+            1,
+            None,
+            ReplyAcceptance::Any,
+            move |view| *sink.lock().unwrap() = Some(InboundReply::from_view(view)),
+            |_| {},
+        )
+        .expect("no quota is stated on this table");
     let ((), delivery) =
         census::large_allocations(|| registry.dispatch_response(response, &HashMap::new()));
     let reply = kept.lock().unwrap().take().expect("the reply fired");

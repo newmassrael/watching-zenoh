@@ -184,6 +184,8 @@ fn run_probe(headers: PicoHeaderArm, library: PicoHeaderArm, dir: &Path) -> (boo
     (out.status.success(), text)
 }
 
+// wz-proves: none -- a layout probe of wz's own builds against pico's headers: a C program
+// allocates pico's structs and wz writes them; nothing is exchanged with a pico peer
 #[test]
 #[ignore = "compiles against the CMake-configured pico headers of every arm and links \
             every wz build; run by run-ci Layer E"]
@@ -301,6 +303,8 @@ fn link_empty(
 /// the reference arm's object does reference pico internals (a compiler that emitted nothing
 /// would pass the check without testing it), and it links against upstream's library built from
 /// that arm (the program itself is linkable, so a wz failure is wz's).
+// wz-proves: none -- a link closure: an empty program links against wz's library, and
+// upstream's library is only the control that the program is linkable; nothing runs
 #[test]
 #[ignore = "compiles against the CMake-configured pico headers of every arm with clang and links \
             every wz build; run by run-ci Layer E"]

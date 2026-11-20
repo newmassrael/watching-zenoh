@@ -245,6 +245,11 @@ pub enum DeclListenerError {
     /// observe the build-time choice as a runtime reject instead of a
     /// missing symbol.
     FeatureDisabled,
+    /// The registry's observer lists refused the listener
+    /// ([`RegisterError`]): a list holds the quota its creator stated
+    /// (`MAX_DECL_OBSERVERS`) or its capacity. Neither observer was
+    /// installed.
+    Refused(RegisterError),
 }
 
 impl core::fmt::Display for DeclListenerError {
@@ -256,11 +261,22 @@ impl core::fmt::Display for DeclListenerError {
                  per surface) is OFF in this build (signature-stability \
                  contract — build-time choice observed as runtime reject)",
             ),
+            Self::Refused(refusal) => write!(
+                f,
+                "declare_remote_*_listener: the session refused the listener: {refusal}"
+            ),
         }
     }
 }
 
-impl core::error::Error for DeclListenerError {}
+impl core::error::Error for DeclListenerError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::FeatureDisabled => None,
+            Self::Refused(refusal) => Some(refusal),
+        }
+    }
+}
 
 impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast>
 where
@@ -445,20 +461,28 @@ where
         #[cfg(feature = "declare-subscriber")]
         {
             let (cell, decl_sink, undecl_sink) = self.deferred_decl_sinks(callback);
+            // Both observers or neither: a list that refuses the second gives back the
+            // first, and what is held is staged only for a listener that was installed.
             let (decl_id, undecl_id, synced_id) = R::with_mutex_mut(&self.observer, |obs| {
+                let d = obs
+                    .remote_subscribers
+                    .on_subscriber_declared_sink(decl_sink)?;
+                let u = match obs
+                    .remote_subscribers
+                    .on_subscriber_undeclared_sink(undecl_sink)
+                {
+                    Ok(u) => u,
+                    Err(refusal) => {
+                        obs.remote_subscribers.remove_subscriber_declared_sink(d);
+                        return Err(refusal);
+                    }
+                };
                 if from_held {
                     self.stage_held(obs.remote_subscribers.iter_declared(), &cell);
                 }
-                let d = obs
-                    .remote_subscribers
-                    .on_subscriber_declared_sink(decl_sink)
-                    .expect("observer install on the alloc backing never exceeds capacity");
-                let u = obs
-                    .remote_subscribers
-                    .on_subscriber_undeclared_sink(undecl_sink)
-                    .expect("observer install on the alloc backing never exceeds capacity");
-                (d, u, self.tell_when_synced(obs, &cell))
-            });
+                Ok((d, u, self.tell_when_synced(obs, &cell)))
+            })
+            .map_err(DeclListenerError::Refused)?;
             Ok(DeclListener {
                 session: self.clone(),
                 decl_id,
@@ -496,20 +520,27 @@ where
         #[cfg(feature = "declare-queryable")]
         {
             let (cell, decl_sink, undecl_sink) = self.deferred_decl_sinks(callback);
+            // Both observers or neither, as the subscriber listener's.
             let (decl_id, undecl_id, synced_id) = R::with_mutex_mut(&self.observer, |obs| {
+                let d = obs
+                    .remote_queryables
+                    .on_queryable_declared_sink(decl_sink)?;
+                let u = match obs
+                    .remote_queryables
+                    .on_queryable_undeclared_sink(undecl_sink)
+                {
+                    Ok(u) => u,
+                    Err(refusal) => {
+                        obs.remote_queryables.remove_queryable_declared_sink(d);
+                        return Err(refusal);
+                    }
+                };
                 if from_held {
                     self.stage_held(obs.remote_queryables.iter_declared(), &cell);
                 }
-                let d = obs
-                    .remote_queryables
-                    .on_queryable_declared_sink(decl_sink)
-                    .expect("observer install on the alloc backing never exceeds capacity");
-                let u = obs
-                    .remote_queryables
-                    .on_queryable_undeclared_sink(undecl_sink)
-                    .expect("observer install on the alloc backing never exceeds capacity");
-                (d, u, self.tell_when_synced(obs, &cell))
-            });
+                Ok((d, u, self.tell_when_synced(obs, &cell)))
+            })
+            .map_err(DeclListenerError::Refused)?;
             Ok(DeclListener {
                 session: self.clone(),
                 decl_id,
@@ -540,17 +571,19 @@ where
         #[cfg(feature = "liveliness-token")]
         {
             let (cell, decl_sink, undecl_sink) = self.deferred_decl_sinks(callback);
+            // Both observers or neither, as the subscriber listener's.
             let (decl_id, undecl_id, synced_id) = R::with_mutex_mut(&self.observer, |obs| {
-                let d = obs
-                    .liveliness
-                    .on_token_declared_sink(decl_sink)
-                    .expect("observer install on the alloc backing never exceeds capacity");
-                let u = obs
-                    .liveliness
-                    .on_token_undeclared_sink(undecl_sink)
-                    .expect("observer install on the alloc backing never exceeds capacity");
-                (d, u, self.tell_when_synced(obs, &cell))
-            });
+                let d = obs.liveliness.on_token_declared_sink(decl_sink)?;
+                let u = match obs.liveliness.on_token_undeclared_sink(undecl_sink) {
+                    Ok(u) => u,
+                    Err(refusal) => {
+                        obs.liveliness.remove_token_declared_sink(d);
+                        return Err(refusal);
+                    }
+                };
+                Ok((d, u, self.tell_when_synced(obs, &cell)))
+            })
+            .map_err(DeclListenerError::Refused)?;
             Ok(DeclListener {
                 session: self.clone(),
                 decl_id,

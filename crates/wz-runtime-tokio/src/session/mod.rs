@@ -3053,6 +3053,10 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     /// Open upstream's `demux{zid}` and `register_subscriber` / `register_queryable` spans for
     /// every declaration the link of this session tells it, through the sinks the registries
     /// already fan a declaration to ([`crate::session_spans`]). `zid_hex` is the node's own.
+    ///
+    /// The spans are a view of the session, not part of it: an observer list that refuses the
+    /// sink (`MAX_DECL_OBSERVERS`, as the observer's creator stated it) leaves the session open
+    /// without that plane's spans, and says so.
     #[cfg(all(
         feature = "tracing-spans",
         any(feature = "declare-subscriber", feature = "declare-queryable")
@@ -3061,30 +3065,30 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         #[cfg(feature = "declare-subscriber")]
         {
             let zid_hex = zid_hex.to_owned();
-            R::with_mutex_mut(&self.observer, |observer| {
-                observer
-                    .remote_subscribers
-                    .on_subscriber_declared_sink(wz_session_core::decl_sink::BoxedDeclSink::new(
-                        move |decl| {
-                            crate::session_spans::registered(&zid_hex, false, decl.keyexpr())
-                        },
-                    ))
-                    .expect("observer install on the alloc backing never exceeds capacity");
+            let installed = R::with_mutex_mut(&self.observer, |observer| {
+                observer.remote_subscribers.on_subscriber_declared_sink(
+                    wz_session_core::decl_sink::BoxedDeclSink::new(move |decl| {
+                        crate::session_spans::registered(&zid_hex, false, decl.keyexpr())
+                    }),
+                )
             });
+            if let Err(refusal) = installed {
+                log::warn!("the subscriber routing spans are not opened: {refusal}");
+            }
         }
         #[cfg(feature = "declare-queryable")]
         {
             let zid_hex = zid_hex.to_owned();
-            R::with_mutex_mut(&self.observer, |observer| {
-                observer
-                    .remote_queryables
-                    .on_queryable_declared_sink(wz_session_core::decl_sink::BoxedDeclSink::new(
-                        move |decl| {
-                            crate::session_spans::registered(&zid_hex, true, decl.keyexpr())
-                        },
-                    ))
-                    .expect("observer install on the alloc backing never exceeds capacity");
+            let installed = R::with_mutex_mut(&self.observer, |observer| {
+                observer.remote_queryables.on_queryable_declared_sink(
+                    wz_session_core::decl_sink::BoxedDeclSink::new(move |decl| {
+                        crate::session_spans::registered(&zid_hex, true, decl.keyexpr())
+                    }),
+                )
             });
+            if let Err(refusal) = installed {
+                log::warn!("the queryable routing spans are not opened: {refusal}");
+            }
         }
     }
 
@@ -3427,13 +3431,14 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
                `codec-push` and `codec-declare` has) reaches the members"
     )]
     /// that listen when it is declared; this is what reaches the ones that listen later. Holding
-    /// an id held already changes nothing.
+    /// an id held already changes nothing. A token the session's registry refuses (the quota its
+    /// creator stated, `MAX_LOCAL_TOKENS`, or the fixed table's capacity) is not held, and the
+    /// refusal is returned.
     #[cfg(feature = "liveliness-token")]
-    pub fn hold_token(&self, id: u64, keyexpr: &str) {
+    pub fn hold_token(&self, id: u64, keyexpr: &str) -> Result<(), RegisterError> {
         R::with_mutex_mut(&self.observer, |observer| {
-            // On the growable backing the registry has room for every token.
-            let _ = observer.local_tokens.register(id, keyexpr);
-        });
+            observer.local_tokens.register(id, keyexpr).map(|_| ())
+        })
     }
 
     /// Stop answering for liveliness token `id` ([`Self::hold_token`]). Releasing an id that is
@@ -3878,29 +3883,27 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
     /// carries whether or not anyone was told of the queryable, which is how zenoh-pico's
     /// multicast transport behaves without `Z_FEATURE_MULTICAST_DECLARATIONS`. No outbound
     /// keyexpr gate applies, for the reason the subscriber's does not: the keyexpr never reaches
-    /// the outbound wire.
+    /// the outbound wire. A registration the session's registry refuses (`MAX_QUERYABLES`, as its
+    /// creator stated it) is returned as that refusal.
     #[cfg(all(feature = "transport-unicast", feature = "query-queryable"))]
     pub fn declare_queryable(
         &self,
         keyexpr: impl Into<String>,
         options: QueryableOptions,
         callback: impl FnMut(&dyn QueryView, &mut dyn ReplyOut) + Send + 'static,
-    ) -> Queryable<R, T> {
+    ) -> Result<Queryable<R, T>, RegisterError> {
         let keyexpr_string = keyexpr.into();
         let (cell, sink) =
             self.deferred_query_sink(options.stamp_timestamp_by(&self.policy), callback);
         let id = R::with_mutex_mut(&self.observer, |observer| {
-            observer
-                .queryables
-                .register_sink(
-                    &keyexpr_string,
-                    options.allowed_origin,
-                    options.complete,
-                    crate::query_sink::BoxedQuerySink::new(sink),
-                )
-                .expect("register on the alloc backing never exceeds declared capacity")
-        });
-        Queryable {
+            observer.queryables.register_sink(
+                &keyexpr_string,
+                options.allowed_origin,
+                options.complete,
+                crate::query_sink::BoxedQuerySink::new(sink),
+            )
+        })?;
+        Ok(Queryable {
             observer: self.observer.clone(),
             _marker: core::marker::PhantomData,
             id,
@@ -3909,7 +3912,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
             cell,
             armed: true,
             retraction: None,
-        }
+        })
     }
 }
 
@@ -6066,12 +6069,13 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                 opts.effective_accept_replies(),
             );
 
+            // A query the registry refuses is registered nowhere and sent to no one.
             let handle = R::with_mutex_mut(&self.observer, |observer| {
                 observer
                     .replies
                     .register_sink(rid, expected_finals, deadline_ms, accept, sink)
-                    .expect("register on the alloc backing never exceeds declared capacity")
-            });
+            })
+            .map_err(QueryAliasError::Refused)?;
 
             // R3061 -- the buffer the REMOTE leg sends as a descriptor: `shm_value` is the
             // query's value whichever way it travels, and only a session that negotiated
@@ -7074,6 +7078,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 QueryableAliasError::FragmentChainAbandoned => {
                     QueryableError::FragmentChainAbandoned
                 }
+                QueryableAliasError::Refused(refusal) => QueryableError::Refused(refusal),
                 // A literal announce names no mapping, so none can be unknown.
                 QueryableAliasError::UnknownMapping(id) => {
                     unreachable!("a literal queryable declare reported unknown mapping {id}")
@@ -7124,15 +7129,14 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 // `options.complete`) now agree by construction. The closure
                 // convenience wrappers default `complete = false`, so a
                 // complete queryable must take this path.
-                let id = observer
-                    .queryables
-                    .register_sink(
-                        &keyexpr_string,
-                        options.allowed_origin,
-                        options.complete,
-                        crate::query_sink::BoxedQuerySink::new(sink),
-                    )
-                    .expect("register on the alloc backing never exceeds declared capacity");
+                // A registration the registry refuses changes nothing and is
+                // announced to no one.
+                let id = observer.queryables.register_sink(
+                    &keyexpr_string,
+                    options.allowed_origin,
+                    options.complete,
+                    crate::query_sink::BoxedQuerySink::new(sink),
+                )?;
                 // R311y797 — a LOCAL declaration can flip a querier's
                 // matching status just as an inbound remote one can, and
                 // pico reports both
@@ -7150,8 +7154,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                             && queryables.has_local_matching(&c.keyexpr, c.complete_required)
                     });
                 }
-                id
-            });
+                Ok(id)
+            })
+            .map_err(QueryableAliasError::Refused)?;
             // R311ow — announce the queryable to the router iff the locality
             // allows remote (pico `_z_register_queryable`, primitives.c:348),
             // rolling the just-registered local entry back on a gate / transport
@@ -8501,6 +8506,11 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // registration outside `_z_send_n_msg`. reliable=true / express=false
             // match the prior `send_declare_token` (dispatch_declare reliable,
             // no flush — a Declare carries no express window).
+            // The held-token registry admits the token before it is announced; a
+            // failure below drops the place, which releases it.
+            let place =
+                liveliness::TokenPlace::take(self, u64::from(token_id), keyexpr_string.clone())
+                    .map_err(LivelinessAliasError::Refused)?;
             let declare = actions
                 .prepare_declare_token(token_id, /*mapping_id=*/ 0, Some(&keyexpr_string))
                 .map_err(map_decl_err)?;
@@ -8522,15 +8532,13 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                     },
                 )
                 .map_err(|e| map_decl_err(SendDeclareError::from(e)))?;
-            // R311mz — the held-token registration (R283) now lives inside
-            // LivelinessToken::new_held, the sole constructor, so the literal
-            // and aliased declare paths register identically by construction.
-            let declared_on = (0, keyexpr_string.clone());
+            // R311mz — the held-token registration (R283) is the place
+            // LivelinessToken::new_held, the sole constructor, takes, so the
+            // literal and aliased declare paths register identically by
+            // construction.
             Ok(LivelinessToken::new_held(
-                self.clone(),
-                u64::from(token_id),
-                keyexpr_string,
-                declared_on,
+                place,
+                (0, keyexpr_string),
                 options,
             ))
         }
@@ -8662,6 +8670,10 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                     ),
                 }
             }
+            // As `declare_token`: admitted before it is announced, released if the
+            // announce fails.
+            let place = liveliness::TokenPlace::take(self, u64::from(token_id), resolved)
+                .map_err(LivelinessAliasError::Refused)?;
             let declare = actions
                 .prepare_declare_token(token_id, mapping_id, inline_suffix)
                 .map_err(map_decl_err)?;
@@ -8678,7 +8690,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                     )
                 })
                 .map_err(|e| map_decl_err(SendDeclareError::from(e)))?;
-            // R311mz — new_held registers the RESOLVED literal in the
+            // R311mz — new_held takes the place the RESOLVED literal holds in the
             // declarer-side LocalTokenRegistry. The prior code constructed the
             // handle WITHOUT registering, so an aliased-declared token was
             // never replayed to a peer that subscribed later (the asymmetry
@@ -8686,9 +8698,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // net/liveliness.c:77). The shared constructor makes the two paths
             // register identically by construction.
             Ok(LivelinessToken::new_held(
-                self.clone(),
-                u64::from(token_id),
-                resolved,
+                place,
                 (mapping_id, inline_suffix.unwrap_or_default().to_string()),
                 options,
             ))
@@ -8864,13 +8874,18 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // panic-free invariant from `send_declare_token` applies
             // equally to `send_interest_liveliness_subscriber`.
             //
-            // R311dh — observer access via R::with_mutex_mut closure form.
+            // R311dh — observer access via R::with_mutex_mut closure form. A
+            // subscriber the table refuses is registered nowhere and no
+            // Interest is emitted for it.
             R::with_mutex_mut(&self.observer, |observer| {
-                observer
-                    .liveliness_subscribers
-                    .register(interest_id, &keyexpr_string, history, sink)
-                    .expect("register on the alloc backing never exceeds declared capacity");
-            });
+                observer.liveliness_subscribers.register(
+                    interest_id,
+                    &keyexpr_string,
+                    history,
+                    sink,
+                )
+            })
+            .map_err(LivelinessSubscriberAliasError::Refused)?;
             // R311ll (Finding B) — roll the slot back if the wire emit
             // fails. Register-first guards the race against an inbound
             // DeclToken (the slot matches by keyexpr, so a proactive peer
@@ -9060,13 +9075,15 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // the slot ready and fires the callback. Same ordering rule
             // as `declare_liveliness_subscriber`.
             //
-            // R311dh — observer access via R::with_mutex_mut closure form.
+            // R311dh — observer access via R::with_mutex_mut closure form. A
+            // refusal registers nothing and emits nothing, as the literal
+            // path's does.
             R::with_mutex_mut(&self.observer, |observer| {
                 observer
                     .liveliness_subscribers
                     .register(interest_id, &resolved, history, sink)
-                    .expect("register on the alloc backing never exceeds declared capacity");
-            });
+            })
+            .map_err(LivelinessSubscriberAliasError::Refused)?;
             // Wire emit carries the alias form so the peer pays the
             // mapping_id + optional inline_suffix cost rather than the
             // full literal each time — bandwidth parity with
@@ -9441,12 +9458,13 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // sink is built before the lock (a pure construction over the
             // cloned `fires` handle; it never touches the observer).
             let sink = self.deferred_reply_sink(on_reply, on_final);
+            // A get the registry refuses is registered nowhere and its Interest is not emitted.
             R::with_mutex_mut(&self.observer, |observer| {
                 observer
                     .liveliness_gets
                     .register(interest_id, deadline_ms, sink)
-                    .expect("register on the alloc backing never exceeds declared capacity");
-            });
+            })
+            .map_err(LivelinessGetError::Refused)?;
             // R311ll (Finding B) — roll the pending get back if the wire
             // emit fails. Unlike the keyexpr-matched subscriber slot, a
             // get correlates by FRESH interest_id, so no solicited reply

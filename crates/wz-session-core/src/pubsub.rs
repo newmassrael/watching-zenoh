@@ -839,7 +839,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         }
         // A heap table's cache slot allocates the first time it sees a key (the key's text and
         // the list of what it matched), which the in-place path's contract does not allow: it
-        // costs the heap the matcher's scratch and nothing more. A fixed table's slots are
+        // costs the heap nothing (the matcher reads the key as text). A fixed table's slots are
         // already in place, so there the cache costs no allocation and is used.
         if !P::ENFORCES_CAPACITY {
             return scan_subscribers(
@@ -8082,7 +8082,11 @@ mod entity_id_space_tests {
 /// The table is filled with real rows rather than a cache slot written by hand: 65537 rows of a
 /// short pattern cost a few megabytes and three scans of them a few milliseconds, and the test
 /// then goes through the same registration and delivery a session does.
-#[cfg(all(test, feature = "alloc"))]
+///
+/// Only a build whose subscriber tables may grow past the positions has the case: a fixed build
+/// states its capacity as every table's quota (`MAX_SUBSCRIPTIONS`), a table on the heap policy
+/// included, and that capacity fits the 16 bits by the build-time assertion beside the cache.
+#[cfg(all(test, feature = "alloc", not(feature = "bounded-heapless")))]
 mod match_memo_position_tests {
     use super::*;
     use crate::bounded::Heap;

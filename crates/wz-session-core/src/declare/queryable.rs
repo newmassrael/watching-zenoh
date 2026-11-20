@@ -789,6 +789,12 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableTable<D, U, Profile> {
 }
 
 impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteQueryableTable<D, U, P> {
+    /// Hold each observer list to the `MAX_DECL_OBSERVERS` its creator resolved
+    /// ([`crate::decl_sink::DeclObserverPair::limit_to`]).
+    pub fn limit_observers_to(&mut self, quota: crate::limits::MaxDeclObserversHeld) {
+        self.observers.limit_to(quota);
+    }
+
     /// R311gb-3d — install an explicit [`DeclSink`] observer (the
     /// seam-native entry point; works on every profile). The `alloc`-only
     /// [`on_queryable_declared`](RemoteQueryableRegistry::on_queryable_declared)
@@ -1297,20 +1303,15 @@ impl RemoteQueryableRegistry<BoxedDeclSink, BoxedUndeclSink> {
     /// via [`BoxedDeclSink`]. R311lb — returns the registry-local
     /// observer id (see [`RemoteQueryableTable::remove_queryable_declared_sink`]).
     ///
-    /// GROWABLE BACKING ONLY: under `bounded-heapless` the observer list is
-    /// fixed and the `.expect` inside would be a panic at the first full
-    /// list, so this wrapper is not compiled there (except for this crate's
-    /// own tests and docs). A fixed-backing build installs through
-    /// [`RemoteQueryableTable::on_queryable_declared_sink`] and handles the `Err`.
-    #[cfg(any(test, doc, not(feature = "bounded-heapless")))]
+    /// Admission is a partial operation, so this returns what
+    /// [`RemoteQueryableTable::on_queryable_declared_sink`] returns on every
+    /// backing: a fixed list fills, and a growable one is held to the quota
+    /// its creator stated ([`RemoteQueryableTable::limit_observers_to`]).
     pub fn on_queryable_declared(
         &mut self,
         callback: impl FnMut(&dyn crate::decl_sink::DeclView) + Send + 'static,
-    ) -> u64 {
-        // AP backing: the observer `BoundedVec` grows past the advisory
-        // `N`, so installing never fails here.
+    ) -> Result<u64, RegisterError> {
         self.on_queryable_declared_sink(BoxedDeclSink::new(callback))
-            .expect("observer install on the alloc backing never exceeds declared capacity")
     }
 
     /// Install a closure fired on every inbound `Declare(UndeclQueryable)`.
@@ -1318,12 +1319,12 @@ impl RemoteQueryableRegistry<BoxedDeclSink, BoxedUndeclSink> {
     /// [`BoxedUndeclSink`]. R311lb — returns the registry-local observer
     /// id (see [`RemoteQueryableTable::remove_queryable_undeclared_sink`]).
     ///
-    /// GROWABLE BACKING ONLY, for the reason
-    /// [`Self::on_queryable_declared`] gives.
-    #[cfg(any(test, doc, not(feature = "bounded-heapless")))]
-    pub fn on_queryable_undeclared(&mut self, callback: impl FnMut(u64) + Send + 'static) -> u64 {
+    /// It refuses as [`Self::on_queryable_declared`] does.
+    pub fn on_queryable_undeclared(
+        &mut self,
+        callback: impl FnMut(u64) + Send + 'static,
+    ) -> Result<u64, RegisterError> {
         self.on_queryable_undeclared_sink(BoxedUndeclSink::new(callback))
-            .expect("observer install on the alloc backing never exceeds declared capacity")
     }
 }
 
@@ -1368,7 +1369,8 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(decl.keyexpr().to_string());
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let mut peer = HashMap::new();
         peer.insert(7u64, "theirs/q".to_string());
@@ -1395,7 +1397,8 @@ mod tests {
         let fired_for_cb = fired.clone();
         reg.on_queryable_declared(move |_decl| {
             fired_for_cb.fetch_add(1, Ordering::SeqCst);
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let mut peer = HashMap::new();
         peer.insert(7u64, "theirs/q".to_string());
@@ -1432,7 +1435,8 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((decl.id(), decl.keyexpr().to_string()));
-        });
+        })
+        .expect("no quota is stated on this table");
         let body =
             DeclareOwnedVariant::CodecZenohDeclQueryable(decl_queryable(8, 0, Some("home/door")));
         reg.dispatch_declare(&body, &HashMap::new());
@@ -1449,7 +1453,8 @@ mod tests {
         let fired_for_cb = fired.clone();
         reg.on_queryable_declared(move |_d| {
             fired_for_cb.fetch_add(1, Ordering::SeqCst);
-        });
+        })
+        .expect("no quota is stated on this table");
         let body = DeclareOwnedVariant::CodecZenohDeclQueryable(decl_queryable(1, 77, None));
         reg.dispatch_declare(&body, &HashMap::new());
         assert_eq!(fired.load(Ordering::SeqCst), 0);
@@ -1462,7 +1467,8 @@ mod tests {
         let captured_for_cb = captured.clone();
         reg.on_queryable_undeclared(move |id| {
             captured_for_cb.lock().unwrap().push(id);
-        });
+        })
+        .expect("no quota is stated on this table");
         let body = DeclareOwnedVariant::CodecZenohUndeclQueryable(undecl_queryable(99));
         reg.dispatch_declare(&body, &HashMap::new());
         assert_eq!(*captured.lock().unwrap(), vec![99]);
@@ -1679,10 +1685,12 @@ mod tests {
         let u = undecl_count.clone();
         reg.on_queryable_declared(move |_d| {
             d.fetch_add(1, Ordering::SeqCst);
-        });
+        })
+        .expect("no quota is stated on this table");
         reg.on_queryable_undeclared(move |_u| {
             u.fetch_add(1, Ordering::SeqCst);
-        });
+        })
+        .expect("no quota is stated on this table");
 
         // Mix of Subscriber + Queryable envelopes — only Queryable
         // arms route into this registry.
@@ -1743,9 +1751,11 @@ mod tests {
         let declared: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
         let undeclared: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
         let declared_for_cb = declared.clone();
-        reg.on_queryable_declared(move |decl| declared_for_cb.lock().unwrap().push(decl.id()));
+        reg.on_queryable_declared(move |decl| declared_for_cb.lock().unwrap().push(decl.id()))
+            .expect("no quota is stated on this table");
         let undeclared_for_cb = undeclared.clone();
-        reg.on_queryable_undeclared(move |id| undeclared_for_cb.lock().unwrap().push(id));
+        reg.on_queryable_undeclared(move |id| undeclared_for_cb.lock().unwrap().push(id))
+            .expect("no quota is stated on this table");
 
         reg.dispatch_declare(
             &decl_queryable_complete(1, "home/temp", false),

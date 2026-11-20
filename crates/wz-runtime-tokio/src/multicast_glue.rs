@@ -5406,7 +5406,8 @@ mod tests {
             .queryables
             .register("demo/mc", |_query, responder| {
                 responder.reply(b"reply-over-multicast");
-            });
+            })
+            .expect("no quota is stated on this table");
 
         // The reply sink pushes through the group's producer: the closure
         // pushes each drained reply onto the pipeline the loop attached, and
@@ -5511,7 +5512,8 @@ mod tests {
             .queryables
             .register("demo/mc", |_query, responder| {
                 responder.reply(b"reply-over-multicast");
-            });
+            })
+            .expect("no quota is stated on this table");
 
         let producer = MulticastTxProducer::new();
         let sink = MulticastReplySink::new(TokioReplyBacking::new(producer.clone()));

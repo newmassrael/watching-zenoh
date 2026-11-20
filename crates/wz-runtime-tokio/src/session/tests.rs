@@ -3222,7 +3222,8 @@ fn query_locality_session_local_fires_loopback_only_and_completes_inline() {
         .queryables
         .register("home/temp", |_query, responder| {
             responder.reply(b"22.5");
-        });
+        })
+        .expect("no quota is stated on this table");
 
     let r = reply_count.clone();
     let f = final_count.clone();
@@ -3333,7 +3334,8 @@ fn query_locality_remote_fires_wire_only_and_keeps_pending_until_wire_final() {
         .queryables
         .register("home/temp", |_q, responder| {
             responder.reply(b"loopback-should-not-fire");
-        });
+        })
+        .expect("no quota is stated on this table");
 
     let r = reply_count.clone();
     let f = final_count.clone();
@@ -3388,7 +3390,8 @@ fn query_locality_any_fires_both_branches_and_waits_for_wire_final() {
         .queryables
         .register("home/temp", |_q, responder| {
             responder.reply(b"22.5");
-        });
+        })
+        .expect("no quota is stated on this table");
 
     let r = reply_count.clone();
     let f = final_count.clone();
@@ -3496,7 +3499,8 @@ fn query_loopback_propagates_del_body() {
         .queryables
         .register("clear/me", |_q, responder| {
             responder.reply_del();
-        });
+        })
+        .expect("no quota is stated on this table");
 
     session
         .query(
@@ -3545,7 +3549,8 @@ fn query_loopback_propagates_err_body_with_encoding_tuple() {
         .queryables
         .register("error/path", |_q, responder| {
             responder.reply_err(Some(4), Some(&b"schema_v1"[..]), b"oops");
-        });
+        })
+        .expect("no quota is stated on this table");
 
     session
         .query(
@@ -3592,7 +3597,8 @@ fn query_with_no_matching_queryable_completes_loopback_with_zero_replies() {
         .queryables
         .register("home/humidity", |_q, responder| {
             responder.reply(b"99");
-        });
+        })
+        .expect("no quota is stated on this table");
 
     let r = reply_count.clone();
     let f = final_count.clone();
@@ -3635,7 +3641,8 @@ fn query_session_local_skips_remote_only_queryable() {
         .queryables
         .register_with_locality("home/temp", Locality::Remote, move |_q, _responder| {
             fired_cb.fetch_add(1, Ordering::SeqCst);
-        });
+        })
+        .expect("no quota is stated on this table");
 
     let reply_count = Arc::new(AtomicUsize::new(0));
     let final_count = Arc::new(AtomicUsize::new(0));
@@ -3684,7 +3691,8 @@ fn query_session_local_with_session_local_queryable_fires() {
         .register_with_locality("home/temp", Locality::SessionLocal, move |_q, responder| {
             fired_cb.fetch_add(1, Ordering::SeqCst);
             responder.reply(b"22.5");
-        });
+        })
+        .expect("no quota is stated on this table");
 
     let reply_count = Arc::new(AtomicUsize::new(0));
     let r = reply_count.clone();
@@ -4085,7 +4093,8 @@ fn query_allcomplete_target_loopback_fires_only_complete_queryable() {
         .register_with_locality("home/temp", Locality::SessionLocal, move |_q, responder| {
             ic.fetch_add(1, Ordering::SeqCst);
             responder.reply(b"incomplete");
-        });
+        })
+        .expect("no quota is stated on this table");
 
     // AllComplete self-get: only the complete queryable fires.
     session
@@ -5397,7 +5406,8 @@ fn query_locality_remote_alone_skips_local_queryable() {
         .register("home/temp", move |_q, responder| {
             fired_cb.fetch_add(1, Ordering::SeqCst);
             responder.reply(b"22.5");
-        });
+        })
+        .expect("no quota is stated on this table");
 
     let reply_count = Arc::new(AtomicUsize::new(0));
     let r = reply_count.clone();
@@ -6086,7 +6096,8 @@ fn loopback_target_pub_field_cannot_bypass_the_query_target_gate() {
         .register_with_locality("home/temp", Locality::SessionLocal, move |_q, responder| {
             ic.fetch_add(1, Ordering::SeqCst);
             responder.reply(b"incomplete");
-        });
+        })
+        .expect("no quota is stated on this table");
 
     let mut opts = QueryOptions::get().with_allowed_destination(Locality::SessionLocal);
     // Pub-field bypass — with_target() is a no-op when query-target is OFF, so
@@ -6326,7 +6337,8 @@ fn query_aliased_locality_session_local_fires_loopback_only() {
         .queryables
         .register("home/temp", |_q, responder| {
             responder.reply(b"22.5");
-        });
+        })
+        .expect("no quota is stated on this table");
 
     let r = reply_count.clone();
     let f = final_count.clone();
@@ -6394,7 +6406,8 @@ fn query_aliased_locality_any_fires_both_branches() {
         .queryables
         .register("home/temp", |_q, responder| {
             responder.reply(b"22.5");
-        });
+        })
+        .expect("no quota is stated on this table");
 
     let r = reply_count.clone();
     let f = final_count.clone();
@@ -6439,7 +6452,8 @@ fn query_aliased_inline_suffix_passes_through_to_wire_and_loopback() {
         .queryables
         .register("home/temp/kitchen", |_q, responder| {
             responder.reply(b"21.0");
-        });
+        })
+        .expect("no quota is stated on this table");
 
     session
         .query_aliased(
@@ -6490,7 +6504,8 @@ fn query_aliased_auto_resolves_loopback_from_outbound_mapping_table() {
         .queryables
         .register("home/temp", |_q, responder| {
             responder.reply(b"22.5");
-        });
+        })
+        .expect("no quota is stated on this table");
 
     let handle = session
         .query_aliased_auto(
@@ -6528,7 +6543,8 @@ fn query_aliased_auto_unknown_mapping_returns_err_and_skips_both_branches() {
         .queryables
         .register("home/temp", move |_q, _r| {
             fired_cb.fetch_add(1, Ordering::SeqCst);
-        });
+        })
+        .expect("no quota is stated on this table");
 
     let err = session.query_aliased_auto(99, None, QueryOptions::get(), |_| {}, |_| {});
     assert_eq!(err, Err(QueryAliasError::UnknownMapping(99)));
@@ -6563,7 +6579,8 @@ fn query_aliased_auto_with_inline_suffix_concatenates_for_loopback() {
         .queryables
         .register("home/temp/kitchen", |_q, responder| {
             responder.reply(b"21.0");
-        });
+        })
+        .expect("no quota is stated on this table");
 
     session
         .query_aliased_auto(
@@ -6908,7 +6925,8 @@ fn querier_get_fires_loopback_through_session_query_session_local() {
         .queryables
         .register("home/temp", |_q, responder| {
             responder.reply(b"22.5");
-        });
+        })
+        .expect("no quota is stated on this table");
 
     let querier = session.declare_querier(
         "home/temp",
@@ -7305,7 +7323,8 @@ fn querier_aliased_get_resolves_loopback_through_outbound_mapping_table() {
         .queryables
         .register("home/temp", |_q, responder| {
             responder.reply(b"22.5");
-        });
+        })
+        .expect("no quota is stated on this table");
 
     let qa = session.declare_querier_aliased(
         7,
@@ -7344,7 +7363,8 @@ fn querier_aliased_get_unknown_mapping_returns_err_and_skips_both_branches() {
         .queryables
         .register("home/temp", move |_q, _r| {
             fired_cb.fetch_add(1, Ordering::SeqCst);
-        });
+        })
+        .expect("no quota is stated on this table");
 
     let qa = session.declare_querier_aliased(99, None, QueryOptions::get());
     let err = qa.get(|_| {}, |_| {});
@@ -7376,7 +7396,8 @@ fn querier_aliased_get_threads_inline_suffix_into_composite_literal() {
         .queryables
         .register("home/temp/kitchen", |_q, responder| {
             responder.reply(b"21.0");
-        });
+        })
+        .expect("no quota is stated on this table");
 
     let qa = session.declare_querier_aliased(
         7,
@@ -7467,7 +7488,8 @@ fn reply_timestamps_seen_on(
                     .reply_keyed_stamped("home/temp", payload, None, &stamp)
                     .unwrap();
             }
-        });
+        })
+        .expect("no quota is stated on this table");
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
     let writer = seen.clone();
     session
@@ -15008,7 +15030,8 @@ fn query_reply_callbacks_run_deferred_lock_free_and_local_sync() {
         .queryables
         .register("home/temp", |_q, responder| {
             responder.reply(b"22.5");
-        });
+        })
+        .expect("no quota is stated on this table");
 
     let outer_replies = Arc::new(AtomicUsize::new(0));
     let outer_finals = Arc::new(AtomicUsize::new(0));
@@ -15573,7 +15596,8 @@ fn query_with_latest_consolidation_delivers_one_reply_per_keyexpr() {
                     },
                 )
                 .unwrap();
-        });
+        })
+        .expect("no quota is stated on this table");
 
     session
         .query(
@@ -15651,7 +15675,8 @@ fn query_with_explicit_none_consolidation_still_delivers_every_reply() {
                     },
                 )
                 .unwrap();
-        });
+        })
+        .expect("no quota is stated on this table");
 
     session
         .query(
@@ -15721,7 +15746,8 @@ fn a_default_get_does_not_consolidate_without_the_query_consolidation_feature() 
                     },
                 )
                 .unwrap();
-        });
+        })
+        .expect("no quota is stated on this table");
 
     session
         .query(
@@ -15793,7 +15819,8 @@ fn a_default_get_consolidates_to_the_latest_reply_like_zenoh() {
                     },
                 )
                 .unwrap();
-        });
+        })
+        .expect("no quota is stated on this table");
 
     session
         .query(
@@ -15875,7 +15902,8 @@ fn a_default_get_with_a_time_range_selector_does_not_consolidate() {
                     },
                 )
                 .unwrap();
-        });
+        })
+        .expect("no quota is stated on this table");
 
     session
         .query(
@@ -15939,7 +15967,8 @@ fn a_default_get_refuses_a_reply_keyed_outside_the_query() {
                 Err(wz_session_core::query_sink::ReplyError::KeyExprNotMatch),
                 "the queryable is told its outside reply was refused"
             );
-        });
+        })
+        .expect("no quota is stated on this table");
 
     session
         .query(
@@ -15992,7 +16021,8 @@ fn a_wildcard_get_refuses_a_reply_outside_the_pattern() {
                 Err(wz_session_core::query_sink::ReplyError::KeyExprNotMatch),
                 "the queryable is told its outside reply was refused"
             );
-        });
+        })
+        .expect("no quota is stated on this table");
 
     session
         .query(
@@ -16035,7 +16065,8 @@ fn accept_replies_any_reinstates_a_reply_keyed_outside_the_query() {
             responder
                 .reply_keyed("other/outside", b"out")
                 .expect("`_anyke` waives the responder gate too");
-        });
+        })
+        .expect("no quota is stated on this table");
 
     session
         .query(

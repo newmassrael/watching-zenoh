@@ -32,7 +32,12 @@
 //! shipped image and the AP run today) the windows that make or host something
 //! must cost it something: that half is the instrument's own control, since a
 //! count that read zero on the state that is known to hold boxes, vectors and
-//! reference counts would prove nothing about the state that is meant not to.
+//! reference counts would prove nothing about the state that is meant not to. A
+//! Put makes and hosts nothing, and costs the heap nothing on EVERY profile: it is
+//! delivered where it lies, and the subscriber matcher reads the key and the
+//! pattern as text (the SCE documents of `keyexpr_match`); until 2026-11-19 the
+//! heap profile paid one allocation per Put there, the chunk list the matcher
+//! split the key into.
 //!
 //! The count is ATTRIBUTED to the measurement's own thread, as `tx_allocations`
 //! and `session_slot_allocations` do, and every lwIP test holds the harness's lock
@@ -605,7 +610,8 @@ impl Costs {
         }
     }
 
-    /// A window that costs the heap nothing on EVERY profile.
+    /// A window that costs the heap nothing on EVERY profile: an idle pass, a
+    /// refusal, and a Put, which the matcher reads as text.
     fn check_free(&mut self, what: &str, allocations: usize) {
         println!("{what}: {allocations} allocation(s)");
         if allocations != 0 {
@@ -755,7 +761,7 @@ fn a_pair_of_pumps_costs_the_heap_nothing_as_tasks_of_a_static_runtime() {
         });
         sent.0.expect("the initiator's Put leaves");
         sent.1.expect("the acceptor's Put leaves");
-        costs.check(&format!("a Put of {len} bytes each way"), n);
+        costs.check_free(&format!("a Put of {len} bytes each way"), n);
         assert_eq!(acceptor_seen.puts.load(Ordering::SeqCst), a_before + 1);
         assert_eq!(initiator_seen.puts.load(Ordering::SeqCst), i_before + 1);
     }

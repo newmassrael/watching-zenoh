@@ -149,6 +149,12 @@ pub struct LivelinessGetRegistry<C: ReplySink, P: Storage = Profile> {
     /// capacity cannot overflow (a dropped marker would be a PERMANENT
     /// replay-leak: this drain is the entry's only prune).
     finalized: BoundedVec<u64, { caps::MAX_PENDING_LIVELINESS_GETS }, P>,
+    /// The most gets the registry holds pending (`MAX_PENDING_LIVELINESS_GETS`): what the
+    /// creator of the registry resolved ([`Self::limit_to`]), the build's value until it does. A
+    /// growable table refuses nothing by its storage, so this is what bounds it; where the build
+    /// fixes the bound to the storage's capacity it is held in no byte and the storage refuses
+    /// alone.
+    quota: crate::limits::MaxPendingLivelinessGetsHeld,
     /// How many token replies were NOT delivered because their keyexpr is longer
     /// than the bounded buffer the slot profile's receive path resolves into
     /// ([`Self::oversize`]). Stays zero on every build that reads the owned
@@ -161,6 +167,7 @@ impl<C: ReplySink, P: Storage> Default for LivelinessGetRegistry<C, P> {
         Self {
             pending: BoundedVec::default(),
             finalized: BoundedVec::default(),
+            quota: Default::default(),
             oversize: 0,
         }
     }
@@ -178,6 +185,14 @@ impl<C: ReplySink> LivelinessGetRegistry<C, Profile> {
 }
 
 impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
+    /// Hold the registry to the `MAX_PENDING_LIVELINESS_GETS` its creator resolved: a
+    /// registration that would leave more gets pending than `quota` admits is refused
+    /// ([`RegisterError::TableFull`]), and the gets already pending are kept, as a lowered soft
+    /// limit keeps what it holds.
+    pub fn limit_to(&mut self, quota: crate::limits::MaxPendingLivelinessGetsHeld) {
+        self.quota = quota;
+    }
+
     /// How many token replies were refused for a keyexpr past the bounded buffer
     /// ([`crate::wireexpr_resolve::KeyexprBuf`]) and so not delivered. Only the slot
     /// profile's receive path, which resolves into that buffer, can refuse; a
@@ -206,7 +221,8 @@ impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
     /// snapshot (`None` = never expires). Returns `Ok(true)` on a fresh
     /// registration, `Err(TableFull)` when the pending table is at
     /// [`caps::MAX_PENDING_LIVELINESS_GETS`] (fail-fast on the fixed
-    /// backing; never returned on the growable backing).
+    /// backing) or at the quota the creator stated ([`Self::limit_to`],
+    /// on every backing).
     ///
     /// On the fixed backing a terminated get's `finalized` marker still
     /// occupies its slot until [`take_finalized`](Self::take_finalized)
@@ -228,6 +244,9 @@ impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
             return Ok(false);
         }
         if self.pending.len() >= self.finalized.free_slots() {
+            return Err(RegisterError::TableFull);
+        }
+        if !self.quota.admits(self.pending.len() + 1) {
             return Err(RegisterError::TableFull);
         }
         self.pending
@@ -603,11 +622,9 @@ impl LivelinessGetRegistry<BoxedReplySink> {
     /// Register a pending get from the `on_reply` + `on_final` capturing
     /// closures (the dynamic-opt-in AP surface). Wraps them in a
     /// [`BoxedReplySink`] and funnels through
-    /// [`register`](LivelinessGetRegistry::register); on the growable
-    /// backing the table never overflows, so the `TableFull` arm is
-    /// unreachable and the result is `Ok(true)` for a fresh id /
-    /// `Ok(false)` for a duplicate. On the fixed backing (`bounded-heapless`)
-    /// `TableFull` is a real answer the caller handles.
+    /// [`register`](LivelinessGetRegistry::register), and refuses as it does:
+    /// `TableFull` past the stated quota on every backing, and past the
+    /// capacity on the fixed one.
     pub fn register_get(
         &mut self,
         interest_id: u64,

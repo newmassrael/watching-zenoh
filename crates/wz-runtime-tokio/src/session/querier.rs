@@ -137,6 +137,10 @@ pub enum LivelinessGetError {
     /// The Interest may be dropped, another sender held its conduit, and the session's queue
     /// profile drops it at once (`SendWireError::HeldConduit`). The Interest was not emitted.
     HeldConduit,
+    /// The session's pending-get registry refused the snapshot ([`RegisterError`]): it holds
+    /// the quota its creator stated (`MAX_PENDING_LIVELINESS_GETS`) or its capacity. Nothing
+    /// was registered and the Interest was not emitted.
+    Refused(RegisterError),
 }
 
 impl std::fmt::Display for LivelinessGetError {
@@ -188,6 +192,11 @@ impl std::fmt::Display for LivelinessGetError {
                 "LivelinessGetError: another sender held this droppable \
                  Interest's conduit and the queue profile drops it at once; \
                  the Interest was not emitted"
+            ),
+            LivelinessGetError::Refused(refusal) => write!(
+                f,
+                "LivelinessGetError: the session refused the get: {refusal}; the \
+                 Interest was not emitted"
             ),
         }
     }
@@ -289,6 +298,11 @@ pub enum QueryAliasError {
     /// (`SendWireError::HeldConduit`), as zenoh-pico's get fails. The Request(Query) was not
     /// emitted.
     HeldConduit,
+    /// The session's pending-query registry refused the query ([`RegisterError`]): it holds
+    /// the quota its creator stated (`MAX_PENDING_QUERIES`) or its capacity, or the accepted
+    /// keyexpr is past the fixed table's bound. Nothing was registered and the Request(Query)
+    /// was not emitted.
+    Refused(RegisterError),
 }
 
 impl std::fmt::Display for QueryAliasError {
@@ -338,6 +352,11 @@ impl std::fmt::Display for QueryAliasError {
                 "QueryAliasError: another sender held this droppable query's conduit \
                  and the queue profile drops it at once; the Request(Query) was not \
                  emitted"
+            ),
+            QueryAliasError::Refused(refusal) => write!(
+                f,
+                "QueryAliasError: the session refused the query: {refusal}; the \
+                 Request(Query) was not emitted"
             ),
         }
     }

@@ -915,7 +915,7 @@ mod query_and_reply {
     }
 
     #[test]
-    fn a_query_read_in_place_reaches_its_queryable_and_costs_only_the_matchers_scratch() {
+    fn a_query_read_in_place_reaches_its_queryable_and_costs_the_heap_nothing() {
         let (_serial, link) = wz_link_lwip::lwip_test_link();
         let link = Rc::new(link);
         let mut pair = Pair::establish(&link, 7507);
@@ -1070,8 +1070,8 @@ fn a_frame_extension_chain_is_owned_only_when_an_owned_record_needs_it() {
 ///
 /// Measured per fragment turn under the counting allocator: a fragment that
 /// does not complete its chain costs the heap NOTHING, and the turn that
-/// completes it costs exactly what a whole frame of the same Puts costs (the
-/// matcher's growable scratch on the AP backing, nothing on the fixed one).
+/// completes it costs exactly what a whole frame of the same Puts costs
+/// (nothing on either backing: the matcher reads the key as text).
 /// Before this, each fragment was copied onto the heap, its payload copied
 /// again out of that copy and staged into a growable buffer, and the completed
 /// message copied into a list of owned messages before the first Put reached a

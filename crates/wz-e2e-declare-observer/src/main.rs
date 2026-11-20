@@ -88,7 +88,8 @@ fn main() -> ExitCode {
                         decl.keyexpr(),
                         decl.id(),
                     );
-                });
+                })
+                .map_err(std::io::Error::other)?;
             // No RAII handle / wire-emitting Drop: a pure observer holds
             // nothing across the drive loop. The unit hold is dropped
             // first at teardown (a no-op) exactly like a declare handle.
