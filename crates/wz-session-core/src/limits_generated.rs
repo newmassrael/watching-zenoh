@@ -441,6 +441,25 @@ const _: LimitDomain = MaxReplyPayloadBytes::DOMAIN;
 /// How `MAX_REPLY_PAYLOAD_BYTES` is held: in no byte when its domain is one value.
 type MaxReplyPayloadBytesHeld = Limited<MaxReplyPayloadBytes, { MaxReplyPayloadBytes::HELD }>;
 
+/// `MAX_MULTICAST_REPLIES`: The replies a node holds for a multicast group before it sends
+/// them, with or without an allocator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MaxMulticastReplies;
+
+impl LimitSpec for MaxMulticastReplies {
+    type Value = Quota;
+    const LIMIT: &'static str = "MAX_MULTICAST_REPLIES";
+    const DRIVEN: Option<Driven> = Some(Driven::Remote);
+    const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_MULTICAST_REPLIES);
+    const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DEFAULT: Quota = Quota::at_most(caps::MAX_MULTICAST_REPLIES);
+}
+
+const _: LimitDomain = MaxMulticastReplies::DOMAIN;
+
+/// How `MAX_MULTICAST_REPLIES` is held: in no byte when its domain is one value.
+type MaxMulticastRepliesHeld = Limited<MaxMulticastReplies, { MaxMulticastReplies::HELD }>;
+
 /// `MAX_LOCATOR_LEN`: The longest locator, in bytes, a node stores: one it is told to
 /// connect to, or one it listens on (for example udp/192.168.1.10:7447).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -529,7 +548,8 @@ impl LimitSpec for TxExpiryCloseAfter {
     const LIMIT: &'static str = "TX_EXPIRY_CLOSE_AFTER";
     const DRIVEN: Option<Driven> = Some(Driven::Remote);
     const CAPACITY: Option<usize> = None;
-    const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DOMAIN: LimitDomain =
+        LimitDomain::of_bound_within(Self::CAPACITY, 65535, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::from_build(caps::TX_EXPIRY_CLOSE_AFTER, true);
 }
 
@@ -1110,9 +1130,9 @@ const _: LimitDomain = PicoSocketTimeoutMs::DOMAIN;
 /// How `PICO_SOCKET_TIMEOUT_MS` is held: in no byte when its domain is one value.
 type PicoSocketTimeoutMsHeld = Limited<PicoSocketTimeoutMs, { PicoSocketTimeoutMs::HELD }>;
 
-/// `PICO_CONNECT_TIMEOUT_MS`: How long, in milliseconds, opening a cooperative zenoh-pico
-/// session waits for the session to be established before the open fails, as zenoh-pico's
-/// Z_TRANSPORT_CONNECT_TIMEOUT.
+/// `PICO_CONNECT_TIMEOUT_MS`: How long, in milliseconds, each open of an endpoint by a
+/// zenoh-pico session waits for the dial and the handshake before it fails, on either
+/// engine, as zenoh-pico's Z_TRANSPORT_CONNECT_TIMEOUT.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PicoConnectTimeoutMs;
 
@@ -1244,6 +1264,8 @@ pub struct SessionLimits {
     max_pending_finals: MaxPendingFinalsHeld,
     /// `MAX_REPLY_PAYLOAD_BYTES`.
     max_reply_payload_bytes: MaxReplyPayloadBytesHeld,
+    /// `MAX_MULTICAST_REPLIES`.
+    max_multicast_replies: MaxMulticastRepliesHeld,
     /// `QUERIER_MAX_PENDING_QUERIES`.
     querier_max_pending_queries: QuerierMaxPendingQueriesHeld,
     /// `TX_NO_PROGRESS_WINDOW_US`.
@@ -1325,6 +1347,7 @@ impl SessionLimits {
             max_pending_replies: Limited::build_default(),
             max_pending_finals: Limited::build_default(),
             max_reply_payload_bytes: Limited::build_default(),
+            max_multicast_replies: Limited::build_default(),
             querier_max_pending_queries: Limited::build_default(),
             tx_no_progress_window_us: Limited::build_default(),
             tx_expiry_close_after: Limited::build_default(),
@@ -1607,6 +1630,17 @@ impl SessionLimits {
         value: Quota,
     ) -> Result<(), OutsideLimitDomain> {
         self.max_reply_payload_bytes = Limited::select(value)?;
+        Ok(())
+    }
+
+    /// `MAX_MULTICAST_REPLIES` as this snapshot holds it.
+    pub const fn max_multicast_replies(&self) -> Quota {
+        self.max_multicast_replies.get()
+    }
+
+    /// Selects `MAX_MULTICAST_REPLIES`, when the build's domain holds `value`.
+    pub fn select_max_multicast_replies(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
+        self.max_multicast_replies = Limited::select(value)?;
         Ok(())
     }
 
@@ -2178,6 +2212,16 @@ impl LimitField<SessionLimits> for MaxReplyPayloadBytes {
     }
 }
 
+impl LimitField<SessionLimits> for MaxMulticastReplies {
+    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
+        snapshot.select_max_multicast_replies(value)
+    }
+
+    fn held_in(snapshot: &SessionLimits) -> Quota {
+        snapshot.max_multicast_replies()
+    }
+}
+
 impl LimitField<SessionLimits> for QuerierMaxPendingQueries {
     fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
         snapshot.select_querier_max_pending_queries(value)
@@ -2449,7 +2493,7 @@ impl LimitField<SessionLimits> for PicoKeepalivesPerLease {
 }
 
 /// How many limits [`SessionLimits`] holds: the length of [`SESSION_LIMITS`].
-pub const SESSION_LIMIT_COUNT: usize = 48;
+pub const SESSION_LIMIT_COUNT: usize = 49;
 
 /// Every limit of [`SessionLimits`] as a reader that names it by its id sees it, in the order of
 /// its fields.
@@ -2475,6 +2519,7 @@ pub static SESSION_LIMITS: [LimitEntry<SessionLimits>; SESSION_LIMIT_COUNT] = [
     LimitEntry::of::<MaxPendingReplies>(),
     LimitEntry::of::<MaxPendingFinals>(),
     LimitEntry::of::<MaxReplyPayloadBytes>(),
+    LimitEntry::of::<MaxMulticastReplies>(),
     LimitEntry::of::<QuerierMaxPendingQueries>(),
     LimitEntry::of::<TxNoProgressWindowUs>(),
     LimitEntry::of::<TxExpiryCloseAfter>(),

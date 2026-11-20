@@ -86,7 +86,7 @@ fn a_timestamp_identity_of_seventeen_bytes_is_refused_by_every_form() {
 /// answers the capacity, and only after reading the frame whole.
 #[test]
 fn a_locator_at_its_bound_is_read_and_only_the_node_answers_its_capacity() {
-    let capacity = wz_codecs::locator::MAX_LOCATOR_LEN;
+    let capacity = wz_codecs::locator::MAX_DECODED_LOCATOR_LEN;
     let read: Answer = Ok(capacity);
     assert_eq!(locator_answers(&locator_frame(capacity)), [read; 3]);
     let at_bound: [Answer; 3] = [Ok(255), Err(CodecError::CapacityExceeded), Ok(255)];

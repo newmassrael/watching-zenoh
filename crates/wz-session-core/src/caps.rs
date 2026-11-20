@@ -352,6 +352,23 @@ const _: () = assert!(
     "an admin reply is staged as a reply, so its bound cannot exceed the reply payload bound"
 );
 
+// A CURRENT interest is answered by one chain, a declaration for each match and a final, staged
+// in the session's declare stage whole or refused. A match-all interest matches every row of the
+// table it asks about, so where capacity is enforced a stage shorter than the longest chain that
+// table can make refuses that interest every time it is asked.
+#[cfg(feature = "declare-subscriber")]
+const _: () = assert!(
+    !crate::bounded::ENFORCES_CAPACITY || MAX_PENDING_DECLARES > MAX_SUBSCRIPTIONS,
+    "MAX_PENDING_DECLARES is at least MAX_SUBSCRIPTIONS + 1 on a fixed-capacity build: a \
+     match-all subscriber interest is answered by every subscription and a final, staged whole"
+);
+#[cfg(feature = "liveliness-token")]
+const _: () = assert!(
+    !crate::bounded::ENFORCES_CAPACITY || MAX_PENDING_DECLARES > MAX_LOCAL_TOKENS,
+    "MAX_PENDING_DECLARES is at least MAX_LOCAL_TOKENS + 1 on a fixed-capacity build: a \
+     match-all token interest is answered by every local token and a final, staged whole"
+);
+
 /// Maximum number of listening locators a node with no allocator reports in its
 /// admin `local_data` (the deploy `session_pool.process.admin_locators` key). The
 /// node's identity holds that many locator rows of [`MAX_LOCATOR_LEN`] bytes; one
@@ -364,12 +381,12 @@ pub const MAX_ADMIN_LOCATORS: usize = generated::MAX_ADMIN_LOCATORS;
 /// is refused and counted, not listed in part.
 pub const MAX_ADMIN_SESSION_LINKS: usize = generated::MAX_ADMIN_SESSION_LINKS;
 
-/// Maximum number of replies a multicast pump of a node with no allocator holds
-/// between the observer that stages one and the loop that frames and sends it (the
-/// deploy `session_pool.process.multicast_replies` key). A reply past it is dropped and
-/// counted by the queue (`wz_session_lwip::multicast_drive::MulticastReplyQueue`),
-/// never queued without bound: multicast to a group is best effort, and a querier
-/// whose reply was dropped asks again.
+/// Maximum number of replies a multicast pump holds between the observer that stages one
+/// and the loop that frames and sends it (the deploy `session_pool.process.multicast_replies`
+/// key): the size of the fixed queue of a node with no allocator, and the bound of the
+/// growable one of a node with one. A reply past it is dropped and counted by the queue
+/// (`wz_session_mcu::group_drive::MulticastReplyQueue`), never queued without bound:
+/// multicast to a group is best effort, and a querier whose reply was dropped asks again.
 pub const MAX_MULTICAST_REPLIES: usize = generated::MAX_MULTICAST_REPLIES;
 
 /// The most tasks a fixed-memory machine's runtime may hold (the deploy
@@ -529,12 +546,14 @@ const _: () = assert!(
 );
 
 /// How many payload fields one message's instance key names, when `instance-key` is on. A keyer
-/// whose description names more is refused. At least `1`.
+/// whose description names more is refused, and so is a message catalog that states one.
+/// At least `1`.
 pub const INSTANCE_KEY_FIELDS: usize = generated::INSTANCE_KEY_FIELDS;
 
 /// How many instances one message's instance key tells apart, the product of its value lists'
 /// lengths, when `instance-key` is on. It bounds the streams and
-/// the last values kept for the message; a keyer whose lists make more is refused. At least `1`.
+/// the last values kept for the message; a keyer whose lists make more is refused, and so is a
+/// message catalog that states one. At least `1`.
 pub const INSTANCES_PER_MESSAGE: usize = generated::INSTANCES_PER_MESSAGE;
 
 /// How far ahead of the node's clock, in milliseconds, a timestamp from another node may be before
@@ -543,9 +562,9 @@ pub const INSTANCES_PER_MESSAGE: usize = generated::INSTANCES_PER_MESSAGE;
 pub const CLOCK_MAX_FORWARD_STEP_MS: usize = generated::CLOCK_MAX_FORWARD_STEP_MS;
 
 /// How many declarations one turn of a paced declaration replay sends, when the
-/// `declaration-sync-pacing` policy is on. It is read only then, by the reconnect supervisor of
-/// the heap runtime, and must be at least `1`: a turn that sends nothing never finishes. A count
-/// of messages and not a table size: it sizes no memory.
+/// `declaration-sync-pacing` policy is on. It is read only then, by every host that replays
+/// paced ([`crate::replay_pacing::ReplayPacing`]), and must be at least `1`: a turn that sends
+/// nothing never finishes. A count of messages and not a table size: it sizes no memory.
 pub const DECLARATION_SYNC_BURST_MESSAGES: usize = generated::DECLARATION_SYNC_BURST_MESSAGES;
 
 /// How long, in milliseconds, a node waits for the peer's answer to an interest it sent before it
@@ -556,8 +575,8 @@ pub const DECLARATION_SYNC_BURST_MESSAGES: usize = generated::DECLARATION_SYNC_B
 pub const DECLARATION_SYNC_FINAL_TIMEOUT_MS: usize = generated::DECLARATION_SYNC_FINAL_TIMEOUT_MS;
 
 /// How long, in milliseconds, a paced declaration replay waits between two turns, when the
-/// `declaration-sync-pacing` policy is on. It is read only then, and must be at least `1`. A time
-/// and not a table size: it sizes no memory.
+/// `declaration-sync-pacing` policy is on; waiting for the declarations to be stable steps by it
+/// whatever the policy. Must be at least `1`. A time and not a table size: it sizes no memory.
 pub const DECLARATION_SYNC_INTERVAL_MS: usize = generated::DECLARATION_SYNC_INTERVAL_MS;
 
 /// How long, in milliseconds, a paced declaration replay waits before it tries a turn the link
@@ -600,11 +619,12 @@ pub const PICO_MULTICAST_BATCH_BYTES: usize = generated::PICO_MULTICAST_BATCH_BY
 pub const PICO_LEASE_MS: usize = generated::PICO_LEASE_MS;
 
 /// How long, in milliseconds, one read step of the pico ABI's cooperative engine waits on its
-/// link: pico's `Z_CONFIG_SOCKET_TIMEOUT`, its socket's receive timeout.
+/// link: pico's `Z_CONFIG_SOCKET_TIMEOUT`, its socket's receive timeout. The tokio engine reads
+/// nothing by it: its read task is woken by what arrives.
 pub const PICO_SOCKET_TIMEOUT_MS: usize = generated::PICO_SOCKET_TIMEOUT_MS;
 
-/// How long, in milliseconds, the pico ABI's cooperative engine gives an endpoint to complete the
-/// handshake: pico's `Z_TRANSPORT_CONNECT_TIMEOUT`, its handshake's receive deadline
+/// How long, in milliseconds, the pico ABI gives an endpoint to complete its dial and handshake,
+/// on either engine: pico's `Z_TRANSPORT_CONNECT_TIMEOUT`, its handshake's receive deadline
 /// (`vendor/zenoh-pico/src/transport/unicast/transport.c` @
 /// `z_clock_advance_ms(&recv_deadline, Z_TRANSPORT_CONNECT_TIMEOUT);`).
 pub const PICO_CONNECT_TIMEOUT_MS: usize = generated::PICO_CONNECT_TIMEOUT_MS;

@@ -237,9 +237,9 @@ config WZ_LIMIT_MAX_MULTICAST_REPLIES
 	int "MAX_MULTICAST_REPLIES"
 	default 8
 	help
-	  The replies a node without an allocator holds for a multicast group before
-	  it sends them. One more is dropped and counted: a group is best effort, and
-	  an asker whose reply was dropped asks again.
+	  The replies a node holds for a multicast group before it sends them, with or
+	  without an allocator. One more is dropped and counted: a group is best
+	  effort, and an asker whose reply was dropped asks again.
 
 config WZ_LIMIT_MAX_TASKS
 	int "MAX_TASKS"
@@ -308,13 +308,15 @@ config WZ_LIMIT_TX_NO_PROGRESS_WINDOW_US
 
 config WZ_LIMIT_TX_EXPIRY_CLOSE_AFTER
 	int "TX_EXPIRY_CLOSE_AFTER"
+	range 0 65535
 	default 0
 	help
 	  How many blocking messages in a row may find no room within their deadline
 	  before the session is closed as unresponsive, when the tx-expiry-keeps-session
 	  policy is on. A blocking message that does find room ends the run. 0 never
 	  closes the session, which is the policy as it was before this limit. At most
-	  65535: a larger value counts as 65535. It is read only when that policy is on.
+	  65535, the count a session holds: a build that states more does not compile.
+	  It is read only when that policy is on.
 
 config WZ_LIMIT_DATAGRAM_FRAGMENT_BURST
 	int "DATAGRAM_FRAGMENT_BURST"
@@ -526,8 +528,10 @@ config WZ_LIMIT_CLOCK_MAX_FORWARD_STEP_MS
 	  UHLC_MAX_DELTA_MS. A refused timestamp is not taken into the clock, and the
 	  data carrying it is stamped afresh or dropped as the timestamping settings say.
 	  A host that sets the environment variable UHLC_MAX_DELTA_MS to a whole number of
-	  milliseconds overrides this at start, as it does zenoh's own bound. 0 refuses
-	  any timestamp ahead of the clock.
+	  milliseconds overrides this at start, as it does zenoh's own bound. A value
+	  that is not a whole number of milliseconds, or one the build does not allow, is
+	  refused by name: the open fails with that reason, where zenoh panics. 0
+	  refuses any timestamp ahead of the clock.
 
 config WZ_LIMIT_DECLARATION_SYNC_BURST_MESSAGES
 	int "DECLARATION_SYNC_BURST_MESSAGES"
@@ -585,7 +589,8 @@ config WZ_LIMIT_DECLARATION_SYNC_RETRY_INTERVAL_MS
 	  DECLARATION_SYNC_INTERVAL_MS, and the turn starts again at the declaration the
 	  link refused. 0 tries nothing again: a refused turn ends the replay and the
 	  link, and a reconnecting session replays again on the next one, as before this
-	  limit. Only the tokio engine reads it.
+	  limit. The tokio engine, the cooperative engine and the fixed-memory slot
+	  client read it alike.
 
 config WZ_LIMIT_DECLARATION_SYNC_TX_NO_PROGRESS_MS
 	int "DECLARATION_SYNC_TX_NO_PROGRESS_MS"
@@ -596,7 +601,8 @@ config WZ_LIMIT_DECLARATION_SYNC_TX_NO_PROGRESS_MS
 	  turns (DECLARATION_SYNC_RETRY_INTERVAL_MS not 0) goes on with no declaration
 	  sent before it gives up, which ends the link as a refused turn does without
 	  retries. Each declaration sent starts the stretch again. 0 gives up only when
-	  the link itself ends. Only the tokio engine reads it.
+	  the link itself ends. The tokio engine, the cooperative engine and the
+	  fixed-memory slot client read it alike.
 
 config WZ_LIMIT_PICO_UNICAST_BATCH_BYTES
 	int "PICO_UNICAST_BATCH_BYTES"
@@ -634,16 +640,17 @@ config WZ_LIMIT_PICO_SOCKET_TIMEOUT_MS
 	help
 	  How long, in milliseconds, one read step of the cooperative zenoh-pico session
 	  waits on its link before it returns with nothing, as zenoh-pico's
-	  Z_CONFIG_SOCKET_TIMEOUT.
+	  Z_CONFIG_SOCKET_TIMEOUT. The tokio engine has no such wait: its read is woken
+	  by what arrives.
 
 config WZ_LIMIT_PICO_CONNECT_TIMEOUT_MS
 	int "PICO_CONNECT_TIMEOUT_MS"
 	range 1 4294967295
 	default 10000
 	help
-	  How long, in milliseconds, opening a cooperative zenoh-pico session waits for
-	  the session to be established before the open fails, as zenoh-pico's
-	  Z_TRANSPORT_CONNECT_TIMEOUT.
+	  How long, in milliseconds, each open of an endpoint by a zenoh-pico session
+	  waits for the dial and the handshake before it fails, on either engine, as
+	  zenoh-pico's Z_TRANSPORT_CONNECT_TIMEOUT.
 
 config WZ_LIMIT_PICO_FRAG_MAX_BYTES
 	int "PICO_FRAG_MAX_BYTES"

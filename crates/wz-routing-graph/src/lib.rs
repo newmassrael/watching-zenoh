@@ -80,7 +80,7 @@ use sce_forge_runtime::codec::{Aligned, Bounded, CodecError, Heap};
 use wz_codecs::linkstate::LinkstateOptionsH;
 use wz_codecs::linkstate_link::LinkstateLink;
 use wz_codecs::linkstate_weight::LinkstateWeight;
-use wz_codecs::locator::{MAX_LOCATORS_PER_NODE, MAX_LOCATOR_LEN};
+use wz_codecs::locator::{MAX_DECODED_LOCATOR_LEN, MAX_LOCATORS_PER_NODE};
 
 /// One LinkState entry as the graph builds and ingests it. This crate always
 /// builds with an allocator, so the lists the protocol bounds by nothing are
@@ -193,24 +193,30 @@ fn within_bound<T, const MAX: usize>(list: Vec<T>) -> Result<Bounded<Vec<T>, MAX
 /// no upstream length/count guarantee, so the obligation to keep the wire within
 /// what a no-alloc receiver can decode is discharged HERE — the producer-side
 /// analog of the ingest's oversized-zid drop. Both bounds are sourced from
-/// `wz-codecs` ([`MAX_LOCATOR_LEN`] = what a wz node stores of one locator,
-/// [`MAX_LOCATORS_PER_NODE`] = how many locators of one entry a wz node
-/// stores), so this never hand-copies a literal that could silently drift from
-/// them. The protocol bounds the list by nothing; the cap is the receiver's.
+/// `wz-codecs` ([`MAX_DECODED_LOCATOR_LEN`] = the longest locator a no-alloc
+/// wz node decodes, [`MAX_LOCATORS_PER_NODE`] = how many locators of one entry
+/// a wz node stores), so this never hand-copies a literal that could silently
+/// drift from them. The protocol bounds the list by nothing; the cap is the
+/// receiver's.
+///
+/// The length cap is the DECODE bound, not a receiver's storage limit (the
+/// session's `MAX_LOCATOR_LEN`, a per-build value of each receiver that a
+/// producer cannot know): a receiver whose own limit is shorter refuses the
+/// longer locator where it stores it, and counts the refusal.
 fn locators_to_wire(locators: &[String]) -> Option<Bounded<Vec<LocatorOwned>, { usize::MAX }>> {
     let owned: Vec<LocatorOwned> = locators
         .iter()
         .filter_map(|loc| {
-            if loc.len() > MAX_LOCATOR_LEN {
+            if loc.len() > MAX_DECODED_LOCATOR_LEN {
                 log::warn!(
-                    "dropping over-long locator ({} bytes, cap {MAX_LOCATOR_LEN}) \
+                    "dropping over-long locator ({} bytes, cap {MAX_DECODED_LOCATOR_LEN}) \
                      from a link-state entry",
                     loc.len()
                 );
                 return None;
             }
             // `from_text` refuses only text past the codec's bound, which the
-            // `> MAX_LOCATOR_LEN` guard above has already kept out; the `?`
+            // `> MAX_DECODED_LOCATOR_LEN` guard above has already kept out; the `?`
             // drops the locator rather than panic if the two ever disagree.
             Some(LocatorOwned {
                 locator_len: loc.len() as u64,
@@ -5324,14 +5330,14 @@ mod tests {
 
     #[test]
     fn an_over_long_locator_is_dropped_at_the_tx_boundary() {
-        // A locator past what a wz node stores of one (MAX_LOCATOR_LEN) is refused
+        // A locator past what a wz node decodes (MAX_DECODED_LOCATOR_LEN) is refused
         // by a no-alloc wz peer's decode, so the TX projection drops it (the same
         // host-validation obligation as the oversized-zid drop) while the
         // valid sibling still rides.
         let mut a = LinkstateNetwork::new(zid(0x0A), WhatAmI::Peer);
         let ok = "tcp/10.0.0.10:7447".to_string();
         let too_long = format!("tcp/[{}]:7447", "f".repeat(200));
-        assert!(too_long.len() > MAX_LOCATOR_LEN);
+        assert!(too_long.len() > MAX_DECODED_LOCATOR_LEN);
         a.set_self_locators(vec![ok.clone(), too_long]);
         a.add_link(zid(0x0B), WhatAmI::Peer);
         let mut b = LinkstateNetwork::new(zid(0x0B), WhatAmI::Peer);

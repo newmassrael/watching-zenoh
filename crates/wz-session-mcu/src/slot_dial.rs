@@ -124,6 +124,10 @@ pub struct SlotSession<
     /// the wait a paced turn leaves. `0` is due now, which is every session's state until its first
     /// turn and the state of an unpaced one throughout.
     next_turn_ms: Cell<u64>,
+    /// When the replay last told the peer a declaration, or began, in the node's milliseconds:
+    /// what a pace's no-progress bound on retrying refused turns counts from
+    /// ([`ReplayPacing::after_refusal`](wz_session_core::replay_pacing::ReplayPacing::after_refusal)).
+    last_progress_ms: Cell<u64>,
 }
 
 impl<C: ClockSource + 'static, D: BoxedLinkDriver + ?Sized + 'static> SlotSession<C, D> {
@@ -134,6 +138,7 @@ impl<C: ClockSource + 'static, D: BoxedLinkDriver + ?Sized + 'static> SlotSessio
             established: false,
             replay: Cell::new(None),
             next_turn_ms: Cell::new(0),
+            last_progress_ms: Cell::new(0),
         }
     }
 
@@ -154,10 +159,23 @@ impl<C: ClockSource + 'static, D: BoxedLinkDriver + ?Sized + 'static> SlotSessio
         self.replay.set(Some(ReplayCursor::idle()));
     }
 
-    /// The replay of the node's `total` declarations on this session, begun at the first entry when
-    /// none was: the peer holds nothing of a session that has just established.
-    pub fn replay(&self, total: usize) -> ReplayCursor {
-        self.replay.get().unwrap_or(ReplayCursor::begin(total))
+    /// The replay of the node's `total` declarations on this session, begun at the first entry at
+    /// `now_ms` when none was: the peer holds nothing of a session that has just established.
+    pub fn replay(&self, total: usize, now_ms: u64) -> ReplayCursor {
+        self.replay.get().unwrap_or_else(|| {
+            self.last_progress_ms.set(now_ms);
+            ReplayCursor::begin(total)
+        })
+    }
+
+    /// Note that a turn at `now_ms` told the peer a declaration.
+    pub fn note_progress(&self, now_ms: u64) {
+        self.last_progress_ms.set(now_ms);
+    }
+
+    /// When the replay last told the peer a declaration, or began.
+    pub fn last_progress_ms(&self) -> u64 {
+        self.last_progress_ms.get()
     }
 
     /// Keep where the replay has got to, for the next round to resume from.

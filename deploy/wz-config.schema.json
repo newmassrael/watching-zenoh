@@ -787,6 +787,25 @@
               "x-wz-binding-fixed": "build",
               "x-wz-wire": "none"
             },
+            "MAX_MULTICAST_REPLIES": {
+              "description": "The replies a node holds for a multicast group before it sends them, with or without an allocator.",
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "const": "unbounded"
+                }
+              ],
+              "x-wz-kind": "bound",
+              "x-wz-driven": "remote",
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "build",
+              "x-wz-wire": "none"
+            },
             "MAX_LOCATOR_LEN": {
               "description": "The longest locator, in bytes, a node stores: one it is told to connect to, or one it listens on (for example udp/192.168.1.10:7447).",
               "oneOf": [
@@ -865,7 +884,8 @@
               "oneOf": [
                 {
                   "type": "integer",
-                  "minimum": 1
+                  "minimum": 1,
+                  "maximum": 65535
                 },
                 {
                   "const": "unbounded"
@@ -1212,7 +1232,7 @@
               "x-wz-storage": "quota",
               "x-wz-scope": "session",
               "x-wz-binding-heap": "live",
-              "x-wz-binding-fixed": "none",
+              "x-wz-binding-fixed": "open",
               "x-wz-wire": "timing"
             },
             "DECLARATION_SYNC_RX_NO_PROGRESS_MS": {
@@ -1238,7 +1258,7 @@
               "x-wz-storage": "quota",
               "x-wz-scope": "session",
               "x-wz-binding-heap": "open",
-              "x-wz-binding-fixed": "none",
+              "x-wz-binding-fixed": "open",
               "x-wz-wire": "timing"
             },
             "DECLARATION_SYNC_TX_NO_PROGRESS_MS": {
@@ -1251,7 +1271,7 @@
               "x-wz-storage": "quota",
               "x-wz-scope": "session",
               "x-wz-binding-heap": "open",
-              "x-wz-binding-fixed": "none",
+              "x-wz-binding-fixed": "open",
               "x-wz-wire": "none"
             },
             "PICO_UNICAST_BATCH_BYTES": {
@@ -1307,7 +1327,7 @@
               "x-wz-wire": "timing"
             },
             "PICO_CONNECT_TIMEOUT_MS": {
-              "description": "How long, in milliseconds, opening a cooperative zenoh-pico session waits for the session to be established before the open fails, as zenoh-pico's Z_TRANSPORT_CONNECT_TIMEOUT.",
+              "description": "How long, in milliseconds, each open of an endpoint by a zenoh-pico session waits for the dial and the handshake before it fails, on either engine, as zenoh-pico's Z_TRANSPORT_CONNECT_TIMEOUT.",
               "type": "integer",
               "minimum": 1,
               "maximum": 4294967295,

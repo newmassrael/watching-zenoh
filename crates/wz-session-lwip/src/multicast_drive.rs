@@ -1943,4 +1943,68 @@ mod tests {
 
         link.leave_multicast_group(group).expect("leave group");
     }
+
+    /// The heap form of the reply queue holds exactly the declared
+    /// `MAX_MULTICAST_REPLIES` replies, drops the ones past it and counts them,
+    /// keeps FIFO order, and takes replies again once drained, as the fixed form
+    /// does (`tests/multicast_slot.rs`). A clone is the same queue: what one end
+    /// pushes and counts, the other sees.
+    #[cfg(all(feature = "alloc", feature = "codec-response-final"))]
+    #[test]
+    fn the_heap_reply_queue_refuses_the_reply_past_the_limit_and_counts_it() {
+        use wz_session_core::caps::MAX_MULTICAST_REPLIES;
+        use wz_session_core::multicast_reply_sink::MulticastReplyEnqueue;
+        use wz_session_core::sample::QosLevel;
+        use wz_session_core::wire_id::RequestId;
+
+        const CAP: usize = MAX_MULTICAST_REPLIES;
+        let final_for = |request_id: RequestId| MulticastTxItem::ResponseFinal {
+            request_id,
+            qos: QosLevel::default(),
+        };
+        let id_of = |item: MulticastTxItem| match item {
+            MulticastTxItem::ResponseFinal { request_id, .. } => request_id,
+            other => panic!("only finals were queued, got {other:?}"),
+        };
+
+        let queue = MulticastReplyQueue::new();
+        let sink = queue.clone();
+        std::assert_eq!(
+            queue.capacity(),
+            CAP,
+            "the queue is bounded by the declared limit"
+        );
+        // CAP to fill it, two past it, and one more once it is drained.
+        let last = RequestId::try_from(CAP + 3).expect("the limit fits a request id");
+        let mut items = (1..=last).map(final_for);
+
+        for _ in 0..CAP {
+            sink.enqueue(items.next().expect("an item"));
+        }
+        std::assert_eq!(
+            (queue.len(), queue.dropped()),
+            (CAP, 0),
+            "full, none dropped"
+        );
+
+        sink.enqueue(items.next().expect("an item"));
+        sink.enqueue(items.next().expect("an item"));
+        std::assert_eq!(
+            (queue.len(), queue.dropped()),
+            (CAP, 2),
+            "two replies past the limit were dropped and counted, the queue is still full"
+        );
+
+        let order: std::vec::Vec<RequestId> = (0..CAP)
+            .map(|_| id_of(queue.pop().expect("a queued reply")))
+            .collect();
+        let expected: std::vec::Vec<RequestId> = (1..=last - 3).collect();
+        std::assert_eq!(order, expected, "FIFO, and the dropped ones are not in it");
+        std::assert!(queue.pop().is_none() && queue.is_empty());
+
+        // The count only rises, and a drained queue takes replies again.
+        sink.enqueue(items.next().expect("an item"));
+        std::assert_eq!((queue.len(), queue.dropped()), (1, 2));
+        std::assert_eq!(id_of(queue.pop().expect("the reply")), last);
+    }
 }

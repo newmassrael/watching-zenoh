@@ -339,15 +339,22 @@ pub mod locator {
         "/../../out/wz-codecs/locator.rs"
     ));
 
-    /// What a wz node stores of one locator string: the `locator` capacity
-    /// `deploy/codec_node.yaml` gives the `node::Node` profile. The protocol's
-    /// bound is wider (`sources/codecs/locator.scxml` `sce:max-size`, a `u8`
-    /// length); a producer (e.g. the linkstate graph) caps against this ONE
-    /// value rather than hand-copying the literal, because a no-alloc wz
-    /// receiver stores a locator inline at this capacity and refuses a longer
-    /// one as `CapacityExceeded`. Keep in lockstep with the deploy file until
-    /// codegen can emit it directly.
-    pub const MAX_LOCATOR_LEN: usize = 128;
+    /// The longest locator string a no-alloc wz node DECODES from a message:
+    /// the `locator` capacity `deploy/codec_node.yaml` gives the `node::Node`
+    /// profile. The protocol's bound is wider (`sources/codecs/locator.scxml`
+    /// `sce:max-size`, a `u8` length); a producer (e.g. the linkstate graph)
+    /// caps against this ONE value rather than hand-copying the literal,
+    /// because a no-alloc wz receiver decodes a locator inline at this capacity
+    /// and refuses a longer one as `CapacityExceeded`. Keep in lockstep with
+    /// the deploy file until codegen can emit it directly.
+    ///
+    /// It is not the length a node STORES a locator at once decoded, which is
+    /// the session's own limit (`wz_session_core::caps::MAX_LOCATOR_LEN`, the
+    /// deploy `MAX_LOCATOR_LEN` key, 64 by default and set per build): a
+    /// locator of up to this many bytes crosses the wire and the decoder, and
+    /// a receiver whose own limit is shorter refuses it where it would store
+    /// it, and counts the refusal.
+    pub const MAX_DECODED_LOCATOR_LEN: usize = 128;
 
     /// The maximum number of locators one node advertises: the linkstate
     /// `locators` capacity `deploy/codec_node.yaml` gives the `node::Node`

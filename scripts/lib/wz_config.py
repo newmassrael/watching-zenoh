@@ -1378,7 +1378,7 @@ LIMIT_ON_HEAP = ("advisory", "capacity", "quota")
 LIMIT_RANGE_MOST = 4294967295
 LIMIT_KEYS = {"id", "kconfig", "default", "help",
               "storage", "scope", "binding_heap", "binding_fixed", "wire",
-              "kind", "driven", "range", "on_heap", "zero_unbounded"}
+              "kind", "driven", "range", "most", "on_heap", "zero_unbounded"}
 
 
 def stated_one_of(out: list[str], where: str, row: dict, key: str,
@@ -1458,6 +1458,17 @@ def limit_kind_problems(lid: str, lim: dict) -> list[str]:
         stated_one_of(out, where, lim, "driven", DRIVERS)
         if "range" in lim:
             out.append(f"{where}: a bound has no `range`; its domain is its capacity")
+        most = lim.get("most")
+        if most is not None:
+            # The largest count the code holds, where it holds the count in a narrower type.
+            if not isinstance(most, int) or isinstance(most, bool) \
+                    or not 1 <= most <= LIMIT_RANGE_MOST:
+                out.append(f"{where}: `most` is the largest count the code holds, an integer in "
+                           f"1..={LIMIT_RANGE_MOST}")
+            elif isinstance(lim.get("default"), int) and lim["default"] > most:
+                out.append(f"{where}: its default {lim['default']} is above its `most` {most}")
+    elif "most" in lim:
+        out.append(f"{where}: only a bound states `most`; a parameter states its `range`")
     elif kind == "parameter":
         if "driven" in lim:
             out.append(f"{where}: a parameter states no `driven`; it limits no table")
@@ -2139,6 +2150,8 @@ def emit_kconfig_limits(decl: dict) -> str:
         if lim["kind"] == "parameter":
             # The range the code runs with, so menuconfig refuses what the build would.
             out.append(f"\trange {lim['range'][0]} {lim['range'][1]}")
+        elif "most" in lim:
+            out.append(f"\trange 0 {lim['most']}")
         out.append(f"\tdefault {lim['default']}")
         out.append("\thelp")
         for line in lim["help"].strip().splitlines():
@@ -2225,9 +2238,10 @@ def emit_rust_limit_bindings(decl: dict) -> str:
         else:
             scope = ["    scope: &["] + [f"        {s}," for s in scopes] + ["    ],"]
         if lim["kind"] == "bound":
+            held = f"Some((0, {lim['most']}))" if "most" in lim else "None"
             kind = ["    kind: LimitKind::Bound,",
                     f"    driven: Some(Driven::{camel(lim['driven'])}),",
-                    "    range: None,"]
+                    f"    range: {held},"]
         else:
             least, most = lim["range"]
             kind = ["    kind: LimitKind::Parameter,", "    driven: None,",
@@ -2307,7 +2321,10 @@ def limit_spec_rust(lim: dict) -> list[str]:
             f"    const LIMIT: &'static str = {rust_word(lid)};",
             f"    const DRIVEN: Option<Driven> = {driven};"]
     out += rust_assoc_const("CAPACITY", "Option<usize>", limit_capacity_rust(lim))
-    if bound:
+    if bound and "most" in lim:
+        domain = (f"LimitDomain::of_bound_within(Self::CAPACITY, {lim['most']}, Self::DEFAULT, "
+                  "DEFAULTS_ONLY)")
+    elif bound:
         domain = "LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY)"
     else:
         least, most = lim["range"]
@@ -2489,7 +2506,10 @@ def emit_config_schema(decl: dict) -> str:
         if lim["kind"] == "bound":
             # A stated bound admits at least one: `0` would refuse everything, and no bound is
             # stated as the word. A build with a capacity narrows it further (its domain).
-            value = {"oneOf": [{"type": "integer", "minimum": 1}, {"const": "unbounded"}]}
+            count = {"type": "integer", "minimum": 1}
+            if "most" in lim:
+                count["maximum"] = lim["most"]
+            value = {"oneOf": [count, {"const": "unbounded"}]}
         else:
             value = {"type": "integer", "minimum": lim["range"][0], "maximum": lim["range"][1],
                      "default": lim["default"]}
@@ -5434,6 +5454,25 @@ def cmd_selftest() -> int:
     expect("a bound with a range is refused",
            limit_refused(SAMPLE.replace("default = 4\n", "default = 4\nrange = [1, 8]\n"),
                          "a bound has no `range`"))
+    most_bound = SAMPLE.replace("default = 4\n", "default = 4\nmost = 65535\n")
+    expect("a bound whose code holds a narrower count states it and validates",
+           validate_decl(read_decl_toml(most_bound)) == [])
+    expect("a bound's `most` under its default is refused",
+           limit_refused(SAMPLE.replace("default = 4\n", "default = 4\nmost = 3\n"),
+                         "its default 4 is above its `most` 3"))
+    expect("a parameter that states `most` is refused",
+           limit_refused(SAMPLE.replace('kind = "bound"\ndriven = "remote"\n',
+                                        'kind = "parameter"\nrange = [1, 8]\nmost = 8\n')
+                         .replace('on_heap = "advisory"', 'on_heap = "capacity"'),
+                         "only a bound states `most`"))
+    mdecl = decl_of(read_decl_toml(most_bound))
+    expect("a bound's `most` reaches its Kconfig range, its binding row, its schema and its domain",
+           "\trange 0 65535\n" in emit_kconfig_limits(mdecl)
+           and "    range: Some((0, 65535)),\n" in emit_rust_limit_bindings(mdecl)
+           and json.loads(emit_config_schema(mdecl))["properties"]["wz"]["properties"]["limits"]
+           ["properties"]["MAX_A"]["oneOf"][0]["maximum"] == 65535
+           and "LimitDomain::of_bound_within(Self::CAPACITY, 65535, Self::DEFAULT, DEFAULTS_ONLY)"
+           in emit_rust_limit_snapshots(mdecl))
     expect("a parameter that names a driver is refused",
            limit_refused(parameter.replace("range = [1, 8]\n", 'range = [1, 8]\ndriven = "local"\n'),
                          "a parameter states no `driven`"))

@@ -327,9 +327,9 @@ pub const MAX_MULTICAST_REPLIES: LimitBinding = LimitBinding {
     kind: LimitKind::Bound,
     driven: Some(Driven::Remote),
     range: None,
-    storage: Storage::Capacity,
+    storage: Storage::Both,
     scope: &[Scope::Session],
-    binding_heap: None,
+    binding_heap: Some(Binding::Open),
     binding_fixed: Some(Binding::Build),
     wire: Wire::None,
 };
@@ -422,7 +422,7 @@ pub const TX_NO_PROGRESS_WINDOW_US: LimitBinding = LimitBinding {
 pub const TX_EXPIRY_CLOSE_AFTER: LimitBinding = LimitBinding {
     kind: LimitKind::Bound,
     driven: Some(Driven::Remote),
-    range: None,
+    range: Some((0, 65535)),
     storage: Storage::Quota,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Live),
@@ -702,7 +702,7 @@ pub const DECLARATION_SYNC_INTERVAL_MS: LimitBinding = LimitBinding {
     storage: Storage::Quota,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Live),
-    binding_fixed: None,
+    binding_fixed: Some(Binding::Open),
     wire: Wire::Timing,
 };
 
@@ -726,7 +726,7 @@ pub const DECLARATION_SYNC_RETRY_INTERVAL_MS: LimitBinding = LimitBinding {
     storage: Storage::Quota,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
-    binding_fixed: None,
+    binding_fixed: Some(Binding::Open),
     wire: Wire::Timing,
 };
 
@@ -738,7 +738,7 @@ pub const DECLARATION_SYNC_TX_NO_PROGRESS_MS: LimitBinding = LimitBinding {
     storage: Storage::Quota,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
-    binding_fixed: None,
+    binding_fixed: Some(Binding::Open),
     wire: Wire::None,
 };
 

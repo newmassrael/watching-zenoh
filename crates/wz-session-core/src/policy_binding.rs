@@ -205,7 +205,8 @@ pub struct LimitBinding {
     pub kind: LimitKind,
     /// Who makes the table a bound limits grow; `None` for a parameter.
     pub driven: Option<Driven>,
-    /// The values a parameter's code runs with, `(least, most)`; `None` for a bound.
+    /// The values the code holds, `(least, most)`: a parameter's range, or `(0, most)` for a bound
+    /// whose code holds its count in a narrower type; `None` for a bound limited by nothing else.
     pub range: Option<(usize, usize)>,
     /// Whether it sizes storage, bounds storage already there, or both.
     pub storage: Storage,

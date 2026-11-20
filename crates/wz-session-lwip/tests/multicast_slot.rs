@@ -96,27 +96,37 @@ fn id_of(item: MulticastTxItem) -> RequestId {
     }
 }
 
-/// The queue takes `N` replies, drops the `N+1`th and counts it, keeps FIFO order,
-/// takes replies again once drained, and allocates nothing for any of it.
+/// The queue holds exactly the declared `MAX_MULTICAST_REPLIES` replies, drops the
+/// ones past it and counts them, keeps FIFO order, takes replies again once drained,
+/// and allocates nothing for any of it.
 #[test]
 fn the_reply_queue_refuses_the_reply_it_has_no_room_for_and_counts_it() {
+    use wz_session_core::caps::MAX_MULTICAST_REPLIES;
     use wz_session_core::multicast_reply_sink::MulticastReplyEnqueue;
 
-    static REPLIES: MulticastReplyQueue<3> = MulticastReplyQueue::new();
-    let sink: &'static MulticastReplyQueue<3> = &REPLIES;
-    let items: Vec<MulticastTxItem> = (1..=6).map(final_for).collect();
+    const CAP: usize = MAX_MULTICAST_REPLIES;
+    static REPLIES: MulticastReplyQueue = MulticastReplyQueue::new();
+    let sink: &'static MulticastReplyQueue = &REPLIES;
+    assert_eq!(
+        REPLIES.capacity(),
+        CAP,
+        "the queue is sized by the declared limit, not by the image"
+    );
+    // CAP to fill it, two past it, and one more once it is drained.
+    let last = RequestId::try_from(CAP + 3).expect("the limit fits a request id");
+    let items: Vec<MulticastTxItem> = (1..=last).map(final_for).collect();
     let mut items = items.into_iter();
     let m = Measurement::new();
 
     let ((), n) = m.count("fill to capacity", || {
-        for _ in 0..3 {
+        for _ in 0..CAP {
             sink.enqueue(items.next().expect("an item"));
         }
     });
-    assert_eq!(n, 0, "three replies into a queue of three cost the heap 0");
+    assert_eq!(n, 0, "filling the queue to its limit costs the heap 0");
     assert_eq!(
         (REPLIES.len(), REPLIES.dropped()),
-        (3, 0),
+        (CAP, 0),
         "full, none dropped"
     );
 
@@ -127,25 +137,27 @@ fn the_reply_queue_refuses_the_reply_it_has_no_room_for_and_counts_it() {
     assert_eq!(n, 0, "a refused reply costs the heap nothing either");
     assert_eq!(
         (REPLIES.len(), REPLIES.dropped()),
-        (3, 2),
-        "two replies past the bound were dropped and counted, the queue still holds three"
+        (CAP, 2),
+        "two replies past the limit were dropped and counted, the queue is still full"
     );
 
     let (order, n) = m.count("drain", || {
-        let mut order: [RequestId; 3] = [0; 3];
+        let mut order: [RequestId; CAP] = [0; CAP];
         for slot in &mut order {
             *slot = id_of(REPLIES.pop().expect("a queued reply"));
         }
         order
     });
     assert_eq!(n, 0, "draining costs the heap nothing");
-    assert_eq!(order, [1, 2, 3], "FIFO, and the dropped ones are not in it");
+    let expected: [RequestId; CAP] =
+        core::array::from_fn(|at| RequestId::try_from(at + 1).expect("fits"));
+    assert_eq!(order, expected, "FIFO, and the dropped ones are not in it");
     assert!(REPLIES.pop().is_none() && REPLIES.is_empty());
 
     // The count only rises, and a drained queue takes replies again.
     sink.enqueue(items.next().expect("an item"));
     assert_eq!((REPLIES.len(), REPLIES.dropped()), (1, 2));
-    assert_eq!(id_of(REPLIES.pop().expect("the reply")), 6);
+    assert_eq!(id_of(REPLIES.pop().expect("the reply")), last);
 }
 
 type Groups = MulticastSlots<Frozen, 4, 1>;
