@@ -16,11 +16,14 @@
 //!   from outside then. A run ends in one of three ways: the call returned (its code, and once the
 //!   sessions are closed whether every closure was dropped, both transports were let go and the
 //!   process holds no more allocations than the run with no failure); the process ended in Rust's
-//!   allocation-failure handler; or anything else (a signal, a failed assertion, a run that did
-//!   not end in time), which fails every build.
+//!   allocation-failure handler (it aborts, with its message on stderr); or anything else (a
+//!   signal, a failed assertion, a run that did not end in time), which fails every build.
 //! * **The allocations of traffic between open sessions.** Once both sessions are open and
 //!   their routes are made, puts (and gets) are counted: how many allocations the process made
-//!   for them and how many bytes those asked for.
+//!   for them and how many bytes those asked for. The count is a process of its own too.
+//!
+//! A run is the library and nothing more: the tokio runtime's lock-order checker, an instrument
+//! of a debug build that allocates a stack under std's backtrace lock, is off in it (`run_child`).
 //!
 //! What a build is held to depends on its memory, which `MEMORY_TAKEN_AT_OPEN` states. A build
 //! that takes a session's memory at `z_open` and none after answers every failed allocation with
@@ -917,11 +920,15 @@ fn ended_in_the_allocation_failure_handler(stderr: &str) -> bool {
         .any(|line| line.contains("memory allocation of ") && line.contains(" bytes failed"))
 }
 
-/// End the process at once when it aborts, with the code a shell gives an abort: the handler's
-/// abort would otherwise leave a core dump for every one of a sweep's thousands of runs.
+/// The code a run that aborted exits with: what a shell gives an abort.
+#[cfg(unix)]
+const ABORT_EXIT: libc::c_int = 134;
+
+/// End the process at once when it aborts, with `ABORT_EXIT`: the handler's abort would otherwise
+/// leave a core dump for every one of a sweep's thousands of runs. The handler calls `_exit` and
+/// nothing else, which is async-signal-safe.
 #[cfg(unix)]
 fn end_at_once_on_abort() {
-    const ABORT_EXIT: libc::c_int = 134;
     extern "C" fn on_abort(_signal: libc::c_int) {
         // SAFETY: `_exit` is async-signal-safe and ends the process without running anything.
         unsafe { libc::_exit(ABORT_EXIT) }
@@ -1049,11 +1056,7 @@ struct Verdict {
 }
 
 fn parse_verdict(stdout: &str) -> Option<Verdict> {
-    // libtest may have written the test's name on the line before the verdict.
-    let line = stdout.lines().find_map(|line| {
-        line.find(VERDICT_PREFIX)
-            .map(|at| &line[at + VERDICT_PREFIX.len()..])
-    })?;
+    let line = verdict_line(stdout, VERDICT_PREFIX)?;
     Some(Verdict {
         fired: field(line, "fired")? == "1",
         rc: field(line, "rc")?.parse().ok()?,
@@ -1063,6 +1066,14 @@ fn parse_verdict(stdout: &str) -> Option<Verdict> {
         dropped: field(line, "dropped")? == "1",
         panics: field(line, "panics")?.parse().ok()?,
     })
+}
+
+/// What follows `prefix` on the line of `stdout` that carries it. libtest may have written the
+/// test's name on that line before it.
+fn verdict_line<'a>(stdout: &'a str, prefix: &str) -> Option<&'a str> {
+    stdout
+        .lines()
+        .find_map(|line| line.find(prefix).map(|at| &line[at + prefix.len()..]))
 }
 
 /// The value of `name=value` among the words of `line`.
@@ -1111,19 +1122,36 @@ fn tail(text: &str) -> String {
     lines[lines.len().saturating_sub(12)..].join("\n    ")
 }
 
-/// Start this executable again on `call`'s test alone, as the run of `point`, and read how it
-/// ended.
-fn run_child(call: Call, point: u64) -> Outcome {
+/// How a process this test started ended, read from outside.
+struct Ended {
+    /// `None` when it did not end within `RUN_BOUND` and was killed.
+    status: Option<ExitStatus>,
+    stdout: String,
+    stderr: String,
+}
+
+/// Start this executable again on the test `test_name` alone, with `request` in `RUN_VARIABLE`,
+/// and wait for it to end.
+///
+/// The run holds the library and nothing more: the tokio runtime's lock-order checker, an
+/// instrument of a debug build, is off in it. On, it captures a stack for each lock order new to
+/// the process, under std's backtrace lock and on the global allocator, so a failure injected
+/// there sends Rust's allocation-failure handler after the lock its own thread holds, and the run
+/// waits for itself instead of ending; and what it allocates is not the library's. The handler
+/// prints no backtrace either, which would only slow thousands of runs.
+fn run_child(test_name: &str, request: &str) -> Ended {
     let exe = std::env::current_exe().expect("the test executable has a path");
     let mut child = Command::new(exe)
         .args([
-            call.test_name(),
+            test_name,
             "--exact",
             "--ignored",
             "--nocapture",
             "--test-threads=1",
         ])
-        .env(RUN_VARIABLE, format!("{}:{point}", call.name()))
+        .env(RUN_VARIABLE, request)
+        .env("WZ_LOCK_ORDER", "off")
+        .env("RUST_BACKTRACE", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1143,8 +1171,32 @@ fn run_child(call: Call, point: u64) -> Outcome {
             }
         }
     };
-    let stdout = stdout.join().expect("the run's stdout is read");
-    let stderr = stderr.join().expect("the run's stderr is read");
+    Ended {
+        status,
+        stdout: stdout.join().expect("the run's stdout is read"),
+        stderr: stderr.join().expect("the run's stderr is read"),
+    }
+}
+
+/// Whether `status` is the end of a process that aborted: the code its abort handler exits with,
+/// or the signal itself.
+#[cfg(unix)]
+fn ended_by_abort(status: &ExitStatus) -> bool {
+    status.code() == Some(ABORT_EXIT) || signal_of(status) == Some(libc::SIGABRT)
+}
+
+#[cfg(not(unix))]
+fn ended_by_abort(status: &ExitStatus) -> bool {
+    !status.success()
+}
+
+/// How a run of a sweep ended.
+fn outcome(ended: Ended) -> Outcome {
+    let Ended {
+        status,
+        stdout,
+        stderr,
+    } = ended;
     match status {
         None => Outcome::Broken(format!(
             "did not end within {RUN_BOUND:?}; stderr:\n    {}",
@@ -1157,7 +1209,11 @@ fn run_child(call: Call, point: u64) -> Outcome {
                 tail(&stdout)
             )),
         },
-        Some(_) if ended_in_the_allocation_failure_handler(&stderr) => Outcome::EndedInTheHandler,
+        Some(status)
+            if ended_by_abort(&status) && ended_in_the_allocation_failure_handler(&stderr) =>
+        {
+            Outcome::EndedInTheHandler
+        }
         Some(status) => Outcome::Broken(format!(
             "ended with {status} (signal {:?}); stderr:\n    {}",
             signal_of(&status),
@@ -1268,7 +1324,7 @@ fn sweep(call: Call) {
     } else {
         "cooperative engine"
     };
-    let reference = match run_child(call, 0) {
+    let reference = match outcome(run_child(call.test_name(), &format!("{}:0", call.name()))) {
         Outcome::Returned(verdict) => verdict,
         other => panic!(
             "{}: the run with no failure did not return: {other:?}",
@@ -1314,7 +1370,12 @@ fn sweep(call: Call) {
         next += points.len() as u64;
         let runs: Vec<(u64, JoinHandle<Outcome>)> = points
             .iter()
-            .map(|&point| (point, std::thread::spawn(move || run_child(call, point))))
+            .map(|&point| {
+                let request = format!("{}:{point}", call.name());
+                let run =
+                    std::thread::spawn(move || outcome(run_child(call.test_name(), &request)));
+                (point, run)
+            })
             .collect();
         for (point, run) in runs {
             let outcome = run.join().expect("a run's reader ends");
@@ -1397,13 +1458,30 @@ unsafe fn exchange(pair: &Pair, traffic: Traffic) {
     }
 }
 
-fn count_traffic(traffic: Traffic) {
+/// The line a traffic run prints its count on.
+const TRAFFIC_PREFIX: &str = "traffic-count:";
+
+impl Traffic {
+    fn name(self) -> &'static str {
+        match self {
+            Traffic::Puts => "puts",
+            Traffic::Gets => "gets",
+        }
+    }
+
+    /// The test that counts this traffic, which its run is started as.
+    fn test_name(self) -> &'static str {
+        match self {
+            Traffic::Puts => "puts_between_open_sessions_are_counted_for_their_allocations",
+            Traffic::Gets => "gets_between_open_sessions_are_counted_for_their_allocations",
+        }
+    }
+}
+
+/// The run of `traffic`, in a process of its own as every run of this file is (`run_child`):
+/// the pair opened, the warm-up, the counted messages, everything closed, the count printed.
+fn measure_traffic(traffic: Traffic) {
     count_panics();
-    let engine = if cfg!(feature = "engine-tokio") {
-        "tokio engine"
-    } else {
-        "cooperative engine"
-    };
     let seen = unsafe {
         let pair = Pair::open(true);
         for _ in 0..WARM_UP {
@@ -1420,22 +1498,63 @@ fn count_traffic(traffic: Traffic) {
         assert!(dropped, "both transports are let go");
         seen
     };
-    eprintln!(
-        "{traffic:?} between open sessions ({engine}): {} allocation(s) of {} bytes for {COUNTED} \
-         messages, {:.1} a message",
-        seen.allocations,
-        seen.bytes,
-        seen.allocations as f64 / COUNTED as f64,
-    );
     assert_eq!(PANICS.load(Ordering::SeqCst), 0, "a thread panicked");
+    println!(
+        "{TRAFFIC_PREFIX} allocations={} bytes={}",
+        seen.allocations, seen.bytes
+    );
+}
+
+/// The test of `traffic`: its run, started by the test, or the test.
+fn count_traffic(traffic: Traffic) {
+    if let Ok(request) = std::env::var(RUN_VARIABLE) {
+        assert_eq!(
+            request,
+            traffic.name(),
+            "a run of {request} was started as the test of {traffic:?}"
+        );
+        measure_traffic(traffic);
+        return;
+    }
+
+    let engine = if cfg!(feature = "engine-tokio") {
+        "tokio engine"
+    } else {
+        "cooperative engine"
+    };
+    let ended = run_child(traffic.test_name(), traffic.name());
+    let counted = match ended.status {
+        Some(status) if status.success() => verdict_line(&ended.stdout, TRAFFIC_PREFIX),
+        _ => None,
+    };
+    let Some(line) = counted else {
+        panic!(
+            "the {traffic:?} run did not end with its count ({:?}); stdout:\n    {}\nstderr:\n    {}",
+            ended.status,
+            tail(&ended.stdout),
+            tail(&ended.stderr)
+        );
+    };
+    let number = |name: &str| -> u64 {
+        field(line, name)
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_else(|| panic!("the {traffic:?} count has no {name}: {line:?}"))
+    };
+    let allocations = number("allocations");
+    let bytes = number("bytes");
+    eprintln!(
+        "{traffic:?} between open sessions ({engine}): {allocations} allocation(s) of {bytes} \
+         bytes for {COUNTED} messages, {:.1} a message",
+        allocations as f64 / COUNTED as f64,
+    );
     if MEMORY_TAKEN_AT_OPEN {
         assert_eq!(
-            seen.allocations, 0,
+            allocations, 0,
             "{traffic:?} between open sessions allocate nothing in a fixed-memory build"
         );
     } else {
         assert!(
-            seen.allocations > 0,
+            allocations > 0,
             "a heap build allocates for its {traffic:?}, and a count of 0 means the counter sees \
              nothing"
         );

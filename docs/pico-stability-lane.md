@@ -130,7 +130,12 @@ allocation was reached, and, once both sessions are closed, whether every closur
 handed was dropped, both transports were let go and how many allocations the process still holds;
 the process ended in Rust's allocation-failure handler (its abort is caught in the run and ends the
 process at once, so thousands of runs leave no core dump); or anything else, a signal, a failed
-assertion, no verdict or no end within a minute.
+assertion, no verdict or no end within a minute. A run is started with the tokio runtime's
+lock-order checker off (`WZ_LOCK_ORDER=off`) and no backtrace: the checker captures a stack for
+each lock order new to the process, under std's backtrace lock and on the global allocator, so a
+failure injected there would send the allocation-failure handler after the lock its own thread
+holds and leave the run waiting for itself; and what it allocates is not the library's. The
+traffic counts are runs of their own for the same reason.
 
 | Build | The sweep is held to | The traffic is held to |
 |---|---|---|
