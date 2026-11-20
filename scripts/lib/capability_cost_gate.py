@@ -345,7 +345,17 @@ CASES: tuple[Case, ...] = (
     # (`SessionLimits::BUILD`), not three 402-byte bodies of stores, which the first build of the
     # round carried. Chosen growth; each budget at its line moves by its pc2 growth, to the
     # hundred.
-    Case("pico-client","wz-capi-pico", "libwz_capi_pico.so", PICO_BASE, 1_974_900,
+    # 2026-11-20 -- step 4b round 2b, the six other bounds a program's own calls fill: +48 on pc2
+    # (`022e6268b` against the round's head), the quota words. The symbol diff of pico-default,
+    # both trees built on one machine (+665 of text symbols there, +1,948 on pc2): the group's
+    # queryable declared before it is announced (`multicast::answer_on` +662), a token admitted
+    # before its declare leaves (`TokenPlace::take` +321 and its drop +412,
+    # `LivelinessToken::new_held` -307) and the group paths that leave a refused entity off
+    # (`declare_token_on` +182, `get_on_wire` +202); the C ABI's router node adds the local
+    # face's end of a get its registry refuses (`State::handle` +530) and the group's join
+    # (`FaceGroup::join` +317). Chosen growth; each budget at its line moves by its pc2 growth,
+    # to the hundred.
+    Case("pico-client","wz-capi-pico", "libwz_capi_pico.so", PICO_BASE, 1_975_000,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
                  CONNECTIVITY, MULTICAST, COOP_ENGINE),
          require=(SINGLE_THREADED, TOKIO_ENGINE),
@@ -366,7 +376,8 @@ CASES: tuple[Case, ...] = (
               "(capic-default's note): the budget is that reading and 3,500, to the hundred"),
     # 2026-11-19 -- step 3b, as pico-client's note of this day says: +16,788 on pc2.
     # 2026-11-20 -- step 4b round 2a, as pico-client's note of this day says: +764 on pc2.
-    Case("pico-client-small", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE, 1_620_800,
+    # 2026-11-20 -- step 4b round 2b, as pico-client's note of this day says: +48 on pc2.
+    Case("pico-client-small", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE, 1_620_900,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
                  CONNECTIVITY, MULTICAST),
          require=(SINGLE_THREADED,), profile="capi-small",
@@ -389,7 +400,8 @@ CASES: tuple[Case, ...] = (
     # hosted at `d8f187dddc` and +2,508 on pc2.
     # 2026-11-19 -- step 3b, as pico-client's note of this day says: +21,616 on pc2.
     # 2026-11-20 -- step 4b round 2a, as pico-client's note of this day says: +1,140 on pc2.
-    Case("pico-client-udp", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",link-udp", 2_043_300,
+    # 2026-11-20 -- step 4b round 2b, as pico-client's note of this day says: +48 on pc2.
+    Case("pico-client-udp", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",link-udp", 2_043_400,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST),
          require=(UDP, SINGLE_THREADED),
@@ -495,8 +507,11 @@ CASES: tuple[Case, ...] = (
     # 2026-11-20 -- step 4b round 2a, as pico-client's note of this day says: +512 on pc2, the
     # engine's registry held to the limits its open resolves (`resolve_limits`, `with_limits`)
     # and the build's `SessionLimits` it copies. Each coop case below moves by its own reading.
+    # 2026-11-20 -- step 4b round 2b, as pico-client's note of this day says: +32 on pc2, the
+    # engine registry's quota words; the query cases add the refusal a get and a queryable
+    # return. Each coop case below moves by its own reading.
     Case("pico-client-coop", "wz-capi-pico", "libwz_capi_pico.so", "engine-coop,link-udp",
-         1_016_300,
+         1_016_400,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
@@ -559,7 +574,8 @@ CASES: tuple[Case, ...] = (
     # tokens. Nothing of it is the engine's, so it costs the ABI's own code and no engine's.
     Case("pico-client-coop-unstable", "wz-capi-pico", "libwz_capi_pico.so",
          # 2026-11-20 -- step 4b round 2a, as pico-client-coop's note says: +512 on pc2.
-         "engine-coop,link-udp,unstable-api", 1_127_400,
+         # 2026-11-20 -- step 4b round 2b, as pico-client-coop's note says: +32 on pc2.
+         "engine-coop,link-udp,unstable-api", 1_127_500,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
@@ -575,7 +591,8 @@ CASES: tuple[Case, ...] = (
     # but a program that publishes and subscribes on one session needs.
     Case("pico-client-coop-local", "wz-capi-pico", "libwz_capi_pico.so",
          # 2026-11-20 -- step 4b round 2a, as pico-client-coop's note says: +496 on pc2.
-         "engine-coop,link-udp,local-subscriber", 1_022_900,
+         # 2026-11-20 -- step 4b round 2b, as pico-client-coop's note says: +32 on pc2.
+         "engine-coop,link-udp,local-subscriber", 1_023_000,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
@@ -590,7 +607,8 @@ CASES: tuple[Case, ...] = (
     # its faces whatever the build, so the plane's own cost is the ABI's.
     Case("pico-client-coop-connectivity", "wz-capi-pico", "libwz_capi_pico.so",
          # 2026-11-20 -- step 4b round 2a, as pico-client-coop's note says: +644 on pc2.
-         "engine-coop,link-udp,unstable-api,connectivity", 1_197_600,
+         # 2026-11-20 -- step 4b round 2b, as pico-client-coop's note says: +32 on pc2.
+         "engine-coop,link-udp,unstable-api,connectivity", 1_197_700,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, MULTICAST,
                  TOKIO_ENGINE, COOP_LISTEN),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE, CONNECTIVITY),
@@ -606,7 +624,8 @@ CASES: tuple[Case, ...] = (
     # engine's faces. It lists no connectivity listener, so that plane's exports stay out.
     Case("pico-client-coop-admin-space", "wz-capi-pico", "libwz_capi_pico.so",
          # 2026-11-20 -- step 4b round 2a, as pico-client-coop's note says: +460 on pc2.
-         "engine-coop,link-udp,admin-space", 1_387_000,
+         # 2026-11-20 -- step 4b round 2b, as pico-client-coop's note says: +128 on pc2.
+         "engine-coop,link-udp,admin-space", 1_387_200,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
@@ -638,7 +657,8 @@ CASES: tuple[Case, ...] = (
     # `wz_ext_get_to_peer` +314, the leg reply moved out of `fan_get` (+2,934 / -2,917).
     Case("pico-client-coop-query", "wz-capi-pico", "libwz_capi_pico.so",
          # 2026-11-20 -- step 4b round 2a, as pico-client-coop's note says: +492 on pc2.
-         "engine-coop,link-udp,query,queryable", 1_340_800,
+         # 2026-11-20 -- step 4b round 2b, as pico-client-coop's note says: +136 on pc2.
+         "engine-coop,link-udp,query,queryable", 1_341_000,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
@@ -660,7 +680,8 @@ CASES: tuple[Case, ...] = (
     # 2026-11-19 -- step 3b, the targeted get of the previous case's note: +2,764 on pc2.
     Case("pico-client-coop-local-queryable", "wz-capi-pico", "libwz_capi_pico.so",
          # 2026-11-20 -- step 4b round 2a, as pico-client-coop's note says: +492 on pc2.
-         "engine-coop,link-udp,query,queryable,local-queryable", 1_357_500,
+         # 2026-11-20 -- step 4b round 2b, as pico-client-coop's note says: +76 on pc2.
+         "engine-coop,link-udp,query,queryable,local-queryable", 1_357_600,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
@@ -679,7 +700,8 @@ CASES: tuple[Case, ...] = (
     # runs when its config names no locator, over the engine's own window and no tokio engine.
     Case("pico-client-coop-scout", "wz-capi-pico", "libwz_capi_pico.so",
          # 2026-11-20 -- step 4b round 2a, as pico-client-coop's note says: +512 on pc2.
-         "engine-coop,link-udp,scout", 1_100_200,
+         # 2026-11-20 -- step 4b round 2b, as pico-client-coop's note says: +32 on pc2.
+         "engine-coop,link-udp,scout", 1_100_300,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE, COOP_SCOUT),
@@ -700,7 +722,8 @@ CASES: tuple[Case, ...] = (
     # (`docs/capi-pico-on-coop-engine.md`, step L4).
     Case("pico-peer-coop", "wz-capi-pico", "libwz_capi_pico.so",
          # 2026-11-20 -- step 4b round 2a, as pico-client-coop's note says: +508 on pc2.
-         "engine-coop,link-udp,peer", 1_163_600,
+         # 2026-11-20 -- step 4b round 2b, as pico-client-coop's note says: +48 on pc2.
+         "engine-coop,link-udp,peer", 1_163_700,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE, COOP_SCOUT, COOP_LISTEN),
@@ -737,7 +760,8 @@ CASES: tuple[Case, ...] = (
     # hosted at `d8f187dddc` and +3,132 on pc2.
     # 2026-11-19 -- step 3b, as pico-client's note of this day says: +21,764 on pc2.
     # 2026-11-20 -- step 4b round 2a, as pico-client's note of this day says: +1,136 on pc2.
-    Case("pico-peer", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",peer", 3_193_200,
+    # 2026-11-20 -- step 4b round 2b, as pico-client's note of this day says: +48 on pc2.
+    Case("pico-peer", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",peer", 3_193_300,
          forbid=(GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY, MULTICAST),
          require=(ACCEPT, RESPONDER, SCOUTING, UDP, SINGLE_THREADED),
          note="peer implies scout and with it the UDP group"),
@@ -768,7 +792,8 @@ CASES: tuple[Case, ...] = (
     # token_clear` 123, `_remove_on_cancel_handler` 14, `_z_sync_group_notifier_drop` 12). Chosen
     # growth; the budget moves by it, to the hundred.
     # 2026-11-20 -- step 4b round 2a, as pico-client's note of this day says: +1,372 on pc2.
-    Case("pico-default", "wz-capi-pico", "libwz_capi_pico.so", None, 4_669_800,
+    # 2026-11-20 -- step 4b round 2b, as pico-client's note of this day says: +1,948 on pc2.
+    Case("pico-default", "wz-capi-pico", "libwz_capi_pico.so", None, 4_671_800,
          forbid=(SINGLE_THREADED,),
          require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
                   CONNECTIVITY, MULTICAST),
@@ -935,7 +960,9 @@ CASES: tuple[Case, ...] = (
     # into the dispatch (-4,715 / +1,379).
     # 2026-11-20 -- step 4b round 2a, as pico-client's note of this day says: +1,680 on pc2
     # (+810 of symbols, the same parts as pico-default's).
-    Case("capic-router-node", "wz-capi-c", "libwz_capi_c.so", "router-node", 6_334_300,
+    # 2026-11-20 -- step 4b round 2b, as pico-client's note of this day says: +2,900 on pc2
+    # (+1,471 of text symbols on one machine, pico-default's parts and the local face's).
+    Case("capic-router-node", "wz-capi-c", "libwz_capi_c.so", "router-node", 6_337_200,
          # What the declaration says the capability implies (`deploy/wz-config.toml`): the peer
          # role and the scouting and UDP link under it, and the multicast transport.
          require=(ROUTER_NODE, ACCEPT, RESPONDER, SCOUTING, UDP, MULTICAST),
@@ -1044,7 +1071,9 @@ CASES: tuple[Case, ...] = (
     # from `wz_capture` to `wz_app_frame` and nets to nothing (-323); the rest is their read-only
     # data. Chosen; that reading and 3,500, to the hundred.
     # 2026-11-20 -- step 4b round 2a, as pico-client's note of this day says: +1,028 on pc2.
-    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 11_392_100,
+    # 2026-11-20 -- step 4b round 2b, as pico-client's note of this day says: +3,272 on pc2
+    # (+2,042 of text symbols on one machine, capic-router-node's parts).
+    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 11_395_400,
          require=(ROUTER_NODE, ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED,
                   MULTICAST, ACCEPT_HANDSHAKE, CONFIG_VERDICT),
          exports=837,
@@ -1123,7 +1152,8 @@ CASES: tuple[Case, ...] = (
          # publisher's ask of `capic-router-node`'s note and the egress-policy answer of
          # pico-client's, chosen; that reading and that growth, and 3,500, to the hundred.
          # 2026-11-20 -- step 4b round 2a, as pico-client's note of this day says: +516 on pc2.
-         9_614_600,
+         # 2026-11-20 -- step 4b round 2b, as pico-client's note of this day says: +1,796 on pc2.
+         9_616_400,
          forbid=(ROUTER_NODE,),
          require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST),
          note="the default of the C ABI without the router node"),
