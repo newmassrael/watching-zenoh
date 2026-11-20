@@ -5969,6 +5969,118 @@ mod link_congestion_tests {
         assert!(!actions.take_congestion_close(), "and taken once");
     }
 
+    /// A link whose blocking asks for room park the asking sender until the test lets it go (or
+    /// [`PARKED_AT_MOST`] passes), so that sender holds its conduit meanwhile, as a sender waiting
+    /// for a full lane does; a droppable ask is answered that the lane stayed congested for the
+    /// whole of its wait.
+    struct ParkingLink {
+        parked: Mutex<std::sync::mpsc::Sender<()>>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+        asked: Mutex<Vec<RoomWait>>,
+        frames: Mutex<Vec<Vec<u8>>>,
+    }
+
+    /// How long a parked blocking ask waits for the test before it finds room by itself: far
+    /// longer than a droppable message may take, so one held behind it shows.
+    const PARKED_AT_MOST: std::time::Duration = std::time::Duration::from_secs(3);
+
+    impl super::BoxedLinkDriver for ParkingLink {
+        fn send_blocking(
+            &self,
+            bytes: &[u8],
+            _reliability: crate::Reliability,
+        ) -> super::LinkSendOutcome {
+            self.frames.lock().expect("frames").push(bytes.to_vec());
+            super::LinkSendOutcome::Sent
+        }
+        fn wait_for_room(&self, _priority: Priority, wait: RoomWait) -> RoomAnswer {
+            self.asked.lock().expect("asked").push(wait);
+            match wait {
+                RoomWait::Block { .. } => {
+                    let _ = self.parked.lock().expect("parked").send(());
+                    let _ = self
+                        .release
+                        .lock()
+                        .expect("release")
+                        .recv_timeout(PARKED_AT_MOST);
+                    RoomAnswer::at_once(LinkRoom::Free)
+                }
+                RoomWait::Drop { wait_us } => RoomAnswer {
+                    room: LinkRoom::Congested,
+                    waited_us: wait_us,
+                },
+            }
+        }
+        fn open_blocking(&self) {}
+        fn close_blocking(&self) {}
+    }
+
+    /// A droppable message whose conduit is held by a blocking sender waiting for room is not
+    /// queued behind that sender: it waits for room itself, out of its own `wait_before_drop`,
+    /// finds none and is dropped, and returns long before the blocking sender's wait ends. The
+    /// blocking message is sent once the link has room, and nothing is closed.
+    #[test]
+    fn a_droppable_message_behind_a_blocking_sender_is_dropped_within_its_own_wait() {
+        use std::time::{Duration, Instant};
+        use wz_session_core::qos::CongestionControl;
+        use wz_session_core::sample::QosLevel;
+        let (parked_tx, parked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let link = Arc::new(ParkingLink {
+            parked: Mutex::new(parked_tx),
+            release: Mutex::new(release_rx),
+            asked: Mutex::new(Vec::new()),
+            frames: Mutex::new(Vec::new()),
+        });
+        let mut params = wz_runtime_tokio_test_support::fixture_session_init_params();
+        params.initial_sn = 7;
+        let actions =
+            super::new_session_actions(link.clone(), params, crate::runtime_impl::TokioTime::new());
+        let blocking = {
+            let actions = Arc::clone(&actions);
+            std::thread::spawn(move || {
+                let meta = super::PushMetadata {
+                    qos: Some(QosLevel::DEFAULT.with_congestion(CongestionControl::Block)),
+                    ..super::PushMetadata::default()
+                };
+                actions.send_push_with_meta_literal("home/block", b"B", true, &meta)
+            })
+        };
+        parked_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the blocking sender waits for room, holding its conduit");
+        let started = Instant::now();
+        actions
+            .send_push_literal_qos("home/drop", b"D", true, Priority::DEFAULT)
+            .expect("a congestion drop is not the caller's error");
+        let took = started.elapsed();
+        let _ = release_tx.send(());
+        blocking
+            .join()
+            .expect("the blocking sender's thread")
+            .expect("the blocking message is sent once there is room");
+        assert!(
+            took < Duration::from_secs(1),
+            "the droppable message took {took:?}: it waited for the blocking sender's conduit \
+             instead of being dropped within `wait_before_drop`"
+        );
+        assert!(
+            link.asked.lock().expect("asked").contains(&RoomWait::Drop {
+                wait_us: wz_session_core::session_actions::WAIT_BEFORE_DROP_US
+            }),
+            "the droppable message waited for room out of `wait_before_drop`"
+        );
+        assert_eq!(
+            link.frames.lock().expect("frames").len(),
+            1,
+            "only the blocking message reached the link"
+        );
+        assert!(
+            !actions.take_congestion_close(),
+            "dropping a droppable message closes nothing"
+        );
+    }
+
     /// zenoh 1.10.2 disables the transport's pipelines at the moment it decides to close an
     /// unresponsive transport, so that the next push fails at once and does not wait another
     /// `wait_before_close`. Here the decision is the staged congestion close, and the next send
