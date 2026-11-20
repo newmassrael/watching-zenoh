@@ -512,6 +512,8 @@ static void fill(unsigned long long timeout_ms) {
 
 static void drop_for(unsigned long long duration_ms, unsigned long long interval_us) {
     unsigned long long sent = 0, ok = 0, err = 0, tx_failed = 0, max = 0, slow = 0;
+    /* The first and the last answer that is neither Z_OK nor TX_FAILED, 0 for none. */
+    int other_first = 0, other_last = 0;
     unsigned long long deadline = now_us() + duration_ms * 1000ULL;
     while (now_us() < deadline) {
         unsigned long long start = now_us();
@@ -524,6 +526,11 @@ static void drop_for(unsigned long long duration_ms, unsigned long long interval
             err++;
             if (rc == TX_FAILED) {
                 tx_failed++;
+            } else {
+                if (other_first == 0) {
+                    other_first = (int)rc;
+                }
+                other_last = (int)rc;
             }
         }
         if (took > max) {
@@ -536,8 +543,9 @@ static void drop_for(unsigned long long duration_ms, unsigned long long interval
             sleep_us(interval_us);
         }
     }
-    printf("drop sent=%llu ok=%llu err=%llu tx_failed=%llu max_us=%llu slow=%llu next=%llu\n", sent, ok, err,
-           tx_failed, max, slow, next_seq[DROP_S]);
+    printf("drop sent=%llu ok=%llu err=%llu tx_failed=%llu other_first=%d other_last=%d max_us=%llu slow=%llu "
+           "next=%llu\n",
+           sent, ok, err, tx_failed, other_first, other_last, max, slow, next_seq[DROP_S]);
 }
 
 static void unfill(unsigned long long timeout_ms) {
@@ -1165,6 +1173,9 @@ struct Congestion {
     drop_ok: u64,
     /// The `Drop` puts that answered `_Z_ERR_TRANSPORT_TX_FAILED`.
     drop_tx_failed: u64,
+    /// The first and the last answer of a `Drop` put that was neither `Z_OK` nor
+    /// `_Z_ERR_TRANSPORT_TX_FAILED`, 0 for none.
+    drop_other_codes: (i32, i32),
     drop_max_us: u64,
     /// `Drop` samples of the full-link phase that reached the subscriber.
     drop_delivered: u64,
@@ -1246,6 +1257,10 @@ fn congestion_run(exe: &Path, library: &str, mode: &str) -> Result<Congestion, S
         drop_sent: need(&dropped, "sent")?,
         drop_ok: need(&dropped, "ok")?,
         drop_tx_failed: need(&dropped, "tx_failed")?,
+        drop_other_codes: (
+            need(&dropped, "other_first")?,
+            need(&dropped, "other_last")?,
+        ),
         drop_max_us: need(&dropped, "max_us")?,
         drop_delivered: report.drop.received.saturating_sub(warm.drop.received),
         drop_disorder: report.drop.disorder,
@@ -1297,9 +1312,11 @@ fn congestion_findings(o: &Congestion) -> Vec<String> {
     if o.drop_ok + o.drop_tx_failed != o.drop_sent {
         found.push(format!(
             "{} of {} Drop puts answered a code that is neither Z_OK nor \
-             _Z_ERR_TRANSPORT_TX_FAILED",
+             _Z_ERR_TRANSPORT_TX_FAILED (the first {}, the last {})",
             o.drop_sent.saturating_sub(o.drop_ok + o.drop_tx_failed),
-            o.drop_sent
+            o.drop_sent,
+            o.drop_other_codes.0,
+            o.drop_other_codes.1
         ));
     }
     if o.drop_delivered != o.drop_ok {
