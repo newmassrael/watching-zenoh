@@ -430,6 +430,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-runtime-posix/src/links.rs` | S9 | |
 | `crates/wz-runtime-posix/src/net.rs` | S9 | |
 | `crates/wz-runtime-posix/src/slot.rs` | S9 | |
+| `crates/wz-runtime-posix/src/windows/group.rs` | S9 | |
 | `crates/wz-runtime-posix/src/stream.rs` | S9 | |
 | `crates/wz-runtime-posix/src/windows/links.rs` | S9 | |
 | `crates/wz-runtime-posix/src/windows/mod.rs` | S9 | |
