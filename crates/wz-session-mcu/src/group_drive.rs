@@ -281,9 +281,37 @@ use wz_session_core::multicast_reply_sink::MulticastReplyEnqueue;
         feature = "liveliness-token"
     )
 ))]
+///
+/// A queue made with [`Self::bounded`] counts what it holds against the lanes the tokio engine
+/// shapes a group's pipeline into (`wz_session_core::multicast_tx::MulticastTxLanes`): a message
+/// of the session asks it for room before it is queued ([`Self::room_at_once`]) and is dropped and
+/// counted when it finds none within its wait ([`Self::dropped`]), and each item drained makes
+/// room. One made with [`Self::new`] takes everything, as it always has.
 #[derive(Clone, Default)]
 pub struct MulticastReplyQueue {
-    queue: Rc<RefCell<VecDeque<MulticastTxItem>>>,
+    queue: Rc<RefCell<Staged>>,
+}
+
+/// What a [`MulticastReplyQueue`] holds: its items in the order they were queued, each with the
+/// lane it counts on and the bytes it counts for, and the lanes of a bounded queue with the group
+/// whose conduits they are.
+#[cfg(all(
+    not(feature = "session-slot"),
+    feature = "alloc",
+    any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    )
+))]
+#[derive(Default)]
+struct Staged {
+    items: VecDeque<(MulticastTxItem, wz_session_core::qos::Priority, usize)>,
+    bound: Option<(
+        wz_session_core::multicast_tx::MulticastTxLanes,
+        MulticastParams,
+    )>,
 }
 
 #[cfg(all(
@@ -297,15 +325,86 @@ pub struct MulticastReplyQueue {
     )
 ))]
 impl MulticastReplyQueue {
-    /// A fresh empty reply queue.
+    /// A fresh empty reply queue, which takes everything it is given.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// An empty queue bounded by the lanes of the group `params` describes: its queue's sizes in
+    /// batches of its batch size, one lane when it runs no QoS.
+    pub fn bounded(params: &MulticastParams) -> Self {
+        let staged = Staged {
+            items: VecDeque::new(),
+            bound: Some((
+                wz_session_core::multicast_tx::MulticastTxLanes::of_group(params),
+                params.clone(),
+            )),
+        };
+        Self {
+            queue: Rc::new(RefCell::new(staged)),
+        }
+    }
+
     /// Drain one queued reply for the loop's `next_tx` seam (FIFO order). `None`
-    /// when empty — the loop then keeps serving RX + the JOIN beacon.
+    /// when empty — the loop then keeps serving RX + the JOIN beacon. What it held
+    /// of its lane is room again.
     pub fn pop(&self) -> Option<MulticastTxItem> {
-        self.queue.borrow_mut().pop_front()
+        let mut staged = self.queue.borrow_mut();
+        let (item, priority, bytes) = staged.items.pop_front()?;
+        if let Some((lanes, _)) = staged.bound.as_mut() {
+            lanes.written(priority, bytes);
+        }
+        Some(item)
+    }
+
+    /// What `item`, asking for room with `wait`, is answered before it waits: the lane rule
+    /// every bounded queue follows, over the lane of its conduit. `None` is a message that has to
+    /// wait for the group's writer to drain the lane; a queue that is not bounded has room.
+    pub fn room_at_once(
+        &self,
+        item: &MulticastTxItem,
+        wait: wz_session_core::link::RoomWait,
+    ) -> Option<wz_session_core::link::LinkRoom> {
+        let mut staged = self.queue.borrow_mut();
+        match staged.bound.as_mut() {
+            Some((lanes, params)) => lanes.room_at_once(
+                wz_session_core::multicast_tx::multicast_tx_conduit(item, params),
+                wait,
+            ),
+            None => Some(wz_session_core::link::LinkRoom::Free),
+        }
+    }
+
+    /// Whether the lane of `item`'s conduit holds less than its bound; a queue that is not
+    /// bounded always does.
+    pub fn has_room(&self, item: &MulticastTxItem) -> bool {
+        let staged = self.queue.borrow();
+        match staged.bound.as_ref() {
+            Some((lanes, params)) => lanes.has_room(
+                wz_session_core::multicast_tx::multicast_tx_conduit(item, params),
+            ),
+            None => true,
+        }
+    }
+
+    /// `item` found no room within its wait and was dropped: the lane of its conduit is marked
+    /// congested and the drop counted, as the tokio group counts a congestion drop.
+    pub fn dropped(&self, item: &MulticastTxItem) {
+        let mut staged = self.queue.borrow_mut();
+        if let Some((lanes, params)) = staged.bound.as_mut() {
+            lanes.dropped(wz_session_core::multicast_tx::multicast_tx_conduit(
+                item, params,
+            ));
+        }
+    }
+
+    /// How many messages of `priority` a bounded queue dropped for want of room.
+    pub fn drops(&self, priority: wz_session_core::qos::Priority) -> u32 {
+        self.queue
+            .borrow()
+            .bound
+            .as_ref()
+            .map_or(0, |(lanes, _)| lanes.drops(priority))
     }
 }
 
@@ -325,8 +424,21 @@ impl MulticastReplyQueue {
     )
 ))]
 impl MulticastReplyEnqueue for MulticastReplyQueue {
+    // Queued whatever its lane holds, and counted on it: a reply the group's own dispatch stages
+    // runs inside the writer it would wait for, and a message of the session has asked for room
+    // first (`room_at_once`).
     fn enqueue(&self, item: MulticastTxItem) {
-        self.queue.borrow_mut().push_back(item);
+        let mut staged = self.queue.borrow_mut();
+        let (priority, bytes) = match staged.bound.as_mut() {
+            Some((lanes, params)) => {
+                let priority = wz_session_core::multicast_tx::multicast_tx_conduit(&item, params);
+                let bytes = wz_session_core::multicast_tx::multicast_tx_bytes(&item);
+                lanes.taken(priority, bytes);
+                (priority, bytes)
+            }
+            None => (wz_session_core::qos::Priority::DEFAULT, 0),
+        };
+        staged.items.push_back((item, priority, bytes));
     }
 }
 
@@ -2041,7 +2153,11 @@ mod tests {
     use wz_session_core::wire_const::T_MID_JOIN;
     use wz_session_core::WhatAmI;
 
-    use super::{GroupSend, GroupTransport, MulticastPump};
+    use wz_session_core::link::{LinkRoom, RoomWait};
+    use wz_session_core::multicast_reply_sink::MulticastReplyEnqueue;
+    use wz_session_core::qos::Priority;
+
+    use super::{GroupSend, GroupTransport, MulticastPump, MulticastReplyQueue};
 
     /// A clock that never moves: the beacon, due at every step, is what moves the test.
     #[derive(Clone, Default)]
@@ -2201,5 +2317,64 @@ mod tests {
             taken(&wire),
             ["join", "first", "second", "join", "third", "join", "join"]
         );
+    }
+
+    /// A bounded queue counts what it holds against its lane: a message asks for room before it
+    /// is queued and a full lane leaves it to the writer; a drop marks the lane, so a droppable
+    /// ask is answered at once, and is counted; each item drained makes room and lowers the mark.
+    /// A queue that is not bounded has room for everything.
+    #[test]
+    fn a_bounded_queue_holds_its_lane_and_each_item_drained_makes_room() {
+        let mut params = params();
+        params.batch_size = 64;
+        params.tx_queue.sizes = [1; Priority::NUM];
+        let queue = MulticastReplyQueue::bounded(&params);
+        let drop = RoomWait::Drop { wait_us: 1_000 };
+        let large = "y".repeat(100);
+
+        assert_eq!(
+            queue.room_at_once(&put("first"), drop),
+            Some(LinkRoom::Free)
+        );
+        queue.enqueue(put("first"));
+        assert!(queue.has_room(&put(&large)), "a small put leaves room");
+        queue.enqueue(put(&large));
+        assert!(!queue.has_room(&put("second")));
+        assert_eq!(
+            queue.room_at_once(&put("second"), drop),
+            None,
+            "a wait for the writer"
+        );
+
+        queue.dropped(&put("second"));
+        assert_eq!(queue.drops(Priority::DEFAULT), 1);
+        assert_eq!(
+            queue.room_at_once(&put("second"), drop),
+            Some(LinkRoom::Congested),
+            "the mark answers a droppable ask at once"
+        );
+
+        assert!(queue.pop().is_some());
+        assert_eq!(
+            queue.room_at_once(&put("second"), drop),
+            None,
+            "an item drained lowers the mark; the large one still fills the lane"
+        );
+        assert!(queue.pop().is_some());
+        assert_eq!(
+            queue.room_at_once(&put("second"), drop),
+            Some(LinkRoom::Free)
+        );
+
+        let open = MulticastReplyQueue::new();
+        for _ in 0..64 {
+            open.enqueue(put(&large));
+        }
+        assert_eq!(
+            open.room_at_once(&put("second"), RoomWait::Drop { wait_us: 0 }),
+            Some(LinkRoom::Free),
+            "CONTROL: a queue that is not bounded"
+        );
+        assert_eq!(open.drops(Priority::DEFAULT), 0);
     }
 }
