@@ -170,12 +170,18 @@ pub struct LocalTokenRegistry<P: Storage = Profile> {
     /// `caps::MAX_LOCAL_TOKENS` is small so the linear scan is cheaper
     /// than a no-alloc map).
     tokens: BoundedVec<LocalToken<P>, { caps::MAX_LOCAL_TOKENS }, P>,
+    /// The most tokens the registry holds (`MAX_LOCAL_TOKENS`): what the creator of the registry
+    /// resolved ([`Self::limit_to`]), the build's value until it does. A growable table refuses
+    /// nothing by its storage, so this is what bounds it; where the build fixes the bound to the
+    /// storage's capacity it is held in no byte and the storage refuses alone.
+    quota: crate::limits::MaxLocalTokensHeld,
 }
 
 impl<P: Storage> Default for LocalTokenRegistry<P> {
     fn default() -> Self {
         Self {
             tokens: BoundedVec::default(),
+            quota: Default::default(),
         }
     }
 }
@@ -191,6 +197,13 @@ impl LocalTokenRegistry<Profile> {
 }
 
 impl<P: Storage> LocalTokenRegistry<P> {
+    /// Hold the registry to the `MAX_LOCAL_TOKENS` its creator resolved: a registration that
+    /// would leave more tokens than `quota` admits is refused ([`RegisterError::TableFull`]), and
+    /// the tokens already held are kept, as a lowered soft limit keeps what it holds.
+    pub fn limit_to(&mut self, quota: crate::limits::MaxLocalTokensHeld) {
+        self.quota = quota;
+    }
+
     /// Record a locally-declared token. Called by
     /// `Session::declare_token` after the proactive `Declare(DeclToken)`
     /// emit.
@@ -201,10 +214,14 @@ impl<P: Storage> LocalTokenRegistry<P> {
     /// `LivelinessToken` gets a fresh monotonic id),
     /// `Err(TableFull)` = token table at [`caps::MAX_LOCAL_TOKENS`],
     /// `Err(KeyexprTooLong)` = keyexpr exceeds [`caps::MAX_KEYEXPR_BYTES`].
-    /// On the `alloc` backing the two `Err` arms are never returned.
+    /// On every backing a registration past the quota the creator stated
+    /// ([`Self::limit_to`]) is `Err(TableFull)`.
     pub fn register(&mut self, token_id: u64, keyexpr: &str) -> Result<bool, RegisterError> {
         if self.tokens.iter().any(|t| t.token_id == token_id) {
             return Ok(false);
+        }
+        if !self.quota.admits(self.tokens.len() + 1) {
+            return Err(RegisterError::TableFull);
         }
         let mut ke: BoundedString<{ caps::MAX_KEYEXPR_BYTES }, P> = BoundedString::default();
         ke.push_str(keyexpr)

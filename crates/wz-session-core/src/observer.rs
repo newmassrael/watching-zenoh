@@ -378,14 +378,41 @@ impl ApplicationLayerObserver {
         observer
             .subscribers
             .limit_to(limits.max_subscriptions_held());
+        #[cfg(feature = "query-queryable")]
+        observer.queryables.limit_to(limits.max_queryables_held());
+        #[cfg(feature = "declare-subscriber")]
+        observer
+            .remote_subscribers
+            .limit_observers_to(limits.max_decl_observers_held());
+        #[cfg(feature = "declare-queryable")]
+        observer
+            .remote_queryables
+            .limit_observers_to(limits.max_decl_observers_held());
+        #[cfg(feature = "liveliness-token")]
+        observer
+            .liveliness
+            .limit_observers_to(limits.max_decl_observers_held());
+        #[cfg(feature = "liveliness-token")]
+        observer
+            .local_tokens
+            .limit_to(limits.max_local_tokens_held());
+        #[cfg(feature = "liveliness-subscriber")]
+        observer
+            .liveliness_subscribers
+            .limit_to(limits.max_liveliness_subscriptions_held());
+        #[cfg(feature = "liveliness-get")]
+        observer
+            .liveliness_gets
+            .limit_to(limits.max_pending_liveliness_gets_held());
+        observer.replies.limit_to(limits.max_pending_queries_held());
         observer
     }
 
     /// New observer with empty registries, held to the build's limits. Callers register
     /// callbacks on each contained registry directly
     /// (`observer.subscribers.register(...)` etc.) before driving
-    /// the session loop; a registration the subscriber table's quota
-    /// refuses comes back as [`RegisterError`](crate::registry_error::RegisterError).
+    /// the session loop; a registration a registry's quota refuses comes
+    /// back as [`RegisterError`](crate::registry_error::RegisterError).
     pub fn new() -> Self {
         Self {
             subscribers: SubscriberRegistry::new(),

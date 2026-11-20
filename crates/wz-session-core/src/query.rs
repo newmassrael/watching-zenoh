@@ -2138,6 +2138,11 @@ pub enum QueryableInterestReply {
 /// separate `all(codec-request, alloc)` impl block below.
 pub struct QueryableRegistry<C: QuerySink, P: Storage = Profile> {
     queryables: BoundedVec<Queryable<C, P>, { caps::MAX_QUERYABLES }, P>,
+    /// The most queryables the registry admits (`MAX_QUERYABLES`): what the creator of the
+    /// registry resolved ([`Self::limit_to`]), the build's value until it does. A growable table
+    /// refuses nothing by its storage, so this is what bounds it; where the build fixes the
+    /// bound to the storage's capacity it is held in no byte and the storage refuses alone.
+    quota: crate::limits::MaxQueryablesHeld,
     /// The declaration id the next queryable takes, from 1. A `u64` only so
     /// that it can stand one past `u32::MAX`, which is how the registry knows
     /// every id has been handed out.
@@ -2170,6 +2175,7 @@ impl<C: QuerySink, P: Storage> Default for QueryableRegistry<C, P> {
     fn default() -> Self {
         Self {
             queryables: BoundedVec::default(),
+            quota: Default::default(),
             next_id: 1,
             requester: None,
             oversize_refused: 0,
@@ -2181,6 +2187,13 @@ impl<C: QuerySink, P: Storage> Default for QueryableRegistry<C, P> {
 }
 
 impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
+    /// Hold the registry to the `MAX_QUERYABLES` its creator resolved: a registration that would
+    /// leave more queryables than `quota` admits is refused ([`RegisterError::TableFull`]), and
+    /// the queryables already in are kept, as a lowered soft limit keeps what it holds.
+    pub fn limit_to(&mut self, quota: crate::limits::MaxQueryablesHeld) {
+        self.quota = quota;
+    }
+
     /// How many queries from a peer were refused for their size: not run by any queryable, and
     /// owed their final as a query that matched nobody is.
     pub fn oversize_refusals(&self) -> u32 {
@@ -2319,8 +2332,8 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
     /// capacity canonical form is rejected with
     /// [`RegisterError::KeyexprTooLong`] and a full table with
     /// [`RegisterError::TableFull`] (fail-fast, no silent
-    /// truncation). On the `alloc` backing neither branch is ever taken,
-    /// so the convenience wrappers `.expect()` the result.
+    /// truncation). On every backing a registration past the quota the
+    /// creator stated ([`Self::limit_to`]) is refused as a full table.
     ///
     /// Once the registry has handed out every `u32` declaration id it refuses
     /// with [`RegisterError::IdsExhausted`] on every backing, rather than wrap
@@ -2360,6 +2373,10 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
                     raw
                 }
             };
+        // The quota before an id is taken: a refused registration changes nothing.
+        if !self.quota.admits(self.queryables.len() + 1) {
+            return Err(RegisterError::TableFull);
+        }
         let id = QueryableId(u32::try_from(self.next_id).map_err(|_| RegisterError::IdsExhausted)?);
         let pattern_facts = crate::keyexpr_match::KeyFacts::of(&pattern);
         // Push first; only consume the id counter on success so a
@@ -3494,20 +3511,18 @@ impl QueryableRegistry<BoxedQuerySink> {
     /// use [`register_with_locality`](Self::register_with_locality)
     /// to restrict to one origin class.
     ///
-    /// GROWABLE BACKING ONLY, for the reason
-    /// [`crate::pubsub::SubscriberRegistry::register`] gives: a fixed-backing
-    /// build registers through
-    /// [`register_sink`](QueryableRegistry::register_sink) with
-    /// `BoxedQuerySink::new(handler)` and handles
-    /// [`RegisterError::TableFull`].
-    #[cfg(any(test, doc, not(feature = "bounded-heapless")))]
+    /// Admission is a partial operation, so this returns what
+    /// [`register_sink`](QueryableRegistry::register_sink) returns on every
+    /// backing, for the reason [`crate::pubsub::SubscriberRegistry::register`]
+    /// gives: a fixed backing fills, and a growable one is held to the quota
+    /// its creator stated ([`QueryableRegistry::limit_to`]).
     pub fn register(
         &mut self,
-        keyexpr_pattern: impl Into<String>,
+        keyexpr_pattern: &str,
         handler: impl FnMut(&dyn crate::query_sink::QueryView, &mut dyn crate::query_sink::ReplyOut)
             + Send
             + 'static,
-    ) -> QueryableId {
+    ) -> Result<QueryableId, RegisterError> {
         self.register_with_locality(keyexpr_pattern, crate::locality::Locality::Any, handler)
     }
 
@@ -3517,28 +3532,21 @@ impl QueryableRegistry<BoxedQuerySink> {
     /// for the dispatch-invariant rationale (every inbound Request
     /// is remote until self-publish loopback lands).
     ///
-    /// GROWABLE BACKING ONLY, for the reason [`register`](Self::register)
-    /// gives.
-    #[cfg(any(test, doc, not(feature = "bounded-heapless")))]
+    /// It refuses as [`register`](Self::register) does.
     pub fn register_with_locality(
         &mut self,
-        keyexpr_pattern: impl Into<String>,
+        keyexpr_pattern: &str,
         allowed_origin: crate::locality::Locality,
         handler: impl FnMut(&dyn crate::query_sink::QueryView, &mut dyn crate::query_sink::ReplyOut)
             + Send
             + 'static,
-    ) -> QueryableId {
-        let pattern = keyexpr_pattern.into();
-        // AP backing: `register_sink` is infallible here (the BoundedVec
-        // table + BoundedString pattern grow past the advisory `N`), so
-        // the convenience wrapper keeps its `QueryableId` signature.
+    ) -> Result<QueryableId, RegisterError> {
         self.register_sink(
-            &pattern,
+            keyexpr_pattern,
             allowed_origin,
             /*complete=*/ false,
             BoxedQuerySink::new(handler),
         )
-        .expect("register on the alloc backing never exceeds declared capacity")
     }
 }
 

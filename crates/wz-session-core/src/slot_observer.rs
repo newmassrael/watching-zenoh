@@ -93,6 +93,20 @@ impl<R: ReplySink, G: ReplySink> Requesters<R, G> {
             _gets: core::marker::PhantomData,
         }
     }
+
+    /// [`Self::new`], each registry held to the limits `limits` states: what the creator of the
+    /// session resolved for it.
+    pub fn with_limits(limits: &crate::limits::SessionLimits) -> Self {
+        let mut requesters = Self::new();
+        requesters
+            .replies
+            .limit_to(limits.max_pending_queries_held());
+        #[cfg(feature = "liveliness-get")]
+        requesters
+            .liveliness_gets
+            .limit_to(limits.max_pending_liveliness_gets_held());
+        requesters
+    }
 }
 
 impl<R: ReplySink, G: ReplySink> Default for Requesters<R, G> {
@@ -412,6 +426,28 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
         observer
             .subscribers
             .limit_to(limits.max_subscriptions_held());
+        #[cfg(feature = "query-queryable")]
+        observer.queryables.limit_to(limits.max_queryables_held());
+        #[cfg(feature = "declare-subscriber")]
+        observer
+            .remote_subscribers
+            .limit_observers_to(limits.max_decl_observers_held());
+        #[cfg(feature = "declare-queryable")]
+        observer
+            .remote_queryables
+            .limit_observers_to(limits.max_decl_observers_held());
+        #[cfg(feature = "liveliness-token")]
+        observer
+            .liveliness
+            .limit_observers_to(limits.max_decl_observers_held());
+        #[cfg(feature = "liveliness-token")]
+        observer
+            .local_tokens
+            .limit_to(limits.max_local_tokens_held());
+        #[cfg(feature = "liveliness-subscriber")]
+        observer
+            .liveliness_subscribers
+            .limit_to(limits.max_liveliness_subscriptions_held());
         observer
     }
 

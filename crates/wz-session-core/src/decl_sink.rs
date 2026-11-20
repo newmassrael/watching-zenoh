@@ -165,6 +165,11 @@ struct KeyedSink<S> {
 pub struct DeclObserverPair<D: DeclSink, U: UndeclSink, P: Storage = Profile> {
     on_decl: BoundedVec<KeyedSink<D>, { caps::MAX_DECL_OBSERVERS }, P>,
     on_undecl: BoundedVec<KeyedSink<U>, { caps::MAX_DECL_OBSERVERS }, P>,
+    /// The most observers each list admits (`MAX_DECL_OBSERVERS`): what the creator of the
+    /// registry resolved ([`Self::limit_to`]), the build's value until it does. A growable list
+    /// refuses nothing by its storage, so this is what bounds it; where the build fixes the
+    /// bound to the storage's capacity it is held in no byte and the storage refuses alone.
+    quota: crate::limits::MaxDeclObserversHeld,
     /// Monotonic id source shared by both lists (ids are unique within
     /// the pair, so a caller cannot cross-cancel a decl observer with
     /// an undecl id that happens to collide).
@@ -176,6 +181,7 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> Default for DeclObserverPair<D, U, 
         Self {
             on_decl: BoundedVec::default(),
             on_undecl: BoundedVec::default(),
+            quota: crate::limits::MaxDeclObserversHeld::build_default(),
             next_id: 0,
         }
     }
@@ -188,19 +194,31 @@ impl<D: DeclSink, U: UndeclSink> DeclObserverPair<D, U, Profile> {
         Self {
             on_decl: BoundedVec::new(),
             on_undecl: BoundedVec::new(),
+            quota: crate::limits::MaxDeclObserversHeld::build_default(),
             next_id: 0,
         }
     }
 }
 
 impl<D: DeclSink, U: UndeclSink, P: Storage> DeclObserverPair<D, U, P> {
-    /// Install a declaration observer. Fallible on the no-alloc backing
-    /// ([`RegisterError::TableFull`] past [`caps::MAX_DECL_OBSERVERS`]);
-    /// infallible on `alloc`. Duplicate sinks are allowed; fired in
-    /// registration order. R311lb — returns the pair-local observer id
-    /// for [`uninstall_decl`](Self::uninstall_decl); the id is consumed
-    /// only on a successful install.
+    /// Hold each list to the `MAX_DECL_OBSERVERS` its creator resolved: an install that would
+    /// leave more observers in its list than `quota` admits is refused
+    /// ([`RegisterError::TableFull`]), and the observers already in are kept, as a lowered soft
+    /// limit keeps what it holds.
+    pub fn limit_to(&mut self, quota: crate::limits::MaxDeclObserversHeld) {
+        self.quota = quota;
+    }
+
+    /// Install a declaration observer. Fallible on every backing
+    /// ([`RegisterError::TableFull`] past the stated quota, and past
+    /// [`caps::MAX_DECL_OBSERVERS`] on the no-alloc backing). Duplicate
+    /// sinks are allowed; fired in registration order. R311lb — returns
+    /// the pair-local observer id for [`uninstall_decl`](Self::uninstall_decl);
+    /// the id is consumed only on a successful install.
     pub fn install_decl(&mut self, sink: D) -> Result<u64, RegisterError> {
+        if !self.quota.admits(self.on_decl.len() + 1) {
+            return Err(RegisterError::TableFull);
+        }
         let id = self.next_id;
         self.on_decl
             .push(KeyedSink { id, sink })
@@ -213,6 +231,9 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> DeclObserverPair<D, U, P> {
     /// [`install_decl`](Self::install_decl); the returned id feeds
     /// [`uninstall_undecl`](Self::uninstall_undecl).
     pub fn install_undecl(&mut self, sink: U) -> Result<u64, RegisterError> {
+        if !self.quota.admits(self.on_undecl.len() + 1) {
+            return Err(RegisterError::TableFull);
+        }
         let id = self.next_id;
         self.on_undecl
             .push(KeyedSink { id, sink })

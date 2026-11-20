@@ -1567,10 +1567,14 @@ async fn establish_link(
 /// on each dispatch / loopback fire (mutex contention is negligible
 /// — the critical section is the per-event fan-out which is
 /// already the serial bottleneck in the registry model).
+///
+/// An install a registry's observer list refuses (its quota is stated by the
+/// observer's creator) ends the run with that refusal: the run asked for the
+/// log line and would not print it.
 fn install_observer_callbacks(
     observer: &Arc<wz::runtime_tokio::sync::PlainMutex<ApplicationLayerObserver>>,
     remote_log_spec: &RemoteLogSpec,
-) {
+) -> io::Result<()> {
     let mut observer_lock = observer.lock().expect("observer mutex poisoned");
 
     // R307.5 — every observer-callback log line below routes through
@@ -1599,12 +1603,14 @@ fn install_observer_callbacks(
                     decl.id(),
                     decl.keyexpr(),
                 );
-            });
+            })
+            .map_err(io::Error::other)?;
         observer_lock
             .remote_subscribers
             .on_subscriber_undeclared(|id| {
                 log::info!("wz-ap-demo: REMOTE SUBSCRIBER UNDECLARED id={id}");
-            });
+            })
+            .map_err(io::Error::other)?;
     }
     if remote_log_spec.on_remote_queryable {
         observer_lock
@@ -1615,28 +1621,37 @@ fn install_observer_callbacks(
                     decl.id(),
                     decl.keyexpr(),
                 );
-            });
+            })
+            .map_err(io::Error::other)?;
         observer_lock
             .remote_queryables
             .on_queryable_undeclared(|id| {
                 log::info!("wz-ap-demo: REMOTE QUERYABLE UNDECLARED id={id}");
-            });
+            })
+            .map_err(io::Error::other)?;
     }
     if remote_log_spec.on_remote_liveliness {
-        observer_lock.liveliness.on_token_declared(|decl| {
-            log::info!(
-                "wz-ap-demo: REMOTE TOKEN DECLARED id={} keyexpr='{}'",
-                decl.id(),
-                decl.keyexpr(),
-            );
-        });
-        observer_lock.liveliness.on_token_undeclared(|id| {
-            log::info!("wz-ap-demo: REMOTE TOKEN UNDECLARED id={id}");
-        });
+        observer_lock
+            .liveliness
+            .on_token_declared(|decl| {
+                log::info!(
+                    "wz-ap-demo: REMOTE TOKEN DECLARED id={} keyexpr='{}'",
+                    decl.id(),
+                    decl.keyexpr(),
+                );
+            })
+            .map_err(io::Error::other)?;
+        observer_lock
+            .liveliness
+            .on_token_undeclared(|id| {
+                log::info!("wz-ap-demo: REMOTE TOKEN UNDECLARED id={id}");
+            })
+            .map_err(io::Error::other)?;
     }
     // observer_lock drops here; subsequent users (drive_session
     // dispatch closure, Session::publish loopback branch) re-lock
     // per-event.
+    Ok(())
 }
 
 /// Step 4 (Session-handle half) — register the local subscriber /
@@ -3419,7 +3434,7 @@ pub(crate) async fn run_demo(
     let observer = Arc::new(wz::runtime_tokio::sync::PlainMutex::new(
         ApplicationLayerObserver::new(),
     ));
-    install_observer_callbacks(&observer, &remote_log_spec);
+    install_observer_callbacks(&observer, &remote_log_spec)?;
 
     // ── Step 4: bundle actions + observer into a Session and spawn the
     //          Established-gated background tasks. Each task polls

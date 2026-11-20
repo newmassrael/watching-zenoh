@@ -1069,6 +1069,11 @@ struct Pending<C: ReplySink, P: Storage = Profile> {
 /// hard-capped table and the growable one.
 pub struct ReplyRegistry<C: ReplySink, P: Storage = Profile> {
     pending: BoundedVec<Pending<C, P>, { caps::MAX_PENDING_QUERIES }, P>,
+    /// The most queries the registry holds pending (`MAX_PENDING_QUERIES`): what the creator of
+    /// the registry resolved ([`Self::limit_to`]), the build's value until it does. A growable
+    /// table refuses nothing by its storage, so this is what bounds it; where the build fixes the
+    /// bound to the storage's capacity it is held in no byte and the storage refuses alone.
+    quota: crate::limits::MaxPendingQueriesHeld,
     /// Which keys a reply from a peer may be on: open takes every key, closed takes the keys of the
     /// image's key set. Starts as the build's `key-set` policy; see [`Self::set_key_gate`].
     key_gate: KeyGate<'static>,
@@ -1089,6 +1094,7 @@ impl<C: ReplySink, P: Storage> Default for ReplyRegistry<C, P> {
     fn default() -> Self {
         Self {
             pending: BoundedVec::default(),
+            quota: Default::default(),
             key_gate: KeyGate::of_build(),
             #[cfg(feature = "transport-shm")]
             shm: crate::extshm::ShmReceiveState::default(),
@@ -1119,6 +1125,14 @@ impl<C: ReplySink> ReplyRegistry<C, Profile> {
 }
 
 impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
+    /// Hold the registry to the `MAX_PENDING_QUERIES` its creator resolved: a registration that
+    /// would leave more queries pending than `quota` admits is refused
+    /// ([`RegisterError::TableFull`]), and the queries already pending are kept, as a lowered
+    /// soft limit keeps what it holds.
+    pub fn limit_to(&mut self, quota: crate::limits::MaxPendingQueriesHeld) {
+        self.quota = quota;
+    }
+
     /// Replace the gate that decides which keys a reply from a peer may be on; it starts as what the
     /// build's `key-set` policy states. A closed image gives the gate over its own table, the one its
     /// subscriber table holds. The counts of the gate it replaces are not carried over.
@@ -1203,8 +1217,8 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     /// R311gb (Track 2) — fallible on the no-alloc backing: a pending
     /// registration past [`caps::MAX_PENDING_QUERIES`] is rejected with
     /// [`RegisterError::TableFull`] (fail-fast, no silent drop). On
-    /// the `alloc` backing it never fails, so the convenience
-    /// [`register`](Self::register) wrapper `.expect()`s the result.
+    /// every backing a registration past the quota the creator stated
+    /// ([`Self::limit_to`]) is refused as a full table.
     /// R311y833 — `accept` is REQUIRED, and there is deliberately no shorter
     /// overload that omits it. zenoh states the matching-keyexpr guarantee as
     /// part of `get()`'s own contract (`zenoh/src/api/session.rs:1181`), so a
@@ -1227,6 +1241,9 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
         sink: C,
     ) -> Result<ReplyHandle, RegisterError> {
         let accept = accept.store()?;
+        if !self.quota.admits(self.pending.len() + 1) {
+            return Err(RegisterError::TableFull);
+        }
         self.pending
             .push(Pending {
                 rid,
@@ -1928,19 +1945,13 @@ impl ReplyRegistry<ConsolidatingSink<BoxedReplySink>> {
     ///
     /// R311y833 — `accept` threads through unchanged to
     /// [`register_sink`](Self::register_sink); see it for why the parameter is
-    /// required rather than defaulted. The `.expect()` below now also covers
-    /// [`RegisterError::KeyexprTooLong`], which the `alloc` backing cannot
-    /// produce: `BoundedString::push_str` is infallible there (the bound is
-    /// advisory), so on this instantiation the only reachable error was, and
-    /// remains, none.
+    /// required rather than defaulted.
     ///
-    /// GROWABLE BACKING ONLY: that "none" holds only where the table grows.
-    /// Under `bounded-heapless` the `.expect()` would be a panic at the first
-    /// full table, so this wrapper is not compiled there (except for this
-    /// crate's own tests and docs); a fixed-backing build calls
-    /// [`register_sink`](Self::register_sink) with a `BoxedReplySink` and
-    /// handles the `Err`.
-    #[cfg(any(test, doc, not(feature = "bounded-heapless")))]
+    /// Admission is a partial operation, so this returns what
+    /// [`register_sink`](Self::register_sink) returns on every backing, for
+    /// the reason [`crate::pubsub::SubscriberRegistry::register`] gives: a
+    /// fixed backing fills, and a growable one is held to the quota its
+    /// creator stated ([`Self::limit_to`]).
     pub fn register(
         &mut self,
         rid: crate::wire_id::RequestId,
@@ -1949,11 +1960,11 @@ impl ReplyRegistry<ConsolidatingSink<BoxedReplySink>> {
         accept: ReplyAcceptance<'_>,
         on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
         on_final: impl FnMut(crate::wire_id::RequestId) + Send + 'static,
-    ) -> ReplyHandle {
-        // R311y321 — signature UNCHANGED; every caller of THIS method
-        // (liveliness_get, the aligner's query plumbing, the tests) registers a
-        // non-consolidating pending and gets byte-identical behaviour, because
-        // `passthrough` pins `ConsolidationMode::None`.
+    ) -> Result<ReplyHandle, RegisterError> {
+        // R311y321 — every caller of THIS method (liveliness_get, the aligner's
+        // query plumbing, the tests) registers a non-consolidating pending and
+        // gets byte-identical behaviour, because `passthrough` pins
+        // `ConsolidationMode::None`.
         //
         // A z_get that carries a mode does NOT come through here: it builds its
         // own `ConsolidatingSink::new(mode, ..)` and calls `register_sink`
@@ -1975,7 +1986,6 @@ impl ReplyRegistry<ConsolidatingSink<BoxedReplySink>> {
             accept,
             ConsolidatingSink::passthrough(BoxedReplySink::new(on_reply, on_final)),
         )
-        .expect("register on the alloc backing never exceeds declared capacity")
     }
 }
 

@@ -100,6 +100,12 @@ impl<D: DeclSink, U: UndeclSink> LivelinessRegistry<D, U> {
         self.oversize
     }
 
+    /// Hold each observer list to the `MAX_DECL_OBSERVERS` its creator resolved
+    /// ([`DeclObserverPair::limit_to`]).
+    pub fn limit_observers_to(&mut self, quota: crate::limits::MaxDeclObserversHeld) {
+        self.observers.limit_to(quota);
+    }
+
     /// R311gb-3d — install an explicit [`DeclSink`] observer (the
     /// seam-native entry point). The `alloc`-only
     /// [`on_token_declared`](LivelinessRegistry::on_token_declared)
@@ -343,18 +349,15 @@ impl LivelinessRegistry<BoxedDeclSink, BoxedUndeclSink> {
     /// via [`BoxedDeclSink`]. R311lb — returns the registry-local
     /// observer id (see [`Self::remove_token_declared_sink`]).
     ///
-    /// GROWABLE BACKING ONLY: under `bounded-heapless` the observer list is
-    /// fixed and the `.expect` inside would be a panic at the first full
-    /// list, so this wrapper is not compiled there (except for this crate's
-    /// own tests and docs). A fixed-backing build installs through
-    /// [`Self::on_token_declared_sink`] and handles the `Err`.
-    #[cfg(any(test, doc, not(feature = "bounded-heapless")))]
+    /// Admission is a partial operation, so this returns what
+    /// [`Self::on_token_declared_sink`] returns on every backing: a fixed
+    /// list fills, and a growable one is held to the quota its creator
+    /// stated ([`Self::limit_observers_to`]).
     pub fn on_token_declared(
         &mut self,
         callback: impl FnMut(&dyn crate::decl_sink::DeclView) + Send + 'static,
-    ) -> u64 {
+    ) -> Result<u64, RegisterError> {
         self.on_token_declared_sink(BoxedDeclSink::new(callback))
-            .expect("observer install on the alloc backing never exceeds declared capacity")
     }
 
     /// Install a closure fired on every inbound `Declare(UndeclToken)`.
@@ -362,12 +365,12 @@ impl LivelinessRegistry<BoxedDeclSink, BoxedUndeclSink> {
     /// [`BoxedUndeclSink`]. R311lb — returns the registry-local observer
     /// id (see [`Self::remove_token_undeclared_sink`]).
     ///
-    /// GROWABLE BACKING ONLY, for the reason
-    /// [`Self::on_token_declared`] gives.
-    #[cfg(any(test, doc, not(feature = "bounded-heapless")))]
-    pub fn on_token_undeclared(&mut self, callback: impl FnMut(u64) + Send + 'static) -> u64 {
+    /// It refuses as [`Self::on_token_declared`] does.
+    pub fn on_token_undeclared(
+        &mut self,
+        callback: impl FnMut(u64) + Send + 'static,
+    ) -> Result<u64, RegisterError> {
         self.on_token_undeclared_sink(BoxedUndeclSink::new(callback))
-            .expect("observer install on the alloc backing never exceeds declared capacity")
     }
 }
 
