@@ -14,7 +14,7 @@
 //! state the same in the document's `wz/key-ids`; what these doors state goes over it, as the
 //! policy doors go over the document's policies.
 //!
-//! What every build has here is the open's judgement of the key-wire form ([`admit_at_open`]): a
+//! What every build has here is the open's judgement of the key-wire form (`admit_at_open`): a
 //! session whose form, or an endpoint's, is `shared` and whose config states no dictionary is
 //! refused, and so is any form but `declared` in a build without the capability. A refusal is the
 //! code `z_open` answers, before anything is dialled.

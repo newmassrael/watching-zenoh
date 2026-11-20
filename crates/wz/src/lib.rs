@@ -273,9 +273,11 @@ pub mod ext {
     /// A configuration states the policies an open runs under in its `wz` member (`wz/profile`,
     /// `wz/policies`), as the zenoh-c and zenoh-pico ABIs read the same document. Over it,
     /// `Config::state_policy` and `Config::state_profile` state the open's own layer
-    /// ([`Origin::Api`]), and `Session::resolved_policies` answers the snapshot the open resolved
-    /// with the layer each value came from ([`Resolved`], [`Provenance`]). The methods are the
-    /// `open-policies` door of the compatibility crate, which this module turns on.
+    /// ([`Origin::Api`](crate::ext::policies::Origin::Api)), and `Session::resolved_policies`
+    /// answers the snapshot the open resolved with the layer each value came from
+    /// ([`Resolved`](crate::ext::policies::Resolved),
+    /// [`Provenance`](crate::ext::policies::Provenance)). The methods are the `open-policies`
+    /// door of the compatibility crate, which this module turns on.
     #[cfg(feature = "api-compat-rust")]
     pub mod policies {
         pub use zenoh::config::{Origin, Provenance, Resolved};

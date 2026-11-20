@@ -16,9 +16,10 @@
 //!
 //! A node with no listener of a protocol writes `0` for that port. The address must be one a
 //! peer can name the node by: the unspecified address, a multicast group and the limited
-//! broadcast address are refused ([`ZidDerivationError`]), since a zid built on one of them
-//! would say nothing of the node. The random half keeps two nodes on one address and ports (a
-//! restart, or two processes behind one listener) apart.
+//! broadcast address are refused
+//! ([`ZidDerivationError`](crate::zid_derivation::ZidDerivationError)), since a zid built on one
+//! of them would say nothing of the node. The random half keeps two nodes on one address and
+//! ports (a restart, or two processes behind one listener) apart.
 //!
 //! Pure: the inputs are values, the random half included, so a test names every byte and a host
 //! with no allocator derives the same zid.

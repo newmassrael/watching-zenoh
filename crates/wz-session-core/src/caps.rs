@@ -570,8 +570,15 @@ pub const DECLARATION_SYNC_TX_NO_PROGRESS_MS: usize = generated::DECLARATION_SYN
 
 /// How long, in milliseconds, a session waits for the next of its peer's initial declarations
 /// before it takes the sync as cut short, when `reliable-gap-reconnect` is not `off`
-/// ([`crate::declaration_sync::stall_deadline`]). `0` keeps no watch, as upstream keeps none. A
-/// time and not a table size: it sizes no memory.
+#[cfg_attr(
+    all(feature = "alloc", feature = "session-unicast"),
+    doc = "([`crate::declaration_sync::stall_deadline`])."
+)]
+#[cfg_attr(
+    not(all(feature = "alloc", feature = "session-unicast")),
+    doc = "(`declaration_sync::stall_deadline`, in the builds with `alloc` and `session-unicast`)."
+)]
+/// `0` keeps no watch, as upstream keeps none. A time and not a table size: it sizes no memory.
 pub const DECLARATION_SYNC_RX_NO_PROGRESS_MS: usize = generated::DECLARATION_SYNC_RX_NO_PROGRESS_MS;
 
 // The numbers of zenoh-pico's value build switches, as the pico C ABI states them. Each defaults

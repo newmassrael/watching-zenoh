@@ -2891,7 +2891,15 @@ pub enum LocalFaceEvent {
     TokenDown { id: u64, keyexpr: Option<String> },
     /// The answers to the interest the face asked under `interest` are all told: the router
     /// relayed a gateway's end of a current interest the face asked beyond the node
-    /// ([`RouterForwarder::ask_routers_current_tokens`]), or ended it unanswered.
+    #[cfg_attr(
+        feature = "routing-token-tables",
+        doc = "([`RouterForwarder::ask_routers_current_tokens`]), or ended it unanswered."
+    )]
+    #[cfg_attr(
+        not(feature = "routing-token-tables"),
+        doc = "(`RouterForwarder::ask_routers_current_tokens`, a method of the builds that keep \
+               tokens), or ended it unanswered."
+    )]
     InterestFinal { interest: u64 },
     /// A reply to a query the face asked, carrying the request id the face gave it.
     Reply(Box<ResponseOwned>),

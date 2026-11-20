@@ -3,8 +3,17 @@
 
 //! `z_whatami_t`, the role bitmask a hello and a transport's peer both carry, and its rendering.
 //!
-//! Its own module, not part of [`crate::scout`], because the connectivity plane reports the
-//! role of the peer a session holds a link to: a build without scouting still needs the type.
+//! Its own module, not part of
+#![cfg_attr(
+    any(feature = "scout", feature = "scout-mcu"),
+    doc = "[`crate::scout`],"
+)]
+#![cfg_attr(
+    not(any(feature = "scout", feature = "scout-mcu")),
+    doc = "`crate::scout` (a module of the builds with `scout` or `scout-mcu`),"
+)]
+//! because the connectivity plane reports the role of the peer a session holds a link to: a
+//! build without scouting still needs the type.
 
 use crate::abi::z_view_string_t;
 use crate::result::ZResult;

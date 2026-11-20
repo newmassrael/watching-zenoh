@@ -4,8 +4,17 @@
 //! `z_owned_string_array_t`, the array of strings a hello lends its locators in and the
 //! connectivity plane lends a transport's.
 //!
-//! Its own module, not part of [`crate::scout`], because the array is not scouting's alone: a
-//! build without `z_scout` keeps the type the connectivity plane returns.
+//! Its own module, not part of
+#![cfg_attr(
+    any(feature = "scout", feature = "scout-mcu"),
+    doc = "[`crate::scout`],"
+)]
+#![cfg_attr(
+    not(any(feature = "scout", feature = "scout-mcu")),
+    doc = "`crate::scout` (a module of the builds with `scout` or `scout-mcu`),"
+)]
+//! because the array is not scouting's alone: a build without `z_scout` keeps the type the
+//! connectivity plane returns.
 //!
 //! A C program stack-allocates the owned form (32 B, measured against the pinned headers); the
 //! contents are wz's — pico's header never dereferences the fields, every read goes through an

@@ -16304,7 +16304,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// Whether this node accepted the link, as the establishment it ran says
-    /// ([`Self::note_link_role`]); `false` for a dialled link and before an establishment.
+    /// (`note_link_role`); `false` for a dialled link and before an establishment.
     #[cfg(feature = "alloc")]
     pub fn link_accepted(&self) -> bool {
         self.peer_sync_bits

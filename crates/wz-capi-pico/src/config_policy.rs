@@ -10,7 +10,7 @@
 //! links a JSON5 reader. An MCU image whose domain of a policy holds one value refuses every other
 //! value of it by name.
 //!
-//! What the doors state is kept in the config ([`PolicyStatements`]) and composed by the open,
+//! What the doors state is kept in the config (`PolicyStatements`) and composed by the open,
 //! lowest first, through [`policy_document::resolve_document_under`], the reader the other ABIs
 //! compose a document and their open's statements with, or, for a config handed no document,
 //! through [`policy_document::resolve_under`], which answers the same without reading one:
