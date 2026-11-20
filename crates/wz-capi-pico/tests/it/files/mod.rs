@@ -27,6 +27,7 @@ mod local_delivery;
 mod matching_multiface;
 mod message_catalog_doors;
 mod mutual_dial;
+mod open_refuses_a_refused_clock;
 mod open_scouts_for_a_locator;
 mod payload_release;
 mod publisher_declared_options_roundtrip;

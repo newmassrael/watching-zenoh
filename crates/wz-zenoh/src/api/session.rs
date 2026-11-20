@@ -4213,6 +4213,9 @@ mod tokio_engine {
                 Box::new(Elapsed(())) as zenoh_result::Error
             }
             (OpenError::LinkFailed, None, Some(words)) => zerror!("{words}").into(),
+            // The clock's own reason, naming the variable and the value stated: upstream's node
+            // does not start on it either (`uhlc` panics when it parses the variable).
+            (OpenError::ClockRefused(refused), _, _) => zerror!("{refused}").into(),
             (error, _, _) => zerror!("the session could not be opened: {:?}", error).into(),
         }
     }
@@ -7084,6 +7087,69 @@ mod tests {
         let session = open(peer("a1b2c3")).wait().expect("a peer opens alone");
         assert_eq!(session.zid(), ZenohId::from_str("a1b2c3").expect("an id"));
         assert!(!session.is_closed());
+    }
+
+    /// Set on a child process of this test binary that the clock-bound test starts: the child
+    /// opens and prints what came of it.
+    const CLOCK_BOUND_CHILD: &str = "WZ_ZENOH_CLOCK_BOUND_CHILD";
+
+    /// An open whose node is to have a clock fails, under a `UHLC_MAX_DELTA_MS` its clock does
+    /// not honour, with the clock's own reason, which names the variable and the value stated;
+    /// under the build's own bound it opens. Each open runs in a process of its own because the
+    /// variable is the process's: set in this one, it would refuse the clock of every test
+    /// running beside it.
+    #[test]
+    fn an_open_whose_stated_clock_bound_is_refused_fails_with_the_clocks_reason() {
+        const NAME: &str =
+            "api::session::tests::an_open_whose_stated_clock_bound_is_refused_fails_with_the_clocks_reason";
+        if std::env::var_os(CLOCK_BOUND_CHILD).is_some() {
+            let stamping = Config::from_json5(
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/127.0.0.1:0"] },
+                     scouting: { multicast: { enabled: false } }, timestamping: { enabled: true } }"#,
+            )
+            .expect("a configuration zenoh reads");
+            match open(stamping).wait() {
+                Ok(session) => {
+                    session.close().wait().expect("closes");
+                    std::println!("CLOCK-BOUND-OPEN opened");
+                }
+                Err(error) => std::println!("CLOCK-BOUND-OPEN refused {error}"),
+            }
+            return;
+        }
+        let under = |stated: &str| -> String {
+            let output =
+                std::process::Command::new(std::env::current_exe().expect("this test binary"))
+                    .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+                    .env(CLOCK_BOUND_CHILD, "1")
+                    .env("UHLC_MAX_DELTA_MS", stated)
+                    .stdin(std::process::Stdio::null())
+                    .output()
+                    .expect("run the open in a process of its own");
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            assert!(
+                output.status.success(),
+                "the child under `{stated}` failed:\n{stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            stdout
+                .lines()
+                .find_map(|line| line.strip_prefix("CLOCK-BOUND-OPEN "))
+                .map(str::to_owned)
+                .unwrap_or_else(|| panic!("the child under `{stated}` ran no open:\n{stdout}"))
+        };
+        let refused = under("soon");
+        assert!(
+            refused.starts_with("refused ")
+                && refused.contains("UHLC_MAX_DELTA_MS")
+                && refused.contains("soon"),
+            "{refused}"
+        );
+        assert_eq!(
+            under(&wz_session_core::caps::CLOCK_MAX_FORWARD_STEP_MS.to_string()),
+            "opened",
+            "the control: the build's own bound"
+        );
     }
 
     /// A value of `subscriber-overload` other than the build's default that the build allows:

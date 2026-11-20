@@ -373,7 +373,9 @@ impl DialFailure {
 /// Deliberately NOT a `z_result_t`: the two C ABIs wz exports both typedef that
 /// to `int8_t` and then disagree about the VALUES, so shared code returning one
 /// ABI's constant would be a wrong-code bug in the other. Each shim maps this.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Not `Copy`: a refusal carries its reason ([`Self::ClockRefused`]), which the caller reports.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OpenError {
     /// The drive thread could not be spawned, its runtime could not be built,
     /// or the session did not reach Established.
@@ -385,6 +387,11 @@ pub enum OpenError {
     /// An endpoint names a scheme no link of this build serves: zenoh-pico's
     /// `_Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN` (`ret = _Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN;`).
     SchemeUnknown,
+    /// The node was to have a clock and its clock was refused: `UHLC_MAX_DELTA_MS` states a bound
+    /// the clock does not honour, carried here as the clock's own reason. Upstream's node does not
+    /// start on such a value, and a node opened without the clock it was asked for would stamp
+    /// nothing in silence.
+    ClockRefused(wz_runtime_tokio::node_clock::MaxDeltaRefused),
 }
 
 impl OpenError {
@@ -3338,13 +3345,14 @@ fn log_open_failure(what: &str, why: &dyn core::fmt::Debug) {
 /// Fail the open of a node whose clock was refused (`NodeHlc::clock_refused`): the bound
 /// `UHLC_MAX_DELTA_MS` states is one the clock does not honour, so the node has no clock where
 /// it was to have one. Both opens of this crate, the registry's and the router node's, build the
-/// node's clock and ask this before any thread or socket exists.
+/// node's clock and ask this before any thread or socket exists; the refusal goes back to the
+/// caller as [`OpenError::ClockRefused`], which each ABI maps.
 fn refuse_a_refused_clock(node_hlc: &NodeHlc) -> Result<(), OpenError> {
     match node_hlc.clock_refused() {
         None => Ok(()),
         Some(refused) => {
             log_open_failure("node clock", &format_args!("{refused}"));
-            Err(OpenError::DriveFailed)
+            Err(OpenError::ClockRefused(refused.clone()))
         }
     }
 }
@@ -6325,7 +6333,14 @@ mod tests {
                 close(state);
                 "opened"
             }
-            Err(OpenError::DriveFailed) => "refused",
+            // The reason the caller is given is the clock's own, naming the variable.
+            Err(OpenError::ClockRefused(refused)) => {
+                assert!(
+                    refused.to_string().contains("UHLC_MAX_DELTA_MS"),
+                    "{refused}"
+                );
+                "refused"
+            }
             Err(other) => panic!("the open failed otherwise: {other:?}"),
         };
         std::println!("CLOCK-BOUND-OPEN {verdict}");

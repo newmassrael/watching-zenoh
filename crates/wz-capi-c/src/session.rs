@@ -583,10 +583,13 @@ pub(crate) unsafe fn open_session(
 }
 
 /// The core reports a NEUTRAL failure; zenoh-c's vocabulary for "the session could not be
-/// established" is Z_ENETWORK, whichever the cause.
+/// established" is Z_ENETWORK, whichever the cause. A node clock refused for the bound
+/// `UHLC_MAX_DELTA_MS` states is a setting the open cannot honour, which this ABI answers as it
+/// answers a document that states one ([`refusal_code`]): `Z_EINVAL`.
 fn open_failure(error: OpenError) -> ZResult {
     match error {
         OpenError::DriveFailed | OpenError::LinkFailed | OpenError::SchemeUnknown => Z_ENETWORK,
+        OpenError::ClockRefused(_) => Z_EINVAL,
     }
 }
 
@@ -1005,6 +1008,18 @@ mod policy_document_tests {
     use wz_runtime_tokio::policy::SubscriberOverload;
     use wz_runtime_tokio_test_support::free_port;
     use wz_session_core::policy_binding::PolicyValue;
+
+    /// A node clock the open refused (the bound `UHLC_MAX_DELTA_MS` states is one it does not
+    /// honour) is a setting the open cannot honour, answered as a document that states one is:
+    /// `Z_EINVAL`, where a session that could not be established is `Z_ENETWORK`.
+    #[test]
+    fn a_refused_node_clock_fails_the_open_as_a_refused_setting() {
+        let refused = wz_runtime_tokio::node_clock::MaxDeltaRefused::NotMilliseconds {
+            stated: "soon".to_owned(),
+        };
+        assert_eq!(open_failure(OpenError::ClockRefused(refused)), Z_EINVAL);
+        assert_eq!(open_failure(OpenError::DriveFailed), Z_ENETWORK);
+    }
 
     /// A value of `subscriber-overload` other than the build default that the build's domain
     /// allows, by its id; the build default itself where the build allows one value.
