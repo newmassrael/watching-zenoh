@@ -6667,8 +6667,9 @@ layer_c1v_cargo_test_ws() {
     # 16 -> 18: the two reserved-face id tests of the face counter
     # (`the_reserved_faces_are_a_closed_band_apart_from_every_minted_id`,
     # `the_counter_refuses_to_mint_a_reserved_id`); ungated, so C1y moves by the same +2. Read
-    # off what the build host PRINTED (`18 passed; 723 filtered out`).
-    _runci_guarded_test C1v 18 cargo test -p wz-runtime-tokio --features routing-accept,transport-link-ws --lib accept_loop --quiet \
+    # off what the build host PRINTED (`18 passed; 723 filtered out`). 18 -> 19, the locator a
+    # node cannot store is refused, counted and the rest taken; ungated, so C1y moves by +1 too.
+    _runci_guarded_test C1v 19 cargo test -p wz-runtime-tokio --features routing-accept,transport-link-ws --lib accept_loop --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-ws --quiet -- -D warnings \
@@ -8830,8 +8831,9 @@ layer_c1ah_cargo_test_time_hlc() {
     # 31 -> 35: the four tests of a relayed Put stamped only once its route has a destination
     # (647a2a812a): no route leaves the clock alone, later routes get the first stamp, a dropped
     # Put is refused to every route, a settled push routes as it is. The pc5 run printed 35.
-    # 35 -> 36, step 3c's node clock snapshot test, printed on a build host.
-    _runci_guarded_test "C1ah node_clock" 36 \
+    # 35 -> 36, step 3c's node clock snapshot test, printed on a build host. 36 -> 39, a clock
+    # bound the build does not allow or that is no number is refused by name (three tests).
+    _runci_guarded_test "C1ah node_clock" 39 \
         cargo test -p wz-node-time --features time-hlc,codec-push,pubsub-timestamp \
         --lib node_clock:: --quiet || return 1
     # R311y818 — the PUBLISH-side auto-stamp (zenoh `resolve_put`'s head,
@@ -10772,8 +10774,8 @@ layer_c1y_cargo_test_routing_peer() {
     # `router-connect-reconcile` compile under `routing-peer` now, and it adds
     # `a_configured_endpoint_is_dialled_again_until_its_listener_comes_up`. Hosted run
     # 44201914197 printed 27 at 4050dd889, 44412368690 printed 34 at 458774b1f; the build host
-    # printed 34 at 5f5342ae1.
-    _runci_guarded_test "C1y accept_loop" 34 \
+    # printed 34 at 5f5342ae1. 34 -> 35, the locator a node cannot store (as C1v).
+    _runci_guarded_test "C1y accept_loop" 35 \
         cargo test -p wz-runtime-tokio --features routing-peer --lib accept_loop --quiet || return 1
     # The loop-level witness of the link admission (two `peer_loop`s that dial each other with
     # one link each, and no face of either goes up on a link that is then closed). It needs
@@ -11474,7 +11476,8 @@ layer_c1d_cargo_test_pubsub() {
     # (it follows the subscriptions and the locality; a repeated key is matched once with slots
     # and every time without; a frame of repeated keys is delivered as the owned path delivers
     # it), and the second states both builds' scan count, so only this arm sees the other half.
-    _runci_guarded_test "C1d match cache out" 3 \
+    # 3 -> 4: a key whose positions pass 16 bits is scanned each time, which the filter reaches.
+    _runci_guarded_test "C1d match cache out" 4 \
         env WZ_LIMIT_MATCH_MEMO_SLOTS=0 \
         cargo test -p wz-session-core --features codec-push,codec-declare,codec-response-final,pubsub-put,pubsub-delete,pubsub-attachment,pubsub-timestamp \
         --lib --quiet -- match_mem repeated_key || return 1
@@ -13651,9 +13654,10 @@ layer_c1m_session_lwip() {
     # subscriptions is not compiled, so what is held here is that the slot client builds without it.
     (cd crates && cargo check -p wz-session-mcu --no-default-features --features client-slot-queryable --quiet) || return 1
     # The latest sample of a subscription (`latest`, the same profile): the cell, its cut at the
-    # subscription's capacity, a delete, a key cut at a character, the storage's bounds, and the
+    # subscription's capacity, a delete, a key past the limit refused and counted (never cut), a
+    # key at the limit kept whole, a refused key into an empty cell, the storage's bounds, and the
     # loop's watch that says each new sample once.
-    _runci_guarded_test "C1m mcu latest sample" 9 \
+    _runci_guarded_test "C1m mcu latest sample" 11 \
         cargo test -p wz-session-mcu --features client-slot --lib latest::tests --quiet || return 1
     # The schedule a querier's gets are kept on (`slot_schedule`, the same profile): the first poll
     # at once, the cadence kept on the grid, a late loop sending once, a retry soon, a lost session
@@ -13691,10 +13695,12 @@ layer_c1m_session_lwip() {
     # number below is the one its own run PRINTED, from the guarded-count oracle.
     # +1 in every leg below that runs the lib without `session-slot`, counted from the source: the
     # lwIP links refuse an IPv6 locator and bind nothing for it (`links::tests`, no feature gate).
-    # The guard of each such leg is its lib count (the other targets print 0).
-    _runci_guarded_test "C1m default" 10 \
+    # The guard of each such leg is its lib count (the other targets print 0). +1 in the two legs
+    # below: the lwIP driver names a link's ends by the cooperative engine's locator rule
+    # (`driver::tests`), read off what the guarded-count oracle printed (11).
+    _runci_guarded_test "C1m default" 11 \
         cargo test -p wz-session-lwip --quiet || return 1
-    _runci_guarded_test "C1m reassembly" 10 \
+    _runci_guarded_test "C1m reassembly" 11 \
         cargo test -p wz-session-lwip --features reassembly --quiet || return 1
     # R2827 — the UNICAST application layer: `app_layer::dispatch_to` wires the
     # session drive's events into the observer and drains replies through the
