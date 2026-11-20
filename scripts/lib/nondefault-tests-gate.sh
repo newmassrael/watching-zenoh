@@ -516,6 +516,10 @@ transport-link-unixpipe,transport-link-ws|"
     # The sessions a host holds at once (`tests/tls_sessions.rs`, 1, compiled with the same
     # feature) starts the provider's own arena and so runs in a binary of its own.
     "wz-capi-coop|hook|connectivity,listen,liveliness,liveliness-get,local-queryable,local-subscriber,query,queryable,scout,ticker,tls-mbedtls|"
+    # The keys a session names by a dictionary it shares with its peers (`tests::shared_key_ids::`,
+    # 14), compiled with `shared-key-ids` beside `listen`, `query` and `queryable`, the four the
+    # module's `cfg` names; the rest of the crate's tests are the leg above's.
+    "wz-capi-coop|hook|listen,query,queryable,shared-key-ids|tests::shared_key_ids::"
     # What a hosted OS tells a node about its network, and the multicast sockets built from it,
     # which the tokio runtime and the cooperative host both open. The `#iface=` honor (the v4 and
     # v6 interface selectors and the tests that read them off the loopback) is compiled only with
@@ -1209,6 +1213,11 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # test of the other means. The filters are the modules' paths, so a test added to either
     # module later is claimed without touching the rows.
     "wz-session-core|hook|pool-monitor|pool_gauge::"
+    # The links of a transport the program supplies: the table and its lifecycle machine
+    # (`app_link_table::`) and the transport object both engines read (`app_transport::`), each
+    # module gated on `app-link` alone.
+    "wz-session-core|hook|app-link|app_link_table::"
+    "wz-session-core|hook|app-link|app_transport::"
     "wz-session-core|hook|declarations-synced-event|decl_sink::"
     # The storage plane is the wz-storage crate's (server-layer split, steps 2-4), and its
     # gated tests went with it: the plugins document reader's (step 3) and the history,
@@ -1491,6 +1500,10 @@ wz-session-core/query-reply-err|"
     # honest reading of this row is that the combination axis now has a
     # population of one where it had none.
     "wz-runtime-tokio|hook|transport-multicast,reassembly|multicast_glue"
+    # Links over a transport the program supplies (`app_link::`, 13): the module is
+    # `transport-link-app`'s, its datagram tests `transport-link-udp`'s (a default) and its group
+    # test `transport-multicast`'s.
+    "wz-runtime-tokio|hook|transport-link-app,transport-multicast|app_link::"
     # The router's routing events (`router_forward::routing_spans`, built with `routing-router-hat`
     # and `tracing-spans`) and the span a spawned task runs in (`runtime_pool::span_tests`, whose
     # claim is the `tracing-instrument` arm). The wide leg names neither tracing feature, so the
