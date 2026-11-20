@@ -2699,8 +2699,9 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
 
     /// Borrow the observer handle. Application code registers
     /// callbacks on the contained registries through this — typically
-    /// `session.observer().lock().unwrap().subscribers.register(...)`
-    /// on the AP profile (where `R::Mutex<T>` resolves to
+    /// `session.observer().lock().unwrap().subscribers.register(...)?`
+    /// (the table refuses a registration past its quota) on the AP
+    /// profile (where `R::Mutex<T>` resolves to
     /// `std::sync::Mutex<T>`); generic-R callers must route through
     /// [`wz_runtime_core::Runtime::with_mutex_mut`] instead since the
     /// `Runtime` trait does not expose a direct `.lock()` method

@@ -149,15 +149,18 @@ async fn wz_to_wz_over_udp_fragments_and_reassembles_oversize_put() {
     {
         let fired = fired.clone();
         let expect = payload.clone();
-        observer.subscribers.register(KEYEXPR, move |sample| {
-            assert_eq!(sample.keyexpr(), KEYEXPR);
-            assert_eq!(
-                sample.payload(),
-                &expect[..],
-                "the reassembled udp payload matches the oversize Put byte-for-byte"
-            );
-            fired.fetch_add(1, Ordering::SeqCst);
-        });
+        observer
+            .subscribers
+            .register(KEYEXPR, move |sample| {
+                assert_eq!(sample.keyexpr(), KEYEXPR);
+                assert_eq!(
+                    sample.payload(),
+                    &expect[..],
+                    "the reassembled udp payload matches the oversize Put byte-for-byte"
+                );
+                fired.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
     }
 
     // ── Publisher on the initiator side (fresh observer — no local

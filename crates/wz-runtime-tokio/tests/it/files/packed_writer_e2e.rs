@@ -116,20 +116,23 @@ async fn a_burst_over_a_packing_stream_writer_arrives_whole_and_in_order() {
     let mut observer = ApplicationLayerObserver::new();
     for (lane, (keyexpr, _)) in LANES.iter().enumerate() {
         let (arrived, corrupt, total) = (arrived.clone(), corrupt.clone(), total.clone());
-        observer.subscribers.register(*keyexpr, move |sample| {
-            let bytes = sample.payload();
-            let intact = bytes.len() >= 4 && {
-                let index = u32::from_le_bytes(bytes[..4].try_into().expect("four bytes"));
-                bytes == &payload_of(index)[..]
-            };
-            if intact {
-                let index = u32::from_le_bytes(bytes[..4].try_into().expect("four bytes"));
-                arrived[lane].lock().expect("arrival log").push(index);
-            } else {
-                corrupt.fetch_add(1, Ordering::SeqCst);
-            }
-            total.fetch_add(1, Ordering::SeqCst);
-        });
+        observer
+            .subscribers
+            .register(*keyexpr, move |sample| {
+                let bytes = sample.payload();
+                let intact = bytes.len() >= 4 && {
+                    let index = u32::from_le_bytes(bytes[..4].try_into().expect("four bytes"));
+                    bytes == &payload_of(index)[..]
+                };
+                if intact {
+                    let index = u32::from_le_bytes(bytes[..4].try_into().expect("four bytes"));
+                    arrived[lane].lock().expect("arrival log").push(index);
+                } else {
+                    corrupt.fetch_add(1, Ordering::SeqCst);
+                }
+                total.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
     }
 
     let timeouts = SessionTimeouts::spec_defaults();
@@ -263,9 +266,12 @@ async fn puts_on_a_declared_alias_never_overtake_its_declaration() {
     let mut observer = ApplicationLayerObserver::new();
     {
         let received = received.clone();
-        observer.subscribers.register(ALIAS_KEY, move |_sample| {
-            received.fetch_add(1, Ordering::SeqCst);
-        });
+        observer
+            .subscribers
+            .register(ALIAS_KEY, move |_sample| {
+                received.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
     }
 
     let timeouts = SessionTimeouts::spec_defaults();
@@ -403,9 +409,12 @@ async fn a_long_kilobyte_stream_is_never_stalled_by_the_writers_flush() {
     let mut observer = ApplicationLayerObserver::new();
     {
         let received = received.clone();
-        observer.subscribers.register(STREAM_KEY, move |_sample| {
-            received.fetch_add(1, Ordering::SeqCst);
-        });
+        observer
+            .subscribers
+            .register(STREAM_KEY, move |_sample| {
+                received.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
     }
 
     let timeouts = SessionTimeouts::spec_defaults();

@@ -472,7 +472,8 @@ async fn r99_subscriber_registry_routes_framepayload_push_to_callback() {
         .unwrap()
         .register(keyexpr_literal, move |_push| {
             hit_count_for_callback.fetch_add(1, Ordering::SeqCst);
-        });
+        })
+        .expect("no quota is stated on this table");
 
     let registry_for_observer = registry.clone();
     let clock = TokioTime::new();

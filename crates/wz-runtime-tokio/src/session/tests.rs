@@ -130,7 +130,8 @@ fn publish_locality_any_fires_wire_and_loopback() {
         .subscribers
         .register("home/temp", move |_sample| {
             counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        })
+        .expect("no quota is stated on this table");
 
     let fired = session
         .publish("home/temp", b"22.5", PublishOptions::put())
@@ -157,7 +158,8 @@ fn publish_locality_remote_fires_wire_only() {
         .subscribers
         .register("home/temp", move |_sample| {
             counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        })
+        .expect("no quota is stated on this table");
 
     let opts = PublishOptions::put().with_locality(Locality::Remote);
     let fired = session.publish("home/temp", b"22.5", opts).unwrap();
@@ -186,7 +188,8 @@ fn publish_locality_session_local_fires_loopback_only() {
         .subscribers
         .register("home/temp", move |_sample| {
             counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        })
+        .expect("no quota is stated on this table");
 
     let opts = PublishOptions::put().with_locality(Locality::SessionLocal);
     let fired = session.publish("home/temp", b"22.5", opts).unwrap();
@@ -225,7 +228,8 @@ fn publish_session_local_does_not_fire_loopback_when_allow_loop_off() {
         .subscribers
         .register("home/temp", move |_sample| {
             counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        })
+        .expect("no quota is stated on this table");
 
     let opts = PublishOptions::put().with_locality(Locality::SessionLocal);
     let fired = session.publish("home/temp", b"22.5", opts).unwrap();
@@ -258,7 +262,8 @@ fn publish_aliased_session_local_does_not_fire_loopback_when_allow_loop_off() {
         .subscribers
         .register("home/temp", move |_sample| {
             counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        })
+        .expect("no quota is stated on this table");
 
     let opts = PublishOptions::put().with_locality(Locality::SessionLocal);
     let fired = session
@@ -289,7 +294,8 @@ fn publish_loopback_sample_carries_options_reliability_and_kind() {
         .subscribers
         .register("home/temp", move |sample| {
             *captured_clone.lock().unwrap() = Some(Sample::from_view(sample));
-        });
+        })
+        .expect("no quota is stated on this table");
 
     let opts = PublishOptions::put()
         .with_locality(Locality::SessionLocal)
@@ -320,7 +326,8 @@ fn publish_del_kind_routes_to_del_loopback_with_empty_payload() {
         .subscribers
         .register("home/temp", move |sample| {
             *captured_clone.lock().unwrap() = Some((sample.kind(), sample.payload().to_vec()));
-        });
+        })
+        .expect("no quota is stated on this table");
 
     let opts = PublishOptions::del().with_locality(Locality::SessionLocal);
     // Payload argument is ignored for Del kind — the Sample observed
@@ -378,7 +385,8 @@ fn publish_locality_remote_only_returns_zero_even_with_matching_subscriber() {
         .subscribers
         .register("home/temp", move |_sample| {
             counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        })
+        .expect("no quota is stated on this table");
 
     let opts = PublishOptions::put().with_locality(Locality::Remote);
     let fired = session.publish("home/temp", b"x", opts).unwrap();
@@ -404,7 +412,8 @@ fn publish_returns_multi_subscriber_fired_count() {
             .subscribers
             .register("home/temp", move |_sample| {
                 clone.fetch_add(1, Ordering::SeqCst);
-            });
+            })
+            .expect("no quota is stated on this table");
     }
     {
         let clone = hits_b.clone();
@@ -415,7 +424,8 @@ fn publish_returns_multi_subscriber_fired_count() {
             .subscribers
             .register("home/*", move |_sample| {
                 clone.fetch_add(1, Ordering::SeqCst);
-            });
+            })
+            .expect("no quota is stated on this table");
     }
 
     let opts = PublishOptions::put().with_locality(Locality::SessionLocal);
@@ -446,7 +456,8 @@ fn publish_locality_session_local_skips_remote_subscribers() {
             .subscribers
             .register_with_locality("home/temp", Locality::Any, move |_sample| {
                 clone.fetch_add(1, Ordering::SeqCst);
-            });
+            })
+            .expect("no quota is stated on this table");
     }
     {
         let clone = local_hits.clone();
@@ -457,7 +468,8 @@ fn publish_locality_session_local_skips_remote_subscribers() {
             .subscribers
             .register_with_locality("home/temp", Locality::SessionLocal, move |_sample| {
                 clone.fetch_add(1, Ordering::SeqCst);
-            });
+            })
+            .expect("no quota is stated on this table");
     }
     {
         let clone = remote_hits.clone();
@@ -468,7 +480,8 @@ fn publish_locality_session_local_skips_remote_subscribers() {
             .subscribers
             .register_with_locality("home/temp", Locality::Remote, move |_sample| {
                 clone.fetch_add(1, Ordering::SeqCst);
-            });
+            })
+            .expect("no quota is stated on this table");
     }
 
     let opts = PublishOptions::put().with_locality(Locality::SessionLocal);
@@ -502,7 +515,8 @@ fn publish_aliased_locality_any_fires_wire_and_loopback() {
         .subscribers
         .register("home/temp", move |_sample| {
             counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        })
+        .expect("no quota is stated on this table");
 
     // Caller has previously (in prod) called send_declare_keyexpr(7,
     // "home/temp"); the loopback_keyexpr argument restates that
@@ -533,7 +547,8 @@ fn publish_aliased_locality_remote_fires_wire_only() {
         .subscribers
         .register("home/temp", move |_sample| {
             counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        })
+        .expect("no quota is stated on this table");
 
     let opts = PublishOptions::put().with_locality(Locality::Remote);
     let fired = session
@@ -557,7 +572,8 @@ fn publish_aliased_locality_session_local_fires_loopback_only() {
         .subscribers
         .register("home/temp", move |_sample| {
             counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        })
+        .expect("no quota is stated on this table");
 
     let opts = PublishOptions::put().with_locality(Locality::SessionLocal);
     let fired = session
@@ -589,7 +605,8 @@ fn publish_aliased_del_kind_routes_to_del_aliased_with_empty_payload() {
                 sample.payload().to_vec(),
                 sample.keyexpr().to_string(),
             ));
-        });
+        })
+        .expect("no quota is stated on this table");
 
     let opts = PublishOptions::del();
     let fired = session
@@ -616,7 +633,8 @@ fn publish_aliased_reliability_propagates_to_wire_and_sample() {
         .subscribers
         .register("home/temp", move |sample| {
             *captured_clone.lock().unwrap() = Some(sample.reliability());
-        });
+        })
+        .expect("no quota is stated on this table");
 
     let opts = PublishOptions::put().with_reliability(Reliability::BestEffort);
     let fired = session
@@ -654,7 +672,8 @@ fn publish_aliased_inline_suffix_passes_through_to_wire() {
         .subscribers
         .register("home/temp/kitchen", move |sample| {
             *captured_clone.lock().unwrap() = Some(sample.keyexpr().to_string());
-        });
+        })
+        .expect("no quota is stated on this table");
 
     let fired = session
         .publish_aliased(
@@ -701,12 +720,15 @@ fn publish_aliased_loopback_independent_of_wire_keyexpr_form() {
     let (session, _driver) = build_session();
     let counter = Arc::new(AtomicUsize::new(0));
     let counter_clone = counter.clone();
-    session.observer().lock().unwrap().subscribers.register(
-        "intentionally_decoupled",
-        move |_sample| {
+    session
+        .observer()
+        .lock()
+        .unwrap()
+        .subscribers
+        .register("intentionally_decoupled", move |_sample| {
             counter_clone.fetch_add(1, Ordering::SeqCst);
-        },
-    );
+        })
+        .expect("no quota is stated on this table");
 
     let fired = session
         .publish_aliased(
@@ -744,7 +766,8 @@ fn publish_aliased_mixed_locality_isolation_matches_publish_literal() {
             .subscribers
             .register_with_locality("home/temp", Locality::Any, move |_s| {
                 clone.fetch_add(1, Ordering::SeqCst);
-            });
+            })
+            .expect("no quota is stated on this table");
     }
     {
         let clone = local_hits.clone();
@@ -755,7 +778,8 @@ fn publish_aliased_mixed_locality_isolation_matches_publish_literal() {
             .subscribers
             .register_with_locality("home/temp", Locality::SessionLocal, move |_s| {
                 clone.fetch_add(1, Ordering::SeqCst);
-            });
+            })
+            .expect("no quota is stated on this table");
     }
     {
         let clone = remote_hits.clone();
@@ -766,7 +790,8 @@ fn publish_aliased_mixed_locality_isolation_matches_publish_literal() {
             .subscribers
             .register_with_locality("home/temp", Locality::Remote, move |_s| {
                 clone.fetch_add(1, Ordering::SeqCst);
-            });
+            })
+            .expect("no quota is stated on this table");
     }
 
     let opts = PublishOptions::put().with_locality(Locality::SessionLocal);
@@ -1947,7 +1972,8 @@ fn record_loopback_samples(session: &TokioSession, pattern: &str) -> Arc<Mutex<V
         .subscribers
         .register(pattern, move |s| {
             captured_clone.lock().unwrap().push(Sample::from_view(s));
-        });
+        })
+        .expect("no quota is stated on this table");
     captured
 }
 
@@ -8417,7 +8443,8 @@ fn publisher_put_fires_loopback_subscriber() {
         .subscribers
         .register("home/temp", move |_sample| {
             fired_cb.fetch_add(1, Ordering::SeqCst);
-        });
+        })
+        .expect("no quota is stated on this table");
 
     let pubr = session.declare_publisher(
         "home/temp",
@@ -8441,7 +8468,8 @@ fn publisher_delete_routes_to_del_kind_and_drops_payload() {
         .subscribers
         .register("clear/me", move |sample| {
             *kind_cb.lock().unwrap() = Some(sample.kind());
-        });
+        })
+        .expect("no quota is stated on this table");
 
     let pubr = session.declare_publisher(
         "clear/me",
@@ -8515,7 +8543,8 @@ fn publisher_aliased_put_resolves_loopback_through_outbound_table() {
         .subscribers
         .register("home/temp", move |_sample| {
             fired_cb.fetch_add(1, Ordering::SeqCst);
-        });
+        })
+        .expect("no quota is stated on this table");
 
     let pa = session.declare_publisher_aliased(
         7,
@@ -8544,7 +8573,8 @@ fn publisher_aliased_unknown_mapping_returns_err_and_skips_both_branches() {
         .subscribers
         .register("home/temp", move |_| {
             fired_cb.fetch_add(1, Ordering::SeqCst);
-        });
+        })
+        .expect("no quota is stated on this table");
 
     let pa = session.declare_publisher_aliased(99, None, PublishOptions::put());
     let err = pa.put(b"x");
@@ -8575,7 +8605,8 @@ fn publisher_aliased_delete_routes_to_del_kind() {
         .subscribers
         .register("clear/me", move |sample| {
             *kind_cb.lock().unwrap() = Some(sample.kind());
-        });
+        })
+        .expect("no quota is stated on this table");
 
     let pa = session.declare_publisher_aliased(
         7,

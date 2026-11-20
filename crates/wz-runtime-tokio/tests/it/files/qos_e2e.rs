@@ -139,15 +139,18 @@ async fn qos_negotiates_and_delivers_prioritized_put_over_real_tcp() {
     {
         let fired = fired.clone();
         let expect = payload.clone();
-        observer.subscribers.register(KEYEXPR, move |sample| {
-            assert_eq!(sample.keyexpr(), KEYEXPR);
-            assert_eq!(
+        observer
+            .subscribers
+            .register(KEYEXPR, move |sample| {
+                assert_eq!(sample.keyexpr(), KEYEXPR);
+                assert_eq!(
                 sample.payload(),
                 &expect[..],
                 "the payload delivered over the prioritized conduit matches the Put byte-for-byte"
             );
-            fired.fetch_add(1, Ordering::SeqCst);
-        });
+                fired.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
     }
 
     let timeouts = SessionTimeouts::spec_defaults();

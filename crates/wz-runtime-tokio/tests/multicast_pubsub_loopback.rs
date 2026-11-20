@@ -148,11 +148,14 @@ async fn publisher_push_reaches_group_subscriber() {
     let mut observer = ApplicationLayerObserver::new();
     {
         let fired = fired.clone();
-        observer.subscribers.register(KEYEXPR, move |sample| {
-            assert_eq!(sample.keyexpr(), KEYEXPR);
-            assert_eq!(sample.payload(), PAYLOAD);
-            fired.fetch_add(1, Ordering::SeqCst);
-        });
+        observer
+            .subscribers
+            .register(KEYEXPR, move |sample| {
+                assert_eq!(sample.keyexpr(), KEYEXPR);
+                assert_eq!(sample.payload(), PAYLOAD);
+                fired.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
     }
 
     // Publisher node A: ephemeral-bound socket targeting the group (TX-only
@@ -254,11 +257,14 @@ async fn compressing_group_delivers_a_compressed_publish() {
     {
         let fired = fired.clone();
         let expected = payload.clone();
-        observer.subscribers.register(KEYEXPR, move |sample| {
-            assert_eq!(sample.keyexpr(), KEYEXPR);
-            assert_eq!(sample.payload(), &expected[..]);
-            fired.fetch_add(1, Ordering::SeqCst);
-        });
+        observer
+            .subscribers
+            .register(KEYEXPR, move |sample| {
+                assert_eq!(sample.keyexpr(), KEYEXPR);
+                assert_eq!(sample.payload(), &expected[..]);
+                fired.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
     }
 
     let mut link_a = MulticastLink::new(|| bind_publisher(COMPRESSION_PORT));
@@ -365,11 +371,14 @@ async fn qos_group_publish_qos_reaches_subscriber() {
     let mut observer_b = ApplicationLayerObserver::new();
     {
         let fired = fired.clone();
-        observer_b.subscribers.register(KEYEXPR, move |sample| {
-            assert_eq!(sample.keyexpr(), KEYEXPR);
-            assert_eq!(sample.payload(), PAYLOAD);
-            fired.fetch_add(1, Ordering::SeqCst);
-        });
+        observer_b
+            .subscribers
+            .register(KEYEXPR, move |sample| {
+                assert_eq!(sample.keyexpr(), KEYEXPR);
+                assert_eq!(sample.payload(), PAYLOAD);
+                fired.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
     }
 
     // Publisher node A: ephemeral-bound socket targeting the group, DRIVEN through a
@@ -497,9 +506,12 @@ async fn qos_publisher_refused_by_non_qos_subscriber() {
     let mut observer_b = ApplicationLayerObserver::new();
     {
         let fired = fired.clone();
-        observer_b.subscribers.register(KEYEXPR, move |_sample| {
-            fired.fetch_add(1, Ordering::SeqCst);
-        });
+        observer_b
+            .subscribers
+            .register(KEYEXPR, move |_sample| {
+                fired.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
     }
 
     // Publisher node A is qos, driven through a direct Session::publish_qos.
@@ -614,11 +626,14 @@ async fn oversize_put_fragments_and_reassembles_across_nodes() {
     {
         let fired = fired.clone();
         let expect = payload.clone();
-        observer.subscribers.register(FRAG_KEYEXPR, move |sample| {
-            assert_eq!(sample.keyexpr(), FRAG_KEYEXPR);
-            assert_eq!(sample.payload(), &expect[..]);
-            fired.fetch_add(1, Ordering::SeqCst);
-        });
+        observer
+            .subscribers
+            .register(FRAG_KEYEXPR, move |sample| {
+                assert_eq!(sample.keyexpr(), FRAG_KEYEXPR);
+                assert_eq!(sample.payload(), &expect[..]);
+                fired.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
     }
 
     let mut link_a = MulticastLink::new(|| bind_publisher(FRAG_PORT));
@@ -736,10 +751,13 @@ async fn concurrent_peers_fragment_reassemble_in_isolation() {
     let mut observer = ApplicationLayerObserver::new();
     {
         let delivered = delivered.clone();
-        observer.subscribers.register(CONC_KEYEXPR, move |sample| {
-            assert_eq!(sample.keyexpr(), CONC_KEYEXPR);
-            delivered.lock().unwrap().push(sample.payload().to_vec());
-        });
+        observer
+            .subscribers
+            .register(CONC_KEYEXPR, move |sample| {
+                assert_eq!(sample.keyexpr(), CONC_KEYEXPR);
+                delivered.lock().unwrap().push(sample.payload().to_vec());
+            })
+            .expect("no quota is stated on this table");
     }
 
     // ── Publishers A and C: distinct ephemeral sockets -> distinct source
@@ -885,11 +903,14 @@ async fn router_egress_helper_reaches_group_subscriber() {
     let mut observer = ApplicationLayerObserver::new();
     {
         let fired = fired.clone();
-        observer.subscribers.register(KEYEXPR, move |sample| {
-            assert_eq!(sample.keyexpr(), KEYEXPR);
-            assert_eq!(sample.payload(), PAYLOAD);
-            fired.fetch_add(1, Ordering::SeqCst);
-        });
+        observer
+            .subscribers
+            .register(KEYEXPR, move |sample| {
+                assert_eq!(sample.keyexpr(), KEYEXPR);
+                assert_eq!(sample.payload(), PAYLOAD);
+                fired.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
     }
 
     let producer_b = MulticastTxProducer::new();
