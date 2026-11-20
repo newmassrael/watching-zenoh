@@ -5967,6 +5967,24 @@
         "The kit lane's `waker` rule pin (8 against a claim of 7 on zephyr-client-fixed and -get), from Round 4558.",
         "The hosted CI of this landing is the first C1cs verdict since `cd240d4b4`; read it, and the C1cc and M legs, before the next round."
       ]
+    },
+    "Round 4568": {
+      "decision_summary": "Repay two reds of Round 4566 that peers found on main `4df161c9e`. First, the round-fed silent-skip gate: the MAX_QUERYABLES enforcement test bailed out with `let Some(..) = stated_two(..) else { return; }`, and `stated_two` says nothing when it yields `None`. That `None` was never a missing fixture. A build whose domain keeps the build's value alone refuses the statement of two, and that refusal is what such a build is checked for. So the helper no longer hands back an `Option`: `held_to_two(select, singleton, check)` asserts the refusal on a build of one value and runs `check` on the snapshot of two on every other build, and the six tests that stated two go through it. Second, Layer C1g's `--all-features` leg: Round 4566 made a fixed build hold every table to its capacity, the heap-policy tables among them, and changed the unit tests that read the old promise but not `tests/it/files/storage_policy_tables.rs`. Its three bodies for tables that hold a quota (subscribers, pending queries, pending liveliness gets) now read the build's quota beside `P::ENFORCES_CAPACITY`, as the unit tests do.",
+      "changes_bullets": [
+        "`crates/wz-session-core/src/limits.rs`: `stated_two` becomes `held_to_two(select, singleton, check)`, which asserts a build of one value refuses two and runs `check` on the snapshot of two otherwise; the six `*_stated_refuses_the_next` tests call it.",
+        "`crates/wz-session-core/tests/it/files/storage_policy_tables.rs`: the subscriber, pending-query and liveliness-get bodies expect the table held to `N` where the storage enforces it or the build's quota is `N`."
+      ],
+      "verification_bullets": [
+        "`silent_skip_gate.py --check` fails at `4df161c9e` on `limits.rs:164` and passes on this tree: 22 tests bail out on an Option helper, none on a silent one.",
+        "wz-session-core `enforcement` tests 14 passed on the C1g heap union and 14 with `bounded-heapless`; `cargo test -p wz-session-core --all-features --test it storage_policy_tables` 26 passed (the three heap cases that failed at `4df161c9e` among them), and 14 with `storage-profile,alloc,liveliness-get`; clippy `-D warnings --all-targets` of wz-session-core on the C1g union and `cargo fmt --check` pass."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "The TCP link MTU round (C1cc's receive-buffer leg), the Layer M group re-join flake, and the kit lane's `waker` pin (taken by another session) remain as Round 4567 carried them."
+      ]
     }
   },
   "inventory_entries": {

@@ -114,17 +114,18 @@ mod enforcement {
         assert_eq!(held(&observer), admitted);
     }
 
-    /// Two, as `select` states it; `None` where the build keeps its value alone, which refuses
-    /// the statement itself.
-    fn stated_two(select: Select, singleton: bool) -> Option<SessionLimits> {
+    /// Two, as `select` states it, and `check` run on the snapshot that states it. A build that
+    /// keeps the build's value alone (`singleton`) refuses the statement itself, and that
+    /// refusal is what the build is checked for: it has no snapshot of two to run `check` on.
+    fn held_to_two(select: Select, singleton: bool, check: impl FnOnce(&SessionLimits)) {
         let mut limits = SessionLimits::defaults();
         let stated = select(&mut limits, Quota::at_most(2));
         if singleton {
-            assert!(stated.is_err());
-            return None;
+            assert!(stated.is_err(), "a build of one value refuses two");
+        } else {
+            stated.expect("two is inside the domain");
+            check(&limits);
         }
-        stated.expect("two is inside the domain");
-        Some(limits)
     }
 
     /// Held to two: the third entry is refused as a full table and changes nothing, and a place
@@ -161,32 +162,32 @@ mod enforcement {
     #[cfg(feature = "query-queryable")]
     #[test]
     fn max_queryables_stated_refuses_the_next_and_takes_no_id() {
-        let Some(limits) = stated_two(
+        held_to_two(
             SessionLimits::select_max_queryables,
             MaxQueryables::DOMAIN.is_singleton(),
-        ) else {
-            return;
-        };
-        let mut observer = ApplicationLayerObserver::with_limits(&limits);
-        let first = observer
-            .queryables
-            .register("bound/a", |_, _| {})
-            .expect("under the quota");
-        let second = observer
-            .queryables
-            .register("bound/b", |_, _| {})
-            .expect("under the quota");
-        assert_eq!(
-            observer.queryables.register("bound/c", |_, _| {}),
-            Err(RegisterError::TableFull)
+            |limits| {
+                let mut observer = ApplicationLayerObserver::with_limits(limits);
+                let first = observer
+                    .queryables
+                    .register("bound/a", |_, _| {})
+                    .expect("under the quota");
+                let second = observer
+                    .queryables
+                    .register("bound/b", |_, _| {})
+                    .expect("under the quota");
+                assert_eq!(
+                    observer.queryables.register("bound/c", |_, _| {}),
+                    Err(RegisterError::TableFull)
+                );
+                assert_eq!(observer.queryables.len(), 2);
+                assert!(observer.queryables.unregister(first));
+                let third = observer
+                    .queryables
+                    .register("bound/c", |_, _| {})
+                    .expect("a place is free under the quota");
+                assert_eq!(third.as_u64(), second.as_u64() + 1);
+            },
         );
-        assert_eq!(observer.queryables.len(), 2);
-        assert!(observer.queryables.unregister(first));
-        let third = observer
-            .queryables
-            .register("bound/c", |_, _| {})
-            .expect("a place is free under the quota");
-        assert_eq!(third.as_u64(), second.as_u64() + 1);
     }
 
     fn pending_query(
@@ -218,20 +219,21 @@ mod enforcement {
     /// `MAX_PENDING_QUERIES` stated as two.
     #[test]
     fn max_pending_queries_stated_refuses_the_next() {
-        if let Some(limits) = stated_two(
+        held_to_two(
             SessionLimits::select_max_pending_queries,
             MaxPendingQueries::DOMAIN.is_singleton(),
-        ) {
-            refuses_the_third(
-                &limits,
-                pending_query,
-                |o, index| {
-                    o.replies
-                        .unregister(u32::try_from(index).expect("a test index"))
-                },
-                |o| o.replies.len(),
-            );
-        }
+            |limits| {
+                refuses_the_third(
+                    limits,
+                    pending_query,
+                    |o, index| {
+                        o.replies
+                            .unregister(u32::try_from(index).expect("a test index"))
+                    },
+                    |o| o.replies.len(),
+                )
+            },
+        );
     }
 
     #[cfg(feature = "declare-subscriber")]
@@ -258,20 +260,21 @@ mod enforcement {
     #[cfg(feature = "declare-subscriber")]
     #[test]
     fn max_decl_observers_stated_refuses_the_next() {
-        if let Some(limits) = stated_two(
+        held_to_two(
             SessionLimits::select_max_decl_observers,
             MaxDeclObservers::DOMAIN.is_singleton(),
-        ) {
-            refuses_the_third(
-                &limits,
-                decl_observer,
-                |o, index| {
-                    o.remote_subscribers
-                        .remove_subscriber_declared_sink(index as u64)
-                },
-                |o| o.remote_subscribers.on_decl_len(),
-            );
-        }
+            |limits| {
+                refuses_the_third(
+                    limits,
+                    decl_observer,
+                    |o, index| {
+                        o.remote_subscribers
+                            .remove_subscriber_declared_sink(index as u64)
+                    },
+                    |o| o.remote_subscribers.on_decl_len(),
+                )
+            },
+        );
     }
 
     #[cfg(feature = "liveliness-subscriber")]
@@ -302,17 +305,18 @@ mod enforcement {
     #[cfg(feature = "liveliness-subscriber")]
     #[test]
     fn max_liveliness_subscriptions_stated_refuses_the_next() {
-        if let Some(limits) = stated_two(
+        held_to_two(
             SessionLimits::select_max_liveliness_subscriptions,
             MaxLivelinessSubscriptions::DOMAIN.is_singleton(),
-        ) {
-            refuses_the_third(
-                &limits,
-                liveliness_subscriber,
-                |o, index| o.liveliness_subscribers.unregister(index as u64),
-                |o| o.liveliness_subscribers.slot_count(),
-            );
-        }
+            |limits| {
+                refuses_the_third(
+                    limits,
+                    liveliness_subscriber,
+                    |o, index| o.liveliness_subscribers.unregister(index as u64),
+                    |o| o.liveliness_subscribers.slot_count(),
+                )
+            },
+        );
     }
 
     #[cfg(feature = "liveliness-token")]
@@ -340,17 +344,18 @@ mod enforcement {
     #[cfg(feature = "liveliness-token")]
     #[test]
     fn max_local_tokens_stated_refuses_the_next() {
-        if let Some(limits) = stated_two(
+        held_to_two(
             SessionLimits::select_max_local_tokens,
             MaxLocalTokens::DOMAIN.is_singleton(),
-        ) {
-            refuses_the_third(
-                &limits,
-                local_token,
-                |o, index| o.local_tokens.unregister(index as u64),
-                |o| o.local_tokens.len(),
-            );
-        }
+            |limits| {
+                refuses_the_third(
+                    limits,
+                    local_token,
+                    |o, index| o.local_tokens.unregister(index as u64),
+                    |o| o.local_tokens.len(),
+                )
+            },
+        );
     }
 
     #[cfg(feature = "liveliness-get")]
@@ -377,17 +382,18 @@ mod enforcement {
     #[cfg(feature = "liveliness-get")]
     #[test]
     fn max_pending_liveliness_gets_stated_refuses_the_next() {
-        if let Some(limits) = stated_two(
+        held_to_two(
             SessionLimits::select_max_pending_liveliness_gets,
             MaxPendingLivelinessGets::DOMAIN.is_singleton(),
-        ) {
-            refuses_the_third(
-                &limits,
-                liveliness_get,
-                |o, index| o.liveliness_gets.unregister(index as u64),
-                |o| o.liveliness_gets.len(),
-            );
-        }
+            |limits| {
+                refuses_the_third(
+                    limits,
+                    liveliness_get,
+                    |o, index| o.liveliness_gets.unregister(index as u64),
+                    |o| o.liveliness_gets.len(),
+                )
+            },
+        );
     }
 }
 
