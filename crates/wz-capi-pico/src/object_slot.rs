@@ -23,7 +23,7 @@ use crate::prelude::*;
 
 /// Which object a place is for. With the pools reserved each kind has a pool of its own, so the
 /// count the program stated for one kind is never spent by another of the same size; a kind a
-/// build has none of is not a variant of it, and each keeps its number in every build.
+/// build places nowhere is not a variant of it, and each keeps its number in every build.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
     Session = 0,
@@ -40,6 +40,9 @@ pub(crate) enum Kind {
     Reply = 7,
     #[cfg(feature = "queryable")]
     Query = 8,
+    // A payload takes a slot only where there are pools to take it from; without them it is
+    // boxed in the allocation its thread kept for it (`crate::bytes`).
+    #[cfg(feature = "object-pool")]
     Bytes = 9,
 }
 
