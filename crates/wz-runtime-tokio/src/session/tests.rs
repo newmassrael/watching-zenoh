@@ -9541,37 +9541,47 @@ fn build_probing_session() -> (
 }
 
 /// R2290 (open-debt item 626) — the SUBSCRIBER plane's half of "a wire
-/// retraction and the local retirement it belongs to are ONE transition".
+/// retraction never leaves while the registry still holds what it retracts,
+/// and never waits for room with the observer held".
 ///
-/// The window between them is not theoretical: the drive thread drains the
-/// staged interest-response chain under this very mutex and resolves each
-/// staged reply against `observer.subscribers`, so a drain landing in the
-/// window announced a subscription whose `UndeclSubscriber` had already gone
-/// out. Measured before the fix as a 1-2% `wz-capi-pico::matching_multiface`
-/// failure delivering `[true, false, true, false]`; 0 in 300 after it.
-///
-/// The probe is deterministic where that leg is statistical: a same-thread
-/// `try_lock` reports `WouldBlock`, so `false` here means the emitting thread
-/// held the observer — which is exactly what denies the drain the window.
+/// The drive thread drains the staged interest-response chain under the
+/// observer mutex and resolves each staged reply against
+/// `observer.subscribers`, so a retraction that left while the subscription was
+/// still registered let a drain announce it afterwards (measured as a 1-2%
+/// `wz-capi-pico::matching_multiface` failure delivering
+/// `[true, false, true, false]`). The retraction is therefore emitted after the
+/// subscription is retired. It is emitted with the observer FREE, because the
+/// emit asks the link for room and may wait for it: a thread that waits for an
+/// event while it holds the observer stops the drive thread that needs it, and
+/// the lock-order checker refuses that wait (the stability suite found it on a
+/// stream link that was full). The probe's room ask waits on a condition
+/// variable, so under the checker's default mode the old order panics here too.
 #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
 #[test]
-fn a_routed_subscribers_wire_retract_is_emitted_under_the_observer_lock() {
+fn a_routed_subscribers_wire_retract_leaves_after_its_retirement_with_the_observer_free() {
     let (session, driver) = build_probing_session();
     let sub = session
         .declare_subscriber("home/temp", SubscribeOptions::default(), |_| {})
         .expect("remote declare against the test link succeeds");
     // Armed AFTER the declare so the population is the retract frame alone.
-    driver.arm(session.observer().clone());
+    driver.arm(session.observer().clone(), |obs| {
+        !obs.subscribers.is_empty()
+    });
     drop(sub);
 
     assert_eq!(
-        driver.lockable_flags(),
-        vec![false],
-        "exactly one frame (the UndeclSubscriber) must leave while armed, and \
-         it must leave with the observer mutex HELD — `true` means the retract \
-         was emitted outside the acquisition that retires the subscription, \
-         which is the window a concurrent interest drain re-announces into, \
-         and an empty vec means no retract was emitted at all"
+        driver.emits(),
+        vec![Some(false)],
+        "exactly one frame (the UndeclSubscriber) must leave while armed, with \
+         the observer mutex FREE (`None` is an emit inside the acquisition) and \
+         the subscription already retired (`Some(true)` is the window a \
+         concurrent interest drain re-announces into); an empty vec means no \
+         retract was emitted at all"
+    );
+    assert_eq!(
+        driver.room_asks(),
+        vec![true],
+        "the retract asks the link for room once, with the observer mutex free"
     );
 }
 
@@ -9580,22 +9590,30 @@ fn a_routed_subscribers_wire_retract_is_emitted_under_the_observer_lock() {
 /// the DRAIN, not from the handle that was caught. `drain_declare_replies`
 /// resolves staged replies against exactly two tables — `subscribers` and
 /// `local_tokens` — so exactly two handles retire an entity a staged reply can
-/// still announce, and both had the same emit-then-retire shape.
+/// still announce, and both retire it before their retraction leaves.
 #[cfg(feature = "liveliness-token")]
 #[test]
-fn a_liveliness_tokens_wire_retract_is_emitted_under_the_observer_lock() {
+fn a_liveliness_tokens_wire_retract_leaves_after_its_retirement_with_the_observer_free() {
     let (session, driver) = build_probing_session();
     let token = session
         .declare_token("group1/wz", LivelinessOptions::new())
         .expect("token declare against the test link succeeds");
-    driver.arm(session.observer().clone());
+    driver.arm(session.observer().clone(), |obs| {
+        !obs.local_tokens.is_empty()
+    });
     drop(token);
 
     assert_eq!(
-        driver.lockable_flags(),
-        vec![false],
-        "exactly one frame (the UndeclToken) must leave while armed, and it \
-         must leave with the observer mutex HELD — see the subscriber twin"
+        driver.emits(),
+        vec![Some(false)],
+        "exactly one frame (the UndeclToken) must leave while armed, with the \
+         observer mutex free and the token already retired — see the subscriber \
+         twin"
+    );
+    assert_eq!(
+        driver.room_asks(),
+        vec![true],
+        "the retract asks the link for room once, with the observer mutex free"
     );
 }
 
