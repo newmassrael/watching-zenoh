@@ -3927,6 +3927,8 @@ layer_c0_test_discipline() {
     _runci_leg claude_md_upstream_pin_gate --after claude_md_upstream_pin_gate.selftest -- python3 scripts/lib/claude_md_upstream_pin_gate.py --check
     # The server layer (storage, admin space, auth methods) sits above wz-session-core: the core
     # names no upper crate and the list of server modules not yet moved out of it only shrinks.
+    # The pico ABI's extension doors sit above its core the same way: they reach it through the
+    # C ABI and the versioned extension interface only, and the core names none of them.
     _runci_leg layer_direction_gate.selftest -- python3 scripts/lib/layer_direction_gate.py --selftest
     _runci_leg layer_direction_gate --after layer_direction_gate.selftest -- python3 scripts/lib/layer_direction_gate.py --check
     # Every fact the dissection has published to a selector stays published: the registry
