@@ -7,11 +7,11 @@
 #[cfg(not(feature = "session-slot"))]
 use alloc::rc::Rc;
 use core::cell::{OnceCell, RefCell};
-use core::fmt::Write as _;
+use core::net::SocketAddr;
 
 use wz_link_lwip::rx_sockets::{SessionRxSocket, SESSION_RX_SLOT_SIZE};
 use wz_link_lwip::{Datagram, TxPayload};
-use wz_session_core::caps::MAX_LOCATOR_LEN;
+use wz_runtime_coop::session_drive::LinkProto;
 use wz_session_core::datagram_peer::{DatagramVerdict, ForeignCounts, PeerBinding};
 use wz_session_core::link::{
     BoxedLinkDriver, LinkDropCause, LinkEndpoints, LinkSendOutcome, TxSlot, TxSlotGrant,
@@ -138,15 +138,10 @@ pub type DriverHandle = Rc<LwipUdpDriver>;
 #[cfg(feature = "session-slot")]
 pub type DriverHandle = wz_session_core::session_slot::SlotDriver<LwipUdpDriver>;
 
-/// `udp/a.b.c.d:port`, zenoh's rendering of a UDP locator, written into fixed
-/// text: the longest one, `udp/255.255.255.255:65535`, is 25 bytes of the
-/// `MAX_LOCATOR_LEN` the text has.
-fn udp_locator(addr: u32, port: u16) -> heapless::String<MAX_LOCATOR_LEN> {
-    let [a, b, c, d] = wz_link_lwip::ipv4_octets(addr);
-    let mut text = heapless::String::new();
-    // Cannot fail: the longest rendering is shorter than the text's capacity.
-    let _ = write!(text, "udp/{a}.{b}.{c}.{d}:{port}");
-    text
+/// An IPv4 address as lwIP holds it and a port, as the socket address the
+/// cooperative engine names a link's end by.
+fn socket_addr(addr: u32, port: u16) -> SocketAddr {
+    SocketAddr::from((wz_link_lwip::ipv4_octets(addr), port))
 }
 
 impl LwipUdpDriver {
@@ -181,6 +176,13 @@ impl LwipUdpDriver {
 
     /// Record the link's ends once the peer is known. The source is the
     /// address lwIP routes to that peer from, with this socket's port.
+    ///
+    /// The text of each end is the cooperative engine's one rule for it
+    /// ([`link_endpoints`](wz_runtime_coop::udp_link::link_endpoints)): an end
+    /// whose text the build's locator bound cannot hold is refused and reads
+    /// blank, never a locator cut short, and that bound is held at compile time
+    /// to at least the widest IPv4 end
+    /// ([`LONGEST_IPV4_LOCATOR_LEN`](wz_runtime_coop::session_drive::LONGEST_IPV4_LOCATOR_LEN)).
     fn note_endpoints(&self) {
         let Some((addr, port)) = self.binding.peer() else {
             return;
@@ -192,10 +194,13 @@ impl LwipUdpDriver {
             return;
         };
         let local_port = self.socket.borrow().local_port();
-        let _ = self.endpoints.set(LinkEndpoints::new(
-            udp_locator(src, local_port).as_str(),
-            udp_locator(addr, port).as_str(),
-        ));
+        let _ = self
+            .endpoints
+            .set(wz_runtime_coop::udp_link::link_endpoints(
+                LinkProto::Udp,
+                socket_addr(src, local_port),
+                socket_addr(addr, port),
+            ));
     }
 
     /// The peer every send targets `(addr, port)`, once one is known.
@@ -701,5 +706,22 @@ mod tests {
         std::assert_eq!(*returned.borrow(), std::vec![0u32], "given back once read");
         std::assert!(lent.borrow().is_empty());
         std::assert_eq!(driver.peer(), Some(peer));
+    }
+
+    /// A link names both its ends in the cooperative engine's locator text, each
+    /// whole: the peer it was given, and the address lwIP routes to it from with
+    /// the socket's port.
+    #[test]
+    fn a_link_names_its_ends_in_the_cooperative_engines_locator_text() {
+        let (_serial, link) = wz_link_lwip::lwip_test_link();
+        let driver = looped(&link, 7486);
+        let ends = driver.link_endpoints().expect("a dialled link has ends");
+        let expected = wz_runtime_coop::udp_link::link_endpoints(
+            LinkProto::Udp,
+            SocketAddr::from(([127, 0, 0, 1], 7486)),
+            SocketAddr::from(([127, 0, 0, 1], 7486)),
+        );
+        std::assert_eq!(ends, &expected);
+        std::assert_eq!(ends.dst, "udp/127.0.0.1:7486");
     }
 }
