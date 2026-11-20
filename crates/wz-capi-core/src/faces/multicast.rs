@@ -472,6 +472,17 @@ fn listen_on(
 }
 
 impl SharedSession {
+    /// Ask `answers` of the session of every group this node joined, and count the groups it
+    /// answers `true` for: the group legs of a session-wide call, such as the batch window's
+    /// (`Self::batch_start_all`), as the faces are counted beside them.
+    pub(super) fn groups_answering(
+        &self,
+        answers: impl Fn(&TokioMulticastSession) -> bool,
+    ) -> usize {
+        let groups = self.lock().mcast_set.clone();
+        groups.iter().filter(|leg| answers(&leg.session)).count()
+    }
+
     /// A session for a group this node joins, sending through `producer`, the
     /// group's transmit seam, and counting the members `membership` holds when a
     /// get is sent on it.

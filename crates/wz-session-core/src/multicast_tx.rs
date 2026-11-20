@@ -488,6 +488,67 @@ where
     M: MulticastTxMint + ?Sized,
     Q: MulticastTxQueue + ?Sized,
 {
+    multicast_tx_push_in(item, tx_sn, params, conf, queue, None)
+}
+
+/// [`multicast_tx_push`] inside a batch window (zenoh-pico `zp_batch_start` on a multicast
+/// transport): the message is appended to `window`, its conduit's open frame, when the frame is
+/// of the message's reliability and the message fits behind it, and spends no sequence number;
+/// otherwise the open frame is put on `queue` and the message opens the next one, asking for
+/// room and taking its SN as an unbatched push does. The frame stays open, and leaves when it
+/// overflows, when an express message joins it, or when the window is flushed
+/// ([`MulticastBatch::flush`]), as zenoh-pico's common transmit batches
+/// (`vendor/zenoh-pico/src/transport/common/tx.c` @ `static z_result_t _z_transport_tx_send_n_msg_inner(`).
+///
+/// A message past the group's batch on its own is not held: the open frame leaves first and
+/// the message leaves as the fragment chain an unbatched push sends. A window frame is built on
+/// the heap and never in a slot the queue lends, since a lent slot is the queue's at once.
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        any(feature = "liveliness-token", feature = "declare-subscriber")
+    )
+))]
+pub fn multicast_tx_push_batched<M, Q>(
+    item: MulticastTxItem,
+    tx_sn: &mut M,
+    params: &crate::multicast_params::MulticastParams,
+    conf: &TxQueueConf,
+    queue: &mut Q,
+    window: &mut MulticastBatch,
+) -> PushOutcome
+where
+    M: MulticastTxMint + ?Sized,
+    Q: MulticastTxQueue + ?Sized,
+{
+    multicast_tx_push_in(item, tx_sn, params, conf, queue, Some(window))
+}
+
+/// [`multicast_tx_push`] with or without a batch window ([`multicast_tx_push_batched`]).
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        any(feature = "liveliness-token", feature = "declare-subscriber")
+    )
+))]
+fn multicast_tx_push_in<M, Q>(
+    item: MulticastTxItem,
+    tx_sn: &mut M,
+    params: &crate::multicast_params::MulticastParams,
+    conf: &TxQueueConf,
+    queue: &mut Q,
+    window: Option<&mut MulticastBatch>,
+) -> PushOutcome
+where
+    M: MulticastTxMint + ?Sized,
+    Q: MulticastTxQueue + ?Sized,
+{
     // R2937 — the meta is resolved once, by the function a producer also asks
     // for the conduit it must hold (`multicast_tx_conduit`), so the conduit
     // locked and the conduit minted on cannot come from two readings.
@@ -511,6 +572,7 @@ where
             params,
             conf,
             queue,
+            window,
         ),
         // A query to the group. Reliable (`frame_meta`); a large one (a long selector, a
         // value) re-frames as a fragment chain exactly like an oversize Push.
@@ -523,6 +585,7 @@ where
             params,
             conf,
             queue,
+            window,
         ),
         // R311lq — queryable reply egress. Reliable like a reliable-ring put
         // (zenoh-pico replies via the same `_z_send_n_msg` multicast TX with
@@ -538,6 +601,7 @@ where
             params,
             conf,
             queue,
+            window,
         ),
         // R311lq — the terminal of a multicast reply chain. Always reliable and
         // always tiny (a single VLE rid), so it never reaches the fragment
@@ -558,6 +622,7 @@ where
                 params,
                 conf,
                 queue,
+                window,
             )
         }
         // R311lr — declarer-side liveliness interest-response egress. Reliable —
@@ -575,6 +640,7 @@ where
             params,
             conf,
             queue,
+            window,
         ),
         #[cfg(all(feature = "codec-declare", feature = "codec-push"))]
         MulticastTxItem::Declare { declare } => push_frame(
@@ -585,6 +651,7 @@ where
             params,
             conf,
             queue,
+            window,
         ),
         #[cfg(feature = "codec-push")]
         MulticastTxItem::Interest { interest } => push_frame(
@@ -595,6 +662,7 @@ where
             params,
             conf,
             queue,
+            window,
         ),
     }
 }
@@ -652,12 +720,13 @@ fn frame_meta(
             // R2928 — the congestion control comes off the Push's own ext_qos,
             // as upstream's `congestion_control()` reads it
             // (`commons/zenoh-protocol/src/network/mod.rs` @ `NetworkBodyRef::Push(msg) => msg.ext_qos.get_congestion_control(),`).
-            let congestion = crate::declare_ext_qos::read_push_qos(push).congestion();
+            let qos = crate::declare_ext_qos::read_push_qos(push);
             FrameMeta {
                 priority: eff,
                 ext_qos: frame_ext_qos(eff),
                 reliable: *reliable,
-                droppable: is_droppable(*reliable, congestion),
+                droppable: is_droppable(*reliable, qos.congestion()),
+                express: qos.is_express(),
             }
         }
         // A query's band comes off its own `ext_qos`, clamped as a Response's is; it rides the
@@ -671,6 +740,7 @@ fn frame_meta(
                 ext_qos: frame_ext_qos(eff),
                 reliable: true,
                 droppable: is_droppable(true, qos.congestion()),
+                express: qos.is_express(),
             }
         }
         // R2594 — the band comes off the Response's own `ext_qos`, clamped
@@ -689,6 +759,7 @@ fn frame_meta(
                 ext_qos: frame_ext_qos(eff),
                 reliable: true,
                 droppable: is_droppable(true, qos.congestion()),
+                express: qos.is_express(),
             }
         }
         // R2595 — the terminator rides its query's band, clamped as the
@@ -701,6 +772,7 @@ fn frame_meta(
                 ext_qos: frame_ext_qos(eff),
                 reliable: true,
                 droppable: is_droppable(true, qos.congestion()),
+                express: qos.is_express(),
             }
         }
         // The declare reply is DEFAULT-band: no frame ext_qos, no per-priority
@@ -718,6 +790,7 @@ fn frame_meta(
                 true,
                 crate::declare_ext_qos::read_interest_qos(interest).congestion(),
             ),
+            express: false,
         },
     }
 }
@@ -741,6 +814,7 @@ fn declare_frame_meta(declare: &crate::transport_profile::owned::DeclareOwned) -
             true,
             crate::declare_ext_qos::read_declare_qos(declare).congestion(),
         ),
+        express: false,
     }
 }
 
@@ -835,6 +909,9 @@ struct FrameMeta {
     ext_qos: Option<Priority>,
     reliable: bool,
     droppable: bool,
+    /// Whether the message leaves at once even inside a batch window, as its own `ext_qos`
+    /// says: the window's open frame goes with it.
+    express: bool,
 }
 
 /// R2928 — one message's walk onto the queue: ask for room, mint, encode, and
@@ -863,6 +940,9 @@ struct FrameMeta {
         any(feature = "liveliness-token", feature = "declare-subscriber")
     )
 ))]
+// The message (meta, size, body), where its SN comes from, the group and its queue, and the
+// window: each is a separate input of one walk, and none is a part of another.
+#[allow(clippy::too_many_arguments)]
 fn push_frame<M, Q, P>(
     meta: FrameMeta,
     worst_case: usize,
@@ -871,6 +951,7 @@ fn push_frame<M, Q, P>(
     params: &crate::multicast_params::MulticastParams,
     conf: &TxQueueConf,
     queue: &mut Q,
+    window: Option<&mut MulticastBatch>,
 ) -> PushOutcome
 where
     M: MulticastTxMint + ?Sized,
@@ -882,7 +963,27 @@ where
         ext_qos,
         reliable,
         droppable,
+        express,
     } = meta;
+    // The group's batch less the `BatchHeader` of a compressing group, so that a datagram, header
+    // included, is within the batch size every member of the group reads it against.
+    let mtu = params.frame_budget();
+    let mut window = window;
+    // Inside a window the message joins its conduit's open frame when it can, with no room
+    // asked and no SN spent: that frame already has both. An express message takes the frame
+    // with it.
+    if let Some(open) = window.as_deref_mut() {
+        if open.append(reliable, mtu, &body) {
+            if express {
+                open.flush(priority, params, queue);
+            }
+            return PushOutcome::Pushed;
+        }
+        // Another reliability, or no room behind the open frame: the frame leaves and the
+        // message opens the next, as zenoh-pico's overflow does
+        // (`vendor/zenoh-pico/src/transport/common/tx.c` @ `static z_result_t _z_transport_tx_batch_overflow(`).
+        open.flush(priority, params, queue);
+    }
     let mut deadline = PushDeadline::new(droppable, conf);
     let has_room = |queue: &mut Q, deadline: &mut PushDeadline| {
         let answer = queue.wait_for_room(priority, deadline.ask());
@@ -895,14 +996,12 @@ where
         return PushOutcome::Congested;
     }
     let sn = tx_sn.mint(priority, reliable);
-    // The group's batch less the `BatchHeader` of a compressing group, so that a datagram, header
-    // included, is within the batch size every member of the group reads it against.
-    let mtu = params.frame_budget();
     let flags = crate::frame_encode::frame_flags(reliable);
     // A compressing group does not lend: a lent frame is written once, into the slot the link
-    // sends, and the batch around it is built from the frame's bytes.
+    // sends, and the batch around it is built from the frame's bytes. Nor does a window: a
+    // lent slot is the queue's once it is filled, and a window's frame stays open.
     #[cfg(feature = "transport-tx-lend")]
-    if !params.compression {
+    if !params.compression && window.is_none() {
         // A frame sent whole is at most one batch (past it, it is fragmented),
         // so that is the most a lent slot must hold. NOT the codec's
         // `MAX_ENCODED_BYTES`, which sizes a vector's first reservation and is
@@ -967,18 +1066,135 @@ where
         return PushOutcome::Pushed;
     }
     #[cfg(not(feature = "transport-fragmentation"))]
-    let _ = (ext_qos, mtu);
-    enqueue_wire(
-        queue,
-        params,
-        MulticastTxDatagram {
-            priority,
+    let _ = ext_qos;
+    match window {
+        // Opened inside a window, the frame stays open for the messages after it.
+        Some(open) if !express => open.hold(reliable, sn, frame),
+        _ => enqueue_wire(
+            queue,
+            params,
+            MulticastTxDatagram {
+                priority,
+                reliable,
+                sn,
+                bytes: frame,
+            },
+        ),
+    }
+    PushOutcome::Pushed
+}
+
+/// One conduit's open frame inside a group's batch window ([`multicast_tx_push_batched`]): the
+/// `T_MID_FRAME` the window's messages are appended to, behind the one sequence number the
+/// frame took when it was opened. Empty outside a window, and between two frames.
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        any(feature = "liveliness-token", feature = "declare-subscriber")
+    )
+))]
+#[derive(Debug, Default)]
+pub struct MulticastBatch {
+    open: Option<OpenFrame>,
+}
+
+/// The frame a [`MulticastBatch`] holds open.
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        any(feature = "liveliness-token", feature = "declare-subscriber")
+    )
+))]
+#[derive(Debug)]
+struct OpenFrame {
+    bytes: alloc::vec::Vec<u8>,
+    reliable: bool,
+    sn: u64,
+}
+
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        any(feature = "liveliness-token", feature = "declare-subscriber")
+    )
+))]
+impl MulticastBatch {
+    /// No frame open.
+    pub const fn new() -> Self {
+        Self { open: None }
+    }
+
+    /// Whether no frame is open.
+    pub fn is_empty(&self) -> bool {
+        self.open.is_none()
+    }
+
+    /// Put the open frame, if one is, on `queue` as `priority`'s datagram, the way every datagram
+    /// of the group goes onto it (compressed when the group compresses), and hold none after.
+    /// No room is asked: the frame was given its room when it was opened.
+    pub fn flush<Q: MulticastTxQueue + ?Sized>(
+        &mut self,
+        priority: Priority,
+        params: &crate::multicast_params::MulticastParams,
+        queue: &mut Q,
+    ) {
+        if let Some(open) = self.open.take() {
+            enqueue_wire(
+                queue,
+                params,
+                MulticastTxDatagram {
+                    priority,
+                    reliable: open.reliable,
+                    sn: open.sn,
+                    bytes: open.bytes,
+                },
+            );
+        }
+    }
+
+    /// Append the message `body` encodes to the open frame, when one is open on the `reliable`
+    /// channel and the frame stays within `mtu` with it. Whether it was appended; a frame it was
+    /// not appended to is as it was.
+    fn append<P>(&mut self, reliable: bool, mtu: usize, body: &P) -> bool
+    where
+        P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
+    {
+        let Some(open) = self.open.as_mut() else {
+            return false;
+        };
+        if open.reliable != reliable {
+            return false;
+        }
+        let before = open.bytes.len();
+        let encoded = {
+            let mut sink = crate::tx_buf::TxSink::new(&mut open.bytes);
+            body(&mut sink).is_ok()
+        };
+        if encoded && open.bytes.len() <= mtu {
+            return true;
+        }
+        open.bytes.truncate(before);
+        false
+    }
+
+    /// Hold `bytes`, a whole frame on the `reliable` channel that took `sn`, open.
+    fn hold(&mut self, reliable: bool, sn: u64, bytes: alloc::vec::Vec<u8>) {
+        debug_assert!(self.open.is_none(), "one frame is open at a time");
+        self.open = Some(OpenFrame {
+            bytes,
             reliable,
             sn,
-            bytes: frame,
-        },
-    );
-    PushOutcome::Pushed
+        });
+    }
 }
 
 /// Put one datagram on the queue as the group's wire carries it: when the group compresses
@@ -1580,6 +1796,141 @@ mod push_tests {
             reliable,
             priority: Priority::DEFAULT,
         }
+    }
+
+    /// [`put`], marked express in its own `ext_qos`.
+    fn express_put(payload: &[u8]) -> MulticastTxItem {
+        let mut push = crate::push_build::build_push_literal("k", payload).unwrap();
+        crate::declare_ext_qos::set_push_qos(
+            &mut push,
+            crate::sample::QosLevel::DEFAULT.with_express(true),
+        )
+        .unwrap();
+        MulticastTxItem::Push {
+            push: Box::new(push),
+            reliable: true,
+            priority: Priority::DEFAULT,
+        }
+    }
+
+    /// The sequence number and the network messages of one `T_MID_FRAME` datagram.
+    fn frame_of(datagram: &[u8]) -> (u64, usize) {
+        let crate::inbound::InboundFrame::Frame { sn, payload, .. } =
+            crate::inbound::parse_inbound(datagram).unwrap()
+        else {
+            panic!("the datagram is a T_MID_FRAME");
+        };
+        let messages = crate::network_message::parse_frame_payload(&payload).unwrap();
+        (sn, messages.len())
+    }
+
+    /// Inside a window the messages of a conduit join one frame: they leave as ONE datagram,
+    /// when the window is flushed and not before, carrying ONE sequence number, and room is
+    /// asked once, by the message that opened the frame.
+    #[test]
+    fn messages_in_a_window_leave_as_one_datagram_with_one_sequence_number() {
+        let params = params(2_048);
+        let conf = TxQueueConf::of_policy(&crate::policy::SessionPolicy::defaults());
+        let mut tx = MulticastTxConduits::new(mask_from_res(params.seq_num_res));
+        let mut queue = Scripted::default();
+        let mut window = MulticastBatch::new();
+        for payload in [&b"a"[..], b"b", b"c"] {
+            let outcome = multicast_tx_push_batched(
+                put(true, payload),
+                &mut tx,
+                &params,
+                &conf,
+                &mut queue,
+                &mut window,
+            );
+            assert_eq!(outcome, PushOutcome::Pushed);
+        }
+        assert!(queue.enqueued.is_empty(), "the frame is held open");
+        assert_eq!(queue.asks.len(), 1, "room is asked by the opening message");
+
+        window.flush(Priority::DEFAULT, &params, &mut queue);
+
+        assert!(window.is_empty());
+        assert_eq!(queue.enqueued.len(), 1, "one datagram");
+        assert_eq!(
+            frame_of(&queue.enqueued[0]),
+            (0, 3),
+            "one SN, three messages"
+        );
+        assert_eq!(
+            tx.advertise_default().next_reliable,
+            1,
+            "the window spent one SN"
+        );
+    }
+
+    /// An express message takes the window's open frame with it, itself inside it.
+    #[test]
+    fn an_express_message_takes_the_open_frame_with_it() {
+        let params = params(2_048);
+        let conf = TxQueueConf::of_policy(&crate::policy::SessionPolicy::defaults());
+        let mut tx = MulticastTxConduits::new(mask_from_res(params.seq_num_res));
+        let mut queue = Scripted::default();
+        let mut window = MulticastBatch::new();
+        multicast_tx_push_batched(
+            put(true, b"a"),
+            &mut tx,
+            &params,
+            &conf,
+            &mut queue,
+            &mut window,
+        );
+        assert!(queue.enqueued.is_empty());
+
+        multicast_tx_push_batched(
+            express_put(b"now"),
+            &mut tx,
+            &params,
+            &conf,
+            &mut queue,
+            &mut window,
+        );
+
+        assert!(window.is_empty(), "nothing is left open");
+        assert_eq!(queue.enqueued.len(), 1);
+        assert_eq!(
+            frame_of(&queue.enqueued[0]),
+            (0, 2),
+            "both messages, in the frame"
+        );
+    }
+
+    /// A message on the other reliability does not join the open frame: the frame leaves, and
+    /// the message opens the next frame on its own ring.
+    #[test]
+    fn a_change_of_reliability_closes_the_open_frame() {
+        let params = params(2_048);
+        let conf = TxQueueConf::of_policy(&crate::policy::SessionPolicy::defaults());
+        let mut tx = MulticastTxConduits::new(mask_from_res(params.seq_num_res));
+        let mut queue = Scripted::default();
+        let mut window = MulticastBatch::new();
+        multicast_tx_push_batched(
+            put(true, b"a"),
+            &mut tx,
+            &params,
+            &conf,
+            &mut queue,
+            &mut window,
+        );
+
+        multicast_tx_push_batched(
+            put(false, b"b"),
+            &mut tx,
+            &params,
+            &conf,
+            &mut queue,
+            &mut window,
+        );
+
+        assert_eq!(queue.enqueued.len(), 1, "the reliable frame left");
+        assert_eq!(frame_of(&queue.enqueued[0]), (0, 1));
+        assert!(!window.is_empty(), "the best-effort frame is open");
+        assert_eq!(tx.advertise_default().next_best_effort, 1);
     }
 
     /// A message that finds no room leaves nothing on the queue and its

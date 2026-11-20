@@ -5495,28 +5495,50 @@ impl SharedSession {
     /// that is an error is the C ABI's to say, from `has_transport`: a listening
     /// peer with no peer yet has a transport and answers `Z_OK`, a client whose
     /// link is gone has none and answers `_Z_ERR_TRANSPORT_NOT_AVAILABLE`.
+    ///
+    /// The groups the session joined batch too: a group's window holds what this session sends
+    /// on the group, as pico's batch holds what it sends on its multicast transport, and each
+    /// group that opened one is counted as a face is.
     pub fn batch_start_all(&self) -> usize {
-        self.face_sessions()
+        let faces = self
+            .face_sessions()
             .into_iter()
             .filter(|session| session.batch_start().is_ok())
-            .count()
+            .count();
+        #[cfg(feature = "multicast-transport")]
+        let groups = self.groups_answering(|group| group.batch_start().is_ok());
+        #[cfg(not(feature = "multicast-transport"))]
+        let groups = 0;
+        faces + groups
     }
 
-    /// Flush every face's open batch window (pico `zp_batch_flush`).
+    /// Flush every face's and every group's open batch window (pico `zp_batch_flush`).
     pub fn batch_flush_all(&self) -> usize {
-        self.face_sessions()
+        let faces = self
+            .face_sessions()
             .into_iter()
             .filter(|session| session.batch_flush().is_ok())
-            .count()
+            .count();
+        #[cfg(feature = "multicast-transport")]
+        let groups = self.groups_answering(|group| group.batch_flush().is_ok());
+        #[cfg(not(feature = "multicast-transport"))]
+        let groups = 0;
+        faces + groups
     }
 
-    /// Close every face's batch window, draining what it holds (pico
+    /// Close every face's and every group's batch window, draining what it holds (pico
     /// `zp_batch_stop`).
     pub fn batch_stop_all(&self) -> usize {
-        self.face_sessions()
+        let faces = self
+            .face_sessions()
             .into_iter()
             .filter(|session| session.batch_stop().is_ok())
-            .count()
+            .count();
+        #[cfg(feature = "multicast-transport")]
+        let groups = self.groups_answering(|group| group.batch_stop().is_ok());
+        #[cfg(not(feature = "multicast-transport"))]
+        let groups = 0;
+        faces + groups
     }
 
     /// The sessions of the live faces, as one shared list: a reference to what the registry
