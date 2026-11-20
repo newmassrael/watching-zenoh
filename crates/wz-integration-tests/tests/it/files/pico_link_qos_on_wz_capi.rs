@@ -115,9 +115,16 @@ use wz_integration_tests::common::{
 ///
 /// It answers one line per command on stdin, after printing `ready` once its entities are
 /// declared. Four streams, each with its own key and its own sequence numbers (the first eight
-/// payload bytes, little endian): `drop` and `block` (8 KiB, reliable, the two congestion
-/// controls), `rel` (64 B, reliable, an advanced publisher with sample-miss detection, read by
-/// an advanced subscriber with a miss listener) and `be` (64 B, best effort).
+/// payload bytes, little endian): `drop` and `block` (half a unicast batch, reliable, the two
+/// congestion controls), `rel` (64 B, reliable, an advanced publisher with sample-miss detection,
+/// read by an advanced subscriber with a miss listener) and `be` (64 B, best effort).
+///
+/// No sample is fragmented. A zenoh-pico receiver drops a fragmented message longer than its
+/// reassembly buffer (`vendor/zenoh-pico/src/transport/unicast/rx.c` @
+/// `if ((_z_wbuf_len(dbuf) + msg->_payload.len) > Z_FRAG_MAX_SIZE) {`), which the reference arm
+/// sets to 4096 bytes over 2048-byte batches (`vendor/zenoh-pico/include/zenoh-pico/config.h.in`
+/// @ `#define Z_FRAG_MAX_SIZE @FRAG_MAX_SIZE@`): an 8 KiB sample never reached the control's
+/// subscriber at all, a limit of the receiver that a congestion run must not measure.
 ///
 /// Publisher commands: `match <stream> <ms>`, `peer <ms>`, `put <stream> <count> <interval_us>`,
 /// `fill <ms>` (a thread puts `block` samples until one stays in the call for 300 ms),
@@ -147,8 +154,13 @@ const PROBE_SRC: &str = r##"
 #define BLOCK_S 1
 #define REL_S 2
 #define BE_S 3
-#define BIG_PAYLOAD 8192
+/* Half a unicast batch: a congestion sample is never fragmented, so what it measures is the link
+   and not the receiver's reassembly limit. */
+#define BIG_PAYLOAD (Z_BATCH_UNICAST_SIZE / 2)
 #define SMALL_PAYLOAD 64
+#if BIG_PAYLOAD < SMALL_PAYLOAD
+#error "the unicast batch of this header arm is too small for the link probe"
+#endif
 /* A blocking put that has been in the call this long is waiting for the link. */
 #define FULL_US 300000ULL
 #define SLOW_US 100000ULL
@@ -861,7 +873,9 @@ fn expect_match(publisher: &mut Probe, stream: &str, run: &str) -> Result<(), St
         Ok(())
     } else {
         Err(format!(
-            "{run}: the {stream} publisher never matched the subscriber (`{line}`)"
+            "{run}: the {stream} publisher's matching status never turned true within 15 s \
+             (`{line}`): the subscriber's declaration did not reach it through the relay, and a \
+             zenoh-pico publisher drops every put until it does"
         ))
     }
 }
@@ -1182,16 +1196,17 @@ fn congestion_run(exe: &Path, library: &str, mode: &str) -> Result<Congestion, S
         ],
         format!("{run} publisher"),
     )?;
+    // Both publishers match before anything is put or the link is stalled: a zenoh-pico
+    // publisher drops its puts silently until it does.
     expect_match(&mut publisher, "drop", &run)?;
     expect_match(&mut publisher, "block", &run)?;
-    publisher.ask("put drop 1 0", "put drop", Duration::from_secs(10))?;
-    publisher.ask("put block 1 0", "put block", Duration::from_secs(10))?;
-    let warm = wait_until(
-        &mut sub,
-        |r| r.drop.received >= 1 && r.block.received >= 1,
-        Duration::from_secs(10),
-    )
-    .map_err(|e| format!("{run}: a put of each publisher did not cross the open link: {e}"))?;
+    // A `Drop` put on an open link may still be dropped on a race for the transmit lock, so
+    // each stream is put until one sample has crossed; what crossed is the baseline.
+    warm_up(&mut publisher, &mut sub, "drop", |r| r.drop.received >= 1)
+        .map_err(|e| format!("{run}: the open link did not carry a sample: {e}"))?;
+    warm_up(&mut publisher, &mut sub, "block", |r| r.block.received >= 1)
+        .map_err(|e| format!("{run}: the open link did not carry a sample: {e}"))?;
+    let warm = sub.report()?;
 
     proxy.stall(true);
     let fill = publisher.ask("fill 10000", "fill", Duration::from_secs(20))?;
