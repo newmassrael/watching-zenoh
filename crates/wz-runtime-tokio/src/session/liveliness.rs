@@ -66,6 +66,59 @@ impl LivelinessOptions {
     }
 }
 
+/// A place the session's held-token registry
+/// ([`LocalTokenRegistry`](wz_session_core::declare::local_token::LocalTokenRegistry))
+/// admitted for a token about to be announced. The registry is asked BEFORE the
+/// `Declare(DeclToken)` leaves, so a token it refuses (its creator's
+/// `MAX_LOCAL_TOKENS` quota, or the fixed table's capacity) is announced to no
+/// one, as a subscriber the session's table refuses is not; zenoh-pico instead
+/// announces first and retracts with an `UndeclToken` when its insert fails
+/// (`vendor/zenoh-pico/src/net/liveliness.c:62-87`). A place dropped before it
+/// becomes a [`LivelinessToken`] (the announce failed) releases what it took.
+#[cfg(feature = "liveliness-token")]
+#[must_use = "a place not made a token is released when dropped"]
+pub(super) struct TokenPlace<'s, R: SessionRuntime, T: TimeSource> {
+    session: &'s Session<R, T, Unicast>,
+    token_id: u64,
+    keyexpr: String,
+    armed: bool,
+}
+
+#[cfg(feature = "liveliness-token")]
+impl<'s, R: SessionRuntime, T: TimeSource> TokenPlace<'s, R, T> {
+    /// Take a place for token `token_id` on the resolved `keyexpr`, or the
+    /// registry's refusal.
+    pub(super) fn take(
+        session: &'s Session<R, T, Unicast>,
+        token_id: u64,
+        keyexpr: String,
+    ) -> Result<Self, RegisterError> {
+        // R283 — the held token answers an inbound non-final liveliness Interest
+        // (the CURRENT-replay state for peers that subscribe LATER; the
+        // proactive declare covers peers subscribed at declare time).
+        R::with_mutex_mut(&session.observer, |observer| {
+            observer.local_tokens.register(token_id, &keyexpr)
+        })?;
+        Ok(Self {
+            session,
+            token_id,
+            keyexpr,
+            armed: true,
+        })
+    }
+}
+
+#[cfg(feature = "liveliness-token")]
+impl<R: SessionRuntime, T: TimeSource> Drop for TokenPlace<'_, R, T> {
+    fn drop(&mut self) {
+        if self.armed {
+            R::with_mutex_mut(&self.session.observer, |observer| {
+                observer.local_tokens.unregister(self.token_id);
+            });
+        }
+    }
+}
+
 /// R248 — handle for a liveliness token declared through
 /// [`Session::declare_token`] / [`Session::declare_token_aliased`].
 /// Holds the `token_id` allocated by
@@ -129,8 +182,8 @@ impl LivelinessOptions {
 // session.actions (concrete Arc<SessionLinkActions>, R-independent)
 // so Drop is generic over R without needing R::with_mutex_mut.
 // R311mz — fields are PRIVATE (not `pub(super)`): the only constructor is
-// [`Self::new_held`], which registers the token in the declarer-side
-// `LocalTokenRegistry`. With the fields sealed, the literal `declare_token`
+// [`Self::new_held`], which takes the [`TokenPlace`] the declarer-side
+// `LocalTokenRegistry` admitted. With the fields sealed, the literal `declare_token`
 // and aliased `declare_token_aliased` paths cannot build a held token without
 // that registration, so the prior asymmetry (aliased skipped it) is
 // unrepresentable rather than test-guarded.
@@ -193,37 +246,28 @@ impl<R: SessionRuntime, T: TimeSource> LivelinessToken<R, T> {
     /// pico parity: `_z_declare_liveliness_token` always inserts the token into
     /// `_local_tokens` (`vendor/zenoh-pico/src/net/liveliness.c:77`), with the
     /// keyexpr resolved before the call, regardless of literal/alias form.
-    /// `keyexpr` here is that RESOLVED literal — registered for inbound-Interest
-    /// matching AND stored on the handle for `keyexpr()` introspection. The
-    /// matching `local_tokens.unregister` runs in [`Self::teardown`].
+    /// The keyexpr the place holds is that RESOLVED literal — registered for
+    /// inbound-Interest matching AND stored on the handle for `keyexpr()`
+    /// introspection. The matching `local_tokens.unregister` runs in
+    /// [`Self::teardown`].
+    ///
+    /// It takes the [`TokenPlace`] the registry admitted, which is how "every
+    /// token is registered" stays true by construction now that the
+    /// registration is taken before the token is announced.
     #[cfg(feature = "liveliness-token")]
     pub(super) fn new_held(
-        session: Session<R, T, Unicast>,
-        token_id: u64,
-        keyexpr: String,
+        mut place: TokenPlace<'_, R, T>,
         declared_on: (wz_session_core::wire_id::ExprId, String),
         options: LivelinessOptions,
     ) -> Self {
-        // R283 — register the held token so an inbound non-final liveliness
-        // Interest can reply with it (the CURRENT-replay state for peers that
-        // subscribe LATER; the proactive declare emit at the call site already
-        // covers peers subscribed at declare time).
-        R::with_mutex_mut(&session.observer, |observer| {
-            observer
-                .local_tokens
-                .register(token_id, &keyexpr)
-                .expect("register on the alloc backing never exceeds declared capacity");
-        });
+        // The place becomes the token's: its teardown releases it from here on.
+        place.armed = false;
         Self {
-            // R2544b — DOWNGRADE here rather than taking the caller's clone.
-            // `new_held` still receives a strong `Session` because the
-            // registration above needs one, and both call sites hand it a
-            // `self.clone()` that dies with this frame — so the handle keeps a
-            // weak reference and the strong count returns to what it was
-            // before the declare.
-            session: session.downgrade(),
-            id: token_id,
-            keyexpr,
+            // R2544b — the handle keeps a WEAK reference, so the strong count
+            // is what it was before the declare.
+            session: place.session.downgrade(),
+            id: place.token_id,
+            keyexpr: core::mem::take(&mut place.keyexpr),
             declared_on,
             options,
             // R311lo — armed: Drop/undeclare teardown frees this handle.
@@ -571,6 +615,11 @@ pub enum LivelinessAliasError {
     /// `pub type TokenId = u32;`), so the DECLARE was not emitted rather than
     /// carry an id a live token may still hold.
     IdsExhausted,
+    /// The session's held-token registry refused the token ([`RegisterError`]):
+    /// it holds the quota its creator stated (`MAX_LOCAL_TOKENS`) or its
+    /// capacity, or the keyexpr is past the fixed table's bound. Nothing was
+    /// held and the DECLARE was not emitted.
+    Refused(RegisterError),
 }
 
 impl std::fmt::Display for LivelinessAliasError {
@@ -620,6 +669,11 @@ impl std::fmt::Display for LivelinessAliasError {
                 "LivelinessAliasError: the session has handed out every 32-bit \
                  token id; the DECLARE was not emitted"
             ),
+            LivelinessAliasError::Refused(refusal) => write!(
+                f,
+                "LivelinessAliasError: the session refused the token: {refusal}; \
+                 the DECLARE was not emitted"
+            ),
         }
     }
 }
@@ -628,6 +682,7 @@ impl std::error::Error for LivelinessAliasError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             LivelinessAliasError::InvalidKeyexpr(inner) => Some(inner),
+            LivelinessAliasError::Refused(refusal) => Some(refusal),
             LivelinessAliasError::UnknownMapping(_)
             | LivelinessAliasError::FeatureDisabled
             | LivelinessAliasError::ExceedsCapacity
@@ -1151,13 +1206,16 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
     ///
     /// `interest_id` is the caller's for the reason `ask`'s is: the group's interests share one
     /// id space with the caller's other entities, which only the caller sees.
+    ///
+    /// A subscriber the session's table refuses (`MAX_LIVELINESS_SUBSCRIPTIONS`, as its creator
+    /// stated it, or the fixed table's capacity) is returned as that refusal.
     pub fn declare_group_liveliness_subscriber(
         &self,
         interest_id: u64,
         keyexpr: impl Into<String>,
         options: LivelinessSubscriberOptions,
         callback: impl FnMut(LivelinessSample<'_>) + Send + 'static,
-    ) -> GroupLivelinessSubscriber<R> {
+    ) -> Result<GroupLivelinessSubscriber<R>, RegisterError> {
         let keyexpr = keyexpr.into();
         let history = options.effective_history();
         let (cell, sink) = self.deferred_liveliness_sample_sink(callback);
@@ -1165,15 +1223,14 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
             observer
                 .liveliness_subscribers
                 .register(interest_id, &keyexpr, history, sink)
-                .expect("register on the alloc backing never exceeds declared capacity");
-        });
-        GroupLivelinessSubscriber {
+        })?;
+        Ok(GroupLivelinessSubscriber {
             observer: self.observer.clone(),
             interest_id,
             keyexpr,
             cell,
             armed: true,
-        }
+        })
     }
 }
 
@@ -1269,6 +1326,12 @@ pub enum LivelinessSubscriberAliasError {
     /// Interest was not emitted rather than carry an id a standing Interest
     /// may still hold.
     IdsExhausted,
+    /// The session's liveliness-subscriber table refused the subscriber
+    /// ([`RegisterError`]): it holds the quota its creator stated
+    /// (`MAX_LIVELINESS_SUBSCRIPTIONS`) or its capacity, or the keyexpr is past
+    /// the fixed table's bound. Nothing was registered and the Interest was
+    /// not emitted.
+    Refused(RegisterError),
 }
 
 impl std::fmt::Display for LivelinessSubscriberAliasError {
@@ -1314,6 +1377,11 @@ impl std::fmt::Display for LivelinessSubscriberAliasError {
                 f,
                 "LivelinessSubscriberAliasError: the session has handed out every \
                  32-bit interest id; the Interest was not emitted"
+            ),
+            LivelinessSubscriberAliasError::Refused(refusal) => write!(
+                f,
+                "LivelinessSubscriberAliasError: the session refused the subscriber: \
+                 {refusal}; the Interest was not emitted"
             ),
         }
     }

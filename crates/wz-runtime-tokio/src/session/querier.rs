@@ -134,6 +134,10 @@ pub enum LivelinessGetError {
     /// Interest was not emitted rather than carry an id a standing Interest
     /// may still hold.
     IdsExhausted,
+    /// The session's pending-get registry refused the snapshot ([`RegisterError`]): it holds
+    /// the quota its creator stated (`MAX_PENDING_LIVELINESS_GETS`) or its capacity. Nothing
+    /// was registered and the Interest was not emitted.
+    Refused(RegisterError),
 }
 
 impl std::fmt::Display for LivelinessGetError {
@@ -179,6 +183,11 @@ impl std::fmt::Display for LivelinessGetError {
                 f,
                 "LivelinessGetError: the session has handed out every 32-bit \
                  interest id; the Interest was not emitted"
+            ),
+            LivelinessGetError::Refused(refusal) => write!(
+                f,
+                "LivelinessGetError: the session refused the get: {refusal}; the \
+                 Interest was not emitted"
             ),
         }
     }
@@ -274,6 +283,11 @@ pub enum QueryAliasError {
         /// The bound that was reached.
         limit: usize,
     },
+    /// The session's pending-query registry refused the query ([`RegisterError`]): it holds
+    /// the quota its creator stated (`MAX_PENDING_QUERIES`) or its capacity, or the accepted
+    /// keyexpr is past the fixed table's bound. Nothing was registered and the Request(Query)
+    /// was not emitted.
+    Refused(RegisterError),
 }
 
 impl std::fmt::Display for QueryAliasError {
@@ -317,6 +331,11 @@ impl std::fmt::Display for QueryAliasError {
                 f,
                 "QueryAliasError: this querier already has {limit} quer(ies) in flight, \
                  its bound; the Request(Query) was not emitted — retry once one ends"
+            ),
+            QueryAliasError::Refused(refusal) => write!(
+                f,
+                "QueryAliasError: the session refused the query: {refusal}; the \
+                 Request(Query) was not emitted"
             ),
         }
     }
