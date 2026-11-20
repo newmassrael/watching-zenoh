@@ -787,7 +787,13 @@ def frames(disassembly: str) -> list[tuple[int, str]]:
 
 
 _CALL = re.compile(r"\t(?:bl|b|b\.w)\t([0-9a-f]+) <")
-_INDIRECT = re.compile(r"\tblx\t(?:r\d+|ip)")
+#: A call through a register: `blx rN`, and the tail call through a register, `bx rN`, which the
+#: compiler emits where a function's last act is a call through a pointer (a waker's `wake`, a vtable
+#: slot) and it has no frame to pop, in any condition of an IT block. `bx lr` is a return, not a call.
+#: Reading only `blx` lost the call of a function whose register call became its tail when inlining
+#: moved (2026-11-21: `SlotSession::abort` left `hang_up` and ended in `bx r2` into the waker).
+REGISTER_CALL = r"bl?x(?:eq|ne|cs|hs|cc|lo|mi|pl|vs|vc|hi|ls|ge|lt|gt|le|al)?(?:\.n|\.w)?\s+(?:r\d+|sl|fp|ip)\s*$"
+_INDIRECT = re.compile(r"\t" + REGISTER_CALL)
 
 
 @dataclass(frozen=True)

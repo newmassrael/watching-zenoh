@@ -14,7 +14,8 @@ the method named on the line, because a reading is what the earlier figure was.
 
 What it asserts of an image, in this order:
 
-1. every call by register in a function the bound reaches has a rule (the source file and line the line
+1. every call by register (a `blx`, or a `bx` to a register other than `lr`, which is a tail call) in a
+   function the bound reaches has a rule (the source file and line the line
    table gives, matched by a fragment of that line's text, or, for the compiler's library, by its position
    at the pinned commit; or the function that makes the call, or a C function's name), and a rule that names
    nobody for a site that uses it is refused;
@@ -70,7 +71,7 @@ BUDGET = ROOT / "deploy" / "resource_budget.json"
 #: The share of the stack a bound may take: `bound * MARGIN_DEN <= stack * MARGIN_NUM`.
 MARGIN_NUM, MARGIN_DEN = 3, 4
 
-SITE = re.compile(r"^\s*([0-9a-f]+):\s+blx\s+(?:r\d+|ip)\s*$")
+SITE = re.compile(r"^\s*([0-9a-f]+):\s+" + g.REGISTER_CALL)
 INSN = re.compile(r"^\s*([0-9a-f]+):\s+\S")
 MOVW = re.compile(r"^\s*([0-9a-f]+):\s+movw\s+(r\d+|ip),\s*#(\d+)")
 MOVT = re.compile(r"^\s*([0-9a-f]+):\s+movt\s+(r\d+|ip),\s*#(\d+)")
@@ -973,6 +974,18 @@ def selftest() -> int:
     # norm drops generic arguments and keeps a qualified path
     eq("norm: generics", norm("a::b::<T>::c"), "a::b::c")
     eq("norm: qualified path", norm("<X<Y> as T>::m"), "<X as T>::m")
+    # a call through a register is a `blx`, or a `bx` to any register but `lr` (a tail call)
+    for line, want in (
+        ("1009e808:\tblx\tr1", True),
+        ("1009c436:\tbx\tr2", True),
+        ("1009c436:\tbxne\tr3", True),
+        ("1009c436:\tblx\tip", True),
+        ("1009c436:\tbx\tsl", True),
+        ("1009c438:\tbx\tlr", False),
+        ("1009c416:\tbxcs\tlr", False),
+        ("1009c3f8:\tbl\t1009d79a <f>", False),
+    ):
+        eq(f"a register call is read from `{line.split(':', 1)[1].strip()}`", bool(SITE.match(line)), want)
     if fails:
         for f in fails:
             print(f"stack-bound selftest FAIL: {f}")
