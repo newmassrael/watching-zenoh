@@ -20,6 +20,14 @@
 # `cc`: the hosted runners of the `capi` job are macOS and Windows, and the C examples'
 # job (`capi-examples`) runs on Linux and Windows.
 #
+# On a Unix the language is pico's own build's: its CMake asks for C11 and leaves the
+# extensions on (`CMAKE_C_STANDARD 11` with no `CMAKE_C_EXTENSIONS`, so `-std=gnu11`), which
+# its Unix header relies on. That header types the clock as `struct timespec` and includes
+# only `<sys/time.h>` for it, plus `<pthread.h>` in the multi-threaded arm; under strict
+# `-std=c11` glibc's `<sys/time.h>` declares no `timespec`, so the single-threaded arm, which
+# has no `<pthread.h>` to bring in `<time.h>`, does not compile, while pico's own build of the
+# same header does.
+#
 # The library is built in the caller's environment, so a build default the caller states
 # there (a `WZ_POLICY_<NAME>`, a `WZ_LIMIT_<NAME>`) is the library's, and a limit stated
 # there is the value of the rendered header's switch too; a source file given with a feature
@@ -189,11 +197,11 @@ compiler=none
 case "$os" in
     macOS)
         compiler=cc
-        cc -std=c11 -DZENOH_MACOS -I"$inc" -I"$ext_inc" "$src" -o "$exe" -L"$lib_dir" -lwz_capi_pico -Wl,-rpath,"$lib_dir" && compiled=PASS
+        cc -std=gnu11 -DZENOH_MACOS -I"$inc" -I"$ext_inc" "$src" -o "$exe" -L"$lib_dir" -lwz_capi_pico -Wl,-rpath,"$lib_dir" && compiled=PASS
         ;;
     Linux)
         compiler=cc
-        cc -std=c11 -DZENOH_LINUX -I"$inc" -I"$ext_inc" "$src" -o "$exe" -L"$lib_dir" -lwz_capi_pico -Wl,-rpath,"$lib_dir" && compiled=PASS
+        cc -std=gnu11 -DZENOH_LINUX -I"$inc" -I"$ext_inc" "$src" -o "$exe" -L"$lib_dir" -lwz_capi_pico -Wl,-rpath,"$lib_dir" && compiled=PASS
         ;;
     Windows)
         compiler=cl
