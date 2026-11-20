@@ -155,6 +155,14 @@ CLASSIFIED: dict[str, tuple[str, str]] = {
         "reader leaves the arm inside the same `Link` as the number, so the "
         "demux socket stays bound for as long as datagrams are sent to it",
     ),
+    # The gate follows a `move` closure only into a braced body, and this one is
+    # `move || accept_loop(&listener, ..)`; the socket is never released.
+    "crates/wz-integration-tests/tests/pico_link_qos_on_wz_capi.rs::start::listener": (
+        "held-elsewhere",
+        "the relay's listener is moved into its acceptor thread, which accepts on "
+        "it until the relay's `Drop` sets the stop flag and joins the thread, so "
+        "the number the sessions dial stays bound and answered for the relay's life",
+    ),
 }
 
 LOCAL_ADDR = re.compile(r"\.\s*local_addr\s*\(\s*\)")
