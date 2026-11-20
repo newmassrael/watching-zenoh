@@ -412,6 +412,18 @@ transport-link-unixpipe,transport-link-ws|"
     # behind the feature). The round, the ring and the admission have model tests of their own in
     # `wz-session-core` and `wz-app-frame`, each a leg below.
     "wz-capi-pico|hook|replay-cache|"
+    # The library's own unit tests of three wz doors, each behind its feature: the program's
+    # transport (`app_transport`, `app-transport`), the config's document door (`config_policy`,
+    # the tests behind `config-document`) and the key ids a config states (`key_ids`, its tests
+    # behind `shared-key-ids`). The filter is each module path.
+    "wz-capi-pico|hook|app-transport|app_transport::tests::"
+    "wz-capi-pico|hook|config-document|config_policy::tests::"
+    "wz-capi-pico|hook|shared-key-ids|key_ids::"
+    # The same doors driven from C-shaped calls over loopback: sessions joined by the program's
+    # transport (`app_transport_doors`) and puts and gets by a shared id (`key_ids_tokio`), each
+    # file behind its feature on top of the default peer, query and queryable.
+    "wz-capi-pico|hook|app-transport|--test=app_transport_doors"
+    "wz-capi-pico|hook|shared-key-ids|--test=key_ids_tokio"
     # Whether a reply of a replay reaches the receiving judge (`replay_admission`, behind `replay`):
     # its model tests on a synthetic profile, and the receiver's baseline CRC they read.
     "wz-app-frame|hook|replay|"
@@ -1239,8 +1251,9 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     "wz-session-core|hook|declarations-synced-event|decl_sink::"
     # The key ids every node of a deployment shares and the reader of a document's `wz/key-ids`
     # (`shared_key_ids`, a module built with `shared-key-ids` alone). Pure functions over a
-    # dictionary and a parsed document; the filter is the module path.
-    "wz-session-core|hook|shared-key-ids|shared_key_ids::"
+    # dictionary and a parsed document; the filter is the module path. Its reply-frame tests also
+    # need `codec-response` and its registry tests `pubsub-put`, so the leg builds both.
+    "wz-session-core|hook|shared-key-ids,codec-response,pubsub-put|shared_key_ids::"
     # The storage plane is the wz-storage crate's (server-layer split, steps 2-4), and its
     # gated tests went with it: the plugins document reader's (step 3) and the history,
     # strip-prefix, replication, aligner, wildcard and garbage-collection subsets (step 4),
