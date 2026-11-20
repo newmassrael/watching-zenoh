@@ -1921,13 +1921,13 @@ pub const GROUP_FACE_ROWS: usize = 32;
 
 /// The dispatcher of one join of a group face of `params`: a table of [`GROUP_FACE_ROWS`] rows
 /// that grows ([`GrowingTable`]) to the cap the profile states, and holds those rows when it
-/// states none.
+/// states none; each member's declarations kept apart when `scope_members` says so. Its config
+/// is the session core's for a group (`MulticastConfig::of_group`), the cooperative engine's too.
 pub fn group_face_dispatcher(
     params: &MulticastParams,
+    scope_members: bool,
 ) -> MulticastDispatcher<GROUP_FACE_ROWS, GrowingTable> {
-    MulticastDispatcher::new(
-        MulticastConfig::new(params.lease_ms).with_max_sessions(params.max_sessions),
-    )
+    MulticastDispatcher::new(MulticastConfig::of_group(params, scope_members))
 }
 
 /// R2850 / open-debt item 913 — run ONE group face on the caller's executor until
@@ -1986,17 +1986,7 @@ where
         mut on_group_subs,
     } = seams;
     let clock = TokioTime::new();
-    let new_dispatcher = || {
-        #[cfg_attr(not(feature = "codec-declare"), allow(unused_mut))]
-        let mut dispatcher = group_face_dispatcher(params);
-        #[cfg(feature = "codec-declare")]
-        if scope_members {
-            dispatcher.scope_member_declarations();
-        }
-        dispatcher
-    };
-    #[cfg(not(feature = "codec-declare"))]
-    let _ = scope_members;
+    let new_dispatcher = || group_face_dispatcher(params, scope_members);
     let mut rejoin = GroupRejoin::new();
     let mut link = MulticastLink::new(bind);
     let mut dispatcher = new_dispatcher();
@@ -4115,7 +4105,7 @@ mod tests {
                 max_sessions: cap,
                 ..params(&[0xAA, 0xBB, 0xCC, 0xDD])
             };
-            let mut dispatcher = group_face_dispatcher(&profile);
+            let mut dispatcher = group_face_dispatcher(&profile, false);
             assert!(dispatcher.create().open());
             let _ = dispatcher.notify_link_ready();
             assert!(dispatcher.is_running());

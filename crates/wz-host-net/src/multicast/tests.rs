@@ -467,3 +467,33 @@ fn a_link_leaves_by_the_interface_its_ipv6_address_is_on() {
     // Any other failure of the lookup refuses it.
     assert!(link_egress_index_v6(at(global, 0), |_| Err(IfaceResolveError::NotFound)).is_err());
 }
+
+/// `#dscp=` marks a socket in the option of the group's family, with the value as written: the
+/// kernel reads back what was set, on an IPv4 socket as `IP_TOS` and on an IPv6 one as
+/// `IPV6_TCLASS` (the IPv6 half only where the host opens an IPv6 socket at all).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_traffic_class_is_set_in_the_option_of_the_groups_family() {
+    let v4 = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).expect("an IPv4 socket");
+    mark_traffic_class(&v4, &SocketAddr::from((GROUP, 7447)), 0x28).expect("IP_TOS is set");
+    assert_eq!(v4.tos_v4().expect("IP_TOS reads back"), 0x28);
+    if let Ok(v6) = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP)) {
+        let group = SocketAddr::from((Ipv6Addr::new(0xff05, 0, 0, 0, 0, 0, 0x7a, 0x7703), 7447));
+        mark_traffic_class(&v6, &group, 0x28).expect("IPV6_TCLASS is set");
+        assert_eq!(v6.tclass_v6().expect("IPV6_TCLASS reads back"), 0x28);
+    }
+}
+
+/// A datagram socket whose send buffer has room is writable at once: the wait answers `true`
+/// long before the time it was given is up.
+#[test]
+fn a_socket_with_room_is_writable_at_once() {
+    let socket = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("a socket");
+    let started = std::time::Instant::now();
+    assert!(wait_writable(&socket, 5_000_000), "a socket with room");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "the wait took {:?}",
+        started.elapsed()
+    );
+}

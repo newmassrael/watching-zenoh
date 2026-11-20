@@ -24,6 +24,46 @@ pub struct RetractionKey {
     pub suffix: String,
 }
 
+/// Open-debt item 913 — the kind of entity a session announces on a multicast group or retracts
+/// there. Every engine that joins groups names the same three, so the declaration each becomes
+/// is built once (`declare_build::build_group_announcement`, `build_group_retraction`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GroupDeclaration {
+    /// A subscriber.
+    Subscriber,
+    /// A queryable, with whether it answers a query completely.
+    Queryable {
+        /// The queryable's completeness, which its declaration carries.
+        complete: bool,
+    },
+    /// A liveliness token.
+    Token,
+}
+
+/// Open-debt item 913 — how a group session names a key on the group: a keyexpr it declared to
+/// the group (`mapping_id`, never 0) followed by `suffix`, or the literal (`mapping_id` 0 and
+/// the whole key as `suffix`). zenoh-pico names a key by a declaration on its group only when
+/// its multicast declarations are on, and by the literal otherwise
+/// (`vendor/zenoh-pico/src/session/keyexpr.c` @ `#if Z_FEATURE_MULTICAST_DECLARATIONS == 0`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct GroupKey<'a> {
+    /// The declaration the key starts with, `0` for none.
+    pub mapping_id: crate::wire_id::ExprId,
+    /// What follows the declaration; the whole key when `mapping_id` is 0, `None` when the
+    /// declaration covers the whole key.
+    pub suffix: Option<&'a str>,
+}
+
+impl<'a> GroupKey<'a> {
+    /// The literal `keyexpr`, no declaration.
+    pub const fn literal(keyexpr: &'a str) -> Self {
+        Self {
+            mapping_id: 0,
+            suffix: Some(keyexpr),
+        }
+    }
+}
+
 /// R2962 — HOW a matching Interest names its key and what it asks of the peer, for a caller that
 /// is not an engine's own declared publisher or querier.
 ///

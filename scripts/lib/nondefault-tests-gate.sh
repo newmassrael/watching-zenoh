@@ -423,6 +423,21 @@ transport-link-unixpipe,transport-link-ws|"
     # transport (`app_transport_doors`) and puts and gets by a shared id (`key_ids_tokio`), each
     # file behind its feature on top of the default peer, query and queryable.
     "wz-capi-pico|hook|app-transport|--test=app_transport_doors"
+    # The same transport on the cooperative engine, with no tokio engine in the build: the
+    # library's unit tests of the door and the file of sessions over the pipe, whose datagram pair
+    # and two-member group (`multicast-transport`) this engine carries too. `multi-thread` gives
+    # each session the read task that steps it while the test thread waits. The filter names both
+    # module paths.
+    "wz-capi-pico|hook|\
+        -default,\
+        engine-coop,\
+        app-transport,\
+        peer,\
+        query,\
+        queryable,\
+        multi-thread,\
+        multicast-transport\
+        |app_transport"
     "wz-capi-pico|hook|shared-key-ids|--test=key_ids_tokio"
     # Whether a reply of a replay reaches the receiving judge (`replay_admission`, behind `replay`):
     # its model tests on a synthetic profile, and the receiver's baseline CRC they read.
@@ -545,11 +560,34 @@ transport-link-unixpipe,transport-link-ws|"
     # the pinned Mbed TLS from its submodules, which is why the feature is a leg of its own cost.
     # The sessions a host holds at once (`tests/tls_sessions.rs`, 1, compiled with the same
     # feature) starts the provider's own arena and so runs in a binary of its own.
-    "wz-capi-coop|hook|connectivity,listen,liveliness,liveliness-get,local-queryable,local-subscriber,query,queryable,scout,ticker,tls-mbedtls|"
+    "wz-capi-coop|hook|connectivity,listen,liveliness,liveliness-get,local-queryable,local-subscriber,query,queryable,scout,ticker,tls-mbedtls,transport-stats|"
     # The keys a session names by a dictionary it shares with its peers (`tests::shared_key_ids::`,
     # 14), compiled with `shared-key-ids` beside `listen`, `query` and `queryable`, the four the
     # module's `cfg` names; the rest of the crate's tests are the leg above's.
     "wz-capi-coop|hook|listen,query,queryable,shared-key-ids|tests::shared_key_ids::"
+    # The multicast groups a session joins (`tests::group::`), compiled with `group` beside
+    # `app-transport`, whose links over a transport the program supplies are what the module's
+    # members join their group over: two members learn each other by their JOINs, a put crosses
+    # the group and a close leaves it, and a group the stack does not join fails the open.
+    "wz-capi-coop|hook|app-transport,group|tests::group::"
+    # The same module with the two ends of a query (`tests::group::asked::`, compiled with `query`
+    # and `queryable`): a get of the group is answered by a member's queryable and ends with its
+    # Final, and one asked while the group holds no member asks nobody.
+    "wz-capi-coop|hook|app-transport,group,query,queryable|tests::group::"
+    # And with `connectivity` (`tests::group::watched::`): each member is a multicast transport of
+    # its own, which a watcher of the faces is told of as it comes and as it goes.
+    "wz-capi-coop|hook|app-transport,group,connectivity|tests::group::"
+    # And with `liveliness` (`tests::group::alive::`): a liveliness subscriber asks the group for
+    # its members' tokens, which a member answers from the tokens its session holds. Each of the
+    # four runs the module's own tests too, a JOIN asked between two beacons among them.
+    "wz-capi-coop|hook|app-transport,group,liveliness|tests::group::"
+    # And with `transport-stats` (`tests::group::congested::`): what a group's queue drops for
+    # congestion is the transport's `tx.n_dropped`, as the tokio engine's group counts it.
+    "wz-capi-coop|hook|app-transport,group,transport-stats|tests::group::congested::"
+    # The groups joined on the host's own sockets (`host_group::`, compiled with `group-host`):
+    # only a `udp/` endpoint that names a multicast group is joined, and the session's two link
+    # policies reach its sockets. The group a real host joins is `#[ignore]`d and Layer M's.
+    "wz-capi-coop|hook|group-host|host_group::"
     # What a hosted OS tells a node about its network, and the multicast sockets built from it,
     # which the tokio runtime and the cooperative host both open. The `#iface=` honor (the v4 and
     # v6 interface selectors and the tests that read them off the loopback) is compiled only with
@@ -668,6 +706,12 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # full task table refuses and counts, a finished task's cell is reused, what a
     # task held is dropped once, a full timer table makes the sleep wake itself.
     "wz-runtime-coop|hook|alloc,reassembly,session-slot,session-unicast|"
+    # The links over a transport the program supplies (`app_link::`): a dial, a listener and its
+    # accepted streams and sources, a datagram that goes whole or not at all, a group joined, read
+    # by member and left, and a group's room answered from the table, inside the loop and out.
+    # `app-link` is a feature no row above names, so before this row none of these ran; `host-lock`
+    # is the host's wait, a parked thread.
+    "wz-runtime-coop|hook|app-link,host-lock|app_link::"
     # The fixed-memory profile's secure channel (decision D9): its tests run the channel, so they
     # link the Mbed TLS `vendored` builds from the pinned submodules, which is not a default.
     # `host-lock` serialises the library's calls for the tests that run two engines on two threads.
@@ -1197,6 +1241,11 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         group,\
         query-get\
         |"
+    # The group pump and its queue on the heap profile (`group_drive::`): a datagram the socket
+    # has no room for kept for the next step with the beacon behind it, the queue bounded by its
+    # lanes, and the most urgent lane written first. `transport-multicast` builds the module and
+    # `codec-push` the items; the row above is the slot profile, where none of this is built.
+    "wz-session-mcu|hook|codec-push,transport-multicast|group_drive::"
     # S9d: the receive path of the slot profile lends the control records (a
     # Declare, an Interest, a ResponseFinal) where their frame lies, and every
     # registry that consumes one reads the lent form and the owned form through one

@@ -178,6 +178,18 @@ pub struct CoopLocalSet<C: ClockSource> {
     tasks: Rc<RefCell<Vec<Option<LocalTaskSlot>>>>,
 }
 
+/// A second handle to the same task pool, on the same thread (the type stays `!Send`): what is
+/// spawned through either is polled by a pass of either. A holder that must let the pool's tasks
+/// run while it waits, with no reference to the set's owner, keeps one.
+impl<C: ClockSource> Clone for CoopLocalSet<C> {
+    fn clone(&self) -> Self {
+        Self {
+            runtime: self.runtime.clone(),
+            tasks: Rc::clone(&self.tasks),
+        }
+    }
+}
+
 impl<C: ClockSource> CoopLocalSet<C> {
     /// Bind a local task pool to `runtime`. The runtime handle is cloned
     /// (it is `Arc`-backed), so the local set and any other holder of the
@@ -363,5 +375,34 @@ impl<C: ClockSource> CoopLocalSet<C> {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CoopLocalSet;
+    use crate::runtime_impl::CoopRuntime;
+    use crate::time::ClockSource;
+
+    struct Still;
+
+    impl ClockSource for Still {
+        fn now_us(&self) -> u64 {
+            0
+        }
+    }
+
+    /// A clone of a local set is the same pool: a task spawned through one is run by a pass of
+    /// the other, and its slot is free after.
+    #[test]
+    fn a_clone_runs_the_tasks_of_the_set_it_was_cloned_from() {
+        let runtime = CoopRuntime::new(Still);
+        let local = CoopLocalSet::new(&runtime);
+        let other = local.clone();
+        let task = local.spawn_local(async { 7u8 });
+        assert!(!task.is_finished(), "nothing ran it yet");
+        other.run_until_idle();
+        assert!(task.is_finished(), "the clone's pass ran it");
+        assert_eq!(local.live_local_task_count(), 0);
     }
 }

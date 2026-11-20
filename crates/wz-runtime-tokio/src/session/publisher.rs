@@ -660,6 +660,10 @@ pub enum PublishAliasError {
     /// The `trusted-only` clock policy held back the time the publication carries; projected
     /// from the underlying [`PublishError::ClockUntrusted`]. No wire bytes were emitted.
     ClockUntrusted,
+    /// Another sender held the droppable Push's conduit and the session's queue profile drops it
+    /// at once; projected from the underlying [`PublishError::HeldConduit`]. No wire bytes were
+    /// emitted.
+    HeldConduit,
 }
 
 impl std::fmt::Display for PublishAliasError {
@@ -704,6 +708,12 @@ impl std::fmt::Display for PublishAliasError {
                 "PublishAliasError: the trusted-only clock policy holds back the \
                  time this publication carries; the Push was not emitted"
             ),
+            PublishAliasError::HeldConduit => write!(
+                f,
+                "PublishAliasError: another sender held this droppable Push's \
+                 conduit and the queue profile drops it at once; the Push was not \
+                 emitted"
+            ),
         }
     }
 }
@@ -719,6 +729,7 @@ impl From<PublishError> for PublishAliasError {
             PublishError::FragmentChainAbandoned => PublishAliasError::FragmentChainAbandoned,
             PublishError::TimestampExhausted => PublishAliasError::TimestampExhausted,
             PublishError::ClockUntrusted => PublishAliasError::ClockUntrusted,
+            PublishError::HeldConduit => PublishAliasError::HeldConduit,
         }
     }
 }

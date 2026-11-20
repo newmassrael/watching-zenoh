@@ -30,6 +30,10 @@ pub fn publish_refusal(why: wz_capi_core::faces::FanoutError) -> ZResult {
     match why {
         wz_capi_core::faces::FanoutError::ExceedsCapacity => WZ_CAPI_C_E_VALUE_TOO_LARGE,
         wz_capi_core::faces::FanoutError::NotHonoured(_) => Z_EUNAVAILABLE,
+        // A congestion drop, which zenoh-c answers with success: its sessions run zenoh's queue
+        // profile, which drops a message behind a held conduit only after waiting for room and
+        // reports no such drop, so this is the code the drop would be given if one were.
+        wz_capi_core::faces::FanoutError::HeldConduit => Z_OK,
     }
 }
 
@@ -165,6 +169,11 @@ mod tests {
                 "{statement:?}"
             );
         }
+        assert_eq!(
+            publish_refusal(FanoutError::HeldConduit),
+            Z_OK,
+            "a congestion drop is a success to zenoh-c's caller"
+        );
     }
 
     /// The two CHANNEL statuses are positive and distinct from `Z_OK` — the

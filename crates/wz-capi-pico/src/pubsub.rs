@@ -48,11 +48,46 @@ use crate::option_fields::unstable_option_fields;
 use crate::prelude::*;
 use crate::result::{
     ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SESSION_CLOSED,
-    Z_ERR_TIMESTAMP_GENERATION_FAILED, Z_OK,
+    Z_ERR_TIMESTAMP_GENERATION_FAILED, Z_ERR_TRANSPORT_TX_FAILED, Z_OK,
 };
 use crate::session::{engine_of, engine_ref, session_handle, z_loaned_session_t, Engine};
 use crate::write_filter::{PicoSession, WriteFilter};
-use wz_capi_port::{FilterPlane, FilteredPut, SubId, WireKey};
+use wz_capi_port::{FanoutError, FilterPlane, FilteredPut, SubId, WireKey};
+
+/// What a put, a delete or a publisher's put answers its caller for what the engine did with it:
+/// a publication its queue profile dropped behind a held conduit is pico's failed send
+/// (`Z_ERR_TRANSPORT_TX_FAILED`, which pico's put answers when its held transmit lock dropped the
+/// message), and any other refusal the generic error.
+fn publish_code(sent: Result<usize, FanoutError>) -> ZResult {
+    match sent {
+        Ok(_) => Z_OK,
+        Err(FanoutError::HeldConduit) => Z_ERR_TRANSPORT_TX_FAILED,
+        Err(_) => Z_ERR_GENERIC,
+    }
+}
+
+#[cfg(test)]
+mod publish_code_tests {
+    use super::publish_code;
+    use crate::result::{Z_ERR_GENERIC, Z_ERR_TRANSPORT_TX_FAILED, Z_OK};
+    use wz_capi_port::FanoutError;
+
+    /// A publication dropped behind a held conduit answers pico's code for a failed send; one the
+    /// engine sent answers `Z_OK` whatever reached it, and any other refusal the generic error.
+    #[test]
+    fn a_drop_behind_a_held_conduit_answers_picos_failed_send() {
+        assert_eq!(
+            publish_code(Err(FanoutError::HeldConduit)),
+            Z_ERR_TRANSPORT_TX_FAILED
+        );
+        assert_eq!(publish_code(Ok(0)), Z_OK);
+        assert_eq!(publish_code(Ok(2)), Z_OK);
+        assert_eq!(
+            publish_code(Err(FanoutError::ExceedsCapacity)),
+            Z_ERR_GENERIC
+        );
+    }
+}
 
 // --- opaque loaned sample --------------------------------------------------
 
@@ -1273,8 +1308,8 @@ impl PlainPublisher {
             .filter
             .put_plain(self.key.literal(), *mapping, payload, params)
         {
-            FilteredPut::Suppressed | FilteredPut::Sent(Ok(_)) => Z_OK,
-            FilteredPut::Sent(Err(_)) => Z_ERR_GENERIC,
+            FilteredPut::Suppressed => Z_OK,
+            FilteredPut::Sent(sent) => publish_code(sent),
             // Nothing was sent, and the put is wanted: the filter said so, or the session holds
             // a multicast group the filter does not hold the put back from.
             FilteredPut::NotPlain => self.publish_filtered(payload, &put_options()),
@@ -1306,13 +1341,10 @@ impl PlainPublisher {
     fn publish_filtered(&self, payload: &[u8], opts: &PublishOptions) -> ZResult {
         let wire = self.key.wire(&*self.shared);
         let opts = self.declared.apply(opts);
-        match self
-            .shared
-            .publish_on_wire_all(self.key.literal(), &wire, payload, &opts)
-        {
-            Ok(_) => Z_OK,
-            Err(_) => Z_ERR_GENERIC,
-        }
+        publish_code(
+            self.shared
+                .publish_on_wire_all(self.key.literal(), &wire, payload, &opts),
+        )
     }
 
     /// The `eid` half of the global id `z_publisher_id` reports.
@@ -2002,11 +2034,7 @@ pub unsafe extern "C" fn z_put(
         let Some(wire) = wire_key_of(keyexpr, engine) else {
             return Z_ERR_INVALID;
         };
-        let result = engine.publish_on_wire_all(ke, &wire, &buf, &resolved);
-        match result {
-            Ok(_) => Z_OK,
-            Err(_) => Z_ERR_GENERIC,
-        }
+        publish_code(engine.publish_on_wire_all(ke, &wire, &buf, &resolved))
     })
 }
 
@@ -2042,11 +2070,7 @@ pub unsafe extern "C" fn z_delete(
         let Some(wire) = wire_key_of(keyexpr, engine) else {
             return Z_ERR_INVALID;
         };
-        let result = engine.publish_on_wire_all(ke, &wire, &[], &resolved);
-        match result {
-            Ok(_) => Z_OK,
-            Err(_) => Z_ERR_GENERIC,
-        }
+        publish_code(engine.publish_on_wire_all(ke, &wire, &[], &resolved))
     })
 }
 

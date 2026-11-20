@@ -1956,10 +1956,11 @@ def coop_features(feats: list[str], table: dict) -> list[str]:
 
     A pico build runs its sessions on the tokio engine whenever that engine is in it, so the
     cooperative build must name no feature that selects it: one that lists `engine-tokio`, or
-    lists a feature that does (the drive threads, the multicast group, gossip). What is left is
-    what the engines share, which the crate forwards weakly (`wz-capi-core?/...`) and so selects
-    neither, and `engine-coop` is named in the place `engine-tokio` was. The table is READ, not
-    listed here, so a feature that later selects the tokio engine leaves the list by itself.
+    lists a feature that does (the drive threads, the raw Ethernet group, gossip). What is
+    left is what the engines share, which the crate forwards weakly (`wz-capi-core?/...`) and so
+    selects neither, and `engine-coop` is named in the place `engine-tokio` was. The table is
+    READ, not listed here, so a feature that later selects the tokio engine leaves the list by
+    itself.
     """
 
     def selects_tokio(name: str, seen: frozenset = frozenset()) -> bool:
@@ -4763,16 +4764,16 @@ def cmd_selftest() -> int:
     good = manifest_features(MANIFESTS["pico"])
     expect("the shipped pico manifest passes", check_manifest(decl, "pico", good) == [])
     # The cooperative list is the arm's with the engine changed: the base's tokio features and a
-    # capability that selects the tokio engine (the multicast group) are out, what the engines
-    # share stays, and the engine is named first.
-    arm = features_for(decl, "pico", {"peer", "query", "multicast-transport"})
+    # capability that selects the tokio engine (the raw Ethernet group) are out, what the
+    # engines share stays (the multicast group among it), and the engine is named first.
+    arm = features_for(decl, "pico", {"peer", "query", "raweth-transport"})
     coop = coop_features(arm, good)
     expect("the cooperative list names its engine first and not the tokio one",
            coop[0] == "engine-coop" and "engine-tokio" not in coop)
     expect("the cooperative list drops what selects the tokio engine",
-           not {"serial-drive-own-thread", "rx-busy-poll", "multicast-transport"} & set(coop))
+           not {"serial-drive-own-thread", "rx-busy-poll", "raweth-transport"} & set(coop))
     expect("the cooperative list keeps what the engines share",
-           {"link-udp", "scout", "peer", "query"} <= set(coop))
+           {"link-udp", "scout", "peer", "query", "multicast-transport"} <= set(coop))
     tokio_selecting = dict(good)
     tokio_selecting["query"] = list(good["query"]) + ["engine-tokio"]
     expect("a capability that later selects the tokio engine leaves the list by itself",
@@ -4804,8 +4805,8 @@ def cmd_selftest() -> int:
     expect("a statement of the cooperative build states what that build has, not what was asked",
            {c["id"]: c["supported"] for c in conformance_statement(
                decl, "pico", coop, defaults, upstream, {"kind": "test"})["capabilities"]}
-           ["multicast-transport"] is False
-           and {c["id"]: c["supported"] for c in stated["capabilities"]}["multicast-transport"])
+           ["raweth-transport"] is False
+           and {c["id"]: c["supported"] for c in stated["capabilities"]}["raweth-transport"])
     expect("the digest does not depend on where the values were read from",
            conformance_statement(decl, "pico", arm, defaults, upstream, {"kind": "other"})["digest"]
            == stated["digest"] and stated["digest"].startswith("sha256:"))

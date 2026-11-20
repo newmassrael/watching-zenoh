@@ -393,6 +393,13 @@ enum Leg {
     /// publish that states an admission retry makes such a leg, and it is neither a delivery
     /// nor a per-face fault (see [`admission_passes`]).
     NoRoom,
+    /// Another sender held the face's conduit and its queue profile dropped the frame at once,
+    /// telling the caller (`PublishError::HeldConduit`, the pico profile): the other faces are
+    /// still sent the sample, and the publish is answered [`FanoutError::HeldConduit`], as
+    /// zenoh-pico answers a put its held transmit lock dropped, with nothing delivered to the
+    /// session's own subscribers after it (pico's `_z_write` delivers locally only once the
+    /// remote send succeeded).
+    Dropped,
 }
 
 impl Leg {
@@ -404,6 +411,7 @@ impl Leg {
             Ok(WireProbe::Queued) => Leg::Delivered(0),
             Ok(WireProbe::NoRoom) => Leg::NoRoom,
             Err(PublishError::TransportUnavailable) => Leg::Skipped,
+            Err(PublishError::HeldConduit) => Leg::Dropped,
             Err(_) => Leg::Refused,
         }
     }
@@ -417,6 +425,7 @@ impl Leg {
             Err(PublishAliasError::UnknownMapping(_) | PublishAliasError::TransportUnavailable) => {
                 Leg::Skipped
             }
+            Err(PublishAliasError::HeldConduit) => Leg::Dropped,
             Err(_) => Leg::Refused,
         }
     }
@@ -426,6 +435,7 @@ impl Leg {
         match result {
             Ok(n) => Leg::Delivered(n),
             Err(PublishError::TransportUnavailable) => Leg::Skipped,
+            Err(PublishError::HeldConduit) => Leg::Dropped,
             Err(_) => Leg::Refused,
         }
     }
@@ -439,6 +449,7 @@ impl Leg {
             Err(PublishAliasError::UnknownMapping(_) | PublishAliasError::TransportUnavailable) => {
                 Leg::Skipped
             }
+            Err(PublishAliasError::HeldConduit) => Leg::Dropped,
             Err(_) => Leg::Refused,
         }
     }
@@ -481,6 +492,9 @@ fn admission_passes(
                 Leg::NoRoom => no_room.push(face),
                 Leg::Skipped => {}
                 Leg::Refused => return Err(FanoutError::ExceedsCapacity),
+                // An offer does not wait for a held conduit either: it is told there is no room
+                // (`Leg::NoRoom`), so this is a drop some other leg reported.
+                Leg::Dropped => return Err(FanoutError::HeldConduit),
             }
         }
         if taken || no_room.is_empty() || passes_left == 0 {
@@ -551,6 +565,9 @@ fn atomic_passes<H>(
                         Leg::Delivered(n) => delivered += n,
                         Leg::Skipped | Leg::NoRoom => {}
                         Leg::Refused => return Err(FanoutError::ExceedsCapacity),
+                        // A send under a reservation holds its room and waits for its conduit,
+                        // so no profile drops it at a held one; answered as any such drop is.
+                        Leg::Dropped => return Err(FanoutError::HeldConduit),
                     }
                 }
                 return Ok(Some(delivered));
@@ -4315,6 +4332,7 @@ impl SharedSession {
                     ));
                 }
                 _ => {
+                    let mut dropped = false;
                     for (session, slot) in targets.faces.iter().zip(targets.slots.iter()) {
                         if !wanted(session, slot) {
                             continue;
@@ -4323,7 +4341,14 @@ impl SharedSession {
                             Leg::Delivered(n) => delivered += n,
                             Leg::Skipped | Leg::NoRoom => {}
                             Leg::Refused => return Err(FanoutError::ExceedsCapacity),
+                            Leg::Dropped => dropped = true,
                         }
+                    }
+                    // The faces whose conduits were free have the sample; the put is answered
+                    // as dropped, and nothing goes to a group or to this session's subscribers
+                    // after it (see `Leg::Dropped`).
+                    if dropped {
+                        return Err(FanoutError::HeldConduit);
                     }
                 }
             }
@@ -4347,9 +4372,10 @@ impl SharedSession {
                 // The plane's link is inert, so the skipped arm is unreachable through
                 // it; kept because the local leg's error handling must not be more
                 // brittle than the wire leg's if the plane ever changes. The local leg is no
-                // probe, so it has no room to lack.
+                // probe, so it has no room to lack, and no conduit another sender holds.
                 Leg::Skipped | Leg::NoRoom => {}
                 Leg::Refused => return Err(FanoutError::ExceedsCapacity),
+                Leg::Dropped => return Err(FanoutError::HeldConduit),
             }
         }
         Ok(delivered)
@@ -4422,6 +4448,7 @@ impl SharedSession {
                     Leg::Delivered(n) => delivered += n,
                     Leg::Skipped | Leg::NoRoom => {}
                     Leg::Refused => return Err(FanoutError::ExceedsCapacity),
+                    Leg::Dropped => return Err(FanoutError::HeldConduit),
                 }
                 continue;
             }
@@ -4434,10 +4461,13 @@ impl SharedSession {
                 }
                 None => group.session.publish(&literal, bytes, remote.clone()),
             };
+            // A group's publish answers every push of its own as sent (see the session's
+            // multicast send arm), so a drop at a held conduit is a unicast face's alone.
             match Leg::of_publish(sent) {
                 Leg::Delivered(n) => delivered += n,
                 Leg::Skipped | Leg::NoRoom => {}
                 Leg::Refused => return Err(FanoutError::ExceedsCapacity),
+                Leg::Dropped => return Err(FanoutError::HeldConduit),
             }
         }
         Ok(delivered)
@@ -8967,6 +8997,29 @@ mod face_up_order_tests {
         assert!(matches!(
             Leg::of_probe_alias(Err(PublishAliasError::ExceedsCapacity)),
             Leg::Refused
+        ));
+    }
+
+    /// A face whose conduit another sender held, and whose queue profile dropped the frame at
+    /// once and said so, is a drop of its own on every kind of leg: neither a skip, which the
+    /// caller is not told of, nor a refusal, which says the message could never be sent.
+    #[test]
+    fn a_drop_at_a_held_conduit_is_classified_as_a_drop() {
+        assert!(matches!(
+            Leg::of_publish(Err(PublishError::HeldConduit)),
+            Leg::Dropped
+        ));
+        assert!(matches!(
+            Leg::of_alias(Err(PublishAliasError::HeldConduit)),
+            Leg::Dropped
+        ));
+        assert!(matches!(
+            Leg::of_probe(Err(PublishError::HeldConduit)),
+            Leg::Dropped
+        ));
+        assert!(matches!(
+            Leg::of_probe_alias(Err(PublishAliasError::HeldConduit)),
+            Leg::Dropped
         ));
     }
 

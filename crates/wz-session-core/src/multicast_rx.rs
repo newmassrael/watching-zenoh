@@ -438,6 +438,7 @@ where
                                         // field, `None` for a code this node does not
                                         // recognize), taken one step nearer the wire.
                                         whatami: WhatAmI::from_wire(join.whatami()),
+                                        locator: src,
                                     },
                                 ));
                             }

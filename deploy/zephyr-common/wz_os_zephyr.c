@@ -33,6 +33,12 @@ void wz_os_mutex_lock(void *mutex)
 	(void)k_mutex_lock(mutex, K_FOREVER);
 }
 
+/* 0 once the mutex is this thread's; -EBUSY at once when another thread holds it. */
+int wz_os_mutex_try_lock(void *mutex)
+{
+	return k_mutex_lock(mutex, K_NO_WAIT);
+}
+
 void wz_os_mutex_unlock(void *mutex)
 {
 	(void)k_mutex_unlock(mutex);

@@ -202,6 +202,27 @@ pub trait SessionDatagramLink {
     fn readiness(&self) -> Option<Box<dyn LinkReadiness>> {
         None
     }
+
+    /// A wait for room on this link's outbound side, made from any thread and with nothing of the
+    /// session held: [`Self::readiness`]'s pair for the other direction. A sender that finds the
+    /// session held by another, which may be waiting for room on this link up to
+    /// `wait_before_close`, asks this instead of waiting for the session, so that a message it may
+    /// drop is not held behind one it may not. `None` for a link that cannot tell. The heap
+    /// profile's, as [`Self::readiness`] is.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn writability(&self) -> Option<Box<dyn LinkWritability>> {
+        None
+    }
+}
+
+/// A wait for room on a link's outbound side, made by a thread that does not drive the link
+/// ([`SessionDatagramLink::writability`]).
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+pub trait LinkWritability: Send + Sync {
+    /// Wait up to `timeout_us` microseconds for the link to take more bytes: `true` once it will
+    /// (or once it has failed, which the send that follows reports), `false` when it still would
+    /// not when the time is up. The answer the link's own wait for room gives, asked from outside.
+    fn wait_writable(&self, timeout_us: u64) -> bool;
 }
 
 /// A wait for a link's next input, made by a thread that does not drive the link
@@ -286,6 +307,11 @@ impl<T: SessionDatagramLink + ?Sized> SessionDatagramLink for Rc<T> {
     #[cfg(feature = "alloc")]
     fn readiness(&self) -> Option<Box<dyn LinkReadiness>> {
         (**self).readiness()
+    }
+
+    #[cfg(feature = "alloc")]
+    fn writability(&self) -> Option<Box<dyn LinkWritability>> {
+        (**self).writability()
     }
 }
 
@@ -454,6 +480,21 @@ pub trait SessionLinks {
         at: Locator,
     ) -> Result<Box<dyn LinkListener<Self::Pump>>, LinkOpenError> {
         let _ = at;
+        Err(LinkOpenError::Unsupported)
+    }
+
+    /// The multicast group `endpoint` names, joined: the
+    /// [`GroupTransport`](crate::group_transport::GroupTransport) a group session runs over,
+    /// opened as the session's link when the session takes it. The endpoint is the text the
+    /// config states (a `udp/` locator naming an interface), which each stack reads as it reads
+    /// a group. A stack that joins no group, or not the one named, is
+    /// [`LinkOpenError::Unsupported`]: the default, so a stack without groups writes nothing here.
+    #[cfg(feature = "alloc")]
+    fn open_group(
+        &self,
+        endpoint: &str,
+    ) -> Result<Box<dyn crate::group_transport::GroupTransport>, LinkOpenError> {
+        let _ = endpoint;
         Err(LinkOpenError::Unsupported)
     }
 }

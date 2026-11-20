@@ -17,7 +17,8 @@
 //! [`MatchingSink`], [`LivelinessSink`]), the
 //! form a key takes on the wire ([`WireKey`]), what a write filter counts ([`FilterPlane`]) and
 //! what a filtered put did ([`FilteredPut`], [`FanoutError`]). They lived in `wz-capi-core`'s
-//! face registry, which re-exports them, so the zenoh-c ABI keeps its paths.
+//! face registry, which re-exports them, so the zenoh-c ABI keeps its paths. The multicast groups
+//! an ABI asks a session to join, and what it tells them, are [`group`]'s, read by either engine.
 //!
 //! The operations an engine implements are [`SessionEngine`]: what a zenoh-pico client asks of a
 //! session, which an ABI reaches through `Arc<dyn SessionEngine>` and nothing else; and
@@ -63,6 +64,7 @@ pub mod cancellation;
 pub mod decl_watch;
 mod drive;
 mod engine;
+pub mod group;
 pub mod listeners;
 // What the doors of the observation plane do, for every C ABI: one behaviour, named by each ABI
 // for itself. Only the features of the instruments compile it.
@@ -213,6 +215,12 @@ pub enum FanoutError {
     /// The publish stated something the engine does not honour ([`StatementNotHonoured`] names
     /// which): nothing was sent, to a link or to a subscriber of the session.
     NotHonoured(StatementNotHonoured),
+    /// The publish may be dropped, another sender held the conduit (or the session) it would
+    /// have been sent on, and the session's queue profile drops it at once and reports it
+    /// (`HeldDrop::DropAtOnce`, the pico profile): a congestion drop its caller is told of, as
+    /// zenoh-pico's put fails. Nothing was sent on that face. Under zenoh's profile a congestion
+    /// drop is the publish's success, and this is never answered.
+    HeldConduit,
 }
 
 impl From<StatementNotHonoured> for FanoutError {

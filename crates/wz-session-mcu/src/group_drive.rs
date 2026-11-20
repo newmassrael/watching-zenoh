@@ -141,6 +141,7 @@
     not(feature = "session-slot"),
     feature = "alloc",
     any(
+        feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
         feature = "liveliness-token"
@@ -148,6 +149,7 @@
 ))]
 use alloc::rc::Rc;
 use core::mem::MaybeUninit;
+use wz_runtime_coop::group_transport::GroupSend;
 pub use wz_runtime_coop::group_transport::GroupTransport;
 
 #[cfg(feature = "reassembly")]
@@ -190,6 +192,7 @@ use wz_session_core::multicast_rx::{
 #[cfg(all(
     feature = "alloc",
     any(
+        feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
         feature = "liveliness-token"
@@ -211,6 +214,7 @@ use wz_session_core::sn::{self, MulticastTxConduits};
     not(feature = "session-slot"),
     feature = "alloc",
     any(
+        feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
         feature = "liveliness-token"
@@ -220,6 +224,7 @@ use alloc::collections::VecDeque;
 #[cfg(all(
     feature = "alloc",
     any(
+        feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
         feature = "liveliness-token"
@@ -229,6 +234,7 @@ use core::cell::RefCell;
 #[cfg(all(
     feature = "alloc",
     any(
+        feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
         feature = "liveliness-token"
@@ -238,6 +244,7 @@ use wz_session_core::caps::MAX_MULTICAST_REPLIES;
 #[cfg(all(
     feature = "alloc",
     any(
+        feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
         feature = "liveliness-token"
@@ -258,18 +265,21 @@ use wz_session_core::multicast_reply_sink::MulticastReplyEnqueue;
 /// `next_tx` seam drains them back out via [`Self::pop`], framing each through
 /// the shared `multicast_tx_emit` SSOT.
 ///
-/// Backed by `Rc<RefCell<VecDeque<MulticastTxItem>>>`, not the AP's tokio mpsc:
+/// Backed by an `Rc<RefCell<..>>` around a `VecDeque`, not the AP's tokio mpsc:
 /// the busy-poll loop is single-task, so the sink (which pushes) and `next_tx`
 /// (which pops) run at different points of the SAME iteration on one thread — no
 /// cross-thread `Send`, an `Rc<RefCell>` is the single-task analogue of the
-/// channel. `Clone` shares the backing store (and the drop count) between the
+/// channel. `Clone` shares the backing store (and both drop counts) between the
 /// sink clone and the loop's `pop` end.
 ///
 /// It holds at most [`MAX_MULTICAST_REPLIES`] replies, the bound the fixed form
 /// below is sized by: a peer that asks faster than the loop answers would
-/// otherwise grow the heap for as long as it kept asking. The reply past the
-/// bound is dropped (which frees what the sink built) and counted in
-/// [`dropped`](Self::dropped), as the fixed form does: multicast to a group is
+/// otherwise grow the heap for as long as it kept asking. A reply is what comes
+/// in through [`MulticastReplyEnqueue::enqueue`] (what the sink stages for a
+/// peer's interest or query, and what a group answers a member's ask with), and
+/// it holds its slot until it is drained. The reply past the bound is dropped
+/// (which frees what the sink built) and counted in [`dropped`](Self::dropped),
+/// as the fixed form does, whatever room its lane has: multicast to a group is
 /// best effort, and a querier whose reply never comes asks again or times out.
 /// The storage grows on demand up to the bound and is not reserved up front.
 ///
@@ -278,12 +288,31 @@ use wz_session_core::multicast_reply_sink::MulticastReplyEnqueue;
 /// [`MulticastReplySink<Q>`](wz_session_core::multicast_reply_sink::MulticastReplySink)
 /// SSOT, so this backing names no wz_codecs type — the wz-codecs dep R311mb added
 /// here is gone, and the duplicated AP/MCU impls collapsed to one. The backing
-/// exists when any reply variant inhabits `MulticastTxItem` (the codec-response /
-/// codec-response-final / liveliness-token union).
+/// exists when any variant inhabits `MulticastTxItem` (the codec-push / codec-response /
+/// codec-response-final / liveliness-token union): a host that puts its own Push items on the
+/// group queues them here beside the replies, so what it sends leaves in the order it was asked
+/// for.
+///
+/// A queue made with [`Self::bounded`] also counts what it holds against the lanes the tokio
+/// engine shapes a group's pipeline into (`wz_session_core::multicast_tx::MulticastTxLanes`): a
+/// message of the session asks it for room before it is queued ([`Self::room_at_once`]), is queued
+/// with [`Self::enqueue_admitted`] when it finds some, and is dropped and counted on its lane when
+/// it finds none within its wait ([`Self::congestion_drop`], read by [`Self::drops`]); each item
+/// drained makes room. One made with [`Self::new`] has no lanes and takes every message of the
+/// session.
+///
+/// The two drop counts are kept apart because they answer different questions.
+/// [`Self::dropped`] is the reply limit's: replies the peers' asks made the node hold past
+/// [`MAX_MULTICAST_REPLIES`], which tells a deployment its declared limit is too small.
+/// [`Self::drops`] is the lanes': messages of the session that found their lane full within
+/// their wait, by priority, as the tokio group counts a congestion drop. A message of the session
+/// holds no reply slot, since its lane is what bounds it and a blocking one waits for room rather
+/// than being dropped for a count.
 #[cfg(all(
     not(feature = "session-slot"),
     feature = "alloc",
     any(
+        feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
         feature = "liveliness-token"
@@ -291,39 +320,116 @@ use wz_session_core::multicast_reply_sink::MulticastReplyEnqueue;
 ))]
 #[derive(Clone, Default)]
 pub struct MulticastReplyQueue {
-    queue: Rc<RefCell<HeapReplies>>,
+    queue: Rc<RefCell<Staged>>,
 }
 
-/// What the heap form's clones share: the queued replies and how many were
-/// dropped for want of room.
+/// What a [`MulticastReplyQueue`]'s clones share: its items in the order they were queued, how
+/// many of them hold a reply slot, how many replies were dropped for want of one, and the lanes of
+/// a bounded queue with the group whose conduits they are.
 #[cfg(all(
     not(feature = "session-slot"),
     feature = "alloc",
     any(
+        feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
         feature = "liveliness-token"
     )
 ))]
 #[derive(Default)]
-struct HeapReplies {
-    items: VecDeque<MulticastTxItem>,
+struct Staged {
+    items: VecDeque<Queued>,
+    replies: usize,
     dropped: u32,
+    bound: Option<(
+        wz_session_core::multicast_tx::MulticastTxLanes,
+        MulticastParams,
+    )>,
+}
+
+/// One item of a [`MulticastReplyQueue`]: the lane it counts on, the bytes it counts for, and
+/// whether it holds a reply slot.
+#[cfg(all(
+    not(feature = "session-slot"),
+    feature = "alloc",
+    any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    )
+))]
+struct Queued {
+    item: MulticastTxItem,
+    priority: wz_session_core::qos::Priority,
+    bytes: usize,
+    reply: bool,
 }
 
 #[cfg(all(
     not(feature = "session-slot"),
     feature = "alloc",
     any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    )
+))]
+impl Staged {
+    /// Queue `item` behind what is queued, counted on its lane when the queue is bounded, and on
+    /// a reply slot when it is a `reply`.
+    fn stage(&mut self, item: MulticastTxItem, reply: bool) {
+        let (priority, bytes) = match self.bound.as_mut() {
+            Some((lanes, params)) => {
+                let priority = wz_session_core::multicast_tx::multicast_tx_conduit(&item, params);
+                let bytes = wz_session_core::multicast_tx::multicast_tx_bytes(&item);
+                lanes.taken(priority, bytes);
+                (priority, bytes)
+            }
+            None => (wz_session_core::qos::Priority::DEFAULT, 0),
+        };
+        self.replies += usize::from(reply);
+        self.items.push_back(Queued {
+            item,
+            priority,
+            bytes,
+            reply,
+        });
+    }
+}
+
+#[cfg(all(
+    not(feature = "session-slot"),
+    feature = "alloc",
+    any(
+        feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
         feature = "liveliness-token"
     )
 ))]
 impl MulticastReplyQueue {
-    /// A fresh empty reply queue.
+    /// A fresh empty queue with no lanes: it takes every message of the session, and replies up
+    /// to [`MAX_MULTICAST_REPLIES`].
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// An empty queue bounded by the lanes of the group `params` describes: its queue's sizes in
+    /// batches of its batch size, one lane when it runs no QoS. Its replies are bounded by
+    /// [`MAX_MULTICAST_REPLIES`] as well, as every queue's are.
+    pub fn bounded(params: &MulticastParams) -> Self {
+        let staged = Staged {
+            bound: Some((
+                wz_session_core::multicast_tx::MulticastTxLanes::of_group(params),
+                params.clone(),
+            )),
+            ..Staged::default()
+        };
+        Self {
+            queue: Rc::new(RefCell::new(staged)),
+        }
     }
 
     /// How many replies the queue holds at most: [`MAX_MULTICAST_REPLIES`].
@@ -331,35 +437,54 @@ impl MulticastReplyQueue {
         MAX_MULTICAST_REPLIES
     }
 
-    /// How many replies are waiting.
+    /// How many items are waiting: the replies, and the messages of the session queued with
+    /// [`Self::enqueue_admitted`], which hold no reply slot.
     pub fn len(&self) -> usize {
         self.queue.borrow().items.len()
     }
 
-    /// Whether no reply is waiting.
+    /// Whether no item is waiting.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    /// How many replies were dropped for want of room since the queue was made.
+    /// How many replies were dropped for want of a reply slot since the queue was made. A message
+    /// of the session dropped for want of room on its lane is not among them ([`Self::drops`]).
     pub fn dropped(&self) -> u32 {
         self.queue.borrow().dropped
     }
 
-    /// Drain one queued reply for the loop's `next_tx` seam (FIFO order). `None`
-    /// when empty — the loop then keeps serving RX + the JOIN beacon.
+    /// Drain one queued item for the loop's `next_tx` seam: the oldest of the most urgent lane,
+    /// with a Control item behind the data queued before it (FIFO on a queue that is not
+    /// bounded). `None` when empty — the loop then keeps serving RX + the JOIN beacon. What it
+    /// held of its lane is room again, and a reply frees its slot.
     pub fn pop(&self) -> Option<MulticastTxItem> {
-        self.queue.borrow_mut().items.pop_front()
+        let mut staged = self.queue.borrow_mut();
+        let at = next_out(&staged.items)?;
+        let queued = staged.items.remove(at)?;
+        staged.replies -= usize::from(queued.reply);
+        if let Some((lanes, _)) = staged.bound.as_mut() {
+            lanes.written(queued.priority, queued.bytes);
+        }
+        Some(queued.item)
     }
 
+    /// Queue `item`, a message of the session whose lane answered it room
+    /// ([`Self::room_at_once`]): counted on its lane, and on no reply slot, since the lane is what
+    /// bounds it.
+    pub fn enqueue_admitted(&self, item: MulticastTxItem) {
+        self.queue.borrow_mut().stage(item, false);
+    }
+
+    /// Queue `item` as a reply when a reply slot is free; drop and count it otherwise.
     fn push(&self, item: MulticastTxItem) {
         let refused = {
-            let mut queue = self.queue.borrow_mut();
-            if queue.items.len() < MAX_MULTICAST_REPLIES {
-                queue.items.push_back(item);
+            let mut staged = self.queue.borrow_mut();
+            if staged.replies < MAX_MULTICAST_REPLIES {
+                staged.stage(item, true);
                 None
             } else {
-                queue.dropped = queue.dropped.saturating_add(1);
+                staged.dropped = staged.dropped.saturating_add(1);
                 Some(item)
             }
         };
@@ -367,6 +492,87 @@ impl MulticastReplyQueue {
         // never runs with the queue borrowed.
         drop(refused);
     }
+
+    /// What `item`, asking for room with `wait`, is answered before it waits: the lane rule
+    /// every bounded queue follows, over the lane of its conduit. `None` is a message that has to
+    /// wait for the group's writer to drain the lane; a queue that is not bounded has room.
+    pub fn room_at_once(
+        &self,
+        item: &MulticastTxItem,
+        wait: wz_session_core::link::RoomWait,
+    ) -> Option<wz_session_core::link::LinkRoom> {
+        let mut staged = self.queue.borrow_mut();
+        match staged.bound.as_mut() {
+            Some((lanes, params)) => lanes.room_at_once(
+                wz_session_core::multicast_tx::multicast_tx_conduit(item, params),
+                wait,
+            ),
+            None => Some(wz_session_core::link::LinkRoom::Free),
+        }
+    }
+
+    /// Whether the lane of `item`'s conduit holds less than its bound; a queue that is not
+    /// bounded always does.
+    pub fn has_room(&self, item: &MulticastTxItem) -> bool {
+        let staged = self.queue.borrow();
+        match staged.bound.as_ref() {
+            Some((lanes, params)) => lanes.has_room(
+                wz_session_core::multicast_tx::multicast_tx_conduit(item, params),
+            ),
+            None => true,
+        }
+    }
+
+    /// `item` found no room within its wait and was dropped: the lane of its conduit is marked
+    /// congested and the drop counted in [`Self::drops`], as the tokio group counts a congestion
+    /// drop, apart from the replies [`Self::dropped`] counts.
+    pub fn congestion_drop(&self, item: &MulticastTxItem) {
+        let mut staged = self.queue.borrow_mut();
+        if let Some((lanes, params)) = staged.bound.as_mut() {
+            lanes.dropped(wz_session_core::multicast_tx::multicast_tx_conduit(
+                item, params,
+            ));
+        }
+    }
+
+    /// How many messages of `priority` a bounded queue dropped for want of room on their lane
+    /// ([`Self::congestion_drop`]); 0 on a queue that is not bounded.
+    pub fn drops(&self, priority: wz_session_core::qos::Priority) -> u32 {
+        self.queue
+            .borrow()
+            .bound
+            .as_ref()
+            .map_or(0, |(lanes, _)| lanes.drops(priority))
+    }
+}
+
+/// Which queued item the group's writer takes next: the oldest of the most urgent lane, as the
+/// tokio engine's group writer serves its lanes, highest first. A Control item waits behind what
+/// the other lanes queued before it, as that writer's fence holds a control datagram behind the
+/// data queued ahead of it, so a declaration never passes a put it was queued after. A queue that
+/// is not bounded counts every item on one lane, and is taken in the order it was queued.
+#[cfg(all(
+    not(feature = "session-slot"),
+    feature = "alloc",
+    any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    )
+))]
+fn next_out(items: &VecDeque<Queued>) -> Option<usize> {
+    use wz_session_core::qos::Priority;
+    // `min_by_key` keeps the first of equals: the oldest of a lane.
+    let at = (0..items.len()).min_by_key(|&at| items[at].priority.wire_byte())?;
+    if items[at].priority == Priority::Control && at > 0 {
+        // Nothing before `at` is a Control item, so the fence holds: the other lanes are served,
+        // highest first, until what they queued before it has left.
+        return (0..items.len())
+            .filter(|&other| items[other].priority != Priority::Control)
+            .min_by_key(|&other| items[other].priority.wire_byte());
+    }
+    Some(at)
 }
 
 // R311md — the single enqueue backing the shared MulticastReplySink<Q> drains
@@ -379,12 +585,17 @@ impl MulticastReplyQueue {
     not(feature = "session-slot"),
     feature = "alloc",
     any(
+        feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
         feature = "liveliness-token"
     )
 ))]
 impl MulticastReplyEnqueue for MulticastReplyQueue {
+    // A reply takes a reply slot, or is dropped and counted when none is free. It is queued
+    // whatever its lane holds, and counted on it: a reply the group's own dispatch stages runs
+    // inside the writer it would wait for. A message of the session asks its lane for room first
+    // and comes in through `enqueue_admitted`.
     fn enqueue(&self, item: MulticastTxItem) {
         self.push(item);
     }
@@ -432,6 +643,7 @@ impl MulticastReplyEnqueue for MulticastReplyQueue {
     feature = "session-slot",
     feature = "alloc",
     any(
+        feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
         feature = "liveliness-token"
@@ -449,6 +661,7 @@ pub struct MulticastReplyQueue {
     feature = "session-slot",
     feature = "alloc",
     any(
+        feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
         feature = "liveliness-token"
@@ -460,6 +673,7 @@ unsafe impl Sync for MulticastReplyQueue {}
     feature = "session-slot",
     feature = "alloc",
     any(
+        feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
         feature = "liveliness-token"
@@ -518,6 +732,7 @@ impl MulticastReplyQueue {
     feature = "session-slot",
     feature = "alloc",
     any(
+        feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
         feature = "liveliness-token"
@@ -535,6 +750,7 @@ impl Default for MulticastReplyQueue {
     feature = "session-slot",
     feature = "alloc",
     any(
+        feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
         feature = "liveliness-token"
@@ -904,6 +1120,71 @@ const TX_SCRATCH_BYTES: usize = 1500 - 20 - 8;
 #[cfg(feature = "alloc")]
 const TX_SCRATCH_BYTES: usize = 0;
 
+/// What the data emit of a pump could not hand its socket: on the heap profile the datagrams the
+/// socket had no room for, kept in order for the next step, as the tokio group's writer keeps
+/// what its socket has not taken; and the count of the datagrams that were lost, to a send that
+/// failed or, where nothing is kept, to a socket with no room.
+struct TxBacklog {
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    held: alloc::collections::VecDeque<alloc::vec::Vec<u8>>,
+    lost: u32,
+}
+
+impl TxBacklog {
+    const fn new() -> Self {
+        Self {
+            #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+            held: alloc::collections::VecDeque::new(),
+            lost: 0,
+        }
+    }
+
+    /// Offer the socket what it had no room for before, in order, until it has none again:
+    /// whether something is still held back.
+    fn offer_held<T: GroupTransport>(&mut self, transport: &mut T) -> bool {
+        #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+        while let Some(datagram) = self.held.front() {
+            match transport.try_send_to_group(datagram) {
+                GroupSend::Sent => {}
+                GroupSend::Full => return true,
+                GroupSend::Failed => self.lost = self.lost.saturating_add(1),
+            }
+            self.held.pop_front();
+        }
+        #[cfg(not(all(feature = "alloc", not(feature = "session-slot"))))]
+        let _ = transport;
+        false
+    }
+
+    /// Offer the socket one datagram of the emit, behind any held back (`full`): whether the
+    /// socket is full from here on in this step.
+    fn send<T: GroupTransport>(&mut self, transport: &mut T, datagram: &[u8], full: bool) -> bool {
+        // A socket already full is not offered more, so the datagrams leave in their order.
+        let sent = if full {
+            GroupSend::Full
+        } else {
+            transport.try_send_to_group(datagram)
+        };
+        match sent {
+            GroupSend::Sent => false,
+            GroupSend::Full => {
+                #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+                self.held.push_back(datagram.to_vec());
+                // Nowhere to keep it: the datagram is lost, and counted.
+                #[cfg(not(all(feature = "alloc", not(feature = "session-slot"))))]
+                {
+                    self.lost = self.lost.saturating_add(1);
+                }
+                true
+            }
+            GroupSend::Failed => {
+                self.lost = self.lost.saturating_add(1);
+                false
+            }
+        }
+    }
+}
+
 /// One MCU multicast session, ready to be advanced one iteration at a time.
 ///
 /// Open-debt item 900 — one program holding SEVERAL sessions (a client session
@@ -934,6 +1215,9 @@ pub struct MulticastPump<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS:
     // datagram at a time (`multicast_tx_emit_offer`); empty on the heap profile,
     // which frames into vectors of its own.
     tx_scratch: [u8; TX_SCRATCH_BYTES],
+    // What the data emit could not hand the socket: the datagrams a full socket left for the
+    // next step, and the count of those that were lost.
+    tx_backlog: TxBacklog,
     next_join_ms: u64,
     next_sweep_ms: u64,
     iter: usize,
@@ -975,6 +1259,13 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
             transport,
             ExecutorPass::Hosted,
         )
+    }
+
+    /// Make the JOIN beacon due now: the next step sends it, and the cadence runs from there, as
+    /// the AP group loop does when a JOIN is asked of it (`MulticastTxProducer::request_join`,
+    /// zenoh-pico's `zp_send_join`).
+    pub fn join_now(&mut self) {
+        self.next_join_ms = 0;
     }
 
     #[cfg_attr(not(feature = "reassembly"), allow(unused_variables))]
@@ -1022,6 +1313,7 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
             pass,
             tx_sn,
             tx_scratch: [0; TX_SCRATCH_BYTES],
+            tx_backlog: TxBacklog::new(),
             next_join_ms,
             next_sweep_ms,
             iter: 0,
@@ -1040,6 +1332,12 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
     /// The peer table the pump drives, for a caller that reports its group.
     pub fn dispatcher(&self) -> &MulticastDispatcher<MAX_PEERS> {
         self.dispatcher
+    }
+
+    /// How many datagrams of the data emit were lost since the pump was made: to a send the stack
+    /// failed, and, on a build that keeps none back, to a socket with no room for them.
+    pub fn tx_lost(&self) -> u32 {
+        self.tx_backlog.lost
     }
 
     /// Advance the session by one iteration. `Some(outcome)` means the session
@@ -1077,6 +1375,7 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
         let clock = &self.clock;
         let tx_sn = &mut self.tx_sn;
         let tx_scratch = &mut self.tx_scratch[..];
+        let tx_backlog = &mut self.tx_backlog;
         let next_join_ms = &mut self.next_join_ms;
         let next_sweep_ms = &mut self.next_sweep_ms;
         let iter = &mut self.iter;
@@ -1178,8 +1477,12 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
         }
 
         let now = clock.now_monotonic_ms();
+        // What the socket had no room for at an earlier step goes first. A JOIN waits behind it:
+        // the beacon advertises the sequence numbers those datagrams carry as sent, and a member
+        // that read it first would drop them as stale when they came.
+        let mut full = tx_backlog.offer_held(&mut *transport);
         // JoinEmit: multicast the self-advertising JOIN beacon when due.
-        if now >= *next_join_ms {
+        if now >= *next_join_ms && !full {
             // R311y227 — the DEFAULT conduit's live SNs (the single-conduit
             // beacon); a qos group additionally advertises per-priority ext_qos (C2).
             // Written into an array on the stack (`encode_join_into_slice` is the
@@ -1196,16 +1499,23 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
         // through the shared multicast_tx_emit_offer SSOT (the same the AP loop
         // calls the heap form of) and multicasting it to the group. Drained right
         // after the JOIN beacon so the datagrams ride THIS iteration's
-        // run_until_idle. send_to_group is best-effort (multicast UDP); the SSOT's
+        // run_until_idle. The send is best-effort (multicast UDP); the SSOT's
         // per-variant reliability flag is inert here (the MCU group socket takes
         // no reliability arg). Every forwarded variant — Push, queryable
         // Response / ResponseFinal, liveliness DeclareReply — routes through the
         // one SSOT, so this drain is variant-agnostic (the item carries which).
         // With no TX body codec the offer is uninhabited, so `next_tx` can only
         // yield `None` and the loop body is never entered.
-        while let Some(offer) = next_tx() {
+        //
+        // A socket with no room ends the drain for this step: what it did not take waits for
+        // the next one (`TxBacklog`), and what is still queued stays queued, where a sender
+        // whose message finds the queue full waits for room as it would on the tokio group's.
+        while !full {
+            let Some(offer) = next_tx() else {
+                break;
+            };
             multicast_tx_emit_offer(offer, tx_sn, params, tx_scratch, &mut |datagram| {
-                transport.send_to_group(datagram)
+                full = tx_backlog.send(&mut *transport, datagram, full);
             });
         }
 
@@ -1351,15 +1661,18 @@ where
         on_event,
         next_tx,
         should_stop,
+        // A session spawned whole has no holder that asks for a JOIN between its beacons.
+        || false,
     )
     .await
 }
 
 /// The loop of a multicast session task over a dispatcher it is lent: the part of
 /// [`multicast_session_task`] and [`multicast_session_task_seeded`] that does not depend on where
-/// the dispatcher was built.
+/// the dispatcher was built. `asks_join` says, before each step, whether the session's holder
+/// asked for a JOIN since the last one.
 #[allow(clippy::too_many_arguments)]
-async fn drive_group_session<'g, C, T, F, G, H, const MAX_PEERS: usize>(
+async fn drive_group_session<'g, C, T, F, G, H, J, const MAX_PEERS: usize>(
     runtime: CoopRuntime<C>,
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
     mut transport: T,
@@ -1370,6 +1683,7 @@ async fn drive_group_session<'g, C, T, F, G, H, const MAX_PEERS: usize>(
     mut on_event: F,
     mut next_tx: G,
     mut should_stop: H,
+    mut asks_join: J,
 ) -> MulticastOutcome
 where
     C: ClockSource,
@@ -1377,6 +1691,7 @@ where
     F: FnMut(IterationEvent<'_, '_>),
     G: FnMut() -> Option<MulticastTxOffer<'g>>,
     H: FnMut() -> bool,
+    J: FnMut() -> bool,
 {
     let mut pump = MulticastPump::new(
         dispatcher,
@@ -1390,6 +1705,10 @@ where
         &mut transport,
     );
     loop {
+        // A JOIN the session's holder asked for is sent at this step.
+        if asks_join() {
+            pump.join_now();
+        }
         if let Some(outcome) = pump.step(&mut on_event, &mut next_tx, Some(&mut should_stop)) {
             return outcome;
         }
@@ -1413,6 +1732,10 @@ pub struct MulticastSessionSeed<T: GroupTransport, const MAX_PEERS: usize> {
     policy: SessionPolicy,
     tick_ms: u64,
     max_iters: Option<usize>,
+    /// The JOIN the session's holder asks for between two beacons, when it keeps the other
+    /// half of the ask ([`Self::with_join_ask`]).
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    join_ask: Option<JoinAsk>,
 }
 
 impl<T: GroupTransport, const MAX_PEERS: usize> MulticastSessionSeed<T, MAX_PEERS> {
@@ -1432,6 +1755,8 @@ impl<T: GroupTransport, const MAX_PEERS: usize> MulticastSessionSeed<T, MAX_PEER
             policy,
             tick_ms,
             max_iters: None,
+            #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+            join_ask: None,
         }
     }
 
@@ -1439,6 +1764,35 @@ impl<T: GroupTransport, const MAX_PEERS: usize> MulticastSessionSeed<T, MAX_PEER
     pub fn with_max_iters(mut self, max_iters: Option<usize>) -> Self {
         self.max_iters = max_iters;
         self
+    }
+
+    /// The session sends its JOIN at the step after `ask` is asked, as well as on its cadence:
+    /// the holder keeps a clone of `ask` and asks through it.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    pub fn with_join_ask(mut self, ask: JoinAsk) -> Self {
+        self.join_ask = Some(ask);
+        self
+    }
+}
+
+/// A JOIN the holder of a group session asks for between two of its beacons: the session sends
+/// it at its next step and keeps its cadence from there, as the AP group loop does when a JOIN is
+/// asked of it (zenoh-pico's `zp_send_join`). One clone is the holder's and one the session's
+/// ([`MulticastSessionSeed::with_join_ask`]); asks made before the session steps are one JOIN.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+#[derive(Clone, Debug, Default)]
+pub struct JoinAsk(alloc::rc::Rc<core::cell::Cell<bool>>);
+
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+impl JoinAsk {
+    /// Ask the session for its JOIN at its next step.
+    pub fn ask(&self) {
+        self.0.set(true);
+    }
+
+    /// Whether a JOIN was asked since the last look; the ask is answered by the look.
+    fn take(&self) -> bool {
+        self.0.replace(false)
     }
 }
 
@@ -1493,7 +1847,13 @@ where
         policy,
         tick_ms,
         max_iters,
+        #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+        join_ask,
     } = seed;
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    let asks_join = move || join_ask.as_ref().is_some_and(JoinAsk::take);
+    #[cfg(not(all(feature = "alloc", not(feature = "session-slot"))))]
+    let asks_join = || false;
     // A local that lives across the await below lies in the future's state, so this slot is
     // where the dispatcher is stored for as long as the task runs.
     let mut slot = MaybeUninit::uninit();
@@ -1509,6 +1869,7 @@ where
         on_event,
         next_tx,
         should_stop,
+        asks_join,
     )
     .await
 }
@@ -1816,6 +2177,12 @@ impl<C: ClockSource + 'static, T: GroupTransport + 'static, const MAX_PEERS: usi
         unsafe { (*self.cell.pump.get()).assume_init_mut() }
     }
 
+    /// How many datagrams of the session's data emit were lost ([`MulticastPump::tx_lost`]): this
+    /// profile keeps none back, so one its socket had no room for is among them.
+    pub fn tx_lost(&mut self) -> u32 {
+        self.pump().tx_lost()
+    }
+
     /// Copy the peer table's count of turned-away JOINs to where the table's owner reads it
     /// ([`MulticastSlots::join_refusals`]); a step changes it by at most one datagram's worth, so
     /// the copy is made after each step and takes the critical section only when the count moved.
@@ -1924,4 +2291,351 @@ where
     local
         .spawn_local_with(move || multicast_pump_task(pump, on_event, next_tx, should_stop))
         .map_err(MulticastSpawnRefused::Task)
+}
+
+#[cfg(all(
+    test,
+    feature = "alloc",
+    feature = "codec-push",
+    not(feature = "session-slot")
+))]
+mod tests {
+    use alloc::collections::VecDeque;
+    use alloc::rc::Rc;
+    use alloc::vec::Vec;
+    use core::cell::RefCell;
+    use core::net::SocketAddr;
+
+    use wz_runtime_coop::{ClockSource, CoopRuntime};
+    use wz_session_core::driver_loop::IterationEvent;
+    use wz_session_core::multicast_dispatch::{MulticastConfig, MulticastDispatcher};
+    use wz_session_core::multicast_params::{
+        zid_vec, GroupJoinRule, MulticastDriveConfig, MulticastParams,
+    };
+    use wz_session_core::multicast_tx::{multicast_put_literal, MulticastTxItem};
+    use wz_session_core::policy::SessionPolicy;
+    use wz_session_core::session_init_params::{LinkRxConf, TxQueueConf};
+    use wz_session_core::wire_const::T_MID_JOIN;
+    use wz_session_core::WhatAmI;
+
+    use wz_session_core::link::{LinkRoom, RoomWait};
+    use wz_session_core::multicast_reply_sink::MulticastReplyEnqueue;
+    use wz_session_core::qos::Priority;
+
+    use super::{next_out, GroupSend, GroupTransport, MulticastPump, MulticastReplyQueue, Queued};
+
+    /// A clock that never moves: the beacon, due at every step, is what moves the test.
+    #[derive(Clone, Default)]
+    struct Frozen;
+
+    impl ClockSource for Frozen {
+        fn now_us(&self) -> u64 {
+            0
+        }
+    }
+
+    /// The payloads the test puts on the group, by which a datagram is told apart.
+    const PAYLOADS: [&str; 4] = ["first", "second", "third", "fourth"];
+
+    /// What the group's socket took, in order, and what it takes next.
+    #[derive(Default)]
+    struct Wire {
+        seen: Vec<Vec<u8>>,
+        /// How many more datagrams it takes before it is full.
+        room: usize,
+        /// The next datagram offered fails.
+        fail: bool,
+    }
+
+    struct Socket(Rc<RefCell<Wire>>);
+
+    impl GroupTransport for Socket {
+        fn open(&mut self) -> bool {
+            true
+        }
+
+        fn close(&mut self) {}
+
+        fn service(&self) {}
+
+        fn carrier_up(&self) -> bool {
+            true
+        }
+
+        // The beacon leaves this way, whatever room there is: where it falls among the data is
+        // what is read.
+        fn send_to_group(&mut self, datagram: &[u8]) {
+            self.0.borrow_mut().seen.push(datagram.to_vec());
+        }
+
+        fn try_send_to_group(&mut self, datagram: &[u8]) -> GroupSend {
+            let mut wire = self.0.borrow_mut();
+            if core::mem::take(&mut wire.fail) {
+                return GroupSend::Failed;
+            }
+            if wire.room == 0 {
+                return GroupSend::Full;
+            }
+            wire.room -= 1;
+            wire.seen.push(datagram.to_vec());
+            GroupSend::Sent
+        }
+
+        fn recv_with(&mut self, _f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
+            false
+        }
+    }
+
+    /// A group whose beacon is due at every step.
+    fn params() -> MulticastParams {
+        MulticastParams {
+            whatami: WhatAmI::Peer,
+            zid: zid_vec(&[0xAA, 0xBB, 0xCC, 0xDD]),
+            lease_ms: 5_000,
+            join_interval_ms: 0,
+            seq_num_res: 0x02,
+            req_id_res: 0x02,
+            batch_size: 2_048,
+            is_qos: false,
+            compression: false,
+            tx_queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
+            link_rx: LinkRxConf::default(),
+            join_rule: GroupJoinRule::Pico,
+            max_sessions: None,
+            policy: SessionPolicy::defaults(),
+        }
+    }
+
+    fn put(payload: &str) -> MulticastTxItem {
+        multicast_put_literal("demo/backlog", payload.as_bytes()).expect("a put")
+    }
+
+    /// What the socket took, each as `join` or the payload of the put it carried.
+    fn taken(wire: &RefCell<Wire>) -> Vec<&'static str> {
+        wire.borrow()
+            .seen
+            .iter()
+            .map(|datagram| {
+                if datagram.first().is_some_and(|h| h & 0x1f == T_MID_JOIN) {
+                    return "join";
+                }
+                PAYLOADS
+                    .into_iter()
+                    .find(|payload| datagram.ends_with(payload.as_bytes()))
+                    .unwrap_or("other")
+            })
+            .collect()
+    }
+
+    /// A datagram the socket has no room for is kept and offered again at the next step, ahead
+    /// of everything, and the beacon waits behind it; what is still queued is not taken while the
+    /// socket is full. A datagram whose send fails is lost and counted, and not offered again.
+    #[test]
+    fn a_datagram_the_socket_has_no_room_for_waits_and_the_beacon_waits_behind_it() {
+        let wire = Rc::new(RefCell::new(Wire {
+            room: 1,
+            ..Wire::default()
+        }));
+        let mut socket = Socket(Rc::clone(&wire));
+        let params = params();
+        let runtime = CoopRuntime::new(Frozen);
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let queue: RefCell<VecDeque<MulticastTxItem>> =
+            RefCell::new(PAYLOADS[..3].iter().copied().map(put).collect());
+        let mut next_tx = || queue.borrow_mut().pop_front();
+        let mut quiet = |_event: IterationEvent<'_, '_>| {};
+        let mut pump = MulticastPump::new(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &params,
+                tick_ms: 5,
+                max_iters: None,
+            },
+            &SessionPolicy::defaults(),
+            &runtime,
+            &mut socket,
+        );
+
+        // The beacon, then the first put, which takes the room there is; the second finds none
+        // and is kept, and the third stays queued.
+        assert!(pump.step(&mut quiet, &mut next_tx, None).is_none());
+        assert_eq!(taken(&wire), ["join", "first"]);
+        assert_eq!(queue.borrow().len(), 1, "what is queued stays queued");
+
+        // Still no room: the beacon that is due waits behind the datagram kept.
+        assert!(pump.step(&mut quiet, &mut next_tx, None).is_none());
+        assert_eq!(taken(&wire), ["join", "first"]);
+
+        // Room: the kept datagram leaves first, then the beacon, then what was queued.
+        wire.borrow_mut().room = 8;
+        assert!(pump.step(&mut quiet, &mut next_tx, None).is_none());
+        assert_eq!(taken(&wire), ["join", "first", "second", "join", "third"]);
+        assert_eq!(pump.tx_lost(), 0, "nothing was lost to a full socket");
+
+        // A send the stack fails loses its datagram: counted, and not offered again.
+        queue.borrow_mut().push_back(put("fourth"));
+        wire.borrow_mut().fail = true;
+        assert!(pump.step(&mut quiet, &mut next_tx, None).is_none());
+        assert_eq!(pump.tx_lost(), 1);
+        assert!(pump.step(&mut quiet, &mut next_tx, None).is_none());
+        assert_eq!(
+            taken(&wire),
+            ["join", "first", "second", "join", "third", "join", "join"]
+        );
+    }
+
+    /// The writer takes the oldest item of the most urgent lane first, as the tokio group's writer
+    /// serves its lanes; a Control item waits behind what other lanes queued before it, while a
+    /// lane more urgent than that data is still served first.
+    #[test]
+    fn the_writer_takes_the_most_urgent_lane_first_and_control_waits_behind_earlier_data() {
+        fn order(priorities: &[Priority]) -> Vec<Priority> {
+            let mut items: VecDeque<Queued> = priorities
+                .iter()
+                .map(|priority| Queued {
+                    item: put("first"),
+                    priority: *priority,
+                    bytes: 0,
+                    reply: false,
+                })
+                .collect();
+            let mut out = Vec::new();
+            while let Some(at) = next_out(&items) {
+                out.push(items.remove(at).expect("the item chosen").priority);
+            }
+            out
+        }
+        use Priority::{Background, Control, Data, RealTime};
+        assert_eq!(
+            order(&[Data, RealTime, Background]),
+            [RealTime, Data, Background]
+        );
+        assert_eq!(
+            order(&[Data, Control, RealTime]),
+            [RealTime, Data, Control],
+            "the Control item waits for the data queued before it"
+        );
+        assert_eq!(order(&[Control, Data]), [Control, Data]);
+        assert_eq!(
+            order(&[Data, Data, Data]),
+            [Data, Data, Data],
+            "CONTROL: one lane"
+        );
+    }
+
+    /// A bounded queue counts what it holds against its lane: a message asks for room before it
+    /// is queued and a full lane leaves it to the writer; a drop marks the lane, so a droppable
+    /// ask is answered at once, and is counted; each item drained makes room and lowers the mark.
+    /// A queue that is not bounded has room for everything.
+    #[test]
+    fn a_bounded_queue_holds_its_lane_and_each_item_drained_makes_room() {
+        let mut params = params();
+        params.batch_size = 64;
+        params.tx_queue.sizes = [1; Priority::NUM];
+        let queue = MulticastReplyQueue::bounded(&params);
+        let drop = RoomWait::Drop { wait_us: 1_000 };
+        let large = "y".repeat(100);
+
+        assert_eq!(
+            queue.room_at_once(&put("first"), drop),
+            Some(LinkRoom::Free)
+        );
+        queue.enqueue_admitted(put("first"));
+        assert!(queue.has_room(&put(&large)), "a small put leaves room");
+        queue.enqueue_admitted(put(&large));
+        assert!(!queue.has_room(&put("second")));
+        assert_eq!(
+            queue.room_at_once(&put("second"), drop),
+            None,
+            "a wait for the writer"
+        );
+
+        queue.congestion_drop(&put("second"));
+        assert_eq!(queue.drops(Priority::DEFAULT), 1);
+        assert_eq!(queue.dropped(), 0, "a congestion drop is no reply refused");
+        assert_eq!(
+            queue.room_at_once(&put("second"), drop),
+            Some(LinkRoom::Congested),
+            "the mark answers a droppable ask at once"
+        );
+
+        assert!(queue.pop().is_some());
+        assert_eq!(
+            queue.room_at_once(&put("second"), drop),
+            None,
+            "an item drained lowers the mark; the large one still fills the lane"
+        );
+        assert!(queue.pop().is_some());
+        assert_eq!(
+            queue.room_at_once(&put("second"), drop),
+            Some(LinkRoom::Free)
+        );
+
+        let open = MulticastReplyQueue::new();
+        for _ in 0..64 {
+            open.enqueue_admitted(put(&large));
+        }
+        assert_eq!(
+            open.room_at_once(&put("second"), RoomWait::Drop { wait_us: 0 }),
+            Some(LinkRoom::Free),
+            "CONTROL: a queue that is not bounded"
+        );
+        assert_eq!(open.drops(Priority::DEFAULT), 0);
+    }
+
+    /// Every queue holds at most `MAX_MULTICAST_REPLIES` replies, whatever room its lanes have:
+    /// the reply past them is dropped and counted in `dropped`, takes nothing of its lane and is
+    /// no congestion drop; a message of the session its lane let on holds no reply slot; and a
+    /// reply drained frees its slot.
+    #[test]
+    fn a_reply_past_the_limit_is_dropped_and_counted_apart_from_the_lanes() {
+        use wz_session_core::caps::MAX_MULTICAST_REPLIES;
+
+        let mut params = params();
+        params.batch_size = 64;
+        params.tx_queue.sizes = [1; Priority::NUM];
+        let queue = MulticastReplyQueue::bounded(&params);
+        let sink = queue.clone();
+        let large = "y".repeat(100);
+        assert_eq!(queue.capacity(), MAX_MULTICAST_REPLIES);
+
+        for _ in 0..MAX_MULTICAST_REPLIES {
+            sink.enqueue(put("first"));
+        }
+        assert_eq!((queue.len(), queue.dropped()), (MAX_MULTICAST_REPLIES, 0));
+
+        sink.enqueue(put(&large));
+        assert_eq!(
+            (queue.len(), queue.dropped()),
+            (MAX_MULTICAST_REPLIES, 1),
+            "the reply past the limit is dropped and counted"
+        );
+        assert_eq!(
+            queue.drops(Priority::DEFAULT),
+            0,
+            "and is no congestion drop"
+        );
+
+        queue.enqueue_admitted(put("second"));
+        assert_eq!(
+            (queue.len(), queue.dropped()),
+            (MAX_MULTICAST_REPLIES + 1, 1),
+            "a message of the session holds no reply slot"
+        );
+
+        assert!(queue.pop().is_some());
+        sink.enqueue(put("third"));
+        assert_eq!(
+            (queue.len(), queue.dropped()),
+            (MAX_MULTICAST_REPLIES + 1, 1),
+            "a reply drained frees its slot"
+        );
+
+        while queue.pop().is_some() {}
+        assert!(queue.is_empty());
+        assert!(
+            queue.has_room(&put(&large)),
+            "the dropped reply took nothing of its lane"
+        );
+    }
 }

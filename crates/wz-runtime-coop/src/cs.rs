@@ -155,6 +155,23 @@ mod host {
             CELLS.with(|held| held.borrow_mut().push(guard));
             Self
         }
+
+        /// [`Self::enter`] that does not wait: `None` when another thread holds `lock` now (or
+        /// this one does: the lock is not reentrant).
+        #[inline(never)]
+        fn try_enter(lock: &std::sync::Mutex<()>) -> Option<Self> {
+            let guard = match lock.try_lock() {
+                Ok(guard) => guard,
+                // Poisoned, as `enter` takes it.
+                Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => return None,
+            };
+            // SAFETY: as in `enter`: the guard is dropped by this thread's `Held` before
+            // `try_with` returns, and `try_with` borrows the cell, so the lock outlives the guard.
+            let guard: MutexGuard<'static, ()> = unsafe { core::mem::transmute(guard) };
+            CELLS.with(|held| held.borrow_mut().push(guard));
+            Some(Self)
+        }
     }
 
     impl Drop for Held {
@@ -178,6 +195,14 @@ mod host {
             // SAFETY: this thread holds `lock` until `_held` drops, after `f` returns or
             // unwinds, so no other thread has the value meanwhile.
             f(unsafe { &mut *self.value.get() })
+        }
+
+        /// [`Self::with`] that does not wait: `None` when another thread holds the lock now,
+        /// and `f` has not run.
+        pub fn try_with<U>(&self, f: impl FnOnce(&mut T) -> U) -> Option<U> {
+            let _held = Held::try_enter(&self.lock)?;
+            // SAFETY: as in `with`: this thread holds `lock` until `_held` drops.
+            Some(f(unsafe { &mut *self.value.get() }))
         }
     }
 
@@ -291,5 +316,45 @@ mod tests {
         release_tx.send(()).expect("the holder is waiting");
         holder.join().expect("the holder ran");
         assert_eq!(held.with(|value| *value), 1);
+    }
+
+    /// A cell tried while another thread holds it answers `None` at once and runs nothing; once
+    /// the holder lets go it is taken and the closure runs. A cell this thread already holds is
+    /// held too: the lock is not reentrant.
+    #[test]
+    fn a_held_cell_is_tried_without_waiting() {
+        let held = Arc::new(HostMutex::new(0u32));
+        let (inside_tx, inside_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = {
+            let held = held.clone();
+            std::thread::spawn(move || {
+                held.with(|value| {
+                    *value += 1;
+                    inside_tx.send(()).expect("the test is listening");
+                    // Bounded, so a try that waited for the holder reads as a wrong answer and
+                    // not as a test that never ends.
+                    let _ = release_rx.recv_timeout(std::time::Duration::from_secs(3));
+                });
+            })
+        };
+        inside_rx.recv().expect("the holder is inside its cell");
+        let mut ran = false;
+        assert_eq!(
+            held.try_with(|value| {
+                ran = true;
+                *value
+            }),
+            None
+        );
+        assert!(!ran, "nothing ran under a cell another thread holds");
+        let _ = release_tx.send(());
+        holder.join().expect("the holder ran");
+        assert_eq!(held.try_with(|value| *value), Some(1));
+        assert_eq!(
+            held.with(|_| held.try_with(|value| *value)),
+            None,
+            "a cell this thread holds is held"
+        );
     }
 }

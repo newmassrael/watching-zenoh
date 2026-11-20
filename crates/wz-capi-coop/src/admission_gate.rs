@@ -18,7 +18,7 @@
 use alloc::rc::Rc;
 use core::cell::Cell;
 
-use wz_runtime_coop::session_drive::{LinkReadiness, SessionDatagramLink};
+use wz_runtime_coop::session_drive::{LinkReadiness, LinkWritability, SessionDatagramLink};
 use wz_runtime_coop::ClockSource;
 use wz_session_core::link::{LostCause, RxFrame};
 use wz_session_mcu::dial::McuActions;
@@ -107,6 +107,12 @@ impl<P: SessionDatagramLink, C: ClockSource + 'static> SessionDatagramLink for A
 
     fn readiness(&self) -> Option<Box<dyn LinkReadiness>> {
         self.pump.readiness()
+    }
+
+    // The gate holds back input only: what the session sends goes out whether or not the link
+    // is admitted, so its room is the link's.
+    fn writability(&self) -> Option<Box<dyn LinkWritability>> {
+        self.pump.writability()
     }
 }
 

@@ -86,8 +86,9 @@ impl<Q> MulticastReplySink<Q> {
 // the terminal rid; the sink wraps each in the matching `MulticastTxItem` and
 // enqueues it. `send_response` is the one place a `wz_codecs` owned type is
 // named — here in wz-session-core (which already deps wz-codecs), not in the
-// backing crates.
-#[cfg(any(feature = "codec-response", feature = "codec-response-final"))]
+// backing crates. Every method is gated by its own codec, so a build with neither
+// reply codec has a sink with nothing to send: a host that drains a group's whole
+// observer through one sink (`SlotObserver::flush_pending`) names it in every build.
 impl<Q: MulticastReplyEnqueue> crate::response_sink::ResponseSink for MulticastReplySink<Q> {
     #[cfg(feature = "codec-response")]
     fn send_response(&self, response: crate::wire::ResponseOwned) {
@@ -190,5 +191,261 @@ impl<Q: MulticastReplyEnqueue> crate::response_sink::DeclareReplySink for Multic
                 subscriber_id,
             )),
         });
+    }
+}
+
+// A group keeps no cache of the interests a session asks again after it reconnects: a group has
+// no reconnect (a member that joins again is a new member), so a liveliness get that ended has
+// nothing to prune here, which is the trait's own body where no cache exists. With it a host that
+// drains its observer through one sink, the shape `SlotObserver::flush_pending` takes, drains a
+// group's through this one.
+impl<Q> crate::response_sink::LivelinessGetPrune for MulticastReplySink<Q> {
+    #[cfg(feature = "liveliness-get")]
+    fn prune_liveliness_get_interest(&self, interest_id: u64) {
+        let _ = interest_id;
+    }
+}
+
+/// Whether `event` carries a member's interest that asks for declarations held now: an
+/// `Interest` with the CURRENT bit, whose answer is the declarations held at this moment and a
+/// final. zenoh-pico answers one on a multicast transport whatever its declarations switch, a
+/// JOIN first (`vendor/zenoh-pico/src/session/interest.c` @ `// Push a join in case it's a new
+/// node`), which is what lets a member that has not admitted this session yet admit it before
+/// the answer arrives: every engine that joins groups asks its group for that JOIN on this.
+#[cfg(feature = "storage-profile")]
+pub fn asks_for_declarations(event: &crate::driver_loop::IterationEvent<'_, '_>) -> bool {
+    use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
+    use crate::network_message::NetworkMessage;
+    match event {
+        IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => messages
+            .iter()
+            .any(|message| matches!(message, NetworkMessage::Interest(interest) if interest.c())),
+        _ => false,
+    }
+}
+
+/// Open-debt item 913 — the keyexprs a group session declared to its group, and the members'
+/// interests in them it still owes an answer: what every engine that joins groups answers a
+/// member with. zenoh-pico answers a CURRENT interest that asks for keyexprs with a declaration
+/// of each key it holds that meets the interest's, ahead of its other declarations and the final
+/// (`vendor/zenoh-pico/src/session/interest.c` @
+/// `ret = _z_interest_send_decl_resource(zn, id, NULL, restr_key_opt);`). An engine notes the
+/// interests of each event its group delivers ([`Self::asked`]) and sends the answers after the
+/// JOIN the interest asked for ([`Self::take_answers`]); the lock around it is the engine's.
+#[cfg(all(
+    feature = "codec-declare",
+    feature = "declare-final",
+    feature = "storage-profile",
+    any(feature = "liveliness-token", feature = "declare-subscriber")
+))]
+#[derive(Debug, Default)]
+pub struct GroupKeyexprAnswers {
+    declared: alloc::collections::BTreeMap<crate::wire_id::ExprId, alloc::string::String>,
+    owed: alloc::vec::Vec<OwedKeyexprs>,
+}
+
+/// One interest's claim on a group session's keyexprs.
+#[cfg(all(
+    feature = "codec-declare",
+    feature = "declare-final",
+    feature = "storage-profile",
+    any(feature = "liveliness-token", feature = "declare-subscriber")
+))]
+#[derive(Debug)]
+struct OwedKeyexprs {
+    interest_id: u64,
+    /// The key the interest names, `None` for every key. A key the member named by a declaration
+    /// of its own arrives here as the literal it declared, the group's dispatch having resolved
+    /// it per member (`MulticastDispatcher::apply_declared_aliases`).
+    restriction: Option<alloc::string::String>,
+    /// Whether this answer ends the interest: it asks for no other kind, so nothing else stages
+    /// its final.
+    ends: bool,
+}
+
+#[cfg(all(
+    feature = "codec-declare",
+    feature = "declare-final",
+    feature = "storage-profile",
+    any(feature = "liveliness-token", feature = "declare-subscriber")
+))]
+impl GroupKeyexprAnswers {
+    /// The session declared `keyexpr` to the group as `mapping_id`.
+    pub fn declared(&mut self, mapping_id: crate::wire_id::ExprId, keyexpr: &str) {
+        self.declared.insert(mapping_id, keyexpr.into());
+    }
+
+    /// The session retracted declaration `mapping_id`.
+    pub fn retracted(&mut self, mapping_id: crate::wire_id::ExprId) {
+        self.declared.remove(&mapping_id);
+    }
+
+    /// Note each interest in `event` that asks for keyexprs now; whether any answer is owed
+    /// after it.
+    pub fn asked(&mut self, event: &crate::driver_loop::IterationEvent<'_, '_>) -> bool {
+        use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
+        use crate::network_message::NetworkMessage;
+        use wz_codecs::wireexpr::WireexprOwnedVariant;
+        let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event else {
+            return !self.owed.is_empty();
+        };
+        for message in messages.iter() {
+            let NetworkMessage::Interest(interest) = message else {
+                continue;
+            };
+            let Some(body) = crate::interest_build::interest_body(&interest.header_c_or_f) else {
+                continue;
+            };
+            if !interest.c() || !body.ke() {
+                continue;
+            }
+            // A key the dispatch could not make literal names a declaration the member never
+            // made: zenoh-pico answers such an interest with nothing, not even its final
+            // (`vendor/zenoh-pico/src/session/interest.c` @
+            // `_Z_RETURN_IF_ERR(_z_get_keyexpr_from_wireexpr(zn, &restr_key, wireexpr, peer, true));`),
+            // and the session's other answers to it drop it alike.
+            let restriction = match body.keyexpr.as_ref().map(|wire| &wire.body) {
+                None => None,
+                Some(WireexprOwnedVariant::WireexprLocal(local)) if local.id == 0 => {
+                    match local.suffix.as_ref() {
+                        Some(suffix) => Some(alloc::string::ToString::to_string(suffix)),
+                        None => continue,
+                    }
+                }
+                Some(_) => continue,
+            };
+            self.owed.push(OwedKeyexprs {
+                interest_id: interest.interest_id,
+                restriction,
+                ends: !(body.su() || body.qu() || body.to()),
+            });
+        }
+        !self.owed.is_empty()
+    }
+
+    /// Every owed answer, in the order it is sent, and none owed after: each declared keyexpr
+    /// that meets the interest's key, then the final when nothing else ends the interest. The
+    /// engine queues them on the group, with its own lock let go when a push may wait for room.
+    pub fn take_answers(&mut self) -> alloc::vec::Vec<MulticastTxItem> {
+        let mut answers = alloc::vec::Vec::new();
+        for ask in core::mem::take(&mut self.owed) {
+            for (mapping_id, keyexpr) in &self.declared {
+                if ask.restriction.as_deref().is_some_and(|restriction| {
+                    !crate::keyexpr_match::keyexpr_intersects_text(restriction, keyexpr)
+                }) {
+                    continue;
+                }
+                if let Ok(declare) = crate::declare_build::build_declare_kexpr_reply(
+                    ask.interest_id,
+                    *mapping_id,
+                    keyexpr,
+                ) {
+                    answers.push(MulticastTxItem::DeclareReply {
+                        declare: Box::new(declare),
+                    });
+                }
+            }
+            if ask.ends {
+                answers.push(MulticastTxItem::DeclareReply {
+                    declare: Box::new(crate::declare_build::build_declare_final_reply(
+                        ask.interest_id,
+                    )),
+                });
+            }
+        }
+        answers
+    }
+}
+
+// The sink is a `DeclareReplySink` where a declare reply exists, which is what the test reads.
+#[cfg(all(
+    test,
+    any(feature = "liveliness-token", feature = "declare-subscriber")
+))]
+mod tests {
+    use super::*;
+    use crate::response_sink::{DeclareReplySink, LivelinessGetPrune, ResponseSink};
+    use alloc::vec::Vec;
+    use core::cell::RefCell;
+
+    /// What a sink enqueued, in order.
+    struct Recorded(RefCell<Vec<MulticastTxItem>>);
+
+    impl MulticastReplyEnqueue for &Recorded {
+        fn enqueue(&self, item: MulticastTxItem) {
+            self.0.borrow_mut().push(item);
+        }
+    }
+
+    /// Compiles only for a sink a whole observer drain takes.
+    fn drains_a_whole_observer<S: ResponseSink + DeclareReplySink + LivelinessGetPrune>(_: &S) {}
+
+    /// A group's sink is one a whole observer drain takes, in a build with no reply codec as in
+    /// one with them, and a liveliness get that ended prunes nothing from it.
+    #[test]
+    fn a_group_sink_takes_a_whole_drain_and_prunes_nothing() {
+        let recorded = Recorded(RefCell::new(Vec::new()));
+        let sink = MulticastReplySink::new(&recorded);
+        drains_a_whole_observer(&sink);
+        #[cfg(feature = "liveliness-get")]
+        sink.prune_liveliness_get_interest(7);
+        assert!(recorded.0.borrow().is_empty());
+    }
+
+    /// A member's current interest in keyexprs is answered with each declared keyexpr its key
+    /// meets, then its final when it asks for nothing else; an interest in what is declared
+    /// later only, and one naming its key by a declaration the dispatch could not resolve, are
+    /// owed nothing, and an answer once taken is not owed again.
+    #[cfg(all(
+        feature = "codec-declare",
+        feature = "declare-final",
+        feature = "storage-profile"
+    ))]
+    #[test]
+    fn a_members_keyexpr_interest_is_answered_with_the_keys_it_meets_and_its_final() {
+        use crate::declare_build::{build_declare_final_reply, build_declare_kexpr_reply};
+        use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
+        use crate::interest_build::{build_interest_exact, InterestKinds};
+        use crate::network_message::NetworkMessage;
+        let ask = |id: u64, current: bool, key: Option<(crate::wire_id::ExprId, Option<&str>)>| {
+            NetworkMessage::Interest(
+                build_interest_exact(id, InterestKinds::KEYEXPRS, current, !current, key)
+                    .expect("an interest"),
+            )
+        };
+        let frame = DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: alloc::vec![
+                ask(42, true, Some((0, Some("demo/**")))),
+                ask(43, false, None),
+                ask(44, true, Some((9, Some("x")))),
+            ],
+            has_ext: false,
+            extensions: Vec::new(),
+            priority: crate::qos::Priority::DEFAULT,
+        };
+        let mut answers = GroupKeyexprAnswers::default();
+        answers.declared(5, "demo/a/x");
+        answers.declared(6, "other/y");
+        answers.declared(7, "demo/b");
+        answers.retracted(7);
+        assert!(answers.asked(&IterationEvent::Poll(&frame)));
+        let replies: Vec<_> = answers
+            .take_answers()
+            .into_iter()
+            .map(|item| match item {
+                MulticastTxItem::DeclareReply { declare } => *declare,
+                _ => panic!("an answer is a declaration reply"),
+            })
+            .collect();
+        assert_eq!(
+            replies,
+            [
+                build_declare_kexpr_reply(42, 5, "demo/a/x").expect("a reply"),
+                build_declare_final_reply(42),
+            ]
+        );
+        assert!(answers.take_answers().is_empty(), "an answer is taken once");
     }
 }

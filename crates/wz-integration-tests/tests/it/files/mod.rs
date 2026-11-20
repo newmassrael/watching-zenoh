@@ -31,6 +31,7 @@ mod pico_dials_a_wz_listener;
 mod pico_header_arm_layout;
 mod pico_initial_interest_twice_and_diff;
 mod pico_keyexpr_declaration_twice_and_diff;
+mod pico_link_qos_on_wz_capi;
 mod pico_listen_and_connect_twice_and_diff;
 mod pico_local_delivery_upstream_tests_on_wz;
 mod pico_nofrag_patch_answer;

@@ -618,6 +618,11 @@ pub enum PublishError {
     /// without a time. No wire bytes were emitted; it may be sent once the host reports the clock
     /// synchronised.
     ClockUntrusted,
+    /// The publication may be dropped, another sender held its conduit, and the session's queue
+    /// profile drops it at once ([`SendWireError::HeldConduit`]): a congestion drop the profile
+    /// reports to the caller, as zenoh-pico's put does. No wire bytes were emitted. Under zenoh's
+    /// profile a congestion drop is the publication's success, and this is never answered.
+    HeldConduit,
 }
 
 impl core::fmt::Display for PublishError {
@@ -657,6 +662,11 @@ impl core::fmt::Display for PublishError {
                 "PublishError: the trusted-only clock policy holds back the time \
                  this publication carries until the clock is reported \
                  synchronised; the Push was not emitted"
+            ),
+            PublishError::HeldConduit => write!(
+                f,
+                "PublishError: another sender held this droppable Push's conduit \
+                 and the queue profile drops it at once; the Push was not emitted"
             ),
         }
     }
@@ -698,6 +708,7 @@ impl From<SendWireError> for PublishError {
                 }
                 crate::link::LinkDropCause::Oversize => PublishError::ExceedsCapacity,
             },
+            SendWireError::HeldConduit => PublishError::HeldConduit,
         }
     }
 }

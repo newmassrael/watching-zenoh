@@ -1046,7 +1046,8 @@ fn a_client_session_opens_over_the_programs_transport_on_the_builds_engine() {
 
 /// A datagram pair: the listening session listens for datagrams, the program accepts the
 /// dialling session's source on it, and each datagram crosses the pipe whole with its source.
-#[cfg(all(feature = "engine-tokio", feature = "link-udp"))]
+/// Both engines carry it: the tokio engine with its udp link, the cooperative one in every build.
+#[cfg(any(not(feature = "engine-tokio"), feature = "link-udp"))]
 #[test]
 fn a_datagram_pair_carries_a_put_and_a_get() {
     let pipe = Arc::new(Pipe::default());

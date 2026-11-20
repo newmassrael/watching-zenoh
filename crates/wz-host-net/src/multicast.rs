@@ -732,5 +732,133 @@ pub fn bind_sender(
     })
 }
 
+/// Mark what `socket` sends with the traffic class `dscp` (`#dscp=`), in the option of `group`'s
+/// family: `IP_TOS` or `IPV6_TCLASS`, given the value as written and not shifted into the DSCP
+/// bits, as upstream writes it. For a runtime whose socket is the one built here: the tokio
+/// runtime marks its own socket type after adoption, a cooperative host marks this one. A
+/// platform that has no such option warns and sends unmarked, as upstream does there.
+pub fn mark_traffic_class(socket: &Socket, group: &SocketAddr, dscp: u32) -> io::Result<()> {
+    match group {
+        SocketAddr::V4(_) => mark_v4(socket, dscp),
+        SocketAddr::V6(_) => mark_v6(socket, dscp),
+    }
+}
+
+/// `IP_TOS`, on the platforms whose sockets have it.
+#[cfg(not(any(
+    target_os = "fuchsia",
+    target_os = "redox",
+    target_os = "solaris",
+    target_os = "illumos",
+    target_os = "haiku",
+    target_os = "wasi",
+)))]
+fn mark_v4(socket: &Socket, dscp: u32) -> io::Result<()> {
+    socket.set_tos_v4(dscp)
+}
+
+/// The warning upstream gives where a socket has no `IP_TOS`.
+#[cfg(any(
+    target_os = "fuchsia",
+    target_os = "redox",
+    target_os = "solaris",
+    target_os = "illumos",
+    target_os = "haiku",
+    target_os = "wasi",
+))]
+fn mark_v4(_socket: &Socket, _dscp: u32) -> io::Result<()> {
+    log::warn!(
+        "IPv4 DSCP is unsupported on platform {}",
+        std::env::consts::OS
+    );
+    Ok(())
+}
+
+/// `IPV6_TCLASS`, on the platforms whose sockets have it.
+#[cfg(any(
+    target_os = "android",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "fuchsia",
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "cygwin",
+))]
+fn mark_v6(socket: &Socket, dscp: u32) -> io::Result<()> {
+    socket.set_tclass_v6(dscp)
+}
+
+/// The warning upstream gives where a socket has no `IPV6_TCLASS`.
+#[cfg(not(any(
+    target_os = "android",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "fuchsia",
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "cygwin",
+)))]
+fn mark_v6(_socket: &Socket, _dscp: u32) -> io::Result<()> {
+    log::warn!(
+        "IPv6 DSCP is unsupported on platform {}",
+        std::env::consts::OS
+    );
+    Ok(())
+}
+
+/// Wait up to `timeout_us` microseconds for `socket` to take another datagram: `true` once the
+/// platform says it is writable, or reports an error on it, which the send that follows meets;
+/// `false` when the time is up first, or when the wait itself failed. The sockets built here do
+/// not block, so a send that found one full asks this when to offer the datagram again; the
+/// tokio runtime's sockets wait in their own send.
+#[cfg(unix)]
+pub fn wait_writable(socket: &std::net::UdpSocket, timeout_us: u64) -> bool {
+    use std::os::fd::AsRawFd;
+    let timeout_ms = libc::c_int::try_from(timeout_us.div_ceil(1_000)).unwrap_or(libc::c_int::MAX);
+    let mut pfd = libc::pollfd {
+        fd: socket.as_raw_fd(),
+        events: libc::POLLOUT,
+        revents: 0,
+    };
+    loop {
+        // SAFETY: one live `pollfd`, for a descriptor `socket` keeps open for the call; the
+        // timeout bounds the wait.
+        let ready = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+        if ready < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+            continue;
+        }
+        return ready > 0 && pfd.revents != 0;
+    }
+}
+
+/// See the unix form of this function: `WSAPoll` for `POLLWRNORM`.
+#[cfg(windows)]
+pub fn wait_writable(socket: &std::net::UdpSocket, timeout_us: u64) -> bool {
+    use std::os::windows::io::AsRawSocket;
+    use windows_sys::Win32::Networking::WinSock as ws;
+    let timeout_ms = i32::try_from(timeout_us.div_ceil(1_000)).unwrap_or(i32::MAX);
+    let mut fd = ws::WSAPOLLFD {
+        fd: socket.as_raw_socket() as ws::SOCKET,
+        events: ws::POLLWRNORM,
+        revents: 0,
+    };
+    // SAFETY: one live `WSAPOLLFD`, for a socket `socket` keeps open for the call; the timeout
+    // bounds the wait.
+    let ready = unsafe { ws::WSAPoll(&mut fd, 1, timeout_ms) };
+    ready > 0 && fd.revents != 0
+}
+
+/// See the unix form of this function: a platform with no wait to ask has room at once, and the
+/// send that follows says whether it had.
+#[cfg(not(any(unix, windows)))]
+pub fn wait_writable(socket: &std::net::UdpSocket, timeout_us: u64) -> bool {
+    let _ = (socket, timeout_us);
+    true
+}
+
 #[cfg(test)]
 mod tests;

@@ -9,6 +9,16 @@
 //! over a group the program joins, and [`AppLinks`], the session shell's [`SessionLinks`] over all
 //! of them, so a session of this engine opens no socket of the system's when a transport is given.
 //!
+//! # Listening
+//!
+//! A listener carries nothing itself: the program accepts on it each stream, or each source that
+//! sends datagrams to it, and the table holds each as a link of its own
+//! (`wz_session_core::app_link_table`). A `tcp/` listener yields a stream link for each accepted
+//! stream, a `udp/` one a datagram link for each accepted source, and each is the link of a
+//! session run as the acceptor, as a connection taken off a socket's port is. The program has told
+//! the sources apart, so a datagram link it accepted is one source's alone: each of its datagrams
+//! is read as that source's, whatever the program names with it.
+//!
 //! # The remainder
 //!
 //! This engine's stream seam takes every byte or fails ([`StreamSocket::send_parts`]), where the
@@ -36,15 +46,16 @@ use core::ffi::c_int;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use wz_session_core::app_link_table::{
-    AcceptRead, AppLinkKind, DatagramRead, LinkHandle, OpenProgress, SendGate, SendStep, StreamRead,
+    kind_for_locator, AcceptRead, AppLinkKind, DatagramRead, LinkHandle, OpenProgress, SendGate,
+    SendStep, StreamRead,
 };
 use wz_session_core::app_transport::AppTransport;
 
-use crate::group_transport::GroupTransport;
+use crate::group_transport::{GroupSend, GroupTransport};
 use crate::ip_stack::{HeapIpDriver, IpDriver};
 use crate::link_storage::HeapTx;
 use crate::session_drive::{
-    LinkListener, LinkOpenError, LinkProto, Locator, OpenedLink, SessionLinks,
+    LinkListener, LinkOpenError, LinkProto, LinkWritability, Locator, OpenedLink, SessionLinks,
 };
 use crate::stream_link::{
     StreamDial, StreamDriver, StreamListen, StreamSocket, STREAM_RX_CAPACITY,
@@ -253,6 +264,15 @@ impl Held {
         });
     }
 
+    /// Wait up to `timeout_ms` for the program to take bytes again, offering what is held on the
+    /// way: `true` once the link is open and holds nothing for the program (or has ended, which
+    /// the send that follows reports).
+    fn wait_writable(&self, timeout_ms: u64) -> bool {
+        until_writable(&self.transport, self.handle, timeout_ms, || {
+            let _ = self.flush();
+        })
+    }
+
     /// What a read just made let the program know of: the links it refused that are read down.
     fn tell_drained(&self) {
         let drained = self.transport.with(|table| table.take_drained());
@@ -263,6 +283,43 @@ impl Held {
 impl Drop for Held {
     fn drop(&mut self) {
         self.transport.release(self.handle);
+    }
+}
+
+/// Wait up to `timeout_ms` for the program to take bytes on `handle` again, calling `offer` before
+/// each look: `true` once the table answers the link writable (open and holding nothing for the
+/// program, or ended, which the send that follows reports).
+fn until_writable(
+    transport: &AppTransport,
+    handle: LinkHandle,
+    timeout_ms: u64,
+    mut offer: impl FnMut(),
+) -> bool {
+    let mut writable = false;
+    wait::wait_while(timeout_ms, |waker| {
+        offer();
+        writable = transport.with(|table| table.poll_writable(handle, waker));
+        !writable
+    });
+    writable
+}
+
+/// A group link's wait for room, asked by a thread other than the one that sends on it: the
+/// table's writable answer for the link, as the link's own wait reads it. It names the link and
+/// holds nothing of it, so a wait made after the link was released answers at once.
+struct GroupRoom {
+    transport: Arc<AppTransport>,
+    handle: LinkHandle,
+}
+
+impl LinkWritability for GroupRoom {
+    fn wait_writable(&self, timeout_us: u64) -> bool {
+        until_writable(
+            &self.transport,
+            self.handle,
+            timeout_us.div_ceil(1_000),
+            || {},
+        )
     }
 }
 
@@ -290,6 +347,12 @@ impl StreamSocket for AppStreamSocket {
 
     fn wait_readable(&self, timeout_ms: c_int) {
         self.held.wait_readable(timeout_ms);
+    }
+
+    // The program's would-block is the stream's full buffer: a link that holds bytes for the
+    // program takes no more until the program says it is writable.
+    fn wait_writable(&self, timeout_us: u64) -> bool {
+        self.held.wait_writable(timeout_us.div_ceil(1_000))
     }
 
     fn try_read(&self, buf: &mut [u8]) -> Result<Option<usize>, AppLinkError> {
@@ -389,6 +452,10 @@ pub struct AppDatagramSocket {
     held: Held,
     /// Where each datagram is said to come from when the program names no source.
     peer: SocketAddr,
+    /// Whether the source the program names with a datagram is read. A link the session dialled
+    /// reads it; a source the program accepted on a listener is one link alone, so each of its
+    /// datagrams is `peer`'s whatever the program names.
+    reads_sources: bool,
 }
 
 impl AppDatagramSocket {
@@ -402,7 +469,21 @@ impl AppDatagramSocket {
                 handle,
             },
             peer: to,
+            reads_sources: true,
         })
+    }
+
+    /// The datagram link of the source the program accepted on a datagram listener as `handle`,
+    /// naming it `remote`.
+    fn accepted(transport: &Arc<AppTransport>, handle: LinkHandle, remote: &str) -> Self {
+        Self {
+            held: Held {
+                transport: Arc::clone(transport),
+                handle,
+            },
+            peer: socket_of(remote),
+            reads_sources: false,
+        }
     }
 
     /// Take the next datagram into `buf`: its length (cut to `buf`) and source.
@@ -417,7 +498,10 @@ impl AppDatagramSocket {
             DatagramRead::Datagram(datagram) => {
                 let n = datagram.bytes.len().min(buf.len());
                 buf[..n].copy_from_slice(&datagram.bytes[..n]);
-                let source = datagram.source.as_deref().map_or(self.peer, socket_of);
+                let source = match datagram.source.as_deref() {
+                    Some(named) if self.reads_sources => socket_of(named),
+                    _ => self.peer,
+                };
                 Ok(Some((n, source)))
             }
             DatagramRead::Empty => Ok(None),
@@ -526,6 +610,37 @@ impl GroupTransport for AppGroupTransport {
         }
     }
 
+    // The program's would-block is the group socket's full buffer: the datagram was not sent,
+    // and the link takes no more until the program says it is writable. A datagram goes whole
+    // or not at all, so one the program took part of is lost.
+    fn try_send_to_group(&mut self, datagram: &[u8]) -> GroupSend {
+        let Some(held) = &self.held else {
+            return GroupSend::Failed;
+        };
+        match held.send_once(datagram) {
+            Ok(taken) if taken == datagram.len() => GroupSend::Sent,
+            Ok(0) => GroupSend::Full,
+            Ok(_) | Err(_) => GroupSend::Failed,
+        }
+    }
+
+    // The table's writable answer for the link; a group that was left answers at once, and the
+    // send that follows fails.
+    fn wait_for_room(&self, timeout_us: u64) -> bool {
+        match &self.held {
+            Some(held) => held.wait_writable(timeout_us.div_ceil(1_000)),
+            None => true,
+        }
+    }
+
+    fn writability(&self) -> Option<Box<dyn LinkWritability>> {
+        let held = self.held.as_ref()?;
+        Some(Box::new(GroupRoom {
+            transport: Arc::clone(&held.transport),
+            handle: held.handle,
+        }))
+    }
+
     fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
         let Some(held) = &self.held else {
             return false;
@@ -550,8 +665,9 @@ impl GroupTransport for AppGroupTransport {
 }
 
 /// The session shell's links over the program's transport: a `tcp/` dial and listen open
-/// streams through the program, a `udp/` dial a datagram link, and nothing is a socket of the
-/// system's. A `tls/` locator is not carried.
+/// streams through the program, a `udp/` dial a datagram link, a `udp/` listen a datagram
+/// listener and a `udp/` listen naming an interface a group the program joins, and nothing is a
+/// socket of the system's. A `tls/` locator is not carried.
 pub struct AppLinks {
     transport: Arc<AppTransport>,
     dial: AppStreamDial,
@@ -587,7 +703,8 @@ impl SessionLinks for AppLinks {
 
     fn open_acceptor(&self, _port: u16) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
         // A datagram port that takes whoever sends first is a socket of the system's; the
-        // program's transport accepts streams on a listener.
+        // program's transport accepts streams and datagram sources on listeners
+        // (`open_listener`).
         Err(LinkOpenError::Unsupported)
     }
 
@@ -621,8 +738,74 @@ impl SessionLinks for AppLinks {
             LinkProto::Tcp => Ok(Box::new(AppLinkListener {
                 listener: self.dial.listen(at.at)?,
             })),
-            LinkProto::Udp | LinkProto::Tls => Err(LinkOpenError::Unsupported),
+            LinkProto::Udp => {
+                let locator = Locator::udp(at.at).to_string();
+                let handle = open_link(&self.transport, AppLinkKind::DatagramListen, &locator)?;
+                Ok(Box::new(AppDatagramListener {
+                    held: Held {
+                        transport: Arc::clone(&self.transport),
+                        handle,
+                    },
+                    at: at.at,
+                    datagram_rx: self.datagram_rx,
+                }))
+            }
+            LinkProto::Tls => Err(LinkOpenError::Unsupported),
         }
+    }
+
+    /// The group the program joins for `endpoint`: a `udp/` listen locator naming an interface,
+    /// which is what the table opens as a group. Any other endpoint is no group the program's
+    /// transport carries, and is refused before the program is asked.
+    fn open_group(&self, endpoint: &str) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
+        if kind_for_locator(endpoint, true) != Some(AppLinkKind::Group) {
+            return Err(LinkOpenError::Unsupported);
+        }
+        Ok(Box::new(AppGroupTransport::join(
+            &self.transport,
+            endpoint,
+        )?))
+    }
+}
+
+/// A `udp/` listener of [`AppLinks`]: each source the program accepts on it is a datagram link.
+struct AppDatagramListener {
+    held: Held,
+    at: SocketAddr,
+    /// The receive buffer each accepted link reads into, as [`AppLinks::with_rx_capacity`] set it.
+    datagram_rx: usize,
+}
+
+impl LinkListener<Rc<AppDriver>> for AppDatagramListener {
+    fn local(&self) -> Locator {
+        Locator::udp(self.at)
+    }
+
+    fn accept(&self) -> Result<Option<OpenedLink<Rc<AppDriver>>>, LinkOpenError> {
+        let next = self
+            .held
+            .transport
+            .with(|table| table.next_accepted(self.held.handle, None));
+        let socket = match next {
+            AcceptRead::Accepted(handle, remote) => {
+                AppDatagramSocket::accepted(&self.held.transport, handle, &remote)
+            }
+            AcceptRead::Empty => return Ok(None),
+            AcceptRead::End => return Err(LinkOpenError::Unsupported),
+        };
+        // The program told this source apart from the others, so the link's remote end is known
+        // from the start, as a dialled link's is; the session over it still runs as the acceptor.
+        let peer = socket.peer;
+        let driver = Rc::new(IpDriver::Udp(UdpDriver::initiator_with_buffers(
+            socket,
+            peer,
+            self.datagram_rx,
+            HeapTx::new(0, 0),
+        )));
+        Ok(Some(OpenedLink {
+            sink: driver.clone(),
+            pump: driver,
+        }))
     }
 }
 
@@ -875,6 +1058,52 @@ mod tests {
         assert!(!group.open(), "a group left is not opened again");
     }
 
+    /// A group's datagram the program cannot take now is full and not sent, and the link has no
+    /// room until the program says it is writable, whether the group's loop asks or a thread
+    /// outside it does; one the program took part of is lost, and a group that was left fails its
+    /// send and has room at once.
+    #[test]
+    fn a_group_datagram_the_program_cannot_take_is_full_until_it_is_writable() {
+        let (script, transport) = transport(64);
+        let mut group =
+            AppGroupTransport::join(&transport, "udp/239.7.7.7:7447#iface=lan7").expect("joined");
+        let handle = group.held.as_ref().unwrap().handle;
+        let outside = group.writability().expect("a wait from outside the loop");
+        assert_eq!(group.try_send_to_group(b"sent"), GroupSend::Sent);
+        assert!(
+            group.wait_for_room(0),
+            "CONTROL: a link that took the datagram"
+        );
+
+        *script.answers.lock().unwrap() = vec![ProgramSend::WouldBlock];
+        assert_eq!(group.try_send_to_group(b"full"), GroupSend::Full);
+        assert!(
+            !group.wait_for_room(0),
+            "no room until the program is writable"
+        );
+        assert!(!outside.wait_writable(0), "nor asked from outside");
+        assert_eq!(
+            group.try_send_to_group(b"held"),
+            GroupSend::Full,
+            "nothing is offered meanwhile"
+        );
+        transport.event(handle, ProgramEvent::Writable).unwrap();
+        assert!(group.wait_for_room(0));
+        assert!(outside.wait_writable(0));
+
+        *script.answers.lock().unwrap() = vec![ProgramSend::Wrote(1)];
+        assert_eq!(group.try_send_to_group(b"part"), GroupSend::Failed);
+        assert_eq!(script.sent.lock().unwrap().as_slice(), b"sentp");
+
+        group.close();
+        assert_eq!(group.try_send_to_group(b"left"), GroupSend::Failed);
+        assert!(group.wait_for_room(0));
+        assert!(
+            outside.wait_writable(0),
+            "a wait made after the leave answers at once"
+        );
+    }
+
     #[test]
     fn the_links_open_a_stream_and_a_datagram_link_and_refuse_tls() {
         let (_script, transport) = transport(64);
@@ -910,5 +1139,130 @@ mod tests {
             .accepted(listening, "tcp/198.51.100.3:50000")
             .unwrap();
         assert!(matches!(listener.accept(), Ok(Some(_))));
+    }
+
+    /// The handle the program was asked to open as a datagram listener, and the locator it was
+    /// asked for.
+    fn datagram_listener_of(script: &Script) -> (LinkHandle, String) {
+        script
+            .opens
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, kind, _)| *kind == AppLinkKind::DatagramListen)
+            .map(|(handle, _, locator)| (*handle, locator.clone()))
+            .expect("the program was asked to listen for datagrams")
+    }
+
+    #[test]
+    fn a_datagram_listener_hands_out_each_source_the_program_accepts_as_a_datagram_link() {
+        let (script, transport) = transport(64);
+        let links = AppLinks::new(Arc::clone(&transport));
+        let listener = links
+            .open_listener(Locator::udp(PEER))
+            .expect("a udp/ listen is carried");
+        assert_eq!(listener.local(), Locator::udp(PEER));
+        let (listening, locator) = datagram_listener_of(&script);
+        assert_eq!(locator, "udp/192.0.2.9:7447");
+        assert!(matches!(listener.accept(), Ok(None)), "no source yet");
+        transport
+            .accepted(listening, "udp/198.51.100.3:50000")
+            .expect("a datagram listener accepts");
+        let opened = listener
+            .accept()
+            .expect("the listener stands")
+            .expect("the accepted source is a link");
+        assert!(
+            !wz_session_core::link::BoxedLinkDriver::batch_length_prefixed(&*opened.sink),
+            "an accepted source carries datagrams, each a batch"
+        );
+        assert!(matches!(listener.accept(), Ok(None)), "one link per source");
+        // A listener the program closed is broken for good, and the engine lets it go.
+        transport.event(listening, ProgramEvent::Closed).unwrap();
+        assert!(matches!(listener.accept(), Err(LinkOpenError::Unsupported)));
+    }
+
+    #[test]
+    fn an_accepted_source_reads_every_datagram_as_its_own() {
+        let (script, transport) = transport(64);
+        let links = AppLinks::new(Arc::clone(&transport));
+        let _listener = links.open_listener(Locator::udp(PEER)).unwrap();
+        let (listening, _) = datagram_listener_of(&script);
+        transport
+            .accepted(listening, "udp/198.51.100.3:50000")
+            .unwrap();
+        let AcceptRead::Accepted(handle, remote) =
+            transport.with(|table| table.next_accepted(listening, None))
+        else {
+            panic!("the accepted source waits on the listener");
+        };
+        let socket = AppDatagramSocket::accepted(&transport, handle, &remote);
+        // The program names another source, and then none: both are the accepted source's.
+        transport
+            .received(handle, b"one", Some("udp/203.0.113.7:9"))
+            .unwrap();
+        transport.received(handle, b"two", None).unwrap();
+        let source = SocketAddr::from(([198, 51, 100, 3], 50000));
+        let mut buf = [0u8; 8];
+        assert_eq!(socket.try_recv(&mut buf), Ok(Some((3, source))));
+        assert_eq!(socket.try_recv(&mut buf), Ok(Some((3, source))));
+        assert_eq!(socket.try_recv(&mut buf), Ok(None));
+        // A dialled link reads the source the program names.
+        let dialled = AppDatagramSocket::dial(&transport, PEER).unwrap();
+        transport
+            .received(dialled.held.handle, b"in", Some("udp/203.0.113.7:9"))
+            .unwrap();
+        assert_eq!(
+            dialled.try_recv(&mut buf),
+            Ok(Some((2, SocketAddr::from(([203, 0, 113, 7], 9)))))
+        );
+    }
+
+    #[test]
+    fn the_links_join_a_group_through_the_program_and_refuse_what_names_none() {
+        let (script, transport) = transport(64);
+        let links = AppLinks::new(Arc::clone(&transport));
+        // Neither a datagram listen nor another scheme names a group: refused, with nothing asked
+        // of the program.
+        for endpoint in ["udp/192.0.2.9:7447", "tcp/239.7.7.7:7447#iface=lan7"] {
+            assert!(
+                matches!(links.open_group(endpoint), Err(LinkOpenError::Unsupported)),
+                "{endpoint}"
+            );
+        }
+        assert!(script.opens.lock().unwrap().is_empty());
+        let mut group = links
+            .open_group("udp/239.7.7.7:7447#iface=lan7")
+            .expect("a group the program joins");
+        let (handle, kind, locator) = script.opens.lock().unwrap()[0].clone();
+        assert_eq!(
+            (kind, locator.as_str()),
+            (AppLinkKind::Group, "udp/239.7.7.7:7447#iface=lan7"),
+            "the program is asked to join the group the endpoint names"
+        );
+        // The boxed transport is the group's: taken as the session's link, sent to, read by
+        // member, left.
+        assert!(group.open());
+        assert!(group.carrier_up());
+        group.send_to_group(b"beacon");
+        assert_eq!(script.sent.lock().unwrap().as_slice(), b"beacon");
+        transport
+            .received(handle, b"member", Some("udp/198.51.100.20:7447"))
+            .unwrap();
+        let mut seen = Vec::new();
+        assert!(group.recv_with(&mut |bytes, src| seen.push((bytes.to_vec(), src))));
+        assert_eq!(
+            seen,
+            [(
+                b"member".to_vec(),
+                SocketAddr::from(([198, 51, 100, 20], 7447))
+            )]
+        );
+        group.close();
+        assert_eq!(
+            script.closes.lock().unwrap().as_slice(),
+            [handle],
+            "the leave"
+        );
     }
 }

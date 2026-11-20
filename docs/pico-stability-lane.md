@@ -56,6 +56,49 @@ left listening and a fresh dialling one. Each storm asserts that every kind of c
 sessions were reopened, and that each fault of its shape was injected, so a run that exercised
 nothing fails.
 
+## The link legs, against the real zenoh-pico
+
+The second leg (`crates/wz-integration-tests/tests/it/files/pico_link_qos_on_wz_capi.rs`) asks
+what a pico program's QoS settings do on a link that is full, lossy or cut. One C program is
+compiled twice,
+against the real `libzenohpico.so` and against `libwz_capi_pico.so`; a run starts a subscriber
+that listens and a publisher that dials it through a relay in the test, and the relay injects
+the fault on the system's own sockets, so the real zenoh-pico and wz meet the same fault from the
+same code. The real zenoh-pico runs first in every test: a control that fails says the harness or
+the host cannot carry the measurement, and nothing about wz.
+
+| Test | Fault | Control | wz is held to |
+|---|---|---|---|
+| `link_qos_drop_and_block_on_a_full_stream_in_client_mode` | the relay stops reading the publisher's stream until a `Block` put has waited 300 ms, and for a second of `Drop` puts after it | the real zenoh-pico in client mode, held to the same | a `Drop` put returns within 250 ms and not every one is delivered; a `Block` put waits (one for at least a second) and every one is delivered, in order |
+| `link_qos_drop_and_block_on_a_full_stream_in_peer_mode` | the same, the publisher in peer mode | the client run of the real zenoh-pico; its peer run is printed as the reference and not held | the same, in peer mode |
+| `link_qos_reliable_samples_over_a_lossy_group_arrive_in_order_or_are_reported_missed` | each member on a multicast group of its own on the loopback interface; the relay between them loses 5 % of the publisher's frames and holds the rest 1 to 7 ms (so reorders them), then a fence goes through it clear | the real zenoh-pico, the same runs with the same relay seeds | reliable samples in order and never twice, each received or reported to the advanced subscriber's miss listener; best-effort samples in order; both fences delivered |
+| `link_qos_reliable_delivery_across_a_cut_and_redialled_stream` | a client publisher dials the subscriber through the relay, which closes both sockets of the stream mid-run; the client dials again | the real zenoh-pico, the same runs | reliable samples in order and never twice, each lost one reported missed, nothing put once the link carries again lost, and the client dialling again |
+
+zenoh's transport does not retransmit: a frame that does not follow the last one taken is
+dropped and any forward jump is taken, so on a datagram link reliable samples can be lost, and
+what zenoh defines is that they arrive in order, never twice, and that a loss is reported to an
+advanced subscriber. A broken stream takes its transport with it and a session that dials again
+opens a new one; the same holds across it. The datagram path between two zenoh-pico sessions is a
+multicast group because zenoh-pico has no UDP unicast listener. The test file cites upstream and
+zenoh-pico for each of these.
+
+| Variable | Default | What it bounds |
+|---|---|---|
+| `WZ_LINK_QOS_REPEATS` | 3 | how many runs each library gets in the two reliability tests; the rate a departure reproduced is printed |
+| `WZ_LINK_QOS_SEED` | the clock | the relay's first seed (run `i` uses it plus `i`, the same for both libraries); printed |
+
+The peer mode of the real zenoh-pico is a reference and not a control because its congestion
+control does not hold on a full link: a peer takes the peers' mutex before the transmit mutex's
+try-lock, and its socket is non-blocking, so a `Block` put on a full link fails instead of
+waiting. The test file cites the lines.
+
+A red reads as the finding it names: `full` false, `Block` did not wait for the full link; a long
+`Drop` put, a dropping put waited for room; every `Drop` sample delivered, nothing was dropped; a
+`Block` sample missing, failed or out of order, a waiting put did not deliver; a reliable sample
+neither received nor reported missed, the loss went unreported; a sample out of order or twice,
+the receiver took a stale frame; the fence or the samples after the re-dial missing, delivery did
+not resume; "measured nothing", the relay found no frame of the publisher's to impair.
+
 ## What it detects
 
 | Defect | How |
@@ -90,5 +133,7 @@ nothing fails.
   the session usable. Until both exist the suite does not inject allocation failure.
 - **The cooperative engine.** The suite runs the tokio engine, the default build's. The cooperative
   engine's client (`engine-coop`) is a separate build of the same ABI.
-- **Real sockets.** The faults are the program transport's. What the system's sockets do under loss
-  is the transport links' own lanes.
+- **Real sockets, in the storm.** The storm's faults are the program transport's. The link legs
+  put a stall, a loss and a cut on the system's sockets, between two processes, but for the
+  default build's tokio engine only, and with no fault on the program's own transport there, which
+  zenoh-pico has no counterpart of to control it with.

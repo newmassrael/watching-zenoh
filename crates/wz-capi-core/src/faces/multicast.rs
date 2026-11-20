@@ -72,25 +72,19 @@ use super::TokenId;
 #[cfg(feature = "queryable")]
 use super::{queryable_options, QblEntry, QblId};
 use super::{
-    FaceEventKind, FaceSnapshot, FilterId, FilterPlane, GroupLink, Inner, LinkSnapshot,
-    SharedSession, SubEntry, SubId, WireKey,
+    FaceEventKind, FaceSnapshot, FilterId, FilterPlane, Inner, SharedSession, SubEntry, SubId,
+    WireKey,
 };
 use crate::drive::GroupDeclarations;
-use wz_runtime_tokio::session::{GroupDeclaration, GroupKey, InterestKinds, RetractionKey};
+use wz_runtime_tokio::session::{GroupDeclaration, InterestKinds, RetractionKey};
+use wz_session_core::face::GroupMemberLink;
 use wz_session_core::wire_id::EntityId;
 
-/// One member of a group as the transport both upstreams report it as: its zid and role,
-/// shared memory as the calling ABI says (`is_shm`), and one link from this node's locator on
-/// the group to the member's address, over the group (`src`, `group` and `endpoint` label it;
-/// see [`GroupLink`]). `None` for a member whose JOIN named a role this node does not know,
-/// which a transport cannot report, as [`FaceSnapshot`] refuses a face with no role.
-///
-/// Not QoS: zenoh reports a member's QoS as its JOIN advertised it, and the member table this
-/// reads does not keep that, so a member whose JOIN carries the QoS extension is reported
-/// without it. A group with QoS is off by default on both upstreams.
-///
-/// The link is the group's: a UDP datagram link, whose MTU each ABI reports by its own table,
-/// or a raweth one ([`member_link_label`]).
+/// One member of a group as the transport both upstreams report it as: the session core's
+/// snapshot of a member (`FaceSnapshot::of_group_member`), which the cooperative engine's
+/// group reports too, over the one link from this node's locator on the group (`src`) to the
+/// member, labelled by [`member_link_label`]: a UDP datagram link, or a raweth one. `None` for a
+/// member whose JOIN named a role this node does not know.
 fn member_snapshot(
     member: &MulticastMember,
     src: &str,
@@ -98,33 +92,18 @@ fn member_snapshot(
     endpoint: &str,
     is_shm: bool,
 ) -> Option<FaceSnapshot> {
-    let whatami = member.whatami?.to_wire();
-    let peer = member.peer.as_slice();
-    let mut zid = [0u8; 16];
-    let n = peer.len().min(16);
-    zid[..n].copy_from_slice(&peer[..n]);
     let (dst, kind) = member_link_label(endpoint, member);
-    Some(FaceSnapshot {
-        zid,
-        whatami,
-        is_qos: false,
-        is_multicast: true,
-        is_shm,
-        links: vec![LinkSnapshot {
-            src: src.to_owned(),
+    FaceSnapshot::of_group_member(
+        member,
+        GroupMemberLink {
+            src,
             dst,
             kind,
-            interfaces: None,
-            mtu: 0,
-            group: Some(GroupLink {
-                locator: group.to_owned(),
-                endpoint: endpoint.to_owned(),
-            }),
-            cert_common_name: None,
-            priorities: None,
-            reliable: None,
-        }],
-    })
+            group,
+            endpoint,
+        },
+        is_shm,
+    )
 }
 
 /// The member's end of a link over the group joined by `endpoint`, and the link's kind: a UDP
@@ -267,65 +246,6 @@ impl Inner {
     }
 }
 
-/// How a group is told the key of an entity declared on `keyexpr` and named to the peers as
-/// `wire`: by that declaration only when the group is told the session's keyexprs
-/// ([`GroupDeclarations::Mapped`]), and by the literal otherwise, as zenoh-pico names a key on
-/// a multicast transport at its default.
-fn group_key<'a>(
-    declarations: GroupDeclarations,
-    keyexpr: &'a str,
-    wire: &'a WireKey,
-) -> GroupKey<'a> {
-    if declarations.declares_keyexprs() && wire.mapping_id != 0 {
-        GroupKey {
-            mapping_id: wire.mapping_id,
-            suffix: wire.suffix.as_deref(),
-        }
-    } else {
-        GroupKey::literal(keyexpr)
-    }
-}
-
-/// The key a retraction names on a group: the entity's own key the declaring ABI retracts by
-/// (`retraction`), when the group is told the session's keyexprs and the ABI names one, and
-/// else the key it was announced on ([`group_key`]).
-fn retraction_key<'a>(
-    declarations: GroupDeclarations,
-    keyexpr: &'a str,
-    wire: &'a WireKey,
-    retraction: Option<&'a RetractionKey>,
-) -> GroupKey<'a> {
-    match retraction {
-        Some(own) if declarations.declares_keyexprs() && own.mapping_id != 0 => GroupKey {
-            mapping_id: own.mapping_id,
-            suffix: Some(own.suffix.as_str()),
-        },
-        _ => group_key(declarations, keyexpr, wire),
-    }
-}
-
-/// The id a group is told an entity by under `declarations`, or `None` when the group is told
-/// nothing of `what`: zenoh announces its subscribers alone, each as id 0, and zenoh-pico every
-/// subscriber, queryable and token by its entity id. An entity that takes its own session's
-/// traffic alone is told to no group: neither upstream declares it to the network.
-///
-/// The id is answered as the group's session takes a declaration's, which is 64 bits wide.
-fn announced_id(
-    declarations: GroupDeclarations,
-    what: GroupDeclaration,
-    id: EntityId,
-    allowed_origin: wz_runtime_tokio::locality::Locality,
-) -> Option<u64> {
-    if allowed_origin == wz_runtime_tokio::locality::Locality::SessionLocal {
-        return None;
-    }
-    match (declarations, what) {
-        (GroupDeclarations::Subscribers, GroupDeclaration::Subscriber) => Some(0),
-        (GroupDeclarations::Entities | GroupDeclarations::Mapped, _) => Some(u64::from(id)),
-        _ => None,
-    }
-}
-
 /// An entity as a group is told of it: its kind, its id, the key it is declared on and how
 /// that key is named to the peers, the key its retraction names, and the traffic it takes.
 struct Told<'a> {
@@ -337,12 +257,13 @@ struct Told<'a> {
     allowed_origin: wz_runtime_tokio::locality::Locality,
 }
 
-/// Tell the group `session` reaches of `entity` as `declarations` says. Best effort, as the
-/// group's put is: a key past the codec's bound is announced nowhere, and the entity still
-/// serves the group.
+/// Tell the group `session` reaches of `entity` as `declarations` says, by the port's rules
+/// (`GroupDeclarations::announced_id`, `key`), which the cooperative engine's groups follow too.
+/// Best effort, as the group's put is: a key past the codec's bound is announced nowhere, and the
+/// entity still serves the group.
 fn announce_on(session: &TokioMulticastSession, declarations: GroupDeclarations, entity: &Told) {
     if let Some(announced) =
-        announced_id(declarations, entity.what, entity.id, entity.allowed_origin)
+        declarations.announced_id(entity.what, entity.id, entity.allowed_origin)
     {
         // The token is held before it is announced, so that a member that asks right after it
         // hears the announcement finds it held.
@@ -350,28 +271,25 @@ fn announce_on(session: &TokioMulticastSession, declarations: GroupDeclarations,
         if entity.what == GroupDeclaration::Token {
             session.hold_token(announced, entity.keyexpr);
         }
-        let key = group_key(declarations, entity.keyexpr, entity.wire);
+        let key = declarations.key(entity.keyexpr, entity.wire);
         let _ = session.announce(entity.what, announced, key);
     }
 }
 
 /// Retract from the group the entity [`announce_on`] told it of. zenoh retracts nothing on a
-/// group: its announcement is a subscriber the group keeps.
+/// group: its announcement is a subscriber the group keeps (`GroupDeclarations::retracts`).
 fn retract_on(session: &TokioMulticastSession, declarations: GroupDeclarations, entity: &Told) {
-    if !matches!(
-        declarations,
-        GroupDeclarations::Entities | GroupDeclarations::Mapped
-    ) {
+    if !declarations.retracts() {
         return;
     }
     if let Some(announced) =
-        announced_id(declarations, entity.what, entity.id, entity.allowed_origin)
+        declarations.announced_id(entity.what, entity.id, entity.allowed_origin)
     {
         #[cfg(feature = "liveliness")]
         if entity.what == GroupDeclaration::Token {
             session.release_token(announced);
         }
-        let key = retraction_key(declarations, entity.keyexpr, entity.wire, entity.retraction);
+        let key = declarations.retraction_key(entity.keyexpr, entity.wire, entity.retraction);
         let _ = session.retract(entity.what, announced, key);
     }
 }
@@ -481,7 +399,7 @@ fn listen_on(
             InterestKinds::TOKENS,
             history,
             /*future=*/ true,
-            Some(group_key(declarations, keyexpr, wire)),
+            Some(declarations.key(keyexpr, wire)),
         );
     }
     subscriber
@@ -993,7 +911,7 @@ impl SharedSession {
                     kinds,
                     /*current=*/ true,
                     /*future=*/ false,
-                    Some(group_key(face.declarations, keyexpr, wire)),
+                    Some(face.declarations.key(keyexpr, wire)),
                 );
                 face.filters.insert(filter, interest_id);
             }

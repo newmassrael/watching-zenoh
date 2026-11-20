@@ -123,6 +123,17 @@ pub const Z_ERR_TRANSPORT_NOT_AVAILABLE: ZResult = -103;
 /// elsewhere, a client connect to a port nobody listens on).
 pub const Z_ERR_TRANSPORT_OPEN_FAILED: ZResult = -102;
 
+/// A put or delete the session did not send: its congestion control let it be dropped, and
+/// another sender held the transmit lock (here, the conduit or the session) it needed. Matches
+/// pico `_Z_ERR_TRANSPORT_TX_FAILED`
+/// (`vendor/zenoh-pico/include/zenoh-pico/utils/result.h` @ `_Z_ERR_TRANSPORT_TX_FAILED = -100,`),
+/// which its put answers for a send that failed
+/// (`vendor/zenoh-pico/src/net/primitives.c` @
+/// `if (_z_send_n_msg(zn, &msg, reliability, cong_ctrl, NULL) != _Z_RES_OK) {`), as its dropping
+/// send does on a held lock (`vendor/zenoh-pico/src/transport/common/tx.c` @
+/// `_Z_INFO("Dropping zenoh message because of congestion control");`).
+pub const Z_ERR_TRANSPORT_TX_FAILED: ZResult = -100;
+
 /// An allocation failed. Matches pico `_Z_ERR_SYSTEM_OUT_OF_MEMORY`
 /// (`utils/result.h`).
 pub const Z_ERR_SYSTEM_OUT_OF_MEMORY: ZResult = -78;
@@ -194,6 +205,7 @@ mod tests {
             Z_ERR_CONFIG_INVALID_MODE,
             Z_ERR_TRANSPORT_NOT_AVAILABLE,
             Z_ERR_TRANSPORT_OPEN_FAILED,
+            Z_ERR_TRANSPORT_TX_FAILED,
             Z_ERR_SYSTEM_OUT_OF_MEMORY,
             Z_ERR_CONFIG_INVALID_VALUE,
         ];

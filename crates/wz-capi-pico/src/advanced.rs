@@ -73,7 +73,8 @@ use crate::pubsub::{
     z_owned_subscriber_t, CClosure, SubscriberState,
 };
 use crate::result::{
-    ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_TIMESTAMP_GENERATION_FAILED, Z_OK,
+    ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_TIMESTAMP_GENERATION_FAILED,
+    Z_ERR_TRANSPORT_TX_FAILED, Z_OK,
 };
 use crate::session::{engine_of, session_handle, z_loaned_session_t, Engine};
 use crate::write_filter::PicoSession;
@@ -731,13 +732,15 @@ pub unsafe extern "C" fn ze_advanced_publisher_put(
 /// fails (`vendor/zenoh-pico/src/api/advanced_publisher.c` @
 /// `_Z_CLEAN_RETURN_IF_ERR(z_timestamp_new(timestamp, &sess_rc), _z_session_rc_drop(&sess_rc));`):
 /// a session with no time left, and the `trusted-only` policy withholding an untrusted clock's
-/// stamp, which pico has no policy for and whose sample is as unmade.
+/// stamp, which pico has no policy for and whose sample is as unmade. A sample the queue profile
+/// dropped behind a held conduit answers pico's failed send, as a plain put does.
 fn advanced_publish_code(sent: Result<usize, PublishError>) -> ZResult {
     match sent {
         Ok(_) => Z_OK,
         Err(PublishError::TimestampExhausted | PublishError::ClockUntrusted) => {
             Z_ERR_TIMESTAMP_GENERATION_FAILED
         }
+        Err(PublishError::HeldConduit) => Z_ERR_TRANSPORT_TX_FAILED,
         Err(_) => Z_ERR_GENERIC,
     }
 }
@@ -1848,6 +1851,11 @@ mod tests {
         assert_eq!(
             advanced_publish_code(Err(PublishError::ExceedsCapacity)),
             Z_ERR_GENERIC
+        );
+        assert_eq!(
+            advanced_publish_code(Err(PublishError::HeldConduit)),
+            crate::result::Z_ERR_TRANSPORT_TX_FAILED,
+            "a sample dropped behind a held conduit answers pico's failed send"
         );
     }
 

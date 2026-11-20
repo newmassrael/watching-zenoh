@@ -1269,6 +1269,9 @@ pub enum LivelinessSubscriberAliasError {
     /// Interest was not emitted rather than carry an id a standing Interest
     /// may still hold.
     IdsExhausted,
+    /// The Interest may be dropped, another sender held its conduit, and the session's queue
+    /// profile drops it at once (`SendWireError::HeldConduit`). The Interest was not emitted.
+    HeldConduit,
 }
 
 impl std::fmt::Display for LivelinessSubscriberAliasError {
@@ -1315,6 +1318,12 @@ impl std::fmt::Display for LivelinessSubscriberAliasError {
                 "LivelinessSubscriberAliasError: the session has handed out every \
                  32-bit interest id; the Interest was not emitted"
             ),
+            LivelinessSubscriberAliasError::HeldConduit => write!(
+                f,
+                "LivelinessSubscriberAliasError: another sender held this droppable \
+                 Interest's conduit and the queue profile drops it at once; the \
+                 Interest was not emitted"
+            ),
         }
     }
 }
@@ -1338,6 +1347,7 @@ impl From<SendWireError> for LivelinessSubscriberAliasError {
             SendWireError::FragmentTxBudgetExhausted => {
                 LivelinessSubscriberAliasError::FragmentChainAbandoned
             }
+            SendWireError::HeldConduit => LivelinessSubscriberAliasError::HeldConduit,
         }
     }
 }

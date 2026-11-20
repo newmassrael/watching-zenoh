@@ -36,7 +36,7 @@ use wz_session_core::sample::SampleKind;
 use crate::liveliness::TokenState;
 use crate::pubsub::{PlainPublisher, PublisherQos};
 use crate::query::PlainQueryable;
-use crate::result::{ZResult, Z_OK};
+use crate::result::{ZResult, Z_ERR_TRANSPORT_TX_FAILED, Z_OK};
 use crate::write_filter::PicoSession;
 
 /// The plane of one pico session.
@@ -195,6 +195,9 @@ impl AdvancedPublisherPlane for PicoPlane {
         // and `Z_OK`.
         match publisher.publish(payload, &pico_publish(options)) {
             code if code == Z_OK => Ok(payload.len()),
+            // Dropped behind a held conduit: the same drop, so the advanced put answers it as
+            // the plain one does.
+            code if code == Z_ERR_TRANSPORT_TX_FAILED => Err(PublishError::HeldConduit),
             _ => Err(PublishError::ExceedsCapacity),
         }
     }

@@ -162,6 +162,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-coop/src/scout_datagram.rs` | S7 | |
 | `crates/wz-capi-coop/src/tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/advanced.rs` | S7 | |
+| `crates/wz-capi-coop/src/tests/congestion.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/decl_watch.rs` | S7 | |
 | `crates/wz-capi-coop/src/tests/face_table.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/faces.rs` | S7 | |

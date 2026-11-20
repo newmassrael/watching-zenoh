@@ -579,6 +579,17 @@ impl<C: ClockSource, D: ?Sized + 'static> Runtime for CoopRuntime<C, D> {
         crate::sync::with(mutex, f)
     }
 
+    // The non-waiting twin. On a host (`host-lock`) a held value answers `None`, as the tokio
+    // runtime's lock does, so a sender that may not wait behind another (a droppable message
+    // behind a blocking one waiting for its link's room) is told so; under a critical section
+    // there is never another holder, and `f` runs.
+    fn try_with_mutex_mut<T, U>(mutex: &Self::Mutex<T>, f: impl FnOnce(&mut T) -> U) -> Option<U>
+    where
+        T: Send + 'static,
+    {
+        crate::sync::try_with(mutex, f)
+    }
+
     // R311di-pre-e — construction-side Mutex/RwLock helpers. MCU profile
     // wraps `value` in `RefCell<T>` first (interior-mutable storage that
     // `critical_section::Mutex` exposes via `borrow(cs).borrow_mut()`),
@@ -740,6 +751,45 @@ mod tests {
         fn now_us(&self) -> u64 {
             0
         }
+    }
+
+    /// On a host the runtime's try answers a value another thread holds with `None` and does not
+    /// wait for it, as the tokio runtime's does: what lets a droppable message give up on a
+    /// conduit a blocking sender holds while it waits for its link's room. Once the holder lets
+    /// go, the try runs.
+    #[cfg(feature = "host-lock")]
+    #[test]
+    fn a_value_another_thread_holds_is_tried_without_waiting() {
+        extern crate std;
+        use std::sync::mpsc::channel;
+        type R = CoopRuntime<NopClock>;
+        let value = std::sync::Arc::new(<R as Runtime>::new_mutex(0u32));
+        let (inside_tx, inside_rx) = channel::<()>();
+        let (release_tx, release_rx) = channel::<()>();
+        let holder = {
+            let value = value.clone();
+            std::thread::spawn(move || {
+                <R as Runtime>::with_mutex_mut(&*value, |held| {
+                    *held += 1;
+                    inside_tx.send(()).expect("the test is listening");
+                    // Bounded, so a try that waited for the holder (the trait's default) reads
+                    // as `Some` and not as a test that never ends.
+                    let _ = release_rx.recv_timeout(std::time::Duration::from_secs(3));
+                });
+            })
+        };
+        inside_rx.recv().expect("the holder is inside the value");
+        assert_eq!(
+            <R as Runtime>::try_with_mutex_mut(&*value, |held| *held),
+            None,
+            "a value another thread holds is not waited for"
+        );
+        let _ = release_tx.send(());
+        holder.join().expect("the holder ran");
+        assert_eq!(
+            <R as Runtime>::try_with_mutex_mut(&*value, |held| *held),
+            Some(1)
+        );
     }
 
     #[test]

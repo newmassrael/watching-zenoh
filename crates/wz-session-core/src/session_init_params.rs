@@ -407,6 +407,25 @@ pub struct TxQueueConf {
     /// it is shaped at Established, or the first time each is wanted. Upstream's default is the
     /// second.
     pub allocation: crate::link::QueueAllocation,
+    /// What a message that may be dropped does when another sender holds the conduit (or the
+    /// session) it would be staged on: a blocking sender holds it across its own wait for room,
+    /// up to `wait_before_close`. The profile's, not a key of a zenoh configuration.
+    pub held_drop: HeldDrop,
+}
+
+/// What a droppable message does when the conduit it would be staged on is held by another
+/// sender ([`TxQueueConf::held_drop`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeldDrop {
+    /// Ask the link for room without the conduit, out of the message's own `wait_before_drop`,
+    /// and drop it when there is none in that time: zenoh bounds a droppable message's whole wait
+    /// so (`commons/zenoh-config/src/defaults.rs` @ `wait_before_drop: 1000,`).
+    WaitForRoom,
+    /// Drop it at once, asking the link nothing: zenoh-pico's dropping send tries the transport's
+    /// lock and drops the message when it is held
+    /// (`vendor/zenoh-pico/src/transport/common/tx.c` @
+    /// `ret = _z_transport_tx_mutex_lock(ztc, cong_ctrl == Z_CONGESTION_CONTROL_BLOCK);`).
+    DropAtOnce,
 }
 
 /// R2926 — upstream's default
@@ -518,6 +537,7 @@ impl TxQueueConf {
             batching: true,
             batching_time_limit_us: crate::link::BATCHING_TIME_LIMIT_US,
             allocation: crate::link::QueueAllocation::Lazy,
+            held_drop: HeldDrop::WaitForRoom,
         }
     }
 
@@ -534,6 +554,10 @@ impl TxQueueConf {
     /// the close deadline: the sender waits for the writer as pico's would wait
     /// for the socket, and a peer that never drains is still bounded by
     /// `wait_before_close`.
+    ///
+    /// The lock half of that send is kept as it is: a DROP message whose conduit another sender
+    /// holds is dropped at once, with nothing asked of the link ([`HeldDrop::DropAtOnce`]). The
+    /// long drop deadline is the socket's half, the wait of a sender that holds the conduit.
     ///
     /// The queue holds `PICO_TX_QUEUE_SIZE` batches per priority and not upstream's two: a put of
     /// pico writes on its own thread, where here a second thread writes, and a lane of four
@@ -553,6 +577,7 @@ impl TxQueueConf {
             batching: true,
             batching_time_limit_us: crate::link::BATCHING_TIME_LIMIT_US,
             allocation: crate::link::QueueAllocation::Lazy,
+            held_drop: HeldDrop::DropAtOnce,
         }
     }
 
@@ -812,6 +837,16 @@ mod no_progress_tests {
                 crate::caps::TX_EXPIRY_CLOSE_AFTER
             );
         }
+    }
+
+    /// A droppable message behind a held conduit: zenoh's profile waits for room out of
+    /// `wait_before_drop`, pico's drops it at once, as its try-lock does.
+    #[test]
+    fn each_profile_states_what_a_held_conduit_costs_a_droppable_message() {
+        use super::HeldDrop;
+        assert_eq!(TxQueueConf::upstream().held_drop, HeldDrop::WaitForRoom);
+        assert_eq!(zenoh_queue().held_drop, HeldDrop::WaitForRoom);
+        assert_eq!(pico_queue().held_drop, HeldDrop::DropAtOnce);
     }
 
     /// Upstream's queue is the queue of a snapshot whose two queue policies are upstream's

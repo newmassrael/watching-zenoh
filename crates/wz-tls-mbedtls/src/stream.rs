@@ -152,6 +152,22 @@ impl<S: StreamSocket + 'static> StreamSocket for TlsStream<S> {
         }
     }
 
+    // The channel's records leave through the stream under it, which takes every byte before it
+    // returns: that stream's room is the channel's.
+    fn wait_writable(&self, timeout_us: u64) -> bool {
+        self.lower.socket.wait_writable(timeout_us)
+    }
+
+    // The same room, waited on from another thread: the stream's own wait, handed out.
+    wz_runtime_coop::with_heap_link_seams! {
+        #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+        fn writability(
+            &self,
+        ) -> Option<alloc::boxed::Box<dyn wz_runtime_coop::session_drive::LinkWritability>> {
+            self.lower.socket.writability()
+        }
+    }
+
     fn try_read(&self, buf: &mut [u8]) -> Result<Option<usize>, Self::Error> {
         let mut session = self
             .session

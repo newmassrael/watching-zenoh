@@ -705,10 +705,15 @@ engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables
   Each decision of the step:
   - `peer` selects no engine (`peer = ["scout", "wz-capi-core?/peer", "wz-capi-coop?/listen"]`):
     the tokio engine accepts what the runtime has and the cooperative engine the `tcp/` links its
-    stack listens on. What only the tokio engine has (a multicast group, `tls/`, `quic/`, `ws/`,
-    serial, gossip) selects it by its own feature, so a build with `peer` and `engine-coop` and
-    none of those is the cooperative peer. A `listen` that names a group is answered as a build
-    without the multicast transport answers it.
+    stack listens on. What only the tokio engine has (`tls/`, `quic/`, `ws/`, serial, gossip)
+    selects it by its own feature, so a build with `peer` and `engine-coop` and none of those is
+    the cooperative peer. A multicast group is no longer among them: `multicast-transport` and
+    `multicast-declarations` select no engine, and the cooperative engine joins a group as a face
+    of its own, on the host's sockets or over a transport the program supplies, with the same
+    declarations, the same keyexpr aliases and the same congestion rule on its send queue as the
+    tokio engine's group (`wz-capi-coop/src/engine/group.rs`). A `listen` that names a group
+    joins it, on either engine, in a build with `multicast-transport`, and is refused as an
+    unknown locator scheme in one without it.
   - `open_on_coop` hands the config's `listen` to the engine, with the handshake bound pico's
     `Z_TRANSPORT_ACCEPT_TIMEOUT` and the other bounds upstream's, as the tokio open states them.
     A config with a listen is a peer whatever its `mode`, as pico forces it. A listener is open
@@ -762,8 +767,9 @@ engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables
   six that need a zenohd run in Layer Z against the cooperative library (they pass on pc2); the
   sixth, the scouting legs in a network namespace, has its own probe and runs against the tokio
   library only, because the machine this was developed on cannot build a namespace to read it
-  on. The multicast-declarations and raw-Ethernet arms select the tokio engine through their
-  own features, so they have no cooperative build.
+  on. The raw-Ethernet arm selects the tokio engine through its own feature, so it has no
+  cooperative build; the multicast arms, `multicast-declarations` among them, build on either
+  engine.
 - **L5. Both roles at once. Done.** A peer that listens and dials holds the dial role's face and
   the accepted ones in one table, and one face for each remote zid, as zenoh's transport manager
   keeps one transport for each and the tokio registry keeps one face (`SharedSession::face_up`).

@@ -169,6 +169,29 @@ listen = ["wz-runtime-coop/session-unicast-accept"]
 # A transport the program supplies: the session shell's links over the program's own network
 # stack (`wz_runtime_coop::app_link`), re-exported for the ABI that opens the engine over them.
 app-transport = ["wz-runtime-coop/app-link"]
+# The multicast groups a session joins (`CoopConfig::groups`), each a face of the session beside
+# its links: the session shell's group session (`wz-session-mcu`'s `group_drive`, the one an MCU
+# image runs) hosted as a task of the session's local set, over the group the stack joins
+# (`SessionLinks::open_group`). Its JOIN, its members and the framing of what it sends are the
+# session core's; the Push items the session puts on the group share the queue its replies take
+# (`codec-push`). Off, a config that names a group is refused by name and the text has none of it.
+group = [
+    "wz-session-mcu/transport-multicast",
+    "wz-session-mcu/codec-push",
+]
+# The groups of `group` joined on the host's own sockets (`host_group::HostGroups`, which the
+# host's links are given with `IpLinks::with_groups`). The sockets are `wz-host-net`'s, built by
+# the plan the tokio runtime's group link is built by, so `#iface=`, `#join=`, `#ttl=`, `#bind=`,
+# `#dscp=`, the loopback and the refusal of an unpinned link are one decision for both engines.
+# A host's, so it selects `std`; the `#iface=` honor is named because a group's interface is what
+# the key names.
+group-host = [
+    "group",
+    "std",
+    "dep:wz-host-net",
+    "dep:log",
+    "wz-host-net/locator-iface",
+]
 # The `tls/` link on a host (`tls::HostTls`): the secure channel `wz-tls-mbedtls` runs, made from
 # the PEM material a C ABI resolved, for both roles. The library is built from the pinned
 # submodules (`vendored`), and every call into it is under one lock (`host-lock`), because the
@@ -226,6 +249,12 @@ query = [
 # key goes on the wire as the session's key-wire form says. Without it a session opened with a
 # form other than `declared` is refused.
 shared-key-ids = ["wz-session-core/shared-key-ids", "wz-capi-port/shared-key-ids"]
+# The session's transport counters (`CoopEngine::transport_stats`): each link's session counts
+# what it sends, receives and drops, as the tokio engine's sessions do under the same session-core
+# feature, and the engine counts the publishes it drops before they reach a link. Off, which is
+# pico's build (pico has no transport counters), no counter is kept and the text has none of them.
+# A Rust surface only: neither zenoh-c nor zenoh-pico reports transport counters through C.
+transport-stats = ["wz-session-core/transport-stats"]
 
 [dev-dependencies]
 # The `tls/` provider's tests (`tests/tls_provider.rs`) make a certificate authority and its end

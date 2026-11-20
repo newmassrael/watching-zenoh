@@ -219,15 +219,23 @@ pub struct MulticastConfig {
     /// See [`MulticastDispatcher::member_cap`] for what a table makes of it, which depends on
     /// whether the table grows ([`TableGrowth`]).
     pub max_sessions: Option<usize>,
+    /// Whether the dispatcher keeps each member's declarations apart from the moment it is built,
+    /// as `MulticastDispatcher::scope_member_declarations` does for one already built: a host
+    /// whose dispatcher is built where its task keeps it (`new_in_place`) states it here, before
+    /// the dispatcher exists. A build without `alloc` and `codec-declare` has no member
+    /// declarations to keep apart, and nothing reads it there.
+    pub scope_members: bool,
 }
 
 impl MulticastConfig {
     /// Construct an explicit config. See the field docs for the no-`Default`
-    /// rationale. No cap is stated, so a table holds as many members as it has fixed rows.
+    /// rationale. No cap is stated, so a table holds as many members as it has fixed rows, and
+    /// the members' declarations are not kept apart.
     pub const fn new(lease_ms: u64) -> Self {
         Self {
             lease_ms,
             max_sessions: None,
+            scope_members: false,
         }
     }
 
@@ -236,6 +244,31 @@ impl MulticastConfig {
         Self {
             max_sessions,
             ..self
+        }
+    }
+
+    /// This config with each member's declarations kept apart ([`Self::scope_members`]).
+    pub const fn scoping_members(self) -> Self {
+        Self {
+            scope_members: true,
+            ..self
+        }
+    }
+
+    /// The config a group session of `params` builds its dispatcher under: the lease and the
+    /// member cap its parameters state, with each member's declarations kept apart when
+    /// `scope_members` says so (a host whose observer is one session's, as a C session's group
+    /// face is). Every engine that joins groups builds its dispatcher from this, so the two read
+    /// the same fields in the same place.
+    #[cfg(feature = "storage-profile")]
+    pub const fn of_group(
+        params: &crate::multicast_params::MulticastParams,
+        scope_members: bool,
+    ) -> Self {
+        Self {
+            lease_ms: params.lease_ms,
+            max_sessions: params.max_sessions,
+            scope_members,
         }
     }
 }
@@ -1007,7 +1040,11 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
             #[cfg(feature = "multicast-ingress-gate")]
             addr_of_mut!((*at).ingress_gate).write(None);
             #[cfg(all(feature = "alloc", feature = "codec-declare"))]
-            addr_of_mut!((*at).member_tags).write(None);
+            addr_of_mut!((*at).member_tags).write(
+                config
+                    .scope_members
+                    .then(crate::multicast_member_scope::MemberTags::new),
+            );
             #[cfg(all(feature = "alloc", feature = "codec-declare"))]
             addr_of_mut!((*at).member_retractions).write(alloc::vec::Vec::new());
             &mut *at
@@ -5397,5 +5434,56 @@ mod tests {
             d.group_sub_keyexprs().is_empty(),
             "an unresolvable aliased sub is dropped, not stored id-only",
         );
+    }
+
+    /// A config that scopes members builds a dispatcher that keeps their declarations apart from
+    /// the start, as one told so after it was built does; the plain config keeps none apart.
+    #[cfg(all(feature = "alloc", feature = "codec-declare"))]
+    #[test]
+    fn a_config_that_scopes_members_builds_a_dispatcher_that_keeps_them_apart() {
+        let plain = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        assert!(plain.member_tags.is_none());
+        let scoped = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000).scoping_members());
+        assert!(scoped.member_tags.is_some());
+        let mut told = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        told.scope_member_declarations();
+        assert!(told.member_tags.is_some());
+        assert!(
+            MulticastConfig::new(5_000)
+                .with_max_sessions(Some(3))
+                .scoping_members()
+                .scope_members,
+            "the builders keep each other's fields"
+        );
+    }
+
+    /// A group's config is its parameters' lease and member cap, with its members kept apart as
+    /// its host asks: the one config both engines build a group's dispatcher from.
+    #[cfg(feature = "storage-profile")]
+    #[test]
+    fn a_groups_config_is_its_lease_its_cap_and_the_scoping_asked() {
+        let policy = crate::policy::SessionPolicy::defaults();
+        let params = crate::multicast_params::MulticastParams {
+            whatami: crate::WhatAmI::Peer,
+            zid: crate::multicast_params::zid_vec(&[0x61, 0x62]),
+            lease_ms: 7_000,
+            join_interval_ms: 250,
+            seq_num_res: 0x02,
+            req_id_res: 0x02,
+            batch_size: 2_048,
+            is_qos: false,
+            compression: false,
+            tx_queue: crate::session_init_params::TxQueueConf::of_policy(&policy),
+            link_rx: crate::session_init_params::LinkRxConf::default(),
+            join_rule: crate::multicast_params::GroupJoinRule::Pico,
+            max_sessions: Some(9),
+            policy,
+        };
+        for scope in [false, true] {
+            let config = MulticastConfig::of_group(&params, scope);
+            assert_eq!(config.lease_ms, 7_000);
+            assert_eq!(config.max_sessions, Some(9));
+            assert_eq!(config.scope_members, scope);
+        }
     }
 }
