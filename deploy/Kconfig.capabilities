@@ -416,7 +416,7 @@ config WZ_CAP_OBJECT_POOL
 	default n
 	select WZ_CAP_UNSTABLE_API
 	help
-	  Fixed pools, one per slot size, that the objects behind the owned handles (sessions, publishers, subscribers, queryables, liveliness tokens and subscribers, owned samples, replies, queries and payloads) are taken from in place of the heap once the program reserves them; a full pool refuses the object with _Z_ERR_SYSTEM_OUT_OF_MEMORY (wz_ext_object_pool_*, wz-own doors).
+	  Fixed pools, one per kind of object, that the objects behind the owned handles (sessions, publishers, subscribers, queryables, liveliness tokens and subscribers, owned samples, replies, queries and payloads) are taken from in place of the heap once the program reserves them; a full pool refuses the object with _Z_ERR_SYSTEM_OUT_OF_MEMORY (wz_ext_object_pool_*, wz-own doors).
 	  Exported by: pico.
 
 config WZ_CAP_OBJECT_POOL_REGION
