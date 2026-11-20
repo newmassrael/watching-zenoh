@@ -87,7 +87,7 @@ fn compile(forms: &Path, libdir: &Path, libs: &[&str], out_dir: &Path, form: &st
     cmd.arg("-std=gnu11")
         .arg("-DZENOH_LINUX")
         .arg(format!("-I{}", forms.join("include").display()))
-        .arg(&src)
+        .arg(src)
         .arg("-o")
         .arg(&exe)
         .arg(format!("-L{}", libdir.display()));
