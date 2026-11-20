@@ -51,11 +51,11 @@ use wz_session_core::app_link_table::{
 };
 use wz_session_core::app_transport::AppTransport;
 
-use crate::group_transport::GroupTransport;
+use crate::group_transport::{GroupSend, GroupTransport};
 use crate::ip_stack::{HeapIpDriver, IpDriver};
 use crate::link_storage::HeapTx;
 use crate::session_drive::{
-    LinkListener, LinkOpenError, LinkProto, Locator, OpenedLink, SessionLinks,
+    LinkListener, LinkOpenError, LinkProto, LinkWritability, Locator, OpenedLink, SessionLinks,
 };
 use crate::stream_link::{
     StreamDial, StreamDriver, StreamListen, StreamSocket, STREAM_RX_CAPACITY,
@@ -268,15 +268,9 @@ impl Held {
     /// way: `true` once the link is open and holds nothing for the program (or has ended, which
     /// the send that follows reports).
     fn wait_writable(&self, timeout_ms: u64) -> bool {
-        let mut writable = false;
-        wait::wait_while(timeout_ms, |waker| {
+        until_writable(&self.transport, self.handle, timeout_ms, || {
             let _ = self.flush();
-            writable = self
-                .transport
-                .with(|table| table.poll_writable(self.handle, waker));
-            !writable
-        });
-        writable
+        })
     }
 
     /// What a read just made let the program know of: the links it refused that are read down.
@@ -289,6 +283,43 @@ impl Held {
 impl Drop for Held {
     fn drop(&mut self) {
         self.transport.release(self.handle);
+    }
+}
+
+/// Wait up to `timeout_ms` for the program to take bytes on `handle` again, calling `offer` before
+/// each look: `true` once the table answers the link writable (open and holding nothing for the
+/// program, or ended, which the send that follows reports).
+fn until_writable(
+    transport: &AppTransport,
+    handle: LinkHandle,
+    timeout_ms: u64,
+    mut offer: impl FnMut(),
+) -> bool {
+    let mut writable = false;
+    wait::wait_while(timeout_ms, |waker| {
+        offer();
+        writable = transport.with(|table| table.poll_writable(handle, waker));
+        !writable
+    });
+    writable
+}
+
+/// A group link's wait for room, asked by a thread other than the one that sends on it: the
+/// table's writable answer for the link, as the link's own wait reads it. It names the link and
+/// holds nothing of it, so a wait made after the link was released answers at once.
+struct GroupRoom {
+    transport: Arc<AppTransport>,
+    handle: LinkHandle,
+}
+
+impl LinkWritability for GroupRoom {
+    fn wait_writable(&self, timeout_us: u64) -> bool {
+        until_writable(
+            &self.transport,
+            self.handle,
+            timeout_us.div_ceil(1_000),
+            || {},
+        )
     }
 }
 
@@ -577,6 +608,37 @@ impl GroupTransport for AppGroupTransport {
         if let Some(held) = &self.held {
             let _ = held.send_once(datagram);
         }
+    }
+
+    // The program's would-block is the group socket's full buffer: the datagram was not sent,
+    // and the link takes no more until the program says it is writable. A datagram goes whole
+    // or not at all, so one the program took part of is lost.
+    fn try_send_to_group(&mut self, datagram: &[u8]) -> GroupSend {
+        let Some(held) = &self.held else {
+            return GroupSend::Failed;
+        };
+        match held.send_once(datagram) {
+            Ok(taken) if taken == datagram.len() => GroupSend::Sent,
+            Ok(0) => GroupSend::Full,
+            Ok(_) | Err(_) => GroupSend::Failed,
+        }
+    }
+
+    // The table's writable answer for the link; a group that was left answers at once, and the
+    // send that follows fails.
+    fn wait_for_room(&self, timeout_us: u64) -> bool {
+        match &self.held {
+            Some(held) => held.wait_writable(timeout_us.div_ceil(1_000)),
+            None => true,
+        }
+    }
+
+    fn writability(&self) -> Option<Box<dyn LinkWritability>> {
+        let held = self.held.as_ref()?;
+        Some(Box::new(GroupRoom {
+            transport: Arc::clone(&held.transport),
+            handle: held.handle,
+        }))
     }
 
     fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
@@ -994,6 +1056,52 @@ mod tests {
             "the leave"
         );
         assert!(!group.open(), "a group left is not opened again");
+    }
+
+    /// A group's datagram the program cannot take now is full and not sent, and the link has no
+    /// room until the program says it is writable, whether the group's loop asks or a thread
+    /// outside it does; one the program took part of is lost, and a group that was left fails its
+    /// send and has room at once.
+    #[test]
+    fn a_group_datagram_the_program_cannot_take_is_full_until_it_is_writable() {
+        let (script, transport) = transport(64);
+        let mut group =
+            AppGroupTransport::join(&transport, "udp/239.7.7.7:7447#iface=lan7").expect("joined");
+        let handle = group.held.as_ref().unwrap().handle;
+        let outside = group.writability().expect("a wait from outside the loop");
+        assert_eq!(group.try_send_to_group(b"sent"), GroupSend::Sent);
+        assert!(
+            group.wait_for_room(0),
+            "CONTROL: a link that took the datagram"
+        );
+
+        *script.answers.lock().unwrap() = vec![ProgramSend::WouldBlock];
+        assert_eq!(group.try_send_to_group(b"full"), GroupSend::Full);
+        assert!(
+            !group.wait_for_room(0),
+            "no room until the program is writable"
+        );
+        assert!(!outside.wait_writable(0), "nor asked from outside");
+        assert_eq!(
+            group.try_send_to_group(b"held"),
+            GroupSend::Full,
+            "nothing is offered meanwhile"
+        );
+        transport.event(handle, ProgramEvent::Writable).unwrap();
+        assert!(group.wait_for_room(0));
+        assert!(outside.wait_writable(0));
+
+        *script.answers.lock().unwrap() = vec![ProgramSend::Wrote(1)];
+        assert_eq!(group.try_send_to_group(b"part"), GroupSend::Failed);
+        assert_eq!(script.sent.lock().unwrap().as_slice(), b"sentp");
+
+        group.close();
+        assert_eq!(group.try_send_to_group(b"left"), GroupSend::Failed);
+        assert!(group.wait_for_room(0));
+        assert!(
+            outside.wait_writable(0),
+            "a wait made after the leave answers at once"
+        );
     }
 
     #[test]
