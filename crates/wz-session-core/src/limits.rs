@@ -88,6 +88,307 @@ mod enforcement {
             .expect("a place is free under the quota");
         assert_eq!(third.entity_id(), second.entity_id() + 1);
     }
+
+    /// One entry of a bound's table, the `index`th, taken through the door its creator uses.
+    type Admit = fn(&mut ApplicationLayerObserver, usize) -> Result<(), RegisterError>;
+    /// The `index`th entry let go; whether it was held.
+    type Release = fn(&mut ApplicationLayerObserver, usize) -> bool;
+    /// How many entries the table holds.
+    type Held = fn(&ApplicationLayerObserver) -> usize;
+    /// A bound's statement in a snapshot.
+    type Select =
+        fn(&mut SessionLimits, Quota) -> Result<(), crate::limit_binding::OutsideLimitDomain>;
+
+    /// With nothing stated the table takes one past the build's count on the heap and the
+    /// capacity on a fixed backing, as it did when it read the build's constant.
+    fn admits_what_the_build_admitted(build: usize, admit: Admit, held: Held) {
+        let mut observer = ApplicationLayerObserver::with_limits(&SessionLimits::defaults());
+        let admitted = if crate::bounded::ENFORCES_CAPACITY {
+            build
+        } else {
+            build + 1
+        };
+        for index in 0..admitted {
+            admit(&mut observer, index).expect("no quota is stated");
+        }
+        assert_eq!(held(&observer), admitted);
+    }
+
+    /// Two, as `select` states it; `None` where the build keeps its value alone, which refuses
+    /// the statement itself.
+    fn stated_two(select: Select, singleton: bool) -> Option<SessionLimits> {
+        let mut limits = SessionLimits::defaults();
+        let stated = select(&mut limits, Quota::at_most(2));
+        if singleton {
+            assert!(stated.is_err());
+            return None;
+        }
+        stated.expect("two is inside the domain");
+        Some(limits)
+    }
+
+    /// Held to two: the third entry is refused as a full table and changes nothing, and a place
+    /// let go is taken again.
+    fn refuses_the_third(limits: &SessionLimits, admit: Admit, release: Release, held: Held) {
+        let mut observer = ApplicationLayerObserver::with_limits(limits);
+        admit(&mut observer, 0).expect("under the quota");
+        admit(&mut observer, 1).expect("under the quota");
+        assert_eq!(admit(&mut observer, 2), Err(RegisterError::TableFull));
+        assert_eq!(held(&observer), 2);
+        assert!(release(&mut observer, 0));
+        admit(&mut observer, 2).expect("a place is free under the quota");
+        assert_eq!(held(&observer), 2);
+    }
+
+    #[cfg(feature = "query-queryable")]
+    fn queryable(
+        observer: &mut ApplicationLayerObserver,
+        index: usize,
+    ) -> Result<(), RegisterError> {
+        let key = std::format!("bound/queryable/{index}");
+        observer.queryables.register(&key, |_, _| {}).map(|_| ())
+    }
+
+    /// `MAX_QUERYABLES` with nothing stated.
+    #[cfg(feature = "query-queryable")]
+    #[test]
+    fn max_queryables_with_nothing_stated_admits_what_the_build_admitted() {
+        admits_what_the_build_admitted(caps::MAX_QUERYABLES, queryable, |o| o.queryables.len());
+    }
+
+    /// `MAX_QUERYABLES` stated as two: the third is refused, and the refusal takes no
+    /// declaration id.
+    #[cfg(feature = "query-queryable")]
+    #[test]
+    fn max_queryables_stated_refuses_the_next_and_takes_no_id() {
+        let Some(limits) = stated_two(
+            SessionLimits::select_max_queryables,
+            MaxQueryables::DOMAIN.is_singleton(),
+        ) else {
+            return;
+        };
+        let mut observer = ApplicationLayerObserver::with_limits(&limits);
+        let first = observer
+            .queryables
+            .register("bound/a", |_, _| {})
+            .expect("under the quota");
+        let second = observer
+            .queryables
+            .register("bound/b", |_, _| {})
+            .expect("under the quota");
+        assert_eq!(
+            observer.queryables.register("bound/c", |_, _| {}),
+            Err(RegisterError::TableFull)
+        );
+        assert_eq!(observer.queryables.len(), 2);
+        assert!(observer.queryables.unregister(first));
+        let third = observer
+            .queryables
+            .register("bound/c", |_, _| {})
+            .expect("a place is free under the quota");
+        assert_eq!(third.as_u64(), second.as_u64() + 1);
+    }
+
+    fn pending_query(
+        observer: &mut ApplicationLayerObserver,
+        index: usize,
+    ) -> Result<(), RegisterError> {
+        let rid = u32::try_from(index).expect("a test index");
+        observer
+            .replies
+            .register(
+                rid,
+                1,
+                None,
+                crate::reply_acceptance::ReplyAcceptance::Any,
+                |_| {},
+                |_| {},
+            )
+            .map(|_| ())
+    }
+
+    /// `MAX_PENDING_QUERIES` with nothing stated.
+    #[test]
+    fn max_pending_queries_with_nothing_stated_admits_what_the_build_admitted() {
+        admits_what_the_build_admitted(caps::MAX_PENDING_QUERIES, pending_query, |o| {
+            o.replies.len()
+        });
+    }
+
+    /// `MAX_PENDING_QUERIES` stated as two.
+    #[test]
+    fn max_pending_queries_stated_refuses_the_next() {
+        if let Some(limits) = stated_two(
+            SessionLimits::select_max_pending_queries,
+            MaxPendingQueries::DOMAIN.is_singleton(),
+        ) {
+            refuses_the_third(
+                &limits,
+                pending_query,
+                |o, index| {
+                    o.replies
+                        .unregister(u32::try_from(index).expect("a test index"))
+                },
+                |o| o.replies.len(),
+            );
+        }
+    }
+
+    #[cfg(feature = "declare-subscriber")]
+    fn decl_observer(
+        observer: &mut ApplicationLayerObserver,
+        _: usize,
+    ) -> Result<(), RegisterError> {
+        observer
+            .remote_subscribers
+            .on_subscriber_declared(|_| {})
+            .map(|_| ())
+    }
+
+    /// `MAX_DECL_OBSERVERS` with nothing stated.
+    #[cfg(feature = "declare-subscriber")]
+    #[test]
+    fn max_decl_observers_with_nothing_stated_admits_what_the_build_admitted() {
+        admits_what_the_build_admitted(caps::MAX_DECL_OBSERVERS, decl_observer, |o| {
+            o.remote_subscribers.on_decl_len()
+        });
+    }
+
+    /// `MAX_DECL_OBSERVERS` stated as two. The observer ids count from zero, one per install.
+    #[cfg(feature = "declare-subscriber")]
+    #[test]
+    fn max_decl_observers_stated_refuses_the_next() {
+        if let Some(limits) = stated_two(
+            SessionLimits::select_max_decl_observers,
+            MaxDeclObservers::DOMAIN.is_singleton(),
+        ) {
+            refuses_the_third(
+                &limits,
+                decl_observer,
+                |o, index| {
+                    o.remote_subscribers
+                        .remove_subscriber_declared_sink(index as u64)
+                },
+                |o| o.remote_subscribers.on_decl_len(),
+            );
+        }
+    }
+
+    #[cfg(feature = "liveliness-subscriber")]
+    fn liveliness_subscriber(
+        observer: &mut ApplicationLayerObserver,
+        index: usize,
+    ) -> Result<(), RegisterError> {
+        let key = std::format!("bound/liveliness/{index}");
+        let sink = crate::declare::liveliness_sample::BoxedLivelinessSampleSink::new(|_| {});
+        observer
+            .liveliness_subscribers
+            .register(index as u64, &key, false, sink)
+            .map(|_| ())
+    }
+
+    /// `MAX_LIVELINESS_SUBSCRIPTIONS` with nothing stated.
+    #[cfg(feature = "liveliness-subscriber")]
+    #[test]
+    fn max_liveliness_subscriptions_with_nothing_stated_admits_what_the_build_admitted() {
+        admits_what_the_build_admitted(
+            caps::MAX_LIVELINESS_SUBSCRIPTIONS,
+            liveliness_subscriber,
+            |o| o.liveliness_subscribers.slot_count(),
+        );
+    }
+
+    /// `MAX_LIVELINESS_SUBSCRIPTIONS` stated as two.
+    #[cfg(feature = "liveliness-subscriber")]
+    #[test]
+    fn max_liveliness_subscriptions_stated_refuses_the_next() {
+        if let Some(limits) = stated_two(
+            SessionLimits::select_max_liveliness_subscriptions,
+            MaxLivelinessSubscriptions::DOMAIN.is_singleton(),
+        ) {
+            refuses_the_third(
+                &limits,
+                liveliness_subscriber,
+                |o, index| o.liveliness_subscribers.unregister(index as u64),
+                |o| o.liveliness_subscribers.slot_count(),
+            );
+        }
+    }
+
+    #[cfg(feature = "liveliness-token")]
+    fn local_token(
+        observer: &mut ApplicationLayerObserver,
+        index: usize,
+    ) -> Result<(), RegisterError> {
+        let key = std::format!("bound/token/{index}");
+        observer
+            .local_tokens
+            .register(index as u64, &key)
+            .map(|_| ())
+    }
+
+    /// `MAX_LOCAL_TOKENS` with nothing stated.
+    #[cfg(feature = "liveliness-token")]
+    #[test]
+    fn max_local_tokens_with_nothing_stated_admits_what_the_build_admitted() {
+        admits_what_the_build_admitted(caps::MAX_LOCAL_TOKENS, local_token, |o| {
+            o.local_tokens.len()
+        });
+    }
+
+    /// `MAX_LOCAL_TOKENS` stated as two.
+    #[cfg(feature = "liveliness-token")]
+    #[test]
+    fn max_local_tokens_stated_refuses_the_next() {
+        if let Some(limits) = stated_two(
+            SessionLimits::select_max_local_tokens,
+            MaxLocalTokens::DOMAIN.is_singleton(),
+        ) {
+            refuses_the_third(
+                &limits,
+                local_token,
+                |o, index| o.local_tokens.unregister(index as u64),
+                |o| o.local_tokens.len(),
+            );
+        }
+    }
+
+    #[cfg(feature = "liveliness-get")]
+    fn liveliness_get(
+        observer: &mut ApplicationLayerObserver,
+        index: usize,
+    ) -> Result<(), RegisterError> {
+        observer
+            .liveliness_gets
+            .register_get(index as u64, None, |_| {}, |_| {})
+            .map(|_| ())
+    }
+
+    /// `MAX_PENDING_LIVELINESS_GETS` with nothing stated.
+    #[cfg(feature = "liveliness-get")]
+    #[test]
+    fn max_pending_liveliness_gets_with_nothing_stated_admits_what_the_build_admitted() {
+        admits_what_the_build_admitted(caps::MAX_PENDING_LIVELINESS_GETS, liveliness_get, |o| {
+            o.liveliness_gets.len()
+        });
+    }
+
+    /// `MAX_PENDING_LIVELINESS_GETS` stated as two.
+    #[cfg(feature = "liveliness-get")]
+    #[test]
+    fn max_pending_liveliness_gets_stated_refuses_the_next() {
+        if let Some(limits) = stated_two(
+            SessionLimits::select_max_pending_liveliness_gets,
+            MaxPendingLivelinessGets::DOMAIN.is_singleton(),
+        ) {
+            refuses_the_third(
+                &limits,
+                liveliness_get,
+                |o, index| o.liveliness_gets.unregister(index as u64),
+                |o| o.liveliness_gets.len(),
+            );
+        }
+    }
 }
 
 #[cfg(test)]
