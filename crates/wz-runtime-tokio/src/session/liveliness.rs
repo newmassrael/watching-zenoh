@@ -73,7 +73,8 @@ impl LivelinessOptions {
 /// `MAX_LOCAL_TOKENS` quota, or the fixed table's capacity) is announced to no
 /// one, as a subscriber the session's table refuses is not; zenoh-pico instead
 /// announces first and retracts with an `UndeclToken` when its insert fails
-/// (`vendor/zenoh-pico/src/net/liveliness.c:62-87`). A place dropped before it
+/// (`vendor/zenoh-pico/src/net/liveliness.c` @
+/// `_z_liveliness_send_undeclare_token(_Z_RC_IN_VAL(zn), id, &ke);`). A place dropped before it
 /// becomes a [`LivelinessToken`] (the announce failed) releases what it took.
 #[cfg(feature = "liveliness-token")]
 #[must_use = "a place not made a token is released when dropped"]
