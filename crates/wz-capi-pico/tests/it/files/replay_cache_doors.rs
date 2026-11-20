@@ -597,3 +597,59 @@ fn the_publisher_doors_refuse_by_name() {
         close(&mut listener_session);
     }
 }
+
+/// What the replay doors read of a session they read through the extension interface: the
+/// session's own snapshot of the build's policies and the querier's bound, open and then closed.
+#[test]
+fn the_core_reports_a_session_s_facts_through_the_extension_interface() {
+    use wz_capi_pico::ext_interface::{
+        wz_ext_interface_session_facts, wz_ext_session_facts_t, WZ_EXT_REPLAY_LIVE_DELIVER,
+        WZ_EXT_REPLAY_LIVE_HOLD_BACK, WZ_EXT_REPLAY_SHAPE_FRAME_PER_SAMPLE,
+        WZ_EXT_REPLAY_SHAPE_SEGMENTED,
+    };
+    use wz_session_core::policy::{ReplayLiveBeforeAnswer, ReplayReplyShape};
+
+    let policy = SessionPolicy::from_build();
+    let port = free_port();
+    let endpoint = CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
+    let size = std::mem::size_of::<wz_ext_session_facts_t>();
+    // SAFETY: one session of this library, read while it is held and dropped at the end.
+    unsafe {
+        let mut session = open(Z_CONFIG_LISTEN_KEY, &endpoint);
+        let mut facts: wz_ext_session_facts_t = std::mem::zeroed();
+        facts.struct_size = size as u32;
+        assert_eq!(
+            wz_ext_interface_session_facts(z_session_loan(&session), &mut facts),
+            Z_OK
+        );
+        assert_eq!(facts.struct_size as usize, size);
+        assert_eq!(facts.closed, 0);
+        let shape = match policy.replay_reply_shape() {
+            ReplayReplyShape::FramePerSample => WZ_EXT_REPLAY_SHAPE_FRAME_PER_SAMPLE,
+            ReplayReplyShape::Segmented => WZ_EXT_REPLAY_SHAPE_SEGMENTED,
+        };
+        assert_eq!(facts.replay_reply_shape, shape);
+        assert_eq!(
+            facts.replay_serve_holds_sends,
+            u8::from(policy.replay_serve_holds_sends())
+        );
+        let live = match policy.replay_live_before_answer() {
+            ReplayLiveBeforeAnswer::Deliver => WZ_EXT_REPLAY_LIVE_DELIVER,
+            ReplayLiveBeforeAnswer::HoldBack => WZ_EXT_REPLAY_LIVE_HOLD_BACK,
+        };
+        assert_eq!(facts.replay_live_before_answer, live);
+        assert_eq!(facts.targeted_query, u8::from(policy.targeted_query()));
+        assert_eq!(
+            facts.querier_max_pending_queries,
+            wz_session_core::caps::QUERIER_MAX_PENDING_QUERIES
+        );
+
+        z_close(z_session_loan_mut(&mut session), std::ptr::null());
+        assert_eq!(
+            wz_ext_interface_session_facts(z_session_loan(&session), &mut facts),
+            Z_OK
+        );
+        assert_eq!(facts.closed, 1, "a closed session is answered too");
+        z_session_drop(z_session_move(&mut session));
+    }
+}
