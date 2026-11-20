@@ -442,9 +442,10 @@ impl Link {
         window_open: &std::sync::atomic::AtomicBool,
     ) -> Result<wz_session_core::tx_deadline::PushOutcome, MulticastTxRefused> {
         use wz_session_core::multicast_tx::{
-            multicast_tx_conduit, multicast_tx_push, multicast_tx_push_batched, MulticastTxConduit,
-            MulticastTxTally,
+            multicast_tx_conduit, multicast_tx_droppable, multicast_tx_push,
+            multicast_tx_push_batched, MulticastTxConduit, MulticastTxTally,
         };
+        use wz_session_core::tx_deadline::PushOutcome;
         #[cfg_attr(not(feature = "routing-namespace"), allow(unused_mut))]
         let mut item = item;
         // §5.21 routing-namespace — the one egress chokepoint every producer's
@@ -459,9 +460,26 @@ impl Link {
         }
         let tally = MulticastTxTally::of(&item);
         let band = multicast_tx_conduit(&item, &self.params);
-        let mut stage = self.stages[band as usize]
-            .lock()
-            .expect("multicast stage poisoned");
+        // A droppable push waits `wait_before_drop` in all, the wait for its stage included: a
+        // blocking push holds its stage across its own wait for room, up to `wait_before_close`,
+        // and one taken by waiting would hold the droppable push behind it as long, as the
+        // unicast dispatch's conduit would (`SessionLinkActions::dispatch_network_message_at`).
+        let mut conf = self.params.tx_queue;
+        let stage = if multicast_tx_droppable(&item, &self.params) {
+            self.droppable_stage(band, &mut conf)
+        } else {
+            Some(
+                self.stages[band as usize]
+                    .lock()
+                    .expect("multicast stage poisoned"),
+            )
+        };
+        let Some(mut stage) = stage else {
+            if let Some(pushed) = self.pushed.as_ref() {
+                let _ = pushed.send((tally, PushOutcome::Congested));
+            }
+            return Ok(PushOutcome::Congested);
+        };
         let Stage { sn, window, queued } = &mut *stage;
         let mut queue = StageQueue {
             lanes: &self.lanes,
@@ -473,7 +491,7 @@ impl Link {
                 item,
                 &mut MulticastTxConduit::new(band, sn),
                 &self.params,
-                &self.params.tx_queue,
+                &conf,
                 &mut queue,
                 window,
             )
@@ -484,7 +502,7 @@ impl Link {
                 item,
                 &mut MulticastTxConduit::new(band, sn),
                 &self.params,
-                &self.params.tx_queue,
+                &conf,
                 &mut queue,
             )
         };
@@ -493,6 +511,37 @@ impl Link {
             let _ = pushed.send((tally, outcome));
         }
         Ok(outcome)
+    }
+
+    /// The stage of `band` for a droppable push: taken when it is free. While another push holds
+    /// it (a blocking one waiting for room), this one asks the lane for room itself, without the
+    /// stage and out of its `wait_before_drop`; `None` is no room within it, a congestion drop.
+    /// Room means the holder is about to let go, and the stage is tried again. What the waits
+    /// spent comes off `conf`'s `wait_before_drop_us`, so the push spends one deadline in all.
+    fn droppable_stage(
+        &self,
+        band: Priority,
+        conf: &mut wz_session_core::session_init_params::TxQueueConf,
+    ) -> Option<std::sync::MutexGuard<'_, Stage>> {
+        use wz_session_core::link::{LinkRoom, RoomWait};
+        loop {
+            match self.stages[band as usize].try_lock() {
+                Ok(stage) => return Some(stage),
+                Err(std::sync::TryLockError::Poisoned(_)) => panic!("multicast stage poisoned"),
+                Err(std::sync::TryLockError::WouldBlock) => {}
+            }
+            let answer = self.lanes.link_room(
+                band,
+                RoomWait::Drop {
+                    wait_us: conf.wait_before_drop_us,
+                },
+            );
+            conf.wait_before_drop_us = conf.wait_before_drop_us.saturating_sub(answer.waited_us);
+            if answer.room == LinkRoom::Congested {
+                return None;
+            }
+            std::hint::spin_loop();
+        }
     }
 
     /// Put every conduit's open frame on the lanes, each under its own conduit's lock, the
@@ -1347,6 +1396,80 @@ mod tests {
         assert!(
             started.elapsed() < CLOSE_WAIT / 3,
             "a droppable push on a congested lane does not wait"
+        );
+    }
+
+    /// Wait until another thread holds `band`'s stage.
+    fn until_held(tap: &MulticastTxTap, band: Priority) {
+        let started = Instant::now();
+        while tap.stages[band as usize].try_lock().is_ok() {
+            assert!(
+                started.elapsed() < CLOSE_WAIT / 2,
+                "the blocking push never took its stage"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    /// A droppable push does not wait for the stage a blocking push holds across its wait for
+    /// room: it asks the lane itself, without the stage, and on the full lane it is a congestion
+    /// drop within its own `wait_before_drop` while the blocking push still waits. zenoh bounds a
+    /// droppable push by `wait_before_drop`
+    /// (`commons/zenoh-config/src/defaults.rs` @ `wait_before_drop: 1000,`); its pipeline holds the
+    /// stage across the blocking wait
+    /// (`io/zenoh-transport/src/common/pipeline.rs` @ `let mut queue = zlock!(self.stage_in[idx]);`),
+    /// and a push that queued behind it would wait out the blocking one's `wait_before_close`.
+    #[test]
+    fn a_droppable_push_behind_a_blocking_one_is_dropped_within_its_own_wait() {
+        let (producer, tap) = MulticastTxTap::attach(&params(false));
+        fill(&producer, Priority::DEFAULT);
+        let waiting = producer.clone();
+        let blocked = std::thread::spawn(move || {
+            waiting.push(terminal(Priority::DEFAULT, CongestionControl::Block))
+        });
+        until_held(&tap, Priority::DEFAULT);
+
+        let started = Instant::now();
+        let outcome = producer.push(terminal(Priority::DEFAULT, CongestionControl::Drop));
+        let took = started.elapsed();
+        assert_eq!(outcome, Ok(PushOutcome::Congested));
+        assert!(
+            !blocked.is_finished(),
+            "the droppable push returned only once the blocking one let go of its stage"
+        );
+        assert!(
+            took < CLOSE_WAIT / 3,
+            "a droppable push waited {took:?} behind a blocking one"
+        );
+        assert_eq!(
+            blocked.join().expect("blocked pusher"),
+            Ok(PushOutcome::Congested)
+        );
+    }
+
+    /// A held stage alone is not congestion: while its lane has room, a droppable push waits for
+    /// the holder to let go and is then pushed, as it would be had it found the stage free.
+    #[test]
+    fn a_droppable_push_whose_lane_has_room_waits_for_a_held_stage() {
+        let (producer, tap) = MulticastTxTap::attach(&params(false));
+        let held = tap.stages[Priority::DEFAULT as usize]
+            .lock()
+            .expect("stage");
+        let pushing = producer.clone();
+        let pushed = std::thread::spawn(move || {
+            pushing.push(terminal(Priority::DEFAULT, CongestionControl::Drop))
+        });
+        // Many times the push's `wait_before_drop`: a push that took the held stage for
+        // congestion would be back by now.
+        std::thread::sleep(CLOSE_WAIT / 6);
+        assert!(
+            !pushed.is_finished(),
+            "a droppable push returned while its stage was held and its lane had room"
+        );
+        drop(held);
+        assert_eq!(
+            pushed.join().expect("droppable pusher"),
+            Ok(PushOutcome::Pushed)
         );
     }
 
