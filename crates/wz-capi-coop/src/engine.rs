@@ -207,7 +207,7 @@ pub struct CoopConfig {
     /// (`SessionDatagramLink::readiness`); a link whose stack does not waits in its own loop.
     pub idle_wait_ms: u32,
     /// The endpoints to listen on (`tcp/a.b.c.d:port`; port 0 has the stack choose one, read back
-    /// with [`CoopEngine::listening`]), which the session takes inbound links from for as long as
+    /// with `CoopEngine::listening`), which the session takes inbound links from for as long as
     /// it lives, each as a face of its own. A session that lists none and dials at least one is
     /// the dial role alone; one that lists some and dials none is only a listener, and is open as
     /// soon as it is bound (`listen`).
