@@ -1369,7 +1369,8 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(decl.keyexpr().to_string());
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let mut peer = HashMap::new();
         peer.insert(7u64, "theirs/q".to_string());
@@ -1396,7 +1397,8 @@ mod tests {
         let fired_for_cb = fired.clone();
         reg.on_queryable_declared(move |_decl| {
             fired_for_cb.fetch_add(1, Ordering::SeqCst);
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let mut peer = HashMap::new();
         peer.insert(7u64, "theirs/q".to_string());
@@ -1433,7 +1435,8 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((decl.id(), decl.keyexpr().to_string()));
-        });
+        })
+        .expect("no quota is stated on this table");
         let body =
             DeclareOwnedVariant::CodecZenohDeclQueryable(decl_queryable(8, 0, Some("home/door")));
         reg.dispatch_declare(&body, &HashMap::new());
@@ -1450,7 +1453,8 @@ mod tests {
         let fired_for_cb = fired.clone();
         reg.on_queryable_declared(move |_d| {
             fired_for_cb.fetch_add(1, Ordering::SeqCst);
-        });
+        })
+        .expect("no quota is stated on this table");
         let body = DeclareOwnedVariant::CodecZenohDeclQueryable(decl_queryable(1, 77, None));
         reg.dispatch_declare(&body, &HashMap::new());
         assert_eq!(fired.load(Ordering::SeqCst), 0);
@@ -1463,7 +1467,8 @@ mod tests {
         let captured_for_cb = captured.clone();
         reg.on_queryable_undeclared(move |id| {
             captured_for_cb.lock().unwrap().push(id);
-        });
+        })
+        .expect("no quota is stated on this table");
         let body = DeclareOwnedVariant::CodecZenohUndeclQueryable(undecl_queryable(99));
         reg.dispatch_declare(&body, &HashMap::new());
         assert_eq!(*captured.lock().unwrap(), vec![99]);
@@ -1680,10 +1685,12 @@ mod tests {
         let u = undecl_count.clone();
         reg.on_queryable_declared(move |_d| {
             d.fetch_add(1, Ordering::SeqCst);
-        });
+        })
+        .expect("no quota is stated on this table");
         reg.on_queryable_undeclared(move |_u| {
             u.fetch_add(1, Ordering::SeqCst);
-        });
+        })
+        .expect("no quota is stated on this table");
 
         // Mix of Subscriber + Queryable envelopes — only Queryable
         // arms route into this registry.
@@ -1744,9 +1751,11 @@ mod tests {
         let declared: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
         let undeclared: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
         let declared_for_cb = declared.clone();
-        reg.on_queryable_declared(move |decl| declared_for_cb.lock().unwrap().push(decl.id()));
+        reg.on_queryable_declared(move |decl| declared_for_cb.lock().unwrap().push(decl.id()))
+            .expect("no quota is stated on this table");
         let undeclared_for_cb = undeclared.clone();
-        reg.on_queryable_undeclared(move |id| undeclared_for_cb.lock().unwrap().push(id));
+        reg.on_queryable_undeclared(move |id| undeclared_for_cb.lock().unwrap().push(id))
+            .expect("no quota is stated on this table");
 
         reg.dispatch_declare(
             &decl_queryable_complete(1, "home/temp", false),

@@ -325,22 +325,24 @@ mod tests {
         let mut registry = Registry::new();
         let log = Arc::new(Mutex::new(Vec::new()));
         let into = log.clone();
-        registry.register("demo/**", move |view, out| {
-            into.lock().expect("not poisoned").push(Seen {
-                keyexpr: String::from(view.keyexpr()),
-                parameters: view.parameters().map(<[u8]>::to_vec),
-                attachment: view.attachment().map(<[u8]>::to_vec),
-                payload: view.payload().map(<[u8]>::to_vec),
-                encoding: view.encoding().cloned(),
-                source_info: view.source_info().cloned(),
-                rid: view.rid(),
-                is_local: view.is_local(),
-                qos: view.qos(),
-                #[cfg(feature = "pubsub-ts-stack")]
-                ts_stack: view.ts_stack().cloned(),
-            });
-            out.reply(b"answer");
-        });
+        registry
+            .register("demo/**", move |view, out| {
+                into.lock().expect("not poisoned").push(Seen {
+                    keyexpr: String::from(view.keyexpr()),
+                    parameters: view.parameters().map(<[u8]>::to_vec),
+                    attachment: view.attachment().map(<[u8]>::to_vec),
+                    payload: view.payload().map(<[u8]>::to_vec),
+                    encoding: view.encoding().cloned(),
+                    source_info: view.source_info().cloned(),
+                    rid: view.rid(),
+                    is_local: view.is_local(),
+                    qos: view.qos(),
+                    #[cfg(feature = "pubsub-ts-stack")]
+                    ts_stack: view.ts_stack().cloned(),
+                });
+                out.reply(b"answer");
+            })
+            .expect("no quota is stated on this table");
         (registry, log)
     }
 

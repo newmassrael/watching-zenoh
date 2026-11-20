@@ -1291,7 +1291,8 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((decl.id(), decl.keyexpr().to_string()));
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let body =
             DeclareOwnedVariant::CodecZenohDeclSubscriber(decl_subscriber(7, 0, Some("home/temp")));
@@ -1312,7 +1313,8 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(decl.keyexpr().to_string());
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let mut peer_table = HashMap::new();
         peer_table.insert(11u64, "sensors/temp".to_string());
@@ -1339,7 +1341,8 @@ mod tests {
         let fired_for_cb = fired.clone();
         reg.on_subscriber_declared(move |_decl| {
             fired_for_cb.fetch_add(1, Ordering::SeqCst);
-        });
+        })
+        .expect("no quota is stated on this table");
 
         // mapping_id=99 not in (empty) peer table -> skip.
         let body = DeclareOwnedVariant::CodecZenohDeclSubscriber(decl_subscriber(1, 99, None));
@@ -1381,7 +1384,8 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(decl.keyexpr().to_string());
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let mut peer = HashMap::new();
         peer.insert(7u64, "theirs/sub".to_string());
@@ -1413,7 +1417,8 @@ mod tests {
         let fired_for_cb = fired.clone();
         reg.on_subscriber_declared(move |_decl| {
             fired_for_cb.fetch_add(1, Ordering::SeqCst);
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let mut peer = HashMap::new();
         peer.insert(7u64, "theirs/sub".to_string());
@@ -1437,7 +1442,8 @@ mod tests {
         let captured_for_cb = captured.clone();
         reg.on_subscriber_undeclared(move |id| {
             captured_for_cb.lock().unwrap().push(id);
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let body = DeclareOwnedVariant::CodecZenohUndeclSubscriber(undecl_subscriber(42));
         reg.dispatch_declare(&body, &HashMap::new());
@@ -1456,9 +1462,11 @@ mod tests {
         let declared: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
         let undeclared: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
         let declared_for_cb = declared.clone();
-        reg.on_subscriber_declared(move |decl| declared_for_cb.lock().unwrap().push(decl.id()));
+        reg.on_subscriber_declared(move |decl| declared_for_cb.lock().unwrap().push(decl.id()))
+            .expect("no quota is stated on this table");
         let undeclared_for_cb = undeclared.clone();
-        reg.on_subscriber_undeclared(move |id| undeclared_for_cb.lock().unwrap().push(id));
+        reg.on_subscriber_undeclared(move |id| undeclared_for_cb.lock().unwrap().push(id))
+            .expect("no quota is stated on this table");
 
         let declare = |id: u64| {
             DeclareOwnedVariant::CodecZenohDeclSubscriber(decl_subscriber(id, 0, Some("home/temp")))
@@ -1495,7 +1503,8 @@ mod tests {
         let mut reg = RemoteSubscriberRegistry::new();
         let declared: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
         let declared_for_cb = declared.clone();
-        reg.on_subscriber_declared(move |decl| declared_for_cb.lock().unwrap().push(decl.id()));
+        reg.on_subscriber_declared(move |decl| declared_for_cb.lock().unwrap().push(decl.id()))
+            .expect("no quota is stated on this table");
         let declare = |id: u64| {
             DeclareOwnedVariant::CodecZenohDeclSubscriber(decl_subscriber(id, 0, Some("home/temp")))
         };
@@ -1645,8 +1654,10 @@ mod tests {
         let order: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
         let order_a = order.clone();
         let order_b = order.clone();
-        reg.on_subscriber_declared(move |_d| order_a.lock().unwrap().push(1));
-        reg.on_subscriber_declared(move |_d| order_b.lock().unwrap().push(2));
+        reg.on_subscriber_declared(move |_d| order_a.lock().unwrap().push(1))
+            .expect("no quota is stated on this table");
+        reg.on_subscriber_declared(move |_d| order_b.lock().unwrap().push(2))
+            .expect("no quota is stated on this table");
         assert_eq!(reg.on_decl_len(), 2);
 
         let body =
@@ -1666,7 +1677,8 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(d.keyexpr().to_string())
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let body = DeclareOwnedVariant::CodecZenohDeclSubscriber(decl_subscriber_nonlocal(
             9,
@@ -1686,7 +1698,8 @@ mod tests {
         let fired_for_cb = fired.clone();
         reg.on_subscriber_declared(move |_d| {
             fired_for_cb.fetch_add(1, Ordering::SeqCst);
-        });
+        })
+        .expect("no quota is stated on this table");
 
         // A DeclFinal envelope must not fire the subscriber callback
         // — it lives in the SubscriberRegistry's path (DeclKexpr /
@@ -1712,7 +1725,8 @@ mod tests {
         let counter_for_cb = counter.clone();
         reg.on_subscriber_declared(move |_d| {
             counter_for_cb.fetch_add(1, Ordering::SeqCst);
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let messages =
             vec![
@@ -1736,10 +1750,12 @@ mod tests {
         let u = undecl_count.clone();
         reg.on_subscriber_declared(move |_d| {
             d.fetch_add(1, Ordering::SeqCst);
-        });
+        })
+        .expect("no quota is stated on this table");
         reg.on_subscriber_undeclared(move |_u| {
             u.fetch_add(1, Ordering::SeqCst);
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let messages =
             vec![

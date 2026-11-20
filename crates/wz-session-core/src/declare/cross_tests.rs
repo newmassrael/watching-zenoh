@@ -47,12 +47,16 @@ fn subscriber_and_queryable_registries_share_a_message_stream() {
     let q_count = Arc::new(AtomicUsize::new(0));
     let s = sub_count.clone();
     let q = q_count.clone();
-    sub_reg.on_subscriber_declared(move |_d| {
-        s.fetch_add(1, Ordering::SeqCst);
-    });
-    q_reg.on_queryable_declared(move |_d| {
-        q.fetch_add(1, Ordering::SeqCst);
-    });
+    sub_reg
+        .on_subscriber_declared(move |_d| {
+            s.fetch_add(1, Ordering::SeqCst);
+        })
+        .expect("no quota is stated on this table");
+    q_reg
+        .on_queryable_declared(move |_d| {
+            q.fetch_add(1, Ordering::SeqCst);
+        })
+        .expect("no quota is stated on this table");
 
     let messages = vec![
         NetworkMessage::Declare(Box::new(declare_envelope_decl_subscriber(decl_subscriber(
@@ -93,15 +97,21 @@ fn three_registries_share_a_message_stream_independently() {
     let s_cb = s.clone();
     let q_cb = q.clone();
     let l_cb = l.clone();
-    sub_reg.on_subscriber_declared(move |_d| {
-        s_cb.fetch_add(1, Ordering::SeqCst);
-    });
-    q_reg.on_queryable_declared(move |_d| {
-        q_cb.fetch_add(1, Ordering::SeqCst);
-    });
-    l_reg.on_token_declared(move |_d| {
-        l_cb.fetch_add(1, Ordering::SeqCst);
-    });
+    sub_reg
+        .on_subscriber_declared(move |_d| {
+            s_cb.fetch_add(1, Ordering::SeqCst);
+        })
+        .expect("no quota is stated on this table");
+    q_reg
+        .on_queryable_declared(move |_d| {
+            q_cb.fetch_add(1, Ordering::SeqCst);
+        })
+        .expect("no quota is stated on this table");
+    l_reg
+        .on_token_declared(move |_d| {
+            l_cb.fetch_add(1, Ordering::SeqCst);
+        })
+        .expect("no quota is stated on this table");
 
     let messages = vec![
         NetworkMessage::Declare(Box::new(declare_envelope_decl_subscriber(decl_subscriber(

@@ -419,8 +419,10 @@ mod tests {
     #[test]
     fn on_token_declared_increments_declare_count() {
         let mut reg = LivelinessRegistry::new();
-        reg.on_token_declared(|_d| {});
-        reg.on_token_declared(|_d| {});
+        reg.on_token_declared(|_d| {})
+            .expect("no quota is stated on this table");
+        reg.on_token_declared(|_d| {})
+            .expect("no quota is stated on this table");
         assert_eq!(reg.on_decl_len(), 2);
         assert_eq!(reg.on_undecl_len(), 0);
     }
@@ -442,7 +444,8 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(decl.keyexpr().to_string());
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let mut peer = HashMap::new();
         peer.insert(7u64, "theirs/token".to_string());
@@ -469,7 +472,8 @@ mod tests {
         let fired_for_cb = fired.clone();
         reg.on_token_declared(move |_decl| {
             fired_for_cb.fetch_add(1, Ordering::SeqCst);
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let mut peer = HashMap::new();
         peer.insert(7u64, "theirs/token".to_string());
@@ -488,7 +492,8 @@ mod tests {
     #[test]
     fn on_token_undeclared_increments_undeclare_count() {
         let mut reg = LivelinessRegistry::new();
-        reg.on_token_undeclared(|_u| {});
+        reg.on_token_undeclared(|_u| {})
+            .expect("no quota is stated on this table");
         assert_eq!(reg.on_decl_len(), 0);
         assert_eq!(reg.on_undecl_len(), 1);
     }
@@ -527,7 +532,8 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((decl.id(), decl.keyexpr().to_string()));
-        });
+        })
+        .expect("no quota is stated on this table");
         let body = DeclareOwnedVariant::CodecZenohDeclToken(decl_token(
             11,
             0,
@@ -547,7 +553,8 @@ mod tests {
         let captured_for_cb = captured.clone();
         reg.on_token_undeclared(move |id| {
             captured_for_cb.lock().unwrap().push(id);
-        });
+        })
+        .expect("no quota is stated on this table");
         let body = DeclareOwnedVariant::CodecZenohUndeclToken(undecl_token(11));
         reg.dispatch_declare(&body, &HashMap::new());
         assert_eq!(*captured.lock().unwrap(), vec![11]);
@@ -560,7 +567,8 @@ mod tests {
         let fired_for_cb = fired.clone();
         reg.on_token_declared(move |_d| {
             fired_for_cb.fetch_add(1, Ordering::SeqCst);
-        });
+        })
+        .expect("no quota is stated on this table");
         let body = DeclareOwnedVariant::CodecZenohDeclToken(decl_token(1, 55, None));
         reg.dispatch_declare(&body, &HashMap::new());
         assert_eq!(fired.load(Ordering::SeqCst), 0);
@@ -579,10 +587,12 @@ mod tests {
         let u = undecl_count.clone();
         reg.on_token_declared(move |_d| {
             d.fetch_add(1, Ordering::SeqCst);
-        });
+        })
+        .expect("no quota is stated on this table");
         reg.on_token_undeclared(move |_u| {
             u.fetch_add(1, Ordering::SeqCst);
-        });
+        })
+        .expect("no quota is stated on this table");
 
         let messages = vec![
             NetworkMessage::Declare(Box::new(declare_envelope_decl_token(decl_token(
@@ -609,7 +619,8 @@ mod tests {
         let counter_for_cb = counter.clone();
         reg.on_token_declared(move |_d| {
             counter_for_cb.fetch_add(1, Ordering::SeqCst);
-        });
+        })
+        .expect("no quota is stated on this table");
 
         // Subscriber + Queryable + Token mix — only Token arm routes.
         let messages =

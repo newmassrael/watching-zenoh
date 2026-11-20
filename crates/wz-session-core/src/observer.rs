@@ -38,8 +38,8 @@
 //! ```text
 //! let mut observer = ApplicationLayerObserver::new();
 //! observer.subscribers.register("home/temp", on_temp)?;
-//! observer.queryables.register("metrics/**", on_metric);
-//! observer.replies.register(rid, expected_finals, on_reply, on_final);
+//! observer.queryables.register("metrics/**", on_metric)?;
+//! observer.replies.register(rid, expected_finals, on_reply, on_final)?;
 //! // … later, inside the drive_session observer closure:
 //! observer.dispatch(event, &actions);
 //! ```
@@ -1412,7 +1412,8 @@ mod tests {
                     assert_eq!(decl.id(), 7);
                     assert_eq!(decl.keyexpr(), "peer/sensor");
                     fired_cb.fetch_add(1, Ordering::SeqCst);
-                });
+                })
+                .expect("no quota is stated on this table");
 
             let outcome = make_outcome(vec![NetworkMessage::Declare(Box::new(
                 declare_decl_subscriber(7, "peer/sensor"),
@@ -1470,15 +1471,22 @@ mod tests {
                 .remote_subscribers
                 .on_subscriber_declared(move |_d| {
                     rs.fetch_add(1, Ordering::SeqCst);
-                });
+                })
+                .expect("no quota is stated on this table");
             let rq = r_q_fired.clone();
-            observer.remote_queryables.on_queryable_declared(move |_d| {
-                rq.fetch_add(1, Ordering::SeqCst);
-            });
+            observer
+                .remote_queryables
+                .on_queryable_declared(move |_d| {
+                    rq.fetch_add(1, Ordering::SeqCst);
+                })
+                .expect("no quota is stated on this table");
             let l = l_fired.clone();
-            observer.liveliness.on_token_declared(move |_d| {
-                l.fetch_add(1, Ordering::SeqCst);
-            });
+            observer
+                .liveliness
+                .on_token_declared(move |_d| {
+                    l.fetch_add(1, Ordering::SeqCst);
+                })
+                .expect("no quota is stated on this table");
 
             // Frame carrying a Push + 3 different Declare arms.
             let outcome = make_outcome(vec![
@@ -1595,15 +1603,18 @@ mod tests {
             let s1 = seen.clone();
             observer
                 .remote_subscribers
-                .on_subscriber_declared(move |d| s1.lock().unwrap().push(d.keyexpr().to_string()));
+                .on_subscriber_declared(move |d| s1.lock().unwrap().push(d.keyexpr().to_string()))
+                .expect("no quota is stated on this table");
             let s2 = seen.clone();
             observer
                 .remote_queryables
-                .on_queryable_declared(move |d| s2.lock().unwrap().push(d.keyexpr().to_string()));
+                .on_queryable_declared(move |d| s2.lock().unwrap().push(d.keyexpr().to_string()))
+                .expect("no quota is stated on this table");
             let s3 = seen.clone();
             observer
                 .liveliness
-                .on_token_declared(move |d| s3.lock().unwrap().push(d.keyexpr().to_string()));
+                .on_token_declared(move |d| s3.lock().unwrap().push(d.keyexpr().to_string()))
+                .expect("no quota is stated on this table");
 
             observer.dispatch_event(IterationEvent::Poll(&make_outcome(vec![
                 NetworkMessage::Push(Box::new(push_own_alias(7))),
@@ -1664,7 +1675,8 @@ mod tests {
             let s1 = seen.clone();
             observer
                 .remote_subscribers
-                .on_subscriber_declared(move |d| s1.lock().unwrap().push(d.keyexpr().to_string()));
+                .on_subscriber_declared(move |d| s1.lock().unwrap().push(d.keyexpr().to_string()))
+                .expect("no quota is stated on this table");
 
             observer.dispatch_event(IterationEvent::Poll(&make_outcome(vec![
                 NetworkMessage::Push(Box::new(push_own_alias(7))),
@@ -1751,7 +1763,8 @@ mod tests {
                 .queryables
                 .register("home/temp", |_query, responder| {
                     responder.reply(b"21.0");
-                });
+                })
+                .expect("no quota is stated on this table");
 
             // Synthesize an inbound Query for "home/temp".
             use wz_codecs::lent::{Query, Request, RequestVariant};
@@ -1973,10 +1986,13 @@ mod tests {
             let seen: Arc<Mutex<alloc::vec::Vec<alloc::string::String>>> =
                 Arc::new(Mutex::new(alloc::vec::Vec::new()));
             let s = seen.clone();
-            f.observer.liveliness.on_token_declared(move |d| {
-                use alloc::string::ToString;
-                s.lock().unwrap().push(d.keyexpr().to_string());
-            });
+            f.observer
+                .liveliness
+                .on_token_declared(move |d| {
+                    use alloc::string::ToString;
+                    s.lock().unwrap().push(d.keyexpr().to_string());
+                })
+                .expect("no quota is stated on this table");
 
             f.observer
                 .dispatch_event(IterationEvent::Poll(&make_outcome(vec![
@@ -2810,7 +2826,11 @@ mod queryable_interest_reply_tests {
     #[test]
     fn a_queryable_interest_is_answered_with_the_queryable_and_a_final() {
         let mut observer = ApplicationLayerObserver::new();
-        let id = observer.queryables.register("lat", |_q, _out| {}).as_u64();
+        let id = observer
+            .queryables
+            .register("lat", |_q, _out| {})
+            .expect("no quota is stated on this table")
+            .as_u64();
         assert_eq!(
             answer(&mut observer, querier_interest(7, "lat", false)),
             [
@@ -2825,7 +2845,10 @@ mod queryable_interest_reply_tests {
     #[test]
     fn an_interest_no_queryable_reaches_is_answered_with_a_final_alone() {
         let mut observer = ApplicationLayerObserver::new();
-        observer.queryables.register("other/key", |_q, _out| {});
+        observer
+            .queryables
+            .register("other/key", |_q, _out| {})
+            .expect("no quota is stated on this table");
         assert_eq!(
             answer(&mut observer, querier_interest(3, "lat", false)),
             ["final 3".to_string()]
@@ -2847,9 +2870,16 @@ mod queryable_interest_reply_tests {
         let first = observer
             .queryables
             .register("demo/**", |_q, _out| {})
+            .expect("no quota is stated on this table")
             .as_u64();
-        observer.queryables.register("demo/a", |_q, _out| {});
-        observer.queryables.register("elsewhere/x", |_q, _out| {});
+        observer
+            .queryables
+            .register("demo/a", |_q, _out| {})
+            .expect("no quota is stated on this table");
+        observer
+            .queryables
+            .register("elsewhere/x", |_q, _out| {})
+            .expect("no quota is stated on this table");
         assert_eq!(
             answer(&mut observer, querier_interest(9, "demo/a", true)),
             [
@@ -2868,6 +2898,7 @@ mod queryable_interest_reply_tests {
         let a = observer
             .queryables
             .register("demo/*", |_q, _out| {})
+            .expect("no quota is stated on this table")
             .as_u64();
         let b = observer
             .queryables
@@ -2902,7 +2933,8 @@ mod queryable_interest_reply_tests {
         let mut observer = ApplicationLayerObserver::new();
         observer
             .queryables
-            .register_with_locality("lat", Locality::SessionLocal, |_q, _out| {});
+            .register_with_locality("lat", Locality::SessionLocal, |_q, _out| {})
+            .expect("no quota is stated on this table");
         assert_eq!(
             answer(&mut observer, querier_interest(5, "lat", false)),
             ["final 5".to_string()]
@@ -2915,7 +2947,10 @@ mod queryable_interest_reply_tests {
     #[test]
     fn only_a_current_queryables_interest_is_answered() {
         let mut observer = ApplicationLayerObserver::new();
-        observer.queryables.register("lat", |_q, _out| {});
+        observer
+            .queryables
+            .register("lat", |_q, _out| {})
+            .expect("no quota is stated on this table");
         let future_only = NetworkMessage::Interest(
             build_interest_kinds_with_aggregate(
                 11,
