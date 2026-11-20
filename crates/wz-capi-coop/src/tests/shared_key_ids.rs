@@ -15,6 +15,7 @@ use wz_capi_port::{
 use wz_runtime_posix::links::PosixLinks;
 use wz_runtime_posix::stream::PosixTcpDial;
 use wz_runtime_posix::{PosixClock, PosixEntropy};
+use wz_session_core::declare_form::InterestForm;
 use wz_session_core::locality::Locality;
 use wz_session_core::policy::{KeyWireForm, SessionPolicy};
 use wz_session_core::publish_options::PublishOptions;
@@ -22,6 +23,7 @@ use wz_session_core::query_sink::{QueryView, ReplyOut};
 use wz_session_core::reply_sink::ReplyView;
 use wz_session_core::shared_key_ids::{KeyIds, KeyIdsAtOpen, SharedKeyIds};
 use wz_session_core::sink::SampleView;
+use wz_session_core::wire_id::ExprId;
 use wz_session_core::WhatAmI;
 
 use super::get::remote_get;
@@ -524,4 +526,122 @@ fn a_shared_form_without_a_dictionary_is_refused_before_anything_is_dialled() {
             Some(OpenError::NoEndpoint)
         );
     }
+}
+
+/// The key every Interest below asks about: an entry of the dictionary of its own (id 41).
+const ASKED: &str = "lab/rig/alpha";
+
+/// An id, and the rest of the key after it, as an Interest named its key on the wire.
+type InterestKey = (ExprId, Option<String>);
+
+/// How the Interest that `ask` makes names its key on the wire, from a session opened under
+/// `form` (holding `ids`) to a stand-in that announces itself a peer and records each Interest
+/// that names a key. `ask` is handed the engine and the id of the session's own declaration of
+/// [`ASKED`], which it names the key by, as a pico ABI does for a declared key. Answers that id
+/// and what the stand-in recorded.
+fn interest_keys_under(
+    ids: Option<SharedKeyIds>,
+    form: KeyWireForm,
+    ask: impl FnOnce(&Engine, ExprId),
+) -> (ExprId, Vec<InterestKey>) {
+    let router = super::Router::start_peer();
+    let engine =
+        open_keyed(super::config(&router), ids, policy_of(form)).expect("the session opens");
+    let declared = engine
+        .acquire_keyexpr(ASKED.to_owned())
+        .expect("a session with ids left declares");
+    ask(&engine, declared);
+    super::until(&engine, "the peer to see the Interest", || {
+        router.seen(|seen| seen.interest_keys.len()) == 1
+    });
+    (declared, router.seen(|seen| seen.interest_keys.clone()))
+}
+
+/// A write filter on [`ASKED`] that asks by the declaration `declared`, as a pico publisher asks.
+fn filter_by(engine: &Engine, declared: ExprId) {
+    engine
+        .declare_write_filter(
+            FilterPlane::Subscribers,
+            ASKED.to_owned(),
+            &WireKey::aliased(declared, None),
+            Some(InterestForm {
+                mapping_id: declared,
+                suffix: None,
+                aggregate: false,
+            }),
+            false,
+        )
+        .expect("a session with ids left declares");
+}
+
+#[test]
+fn a_write_filters_interest_on_a_literal_link_names_its_key_whole() {
+    let (_, keys) = interest_keys_under(None, KeyWireForm::Literal, filter_by);
+    assert_eq!(keys, [(0, Some(ASKED.to_owned()))]);
+}
+
+#[test]
+fn a_write_filters_interest_on_a_shared_link_names_the_dictionary_id() {
+    let (_, keys) = interest_keys_under(Some(dictionary()), KeyWireForm::Shared, filter_by);
+    assert_eq!(keys, [(41, None)]);
+}
+
+#[test]
+fn a_write_filters_interest_on_a_declared_link_names_the_declaration() {
+    let (declared, keys) = interest_keys_under(None, KeyWireForm::Declared, filter_by);
+    assert_eq!(
+        keys,
+        [(declared, None)],
+        "CONTROL: upstream's form keeps the key as the ABI named it"
+    );
+}
+
+/// A liveliness subscriber on [`ASKED`], declared by the declaration `declared`.
+#[cfg(feature = "liveliness")]
+fn tokens_by(engine: &Engine, declared: ExprId) {
+    use wz_session_core::declare::liveliness_sample::LivelinessSample;
+
+    let sink: wz_capi_port::LivelinessSink = Arc::new(|| {
+        Box::new(|_: LivelinessSample<'_>| {})
+            as Box<dyn for<'a> FnMut(LivelinessSample<'a>) + Send>
+    });
+    engine
+        .declare_liveliness_subscriber_on_wire(
+            ASKED.to_owned(),
+            WireKey::aliased(declared, None),
+            false,
+            sink,
+        )
+        .expect("the engine has liveliness");
+}
+
+#[cfg(feature = "liveliness")]
+#[test]
+fn a_liveliness_subscribers_interest_follows_the_links_form() {
+    let (_, keys) = interest_keys_under(None, KeyWireForm::Literal, tokens_by);
+    assert_eq!(keys, [(0, Some(ASKED.to_owned()))]);
+    let (declared, keys) = interest_keys_under(None, KeyWireForm::Declared, tokens_by);
+    assert_eq!(keys, [(declared, None)], "CONTROL: upstream's form");
+}
+
+/// A liveliness get on [`ASKED`], asked by the declaration `declared`.
+#[cfg(feature = "liveliness-get")]
+fn alive_by(engine: &Engine, declared: ExprId) {
+    let issued = engine.liveliness_get_on_wire(
+        ASKED,
+        &WireKey::aliased(declared, None),
+        5_000,
+        None,
+        &mut || Box::new(|_: &dyn ReplyView| {}) as ReplyCallback,
+    );
+    assert_eq!(issued, Some(1), "one leg for the one face");
+}
+
+#[cfg(feature = "liveliness-get")]
+#[test]
+fn a_liveliness_gets_interest_follows_the_links_form() {
+    let (_, keys) = interest_keys_under(None, KeyWireForm::Literal, alive_by);
+    assert_eq!(keys, [(0, Some(ASKED.to_owned()))]);
+    let (declared, keys) = interest_keys_under(None, KeyWireForm::Declared, alive_by);
+    assert_eq!(keys, [(declared, None)], "CONTROL: upstream's form");
 }

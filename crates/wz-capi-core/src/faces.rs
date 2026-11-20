@@ -203,19 +203,46 @@ struct FilterAsk {
 }
 
 impl FilterAsk {
-    /// Ask `session` the question, holding its Interest until the returned hold is dropped.
+    /// Ask `session` the question, holding its Interest until the returned hold is dropped. The
+    /// Interest names the key as the face's key-wire form says, as a put on the face does.
     fn hold(
         &self,
         plane: FilterPlane,
         session: &TokioSession,
     ) -> MatchingInterestHold<TokioRuntime, TokioTime> {
+        let form = interest_on_link(session, &self.key, &self.form);
         match plane {
-            FilterPlane::Subscribers => session.hold_subscribers_interest(&self.key, &self.form),
-            FilterPlane::Queryables { .. } => {
-                session.hold_queryables_interest(&self.key, &self.form)
-            }
+            FilterPlane::Subscribers => session.hold_subscribers_interest(&self.key, &form),
+            FilterPlane::Queryables { .. } => session.hold_queryables_interest(&self.key, &form),
         }
     }
+}
+
+/// `form`, an Interest about the key `keyexpr`, as the link of `session` names that key: by the
+/// face's key-wire form, as `on_link` names the key of a put or a declaration, the declared form
+/// keeping `form` as the ABI made it (`shared-key-ids`).
+#[cfg(feature = "shared-key-ids")]
+fn interest_on_link<'f>(
+    session: &TokioSession,
+    keyexpr: &str,
+    form: &'f InterestForm,
+) -> std::borrow::Cow<'f, InterestForm> {
+    match wz_capi_port::interest_on_link(session.actions().key_wire_on_link(keyexpr), keyexpr, form)
+    {
+        Some(linked) => std::borrow::Cow::Owned(linked),
+        None => std::borrow::Cow::Borrowed(form),
+    }
+}
+
+/// A build without the shared key ids names the key of every Interest as the ABI made it.
+#[cfg(not(feature = "shared-key-ids"))]
+#[inline(always)]
+fn interest_on_link<'f>(
+    _session: &TokioSession,
+    _keyexpr: &str,
+    form: &'f InterestForm,
+) -> std::borrow::Cow<'f, InterestForm> {
+    std::borrow::Cow::Borrowed(form)
 }
 
 /// A C-declared write filter — the SSOT replayed onto every face that comes up,
@@ -1000,7 +1027,8 @@ fn declare_token_on(
     }
 }
 
-/// Declare a liveliness subscriber on one face in `wire`'s form.
+/// Declare a liveliness subscriber on one face in `wire`'s form: its Interest names the key as
+/// the face's key-wire form says, as a token's declaration does.
 fn declare_liveliness_subscriber_on(
     session: &TokioSession,
     keyexpr: &str,
@@ -1008,6 +1036,7 @@ fn declare_liveliness_subscriber_on(
     options: LivelinessSubscriberOptions,
     sink: impl for<'a> FnMut(LivelinessSample<'a>) + Send + 'static,
 ) -> Option<LivelinessSubscriber<TokioRuntime>> {
+    let wire: &WireKey = &on_link(session, keyexpr, wire);
     if wire.is_literal() {
         session
             .declare_liveliness_subscriber(keyexpr.to_string(), options, sink)

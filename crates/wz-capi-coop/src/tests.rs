@@ -148,6 +148,15 @@ struct Seen {
     /// (`true` is the sender's space).
     #[cfg(all(feature = "queryable", feature = "shared-key-ids"))]
     reply_keys: Vec<(wz_session_core::wire_id::ExprId, Option<String>, bool)>,
+    /// How each Interest that names a key named it on the wire: its id and the rest after it, in
+    /// the order the Interests arrived (the key tests' module reads it).
+    #[cfg(all(
+        feature = "shared-key-ids",
+        feature = "listen",
+        feature = "query",
+        feature = "queryable"
+    ))]
+    interest_keys: Vec<(wz_session_core::wire_id::ExprId, Option<String>)>,
     /// The queries the session asked.
     #[cfg(feature = "query")]
     queries: usize,
@@ -367,7 +376,24 @@ fn run_router(
                 for m in messages {
                     match m {
                         NetworkMessage::Declare(_) => seen.declares += 1,
-                        NetworkMessage::Interest(_) => seen.interests += 1,
+                        NetworkMessage::Interest(_interest) => {
+                            seen.interests += 1;
+                            #[cfg(all(
+                                feature = "shared-key-ids",
+                                feature = "listen",
+                                feature = "query",
+                                feature = "queryable"
+                            ))]
+                            if let Some(keyexpr) = wz_session_core::interest_build::interest_body(
+                                &_interest.header_c_or_f,
+                            )
+                            .and_then(|body| body.keyexpr.as_ref())
+                            {
+                                let (id, rest) =
+                                    wz_session_core::wireexpr_resolve::id_and_suffix(&keyexpr.body);
+                                seen.interest_keys.push((id, rest.map(str::to_owned)));
+                            }
+                        }
                         NetworkMessage::Push(_) => seen.pushes += 1,
                         #[cfg(feature = "queryable")]
                         NetworkMessage::Response(_response) => {

@@ -447,6 +447,105 @@ pub fn wire_on_link(link: wz_session_core::shared_key_ids::KeyWire<'_>) -> Optio
     }
 }
 
+/// `form`, an Interest that asks about `keyexpr`, as one link names that key, by what the link's
+/// key-wire form answered for it ([`wire_on_link`]): `None` for the declared form, which keeps
+/// `form` as the ABI made it; the whole key under id 0 for the literal; an id of the dictionary
+/// every node of the deployment shares, with the rest of the key, otherwise. What the Interest
+/// asks (`aggregate`) is the ABI's either way.
+///
+/// An Interest names its key as a put, a query and a declaration on the same link do, so a peer
+/// that reads keys only whole or by the dictionary reads the Interest too: a declaration of this
+/// session's own, which such a peer never resolves, is not named under any form but `declared`.
+#[cfg(feature = "shared-key-ids")]
+pub fn interest_on_link(
+    link: wz_session_core::shared_key_ids::KeyWire<'_>,
+    keyexpr: &str,
+    form: &wz_session_core::declare_form::InterestForm,
+) -> Option<wz_session_core::declare_form::InterestForm> {
+    wire_on_link(link).map(|wire| wz_session_core::declare_form::InterestForm {
+        suffix: if wire.is_literal() {
+            Some(String::from(keyexpr))
+        } else {
+            wire.suffix
+        },
+        mapping_id: wire.mapping_id,
+        aggregate: form.aggregate,
+    })
+}
+
+/// How an Interest names its key on a link of each key-wire form (`shared-key-ids`).
+#[cfg(all(test, feature = "shared-key-ids"))]
+mod link_form_tests {
+    use super::*;
+    use wz_session_core::declare_form::InterestForm;
+    use wz_session_core::shared_key_ids::KeyWire;
+
+    const KEY: &str = "lab/rig/alpha";
+
+    /// How the ABI asks: by the session's own declaration 7 and the rest after it, aggregated.
+    fn by_declaration() -> InterestForm {
+        InterestForm {
+            mapping_id: 7,
+            suffix: Some(String::from("/alpha")),
+            aggregate: true,
+        }
+    }
+
+    #[test]
+    fn an_interest_on_a_literal_link_names_its_key_whole() {
+        assert_eq!(
+            interest_on_link(KeyWire::Literal, KEY, &by_declaration()),
+            Some(InterestForm {
+                mapping_id: 0,
+                suffix: Some(String::from(KEY)),
+                aggregate: true,
+            })
+        );
+    }
+
+    #[test]
+    fn an_interest_on_a_shared_link_names_the_dictionary_id_and_the_rest() {
+        assert_eq!(
+            interest_on_link(
+                KeyWire::Shared {
+                    id: 40,
+                    suffix: Some("/alpha"),
+                },
+                KEY,
+                &by_declaration(),
+            ),
+            Some(InterestForm {
+                mapping_id: 40,
+                suffix: Some(String::from("/alpha")),
+                aggregate: true,
+            })
+        );
+        assert_eq!(
+            interest_on_link(
+                KeyWire::Shared {
+                    id: 41,
+                    suffix: None,
+                },
+                KEY,
+                &by_declaration(),
+            ),
+            Some(InterestForm {
+                mapping_id: 41,
+                suffix: None,
+                aggregate: true,
+            })
+        );
+    }
+
+    #[test]
+    fn an_interest_on_a_declared_link_is_left_as_the_abi_made_it() {
+        assert_eq!(
+            interest_on_link(KeyWire::Declared, KEY, &by_declaration()),
+            None
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

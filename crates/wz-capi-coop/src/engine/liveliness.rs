@@ -85,17 +85,18 @@ pub(super) struct LiveSubEntry {
 
 impl LiveSubEntry {
     /// Send this subscriber's Interest over `actions`: the tokens to come, and with `history` the
-    /// ones alive now: whether the link took it.
+    /// ones alive now, its key named as the link's key-wire form says: whether the link took it.
     pub(super) fn ask<C: ClockSource + 'static>(&self, actions: &McuActions<C>) -> bool {
         let id = u64::from(self.id);
-        if self.wire.is_literal() {
+        let wire = super::on_link(actions, &self.keyexpr, &self.wire);
+        if wire.is_literal() {
             actions.send_interest_liveliness_subscriber(id, self.history, 0, Some(&self.keyexpr))
         } else {
             actions.send_interest_liveliness_subscriber(
                 id,
                 self.history,
-                self.wire.mapping_id,
-                self.wire.suffix.as_deref(),
+                wire.mapping_id,
+                wire.suffix.as_deref(),
             )
         }
         .is_ok()

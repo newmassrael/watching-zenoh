@@ -20,6 +20,27 @@
 //!
 //! A payload that is not a piece of the profile, or whose CRC is wrong, or that cannot be placed,
 //! joins nothing and is counted ([`PieceJoiner::unjoined`]).
+//!
+//! # How a responder numbers its answers is its own
+//!
+//! A responder may number the transfers of every answer from the same first number, or go on from
+//! where its previous answer stopped, as wz's own replay cache does. The joining reads neither,
+//! and accepts both alike, by these rules:
+//!
+//! * the replies to each query are a stream of their own, under the number the caller gives the
+//!   query, never under the transfer numbers: a number one answer used, completed or still open,
+//!   never meets the same number in another answer;
+//! * within one answer a piece whose number differs from the transfer being joined starts the next
+//!   transfer, whatever the number is: one more, a jump, a step back or a wrap of the field alike.
+//!   No first number is expected, and none is refused;
+//! * a frame that two answers both carry is one frame, under whatever number each gave it: the
+//!   receiving judge tells it by its counter ([`crate::replay_admission`]) and drops it as a
+//!   duplicate or as stale, so it is never judged twice, and never dropped for its number.
+//!
+//! What the stream of one query cannot tell apart is two responders answering it with pieces whose
+//! `stream` fields agree (a get asked of every publisher at once): their transfers then share one
+//! stream, and the numbering decides only how they spoil each other. A segment profile keeps
+//! responders apart by a `stream` field each sender draws for itself.
 
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -127,6 +148,10 @@ mod tests {
     use alloc::vec::Vec;
 
     use super::*;
+    use crate::e2e_frame::{build, Values};
+    use crate::e2e_profile::Profile;
+    use crate::e2e_receiver::{Keying, Receiver};
+    use crate::replay_admission::{admit, Admission};
     use crate::segment_sender::{Rollover, SegmentSender};
 
     /// A one-byte mark, a stream field and a two-byte number, total and place: synthetic.
@@ -251,5 +276,115 @@ mod tests {
         assert_eq!(j.reply(1, &[]), Joined::Unjoined);
         assert_eq!(j.unjoined(), 2);
         assert!(PieceJoiner::new("{}", KEY).is_err());
+    }
+
+    /// The pieces of `frames` as one answer sends them, cut at five bytes, its transfers numbered
+    /// from `first`, in the order they go out.
+    fn answer(frames: &[&Vec<u8>], first: u64) -> Vec<Vec<u8>> {
+        pieces(frames, first, 5).into_iter().flatten().collect()
+    }
+
+    #[test]
+    fn within_one_answer_any_new_number_starts_the_next_transfer() {
+        let (a, b, c) = (frame(12, 9), frame(11, 10), frame(9, 11));
+        // A jump, a step back and zero: each number new to the stream, so each a frame.
+        let mut sent = Vec::new();
+        for (whole, number) in [(&a, 40), (&b, 3), (&c, 0)] {
+            sent.extend(answer(&[whole], number));
+        }
+        let mut j = joiner();
+        let mut got = Vec::new();
+        for piece in &sent {
+            if let Joined::Frame(f) = j.reply(5, piece) {
+                got.push(f.to_vec());
+            }
+        }
+        assert_eq!(got, [a, b, c]);
+        assert_eq!((j.abandoned(), j.unjoined()), (0, 0));
+    }
+
+    /// A protected frame's profile: a 32-bit CRC, a two-byte counter and a length; synthetic.
+    const PROTECTION: &str = r#"{
+      "name": "replay-pieces-e2e",
+      "fields": [{"name": "crc", "bytes": 4}, {"name": "counter", "bytes": 2},
+                 {"name": "length", "bytes": 2}],
+      "crc": {"field": "crc", "width": 32, "poly": "0x1EDC6F41", "init": "0xFFFFFFFF",
+              "refin": true, "refout": true, "xorout": "0xFFFFFFFF",
+              "cover": ["counter", "length", "@payload"]},
+      "length": {"field": "length", "counts": "frame"},
+      "counter": {"field": "counter", "max_gap": 3, "timeout_ms": 1000}
+    }"#;
+
+    /// The depth of the ring the answers are read from.
+    const DEPTH: usize = 4;
+
+    /// The counters the receiving judge is handed when two answers of one publisher are joined
+    /// and admitted as the replay subscriber joins and admits them: the first answer carries the
+    /// frames of counters 1 and 2, its transfers numbered from 1; the second, to a later query,
+    /// carries 1, 2 and 3, numbered from `second_from`. The joiner is handed back for its counts.
+    fn judged_over_two_answers(second_from: u64) -> (Vec<u64>, PieceJoiner) {
+        let profile = Profile::parse(PROTECTION).expect("valid");
+        let protected = |counter: u64| {
+            build(
+                &profile,
+                &Values::new().whole("counter", counter),
+                &[counter as u8; 6],
+            )
+            .expect("builds")
+            .bytes
+        };
+        let mut receiver = Receiver::new(
+            profile.clone(),
+            &Values::new(),
+            Keying::Indexed { streams: 1 },
+            None,
+            0,
+        )
+        .expect("made");
+        let (one, two, three) = (protected(1), protected(2), protected(3));
+        let answers = [
+            (1, answer(&[&one, &two], 1)),
+            (2, answer(&[&one, &two, &three], second_from)),
+        ];
+        let mut j = joiner();
+        let mut judged = Vec::new();
+        for (request, sent) in &answers {
+            for piece in sent {
+                let Joined::Frame(joined) = j.reply(*request, piece) else {
+                    continue;
+                };
+                if admit(&receiver, 0, &joined, DEPTH) == Admission::Judge {
+                    let verdict = receiver.receive(0, &joined, 0).expect("judged");
+                    judged.push(verdict.counter.expect("a frame with a header"));
+                }
+            }
+            j.close(*request);
+        }
+        (judged, j)
+    }
+
+    /// A responder that numbers every answer from the same first number: the second answer's
+    /// numbers are the first's again, on a stream of their own.
+    #[test]
+    fn answers_numbered_from_one_first_number_judge_each_frame_once() {
+        let (judged, j) = judged_over_two_answers(1);
+        assert_eq!(
+            judged,
+            [1, 2, 3],
+            "the frames answered twice are judged once"
+        );
+        assert_eq!((j.abandoned(), j.unjoined()), (0, 0));
+    }
+
+    /// A responder that goes on from where its previous answer stopped.
+    #[test]
+    fn answers_numbered_on_from_the_last_judge_each_frame_once() {
+        let (judged, j) = judged_over_two_answers(3);
+        assert_eq!(
+            judged,
+            [1, 2, 3],
+            "the frames answered twice are judged once"
+        );
+        assert_eq!((j.abandoned(), j.unjoined()), (0, 0));
     }
 }

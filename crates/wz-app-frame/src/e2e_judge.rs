@@ -43,8 +43,9 @@
 //!    `e2e_counter_verdict.scxml`), generated into `out/wz-app-frame/` and
 //!    included here, so the wrapping subtraction is the generator's.
 //! 3. **Timeout**, judged LAST, against the last-valid instant as it stands
-//!    after step 2: an error when that instant exists and
-//!    `now - instant > timeout_ms`. Two things follow, and both are contract:
+//!    after step 2: an error when that instant exists, the stream has a limit
+//!    (see below) and `now - instant > timeout_ms`. Two things follow, and
+//!    both are contract:
 //!    * **A valid reception clears its own timeout.** A valid frame, fine or
 //!      out of range, has just moved the instant to now, so its timeout is
 //!      false however long the silence before it was. That silence was a
@@ -56,6 +57,19 @@
 //!
 //! [`Judge::poll`] judges step 3 alone, at an instant when nothing was
 //! received, and changes no state.
+//!
+//! # A stream with no timeout
+//!
+//! A `timeout_ms` of [`JudgeConfig::NO_TIMEOUT`] (0) states that the stream has
+//! no limit on its silence: a message sent on an event, with no period, can be
+//! silent for as long as nothing happens, so no silence of it is an error. Such
+//! a judge never reports a timeout, on a reception, on a poll or after
+//! [`Judge::arm`]; it still measures [`Judgment::silence_ms`], which is
+//! information and judges nothing. Zero is free to mean this because a limit of
+//! zero milliseconds would time out every gap, which no stream means, and it is
+//! how every other limit of the workspace says "no bound"
+//! (`wz_session_core::quota`). A stream with a limit (a periodic message) is
+//! judged against it exactly as above.
 //!
 //! # Output
 //!
@@ -179,8 +193,25 @@ pub struct JudgeConfig {
     pub counter_bytes: usize,
     /// The largest step that is not an error.
     pub max_gap: u64,
-    /// The longest silence that is not an error.
+    /// The longest silence that is not an error; [`JudgeConfig::NO_TIMEOUT`]
+    /// for a stream whose silence is never an error.
     pub timeout_ms: u64,
+}
+
+impl JudgeConfig {
+    /// The `timeout_ms` of a stream with no limit on its silence (see the
+    /// module doc).
+    pub const NO_TIMEOUT: u64 = 0;
+
+    /// The longest silence that is not an error; `None` when the stream has no
+    /// limit.
+    pub const fn timeout_limit(&self) -> Option<u64> {
+        if self.timeout_ms == Self::NO_TIMEOUT {
+            None
+        } else {
+            Some(self.timeout_ms)
+        }
+    }
 }
 
 /// What a judge's counter verdicts do to its state, as a profile states it.
@@ -311,10 +342,12 @@ impl Judge {
             .map(|from| now_ms.saturating_sub(from))
     }
 
-    /// Whether the silence at `now_ms` exceeds the limit.
+    /// Whether the silence at `now_ms` exceeds the limit; never for a stream
+    /// that has none.
     fn timed_out(&self, now_ms: u64) -> bool {
-        self.silence(now_ms)
-            .is_some_and(|silence| silence > self.config.timeout_ms)
+        self.config
+            .timeout_limit()
+            .is_some_and(|limit| self.silence(now_ms).is_some_and(|silence| silence > limit))
     }
 
     /// Judge one received frame: whether its CRC matched, the counter it
@@ -690,6 +723,51 @@ mod tests {
             "equal to the limit is not over it"
         );
         assert!(j.poll(5000 + LIMIT + 1).timeout_error);
+    }
+
+    /// A stream of `counter_bytes` whose silence has no limit: an event stream.
+    fn untimed(counter_bytes: usize) -> Judge {
+        Judge::new(JudgeConfig {
+            counter_bytes,
+            max_gap: GAP,
+            timeout_ms: JudgeConfig::NO_TIMEOUT,
+        })
+    }
+
+    #[test]
+    fn a_stream_with_no_timeout_never_reports_one() {
+        let mut j = untimed(2);
+        assert_eq!(j.config().timeout_limit(), None);
+        rx(&mut j, true, 1, 0);
+        assert!(!j.poll(LIMIT + 1).timeout_error);
+        assert!(!j.poll(u64::MAX).timeout_error);
+        // A CRC error and a repetition after any silence are judged as
+        // themselves, and neither is a timeout.
+        let crc = rx_full(&mut j, false, 2, u64::MAX / 2);
+        assert!(crc.crc_error && !crc.timeout_error);
+        assert_eq!(crc.silence_ms, Some(u64::MAX / 2), "still measured");
+        let again = rx(&mut j, true, 1, u64::MAX / 2);
+        assert!(again.counter_error && !again.timeout_error);
+        // A stream armed and never received is never silent too long either.
+        let mut armed = untimed(2);
+        armed.arm(0);
+        assert!(!armed.poll(u64::MAX).timeout_error);
+    }
+
+    /// The same receptions, judged by a periodic stream's judge and by an event
+    /// stream's: only the one with a limit reports the silence.
+    #[test]
+    fn a_periodic_stream_keeps_its_timeout_beside_an_event_stream() {
+        let (mut periodic, mut event) = (judge(2), untimed(2));
+        assert_eq!(periodic.config().timeout_limit(), Some(LIMIT));
+        for j in [&mut periodic, &mut event] {
+            rx(j, true, 1, 0);
+        }
+        assert!(periodic.poll(LIMIT + 1).timeout_error);
+        assert!(!event.poll(LIMIT + 1).timeout_error);
+        let late = |j: &mut Judge| rx(j, false, 2, 3 * LIMIT).timeout_error;
+        assert!(late(&mut periodic), "a CRC error after the limit");
+        assert!(!late(&mut event));
     }
 
     #[test]
