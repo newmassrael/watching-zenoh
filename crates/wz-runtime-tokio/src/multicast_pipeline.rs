@@ -456,7 +456,6 @@ impl Link {
             multicast_tx_conduit, multicast_tx_droppable, multicast_tx_push,
             multicast_tx_push_batched, MulticastTxConduit, MulticastTxTally,
         };
-        use wz_session_core::tx_deadline::PushOutcome;
         #[cfg_attr(not(feature = "routing-namespace"), allow(unused_mut))]
         let mut item = item;
         // §5.21 routing-namespace — the one egress chokepoint every producer's
@@ -483,17 +482,18 @@ impl Link {
                 self.lanes.link_room(band, wait)
             })
         } else {
-            Some(
-                self.stages[band as usize]
-                    .lock()
-                    .expect("multicast stage poisoned"),
-            )
+            Ok(self.stages[band as usize]
+                .lock()
+                .expect("multicast stage poisoned"))
         };
-        let Some(mut stage) = stage else {
-            if let Some(pushed) = self.pushed.as_ref() {
-                let _ = pushed.send((tally, PushOutcome::Congested));
+        let mut stage = match stage {
+            Ok(stage) => stage,
+            Err(dropped) => {
+                if let Some(pushed) = self.pushed.as_ref() {
+                    let _ = pushed.send((tally, dropped));
+                }
+                return Ok(dropped);
             }
-            return Ok(PushOutcome::Congested);
         };
         let inside = SenderInside::mark(sender);
         let Stage { sn, window, queued } = &mut *stage;
@@ -587,11 +587,12 @@ impl Drop for SenderInside<'_> {
 /// The stage of a droppable push: taken when it is free. While another holds it, what the push
 /// does is the queue profile's (`TxQueueConf::held_drop`): zenoh's asks the lane for room itself
 /// with `ask`, without the stage and out of its `wait_before_drop`, and is a congestion drop
-/// (`None`) when there is none within it, while room means the holder is about to let go and the
-/// stage is tried again; pico's is dropped at once, asking nothing, when the holder is another
-/// push (`sender`), as pico's try-lock fails only on a lock another send holds, and waits for a
-/// holder that is not one. What the waits spent comes off `conf`'s `wait_before_drop_us`, so the
-/// push spends one deadline in all.
+/// (`PushOutcome::Congested`) when there is none within it, while room means the holder is about
+/// to let go and the stage is tried again; pico's is dropped at once, asking nothing, when the
+/// holder is another push (`sender`), as pico's try-lock fails only on a lock another send holds
+/// (`PushOutcome::Held`, which its sender is told of), and waits for a holder that is not one.
+/// What the waits spent comes off `conf`'s `wait_before_drop_us`, so the push spends one deadline
+/// in all.
 #[cfg(any(
     feature = "codec-push",
     feature = "codec-response",
@@ -603,19 +604,20 @@ fn droppable_stage<'a>(
     sender: &std::sync::atomic::AtomicBool,
     conf: &mut wz_session_core::session_init_params::TxQueueConf,
     mut ask: impl FnMut(wz_session_core::link::RoomWait) -> wz_session_core::link::RoomAnswer,
-) -> Option<std::sync::MutexGuard<'a, Stage>> {
+) -> Result<std::sync::MutexGuard<'a, Stage>, wz_session_core::tx_deadline::PushOutcome> {
     use wz_session_core::link::{LinkRoom, RoomWait};
     use wz_session_core::session_init_params::HeldDrop;
+    use wz_session_core::tx_deadline::PushOutcome;
     loop {
         match stage.try_lock() {
-            Ok(stage) => return Some(stage),
+            Ok(stage) => return Ok(stage),
             Err(std::sync::TryLockError::Poisoned(_)) => panic!("multicast stage poisoned"),
             Err(std::sync::TryLockError::WouldBlock) => {}
         }
         if conf.held_drop == HeldDrop::DropAtOnce {
             // Only behind another push (`sender`); a holder that is not one lets go once done.
             if sender.load(std::sync::atomic::Ordering::SeqCst) {
-                return None;
+                return Err(PushOutcome::Held);
             }
             std::hint::spin_loop();
             continue;
@@ -625,7 +627,7 @@ fn droppable_stage<'a>(
         });
         conf.wait_before_drop_us = conf.wait_before_drop_us.saturating_sub(answer.waited_us);
         if answer.room == LinkRoom::Congested {
-            return None;
+            return Err(PushOutcome::Congested);
         }
         std::hint::spin_loop();
     }
@@ -1035,7 +1037,10 @@ impl MulticastTxPlane {
                 wz_session_core::tx_deadline::PushOutcome::Pushed => {
                     stats.network_message_sent(&tally)
                 }
-                wz_session_core::tx_deadline::PushOutcome::Congested => {
+                // A push dropped behind a held stage is a congestion drop as well, which the
+                // pico profile tells its sender of.
+                wz_session_core::tx_deadline::PushOutcome::Congested
+                | wz_session_core::tx_deadline::PushOutcome::Held => {
                     stats.network_message_dropped(&tally)
                 }
             }
@@ -1550,8 +1555,8 @@ mod tests {
             RoomAnswer::at_once(LinkRoom::Congested)
         });
         assert!(
-            taken.is_none(),
-            "a stage another push holds drops the push at once"
+            matches!(taken, Err(PushOutcome::Held)),
+            "a stage another push holds drops the push at once, and its sender is told"
         );
         assert!(asked.is_empty(), "the lane was asked {asked:?}");
 
@@ -1566,7 +1571,10 @@ mod tests {
                 waited_us: 1_000,
             }
         });
-        assert!(taken.is_none(), "no room within the wait");
+        assert!(
+            matches!(taken, Err(PushOutcome::Congested)),
+            "no room within the wait is a congestion drop, answered as sent"
+        );
         assert_eq!(
             asked,
             [RoomWait::Drop { wait_us: 1_000 }],
@@ -1607,7 +1615,7 @@ mod tests {
             RoomAnswer::at_once(LinkRoom::Congested)
         });
         assert!(
-            taken.is_some(),
+            taken.is_ok(),
             "the push waited for the holder and took the stage"
         );
         assert!(
@@ -1618,6 +1626,47 @@ mod tests {
         assert_eq!(asked, 0, "the lane was asked for room");
         releaser.join().expect("the releaser");
         holder.join().expect("the holder");
+    }
+
+    /// Under the pico profile a droppable push whose stage a blocking push holds, waiting for room
+    /// on the full lane, is answered `Held`, which its sender is told of, where a congestion drop
+    /// is answered `Congested`, which a multicast put answers as sent; the blocking push still
+    /// waits out its own deadline.
+    #[test]
+    fn under_the_pico_profile_a_push_behind_another_push_is_answered_held() {
+        use wz_session_core::policy::SessionPolicy;
+        let mut pico = params(false);
+        pico.tx_queue = TxQueueConf {
+            sizes: [1; Priority::NUM],
+            // `fill` pushes droppable messages until one finds no room, each within this wait.
+            wait_before_drop_us: 1_000,
+            wait_before_close_us: CLOSE_WAIT.as_micros() as u64,
+            ..TxQueueConf::pico_of_policy(&SessionPolicy::defaults())
+        };
+        let (producer, tap) = MulticastTxTap::attach(&pico);
+        fill(&producer, Priority::DEFAULT);
+        let waiting = producer.clone();
+        let blocked = std::thread::spawn(move || {
+            waiting.push(terminal(Priority::DEFAULT, CongestionControl::Block))
+        });
+        until_held(&tap, Priority::DEFAULT);
+
+        let started = Instant::now();
+        let outcome = producer.push(terminal(Priority::DEFAULT, CongestionControl::Drop));
+        let took = started.elapsed();
+        assert_eq!(outcome, Ok(PushOutcome::Held));
+        assert!(
+            took < CLOSE_WAIT / 3,
+            "a push behind another push waited {took:?}"
+        );
+        assert!(
+            !blocked.is_finished(),
+            "CONTROL: the blocking push still held the stage"
+        );
+        assert_eq!(
+            blocked.join().expect("blocked pusher"),
+            Ok(PushOutcome::Congested)
+        );
     }
 
     /// A held stage alone is not congestion: while its lane has room, a droppable push waits for

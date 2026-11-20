@@ -14,13 +14,20 @@ use crate::link::RoomWait;
 use crate::session_init_params::TxQueueConf;
 
 /// R2923 / R2926 — whether a message was pushed onto its conduit's link, or
-/// found no room within its deadline (a congestion drop).
+/// found no room within its deadline (a congestion drop), or was dropped behind
+/// a conduit another sender held.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PushOutcome {
     /// The message is on the link's queue.
     Pushed,
     /// No room was found within the message's deadline.
     Congested,
+    /// The message may be dropped and another sender held its conduit, so the queue profile
+    /// dropped it at once with nothing asked of the link
+    /// ([`HeldDrop::DropAtOnce`](crate::session_init_params::HeldDrop::DropAtOnce)): a
+    /// congestion drop the sender is told of, as pico's put fails when its held transmit lock
+    /// drops the message, where a [`Self::Congested`] one is answered as sent.
+    Held,
 }
 
 /// What a BLOCKING message that found no room in its deadline costs: the one decision the
