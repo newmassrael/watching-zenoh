@@ -157,6 +157,39 @@ const PICO_ACCEPT: wz_capi_core::runtime::accept_bounds::AcceptBounds =
         pending: wz_capi_core::runtime::config::ACCEPT_PENDING,
     };
 
+/// How the tokio engine's open of this ABI dials. One attempt, as pico's `z_open` makes; a lost
+/// client session is opened again every 1000 ms, as pico re-opens it by default
+/// (`Z_FEATURE_AUTO_RECONNECT`, `vendor/zenoh-pico/src/net/session.c` @
+/// `return _z_fut_fn_result_wake_up_after(1000);`).
+///
+/// Each open of an endpoint, its dial and its handshake, is held to pico's
+/// `Z_TRANSPORT_CONNECT_TIMEOUT` as the build states it
+/// ([`wz_session_core::caps::PICO_CONNECT_TIMEOUT_MS`]), and the session machine holds the
+/// handshake to the same bound, as the cooperative engine's open does: pico gives both receives of
+/// its handshake one deadline that long (`vendor/zenoh-pico/src/transport/unicast/transport.c` @
+/// `z_clock_advance_ms(&recv_deadline, Z_TRANSPORT_CONNECT_TIMEOUT);`), where zenoh's
+/// `transport/unicast/open_timeout` would hold it to zenoh's ten seconds whatever the build
+/// states.
+///
+/// pico's `Z_CONFIG_SOCKET_TIMEOUT` has nothing to bound on this engine, so it is not read here.
+/// Upstream it is how long a blocking receive, and the read task's wait on its sockets, lasts
+/// before the task looks again (`vendor/zenoh-pico/src/transport/unicast/read.c` @
+/// `return _z_socket_wait_readable(&iter, Z_CONFIG_SOCKET_TIMEOUT);`): a polling period, not a
+/// deadline. This engine's read task is woken by its link's input and never polls, and its
+/// `zp_read` processes nothing, so no wait of it corresponds.
+#[cfg(feature = "engine-tokio")]
+fn pico_dial_phase() -> DialPhase {
+    DialPhase {
+        redial: Some(wz_capi_core::runtime::retry_period::RetryPolicy::constant(
+            1000,
+        )),
+        open_timeout: core::time::Duration::from_millis(
+            wz_session_core::caps::PICO_CONNECT_TIMEOUT_MS as u64,
+        ),
+        ..DialPhase::ONCE
+    }
+}
+
 /// How often a session of this ABI sends a keepalive on an idle link, on either engine: pico's
 /// `Z_TRANSPORT_LEASE_EXPIRE_FACTOR` as the build states it, dividing the adopted lease. Refused
 /// when the build is made if the build states none (a division by zero in pico's own task).
@@ -1030,16 +1063,9 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
         listen.into_iter().collect(),
         tls,
         dial_whatami,
-        // R2948 — pico re-opens a lost client session by default
-        // (`Z_FEATURE_AUTO_RECONNECT`), every 1000 ms
-        // (`vendor/zenoh-pico/src/net/session.c` @
-        // `return _z_fut_fn_result_wake_up_after(1000);`).
-        DialPhase {
-            redial: Some(wz_capi_core::runtime::retry_period::RetryPolicy::constant(
-                1000,
-            )),
-            ..DialPhase::ONCE
-        },
+        // R2948 — pico re-opens a lost client session by default; its handshake bound is
+        // pico's (`pico_dial_phase`).
+        pico_dial_phase(),
         OpenStance {
             tx_queue,
             // pico's batch size and lease are build switches of its, not config keys
@@ -2315,6 +2341,36 @@ mod build_numbers {
             const WAIT: u32 = PICO_SOCKET_TIMEOUT;
             assert_eq!(WAIT as usize, wz_session_core::caps::PICO_SOCKET_TIMEOUT_MS);
         }
+    }
+
+    /// The tokio engine's open holds each open of an endpoint, and its handshake, to the bound the
+    /// build states for pico's `Z_TRANSPORT_CONNECT_TIMEOUT`, as the cooperative engine's open
+    /// does, and not to zenoh's `transport/unicast/open_timeout`; it re-opens a lost session every
+    /// second, and is otherwise the one attempt every open here makes.
+    #[cfg(feature = "engine-tokio")]
+    #[test]
+    fn the_tokio_open_is_held_to_the_connect_timeout_the_build_states() {
+        let phase = pico_dial_phase();
+        assert_eq!(
+            phase.open_timeout,
+            core::time::Duration::from_millis(
+                wz_session_core::caps::PICO_CONNECT_TIMEOUT_MS as u64
+            )
+        );
+        assert_eq!(
+            phase.redial,
+            Some(wz_capi_core::runtime::retry_period::RetryPolicy::constant(
+                1000
+            ))
+        );
+        assert_eq!(
+            DialPhase {
+                redial: DialPhase::ONCE.redial,
+                open_timeout: DialPhase::ONCE.open_timeout,
+                ..phase
+            },
+            DialPhase::ONCE
+        );
     }
 
     /// The keepalive of this ABI divides the ADOPTED lease by the factor the build states for
