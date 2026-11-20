@@ -6009,6 +6009,40 @@
         "The rule could be stated as a protocol fact of each ABI in `deploy/wz-config.toml` (pico `65535`, c the MSS rule), which moves the catalogue version; it is left until the conformance statement next moves.",
         "Layer M's group re-join flake (2 of 3 on pc2) remains: observe the Joins the subject turns away first."
       ]
+    },
+    "Round 4570": {
+      "decision_summary": "The fourth set of the PoC's generic, default-off work lands. The pico C ABI's cooperative engine joins multicast groups, on the host's own sockets or over a transport the program supplies, as faces of the session beside its links: JOIN and members, declarations announced and asked by filter, queries asked and answered, liveliness tokens, a member reported as a transport of its own, a group joined again after its link is lost, and a group queue bounded by its lanes with the most urgent written first. The QoS of the program's transport holds on both engines: a put that may be dropped is dropped at once only behind another sender's conduit, as zenoh-pico does, and its answer says so; a Block put waits for room. A session runs on a time base the program supplies (default off): every timer, lease, open, redial, scout and reply deadline reads it, on either engine. The pico library is held to 32-bit hosts (Linux i686 lane, Windows x86 package); the extension doors are reached only through the C ABI and a versioned interface; a catalog message's payload is set and read by field path from C; keyed, history and own-stack C examples run in the package test. The program clock's word that ends a cooperative read's wait is compiled only with `wz-capi-coop/time-base`, so a build without it carries none of it.",
+      "changes_bullets": [
+        "`wz-capi-coop`: multicast group faces (`group`, `group-host`), group queries, liveliness and connectivity, transport counters (`transport-stats`), the held-conduit drop rule, `time-base` for the program clock's word (`ClockMovesWord`).",
+        "`wz-session-mcu`: the group's queue bounded by its lanes, the most urgent lane written first, datagrams kept when the socket has no room.",
+        "`wz-session-core`: the group's keyexpr answers and announcement in one place (`GroupKeyexprAnswers`, `build_group_announcement`); the drop behind a held conduit (`sending` marked inside `stage_and_emit`) and the cost it states.",
+        "`wz-runtime-coop`: link and group room, try-locks, a second handle to a local task pool, datagram listens and groups over the program's transport, app-link opens on the session clock.",
+        "`wz-runtime-tokio`: connect, bind, open and redial on the session clock (`TokioTime`, `program-time`); the multicast push dropped at once only behind another push.",
+        "`wz-node-time`, `wz-capi-port`, `wz-capi-core`, `wz-capi-c`, `wz-capi-pico`: a time base the program supplies and its doors; group join types through the engine port.",
+        "`wz-capi-pico`: 32-bit hosts, the versioned extension interface, catalog payload doors, keyed / history / own-stack examples; `wz-app-frame`: fields set and read by path, an e2e profile with no timeout.",
+        "`scripts/`: JSON-pointer map into a message catalog, C1p32 lane, Windows x86 package, legs for the group pump, app links and group stats, `time-base` leg of `wz-capi-coop`.",
+        "Gates: 16 cost budgets moved by the measured growth; the accept lint reads an owner-stopped non-blocking accept loop; the feature census row of `wz-capi-coop` names `time-base`; logic-census rows and reason pins for the new files."
+      ],
+      "verification_bullets": [
+        "On the build hosts at the integration tip, each run read from its own log: crate tests of wz-session-core, -mcu, -lwip, wz-runtime-tokio (lib and it), -coop, -posix, wz-capi-core, -port, -coop (default, group, key-ids, time-base: clock_moves_tests 2 of 2), wz-capi-pico (lib and it, time-base, the coop build), wz-capi-c, wz-app-frame, wz-tls-mbedtls; clippy --all-targets -D warnings per crate and on the reduced and full coop feature sets; coop rustdoc with -D warnings.",
+        "After merging main at rounds 4567, 4568 and 4569: the touched crates' tests and clippy again, all passing; Layers C0d, G, C2m and C1p32 (32-bit compiler on the build host that has it); the non-default census; every round-fed gate of the pre-push hook and gate 2f run locally, each passing.",
+        "Layer S on one build host: three storms pass, and the sequential run under valgrind passes at 16 pairs (allocations flat at 156 from the seventh pair). With 6 pairs it failed the same way on main, inside the warm-up.",
+        "The size lane measured for main 4df161c9e and for the tip on one machine, each tree alone in turn; the 16 budget moves are those deltas, attributed by symbol; capability_cost_gate --selftest 25 of 25; --check passes after the 4569 merge.",
+        "The kit images built for main and the tip on one host: the fourth landing adds 72 bytes of text to the fixed client and 80 to the heap client; the lane's red on both trees is the waker pin (8 against 7), owned elsewhere."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-18-time",
+        "wire-spec-subset--watching-zenoh-mvp/4-transport-session-layer",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The no_std kit images no longer beat zenoh-pico on text: the fixed client grew from 142,528 (2026-10-31) to over 155,000 through rounds that moved only their own budget; a gate against the reference built in the same run, and the bytes taken back, are their own rounds.",
+        "S9 (the group's sequence numbers numbered where its producers push) is verified on its own branch and lands after this.",
+        "The build image (scripts/image) and the path and time normalisation of measured builds wait for the fleet's pinned BuildKit builder, the GitHub OIDC push and the hosted copy.",
+        "Tokio's group publish answers Ok whatever its outcome; the coop session lock drops a droppable message on every face when one face is held; the coop group's reply-limit drops are not counted in n_dropped."
+      ]
     }
   },
   "inventory_entries": {
