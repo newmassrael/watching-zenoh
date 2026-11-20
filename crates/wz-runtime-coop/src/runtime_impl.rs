@@ -772,7 +772,9 @@ mod tests {
                 <R as Runtime>::with_mutex_mut(&*value, |held| {
                     *held += 1;
                     inside_tx.send(()).expect("the test is listening");
-                    release_rx.recv().expect("the test releases");
+                    // Bounded, so a try that waited for the holder (the trait's default) reads
+                    // as `Some` and not as a test that never ends.
+                    let _ = release_rx.recv_timeout(std::time::Duration::from_secs(3));
                 });
             })
         };
@@ -782,7 +784,7 @@ mod tests {
             None,
             "a value another thread holds is not waited for"
         );
-        release_tx.send(()).expect("the holder is waiting");
+        let _ = release_tx.send(());
         holder.join().expect("the holder ran");
         assert_eq!(
             <R as Runtime>::try_with_mutex_mut(&*value, |held| *held),

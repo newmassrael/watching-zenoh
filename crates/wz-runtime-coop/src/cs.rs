@@ -332,7 +332,9 @@ mod tests {
                 held.with(|value| {
                     *value += 1;
                     inside_tx.send(()).expect("the test is listening");
-                    release_rx.recv().expect("the test releases");
+                    // Bounded, so a try that waited for the holder reads as a wrong answer and
+                    // not as a test that never ends.
+                    let _ = release_rx.recv_timeout(std::time::Duration::from_secs(3));
                 });
             })
         };
@@ -346,7 +348,7 @@ mod tests {
             None
         );
         assert!(!ran, "nothing ran under a cell another thread holds");
-        release_tx.send(()).expect("the holder is waiting");
+        let _ = release_tx.send(());
         holder.join().expect("the holder ran");
         assert_eq!(held.try_with(|value| *value), Some(1));
         assert_eq!(
