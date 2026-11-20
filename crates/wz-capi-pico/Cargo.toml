@@ -148,11 +148,11 @@ multicast-transport = [
     "wz-capi-coop?/group-host",
 ]
 # Open-debt item 913 — pico's `Z_FEATURE_MULTICAST_DECLARATIONS` (vendor default 0), off here
-# as there.
+# as there. Both engines tell a group the session's keyexprs and ask it for its members' on it,
+# so it selects neither: the cooperative engine's group reads the declarations the open hands it.
 multicast-declarations = [
-    "engine-tokio",
     "multicast-transport",
-    "wz-capi-core/multicast-declarations",
+    "wz-capi-core?/multicast-declarations",
 ]
 # Open-debt item 911 — pico's `Z_FEATURE_RAWETH_TRANSPORT` (vendor default 0): `z_open` with a
 # `listen` endpoint `reth/<mac>#...` joins a group over raw Ethernet as the session's one

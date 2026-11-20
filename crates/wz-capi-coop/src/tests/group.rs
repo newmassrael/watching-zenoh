@@ -685,3 +685,100 @@ mod alive {
         SessionDrive::close(&*first);
     }
 }
+
+/// A group told the session's keyexprs and asked by its write filters
+/// (`GroupDeclarations::Mapped`, zenoh-pico's multicast declarations).
+mod mapped {
+    use std::sync::Arc;
+
+    use wz_capi_port::group::GroupDeclarations;
+    use wz_capi_port::{FilterPlane, SessionDrive, SessionEngine, WireKey};
+
+    use super::{
+        eventually, member_config, open_member, put, subscribe, until_members_know_each_other,
+        CoopConfig, Engine, Network, OpenError, GROUP,
+    };
+
+    /// A member of the group, told the session's keyexprs.
+    fn open_mapped(network: &Arc<Network>, member: u8) -> Result<Arc<Engine>, OpenError> {
+        let mut config: CoopConfig = member_config(member, GROUP);
+        config.groups[0].declarations = GroupDeclarations::Mapped;
+        open_member(network, member, config)
+    }
+
+    /// A write filter asks the group for its members' subscribers, and the answer of a member
+    /// whose subscriber was declared before this session joined, which it never heard announced,
+    /// opens the filter: it holds a put back until then, and not after.
+    #[test]
+    fn a_write_filter_asks_the_group_and_a_members_answer_opens_it() {
+        let network = Arc::new(Network::default());
+        let second = open_mapped(&network, 2).expect("the second joins");
+        SessionDrive::start_read_task(&*second).expect("the second's read task starts");
+        let _heard = subscribe(&second, "demo/mapped/**");
+        let first = open_mapped(&network, 1).expect("the first joins");
+        SessionDrive::start_read_task(&*first).expect("the first's read task starts");
+        until_members_know_each_other(&first, &second);
+
+        let filter = first
+            .declare_write_filter(
+                FilterPlane::Subscribers,
+                "demo/mapped/a".to_owned(),
+                &WireKey::literal(),
+                None,
+                false,
+            )
+            .expect("a session with ids left declares a filter");
+        eventually("the member's answer to open the filter", || {
+            !first.write_filter_holds_back(filter)
+        });
+        first.undeclare_write_filter(filter);
+        SessionDrive::close(&*first);
+        SessionDrive::close(&*second);
+    }
+
+    /// A put names its key by the keyexpr the session declared, which a member that joined after
+    /// the declaration learns by asking the group for its members' keyexprs as it comes up: the
+    /// put reaches its subscriber.
+    #[test]
+    fn a_put_by_a_declared_keyexpr_reaches_a_member_that_asked_for_it() {
+        let network = Arc::new(Network::default());
+        let first = open_mapped(&network, 1).expect("the first joins");
+        SessionDrive::start_read_task(&*first).expect("the first's read task starts");
+        let id = first
+            .acquire_keyexpr("demo/mapped/b".to_owned())
+            .expect("a session with ids left declares a keyexpr");
+        let second = open_mapped(&network, 2).expect("the second joins");
+        SessionDrive::start_read_task(&*second).expect("the second's read task starts");
+        until_members_know_each_other(&first, &second);
+        let heard = subscribe(&second, "demo/mapped/**");
+
+        eventually("a put by the declaration to reach the second", || {
+            first
+                .publish_on_wire_all(
+                    "demo/mapped/b",
+                    &WireKey::aliased(id, None),
+                    b"by-its-declaration",
+                    &wz_session_core::publish_options::PublishOptions::put()
+                        .with_locality(wz_session_core::locality::Locality::Remote),
+                )
+                .expect("a put the group carries");
+            heard
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|payload| payload == b"by-its-declaration")
+        });
+        // A literal put still reaches it, by the same group.
+        put(&first, "demo/mapped/c", b"by-its-literal");
+        eventually("a literal put to reach the second", || {
+            heard
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|payload| payload == b"by-its-literal")
+        });
+        first.release_keyexpr(id);
+        SessionDrive::close(&*second);
+        SessionDrive::close(&*first);
+    }
+}

@@ -23,20 +23,23 @@ use core::cell::{Cell, RefCell};
 use core::net::SocketAddr;
 
 use wz_capi_port::group::{GroupDeclarations, GroupJoin};
-use wz_capi_port::{FanoutError, WireKey};
+use wz_capi_port::{FanoutError, FilterId, FilterPlane, WireKey};
 use wz_runtime_coop::group_transport::GroupTransport;
 use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet};
-use wz_session_core::declare_build::{build_group_announcement, build_group_retraction};
+use wz_session_core::declare_build::{
+    build_declare_kexpr, build_group_announcement, build_group_retraction, build_undeclare_kexpr,
+};
 use wz_session_core::declare_form::{GroupDeclaration, GroupKey, RetractionKey};
 use wz_session_core::driver_loop::IterationEvent;
-#[cfg(feature = "liveliness")]
 use wz_session_core::interest_build::{build_interest_exact, build_interest_final, InterestKinds};
 use wz_session_core::locality::Locality;
 use wz_session_core::metadata::PushMetadata;
 use wz_session_core::multicast_dispatch::MulticastConfig;
 use wz_session_core::multicast_dispatch::MulticastMember;
 use wz_session_core::multicast_params::{MulticastOutcome, MulticastParams};
-use wz_session_core::multicast_reply_sink::{MulticastReplyEnqueue, MulticastReplySink};
+use wz_session_core::multicast_reply_sink::{
+    asks_for_declarations, GroupKeyexprAnswers, MulticastReplyEnqueue, MulticastReplySink,
+};
 use wz_session_core::multicast_tx::MulticastTxItem;
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::push_build;
@@ -203,6 +206,14 @@ pub(super) struct GroupFace {
     stop: Rc<Cell<bool>>,
     /// The JOIN the session asks of the group between two beacons ([`Self::ask_join`]).
     join_ask: JoinAsk,
+    /// The keyexprs this join of the group was told, and the members' asks for them the session
+    /// owes an answer ([`GroupKeyexprAnswers`]).
+    keyexprs: Rc<RefCell<GroupKeyexprAnswers>>,
+    /// Whether this join is still to ask the group for its members' keyexprs
+    /// ([`Self::owes_keyexpr_ask`]).
+    keyexpr_ask_owed: Cell<bool>,
+    /// The write filters that asked this join of the group, each by the interest id it asked by.
+    filters: RefCell<Vec<(FilterId, u64)>>,
     /// The entities this join of the group was told of, which their retractions are told by.
     announced: RefCell<Vec<Announced>>,
     /// What the session's watchers of its faces are told of the members (`connectivity`).
@@ -265,13 +276,20 @@ impl GroupFace {
             u64::from(GROUP_TICK_MS),
         )
         .with_join_ask(join_ask.clone());
-        let on_event = noting_members(
-            Rc::clone(&members),
-            MulticastReplySink::new(tx.clone()),
-            dispatch,
-            #[cfg(feature = "connectivity")]
-            Rc::clone(&events),
+        let keyexprs = Rc::new(RefCell::new(GroupKeyexprAnswers::default()));
+        let on_event = answering_asks(
+            noting_members(
+                Rc::clone(&members),
+                MulticastReplySink::new(tx.clone()),
+                dispatch,
+                #[cfg(feature = "connectivity")]
+                Rc::clone(&events),
+            ),
+            Rc::clone(&keyexprs),
+            join_ask.clone(),
+            tx.clone(),
         );
+        let keyexpr_ask_owed = Cell::new(join.declarations.declares_keyexprs());
         let next_tx = {
             let tx = tx.clone();
             move || tx.pop()
@@ -297,6 +315,9 @@ impl GroupFace {
             took,
             stop,
             join_ask,
+            keyexprs,
+            keyexpr_ask_owed,
+            filters: RefCell::new(Vec::new()),
             announced: RefCell::new(Vec::new()),
             #[cfg(feature = "connectivity")]
             events,
@@ -560,20 +581,136 @@ impl GroupFace {
         });
     }
 
-    /// Put a publication on the group, naming its key in full: the group is told no keyexpr the
-    /// session declares unless its declarations say so (`GroupDeclarations::declares_keyexprs`),
-    /// which a group whose session tells it its entities, or less, does not. Built by the session
+    /// Tell the group the keyexpr the session declared as `id`, when it is told the session's
+    /// keyexprs (`GroupDeclarations::declares_keyexprs`), as the tokio engine's group is told it,
+    /// and hold it for the members that ask for it.
+    pub(super) fn announce_keyexpr(&self, id: ExprId, keyexpr: &str) {
+        if id == 0 || self.has_ended() || !self.join.declarations.declares_keyexprs() {
+            return;
+        }
+        if let Ok(declare) = build_declare_kexpr(id, keyexpr) {
+            self.keyexprs.borrow_mut().declared(id, keyexpr);
+            self.tx.enqueue(MulticastTxItem::Declare {
+                declare: alloc::boxed::Box::new(declare),
+            });
+        }
+    }
+
+    /// Retract from the group the keyexpr [`Self::announce_keyexpr`] told it as `id`.
+    pub(super) fn retract_keyexpr(&self, id: ExprId) {
+        if self.has_ended() || !self.join.declarations.declares_keyexprs() {
+            return;
+        }
+        self.keyexprs.borrow_mut().retracted(id);
+        self.tx.enqueue(MulticastTxItem::Declare {
+            declare: alloc::boxed::Box::new(build_undeclare_kexpr(id)),
+        });
+    }
+
+    /// Whether this join is still to ask the group for its members' keyexprs, which it is once,
+    /// when it comes up, when the group is told the session's keyexprs; the look answers it.
+    pub(super) fn owes_keyexpr_ask(&self) -> bool {
+        self.keyexpr_ask_owed.replace(false) && !self.has_ended()
+    }
+
+    /// Ask the group for its members' keyexprs, the ones held now, by `interest_id`, as
+    /// zenoh-pico asks when it opens its multicast transport
+    /// (`vendor/zenoh-pico/src/session/interest.c` @
+    /// `z_result_t _z_interest_pull_resource_from_peers(_z_session_t *zn) {`).
+    pub(super) fn ask_keyexprs(&self, interest_id: u64) {
+        if let Ok(interest) = build_interest_exact(
+            interest_id,
+            InterestKinds::KEYEXPRS,
+            /*current=*/ true,
+            /*future=*/ false,
+            None,
+        ) {
+            self.tx.enqueue(MulticastTxItem::Interest {
+                interest: alloc::boxed::Box::new(interest),
+            });
+        }
+    }
+
+    /// Ask the group for its members' declarations on `plane` and `keyexpr` (named as the group
+    /// was told it, `wire`) for the write filter `filter`, by `interest_id`, when a write filter
+    /// asks it (`GroupDeclarations::asks_for_filters`): the current ones and the kind alone, as a
+    /// zenoh-pico peer puts its filter's Interest on its multicast transport
+    /// (`vendor/zenoh-pico/src/net/filtering.c` @
+    /// `uint8_t flags = interest_flag | _Z_INTEREST_FLAG_RESTRICTED | _Z_INTEREST_FLAG_CURRENT;`).
+    /// The group keeps the id for [`Self::end_filter`].
+    pub(super) fn ask_filter(
+        &self,
+        filter: FilterId,
+        interest_id: u64,
+        plane: FilterPlane,
+        keyexpr: &str,
+        wire: &WireKey,
+    ) {
+        let told = self.join.declarations;
+        if self.has_ended() || !told.asks_for_filters() {
+            return;
+        }
+        let kinds = match plane {
+            FilterPlane::Subscribers => InterestKinds::SUBSCRIBERS,
+            FilterPlane::Queryables { .. } => InterestKinds::QUERYABLES,
+        };
+        let key = told.key(keyexpr, wire);
+        if let Ok(interest) = build_interest_exact(
+            interest_id,
+            kinds,
+            /*current=*/ true,
+            /*future=*/ false,
+            Some((key.mapping_id, key.suffix)),
+        ) {
+            self.tx.enqueue(MulticastTxItem::Interest {
+                interest: alloc::boxed::Box::new(interest),
+            });
+            self.filters.borrow_mut().push((filter, interest_id));
+        }
+    }
+
+    /// End on the group the Interest write filter `filter` asked it by: its `Interest(Final)`.
+    pub(super) fn end_filter(&self, filter: FilterId) {
+        let asked = {
+            let mut filters = self.filters.borrow_mut();
+            let at = filters.iter().position(|(asked, _)| *asked == filter);
+            at.map(|at| filters.remove(at).1)
+        };
+        if let (Some(interest_id), false) = (asked, self.has_ended()) {
+            self.tx.enqueue(MulticastTxItem::Interest {
+                interest: alloc::boxed::Box::new(build_interest_final(interest_id)),
+            });
+        }
+    }
+
+    /// Put a publication on the group, naming its key by the declaration the group was told when
+    /// it is told the session's keyexprs (`GroupDeclarations::declares_keyexprs`), and in full
+    /// otherwise, as a group whose session tells it its entities, or less, is. Built by the session
     /// core's Push builders, as a link's is, and framed by the group's task with the sequence
     /// number of its channel. A group whose session ended is sent nothing.
     pub(super) fn publish(&self, put: GroupPut<'_>) -> Result<usize, FanoutError> {
         if self.has_ended() {
             return Ok(0);
         }
-        let push = match put.kind {
-            SampleKind::Put => {
+        // A group told the session's keyexprs is sent the key by its declaration, as the tokio
+        // engine's group is; any other by its literal.
+        let key = self.join.declarations.key(put.keyexpr, put.wire);
+        let push = match (put.kind, key.mapping_id) {
+            (SampleKind::Put, 0) => {
                 push_build::build_push_literal_with_meta(put.keyexpr, put.payload, put.meta)
             }
-            SampleKind::Del => push_build::build_push_del_literal_with_meta(put.keyexpr, put.meta),
+            (SampleKind::Del, 0) => {
+                push_build::build_push_del_literal_with_meta(put.keyexpr, put.meta)
+            }
+            (SampleKind::Put, mapping_id) => push_build::build_push_aliased_with_meta(
+                mapping_id,
+                key.suffix,
+                put.payload,
+                put.meta,
+            ),
+            (SampleKind::Del, mapping_id) => {
+                push_build::build_push_del_aliased_with_meta(mapping_id, key.suffix, put.meta)
+            }
         }
         .map_err(|_| FanoutError::ExceedsCapacity)?;
         self.tx.enqueue(MulticastTxItem::Push {
@@ -582,6 +719,37 @@ impl GroupFace {
             priority: put.priority,
         });
         Ok(0)
+    }
+}
+
+/// The `on_event` of a group's session, around `inner`: a member's interest in what is declared
+/// now asks the group for a JOIN first, as zenoh-pico pushes one (`asks_for_declarations`), and a
+/// member's ask for the session's keyexprs is answered ahead of the session's other declarations
+/// (`GroupKeyexprAnswers`), as the tokio engine's group answers both.
+fn answering_asks<E>(
+    mut inner: E,
+    keyexprs: Rc<RefCell<GroupKeyexprAnswers>>,
+    join_ask: JoinAsk,
+    tx: MulticastReplyQueue,
+) -> impl FnMut(IterationEvent<'_, '_>) + 'static
+where
+    E: FnMut(IterationEvent<'_, '_>) + 'static,
+{
+    move |event| {
+        if asks_for_declarations(&event) {
+            // What is queued below, and what the dispatch queues, leaves after the JOIN the
+            // group's next step sends: a step sends its beacon before what is queued.
+            join_ask.ask();
+            let answers = {
+                let mut keyexprs = keyexprs.borrow_mut();
+                keyexprs.asked(&event);
+                keyexprs.take_answers()
+            };
+            for item in answers {
+                tx.enqueue(item);
+            }
+        }
+        inner(event);
     }
 }
 
@@ -654,6 +822,9 @@ struct Announced {
 /// One publication the session puts on its groups.
 pub(super) struct GroupPut<'a> {
     pub(super) keyexpr: &'a str,
+    /// How the session's peers were told the key, which a group told the session's keyexprs is
+    /// told it by too.
+    pub(super) wire: &'a WireKey,
     pub(super) payload: &'a [u8],
     pub(super) kind: SampleKind,
     pub(super) meta: &'a PushMetadata,

@@ -206,6 +206,24 @@ impl<Q> crate::response_sink::LivelinessGetPrune for MulticastReplySink<Q> {
     }
 }
 
+/// Whether `event` carries a member's interest that asks for declarations held now: an
+/// `Interest` with the CURRENT bit, whose answer is the declarations held at this moment and a
+/// final. zenoh-pico answers one on a multicast transport whatever its declarations switch, a
+/// JOIN first (`vendor/zenoh-pico/src/session/interest.c` @ `// Push a join in case it's a new
+/// node`), which is what lets a member that has not admitted this session yet admit it before
+/// the answer arrives: every engine that joins groups asks its group for that JOIN on this.
+#[cfg(feature = "storage-profile")]
+pub fn asks_for_declarations(event: &crate::driver_loop::IterationEvent<'_, '_>) -> bool {
+    use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
+    use crate::network_message::NetworkMessage;
+    match event {
+        IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => messages
+            .iter()
+            .any(|message| matches!(message, NetworkMessage::Interest(interest) if interest.c())),
+        _ => false,
+    }
+}
+
 /// Open-debt item 913 — the keyexprs a group session declared to its group, and the members'
 /// interests in them it still owes an answer: what every engine that joins groups answers a
 /// member with. zenoh-pico answers a CURRENT interest that asks for keyexprs with a declaration

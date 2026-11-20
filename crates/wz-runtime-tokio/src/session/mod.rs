@@ -609,24 +609,6 @@ pub enum LocalDeliveryDrain {
     DriveTask,
 }
 
-/// Open-debt item 913 — whether `event` carries an interest a member's session answers now: one
-/// with the CURRENT bit, whose answer is the declarations held at this moment and a final.
-#[cfg(all(
-    feature = "transport-multicast",
-    feature = "codec-push",
-    any(feature = "liveliness-token", feature = "declare-subscriber")
-))]
-fn asks_for_declarations(event: &wz_session_core::driver_loop::IterationEvent<'_, '_>) -> bool {
-    use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
-    use wz_session_core::network_message::NetworkMessage;
-    match event {
-        IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => messages
-            .iter()
-            .any(|message| matches!(message, NetworkMessage::Interest(interest) if interest.c())),
-        _ => false,
-    }
-}
-
 /// Open-debt item 913 — the keyexprs a group session declared to its group, and the members'
 /// interests in them it still owes an answer. zenoh-pico answers a CURRENT interest that asks
 /// for keyexprs with a declaration of each key it holds that meets the interest's, ahead of its
@@ -3800,7 +3782,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
             feature = "codec-push",
             any(feature = "liveliness-token", feature = "declare-subscriber")
         ))]
-        if asks_for_declarations(&event) {
+        if wz_session_core::multicast_reply_sink::asks_for_declarations(&event) {
             self.transport.keyexprs.asked(&event);
             self.transport.tx.request_join();
         }

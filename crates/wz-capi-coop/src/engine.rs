@@ -2396,6 +2396,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         for group in &core.0.groups {
             let sent = group.publish(GroupPut {
                 keyexpr,
+                wire,
                 payload,
                 kind: opts.kind,
                 meta: &meta,
@@ -2558,6 +2559,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         if core.poll_links(redial_ms).is_err() {
             self.closed.store(true, Ordering::Release);
             return false;
+        }
+        // A group told the session's keyexprs that came up, at the open or joined again, asks
+        // for its members' with the session's next entity id, as the tokio engine's group asks
+        // when it comes up. Best effort: a member's own declarations reach the group later all
+        // the same, so a session with no entity id left does not ask.
+        #[cfg(feature = "group")]
+        for group in &core.groups {
+            if group.owes_keyexpr_ask() {
+                if let Some(interest_id) = self.next_entity_id() {
+                    group.ask_keyexprs(u64::from(interest_id));
+                }
+            }
         }
         true
     }
@@ -3063,6 +3076,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         if !taken {
             return None;
         }
+        // And each group told the session's keyexprs, as a link is.
+        #[cfg(feature = "group")]
+        for group in &core.groups {
+            group.announce_keyexpr(id, &keyexpr);
+        }
         core.next_mapping = id.wrapping_add(1);
         core.keyexprs.push(KexprEntry {
             id,
@@ -3086,6 +3104,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             core.keyexprs.remove(at);
             for actions in links {
                 actions.send_undeclare_kexpr(mapping_id);
+            }
+            #[cfg(feature = "group")]
+            for group in &core.groups {
+                group.retract_keyexpr(mapping_id);
             }
         }
     }
@@ -3201,7 +3223,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         &self,
         plane: FilterPlane,
         keyexpr: String,
-        _wire: &WireKey,
+        wire: &WireKey,
         ask: Option<InterestForm>,
         // See `declare_matching_listener`: the session's own subscribers count with
         // `local-subscriber`.
@@ -3211,11 +3233,27 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return Some(0);
         };
         let core = &mut core.0;
+        // The id this filter spent of its own, when it spent one: its Interest's, when it is the
+        // first to hold it, or the one taken for a filter that sends none.
+        let mut spent = None;
         let held = match &ask {
-            Some(form) => self.acquire_interest(core, plane, &keyexpr, form),
+            Some(form) => {
+                let before = core.interests.len();
+                let held = self.acquire_interest(core, plane, &keyexpr, form);
+                if held && core.interests.len() > before {
+                    spent = core.interests.last().map(|hold| hold.interest_id);
+                }
+                held
+            }
             // The entity id is taken whether the Interest is sent or not, as zenoh-pico's
             // `_z_add_interest` takes it before it decides.
-            None => self.next_entity_id().is_some(),
+            None => match self.next_entity_id() {
+                Some(taken) => {
+                    spent = Some(u64::from(taken));
+                    true
+                }
+                None => false,
+            },
         };
         // A session with no id left refuses the filter, and spends no filter id on it.
         if !held {
@@ -3223,6 +3261,23 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         }
         let id = core.next_filter;
         core.next_filter += 1;
+        // Each group a write filter asks (`asks_for_filters`) is asked for its members'
+        // declarations by an id of the filter's own, as the tokio engine's group is: the one the
+        // filter spent, or a fresh one when its Interest was held already.
+        #[cfg(feature = "group")]
+        if core
+            .groups
+            .iter()
+            .any(|group| group.declarations().asks_for_filters())
+        {
+            if let Some(interest_id) = spent.or_else(|| self.next_entity_id().map(u64::from)) {
+                for group in &core.groups {
+                    group.ask_filter(id, interest_id, plane, &keyexpr, wire);
+                }
+            }
+        }
+        #[cfg(not(feature = "group"))]
+        let _ = (spent, wire);
         core.filters.push(FilterEntry {
             id,
             plane,
@@ -3275,6 +3330,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let entry = core.filters.remove(at);
         if entry.asked {
             Self::release_interest(core, entry.plane, &entry.keyexpr);
+        }
+        // The groups it asked are told the asking ended.
+        #[cfg(feature = "group")]
+        for group in &core.groups {
+            group.end_filter(id);
         }
     }
 

@@ -1227,10 +1227,13 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
                 endpoint,
                 profile: pico_group(sn_resolution),
                 is_shm: false,
-                // pico declares its entities over whatever transport it holds, a group too;
-                // its keyexprs and write filters on a group (`multicast-declarations`) are the
-                // tokio engine's, which that switch selects.
+                // pico declares its entities over whatever transport it holds, a group too, and
+                // with `Z_FEATURE_MULTICAST_DECLARATIONS` its keyexprs and write filters as
+                // well, as the tokio engine's open reads it.
+                #[cfg(not(feature = "multicast-declarations"))]
                 declarations: wz_capi_port::group::GroupDeclarations::Entities,
+                #[cfg(feature = "multicast-declarations")]
+                declarations: wz_capi_port::group::GroupDeclarations::Mapped,
             }],
         ),
         listen => (listen.into_iter().collect(), request.connect, Vec::new()),
