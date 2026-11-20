@@ -435,3 +435,13 @@ carries about 6 KB of C library code wz does not, which is why the difference is
 Build the image (`bash scripts/kit-lane.sh build KEY`), print its row with
 `python3 scripts/lib/text_owner_gate.py --emit KEY --elf ELF`, put it in `deploy/text_budget.json`
 and say in `measured` what moved the text.
+
+**A row moves only under the zenoh-pico ceiling** (docs/upstream-parity.md D8). This file's gate
+holds an image to its own committed figure, so a row that moves with its image holds nothing
+against the original: the fixed client's row went from 142,528 bytes (2026-10-31) to 155,796
+(2026-11-18) one reasoned move at a time, and the parity matrix's text cell went from WIN to LOSS
+with no gate red. Layer Qzk now builds each image the matrix pairs with zenoh-pico and that
+reference in the same run (`scripts/lib/pico_ceiling_gate.py`) and refuses an image whose text,
+flash, static RAM or stack objects are not under the reference's. Moving a row is still how a
+measured change is recorded; a move past the ceiling fails the layer anyway, and is answered by
+taking the bytes back or by the owner's decision, not by the row.
