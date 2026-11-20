@@ -1470,10 +1470,11 @@ mod tests {
         let _held = stage.lock().expect("stage");
         let mut asked = Vec::new();
 
+        // Answered as congested, so a push that asked would end here too and show in `asked`.
         let mut pico = TxQueueConf::pico_of_policy(&SessionPolicy::defaults());
         let taken = droppable_stage(&stage, &mut pico, |wait| {
             asked.push(wait);
-            RoomAnswer::at_once(LinkRoom::Free)
+            RoomAnswer::at_once(LinkRoom::Congested)
         });
         assert!(taken.is_none(), "a held stage drops the push at once");
         assert!(asked.is_empty(), "the lane was asked {asked:?}");
