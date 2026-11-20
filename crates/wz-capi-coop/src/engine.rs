@@ -114,7 +114,10 @@ mod query;
 #[cfg(feature = "group")]
 mod group;
 #[cfg(feature = "group")]
-use group::{GroupFace, GroupJoining, GroupPut};
+use {
+    group::{GroupFace, GroupJoining, GroupPut},
+    wz_capi_port::group::GroupJoin,
+};
 
 mod registry;
 #[cfg(feature = "local-queryable")]
@@ -1193,6 +1196,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // The connections that arrived come first, so their handshakes are moved on in this pass.
         #[cfg(feature = "listen")]
         self.accept_links();
+        // A group whose link was lost is let go of, and joined again when its time comes.
+        #[cfg(feature = "group")]
+        self.poll_groups(redial_ms);
         // From the last face to the first: a face that is gone is removed, which moves none of the
         // ones before it.
         for at in (0..self.faces.len()).rev() {
@@ -1417,12 +1423,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     fn join_groups(&mut self) -> Result<(), OpenError> {
         #[cfg(feature = "group")]
         for join in self.config.groups.clone() {
-            let transport = self
-                .links
-                .open_group(&join.endpoint)
-                .map_err(|why| OpenError::Group(format!("{}: {why:?}", join.endpoint)))?;
             let id = self.next_face;
-            // The tables first: the group's task dispatches to them from its first step.
+            // The tables first: the group's task dispatches to them from its first step. They are
+            // the face's for as long as the session holds the group, across its joins.
             self.registry.borrow_mut().add_face(id);
             // An id of the key ids every node shares is read on the group as on a link.
             #[cfg(feature = "shared-key-ids")]
@@ -1431,50 +1434,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     .borrow_mut()
                     .install_shared_key_ids(id, ids.clone());
             }
-            let params = join.profile.params(
-                self.config.whatami,
-                self.wire_zid,
-                self.config.tx_queue,
-                self.config.link_rx,
-                self.policy,
-            );
-            // A member's query is held, and answered, under the group's own generation, as a
-            // link's is under its.
-            #[cfg(feature = "queryable")]
-            let generation = self.plane.generation.fetch_add(1, Ordering::AcqRel) + 1;
-            #[cfg(feature = "queryable")]
-            let dispatch = group::dispatch(
-                self.registry.clone(),
-                id,
-                self.policy,
-                self.plane.clone(),
-                generation,
-            );
-            #[cfg(not(feature = "queryable"))]
-            let dispatch = group::dispatch(self.registry.clone(), id);
-            let face = GroupFace::join(
-                &self.local,
-                GroupJoining {
-                    id,
-                    declarations: join.declarations,
-                    transport,
-                    params,
-                    policy: self.policy,
-                    #[cfg(feature = "queryable")]
-                    generation,
-                },
-                dispatch,
-            );
-            self.local.run_until_idle();
-            if face.has_ended() {
-                self.registry.borrow_mut().remove_face(id);
-                return Err(OpenError::Group(format!(
-                    "{}: the group's link did not open",
-                    join.endpoint
-                )));
+            match self.join_group(id, join) {
+                Ok(face) => {
+                    self.next_face += 1;
+                    self.groups.push(face);
+                }
+                Err(refused) => {
+                    self.registry.borrow_mut().remove_face(id);
+                    return Err(refused);
+                }
             }
-            self.next_face += 1;
-            self.groups.push(face);
         }
         #[cfg(not(feature = "group"))]
         if let Some(join) = self.config.groups.first() {
@@ -1484,6 +1453,93 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             )));
         }
         Ok(())
+    }
+
+    /// Join the group `join` names as face `id`, whose tables the registry holds: the stack joins
+    /// the group, and its session, with a fresh dispatcher, is spawned on the session's local set
+    /// and stepped once. [`OpenError::Group`] when the stack joins no such group or the session
+    /// ended at its first step (its link did not open).
+    #[cfg(feature = "group")]
+    fn join_group(&mut self, id: FaceId, join: GroupJoin) -> Result<GroupFace, OpenError> {
+        let transport = self
+            .links
+            .open_group(&join.endpoint)
+            .map_err(|why| OpenError::Group(format!("{}: {why:?}", join.endpoint)))?;
+        let endpoint = join.endpoint.clone();
+        let params = join.profile.params(
+            self.config.whatami,
+            self.wire_zid,
+            self.config.tx_queue,
+            self.config.link_rx,
+            self.policy,
+        );
+        // A member's query is held, and answered, under the group's own generation, as a link's
+        // is under its; each join of the group is a generation of its own.
+        #[cfg(feature = "queryable")]
+        let generation = self.plane.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        #[cfg(feature = "queryable")]
+        let dispatch = group::dispatch(
+            self.registry.clone(),
+            id,
+            self.policy,
+            self.plane.clone(),
+            generation,
+        );
+        #[cfg(not(feature = "queryable"))]
+        let dispatch = group::dispatch(self.registry.clone(), id);
+        let face = GroupFace::join(
+            &self.local,
+            GroupJoining {
+                id,
+                join,
+                transport,
+                params,
+                policy: self.policy,
+                #[cfg(feature = "queryable")]
+                generation,
+            },
+            dispatch,
+        );
+        self.local.run_until_idle();
+        if face.has_ended() {
+            return Err(OpenError::Group(format!(
+                "{endpoint}: the group's link did not open"
+            )));
+        }
+        Ok(face)
+    }
+
+    /// Move each group on. A group whose session ended on its own (its link was lost) takes with
+    /// it what its members declared and the gets asked of them, as a lost link does, and is
+    /// joined again `redial_ms` later, and again after each attempt that fails, as zenoh-pico's
+    /// reopen task rejoins a lost multicast transport on the period it redials a lost link. Which
+    /// ends are worth a new join is the session core's rule
+    /// (`MulticastOutcome::warrants_rejoin`); a session that redials nothing joins nothing again.
+    #[cfg(feature = "group")]
+    fn poll_groups(&mut self, redial_ms: Option<u64>) {
+        let now_us = self.clock.now_us();
+        let again_at = |ms: u64| now_us.saturating_add(ms.saturating_mul(1000));
+        for at in 0..self.groups.len() {
+            let id = self.groups[at].id();
+            if let Some(outcome) = self.groups[at].take_outcome(&self.local) {
+                self.lose_link(id);
+                if let (true, Some(ms)) = (outcome.warrants_rejoin(), redial_ms) {
+                    self.groups[at].wait_to_rejoin(again_at(ms));
+                }
+                continue;
+            }
+            if self.groups[at].rejoin_due(now_us) {
+                let join = self.groups[at].group_join().clone();
+                match self.join_group(id, join) {
+                    Ok(face) => self.groups[at] = face,
+                    Err(_) => {
+                        if let Some(ms) = redial_ms {
+                            self.groups[at].wait_to_rejoin(again_at(ms));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Take the connections waiting on every port the session listens on, each as a face of its

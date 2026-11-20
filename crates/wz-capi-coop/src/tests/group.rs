@@ -16,7 +16,7 @@ use wz_capi_port::group::{GroupDeclarations, GroupJoin, GroupProfile};
 use wz_capi_port::{SessionDrive, SessionEngine, WireKey};
 use wz_runtime_posix::{PosixClock, PosixEntropy};
 use wz_session_core::app_link_table::{
-    AppLinkKind, AppLinkTable, LinkHandle, ProgramOpen, ProgramSend,
+    AppLinkKind, AppLinkTable, LinkHandle, ProgramEvent, ProgramOpen, ProgramSend,
 };
 use wz_session_core::app_transport::{AppPort, AppTransport, TableLock};
 use wz_session_core::locality::Locality;
@@ -46,6 +46,36 @@ struct Network {
     joined: Mutex<Vec<Joined>>,
     /// How many times a member's stack was told to leave the group.
     leaves: AtomicUsize,
+    /// Each member whose stack was asked to join the group, once per join.
+    joins: Mutex<Vec<u8>>,
+}
+
+impl Network {
+    /// How many times `member`'s stack was asked to join the group.
+    fn joins_of(&self, member: u8) -> usize {
+        self.joins
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|joined| **joined == member)
+            .count()
+    }
+
+    /// `member`'s stack loses its group link, as an interface that goes down loses it: the stack
+    /// tells the session the link is closed.
+    fn cut(&self, member: u8) {
+        let lost: Vec<Joined> = {
+            let mut joined = self.joined.lock().unwrap();
+            let (lost, kept) = joined.drain(..).partition(|j| j.member == member);
+            *joined = kept;
+            lost
+        };
+        for joined in lost {
+            if let Some(transport) = joined.transport.upgrade() {
+                let _ = transport.event(joined.link, ProgramEvent::Closed);
+            }
+        }
+    }
 }
 
 struct Joined {
@@ -69,6 +99,7 @@ impl AppPort for MemberStack {
             return ProgramOpen::Refused;
         }
         let transport = self.transport.lock().unwrap().clone();
+        self.network.joins.lock().unwrap().push(self.member);
         self.network.joined.lock().unwrap().push(Joined {
             member: self.member,
             link,
@@ -190,30 +221,8 @@ fn two_members_learn_each_other_by_their_joins_and_a_put_crosses_the_group() {
     // (1, a peer).
     until_members_know_each_other(&first, &second);
 
-    let heard = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
-    let into = Arc::clone(&heard);
-    second
-        .declare_subscriber_on_wire(
-            "demo/group/**".to_owned(),
-            WireKey::literal(),
-            Locality::Any,
-            None,
-            Arc::new(move || {
-                let into = Arc::clone(&into);
-                Box::new(move |sample: &dyn SampleView| {
-                    into.lock().unwrap().push(sample.payload().to_vec());
-                })
-            }),
-        )
-        .expect("a session with ids left declares");
-    first
-        .publish_on_wire_all(
-            "demo/group/a",
-            &WireKey::literal(),
-            b"over-the-group",
-            &PublishOptions::put().with_locality(Locality::Remote),
-        )
-        .expect("a put the group carries");
+    let heard = subscribe(&second, "demo/group/**");
+    put(&first, "demo/group/a", b"over-the-group");
     eventually("the second member to hear the put", || {
         heard
             .lock()
@@ -253,6 +262,77 @@ fn a_group_the_stack_does_not_join_fails_the_open_by_name() {
         network.joined.lock().unwrap().is_empty(),
         "no member joined a group"
     );
+}
+
+/// Declare a subscriber on `keyexpr` of `engine`, and the payloads it is handed, in order.
+fn subscribe(engine: &Engine, keyexpr: &str) -> Arc<Mutex<Vec<Vec<u8>>>> {
+    let heard = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+    let into = Arc::clone(&heard);
+    engine
+        .declare_subscriber_on_wire(
+            keyexpr.to_owned(),
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            Arc::new(move || {
+                let into = Arc::clone(&into);
+                Box::new(move |sample: &dyn SampleView| {
+                    into.lock().unwrap().push(sample.payload().to_vec());
+                })
+            }),
+        )
+        .expect("a session with ids left declares");
+    heard
+}
+
+/// Put `payload` on `keyexpr` from `engine`, for its peers alone.
+fn put(engine: &Engine, keyexpr: &str, payload: &[u8]) {
+    engine
+        .publish_on_wire_all(
+            keyexpr,
+            &WireKey::literal(),
+            payload,
+            &PublishOptions::put().with_locality(Locality::Remote),
+        )
+        .expect("a put the group carries");
+}
+
+/// A member whose stack loses its group link lets the group go, and joins it again a redial
+/// period later with a session of its own: the stack is asked to join a second time, the members
+/// learn each other again by their JOINs, and a put crosses the group again. A member that
+/// redials nothing would not join again, so the session here redials every 100 ms.
+#[test]
+fn a_member_whose_group_link_is_lost_joins_the_group_again() {
+    let network = Arc::new(Network::default());
+    let redialling = |member: u8| CoopConfig {
+        redial_ms: Some(100),
+        ..member_config(member, GROUP)
+    };
+    let first = open_member(&network, 1, redialling(1)).expect("the first joins");
+    let second = open_member(&network, 2, redialling(2)).expect("the second joins");
+    SessionDrive::start_read_task(&*first).expect("the first's read task starts");
+    SessionDrive::start_read_task(&*second).expect("the second's read task starts");
+    until_members_know_each_other(&first, &second);
+    assert_eq!(network.joins_of(2), 1);
+
+    network.cut(2);
+    eventually(
+        "the second member's stack to be asked to join again",
+        || network.joins_of(2) == 2,
+    );
+    until_members_know_each_other(&first, &second);
+    let heard = subscribe(&second, "demo/group/**");
+    eventually("a put to cross the group joined again", || {
+        put(&first, "demo/group/b", b"after-the-loss");
+        heard
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|payload| payload == b"after-the-loss")
+    });
+    assert_eq!(network.joins_of(2), 2, "joined again once, and only once");
+    SessionDrive::close(&*second);
+    SessionDrive::close(&*first);
 }
 
 /// Wait until the two members each list the other, which is when a member reads what the other

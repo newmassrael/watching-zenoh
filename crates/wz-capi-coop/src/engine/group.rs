@@ -21,7 +21,7 @@ use alloc::rc::Rc;
 use core::cell::{Cell, RefCell};
 use core::net::SocketAddr;
 
-use wz_capi_port::group::GroupDeclarations;
+use wz_capi_port::group::{GroupDeclarations, GroupJoin};
 use wz_capi_port::FanoutError;
 use wz_runtime_coop::group_transport::GroupTransport;
 use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet};
@@ -111,11 +111,12 @@ impl GroupTransport for Watched {
     }
 }
 
-/// What a group is joined with: the face its tables are in, what the session tells it of its
-/// declarations, the stack's transport and the parameters its session runs with.
+/// What a group is joined with: the face its tables are in, the group as the ABI stated it (where
+/// it is, what the session advertises and tells it), the stack's transport and the parameters its
+/// session runs with.
 pub(super) struct GroupJoining {
     pub(super) id: FaceId,
-    pub(super) declarations: GroupDeclarations,
+    pub(super) join: GroupJoin,
     pub(super) transport: alloc::boxed::Box<dyn GroupTransport>,
     pub(super) params: MulticastParams,
     pub(super) policy: SessionPolicy,
@@ -127,8 +128,11 @@ pub(super) struct GroupJoining {
 /// One group of the session: its face, its task, its queue, its members and its stop.
 pub(super) struct GroupFace {
     id: FaceId,
-    declarations: GroupDeclarations,
-    task: CoopLocalJoinHandle<MulticastOutcome>,
+    join: GroupJoin,
+    /// The group's session; `None` once the session's end was read ([`Self::take_outcome`]).
+    task: Option<CoopLocalJoinHandle<MulticastOutcome>>,
+    /// When the group, whose session ended on its own, is joined again.
+    rejoin_at_us: Option<u64>,
     tx: MulticastReplyQueue,
     members: Rc<RefCell<Vec<Member>>>,
     took: Rc<Cell<bool>>,
@@ -157,7 +161,7 @@ impl GroupFace {
     {
         let GroupJoining {
             id,
-            declarations,
+            join,
             transport,
             params,
             policy,
@@ -197,8 +201,9 @@ impl GroupFace {
         let task = spawn_multicast_session_seeded(local, seed, on_event, next_tx, should_stop);
         Self {
             id,
-            declarations,
-            task,
+            join,
+            task: Some(task),
+            rejoin_at_us: None,
             #[cfg(feature = "queryable")]
             generation,
             #[cfg(feature = "queryable")]
@@ -267,13 +272,46 @@ impl GroupFace {
 
     /// What the session tells the group of its declarations.
     pub(super) fn declarations(&self) -> GroupDeclarations {
-        self.declarations
+        self.join.declarations
+    }
+
+    /// The group as the ABI stated it, which it is joined again by.
+    pub(super) fn group_join(&self) -> &GroupJoin {
+        &self.join
     }
 
     /// Whether the group's session has ended: it left the group, lost its link, or could not
     /// open it.
     pub(super) fn has_ended(&self) -> bool {
-        self.task.is_finished()
+        match &self.task {
+            Some(task) => task.is_finished(),
+            None => true,
+        }
+    }
+
+    /// How the group's session ended, read once: `None` while it runs, and after it was read.
+    /// The members it held go with it.
+    pub(super) fn take_outcome<C: ClockSource + 'static>(
+        &mut self,
+        local: &CoopLocalSet<C>,
+    ) -> Option<MulticastOutcome> {
+        if !self.task.as_ref()?.is_finished() {
+            return None;
+        }
+        let task = self.task.take()?;
+        self.members.borrow_mut().clear();
+        // A finished task's output is taken without stepping anything.
+        local.block_on_local(task).ok()
+    }
+
+    /// Join the group again at `at_us`, on the session's clock.
+    pub(super) fn wait_to_rejoin(&mut self, at_us: u64) {
+        self.rejoin_at_us = Some(at_us);
+    }
+
+    /// Whether the group waits to be joined again and its time has come.
+    pub(super) fn rejoin_due(&self, now_us: u64) -> bool {
+        self.rejoin_at_us.is_some_and(|at_us| now_us >= at_us)
     }
 
     /// Whether the group's task took a datagram since this was last asked.
