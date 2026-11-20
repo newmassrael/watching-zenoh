@@ -143,6 +143,16 @@ impl SessionEngine for SharedSession {
         SharedSession::peer_identities(self)
     }
 
+    #[cfg(feature = "multicast-transport")]
+    fn group_member_zids(&self) -> Vec<Vec<u8>> {
+        SharedSession::group_member_zids(self)
+    }
+
+    #[cfg(feature = "multicast-transport")]
+    fn send_join_on_groups(&self) -> usize {
+        SharedSession::send_join_on_groups(self)
+    }
+
     fn listen_locators(&self) -> Vec<String> {
         SharedSession::listen_locators(self)
     }

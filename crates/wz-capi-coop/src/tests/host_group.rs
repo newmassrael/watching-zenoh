@@ -102,8 +102,7 @@ fn two_members_on_the_hosts_sockets_learn_each_other_and_a_put_crosses_the_group
     SessionDrive::start_read_task(&*first).expect("the first's read task starts");
     SessionDrive::start_read_task(&*second).expect("the second's read task starts");
     eventually("each member to list the other", || {
-        first.peer_identities() == [(vec![2u8; 4], 1u8)]
-            && second.peer_identities() == [(vec![1u8; 4], 1u8)]
+        first.group_member_zids() == [vec![2u8; 4]] && second.group_member_zids() == [vec![1u8; 4]]
     });
 
     let heard = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
@@ -140,7 +139,7 @@ fn two_members_on_the_hosts_sockets_learn_each_other_and_a_put_crosses_the_group
 
     SessionDrive::close(&*second);
     eventually("the first member to lose the second", || {
-        first.peer_identities().is_empty()
+        first.group_member_zids().is_empty()
     });
     SessionDrive::close(&*first);
 }

@@ -23,6 +23,7 @@ use wz_session_core::locality::Locality;
 use wz_session_core::multicast_params::GroupJoinRule;
 use wz_session_core::publish_options::PublishOptions;
 use wz_session_core::sink::SampleView;
+use wz_session_core::wire_const::T_MID_JOIN;
 use wz_session_core::WhatAmI;
 
 use super::client_config;
@@ -48,9 +49,21 @@ struct Network {
     leaves: AtomicUsize,
     /// Each member whose stack was asked to join the group, once per join.
     joins: Mutex<Vec<u8>>,
+    /// Each member that sent a JOIN beacon on the group, once per beacon.
+    beacons: Mutex<Vec<u8>>,
 }
 
 impl Network {
+    /// How many JOIN beacons `member` sent on the group.
+    fn beacons_of(&self, member: u8) -> usize {
+        self.beacons
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|sent| **sent == member)
+            .count()
+    }
+
     /// How many times `member`'s stack was asked to join the group.
     fn joins_of(&self, member: u8) -> usize {
         self.joins
@@ -109,6 +122,13 @@ impl AppPort for MemberStack {
     }
 
     fn send(&self, _link: LinkHandle, bytes: &[u8]) -> ProgramSend {
+        // A beacon is sent alone in its datagram; the low five bits of a header are its id.
+        if bytes
+            .first()
+            .is_some_and(|header| header & 0x1f == T_MID_JOIN)
+        {
+            self.network.beacons.lock().unwrap().push(self.member);
+        }
         let others: Vec<(LinkHandle, Arc<AppTransport>)> = self
             .network
             .joined
@@ -217,9 +237,10 @@ fn two_members_learn_each_other_by_their_joins_and_a_put_crosses_the_group() {
     SessionDrive::start_read_task(&*first).expect("the first's read task starts");
     SessionDrive::start_read_task(&*second).expect("the second's read task starts");
 
-    // Each member is known to the other from the other's JOIN alone, by its zid and its role
-    // (1, a peer).
+    // Each member is known to the other from the other's JOIN alone, by its zid, and as a
+    // member of the group and not a peer of a link.
     until_members_know_each_other(&first, &second);
+    assert!(first.peer_identities().is_empty() && second.peer_identities().is_empty());
 
     let heard = subscribe(&second, "demo/group/**");
     put(&first, "demo/group/a", b"over-the-group");
@@ -240,10 +261,39 @@ fn two_members_learn_each_other_by_their_joins_and_a_put_crosses_the_group() {
         "the closed session's stack left the group"
     );
     eventually("the first member to lose the second", || {
-        first.peer_identities().is_empty()
+        first.group_member_zids().is_empty()
     });
     SessionDrive::close(&*first);
     assert_eq!(network.leaves.load(Ordering::SeqCst), 2);
+}
+
+/// A JOIN asked of the session between two beacons is sent at once, and the cadence goes on from
+/// it: a member whose beacon is due every minute sends its first at the open, none more while
+/// nothing asks, and a second when the session is asked for one. A session that closed asks no
+/// group.
+#[test]
+fn a_join_asked_between_two_beacons_is_sent_at_once() {
+    let network = Arc::new(Network::default());
+    let mut config = member_config(1, GROUP);
+    config.groups[0].profile.lease_ms = 180_000;
+    config.groups[0].profile.join_interval_ms = 60_000;
+    let member = open_member(&network, 1, config).expect("the member joins");
+    SessionDrive::start_read_task(&*member).expect("the read task starts");
+    eventually("the beacon of the open", || network.beacons_of(1) == 1);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(network.beacons_of(1), 1, "no beacon is due within a minute");
+
+    assert_eq!(member.send_join_on_groups(), 1, "the one group is asked");
+    eventually("the JOIN asked for", || network.beacons_of(1) == 2);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(network.beacons_of(1), 2, "and the cadence runs from it");
+
+    SessionDrive::close(&*member);
+    assert_eq!(
+        member.send_join_on_groups(),
+        0,
+        "a closed session asks no group"
+    );
 }
 
 #[test]
@@ -385,8 +435,7 @@ fn a_members_subscriber_is_announced_on_the_group_and_retracted_from_it() {
 /// sends: a group admits a member's frames only once it heard that member's JOIN.
 fn until_members_know_each_other(first: &Engine, second: &Engine) {
     eventually("each member to list the other", || {
-        first.peer_identities() == [(vec![2u8; 4], 1u8)]
-            && second.peer_identities() == [(vec![1u8; 4], 1u8)]
+        first.group_member_zids() == [vec![2u8; 4]] && second.group_member_zids() == [vec![1u8; 4]]
     });
 }
 

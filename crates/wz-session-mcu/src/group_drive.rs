@@ -915,6 +915,13 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
         )
     }
 
+    /// Make the JOIN beacon due now: the next step sends it, and the cadence runs from there, as
+    /// the AP group loop does when a JOIN is asked of it (`MulticastTxProducer::request_join`,
+    /// zenoh-pico's `zp_send_join`).
+    pub fn join_now(&mut self) {
+        self.next_join_ms = 0;
+    }
+
     #[cfg_attr(not(feature = "reassembly"), allow(unused_variables))]
     fn with_pass(
         dispatcher: &'a mut MulticastDispatcher<MAX_PEERS>,
@@ -1289,15 +1296,18 @@ where
         on_event,
         next_tx,
         should_stop,
+        // A session spawned whole has no holder that asks for a JOIN between its beacons.
+        || false,
     )
     .await
 }
 
 /// The loop of a multicast session task over a dispatcher it is lent: the part of
 /// [`multicast_session_task`] and [`multicast_session_task_seeded`] that does not depend on where
-/// the dispatcher was built.
+/// the dispatcher was built. `asks_join` says, before each step, whether the session's holder
+/// asked for a JOIN since the last one.
 #[allow(clippy::too_many_arguments)]
-async fn drive_group_session<'g, C, T, F, G, H, const MAX_PEERS: usize>(
+async fn drive_group_session<'g, C, T, F, G, H, J, const MAX_PEERS: usize>(
     runtime: CoopRuntime<C>,
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
     mut transport: T,
@@ -1308,6 +1318,7 @@ async fn drive_group_session<'g, C, T, F, G, H, const MAX_PEERS: usize>(
     mut on_event: F,
     mut next_tx: G,
     mut should_stop: H,
+    mut asks_join: J,
 ) -> MulticastOutcome
 where
     C: ClockSource,
@@ -1315,6 +1326,7 @@ where
     F: FnMut(IterationEvent<'_, '_>),
     G: FnMut() -> Option<MulticastTxOffer<'g>>,
     H: FnMut() -> bool,
+    J: FnMut() -> bool,
 {
     let mut pump = MulticastPump::new(
         dispatcher,
@@ -1328,6 +1340,10 @@ where
         &mut transport,
     );
     loop {
+        // A JOIN the session's holder asked for is sent at this step.
+        if asks_join() {
+            pump.join_now();
+        }
         if let Some(outcome) = pump.step(&mut on_event, &mut next_tx, Some(&mut should_stop)) {
             return outcome;
         }
@@ -1351,6 +1367,10 @@ pub struct MulticastSessionSeed<T: GroupTransport, const MAX_PEERS: usize> {
     policy: SessionPolicy,
     tick_ms: u64,
     max_iters: Option<usize>,
+    /// The JOIN the session's holder asks for between two beacons, when it keeps the other
+    /// half of the ask ([`Self::with_join_ask`]).
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    join_ask: Option<JoinAsk>,
 }
 
 impl<T: GroupTransport, const MAX_PEERS: usize> MulticastSessionSeed<T, MAX_PEERS> {
@@ -1370,6 +1390,8 @@ impl<T: GroupTransport, const MAX_PEERS: usize> MulticastSessionSeed<T, MAX_PEER
             policy,
             tick_ms,
             max_iters: None,
+            #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+            join_ask: None,
         }
     }
 
@@ -1377,6 +1399,35 @@ impl<T: GroupTransport, const MAX_PEERS: usize> MulticastSessionSeed<T, MAX_PEER
     pub fn with_max_iters(mut self, max_iters: Option<usize>) -> Self {
         self.max_iters = max_iters;
         self
+    }
+
+    /// The session sends its JOIN at the step after `ask` is asked, as well as on its cadence:
+    /// the holder keeps a clone of `ask` and asks through it.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    pub fn with_join_ask(mut self, ask: JoinAsk) -> Self {
+        self.join_ask = Some(ask);
+        self
+    }
+}
+
+/// A JOIN the holder of a group session asks for between two of its beacons: the session sends
+/// it at its next step and keeps its cadence from there, as the AP group loop does when a JOIN is
+/// asked of it (zenoh-pico's `zp_send_join`). One clone is the holder's and one the session's
+/// ([`MulticastSessionSeed::with_join_ask`]); asks made before the session steps are one JOIN.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+#[derive(Clone, Debug, Default)]
+pub struct JoinAsk(alloc::rc::Rc<core::cell::Cell<bool>>);
+
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+impl JoinAsk {
+    /// Ask the session for its JOIN at its next step.
+    pub fn ask(&self) {
+        self.0.set(true);
+    }
+
+    /// Whether a JOIN was asked since the last look; the ask is answered by the look.
+    fn take(&self) -> bool {
+        self.0.replace(false)
     }
 }
 
@@ -1431,7 +1482,13 @@ where
         policy,
         tick_ms,
         max_iters,
+        #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+        join_ask,
     } = seed;
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    let asks_join = move || join_ask.as_ref().is_some_and(JoinAsk::take);
+    #[cfg(not(all(feature = "alloc", not(feature = "session-slot"))))]
+    let asks_join = || false;
     // A local that lives across the await below lies in the future's state, so this slot is
     // where the dispatcher is stored for as long as the task runs.
     let mut slot = MaybeUninit::uninit();
@@ -1447,6 +1504,7 @@ where
         on_event,
         next_tx,
         should_stop,
+        asks_join,
     )
     .await
 }

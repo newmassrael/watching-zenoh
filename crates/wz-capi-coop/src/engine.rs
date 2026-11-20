@@ -2812,8 +2812,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let Some(core) = self.live() else {
             return Vec::new();
         };
-        let links = core
-            .0
+        // A group's members are not listed here, as the tokio engine lists none:
+        // `group_member_zids` answers them, whatever role they announced.
+        core.0
             .ups()
             .filter(|actions| actions.is_established())
             .filter_map(
@@ -2821,12 +2822,39 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                     (Some(zid), Some(role)) => Some((zid, role)),
                     _ => None,
                 },
-            );
-        // And each member a group's JOINs admitted, as zenoh-pico lists the peers of its
-        // multicast transport.
-        #[cfg(feature = "group")]
-        let links = links.chain(core.0.groups.iter().flat_map(GroupFace::member_identities));
-        links.collect()
+            )
+            .collect()
+    }
+
+    #[cfg(feature = "group")]
+    fn group_member_zids(&self) -> Vec<Vec<u8>> {
+        let Some(core) = self.live() else {
+            return Vec::new();
+        };
+        core.0
+            .groups
+            .iter()
+            .flat_map(GroupFace::member_zids)
+            .collect()
+    }
+
+    /// Each group's session sends its JOIN at its next step, which this call takes, as the tokio
+    /// engine's group sends one at once.
+    #[cfg(feature = "group")]
+    fn send_join_on_groups(&self) -> usize {
+        let Some(mut guard) = self.live() else {
+            return 0;
+        };
+        let core = &mut guard.0;
+        let asked = core.groups.iter().filter(|group| group.ask_join()).count();
+        if asked == 0 {
+            return 0;
+        }
+        core.local.run_until_idle();
+        drop(guard);
+        // What the step took from a group is handed out outside the lock, as a read's is.
+        self.deliver();
+        asked
     }
 
     #[cfg(feature = "connectivity")]

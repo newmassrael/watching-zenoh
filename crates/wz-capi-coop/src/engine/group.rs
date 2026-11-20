@@ -44,7 +44,7 @@ use wz_session_core::qos::Priority;
 use wz_session_core::sample::SampleKind;
 use wz_session_core::wire_id::{EntityId, ExprId};
 use wz_session_mcu::group_drive::{
-    spawn_multicast_session_seeded, MulticastReplyQueue, MulticastSessionSeed,
+    spawn_multicast_session_seeded, JoinAsk, MulticastReplyQueue, MulticastSessionSeed,
 };
 #[cfg(feature = "connectivity")]
 use {
@@ -201,6 +201,8 @@ pub(super) struct GroupFace {
     members: Rc<RefCell<Vec<MulticastMember>>>,
     took: Rc<Cell<bool>>,
     stop: Rc<Cell<bool>>,
+    /// The JOIN the session asks of the group between two beacons ([`Self::ask_join`]).
+    join_ask: JoinAsk,
     /// The entities this join of the group was told of, which their retractions are told by.
     announced: RefCell<Vec<Announced>>,
     /// What the session's watchers of its faces are told of the members (`connectivity`).
@@ -248,6 +250,7 @@ impl GroupFace {
         let members: Rc<RefCell<Vec<MulticastMember>>> = Rc::new(RefCell::new(Vec::new()));
         let took = Rc::new(Cell::new(false));
         let stop = Rc::new(Cell::new(false));
+        let join_ask = JoinAsk::default();
         // The session core's config for a group, the tokio engine's group face's too, with each
         // member's declarations kept apart: the group's events feed one session's tables.
         let config = MulticastConfig::of_group(&params, true);
@@ -260,7 +263,8 @@ impl GroupFace {
             params,
             policy,
             u64::from(GROUP_TICK_MS),
-        );
+        )
+        .with_join_ask(join_ask.clone());
         let on_event = noting_members(
             Rc::clone(&members),
             MulticastReplySink::new(tx.clone()),
@@ -292,10 +296,22 @@ impl GroupFace {
             members,
             took,
             stop,
+            join_ask,
             announced: RefCell::new(Vec::new()),
             #[cfg(feature = "connectivity")]
             events,
         }
+    }
+
+    /// Ask the group's session for its JOIN at its next step, between two beacons, as the tokio
+    /// engine's group sends one when it is asked (zenoh-pico's `zp_send_join`): whether the group
+    /// was asked, which one whose session ended is not.
+    pub(super) fn ask_join(&self) -> bool {
+        if self.has_ended() {
+            return false;
+        }
+        self.join_ask.ask();
+        true
     }
 
     /// Whether a query that came in under `generation` came on this group, whose session has
@@ -413,20 +429,16 @@ impl GroupFace {
         self.stop.set(true);
     }
 
-    /// The members the group holds, each by its zid and the wire code of the role it announced;
-    /// a member whose role this node does not know is not one a caller can name, and a group whose
-    /// session ended holds none.
-    pub(super) fn member_identities(&self) -> Vec<(Vec<u8>, u8)> {
+    /// The zid of each member the group holds, whatever role it announced; a group whose session
+    /// ended holds none.
+    pub(super) fn member_zids(&self) -> Vec<Vec<u8>> {
         if self.has_ended() {
             return Vec::new();
         }
         self.members
             .borrow()
             .iter()
-            .filter_map(|member| {
-                let role = member.whatami?;
-                Some((member.peer.as_slice().to_vec(), role.to_wire()))
-            })
+            .map(|member| member.peer.as_slice().to_vec())
             .collect()
     }
 

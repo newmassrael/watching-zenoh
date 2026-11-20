@@ -86,6 +86,23 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// completed is not listed.
     fn peer_identities(&self) -> Vec<(Vec<u8>, u8)>;
 
+    /// The zid of every member of every multicast group the session joined, as each group's
+    /// member table holds it, whatever role the member announced: zenoh-pico lists each of them
+    /// as a peer of its multicast transport (`vendor/zenoh-pico/src/transport/multicast.c` @
+    /// `void _zp_multicast_fetch_zid(`). A group's members are not [`Self::peer_identities`],
+    /// whose split by role is a link's. An engine that joins no group has none, the provided
+    /// answer.
+    fn group_member_zids(&self) -> Vec<Vec<u8>> {
+        Vec::new()
+    }
+
+    /// Ask every multicast group the session joined to send its JOIN now, between two beacons,
+    /// which then keeps its cadence from it (zenoh-pico's `zp_send_join`): how many groups were
+    /// asked. An engine that joins no group asks none, the provided answer.
+    fn send_join_on_groups(&self) -> usize {
+        0
+    }
+
     /// A snapshot of every established face: the peer's identity and the negotiated booleans of
     /// its transport, and the links under it. One entry for each transport a connectivity plane
     /// lists, a joined group's members included where the engine joins groups. A face whose
