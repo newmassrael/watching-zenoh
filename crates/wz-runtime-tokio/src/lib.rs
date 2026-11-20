@@ -3393,8 +3393,9 @@ impl UdpDriver {
     /// What [`Self::group_sender`] sends through, for a thread that writes one datagram of its
     /// own without waiting ([`writer_queue::InlineWrite`]): a duplicate of the sending socket,
     /// addressed to the same peer. `None` when this driver has no peer or socket, or the socket
-    /// cannot be duplicated.
-    #[cfg(unix)]
+    /// cannot be duplicated. Only a group writes this way, so a build without
+    /// `transport-multicast` has no reader of it.
+    #[cfg(all(unix, feature = "transport-multicast"))]
     pub(crate) fn group_inline_socket(
         &self,
     ) -> Option<std::sync::Arc<dyn writer_queue::InlineWrite>> {

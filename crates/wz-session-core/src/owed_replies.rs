@@ -130,6 +130,14 @@ impl OwedReplies {
 
     /// Send the owed declarations through `sink`, in order, and owe none after.
     pub fn send_declarations<S: DeclareReplySink>(&mut self, sink: &S) {
+        // Without a declaring feature no declaration is owed and the sink has nothing to take,
+        // as the replies' drain above says for a build without `query-queryable`.
+        #[cfg(not(any(
+            feature = "liveliness-token",
+            feature = "declare-subscriber",
+            feature = "declare-queryable"
+        )))]
+        let _ = sink;
         for owed in self.declarations.get_mut().drain(..) {
             match owed {
                 #[cfg(feature = "liveliness-token")]

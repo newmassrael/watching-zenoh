@@ -1512,7 +1512,6 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_udp_links_inline_write_sends_one_whole_datagram_to_its_peer() {
-        use crate::writer_queue::InlineWrite;
         let receiver = UdpSocket::bind("127.0.0.1:0").await.expect("bind receiver");
         let to = receiver.local_addr().expect("receiver addr");
         let sender = UdpSocket::bind("127.0.0.1:0").await.expect("bind sender");
