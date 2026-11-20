@@ -598,6 +598,9 @@ type SubscriberCallback = Arc<Mutex<Box<dyn FnMut(&dyn SampleView) + Send + 'sta
 #[cfg(feature = "queryable")]
 type QueryableCallback = Arc<Mutex<QueryCallback>>;
 
+/// The session's state, held: what [`CoopEngine::live`] hands a caller that may act on it.
+type LiveCore<'a, L, C> = MutexGuard<'a, Confined<Core<L, C>>>;
+
 /// Where a delivery goes.
 enum Target {
     Subscriber(SubscriberCallback),
@@ -2284,7 +2287,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     }
 
     /// The session's state, for one operation. `None` once the session is closed.
-    fn live(&self) -> Option<MutexGuard<'_, Confined<Core<L, C>>>> {
+    fn live(&self) -> Option<LiveCore<'_, L, C>> {
         if self.closed.load(Ordering::Acquire) {
             return None;
         }
@@ -2310,10 +2313,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// for want of room. Under the pico profile a held session drops the publish at once, with
     /// nothing asked ([`LinkRooms::for_held`]), and the caller is told
     /// ([`FanoutError::HeldConduit`]), as pico's put fails when its held transmit lock drops it.
-    fn live_to_publish(
-        &self,
-        droppable: bool,
-    ) -> Result<Option<MutexGuard<'_, Confined<Core<L, C>>>>, FanoutError> {
+    fn live_to_publish(&self, droppable: bool) -> Result<Option<LiveCore<'_, L, C>>, FanoutError> {
         if !droppable {
             return Ok(self.live());
         }
