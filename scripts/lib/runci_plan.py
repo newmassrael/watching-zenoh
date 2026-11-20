@@ -168,8 +168,10 @@ OFFLINE_BUILD_SANDBOX = "scripts/lib/offline_build.py --build"
 # Programs a lane fails without because its HOSTED JOB arms it, so no arming in run-ci.sh says so
 # and the census cannot (see the docstring). Each entry quotes the lane's failure sentence.
 #   C1cc: "valgrind is absent ... WZ_C1CC_REQUIRE is set, so this is a failure" (the job's env).
+#   C1p32: "no C compiler here builds and runs a 32-bit program (cc -m32; gcc-multilib), and
+#         WZ_C1P32_REQUIRE is set" (the job's env); the 32-bit mode is the package below.
 # Layer U asked for `gh` until 2026-11-07; it now reads the releases snapshot the tree carries.
-JOB_ARMED_COMMANDS: dict[str, list[str]] = {"C1cc": ["valgrind"]}
+JOB_ARMED_COMMANDS: dict[str, list[str]] = {"C1cc": ["valgrind"], "C1p32": ["cc"]}
 
 # Programs a lane refuses to run without, by ITS OWN sentence: its function asks for the program
 # and fails, or declines, which a unit's `WZ_DECLINED_EXPECT=` makes a failure. Until 2026-11-07
@@ -212,6 +214,10 @@ LANE_PACKAGES: dict[str, list[str]] = {
     # C1ob: bindgen loads libclang while librocksdb-sys's build script runs, and the bundle
     # `ap-demo` fails there without it (`deploy/offline-build.json`, tool `libclang`).
     "C1ob": ["libclang-dev"],
+    # C1p32: `cc -m32` builds and links the i686 target only with the compiler's 32-bit mode and
+    # C library, and its profile leg resolves the profile with the Kconfig interpreter it
+    # provisions, as C1st does.
+    "C1p32": ["gcc-multilib", "python3-venv"],
     "C1st": ["python3-venv"],
     "E": ["python3-venv"],
     "Qz": ["python3-venv"],
@@ -489,6 +495,10 @@ def selftest() -> int:
     assert not any("qemu-user" in p or "qemu-arm" == p for progs in merged.values() for p in progs), (
         "qemu-user is asked again, though no file of the tree runs a qemu user-mode emulator"
     )
+    # The 32-bit lane's compiler mode is a package and not a program: every machine has `cc`, and
+    # one without `gcc-multilib` fails the lane's own probe, so the unit has to ask for it.
+    assert merged["C1p32"] == ["cc"] and "gcc-multilib" in LANE_PACKAGES["C1p32"], (
+        merged.get("C1p32"), LANE_PACKAGES.get("C1p32"))
     cases += 1
     a = hosted["A"]
     assert a.env == {"WZ_DECLINED_EXPECT": "", "RUST_BACKTRACE": "1", "WZ_PICO_REQUIRE": "1"}, (

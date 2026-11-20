@@ -656,10 +656,15 @@ mod tests {
         got
     }
 
+    /// The C header declares the row as four `uint64_t`, so a caller's table is aligned as that
+    /// type is on the target: 8 on a 64-bit host and on 32-bit Windows, 4 on 32-bit x86 Linux.
     #[test]
     fn a_publisher_row_has_the_layout_a_c_caller_sizes() {
         assert_eq!(core::mem::size_of::<PublisherSlot>(), 32);
-        assert_eq!(core::mem::align_of::<PublisherSlot>(), 8);
+        assert_eq!(
+            core::mem::align_of::<PublisherSlot>(),
+            core::mem::align_of::<u64>()
+        );
     }
 
     #[test]

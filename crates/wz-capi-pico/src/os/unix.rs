@@ -22,13 +22,21 @@ use std::ffi::{c_char, c_ulong, c_void};
 
 use super::Unit;
 
-/// pico `z_clock_t`: `struct timespec`, 16 B. Returned BY VALUE from `clock_now`,
-/// which the SysV AMD64 ABI passes back in two integer registers; `libc::timespec`
-/// is `#[repr(C)]` with the same two fields, so the register assignment matches
-/// without a shim.
+/// pico `z_clock_t`: `struct timespec`, 16 B on a 64-bit host and 8 B on a 32-bit Linux, whose
+/// `time_t` and `long` are 32 bits. Returned BY VALUE from `clock_now`; `libc::timespec` is
+/// `#[repr(C)]` with the same two fields of the same host types, so the return follows the C ABI
+/// of the target without a shim.
 pub type Clock = libc::timespec;
-/// pico `z_time_t`: `struct timeval`, the WALL clock, 16 B.
+/// pico `z_time_t`: `struct timeval`, the WALL clock, of the host's `time_t` and `suseconds_t`.
 pub type WallTime = libc::timeval;
+
+/// A field of the host's `timespec` or `timeval` as `i64`. Those fields are `time_t`, `long` and
+/// `suseconds_t`: 64 bits on a 64-bit Linux, 32 bits on a 32-bit one, and `suseconds_t` is 32 bits
+/// on macOS. The arithmetic below is done in 64 bits whatever their width, so a difference of two
+/// readings cannot overflow where the C library's type would.
+fn wide<T: Into<i64>>(field: T) -> i64 {
+    field.into()
+}
 
 // ---------------------------------------------------------------------------
 // Memory and sleep
@@ -87,20 +95,26 @@ pub fn clock_now() -> Clock {
 /// rather than the obvious `Duration` subtraction matters because the C side may hand
 /// back a clock it advanced past now, and a `Duration` subtraction would panic where
 /// pico returns zero. The seconds unit uses only `tv_sec`, so a 0.9 s gap is 0.
+///
+/// An interval past what the host's `unsigned long` holds is that type's largest value. On a
+/// 32-bit host that is about 71 minutes of microseconds, which pico computes in a 32-bit `long`
+/// and overflows (undefined in C, a wrap in practice); a wrapped interval reads as a short one, so
+/// a timeout that compares against it would never expire. The Windows layer saturates the same
+/// way (`arith::ticks_elapsed`).
 pub fn clock_elapsed_between(instant: &Clock, epoch: &Clock, unit: Unit) -> c_ulong {
     let (sec_scale, nsec_div): (i64, i64) = match unit {
         Unit::Micro => (1_000_000, 1_000),
         Unit::Milli => (1_000, 1_000_000),
         Unit::Second => (1, 0),
     };
-    let secs: i64 = instant.tv_sec - epoch.tv_sec;
+    let secs = wide(instant.tv_sec) - wide(epoch.tv_sec);
     let mut elapsed = secs.saturating_mul(sec_scale);
     if nsec_div != 0 {
-        let nsecs: i64 = instant.tv_nsec - epoch.tv_nsec;
+        let nsecs = wide(instant.tv_nsec) - wide(epoch.tv_nsec);
         elapsed = elapsed.saturating_add(nsecs / nsec_div);
     }
     if elapsed > 0 {
-        elapsed as c_ulong
+        c_ulong::try_from(elapsed).unwrap_or(c_ulong::MAX)
     } else {
         0
     }
@@ -113,22 +127,20 @@ pub fn clock_elapsed_between(instant: &Clock, epoch: &Clock, unit: Unit) -> c_ul
 /// suffices. Reproduced rather than replaced by a `Duration` addition because a caller
 /// may then hand the advanced clock to the elapsed functions, whose clamp is what
 /// makes a FUTURE instant read as 0.
+///
+/// The two parts are converted as pico converts them, `(time_t)` and `(long int)`: the seconds
+/// wrap into the host's `time_t` as that cast does, and the nanoseconds part is below 1e9, which
+/// a `long` holds on every host, so the sum with `tv_nsec` stays below 2e9 on a 32-bit one too.
 pub fn clock_advance(clock: &mut Clock, unit: Unit, duration: c_ulong) {
     let (secs, nsecs) = match unit {
-        Unit::Micro => (
-            (duration / 1_000_000) as i64,
-            ((duration % 1_000_000) * 1_000) as i64,
-        ),
-        Unit::Milli => (
-            (duration / 1_000) as i64,
-            ((duration % 1_000) * 1_000_000) as i64,
-        ),
-        Unit::Second => (duration as i64, 0),
+        Unit::Micro => (duration / 1_000_000, (duration % 1_000_000) * 1_000),
+        Unit::Milli => (duration / 1_000, (duration % 1_000) * 1_000_000),
+        Unit::Second => (duration, 0),
     };
-    clock.tv_sec += secs;
-    clock.tv_nsec += nsecs;
+    clock.tv_sec = clock.tv_sec.wrapping_add(secs as libc::time_t);
+    clock.tv_nsec += nsecs as libc::c_long;
     if clock.tv_nsec >= 1_000_000_000 {
-        clock.tv_sec += 1;
+        clock.tv_sec = clock.tv_sec.wrapping_add(1);
         clock.tv_nsec -= 1_000_000_000;
     }
 }
@@ -150,14 +162,6 @@ pub fn wall_now() -> WallTime {
     now
 }
 
-/// A `timeval`'s microseconds as `i64`. `suseconds_t` is `i64` on Linux and `i32` on
-/// macOS, so this is an identity on one host and a widening on the other, and the two
-/// lints name exactly those two cases.
-#[allow(clippy::unnecessary_cast, clippy::useless_conversion)]
-fn usec_i64(usec: libc::suseconds_t) -> i64 {
-    usec as i64
-}
-
 /// Elapsed time in `unit` on the WALL clock since `time`.
 ///
 /// No clamp, unlike the monotonic family: upstream casts a signed difference straight
@@ -172,13 +176,14 @@ pub fn wall_elapsed(time: &WallTime, unit: Unit) -> c_ulong {
         Unit::Second => (1, 0),
     };
     let now = wall_now();
-    let secs: i64 = now.tv_sec - time.tv_sec;
+    let secs = wide(now.tv_sec) - wide(time.tv_sec);
     let mut elapsed = secs.saturating_mul(sec_scale);
     if usec_div != 0 {
-        let usecs: i64 = usec_i64(now.tv_usec) - usec_i64(time.tv_usec);
+        let usecs = wide(now.tv_usec) - wide(time.tv_usec);
         elapsed = elapsed.saturating_add(usecs / usec_div);
     }
-    // The wrapping cast IS the contract here.
+    // The wrapping cast IS the contract here. Truncating the 64-bit result to a 32-bit host's
+    // `unsigned long` gives what pico's 32-bit `long` arithmetic wraps to.
     elapsed as c_ulong
 }
 
@@ -309,16 +314,17 @@ mod threads {
     use crate::result::{ZResult, Z_OK};
     use crate::sync::{Z_ERR_SYSTEM_GENERIC, Z_ETIMEDOUT};
 
-    /// pico `_z_mutex_t`: `pthread_mutex_t`. 40 B on Linux, measured; 64 B on macOS.
+    /// pico `_z_mutex_t`: `pthread_mutex_t`. 40 B on x86_64 Linux, measured; 24 B on 32-bit x86
+    /// glibc; 64 B on macOS.
     pub type RawMutex = libc::pthread_mutex_t;
     /// pico `_z_condvar_t`: `pthread_cond_t`, 48 B.
     pub type RawCondvar = libc::pthread_cond_t;
-    /// pico `_z_task_t`: `pthread_t`, 8 B (4 B on QNX, where it is an `int`).
+    /// pico `_z_task_t`: `pthread_t`, a word (4 B on QNX, where it is an `int`).
     pub type RawTask = libc::pthread_t;
     /// pico `z_task_attr_t`: `pthread_attr_t`. 56 B on x86_64 glibc and on Android's C library; 64 B
     /// on aarch64 glibc (measured with a Yocto kirkstone SDK's glibc 2.35 headers) and on macOS,
     /// where Darwin's pthread types are a signature word plus an opaque block
-    /// (`__sig` and `__opaque[56]`).
+    /// (`__sig` and `__opaque[56]`); 36 B on 32-bit x86 glibc.
     pub type TaskAttr = libc::pthread_attr_t;
 
     /// The value of a task that was never started or has been joined or detached.
@@ -341,18 +347,29 @@ mod threads {
     // 8), `pthread_mutex_t` 8 B (align 4), `pthread_cond_t` 8 B (align 4).
     #[cfg(target_os = "nto")]
     const TASK_ATTR_BYTES: usize = 104;
+    // 32-bit x86 glibc: `__SIZEOF_PTHREAD_ATTR_T` of its `bits/pthreadtypes-arch.h`, which the test
+    // `owned_sync_types_match_the_host_c_compilers_pthread_sizes` measures with the C compiler in
+    // its 32-bit mode.
+    #[cfg(all(target_os = "linux", target_env = "gnu", target_arch = "x86"))]
+    const TASK_ATTR_BYTES: usize = 36;
     #[cfg(not(any(
         target_os = "macos",
         target_os = "nto",
-        all(target_os = "linux", target_env = "gnu", target_arch = "aarch64")
+        all(
+            target_os = "linux",
+            target_env = "gnu",
+            any(target_arch = "aarch64", target_arch = "x86")
+        )
     )))]
     const TASK_ATTR_BYTES: usize = 56;
 
-    /// What `sizeof(pthread_t)` is on this host: a pointer-sized value everywhere measured but QNX.
+    /// What `sizeof(pthread_t)` is on this host: a pointer-sized value everywhere measured but QNX
+    /// (glibc's `unsigned long`, which is a word on a 32-bit Linux as on a 64-bit one, and Darwin's
+    /// pointer).
     #[cfg(target_os = "nto")]
     const TASK_BYTES: usize = 4;
     #[cfg(not(target_os = "nto"))]
-    const TASK_BYTES: usize = 8;
+    const TASK_BYTES: usize = std::mem::size_of::<*const c_void>();
 
     const _: () = {
         assert!(std::mem::size_of::<RawTask>() == TASK_BYTES);
@@ -600,8 +617,13 @@ pub use threads::*;
 mod tests {
     use super::*;
 
-    fn at(tv_sec: i64, tv_nsec: i64) -> Clock {
+    fn at(tv_sec: libc::time_t, tv_nsec: libc::c_long) -> Clock {
         libc::timespec { tv_sec, tv_nsec }
+    }
+
+    /// An `unsigned long` of this host as `u64`, whichever width it has.
+    fn as_u64<T: Into<u64>>(value: T) -> u64 {
+        value.into()
     }
 
     /// The carry in `clock_advance` is ONE borrow, and it has to fire when the
@@ -644,6 +666,22 @@ mod tests {
         assert_eq!(clock_elapsed_between(&early, &late, Unit::Second), 0);
     }
 
+    /// An interval past what this host's `unsigned long` holds reads as that type's largest
+    /// value, never as a short interval it wrapped to: 5,000 s in microseconds is past a 32-bit
+    /// `unsigned long` and well inside a 64-bit one, and in milliseconds inside both.
+    #[test]
+    fn an_interval_past_the_hosts_unsigned_long_saturates() {
+        let (epoch, instant) = (at(0, 0), at(5_000, 0));
+        assert_eq!(
+            as_u64(clock_elapsed_between(&instant, &epoch, Unit::Micro)),
+            5_000_000_000_u64.min(as_u64(c_ulong::MAX)),
+        );
+        assert_eq!(
+            clock_elapsed_between(&instant, &epoch, Unit::Milli),
+            5_000_000
+        );
+    }
+
     /// The WALL clock family does NOT clamp: upstream casts a signed difference to
     /// `unsigned long`, so a future timestamp wraps. Pinned because it is the
     /// opposite of the monotonic family above, and "obviously both should clamp" is
@@ -656,27 +694,34 @@ mod tests {
             tv_usec: now.tv_usec,
         };
         let elapsed = wall_elapsed(&future, Unit::Second);
+        // Past half the type's range: a wrap of the whole 64-bit difference on a 64-bit host
+        // (a difference truncated to 32 bits there would stay below it), the 32-bit wrap
+        // pico's own `long` gives on a 32-bit one.
         assert!(
-            elapsed > u64::from(u32::MAX) as c_ulong,
+            elapsed > c_ulong::MAX / 2,
             "a future wall time must WRAP (got {elapsed}), which is what upstream's \
              unsigned cast does"
         );
     }
 
     /// The ABI claim this layer rests on, asserted rather than assumed: the owned
-    /// structs a C program stack-allocates through pico's header are 40 (64 on macOS)
-    /// and 48 bytes, and those are the sizes the pthread objects wz initialises in
-    /// place occupy.
+    /// structs a C program stack-allocates through pico's header are 40 (64 on macOS,
+    /// 24 on 32-bit x86 glibc) and 48 bytes, and those are the sizes the pthread
+    /// objects wz initialises in place occupy.
     #[cfg(feature = "multi-thread")]
     #[test]
     fn owned_sync_types_match_picos_measured_sizes() {
         // Linux: measured. macOS: `__sig` plus `__opaque[56]` for the mutex and
         // `__opaque[40]` for the condvar, read off Darwin's layout.
         // QNX: measured with the SDP's compiler, 8 B each.
+        // 32-bit x86 glibc: `__SIZEOF_PTHREAD_MUTEX_T` of its header, which the test below
+        // measures with the C compiler in its 32-bit mode.
         let mutex_bytes = if cfg!(target_os = "macos") {
             64
         } else if cfg!(target_os = "nto") {
             8
+        } else if cfg!(all(target_os = "linux", target_arch = "x86")) {
+            24
         } else {
             40
         };
@@ -690,7 +735,9 @@ mod tests {
     // `pthread_*_t` (system/platform/unix.h), so the host C compiler's own `sizeof` is
     // the layout pico programs see, and the Rust types must be exactly that large on
     // every host that builds them. A missing compiler fails the test; it is never a
-    // skip.
+    // skip. A 32-bit x86 build is tested on a 64-bit host whose compiler emits 64-bit
+    // code unless told otherwise, and its 64-bit sizes are not this build's, so the
+    // probe is compiled with `-m32` there, as the linker of the build itself is.
     #[cfg(feature = "multi-thread")]
     #[test]
     fn owned_sync_types_match_the_host_c_compilers_pthread_sizes() {
@@ -703,7 +750,13 @@ mod tests {
         let exe =
             std::env::temp_dir().join(format!("wz_capi_pico_pthread_sizes_{}", std::process::id()));
         let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+        let width: &[&str] = if cfg!(target_arch = "x86") {
+            &["-m32"]
+        } else {
+            &[]
+        };
         let mut compile = Command::new(&cc)
+            .args(width)
             .args(["-x", "c", "-", "-o"])
             .arg(&exe)
             .stdin(Stdio::piped())

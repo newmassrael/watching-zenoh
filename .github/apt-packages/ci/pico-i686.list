@@ -1,0 +1,5 @@
+image ubuntu22
+clang
+gcc-multilib
+libclang-dev
+pkg-config

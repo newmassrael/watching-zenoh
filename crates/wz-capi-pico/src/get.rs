@@ -747,6 +747,12 @@ impl z_get_options_t {
 /// nobody reads) or a harmful one (a field displaced under a caller's writes),
 /// and only an OFFSET assertion tells those apart. So the field that moved is
 /// pinned by offset, not merely counted.
+///
+/// Every number here is the 64-bit host's (the crate root says how a 32-bit build is held): the
+/// struct mixes pointers with a `uint64_t` whose alignment a 32-bit ABI decides (4 on 32-bit x86
+/// Linux, 8 on Windows), so its 32-bit offsets are not these halved, and the `repr(C)` mirror of
+/// the header's fields takes them from the target.
+#[cfg(target_pointer_width = "64")]
 const _: () = {
     assert!(std::mem::align_of::<z_get_options_t>() == 8);
     // Every field AFTER the feature-conditional region, by offset. These are
@@ -766,7 +772,7 @@ const _: () = {
     );
 };
 
-#[cfg(feature = "unstable-api")]
+#[cfg(all(feature = "unstable-api", target_pointer_width = "64"))]
 const _: () = {
     assert!(std::mem::size_of::<z_get_options_t>() == 80);
     assert!(std::mem::offset_of!(z_get_options_t, source_info) == 56);
@@ -774,7 +780,7 @@ const _: () = {
     assert!(std::mem::offset_of!(z_get_options_t, accept_replies) == 72);
 };
 
-#[cfg(not(feature = "unstable-api"))]
+#[cfg(all(not(feature = "unstable-api"), target_pointer_width = "64"))]
 const _: () = {
     assert!(std::mem::size_of::<z_get_options_t>() == 64);
     assert!(std::mem::offset_of!(z_get_options_t, accept_replies) == 56);
@@ -1657,7 +1663,11 @@ pub unsafe extern "C" fn z_reply_err_payload(
 // cdylib did not. `z_owned_reply_err_t` is 72 B MEASURED against the built
 // library's own headers.
 
-/// pico `z_owned_reply_err_t` — `{ _z_value_t _val }`, 72 B measured.
+/// What a `z_owned_reply_err_t` takes: pico's 72 B on a 64-bit host, and on a 32-bit one the
+/// handle alone, which is never more than pico's struct there (`crate::abi::element_bytes`).
+const REPLY_ERR_BYTES: usize = crate::abi::element_bytes(72);
+
+/// pico `z_owned_reply_err_t` — `{ _z_value_t _val }`, 72 B measured on a 64-bit host.
 ///
 /// The handle model, as everywhere else in this crate: this crate's boxed
 /// marshal in slot 0, inert padding to upstream's size. The padding is what a
@@ -1665,7 +1675,7 @@ pub unsafe extern "C" fn z_reply_err_payload(
 #[repr(C)]
 pub struct z_owned_reply_err_t {
     handle: *mut c_void,
-    _pad: [u8; 64],
+    _pad: [u8; REPLY_ERR_BYTES - std::mem::size_of::<*mut c_void>()],
 }
 
 /// Moved reply error (pico `z_moved_reply_err_t`).
@@ -1675,14 +1685,14 @@ pub struct z_moved_reply_err_t {
 }
 
 const _: () = {
-    assert!(std::mem::size_of::<z_owned_reply_err_t>() == 72);
+    assert!(std::mem::size_of::<z_owned_reply_err_t>() == REPLY_ERR_BYTES);
 };
 
 impl z_owned_reply_err_t {
     fn null_value() -> Self {
         Self {
             handle: std::ptr::null_mut(),
-            _pad: [0u8; 64],
+            _pad: [0u8; REPLY_ERR_BYTES - std::mem::size_of::<*mut c_void>()],
         }
     }
 }

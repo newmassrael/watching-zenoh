@@ -402,19 +402,23 @@ pub unsafe extern "C" fn ze_advanced_publisher_delete_options_default(
     (*options).source_info = std::ptr::null_mut();
 }
 
+/// The padding after the handle of an advanced publisher: to pico's 224 B on a 64-bit host, none
+/// on a 32-bit one (`crate::abi::element_bytes`).
+const PUBLISHER_PAD: usize = crate::abi::element_bytes(224) - std::mem::size_of::<*mut c_void>();
+
 /// Owned advanced publisher (pico `ze_owned_advanced_publisher_t`, 224 B
-/// measured). Handle in slot 0, zero-padded to pico's size.
+/// measured on a 64-bit host). Handle in slot 0, zero-padded to pico's size.
 #[repr(C)]
 pub struct ze_owned_advanced_publisher_t {
     pub(crate) handle: *mut c_void,
-    pub(crate) _pad: [u8; 216],
+    pub(crate) _pad: [u8; PUBLISHER_PAD],
 }
 
 /// Loaned advanced publisher, same layout.
 #[repr(C)]
 pub struct ze_loaned_advanced_publisher_t {
     pub(crate) handle: *mut c_void,
-    pub(crate) _pad: [u8; 216],
+    pub(crate) _pad: [u8; PUBLISHER_PAD],
 }
 
 /// Moved advanced publisher.
@@ -428,7 +432,7 @@ impl ze_owned_advanced_publisher_t {
     pub(crate) fn null_value() -> Self {
         Self {
             handle: std::ptr::null_mut(),
-            _pad: [0u8; 216],
+            _pad: [0u8; PUBLISHER_PAD],
         }
     }
 }
@@ -850,19 +854,23 @@ pub unsafe extern "C" fn ze_advanced_subscriber_options_default(
     (*options).subscriber_detection_metadata = std::ptr::null();
 }
 
+/// The padding after the handle of an advanced subscriber: to pico's 152 B on a 64-bit host, none
+/// on a 32-bit one (`crate::abi::element_bytes`).
+const SUBSCRIBER_PAD: usize = crate::abi::element_bytes(152) - std::mem::size_of::<*mut c_void>();
+
 /// Owned advanced subscriber (pico `ze_owned_advanced_subscriber_t`, 152 B
-/// measured).
+/// measured on a 64-bit host).
 #[repr(C)]
 pub struct ze_owned_advanced_subscriber_t {
     pub(crate) handle: *mut c_void,
-    pub(crate) _pad: [u8; 144],
+    pub(crate) _pad: [u8; SUBSCRIBER_PAD],
 }
 
 /// Loaned advanced subscriber, same layout.
 #[repr(C)]
 pub struct ze_loaned_advanced_subscriber_t {
     pub(crate) handle: *mut c_void,
-    pub(crate) _pad: [u8; 144],
+    pub(crate) _pad: [u8; SUBSCRIBER_PAD],
 }
 
 /// Moved advanced subscriber.
@@ -876,7 +884,7 @@ impl ze_owned_advanced_subscriber_t {
     pub(crate) fn null_value() -> Self {
         Self {
             handle: std::ptr::null_mut(),
-            _pad: [0u8; 144],
+            _pad: [0u8; SUBSCRIBER_PAD],
         }
     }
 }
@@ -1487,13 +1495,27 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers(
 // Compile-time byte-compat guard. Every size here is MEASURED against the
 // pinned pico headers with a real C compiler; a drift is a stack smash in the
 // caller's frame, not a Rust error, so it is pinned at build time.
+//
+// The miss is a global id and a count, the same bytes on every host; the closure and the
+// listener are three words on any host; the publisher and the subscriber are a handle padded to
+// the 64-bit measurement, and the handle alone elsewhere (`crate::abi::element_bytes`).
 const _: () = {
     use core::mem::size_of;
+    const WORD: usize = size_of::<*mut c_void>();
     assert!(size_of::<ze_miss_t>() == 24);
-    assert!(size_of::<ze_owned_closure_miss_t>() == 24);
-    assert!(size_of::<ze_owned_advanced_publisher_t>() == 224);
-    assert!(size_of::<ze_owned_advanced_subscriber_t>() == 152);
-    assert!(size_of::<ze_owned_sample_miss_listener_t>() == 24);
+    assert!(size_of::<ze_owned_closure_miss_t>() == 3 * WORD);
+    assert!(size_of::<ze_owned_advanced_publisher_t>() == crate::abi::element_bytes(224));
+    assert!(size_of::<ze_owned_advanced_subscriber_t>() == crate::abi::element_bytes(152));
+    assert!(size_of::<ze_owned_sample_miss_listener_t>() == 3 * WORD);
+};
+
+// The option structs, as the 64-bit host lays them out. They mix pointers, `size_t`, `bool`,
+// enums and `uint64_t`, whose alignment a 32-bit ABI decides (4 on 32-bit x86 Linux, 8 on
+// Windows), so their 32-bit sizes are not these halved; the `repr(C)` mirrors of the header's
+// fields take them from the target (the crate root says how a 32-bit build is held).
+#[cfg(target_pointer_width = "64")]
+const _: () = {
+    use core::mem::size_of;
     // The embedded `z_publisher_options_t` gains `allowed_destination` with
     // `local-subscriber` (24 -> 32 B), which moves everything after it.
     assert!(
@@ -1939,7 +1961,7 @@ mod tests {
         });
         let owned = ze_owned_advanced_subscriber_t {
             handle: Box::into_raw(state).cast::<c_void>(),
-            _pad: [0u8; 144],
+            _pad: [0u8; SUBSCRIBER_PAD],
         };
         (owned, set)
     }

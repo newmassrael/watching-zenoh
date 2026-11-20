@@ -232,6 +232,9 @@ _add(
     "one of them; the exception is BINDGEN_FREE (item 861).",
     [
         "ci",
+        # Layer C1p32's own job: the pico C ABI library built for i686, whose
+        # host preset reaches zenoh-pico-sys (bindgen over pico's headers).
+        "pico-i686",
         # R3016 -- Layers B and B2 and the sce-codegen build left
         # `validate-codegen` for this job and took the install line with them.
         "codegen-verify",
@@ -316,6 +319,7 @@ _add(
     "libclang-dev above and carried on the same jobs.",
     [
         "ci",
+        "pico-i686",
         "codegen-verify",
         "verdict-legs",
         "session-planes",
@@ -600,6 +604,7 @@ _add(
     "R311y865.",
     [
         "ci",
+        "pico-i686",
         "validate-codegen",
         "codegen-verify",
         "verdict-legs",
@@ -666,6 +671,12 @@ _add(
     ],
 )
 _add("python3-yaml", "the workflow-shape lints Layer C0 runs on ci.yml.", ["ci"])
+# Layer C1p32 builds and runs the pico C ABI and the crates it links for `i686-unknown-linux-gnu`.
+# rustc links that target through `cc -m32`, `ring`'s build script compiles its C and assembly
+# with the same, and the unix host layer's pthread probe compiles a 32-bit program to compare its
+# sizes with; the runner's gcc has no 32-bit mode or 32-bit C library without this package.
+_add("gcc-multilib", "the 32-bit mode of the C compiler and the 32-bit C library the i686 target "
+     "of Layer C1p32 links, builds `ring` and probes pthread sizes with (`cc -m32`).", ["pico-i686"])
 # Layer C1ob's own job builds the four consumer bundles of deploy/offline-build.json and nothing
 # else. `wz-ap-demo` at `preset-ap-full` holds librocksdb-sys, whose build script loads libclang
 # through bindgen: the entry's `libclang` tool. `perl` is not here, measured: the vendored ring has

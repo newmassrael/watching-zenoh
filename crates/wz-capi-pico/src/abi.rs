@@ -496,7 +496,11 @@ macro_rules! impl_value_ownership {
 pub(crate) use impl_value_ownership;
 
 /// The bytes an owned element block (`impl_boxed_element!`) takes: `lp64`, pico's size as its
-/// header measures on a 64-bit host, on a 64-bit target; the handle alone on any other.
+/// header measures on a 64-bit host, on a 64-bit target; the handle alone on any other. Every
+/// owned type of this crate that is a handle padded with BYTES to a 64-bit measurement (an error
+/// reply, the advanced publisher and subscriber) is sized by it too: bytes do not halve with the
+/// word, so a pad of them written for 64 bits would make the type larger than pico's on a 32-bit
+/// host. A type padded with WORDS follows the word on its own.
 ///
 /// The block holds the handle in its first word and nothing this crate reads after it, so what a
 /// C program's storage must hold is the handle, and the padding exists only to make the block the

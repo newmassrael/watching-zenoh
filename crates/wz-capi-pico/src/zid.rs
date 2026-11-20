@@ -412,16 +412,19 @@ mod tests {
     /// closure OFFSETS matter more here than anywhere else in this crate: pico's
     /// `z_closure` is a macro that writes the fields directly, so a wrong order
     /// corrupts memory instead of failing to link.
+    ///
+    /// The closure is three pointers, 24 B on a 64-bit host and a word each on any.
     #[test]
     fn closure_zid_abi_matches_pico() {
+        let word = core::mem::size_of::<*mut c_void>();
         assert_eq!(core::mem::size_of::<z_id_t>(), 16);
-        assert_eq!(core::mem::size_of::<z_owned_closure_zid_t>(), 24);
-        assert_eq!(core::mem::size_of::<z_moved_closure_zid_t>(), 24);
+        assert_eq!(core::mem::size_of::<z_owned_closure_zid_t>(), 3 * word);
+        assert_eq!(core::mem::size_of::<z_moved_closure_zid_t>(), 3 * word);
         let closure = z_owned_closure_zid_t::null_value();
         let base = &closure as *const _ as usize;
         assert_eq!(&closure.context as *const _ as usize - base, 0);
-        assert_eq!(&closure.call as *const _ as usize - base, 8);
-        assert_eq!(&closure.drop as *const _ as usize - base, 16);
+        assert_eq!(&closure.call as *const _ as usize - base, word);
+        assert_eq!(&closure.drop as *const _ as usize - base, 2 * word);
     }
 
     /// `_z_id_len` strips TRAILING zeros only, and reports 0 for the empty id.

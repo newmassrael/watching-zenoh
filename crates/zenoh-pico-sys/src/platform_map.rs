@@ -65,6 +65,8 @@ mod platform_map_tests {
             ("x86_64-apple-darwin", "ZENOH_MACOS"),
             ("x86_64-pc-windows-msvc", "ZENOH_WINDOWS"),
             ("x86_64-pc-windows-gnu", "ZENOH_WINDOWS"),
+            ("i686-pc-windows-msvc", "ZENOH_WINDOWS"),
+            ("i686-unknown-linux-gnu", "ZENOH_LINUX"),
         ] {
             assert_eq!(platform_definition(target), Some(want), "{target}");
         }

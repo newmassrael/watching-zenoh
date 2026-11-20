@@ -444,11 +444,24 @@ impl z_liveliness_get_options_t {
 /// (`crates/wz-integration-tests/tests/pico_abi_option_layout.rs`) is what
 /// notices upstream MOVING the field; this const is the compile-time floor under
 /// it. Without the unstable API the struct is the 8 B timeout alone.
+///
+/// The offset holds on every host: the token follows an eight-byte `uint64_t`. The size and the
+/// alignment are the 64-bit host's; on a 32-bit one they follow that ABI's alignment of a
+/// `uint64_t` (4 on 32-bit x86 Linux, which makes the struct 12 B; 8 on Windows and ARM, 16 B),
+/// which the `repr(C)` mirror of the same two fields takes from the target.
 #[cfg(all(feature = "liveliness-get", feature = "unstable-api"))]
+const _: () = {
+    assert!(core::mem::offset_of!(z_liveliness_get_options_t, cancellation_token) == 8);
+};
+
+#[cfg(all(
+    feature = "liveliness-get",
+    feature = "unstable-api",
+    target_pointer_width = "64"
+))]
 const _: () = {
     assert!(core::mem::size_of::<z_liveliness_get_options_t>() == 16);
     assert!(core::mem::align_of::<z_liveliness_get_options_t>() == 8);
-    assert!(core::mem::offset_of!(z_liveliness_get_options_t, cancellation_token) == 8);
 };
 
 #[cfg(all(feature = "liveliness-get", not(feature = "unstable-api")))]
