@@ -69,6 +69,7 @@ pub const CAPABILITIES: &[(&str, &[&str])] = &[
     ("e2e-supervision", &["core", "pico"]),
     ("replay-cache", &["core", "pico"]),
     ("message-catalog", &["core", "pico"]),
+    ("message-payload", &["core", "pico"]),
     ("app-transport", &["core", "pico"]),
     ("shared-key-ids", &["core", "pico", "c"]),
     ("rx-callback-offload", &["core", "c"]),
