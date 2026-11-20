@@ -8001,7 +8001,10 @@ mod storage_policy_tests {
     }
 
     /// Fill to `MAX_QUERYABLES`, then register one more: refused with the table as it
-    /// was where the capacity is hard, taken where it is not.
+    /// was where the capacity is hard or the build's quota is the capacity, taken where
+    /// neither refuses. A fixed build states the capacity as every table's quota, so a
+    /// table it builds on the heap policy is held to it too: the bound is the session's,
+    /// and the storage is only how a table holds it.
     fn fill_to_n_then_refuse_at_n_plus_one<P: Storage>() {
         let mut reg: QueryableRegistry<Noop, P> = QueryableRegistry::default();
         for _ in 0..caps::MAX_QUERYABLES {
@@ -8009,8 +8012,10 @@ mod storage_policy_tests {
         }
         assert_eq!(reg.len(), caps::MAX_QUERYABLES);
 
+        let held_to_n = P::ENFORCES_CAPACITY
+            || !crate::limits::MaxQueryablesHeld::default().admits(caps::MAX_QUERYABLES + 1);
         let beyond = reg.register_sink("a/b", Locality::Any, false, Noop);
-        if P::ENFORCES_CAPACITY {
+        if held_to_n {
             assert_eq!(beyond.err(), Some(RegisterError::TableFull));
             assert_eq!(reg.len(), caps::MAX_QUERYABLES);
         } else {
