@@ -152,6 +152,12 @@ impl<S: StreamSocket + 'static> StreamSocket for TlsStream<S> {
         }
     }
 
+    // The channel's records leave through the stream under it, which takes every byte before it
+    // returns: that stream's room is the channel's.
+    fn wait_writable(&self, timeout_us: u64) -> bool {
+        self.lower.socket.wait_writable(timeout_us)
+    }
+
     fn try_read(&self, buf: &mut [u8]) -> Result<Option<usize>, Self::Error> {
         let mut session = self
             .session

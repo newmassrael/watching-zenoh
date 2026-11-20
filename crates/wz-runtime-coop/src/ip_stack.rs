@@ -28,7 +28,8 @@ use wz_session_core::byte_cells::ByteBuf;
 #[cfg(feature = "session-slot")]
 use wz_session_core::byte_cells::ByteSource;
 use wz_session_core::link::{
-    BoxedLinkDriver, LinkEndpoints, LinkSendOutcome, LostCause, TxSlot, TxSlotGrant,
+    BoxedLinkDriver, LinkEndpoints, LinkSendOutcome, LostCause, RoomAnswer, RoomWait, TxSlot,
+    TxSlotGrant,
 };
 #[cfg(feature = "alloc")]
 use wz_session_core::link::{LinkKind, LinkSubject, RxFrame};
@@ -110,6 +111,11 @@ where
 {
     fn send_blocking(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome {
         either!(self, link => link.send_blocking(bytes, reliability))
+    }
+
+    // Forwarded, or every session over this driver would find room on a stream that has none.
+    fn wait_for_room(&self, priority: Priority, wait: RoomWait) -> RoomAnswer {
+        either!(self, link => link.wait_for_room(priority, wait))
     }
 
     fn tx_slot_acquire(&self, want: usize, priority: Priority) -> Option<TxSlotGrant> {

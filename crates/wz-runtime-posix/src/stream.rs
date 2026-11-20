@@ -304,6 +304,25 @@ impl StreamSocket for PosixTcpSocket {
         unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
     }
 
+    fn wait_writable(&self, timeout_us: u64) -> bool {
+        let timeout_ms = c_int::try_from(timeout_us.div_ceil(1_000)).unwrap_or(c_int::MAX);
+        let mut pfd = libc::pollfd {
+            fd: self.fd,
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        loop {
+            // SAFETY: one live `pollfd`; the timeout bounds the wait.
+            let ready = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+            if ready < 0 && errno() == libc::EINTR {
+                continue;
+            }
+            // POLLOUT, or an error or hang-up the write that follows reports. A wait that failed
+            // otherwise is a stream that did not become writable.
+            return ready > 0 && pfd.revents != 0;
+        }
+    }
+
     fn try_read(&self, buf: &mut [u8]) -> Result<Option<usize>, PosixNetError> {
         // SAFETY: `buf` is live and writable for its length.
         let got = unsafe {
@@ -422,6 +441,39 @@ mod tests {
             }
         }
         out
+    }
+
+    /// A stream whose peer does not read stops being writable once the stacks hold all they
+    /// will, and is writable again once the peer reads: the room a sender of the cooperative
+    /// engine waits for. The writes are small enough that a stream that says it is writable takes
+    /// each without blocking.
+    #[test]
+    fn a_stream_the_peer_does_not_read_stops_being_writable_until_it_reads() {
+        let (near, mut far) = pair();
+        assert!(near.wait_writable(1_000), "an empty stream takes bytes");
+        let chunk = [0x5au8; 1024];
+        let mut written = 0usize;
+        while near.wait_writable(1_000) {
+            near.send_parts(&[&chunk])
+                .expect("a write the stream said it would take");
+            written += chunk.len();
+            assert!(
+                written < 256 << 20,
+                "the stream took {written} bytes and never filled"
+            );
+        }
+        let mut buf = [0u8; 64 * 1024];
+        let mut read = 0usize;
+        while !near.wait_writable(0) {
+            let n = far.read(&mut buf).expect("the far end reads");
+            assert_ne!(n, 0, "the stream ended");
+            read += n;
+            assert!(read <= written, "read more than was written");
+        }
+        assert!(
+            near.wait_writable(1_000),
+            "read down, the stream takes bytes again"
+        );
     }
 
     #[test]

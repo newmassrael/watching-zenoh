@@ -316,6 +316,20 @@ pub(crate) fn poll_readable(socket: ws::SOCKET, timeout_ms: i32) -> bool {
     ready > 0 && fd.revents != 0
 }
 
+/// Whether `socket` takes more bytes (or has failed, which the write that follows reports) within
+/// `timeout_ms` milliseconds; at once when it already does. A failed wait is a socket that did not
+/// become writable.
+pub(crate) fn poll_writable(socket: ws::SOCKET, timeout_ms: i32) -> bool {
+    let mut fd = ws::WSAPOLLFD {
+        fd: socket,
+        events: ws::POLLWRNORM,
+        revents: 0,
+    };
+    // SAFETY: one live `WSAPOLLFD`; the timeout bounds the wait.
+    let ready = unsafe { ws::WSAPoll(&mut fd, 1, timeout_ms) };
+    ready > 0 && fd.revents != 0
+}
+
 /// The address an IPv4 address is in Winsock's form.
 pub(crate) fn in_addr(address: Ipv4Addr) -> ws::IN_ADDR {
     ws::IN_ADDR {

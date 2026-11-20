@@ -253,6 +253,21 @@ impl Held {
         });
     }
 
+    /// Wait up to `timeout_ms` for the program to take bytes again, offering what is held on the
+    /// way: `true` once the link is open and holds nothing for the program (or has ended, which
+    /// the send that follows reports).
+    fn wait_writable(&self, timeout_ms: u64) -> bool {
+        let mut writable = false;
+        wait::wait_while(timeout_ms, |waker| {
+            let _ = self.flush();
+            writable = self
+                .transport
+                .with(|table| table.poll_writable(self.handle, waker));
+            !writable
+        });
+        writable
+    }
+
     /// What a read just made let the program know of: the links it refused that are read down.
     fn tell_drained(&self) {
         let drained = self.transport.with(|table| table.take_drained());
@@ -290,6 +305,12 @@ impl StreamSocket for AppStreamSocket {
 
     fn wait_readable(&self, timeout_ms: c_int) {
         self.held.wait_readable(timeout_ms);
+    }
+
+    // The program's would-block is the stream's full buffer: a link that holds bytes for the
+    // program takes no more until the program says it is writable.
+    fn wait_writable(&self, timeout_us: u64) -> bool {
+        self.held.wait_writable(timeout_us.div_ceil(1_000))
     }
 
     fn try_read(&self, buf: &mut [u8]) -> Result<Option<usize>, AppLinkError> {

@@ -29,8 +29,8 @@ wz_runtime_coop::with_heap_link_seams! {
 }
 
 use super::{
-    close, keep_from_children, last_error, name_of, open_socket, poll_readable, set_flag,
-    set_nonblocking, RawAddr, WindowsNetError,
+    close, keep_from_children, last_error, name_of, open_socket, poll_readable, poll_writable,
+    set_flag, set_nonblocking, RawAddr, WindowsNetError,
 };
 
 /// The most parts one write gathers: a length and its batch, with room to spare.
@@ -290,6 +290,13 @@ impl StreamSocket for WindowsTcpSocket {
 
     fn wait_readable(&self, timeout_ms: c_int) {
         poll_readable(self.socket, timeout_ms);
+    }
+
+    fn wait_writable(&self, timeout_us: u64) -> bool {
+        poll_writable(
+            self.socket,
+            i32::try_from(timeout_us.div_ceil(1_000)).unwrap_or(i32::MAX),
+        )
     }
 
     fn try_read(&self, buf: &mut [u8]) -> Result<Option<usize>, WindowsNetError> {
