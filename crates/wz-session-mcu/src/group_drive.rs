@@ -227,7 +227,6 @@ use alloc::collections::VecDeque;
 ))]
 use core::cell::RefCell;
 #[cfg(all(
-    feature = "session-slot",
     feature = "alloc",
     any(
         feature = "codec-response",
@@ -263,8 +262,16 @@ use wz_session_core::multicast_reply_sink::MulticastReplyEnqueue;
 /// the busy-poll loop is single-task, so the sink (which pushes) and `next_tx`
 /// (which pops) run at different points of the SAME iteration on one thread — no
 /// cross-thread `Send`, an `Rc<RefCell>` is the single-task analogue of the
-/// channel. `Clone` shares the backing store between the sink clone and the
-/// loop's `pop` end.
+/// channel. `Clone` shares the backing store (and the drop count) between the
+/// sink clone and the loop's `pop` end.
+///
+/// It holds at most [`MAX_MULTICAST_REPLIES`] replies, the bound the fixed form
+/// below is sized by: a peer that asks faster than the loop answers would
+/// otherwise grow the heap for as long as it kept asking. The reply past the
+/// bound is dropped (which frees what the sink built) and counted in
+/// [`dropped`](Self::dropped), as the fixed form does: multicast to a group is
+/// best effort, and a querier whose reply never comes asks again or times out.
+/// The storage grows on demand up to the bound and is not reserved up front.
 ///
 /// R311md: the `ResponseSink` / `DeclareReplySink` construction (which
 /// `MulticastTxItem`, the `build_*_reply` + `Box::new`) moved to the shared
@@ -284,7 +291,24 @@ use wz_session_core::multicast_reply_sink::MulticastReplyEnqueue;
 ))]
 #[derive(Clone, Default)]
 pub struct MulticastReplyQueue {
-    queue: Rc<RefCell<VecDeque<MulticastTxItem>>>,
+    queue: Rc<RefCell<HeapReplies>>,
+}
+
+/// What the heap form's clones share: the queued replies and how many were
+/// dropped for want of room.
+#[cfg(all(
+    not(feature = "session-slot"),
+    feature = "alloc",
+    any(
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    )
+))]
+#[derive(Default)]
+struct HeapReplies {
+    items: VecDeque<MulticastTxItem>,
+    dropped: u32,
 }
 
 #[cfg(all(
@@ -302,18 +326,55 @@ impl MulticastReplyQueue {
         Self::default()
     }
 
+    /// How many replies the queue holds at most: [`MAX_MULTICAST_REPLIES`].
+    pub const fn capacity(&self) -> usize {
+        MAX_MULTICAST_REPLIES
+    }
+
+    /// How many replies are waiting.
+    pub fn len(&self) -> usize {
+        self.queue.borrow().items.len()
+    }
+
+    /// Whether no reply is waiting.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// How many replies were dropped for want of room since the queue was made.
+    pub fn dropped(&self) -> u32 {
+        self.queue.borrow().dropped
+    }
+
     /// Drain one queued reply for the loop's `next_tx` seam (FIFO order). `None`
     /// when empty — the loop then keeps serving RX + the JOIN beacon.
     pub fn pop(&self) -> Option<MulticastTxItem> {
-        self.queue.borrow_mut().pop_front()
+        self.queue.borrow_mut().items.pop_front()
+    }
+
+    fn push(&self, item: MulticastTxItem) {
+        let refused = {
+            let mut queue = self.queue.borrow_mut();
+            if queue.items.len() < MAX_MULTICAST_REPLIES {
+                queue.items.push_back(item);
+                None
+            } else {
+                queue.dropped = queue.dropped.saturating_add(1);
+                Some(item)
+            }
+        };
+        // Dropped once the borrow is released, so freeing what the item holds
+        // never runs with the queue borrowed.
+        drop(refused);
     }
 }
 
 // R311md — the single enqueue backing the shared MulticastReplySink<Q> drains
 // into. The observer-drain construction (which MulticastTxItem the staged reply
 // becomes, the build_*_reply + Box::new) lives ONCE in
-// wz_session_core::multicast_reply_sink; this backing owns only the push_back
-// onto the single-task queue (the MCU analogue of the AP backing's mpsc send).
+// wz_session_core::multicast_reply_sink; this backing owns only the bounded
+// push onto the single-task queue (the MCU analogue of the AP backing's mpsc
+// send).
 #[cfg(all(
     not(feature = "session-slot"),
     feature = "alloc",
@@ -325,25 +386,25 @@ impl MulticastReplyQueue {
 ))]
 impl MulticastReplyEnqueue for MulticastReplyQueue {
     fn enqueue(&self, item: MulticastTxItem) {
-        self.queue.borrow_mut().push_back(item);
+        self.push(item);
     }
 }
 
 /// Fixed-memory step S9c -- the multicast reply backing of the `session-slot`
 /// profile: a queue of [`MAX_MULTICAST_REPLIES`] items in a `static`, which REFUSES
-/// the reply it has no room for and COUNTS it, where the heap form above grows
-/// without bound.
+/// the reply it has no room for and COUNTS it, as the heap form above does with
+/// the same bound.
 ///
 /// Its size is the declared limit and nothing else (the deploy
-/// `session_pool.process.multicast_replies` key, bound at build): an image does not
-/// choose a number of its own, so the limit a deployment declares is the one every
-/// image that holds a reply queue is built with.
+/// `session_pool.process.multicast_replies` key): an image does not choose a number
+/// of its own, so the limit a deployment declares is the one every image that holds
+/// a reply queue is built with, whichever form it holds.
 ///
 /// The queue is the seam between the observer that stages a reply and the loop that
 /// frames and sends it, and the sender is a pump that gives the thread back
 /// between iterations, so a peer that asks faster than the loop answers (a flood of
-/// interests or queries on the group) would have grown the heap form for as long as
-/// it lasted. Here the reply that does not fit is dropped (the item is dropped
+/// interests or queries on the group) would fill it for as long as it lasted. The
+/// reply that does not fit is dropped (the item is dropped
 /// with it, which frees what the sink built) and
 /// [`dropped`](MulticastReplyQueue::dropped) says how many, the same
 /// counted, typed-by-its-counter refusal every other table of the profile makes. A
