@@ -214,6 +214,8 @@ RUST_LIMITS = ROOT / "crates" / "wz-session-core" / "src" / "caps_generated.rs"
 KCONFIG_POLICIES = ROOT / "deploy" / "Kconfig.policies"
 RUST_POLICIES = ROOT / "crates" / "wz-session-core" / "src" / "policy_generated.rs"
 RUST_LIMIT_BINDINGS = ROOT / "crates" / "wz-session-core" / "src" / "caps_binding_generated.rs"
+# The limits a stage after the build may decide, as types and snapshots (`crate::limits`).
+RUST_LIMIT_SNAPSHOTS = ROOT / "crates" / "wz-session-core" / "src" / "limits_generated.rs"
 # The hand-written types the generated policy and limit rows name (`Domain`, `Bound`, the words
 # of where a value is bound); `--check` holds the variants of its enums to the declaration's words.
 POLICY_BINDING_RS = ROOT / "crates" / "wz-session-core" / "src" / "policy_binding.rs"
@@ -266,7 +268,8 @@ def read_decl_toml(text: str) -> dict:
     small shape and this reads exactly that: `[table]` and `[[array of tables]]` headers, and
     `[array.table]`, a table of the last element of an array of tables opened before it (a
     profile's `[profile.policies]`), or of a table; `key = value` on ONE line, the value a string,
-    an integer, a boolean or an array of strings; a `'''`
+    an integer, a boolean, an array of strings or a non-empty array of integers (a limit's
+    `range`); a `'''`
     literal string whose lines run to the closing `'''` (the newline right after the opening
     delimiter is not part of it, as TOML says), or one closed on the line it opens (`'''text'''`,
     with no `'''` inside); `#` comments on lines of their own. Anything else is refused by line
@@ -335,8 +338,11 @@ def read_decl_toml(text: str) -> dict:
             if not (
                 isinstance(value, (bool, str, int))
                 or (isinstance(value, list) and all(isinstance(x, str) for x in value))
+                or (isinstance(value, list) and value
+                    and all(isinstance(x, int) and not isinstance(x, bool) for x in value))
             ):
-                raise ValueError(f"line {number}: value is not a string, integer, boolean or string array")
+                raise ValueError(f"line {number}: value is not a string, integer, boolean, string "
+                                 "array or integer array")
         if key in table:
             raise ValueError(f"line {number}: key `{key}` is set twice")
         table[key] = value
@@ -1358,8 +1364,21 @@ WIRES = ("none", "timing", "visible", "negotiated")
 LIMIT_STORAGES = ("capacity", "quota", "both")
 # A storage profile that does not read the limit binds it at no stage.
 LIMIT_BINDINGS = BINDINGS + ("none",)
+# What a limit's value is to the code (deploy/wz-config.toml, "Limits"): a bound, which a build
+# with no capacity of it may leave unbounded, or a parameter, inside its declared range.
+LIMIT_KINDS = ("bound", "parameter")
+# Who makes the table a bound limits grow: the program's own calls, or a peer's messages.
+DRIVERS = ("local", "remote")
+# What the heap storage profile does with a limit that is `both`: nothing (its growable table
+# refuses nothing), size storage by it as the fixed profile does, or refuse past it without
+# sizing anything.
+LIMIT_ON_HEAP = ("advisory", "capacity", "quota")
+# The most a parameter's range may reach: a limit is a `usize`, which is 32 bits on the targets
+# with the narrowest word wz builds for.
+LIMIT_RANGE_MOST = 4294967295
 LIMIT_KEYS = {"id", "kconfig", "default", "help",
-              "storage", "scope", "binding_heap", "binding_fixed", "wire"}
+              "storage", "scope", "binding_heap", "binding_fixed", "wire",
+              "kind", "driven", "range", "on_heap", "zero_unbounded"}
 
 
 def stated_one_of(out: list[str], where: str, row: dict, key: str,
@@ -1426,6 +1445,50 @@ def limit_binding_problems(lid: str, lim: dict) -> list[str]:
     return out
 
 
+def limit_kind_problems(lid: str, lim: dict) -> list[str]:
+    """What a limit's value is to the code. A bound names who makes its table grow (`driven`); a
+    parameter names the range its code runs with (`range`, holding the default). A limit that is
+    `both` names what the heap profile does with it (`on_heap`); a parameter is never advisory,
+    since a number the code runs with is always read. Only a bound that sizes nothing may read a
+    build value of `0` as no bound (`zero_unbounded`)."""
+    where = f"limit `{lid}`"
+    out: list[str] = []
+    kind = stated_one_of(out, where, lim, "kind", LIMIT_KINDS)
+    if kind == "bound":
+        stated_one_of(out, where, lim, "driven", DRIVERS)
+        if "range" in lim:
+            out.append(f"{where}: a bound has no `range`; its domain is its capacity")
+    elif kind == "parameter":
+        if "driven" in lim:
+            out.append(f"{where}: a parameter states no `driven`; it limits no table")
+        rng = lim.get("range")
+        if (not isinstance(rng, list) or len(rng) != 2
+                or not all(isinstance(v, int) and not isinstance(v, bool) for v in rng)):
+            out.append(f"{where}: a parameter states its `range` as [least, most]")
+        else:
+            least, most = rng
+            if not 0 <= least <= most <= LIMIT_RANGE_MOST:
+                out.append(f"{where}: `range` {rng} is not 0 <= least <= most <= "
+                           f"{LIMIT_RANGE_MOST}")
+            elif isinstance(lim.get("default"), int) and not least <= lim["default"] <= most:
+                out.append(f"{where}: its default {lim['default']} is outside its `range` {rng}")
+    storage = lim.get("storage")
+    if storage == "both":
+        on_heap = stated_one_of(out, where, lim, "on_heap", LIMIT_ON_HEAP)
+        if on_heap == "advisory" and kind == "parameter":
+            out.append(f"{where}: a parameter is read by every profile that holds it, so its "
+                       "`on_heap` is not 'advisory'")
+    elif "on_heap" in lim:
+        out.append(f"{where}: only a limit that is `both` states `on_heap`")
+    if "zero_unbounded" in lim:
+        if lim["zero_unbounded"] is not True:
+            out.append(f"{where}: `zero_unbounded` is stated as true or not at all")
+        elif kind != "bound" or storage != "quota":
+            out.append(f"{where}: only a bound that sizes no storage (`quota`) reads `0` as no "
+                       "bound")
+    return out
+
+
 def validate_limits(limits: list[dict]) -> list[str]:
     out: list[str] = []
     ids = [l.get("id") for l in limits]
@@ -1436,6 +1499,7 @@ def validate_limits(limits: list[dict]) -> list[str]:
         for key in sorted(set(lim) - LIMIT_KEYS):
             out.append(f"limit `{lid}`: `{key}` is not a key a limit has")
         out += limit_binding_problems(lid, lim)
+        out += limit_kind_problems(lid, lim)
         if not re.fullmatch(r"[A-Z][A-Z0-9_]*", str(lid)):
             out.append(f"limit `{lid}`: an id is a Rust constant name, SCREAMING_SNAKE_CASE")
         if lim.get("kconfig") != f"WZ_LIMIT_{lid}":
@@ -2072,6 +2136,9 @@ def emit_kconfig_limits(decl: dict) -> str:
     for lim in decl["limits"]:
         out.append(f"config {lim['kconfig']}")
         out.append(f'\tint "{lim["id"]}"')
+        if lim["kind"] == "parameter":
+            # The range the code runs with, so menuconfig refuses what the build would.
+            out.append(f"\trange {lim['range'][0]} {lim['range'][1]}")
         out.append(f"\tdefault {lim['default']}")
         out.append("\thelp")
         for line in lim["help"].strip().splitlines():
@@ -2142,20 +2209,247 @@ def emit_rust_limit_bindings(decl: dict) -> str:
         "//! a peer sees of it. The limit's value is the constant of the same name in `crate::caps`.",
     ]
     if decl["limits"]:
-        out += ["", "use crate::policy_binding::{Binding, LimitBinding, Scope, Storage, Wire};"]
+        names = ["Binding", "LimitBinding", "LimitKind", "Scope", "Storage", "Wire"]
+        if any(lim["kind"] == "bound" for lim in decl["limits"]):
+            names.insert(1, "Driven")
+        line = "use crate::policy_binding::{" + ", ".join(names) + "};"
+        if len(line) <= RUST_MAX_WIDTH:
+            out += ["", line]
+        else:
+            out += ["", "use crate::policy_binding::{",
+                    "    " + ", ".join(names) + ",", "};"]
     for lim in decl["limits"]:
         scopes = [f"Scope::{camel(s)}" for s in limit_scopes(lim)]
         if len(", ".join(scopes)) <= RUST_ARRAY_WIDTH:
             scope = [f"    scope: &[{', '.join(scopes)}],"]
         else:
             scope = ["    scope: &["] + [f"        {s}," for s in scopes] + ["    ],"]
+        if lim["kind"] == "bound":
+            kind = ["    kind: LimitKind::Bound,",
+                    f"    driven: Some(Driven::{camel(lim['driven'])}),",
+                    "    range: None,"]
+        else:
+            least, most = lim["range"]
+            kind = ["    kind: LimitKind::Parameter,", "    driven: None,",
+                    f"    range: Some(({least}, {most})),"]
         out += ["", f"/// Where [`super::{lim['id']}`] is bound.",
-                f"pub const {lim['id']}: LimitBinding = LimitBinding {{",
+                f"pub const {lim['id']}: LimitBinding = LimitBinding {{"] + kind + [
                 f"    storage: Storage::{camel(lim['storage'])},"] + scope + [
                 f"    binding_heap: {rust_stage(lim['binding_heap'])},",
                 f"    binding_fixed: {rust_stage(lim['binding_fixed'])},",
                 f"    wire: Wire::{camel(lim['wire'])},",
                 "};"]
+    return "\n".join(out) + "\n"
+
+
+def open_limits(decl: dict) -> list[dict]:
+    """The limits a stage after the build may decide: every limit that is not a capacity alone.
+    A capacity sizes storage only the build can size, so it stays a constant of `caps` and a
+    document that states one is refused by name."""
+    return [lim for lim in decl["limits"] if lim["storage"] != "capacity"]
+
+
+def is_runtime_limit(lim: dict) -> bool:
+    """Whether the snapshot of the node or runtime holds `lim` (its widest scope is `runtime`)
+    rather than the snapshot of a session, whose links and entities take the session's value."""
+    return limit_scopes(lim)[0] == "runtime"
+
+
+def limit_capacity_rust(lim: dict) -> str:
+    """`CAPACITY` of a limit's `LimitSpec`: the storage the build sized by it. A limit that is
+    `both` sizes the fixed profile's storage, and the heap's too where `on_heap` is `capacity`; a
+    limit that sizes nothing (`quota`) has none in any build."""
+    value = f"caps::{lim['id']}"
+    if lim["storage"] == "quota":
+        return "None"
+    if lim["on_heap"] == "capacity":
+        return f"Some({value})"
+    return f"fixed_capacity({value})"
+
+
+def limit_default_rust(lim: dict) -> str:
+    """`DEFAULT` of a limit's `LimitSpec`: what the code admits or runs with when no stage after
+    the build states a value, which is what the build runs with today. A parameter's is the
+    build's value. A bound's is its capacity where the build sized storage by it; elsewhere the
+    build's value, where the code refuses past it (`quota`, or `on_heap = "quota"`), with `0`
+    read as no bound where the limit says so, and no bound where the heap's growable table
+    refuses nothing (`on_heap = "advisory"`)."""
+    value = f"caps::{lim['id']}"
+    if lim["kind"] == "parameter":
+        return value
+    if lim["storage"] == "quota":
+        zero = "true" if lim.get("zero_unbounded") else "false"
+        return f"Quota::from_build({value}, {zero})"
+    # Where the heap sizes storage by it or refuses past it, both profiles run with the build's
+    # value, which is the fixed profile's capacity too.
+    if lim["on_heap"] != "advisory":
+        return f"Quota::at_most({value})"
+    return "Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED)"
+
+
+def rust_assoc_const(name: str, ty: str, value: str) -> list[str]:
+    """`const <name>: <ty> = <value>;` in an impl, broken after the `=` when it does not fit."""
+    one = f"    const {name}: {ty} = {value};"
+    if len(one) <= RUST_MAX_WIDTH:
+        return [one]
+    return [f"    const {name}: {ty} =", f"        {value};"]
+
+
+def limit_spec_rust(lim: dict) -> list[str]:
+    """One limit's type and its `LimitSpec`, and the `Limited` alias a snapshot holds it in."""
+    name, lid = camel_limit(lim["id"]), lim["id"]
+    bound = lim["kind"] == "bound"
+    ty = "Quota" if bound else "usize"
+    driven = f"Some(Driven::{camel(lim['driven'])})" if bound else "None"
+    out = rust_doc(f"`{lid}`: {first_sentence(lim['help'])}", "")
+    out += ["#[derive(Clone, Copy, Debug, PartialEq, Eq)]", f"pub struct {name};", "",
+            f"impl LimitSpec for {name} {{", f"    type Value = {ty};",
+            f"    const LIMIT: &'static str = {rust_word(lid)};",
+            f"    const DRIVEN: Option<Driven> = {driven};"]
+    out += rust_assoc_const("CAPACITY", "Option<usize>", limit_capacity_rust(lim))
+    if bound:
+        domain = "LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY)"
+    else:
+        least, most = lim["range"]
+        domain = (f"LimitDomain::of_parameter({least}, {most}, Self::CAPACITY, Self::DEFAULT, "
+                  "DEFAULTS_ONLY)")
+    out += rust_assoc_const("DOMAIN", "LimitDomain", domain)
+    out += rust_assoc_const("DEFAULT", ty, limit_default_rust(lim))
+    out += ["}", ""]
+    # An associated constant is evaluated only where it is used, so the domain's own refusal of a
+    # build value outside it is forced here, for every build, whether or not a reader names it.
+    out += [f"const _: LimitDomain = {name}::DOMAIN;", ""]
+    alias = f"type {name}Held = Limited<{name}, {{ {name}::HELD }}>;"
+    if len(alias) > RUST_MAX_WIDTH:
+        alias_lines = [f"type {name}Held =", f"    Limited<{name}, {{ {name}::HELD }}>;"]
+    else:
+        alias_lines = [alias]
+    return out + [f"/// How `{lid}` is held: in no byte when its domain is one value."] + alias_lines
+
+
+def camel_limit(lid: str) -> str:
+    """The type of a limit, from its SCREAMING_SNAKE_CASE id: `MAX_SUBSCRIPTIONS` is
+    `MaxSubscriptions`."""
+    return "".join(part.capitalize() for part in lid.lower().split("_"))
+
+
+def limit_snapshot_rust(snapshot: str, lims: list[dict], what: str) -> list[str]:
+    """The snapshot `snapshot` of `lims`: one field per limit, its build defaults, an accessor and a
+    `select_*` per field, the `LimitField` impl of each limit's type, and the table a reader that
+    names a limit by its id dispatches on."""
+    table = {"SessionLimits": "SESSION_LIMITS", "RuntimeLimits": "RUNTIME_LIMITS"}[snapshot]
+    count = f"{table[:-len('LIMITS')]}LIMIT_COUNT"
+    out = rust_doc(f"The value of every limit {what}, as one snapshot: what a creator resolved and "
+                   "hands the machines of its scope. A machine reads a limit through the accessor of "
+                   "its field, never from the build. Each value lies inside the build's domain of "
+                   "its limit, and a limit whose domain is one value reads as that value whatever "
+                   "was selected ([`Limited::get`]).", "")
+    out += ["#[derive(Clone, Copy, Debug, PartialEq, Eq)]", "#[non_exhaustive]"]
+    if lims:
+        out.append(f"pub struct {snapshot} {{")
+        for lim in lims:
+            out += [f"    /// `{lim['id']}`.", f"    {lim['id'].lower()}: {camel_limit(lim['id'])}Held,"]
+        out.append("}")
+    else:
+        out.append(f"pub struct {snapshot} {{}}")
+    out += ["", f"impl {snapshot} {{",
+            "    /// The build defaults: each limit's value as the build states it ([`LimitSpec::DEFAULT`]).",
+            "    pub const fn from_build() -> Self {"]
+    inits = [f"{lim['id'].lower()}: Limited::build_default()" for lim in lims]
+    if not inits:
+        out.append("        Self {}")
+    else:
+        out += ["        Self {"] + [f"            {init}," for init in inits] + ["        }"]
+    out += ["    }", "",
+            "    /// The build defaults ([`Self::from_build`]): the snapshot a creator starts from. A machine",
+            "    /// does not call it; it reads the snapshot its creator handed it.",
+            "    pub const fn defaults() -> Self {",
+            "        Self::from_build()",
+            "    }"]
+    for lim in lims:
+        field = lim["id"].lower()
+        ty = "Quota" if lim["kind"] == "bound" else "usize"
+        out += ["", f"    /// `{lim['id']}` as this snapshot holds it.",
+                f"    pub const fn {field}(&self) -> {ty} {{", f"        self.{field}.get()", "    }",
+                "", f"    /// Selects `{lim['id']}`, when the build's domain holds `value`."]
+        one = f"    pub fn select_{field}(&mut self, value: {ty}) -> Result<(), OutsideLimitDomain> {{"
+        if len(one) <= RUST_MAX_WIDTH:
+            out.append(one)
+        else:
+            out += [f"    pub fn select_{field}(", "        &mut self,", f"        value: {ty},",
+                    "    ) -> Result<(), OutsideLimitDomain> {"]
+        out += [f"        self.{field} = Limited::select(value)?;", "        Ok(())", "    }"]
+    out += ["}", "", f"impl Default for {snapshot} {{", "    fn default() -> Self {",
+            "        Self::from_build()", "    }", "}"]
+    for lim in lims:
+        field, name = lim["id"].lower(), camel_limit(lim["id"])
+        ty = "Quota" if lim["kind"] == "bound" else "usize"
+        head = f"    fn select_in(snapshot: &mut {snapshot}, value: {ty}) -> Result<(), OutsideLimitDomain> {{"
+        if len(head) <= RUST_MAX_WIDTH:
+            sel = [head]
+        else:
+            sel = ["    fn select_in(", f"        snapshot: &mut {snapshot},", f"        value: {ty},",
+                   "    ) -> Result<(), OutsideLimitDomain> {"]
+        out += ["", f"impl LimitField<{snapshot}> for {name} {{"] + sel + [
+                f"        snapshot.select_{field}(value)", "    }", "",
+                f"    fn held_in(snapshot: &{snapshot}) -> {ty} {{",
+                f"        snapshot.{field}()", "    }", "}"]
+    out += ["", f"/// How many limits [`{snapshot}`] holds: the length of [`{table}`].",
+            f"pub const {count}: usize = {len(lims)};", "",
+            f"/// Every limit of [`{snapshot}`] as a reader that names it by its id sees it, in the order of",
+            "/// its fields."]
+    rows = [f"LimitEntry::of::<{camel_limit(lim['id'])}>()" for lim in lims]
+    return out + rust_static_array(f"pub static {table}: [LimitEntry<{snapshot}>; {count}] =", rows)
+
+
+def emit_rust_limit_snapshots(decl: dict) -> str:
+    """The module `limits.rs` includes: one type per limit a stage after the build may decide
+    (`open_limits`), implementing `LimitSpec` (its kind, who makes it grow, its capacity in this
+    build, its domain and the build's value), and the two snapshots that hold one value of each:
+    `RuntimeLimits` for a limit whose widest scope is the runtime, `SessionLimits` for the rest.
+    No machine reads them yet; each limit's reader still reads `caps`, so nothing a build does
+    changes."""
+    lims = open_limits(decl)
+    runtime = [lim for lim in lims if is_runtime_limit(lim)]
+    session = [lim for lim in lims if not is_runtime_limit(lim)]
+    out = generated_header("//", "rust-limit-snapshots") + [
+        "",
+        "//! The limits a stage after the build may decide, as the code will read them: each is a field of",
+        "//! [`SessionLimits`] or of [`RuntimeLimits`], the snapshots a creator hands its machines. Their",
+        "//! build defaults are what the build runs with today ([`LimitSpec::DEFAULT`]), so a snapshot",
+        "//! that starts from them changes nothing; a test names another value with the field's",
+        "//! `select_*`.",
+        "//!",
+        "//! Each limit's type implements [`LimitSpec`]: its capacity in this build, the domain the build",
+        "//! allows (the build's value alone where `DEFAULTS_ONLY`), and the build's value, which the",
+        "//! domain must hold: a constant after each type evaluates its domain, so a build that states a",
+        "//! value outside it does not compile. A field holds no byte for a limit whose domain is one value.",
+        "",
+        "use crate::caps;",
+        "use crate::limit_binding::{",
+        "    limit_defaults_only, LimitDomain, LimitEntry, LimitField, LimitSpec, Limited,",
+        "    OutsideLimitDomain, Quota,",
+        "};",
+        "use crate::policy_binding::Driven;",
+        "",
+        "/// Whether a limit's domain keeps only the build's value: what `WZ_LIMIT_DOMAINS` states, else",
+        "/// whether the target has no operating system.",
+        'const DEFAULTS_ONLY: bool = limit_defaults_only(option_env!("WZ_LIMIT_DOMAINS"));',
+        "",
+        "/// The capacity of a limit the fixed storage profile sizes storage by and the heap profile",
+        "/// does not: `value` where the build's tables are fixed in size, none where they grow.",
+        "const fn fixed_capacity(value: usize) -> Option<usize> {",
+        "    if crate::bounded::ENFORCES_CAPACITY {",
+        "        Some(value)",
+        "    } else {",
+        "        None",
+        "    }",
+        "}",
+    ]
+    for lim in lims:
+        out += [""] + limit_spec_rust(lim)
+    out += [""] + limit_snapshot_rust("SessionLimits", session, "a session holds")
+    out += [""] + limit_snapshot_rust("RuntimeLimits", runtime, "a node or runtime holds")
     return "\n".join(out) + "\n"
 
 
@@ -2175,9 +2469,9 @@ def schema_annotations(row: dict, keys: tuple[str, ...]) -> dict:
 def emit_config_schema(decl: dict) -> str:
     """The JSON Schema (draft 2020-12) of the run-time document: under `wz`, `policies` holds each
     policy a stage after the build decides (its `binding` is not `build`), as the enum of its
-    values, and `limits` each limit the heap storage profile decides at the open or while running,
-    as an integer with the declared default. Each carries its help's first sentence and where it
-    is bound (`x-wz-*`). The build may narrow a policy's values further (its domain), which a
+    values, and `limits` each limit that is not a capacity alone (`open_limits`): a bound as an
+    integer of at least 1 or `"unbounded"`, a parameter as an integer in its range with the
+    declared default. Each carries its help's first sentence and where it is bound (`x-wz-*`). The build may narrow a policy's values further (its domain), which a
     document is checked against when it is applied, not here. `profile` is the enum of the
     declared profiles' ids, present only where the declaration states one."""
     policies = {}
@@ -2191,15 +2485,19 @@ def emit_config_schema(decl: dict) -> str:
             **schema_annotations(pol, ("scope", "binding", "mutability", "boundary", "wire")),
         }
     limits = {}
-    for lim in decl["limits"]:
-        if lim["binding_heap"] not in ("open", "live"):
-            continue
+    for lim in open_limits(decl):
+        if lim["kind"] == "bound":
+            # A stated bound admits at least one: `0` would refuse everything, and no bound is
+            # stated as the word. A build with a capacity narrows it further (its domain).
+            value = {"oneOf": [{"type": "integer", "minimum": 1}, {"const": "unbounded"}]}
+        else:
+            value = {"type": "integer", "minimum": lim["range"][0], "maximum": lim["range"][1],
+                     "default": lim["default"]}
         limits[lim["id"]] = {
             "description": first_sentence(lim["help"]),
-            "type": "integer",
-            "minimum": 0,
-            "default": lim["default"],
-            **schema_annotations(lim, ("storage", "scope", "binding_heap", "binding_fixed", "wire")),
+            **value,
+            **schema_annotations(lim, ("kind", "driven", "storage", "scope", "binding_heap",
+                                       "binding_fixed", "wire")),
         }
     members: dict = {}
     profiles = decl.get("profiles", [])
@@ -3130,6 +3428,7 @@ GENERATED = {
     "kconfig-limits": (KCONFIG_LIMITS, emit_kconfig_limits),
     "rust-limits": (RUST_LIMITS, emit_rust_limits),
     "rust-limit-bindings": (RUST_LIMIT_BINDINGS, emit_rust_limit_bindings),
+    "rust-limit-snapshots": (RUST_LIMIT_SNAPSHOTS, emit_rust_limit_snapshots),
     "rust-policies": (RUST_POLICIES, emit_rust_policies),
     "config-schema": (CONFIG_SCHEMA, emit_config_schema),
     "rust-feature-bits": (RUST_FEATURE_BITS, emit_rust_feature_bits),
@@ -3234,7 +3533,8 @@ def check_caps_rs(decl: dict, text: str) -> list[str]:
 
 # The hand-written enums the generated rows name, each with the declaration's words it spells.
 BINDING_ENUMS = (("Scope", SCOPES), ("Binding", BINDINGS), ("Mutability", MUTABILITIES),
-                 ("Wire", WIRES), ("Storage", LIMIT_STORAGES))
+                 ("Wire", WIRES), ("Storage", LIMIT_STORAGES), ("LimitKind", LIMIT_KINDS),
+                 ("Driven", DRIVERS))
 
 
 def check_policy_binding_rs(text: str) -> list[str]:
@@ -4039,6 +4339,9 @@ help = "A sample role."
 id = "MAX_A"
 kconfig = "WZ_LIMIT_MAX_A"
 default = 4
+kind = "bound"
+driven = "remote"
+on_heap = "advisory"
 storage = "both"
 scope = "session"
 binding_heap = "open"
@@ -4828,9 +5131,11 @@ def cmd_selftest() -> int:
     # Where each limit is bound.
     rbindings = emit_rust_limit_bindings(sdecl)
     expect("each limit is a LimitBinding constant of its own name, in the declaration's words",
-           "use crate::policy_binding::{Binding, LimitBinding, Scope, Storage, Wire};\n" in rbindings
+           "use crate::policy_binding::{Binding, Driven, LimitBinding, LimitKind, Scope, Storage, Wire};\n"
+           in rbindings
            and "/// Where [`super::MAX_A`] is bound.\n"
-               "pub const MAX_A: LimitBinding = LimitBinding {\n    storage: Storage::Both,\n"
+               "pub const MAX_A: LimitBinding = LimitBinding {\n    kind: LimitKind::Bound,\n"
+               "    driven: Some(Driven::Remote),\n    range: None,\n    storage: Storage::Both,\n"
                "    scope: &[Scope::Session],\n    binding_heap: Some(Binding::Open),\n"
                "    binding_fixed: Some(Binding::Build),\n    wire: Wire::None,\n};\n" in rbindings)
     widened = emit_rust_limit_bindings({"limits": [dict(sdecl["limits"][0], scope=["runtime", "link"],
@@ -4859,13 +5164,17 @@ def cmd_selftest() -> int:
     expect("a policy the build fixes is not in the schema",
            list(json.loads(emit_config_schema(build_bound))["properties"]["wz"]["properties"]
                 ["policies"]["properties"]) == ["wire-mode"])
-    expect("a limit the heap profile decides at the open is an integer with its declared default",
-           slimits["MAX_A"] == {"description": "A table.", "type": "integer", "minimum": 0,
-                                "default": 4, "x-wz-storage": "both", "x-wz-scope": "session",
+    expect("a bound a stage after the build decides is a count of at least 1 or `unbounded`",
+           slimits["MAX_A"] == {"description": "A table.",
+                                "oneOf": [{"type": "integer", "minimum": 1},
+                                          {"const": "unbounded"}],
+                                "x-wz-kind": "bound", "x-wz-driven": "remote",
+                                "x-wz-storage": "both", "x-wz-scope": "session",
                                 "x-wz-binding-heap": "open", "x-wz-binding-fixed": "build",
                                 "x-wz-wire": "none"})
-    built_only = [dict(sdecl["limits"][0], binding_heap=stage) for stage in ("build", "none")]
-    expect("a limit the heap profile decides at the build, or does not read, is not in the schema",
+    built_only = [dict(sdecl["limits"][0], storage="capacity", binding_heap=stage)
+                  for stage in ("open", "none")]
+    expect("a capacity alone is not in the schema, whatever stage sizes it",
            json.loads(emit_config_schema({"policies": [], "limits": built_only}))["properties"]["wz"]
            ["properties"]["limits"]["properties"] == {})
     expect("a description is the help's first sentence, a stop inside an address not ending it",
@@ -4874,6 +5183,7 @@ def cmd_selftest() -> int:
            and first_sentence("No stop at all") == "No stop at all")
     expect("every generated file includes the limit bindings and the schema",
            GENERATED.get("rust-limit-bindings", (None,))[0] == RUST_LIMIT_BINDINGS
+           and GENERATED.get("rust-limit-snapshots", (None,))[0] == RUST_LIMIT_SNAPSHOTS
            and GENERATED.get("config-schema", (None,))[0] == CONFIG_SCHEMA)
     # The profiles: named sets of policy values a run-time document starts from.
     with_profile = with_policy + PROFILE_SAMPLE
@@ -5036,11 +5346,14 @@ def cmd_selftest() -> int:
     expect("a limit help of two paragraphs is refused",
            any("paragraph" in p for p in validate_decl(read_decl_toml(two_para))))
 
-    # Where a limit is bound: SAMPLE's limit is both a capacity and a quota.
+    # Where a limit is bound: SAMPLE's limit is both a capacity and a quota. A limit that is not
+    # `both` states no `on_heap`, so a text that makes it another storage drops that line.
     def limit_text(**stated: str) -> str:
         text = SAMPLE
         for key, value in stated.items():
             text = re.sub(rf"(?m)^{key} = .*$", f"{key} = {value}", text)
+        if stated.get("storage", '"both"') != '"both"':
+            text = text.replace('on_heap = "advisory"\n', "")
         return text
 
     def limit_refused(text: str, words: str) -> bool:
@@ -5089,6 +5402,116 @@ def cmd_selftest() -> int:
            limit_refused(limit_text(scope='["session"]'), "lists two or more"))
     expect("a scope array naming a scope twice is refused",
            limit_refused(limit_text(scope='["runtime", "runtime"]'), "lists two or more"))
+
+    # What a limit's value is to the code: a bound names who makes it grow, a parameter its range.
+    # Replaced as text: an artifact of SAMPLE has a `kind` of its own, which `limit_text` would
+    # rewrite too.
+    parameter = (SAMPLE.replace('kind = "bound"\ndriven = "remote"\n',
+                                'kind = "parameter"\nrange = [1, 8]\n')
+                 .replace('on_heap = "advisory"', 'on_heap = "capacity"'))
+    expect("a parameter with a range holding its default validates",
+           validate_decl(read_decl_toml(parameter)) == [])
+    expect("a limit that states no `kind` is refused",
+           limit_refused(SAMPLE.replace('kind = "bound"\n', ""), "limit `MAX_A`: it states no `kind`"))
+    expect("a kind outside its set is refused",
+           limit_refused(SAMPLE.replace('kind = "bound"', 'kind = "gauge"'),
+                         "`kind` is 'gauge', one of bound, parameter"))
+    expect("a bound that states no `driven` is refused",
+           limit_refused(SAMPLE.replace('driven = "remote"\n', ""), "states no `driven`"))
+    expect("a driver outside its set is refused",
+           limit_refused(limit_text(driven='"both"'), "`driven` is 'both', one of local, remote"))
+    expect("a bound with a range is refused",
+           limit_refused(SAMPLE.replace("default = 4\n", "default = 4\nrange = [1, 8]\n"),
+                         "a bound has no `range`"))
+    expect("a parameter that names a driver is refused",
+           limit_refused(parameter.replace("range = [1, 8]\n", 'range = [1, 8]\ndriven = "local"\n'),
+                         "a parameter states no `driven`"))
+    expect("a parameter with no range is refused",
+           limit_refused(parameter.replace("range = [1, 8]\n", ""), "states its `range` as [least, most]"))
+    expect("a parameter whose range leaves out its default is refused",
+           limit_refused(parameter.replace("range = [1, 8]", "range = [5, 8]"),
+                         "its default 4 is outside its `range` [5, 8]"))
+    expect("a range past what a 32-bit limit holds is refused",
+           limit_refused(parameter.replace("range = [1, 8]", "range = [1, 4294967296]"),
+                         "is not 0 <= least <= most <= 4294967295"))
+    expect("a range of one end is refused",
+           limit_refused(parameter.replace("range = [1, 8]", "range = [1]"),
+                         "states its `range` as [least, most]"))
+    expect("an advisory parameter is refused",
+           limit_refused(parameter.replace('on_heap = "capacity"', 'on_heap = "advisory"'),
+                         "a parameter is read by every profile that holds it"))
+    expect("a limit that is both and states no `on_heap` is refused",
+           limit_refused(SAMPLE.replace('on_heap = "advisory"\n', ""), "states no `on_heap`"))
+    expect("an `on_heap` outside its set is refused",
+           limit_refused(limit_text(on_heap='"spill"'), "`on_heap` is 'spill', one of advisory"))
+    expect("an `on_heap` on a limit that is not both is refused",
+           limit_refused(limit_text(storage='"quota"', binding_fixed='"live"')
+                         .replace("default = 4\n", 'default = 4\non_heap = "quota"\n'),
+                         "only a limit that is `both` states `on_heap`"))
+    quota_bound = limit_text(storage='"quota"', binding_fixed='"live"')
+    expect("a bound that sizes nothing may read 0 as no bound",
+           validate_decl(read_decl_toml(quota_bound.replace(
+               "default = 4\n", "default = 0\nzero_unbounded = true\n"))) == [])
+    expect("0 as no bound on a limit that sizes storage is refused",
+           limit_refused(SAMPLE.replace("default = 4\n", "default = 4\nzero_unbounded = true\n"),
+                         "only a bound that sizes no storage (`quota`) reads `0` as no bound"))
+    expect("`zero_unbounded = false` is refused",
+           limit_refused(quota_bound.replace("default = 4\n", "default = 4\nzero_unbounded = false\n"),
+                         "`zero_unbounded` is stated as true or not at all"))
+    # What the generator makes of the kinds: Kconfig ranges, binding rows, the schema, snapshots.
+    pdecl = decl_of(read_decl_toml(parameter))
+    expect("a parameter's Kconfig states its range",
+           "\trange 1 8\n\tdefault 4\n" in emit_kconfig_limits(pdecl))
+    expect("a parameter's binding row states its range and no driver",
+           "    kind: LimitKind::Parameter,\n    driven: None,\n    range: Some((1, 8)),\n"
+           in emit_rust_limit_bindings(pdecl))
+    bdecl = decl_of(read_decl_toml(SAMPLE))
+    expect("a bound's binding row states its driver",
+           "    kind: LimitKind::Bound,\n    driven: Some(Driven::Remote),\n    range: None,\n"
+           in emit_rust_limit_bindings(bdecl))
+    bound_schema = json.loads(emit_config_schema(bdecl))["properties"]["wz"]["properties"]["limits"]
+    expect("a bound's schema takes a count of at least 1 or `unbounded`",
+           bound_schema["properties"]["MAX_A"]["oneOf"]
+           == [{"type": "integer", "minimum": 1}, {"const": "unbounded"}])
+    param_schema = json.loads(emit_config_schema(pdecl))["properties"]["wz"]["properties"]["limits"]
+    expect("a parameter's schema is an integer in its range",
+           {k: param_schema["properties"]["MAX_A"][k] for k in ("type", "minimum", "maximum")}
+           == {"type": "integer", "minimum": 1, "maximum": 8})
+    cdecl = decl_of(read_decl_toml(limit_text(storage='"capacity"')))
+    expect("a capacity alone is not in the schema and has no snapshot type",
+           "MAX_A" not in json.loads(emit_config_schema(cdecl))["properties"]["wz"]["properties"]
+           ["limits"]["properties"]
+           and "pub struct MaxA;" not in emit_rust_limit_snapshots(cdecl))
+    bsnap = emit_rust_limit_snapshots(bdecl)
+    expect("an advisory bound is sized only on the fixed profile and unbounded on the heap",
+           "const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_A);" in bsnap
+           and "const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);" in bsnap)
+    expect("a session-scope limit is a field of SessionLimits and in its table",
+           "    max_a: MaxAHeld,\n" in bsnap
+           and "pub const SESSION_LIMIT_COUNT: usize = 1;" in bsnap
+           and "pub const RUNTIME_LIMIT_COUNT: usize = 0;" in bsnap)
+    rsnap = emit_rust_limit_snapshots(decl_of(read_decl_toml(limit_text(scope='"runtime"'))))
+    expect("a runtime-scope limit is a field of RuntimeLimits",
+           "pub const RUNTIME_LIMIT_COUNT: usize = 1;" in rsnap)
+    csnap = emit_rust_limit_snapshots(decl_of(read_decl_toml(
+        SAMPLE.replace('on_heap = "advisory"', 'on_heap = "capacity"'))))
+    expect("a bound the heap sizes too has its capacity in every build",
+           "const CAPACITY: Option<usize> = Some(caps::MAX_A);" in csnap
+           and "const DEFAULT: Quota = Quota::at_most(caps::MAX_A);" in csnap)
+    zsnap = emit_rust_limit_snapshots(decl_of(read_decl_toml(quota_bound.replace(
+        "default = 4\n", "default = 0\nzero_unbounded = true\n"))))
+    expect("a bound that sizes nothing has no capacity and reads 0 as no bound",
+           "const CAPACITY: Option<usize> = None;" in zsnap
+           and "const DEFAULT: Quota = Quota::from_build(caps::MAX_A, true);" in zsnap)
+    psnap = emit_rust_limit_snapshots(pdecl)
+    expect("a parameter is held as a usize inside its range",
+           "    type Value = usize;" in psnap
+           and "LimitDomain::of_parameter(1, 8, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY)"
+           in psnap)
+    expect("every limit's domain is evaluated in every build, read or not",
+           "}\n\nconst _: LimitDomain = MaxA::DOMAIN;\n" in psnap
+           and "}\n\nconst _: LimitDomain = MaxA::DOMAIN;\n" in bsnap)
+
     def caps_refused(old: str, new: str, words: str) -> bool:
         return any(words in p for p in validate_decl(read_decl_toml(SAMPLE.replace(old, new))))
 
@@ -5596,6 +6019,11 @@ requires = "WZ_MODE_P && !WZ_SIDE_R"
     expect("a multi-line array is refused, not skipped", not refuses('a = [\n  "x",\n]\n'))
     expect("an inline table is refused", not refuses('a = { b = "c" }\n'))
     expect("a float is refused", not refuses("a = 1.5\n"))
+    expect("an integer array is read (a limit's range)",
+           read_decl_toml("a = [1, 2]\n") == {"a": [1, 2]})
+    expect("an array mixing integers and strings is refused", not refuses('a = [1, "x"]\n'))
+    expect("an array of booleans is refused", not refuses("a = [true, false]\n"))
+    expect("an empty array is still a string array", read_decl_toml("a = []\n") == {"a": []})
     expect("a boolean is read as TOML reads it", read_decl_toml("a = true\nb = false\n") == {"a": True, "b": False})
     expect("a JSON null, which TOML has no spelling of, is refused", not refuses("a = null\n"))
     expect("a key set twice is refused", not refuses('a = "x"\na = "y"\n'))

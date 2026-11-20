@@ -179,6 +179,16 @@ pub mod policy;
 // sees. Unconditional, no_std and no_alloc, like `policy`. Documented from inside.
 pub mod policy_binding;
 
+// The value of a limit (a quota, or a parameter's integer), the values of it a build allows, and
+// the types that carry it to the stage that selects it. Unconditional, no_std and no_alloc, like
+// `policy_binding`. Documented from inside.
+pub mod limit_binding;
+
+/// The limits a stage after the build may decide: one type per limit and the snapshots
+/// [`limits::SessionLimits`] and [`limits::RuntimeLimits`] that hold one value of each, generated
+/// from the declaration. Unconditional, no_std and no_alloc, like [`policy`].
+pub mod limits;
+
 // The open stage of the policies: a document's statements composed in layers over a base into one
 // snapshot and the origin of each value, or every refusal found. The core is no_std and no_alloc;
 // the reader of a JSON5 tree needs `alloc`. Documented from inside.
