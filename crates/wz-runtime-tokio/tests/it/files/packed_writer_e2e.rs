@@ -118,7 +118,7 @@ async fn a_burst_over_a_packing_stream_writer_arrives_whole_and_in_order() {
         let (arrived, corrupt, total) = (arrived.clone(), corrupt.clone(), total.clone());
         observer
             .subscribers
-            .register(*keyexpr, move |sample| {
+            .register(keyexpr, move |sample| {
                 let bytes = sample.payload();
                 let intact = bytes.len() >= 4 && {
                     let index = u32::from_le_bytes(bytes[..4].try_into().expect("four bytes"));
