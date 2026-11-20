@@ -839,7 +839,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         }
         // A heap table's cache slot allocates the first time it sees a key (the key's text and
         // the list of what it matched), which the in-place path's contract does not allow: it
-        // costs the heap the matcher's scratch and nothing more. A fixed table's slots are
+        // costs the heap nothing (the matcher reads the key as text). A fixed table's slots are
         // already in place, so there the cache costs no allocation and is used.
         if !P::ENFORCES_CAPACITY {
             return scan_subscribers(
