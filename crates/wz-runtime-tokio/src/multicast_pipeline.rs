@@ -460,13 +460,16 @@ impl Link {
         }
         let tally = MulticastTxTally::of(&item);
         let band = multicast_tx_conduit(&item, &self.params);
-        // A droppable push waits `wait_before_drop` in all, the wait for its stage included: a
-        // blocking push holds its stage across its own wait for room, up to `wait_before_close`,
-        // and one taken by waiting would hold the droppable push behind it as long, as the
-        // unicast dispatch's conduit would (`SessionLinkActions::dispatch_network_message_at`).
+        // A droppable push does not wait for its stage as a blocking one does: a blocking push
+        // holds its stage across its own wait for room, up to `wait_before_close`, and a stage
+        // taken by waiting would hold the droppable push behind it as long, as the unicast
+        // dispatch's conduit would (`SessionLinkActions::dispatch_network_message_at`). What a
+        // held stage costs it instead is the queue profile's (`droppable_stage`).
         let mut conf = self.params.tx_queue;
         let stage = if multicast_tx_droppable(&item, &self.params) {
-            self.droppable_stage(band, &mut conf)
+            droppable_stage(&self.stages[band as usize], &mut conf, |wait| {
+                self.lanes.link_room(band, wait)
+            })
         } else {
             Some(
                 self.stages[band as usize]
@@ -513,37 +516,6 @@ impl Link {
         Ok(outcome)
     }
 
-    /// The stage of `band` for a droppable push: taken when it is free. While another push holds
-    /// it (a blocking one waiting for room), this one asks the lane for room itself, without the
-    /// stage and out of its `wait_before_drop`; `None` is no room within it, a congestion drop.
-    /// Room means the holder is about to let go, and the stage is tried again. What the waits
-    /// spent comes off `conf`'s `wait_before_drop_us`, so the push spends one deadline in all.
-    fn droppable_stage(
-        &self,
-        band: Priority,
-        conf: &mut wz_session_core::session_init_params::TxQueueConf,
-    ) -> Option<std::sync::MutexGuard<'_, Stage>> {
-        use wz_session_core::link::{LinkRoom, RoomWait};
-        loop {
-            match self.stages[band as usize].try_lock() {
-                Ok(stage) => return Some(stage),
-                Err(std::sync::TryLockError::Poisoned(_)) => panic!("multicast stage poisoned"),
-                Err(std::sync::TryLockError::WouldBlock) => {}
-            }
-            let answer = self.lanes.link_room(
-                band,
-                RoomWait::Drop {
-                    wait_us: conf.wait_before_drop_us,
-                },
-            );
-            conf.wait_before_drop_us = conf.wait_before_drop_us.saturating_sub(answer.waited_us);
-            if answer.room == LinkRoom::Congested {
-                return None;
-            }
-            std::hint::spin_loop();
-        }
-    }
-
     /// Put every conduit's open frame on the lanes, each under its own conduit's lock, the
     /// most urgent conduit first, as the unicast window drains.
     fn flush_window(&self) {
@@ -559,6 +531,46 @@ impl Link {
                 },
             );
         }
+    }
+}
+
+/// The stage of a droppable push: taken when it is free. While another push holds it (a blocking
+/// one waiting for room), what the push does is the queue profile's (`TxQueueConf::held_drop`):
+/// zenoh's asks the lane for room itself with `ask`, without the stage and out of its
+/// `wait_before_drop`, and is a congestion drop (`None`) when there is none within it, while room
+/// means the holder is about to let go and the stage is tried again; pico's is dropped at once
+/// and asks nothing, as pico's try-lock drops it. What the waits spent comes off `conf`'s
+/// `wait_before_drop_us`, so the push spends one deadline in all.
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    any(feature = "liveliness-token", feature = "declare-subscriber")
+))]
+fn droppable_stage<'a>(
+    stage: &'a Mutex<Stage>,
+    conf: &mut wz_session_core::session_init_params::TxQueueConf,
+    mut ask: impl FnMut(wz_session_core::link::RoomWait) -> wz_session_core::link::RoomAnswer,
+) -> Option<std::sync::MutexGuard<'a, Stage>> {
+    use wz_session_core::link::{LinkRoom, RoomWait};
+    use wz_session_core::session_init_params::HeldDrop;
+    loop {
+        match stage.try_lock() {
+            Ok(stage) => return Some(stage),
+            Err(std::sync::TryLockError::Poisoned(_)) => panic!("multicast stage poisoned"),
+            Err(std::sync::TryLockError::WouldBlock) => {}
+        }
+        if conf.held_drop == HeldDrop::DropAtOnce {
+            return None;
+        }
+        let answer = ask(RoomWait::Drop {
+            wait_us: conf.wait_before_drop_us,
+        });
+        conf.wait_before_drop_us = conf.wait_before_drop_us.saturating_sub(answer.waited_us);
+        if answer.room == LinkRoom::Congested {
+            return None;
+        }
+        std::hint::spin_loop();
     }
 }
 
@@ -1444,6 +1456,44 @@ mod tests {
         assert_eq!(
             blocked.join().expect("blocked pusher"),
             Ok(PushOutcome::Congested)
+        );
+    }
+
+    /// Under the pico profile a droppable push whose stage another push holds is dropped at once,
+    /// as pico's try-lock drops it, and the lane is asked nothing; under zenoh's the same push
+    /// asks the lane for room out of its own `wait_before_drop`.
+    #[test]
+    fn under_the_pico_profile_a_droppable_push_behind_a_held_stage_asks_nothing() {
+        use wz_session_core::link::{LinkRoom, RoomAnswer, RoomWait};
+        use wz_session_core::policy::SessionPolicy;
+        let stage = Stage::new(0xff);
+        let _held = stage.lock().expect("stage");
+        let mut asked = Vec::new();
+
+        let mut pico = TxQueueConf::pico_of_policy(&SessionPolicy::defaults());
+        let taken = droppable_stage(&stage, &mut pico, |wait| {
+            asked.push(wait);
+            RoomAnswer::at_once(LinkRoom::Free)
+        });
+        assert!(taken.is_none(), "a held stage drops the push at once");
+        assert!(asked.is_empty(), "the lane was asked {asked:?}");
+
+        let mut zenoh = TxQueueConf {
+            wait_before_drop_us: 1_000,
+            ..TxQueueConf::of_policy(&SessionPolicy::defaults())
+        };
+        let taken = droppable_stage(&stage, &mut zenoh, |wait| {
+            asked.push(wait);
+            RoomAnswer {
+                room: LinkRoom::Congested,
+                waited_us: 1_000,
+            }
+        });
+        assert!(taken.is_none(), "no room within the wait");
+        assert_eq!(
+            asked,
+            [RoomWait::Drop { wait_us: 1_000 }],
+            "CONTROL: zenoh's profile asks the lane, out of `wait_before_drop`"
         );
     }
 
