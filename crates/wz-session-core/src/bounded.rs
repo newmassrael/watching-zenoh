@@ -62,9 +62,11 @@ use alloc::vec::Vec;
 /// which `N` is advisory and no push fails.
 ///
 /// For a consumer whose code relies on one of the two: an AP crate that
-/// treats a registration as infallible asserts `!ENFORCES_CAPACITY` at
-/// compile time, so a build graph that unifies `bounded-heapless` into it
-/// fails to build instead of panicking at the first table that fills.
+/// still treats some registration as infallible asserts `!ENFORCES_CAPACITY`
+/// at compile time, so a build graph that unifies `bounded-heapless` into it
+/// fails to build instead of panicking at the first table that fills. A table
+/// held to a stated quota refuses on either backing, so an infallible
+/// registration is true of no table a creator can limit.
 pub const ENFORCES_CAPACITY: bool = <Profile as Storage>::ENFORCES_CAPACITY;
 
 /// Error returned by [`BoundedVec::push`] when the fixed backing has
