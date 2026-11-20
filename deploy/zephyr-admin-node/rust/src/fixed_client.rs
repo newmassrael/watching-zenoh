@@ -230,6 +230,16 @@ const _: () = {
 type Storage =
     NodeStorage<Clock, Stack, ZephyrEntropy, TASKS, TASK_BYTES, TIMERS, SESSIONS, RX, TX, RUN>;
 
+// The bytes of the storage block, as an absolute symbol of the image, which takes no byte of flash
+// or RAM (as Zephyr's own `CONFIG_*` symbols): on the heap profile the block is taken at start and
+// no symbol of the image has its size, and the kit lane's ceiling against zenoh-pico reads the
+// block out of the build (`scripts/lib/pico_ceiling_gate.py`, `docs/upstream-parity.md` D8).
+core::arch::global_asm!(
+    ".globl wz_storage_block_bytes",
+    ".set wz_storage_block_bytes, {bytes}",
+    bytes = const core::mem::size_of::<Storage>(),
+);
+
 /// Where the storage block comes from. On the fixed profile it is a static the image declares. On
 /// the heap profile of the client (`CONFIG_WZ_STORAGE_HEAP`, feature `heap-storage`) it is the same
 /// block taken once from the kernel heap at start: the session code is the slot profile's in both,
