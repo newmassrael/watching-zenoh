@@ -327,6 +327,23 @@ impl wz_capi_coop::ClockMoves for TimeBaseMoves {
     }
 }
 
+/// What bounds an open over the program's transport for a cooperative session on `clock`: a sleep
+/// of its time base, for a session on one; none for one on the host's clock, whose open waits the
+/// wall clock's bound.
+#[cfg(all(feature = "app-transport", not(feature = "engine-tokio")))]
+pub(crate) fn open_bound(clock: &SessionClock) -> Option<wz_capi_coop::app_link::OpenBound> {
+    let SessionClock::Program(time_base) = clock else {
+        return None;
+    };
+    let time = time_base.time();
+    Some(std::sync::Arc::new(
+        move |ms: u64| -> wz_capi_coop::app_link::BoundSleep {
+            let deadline_ns = time.now_ns().saturating_add(ms.saturating_mul(1_000_000));
+            Box::pin(time.sleep_until(deadline_ns))
+        },
+    ))
+}
+
 /// What tells a read of a cooperative session on `clock` that its clock moved on: the program's
 /// word, for a session on a time base; none for one on the host's clock, which moves by itself.
 #[cfg(not(feature = "engine-tokio"))]

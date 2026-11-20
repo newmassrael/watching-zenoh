@@ -82,7 +82,8 @@ mod wait_parked {
     extern crate std;
 
     use alloc::sync::Arc;
-    use core::task::Waker;
+    use core::future::Future;
+    use core::task::{Context, Waker};
     use std::task::Wake;
     use std::thread::Thread;
     use std::time::{Duration, Instant};
@@ -112,6 +113,23 @@ mod wait_parked {
             std::thread::park_timeout(deadline - now);
         }
     }
+
+    /// Wait while `pending` answers `true` and `bound`, a sleep of the session's clock, has not
+    /// ended: the thread parks until the program's calls or the clock's move wake it, both by the
+    /// one waker, and the wall clock bounds nothing.
+    pub(super) fn wait_while_bound(
+        mut bound: super::BoundSleep,
+        mut pending: impl FnMut(Option<&Waker>) -> bool,
+    ) {
+        let waker = Waker::from(Arc::new(Unpark(std::thread::current())));
+        let mut cx = Context::from_waker(&waker);
+        while pending(Some(&waker)) {
+            if bound.as_mut().poll(&mut cx).is_ready() {
+                return;
+            }
+            std::thread::park();
+        }
+    }
 }
 
 #[cfg(not(feature = "host-lock"))]
@@ -131,7 +149,26 @@ mod wait_turns {
             core::hint::spin_loop();
         }
     }
+
+    /// [`wait_while`] whatever the clock: the turns bound an image's look, and the open's own
+    /// deadline on the session's clock is the engine's.
+    pub(super) fn wait_while_bound(
+        bound: super::BoundSleep,
+        pending: impl FnMut(Option<&Waker>) -> bool,
+    ) {
+        drop(bound);
+        wait_while(0, pending);
+    }
 }
+
+/// A sleep of the session's clock: what an [`OpenBound`] makes.
+pub type BoundSleep = core::pin::Pin<Box<dyn core::future::Future<Output = ()> + Send>>;
+
+/// How a session's clock bounds an open over the program's transport: a sleep of that many
+/// milliseconds of it. Given for a clock the program moves (a time base it supplies), whose
+/// sleeps end when the program says its time has passed them and not when the wall clock's do
+/// ([`AppLinks::with_open_bound`]).
+pub type OpenBound = Arc<dyn Fn(u64) -> BoundSleep + Send + Sync>;
 
 /// The socket address a locator names, or the unspecified address when it names none.
 fn socket_of(locator: &str) -> SocketAddr {
@@ -146,18 +183,24 @@ fn socket_of(locator: &str) -> SocketAddr {
         .unwrap_or(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0))
 }
 
-/// Open a link of `kind` for `locator` and wait until the program says it is up.
+/// Open a link of `kind` for `locator` and wait until the program says it is up: for
+/// [`OPEN_WAIT_MS`] of the wall clock, or of the session's clock when `bound` gives a sleep of it.
 fn open_link(
     transport: &Arc<AppTransport>,
     kind: AppLinkKind,
     locator: &str,
+    bound: Option<&OpenBound>,
 ) -> Result<LinkHandle, LinkOpenError> {
     let handle = transport.begin_open(kind, locator);
     let mut progress = OpenProgress::Opening;
-    wait::wait_while(OPEN_WAIT_MS, |waker| {
+    let opening = |waker: Option<&core::task::Waker>| {
         progress = transport.with(|table| table.poll_open(handle, waker));
         progress == OpenProgress::Opening
-    });
+    };
+    match bound {
+        Some(bound) => wait::wait_while_bound(bound(OPEN_WAIT_MS), opening),
+        None => wait::wait_while(OPEN_WAIT_MS, opening),
+    }
     match progress {
         OpenProgress::Open => Ok(handle),
         // Not up in time, or refused: the link is let go, and the dial is one the other end did
@@ -317,6 +360,8 @@ impl StreamSocket for AppStreamSocket {
 #[derive(Clone)]
 pub struct AppStreamDial {
     transport: Arc<AppTransport>,
+    /// What an open waits on, when it is a clock of the session's ([`AppLinks::with_open_bound`]).
+    open_bound: Option<OpenBound>,
 }
 
 impl StreamDial for AppStreamDial {
@@ -324,7 +369,12 @@ impl StreamDial for AppStreamDial {
 
     fn dial(&self, to: SocketAddr) -> Result<AppStreamSocket, LinkOpenError> {
         let locator = Locator::tcp(to).to_string();
-        let handle = open_link(&self.transport, AppLinkKind::StreamDial, &locator)?;
+        let handle = open_link(
+            &self.transport,
+            AppLinkKind::StreamDial,
+            &locator,
+            self.open_bound.as_ref(),
+        )?;
         Ok(AppStreamSocket {
             held: Held {
                 transport: Arc::clone(&self.transport),
@@ -340,7 +390,12 @@ impl StreamDial for AppStreamDial {
         at: SocketAddr,
     ) -> Result<Box<dyn StreamListen<Stream = AppStreamSocket>>, LinkOpenError> {
         let locator = Locator::tcp(at).to_string();
-        let handle = open_link(&self.transport, AppLinkKind::StreamListen, &locator)?;
+        let handle = open_link(
+            &self.transport,
+            AppLinkKind::StreamListen,
+            &locator,
+            self.open_bound.as_ref(),
+        )?;
         Ok(Box::new(AppStreamListener {
             held: Held {
                 transport: Arc::clone(&self.transport),
@@ -394,8 +449,18 @@ pub struct AppDatagramSocket {
 impl AppDatagramSocket {
     /// Open a datagram link to `to` over `transport`.
     pub fn dial(transport: &Arc<AppTransport>, to: SocketAddr) -> Result<Self, LinkOpenError> {
+        Self::dial_bounded(transport, to, None)
+    }
+
+    /// [`Self::dial`] whose open waits on `bound`, a sleep of the session's clock, when there is
+    /// one ([`AppLinks::with_open_bound`]).
+    pub fn dial_bounded(
+        transport: &Arc<AppTransport>,
+        to: SocketAddr,
+        bound: Option<&OpenBound>,
+    ) -> Result<Self, LinkOpenError> {
         let locator = Locator::udp(to).to_string();
-        let handle = open_link(transport, AppLinkKind::Datagram, &locator)?;
+        let handle = open_link(transport, AppLinkKind::Datagram, &locator, bound)?;
         Ok(Self {
             held: Held {
                 transport: Arc::clone(transport),
@@ -473,7 +538,7 @@ pub struct AppGroupTransport {
 impl AppGroupTransport {
     /// Join the group `locator` names (a `udp/` locator with `#iface=`) over `transport`.
     pub fn join(transport: &Arc<AppTransport>, locator: &str) -> Result<Self, LinkOpenError> {
-        let handle = open_link(transport, AppLinkKind::Group, locator)?;
+        let handle = open_link(transport, AppLinkKind::Group, locator, None)?;
         Ok(Self {
             held: Some(Held {
                 transport: Arc::clone(transport),
@@ -556,6 +621,7 @@ pub struct AppLinks {
     transport: Arc<AppTransport>,
     dial: AppStreamDial,
     datagram_rx: usize,
+    open_bound: Option<OpenBound>,
 }
 
 impl AppLinks {
@@ -564,9 +630,11 @@ impl AppLinks {
         Self {
             dial: AppStreamDial {
                 transport: Arc::clone(&transport),
+                open_bound: None,
             },
             transport,
             datagram_rx: UDP_RX_CAPACITY,
+            open_bound: None,
         }
     }
 
@@ -575,6 +643,16 @@ impl AppLinks {
     #[must_use]
     pub fn with_rx_capacity(mut self, bytes: usize) -> Self {
         self.datagram_rx = bytes.clamp(1, UDP_RX_CAPACITY);
+        self
+    }
+
+    /// Links whose opens wait for the program to report a link up for [`OPEN_WAIT_MS`] of the
+    /// session's clock, which `bound` sleeps on, in place of the wall clock's: the clock of a
+    /// session timed by a time base the program supplies.
+    #[must_use]
+    pub fn with_open_bound(mut self, bound: OpenBound) -> Self {
+        self.dial.open_bound = Some(Arc::clone(&bound));
+        self.open_bound = Some(bound);
         self
     }
 }
@@ -594,7 +672,7 @@ impl SessionLinks for AppLinks {
     fn open_initiator(&self, to: Locator) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
         let driver: AppDriver = match to.proto {
             LinkProto::Udp => IpDriver::Udp(UdpDriver::initiator_with_buffers(
-                AppDatagramSocket::dial(&self.transport, to.at)?,
+                AppDatagramSocket::dial_bounded(&self.transport, to.at, self.open_bound.as_ref())?,
                 to.at,
                 self.datagram_rx,
                 HeapTx::new(0, 0),
@@ -729,6 +807,7 @@ mod tests {
         let (script, transport) = transport(64);
         let stream = AppStreamDial {
             transport: Arc::clone(&transport),
+            open_bound: None,
         }
         .dial(PEER)
         .expect("the program answers up");
@@ -755,6 +834,7 @@ mod tests {
         *script.answers.lock().unwrap() = vec![ProgramSend::Wrote(2), ProgramSend::WouldBlock];
         let stream = AppStreamDial {
             transport: Arc::clone(&transport),
+            open_bound: None,
         }
         .dial(PEER)
         .unwrap();
@@ -786,6 +866,7 @@ mod tests {
         *script.answers.lock().unwrap() = vec![ProgramSend::WouldBlock];
         let stream = AppStreamDial {
             transport: Arc::clone(&transport),
+            open_bound: None,
         }
         .dial(PEER)
         .unwrap();
@@ -797,6 +878,7 @@ mod tests {
         let (_script, transport) = transport(64);
         let stream = AppStreamDial {
             transport: Arc::clone(&transport),
+            open_bound: None,
         }
         .dial(PEER)
         .unwrap();
@@ -910,5 +992,93 @@ mod tests {
             .accepted(listening, "tcp/198.51.100.3:50000")
             .unwrap();
         assert!(matches!(listener.accept(), Ok(Some(_))));
+    }
+
+    /// A program whose opens stay under way: it never reports a link up.
+    #[cfg(feature = "host-lock")]
+    struct Unanswered;
+
+    #[cfg(feature = "host-lock")]
+    impl AppPort for Unanswered {
+        fn open(&self, _link: LinkHandle, _kind: AppLinkKind, _locator: &str) -> ProgramOpen {
+            ProgramOpen::Pending
+        }
+
+        fn send(&self, _link: LinkHandle, _bytes: &[u8]) -> ProgramSend {
+            ProgramSend::WouldBlock
+        }
+
+        fn close(&self, _link: LinkHandle) {}
+    }
+
+    /// A sleep of a clock the test moves: it ends once the test says the clock passed it, and
+    /// wakes whoever waits on it then.
+    #[cfg(feature = "host-lock")]
+    struct Until {
+        passed: Arc<std::sync::atomic::AtomicBool>,
+        waker: Arc<Mutex<Option<core::task::Waker>>>,
+    }
+
+    #[cfg(feature = "host-lock")]
+    impl core::future::Future for Until {
+        type Output = ();
+
+        fn poll(
+            self: core::pin::Pin<&mut Self>,
+            cx: &mut core::task::Context<'_>,
+        ) -> core::task::Poll<()> {
+            let passed = || self.passed.load(std::sync::atomic::Ordering::SeqCst);
+            if passed() {
+                return core::task::Poll::Ready(());
+            }
+            *self.waker.lock().unwrap() = Some(cx.waker().clone());
+            if passed() {
+                core::task::Poll::Ready(())
+            } else {
+                core::task::Poll::Pending
+            }
+        }
+    }
+
+    /// An open bounded by the session's clock is given up when that clock passes the bound, long
+    /// before the wall clock's ten seconds; while it has not, the open is still waiting.
+    #[cfg(feature = "host-lock")]
+    #[test]
+    fn an_open_bounded_on_the_sessions_clock_is_given_up_when_that_clock_passes() {
+        let transport = Arc::new(AppTransport::new(
+            Box::new(HostLock(Mutex::new(AppLinkTable::with_queue_bound(64)))),
+            Box::new(Unanswered),
+        ));
+        let passed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let waker = Arc::new(Mutex::new(None::<core::task::Waker>));
+        let bound: OpenBound = {
+            let (passed, waker) = (Arc::clone(&passed), Arc::clone(&waker));
+            Arc::new(move |_ms| {
+                Box::pin(Until {
+                    passed: Arc::clone(&passed),
+                    waker: Arc::clone(&waker),
+                }) as BoundSleep
+            })
+        };
+        let opening = std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let opened = AppDatagramSocket::dial_bounded(&transport, PEER, Some(&bound));
+            (opened.is_err(), started.elapsed())
+        });
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(
+            !opening.is_finished(),
+            "the open ended while the session's clock stood still"
+        );
+        passed.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(waker) = waker.lock().unwrap().take() {
+            waker.wake();
+        }
+        let (refused, took) = opening.join().expect("the opening thread");
+        assert!(refused, "an open the program never reported up is refused");
+        assert!(
+            took < std::time::Duration::from_secs(5),
+            "the open waited out the wall clock's bound, not the session clock's ({took:?})"
+        );
     }
 }

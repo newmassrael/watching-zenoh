@@ -1184,6 +1184,37 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
     }
 }
 
+/// `links` whose opens wait on the clock of the session they are for: its time base's, for a
+/// session on one, so an open the program has not reported up is given up when the program's time
+/// passes its bound.
+#[cfg(all(
+    feature = "app-transport",
+    feature = "time-base",
+    not(feature = "engine-tokio")
+))]
+fn app_links_on(
+    links: wz_capi_coop::app_link::AppLinks,
+    clock: &crate::time_base::SessionClock,
+) -> wz_capi_coop::app_link::AppLinks {
+    match crate::time_base::open_bound(clock) {
+        Some(bound) => links.with_open_bound(bound),
+        None => links,
+    }
+}
+
+/// `links` as they are: a session on the host's clock waits the wall clock's bound.
+#[cfg(all(
+    feature = "app-transport",
+    not(feature = "time-base"),
+    not(feature = "engine-tokio")
+))]
+fn app_links_on<C>(
+    links: wz_capi_coop::app_link::AppLinks,
+    _clock: &C,
+) -> wz_capi_coop::app_link::AppLinks {
+    links
+}
+
 /// Open `request` on the cooperative engine and install the session in `zs`: a session dialled
 /// over the sockets of the system the build runs on (`crate::coop_host`), and with `peer` one that listens on the `tcp/` endpoint of its
 /// `listen` key as well, opened on this thread before `z_open` returns, as the tokio engine's is.
@@ -1304,8 +1335,11 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     #[cfg(feature = "app-transport")]
     let opened = match request.app_transport {
         Some(transport) => wz_capi_coop::CoopEngine::open_with_key_ids(
-            wz_capi_coop::app_link::AppLinks::new(transport)
-                .with_rx_capacity(wz_session_core::caps::PICO_UNICAST_BATCH_BYTES),
+            app_links_on(
+                wz_capi_coop::app_link::AppLinks::new(transport)
+                    .with_rx_capacity(wz_session_core::caps::PICO_UNICAST_BATCH_BYTES),
+                &clock,
+            ),
             clock,
             crate::coop_host::entropy(),
             config,
