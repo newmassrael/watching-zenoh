@@ -1011,6 +1011,20 @@ where
     /// profiles can bind their own mutex (`embassy_sync::Mutex<...>`,
     /// `critical_section::Mutex<...>`) without touching this field.
     observer: Arc<<R as Runtime>::Mutex<ApplicationLayerObserver>>,
+    /// The order of what this session sends on the declaration plane, and what the drive loop
+    /// owes its peer between deciding and sending it
+    /// ([`OwedReplies`](wz_session_core::owed_replies::OwedReplies)).
+    ///
+    /// Taken BEFORE the observer, by the drive loop around its dispatch and the send of what the
+    /// dispatch owes, and by a teardown around the retirement of what it retracts and the
+    /// retraction: a declaration the drive loop resolved reaches the link before the retraction
+    /// of an entity retired after it, and a retraction never leaves while the drive loop still
+    /// holds a declaration of the entity it retracts. The sends themselves run with the observer
+    /// let go, because a send may wait for room on a full link and the drive thread needs the
+    /// observer to go on. Held across that wait, so it is made as a lock that may be
+    /// ([`Runtime::new_mutex_held_across_waits`]), and taken by nobody who holds another lock.
+    /// Shared on `clone()`, as the observer is.
+    declaration_order: Arc<<R as Runtime>::Mutex<wz_session_core::owed_replies::OwedReplies>>,
     /// The observer's count of subscribers a publish from this session can reach, read
     /// without the observer's lock ([`SubscriberTable::local_live`](wz_session_core::pubsub::SubscriberTable::local_live)).
     /// A publish asks whether anything here wants it once per message; with no subscriber
@@ -1553,6 +1567,7 @@ where
             local_stage_wake: self.local_stage_wake.clone(),
             transport: self.transport.clone(),
             observer: self.observer.clone(),
+            declaration_order: self.declaration_order.clone(),
             // The count of the very observer shared above.
             local_live: self.local_live.clone(),
             fires: self.fires.clone(),
@@ -3376,6 +3391,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
         #[cfg(feature = "codec-push")] tx: crate::multicast_pipeline::MulticastTxProducer,
     ) -> Self {
         let local_live = R::with_mutex_mut(&observer, |o| o.subscribers.local_live());
+        let declaration_order = Arc::new(R::new_mutex_held_across_waits(
+            wz_session_core::owed_replies::OwedReplies::new(),
+        ));
         #[cfg(feature = "access-acl")]
         let interceptors_egress: Arc<
             <R as Runtime>::Mutex<crate::interceptor::InterceptorChain>,
@@ -3422,6 +3440,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
         ))]
         {
             let observer = observer.clone();
+            let declaration_order = declaration_order.clone();
             let keyexprs = keyexprs.clone();
             let producer = tx.downgrade();
             #[cfg(feature = "access-acl-multicast")]
@@ -3439,7 +3458,12 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
                 #[cfg(not(feature = "access-acl-multicast"))]
                 let backing = crate::multicast_glue::TokioReplyBacking::new(producer);
                 let sink = wz_session_core::multicast_reply_sink::MulticastReplySink::new(backing);
-                R::with_mutex_mut(&observer, |obs| obs.flush_declare_replies(&sink));
+                // Decided under the observer, sent with it let go: a push onto the group waits
+                // for room on its lane ([`SessionInner::declaration_order`]).
+                R::with_mutex_mut(&*declaration_order, |owed| {
+                    R::with_mutex_mut(&observer, |obs| obs.take_owed_declarations(owed));
+                    owed.send_declarations(&sink);
+                });
             }));
         }
         Self::from_inner(SessionInner {
@@ -3468,6 +3492,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
                 keyexprs,
             },
             observer,
+            declaration_order,
             local_live,
             fires: wz_session_core::deferred_fire::DeferredFireQueue::new(),
             clock,
@@ -3943,28 +3968,50 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
             self.transport.keyexprs.asked(&event);
             self.transport.tx.request_join();
         }
-        R::with_mutex_mut(&self.observer, |obs| {
-            obs.dispatch_event(event);
+        // The replies the dispatch staged are taken under the observer and pushed onto the group
+        // with it let go, as the unicast dispatch sends them: a push waits for room on its lane
+        // ([`SessionInner::declaration_order`]).
+        R::with_mutex_mut(&self.declaration_order, |owed| {
+            R::with_mutex_mut(&self.observer, |obs| {
+                obs.dispatch_event(event);
+                #[cfg(all(
+                    feature = "query-queryable",
+                    feature = "codec-push",
+                    feature = "codec-response-final"
+                ))]
+                {
+                    obs.take_owed_reply_bodies(owed);
+                    let route = <Multicast as TransportState<R, T>>::reply_route(&self.transport);
+                    for (rid, qos) in obs.take_pending_final_rids() {
+                        let route = route.clone();
+                        let holds = self.final_holds.clone();
+                        self.fires.stage(Box::new(move || {
+                            if defer_final_to_holder(
+                                &holds,
+                                FinalKey { rid, local: false },
+                                Some(qos),
+                            ) {
+                                return;
+                            }
+                            route.send_final(rid, qos);
+                        }));
+                    }
+                }
+            });
             #[cfg(all(
                 feature = "query-queryable",
                 feature = "codec-push",
                 feature = "codec-response-final"
             ))]
-            {
-                let route = <Multicast as TransportState<R, T>>::reply_route(&self.transport);
-                obs.flush_query_reply_bodies(&route);
-                for (rid, qos) in obs.take_pending_final_rids() {
-                    let route = route.clone();
-                    let holds = self.final_holds.clone();
-                    self.fires.stage(Box::new(move || {
-                        if defer_final_to_holder(&holds, FinalKey { rid, local: false }, Some(qos))
-                        {
-                            return;
-                        }
-                        route.send_final(rid, qos);
-                    }));
-                }
-            }
+            owed.send_replies(&<Multicast as TransportState<R, T>>::reply_route(
+                &self.transport,
+            ));
+            #[cfg(not(all(
+                feature = "query-queryable",
+                feature = "codec-push",
+                feature = "codec-response-final"
+            )))]
+            let _ = owed;
         });
         self.drain_deferred_fires();
     }
@@ -3990,6 +4037,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
         let (id, cell) = self.register_subscriber_local(&keyexpr_string, &options, callback);
         Subscriber {
             observer: self.observer.clone(),
+            declaration_order: self.declaration_order.clone(),
             id,
             keyexpr: keyexpr_string,
             options,
@@ -4144,6 +4192,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // TransportState<R, T>>::Payload`); no enum-variant wrap.
             transport: actions,
             observer,
+            declaration_order: Arc::new(R::new_mutex_held_across_waits(
+                wz_session_core::owed_replies::OwedReplies::new(),
+            )),
             local_live,
             // R311kz — fresh deferred-fire queue per logical session;
             // every deferred sink (matching, decl listeners, data
@@ -4860,6 +4911,26 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         // `declarations_synced` reports on; the registries below read the same final for their own
         // interests, so this notes it without claiming it.
         self.actions().note_declare_finals_in(event);
+        // What the dispatch owes the peer (the replies its queryables staged, the declarations
+        // that answer the peer's interests) is decided under the observer and sent once the
+        // observer is let go, all under the declaration order ([`SessionInner::declaration_order`]).
+        R::with_mutex_mut(&self.declaration_order, |owed| {
+            self.dispatch_under_observer(event, under_lock, owed);
+            owed.send(self.actions().as_ref());
+        });
+        self.drain_deferred_fires();
+    }
+
+    /// The part of [`Self::dispatch_iteration_event_with`] that holds the observer: the dispatch
+    /// itself, and the decision of what it owes the peer, taken into `owed` and not sent.
+    fn dispatch_under_observer(
+        &self,
+        event: crate::session_glue::IterationEvent<'_, '_>,
+        under_lock: impl FnOnce(&mut ApplicationLayerObserver),
+        owed: &mut wz_session_core::owed_replies::OwedReplies,
+    ) where
+        SessionLinkActions<R, T>: Send + Sync + 'static,
+    {
         R::with_mutex_mut(&self.observer, |obs| {
             // R311y516 (transport-shm) — restamp the LIVE negotiated SHM
             // capability onto the subscriber registry BEFORE the un-swap can
@@ -4943,8 +5014,10 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // legs on a multicast session — the illegal-state-representable the
             // review flagged) is gone: a multicast session is a distinct type
             // that does not have this method, and is driven by
-            // `dispatch_multicast_iteration_event` instead.
-            obs.flush_pending_replies(self.actions().as_ref());
+            // `dispatch_multicast_iteration_event` instead. Taken, not sent: the caller sends
+            // what is owed once it has let go of the observer, before the finals staged below
+            // leave with the deferred fires.
+            obs.take_owed_replies(owed, self.actions().as_ref());
             under_lock(obs);
             #[cfg(feature = "query-queryable")]
             {
@@ -4979,7 +5052,6 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 }
             }
         });
-        self.drain_deferred_fires();
     }
 
     /// Whether the peer has ended its initial declarations: it sent the `DeclareFinal` of the
@@ -8234,6 +8306,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         };
         Ok(Subscriber {
             observer: self.observer.clone(),
+            declaration_order: self.declaration_order.clone(),
             id,
             keyexpr: keyexpr_string,
             options,

@@ -3390,6 +3390,17 @@ impl UdpDriver {
         })
     }
 
+    /// What [`Self::group_sender`] sends through, for a thread that writes one datagram of its
+    /// own without waiting ([`writer_queue::InlineWrite`]): a duplicate of the sending socket,
+    /// addressed to the same peer. `None` when this driver has no peer or socket, or the socket
+    /// cannot be duplicated.
+    #[cfg(unix)]
+    pub(crate) fn group_inline_socket(
+        &self,
+    ) -> Option<std::sync::Arc<dyn writer_queue::InlineWrite>> {
+        udp_pipeline::udp_inline_socket(self.sending_socket().ok()?, self.peer?)
+    }
+
     /// R2850 (open-debt item 821) — a multicast LINK in upstream's shape: the
     /// group is read on a joined socket ([`Self::bind_multicast`]) and every
     /// datagram is written from a separate send socket

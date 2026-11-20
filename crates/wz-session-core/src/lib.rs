@@ -1845,6 +1845,11 @@ pub mod reply;
 #[cfg(feature = "storage-profile")]
 pub mod response_sink;
 
+// What an observer's drain decided to send, held so that it is sent after the observer is let go
+// (a send may wait for room on its link). Heap profile: the declarations are kept owned.
+#[cfg(feature = "alloc")]
+pub mod owed_replies;
+
 // R311dz — application-layer observer bundle (`ApplicationLayerObserver`):
 // combines the six per-domain registries (subscribers, queryables,
 // remote_subscribers, remote_queryables, liveliness,

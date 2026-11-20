@@ -366,8 +366,14 @@ impl Lanes {
     /// Not when the thread that did it is the one that writes it: a sender flushing its own
     /// message (`flush_inline`) takes what lands before it lets go of the role,
     /// and waking the writer for it is the thread hop that flush exists to save.
-    fn frame_landed(&self) {
+    ///
+    /// On a datagram link a frame that lands may be written by the thread that landed it
+    /// (`Self::write_landed_datagram`), and then nobody is woken.
+    fn frame_landed(self: &Arc<Self>) {
         if INLINE_STEP.with(std::cell::Cell::get) {
+            return;
+        }
+        if self.write_landed_datagram() {
             return;
         }
         self.ready.notify_one();
@@ -435,12 +441,19 @@ impl Lanes {
 
     /// [`Self::write_inline`] over `scope`: everything queued, or the urgent frames alone.
     fn write_inline_scope(self: &Arc<Self>, sink: &dyn InlineWrite, scope: InlineScope) -> bool {
+        // A datagram link takes its frames one by one, as its writer does: each frame is a
+        // datagram of its own, and two packed into one write would be one datagram.
+        let datagrams = sink.datagrams();
         loop {
             let (carried, taken, freed) = {
                 let mut st = self.state.lock().expect("outbound lanes poisoned");
                 match st.carry.take() {
                     Some(carried) => (Some(carried), Taken::Empty, false),
                     None => match scope {
+                        InlineScope::All if datagrams => {
+                            let (taken, freed) = st.take_next();
+                            (None, taken, freed)
+                        }
                         InlineScope::All => {
                             let budget = st.batch_bytes.max(1);
                             let (taken, freed) = st.take_next_packed(budget);
@@ -477,8 +490,52 @@ impl Lanes {
                     }
                 }
             }
+            sink.wrote(priority, total);
             self.recycle_wire(wire);
         }
+    }
+
+    /// A frame landed on a DATAGRAM link that has an inline write ([`InlineWrite::datagrams`]):
+    /// write it from this thread, as zenoh-pico writes each batch on the thread that sends it
+    /// (`vendor/zenoh-pico/src/transport/common/tx.c` @ `static z_result_t _z_transport_tx_flush_buffer(`),
+    /// and answer whether this thread took the frame on. Waking the writer instead costs a
+    /// thread hop and the writer's wake-up for every datagram, in both directions of a round
+    /// trip.
+    ///
+    /// The rules of a sender's own flush (`OutboundTx::flush_inline`), in the shape a datagram
+    /// link needs: only when no write ran a moment ago (datagrams that come faster than a write
+    /// are a stream, which the writer takes on another thread while the producer builds the
+    /// next), only when the role is free (a writer mid-write keeps what it has), and never for
+    /// a stream link, whose frames are coalesced by its flush and not written one by one. A
+    /// datagram the link does not take now is left in the carry for the writer, who is woken.
+    fn write_landed_datagram(self: &Arc<Self>) -> bool {
+        let Some(sink) = self.inline.get() else {
+            return false;
+        };
+        if !sink.datagrams() {
+            return false;
+        }
+        let last = self.last_flush_ns.load(Ordering::Relaxed);
+        if last != NEVER_FLUSHED && self.now_ns().saturating_sub(last) < INLINE_MIN_QUIET_NS {
+            return false;
+        }
+        let Some(role) = self.try_acquire_role() else {
+            return false;
+        };
+        if self.state.lock().expect("outbound lanes poisoned").closed {
+            return false;
+        }
+        let step = InlineStep::enter();
+        let left = self.write_inline(sink.as_ref());
+        drop(step);
+        drop(role);
+        self.last_flush_ns.store(self.now_ns(), Ordering::Relaxed);
+        // Work the writer must see: a datagram the link would not take now, or a frame that
+        // landed behind this take.
+        if left || self.has_queued() {
+            self.ready.notify_one();
+        }
+        true
     }
 
     /// Keep the rest of a frame for the next thread that holds the role. Dropped when the
@@ -540,6 +597,21 @@ pub trait InlineWrite: Send + Sync {
     /// Write as much of `buf` as the link takes now. `WouldBlock` is "none of it now", and any
     /// other error is the writer's to find: the bytes are left for it.
     fn try_write(&self, buf: &[u8]) -> std::io::Result<usize>;
+
+    /// Whether each frame is a datagram of its own, written whole or not at all: a write then
+    /// takes one frame and never packs two, and a frame that lands on the queue may be written
+    /// by the thread that put it there (`Lanes::write_landed_datagram`). The default is a byte
+    /// stream, whose frames a sender writes only through its own flush.
+    fn datagrams(&self) -> bool {
+        false
+    }
+
+    /// The frame taken at `priority`, `len` bytes, was written through [`Self::try_write`] in
+    /// whole: what the link's own writer notes after each write it makes, noted for a write
+    /// made from another thread. The default notes nothing.
+    fn wrote(&self, priority: Priority, len: usize) {
+        let _ = (priority, len);
+    }
 }
 
 /// This thread is flushing its own message (`flush_inline`) from `enter` to drop.
@@ -3909,6 +3981,128 @@ mod tests {
                 .extend_from_slice(&buf[..take]);
             Ok(take)
         }
+    }
+
+    /// A datagram link a test writes through ([`InlineWrite`] with `datagrams`): it keeps each
+    /// datagram it takes and each one it is told was written, and answers `WouldBlock` to every
+    /// write while `refusing` stands.
+    struct DatagramLink {
+        sent: PlainMutex<Vec<Vec<u8>>>,
+        noted: PlainMutex<Vec<(Priority, usize)>>,
+        refusing: std::sync::atomic::AtomicBool,
+    }
+
+    impl DatagramLink {
+        fn new(refusing: bool) -> Arc<Self> {
+            Arc::new(Self {
+                sent: PlainMutex::new(Vec::new()),
+                noted: PlainMutex::new(Vec::new()),
+                refusing: std::sync::atomic::AtomicBool::new(refusing),
+            })
+        }
+
+        fn sent(&self) -> Vec<Vec<u8>> {
+            self.sent.lock().expect("datagram link").clone()
+        }
+
+        fn noted(&self) -> Vec<(Priority, usize)> {
+            self.noted.lock().expect("datagram link").clone()
+        }
+    }
+
+    impl InlineWrite for DatagramLink {
+        fn try_write(&self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.refusing.load(Ordering::SeqCst) {
+                return Err(std::io::ErrorKind::WouldBlock.into());
+            }
+            self.sent.lock().expect("datagram link").push(buf.to_vec());
+            Ok(buf.len())
+        }
+
+        fn datagrams(&self) -> bool {
+            true
+        }
+
+        fn wrote(&self, priority: Priority, len: usize) {
+            self.noted
+                .lock()
+                .expect("datagram link")
+                .push((priority, len));
+        }
+    }
+
+    /// A datagram that lands on a datagram link with an inline write is written by the thread
+    /// that sends it, whole, and noted as written; nothing is left for the writer, which is
+    /// therefore not woken for it.
+    #[test]
+    fn a_lone_datagram_is_written_by_the_thread_that_sends_it() {
+        let (tx, rx) = datagram_outbound_channel();
+        let link = DatagramLink::new(false);
+        tx.set_inline_write(link.clone());
+
+        tx.send(Priority::Data, b"datagram".to_vec()).expect("open");
+
+        assert_eq!(link.sent(), vec![b"datagram".to_vec()], "written whole");
+        assert_eq!(
+            link.noted(),
+            vec![(Priority::Data, 8)],
+            "and noted with its priority and size"
+        );
+        assert!(!rx.shared.has_queued(), "nothing is left for the writer");
+    }
+
+    /// While the writer holds the role (it is mid-write) a datagram that lands stays on the
+    /// queue for it, and is not written past the one being written.
+    #[test]
+    fn a_datagram_landing_while_the_writer_writes_is_left_to_the_writer() {
+        let (tx, rx) = datagram_outbound_channel();
+        let link = DatagramLink::new(false);
+        tx.set_inline_write(link.clone());
+        let role = rx.shared.try_acquire_role().expect("the role is free");
+
+        tx.send(Priority::Data, b"datagram".to_vec()).expect("open");
+
+        assert!(
+            link.sent().is_empty(),
+            "not written from the sending thread"
+        );
+        assert!(rx.shared.has_queued(), "the writer's to write");
+        drop(role);
+    }
+
+    /// A STREAM link's frames are not written by the thread that lands them: a stream sender
+    /// writes only through its own flush, which coalesces.
+    #[test]
+    fn a_frame_landing_on_a_stream_link_is_left_to_the_writer() {
+        let (tx, rx) = outbound_channel();
+        let link = FakeLink::new(usize::MAX, 0);
+        tx.set_inline_write(link.clone());
+
+        tx.send(Priority::Data, b"frame".to_vec()).expect("open");
+
+        assert!(
+            link.bytes().is_empty(),
+            "nothing written from the sending thread"
+        );
+        assert!(rx.shared.has_queued(), "the writer's to write");
+    }
+
+    /// A datagram the link does not take now is left to the writer whole, and noted by nobody
+    /// until it is written.
+    #[tokio::test]
+    async fn a_datagram_the_link_refuses_now_is_the_writers_whole() {
+        let (tx, mut rx) = datagram_outbound_channel();
+        let link = DatagramLink::new(true);
+        tx.set_inline_write(link.clone());
+
+        tx.send(Priority::Data, b"datagram".to_vec()).expect("open");
+
+        assert!(link.noted().is_empty(), "not written, so not noted");
+        assert_eq!(
+            rx.recv().await.expect("the datagram"),
+            b"datagram",
+            "the writer takes it whole"
+        );
     }
 
     /// The line has spoken when a write FINISHES, not when a frame is queued: a queue that has
