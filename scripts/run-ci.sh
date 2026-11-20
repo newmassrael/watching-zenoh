@@ -13711,7 +13711,11 @@ layer_c1m_session_lwip() {
     # the number this command PRINTED.
     # R3080 4 -> 4: the application-layer test moved to the shell crate and the
     # lwIP links' bind test arrived, beside the three session_drive tests.
-    _runci_guarded_test "C1m unicast app layer" 10 \
+    # +1 in this leg and every lib leg below: the lwIP driver names a link's ends by the
+    # cooperative engine's locator rule (`driver::tests`, no feature gate); the multicast legs
+    # with `codec-response-final` +1 more, the heap reply queue's bound. Read off what the
+    # guarded-count oracle printed.
+    _runci_guarded_test "C1m unicast app layer" 11 \
         cargo test -p wz-session-lwip \
         --features query-queryable,codec-response,codec-response-final,pubsub-put \
         --quiet || return 1
@@ -13727,7 +13731,7 @@ layer_c1m_session_lwip() {
     # R3080 11 -> 5: the admin host, connection manager and dialer tests moved
     # to the shell crate; the three session_drive tests stay and the lwIP links'
     # two tests (the bind, and the handshake) arrived.
-    _runci_guarded_test "C1m adminspace-write" 11 \
+    _runci_guarded_test "C1m adminspace-write" 12 \
         cargo test -p wz-session-lwip --features adminspace-write --quiet || return 1
     # R2829 — the node ANSWERS upstream's admin GET (`admin_status`) through
     # the shared `answer_admin_query`. Alone: 2 + the lwIP GET test = 3. With
@@ -13737,7 +13741,7 @@ layer_c1m_session_lwip() {
     # R2846 3 -> 4: the `status/connect` document test.
     # R3080 5 -> 4: the admin status and host tests moved to the shell crate,
     # leaving the three session_drive tests and the lwIP links' bind test.
-    _runci_guarded_test "C1m adminspace-core" 10 \
+    _runci_guarded_test "C1m adminspace-core" 11 \
         cargo test -p wz-session-lwip --features adminspace-core --quiet || return 1
     # R2830 6 -> 9: the same three `connect_manager` tests.
     # R2831 9 -> 12: the same three R2831 tests.
@@ -13747,7 +13751,7 @@ layer_c1m_session_lwip() {
     # verdict test.
     # R3080 17 -> 5: everything but the three session_drive tests and the lwIP
     # links' two moved to the shell crate.
-    _runci_guarded_test "C1m adminspace read+write" 11 \
+    _runci_guarded_test "C1m adminspace read+write" 12 \
         cargo test -p wz-session-lwip --features adminspace-core,adminspace-write --quiet || return 1
     # R2390 (transport-multicast) — each `transport-multicast` leg moved by TWO:
     # the MCU loop's link-loss arm brought a witness test and an ordering test,
@@ -13789,23 +13793,23 @@ layer_c1m_session_lwip() {
     #
     # The lwIP links' IPv6 refusal moved the same seven, and the two-session leg below, by ONE,
     # as it moved the legs above. Counted from the source.
-    _runci_guarded_test "C1m multicast" 20 \
+    _runci_guarded_test "C1m multicast" 21 \
         cargo test -p wz-session-lwip --features transport-multicast --quiet || return 1
-    _runci_guarded_test "C1m multicast+push" 23 \
+    _runci_guarded_test "C1m multicast+push" 24 \
         cargo test -p wz-session-lwip --features transport-multicast,codec-push --quiet || return 1
-    _runci_guarded_test "C1m multicast+liveliness" 22 \
+    _runci_guarded_test "C1m multicast+liveliness" 23 \
         cargo test -p wz-session-lwip --features transport-multicast,liveliness-token --quiet || return 1
-    _runci_guarded_test "C1m multicast+queryable" 21 \
+    _runci_guarded_test "C1m multicast+queryable" 23 \
         cargo test -p wz-session-lwip \
         --features transport-multicast,query-queryable,codec-response,codec-response-final \
         --quiet || return 1
-    _runci_guarded_test "C1m multicast maximal" 26 \
+    _runci_guarded_test "C1m multicast maximal" 28 \
         cargo test -p wz-session-lwip \
         --features transport-multicast,codec-push,codec-response,codec-response-final,liveliness-token,query-queryable \
         --quiet || return 1
-    _runci_guarded_test "C1m multicast+reassembly" 20 \
+    _runci_guarded_test "C1m multicast+reassembly" 21 \
         cargo test -p wz-session-lwip --features transport-multicast,reassembly --quiet || return 1
-    _runci_guarded_test "C1m multicast+fragmentation" 24 \
+    _runci_guarded_test "C1m multicast+fragmentation" 25 \
         cargo test -p wz-session-lwip \
         --features transport-multicast,transport-fragmentation,codec-push --quiet || return 1
     # Open-debt item 900 — ONE program, TWO sessions: a client session to a
@@ -13817,7 +13821,7 @@ layer_c1m_session_lwip() {
     # (the +1 above), derived. 27 since the group session was also run from a seed
     # (`a_seeded_group_session_runs_beside_the_client_session`), the number this PRINTED.
     # 28 with the lwIP links' IPv6 refusal (the +1 above), counted from the source.
-    _runci_guarded_test "C1m two sessions" 28 \
+    _runci_guarded_test "C1m two sessions" 29 \
         cargo test -p wz-session-lwip \
         --features transport-multicast,session-unicast-open,session-unicast-accept,codec-push \
         --quiet || return 1
@@ -13900,7 +13904,7 @@ layer_c1m_session_lwip() {
     # datagram the dispatch is handed in the MAC's own buffer, and no leg above
     # builds the library with this feature. 10 = what the command PRINTED.
     # 11 with the lwIP links' IPv6 refusal, counted from the source.
-    _runci_guarded_test "C1m lib in place" 11 \
+    _runci_guarded_test "C1m lib in place" 12 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,rx-in-place \
         --lib --quiet || return 1
@@ -13975,7 +13979,7 @@ layer_c1m_session_lwip() {
     # over the lwIP loopback, every frame counted against a transmit pool. 10 =
     # the default leg's 9 + that one, the number this command PRINTED. 11 with the lwIP links'
     # IPv6 refusal (the default leg's 10 + that one), counted from the source.
-    _runci_guarded_test "C1m keep-alive tx pool" 11 \
+    _runci_guarded_test "C1m keep-alive tx pool" 12 \
         cargo test -p wz-session-lwip \
         --features transport-keepalive,session-unicast-open,session-unicast-accept \
         --quiet || return 1
