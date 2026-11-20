@@ -35,8 +35,9 @@ use super::{arith, Unit};
 const TIME_ZONE_ID_DAYLIGHT: u32 = 2;
 
 /// pico `z_clock_t`: `LARGE_INTEGER`, a union of which `QuadPart` is the only member
-/// pico reads. Eight bytes, passed and returned in one integer register, exactly as
-/// the union is, so the by-value return of `clock_now` matches without a shim.
+/// pico reads. Eight bytes aligned to eight on both Windows widths, returned in `RAX` on
+/// x64 and in `EDX:EAX` on x86, exactly as the union is, so the by-value return of
+/// `clock_now` matches without a shim.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Clock {

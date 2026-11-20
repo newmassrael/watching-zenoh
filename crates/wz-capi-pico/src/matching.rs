@@ -544,18 +544,27 @@ mod tests {
     /// The ABI sizes a C program stack-allocates through pico's own header,
     /// measured against the vendored headers and pinned here so padding drift
     /// fails the build rather than corrupting the caller's frame.
+    ///
+    /// The closure and the listener are three words each, 24 B on a 64-bit host.
     #[test]
     fn matching_abi_sizes_match_pico() {
+        let three_words = 3 * core::mem::size_of::<*mut c_void>();
         assert_eq!(
             core::mem::size_of::<z_owned_closure_matching_status_t>(),
-            24
+            three_words
         );
         assert_eq!(
             core::mem::size_of::<z_moved_closure_matching_status_t>(),
-            24
+            three_words
         );
-        assert_eq!(core::mem::size_of::<z_owned_matching_listener_t>(), 24);
-        assert_eq!(core::mem::size_of::<z_moved_matching_listener_t>(), 24);
+        assert_eq!(
+            core::mem::size_of::<z_owned_matching_listener_t>(),
+            three_words
+        );
+        assert_eq!(
+            core::mem::size_of::<z_moved_matching_listener_t>(),
+            three_words
+        );
         // `z_matching_status_t` is `{ bool }` — 1 B, field at offset 0, and it
         // crosses the boundary BY POINTER so C reads this layout directly.
         assert_eq!(core::mem::size_of::<z_matching_status_t>(), 1);

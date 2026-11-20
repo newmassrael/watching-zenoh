@@ -69,15 +69,20 @@ pub struct z_loaned_sample_t {
     _opaque: [u8; 0],
 }
 
-/// `offsetof(_z_sample_t, payload)` in upstream's headers, LP64.
+/// `offsetof(_z_sample_t, payload)` in upstream's headers: six words, 48 B on a 64-bit host
+/// and 24 B on a 32-bit one.
 ///
-/// MEASURED against `vendor/zenoh-pico`: `_z_sample_t` opens with a
+/// MEASURED against `vendor/zenoh-pico` on a 64-bit host: `_z_sample_t` opens with a
 /// `_z_declared_keyexpr_t keyexpr` of exactly 48 bytes, and `payload` follows it
-/// (`include/zenoh-pico/net/sample.h:38-47`). It is a plain `const` rather than
+/// (`include/zenoh-pico/net/sample.h:38-47`). That key is six words on any host: its
+/// declaration's rc (a value pointer and a count pointer) and its `_z_string_t` (a slice:
+/// a length, a start and the two pointers of its delete context), all pointers and `size_t`
+/// (`include/zenoh-pico/session/keyexpr.h` @ `_z_declared_keyexpr_t`), so a 32-bit
+/// program reads `payload` 24 bytes in, not 48. It is a plain `const` rather than
 /// a bindgen import because this crate deliberately does not build pico — the
 /// number is pinned by the assertion below plus, ultimately, by the drop-in leg
 /// that fails if the two layouts disagree.
-const PICO_SAMPLE_PAYLOAD_OFFSET: usize = 48;
+const PICO_SAMPLE_PAYLOAD_OFFSET: usize = 6 * core::mem::size_of::<*const c_void>();
 
 /// The marshal's pico-layout prefix must land `pico_payload` exactly where
 /// upstream's header puts `_z_sample_t.payload`, or `z_pong.c` reads the wrong
@@ -124,7 +129,7 @@ const _: () = assert!(
 /// arc-slice vector header; this is that flag, in the handle model.
 #[repr(C)]
 pub(crate) struct SampleMarshal {
-    /// pico `_z_sample_t.keyexpr` (`_z_declared_keyexpr_t`, 48 B). INERT — wz
+    /// pico `_z_sample_t.keyexpr` (`_z_declared_keyexpr_t`, six words). INERT — wz
     /// never reads or writes it, and a C program that dereferences it gets
     /// zeroes. It exists so `pico_payload` lands at upstream's offset; the
     /// keyexpr a C program is supposed to use comes from `z_sample_keyexpr`,
@@ -2940,4 +2945,39 @@ pub unsafe extern "C" fn z_closure_sample_call(
         }
         Z_OK
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// pico's `_z_declared_keyexpr_t` field for field, as its header declares it: the
+    /// declaration's rc (`_z_keyexpr_wire_declaration_rc_t`, a value pointer and a count
+    /// pointer) and the key's `_z_string_t`, a `_z_slice_t` of a length, a start and a delete
+    /// context of two pointers.
+    #[allow(dead_code)]
+    #[repr(C)]
+    struct PicoDeclaredKeyexpr {
+        declaration_val: *mut c_void,
+        declaration_cnt: *mut c_void,
+        len: usize,
+        start: *const u8,
+        deleter: *mut c_void,
+        context: *mut c_void,
+    }
+
+    /// A program reads `sample->payload` right after the declared key, which is that key's size
+    /// on the program's own target: 48 B on a 64-bit host and 24 B on a 32-bit one. The marshal
+    /// has to put its payload view there, or a 32-bit program reads the zeroes of the inert key.
+    #[test]
+    fn the_payload_view_sits_where_a_program_of_this_target_reads_it() {
+        assert_eq!(
+            PICO_SAMPLE_PAYLOAD_OFFSET,
+            core::mem::size_of::<PicoDeclaredKeyexpr>()
+        );
+        assert_eq!(
+            core::mem::offset_of!(SampleMarshal, pico_payload),
+            core::mem::size_of::<PicoDeclaredKeyexpr>()
+        );
+    }
 }

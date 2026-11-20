@@ -430,11 +430,15 @@ mod tests {
     use super::*;
 
     /// The owned string array is stack-allocated by a C program, so its size is
-    /// pinned against the 32 B measured off the pinned zenoh-pico headers, and the
-    /// loaned form must keep the owned form's layout for the offset-0 loan casts.
+    /// pinned against the 32 B measured off the pinned zenoh-pico headers on a 64-bit host,
+    /// four words (pico's vector: capacity, length, values, the aliased flag padded to a word),
+    /// and the loaned form must keep the owned form's layout for the offset-0 loan casts.
     #[test]
     fn string_array_abi() {
-        assert_eq!(core::mem::size_of::<z_owned_string_array_t>(), 32);
+        assert_eq!(
+            core::mem::size_of::<z_owned_string_array_t>(),
+            4 * core::mem::size_of::<*mut c_void>()
+        );
         assert_eq!(
             core::mem::size_of::<z_loaned_string_array_t>(),
             core::mem::size_of::<z_owned_string_array_t>()

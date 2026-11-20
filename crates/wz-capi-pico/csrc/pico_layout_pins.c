@@ -8,7 +8,9 @@
  * any other target the numbers it pinned are not the header's, so an image compiles this file
  * with pico's include directory and the `zenoh-pico/config.h` its switches made: a type the Rust
  * layer writes more of than the program's header gives it fails this build, which is the one
- * direction that writes past a program's storage. The Rust layer's owned and view types are
+ * direction that writes past a program's storage. The Windows package's test compiles it the same
+ * way against the package's headers, once with the compiler of each width the package ships
+ * (scripts/lib/pico_windows_package.py). The Rust layer's owned and view types are
  * `repr(C)` over pointer-sized words, and each line below states how many; the crate's test
  * `layout_pins` holds every count to the Rust declaration it names, so the two cannot drift.
  *

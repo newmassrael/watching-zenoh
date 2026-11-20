@@ -65,7 +65,8 @@ pub(crate) unsafe fn take_moved_cancellation_token(
 }
 
 /// pico `z_owned_cancellation_token_t` — `{ _z_cancellation_token_rc_t _rc }`,
-/// 16 B MEASURED. Slot 0 carries this crate's `Arc` handle; slot 1 is the
+/// 16 B MEASURED on a 64-bit host: the rc's value pointer and its count pointer, two
+/// words on any host. Slot 0 carries this crate's `Arc` handle; slot 1 is the
 /// refcount word upstream keeps there and wz leaves zero.
 #[repr(C)]
 pub struct z_owned_cancellation_token_t {
@@ -87,7 +88,10 @@ pub struct z_moved_cancellation_token_t {
 }
 
 const _: () = {
-    assert!(std::mem::size_of::<z_owned_cancellation_token_t>() == 16);
+    assert!(
+        std::mem::size_of::<z_owned_cancellation_token_t>()
+            == 2 * std::mem::size_of::<*mut c_void>()
+    );
 };
 
 impl z_owned_cancellation_token_t {

@@ -593,8 +593,14 @@ pub unsafe extern "C" fn ze_deserializer_deserialize_sequence_length(
         let reader = &mut (*deserializer)._reader;
         match decode_zint(reader.remaining()) {
             Some((value, used)) => {
+                // A count past this host's `size_t` is refused, as pico's zsize decode refuses
+                // it (`> SIZE_MAX`): on a 32-bit host a cast would hand back its low bits, a
+                // plausible small count the payload does not hold.
+                let Ok(value) = usize::try_from(value) else {
+                    return Z_ERR_GENERIC;
+                };
                 reader.pos += used;
-                *len = value as usize;
+                *len = value;
                 Z_OK
             }
             // Truncated input: reported rather than guessed, so a malformed
@@ -653,6 +659,10 @@ pub unsafe extern "C" fn ze_deserializer_deserialize_string(
 /// `_Z_ERR_DID_NOT_READ` and leaves the position alone, so a program that
 /// retries after a short read sees the same record rather than a shifted one.
 ///
+/// A length past this host's `size_t`, or one whose end past the prefix does not fit it, is a
+/// record that is not there: on a 32-bit host a cast would keep the length's low bits and read a
+/// short record the writer never wrote, and an unchecked sum would wrap on any host.
+///
 /// # Safety
 /// `deserializer` must be null or valid.
 unsafe fn take_length_prefixed(deserializer: *mut ze_deserializer_t) -> Option<ByteBuf> {
@@ -662,10 +672,10 @@ unsafe fn take_length_prefixed(deserializer: *mut ze_deserializer_t) -> Option<B
     let reader = &mut (*deserializer)._reader;
     let remaining = reader.remaining();
     let (len, used) = decode_zint(remaining)?;
-    let len = len as usize;
-    let body = remaining.get(used..used + len)?;
+    let end = used.checked_add(usize::try_from(len).ok()?)?;
+    let body = remaining.get(used..end)?;
     let out = ByteBuf::from(body);
-    reader.pos += used + len;
+    reader.pos += end;
     Some(out)
 }
 
@@ -1012,14 +1022,20 @@ mod tests {
     /// pass `&serializer->_writer` and `&deserializer->_reader` to exported
     /// functions, so a non-zero offset here is silent memory corruption rather
     /// than a link error.
+    ///
+    /// The sizes are words: pico's writer is a pointer and a vector of four (`size_t`
+    /// capacity and length, the values pointer, the aliased flag padded to a word), its
+    /// reader three `size_t` and a pointer, so 40 and 32 B on a 64-bit host and half that
+    /// on a 32-bit one.
     #[test]
     fn serde_abi_matches_pico() {
-        assert_eq!(core::mem::size_of::<z_owned_bytes_writer_t>(), 40);
-        assert_eq!(core::mem::size_of::<z_moved_bytes_writer_t>(), 40);
-        assert_eq!(core::mem::size_of::<ze_owned_serializer_t>(), 40);
-        assert_eq!(core::mem::size_of::<ze_moved_serializer_t>(), 40);
-        assert_eq!(core::mem::size_of::<z_bytes_reader_t>(), 32);
-        assert_eq!(core::mem::size_of::<ze_deserializer_t>(), 32);
+        let word = core::mem::size_of::<*mut c_void>();
+        assert_eq!(core::mem::size_of::<z_owned_bytes_writer_t>(), 5 * word);
+        assert_eq!(core::mem::size_of::<z_moved_bytes_writer_t>(), 5 * word);
+        assert_eq!(core::mem::size_of::<ze_owned_serializer_t>(), 5 * word);
+        assert_eq!(core::mem::size_of::<ze_moved_serializer_t>(), 5 * word);
+        assert_eq!(core::mem::size_of::<z_bytes_reader_t>(), 4 * word);
+        assert_eq!(core::mem::size_of::<ze_deserializer_t>(), 4 * word);
 
         let d = ze_deserializer_t {
             _reader: z_bytes_reader_t::empty(),
@@ -1120,6 +1136,45 @@ mod tests {
                 "a short record must be an error"
             );
             assert_eq!(d._reader.pos, before, "the reader must not have advanced");
+        }
+    }
+
+    /// A length prefix past what this host's `size_t` holds is never read as its low bits.
+    /// 2^32 + 1 is the count a 32-bit host would read as 1, and it is followed here by exactly
+    /// one byte: a short record the writer never wrote. Every host refuses the record and leaves
+    /// the reader where it was; the bare count is read on a host whose `size_t` holds it and
+    /// refused, without advancing, on one whose `size_t` does not.
+    #[test]
+    fn a_length_past_the_hosts_size_t_is_not_read_as_its_low_bits() {
+        let big: u64 = (1 << 32) + 1;
+        let mut prefix = [0u8; VLE_LEN];
+        let used = encode_zint(&mut prefix, big);
+        let mut payload = prefix[..used].to_vec();
+        payload.push(0xAB);
+        unsafe {
+            let mut bytes = core::mem::zeroed();
+            store_owned_bytes(&mut bytes, ByteBuf::from(payload));
+            let mut d = ze_deserializer_from_bytes(crate::bytes::z_bytes_loan(&bytes));
+            let mut s = core::mem::zeroed();
+            assert_ne!(
+                ze_deserializer_deserialize_slice(&mut d, &mut s),
+                Z_OK,
+                "a record longer than the payload is not there"
+            );
+            assert_eq!(d._reader.pos, 0, "the refused record leaves the reader");
+
+            let mut count = 0usize;
+            let rc = ze_deserializer_deserialize_sequence_length(&mut d, &mut count);
+            match usize::try_from(big) {
+                Ok(fits) => {
+                    assert_eq!(rc, Z_OK);
+                    assert_eq!(count, fits);
+                }
+                Err(_) => {
+                    assert_ne!(rc, Z_OK, "a count this size_t cannot hold is refused");
+                    assert_eq!(d._reader.pos, 0, "the refused count leaves the reader");
+                }
+            }
         }
     }
 

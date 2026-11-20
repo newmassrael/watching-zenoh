@@ -2138,11 +2138,13 @@ const _: () = {
     assert!(core::mem::size_of::<zp_task_lease_options_t>() == 8);
 };
 
+// The flag follows the two task flags and the attributes pointer, which the flags' padding
+// aligns: two words in on any host (16 B on a 64-bit one).
 #[cfg(feature = "admin-space")]
 const _: () = assert!(
     core::mem::offset_of!(z_open_options_t, auto_start_admin_space)
         == if cfg!(feature = "multi-thread") {
-            16
+            2 * core::mem::size_of::<*mut c_void>()
         } else {
             0
         }

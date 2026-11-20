@@ -878,14 +878,20 @@ mod tests {
     use crate::string_array::z_string_array_len;
 
     /// The three C-allocated structs of this plane, pinned against the sizes
-    /// MEASURED off the pinned zenoh-pico headers (56 / 32 / 24). A C program
-    /// stack-allocates each, so a drift here corrupts its frame — and the
+    /// MEASURED off the pinned zenoh-pico headers on a 64-bit host (56 / 32 / 24). A C
+    /// program stack-allocates each, so a drift here corrupts its frame — and the
     /// linker cannot see it, because a size mismatch is not a symbol mismatch.
+    ///
+    /// Each is held as the words it is declared in: seven, four and three, which are those
+    /// sizes on a 64-bit host. On a 32-bit one pico's hello keeps its 16-byte id and its two
+    /// small fields, so it is larger than the seven words the handle model writes into it,
+    /// which is the direction that cannot write past a program's storage.
     #[test]
     fn hello_and_string_array_abi() {
-        assert_eq!(std::mem::size_of::<z_owned_hello_t>(), 56);
-        assert_eq!(std::mem::size_of::<z_owned_string_array_t>(), 32);
-        assert_eq!(std::mem::size_of::<z_owned_closure_hello_t>(), 24);
+        let word = std::mem::size_of::<*mut c_void>();
+        assert_eq!(std::mem::size_of::<z_owned_hello_t>(), 7 * word);
+        assert_eq!(std::mem::size_of::<z_owned_string_array_t>(), 4 * word);
+        assert_eq!(std::mem::size_of::<z_owned_closure_hello_t>(), 3 * word);
         assert_eq!(std::mem::size_of::<z_scout_options_t>(), 8);
         // Every loan in this crate is an offset-0 identity cast, which is only
         // sound while the loaned form has the owned form's layout.

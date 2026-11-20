@@ -146,24 +146,28 @@ impl z_querier_get_options_t {
     }
 }
 
+/// One pointer of the host: every field of this struct is one, so its layout is a count of them on
+/// any host (24 and 40 B are the 64-bit host's).
+const WORD: usize = std::mem::size_of::<*mut c_void>();
+
 #[cfg(not(feature = "unstable-api"))]
-const _: () = assert!(std::mem::size_of::<z_querier_get_options_t>() == 24);
+const _: () = assert!(std::mem::size_of::<z_querier_get_options_t>() == 3 * WORD);
 
 /// The reference build declares this at 40 B
 /// (`-DZENOH_LINUX -DZ_FEATURE_UNSTABLE_API`); pinned so the unstable tail
 /// cannot silently fall off, as it had on `z_get_options_t`.
 #[cfg(feature = "unstable-api")]
 const _: () = {
-    assert!(std::mem::size_of::<z_querier_get_options_t>() == 40);
+    assert!(std::mem::size_of::<z_querier_get_options_t>() == 5 * WORD);
     // By OFFSET too: this struct's unstable tail is a PAIR, and a pair is where
     // an order mistake hides — `cancellation_token` before `source_info` here,
     // the other way round in `z_get_options_t`. Upstream really does declare
     // them in opposite orders in the two structs
     // (`api/types.h:290-297` vs `:479-497`), so "same two fields" is not the
     // same layout and only a measured offset says which.
-    assert!(std::mem::offset_of!(z_querier_get_options_t, attachment) == 16);
-    assert!(std::mem::offset_of!(z_querier_get_options_t, cancellation_token) == 24);
-    assert!(std::mem::offset_of!(z_querier_get_options_t, source_info) == 32);
+    assert!(std::mem::offset_of!(z_querier_get_options_t, attachment) == 2 * WORD);
+    assert!(std::mem::offset_of!(z_querier_get_options_t, cancellation_token) == 3 * WORD);
+    assert!(std::mem::offset_of!(z_querier_get_options_t, source_info) == 4 * WORD);
 };
 
 /// Default querier options (pico `z_querier_options_default`,

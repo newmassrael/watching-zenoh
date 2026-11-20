@@ -313,7 +313,10 @@ pub use session::*;
 // so each such block holds on a 64-bit target only. The types are `repr(C)` over pointer-sized
 // words, as pico's are, and follow a 32-bit core by construction; what a 32-bit image's program
 // allocates is pinned by that image against pico's own header as it compiles it
-// (`csrc/pico_layout_pins.c`, which the tests of `layout_pins` below hold to these declarations).
+// (`csrc/pico_layout_pins.c`, which the tests of `layout_pins` below hold to these declarations),
+// and a 32-bit host's the same way: the Windows package's test compiles that file against the
+// package's own headers with the compiler of each width it ships
+// (`scripts/lib/pico_windows_package.py`).
 #[cfg(target_pointer_width = "64")]
 const _: () = {
     use core::mem::size_of;

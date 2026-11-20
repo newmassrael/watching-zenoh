@@ -647,11 +647,13 @@ mod tests {
         }
     }
 
-    /// The ABI size a C program stack-allocates through pico's own header.
+    /// The ABI size a C program stack-allocates through pico's own header: five words, 40 B on a
+    /// 64-bit host (`csrc/pico_layout_pins.c` holds the count against the header on any other).
     #[test]
     fn encoding_abi_size_matches_pico() {
-        assert_eq!(core::mem::size_of::<z_owned_encoding_t>(), 40);
-        assert_eq!(core::mem::size_of::<z_moved_encoding_t>(), 40);
+        let words = 5 * core::mem::size_of::<*mut c_void>();
+        assert_eq!(core::mem::size_of::<z_owned_encoding_t>(), words);
+        assert_eq!(core::mem::size_of::<z_moved_encoding_t>(), words);
     }
 
     /// The packed id is the WIRE word, and bit 0 is derived from the schema
