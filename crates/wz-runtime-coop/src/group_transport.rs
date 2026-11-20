@@ -130,6 +130,52 @@ impl<T: GroupTransport + ?Sized> GroupTransport for alloc::boxed::Box<T> {
     }
 }
 
+/// What joins the multicast groups a stack's links are asked for
+/// ([`SessionLinks::open_group`](crate::session_drive::SessionLinks::open_group)) when the stack
+/// itself is a host's sockets: the joining is the host's (its interface table, its membership
+/// and egress options), so the links that dial and listen on the host are given it as a value,
+/// as they are given the dial of their streams. A joiner that joins no group, or not the one
+/// named, is [`LinkOpenError::Unsupported`](crate::session_drive::LinkOpenError::Unsupported).
+#[cfg(all(
+    feature = "session-unicast",
+    feature = "alloc",
+    not(feature = "session-slot")
+))]
+pub trait GroupJoiner {
+    /// The group `endpoint` names, joined: the transport a group session runs over. The endpoint
+    /// is the text the config states (a `udp/` locator naming an interface).
+    fn join(
+        &self,
+        endpoint: &str,
+    ) -> Result<alloc::boxed::Box<dyn GroupTransport>, crate::session_drive::LinkOpenError>;
+}
+
+/// The joiner of links that join no group: every group endpoint is
+/// [`LinkOpenError::Unsupported`](crate::session_drive::LinkOpenError::Unsupported), what the
+/// seam answers by default.
+#[cfg(all(
+    feature = "session-unicast",
+    feature = "alloc",
+    not(feature = "session-slot")
+))]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoGroups;
+
+#[cfg(all(
+    feature = "session-unicast",
+    feature = "alloc",
+    not(feature = "session-slot")
+))]
+impl GroupJoiner for NoGroups {
+    fn join(
+        &self,
+        endpoint: &str,
+    ) -> Result<alloc::boxed::Box<dyn GroupTransport>, crate::session_drive::LinkOpenError> {
+        let _ = endpoint;
+        Err(crate::session_drive::LinkOpenError::Unsupported)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

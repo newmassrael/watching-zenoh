@@ -31,7 +31,8 @@
 //!
 //! With `group` it also joins multicast groups: each group `CoopConfig::groups` names is a face of
 //! its own, whose session is the session shell's group session hosted as a task of the session's
-//! local set, over the group the network stack joins.
+//! local set, over the group the network stack joins. With `group-host` the host's own sockets
+//! join it (`host_group`), as the tokio engine's group link does.
 //!
 //! With `listen` it also listens: the ports `CoopConfig::listen` names take inbound `tcp/` links,
 //! each a face of its own beside the dial role's (`docs/capi-pico-on-coop-engine.md`, step L3).
@@ -75,6 +76,8 @@ mod prelude {
 #[cfg(feature = "listen")]
 mod admission_gate;
 mod engine;
+#[cfg(feature = "group-host")]
+pub mod host_group;
 #[cfg(feature = "scout")]
 pub mod scout;
 #[cfg(feature = "scout-datagram")]

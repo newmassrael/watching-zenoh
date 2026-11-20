@@ -179,6 +179,19 @@ group = [
     "wz-session-mcu/transport-multicast",
     "wz-session-mcu/codec-push",
 ]
+# The groups of `group` joined on the host's own sockets (`host_group::HostGroups`, which the
+# host's links are given with `IpLinks::with_groups`). The sockets are `wz-host-net`'s, built by
+# the plan the tokio runtime's group link is built by, so `#iface=`, `#join=`, `#ttl=`, `#bind=`,
+# `#dscp=`, the loopback and the refusal of an unpinned link are one decision for both engines.
+# A host's, so it selects `std`; the `#iface=` honor is named because a group's interface is what
+# the key names.
+group-host = [
+    "group",
+    "std",
+    "dep:wz-host-net",
+    "dep:log",
+    "wz-host-net/locator-iface",
+]
 # The `tls/` link on a host (`tls::HostTls`): the secure channel `wz-tls-mbedtls` runs, made from
 # the PEM material a C ABI resolved, for both roles. The library is built from the pinned
 # submodules (`vendored`), and every call into it is under one lock (`host-lock`), because the

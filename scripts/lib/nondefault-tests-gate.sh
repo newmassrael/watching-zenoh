@@ -578,6 +578,10 @@ transport-link-unixpipe,transport-link-ws|"
     # And with `liveliness` (`tests::group::alive::`): a liveliness subscriber asks the group for
     # its members' tokens, which a member answers from the tokens its session holds.
     "wz-capi-coop|hook|app-transport,group,liveliness|tests::group::"
+    # The groups joined on the host's own sockets (`host_group::`, compiled with `group-host`):
+    # only a `udp/` endpoint that names a multicast group is joined, and the session's two link
+    # policies reach its sockets. The group a real host joins is `#[ignore]`d and Layer M's.
+    "wz-capi-coop|hook|group-host|host_group::"
     # What a hosted OS tells a node about its network, and the multicast sockets built from it,
     # which the tokio runtime and the cooperative host both open. The `#iface=` honor (the v4 and
     # v6 interface selectors and the tests that read them off the loopback) is compiled only with

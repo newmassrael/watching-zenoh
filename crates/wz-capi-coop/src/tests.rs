@@ -1295,6 +1295,8 @@ mod faces;
 mod get;
 #[cfg(all(feature = "group", feature = "app-transport"))]
 mod group;
+#[cfg(feature = "group-host")]
+mod host_group;
 mod link_sets;
 #[cfg(all(feature = "listen", feature = "query", feature = "queryable"))]
 mod listen;

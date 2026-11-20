@@ -38,6 +38,8 @@ use wz_session_core::reliability::Reliability;
 use wz_session_core::session_slot::SlotDriver;
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use crate::group_transport::{GroupJoiner, GroupTransport, NoGroups};
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::link_storage::HeapTx;
 use crate::link_storage::TxStore;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
@@ -239,12 +241,14 @@ where
 /// its receive buffer when it opens, a datagram link's sized to the largest datagram and a stream
 /// link's to the largest batch with its length, and lends the session `tx_slots` buffers of
 /// `tx_capacity` bytes to encode its frames into (none by default: the session then builds each
-/// frame in a buffer of its own).
+/// frame in a buffer of its own). A multicast group is joined by the host's joiner `G`
+/// ([`IpLinks::with_groups`]); links given none join no group.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-pub struct IpLinks<U, D, L = NoDial> {
+pub struct IpLinks<U, D, L = NoDial, G = NoGroups> {
     local: IpAddr,
     dial: D,
     tls: L,
+    groups: G,
     shape: LinkShape,
     datagrams: core::marker::PhantomData<fn() -> U>,
 }
@@ -322,6 +326,7 @@ where
             local: local.into(),
             dial,
             tls: NoDial,
+            groups: NoGroups,
             shape: LinkShape::default(),
             datagrams: core::marker::PhantomData,
         }
@@ -329,20 +334,35 @@ where
 }
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-impl<U, D, L> IpLinks<U, D, L>
+impl<U, D, L, G> IpLinks<U, D, L, G>
 where
     U: DatagramSocket + 'static,
     D: StreamDial,
     D::Stream: 'static,
     L: StreamDial,
     L::Stream: 'static,
+    G: GroupJoiner,
 {
     /// The same links, whose `tls/` links run over the secure channels `tls` opens.
-    pub fn with_tls<S: StreamDial>(self, tls: S) -> IpLinks<U, D, S> {
+    pub fn with_tls<S: StreamDial>(self, tls: S) -> IpLinks<U, D, S, G> {
         IpLinks {
             local: self.local,
             dial: self.dial,
             tls,
+            groups: self.groups,
+            shape: self.shape,
+            datagrams: self.datagrams,
+        }
+    }
+
+    /// The same links, which join the multicast groups `groups` joins
+    /// ([`SessionLinks::open_group`]).
+    pub fn with_groups<J: GroupJoiner>(self, groups: J) -> IpLinks<U, D, L, J> {
+        IpLinks {
+            local: self.local,
+            dial: self.dial,
+            tls: self.tls,
+            groups,
             shape: self.shape,
             datagrams: self.datagrams,
         }
@@ -423,13 +443,14 @@ where
 }
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-impl<U, D, L> SessionLinks for IpLinks<U, D, L>
+impl<U, D, L, G> SessionLinks for IpLinks<U, D, L, G>
 where
     U: DatagramSocket + 'static,
     D: StreamDial,
     D::Stream: 'static,
     L: StreamDial,
     L::Stream: 'static,
+    G: GroupJoiner,
 {
     type Pump = Rc<HeapIpDriver<U, D::Stream, L::Stream>>;
 
@@ -480,6 +501,12 @@ where
             }
             _ => Err(LinkOpenError::Unsupported),
         }
+    }
+
+    /// The group `endpoint` names, joined by the host's joiner the links were given
+    /// ([`IpLinks::with_groups`]); links given none refuse it as unsupported.
+    fn open_group(&self, endpoint: &str) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
+        self.groups.join(endpoint)
     }
 }
 
@@ -1395,6 +1422,66 @@ mod tests {
             links.open_group("udp/239.1.2.3:7447#iface=lo"),
             Err(LinkOpenError::Unsupported)
         ));
+    }
+
+    /// Links given a joiner hand it the group endpoint as the config states it and answer what it
+    /// answers: the group it joined, or its refusal. The secure channel given after it keeps it.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[test]
+    fn heap_links_given_a_joiner_join_the_group_it_joins() {
+        use alloc::string::String;
+        use core::cell::RefCell;
+
+        /// A group that carries nothing, for the joiner below to hand out.
+        struct Quiet;
+        impl GroupTransport for Quiet {
+            fn open(&mut self) -> bool {
+                true
+            }
+            fn close(&mut self) {}
+            fn service(&self) {}
+            fn carrier_up(&self) -> bool {
+                true
+            }
+            fn send_to_group(&mut self, _datagram: &[u8]) {}
+            fn recv_with(&mut self, _f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
+                false
+            }
+        }
+
+        /// Joins the one group it names, and records every endpoint it was asked for.
+        struct Joiner {
+            asked: RefCell<Vec<String>>,
+        }
+        impl GroupJoiner for Joiner {
+            fn join(&self, endpoint: &str) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
+                self.asked.borrow_mut().push(endpoint.into());
+                if endpoint.starts_with("udp/239.1.2.3:7447") {
+                    Ok(Box::new(Quiet))
+                } else {
+                    Err(LinkOpenError::Refused)
+                }
+            }
+        }
+
+        let links = IpLinks::<Datagrams, Dial>::new(NODE, Dial)
+            .with_groups(Joiner {
+                asked: RefCell::new(Vec::new()),
+            })
+            .with_tls(Dial);
+        let mut joined = links
+            .open_group("udp/239.1.2.3:7447#iface=lo")
+            .expect("the joiner joins the group it names");
+        assert!(joined.open());
+        assert!(matches!(
+            links.open_group("udp/239.9.9.9:7447#iface=lo"),
+            Err(LinkOpenError::Refused)
+        ));
+        assert_eq!(
+            *links.groups.asked.borrow(),
+            ["udp/239.1.2.3:7447#iface=lo", "udp/239.9.9.9:7447#iface=lo"],
+            "each endpoint reaches the joiner as written"
+        );
     }
 
     /// An IPv6 locator dials over a socket of its family on a node whose own address is IPv4:

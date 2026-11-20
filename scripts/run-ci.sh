@@ -21701,6 +21701,13 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     wz_test_args wz-capi-c scouting_autoconnect
     _runci_guarded_test "M autoconnect decides which answering node a peer dials" 1 \
         cargo test -p wz-capi-c "${WZ_TEST_ARGS[@]}" -- --ignored --test-threads=1 || return 1
+    # The cooperative engine's groups on the host's own sockets (`group-host`): one member's
+    # datagram reaches another from the sender's own send socket, and two sessions learn each
+    # other by their JOINs and a put of one crosses the group to the other. Serial, for the
+    # group space. 2 = the `#[ignore]`d tests the filter selects (the joiner's and the engine's).
+    _runci_guarded_test "M cooperative groups on the host's sockets" 2 \
+        cargo test -p wz-capi-coop --features group-host --lib host_group:: \
+        -- --ignored --test-threads=1 || return 1
     # The `scout` role of a `--sessions` driver: one process answers Scouts from a
     # `scouting.multicast` block, a second asks from inside its own session and
     # prints the Hello it hears. It needs a multicast route and nothing else.

@@ -732,5 +732,83 @@ pub fn bind_sender(
     })
 }
 
+/// Mark what `socket` sends with the traffic class `dscp` (`#dscp=`), in the option of `group`'s
+/// family: `IP_TOS` or `IPV6_TCLASS`, given the value as written and not shifted into the DSCP
+/// bits, as upstream writes it. For a runtime whose socket is the one built here: the tokio
+/// runtime marks its own socket type after adoption, a cooperative host marks this one. A
+/// platform that has no such option warns and sends unmarked, as upstream does there.
+pub fn mark_traffic_class(socket: &Socket, group: &SocketAddr, dscp: u32) -> io::Result<()> {
+    match group {
+        SocketAddr::V4(_) => mark_v4(socket, dscp),
+        SocketAddr::V6(_) => mark_v6(socket, dscp),
+    }
+}
+
+/// `IP_TOS`, on the platforms whose sockets have it.
+#[cfg(not(any(
+    target_os = "fuchsia",
+    target_os = "redox",
+    target_os = "solaris",
+    target_os = "illumos",
+    target_os = "haiku",
+    target_os = "wasi",
+)))]
+fn mark_v4(socket: &Socket, dscp: u32) -> io::Result<()> {
+    socket.set_tos_v4(dscp)
+}
+
+/// The warning upstream gives where a socket has no `IP_TOS`.
+#[cfg(any(
+    target_os = "fuchsia",
+    target_os = "redox",
+    target_os = "solaris",
+    target_os = "illumos",
+    target_os = "haiku",
+    target_os = "wasi",
+))]
+fn mark_v4(_socket: &Socket, _dscp: u32) -> io::Result<()> {
+    log::warn!(
+        "IPv4 DSCP is unsupported on platform {}",
+        std::env::consts::OS
+    );
+    Ok(())
+}
+
+/// `IPV6_TCLASS`, on the platforms whose sockets have it.
+#[cfg(any(
+    target_os = "android",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "fuchsia",
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "cygwin",
+))]
+fn mark_v6(socket: &Socket, dscp: u32) -> io::Result<()> {
+    socket.set_tclass_v6(dscp)
+}
+
+/// The warning upstream gives where a socket has no `IPV6_TCLASS`.
+#[cfg(not(any(
+    target_os = "android",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "fuchsia",
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "cygwin",
+)))]
+fn mark_v6(_socket: &Socket, _dscp: u32) -> io::Result<()> {
+    log::warn!(
+        "IPv6 DSCP is unsupported on platform {}",
+        std::env::consts::OS
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests;
