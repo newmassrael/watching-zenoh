@@ -3,13 +3,19 @@ SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseR
 SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 -->
 
-# wz pico C ABI library for Windows x64
+# wz pico C ABI library for Windows
 
 This package holds `wz_capi_pico.dll`, a library that exports zenoh-pico's C API (`z_*`, `zp_*`)
 with watching-zenoh's session engine behind it, and wz's own extension doors (`wz_ext_*`). A
 program written for zenoh-pico compiles against the headers of this package and links this
 library in place of zenoh-pico's. The packaging script is `scripts/lib/pico_windows_package.py`
 in the watching-zenoh repository; this file is `crates/wz-capi-pico/package/README.md` there.
+
+The library is made for one width of Windows, which the package's name (`windows-x64` or
+`windows-x86`) and the `target` of its `manifest.json` (`x86_64-pc-windows-msvc` or
+`i686-pc-windows-msvc`) both state. A 64-bit program links the x64 package and a 32-bit program
+the x86 one; a program cannot load a library of the other width. The two packages are made from
+the same commit and profile and carry the same headers.
 
 ## What is in the package
 
@@ -33,7 +39,9 @@ The debug and release libraries have the same file name, so a program takes one 
 
 ## Building a program
 
-From a Visual Studio "x64 Native Tools Command Prompt", in the package directory:
+From the Visual Studio command prompt of the package's width, in the package directory: "x64 Native
+Tools Command Prompt" for the x64 package, "x86 Native Tools Command Prompt" for the x86 one
+(`vcvarsall.bat x64` or `vcvarsall.bat x86`):
 
 ```
 cl /std:c11 /DZENOH_WINDOWS /I include my_program.c release\lib\wz_capi_pico.lib
@@ -55,7 +63,9 @@ cl /std:c11 /DZENOH_WINDOWS /I include my_program.c release\lib\wz_capi_pico.lib
 
 Put `wz_capi_pico.dll` beside the program's executable or on its `PATH`; keep the `.pdb` beside
 the DLL for a debugger. The library links the Microsoft C runtime dynamically (`vcruntime140.dll`
-and the Universal C runtime), which a machine has with the Visual C++ Redistributable for x64.
+and the Universal C runtime), which a machine has with the Visual C++ Redistributable of the
+package's width (x64, or x86 for the x86 package, which a 64-bit Windows runs a 32-bit program
+with).
 
 ## Threads and callbacks
 

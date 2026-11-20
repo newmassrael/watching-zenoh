@@ -1158,18 +1158,23 @@ jobs:
           WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN: "on"
         run: bash scripts/pico-c-program.sh crates/wz-capi-pico/examples/c/profiles.c "example of pub/sub and query under the entity-timestamp-opt-in profile" "$WZ_EXAMPLE_FEATURES"
 
-  # The Windows x64 release package of the pico C ABI library (scripts/lib/pico_windows_package.py):
-  # the DLL in a debug and a release build with its import library and symbols, zenoh-pico's headers
-  # with the config.h of the DLL's build and wz_ext.h, the examples, a configuration sample, the
-  # usage and release notes, the licence and the notices derived from the dependency graph, and a
-  # manifest of every file's SHA-256, as one deterministic zip. The feature set is the registered
+  # The Windows release packages of the pico C ABI library (scripts/lib/pico_windows_package.py),
+  # one per width of Windows, a row of the matrix each: x64 (`x86_64-pc-windows-msvc`) and x86
+  # (`i686-pc-windows-msvc`, a 32-bit program, which the 64-bit runner runs as Windows runs any).
+  # Each is the DLL in a debug and a release build with its import library and symbols, zenoh-pico's
+  # headers with the config.h of the DLL's build and wz_ext.h, the examples, a configuration sample,
+  # the usage and release notes, the licence and the notices derived from the dependency graph, and
+  # a manifest of every file's SHA-256, as one deterministic zip. The feature set is the registered
   # profile `host-peer-ext` (configs/profiles/), resolved by the pinned Kconfig interpreter, which
-  # is installed here by the hashes scripts/requirements-kconfig.txt pins.
+  # is installed here by the hashes scripts/requirements-kconfig.txt pins. The Rust target of each
+  # width is installed with the toolchain, from rust-toolchain.toml.
   #
-  # The regression test is the zip itself: it is extracted, held to its manifest, and every
+  # The regression test is the zip itself: it is extracted, held to its manifest, the layout pins
+  # (crates/wz-capi-pico/csrc/pico_layout_pins.c) are compiled against its headers, and every
   # example and a check program are compiled against the package's own headers and import library
-  # with MSVC's cl and run, for both builds. The upload follows only a passing test, so a package
-  # this job publishes is one that passed it.
+  # with MSVC's cl of the package's width (`vcvarsall.bat x64` or `x86`, chosen by the manifest's
+  # target) and run, for both builds. The upload follows only a passing test, so a package this
+  # job publishes is one that passed it.
   #
   # Observed, not yet gated, as every new program of this workflow has started: the job is
   # `continue-on-error`, so a red here does not fail the run, and the test's verdict lines in the
@@ -1177,11 +1182,15 @@ jobs:
   # No Rust cache: the package is built with full debug information in both profiles, which no
   # entry of the cached workspace was built with.
   package-windows:
-    name: pico library package (windows-latest)
+    name: pico library package ${{ matrix.arch }} (windows-latest)
     runs-on: windows-latest
     timeout-minutes: 120
     continue-on-error: true
     if: ${{ inputs.host == '' || inputs.host == 'both' || inputs.host == 'windows' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, x86]
     steps:
       - name: Checkout (with submodules)
         uses: actions/checkout@v4
@@ -1215,16 +1224,16 @@ jobs:
       - name: build the package
         timeout-minutes: 90
         shell: bash
-        run: python scripts/lib/pico_windows_package.py --build "$RUNNER_TEMP/pico-package" --profile host-peer-ext
+        run: python scripts/lib/pico_windows_package.py --build "$RUNNER_TEMP/pico-package-${{ matrix.arch }}" --profile host-peer-ext --arch ${{ matrix.arch }}
 
       - name: the package's regression test (its zip, extracted, verified, compiled against and run)
         timeout-minutes: 25
         shell: bash
         run: |
-          out="$(cygpath -u "$RUNNER_TEMP")/pico-package"
-          set -- "$out"/*.zip
+          out="$(cygpath -u "$RUNNER_TEMP")/pico-package-${{ matrix.arch }}"
+          set -- "$out"/*-windows-${{ matrix.arch }}-*.zip
           if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
-            echo "pico-package-test on Windows: the build left no single zip in $out: FAIL" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "pico-package-test on Windows ${{ matrix.arch }}: the build left no single zip in $out: FAIL" | tee -a "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
           python scripts/lib/pico_windows_package.py --test "$(cygpath -w "$1")"
@@ -1232,10 +1241,10 @@ jobs:
       - name: Upload the package
         uses: actions/upload-artifact@v4
         with:
-          name: pico-windows-package
+          name: pico-windows-package-${{ matrix.arch }}
           path: |
-            ${{ runner.temp }}/pico-package/*.zip
-            ${{ runner.temp }}/pico-package/*.zip.sha256
+            ${{ runner.temp }}/pico-package-${{ matrix.arch }}/*.zip
+            ${{ runner.temp }}/pico-package-${{ matrix.arch }}/*.zip.sha256
           if-no-files-found: error
           retention-days: 7
 

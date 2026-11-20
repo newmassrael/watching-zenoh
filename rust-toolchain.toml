@@ -61,4 +61,7 @@ targets = [
     # cross SDK gets the standard library for its triple with the compiler, not by a hand install.
     "aarch64-unknown-linux-gnu",
     "aarch64-linux-android",
+    # The x86 Windows package of the pico C ABI library (scripts/lib/pico_windows_package.py
+    # --arch x86), built beside the x64 one by the Platform workflow's Windows package job.
+    "i686-pc-windows-msvc",
 ]

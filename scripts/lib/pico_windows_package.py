@@ -2,28 +2,34 @@
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-"""R4551 (no register item) -- the Windows x64 release package of the pico C ABI library.
+"""R4551 (no register item) -- the Windows release packages of the pico C ABI library, one for each
+width of Windows: x64 and x86.
 
-    pico_windows_package.py --build OUT --profile ID
+    pico_windows_package.py --build OUT --profile ID [--arch x64|x86]
     pico_windows_package.py --verify DIR|ZIP
     pico_windows_package.py --test ZIP
     pico_windows_package.py --selftest
 
-`--build` makes, on a Windows host with the MSVC toolchain, one package of `wz-capi-pico` built from
-a registered profile (`configs/profiles/<ID>.conf`, resolved strictly by the pinned Kconfig
-interpreter, as `wz_config.py --resolve-features pico` resolves it): the DLL in a debug and a release
-build, each with its import library and its symbols, the headers a program compiles against, the
-examples, a configuration sample, the usage notes and release notes, the licence of the library and
-the notices of everything it links, and `manifest.json`, the size and SHA-256 of every other file.
-It writes `OUT/<name>/`, `OUT/<name>.zip` and `OUT/<name>.zip.sha256`.
+`--build` makes, on a Windows host with the MSVC toolchain, a package of `wz-capi-pico` built from a
+registered profile (`configs/profiles/<ID>.conf`, resolved strictly by the pinned Kconfig
+interpreter, as `wz_config.py --resolve-features pico` resolves it) for each width `--arch` names,
+both when it names none: the DLL in a debug and a release build, each with its import library and
+its symbols, the headers a program compiles against, the examples, a configuration sample, the
+usage notes and release notes, the licence of the library and the notices of everything it links,
+and `manifest.json`, the size and SHA-256 of every other file. For each width it writes
+`OUT/<name>/`, `OUT/<name>.zip` and `OUT/<name>.zip.sha256`, the width in `<name>` and the Rust
+target in the manifest's `target`.
 
 `--verify` re-hashes a package (a directory, or a zip it extracts first) against its manifest: a
 file that differs, one the manifest names that is missing, and one it does not name are each a
 finding. `--test` is the regression test of a zip on a Windows host: it extracts and verifies it,
-then compiles every example and `crates/wz-capi-pico/tests/c/package_check.c` against the package's
-own `include/` and import library with MSVC's `cl`, for the debug and the release build, and runs
-each with the package's `bin/` on the path. The check program holds the DLL to the conformance
-digest of the package's `build-statement.json` and reads the configuration sample through it.
+then compiles `crates/wz-capi-pico/csrc/pico_layout_pins.c` (whose static assertions hold the words
+the library writes into each type a program allocates to what the package's headers give it), every
+example and `crates/wz-capi-pico/tests/c/package_check.c` against the package's own `include/` and
+import library with MSVC's `cl` of the package's width (its manifest's `target`), for the debug and
+the release build, and runs each with the package's `bin/` on the path. The check program holds the
+DLL to the conformance digest of the package's `build-statement.json` and reads the configuration
+sample through it.
 
 ## Why each piece is what it is
 
@@ -71,7 +77,13 @@ import wz_config  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 CRATES = ROOT / "crates"
-TARGET = "x86_64-pc-windows-msvc"
+# The widths a package is made for: the name the package and `--arch` give it -> (the Rust target
+# its DLL is built for, the argument of `vcvarsall.bat` that sets up MSVC's compiler of the same
+# width). A program of one width links the package of that width only.
+ARCHES = {
+    "x64": ("x86_64-pc-windows-msvc", "x64"),
+    "x86": ("i686-pc-windows-msvc", "x86"),
+}
 CRATE = "wz-capi-pico"
 LIBRARY = "wz_capi_pico"
 PROFILE_ID_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
@@ -94,6 +106,8 @@ EXAMPLES_DIR = CRATES / CRATE / "examples" / "c"
 # The program the C ABI examples job runs as the example of a transport the program supplies.
 TRANSPORT_EXAMPLE = CRATES / CRATE / "tests" / "c" / "pico_app_transport.c"
 CHECK_PROGRAM = CRATES / CRATE / "tests" / "c" / "package_check.c"
+# The static assertions that hold the Rust layer's word counts to the program's header.
+LAYOUT_PINS = CRATES / CRATE / "csrc" / "pico_layout_pins.c"
 EXT_HEADER = CRATES / "wz-capi-core" / "include" / "wz_ext.h"
 PICO_TREE = ROOT / "vendor" / "zenoh-pico"
 # Files copied as they are: (path in the package, source).
@@ -144,8 +158,27 @@ def parse_env_lines(lines: list[str]) -> dict[str, str]:
     return out
 
 
-def package_name(version: str, profile: str, commit: str) -> str:
-    return f"{CRATE}-{version}-{profile}-windows-x64-{commit[:10]}"
+def package_name(version: str, profile: str, arch: str, commit: str) -> str:
+    return f"{CRATE}-{version}-{profile}-windows-{arch}-{commit[:10]}"
+
+
+def arch_of_target(target: str) -> str:
+    """The width a package's manifest `target` is built for; a target no package is made for is
+    refused, as a package of it cannot be compiled against with either compiler."""
+    for arch, (rust_target, _) in ARCHES.items():
+        if rust_target == target:
+            return arch
+    raise Refusal(f"`{target}` is the target of no Windows package ({', '.join(t for t, _ in ARCHES.values())})")
+
+
+def cl_script(vs: pathlib.Path, vcvars: str, work: pathlib.Path, args: str) -> str:
+    """A batch file that runs MSVC's `cl` with `args` in `work`, in the environment
+    `vcvarsall.bat <vcvars>` sets up: the compiler, linker and libraries of that width. zenoh-pico's
+    Windows build is C11 with `ZENOH_WINDOWS`, and so is every program compiled here."""
+    return ("@echo off\r\n"
+            f'call "{vs}\\VC\\Auxiliary\\Build\\vcvarsall.bat" {vcvars} > nul\r\n'
+            f'cd /d "{work}"\r\n'
+            f"cl /nologo /std:c11 /DZENOH_WINDOWS {args}\r\n")
 
 
 def parse_tree(text: str) -> set[tuple[str, str]]:
@@ -244,7 +277,8 @@ def notice_table(rows: list[dict]) -> list[str]:
     return out
 
 
-def render_notices(profile: str, linked: list[dict], compile_time: list[dict], rust: dict, pico: dict) -> str:
+def render_notices(profile: str, target: str, linked: list[dict], compile_time: list[dict], rust: dict,
+                   pico: dict) -> str:
     """THIRD-PARTY-NOTICES.md: what the library links and the texts that cover it."""
     textless = [row for row in linked if not row["texts"]]
     out = [
@@ -255,7 +289,7 @@ def render_notices(profile: str, linked: list[dict], compile_time: list[dict], r
         "It links the packages listed below, each under its own licence.",
         "",
         "This list is derived from the build, not written by hand: it is the normal-dependency graph of",
-        f"`{CRATE}` built with the features of profile `{profile}` for `{TARGET}` (`cargo tree`),",
+        f"`{CRATE}` built with the features of profile `{profile}` for `{target}` (`cargo tree`),",
         "each package joined with its manifest (`cargo metadata`) for its licence expression and its",
         "source. The texts are the licence, copyright and notice files each package ships, copied under",
         "`licenses/`; a copy of a package carried in the watching-zenoh tree with a changed arm ships its",
@@ -426,7 +460,7 @@ def release_notes(template: str, facts: dict) -> str:
         f"- Package: `{facts['name']}`",
         f"- Library version: {facts['version']}",
         f"- Source: commit `{facts['commit']}`" + ("" if facts["tree_clean"] else " with changes not committed"),
-        f"- Toolchain: `{facts['rustc']}`, target `{TARGET}`",
+        f"- Toolchain: `{facts['rustc']}`, target `{facts['target']}`",
         f"- Profile: `{facts['profile']}` (`configs/profiles/{facts['profile']}.conf`)",
         f"- Conformance digest: `{statement['digest']}` (what `wz_ext_conformance_digest()` answers)",
         f"- Engine: {statement['engine']}",
@@ -531,10 +565,13 @@ def copy_texts(stage: pathlib.Path, rows: list[dict]) -> None:
             copy(row["dir"] / text, stage / text_dir(row) / text)
 
 
-def build(out: pathlib.Path, profile: str) -> pathlib.Path:
+def build(out: pathlib.Path, profile: str, arch: str) -> pathlib.Path:
     if sys.platform != "win32":
         raise Refusal("the package is built on a Windows host: its DLL, import library and symbols are "
                       "the MSVC toolchain's")
+    if arch not in ARCHES:
+        raise Refusal(f"`{arch}` is not a width a package is made for ({', '.join(ARCHES)})")
+    target = ARCHES[arch][0]
     stated = stated_in_environment(dict(os.environ))
     if stated:
         raise Refusal(f"the environment states {', '.join(stated)}; the package's build is its profile's "
@@ -546,18 +583,21 @@ def build(out: pathlib.Path, profile: str) -> pathlib.Path:
     env = {**os.environ, **plan["env"], **DEBUG_INFO_ENV}
 
     metadata = json.loads(run(["cargo", "metadata", "--format-version", "1", "--all-features",
-                               "--filter-platform", TARGET], CRATES))
+                               "--filter-platform", target], CRATES))
     crate = next((p for p in metadata["packages"] if p["name"] == CRATE and p["id"] in metadata["workspace_members"]),
                  None)
     if crate is None:
         raise Refusal(f"{CRATE} is no package of the crates workspace")
     commit = git("rev-parse", "HEAD")
-    name = package_name(crate["version"], profile, commit)
+    name = package_name(crate["version"], profile, arch, commit)
     stage = out / name
     if stage.exists():
         shutil.rmtree(stage)
     stage.mkdir(parents=True)
 
+    # The headers are the same text for either width (a width is the compiler's, and the config.h
+    # of the build's switches is rendered below), so they come from the vendored library's build
+    # for the host, which is the build of them a host already has.
     include = pico_include(run(["cargo", "build", "-p", "zenoh-pico-sys", "--message-format=json-render-diagnostics"],
                                CRATES, env))
     for src in sorted(p for p in include.rglob("*") if p.is_file()):
@@ -566,7 +606,7 @@ def build(out: pathlib.Path, profile: str) -> pathlib.Path:
 
     feature_args = ["--no-default-features", "--features", ",".join(features)]
     for where, cargo_profile in BUILDS:
-        report = run(["cargo", "rustc", "-p", CRATE, "--lib", *feature_args, *cargo_profile,
+        report = run(["cargo", "rustc", "-p", CRATE, "--lib", "--target", target, *feature_args, *cargo_profile,
                       "--message-format=json-render-diagnostics", "--", *LINK_ARGS], CRATES, env)
         files = artifact_files(report, LIBRARY)
         dll = pick(files, ".dll")
@@ -587,7 +627,7 @@ def build(out: pathlib.Path, profile: str) -> pathlib.Path:
     copy(TRANSPORT_EXAMPLE, stage / "examples" / TRANSPORT_EXAMPLE.name)
     (stage / STATEMENT).write_text(render_json(plan["statement"]), encoding="utf-8", newline="\n")
 
-    tree_args = ["cargo", "tree", "-p", CRATE, *feature_args, "--target", TARGET, "--prefix", "none", "--format", "{p}"]
+    tree_args = ["cargo", "tree", "-p", CRATE, *feature_args, "--target", target, "--prefix", "none", "--format", "{p}"]
     linked_ids = parse_tree(run(tree_args + ["-e", "normal,no-proc-macro"], CRATES, env))
     all_ids = parse_tree(run(tree_args + ["-e", "normal"], CRATES, env))
     linked, problems = notice_rows(linked_ids, metadata, ROOT)
@@ -600,12 +640,13 @@ def build(out: pathlib.Path, profile: str) -> pathlib.Path:
     release = next((line for line in rustc.splitlines() if line.startswith("release:")), "release: unknown")
     rust = rust_notice(stage, "rustc " + release.split(":", 1)[1].strip())
     pico = pico_notice(stage)
-    (stage / "THIRD-PARTY-NOTICES.md").write_text(render_notices(profile, linked, compile_time, rust, pico),
+    (stage / "THIRD-PARTY-NOTICES.md").write_text(render_notices(profile, target, linked, compile_time, rust, pico),
                                                   encoding="utf-8", newline="\n")
 
     tree_clean = git("status", "--porcelain", "--untracked-files=no") == ""
     facts = {"name": name, "version": crate["version"], "commit": commit, "tree_clean": tree_clean,
-             "rustc": rust["release"], "profile": profile, "features": features, "statement": plan["statement"]}
+             "rustc": rust["release"], "target": target, "profile": profile, "features": features,
+             "statement": plan["statement"]}
     template = (PACKAGE_DOCS / "RELEASE-NOTES.md").read_text(encoding="utf-8")
     (stage / "RELEASE-NOTES.md").write_text(release_notes(template, facts), encoding="utf-8", newline="\n")
 
@@ -615,7 +656,7 @@ def build(out: pathlib.Path, profile: str) -> pathlib.Path:
         "name": name,
         "version": crate["version"],
         "profile": profile,
-        "target": TARGET,
+        "target": target,
         "built_from": {"commit": commit, "tree_clean": tree_clean},
         "toolchain": {"rustc": rust["release"]},
         "statement_digest": plan["statement"]["digest"],
@@ -658,19 +699,28 @@ def vs_root() -> pathlib.Path:
     return pathlib.Path(found)
 
 
-def compile_program(vs: pathlib.Path, package: pathlib.Path, where: str, src: pathlib.Path,
+def run_cl(vs: pathlib.Path, vcvars: str, work: pathlib.Path, name: str, args: str) -> bool:
+    """Whether `cl` with `args`, in the environment of `vcvars`, succeeded (`cl_script`)."""
+    bat = work / f"cl-{name}.bat"
+    bat.write_text(cl_script(vs, vcvars, work, args), encoding="ascii")
+    return subprocess.run(["cmd.exe", "/c", str(bat)]).returncode == 0
+
+
+def compile_program(vs: pathlib.Path, vcvars: str, package: pathlib.Path, where: str, src: pathlib.Path,
                     work: pathlib.Path) -> pathlib.Path | None:
     exe = work / f"{where}-{src.stem}.exe"
-    bat = work / f"build-{where}-{src.stem}.bat"
-    bat.write_text(
-        "@echo off\r\n"
-        f'call "{vs}\\VC\\Auxiliary\\Build\\vcvars64.bat" > nul\r\n'
-        f'cd /d "{work}"\r\n'
-        f'cl /nologo /std:c11 /DZENOH_WINDOWS /I"{package / "include"}" "{src}" '
-        f'"{package / where / "lib" / (LIBRARY + ".lib")}" /Fe:"{exe}"\r\n',
-        encoding="ascii")
-    proc = subprocess.run(["cmd.exe", "/c", str(bat)])
-    return exe if proc.returncode == 0 and exe.is_file() else None
+    built = run_cl(vs, vcvars, work, f"{where}-{src.stem}",
+                   f'/I"{package / "include"}" "{src}" '
+                   f'"{package / where / "lib" / (LIBRARY + ".lib")}" /Fe:"{exe}"')
+    return exe if built and exe.is_file() else None
+
+
+def layout_pins_hold(vs: pathlib.Path, vcvars: str, package: pathlib.Path, work: pathlib.Path) -> bool:
+    """Whether the layout pins compile against the package's headers with the compiler of its
+    width: each is a static assertion that a type a program allocates holds the words the library
+    writes into it, so a compile is the verdict and there is nothing to link or run."""
+    return run_cl(vs, vcvars, work, "layout-pins",
+                  f'/I"{package / "include"}" /c "{LAYOUT_PINS}" /Fo:"{work / "pico_layout_pins.obj"}"')
 
 
 def test(archive: pathlib.Path) -> int:
@@ -685,11 +735,19 @@ def test(archive: pathlib.Path) -> int:
         if findings:
             say(f"pico-package-test on Windows: {archive.name} does not match its manifest: FAIL")
             return 1
+        manifest = json.loads((package / MANIFEST).read_text(encoding="utf-8"))
+        arch = arch_of_target(manifest.get("target", ""))
+        vcvars = ARCHES[arch][1]
         statement = json.loads((package / STATEMENT).read_text(encoding="utf-8"))
         programs = sorted(p for p in (package / "examples").glob("*.c"))
         if not programs:
             raise Refusal("the package carries no example")
         failed = 0
+        pins_work = pathlib.Path(tmp) / "work-layout"
+        pins_work.mkdir()
+        verdict = "PASS" if layout_pins_hold(vs, vcvars, package, pins_work) else "did not compile: FAIL"
+        failed += not verdict.startswith("PASS")
+        say(f"pico-package-test on Windows {arch}: {LAYOUT_PINS.name}: {verdict}")
         for where, _ in BUILDS:
             work = pathlib.Path(tmp) / f"work-{where}"
             work.mkdir()
@@ -697,7 +755,7 @@ def test(archive: pathlib.Path) -> int:
             runs = [(src, []) for src in programs]
             runs.append((CHECK_PROGRAM, [statement["digest"], str(package / CATALOG_SAMPLE)]))
             for src, args in runs:
-                exe = compile_program(vs, package, where, src, work)
+                exe = compile_program(vs, vcvars, package, where, src, work)
                 if exe is None:
                     verdict = "did not compile or link: FAIL"
                 else:
@@ -707,7 +765,7 @@ def test(archive: pathlib.Path) -> int:
                     except subprocess.TimeoutExpired:
                         verdict = "no answer within 600 s: FAIL"
                 failed += not verdict.startswith("PASS")
-                say(f"pico-package-test on Windows: {where} {src.name}: {verdict}")
+                say(f"pico-package-test on Windows {arch}: {where} {src.name}: {verdict}")
         return 1 if failed else 0
 
 
@@ -734,8 +792,25 @@ def selftest() -> int:
         expect("a line with no `=` is refused", False)
     except Refusal:
         pass
-    expect("the name carries version, profile, host and ten digits of the commit",
-           package_name("0.1.0", "host-peer-ext", "0123456789abcdef") == "wz-capi-pico-0.1.0-host-peer-ext-windows-x64-0123456789")
+    expect("the name carries version, profile, host, width and ten digits of the commit",
+           package_name("0.1.0", "host-peer-ext", "x64", "0123456789abcdef")
+           == "wz-capi-pico-0.1.0-host-peer-ext-windows-x64-0123456789")
+    expect("the two widths make two names",
+           package_name("0.1.0", "host-peer-ext", "x86", "0123456789abcdef")
+           == "wz-capi-pico-0.1.0-host-peer-ext-windows-x86-0123456789")
+    expect("each width is built for its own target and compiled against with its own compiler",
+           ARCHES == {"x64": ("x86_64-pc-windows-msvc", "x64"), "x86": ("i686-pc-windows-msvc", "x86")})
+    expect("a manifest's target names its width",
+           arch_of_target("x86_64-pc-windows-msvc") == "x64" and arch_of_target("i686-pc-windows-msvc") == "x86")
+    try:
+        arch_of_target("aarch64-pc-windows-msvc")
+        expect("a target no package is made for is refused", False)
+    except Refusal:
+        pass
+    script = cl_script(pathlib.Path("C:/VS"), "x86", pathlib.Path("C:/w"), "/c a.c")
+    expect("the compiler of the x86 width is set up by vcvarsall with its argument",
+           '\\VC\\Auxiliary\\Build\\vcvarsall.bat" x86 > nul\r\n' in script
+           and script.endswith("cl /nologo /std:c11 /DZENOH_WINDOWS /c a.c\r\n"))
     expect("a profile name is a word list, not a path",
            PROFILE_ID_RE.match("host-peer-ext") is not None and PROFILE_ID_RE.match("../x") is None
            and PROFILE_ID_RE.match("a--b") is None)
@@ -820,17 +895,21 @@ def selftest() -> int:
         except Refusal:
             pass
 
-        notices = render_notices("p", rows, [], {"release": "rustc 1.0.0", "dir": "licenses/rust-std-1.0.0",
-                                                 "notice": "COPYRIGHT-library.html"},
+        notices = render_notices("p", "i686-pc-windows-msvc", rows, [],
+                                 {"release": "rustc 1.0.0", "dir": "licenses/rust-std-1.0.0",
+                                  "notice": "COPYRIGHT-library.html"},
                                  {"version": "1.0", "commit": "abc", "dir": "licenses/zenoh-pico"})
         expect("the notices list each linked package with the place of its texts",
                "| dual | 1.2.3 | MIT OR Apache-2.0 | crates.io | `licenses/dual-1.2.3/LICENSE-APACHE`, "
                "`licenses/dual-1.2.3/LICENSE-MIT` |" in notices)
+        expect("the notices name the target the graph was read for",
+               "for `i686-pc-windows-msvc` (`cargo tree`)" in notices)
         expect("a package with no text is listed under its own heading",
                "## Linked packages that ship no licence text (1)" in notices and "- bare 3.0.0: MIT" in notices)
         expect("the same rows give the same notices",
-               notices == render_notices("p", rows, [], {"release": "rustc 1.0.0", "dir": "licenses/rust-std-1.0.0",
-                                                         "notice": "COPYRIGHT-library.html"},
+               notices == render_notices("p", "i686-pc-windows-msvc", rows, [],
+                                         {"release": "rustc 1.0.0", "dir": "licenses/rust-std-1.0.0",
+                                          "notice": "COPYRIGHT-library.html"},
                                          {"version": "1.0", "commit": "abc", "dir": "licenses/zenoh-pico"}))
         expect("a pipe in a licence cell does not split the table", cell("A | B") == "A \\| B")
 
@@ -928,8 +1007,10 @@ def selftest() -> int:
                  "policies": [{"id": "p", "value": "on", "upstream": "off"}]}
     notes = release_notes("# Notes\n\nwritten\n", {
         "name": "n", "version": "0.1.0", "commit": "c" * 40, "tree_clean": False, "rustc": "rustc 1.0.0",
-        "profile": "host-peer-ext", "features": ["std", "a"], "statement": statement})
+        "target": "i686-pc-windows-msvc", "profile": "host-peer-ext", "features": ["std", "a"],
+        "statement": statement})
     expect("the release notes keep the written part first", notes.startswith("# Notes\n\nwritten\n\n## This build"))
+    expect("the release notes name the build's target", "target `i686-pc-windows-msvc`" in notes)
     expect("the release notes name the capabilities the build has and no other", "Capabilities (1): `a`" in notes)
     expect("the release notes name what is off its default, and only that",
            "L = 4 (default 2)" in notes and "M = 1" not in notes and "p = on (upstream off)" in notes)
@@ -947,10 +1028,16 @@ def main(argv: list[str]) -> int:
     try:
         if len(argv) == 2 and argv[1] == "--selftest":
             return selftest()
-        if len(argv) == 5 and argv[1] == "--build" and argv[3] == "--profile":
+        if (len(argv) in (5, 7) and argv[1] == "--build" and argv[3] == "--profile"
+                and (len(argv) == 5 or argv[5] == "--arch")):
+            arches = [argv[6]] if len(argv) == 7 else list(ARCHES)
+            unknown = [arch for arch in arches if arch not in ARCHES]
+            if unknown:
+                raise Refusal(f"`{unknown[0]}` is not a width a package is made for ({', '.join(ARCHES)})")
             out = pathlib.Path(argv[2]).resolve()
             out.mkdir(parents=True, exist_ok=True)
-            build(out, argv[4])
+            for arch in arches:
+                build(out, argv[4], arch)
             return 0
         if len(argv) == 3 and argv[1] == "--verify":
             target = pathlib.Path(argv[2])
