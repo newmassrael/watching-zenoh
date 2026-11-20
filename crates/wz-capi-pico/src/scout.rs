@@ -106,10 +106,53 @@ mod window {
     use wz_session_core::scouting_host::ScoutedHello;
     use wz_session_core::session_zid::SessionZid;
 
-    /// Scout `group:port` for `budget_ms`, handing each peer that answered to `on_hello` after the
-    /// window, last responder first; the number delivered.
+    use crate::config::ConfigState;
+
+    /// The clock a window is timed by: the system's, or the time base the scout's config names
+    /// (`time-base`), which a window then runs on as a session opened from that config does.
     #[cfg(feature = "engine-tokio")]
+    pub(super) type Clock = wz_capi_core::runtime::runtime_impl::TokioTime;
+    /// See the tokio engine's twin.
+    #[cfg(all(not(feature = "engine-tokio"), feature = "time-base"))]
+    pub(super) type Clock = crate::time_base::SessionClock;
+    /// See the tokio engine's twin.
+    #[cfg(all(not(feature = "engine-tokio"), not(feature = "time-base")))]
+    pub(super) type Clock = crate::coop_host::Clock;
+
+    /// The clock of a window `cfg` scouts with. A clock made over a time base reads it only while
+    /// `cfg`, which holds it, lives: the caller keeps `cfg` for the window.
+    #[cfg(all(feature = "engine-tokio", feature = "time-base"))]
+    pub(super) fn clock_of(cfg: Option<&ConfigState>) -> Clock {
+        match cfg.and_then(|cfg| cfg.time_base.as_ref()) {
+            Some(time_base) => Clock::on_time_base(time_base.time()),
+            None => Clock::new(),
+        }
+    }
+
+    /// See the twin of the build with a time base.
+    #[cfg(all(feature = "engine-tokio", not(feature = "time-base")))]
+    pub(super) fn clock_of(_cfg: Option<&ConfigState>) -> Clock {
+        Clock::new()
+    }
+
+    /// See the tokio engine's twin.
+    #[cfg(all(not(feature = "engine-tokio"), feature = "time-base"))]
+    pub(super) fn clock_of(cfg: Option<&ConfigState>) -> Clock {
+        crate::time_base::session_clock(cfg.and_then(|cfg| cfg.time_base.clone()))
+    }
+
+    /// See the tokio engine's twin.
+    #[cfg(all(not(feature = "engine-tokio"), not(feature = "time-base")))]
+    pub(super) fn clock_of(_cfg: Option<&ConfigState>) -> Clock {
+        crate::coop_host::clock()
+    }
+
+    /// Scout `group:port` for `budget_ms` of `clock`, handing each peer that answered to
+    /// `on_hello` after the window, last responder first; the number delivered.
+    #[cfg(feature = "engine-tokio")]
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn run(
+        clock: &Clock,
         group: IpAddr,
         port: u16,
         what: u8,
@@ -118,12 +161,15 @@ mod window {
         policy: &SessionPolicy,
         on_hello: impl FnMut(&ScoutedHello),
     ) -> usize {
-        wz_capi_core::scouting::run_scout(group, port, what, zid, budget_ms, policy, on_hello)
+        wz_capi_core::scouting::run_scout(
+            *clock, group, port, what, zid, budget_ms, policy, on_hello,
+        )
     }
 
     /// Scout and answer the first node that replies, or `None` when none does in the window.
     #[cfg(feature = "engine-tokio")]
     pub(super) fn first(
+        clock: &Clock,
         group: IpAddr,
         port: u16,
         what: u8,
@@ -131,12 +177,14 @@ mod window {
         budget_ms: u64,
         policy: &SessionPolicy,
     ) -> Option<ScoutedHello> {
-        wz_capi_core::scouting::scout_first(group, port, what, zid, budget_ms, policy)
+        wz_capi_core::scouting::scout_first(*clock, group, port, what, zid, budget_ms, policy)
     }
 
     // The cooperative engine on a host with `scout`: a socket for each interface.
     #[cfg(all(not(feature = "engine-tokio"), feature = "scout"))]
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn run(
+        clock: &Clock,
         group: IpAddr,
         port: u16,
         what: u8,
@@ -145,19 +193,12 @@ mod window {
         _policy: &SessionPolicy,
         on_hello: impl FnMut(&ScoutedHello),
     ) -> usize {
-        wz_capi_coop::scout::run_scout(
-            &crate::coop_host::clock(),
-            group,
-            port,
-            what,
-            zid,
-            budget_ms,
-            on_hello,
-        )
+        wz_capi_coop::scout::run_scout(clock, group, port, what, zid, budget_ms, on_hello)
     }
 
     #[cfg(all(not(feature = "engine-tokio"), feature = "scout"))]
     pub(super) fn first(
+        clock: &Clock,
         group: IpAddr,
         port: u16,
         what: u8,
@@ -165,20 +206,15 @@ mod window {
         budget_ms: u64,
         _policy: &SessionPolicy,
     ) -> Option<ScoutedHello> {
-        wz_capi_coop::scout::scout_first(
-            &crate::coop_host::clock(),
-            group,
-            port,
-            what,
-            zid,
-            budget_ms,
-        )
+        wz_capi_coop::scout::scout_first(clock, group, port, what, zid, budget_ms)
     }
 
     // The cooperative engine with `scout-mcu` alone: one datagram socket of the stack its links
     // run on (`crate::coop_host`), as zenoh-pico scouts where it has no interface iterator.
     #[cfg(all(not(feature = "engine-tokio"), not(feature = "scout")))]
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn run(
+        clock: &Clock,
         group: IpAddr,
         port: u16,
         what: u8,
@@ -187,11 +223,12 @@ mod window {
         _policy: &SessionPolicy,
         on_hello: impl FnMut(&ScoutedHello),
     ) -> usize {
-        crate::coop_host::run_scout(group, port, what, zid, budget_ms, on_hello)
+        crate::coop_host::run_scout(clock, group, port, what, zid, budget_ms, on_hello)
     }
 
     #[cfg(all(not(feature = "engine-tokio"), not(feature = "scout")))]
     pub(super) fn first(
+        clock: &Clock,
         group: IpAddr,
         port: u16,
         what: u8,
@@ -199,7 +236,7 @@ mod window {
         budget_ms: u64,
         _policy: &SessionPolicy,
     ) -> Option<ScoutedHello> {
-        crate::coop_host::scout_first(group, port, what, zid, budget_ms)
+        crate::coop_host::scout_first(clock, group, port, what, zid, budget_ms)
     }
 }
 
@@ -672,7 +709,10 @@ pub(crate) fn locators_by_scout(
         return Err(crate::result::Z_ERR_INVALID);
     };
     let zid = read.zid.or_else(fresh_scout_zid);
-    window::first(group, port, read.what, zid, read.budget_ms, policy)
+    // On the time base the config names, which `cfg` holds for the window, as the session opened
+    // from it will run on.
+    let clock = window::clock_of(Some(cfg));
+    window::first(&clock, group, port, read.what, zid, read.budget_ms, policy)
         .map(|hello| hello.locators)
         .filter(|locators| !locators.is_empty())
         .ok_or(crate::result::Z_ERR_SCOUT_NO_RESULTS)
@@ -731,7 +771,9 @@ pub unsafe extern "C" fn z_scout(
     let policy =
         crate::session::resolve_policy(cfg.as_deref().map_or(&unstated, |cfg| &cfg.policies))
             .map(|resolved| resolved.policy);
-    drop(cfg);
+    // The window's clock: the time base the config names, which `cfg` holds and is kept for the
+    // window, or the system's.
+    let clock = window::clock_of(cfg.as_deref());
     let (read, policy) = match (read, policy) {
         (Ok(read), Ok(policy)) => (read, policy),
         (Err(code), _) | (Ok(_), Err(code)) => {
@@ -754,20 +796,30 @@ pub unsafe extern "C" fn z_scout(
         return crate::result::Z_ERR_INVALID;
     };
 
-    let hellos = run_scout(group, port, what, zid, budget_ms, &policy, |hello| {
-        // The callback takes a MUTABLE loaned pointer (pico's signature), but
-        // this side keeps ownership: the state is dropped when `run_scout`'s
-        // per-hello box goes out of scope, matching upstream, where the hello
-        // is owned by the scouting task and only borrowed by the user.
-        if let Some(call) = user_call {
-            let mut loaned = z_loaned_hello_t {
-                handle: hello as *mut HelloState as *mut c_void,
-                _pad: [core::ptr::null_mut(); 6],
-            };
-            call(&mut loaned as *mut z_loaned_hello_t, user_ctx);
-        }
-    });
+    let hellos = run_scout(
+        &clock,
+        group,
+        port,
+        what,
+        zid,
+        budget_ms,
+        &policy,
+        |hello| {
+            // The callback takes a MUTABLE loaned pointer (pico's signature), but
+            // this side keeps ownership: the state is dropped when `run_scout`'s
+            // per-hello box goes out of scope, matching upstream, where the hello
+            // is owned by the scouting task and only borrowed by the user.
+            if let Some(call) = user_call {
+                let mut loaned = z_loaned_hello_t {
+                    handle: hello as *mut HelloState as *mut c_void,
+                    _pad: [core::ptr::null_mut(); 6],
+                };
+                call(&mut loaned as *mut z_loaned_hello_t, user_ctx);
+            }
+        },
+    );
     let _ = hellos;
+    drop(cfg);
 
     // The closure's `drop` runs exactly once, AFTER the last callback — the
     // signal `z_scout.c` uses to print its "found nothing" / "dropping" line,
@@ -794,7 +846,9 @@ pub unsafe extern "C" fn z_scout(
 ///
 /// All this side keeps is the ABI mapping: a scouted hello becomes the `HelloState` behind
 /// pico's `z_loaned_hello_t`. `policy` is the scout's snapshot, handed to the window.
+#[allow(clippy::too_many_arguments)]
 fn run_scout(
+    clock: &window::Clock,
     group: IpAddr,
     port: u16,
     what: u8,
@@ -803,7 +857,7 @@ fn run_scout(
     policy: &SessionPolicy,
     mut on_hello: impl FnMut(&mut HelloState),
 ) -> usize {
-    window::run(group, port, what, zid, budget_ms, policy, |hello| {
+    window::run(clock, group, port, what, zid, budget_ms, policy, |hello| {
         let whatami = hello.whatami.map_or(0, |w| u32::from(w.to_api()));
         let mut state = HelloState::new(
             z_id_t::from_wire(&hello.zid),

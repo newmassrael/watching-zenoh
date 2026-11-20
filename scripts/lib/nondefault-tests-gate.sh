@@ -427,10 +427,11 @@ transport-link-unixpipe,transport-link-ws|"
     # A time base the program supplies (`wz_ext_time_base_*`): the doors' refusals and ownership
     # and a listening session that runs on the program's time with its control on the system's
     # (`time_base::`), a silent inbound link held to the accept timeout of the program's time
-    # (`files::time_base_accept::`) and, on the tokio engine, a get held to a timeout of the
-    # program's time (`files::get_roundtrip::c_get_on_a_time_base_...`): every name says
-    # `time_base`, which is the filter. The tokio engine first (7), then the cooperative one,
-    # where the session's clock itself and its read's wake run too.
+    # (`files::time_base_accept::`), an open's scouting window of the program's time
+    # (`files::open_scouts_for_a_locator::an_open_on_a_time_base_...`) and, on the tokio engine,
+    # a get held to a timeout of the program's time (`files::get_roundtrip::c_get_on_a_time_base_
+    # ...`): every name says `time_base`, which is the filter. The tokio engine first (8), then the
+    # cooperative one (8), where the session's clock itself and its read's word run too.
     "wz-capi-pico|hook|time-base|time_base"
     "wz-capi-pico|hook|-default,engine-coop,peer,multi-thread,link-udp,connectivity,time-base|time_base"
     # Whether a reply of a replay reaches the receiving judge (`replay_admission`, behind `replay`):
@@ -1260,6 +1261,9 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # module gated on `app-link` alone.
     "wz-session-core|hook|app-link|app_link_table::"
     "wz-session-core|hook|app-link|app_transport::"
+    # The cooperative engine's links over the program's transport (`app_link::`, `app-link`), with
+    # the host's parked waits (`host-lock`), which the open bounded by the session's clock is.
+    "wz-runtime-coop|hook|app-link,host-lock|app_link::"
     "wz-session-core|hook|declarations-synced-event|decl_sink::"
     # The key ids every node of a deployment shares and the reader of a document's `wz/key-ids`
     # (`shared_key_ids`, a module built with `shared-key-ids` alone). Pure functions over a

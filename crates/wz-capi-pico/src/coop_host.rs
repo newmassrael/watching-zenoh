@@ -183,14 +183,16 @@ mod scouting {
 
     use wz_session_core::session_zid::SessionZid;
 
-    use super::{clock, Datagram};
+    use super::Datagram;
 
     /// What one datagram of a scout is read into: zenoh-pico's multicast batch as the build states
     /// it, which is what its scout reads into.
     const SCOUT_RX_BYTES: usize = wz_session_core::caps::PICO_MULTICAST_BATCH_BYTES;
 
-    /// The group is asked from a socket of its family, IPv4 or IPv6, as the window binds it.
-    pub(crate) fn run_scout(
+    /// The group is asked from a socket of its family, IPv4 or IPv6, as the window binds it. The
+    /// window is `budget_ms` of `clock`: the host's, or the time base the scout's config names.
+    pub(crate) fn run_scout<C: wz_capi_coop::ClockSource + Clone>(
+        clock: &C,
         group: IpAddr,
         port: u16,
         what: u8,
@@ -199,7 +201,7 @@ mod scouting {
         on_hello: impl FnMut(&ScoutedHello),
     ) -> usize {
         wz_capi_coop::scout_datagram::run_scout::<Datagram, _>(
-            &clock(),
+            clock,
             SocketAddr::new(group, port),
             what,
             zid,
@@ -209,7 +211,8 @@ mod scouting {
         )
     }
 
-    pub(crate) fn scout_first(
+    pub(crate) fn scout_first<C: wz_capi_coop::ClockSource + Clone>(
+        clock: &C,
         group: IpAddr,
         port: u16,
         what: u8,
@@ -217,7 +220,7 @@ mod scouting {
         budget_ms: u64,
     ) -> Option<ScoutedHello> {
         wz_capi_coop::scout_datagram::scout_first::<Datagram, _>(
-            &clock(),
+            clock,
             SocketAddr::new(group, port),
             what,
             zid,
