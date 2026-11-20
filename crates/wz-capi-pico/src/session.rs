@@ -141,9 +141,13 @@ const fn pico_batch(bytes: usize) -> u16 {
 /// The read storage a stream link pools is upstream's default, which pools exactly one buffer:
 /// pico reads each unicast transport into one buffer of its own
 /// (`vendor/zenoh-pico/src/transport/unicast/transport.c` @ `ztu->_common._zbuf = _z_zbuf_make(zbuf_size);`).
+///
+/// A link over TCP is as wide as pico's, the widest batch whatever the connection
+/// ([`TcpLinkMtu::Widest`](wz_session_core::session_init_params::TcpLinkMtu::Widest)).
 const PICO_LINK_RX: LinkRxConf = LinkRxConf {
     buffer_size: wz_session_core::session_init_params::RX_BUFFER_SIZE,
     max_message_size: wz_session_core::caps::PICO_FRAG_MAX_BYTES,
+    tcp_mtu: wz_session_core::session_init_params::TcpLinkMtu::Widest,
 };
 
 /// How long a listening session of this ABI gives an inbound link, pico's

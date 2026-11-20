@@ -54,6 +54,7 @@ use crate::link_socket::LinkSocket;
 use crate::stream_link::{writer_task, StreamReadDriver, StreamWriteDriver};
 use crate::writer_queue::WriterHandle;
 use wz_session_core::link::LinkKind;
+use wz_session_core::session_init_params::{LinkRxConf, TcpLinkMtu, TcpMss};
 
 /// Inbound read driver of a split `TcpStream` — the TCP instantiation of the
 /// shared [`StreamReadDriver`]. The framing / [`crate::LinkDriver`] impl lives
@@ -794,11 +795,12 @@ pub fn wire_tcp_stream(stream: TcpStream) -> (TcpReadDriver, Arc<StreamWriteDriv
     // Universal framing: a fresh always-false lowlatency flag (the u16 batch
     // prefix). The lowlatency open helpers instead use the _with_lowlatency
     // variant to share a flag they flip at Established. No session parameters
-    // reach this form, so the RX pool is upstream's default size.
+    // reach this form, so the link takes upstream's default `transport/link/rx`
+    // and zenoh's MTU rule.
     wire_tcp_stream_with_lowlatency(
         stream,
         Arc::new(AtomicBool::new(false)),
-        wz_session_core::session_init_params::RX_BUFFER_SIZE,
+        LinkRxConf::default(),
     )
 }
 
@@ -808,13 +810,16 @@ pub fn wire_tcp_stream(stream: TcpStream) -> (TcpReadDriver, Arc<StreamWriteDriv
 /// it at Established. The flag stays false through the handshake and for every
 /// universal link, so those wires are byte-identical to before.
 ///
-/// `rx_buffer_size` is the session's `transport/link/rx/buffer_size`: the read
-/// storage the link pools.
+/// `link_rx` is the session's `transport/link/rx` section: `buffer_size` is the
+/// read storage the link pools, and `tcp_mtu` the rule the connection's MTU is
+/// sized by ([`tcp_link_mtu`]).
 pub fn wire_tcp_stream_with_lowlatency(
     stream: TcpStream,
     lowlatency: Arc<AtomicBool>,
-    rx_buffer_size: usize,
+    link_rx: LinkRxConf,
 ) -> (TcpReadDriver, Arc<StreamWriteDriver>, WriterHandle) {
+    // Read off the socket before the split, as upstream sizes the link when it is made.
+    let mtu = tcp_link_mtu(&stream, link_rx.tcp_mtu);
     // R311y453 — the §5.16 subject is resolved BEFORE the split, while the
     // stream still owns its socket and can report its local address.
     let subject = ip_link_subject(LinkKind::Tcp, stream.local_addr().ok());
@@ -831,7 +836,11 @@ pub fn wire_tcp_stream_with_lowlatency(
     #[cfg(unix)]
     let inline_write = crate::stream_link::inline_write_of(&stream);
     let (reader, writer) = stream.into_split();
-    let inbound = StreamReadDriver::new(TcpRead::new(reader), lowlatency.clone(), rx_buffer_size);
+    let inbound = StreamReadDriver::new(
+        TcpRead::new(reader),
+        lowlatency.clone(),
+        link_rx.buffer_size,
+    );
     let (tx, rx) = crate::stream_link::stream_outbound_channel();
     #[cfg(unix)]
     if let Some(sink) = inline_write {
@@ -840,9 +849,28 @@ pub fn wire_tcp_stream_with_lowlatency(
     let writer_handle = WriterHandle::spawn(rx, |queue| writer_task(writer, queue));
     let outbound = Arc::new(
         StreamWriteDriver::new(tx, lowlatency, subject, endpoints)
-            .settling_rx(inbound.rx_settler()),
+            .settling_rx(inbound.rx_settler())
+            .with_link_mtu(mtu),
     );
     (inbound, outbound, writer_handle)
+}
+
+/// The MTU of a link over the TCP connection `stream` under `rule`: the IP
+/// header follows the connection's local address and the MSS is the socket's,
+/// read where zenoh reads it, on unix.
+pub(crate) fn tcp_link_mtu(stream: &TcpStream, rule: TcpLinkMtu) -> usize {
+    if rule == TcpLinkMtu::Widest {
+        return rule.mtu(false, TcpMss::Unread);
+    }
+    let v6 = stream.local_addr().is_ok_and(|local| local.is_ipv6());
+    #[cfg(unix)]
+    let mss = match socket2::SockRef::from(stream).tcp_mss() {
+        Ok(mss) => TcpMss::Read(mss),
+        Err(_) => TcpMss::Failed,
+    };
+    #[cfg(not(unix))]
+    let mss = TcpMss::Unread;
+    rule.mtu(v6, mss)
 }
 
 #[cfg(test)]
@@ -1081,6 +1109,76 @@ mod tests {
         client.await.expect("client task").expect("client connect");
         assert_eq!(peer.ip(), addr.ip(), "accepted peer is the loopback client");
         assert!(server.peer_addr().is_ok(), "server stream is connected");
+    }
+
+    /// A wired TCP link reports its MTU to the session as both the batch it sends and the batch
+    /// it receives: under zenoh's rule what the socket's MSS gives (each end its own, read off
+    /// its own socket the way the rule reads it), under zenoh-pico's the widest batch. The
+    /// control is the wired default, which is zenoh's.
+    #[tokio::test]
+    async fn a_wired_tcp_link_is_as_wide_as_its_rule_reads_its_socket() {
+        use wz_session_core::link::BoxedLinkDriver;
+
+        async fn pair() -> (TcpStream, TcpStream) {
+            let listener = bind_tcp(
+                "127.0.0.1:0".parse().expect("loopback addr"),
+                &LinkSocket::NONE,
+            )
+            .await
+            .expect("bind loopback");
+            let addr = listener.local_addr().expect("local addr");
+            let client = tokio::spawn(async move { TcpStream::connect(addr).await });
+            let (server, _) = accept_tcp(listener).await.expect("accept one peer");
+            let client = client.await.expect("client task").expect("client connect");
+            (client, server)
+        }
+        fn rule_reads(stream: &TcpStream) -> usize {
+            #[cfg(unix)]
+            let mss = TcpMss::Read(
+                socket2::SockRef::from(stream)
+                    .tcp_mss()
+                    .expect("a connected socket reads its MSS"),
+            );
+            #[cfg(not(unix))]
+            let mss = TcpMss::Unread;
+            TcpLinkMtu::HalfMssMultiple.mtu(false, mss)
+        }
+
+        for end in ["dialling", "accepting"] {
+            let (client, server) = pair().await;
+            let stream = if end == "dialling" { client } else { server };
+            let expected = rule_reads(&stream);
+            assert!(
+                expected <= 65_495,
+                "zenoh's rule takes the IPv4 header off the widest batch, read {expected}"
+            );
+            let link_rx = LinkRxConf {
+                tcp_mtu: TcpLinkMtu::HalfMssMultiple,
+                ..LinkRxConf::default()
+            };
+            let (_inbound, outbound, _writer) =
+                wire_tcp_stream_with_lowlatency(stream, Arc::new(AtomicBool::new(false)), link_rx);
+            assert_eq!(outbound.link_mtu(), expected, "the send bound, {end} end");
+            assert_eq!(
+                outbound.link_rx_capacity(),
+                expected,
+                "the receive bound, {end} end"
+            );
+        }
+
+        let (client, _server) = pair().await;
+        let (_inbound, outbound, _writer) = wire_tcp_stream(client);
+        assert!(outbound.link_mtu() < 65_535, "the default is zenoh's rule");
+
+        let (client, _server) = pair().await;
+        let link_rx = LinkRxConf {
+            tcp_mtu: TcpLinkMtu::Widest,
+            ..LinkRxConf::default()
+        };
+        let (_inbound, outbound, _writer) =
+            wire_tcp_stream_with_lowlatency(client, Arc::new(AtomicBool::new(false)), link_rx);
+        assert_eq!(outbound.link_mtu(), 65_535);
+        assert_eq!(outbound.link_rx_capacity(), 65_535);
     }
 
     /// `dial_tcp` + `accept_tcp` set `TCP_NODELAY` on both ends (zenoh per-link

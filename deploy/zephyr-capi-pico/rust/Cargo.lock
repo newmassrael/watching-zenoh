@@ -959,6 +959,7 @@ dependencies = [
  "portable-atomic",
  "sce-forge-runtime",
  "sce-rust-runtime",
+ "socket2",
  "tokio",
  "windows-sys",
  "wz-codecs",

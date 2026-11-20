@@ -451,7 +451,7 @@ async fn a_tls_link_carries_its_peers_certificate_common_name_onto_its_subject()
     let (_inbound, outbound, _writer) = wire_tls_stream(
         *tls,
         false,
-        wz_session_core::session_init_params::RX_BUFFER_SIZE,
+        wz_session_core::session_init_params::LinkRxConf::default(),
     );
     let subject = outbound
         .link_subject()
@@ -713,7 +713,7 @@ async fn an_expiring_peer_chain_closes_only_the_tls_link_that_asked_for_it() {
             wire_tls_stream(
                 *stream,
                 closes,
-                wz_session_core::session_init_params::RX_BUFFER_SIZE,
+                wz_session_core::session_init_params::LinkRxConf::default(),
             )
             .0
         }
@@ -726,7 +726,7 @@ async fn an_expiring_peer_chain_closes_only_the_tls_link_that_asked_for_it() {
             wire_tls_stream(
                 *stream,
                 closes,
-                wz_session_core::session_init_params::RX_BUFFER_SIZE,
+                wz_session_core::session_init_params::LinkRxConf::default(),
             )
             .0
         }
@@ -854,7 +854,7 @@ async fn an_expiring_peer_chain_closes_a_tls_link_whose_kind_asked_for_it() {
             wire_tls_stream(
                 *stream,
                 closes,
-                wz_session_core::session_init_params::RX_BUFFER_SIZE,
+                wz_session_core::session_init_params::LinkRxConf::default(),
             )
             .0
         }
@@ -870,7 +870,7 @@ async fn an_expiring_peer_chain_closes_a_tls_link_whose_kind_asked_for_it() {
             wire_tls_stream(
                 *stream,
                 closes,
-                wz_session_core::session_init_params::RX_BUFFER_SIZE,
+                wz_session_core::session_init_params::LinkRxConf::default(),
             )
             .0
         }

@@ -4315,11 +4315,10 @@ pub fn wire_dialed_link_with_lowlatency(
     // Only the udp writer reads a policy of the snapshot today.
     #[cfg(not(feature = "transport-link-udp"))]
     let _ = policy;
-    let rx_buffer_size = link_rx.buffer_size;
     match dialed {
         DialedLink::Tcp(stream) => {
             let (inbound, outbound, handle) =
-                wire_tcp_stream_with_lowlatency(stream, lowlatency, rx_buffer_size);
+                wire_tcp_stream_with_lowlatency(stream, lowlatency, link_rx);
             (InboundLink::Tcp(inbound), outbound, handle)
         }
         #[cfg(feature = "transport-link-udp")]
@@ -4343,7 +4342,7 @@ pub fn wire_dialed_link_with_lowlatency(
         #[cfg(feature = "transport-link-tls")]
         DialedLink::Tls(stream, closes_on_expiration) => {
             let (inbound, outbound, handle) =
-                wire_tls_stream(*stream, closes_on_expiration, rx_buffer_size);
+                wire_tls_stream(*stream, closes_on_expiration, link_rx);
             (InboundLink::Tls(inbound), outbound, handle)
         }
         #[cfg(feature = "transport-link-ws")]
@@ -4353,22 +4352,22 @@ pub fn wire_dialed_link_with_lowlatency(
         }
         #[cfg(all(feature = "transport-link-unixsock", unix))]
         DialedLink::Unixsock(stream) => {
-            let (inbound, outbound, handle) = wire_unixsock_stream(stream, rx_buffer_size);
+            let (inbound, outbound, handle) = wire_unixsock_stream(stream, link_rx.buffer_size);
             (InboundLink::Unixsock(inbound), outbound, handle)
         }
         #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
         DialedLink::Vsock(stream) => {
-            let (inbound, outbound, handle) = wire_vsock_stream(stream, rx_buffer_size);
+            let (inbound, outbound, handle) = wire_vsock_stream(stream, link_rx.buffer_size);
             (InboundLink::Vsock(inbound), outbound, handle)
         }
         #[cfg(all(feature = "transport-link-unixpipe", unix))]
         DialedLink::Unixpipe(link) => {
-            let (inbound, outbound, handle) = wire_unixpipe_stream(link, rx_buffer_size);
+            let (inbound, outbound, handle) = wire_unixpipe_stream(link, link_rx.buffer_size);
             (InboundLink::Unixpipe(inbound), outbound, handle)
         }
         #[cfg(feature = "transport-link-quic")]
         DialedLink::Quic(link) => {
-            let (inbound, outbound, handle) = wire_quic_stream(*link, rx_buffer_size);
+            let (inbound, outbound, handle) = wire_quic_stream(*link, link_rx.buffer_size);
             (InboundLink::Quic(inbound), outbound, handle)
         }
         #[cfg(feature = "transport-link-quic-datagram")]
@@ -4381,14 +4380,14 @@ pub fn wire_dialed_link_with_lowlatency(
         // builds, so no inbound variant of its own is needed.
         #[cfg(feature = "transport-link-udp-reliable")]
         DialedLink::UdpReliable(link) => {
-            let (inbound, outbound, handle) = wire_udp_reliable(*link, rx_buffer_size);
+            let (inbound, outbound, handle) = wire_udp_reliable(*link, link_rx.buffer_size);
             (InboundLink::Quic(inbound), outbound, handle)
         }
         // Universal framing only: the lowlatency negotiation is wired for the system's TCP link,
         // and a pico session offers none.
         #[cfg(feature = "transport-link-app")]
         DialedLink::App(stream) => {
-            let (inbound, outbound, handle) = wire_app_stream(stream, rx_buffer_size);
+            let (inbound, outbound, handle) = wire_app_stream(stream, link_rx.buffer_size);
             (InboundLink::App(inbound), outbound, handle)
         }
         #[cfg(all(feature = "transport-link-app", feature = "transport-link-udp"))]
