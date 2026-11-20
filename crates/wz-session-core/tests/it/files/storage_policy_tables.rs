@@ -6,7 +6,9 @@
 //! in one build, so the two policies are compared by the same code and not by two
 //! copies of it. What a policy promises is read from `P::ENFORCES_CAPACITY`, never
 //! from a feature gate: the hard bound refuses the entry past `N` and counts it, the
-//! growable one takes it.
+//! growable one takes it. A table that holds its bound's quota is held to `N` on the
+//! growable policy too where the build's quota is `N` (a fixed build states its
+//! capacity as every table's quota), which the test reads from the quota itself.
 //!
 //! `bounded_heapless_backing.rs` measures the build's own profile (including the
 //! zero-allocation property, which needs the whole build to be fixed); this file is
@@ -53,7 +55,10 @@ fn subscriber_table_fills_to_n_and_refuses_at_n_plus_one<P: Storage>() {
     assert_eq!(reg.len(), caps::MAX_SUBSCRIPTIONS);
 
     let past = reg.register_sink("s/past", Locality::Any, NoopSampleSink);
-    if P::ENFORCES_CAPACITY {
+    let held_to_n = P::ENFORCES_CAPACITY
+        || !wz_session_core::limits::MaxSubscriptionsHeld::default()
+            .admits(caps::MAX_SUBSCRIPTIONS + 1);
+    if held_to_n {
         assert_eq!(past.err(), Some(RegisterError::TableFull));
         assert_eq!(reg.len(), caps::MAX_SUBSCRIPTIONS);
     } else {
@@ -133,7 +138,10 @@ fn pending_queries_fill_to_n_and_refuse_at_n_plus_one<P: Storage>() {
         ReplyAcceptance::Any,
         NoopReplySink,
     );
-    if P::ENFORCES_CAPACITY {
+    let held_to_n = P::ENFORCES_CAPACITY
+        || !wz_session_core::limits::MaxPendingQueriesHeld::default()
+            .admits(caps::MAX_PENDING_QUERIES + 1);
+    if held_to_n {
         assert_eq!(past.err(), Some(RegisterError::TableFull));
         assert_eq!(reg.len(), caps::MAX_PENDING_QUERIES);
         assert!(reg.unregister(0));
@@ -185,7 +193,10 @@ fn liveliness_gets_fill_to_n_and_refuse_at_n_plus_one<P: Storage>() {
         None,
         NoopReplySink,
     );
-    if P::ENFORCES_CAPACITY {
+    let held_to_n = P::ENFORCES_CAPACITY
+        || !wz_session_core::limits::MaxPendingLivelinessGetsHeld::default()
+            .admits(caps::MAX_PENDING_LIVELINESS_GETS + 1);
+    if held_to_n {
         assert_eq!(past, Err(RegisterError::TableFull));
         assert_eq!(reg.len(), caps::MAX_PENDING_LIVELINESS_GETS);
     } else {
