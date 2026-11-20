@@ -490,7 +490,8 @@ impl<R: SessionRuntime> Subscriber<R> {
         // room and waits for it when the link is full, and a thread that waits
         // for an event while it holds the observer stops the drive thread,
         // which needs the observer to deliver anything at all. pico's order
-        // (send, then unregister, `vendor/zenoh-pico/src/net/primitives.c:300-307`)
+        // (send, then unregister: `vendor/zenoh-pico/src/net/primitives.c` @
+        // `_z_unregister_subscription(zn, _Z_SUBSCRIBER_KIND_SUBSCRIBER, &s);`)
         // holds no lock across its send; what the reversed order changes is
         // only that a sample arriving in between is not delivered, which the
         // killed cell above already guarantees.
