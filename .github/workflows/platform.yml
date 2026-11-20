@@ -997,11 +997,12 @@ jobs:
 
   # The C examples of the pico C ABI (crates/wz-capi-pico/examples/c/), on Linux and on
   # Windows: the policy profile the library is built with, the three transport configs over
-  # the system's sockets and over a transport the program supplies, batching, end-to-end
-  # protection, stream supervision and a program's own periodic task. Each is compiled
-  # against zenoh-pico's own headers for the host and linked against the wz library by
-  # scripts/pico-c-program.sh, as the programs of the `capi` job are, and exits 0 when it
-  # ran its exchange.
+  # the system's sockets and over a transport the program supplies (the program's own stack,
+  # and the test program with injected faults), batching, end-to-end protection, stream
+  # supervision, a program's own periodic task, a keyed topic and history for a late
+  # subscriber. Each is compiled against zenoh-pico's own headers for the host and linked
+  # against the wz library by scripts/pico-c-program.sh, as the programs of the `capi` job
+  # are, and exits 0 when it ran its exchange.
   #
   # A job of its own and not steps of `capi`: that job's budget is spent by what it gates,
   # and Linux is not one of its hosts. Every example builds the library with ONE feature list
@@ -1028,7 +1029,7 @@ jobs:
             host: windows
     env:
       WZ_HOST_SELECTED: ${{ (inputs.host == '' || inputs.host == 'both' || inputs.host == matrix.host) && 'true' || 'false' }}
-      WZ_EXAMPLE_FEATURES: app-transport,e2e-sender,e2e-receiver,e2e-supervision
+      WZ_EXAMPLE_FEATURES: app-transport,e2e-sender,e2e-receiver,e2e-supervision,instance-key,replay-cache
     steps:
       - name: Checkout (with submodules)
         if: ${{ env.WZ_HOST_SELECTED == 'true' }}
@@ -1110,6 +1111,13 @@ jobs:
         shell: bash
         run: bash scripts/pico-c-program.sh crates/wz-capi-pico/tests/c/pico_app_transport.c "example of tcp, udp and a group over a transport the program supplies" "$WZ_EXAMPLE_FEATURES"
 
+      - name: example, tcp, udp and a group over a network stack of the program's own (observed)
+        if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
+        timeout-minutes: 15
+        continue-on-error: true
+        shell: bash
+        run: bash scripts/pico-c-program.sh crates/wz-capi-pico/examples/c/own_transport.c "example of tcp, udp and a group over a network stack of the program's own" "$WZ_EXAMPLE_FEATURES"
+
       - name: example, batching on and off with a flush (observed)
         if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
         timeout-minutes: 15
@@ -1137,6 +1145,20 @@ jobs:
         continue-on-error: true
         shell: bash
         run: bash scripts/pico-c-program.sh crates/wz-capi-pico/examples/c/periodic.c "example of a program's own periodic task" "$WZ_EXAMPLE_FEATURES"
+
+      - name: example, a keyed topic with a last value per instance (observed)
+        if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
+        timeout-minutes: 15
+        continue-on-error: true
+        shell: bash
+        run: bash scripts/pico-c-program.sh crates/wz-capi-pico/examples/c/keyed.c "example of a keyed topic with a last value per instance" "$WZ_EXAMPLE_FEATURES"
+
+      - name: example, history for a late subscriber then live samples (observed)
+        if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
+        timeout-minutes: 15
+        continue-on-error: true
+        shell: bash
+        run: bash scripts/pico-c-program.sh crates/wz-capi-pico/examples/c/history.c "example of history for a late subscriber then live samples" "$WZ_EXAMPLE_FEATURES"
 
       # The platform exports the periodic task stands on (its timer, lock, task and event
       # wait), on the Linux row too, which the `capi` job does not run.
