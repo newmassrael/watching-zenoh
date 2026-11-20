@@ -45,6 +45,8 @@
 //! | `proto_decode` | a protobuf payload read by the types its schema gives it | `proto` |
 //! | `message_payload` | one message set and read field by field at paths, its protobuf bytes encoded and decoded | `message-payload` |
 //! | `proto_lex`, `proto_parse` | the tokenizer and the parser behind the schema reader | `proto` |
+//! | `proto_nanopb` | the nanopb options a schema states, merged as nanopb's generator merges them, and the largest size a message encodes to | `proto` |
+//! | `proto_range` | the integers a field may hold: by its type, or narrowed by the nanopb `int_size` in force | `proto` |
 //! | `instance_key` | the instance of a message a sample is, read from payload fields; a stream and a last value per instance | `instance-key` |
 //!
 //! `no_std`, with no third-party dependency. The CRC engine and the judge need
@@ -97,7 +99,11 @@ pub mod proto_decode;
 #[cfg(feature = "proto")]
 pub mod proto_lex;
 #[cfg(feature = "proto")]
+pub mod proto_nanopb;
+#[cfg(feature = "proto")]
 pub mod proto_parse;
+#[cfg(feature = "proto")]
+pub mod proto_range;
 #[cfg(feature = "proto")]
 pub mod proto_schema;
 // The model tests of the catalog reader: the synthetic catalog, its handles, the generator's

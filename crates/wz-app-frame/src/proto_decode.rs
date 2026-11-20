@@ -78,9 +78,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
-use crate::proto_parse::{Label, ScalarKind, MAX_FIELD_NUMBER};
+use crate::proto_parse::{FieldOption, Label, ScalarKind, MAX_FIELD_NUMBER};
 use crate::proto_schema::{
-    EnumInfo, FieldKind, Linker, MapValueKind, Msg, ProtoDiagnostic, ProtoFile,
+    EnumInfo, FieldKind, FileOptions, Linker, MapValueKind, Msg, ProtoDiagnostic, ProtoFile,
 };
 
 /// How many messages deep the reader walks: a message inside a message is one
@@ -279,6 +279,9 @@ impl<'f, 'a> LinkedSchema<'f, 'a> {
 pub struct SchemaSet {
     msgs: Vec<Msg>,
     enums: Vec<EnumInfo>,
+    /// Each file's own `option` statements, by the index a message's `file`
+    /// holds: what a writer that narrows by the nanopb options merges first.
+    file_options: Vec<Vec<FieldOption>>,
 }
 
 /// One message of a [`SchemaSet`], as [`SchemaSet::message`] found it.
@@ -294,6 +297,12 @@ impl fmt::Debug for SchemaSet {
     }
 }
 
+impl FileOptions for SchemaSet {
+    fn options_of_file(&self, file: usize) -> &[FieldOption] {
+        self.file_options.get(file).map_or(&[][..], Vec::as_slice)
+    }
+}
+
 impl SchemaSet {
     /// Read every file of `files`, each with what it imports.
     ///
@@ -302,8 +311,12 @@ impl SchemaSet {
     /// The first problem found, in the order the files are listed, with the
     /// diagnostic the writer gives for the same file.
     pub fn read(files: &[ProtoFile<'_>]) -> Result<Self, ProtoDiagnostic> {
-        let (msgs, enums) = Linker::read_all(files)?.into_types();
-        Ok(Self { msgs, enums })
+        let (msgs, enums, file_options) = Linker::read_all(files)?.into_types();
+        Ok(Self {
+            msgs,
+            enums,
+            file_options,
+        })
     }
 
     /// The message whose full name, package included, is `full_name`.

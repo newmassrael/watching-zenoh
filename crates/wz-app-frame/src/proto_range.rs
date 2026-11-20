@@ -2,9 +2,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! The integers a field of a `.proto` schema may hold: the ONE place that range
-//! is judged, for the encoder that refuses a value outside it
-//! ([`crate::proto_encode`]) and the description document that shows it
-//! ([`crate::proto_describe_json`]).
+//! is judged, for the writer that refuses a value outside it and the
+//! description document of the capture crate that shows it.
 //!
 //! ## Why the type is not the whole answer
 //!
@@ -46,7 +45,7 @@
 
 use crate::proto_nanopb::{field_int_size, field_type_overridden, map_entry_int_size, IntSize};
 use crate::proto_parse::ScalarKind;
-use crate::proto_schema::{FieldKind, Fld, Linker, Msg};
+use crate::proto_schema::{FieldKind, FileOptions, Fld, Msg};
 
 /// Where a field's range comes from: the words of `source`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -130,7 +129,7 @@ pub fn refusal_words() -> [&'static str; 4] {
 impl ValueRange {
     /// The range of `kind` by its type alone, `None` for a kind that holds no
     /// integer.
-    pub(crate) fn of_type(kind: ScalarKind) -> Option<Self> {
+    pub fn of_type(kind: ScalarKind) -> Option<Self> {
         type_range(kind).map(|(low, high)| Self {
             low,
             high,
@@ -140,7 +139,7 @@ impl ValueRange {
 }
 
 /// The inclusive range an integer kind holds by its protobuf type.
-pub(crate) fn type_range(kind: ScalarKind) -> Option<(i128, i128)> {
+fn type_range(kind: ScalarKind) -> Option<(i128, i128)> {
     Some(match kind {
         ScalarKind::Int32 | ScalarKind::Sint32 | ScalarKind::Sfixed32 => {
             (i128::from(i32::MIN), i128::from(i32::MAX))
@@ -159,7 +158,7 @@ pub(crate) fn type_range(kind: ScalarKind) -> Option<(i128, i128)> {
 }
 
 /// The range a value of `kind` is held to under the nanopb `int_size` in force.
-pub(crate) fn value_range(kind: ScalarKind, int_size: IntSize) -> Result<ValueRange, RangeRefusal> {
+pub fn value_range(kind: ScalarKind, int_size: IntSize) -> Result<ValueRange, RangeRefusal> {
     let of_type = ValueRange::of_type(kind).ok_or(RangeRefusal::NotAnInteger)?;
     let signed = match kind {
         ScalarKind::Int32 | ScalarKind::Int64 | ScalarKind::Sint32 | ScalarKind::Sint64 => true,
@@ -195,20 +194,31 @@ pub(crate) fn value_range(kind: ScalarKind, int_size: IntSize) -> Result<ValueRa
     })
 }
 
-/// The range of the values of `field` of `msg`, or why it has none. The one
-/// judgement the encoder and the description document share.
-pub(crate) fn field_range(
-    linker: &Linker<'_, '_>,
+/// The range of the values of `field` of `msg` under the nanopb options in
+/// force, or why it has none. The one judgement the writer and the description
+/// document share; `schema` is the linked schema `msg` belongs to.
+pub fn field_range<S: FileOptions + ?Sized>(
+    schema: &S,
     msg: &Msg,
     field: &Fld,
 ) -> Result<ValueRange, RangeRefusal> {
     // Before the kind: an overridden field is not of the kind it declares, so
     // even a fixed width or an enum has no range to claim.
-    if field_type_overridden(linker, msg, field) {
+    if field_type_overridden(schema, msg, field) {
         return Err(RangeRefusal::UnmodelledOption);
     }
     match field.kind {
-        FieldKind::Scalar(kind) => value_range(kind, field_int_size(linker, msg, field)),
+        FieldKind::Scalar(kind) => value_range(kind, field_int_size(schema, msg, field)),
+        _ => type_field_range(field),
+    }
+}
+
+/// The range of the values of `field` by its protobuf type alone, or why it has
+/// none: what a writer that does not narrow holds a value to, and what every
+/// protobuf library accepts.
+pub fn type_field_range(field: &Fld) -> Result<ValueRange, RangeRefusal> {
+    match field.kind {
+        FieldKind::Scalar(kind) => ValueRange::of_type(kind).ok_or(RangeRefusal::NotAnInteger),
         FieldKind::Enum(_) => Err(RangeRefusal::Enum),
         FieldKind::Map { .. } => Err(RangeRefusal::Map),
         FieldKind::Message(_) | FieldKind::Group => Err(RangeRefusal::NotAnInteger),
@@ -217,10 +227,10 @@ pub(crate) fn field_range(
 
 /// The range of the key or the value, of scalar `kind`, of an entry of a map
 /// written in file `file`, by the file's options alone.
-pub(crate) fn map_entry_range(
-    linker: &Linker<'_, '_>,
+pub fn map_entry_range<S: FileOptions + ?Sized>(
+    schema: &S,
     file: usize,
     kind: ScalarKind,
 ) -> Result<ValueRange, RangeRefusal> {
-    value_range(kind, map_entry_int_size(linker, file))
+    value_range(kind, map_entry_int_size(schema, file))
 }
