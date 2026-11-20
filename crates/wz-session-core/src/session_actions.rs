@@ -731,6 +731,79 @@ pub struct TxConduits<R: SessionRuntime> {
     #[cfg(feature = "transport-batching")]
     control_open: core::sync::atomic::AtomicBool,
     conduits: [R::Mutex<BatchTx>; TX_CONDUITS],
+    /// Per conduit, whether a SENDER holds it: one staging its message, writing its frame or
+    /// waiting for room for it ([`SenderInside`]). A conduit is also held by what is not a
+    /// sender (the writer's flush of what is staged, a drain), and that holder lets go once it
+    /// has written. zenoh-pico's dropping send gives up only on a transmit lock another send
+    /// holds (`vendor/zenoh-pico/src/transport/common/tx.c` @
+    /// `ret = _z_transport_tx_mutex_lock(ztc, cong_ctrl == Z_CONGESTION_CONTROL_BLOCK);`), so a
+    /// profile that drops at once (`HeldDrop::DropAtOnce`) reads this to tell the two apart.
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    ))]
+    sending: [core::sync::atomic::AtomicBool; TX_CONDUITS],
+}
+
+/// A sender inside its conduit, marked for as long as this lives: set when the sender has taken
+/// the conduit's lock, cleared when it lets go, also when its staging unwinds.
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-request",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "declare-keyexpr",
+    feature = "declare-subscriber",
+    feature = "declare-queryable",
+    feature = "declare-token",
+    feature = "declare-interest",
+    feature = "liveliness-token",
+))]
+struct SenderInside<'a>(&'a core::sync::atomic::AtomicBool);
+
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-request",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "declare-keyexpr",
+    feature = "declare-subscriber",
+    feature = "declare-queryable",
+    feature = "declare-token",
+    feature = "declare-interest",
+    feature = "liveliness-token",
+))]
+impl<'a> SenderInside<'a> {
+    fn mark(flag: &'a core::sync::atomic::AtomicBool) -> Self {
+        flag.store(true, core::sync::atomic::Ordering::SeqCst);
+        Self(flag)
+    }
+}
+
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-request",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "declare-keyexpr",
+    feature = "declare-subscriber",
+    feature = "declare-queryable",
+    feature = "declare-token",
+    feature = "declare-interest",
+    feature = "liveliness-token",
+))]
+impl Drop for SenderInside<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, core::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// The number of TX conduits, sized by the build's priority space.
@@ -851,7 +924,37 @@ impl<R: SessionRuntime> TxConduits<R> {
             // keep their sequence numbers), and a probe takes it without waiting
             // (`DispatchStage::Probe`): the lock is one held across a wait for an event.
             conduits: core::array::from_fn(|_| R::new_mutex_held_across_waits(BatchTx::default())),
+            #[cfg(any(
+                feature = "codec-push",
+                feature = "codec-request",
+                feature = "codec-response",
+                feature = "codec-response-final",
+                feature = "declare-keyexpr",
+                feature = "declare-subscriber",
+                feature = "declare-queryable",
+                feature = "declare-token",
+                feature = "declare-interest",
+                feature = "liveliness-token",
+            ))]
+            sending: core::array::from_fn(|_| core::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    /// Whether a sender holds the conduit `priority` rides: the conduit's `sending` flag.
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    ))]
+    fn sender_flag(&self, priority: Priority) -> &core::sync::atomic::AtomicBool {
+        &self.sending[Self::conduit_index(priority)]
     }
 
     /// The conduit `priority` rides. With `transport-qos` this is zenoh's
@@ -10637,6 +10740,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             });
         }
         let stage_and_emit = |batch: &mut BatchTx| {
+            // Whatever this sender does with the conduit, a wait for room included, is a send
+            // in progress to a droppable message that finds the conduit held.
+            let _sender = SenderInside::mark(self.tx_conduits.sender_flag(priority));
             #[cfg(feature = "transport-batching")]
             if self.tx_conduits.is_active() {
                 // The heap stage's helpers: under `tx-lend-only` the window's
@@ -10984,8 +11090,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 if self.params.tx_queue.held_drop
                     == crate::session_init_params::HeldDrop::DropAtOnce
                 {
-                    held_dropped = true;
-                    break Ok(UnicastPush::Congested);
+                    // Dropped only behind another SENDER, as pico's try-lock fails only on a
+                    // lock another send holds; a holder that is not one (the writer's flush of
+                    // what is staged) lets go once it has written, and is waited for.
+                    if self
+                        .tx_conduits
+                        .sender_flag(priority)
+                        .load(core::sync::atomic::Ordering::SeqCst)
+                    {
+                        held_dropped = true;
+                        break Ok(UnicastPush::Congested);
+                    }
+                    core::hint::spin_loop();
+                    continue;
                 }
                 if congested() {
                     break Ok(UnicastPush::Congested);
