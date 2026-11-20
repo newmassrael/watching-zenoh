@@ -2360,6 +2360,83 @@ jobs:
           WZ_STABILITY_SECONDS: "10"
         run: bash scripts/run-ci.sh --layer S
 
+  # Layer C1p32, in a job of its own: the pico C ABI library and every crate either of its engines
+  # links, built and tested for `i686-unknown-linux-gnu`, which this 64-bit runner runs natively.
+  # The library ships for 32-bit Windows too, and every other job builds it for 64 bits only, where
+  # a width defect compiles and passes; this one is where such a defect reds on every landing. It
+  # is several builds of wz-capi-pico for a target no other job compiles, so it has a job of its
+  # own rather than a place in one measured near its ceiling.
+  #
+  # Its apt package is `gcc-multilib`: the C compiler's 32-bit mode and libraries, which `ring`'s
+  # build script, the linker of the target and the unix host layer's pthread probe use
+  # (`cc -m32`). The target's standard library comes with the pinned toolchain (rust-toolchain.toml).
+  # `WZ_C1P32_REQUIRE` makes a runner without either a failure rather than a skip.
+  #
+  # NO BUDGET GATE YET, on the precedent of `pico-client-only`: the first hosted run is the
+  # measurement, and `timeout-minutes` is a ceiling until then. The i686 artifacts are in no
+  # cache entry, so a run compiles them from nothing.
+  pico-i686:
+    name: pico C ABI and its crates at 32 bits (Layer C1p32)
+    runs-on: ubuntu-22.04
+    outputs:
+      cache_spec: ${{ steps.cache-series.outputs.spec }}
+    timeout-minutes: 90
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Restore apt archives (R311y882 — keep the mirror off the path)
+        id: apt-archives
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}
+          restore-keys: |
+            apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}-
+
+      - name: Name the cache series this job saves
+        # Handed to `evict-superseded` as this job's `cache_spec` output: the
+        # series of every class .github/cache-classes.json says this job saves,
+        # by the pruner's own definition, so that job deletes exactly what the
+        # pruner's superseded pass would, without running this repository's code.
+        id: cache-series
+        run: python3 scripts/lib/cache_prune.py --saver-spec "ci.yml:${GITHUB_JOB}" >> "$GITHUB_OUTPUT"
+
+      - name: Install system dependencies
+        # `gcc-multilib`: the C compiler's 32-bit mode (`cc -m32`) and the 32-bit C library to
+        # link and run against, for the i686 target (apt_package_census.py says why).
+        run: |
+          bash scripts/lib/apt-install.sh --list ".github/apt-packages/ci/${GITHUB_JOB}.list"
+
+      - name: Save apt archives
+        if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        run: bash scripts/lib/rust-toolchain-pinned.sh
+
+      - name: Cache Cargo registry + build artifacts
+        # A READER of the `ci` job's entry (class `rust-ci`); see there. Its registry is the one
+        # this job reads; the i686 builds are in no entry.
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+          add-job-id-key: "false"
+          save-if: "false"
+          workspaces: |
+            crates -> target
+            vendor/sce -> target
+
+      - name: Layer C1p32 — the pico C ABI and the crates it links, at 32 bits
+        env:
+          WZ_C1P32_REQUIRE: "1"
+        run: bash scripts/run-ci.sh --layer C1p32
+
   # Layer Z8, in a job of its own: upstream's integration tests (`zenoh/tests`, at the pin) run
   # against the patched family, a file at a time, and the report is held to `docs/z8-expected.tsv`
   # (what each file must still do). A repair that breaks a file passes every gate that does not
@@ -8251,6 +8328,7 @@ jobs:
       - e2e-demo
       - e2e-demo-pico
       - e2e-router-scale
+      - pico-i686
     if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-22.04
     timeout-minutes: 10

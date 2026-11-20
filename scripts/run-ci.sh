@@ -12828,6 +12828,96 @@ layer_c1co_pico_client_dials_a_listener() {
     done
 }
 
+# ─── Layer C1p32 — the pico C ABI and the crates it links, at 32 bits ──────
+#
+# The pico C ABI library ships for 32-bit Windows (`i686-pc-windows-msvc`, the x86 package of
+# `scripts/lib/pico_windows_package.py`) as well as for 64-bit hosts, and every other lane builds
+# it for 64 bits only, where `usize`, a pointer, `size_t` and a 64-bit `uint64_t` alignment are
+# one width and a defect of the other width compiles and passes: a layout pinned in bytes, a
+# length cast from 64 bits to `usize`, a `time_t` or `long` taken for 64 bits, a pad sized for
+# 64 bits that writes past a 32-bit program's struct. This lane builds and runs the same tests for
+# `i686-unknown-linux-gnu`, which a 64-bit Linux host runs natively, so such a defect is caught on
+# every landing before a Windows runner or a 32-bit device sees it:
+#
+#   1. kconfig     the pinned Kconfig interpreter, which the next leg resolves the profile with
+#                  (idempotent, hash-pinned), as Layer C1st provisions it.
+#   2. pico-tokio  `wz-capi-pico` built from the profile the Windows package is built from
+#                  (`configs/profiles/host-peer-ext.conf`, resolved by `wz_config.py`), its unit
+#                  tests and every integration test target that build compiles: the doors, the
+#                  layouts and the sessions over the loopback of a 32-bit process.
+#   3. pico-coop   the cooperative engine's build of the same planes (it carries no tokio
+#                  engine): its unit tests, over `wz-runtime-posix`'s host at 32 bits.
+#   4. coop-mutual-dial  two cooperative sessions dialling each other over real sockets, the
+#                  test Layer C1co runs at 64 bits, with its exact count.
+#   5. linked-crates  the unit tests of every crate of the workspace either engine links.
+#
+# The legs read the tree and not each other's builds, so the lane is a leg ledger: one red does
+# not hide the rest. The host needs the target's standard library (rust-toolchain.toml installs
+# it with the pinned toolchain) and a C compiler that emits 32-bit code (`cc -m32`, from
+# `gcc-multilib` on Debian and Ubuntu), which the build scripts of `ring` and the linker use and
+# the pthread probe of `wz-capi-pico`'s unix host layer compiles with. Without either the lane
+# says so and does not run; `WZ_C1P32_REQUIRE=1` (set by the hosted job, which installs both)
+# turns that into a failure.
+layer_c1p32_pico_i686() {
+    local target=i686-unknown-linux-gnu required=0 why="" installed probe
+    [[ "${WZ_C1P32_REQUIRE:-0}" == "1" ]] && required=1
+    installed="$(cd crates && rustup target list --installed 2>/dev/null)"
+    if ! grep -qx "$target" <<<"$installed"; then
+        why="the toolchain has no standard library for $target (rustup target add $target)"
+    else
+        probe="$(mktemp -d)" || return 1
+        if ! printf 'int main(void) { return 0; }\n' | cc -m32 -x c - -o "$probe/p" 2>/dev/null \
+            || ! "$probe/p"; then
+            why="no C compiler here builds and runs a 32-bit program (cc -m32; gcc-multilib)"
+        fi
+        rm -rf "$probe"
+    fi
+    if [[ -n "$why" ]]; then
+        if (( required )); then
+            echo "  C1p32 FAIL: ${why}, and WZ_C1P32_REQUIRE is set" >&2
+            return 1
+        fi
+        echo "Layer C1p32 SKIP (${why}; WZ_C1P32_REQUIRE=1 makes that a failure)"
+        return 0
+    fi
+    # The cooperative engine's planes: the profile's that this engine has (the client's pub/sub,
+    # the roles, queries, liveliness, the advanced plane, connectivity and a program's transport)
+    # on `engine-coop`, with the read task of the multi-threaded arm.
+    local coop="engine-coop,peer,multi-thread,link-udp,query,queryable,liveliness,liveliness-get"
+    coop+=",advanced,unstable-api,connectivity,app-transport"
+    _runci_legs_open C1p32 || return 1
+    _runci_leg kconfig -- bash scripts/provision-kconfiglib.sh
+    _runci_leg pico-tokio --after kconfig -- _c1p32_pico_profile_tests "$target"
+    _runci_leg pico-coop -- _runci_guarded_test "C1p32 pico cooperative engine" + \
+        cargo test -p wz-capi-pico --target "$target" --no-default-features --features "$coop" --lib
+    wz_test_args wz-capi-pico mutual_dial
+    _runci_leg coop-mutual-dial -- _runci_guarded_test "C1p32 engine-coop mutual dial" 2 \
+        cargo test -p wz-capi-pico --target "$target" --no-default-features \
+        --features "engine-coop,peer,multi-thread,link-udp,connectivity" "${WZ_TEST_ARGS[@]}"
+    _runci_leg linked-crates -- _runci_guarded_test "C1p32 the crates the library links" + \
+        cargo test --target "$target" --lib -p wz-abi-stamp -p wz-app-frame -p wz-capi-core \
+        -p wz-capi-coop -p wz-capi-port -p wz-codecs -p wz-ext-pubsub -p wz-host-net \
+        -p wz-node-time -p wz-routing-graph -p wz-runtime-coop -p wz-runtime-core \
+        -p wz-runtime-posix -p wz-runtime-tokio -p wz-session-core -p wz-session-mcu \
+        -p wz-storage -p wz-workload
+    _runci_legs_close
+}
+
+# Leg 2 of Layer C1p32: the cargo arguments of the profile the Windows package is built from, as
+# the packager resolves them, and the tests of that build for `$1`.
+_c1p32_pico_profile_tests() {
+    local target="$1" resolved
+    local -a args=()
+    if ! resolved="$(python3 scripts/lib/wz_config.py --resolve-features pico \
+        configs/profiles/host-peer-ext.conf)"; then
+        echo "  C1p32 FAIL: profile host-peer-ext did not resolve" >&2
+        return 1
+    fi
+    read -r -a args <<<"$resolved"
+    _runci_guarded_test "C1p32 pico host-peer-ext (tokio engine)" + \
+        cargo test -p wz-capi-pico --target "$target" "${args[@]}" --tests
+}
+
 # ─── Layer C1cn — every crate LINTS CLEAN behind its non-default ────
 #                 features
 #
@@ -28652,6 +28742,7 @@ run_layer C1cf layer_c1cf_reduced_features || overall=1
 run_layer C1cs layer_c1cs_capability_cost || overall=1
 run_layer Z8 layer_z8_upstream_suite || overall=1
 run_layer C1co layer_c1co_pico_client_dials_a_listener || overall=1
+run_layer C1p32 layer_c1p32_pico_i686 || overall=1
 run_layer C1cn layer_c1cn_nondefault_features || overall=1
 run_layer C1i layer_c1i_cargo_test_scouting || overall=1
 run_layer C1k layer_c1k_cargo_test_scouting_static || overall=1
