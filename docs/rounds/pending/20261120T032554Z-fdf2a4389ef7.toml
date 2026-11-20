@@ -1,0 +1,17 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat", "watching-zenoh/local-ci-gates"]
+decision = '''
+Repay the Platform `C ABI (macos-latest)` red that has stood since Round 4550 (first red run 44619797700 at 4481c5ac8, then every Platform run to 44656258073): the pico C programs failed to link against the wz library on arm64, `_z_cancellation_token_clear`, `_z_cancellation_token_remove_on_cancel_handler` and `_z_sync_group_notifier_drop` undefined. Cause, read from the job log and reproduced: since the programs compile against the config.h of the library's own arm (Z_FEATURE_UNSTABLE_API on), pico's session.h brings in `_z_pending_query_cancellation_data_clear`, defined `static inline` and then declared again without `inline`; clang reads the second declaration as an ordinary internal function and emits it into every object, used or not (gcc does not), and its body calls three pico internals. Upstream's library exports them, so a clang program of the unstable arm linked against upstream and not against wz: a drop-in gap, not a CI artifact. The fix exports the three from wz-capi-pico under `unstable-api` (`header_internals`), with pico's contract over what wz can hand them.
+'''
+changes = '''
+wz-capi-pico: new module `header_internals` (unstable-api) exporting `_z_cancellation_token_clear` (releases the token handle in slot 0; a no-op without the query plane), `_z_cancellation_token_remove_on_cancel_handler` (wz registers no handler under an id: every id is absent, Z_OK; null refused) and `_z_sync_group_notifier_drop` (wz makes no notifier; nulls it, as pico's drop does).
+wz-integration-tests: `an_empty_program_of_each_arm_links_when_clang_compiles_it` (Layer E's ignored sweep): an empty program including zenoh-pico.h, compiled by clang (gnu11, pico's own standard) against each header arm, links that arm's wz build; controls: the reference arm's object references a pico internal, and it links upstream's library.
+Capability cost: pico-default exports 808 -> 811 and its budget 4,647,000 -> 4,647,500 (+465 of text on the build machine, the three functions alone in the symbol diff, +149); logic census S7 row 108 and files.md row for the new file, totals moved by its 108 lines.
+'''
+verification = '''
+On the build machine (32 cores, 125 GB): the new test passes for all four arms (ran=1) with the fix, and the same test on origin/main without the fix fails on the MultiThreaded arm with exactly the hosted symptom (ld: undefined `_z_cancellation_token_remove_on_cancel_handler`, `_z_sync_group_notifier_drop`, `_z_cancellation_token_clear`); `each_header_arm_is_written_inside_of_by_its_own_build` still passes.
+clippy -D warnings passes for wz-capi-pico (all targets) and wz-integration-tests (tests); capability_cost_gate --selftest 25/25; pico-default measured 811 exports, digest unchanged.
+Static gates: logic census coverage, feature public surface census, upstream citation anchor (pico bare budget held at 126), store reason citations, count guard lint, guarded count gate (no guard moved): pass.
+'''
+carry = '''
+The hosted macOS and Windows C ABI jobs are the platform witnesses of this fix; read them on this landing's Platform run.
+'''
