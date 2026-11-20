@@ -54,6 +54,10 @@ codec-push = ["wz-codecs/codec-push", "wz-session-core/codec-push"]
 # The send-side gate `set_push_timestamp` routes through: with it off a forward stamp is a
 # deliberate no-op.
 pubsub-timestamp = ["wz-session-core/pubsub-timestamp"]
+# The time base a program supplies (`time_base`): the clock a session's timers read and wait on in
+# place of the system's monotonic clock, for a program that runs the session on a time of its own
+# (a simulation, paused or faster or slower than the wall clock). Off, the module is not built.
+time-base = []
 
 [dependencies]
 # The timestamp type, the NTP64 word, the epoch port and (with `codec-push`) the Push the forward

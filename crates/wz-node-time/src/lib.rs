@@ -10,6 +10,8 @@
 //!   a node has one, and the forward-path stamp.
 //! * `clock_registry` (with `clock-source`): the clock sources an application registers, which the
 //!   node clock reads instead of the system clock.
+//! * `time_base` (with `time-base`): the time base a program supplies, which the timers of a
+//!   session run on in place of the system's monotonic clock.
 //!
 //! The tokio runtime re-exports both modules at the paths it has always had, and the cooperative
 //! engine hosts the same ones (`docs/advanced-pubsub-on-a-neutral-core.md`).
@@ -21,4 +23,6 @@ pub mod event_log;
 pub mod node_clock;
 #[cfg(feature = "time-hlc")]
 pub mod standing_cell;
+#[cfg(feature = "time-base")]
+pub mod time_base;
 pub mod timestamp_source;
