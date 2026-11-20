@@ -355,7 +355,20 @@ CASES: tuple[Case, ...] = (
     # face's end of a get its registry refuses (`State::handle` +530) and the group's join
     # (`FaceGroup::join` +317). Chosen growth; each budget at its line moves by its pc2 growth,
     # to the hundred.
-    Case("pico-client","wz-capi-pico", "libwz_capi_pico.so", PICO_BASE, 1_975_000,
+    # 2026-11-20 -- the hosted reading again. Hosted run 44669791897 (main `cd240d4b4`) read
+    # eight cases over their budgets, pico-default by 38,192, and no hosted C1cs has decided
+    # since. Hosted read `7e14fb72d` 559 over (run 44646497313), and both trees built on one
+    # build host put +37,633 of text on pico-default between the two: Rounds 4557 and 4558
+    # grew it and moved no budget. The symbol diff (+31,791 of text symbols) names their
+    # refusals reaching every caller: the refused node clock's `OpenError` through the open
+    # (`open_blocking` +1,499, `bind_listener` +1,822, `bind_listeners` +1,886, the drive
+    # closures, `LateBinds::spawn`), pico's connect timeout on the tokio open
+    # (`drive_connect_phase` +2,151, `open_on_tokio` +1,384) and a value outside its limit's
+    # domain (`OutsideLimitDomain`'s Display +755). Each of the eight budgets is that hosted
+    # reading, the growth from `cd240d4b4` to `e924c1792` measured on that build host (+6,356
+    # here, +26,144 on pico-default), and 3,500, to the hundred; the other thirteen cases sit
+    # under theirs.
+    Case("pico-client","wz-capi-pico", "libwz_capi_pico.so", PICO_BASE, 1_992_500,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
                  CONNECTIVITY, MULTICAST, COOP_ENGINE),
          require=(SINGLE_THREADED, TOKIO_ENGINE),
@@ -377,7 +390,9 @@ CASES: tuple[Case, ...] = (
     # 2026-11-19 -- step 3b, as pico-client's note of this day says: +16,788 on pc2.
     # 2026-11-20 -- step 4b round 2a, as pico-client's note of this day says: +764 on pc2.
     # 2026-11-20 -- step 4b round 2b, as pico-client's note of this day says: +48 on pc2.
-    Case("pico-client-small", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE, 1_620_900,
+    # 2026-11-20 -- the hosted reading again, as pico-client's note of this day says: 1,623,992
+    # at `cd240d4b4` and +5,072 since.
+    Case("pico-client-small", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE, 1_632_600,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
                  CONNECTIVITY, MULTICAST),
          require=(SINGLE_THREADED,), profile="capi-small",
@@ -401,7 +416,9 @@ CASES: tuple[Case, ...] = (
     # 2026-11-19 -- step 3b, as pico-client's note of this day says: +21,616 on pc2.
     # 2026-11-20 -- step 4b round 2a, as pico-client's note of this day says: +1,140 on pc2.
     # 2026-11-20 -- step 4b round 2b, as pico-client's note of this day says: +48 on pc2.
-    Case("pico-client-udp", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",link-udp", 2_043_400,
+    # 2026-11-20 -- the hosted reading again, as pico-client's note of this day says: 2,049,727
+    # at `cd240d4b4` and +7,600 since.
+    Case("pico-client-udp", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",link-udp", 2_060_900,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST),
          require=(UDP, SINGLE_THREADED),
@@ -761,7 +778,9 @@ CASES: tuple[Case, ...] = (
     # 2026-11-19 -- step 3b, as pico-client's note of this day says: +21,764 on pc2.
     # 2026-11-20 -- step 4b round 2a, as pico-client's note of this day says: +1,136 on pc2.
     # 2026-11-20 -- step 4b round 2b, as pico-client's note of this day says: +48 on pc2.
-    Case("pico-peer", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",peer", 3_193_300,
+    # 2026-11-20 -- the hosted reading again, as pico-client's note of this day says: 3,206,730
+    # at `cd240d4b4` and +9,128 since.
+    Case("pico-peer", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",peer", 3_219_400,
          forbid=(GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY, MULTICAST),
          require=(ACCEPT, RESPONDER, SCOUTING, UDP, SINGLE_THREADED),
          note="peer implies scout and with it the UDP group"),
@@ -793,7 +812,9 @@ CASES: tuple[Case, ...] = (
     # growth; the budget moves by it, to the hundred.
     # 2026-11-20 -- step 4b round 2a, as pico-client's note of this day says: +1,372 on pc2.
     # 2026-11-20 -- step 4b round 2b, as pico-client's note of this day says: +1,948 on pc2.
-    Case("pico-default", "wz-capi-pico", "libwz_capi_pico.so", None, 4_671_800,
+    # 2026-11-20 -- the hosted reading again, as pico-client's note of this day says: 4,685,692
+    # at `cd240d4b4` and +26,144 since.
+    Case("pico-default", "wz-capi-pico", "libwz_capi_pico.so", None, 4_715_400,
          forbid=(SINGLE_THREADED,),
          require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
                   CONNECTIVITY, MULTICAST),
@@ -962,7 +983,9 @@ CASES: tuple[Case, ...] = (
     # (+810 of symbols, the same parts as pico-default's).
     # 2026-11-20 -- step 4b round 2b, as pico-client's note of this day says: +2,900 on pc2
     # (+1,471 of text symbols on one machine, pico-default's parts and the local face's).
-    Case("capic-router-node", "wz-capi-c", "libwz_capi_c.so", "router-node", 6_337_200,
+    # 2026-11-20 -- the hosted reading again, as pico-client's note of this day says: 6,331,248
+    # at `cd240d4b4` and +30,148 since.
+    Case("capic-router-node", "wz-capi-c", "libwz_capi_c.so", "router-node", 6_364_900,
          # What the declaration says the capability implies (`deploy/wz-config.toml`): the peer
          # role and the scouting and UDP link under it, and the multicast transport.
          require=(ROUTER_NODE, ACCEPT, RESPONDER, SCOUTING, UDP, MULTICAST),
@@ -1073,7 +1096,9 @@ CASES: tuple[Case, ...] = (
     # 2026-11-20 -- step 4b round 2a, as pico-client's note of this day says: +1,028 on pc2.
     # 2026-11-20 -- step 4b round 2b, as pico-client's note of this day says: +3,272 on pc2
     # (+2,042 of text symbols on one machine, capic-router-node's parts).
-    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 11_395_400,
+    # 2026-11-20 -- the hosted reading again, as pico-client's note of this day says:
+    # 11,398,161 at `cd240d4b4` and +32,660 since.
+    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 11_434_400,
          require=(ROUTER_NODE, ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED,
                   MULTICAST, ACCEPT_HANDSHAKE, CONFIG_VERDICT),
          exports=837,
@@ -1153,7 +1178,9 @@ CASES: tuple[Case, ...] = (
          # pico-client's, chosen; that reading and that growth, and 3,500, to the hundred.
          # 2026-11-20 -- step 4b round 2a, as pico-client's note of this day says: +516 on pc2.
          # 2026-11-20 -- step 4b round 2b, as pico-client's note of this day says: +1,796 on pc2.
-         9_616_400,
+         # 2026-11-20 -- the hosted reading again, as pico-client's note of this day says:
+         # 9,618,897 at `cd240d4b4` and +30,560 since.
+         9_653_000,
          forbid=(ROUTER_NODE,),
          require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST),
          note="the default of the C ABI without the router node"),
