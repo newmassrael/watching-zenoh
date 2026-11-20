@@ -46,7 +46,7 @@ pub(crate) const TARGETED_IN_DOMAIN: bool =
     <TargetedQuery as PolicyValue>::DOMAIN.contains_index(TargetedQuery::On as usize);
 
 /// Whether `policy`, the snapshot of the session a get is asked on, admits a target.
-fn targeted_by(policy: &SessionPolicy) -> bool {
+pub(crate) fn targeted_by(policy: &SessionPolicy) -> bool {
     TARGETED_IN_DOMAIN && policy.targeted_query()
 }
 

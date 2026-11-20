@@ -27,7 +27,7 @@ use std::ffi::CString;
 use wz_app_frame::message_catalog::{build_limits, Catalog};
 
 use crate::abi::z_owned_string_t;
-use crate::bytes::store_owned_string;
+use crate::bytes::{z_internal_string_null, z_string_copy_from_substr};
 use crate::ffi::{guard_val, guarded};
 use crate::result::{
     ZResult, Z_EINVAL, Z_ERR_CONFIG_INVALID_VALUE, Z_ERR_INVALID, Z_ERR_NULL, Z_OK,
@@ -139,18 +139,18 @@ unsafe fn held<'a>(this_: *const wz_ext_loaned_message_catalog_t) -> Option<&'a 
 /// # Safety
 /// `out` is null or writable for a `z_owned_string_t`.
 unsafe fn clear_refusal(out: *mut z_owned_string_t) {
-    if !out.is_null() {
-        *out = z_owned_string_t::null_value();
-    }
+    z_internal_string_null(out);
 }
 
-/// Write `text` as the caller's refusal, when it gave a slot for one.
+/// Write `text` as the caller's refusal, when it gave a slot for one: a string the core's
+/// `z_string_*` made, which the program drops with them.
 ///
 /// # Safety
 /// `out` is null or writable for a `z_owned_string_t`.
 unsafe fn write_refusal(out: *mut z_owned_string_t, text: &str) {
     if !out.is_null() {
-        store_owned_string(out, text.as_bytes());
+        // The copy refuses only a null slot or a null text with a length, and neither is here.
+        z_string_copy_from_substr(out, text.as_ptr().cast::<c_char>(), text.len());
     }
 }
 

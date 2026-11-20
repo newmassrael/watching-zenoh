@@ -65,31 +65,32 @@ use wz_session_core::replay_subscriber::{
 };
 use wz_session_core::session_zid::ZID_MAX;
 
-use crate::abi::{z_loaned_keyexpr_t, z_view_keyexpr_t};
-use crate::bytes::bytes_ref;
+use crate::abi::{z_loaned_bytes_t, z_loaned_keyexpr_t, z_view_keyexpr_t};
 use crate::decl_watch::{
     wz_ext_decl_event_t, wz_ext_decl_watch_declare, wz_ext_decl_watch_drop,
     wz_ext_owned_decl_watch_t, WZ_EXT_DECL_DECLARED, WZ_EXT_DECL_QUERYABLE, WZ_EXT_DECL_UNDECLARED,
 };
-use crate::e2e::{locked, utf8_arg};
+use crate::e2e::{bytes_arg, keyexpr_text, locked, session_facts, utf8_arg, ReplayPolicies};
 use crate::e2e_receiver::{to_c, wz_ext_e2e_verdict_t, wz_ext_moved_e2e_receiver_t};
-use crate::ffi::{catch, guard_val, guarded, InCallback, SendPtr};
+use crate::ext_interface::{wz_ext_interface_bytes_view, wz_ext_interface_run_in_callback};
+use crate::ffi::{catch, guard_val, guarded, SendPtr};
 use crate::get::{
-    z_get, z_get_options_default, z_get_options_t, z_loaned_reply_t, z_moved_closure_reply_t,
-    z_owned_closure_reply_t, z_reply_is_ok, z_reply_ok, Z_CONSOLIDATION_MODE_NONE,
-    Z_QUERY_TARGET_ALL,
+    z_closure_reply, z_closure_reply_move, z_get, z_get_options_default, z_get_options_t,
+    z_loaned_reply_t, z_owned_closure_reply_t, z_reply_is_ok, z_reply_ok,
+    Z_CONSOLIDATION_MODE_NONE, Z_QUERY_TARGET_ALL,
 };
-use crate::get_to_peer::{wz_ext_get_to_peer, TARGETED_IN_DOMAIN};
-use crate::keyexpr::{keyexpr_str, z_view_keyexpr_from_substr, z_view_keyexpr_loan};
+use crate::get_to_peer::wz_ext_get_to_peer;
+use crate::keyexpr::{z_view_keyexpr_from_substr, z_view_keyexpr_loan};
 use crate::pubsub::{
-    z_declare_subscriber, z_loaned_sample_t, z_moved_closure_sample_t, z_owned_closure_sample_t,
-    z_owned_subscriber_t, z_sample_payload, z_subscriber_move, z_undeclare_subscriber,
+    z_closure_sample, z_closure_sample_move, z_declare_subscriber, z_loaned_sample_t,
+    z_owned_closure_sample_t, z_owned_subscriber_t, z_sample_payload, z_subscriber_move,
+    z_undeclare_subscriber,
 };
 use crate::result::{
-    ZResult, Z_EINVAL, Z_ERR_CONFIG_INVALID_VALUE, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SESSION_CLOSED,
-    Z_OK,
+    ZResult, WZ_EXT_ERR_UNSUPPORTED, Z_EINVAL, Z_ERR_CONFIG_INVALID_VALUE, Z_ERR_INVALID,
+    Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK,
 };
-use crate::session::{session_handle, z_loaned_session_t};
+use crate::session::z_loaned_session_t;
 use crate::zid::{z_id_t, Z_ID_SIZE};
 
 // The peer a get is addressed to is the zenoh id the watch named, in the layout of `z_id_t`.
@@ -350,6 +351,37 @@ struct ReplyContext {
     request: u64,
 }
 
+/// One sample on its way to the program's callback.
+struct Handing<'a> {
+    deliver: wz_ext_replay_deliver_fn,
+    context: *mut c_void,
+    sample: &'a wz_ext_replay_sample_t,
+}
+
+/// Hand a sample to the program's callback; the extension interface runs it.
+///
+/// # Safety
+/// `handing` points at a live `Handing`.
+unsafe extern "C" fn hand_over(handing: *mut c_void) {
+    let handing = &*handing.cast_const().cast::<Handing<'_>>();
+    // SAFETY: the program's callback, called as its declaration says, with a sample that
+    // outlives the call.
+    let _ = catch(|| (handing.deliver)(handing.context, handing.sample));
+}
+
+/// The bytes of a payload the session hands over, in place, for the call; `None` for no payload.
+///
+/// # Safety
+/// `payload` is null or a loaned payload of this library.
+unsafe fn payload_bytes<'a>(payload: *const z_loaned_bytes_t) -> Option<&'a [u8]> {
+    let mut data = core::ptr::null();
+    let mut len = 0usize;
+    if wz_ext_interface_bytes_view(payload, &mut data, &mut len) != Z_OK {
+        return None;
+    }
+    Some(bytes_arg(data, len))
+}
+
 impl State {
     /// Judge `frame` and hand it to the program: a reply when `from` names its publisher.
     fn hand_on(&mut self, frame: &[u8], from: Option<&[u8]>, now: Option<u32>) {
@@ -373,12 +405,20 @@ impl State {
             // A row's zenoh id is at most `ZID_MAX` bytes.
             sample.zid_len = zid.len() as u8;
         }
-        let call = self.deliver;
-        let context = self.context.0;
-        let _in_callback = InCallback::enter();
-        // SAFETY: the program's callback, called as its declaration says, with a sample that
-        // outlives the call.
-        let _ = catch(|| unsafe { call(context, &sample) });
+        let handing = Handing {
+            deliver: self.deliver,
+            context: self.context.0,
+            sample: &sample,
+        };
+        // The program's callback runs as one of the core's, so a door of the core it calls does
+        // not wait for the callback that is calling it.
+        // SAFETY: `hand_over` reads the handing only during the call, which it outlives.
+        unsafe {
+            wz_ext_interface_run_in_callback(
+                Some(hand_over),
+                core::ptr::addr_of!(handing).cast_mut().cast::<c_void>(),
+            );
+        }
     }
 
     /// Hand on, in arrival order, every held sample the round has released.
@@ -568,20 +608,15 @@ unsafe fn ask(shared: &Arc<Shared>, ask: Ask) {
         on_reply_drop(context);
         return;
     }
-    let mut callback = z_moved_closure_reply_t {
-        _this: z_owned_closure_reply_t {
-            context,
-            call: Some(on_reply),
-            drop: Some(on_reply_drop),
-        },
-    };
+    let mut callback: z_owned_closure_reply_t = core::mem::zeroed();
+    // The closure door refuses only a null closure.
+    z_closure_reply(&mut callback, Some(on_reply), Some(on_reply_drop), context);
     let mut options: z_get_options_t = core::mem::zeroed();
     z_get_options_default(&mut options);
     options.target = Z_QUERY_TARGET_ALL;
     options.consolidation.mode = Z_CONSOLIDATION_MODE_NONE;
     options.timeout_ms = shared.get_timeout_ms;
-    let targeted = TARGETED_IN_DOMAIN
-        && session_handle(&shared.session).is_some_and(|handle| handle.ext.policy.targeted_query());
+    let targeted = session_facts(&shared.session).is_ok_and(|facts| facts.targeted_query != 0);
     // The callback is consumed on every path: a get refused or never sent runs its drop, which
     // ends the query.
     let _ = if targeted {
@@ -590,7 +625,7 @@ unsafe fn ask(shared: &Arc<Shared>, ask: Ask) {
             &shared.session,
             z_view_keyexpr_loan(&view),
             core::ptr::null(),
-            &mut callback,
+            z_closure_reply_move(&mut callback),
             &mut options,
             &peer,
         )
@@ -599,7 +634,7 @@ unsafe fn ask(shared: &Arc<Shared>, ask: Ask) {
             &shared.session,
             z_view_keyexpr_loan(&view),
             core::ptr::null(),
-            &mut callback,
+            z_closure_reply_move(&mut callback),
             &mut options,
         )
     };
@@ -612,14 +647,12 @@ unsafe extern "C" fn on_reply(reply: *mut z_loaned_reply_t, context: *mut c_void
         if !z_reply_is_ok(reply) {
             return;
         }
-        let Some(payload) = bytes_ref(z_sample_payload(z_reply_ok(reply))) else {
+        let Some(payload) = payload_bytes(z_sample_payload(z_reply_ok(reply))) else {
             return;
         };
-        reply_context.shared.reply(
-            reply_context.slot,
-            reply_context.request,
-            payload.as_slice(),
-        );
+        reply_context
+            .shared
+            .reply(reply_context.slot, reply_context.request, payload);
     });
 }
 
@@ -640,8 +673,8 @@ unsafe extern "C" fn on_reply_drop(context: *mut c_void) {
 unsafe extern "C" fn on_sample(sample: *const z_loaned_sample_t, context: *mut c_void) {
     let shared = &*context.cast_const().cast::<Shared>();
     let _ = catch(|| {
-        if let Some(payload) = bytes_ref(z_sample_payload(sample)) {
-            shared.live(payload.as_slice());
+        if let Some(payload) = payload_bytes(z_sample_payload(sample)) {
+            shared.live(payload);
         }
     });
 }
@@ -760,8 +793,10 @@ pub unsafe extern "C" fn wz_ext_replay_subscriber_options_default(
 /// slot, a deadline of 0 or past 2147483647, a depth of 0, a hold-back store with no room for one
 /// cell, a cell past 2^32 - 1, or a segment profile that is not UTF-8; `Z_ERR_INVALID` for a
 /// suffixed key that is not a key expression; under `replay-reply-shape = segmented`, `Z_ERR_NULL`
-/// for no segment profile and `_Z_ERR_CONFIG_INVALID_VALUE` for one refused; otherwise what
-/// declaring the subscriber or the watch answers.
+/// for no segment profile and `_Z_ERR_CONFIG_INVALID_VALUE` for one refused;
+/// `WZ_EXT_ERR_UNSUPPORTED` for a session whose replay policy has a value this door does not know
+/// (a core of a later extension interface); otherwise what declaring the subscriber or the watch
+/// answers.
 ///
 /// # Safety
 /// `this_` is writable; `session` and `keyexpr` are null or loans of this library, the session
@@ -804,14 +839,17 @@ pub unsafe extern "C" fn wz_ext_replay_subscriber_new(
         if keyexpr.is_null() || suffix.is_null() || options.is_null() {
             return refuse(Z_ERR_NULL);
         }
-        let Some(handle) = session_handle(session) else {
-            return refuse(Z_ERR_NULL);
+        let facts = match session_facts(session) {
+            Ok(facts) => facts,
+            Err(code) => return refuse(code),
         };
-        if handle.is_closed() {
+        if facts.closed != 0 {
             return refuse(Z_ERR_SESSION_CLOSED);
         }
-        let policy = &handle.ext.policy;
-        let (Some(key), Some(suffix)) = (keyexpr_str(keyexpr), utf8_arg(suffix)) else {
+        let Some(policy) = ReplayPolicies::of(&facts) else {
+            return refuse(WZ_EXT_ERR_UNSUPPORTED);
+        };
+        let (Some(key), Some(suffix)) = (keyexpr_text(keyexpr), utf8_arg(suffix)) else {
             return refuse(Z_EINVAL);
         };
         let replay_key = format!("{key}{suffix}");
@@ -819,7 +857,7 @@ pub unsafe extern "C" fn wz_ext_replay_subscriber_new(
             return refuse(Z_ERR_INVALID);
         }
         let options = *options;
-        let joiner = match policy.replay_reply_shape() {
+        let joiner = match policy.reply_shape {
             ReplayReplyShape::FramePerSample => None,
             ReplayReplyShape::Segmented => {
                 if options.segment_profile.is_null() {
@@ -840,7 +878,7 @@ pub unsafe extern "C" fn wz_ext_replay_subscriber_new(
         if options.slot_count == 0 || options.depth == 0 {
             return refuse(Z_EINVAL);
         }
-        let live = policy.replay_live_before_answer();
+        let live = policy.live_before_answer;
         let held: &'static mut [u8] = match live {
             wz_session_core::policy::ReplayLiveBeforeAnswer::Deliver => &mut [],
             wz_session_core::policy::ReplayLiveBeforeAnswer::HoldBack => {
@@ -850,12 +888,9 @@ pub unsafe extern "C" fn wz_ext_replay_subscriber_new(
                 core::slice::from_raw_parts_mut(options.held, options.held_len)
             }
         };
-        // Both are quotas, `0` for no bound: the build's is `0` on a host and a number on an
+        // Both are quotas, `0` for no bound: the core's is `0` on a host and a number on an
         // image, so the two are combined as quotas, not by a `min` that `0` would turn into none.
-        let quota = Quota::tighter(
-            options.max_in_flight,
-            wz_session_core::caps::QUERIER_MAX_PENDING_QUERIES,
-        );
+        let quota = Quota::tighter(options.max_in_flight, facts.querier_max_pending_queries);
         let clock = Clock {
             read: options.clock,
             context: SendPtr(options.clock_context),
@@ -897,10 +932,8 @@ pub unsafe extern "C" fn wz_ext_replay_subscriber_new(
                 joiner,
                 next_request: 0,
             }),
-            session: z_loaned_session_t {
-                _val: (*session)._val,
-                _cnt: (*session)._cnt,
-            },
+            // The loan's words, copied as a C program copies the struct its header declares.
+            session: core::ptr::read(session),
             replay_key,
             get_timeout_ms: u64::from(options.round_ms),
         });
@@ -910,21 +943,22 @@ pub unsafe extern "C" fn wz_ext_replay_subscriber_new(
         if made != Z_OK {
             return refuse(made);
         }
-        let mut sample_closure = z_moved_closure_sample_t {
-            _this: z_owned_closure_sample_t {
-                context: Arc::into_raw(Arc::clone(&shared))
-                    .cast_mut()
-                    .cast::<c_void>(),
-                call: Some(on_sample),
-                drop: Some(on_share_drop),
-            },
-        };
+        let mut sample_closure: z_owned_closure_sample_t = core::mem::zeroed();
+        // The closure door refuses only a null closure.
+        z_closure_sample(
+            &mut sample_closure,
+            Some(on_sample),
+            Some(on_share_drop),
+            Arc::into_raw(Arc::clone(&shared))
+                .cast_mut()
+                .cast::<c_void>(),
+        );
         let mut subscriber: z_owned_subscriber_t = core::mem::zeroed();
         let declared = z_declare_subscriber(
             &shared.session,
             &mut subscriber,
             z_view_keyexpr_loan(&view),
-            &mut sample_closure,
+            z_closure_sample_move(&mut sample_closure),
             core::ptr::null(),
         );
         if declared != Z_OK {

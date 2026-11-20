@@ -38,7 +38,6 @@ use wz_app_frame::message_payload::{Given, Got, Payload, Refusal, Wanted};
 use wz_app_frame::proto_decode::SchemaSet;
 
 use crate::abi::z_owned_string_t;
-use crate::bytes::store_owned_string;
 use crate::e2e::{
     adopt, behind, bytes_arg, clear_refusal, locked, release, utf8_arg, write_refusal,
 };
@@ -870,7 +869,7 @@ pub unsafe extern "C" fn wz_ext_message_payload_refusal(
             return Z_ERR_NULL;
         };
         if let Some(text) = &locked(held).refusal {
-            store_owned_string(out, text.as_bytes());
+            write_refusal(out, text);
         }
         Z_OK
     })

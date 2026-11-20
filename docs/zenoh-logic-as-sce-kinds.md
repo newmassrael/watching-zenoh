@@ -71,7 +71,7 @@ image.
   | S9 | MCU and hosted runtimes, links, network stacks, TLS, time: 22 crates | 87 |
   | S10 | application framing, bridges, the demo, and the files S1 to S6 left out | 85 |
   | S11 | the application frame layer (`.proto` schemas, instance keys, the message catalogue, end-to-end receive and send, segment joining) and its replay, with the SCE documents written for them | 38 |
-  | S12 | the application transport, stream supervision and key ids in the session core and both runtimes, and the zenoh-pico doors to S11's code | 43 |
+  | S12 | the application transport, stream supervision and key ids in the session core and both runtimes, and the zenoh-pico doors to S11's code | 44 |
 
   S7 to S10 were added on 2026-11-20, after the owner ruled that all protocol
   logic is to be in SCE and that the C build is the zenoh-pico preset, and read
@@ -127,8 +127,8 @@ image.
 | G | 202,588 | 36 % |
 | S | 78,928 | 14 % |
 | D | 36,220 | 6 % |
-| X | 155,523 | 27 % |
-| Total | 565,594 | |
+| X | 155,748 | 28 % |
+| Total | 565,819 | |
 
 | Slice | A | K | G | S | D | X |
 |---|---|---|---|---|---|---|
@@ -143,7 +143,7 @@ image.
 | S9 | 2,452 | 4,147 | 6,393 | 13,655 | 1,497 | 4,986 |
 | S10 | 108 | 7,976 | 10,132 | 2,744 | 1,371 | 17,923 |
 | S11 | 0 | 1,477 | 8,219 | 322 | 0 | 349 |
-| S12 | 0 | 917 | 1,839 | 1,814 | 0 | 5,662 |
+| S12 | 0 | 917 | 1,839 | 1,814 | 0 | 5,887 |
 
 S11's and S12's A rows are SCE documents (447 and 185 SCXML lines) that wz's
 Rust calls through `out/`; the table counts Rust, so their A is 0 here, and the
