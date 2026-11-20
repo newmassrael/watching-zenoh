@@ -3829,9 +3829,11 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
-        let _id = registry.register("topic/a", move |_push| {
-            counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        let _id = registry
+            .register("topic/a", move |_push| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
 
         let push = push_with_keyexpr("topic/a");
         registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
@@ -3864,9 +3866,11 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
-        let _id = registry.register("topic/a", move |_push| {
-            counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        let _id = registry
+            .register("topic/a", move |_push| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
 
         let push = push_with_keyexpr("topic/*");
         registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
@@ -3893,9 +3897,11 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
-        let _id = registry.register("topic/a", move |_push| {
-            counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        let _id = registry
+            .register("topic/a", move |_push| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
 
         let push = push_with_keyexpr("topic/b");
         registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
@@ -3913,17 +3919,23 @@ mod tests {
         let log = Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
 
         let log1 = log.clone();
-        registry.register("topic/a", move |_push| {
-            log1.lock().unwrap().push("first");
-        });
+        registry
+            .register("topic/a", move |_push| {
+                log1.lock().unwrap().push("first");
+            })
+            .expect("no quota is stated on this table");
         let log2 = log.clone();
-        registry.register("topic/a", move |_push| {
-            log2.lock().unwrap().push("second");
-        });
+        registry
+            .register("topic/a", move |_push| {
+                log2.lock().unwrap().push("second");
+            })
+            .expect("no quota is stated on this table");
         let log3 = log.clone();
-        registry.register("topic/b", move |_push| {
-            log3.lock().unwrap().push("other");
-        });
+        registry
+            .register("topic/b", move |_push| {
+                log3.lock().unwrap().push("other");
+            })
+            .expect("no quota is stated on this table");
 
         let push = push_with_keyexpr("topic/a");
         registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
@@ -3941,9 +3953,11 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
-        registry.register("topic/a", move |_push| {
-            counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        registry
+            .register("topic/a", move |_push| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
 
         // Push referencing a DECLARE-established mapping id (no
         // inline suffix). The registry has no resolver for the id so
@@ -3979,9 +3993,11 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let captured = Arc::new(std::sync::Mutex::new(None::<Reliability>));
         let captured_clone = captured.clone();
-        registry.register("topic/a", move |sample| {
-            *captured_clone.lock().unwrap() = Some(sample.reliability());
-        });
+        registry
+            .register("topic/a", move |sample| {
+                *captured_clone.lock().unwrap() = Some(sample.reliability());
+            })
+            .expect("no quota is stated on this table");
         let push = push_with_keyexpr("topic/a");
         registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
         assert_eq!(*captured.lock().unwrap(), Some(Reliability::Reliable));
@@ -3992,9 +4008,11 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let captured = Arc::new(std::sync::Mutex::new(None::<Reliability>));
         let captured_clone = captured.clone();
-        registry.register("topic/a", move |sample| {
-            *captured_clone.lock().unwrap() = Some(sample.reliability());
-        });
+        registry
+            .register("topic/a", move |sample| {
+                *captured_clone.lock().unwrap() = Some(sample.reliability());
+            })
+            .expect("no quota is stated on this table");
         let push = push_with_keyexpr("topic/a");
         registry.dispatch(
             &NetworkMessage::Push(Box::new(push)),
@@ -4009,9 +4027,11 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let captured = Arc::new(std::sync::Mutex::new(None::<Reliability>));
         let captured_clone = captured.clone();
-        registry.register("topic/a", move |sample| {
-            *captured_clone.lock().unwrap() = Some(sample.reliability());
-        });
+        registry
+            .register("topic/a", move |sample| {
+                *captured_clone.lock().unwrap() = Some(sample.reliability());
+            })
+            .expect("no quota is stated on this table");
         let push = push_with_keyexpr("topic/a");
         let outcome = DriverLoopOutcome::FramePayload {
             priority: crate::qos::Priority::DEFAULT,
@@ -4043,9 +4063,11 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
-        registry.register("topic/a", move |_push| {
-            counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        registry
+            .register("topic/a", move |_push| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
 
         // R98 scope routes Push only. ResponseFinal (or any other
         // variant) flowing through dispatch must not invoke any
@@ -4481,9 +4503,11 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
-        registry.register("home/$*/temp", move |_push| {
-            counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        registry
+            .register("home/$*/temp", move |_push| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
 
         let push = push_with_keyexpr("home/kitchen/temp");
         registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
@@ -4521,9 +4545,11 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
-        registry.register("home/**/*/temp", move |_push| {
-            counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        registry
+            .register("home/**/*/temp", move |_push| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
 
         // The zero-extra-chunk case must NOT match: one wild chunk is required.
         let push = push_with_keyexpr("home/temp");
@@ -4555,9 +4581,11 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
-        registry.register("home/$*$*$*foo", move |_push| {
-            counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        registry
+            .register("home/$*$*$*foo", move |_push| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
 
         let push = push_with_keyexpr("home/barfoo");
         registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
@@ -4578,9 +4606,11 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
-        registry.register("home/foo?bar", move |_push| {
-            counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        registry
+            .register("home/foo?bar", move |_push| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
         // Registry accepted the registration without panicking.
         assert_eq!(registry.len(), 1);
         // Dispatch with a structurally valid keyexpr that does NOT
@@ -4604,9 +4634,11 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
-        registry.register("home/temp", move |_push| {
-            counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        registry
+            .register("home/temp", move |_push| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
 
         let push = push_with_keyexpr("home/temp");
         registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
@@ -4626,9 +4658,11 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
-        registry.register_with_locality("home/temp", Locality::Remote, move |_push| {
-            counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        registry
+            .register_with_locality("home/temp", Locality::Remote, move |_push| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
 
         let push = push_with_keyexpr("home/temp");
         registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
@@ -4650,9 +4684,11 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
-        registry.register_with_locality("home/temp", Locality::SessionLocal, move |_push| {
-            counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        registry
+            .register_with_locality("home/temp", Locality::SessionLocal, move |_push| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
 
         let push = push_with_keyexpr("home/temp");
         registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
@@ -4674,12 +4710,16 @@ mod tests {
         let local_counter = Arc::new(AtomicUsize::new(0));
         let any_clone = any_counter.clone();
         let local_clone = local_counter.clone();
-        registry.register("home/temp", move |_push| {
-            any_clone.fetch_add(1, Ordering::SeqCst);
-        });
-        registry.register_with_locality("home/temp", Locality::SessionLocal, move |_push| {
-            local_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        registry
+            .register("home/temp", move |_push| {
+                any_clone.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
+        registry
+            .register_with_locality("home/temp", Locality::SessionLocal, move |_push| {
+                local_clone.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
 
         let push = push_with_keyexpr("home/temp");
         registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
@@ -4706,9 +4746,11 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
-        registry.register_with_locality("**", Locality::SessionLocal, move |_push| {
-            counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        registry
+            .register_with_locality("**", Locality::SessionLocal, move |_push| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
 
         let push = push_with_keyexpr("home/kitchen/temp");
         registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
@@ -4736,9 +4778,11 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let captured = Arc::new(Mutex::new(None::<crate::sample::Sample>));
         let captured_clone = captured.clone();
-        registry.register("home/temp", move |sample| {
-            *captured_clone.lock().unwrap() = Some(Sample::from_view(sample));
-        });
+        registry
+            .register("home/temp", move |sample| {
+                *captured_clone.lock().unwrap() = Some(Sample::from_view(sample));
+            })
+            .expect("no quota is stated on this table");
 
         let push = push_with_payload("home/temp", b"23.5");
         registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
@@ -4756,9 +4800,11 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let captured = Arc::new(Mutex::new(None::<crate::sample::Sample>));
         let captured_clone = captured.clone();
-        registry.register("clear/me", move |sample| {
-            *captured_clone.lock().unwrap() = Some(Sample::from_view(sample));
-        });
+        registry
+            .register("clear/me", move |sample| {
+                *captured_clone.lock().unwrap() = Some(Sample::from_view(sample));
+            })
+            .expect("no quota is stated on this table");
 
         let push = push_with_del_body("clear/me");
         registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
@@ -4782,9 +4828,11 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let captured = Arc::new(Mutex::new(None::<String>));
         let captured_clone = captured.clone();
-        registry.register("sensors/**", move |sample| {
-            *captured_clone.lock().unwrap() = Some(sample.keyexpr().to_string());
-        });
+        registry
+            .register("sensors/**", move |sample| {
+                *captured_clone.lock().unwrap() = Some(sample.keyexpr().to_string());
+            })
+            .expect("no quota is stated on this table");
 
         registry.dispatch(
             &NetworkMessage::Declare(Box::new(declare_kexpr_literal(7, "sensors/room1/temp"))),
@@ -4805,9 +4853,11 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
-        registry.register("sensors/*/temp", move |_push| {
-            counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        registry
+            .register("sensors/*/temp", move |_push| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
 
         let push = push_with_keyexpr("sensors/room1/temp");
         registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
@@ -4824,9 +4874,11 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
-        registry.register("home/**", move |_push| {
-            counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        registry
+            .register("home/**", move |_push| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
 
         let push = push_with_keyexpr("home/kitchen/sensor/c");
         registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
@@ -4843,9 +4895,11 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
-        registry.register("sensors/*/temp", move |_push| {
-            counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        registry
+            .register("sensors/*/temp", move |_push| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
 
         // `sensors/temp` lacks the middle chunk that `*` requires.
         let push = push_with_keyexpr("sensors/temp");
@@ -4861,7 +4915,9 @@ mod tests {
     #[test]
     fn unregister_removes_subscriber_idempotently() {
         let mut registry = SubscriberRegistry::new();
-        let id = registry.register("topic/a", |_push| {});
+        let id = registry
+            .register("topic/a", |_push| {})
+            .expect("no quota is stated on this table");
         assert_eq!(registry.len(), 1);
         assert!(registry.unregister(id));
         assert_eq!(registry.len(), 0);
@@ -5011,12 +5067,16 @@ mod tests {
         let ours = Arc::new(AtomicUsize::new(0));
         let theirs = Arc::new(AtomicUsize::new(0));
         let (o, t) = (ours.clone(), theirs.clone());
-        registry.register("ours/temp", move |_| {
-            o.fetch_add(1, Ordering::SeqCst);
-        });
-        registry.register("peer/only/temp", move |_| {
-            t.fetch_add(1, Ordering::SeqCst);
-        });
+        registry
+            .register("ours/temp", move |_| {
+                o.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
+        registry
+            .register("peer/only/temp", move |_| {
+                t.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
 
         // The PEER declares id 4 too, under its own literal. Both spaces now
         // hold 4, which is the collision the mapping bit exists to resolve.
@@ -5053,12 +5113,16 @@ mod tests {
         let ours = Arc::new(AtomicUsize::new(0));
         let theirs = Arc::new(AtomicUsize::new(0));
         let (o, t) = (ours.clone(), theirs.clone());
-        registry.register("ours/temp", move |_| {
-            o.fetch_add(1, Ordering::SeqCst);
-        });
-        registry.register("peer/only/temp", move |_| {
-            t.fetch_add(1, Ordering::SeqCst);
-        });
+        registry
+            .register("ours/temp", move |_| {
+                o.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
+        registry
+            .register("peer/only/temp", move |_| {
+                t.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
         registry.dispatch(
             &NetworkMessage::Declare(Box::new(declare_kexpr_literal(4, "peer/only/temp"))),
             Reliability::Reliable,
@@ -5086,9 +5150,11 @@ mod tests {
         registry.set_own_mapping_space(own_space(4, "ours/temp"));
         let ours = Arc::new(AtomicUsize::new(0));
         let o = ours.clone();
-        registry.register("ours/temp", move |_| {
-            o.fetch_add(1, Ordering::SeqCst);
-        });
+        registry
+            .register("ours/temp", move |_| {
+                o.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
         registry.dispatch(
             &NetworkMessage::Push(Box::new(push_with_own_mapping_id(4, None))),
             Reliability::Reliable,
@@ -5114,9 +5180,11 @@ mod tests {
         registry.set_own_mapping_space(own_space(6, "ours/"));
         let fired = Arc::new(AtomicUsize::new(0));
         let f = fired.clone();
-        registry.register("ours/temp", move |_| {
-            f.fetch_add(1, Ordering::SeqCst);
-        });
+        registry
+            .register("ours/temp", move |_| {
+                f.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
         registry.dispatch(
             &NetworkMessage::Push(Box::new(push_with_own_mapping_id(6, Some("temp")))),
             Reliability::Reliable,
@@ -5134,9 +5202,11 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let fired = Arc::new(AtomicUsize::new(0));
         let f = fired.clone();
-        registry.register("home/temp", move |_| {
-            f.fetch_add(1, Ordering::SeqCst);
-        });
+        registry
+            .register("home/temp", move |_| {
+                f.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
         registry.dispatch(
             &NetworkMessage::Push(Box::new(push_with_own_mapping_id(0, Some("home/temp")))),
             Reliability::Reliable,
@@ -5249,12 +5319,16 @@ mod tests {
         let ours = Arc::new(AtomicUsize::new(0));
         let theirs = Arc::new(AtomicUsize::new(0));
         let (o, t) = (ours.clone(), theirs.clone());
-        registry.register("ours/temp/inner", move |_| {
-            o.fetch_add(1, Ordering::SeqCst);
-        });
-        registry.register("theirs/temp/inner", move |_| {
-            t.fetch_add(1, Ordering::SeqCst);
-        });
+        registry
+            .register("ours/temp/inner", move |_| {
+                o.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
+        registry
+            .register("theirs/temp/inner", move |_| {
+                t.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
 
         // The peer mints id 9 for "<the prefix you called 4>/inner".
         registry.dispatch(
@@ -5340,9 +5414,11 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
-        registry.register("demo/test", move |_push| {
-            counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        registry
+            .register("demo/test", move |_push| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
 
         registry.dispatch(
             &NetworkMessage::Declare(Box::new(declare_kexpr_literal(1, "demo/test"))),
@@ -5366,9 +5442,11 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
-        registry.register("demo/test", move |_push| {
-            counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        registry
+            .register("demo/test", move |_push| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
 
         registry.dispatch(
             &NetworkMessage::Declare(Box::new(declare_kexpr_literal(1, "demo/test"))),
@@ -5401,9 +5479,11 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
-        registry.register("home/sensor/temp", move |_push| {
-            counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        registry
+            .register("home/sensor/temp", move |_push| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
 
         registry.dispatch(
             &NetworkMessage::Declare(Box::new(declare_kexpr_literal(5, "home/sensor/"))),
@@ -5467,16 +5547,18 @@ mod tests {
     ) -> Arc<std::sync::Mutex<Vec<String>>> {
         let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
         let seen_in = seen.clone();
-        registry.register(pattern, move |sample| {
-            seen_in.lock().unwrap().push(std::format!(
-                "{} {:?} {:?} {:?} {:?}",
-                sample.keyexpr(),
-                sample.payload(),
-                sample.kind(),
-                sample.reliability(),
-                sample.qos()
-            ));
-        });
+        registry
+            .register(pattern, move |sample| {
+                seen_in.lock().unwrap().push(std::format!(
+                    "{} {:?} {:?} {:?} {:?}",
+                    sample.keyexpr(),
+                    sample.payload(),
+                    sample.kind(),
+                    sample.reliability(),
+                    sample.qos()
+                ));
+            })
+            .expect("no quota is stated on this table");
         seen
     }
 
@@ -5788,9 +5870,11 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
-        registry.register("home/temp", move |_sample| {
-            counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        registry
+            .register("home/temp", move |_sample| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
 
         let sample = Sample::new_put("home/temp", b"22.5".to_vec());
         let fired = registry.local_publish(&sample);
@@ -5808,9 +5892,11 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
-        registry.register_with_locality("home/temp", Locality::SessionLocal, move |_sample| {
-            counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        registry
+            .register_with_locality("home/temp", Locality::SessionLocal, move |_sample| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
 
         let sample = Sample::new_put("home/temp", b"22.5".to_vec());
         let fired = registry.local_publish(&sample);
@@ -5832,9 +5918,11 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
-        registry.register_with_locality("home/temp", Locality::Remote, move |_sample| {
-            counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        registry
+            .register_with_locality("home/temp", Locality::Remote, move |_sample| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
 
         let sample = Sample::new_put("home/temp", b"22.5".to_vec());
         let fired = registry.local_publish(&sample);
@@ -5854,7 +5942,9 @@ mod tests {
     fn has_local_matching_sees_a_session_local_subscriber() {
         use crate::locality::Locality;
         let mut registry = SubscriberRegistry::new();
-        registry.register_with_locality("home/temp", Locality::SessionLocal, |_s| {});
+        registry
+            .register_with_locality("home/temp", Locality::SessionLocal, |_s| {})
+            .expect("no quota is stated on this table");
         assert!(
             registry.has_local_matching("home/temp"),
             "a SessionLocal subscriber is a local matching target"
@@ -5872,7 +5962,9 @@ mod tests {
         // `_z_locality_allows_local(sub->_allowed_origin)`).
         use crate::locality::Locality;
         let mut registry = SubscriberRegistry::new();
-        registry.register_with_locality("home/temp", Locality::Remote, |_s| {});
+        registry
+            .register_with_locality("home/temp", Locality::Remote, |_s| {})
+            .expect("no quota is stated on this table");
         assert!(
             !registry.has_local_matching("home/temp"),
             "a Remote-only subscriber is not a target for its own session's publisher"
@@ -5893,7 +5985,9 @@ mod tests {
         // `home/kitchen/temp`, so a publisher on the latter matches.
         use crate::locality::Locality;
         let mut registry = SubscriberRegistry::new();
-        registry.register_with_locality("home/*/temp", Locality::Any, |_s| {});
+        registry
+            .register_with_locality("home/*/temp", Locality::Any, |_s| {})
+            .expect("no quota is stated on this table");
         assert!(registry.has_local_matching("home/kitchen/**"));
         assert!(
             !registry.has_local_matching("garden/kitchen/temp"),
@@ -5913,7 +6007,9 @@ mod tests {
     fn has_local_matching_follows_the_undeclare() {
         use crate::locality::Locality;
         let mut registry = SubscriberRegistry::new();
-        let id = registry.register_with_locality("home/temp", Locality::Any, |_s| {});
+        let id = registry
+            .register_with_locality("home/temp", Locality::Any, |_s| {})
+            .expect("no quota is stated on this table");
         assert!(registry.has_local_matching("home/temp"));
         assert!(registry.unregister(id));
         assert!(
@@ -5936,21 +6032,27 @@ mod tests {
         let remote_hits = Arc::new(AtomicUsize::new(0));
         {
             let any_clone = any_hits.clone();
-            registry.register_with_locality("home/temp", Locality::Any, move |_sample| {
-                any_clone.fetch_add(1, Ordering::SeqCst);
-            });
+            registry
+                .register_with_locality("home/temp", Locality::Any, move |_sample| {
+                    any_clone.fetch_add(1, Ordering::SeqCst);
+                })
+                .expect("no quota is stated on this table");
         }
         {
             let local_clone = local_hits.clone();
-            registry.register_with_locality("home/temp", Locality::SessionLocal, move |_sample| {
-                local_clone.fetch_add(1, Ordering::SeqCst);
-            });
+            registry
+                .register_with_locality("home/temp", Locality::SessionLocal, move |_sample| {
+                    local_clone.fetch_add(1, Ordering::SeqCst);
+                })
+                .expect("no quota is stated on this table");
         }
         {
             let remote_clone = remote_hits.clone();
-            registry.register_with_locality("home/temp", Locality::Remote, move |_sample| {
-                remote_clone.fetch_add(1, Ordering::SeqCst);
-            });
+            registry
+                .register_with_locality("home/temp", Locality::Remote, move |_sample| {
+                    remote_clone.fetch_add(1, Ordering::SeqCst);
+                })
+                .expect("no quota is stated on this table");
         }
 
         let sample = Sample::new_put("home/temp", b"22.5".to_vec());
@@ -6004,9 +6106,11 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
-        registry.register("kitchen/temp", move |_sample| {
-            counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        registry
+            .register("kitchen/temp", move |_sample| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
 
         let sample = Sample::new_put("home/temp", b"22.5".to_vec());
         let fired = registry.local_publish(&sample);
@@ -6025,15 +6129,19 @@ mod tests {
         let hits_b = Arc::new(AtomicUsize::new(0));
         {
             let clone = hits_a.clone();
-            registry.register("home/temp", move |_sample| {
-                clone.fetch_add(1, Ordering::SeqCst);
-            });
+            registry
+                .register("home/temp", move |_sample| {
+                    clone.fetch_add(1, Ordering::SeqCst);
+                })
+                .expect("no quota is stated on this table");
         }
         {
             let clone = hits_b.clone();
-            registry.register("home/*", move |_sample| {
-                clone.fetch_add(1, Ordering::SeqCst);
-            });
+            registry
+                .register("home/*", move |_sample| {
+                    clone.fetch_add(1, Ordering::SeqCst);
+                })
+                .expect("no quota is stated on this table");
         }
 
         let sample = Sample::new_put("home/temp", b"22.5".to_vec());
@@ -6052,9 +6160,11 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
-        registry.register("home/**", move |_sample| {
-            counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        registry
+            .register("home/**", move |_sample| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
 
         let sample = Sample::new_put("home/kitchen/temp", b"22.5".to_vec());
         let fired = registry.local_publish(&sample);
@@ -6071,9 +6181,11 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
-        registry.register("home/temp_$*", move |_sample| {
-            counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        registry
+            .register("home/temp_$*", move |_sample| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
 
         let sample = Sample::new_put("home/temp_42", b"22.5".to_vec());
         let fired = registry.local_publish(&sample);
@@ -6091,9 +6203,11 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let observed = Arc::new(std::sync::Mutex::new(None::<Sample>));
         let observed_clone = observed.clone();
-        registry.register("home/temp", move |sample| {
-            *observed_clone.lock().unwrap() = Some(Sample::from_view(sample));
-        });
+        registry
+            .register("home/temp", move |sample| {
+                *observed_clone.lock().unwrap() = Some(Sample::from_view(sample));
+            })
+            .expect("no quota is stated on this table");
 
         let sample = Sample::new_put("home/temp", b"payload".to_vec())
             .with_reliability(Rel::BestEffort)
@@ -6124,10 +6238,12 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let observed = Arc::new(std::sync::Mutex::new(None::<SampleKind>));
         let observed_clone = observed.clone();
-        registry.register("home/temp", move |sample| {
-            *observed_clone.lock().unwrap() = Some(sample.kind());
-            assert!(sample.payload().is_empty(), "Del Sample carries no payload");
-        });
+        registry
+            .register("home/temp", move |sample| {
+                *observed_clone.lock().unwrap() = Some(sample.kind());
+                assert!(sample.payload().is_empty(), "Del Sample carries no payload");
+            })
+            .expect("no quota is stated on this table");
 
         let sample = Sample::new_del("home/temp");
         let fired = registry.local_publish(&sample);
@@ -6146,9 +6262,11 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
-        registry.register_with_locality("home/**", Locality::Remote, move |_sample| {
-            counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        registry
+            .register_with_locality("home/**", Locality::Remote, move |_sample| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
 
         let sample = Sample::new_put("home/kitchen/temp", b"22.5".to_vec());
         let fired = registry.local_publish(&sample);
@@ -6223,9 +6341,11 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
-        registry.register("demo/temp", move |_s| {
-            counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        registry
+            .register("demo/temp", move |_s| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
         let own = vec![0x01, 0x02, 0x03, 0x04];
         assert!(registry.set_own_zid(own.clone()));
 
@@ -6249,9 +6369,11 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let fired = Arc::new(AtomicUsize::new(0));
         let f = fired.clone();
-        registry.register("demo/shm", move |_s| {
-            f.fetch_add(1, Ordering::SeqCst);
-        });
+        registry
+            .register("demo/shm", move |_s| {
+                f.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
         // R311y516 — negotiate FIRST so this test still measures what it is
         // named for. The negotiation gate added in R311y516 runs BEFORE the
         // resolve and would otherwise absorb this Put into
@@ -6301,9 +6423,11 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let fired = Arc::new(AtomicUsize::new(0));
         let f = fired.clone();
-        registry.register("demo/shm", move |_s| {
-            f.fetch_add(1, Ordering::SeqCst);
-        });
+        registry
+            .register("demo/shm", move |_s| {
+                f.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
         registry.set_shm_negotiated(true);
         let bands = Arc::new(std::sync::Mutex::new(Vec::new()));
         registry.set_shm_handoff(Some(Box::new(RecordingHandoff(bands.clone()))));
@@ -6425,9 +6549,11 @@ mod tests {
         let delivered = Arc::new(AtomicUsize::new(0));
         let mut registry = SubscriberRegistry::<BoxedSink>::new();
         let seen = delivered.clone();
-        registry.register("demo/shm", move |sample| {
-            seen.store(sample.payload().as_ptr() as usize, Ordering::SeqCst);
-        });
+        registry
+            .register("demo/shm", move |sample| {
+                seen.store(sample.payload().as_ptr() as usize, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
         registry.set_shm_negotiated(true);
         registry.set_shm_resolver(Box::new(crate::extshm::test_support::LendsStorage(
             storage.clone(),
@@ -6504,14 +6630,16 @@ mod tests {
         let joined: Arc<std::sync::Mutex<Vec<u8>>> = Arc::default();
         let mut registry = SubscriberRegistry::<BoxedSink>::new();
         let (slices_seen, joined_seen) = (seen.clone(), joined.clone());
-        registry.register("demo/shm", move |sample| {
-            let payload = sample.payload_shared().expect("a shared payload");
-            *slices_seen.lock().expect("seen") = payload
-                .slices()
-                .map(|slice| (slice.as_ptr() as usize, slice.len()))
-                .collect();
-            *joined_seen.lock().expect("joined") = sample.payload().to_vec();
-        });
+        registry
+            .register("demo/shm", move |sample| {
+                let payload = sample.payload_shared().expect("a shared payload");
+                *slices_seen.lock().expect("seen") = payload
+                    .slices()
+                    .map(|slice| (slice.as_ptr() as usize, slice.len()))
+                    .collect();
+                *joined_seen.lock().expect("joined") = sample.payload().to_vec();
+            })
+            .expect("no quota is stated on this table");
         registry.set_shm_negotiated(true);
         registry.set_shm_resolver(Box::new(crate::extshm::test_support::LendsEach(
             std::sync::Mutex::new([first.clone(), second.clone()].into()),
@@ -6680,9 +6808,11 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
-        registry.register("demo/temp", move |_s| {
-            counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        registry
+            .register("demo/temp", move |_s| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
         assert!(registry.set_own_zid(vec![0x01, 0x02, 0x03, 0x04]));
 
         let push = push_put_literal_with_source_info("demo/temp", &[0xAA, 0xBB, 0xCC, 0xDD]);
@@ -6704,9 +6834,11 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
-        registry.register("demo/temp", move |_s| {
-            counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        registry
+            .register("demo/temp", move |_s| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
         assert!(registry.set_own_zid(vec![0x01, 0x02, 0x03, 0x04]));
 
         // push_with_mapping_id builds a Push::default() body which
@@ -6798,12 +6930,14 @@ mod tests {
         let present = Arc::new(AtomicUsize::new(0));
         let f = fired.clone();
         let p = present.clone();
-        registry.register("home/temp", move |sample| {
-            f.fetch_add(1, Ordering::SeqCst);
-            if sample.encoding().is_some() {
-                p.fetch_add(1, Ordering::SeqCst);
-            }
-        });
+        registry
+            .register("home/temp", move |sample| {
+                f.fetch_add(1, Ordering::SeqCst);
+                if sample.encoding().is_some() {
+                    p.fetch_add(1, Ordering::SeqCst);
+                }
+            })
+            .expect("no quota is stated on this table");
         registry.dispatch(
             &NetworkMessage::Push(Box::new(push_put_with_encoding("home/temp", 4))),
             Reliability::Reliable,
@@ -6824,12 +6958,14 @@ mod tests {
         let present = Arc::new(AtomicUsize::new(0));
         let f = fired.clone();
         let p = present.clone();
-        registry.register("home/temp", move |sample| {
-            f.fetch_add(1, Ordering::SeqCst);
-            if sample.encoding().is_some() {
-                p.fetch_add(1, Ordering::SeqCst);
-            }
-        });
+        registry
+            .register("home/temp", move |sample| {
+                f.fetch_add(1, Ordering::SeqCst);
+                if sample.encoding().is_some() {
+                    p.fetch_add(1, Ordering::SeqCst);
+                }
+            })
+            .expect("no quota is stated on this table");
         registry.dispatch(
             &NetworkMessage::Push(Box::new(push_put_with_encoding("home/temp", 4))),
             Reliability::Reliable,
@@ -6856,12 +6992,14 @@ mod tests {
         let present = Arc::new(AtomicUsize::new(0));
         let f = fired.clone();
         let p = present.clone();
-        registry.register("demo/temp", move |sample| {
-            f.fetch_add(1, Ordering::SeqCst);
-            if sample.source_info().is_some() {
-                p.fetch_add(1, Ordering::SeqCst);
-            }
-        });
+        registry
+            .register("demo/temp", move |sample| {
+                f.fetch_add(1, Ordering::SeqCst);
+                if sample.source_info().is_some() {
+                    p.fetch_add(1, Ordering::SeqCst);
+                }
+            })
+            .expect("no quota is stated on this table");
         registry.dispatch(
             &NetworkMessage::Push(Box::new(push_put_literal_with_source_info(
                 "demo/temp",
@@ -6885,12 +7023,14 @@ mod tests {
         let present = Arc::new(AtomicUsize::new(0));
         let f = fired.clone();
         let p = present.clone();
-        registry.register("demo/temp", move |sample| {
-            f.fetch_add(1, Ordering::SeqCst);
-            if sample.source_info().is_some() {
-                p.fetch_add(1, Ordering::SeqCst);
-            }
-        });
+        registry
+            .register("demo/temp", move |sample| {
+                f.fetch_add(1, Ordering::SeqCst);
+                if sample.source_info().is_some() {
+                    p.fetch_add(1, Ordering::SeqCst);
+                }
+            })
+            .expect("no quota is stated on this table");
         registry.dispatch(
             &NetworkMessage::Push(Box::new(push_put_literal_with_source_info(
                 "demo/temp",
@@ -6953,12 +7093,14 @@ mod tests {
         let present = Arc::new(AtomicUsize::new(0));
         let f = fired.clone();
         let p = present.clone();
-        registry.register("home/temp", move |sample| {
-            f.fetch_add(1, Ordering::SeqCst);
-            if sample.qos().is_some() {
-                p.fetch_add(1, Ordering::SeqCst);
-            }
-        });
+        registry
+            .register("home/temp", move |sample| {
+                f.fetch_add(1, Ordering::SeqCst);
+                if sample.qos().is_some() {
+                    p.fetch_add(1, Ordering::SeqCst);
+                }
+            })
+            .expect("no quota is stated on this table");
         registry.dispatch(
             &NetworkMessage::Push(Box::new(push_put_with_qos("home/temp", 0xBE))),
             Reliability::Reliable,
@@ -6979,12 +7121,14 @@ mod tests {
         let present = Arc::new(AtomicUsize::new(0));
         let f = fired.clone();
         let p = present.clone();
-        registry.register("home/temp", move |sample| {
-            f.fetch_add(1, Ordering::SeqCst);
-            if sample.qos().is_some() {
-                p.fetch_add(1, Ordering::SeqCst);
-            }
-        });
+        registry
+            .register("home/temp", move |sample| {
+                f.fetch_add(1, Ordering::SeqCst);
+                if sample.qos().is_some() {
+                    p.fetch_add(1, Ordering::SeqCst);
+                }
+            })
+            .expect("no quota is stated on this table");
         registry.dispatch(
             &NetworkMessage::Push(Box::new(push_put_with_qos("home/temp", 0xBE))),
             Reliability::Reliable,
@@ -7075,12 +7219,14 @@ mod tests {
         let present = Arc::new(AtomicUsize::new(0));
         let f = fired.clone();
         let p = present.clone();
-        registry.register("home/temp", move |sample| {
-            f.fetch_add(1, Ordering::SeqCst);
-            if sample.timestamp().is_some() {
-                p.fetch_add(1, Ordering::SeqCst);
-            }
-        });
+        registry
+            .register("home/temp", move |sample| {
+                f.fetch_add(1, Ordering::SeqCst);
+                if sample.timestamp().is_some() {
+                    p.fetch_add(1, Ordering::SeqCst);
+                }
+            })
+            .expect("no quota is stated on this table");
         registry.dispatch(
             &NetworkMessage::Push(Box::new(push_put_with_timestamp("home/temp"))),
             Reliability::Reliable,
@@ -7098,9 +7244,11 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let captured: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
         let cap = captured.clone();
-        registry.register("home/temp", move |sample| {
-            *cap.lock().unwrap() = sample.attachment().map(<[u8]>::to_vec);
-        });
+        registry
+            .register("home/temp", move |sample| {
+                *cap.lock().unwrap() = sample.attachment().map(<[u8]>::to_vec);
+            })
+            .expect("no quota is stated on this table");
         registry.dispatch(
             &NetworkMessage::Push(Box::new(push_put_with_attachment(
                 "home/temp",
@@ -7124,9 +7272,11 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
-        registry.register("demo/temp", move |_s| {
-            counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        registry
+            .register("demo/temp", move |_s| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
         assert!(
             registry.own_zid().is_none(),
             "fresh registry must have no own_zid installed"
@@ -7152,9 +7302,11 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
-        registry.register("demo/temp", move |_s| {
-            counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        registry
+            .register("demo/temp", move |_s| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
         assert!(registry.set_own_zid(vec![0x01, 0x02, 0x03, 0x04]));
 
         let push = push_put_literal_with_source_info(
@@ -7180,9 +7332,11 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
-        registry.register("demo/temp", move |_s| {
-            counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        registry
+            .register("demo/temp", move |_s| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
         let own = vec![0x01, 0x02, 0x03, 0x04];
         assert!(registry.set_own_zid(own.clone()));
 
@@ -7230,9 +7384,11 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
-        registry.register("demo/temp", move |_s| {
-            counter_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        registry
+            .register("demo/temp", move |_s| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
         let own = vec![0x09, 0x08, 0x07, 0x06];
         assert!(registry.set_own_zid(own.clone()));
 
@@ -7272,7 +7428,8 @@ mod tests {
         reg.register("home/temp", move |v: &dyn SampleView| {
             assert_eq!(v.keyexpr(), "home/temp");
             h.fetch_add(1, Ordering::SeqCst);
-        });
+        })
+        .expect("no quota is stated on this table");
         let fired = reg.dispatch_borrowed(
             &BorrowedSample {
                 keyexpr: "home/temp",
@@ -7320,7 +7477,9 @@ mod tests {
             reliability: Reliability::Reliable,
         };
         let mut reg = SubscriberRegistry::new();
-        let wildcard = reg.register("a/*", log("wildcard"));
+        let wildcard = reg
+            .register("a/*", log("wildcard"))
+            .expect("no quota is stated on this table");
 
         // Three messages on one key: the first is matched, the next two are remembered.
         for _ in 0..3 {
@@ -7330,7 +7489,8 @@ mod tests {
 
         // A subscription registered now moves the epoch: the next message reaches both,
         // in the table's order, and the one after that (remembered) still does.
-        reg.register("a/x", log("exact"));
+        reg.register("a/x", log("exact"))
+            .expect("no quota is stated on this table");
         order.lock().unwrap().clear();
         for _ in 0..2 {
             assert_eq!(reg.dispatch_borrowed(&key("a/x"), true), 2);
@@ -7355,7 +7515,8 @@ mod tests {
 
         // The locality is part of the answer: a Remote-only subscriber is fired for a
         // wire-arrived key and not for a local-origin one, whichever was asked first.
-        reg.register_with_locality("loc/k", Locality::Remote, log("remote-only"));
+        reg.register_with_locality("loc/k", Locality::Remote, log("remote-only"))
+            .expect("no quota is stated on this table");
         order.lock().unwrap().clear();
         assert_eq!(reg.dispatch_borrowed(&key("loc/k"), false), 0);
         assert_eq!(reg.dispatch_borrowed(&key("loc/k"), true), 1);
@@ -7383,7 +7544,8 @@ mod tests {
         // one its storage policy reads.
         let remembered = if memo_slots::<Profile>() == 0 { 5 } else { 1 };
         let mut reg = SubscriberRegistry::new();
-        reg.register("a/*", |_: &dyn SampleView| {});
+        reg.register("a/*", |_: &dyn SampleView| {})
+            .expect("no quota is stated on this table");
 
         let start = scans();
         for _ in 0..5 {
@@ -7392,7 +7554,8 @@ mod tests {
         let first_key = scans() - start;
         assert_eq!(first_key, remembered, "five messages on one key");
 
-        reg.register("a/x", |_: &dyn SampleView| {});
+        reg.register("a/x", |_: &dyn SampleView| {})
+            .expect("no quota is stated on this table");
         let start = scans();
         for _ in 0..5 {
             assert_eq!(reg.dispatch_borrowed(&key("a/x"), true), 2);
@@ -7503,9 +7666,11 @@ mod decode_isolation_tests {
         let mut registry = SubscriberRegistry::new();
         let fired = Arc::new(AtomicUsize::new(0));
         let f = fired.clone();
-        registry.register("home/temp", move |_| {
-            f.fetch_add(1, Ordering::SeqCst);
-        });
+        registry
+            .register("home/temp", move |_| {
+                f.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
 
         // Del variant → `pubsub-delete` arm cfg'd out → `_ => return`.
         registry.dispatch(
@@ -7537,9 +7702,11 @@ mod decode_isolation_tests {
         let mut registry = SubscriberRegistry::new();
         let fired = Arc::new(AtomicUsize::new(0));
         let f = fired.clone();
-        registry.register("home/temp", move |_| {
-            f.fetch_add(1, Ordering::SeqCst);
-        });
+        registry
+            .register("home/temp", move |_| {
+                f.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
 
         // Put variant → `pubsub-put` arm cfg'd out → `_ => return`.
         registry.dispatch(
@@ -7665,12 +7832,14 @@ mod metadata_decode_isolation_tests {
         let present = Arc::new(AtomicUsize::new(0));
         let f = fired.clone();
         let p = present.clone();
-        registry.register("home/temp", move |sample| {
-            f.fetch_add(1, Ordering::SeqCst);
-            if sample.timestamp().is_some() {
-                p.fetch_add(1, Ordering::SeqCst);
-            }
-        });
+        registry
+            .register("home/temp", move |sample| {
+                f.fetch_add(1, Ordering::SeqCst);
+                if sample.timestamp().is_some() {
+                    p.fetch_add(1, Ordering::SeqCst);
+                }
+            })
+            .expect("no quota is stated on this table");
         registry.dispatch(
             &NetworkMessage::Push(Box::new(put_push_with_timestamp("home/temp"))),
             Reliability::Reliable,
@@ -7694,12 +7863,14 @@ mod metadata_decode_isolation_tests {
         let present = Arc::new(AtomicUsize::new(0));
         let f = fired.clone();
         let p = present.clone();
-        registry.register("home/temp", move |sample| {
-            f.fetch_add(1, Ordering::SeqCst);
-            if sample.attachment().is_some() {
-                p.fetch_add(1, Ordering::SeqCst);
-            }
-        });
+        registry
+            .register("home/temp", move |sample| {
+                f.fetch_add(1, Ordering::SeqCst);
+                if sample.attachment().is_some() {
+                    p.fetch_add(1, Ordering::SeqCst);
+                }
+            })
+            .expect("no quota is stated on this table");
         registry.dispatch(
             &NetworkMessage::Push(Box::new(put_push_with_attachment(
                 "home/temp",

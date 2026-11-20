@@ -1388,9 +1388,11 @@ mod registry_tests {
         let mut registry = SubscriberRegistry::new();
         let heard = Arc::new(Mutex::new(alloc::vec::Vec::new()));
         let into = heard.clone();
-        registry.register("lab/rig/**", move |sample: &dyn SampleView| {
-            into.lock().unwrap().push(sample.keyexpr().to_string());
-        });
+        registry
+            .register("lab/rig/**", move |sample: &dyn SampleView| {
+                into.lock().unwrap().push(sample.keyexpr().to_string());
+            })
+            .expect("no quota is stated on this table");
         (registry, heard)
     }
 
