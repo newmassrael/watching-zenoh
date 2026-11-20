@@ -6,7 +6,9 @@
 //! would.
 //!
 //! The client leg is the timer this ABI's opens wait on: a connect budget with a retry schedule,
-//! dialled at a port nothing listens on, so the open can end only by the budget. The program's
+//! dialled at a port the test holds and nothing listens on (`refusing_port`: a released number
+//! could be taken by a listener of a test beside it), so the open can end only by the budget. The
+//! program's
 //! time stands still while the wall clock runs three budgets past it, and the open must not end;
 //! the program then moves its time past the budget and says so, and the open must end, refused as
 //! a budget that ran out is. A build whose connect wait read the system's clock would end the open
@@ -31,7 +33,7 @@ use wz_capi_c::time_base::{
     wz_capi_c_time_base_drop, wz_capi_c_time_base_loan, wz_capi_c_time_base_move,
     wz_capi_c_time_base_new, wz_capi_c_time_base_t,
 };
-use wz_runtime_tokio_test_support::free_port;
+use wz_runtime_tokio_test_support::refusing_port;
 
 /// The connect budget of the client leg, in the program's time.
 const BUDGET: Duration = Duration::from_millis(1000);
@@ -147,12 +149,12 @@ impl Handed {
 /// once the time passes the budget and the program says so, refused as a spent budget is.
 #[test]
 fn a_clients_connect_budget_on_a_time_base_is_a_budget_of_the_programs_time() {
-    let port = free_port();
+    let dead = refusing_port();
     let time = program_time();
     let mut time_base = time_base_over(time);
     let entries = [
         ("mode", String::from("\"client\"")),
-        ("connect/endpoints", format!("[\"tcp/127.0.0.1:{port}\"]")),
+        ("connect/endpoints", format!("[\"tcp/{}\"]", dead.addr())),
         ("connect/timeout_ms", BUDGET.as_millis().to_string()),
         (
             "connect/retry",
@@ -190,6 +192,8 @@ fn a_clients_connect_budget_on_a_time_base_is_a_budget_of_the_programs_time() {
     assert_eq!(opening.join().expect("the opening thread"), Z_ENETWORK);
     // SAFETY: the program's own reference, dropped once.
     unsafe { wz_capi_c_time_base_drop(wz_capi_c_time_base_move(&mut time_base)) };
+    // Held to here, so the number refused every dial of the open.
+    drop(dead);
 }
 
 /// A node that forwards between its faces is not timed by a time base: its open from a config that
@@ -198,6 +202,7 @@ fn a_clients_connect_budget_on_a_time_base_is_a_budget_of_the_programs_time() {
 #[test]
 fn a_router_on_a_time_base_is_refused_and_opens_without_one() {
     use wz_capi_c::result::Z_EINVAL;
+    use wz_runtime_tokio_test_support::free_port;
 
     let entries = |port: u16| {
         [
