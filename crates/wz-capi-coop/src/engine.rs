@@ -2196,6 +2196,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         Ok(id)
     }
 
+    /// The waits for room a publish that finds the session held asks.
+    #[cfg(all(test, feature = "group"))]
+    pub(crate) fn rooms(&self) -> &LinkRooms {
+        &self.rooms
+    }
+
     /// How many messages of `priority` the session put on its groups were dropped for want of
     /// room on the group's queue.
     #[cfg(all(test, feature = "group"))]

@@ -932,6 +932,29 @@ mod congested {
         SessionDrive::close(&*member);
     }
 
+    /// A droppable put that finds the session held asks the group's socket for room as it asks a
+    /// link's: the session's waits for room hold the group's, which answers congestion while the
+    /// socket is full and room once it takes datagrams again.
+    #[test]
+    fn a_held_session_asks_the_group_socket_for_room() {
+        use crate::engine::Room;
+        let (member, stack, transport) = open_filling();
+        assert_eq!(
+            member.rooms().within(1_000),
+            Room::Free,
+            "CONTROL: a socket with room"
+        );
+        stack.full.store(true, Ordering::SeqCst);
+        // The third put has the group's task offer the socket a datagram, which it refuses.
+        for _ in 0..3 {
+            put_with(&member, CongestionControl::Drop);
+        }
+        assert_eq!(member.rooms().within(1_000), Room::Congested);
+        writable(&stack, &transport);
+        assert_eq!(member.rooms().within(1_000), Room::Free);
+        SessionDrive::close(&*member);
+    }
+
     /// A blocking put that finds the lane full waits its whole `wait_before_close` for room, and
     /// is then dropped and counted, as the tokio engine's group drops it: a multicast transport
     /// closes nothing on a congestion drop. The group is still joined, and carries the next put
