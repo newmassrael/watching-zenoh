@@ -32,7 +32,7 @@ pub use generated::*;
 mod enforcement {
     use super::*;
     use crate::caps;
-    use crate::limit_binding::Quota;
+    use crate::limit_binding::{LimitSpec, Quota};
     use crate::observer::ApplicationLayerObserver;
     use crate::registry_error::RegisterError;
 

@@ -408,19 +408,35 @@ impl QblEntry {
 }
 
 /// Declare the C subscription `entry` on a group's session, and tell the group of it as
-/// `declarations` says.
+/// `declarations` says. `None` when the group's table refused it: the plane admitted it, and
+/// the group's table is held to no tighter limit, so only a group that has spent its
+/// declaration ids refuses. The subscription then hears nothing from that group, which is said
+/// on stderr when `WZ_CAPI_LOG` is set, as an open's failure is, and the node's other links are
+/// untouched.
 fn subscribe_on(
     session: &TokioMulticastSession,
     entry: &SubEntry,
     declarations: GroupDeclarations,
-) -> Subscriber {
-    let subscriber = session.declare_subscriber(
+) -> Option<Subscriber> {
+    let subscriber = match session.declare_subscriber(
         entry.keyexpr.clone(),
         SubscribeOptions::default().with_allowed_origin(entry.allowed_origin),
         (entry.sink)(),
-    );
+    ) {
+        Ok(subscriber) => subscriber,
+        Err(refusal) => {
+            if std::env::var_os("WZ_CAPI_LOG").is_some() {
+                std::eprintln!(
+                    "[wz-capi] a group refused the subscription on `{}` the node admitted \
+                     ({refusal}); it hears nothing from that group",
+                    entry.keyexpr
+                );
+            }
+            return None;
+        }
+    };
     announce_on(session, declarations, &entry.told());
-    subscriber
+    Some(subscriber)
 }
 
 /// Declare the C queryable `entry` on a group's session, and tell the group of it as
@@ -484,9 +500,9 @@ impl SharedSession {
         membership: &McastGroupMembership,
         is_shm: bool,
     ) -> TokioMulticastSession {
-        let observer = Arc::new(WzMutex::new(ApplicationLayerObserver::with_limits(
-            self.session_limits(),
-        )));
+        // A mirror of the plane's entities, as a unicast face's observer is: the limits are the
+        // plane's to hold.
+        let observer = Arc::new(WzMutex::new(ApplicationLayerObserver::new()));
         // The node's snapshot, the one its group's parameters carry to the drive loop.
         let session = TokioMulticastSession::new_multicast(
             observer,
@@ -542,11 +558,8 @@ impl SharedSession {
             .subs
             .iter()
             .filter(|entry| !entry.links.is_restricted())
-            .map(|entry| {
-                (
-                    entry.id,
-                    subscribe_on(session, entry, GroupDeclarations::None),
-                )
+            .filter_map(|entry| {
+                subscribe_on(session, entry, GroupDeclarations::None).map(|sub| (entry.id, sub))
             })
             .collect();
         #[cfg(feature = "queryable")]
@@ -757,8 +770,9 @@ impl SharedSession {
     /// Declare the C subscription `entry` on every group face.
     pub(super) fn subscribe_on_groups(guard: &mut Inner, entry: &SubEntry) {
         for face in guard.mcast_faces.values_mut() {
-            let sub = subscribe_on(&face.session, entry, face.declarations);
-            face.subs.insert(entry.id, sub);
+            if let Some(sub) = subscribe_on(&face.session, entry, face.declarations) {
+                face.subs.insert(entry.id, sub);
+            }
         }
     }
 

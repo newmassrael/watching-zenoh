@@ -2420,7 +2420,8 @@ pub struct SessionResources {
     /// by their `link-tie-order`.
     pub session_policy: SessionPolicy,
     /// The session limits the node runs under, as its open resolved them: the observer of the
-    /// plane, of every face and of every group is held to them.
+    /// plane, where the program declares, is held to them. A face's and a group's observers
+    /// mirror what the plane admitted and are not held again.
     pub session_limits: SessionLimits,
     /// The key ids every node of the deployment shares and the key-wire form of each face, which
     /// every face session is handed for its link (`shared-key-ids`).
@@ -2609,7 +2610,7 @@ impl SharedSession {
     }
 
     /// The session limits the node runs under, as its creator resolved them: what the observer
-    /// of its plane, of each face and of each group is held to, never the build.
+    /// of its plane is held to, never the build.
     pub fn session_limits(&self) -> &SessionLimits {
         &self.session_limits
     }
@@ -3209,9 +3210,10 @@ impl SharedSession {
         actions: &Arc<SessionLinkActions>,
         dialled: bool,
     ) -> Option<LinkAnnounced> {
-        let observer = Arc::new(WzMutex::new(ApplicationLayerObserver::with_limits(
-            &self.session_limits,
-        )));
+        // A face's tables mirror what the plane admitted (the replay declares each of the
+        // plane's entities on it), so the limits are the plane's to hold, once, where the
+        // program declares; a mirror held to them again could refuse what the node admitted.
+        let observer = Arc::new(WzMutex::new(ApplicationLayerObserver::new()));
         // R311y554 — THE hand-off that makes `allowed_destination` honourable.
         //
         // A FACE session's drain is `DriveTask` for both ABIs, and it is a
