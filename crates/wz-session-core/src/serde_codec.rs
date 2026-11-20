@@ -758,15 +758,37 @@ mod tests {
     /// bits and stops at NINE. `VarInt` is public `Serialize` surface, so
     /// that difference is reachable through the API and not only through
     /// length prefixes. Routing this back through `crate::vle` reds here.
+    ///
+    /// `VarInt` is `VarInt<usize>` only, as upstream's is, so the split is
+    /// reachable through it where `usize` is 64 bits. On a 32-bit host its
+    /// largest value is `2^32 - 1`, five LEB128 bytes, which is the encoding
+    /// upstream's `leb128::write::unsigned(len as u64)` gives there too: the
+    /// writer takes a `u64` and nothing is cut. The writer itself is held at
+    /// `u64::MAX` on every host.
     #[test]
     fn varint_is_leb128_not_the_protocol_vle() {
-        // usize::MAX == u64::MAX on this target, the value that separates
-        // the two encodings.
-        let bytes = z_serialize(&VarInt(usize::MAX));
+        // `u64::MAX`, the value that separates the two encodings.
+        let ten: Vec<u8> = vec![0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01];
+        let mut leb = alloc::vec::Vec::new();
+        write_leb128(&mut leb, u64::MAX);
         assert_eq!(
-            bytes,
-            vec![0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01],
-            "VarInt(u64::MAX) is ten LEB128 bytes; the protocol VLE would emit nine",
+            leb, ten,
+            "u64::MAX is ten LEB128 bytes; the protocol VLE would emit nine",
+        );
+        // The public type at its largest value on this host.
+        let widest = z_serialize(&VarInt(usize::MAX));
+        match usize::BITS {
+            64 => assert_eq!(widest, ten, "VarInt(usize::MAX) is u64::MAX here"),
+            32 => assert_eq!(
+                widest,
+                vec![0xff, 0xff, 0xff, 0xff, 0x0f],
+                "VarInt(usize::MAX) is 2^32 - 1 here, five LEB128 bytes"
+            ),
+            other => panic!("no expectation for a {other}-bit usize"),
+        }
+        assert_eq!(
+            z_deserialize::<VarInt<usize>>(&widest).unwrap(),
+            VarInt(usize::MAX)
         );
         // The protocol VLE's nine-byte form must NOT decode as this value:
         // it is a different encoding, and reading it as LEB128 is a short,
@@ -778,16 +800,31 @@ mod tests {
             9,
             "the protocol VLE caps a u64 at nine bytes"
         );
-        assert_ne!(vle_form, bytes);
+        assert_ne!(vle_form, leb);
         assert!(z_deserialize::<VarInt<usize>>(&vle_form).is_err());
 
         // Below the split the two agree, which is why every length prefix
-        // in the golden vectors is unchanged.
+        // in the golden vectors is unchanged; through `VarInt` wherever the
+        // value is a `usize` of this host.
         for v in [0u64, 1, 127, 128, 300, 16384, (1u64 << 63) - 1] {
             let mut vle = alloc::vec::Vec::new();
             crate::vle::encode_vle_u64_into(&mut vle, v);
-            assert_eq!(z_serialize(&VarInt(v as usize)), vle, "value {v}");
+            let mut leb = alloc::vec::Vec::new();
+            write_leb128(&mut leb, v);
+            assert_eq!(leb, vle, "value {v}");
+            if let Ok(n) = usize::try_from(v) {
+                assert_eq!(z_serialize(&VarInt(n)), vle, "VarInt({v})");
+            }
         }
+
+        // A value past this host's `usize` is refused, not cut: 2^32 in
+        // LEB128 reads as a `VarInt` only where `usize` holds it.
+        let mut past_u32 = alloc::vec::Vec::new();
+        write_leb128(&mut past_u32, 1 << 32);
+        assert_eq!(
+            z_deserialize::<VarInt<usize>>(&past_u32).is_ok(),
+            usize::try_from(1u64 << 32).is_ok()
+        );
 
         // The overflow reject `leb128::read::unsigned` makes at shift 63.
         assert!(z_deserialize::<VarInt<usize>>(&[

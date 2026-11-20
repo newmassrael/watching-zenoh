@@ -285,7 +285,15 @@ mod tests {
     /// it forwards to, so the schema's container must not move it. Measured on
     /// x86_64 at SCE 9ae6a6b682, where the hot path's allocation budget passed
     /// unchanged: the layout the text schema had.
+    ///
+    /// The message is mostly words (its containers' pointers and lengths), so
+    /// the size is the host's: 180 B measured on 32-bit x86 Linux (Layer
+    /// C1p32). A host of another layout has no row, and the two relative
+    /// assertions of the test below are what hold the schema there.
+    #[cfg(target_pointer_width = "64")]
     const PUSH_OWNED_BYTES_AT_TEXT_SCHEMA: usize = 312;
+    #[cfg(all(target_arch = "x86", target_os = "linux"))]
+    const PUSH_OWNED_BYTES_AT_TEXT_SCHEMA: usize = 180;
 
     /// The wire of a literal Push carrying `payload`, laid in a larger storage
     /// at a non-zero offset so a range that were mistaken for the whole storage
@@ -308,7 +316,7 @@ mod tests {
         (storage, frame, start..end)
     }
 
-    fn payload_of<S: PushStorage>(push: &wz_codecs::push::PushOwned<S>) -> &[u8] {
+    fn payload_of<S: PushStorage>(push: &PushOwned<S>) -> &[u8] {
         match &push.body {
             PushOwnedVariant::CodecZenohMsgPut(put) => {
                 inline_bytes(put).expect("an inline Put carries a payload")
@@ -443,6 +451,10 @@ mod tests {
             size_of::<EncodingOwned<RxShared>>(),
             size_of::<EncodingOwned<Heap>>()
         );
+        #[cfg(any(
+            target_pointer_width = "64",
+            all(target_arch = "x86", target_os = "linux")
+        ))]
         assert_eq!(
             size_of::<PushOwned<RxShared>>(),
             PUSH_OWNED_BYTES_AT_TEXT_SCHEMA
