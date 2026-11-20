@@ -270,9 +270,11 @@ impl Dialer {
         expected: Option<[u8; wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES]>,
     ) -> Result<OpenedSession, DialFailure> {
         // The dial and the handshake are one open, bounded by `transport/unicast/open_timeout`
-        // as `open_within` bounds the runtime's opens; one that runs out did not complete.
-        match tokio::time::timeout(
-            self.open_timeout,
+        // on the session's clock as `open_within_on` bounds the runtime's opens; one that runs
+        // out did not complete.
+        match wz_runtime_tokio::runtime_impl::timeout_on(
+            &self.clock,
+            wz_runtime_tokio::runtime_impl::whole_ms(self.open_timeout),
             self.open_unbounded(endpoint, dial_cfg, expected),
         )
         .await

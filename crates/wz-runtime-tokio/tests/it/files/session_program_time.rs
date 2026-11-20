@@ -27,6 +27,7 @@ use wz_runtime_tokio::session_glue::{
     drive_session_until_terminal, new_session_actions, new_session_engine, BoxedLinkDriver,
     DriverOutcome, IterationEvent, LeaseCheckOutcome, SessionActionsBinding, SessionLinkActions,
 };
+use wz_runtime_tokio::session_open::{open_within_on, OpenError};
 use wz_runtime_tokio::time_base::{ProgramTime, TimeBaseHold};
 use wz_runtime_tokio::{LinkDriver, LinkEvent, Reliability, TxFrame};
 use wz_runtime_tokio_test_support::{fixture_session_init_params, NoopOutboundDriver};
@@ -181,6 +182,39 @@ async fn a_bound_for_a_borrowing_future_runs_on_the_programs_time() {
         .expect("the bound ends once the program's time passes it")
         .expect("the bounding task");
     assert_eq!(outcome, Err(TimeoutElapsed));
+}
+
+/// An open bounded on the session's clock (`open_within_on`, the bound of a dial and its
+/// handshake) is not given up while the program's time stands still, and is given up with the
+/// bound it was held to once that time passes it and the program says so.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_open_bounded_on_the_programs_time_is_given_up_only_when_that_time_passes() {
+    let (now, hold) = program_time();
+    let clock = TokioTime::on_time_base(hold.time());
+    let bound = Duration::from_millis(40);
+    let open = tokio::spawn(async move {
+        open_within_on(
+            &clock,
+            bound,
+            std::future::pending::<Result<(), OpenError>>(),
+        )
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !open.is_finished(),
+        "the wall clock gave up an open bounded on the program's time"
+    );
+    now.fetch_add(40 * MS, Ordering::SeqCst);
+    hold.advanced();
+    let outcome = tokio::time::timeout(Duration::from_secs(5), open)
+        .await
+        .expect("the open is given up once the program's time passes its bound")
+        .expect("the opening task");
+    assert!(
+        matches!(outcome, Err(OpenError::OpenTimeout(held)) if held == bound),
+        "{outcome:?}"
+    );
 }
 
 /// A silent peer and a lease of 20 ms: over a second of the wall clock with the program's time
