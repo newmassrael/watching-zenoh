@@ -793,8 +793,10 @@ pub unsafe extern "C" fn wz_ext_replay_subscriber_options_default(
 /// slot, a deadline of 0 or past 2147483647, a depth of 0, a hold-back store with no room for one
 /// cell, a cell past 2^32 - 1, or a segment profile that is not UTF-8; `Z_ERR_INVALID` for a
 /// suffixed key that is not a key expression; under `replay-reply-shape = segmented`, `Z_ERR_NULL`
-/// for no segment profile and `_Z_ERR_CONFIG_INVALID_VALUE` for one refused; otherwise what
-/// declaring the subscriber or the watch answers.
+/// for no segment profile and `_Z_ERR_CONFIG_INVALID_VALUE` for one refused;
+/// `WZ_EXT_ERR_UNSUPPORTED` for a session whose replay policy has a value this door does not know
+/// (a core of a later extension interface); otherwise what declaring the subscriber or the watch
+/// answers.
 ///
 /// # Safety
 /// `this_` is writable; `session` and `keyexpr` are null or loans of this library, the session
