@@ -1,0 +1,18 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform", "watching-zenoh/local-ci-gates"]
+decision = '''
+Three fixed-client Zephyr images (`zephyr-client-fixed`, `-batching`, `zephyr-client-heap`) stopped compiling: the run arena's budget (832 bytes, a commitment of the image) refused the host, factory and node the loop builds in it. The growth was 24 bytes of retry state no fixed client can vary: the replay pace's two retry limits (`ReplayPacing`, from the PoC's replay pacing) and a session's last-progress stamp (`SlotSession`, from the refused-turn repay), each a plain u64 held whether or not the build lets the limit be other than its default. They are now held as the limit plane holds any limit (`Limited`, no byte where the domain is one value) and as a stamp of zero cells where neither limit may be set, so the image pays nothing for a capability it does not turn on; the arena budget is unchanged. The same range left eight bytes on `zephyr-admin-fixed-tls`'s stack bound: the lend-only handshake writers kept a slice's start live across the encode for an answer the image never holds; a constant question (`holds_answer`) now compiles that path out where the domain has no replay. The kit lane now prints a refused stack verdict into its own output, since the log stays on the host that built the image.
+'''
+changes = '''
+- `replay_pacing.rs`: `ReplayPacing` retry limits as `Limited`; `ProgressStamp` with `PROGRESS_STAMPS` cells; `with_refusal` refuses a value outside the limit's domain.
+- `slot_dial.rs`: `SlotSession` keeps a `ProgressStamp`; `session_actions.rs`: `holds_answer` guards both lend-only writers.
+- `scripts/kit-lane.sh`: a refused stack gate or stack bound prints its verdict lines; one reason-pin row re-read.
+'''
+verification = '''
+- `kit-lane.sh build` (build host): zephyr-client-fixed compiles again (arena assertion holds), text gate OK, stack bound 3520 B; zephyr-admin-fixed-tls stack bound OK at its 11996 row (was 12004).
+- Remaining kit red on zephyr-client-fixed and -get is rule `waker` pinning 8 and claiming 7, attributed to Round 4558 and owned by that repay.
+- wz-session-core `replay_pacing::` 10, defaults domain 4, `held_answer_tests` 1 in the tx-lend-only leg both domains; session-core lib, session-mcu `slot_client::tests` 13, capi-coop lib, clippy of the three crates, Layer C2m: all pass.
+'''
+carry = '''
+- Rule `waker` pin (8 vs 7) on the fixed-client images, and the get/tls stack frames, belong to Round 4558's repay.
+- `QueryableRegistry.answers_unresolved` holds a byte whatever the domain of `query-unanswerable-final`, and the slot profile never applies that policy.
+'''

@@ -28,6 +28,7 @@ use wz_session_core::entropy::EntropySource;
 use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::locator_directory::DirectoryZid;
 use wz_session_core::replay_cursor::ReplayCursor;
+use wz_session_core::replay_pacing::ProgressStamp;
 use wz_session_core::session_init_params::SessionInitParams;
 use wz_session_core::session_timeouts::SessionTimeouts;
 
@@ -127,7 +128,8 @@ pub struct SlotSession<
     /// When the replay last told the peer a declaration, or began, in the node's milliseconds:
     /// what a pace's no-progress bound on retrying refused turns counts from
     /// ([`ReplayPacing::after_refusal`](wz_session_core::replay_pacing::ReplayPacing::after_refusal)).
-    last_progress_ms: Cell<u64>,
+    /// No byte of the session in a build whose paces never read it ([`ProgressStamp`]).
+    last_progress: ProgressStamp,
 }
 
 impl<C: ClockSource + 'static, D: BoxedLinkDriver + ?Sized + 'static> SlotSession<C, D> {
@@ -138,7 +140,7 @@ impl<C: ClockSource + 'static, D: BoxedLinkDriver + ?Sized + 'static> SlotSessio
             established: false,
             replay: Cell::new(None),
             next_turn_ms: Cell::new(0),
-            last_progress_ms: Cell::new(0),
+            last_progress: ProgressStamp::new(),
         }
     }
 
@@ -163,19 +165,20 @@ impl<C: ClockSource + 'static, D: BoxedLinkDriver + ?Sized + 'static> SlotSessio
     /// `now_ms` when none was: the peer holds nothing of a session that has just established.
     pub fn replay(&self, total: usize, now_ms: u64) -> ReplayCursor {
         self.replay.get().unwrap_or_else(|| {
-            self.last_progress_ms.set(now_ms);
+            self.last_progress.note(now_ms);
             ReplayCursor::begin(total)
         })
     }
 
     /// Note that a turn at `now_ms` told the peer a declaration.
     pub fn note_progress(&self, now_ms: u64) {
-        self.last_progress_ms.set(now_ms);
+        self.last_progress.note(now_ms);
     }
 
-    /// When the replay last told the peer a declaration, or began.
+    /// When the replay last told the peer a declaration, or began: `0` in a build that keeps no
+    /// stamp, whose paces never read it.
     pub fn last_progress_ms(&self) -> u64 {
-        self.last_progress_ms.get()
+        self.last_progress.get()
     }
 
     /// Keep where the replay has got to, for the next round to resume from.
