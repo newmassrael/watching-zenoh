@@ -166,6 +166,12 @@ pub struct Subscriber<R: SessionRuntime = TokioRuntime> {
     /// and lets a `Session<R, T, Multicast>` declare subscribers (B4) without
     /// the handle gaining a transport type param.
     pub(super) observer: Arc<<R as Runtime>::Mutex<ApplicationLayerObserver>>,
+    /// The declaration order of the session that declared this subscriber
+    /// (`SessionInner::declaration_order`): the teardown retires the subscription and sends its
+    /// retraction under it, so the retraction is ordered against the declarations the drive loop
+    /// decided and has not sent yet.
+    pub(super) declaration_order:
+        Arc<<R as Runtime>::Mutex<wz_session_core::owed_replies::OwedReplies>>,
     pub(super) id: SubscriptionId,
     pub(super) keyexpr: String,
     pub(super) options: SubscribeOptions,
@@ -467,18 +473,18 @@ impl<R: SessionRuntime> Subscriber<R> {
         // teardown (already guarded by `armed`) cannot double-emit.
         //
         // R2290 (open-debt item 626) — the subscription is RETIRED before its
-        // retraction leaves, and the retraction is emitted after the observer
-        // is let go. The drive thread drains the staged interest-response
-        // chain under the observer mutex and resolves each staged reply
-        // against `observer.subscribers`: a retraction that left while the
-        // table still held this subscription let a drain emit a
-        // `Declare(DeclSubscriber)` for it AFTER the `UndeclSubscriber`, and the
-        // peer re-inserted the remote subscriber it was just told to drop
-        // (measured as a 1-2% `wz-capi-pico::matching_multiface` failure
-        // delivering `[true, false, true, false]`). Retired first, a drain
-        // either ran before the retirement, and staged its declaration ahead
-        // of this retraction on the same Control conduit, or runs after it and
-        // finds nothing to announce.
+        // retraction leaves, both under the session's declaration order, and
+        // the retraction is emitted after the observer is let go. The drive
+        // loop resolves each staged interest reply against
+        // `observer.subscribers` and sends what it resolved under the same
+        // order: a retraction that left while the table still held this
+        // subscription let the drive loop announce it AFTER the
+        // `UndeclSubscriber`, and the peer re-inserted the remote subscriber it
+        // was just told to drop (measured as a 1-2%
+        // `wz-capi-pico::matching_multiface` failure delivering
+        // `[true, false, true, false]`). Under the order, the drive loop
+        // either resolved and sent its declaration before this retirement, or
+        // resolves after it and finds nothing to announce.
         //
         // Not inside the observer acquisition: the emit asks the link for
         // room and waits for it when the link is full, and a thread that waits
@@ -489,11 +495,28 @@ impl<R: SessionRuntime> Subscriber<R> {
         // only that a sample arriving in between is not delivered, which the
         // killed cell above already guarantees.
         let id = self.id;
+        let observer = &self.observer;
+        let retraction = &mut self.retraction;
+        R::with_mutex_mut(&*self.declaration_order, |_owed| {
+            let removed = Self::retire(observer, id);
+            if let Some(mut retract) = retraction.take() {
+                retract();
+            }
+            removed
+        })
+    }
+
+    /// Take subscription `id` out of `observer`'s registry, and re-judge what its going changes
+    /// for the matching listeners. Whether it was there.
+    fn retire(
+        observer: &<R as Runtime>::Mutex<ApplicationLayerObserver>,
+        id: SubscriptionId,
+    ) -> bool {
         // R311de — observer access via R::with_mutex_mut closure form;
         // per-profile poison-recovery lives inside the runtime impl (AP:
         // PoisonError::into_inner; MCU: no poison concept under panic =
         // abort).
-        let removed = R::with_mutex_mut(&self.observer, |observer| {
+        R::with_mutex_mut(observer, |observer| {
             let removed = observer.subscribers.unregister(id);
             // R311y788 — the undeclare twin of the declare-side
             // re-evaluation (pico `_z_write_filter_ctx_remove_local_match`,
@@ -511,11 +534,7 @@ impl<R: SessionRuntime> Subscriber<R> {
                 });
             }
             removed
-        });
-        if let Some(mut retract) = self.retraction.take() {
-            retract();
-        }
-        removed
+        })
     }
 }
 

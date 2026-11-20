@@ -9617,6 +9617,45 @@ fn a_liveliness_tokens_wire_retract_leaves_after_its_retirement_with_the_observe
     );
 }
 
+/// The DRIVE LOOP's half of the same property: what a dispatch owes the peer is
+/// decided under the observer and sent once the observer is let go.
+///
+/// A peer's standing subscriber interest makes the next subscription stage a
+/// `DeclSubscriber` reply, which the next drive iteration resolves against the
+/// registry and sends. The send asks the link for room and may wait for it; the
+/// drive thread waiting there with the observer held stops every other thread
+/// that needs the observer (a teardown, a publish's loopback leg) for as long
+/// as the link stays full. The probe's room ask waits on a condition variable,
+/// so under the lock-order checker's default mode a send made under the
+/// observer panics here as well as failing the assertions.
+#[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
+#[test]
+fn the_drive_loops_interest_reply_leaves_with_the_observer_free() {
+    let (session, driver) = build_probing_session();
+    deliver_future_subscriber_interest(&session, /*aggregate=*/ false);
+    let _sub = session
+        .declare_subscriber("home/temp", SubscribeOptions::default(), |_| {})
+        .expect("remote declare against the test link succeeds");
+    // Armed AFTER the declare so the population is the reply the drive loop sends.
+    driver.arm(session.observer().clone(), |obs| {
+        !obs.subscribers.is_empty()
+    });
+    drain_one_drive_iteration(&session);
+
+    assert_eq!(
+        driver.emits(),
+        vec![Some(true)],
+        "exactly one frame (the DeclSubscriber reply) must leave the drive \
+         iteration, with the observer mutex FREE (`None` is a send inside the \
+         acquisition) and the subscription it announces still registered"
+    );
+    assert_eq!(
+        driver.room_asks(),
+        vec![true],
+        "the reply asks the link for room once, with the observer mutex free"
+    );
+}
+
 #[cfg(feature = "declare-subscriber")]
 #[test]
 fn declare_subscriber_invalid_keyexpr_rejects_and_rolls_back_local_registration() {

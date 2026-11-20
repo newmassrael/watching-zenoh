@@ -397,6 +397,14 @@ impl<P: Storage> ReplyStage<P> {
         self.arena.len()
     }
 
+    /// Exchange the staged replies of this stage and `other`, rows and the bytes they lie in, each
+    /// keeping its own counts of what it refused: the replies move to the stage that sends them,
+    /// and the counts stay with the stage that refused.
+    pub fn exchange_staged(&mut self, other: &mut Self) {
+        core::mem::swap(&mut self.rows, &mut other.rows);
+        core::mem::swap(&mut self.arena, &mut other.arena);
+    }
+
     /// Drop every staged reply; the counts are kept.
     pub fn clear(&mut self) {
         self.rows.clear();
@@ -1061,6 +1069,42 @@ mod tests {
         }
     }
 
+    /// An exchange moves the staged replies, rows and bytes, to the other stage, in their
+    /// order, and leaves each stage the counts of what it refused itself.
+    fn exchange_moves_the_replies_and_keeps_the_refusals<P: Storage>() {
+        let big = [7u8; caps::MAX_REPLY_PAYLOAD_BYTES + 1];
+        let mut staging: ReplyStage<P> = ReplyStage::default();
+        // Refused on a policy that enforces its bound, and so counted there; staged on one
+        // that does not.
+        let _ = staging.stage_parts(put_reply(9, "a", &big));
+        staging.clear();
+        let refused = staging.refusals();
+        assert_eq!(staging.stage_parts(put_reply(1, "a/b", b"one")), Ok(()));
+        assert_eq!(staging.stage_parts(put_reply(2, "a/c", b"two")), Ok(()));
+        let mut sending: ReplyStage<P> = ReplyStage::default();
+
+        staging.exchange_staged(&mut sending);
+
+        assert_eq!(
+            staging.staged(),
+            0,
+            "the stage that staged holds none after"
+        );
+        assert_eq!(staging.bytes_held(), 0);
+        assert_eq!(staging.refusals(), refused, "its refusals stay with it");
+        assert_eq!(sending.refusals(), ReplyRefusals::default());
+        let mut seen: [(crate::wire_id::RequestId, usize); 2] = [(0, 0); 2];
+        let mut count = 0usize;
+        sending.drain_parts(|parts| {
+            if let Some(slot) = seen.get_mut(count) {
+                *slot = (parts.rid, parts.keyexpr.len());
+            }
+            count += 1;
+        });
+        assert_eq!(count, 2, "both replies were moved");
+        assert_eq!(seen, [(1, 3), (2, 3)], "in their order");
+    }
+
     /// The arena has its own room, apart from the rows: replies fat enough to use up
     /// the declared bytes before the rows are used up are refused as `StagingFull`.
     fn arena_runs_out_before_the_rows<P: Storage>() {
@@ -1228,6 +1272,7 @@ mod tests {
         clear_keeps_the_count,
         rows_fill_to_n_then_refuse_at_n_plus_one,
         payload_past_the_bound,
+        exchange_moves_the_replies_and_keeps_the_refusals,
         arena_runs_out_before_the_rows,
         drain_parts_hands_out_what_was_staged,
         owned_drain_is_from_parts,

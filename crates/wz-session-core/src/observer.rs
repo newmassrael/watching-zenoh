@@ -168,6 +168,7 @@ use crate::switchboard::{EventInjector, SwitchboardRegistry};
 // re-exported `QueryableRegistry` under codec-request; the migration
 // makes the consumer-feature gate explicit so a codec-declare-on /
 // query-queryable-off subset compiles.)
+use crate::owed_replies::OwedReplies;
 #[cfg(feature = "query-queryable")]
 use crate::query::QueryableRegistry;
 use crate::reply_stage::{FinalStage, ReplyStage};
@@ -888,6 +889,34 @@ impl ApplicationLayerObserver {
     /// [`Self::flush_pending`]).
     pub fn flush_declare_replies<S: DeclareReplySink>(&mut self, sink: &S) {
         self.drain_declare_replies(sink);
+    }
+
+    /// [`Self::flush_pending_replies`] for a host that sends after it lets go of this observer:
+    /// the staged query replies move into `owed` whole, each declaration owed to a peer's
+    /// interest is resolved against the registries, as the drain resolves it, and kept in `owed`,
+    /// and the liveliness-get prunes, which put nothing on a link, run through `prunes` here. The
+    /// host sends `owed` ([`OwedReplies::send`]) once it has let go of the observer, and before
+    /// it takes again.
+    ///
+    /// A send may wait for room on its link, for as long as the link stays full, and whoever
+    /// holds this observer meanwhile stops every thread that needs it, the drive thread first.
+    pub fn take_owed_replies<P: LivelinessGetPrune>(&mut self, owed: &mut OwedReplies, prunes: &P) {
+        self.take_owed_reply_bodies(owed);
+        self.take_owed_declarations(owed);
+        self.drain_get_prunes(prunes);
+    }
+
+    /// The staged query replies alone, into `owed`: [`Self::flush_query_reply_bodies`] for a host
+    /// that sends after it lets go of this observer (see [`Self::take_owed_replies`]).
+    pub fn take_owed_reply_bodies(&mut self, owed: &mut OwedReplies) {
+        owed.take_replies_from(&mut self.pending_replies);
+    }
+
+    /// The declarations owed to peers' interests alone, resolved now and kept in `owed`:
+    /// [`Self::flush_declare_replies`] for a host that sends after it lets go of this observer
+    /// (see [`Self::take_owed_replies`]).
+    pub fn take_owed_declarations(&mut self, owed: &mut OwedReplies) {
+        self.drain_declare_replies(&*owed);
     }
 
     /// R311lq — drain the staged queryable data replies (`pending_replies`)

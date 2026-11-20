@@ -344,19 +344,19 @@ impl<R: SessionRuntime, T: TimeSource> LivelinessToken<R, T> {
         // arm is present whenever this block is.
         //
         // R2290 (open-debt item 626) — the token is RETIRED before its
-        // retraction leaves, and the retraction is emitted after the observer
-        // is let go. `LocalTokenRegistry` is one of exactly two tables the
-        // drive thread's `drain_declare_replies` resolves staged interest
-        // replies against (`local_tokens.keyexpr_for`, the twin of the
-        // subscriber plane's `sub_interest_reply`), under the observer mutex.
-        // A retraction that left while the table still held this token let a
-        // drain emit a `Declare(DeclToken)` for it AFTER the `UndeclToken`, the
-        // subscriber plane's measured defect on the liveliness plane. Retired
-        // first, a drain either ran before, and staged its declaration ahead of
-        // this retraction on the same Control conduit, or runs after and finds
-        // nothing. The emit stays outside the acquisition because it may wait
-        // for room on a full link, and a thread that waits for an event while
-        // it holds the observer stops the drive thread that needs it (see
+        // retraction leaves, both under the session's declaration order, and
+        // the retraction is emitted after the observer is let go.
+        // `LocalTokenRegistry` is one of exactly two tables the drive loop
+        // resolves staged interest replies against (`local_tokens.keyexpr_for`,
+        // the twin of the subscriber plane's `sub_interest_reply`), and it
+        // sends what it resolved under the same order. A retraction that left
+        // while the table still held this token let the drive loop announce it
+        // AFTER the `UndeclToken`, the subscriber plane's measured defect on the
+        // liveliness plane. Under the order, the drive loop either resolved and
+        // sent before this retirement, or resolves after it and finds nothing.
+        // The emit stays outside the observer because it may wait for room on
+        // a full link, and a thread that waits for an event while it holds the
+        // observer stops the drive thread that needs it (see
         // `Subscriber::teardown`).
         // R2544b — UPGRADE ONCE, here, before the observer lock. Everything
         // below needs the live session: the observer to lock, the link to emit
@@ -385,65 +385,16 @@ impl<R: SessionRuntime, T: TimeSource> LivelinessToken<R, T> {
         // UNREGISTER happens whatever the emit answers, and that is deliberate:
         // a token whose retraction failed to reach the wire must still stop
         // being replied to locally, or this node would keep answering interests
-        // for a token it has given up.
+        // for a token it has given up. Both under the session's declaration
+        // order, which the drive loop holds from resolving an interest reply
+        // to sending it (`SessionInner::declaration_order`).
         #[cfg(feature = "liveliness-token")]
-        R::with_mutex_mut(&session.observer, |obs| {
-            obs.local_tokens.unregister(self.id);
+        let sent = R::with_mutex_mut(&*session.declaration_order, |_owed| {
+            R::with_mutex_mut(&*session.observer, |obs| {
+                obs.local_tokens.unregister(self.id);
+            });
+            self.send_retraction(&session)
         });
-        #[cfg(all(
-            feature = "liveliness-token",
-            feature = "declare-token",
-            feature = "declare-undeclare"
-        ))]
-        let sent = {
-            // Id-only unless the declaring ABI asked for the key too — see
-            // `LivelinessOptions::with_retraction_naming_the_key` for why
-            // the two reference libraries differ here.
-            let declare = if self.options.retraction_names_the_key() {
-                let (mapping_id, suffix) = &self.declared_on;
-                wz_session_core::declare_build::build_undeclare_token_on_wire(
-                    self.id,
-                    *mapping_id,
-                    suffix,
-                )
-                .expect("the ext body rides the alloc carrier, which is unbounded")
-            } else {
-                wz_session_core::declare_build::build_undeclare_token(self.id)
-            };
-            // R2544b — through the UPGRADED handle, not `self.session`,
-            // which is now weak. Upgrading once above and reusing it here
-            // is what keeps the emit and the prune on the SAME session:
-            // upgrading twice could, in principle, answer `Some` and then
-            // `None` and leave the pair straddling a drop.
-            // R311nf — the handle owns a `Session<R, T, Unicast>`, so
-            // `actions()` is the infallible unicast bundle borrow (the
-            // R311nc `if let Ok` guard for a possible multicast session is
-            // gone — a LivelinessToken cannot exist on a multicast
-            // session).
-            //
-            // The replay-cache entry is removed and the retraction sent as one step: a
-            // token a paced replay had not yet reached was never told to the peer, so
-            // nothing is sent and `Ok(())` is what happened.
-            session
-                .actions()
-                .retract_token_recorded(self.id, || {
-                    session.send_network_message(
-                        wz_session_core::network_message::NetworkMessage::Declare(Box::new(
-                            declare,
-                        )),
-                        /*reliable=*/ true,
-                        /*express=*/ false,
-                    )
-                })
-                .unwrap_or(Ok(()))
-        };
-        // A build without the declare pair emits nothing, so there is no wire
-        // verdict to report and `Ok(())` is what happened.
-        #[cfg(all(
-            feature = "liveliness-token",
-            not(all(feature = "declare-token", feature = "declare-undeclare"))
-        ))]
-        let sent = Ok(());
         // R311mw / R2290 — `liveliness-token` implies `declare-token` +
         // `declare-undeclare`, and it is also what gates the CONSTRUCTOR, so a
         // build without it can hold no `LivelinessToken` and never reaches this
@@ -460,6 +411,69 @@ impl<R: SessionRuntime, T: TimeSource> LivelinessToken<R, T> {
         }
         #[cfg(feature = "liveliness-token")]
         sent
+    }
+
+    /// Send this token's retraction on `session`, the session [`Self::teardown`] upgraded, and
+    /// answer what the send answered.
+    #[cfg(all(
+        feature = "liveliness-token",
+        feature = "declare-token",
+        feature = "declare-undeclare"
+    ))]
+    fn send_retraction(
+        &self,
+        session: &Session<R, T, Unicast>,
+    ) -> Result<(), wz_session_core::send_wire_error::SendWireError> {
+        // Id-only unless the declaring ABI asked for the key too — see
+        // `LivelinessOptions::with_retraction_naming_the_key` for why
+        // the two reference libraries differ here.
+        let declare = if self.options.retraction_names_the_key() {
+            let (mapping_id, suffix) = &self.declared_on;
+            wz_session_core::declare_build::build_undeclare_token_on_wire(
+                self.id,
+                *mapping_id,
+                suffix,
+            )
+            .expect("the ext body rides the alloc carrier, which is unbounded")
+        } else {
+            wz_session_core::declare_build::build_undeclare_token(self.id)
+        };
+        // R2544b — through the UPGRADED handle, not `self.session`, which is
+        // now weak. Upgrading once in the teardown and reusing it here is what
+        // keeps the emit and the prune on the SAME session: upgrading twice
+        // could, in principle, answer `Some` and then `None` and leave the pair
+        // straddling a drop.
+        // R311nf — the handle owns a `Session<R, T, Unicast>`, so `actions()`
+        // is the infallible unicast bundle borrow (a LivelinessToken cannot
+        // exist on a multicast session).
+        //
+        // The replay-cache entry is removed and the retraction sent as one step: a
+        // token a paced replay had not yet reached was never told to the peer, so
+        // nothing is sent and `Ok(())` is what happened.
+        session
+            .actions()
+            .retract_token_recorded(self.id, || {
+                session.send_network_message(
+                    wz_session_core::network_message::NetworkMessage::Declare(Box::new(declare)),
+                    /*reliable=*/ true,
+                    /*express=*/ false,
+                )
+            })
+            .unwrap_or(Ok(()))
+    }
+
+    /// A build without the declare pair emits nothing, so there is no wire
+    /// verdict to report and `Ok(())` is what happened.
+    #[cfg(all(
+        feature = "liveliness-token",
+        not(all(feature = "declare-token", feature = "declare-undeclare"))
+    ))]
+    fn send_retraction(
+        &self,
+        session: &Session<R, T, Unicast>,
+    ) -> Result<(), wz_session_core::send_wire_error::SendWireError> {
+        let _ = (session, &self.options, &self.declared_on);
+        Ok(())
     }
 }
 
