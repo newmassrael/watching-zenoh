@@ -698,6 +698,9 @@ pub struct StreamWriteDriver {
     /// shapes this half at Established ([`Self::settling_rx`]). `None` for a write half
     /// with no read half of its own to settle.
     rx_settler: Option<LinkArenaSettler>,
+    /// The link's MTU, the largest batch it reads and sends ([`Self::with_link_mtu`]): the
+    /// widest batch unless the constructing pipeline sized its connection otherwise.
+    link_mtu: usize,
 }
 
 /// The buffers lent for outbound frames, by slot number: an occupied entry is a
@@ -789,7 +792,18 @@ impl StreamWriteDriver {
             endpoints,
             lent: Mutex::new(LentFrames::default()),
             rx_settler: None,
+            link_mtu: wz_session_core::link::DEFAULT_LINK_MTU,
         }
+    }
+
+    /// This write half over a connection of `mtu` bytes: the session advertises no wider a
+    /// batch, sends none wider, and the read half's pool divides by it when it is narrower
+    /// than the negotiated batch, as upstream's link sizes all three by its MTU
+    /// (`io/zenoh-transport/src/unicast/link.rs` @
+    /// `config.batch.mtu = link.get_mtu().min(config.batch.mtu);`).
+    pub(crate) fn with_link_mtu(mut self, mtu: usize) -> Self {
+        self.link_mtu = mtu;
+        self
     }
 
     /// This write half with the settler of its link's read half
@@ -937,6 +951,16 @@ impl BoxedLinkDriver for StreamWriteDriver {
     // resolved, for the same six-pipelines reason as the subject above.
     fn link_endpoints(&self) -> Option<&wz_session_core::link::LinkEndpoints> {
         self.endpoints.as_ref()
+    }
+
+    // The connection's MTU bounds both what the session sends and what it invites a peer
+    // to send ([`StreamWriteDriver::with_link_mtu`]).
+    fn link_mtu(&self) -> usize {
+        self.link_mtu
+    }
+
+    fn link_rx_capacity(&self) -> usize {
+        self.link_mtu
     }
 
     // Every batch this link writes goes behind the `StreamEnvelope` length, and the

@@ -967,7 +967,9 @@ codec-response = ["wz-codecs/codec-response", "codec-frame", "wz-session-core/co
 # access-* knobs instead broke a bare `routing-peer` build, which has the TCP
 # pipeline but no access knob: the pipeline imported a module the feature
 # graph had not compiled.
-transport-link-tcp = ["link-interfaces"]
+# `socket2` reads a connection's MSS, which zenoh's rule sizes a TCP link's MTU by
+# (`TcpLinkMtu::HalfMssMultiple`).
+transport-link-tcp = ["link-interfaces", "dep:socket2"]
 transport-link-udp = ["link-interfaces"]
 # R311y236 — locator-iface: honour the `#iface=<name>` locator config tail by
 # binding the dialing socket to the named NIC (SO_BINDTODEVICE, Linux/Android;
