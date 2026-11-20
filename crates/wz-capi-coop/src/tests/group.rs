@@ -51,6 +51,9 @@ struct Network {
     joins: Mutex<Vec<u8>>,
     /// Each member that sent a JOIN beacon on the group, once per beacon.
     beacons: Mutex<Vec<u8>>,
+    /// Each datagram a member sent on the group, with the member (read by the tests of a get).
+    #[cfg(feature = "query")]
+    datagrams: Mutex<Vec<(u8, Vec<u8>)>>,
 }
 
 impl Network {
@@ -129,6 +132,12 @@ impl AppPort for MemberStack {
         {
             self.network.beacons.lock().unwrap().push(self.member);
         }
+        #[cfg(feature = "query")]
+        self.network
+            .datagrams
+            .lock()
+            .unwrap()
+            .push((self.member, bytes.to_vec()));
         let others: Vec<(LinkHandle, Arc<AppTransport>)> = self
             .network
             .joined
@@ -704,6 +713,75 @@ mod mapped {
         let mut config: CoopConfig = member_config(member, GROUP);
         config.groups[0].declarations = GroupDeclarations::Mapped;
         open_member(network, member, config)
+    }
+
+    /// Whether a datagram `member` sent carries `bytes`.
+    #[cfg(feature = "query")]
+    fn carried(network: &Network, member: u8, bytes: &[u8]) -> bool {
+        network
+            .datagrams
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(from, datagram)| {
+                *from == member && datagram.windows(bytes.len()).any(|at| at == bytes)
+            })
+    }
+
+    /// A get on a group told the session's keyexprs names its key by the declaration the group
+    /// was told, as a put does: once the declaration has left, nothing the member sends carries
+    /// the key's text again, the query included.
+    #[cfg(feature = "query")]
+    #[test]
+    fn a_get_by_a_declared_keyexpr_names_its_key_by_the_declaration() {
+        use wz_capi_port::ReplyCallback;
+        use wz_session_core::locality::Locality;
+        use wz_session_core::query_options::QueryOptions;
+        use wz_session_core::reply_sink::ReplyView;
+        use wz_session_core::wire_const::T_MID_JOIN;
+
+        let network = Arc::new(Network::default());
+        let first = open_mapped(&network, 1).expect("the first joins");
+        let second = open_mapped(&network, 2).expect("the second joins");
+        SessionDrive::start_read_task(&*first).expect("the first's read task starts");
+        SessionDrive::start_read_task(&*second).expect("the second's read task starts");
+        until_members_know_each_other(&first, &second);
+        let id = first
+            .acquire_keyexpr("demo/mapped/q".to_owned())
+            .expect("a session with ids left declares a keyexpr");
+        eventually("the declaration to leave", || {
+            carried(&network, 1, b"mapped/q")
+        });
+        network.datagrams.lock().unwrap().clear();
+
+        let mut opts = QueryOptions::get();
+        opts.allowed_destination = Locality::Remote;
+        opts.timeout_ms = 500;
+        let issued = first.get_on_wire(
+            "demo/mapped/q",
+            &WireKey::aliased(id, None),
+            &opts,
+            None,
+            &mut || Box::new(|_view: &dyn ReplyView| {}) as ReplyCallback,
+        );
+        assert!(issued.is_some(), "the get was asked");
+        // The query is the first datagram after the clear that is not a beacon.
+        eventually("the query to leave", || {
+            network
+                .datagrams
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(from, datagram)| {
+                    *from == 1 && datagram.first().is_some_and(|h| h & 0x1f != T_MID_JOIN)
+                })
+        });
+        assert!(
+            !carried(&network, 1, b"mapped/q"),
+            "the query named its key by the declaration"
+        );
+        SessionDrive::close(&*second);
+        SessionDrive::close(&*first);
     }
 
     /// A write filter asks the group for its members' subscribers, and the answer of a member

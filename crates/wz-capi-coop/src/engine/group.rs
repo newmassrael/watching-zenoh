@@ -484,13 +484,22 @@ impl GroupFace {
         rid
     }
 
-    /// Ask the group the query `rid` on `keyexpr`, naming the key in full as a put does here,
-    /// with the slots `meta` states: built by the session core's request builder, as a link's
+    /// Ask the group the query `rid` on `keyexpr`, named to the peers as `wire`, with the slots
+    /// `meta` states. The key is named as a put on the group names it: by the declaration the
+    /// group was told when it is told the session's keyexprs, and in full otherwise
+    /// (`GroupDeclarations::key`). Built by the session core's request builder, as a link's
     /// query is, and sent reliably by the group's task, as zenoh-pico sends one on its multicast
     /// transport. `false` when the query cannot be built, and nothing is queued.
     #[cfg(feature = "query")]
-    pub(super) fn ask(&self, rid: RequestId, keyexpr: &str, meta: &QueryMetadata) -> bool {
-        match build_request_query_with_meta(rid, 0, Some(keyexpr), meta) {
+    pub(super) fn ask(
+        &self,
+        rid: RequestId,
+        keyexpr: &str,
+        wire: &WireKey,
+        meta: &QueryMetadata,
+    ) -> bool {
+        let key = self.join.declarations.key(keyexpr, wire);
+        match build_request_query_with_meta(rid, key.mapping_id, key.suffix, meta) {
             Ok(request) => {
                 self.push(MulticastTxItem::Request {
                     request: alloc::boxed::Box::new(request),

@@ -3819,7 +3819,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 continue;
             }
             self.hold_leg(leg_id, leg());
-            if !group.ask(rid, keyexpr, &opts.query_metadata()) {
+            if !group.ask(rid, keyexpr, wire, &opts.query_metadata()) {
                 // Nothing was queued: the entry and the leg go, and the leg is over.
                 if let Some(tables) = core.registry.borrow_mut().face_mut(face) {
                     tables.gets.replies.unregister(rid);
