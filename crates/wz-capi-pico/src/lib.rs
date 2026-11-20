@@ -421,8 +421,9 @@ const _: () = {
 
 // The pins a 32-bit image compiles against pico's header (`csrc/pico_layout_pins.c`), held to the
 // declarations they name: each count of words is the Rust type's size in words on this host, which
-// is the same count on any word size because the types are `repr(C)` over words.
-#[cfg(all(test, feature = "queryable"))]
+// is the same count on any word size because the types are `repr(C)` over words. The file pins
+// types of both ends of a query, so the build that reads it back has both.
+#[cfg(all(test, feature = "queryable", feature = "query"))]
 mod layout_pins {
     use crate::prelude::Vec;
     use core::mem::{offset_of, size_of};
@@ -442,6 +443,7 @@ mod layout_pins {
             "z_owned_encoding_t" => size_of::<crate::encoding::z_owned_encoding_t>(),
             "z_owned_closure_query_t" => size_of::<crate::query::z_owned_closure_query_t>(),
             "z_owned_queryable_t" => size_of::<crate::query::z_owned_queryable_t>(),
+            "z_owned_querier_t" => size_of::<crate::querier::z_owned_querier_t>(),
             _ => return None,
         })
     }
@@ -464,7 +466,7 @@ mod layout_pins {
             assert_eq!(bytes / WORD, words, "{name}");
             checked += 1;
         }
-        assert_eq!(checked, 9, "every pin of the file was read");
+        assert_eq!(checked, 10, "every pin of the file was read");
     }
 
     #[test]

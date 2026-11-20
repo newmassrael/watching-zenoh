@@ -1152,15 +1152,20 @@ async fn a_links_room_wakes_the_loop_whose_pass_releases_and_wakes_the_gated_fac
 
 /// What a held message costs is the entry that carries it and its payload, so that two messages of
 /// the same kind differ by exactly the bytes of their payloads, and the entry itself is not free.
+/// The entry's size is the host's (its message holds words: pointers and lengths), 84 B on a
+/// 32-bit one where it is more on a 64-bit one, so it is read from the type and not written down.
 #[test]
 fn a_messages_cost_is_its_entry_and_its_payload() {
+    let entry = std::mem::size_of::<super::egress::Held>();
     let small = message_cost(&blocking_put(&[0u8; 10]));
     let large = message_cost(&blocking_put(&[0u8; 10_010]));
     assert_eq!(large - small, 10_000, "the payload, byte for byte");
-    assert!(
-        small > 10 + 100,
-        "and the entry that holds a message is more than its payload: {small}"
+    assert_eq!(
+        small,
+        entry + 10,
+        "a message costs the entry that holds it and its payload"
     );
+    assert!(small > 10, "and the entry is not free: {small}");
 }
 
 /// The budget is bytes and not messages: the number of messages the credit used to gate at, held

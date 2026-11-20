@@ -48,3 +48,8 @@ WZ_PIN_WORDS(z_owned_closure_query_t, 3);
 WZ_PIN_WORDS(z_owned_queryable_t, 4);
 WZ_PIN_HANDLE(z_owned_query_t);
 #endif
+
+/* The querier is the Rust layer's only where the build asks queries. */
+#if Z_FEATURE_QUERY == 1
+WZ_PIN_WORDS(z_owned_querier_t, 23);
+#endif

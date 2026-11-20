@@ -292,7 +292,8 @@ impl QuerierState {
     }
 }
 
-/// Owned querier (pico `z_owned_querier_t`, 184 B measured).
+/// Owned querier (pico `z_owned_querier_t`, 184 B measured on a 64-bit host): the handle and
+/// twenty-two words, which a 32-bit host's larger struct holds (the tests below say how).
 #[repr(C)]
 pub struct z_owned_querier_t {
     pub(crate) handle: *mut c_void,
@@ -657,23 +658,60 @@ unsafe fn querier_filter<'a>(querier: *const z_loaned_querier_t) -> Option<&'a W
 mod tests {
     use super::*;
 
+    /// Where pico's header puts each field of `z_querier_options_t` on this target, and the
+    /// struct's size: `[target, consolidation, congestion_control, is_express,
+    /// allowed_destination (0 without the switch), priority, timeout_ms, accept_replies, size]`.
+    ///
+    /// The header's fields are a pointer, four `int`-sized fields and a `bool` (with the local
+    /// queryable's `int` after it), a `uint64_t` and an `int`. The 64-bit rows were measured
+    /// against the vendored headers plus the generated `config.h`; the 32-bit rows are the same
+    /// header laid out by each 32-bit ABI's rules, which differ only in the alignment of the
+    /// `uint64_t`: 4 on 32-bit x86 Linux (System V i386), 8 on 32-bit Windows and ARM.
+    fn options_layout() -> [usize; 9] {
+        let word = std::mem::size_of::<*mut c_void>();
+        let u64_align = std::mem::align_of::<u64>();
+        match (word, u64_align, cfg!(feature = "local-queryable")) {
+            (8, _, false) => [8, 12, 16, 20, 0, 24, 32, 40, 48],
+            (8, _, true) => [8, 12, 16, 20, 24, 28, 32, 40, 48],
+            (4, 4, false) => [4, 8, 12, 16, 0, 20, 24, 32, 36],
+            (4, 4, true) => [4, 8, 12, 16, 20, 24, 28, 36, 40],
+            (4, 8, false) => [4, 8, 12, 16, 0, 20, 24, 32, 40],
+            (4, 8, true) => [4, 8, 12, 16, 20, 24, 32, 40, 48],
+            other => {
+                panic!("no layout of the header for a word and uint64_t alignment of {other:?}")
+            }
+        }
+    }
+
     /// The ABI a C program stack-allocates through pico's own header, measured
     /// against the vendored headers plus the GENERATED `config.h` (the feature
     /// switches move these numbers, so the source tree alone cannot tell you
     /// them).
+    ///
+    /// The owned querier is the handle model: twenty-three words, pico's 184 B on a 64-bit host.
+    /// On a 32-bit one pico's `_z_querier_t` is larger than 23 words (92 B): its six-word key,
+    /// a `uint32_t` id, a two-word session reference, a five-word encoding, seven `int`-sized
+    /// fields, a `bool`, a `uint64_t` and a three-word write filter come to 108 B on 32-bit x86
+    /// Linux and 112 B on 32-bit Windows, so the handle model writes no byte past a program's
+    /// storage; `csrc/pico_layout_pins.c` holds that count against the header with a compiler.
+    /// The get options are all pointers: five words with the unstable tail, three without.
     #[test]
     fn querier_abi_sizes_match_pico() {
-        assert_eq!(std::mem::size_of::<z_owned_querier_t>(), 184);
-        assert_eq!(std::mem::size_of::<z_loaned_querier_t>(), 184);
-        assert_eq!(std::mem::size_of::<z_moved_querier_t>(), 184);
-        assert_eq!(std::mem::size_of::<z_querier_options_t>(), 48);
+        let word = std::mem::size_of::<*mut c_void>();
+        assert_eq!(std::mem::size_of::<z_owned_querier_t>(), 23 * word);
+        assert_eq!(std::mem::size_of::<z_loaned_querier_t>(), 23 * word);
+        assert_eq!(std::mem::size_of::<z_moved_querier_t>(), 23 * word);
+        assert_eq!(
+            std::mem::size_of::<z_querier_options_t>(),
+            options_layout()[8]
+        );
         // The token and source-info tail is the unstable API's.
         assert_eq!(
             std::mem::size_of::<z_querier_get_options_t>(),
             if cfg!(feature = "unstable-api") {
-                40
+                5 * word
             } else {
-                24
+                3 * word
             }
         );
     }
@@ -682,6 +720,10 @@ mod tests {
     /// struct field by field through pico's header and a slip is silent.
     #[test]
     fn querier_options_offsets_match_pico() {
+        let [target, consolidation, congestion, express, allowed, priority, timeout, accept, _] =
+            options_layout();
+        #[cfg(not(feature = "local-queryable"))]
+        let _ = allowed;
         let o = z_querier_options_t {
             encoding: std::ptr::null_mut(),
             target: 0,
@@ -696,22 +738,18 @@ mod tests {
         };
         let base = &o as *const _ as usize;
         assert_eq!(&o.encoding as *const _ as usize - base, 0);
-        assert_eq!(&o.target as *const _ as usize - base, 8);
-        assert_eq!(&o.consolidation as *const _ as usize - base, 12);
-        assert_eq!(&o.congestion_control as *const _ as usize - base, 16);
-        assert_eq!(&o.is_express as *const _ as usize - base, 20);
-        #[cfg(feature = "local-queryable")]
-        assert_eq!(&o.allowed_destination as *const _ as usize - base, 24);
+        assert_eq!(&o.target as *const _ as usize - base, target);
+        assert_eq!(&o.consolidation as *const _ as usize - base, consolidation);
         assert_eq!(
-            &o.priority as *const _ as usize - base,
-            if cfg!(feature = "local-queryable") {
-                28
-            } else {
-                24
-            }
+            &o.congestion_control as *const _ as usize - base,
+            congestion
         );
-        assert_eq!(&o.timeout_ms as *const _ as usize - base, 32);
-        assert_eq!(&o.accept_replies as *const _ as usize - base, 40);
+        assert_eq!(&o.is_express as *const _ as usize - base, express);
+        #[cfg(feature = "local-queryable")]
+        assert_eq!(&o.allowed_destination as *const _ as usize - base, allowed);
+        assert_eq!(&o.priority as *const _ as usize - base, priority);
+        assert_eq!(&o.timeout_ms as *const _ as usize - base, timeout);
+        assert_eq!(&o.accept_replies as *const _ as usize - base, accept);
     }
 
     /// A defaulted querier must describe the SAME query a defaulted `z_get`
