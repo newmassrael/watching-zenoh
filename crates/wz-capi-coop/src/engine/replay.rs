@@ -18,11 +18,17 @@
 //! zenoh-pico's client reopens (`vendor/zenoh-pico/src/net/session.c` @
 //! `_z_fut_fn_result_t _z_client_reopen_task_fn(void *ztc_arg, _z_executor_t *executor) {`). With
 //! it a turn is a burst of declarations and the next turn is an interval away, which the read's
-//! idle wait is shortened to. A send the link refused is not lost in either case: the next turn
-//! starts at the entry it failed on. A paced replay answers a refused turn as its pace says
-//! (`ReplayPacing::after_refusal`), as the tokio host does: it tries again after the pace's own
-//! retry wait, or, with no retry wait or after the no-progress bound, gives the replay up and the
-//! link with it ([`TurnEnd::EndsLink`]).
+//! idle wait is shortened to.
+//!
+//! A refused send is answered by the replay's pace. Without one, it ends the link, as zenoh-pico's
+//! reopen task clears a transport it could not send a declaration over and opens again
+//! (`vendor/zenoh-pico/src/net/session.c` @ `_z_transport_clear(&s->_tp);`): this engine builds
+//! every frame on the heap, so a send is refused only when the link is gone or the declaration
+//! cannot be made at all, and neither is a thing a later try on the same link outlives. A paced
+//! replay answers a refused turn as its pace says (`ReplayPacing::after_refusal`), as the tokio
+//! host does: it tries again from the entry the link refused after the pace's own retry wait, or,
+//! with no retry wait or after the no-progress bound, gives the replay up and the link with it
+//! ([`TurnEnd::EndsLink`]).
 
 use alloc::rc::Rc;
 
@@ -34,10 +40,6 @@ use wz_session_mcu::dial::McuActions;
 
 use super::{Core, Link};
 use crate::prelude::*;
-
-/// How long a turn that a refused send cut short waits when the session is not paced, so a link
-/// that keeps refusing is asked again on the next step and not in a spin.
-const RETRY_MS: u64 = 1;
 
 /// The kinds of declaration a session holds, which is to say the lists the replay walks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,8 +84,8 @@ pub(super) enum OnRefusal {
 pub(super) enum TurnEnd {
     /// The link stays; the replay goes on at its next turn, if one is owed.
     Kept,
-    /// The pace gave the replay up on a turn the link refused: the link is to end, and the
-    /// session tells everything again over the next one.
+    /// The replay was given up on a turn the link refused, at once without a pace or when the
+    /// pace said so: the link is to end, and the session tells everything again over the next one.
     EndsLink,
 }
 
@@ -125,9 +127,9 @@ impl Replay {
     /// the link took any declaration of it and `refused` whether the link refused one, and say
     /// what the link is left with. An unfinished replay sends its next turn after the pace's
     /// interval, or, when the link refused a send, as the pace's answer to a refusal says
-    /// ([`ReplayPacing::after_refusal`]); when that answer gives the replay up, nothing more is
-    /// owed over this link. A session that is not paced tries a refused send again on its next
-    /// step, as it is told everything in one turn.
+    /// ([`ReplayPacing::after_refusal`]); a session that is not paced gives the replay up on a
+    /// refused send, as upstream's one call does (see the module's note). When the replay is
+    /// given up, nothing more is owed over this link.
     fn settle(&mut self, cursor: ReplayCursor, told: bool, refused: bool, now_ms: u64) -> TurnEnd {
         self.cursor = cursor;
         if told {
@@ -136,16 +138,22 @@ impl Replay {
         if cursor.finished() {
             return TurnEnd::Kept;
         }
-        let wait_ms = match self.pacing {
-            None => RETRY_MS,
-            Some(pace) if !refused => pace.interval_ms(),
-            Some(pace) => match pace.after_refusal(self.last_progress_ms, now_ms) {
+        let wait_ms = if refused {
+            let step = match self.pacing {
+                Some(pace) => pace.after_refusal(self.last_progress_ms, now_ms),
+                None => RefusalStep::EndsLink,
+            };
+            match step {
                 RefusalStep::RetryIn(wait_ms) => wait_ms,
                 RefusalStep::EndsLink => {
                     self.discard();
                     return TurnEnd::EndsLink;
                 }
-            },
+            }
+        } else {
+            // A turn the link took whole leaves more owed only under a pace, whose interval it
+            // waits; an unpaced turn is the whole sequence.
+            self.pacing.map_or(0, |pace| pace.interval_ms())
         };
         self.next_turn_ms = now_ms.saturating_add(wait_ms);
         TurnEnd::Kept
@@ -253,7 +261,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
 
     /// One turn of the replay of the face at `at`, if one is owed and due: the burst of the pace,
     /// or everything when the session is not paced, from the entry the last turn stopped at. What
-    /// the turn leaves of the link: [`TurnEnd::EndsLink`] when the pace gave the replay up on a
+    /// the turn leaves of the link: [`TurnEnd::EndsLink`] when the replay was given up on a
     /// refused send, which the caller answers by ending the link.
     pub(super) fn replay_turn(
         &mut self,
@@ -447,9 +455,9 @@ mod tests {
     }
 
     /// A turn the link took whole waits the interval when more is owed and nothing when all is
-    /// told; a session that is not paced tries a refused send again on its next step, as before.
+    /// told.
     #[test]
-    fn a_turn_not_refused_waits_the_interval_and_an_unpaced_refusal_its_step() {
+    fn a_turn_not_refused_waits_the_interval_until_all_is_told() {
         let mut paced = Replay::with_pacing(ReplayPacing::new(2, 10));
         paced.begin(5, 100);
         let mut cursor = paced.cursor;
@@ -460,13 +468,31 @@ mod tests {
         let _ = cursor.turn(usize::MAX);
         assert_eq!(paced.settle(cursor, true, false, 110), TurnEnd::Kept);
         assert!(paced.finished());
+    }
 
+    /// A session that is not paced gives its replay up on the first send the link refuses, even
+    /// after the link took some of the turn, so the link ends and the next one is told everything
+    /// from the start, as upstream's reopen does; it does not try the send again on this link.
+    #[test]
+    fn an_unpaced_refusal_ends_the_link() {
         let mut unpaced = Replay::with_pacing(None);
         unpaced.begin(3, 100);
         let mut cursor = unpaced.cursor;
         let places = cursor.turn(usize::MAX);
         cursor.refused(places.start + 1);
-        assert_eq!(unpaced.settle(cursor, true, true, 100), TurnEnd::Kept);
-        assert_eq!(unpaced.next_turn_ms(), Some(100 + RETRY_MS));
+        assert_eq!(unpaced.settle(cursor, true, true, 100), TurnEnd::EndsLink);
+        assert!(
+            unpaced.finished(),
+            "the link that ends is owed nothing more"
+        );
+        assert_eq!(unpaced.next_turn_ms(), None);
+
+        // Control: the same session with nothing refused tells everything and keeps its link.
+        let mut whole = Replay::with_pacing(None);
+        whole.begin(3, 100);
+        let mut cursor = whole.cursor;
+        let _ = cursor.turn(usize::MAX);
+        assert_eq!(whole.settle(cursor, true, false, 100), TurnEnd::Kept);
+        assert!(whole.finished());
     }
 }

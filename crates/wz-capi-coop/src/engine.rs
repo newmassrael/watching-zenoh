@@ -1173,20 +1173,21 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
 
     /// Move the link of the face at `at` on. A handshake that completed brings the link up and
     /// begins to declare over it what the session holds, and a link that is up goes on with the
-    /// telling when a turn of it is due (`replay`), or ends when the pace gives up a turn the link
-    /// refused, and is then lost as any other link is. The dial role's face is kept: a link that
-    /// ended or ran out of time gives way to the next endpoint, and a lost link takes what its
-    /// peer declared with it and is dialled again. Any other face is not dialled again: its lost
-    /// or failed link takes the face with it. `Err` when the session ends: the dial role's link
-    /// was lost, or no endpoint answered, and `redial_ms` is `None`; or the platform gave no
-    /// entropy.
+    /// telling when a turn of it is due (`replay`), or ends when the replay is given up on a send
+    /// the link refused, and is then lost as any other link is. The dial role's face is kept: a
+    /// link that ended or ran out of time gives way to the next endpoint, and a lost link takes
+    /// what its peer declared with it and is dialled again. Any other face is not dialled again:
+    /// its lost or failed link takes the face with it. `Err` when the session ends: the dial
+    /// role's link was lost, or no endpoint answered, and `redial_ms` is `None`; or the platform
+    /// gave no entropy.
     fn poll_face(&mut self, at: usize, redial_ms: Option<u64>) -> Result<(), OpenError> {
         let now_us = self.clock.now_us();
         let now_ms = now_us / 1000;
         let id = self.faces[at].id;
         let link = core::mem::replace(&mut self.faces[at].link, Link::Waiting { at_us: now_us });
         // A link that is up goes on telling its peer what the session holds, when a turn is due.
-        // A turn whose refusal the pace gives up on ends the link here, with no Close, as
+        // A turn the replay is given up on (a refused send, at once without a pace or when the
+        // pace says so) ends the link here, with no Close, as
         // zenoh-pico clears a transport its reopen could not send its declarations over
         // (`vendor/zenoh-pico/src/net/session.c` @ `_z_transport_clear(&s->_tp);`); the arm for a
         // lost link below then takes it as lost, so the dial role's face dials again and tells
@@ -1314,8 +1315,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// Tell the peer of every face whose link is up everything the session holds again, as a link
     /// that has just come up is told (`begin_replay`), at the session's pace; the count of faces.
     /// What the application asks for when it holds that a peer lost declarations the session made.
-    /// A face whose first turn the pace gives up on is not counted: its link ends, and the next
-    /// pass over the faces takes it as lost (`poll_face`).
+    /// A face whose first turn the replay is given up on is not counted: its link ends, and the
+    /// next pass over the faces takes it as lost (`poll_face`).
     fn redeclare(&mut self) -> usize {
         let now_ms = self.clock.now_us() / 1000;
         let mut told = 0;
@@ -1337,8 +1338,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     }
 
     /// The link of the face at `at` is `wire`, up: what the session holds is declared over it from
-    /// here on, and the watchers of the faces are told it came up. A first turn the pace gives up
-    /// on ends the link at once, and the next pass over the faces takes it as lost (`poll_face`).
+    /// here on, and the watchers of the faces are told it came up. A first turn the replay is
+    /// given up on ends the link at once, and the next pass over the faces takes it as lost
+    /// (`poll_face`).
     fn bring_up(&mut self, at: usize, wire: Wire<C>, now_us: u64) {
         #[cfg(feature = "listen")]
         wire.admitted.grant();
