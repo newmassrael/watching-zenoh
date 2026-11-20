@@ -10932,7 +10932,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // room means the holder is about to let go. A sender under a reservation holds room
         // already and waits for the lock as before. Whether a droppable message behind a held
         // conduit waits for room at all is the queue profile's (`HeldDrop`): the pico profile
-        // drops it at once and asks the link nothing, as pico's try-lock does.
+        // drops it at once and asks the link nothing, as pico's try-lock does, and tells the
+        // sender so (`SendWireError::HeldConduit`), as pico's put does.
+        #[cfg(feature = "alloc")]
+        let mut held_dropped = false;
         #[cfg(feature = "alloc")]
         let push = if probing {
             match R::try_with_mutex_mut(self.tx_conduits.conduit(priority), stage_and_emit) {
@@ -10948,9 +10951,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 if let Some(push) = taken {
                     break push;
                 }
-                let drop_at_once = self.params.tx_queue.held_drop
-                    == crate::session_init_params::HeldDrop::DropAtOnce;
-                if drop_at_once || congested() {
+                if self.params.tx_queue.held_drop
+                    == crate::session_init_params::HeldDrop::DropAtOnce
+                {
+                    held_dropped = true;
+                    break Ok(UnicastPush::Congested);
+                }
+                if congested() {
                     break Ok(UnicastPush::Congested);
                 }
                 core::hint::spin_loop();
@@ -11018,6 +11025,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     message_priority,
                     &_stats_class,
                 );
+                #[cfg(feature = "alloc")]
+                if held_dropped {
+                    return Err(SendWireError::HeldConduit);
+                }
                 if !droppable && self.settle_blocking_expiry() == TxExpiry::Kept {
                     return Err(SendWireError::TransportUnavailable);
                 }

@@ -120,6 +120,15 @@ pub enum SendDeclareError {
     /// Present only under `tx-lend-only`, as the wire-plane variant is.
     #[cfg(feature = "tx-lend-only")]
     LinkRefused(crate::link::LinkDropCause),
+    /// Declare-plane projection of
+    /// [`SendWireError::HeldConduit`](crate::send_wire_error::SendWireError::HeldConduit): a
+    /// droppable message whose conduit another sender held, dropped at once by the queue
+    /// profile. A declaration is reliable and blocking by its QoS, so the declare plane meets it
+    /// only for a message sent with a droppable QoS. Nothing was emitted or cached.
+    ///
+    /// Variant ordering: appended at end, per the note on
+    /// [`Self::FeatureDisabled`].
+    HeldConduit,
 }
 
 impl fmt::Display for SendDeclareError {
@@ -180,6 +189,11 @@ impl fmt::Display for SendDeclareError {
                  built ({cause:?}) — no bytes emitted and nothing cached; \
                  re-declare once the pool refills"
             ),
+            Self::HeldConduit => f.write_str(
+                "send_declare: another sender held the conduit of this \
+                 droppable message and the queue profile drops it at once — \
+                 no bytes emitted and nothing cached",
+            ),
         }
     }
 }
@@ -221,6 +235,7 @@ impl From<crate::send_wire_error::SendWireError> for SendDeclareError {
             W::FragmentTxBudgetExhausted => Self::FragmentTxBudgetExhausted,
             #[cfg(feature = "tx-lend-only")]
             W::LinkRefused(cause) => Self::LinkRefused(cause),
+            W::HeldConduit => Self::HeldConduit,
         }
     }
 }

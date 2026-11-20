@@ -157,6 +157,21 @@ pub enum SendWireError {
     /// finds a slot.
     #[cfg(feature = "tx-lend-only")]
     LinkRefused(crate::link::LinkDropCause),
+    /// The message may be dropped, another sender held its conduit, and the session's queue
+    /// profile drops such a message at once
+    /// ([`HeldDrop::DropAtOnce`](crate::session_init_params::HeldDrop::DropAtOnce)). No bytes
+    /// were emitted, and the drop is counted as a congestion drop. zenoh-pico's dropping send
+    /// fails so (`vendor/zenoh-pico/src/transport/common/tx.c` @
+    /// `_Z_INFO("Dropping zenoh message because of congestion control");`), and its put reports
+    /// that failure to the caller
+    /// (`vendor/zenoh-pico/src/net/primitives.c` @
+    /// `if (_z_send_n_msg(zn, &msg, reliability, cong_ctrl, NULL) != _Z_RES_OK) {`). Under
+    /// zenoh's profile a congestion drop is the send's success, and this is never answered.
+    ///
+    /// Variant ordering: appended at end so existing match arms in
+    /// downstream crates surface a non-exhaustive-match warning rather
+    /// than silently rebind a prior variant.
+    HeldConduit,
 }
 
 impl fmt::Display for SendWireError {
@@ -203,6 +218,11 @@ impl fmt::Display for SendWireError {
                 "send_wire: the link refused the frame before it was built \
                  ({cause:?}) — no bytes were emitted; the refusal is counted, \
                  and the same send finds a slot once the pool refills"
+            ),
+            Self::HeldConduit => f.write_str(
+                "send_wire: another sender held this droppable message's \
+                 conduit and the queue profile drops it at once — no bytes \
+                 were emitted; the drop is counted as a congestion drop",
             ),
         }
     }
