@@ -34,19 +34,23 @@
 //
 //   perf_probe pub sent=<puts that returned 0> failed=<n> elapsed_ns=<..> cpu_ns=<process CPU over the loop>
 //     start_ns=<..> end_ns=<..> batch_cycles=<windows opened, 0 without -b>
+//     lost_match_ns=<when the publisher was first seen to match nothing, 0 for never> matched_at_end=<1|0|-1>
+//     peers_at_end=<n>
 //
 // sub counts what it is handed; from its first sample it waits WARMUP_MS, then reads the count, the payload
 // bytes and its process CPU at the start and the end of a WINDOW_S window, and prints
 //
 //   perf_probe sub received=<n> bytes=<n> window_ns=<..> cpu_ns=<process CPU over the window> start_ns=<..>
-//     end_ns=<..>
+//     end_ns=<..> first_ns=<when the first sample was seen>
 //
-// start_ns and end_ns are CLOCK_MONOTONIC, which both processes read on the one host, so the reader can tell
-// whether the subscriber's window lay inside the publisher's loop.
+// Every time is CLOCK_MONOTONIC, which both processes read on the one host, so the reader can tell whether
+// the subscriber's window lay inside the publisher's loop, and when one side stopped.
 //
 // then keeps its session until SIGTERM, so the publisher never puts into a peer that has gone, and prints
-// `perf_probe sub total=<n>` on its way out. The count is taken by the callback alone (two relaxed atomic
-// additions); the window is read by the main thread, so no clock is read per sample.
+// `perf_probe sub total=<n> last_growth_ns=<..> peers=<n>` on its way out: the last time its count was seen
+// to grow (looked at every 10 ms) and the peers it lists then. The count is taken by the callback alone (two
+// relaxed atomic additions); the window and the growth are read by the main thread, so no clock is read per
+// sample.
 //
 // With -b the batching of zenoh-pico (zp_batch_start / zp_batch_stop) is on. pub puts in cycles of one
 // millisecond, each cycle one batch window that is closed, and so flushed, at its end; a batch that fills
@@ -476,14 +480,19 @@ static void count_peer(const z_id_t *id, void *context) {
     (*(int *)context)++;
 }
 
+// The peers the session lists now.
+static int peer_count(const z_loaned_session_t *session) {
+    int peers = 0;
+    z_owned_closure_zid_t closure;
+    z_closure_zid(&closure, count_peer, NULL, &peers);
+    z_info_peers_zid(session, z_closure_zid_move(&closure));
+    return peers;
+}
+
 // 1 once the session lists a peer, 0 when none came in PEER_WAIT_MS.
 static int wait_for_peer(const z_loaned_session_t *session) {
     for (unsigned waited = 0; waited < PEER_WAIT_MS && !terminated; waited += 10) {
-        int peers = 0;
-        z_owned_closure_zid_t closure;
-        z_closure_zid(&closure, count_peer, NULL, &peers);
-        z_info_peers_zid(session, z_closure_zid_move(&closure));
-        if (peers > 0) return 1;
+        if (peer_count(session) > 0) return 1;
         sleep_ms(10);
     }
     return 0;
@@ -509,20 +518,26 @@ static const z_loaned_publisher_t *declare_publisher(const z_loaned_session_t *s
     return z_publisher_loan(pub);
 }
 
-// 1 once `pub` matches a subscriber, 0 when none did in PEER_WAIT_MS. main refuses -M in a build without
-// Z_FEATURE_MATCHING, so the second arm is never reached there.
-static int wait_for_match(const z_loaned_publisher_t *pub) {
+// 1 when `pub` matches a subscriber now, 0 when it does not, -1 when the build cannot say.
+static int matched_now(const z_loaned_publisher_t *pub) {
 #if Z_FEATURE_MATCHING == 1
+    z_matching_status_t status;
+    if (z_publisher_get_matching_status(pub, &status) != Z_OK) return -1;
+    return status.matching ? 1 : 0;
+#else
+    (void)pub;
+    return -1;
+#endif
+}
+
+// 1 once `pub` matches a subscriber, 0 when none did in PEER_WAIT_MS. main refuses -M in a build without
+// Z_FEATURE_MATCHING, where the publisher can never be seen to match.
+static int wait_for_match(const z_loaned_publisher_t *pub) {
     for (unsigned waited = 0; waited < PEER_WAIT_MS && !terminated; waited += 10) {
-        z_matching_status_t status;
-        if (z_publisher_get_matching_status(pub, &status) == Z_OK && status.matching) return 1;
+        if (matched_now(pub) == 1) return 1;
         sleep_ms(10);
     }
     return 0;
-#else
-    (void)pub;
-    return 0;
-#endif
 }
 
 // The client side's publisher on `key`, ready for its first counted put, the same in both arms. As
@@ -757,6 +772,25 @@ static void on_thr(z_loaned_sample_t *sample, void *context) {
     atomic_fetch_add_explicit(&received_count, 1, memory_order_relaxed);
 }
 
+// The count the main thread last saw and when it last saw it grow: a delivery that stops is told from
+// one that never started, at the cost of a look every 10 ms and none per sample.
+static uint64_t watched_count;
+static uint64_t last_growth_ns;
+
+static void watch_for(unsigned ms) {
+    const uint64_t until = now_ns() + (uint64_t)ms * 1000000ULL;
+    while (!terminated) {
+        const uint64_t n = atomic_load_explicit(&received_count, memory_order_relaxed);
+        if (n != watched_count) {
+            watched_count = n;
+            last_growth_ns = now_ns();
+        }
+        const uint64_t now = now_ns();
+        if (now >= until) return;
+        sleep_ms(until - now < 10000000ULL ? (unsigned)((until - now + 999999ULL) / 1000000ULL) : 10U);
+    }
+}
+
 static int run_sub(const z_loaned_session_t *session, const struct options *o) {
     if (declare_subscriber(session, KEY_THR, on_thr, NULL) != 0) {
         printf("perf_probe sub: unable to declare the subscriber\n");
@@ -764,22 +798,27 @@ static int run_sub(const z_loaned_session_t *session, const struct options *o) {
     }
     // The first sample starts the clock; a publisher that never came leaves no window to print.
     while (!terminated && atomic_load_explicit(&received_count, memory_order_relaxed) == 0) sleep_ms(1);
-    if (!terminated) sleep_ms(o->warmup_ms);
+    const uint64_t first_ns = now_ns();
+    if (!terminated) watch_for(o->warmup_ms);
     if (!terminated) {
         const uint64_t n0 = atomic_load(&received_count), b0 = atomic_load(&received_bytes);
         const uint64_t t0 = now_ns(), c0 = cpu_ns();
-        sleep_ms(o->seconds * 1000U);
+        watch_for(o->seconds * 1000U);
         const uint64_t n1 = atomic_load(&received_count), b1 = atomic_load(&received_bytes);
         const uint64_t t1 = now_ns(), c1 = cpu_ns();
         if (!terminated) {
-            printf("perf_probe sub received=%llu bytes=%llu window_ns=%llu cpu_ns=%llu start_ns=%llu end_ns=%llu\n",
+            printf("perf_probe sub received=%llu bytes=%llu window_ns=%llu cpu_ns=%llu start_ns=%llu end_ns=%llu "
+                   "first_ns=%llu\n",
                    (unsigned long long)(n1 - n0), (unsigned long long)(b1 - b0), (unsigned long long)(t1 - t0),
-                   (unsigned long long)(c1 - c0), (unsigned long long)t0, (unsigned long long)t1);
+                   (unsigned long long)(c1 - c0), (unsigned long long)t0, (unsigned long long)t1,
+                   (unsigned long long)first_ns);
             fflush(stdout);
         }
     }
-    while (!terminated) sleep_ms(5);
-    printf("perf_probe sub total=%llu\n", (unsigned long long)atomic_load(&received_count));
+    while (!terminated) watch_for(10);
+    printf("perf_probe sub total=%llu last_growth_ns=%llu peers=%d\n",
+           (unsigned long long)atomic_load(&received_count), (unsigned long long)last_growth_ns,
+           peer_count(session));
     fflush(stdout);
     return 0;
 }
@@ -809,10 +848,19 @@ static int run_pub(const z_loaned_session_t *session, const struct options *o) {
     // and opened again: the puts of a cycle are one batch, and a full batch leaves inside it.
     uint64_t cycle_end = t0 + BATCH_CYCLE_NS;
     unsigned long long cycles = 0;
+    // With -M, when the publisher was first seen to match no subscriber any more, looked at every 100 ms: a
+    // put then returns success and goes nowhere, so the reader can tell a sender that lost its peer from a
+    // receiver that stopped reading. Without -M (a group, which carries no declarations) there is no
+    // match to lose, and the line says 0 and -1.
+    uint64_t next_look = t0, lost_match_ns = 0;
     if (o->batching) batch_start(session);
     for (unsigned i = 0; !terminated; i++) {
         if ((i & 63U) == 0) {
             if ((t1 = now_ns()) >= end) break;
+            if (o->match && t1 >= next_look) {
+                next_look = t1 + 100000000ULL;
+                if (lost_match_ns == 0 && matched_now(loaned) == 0) lost_match_ns = t1;
+            }
             if (o->batching && t1 >= cycle_end) {
                 batch_stop(session);
                 batch_start(session);
@@ -832,9 +880,10 @@ static int run_pub(const z_loaned_session_t *session, const struct options *o) {
     const uint64_t c1 = cpu_ns();
     t1 = now_ns();
     printf("perf_probe pub sent=%llu failed=%llu elapsed_ns=%llu cpu_ns=%llu start_ns=%llu end_ns=%llu "
-           "batch_cycles=%llu\n",
+           "batch_cycles=%llu lost_match_ns=%llu matched_at_end=%d peers_at_end=%d\n",
            sent, failed, (unsigned long long)(t1 - t0), (unsigned long long)(c1 - c0), (unsigned long long)t0,
-           (unsigned long long)t1, o->batching ? cycles + 1 : 0ULL);
+           (unsigned long long)t1, o->batching ? cycles + 1 : 0ULL, (unsigned long long)lost_match_ns,
+           o->match ? matched_now(loaned) : -1, peer_count(session));
     fflush(stdout);
     z_bytes_drop(z_bytes_move(&payload));
     free(buf);
