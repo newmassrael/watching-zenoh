@@ -5125,20 +5125,22 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     ///
     /// A declaration made, or withdrawn, while the wait runs restarts the check: the set the peer
     /// must hold has changed, and a sync that was true of the old set says nothing of the new one.
-    /// The interval is `DECLARATION_SYNC_INTERVAL_MS`, the pace a paced replay is driven at.
+    /// The interval is `DECLARATION_SYNC_INTERVAL_MS`, the pace a paced replay is driven at. Both
+    /// the interval and `timeout` are of the session's clock, as the sync it reads is.
     pub async fn wait_declarations_stable(&self, timeout: std::time::Duration) -> bool {
-        let step = std::time::Duration::from_millis(
-            wz_session_core::caps::DECLARATION_SYNC_INTERVAL_MS as u64,
-        );
-        let deadline = tokio::time::Instant::now() + timeout;
+        let step = wz_session_core::caps::DECLARATION_SYNC_INTERVAL_MS as u64;
+        let deadline = self
+            .clock
+            .now_monotonic_ms()
+            .saturating_add(crate::runtime_impl::whole_ms(timeout));
         loop {
             let seen = self.actions().declaration_generation();
             let synced = self.actions().declarations_synced();
-            let now = tokio::time::Instant::now();
+            let now = self.clock.now_monotonic_ms();
             if now >= deadline {
                 return false;
             }
-            tokio::time::sleep(step.min(deadline - now)).await;
+            self.clock.sleep(step.min(deadline - now)).await;
             if synced
                 && seen == self.actions().declaration_generation()
                 && self.actions().declarations_synced()
@@ -9572,7 +9574,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     {
         let reaper = self.clone();
         crate::runtime_pool::WzRuntime::Net.spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(timeout_ms)).await;
+            // On the session's clock, which the snapshot's deadline is of.
+            reaper.clock.sleep(timeout_ms).await;
             reaper.sweep_expired_liveliness_gets();
         })
     }

@@ -473,6 +473,29 @@ impl Default for TokioTime {
     }
 }
 
+/// `fut` raced against `ms` milliseconds of `clock`: [`TimeSource::timeout`] for a future that
+/// borrows, which that one cannot take, so a bound a session keeps on its own clock reaches a
+/// wait that is not `'static`. The future is polled first, as tokio's timeout polls it: one that
+/// is ready when the time passes has finished in time.
+pub async fn timeout_on<C, F>(clock: &C, ms: u64, fut: F) -> Result<F::Output, TimeoutElapsed>
+where
+    C: TimeSource,
+    F: Future,
+{
+    tokio::select! {
+        biased;
+        out = fut => Ok(out),
+        () = clock.sleep(ms) => Err(TimeoutElapsed),
+    }
+}
+
+/// `duration` in the whole milliseconds a [`TimeSource`] waits in, rounded up, so a wait never
+/// ends before the duration it stands for; past `u64::MAX` milliseconds it is `u64::MAX`, which a
+/// wait reads as never.
+pub fn whole_ms(duration: Duration) -> u64 {
+    u64::try_from(duration.as_micros().div_ceil(1000)).unwrap_or(u64::MAX)
+}
+
 impl TimeSource for TokioTime {
     fn now_monotonic_ms(&self) -> u64 {
         #[cfg(feature = "program-time")]

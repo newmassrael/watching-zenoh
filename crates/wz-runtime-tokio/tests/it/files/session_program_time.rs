@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use sce_rust_runtime::Engine;
 use wz_runtime_core::{TimeSource, TimeoutElapsed};
-use wz_runtime_tokio::runtime_impl::TokioTime;
+use wz_runtime_tokio::runtime_impl::{timeout_on, TokioTime};
 use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy, SessionFsmUnicastState as S,
 };
@@ -152,6 +152,34 @@ async fn a_timeout_on_a_program_time_base_runs_on_that_time() {
         .await
         .expect("the timeout ends once the program's time passes it")
         .expect("the timing task");
+    assert_eq!(outcome, Err(TimeoutElapsed));
+}
+
+/// `timeout_on`, the bound for a future that borrows, holds on the program's time as the clock's
+/// own timeout does: a local the bounded future reads is still borrowed when the bound passes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bound_for_a_borrowing_future_runs_on_the_programs_time() {
+    let (now, hold) = program_time();
+    let clock = TokioTime::on_time_base(hold.time());
+    let bounded = tokio::spawn(async move {
+        let held = String::from("held across the wait");
+        let borrowing = async {
+            std::future::pending::<()>().await;
+            held.len()
+        };
+        timeout_on(&clock, 30, borrowing).await
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !bounded.is_finished(),
+        "the wall clock ended a bound of the program's time"
+    );
+    now.fetch_add(30 * MS, Ordering::SeqCst);
+    hold.advanced();
+    let outcome = tokio::time::timeout(Duration::from_secs(5), bounded)
+        .await
+        .expect("the bound ends once the program's time passes it")
+        .expect("the bounding task");
     assert_eq!(outcome, Err(TimeoutElapsed));
 }
 
