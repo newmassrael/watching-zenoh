@@ -369,7 +369,18 @@ impl Default for ApplicationLayerObserver {
 }
 
 impl ApplicationLayerObserver {
-    /// New observer with empty registries. Callers register
+    /// New observer with empty registries, each held to the limits `limits` states: what the
+    /// creator of the session (an open, a node) resolved for it. A table reads its bound here and
+    /// never from the build.
+    pub fn with_limits(limits: &crate::limits::SessionLimits) -> Self {
+        let mut observer = Self::new();
+        observer
+            .subscribers
+            .limit_to(limits.max_subscriptions_held());
+        observer
+    }
+
+    /// New observer with empty registries, held to the build's limits. Callers register
     /// callbacks on each contained registry directly
     /// (`observer.subscribers.register(...)` etc.) before driving
     /// the session loop.

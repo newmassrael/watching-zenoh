@@ -2336,12 +2336,15 @@ def limit_spec_rust(lim: dict) -> list[str]:
     # An associated constant is evaluated only where it is used, so the domain's own refusal of a
     # build value outside it is forced here, for every build, whether or not a reader names it.
     out += [f"const _: LimitDomain = {name}::DOMAIN;", ""]
-    alias = f"type {name}Held = Limited<{name}, {{ {name}::HELD }}>;"
+    alias = f"pub type {name}Held = Limited<{name}, {{ {name}::HELD }}>;"
     if len(alias) > RUST_MAX_WIDTH:
-        alias_lines = [f"type {name}Held =", f"    Limited<{name}, {{ {name}::HELD }}>;"]
+        alias_lines = [f"pub type {name}Held =", f"    Limited<{name}, {{ {name}::HELD }}>;"]
     else:
         alias_lines = [alias]
-    return out + [f"/// How `{lid}` is held: in no byte when its domain is one value."] + alias_lines
+    held = [f"/// How `{lid}` is held: in no byte when its domain is one value."]
+    if bound:
+        held.append("/// A table the bound limits keeps it so, and asks it [`Limited::admits`].")
+    return out + held + alias_lines
 
 
 def camel_limit(lid: str) -> str:
@@ -2387,8 +2390,14 @@ def limit_snapshot_rust(snapshot: str, lims: list[dict], what: str) -> list[str]
         field = lim["id"].lower()
         ty = "Quota" if lim["kind"] == "bound" else "usize"
         out += ["", f"    /// `{lim['id']}` as this snapshot holds it.",
-                f"    pub const fn {field}(&self) -> {ty} {{", f"        self.{field}.get()", "    }",
-                "", f"    /// Selects `{lim['id']}`, when the build's domain holds `value`."]
+                f"    pub const fn {field}(&self) -> {ty} {{", f"        self.{field}.get()", "    }"]
+        if lim["kind"] == "bound":
+            name = camel_limit(lim["id"])
+            out += ["", f"    /// `{lim['id']}` as the snapshot keeps it, for the table the bound limits to keep",
+                    "    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.",
+                    f"    pub const fn {field}_held(&self) -> {name}Held {{",
+                    f"        self.{field}", "    }"]
+        out += ["", f"    /// Selects `{lim['id']}`, when the build's domain holds `value`."]
         one = f"    pub fn select_{field}(&mut self, value: {ty}) -> Result<(), OutsideLimitDomain> {{"
         if len(one) <= RUST_MAX_WIDTH:
             out.append(one)

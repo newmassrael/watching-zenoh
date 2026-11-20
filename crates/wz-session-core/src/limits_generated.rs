@@ -53,7 +53,8 @@ impl LimitSpec for MaxKeyexprBytes {
 const _: LimitDomain = MaxKeyexprBytes::DOMAIN;
 
 /// How `MAX_KEYEXPR_BYTES` is held: in no byte when its domain is one value.
-type MaxKeyexprBytesHeld = Limited<MaxKeyexprBytes, { MaxKeyexprBytes::HELD }>;
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type MaxKeyexprBytesHeld = Limited<MaxKeyexprBytes, { MaxKeyexprBytes::HELD }>;
 
 /// `MAX_SUBSCRIPTIONS`: The subscribers a session holds at once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,7 +72,8 @@ impl LimitSpec for MaxSubscriptions {
 const _: LimitDomain = MaxSubscriptions::DOMAIN;
 
 /// How `MAX_SUBSCRIPTIONS` is held: in no byte when its domain is one value.
-type MaxSubscriptionsHeld = Limited<MaxSubscriptions, { MaxSubscriptions::HELD }>;
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type MaxSubscriptionsHeld = Limited<MaxSubscriptions, { MaxSubscriptions::HELD }>;
 
 /// `MATCH_MEMO_SLOTS`: How many distinct keys the receive match cache remembers at once:
 /// the keys whose matching subscriptions it can answer without matching again.
@@ -91,7 +93,7 @@ impl LimitSpec for MatchMemoSlots {
 const _: LimitDomain = MatchMemoSlots::DOMAIN;
 
 /// How `MATCH_MEMO_SLOTS` is held: in no byte when its domain is one value.
-type MatchMemoSlotsHeld = Limited<MatchMemoSlots, { MatchMemoSlots::HELD }>;
+pub type MatchMemoSlotsHeld = Limited<MatchMemoSlots, { MatchMemoSlots::HELD }>;
 
 /// `DELIVERY_LANE_EVENTS`: How many samples the delivery lane of an offloaded subscriber
 /// holds at once: the samples the receive path has copied in and its callback has not yet
@@ -111,7 +113,8 @@ impl LimitSpec for DeliveryLaneEvents {
 const _: LimitDomain = DeliveryLaneEvents::DOMAIN;
 
 /// How `DELIVERY_LANE_EVENTS` is held: in no byte when its domain is one value.
-type DeliveryLaneEventsHeld = Limited<DeliveryLaneEvents, { DeliveryLaneEvents::HELD }>;
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type DeliveryLaneEventsHeld = Limited<DeliveryLaneEvents, { DeliveryLaneEvents::HELD }>;
 
 /// `DELIVERY_LANE_BYTES`: How many bytes of copied samples a delivery lane holds at once:
 /// the key, the payload, the attachment and the encoding schema of each waiting sample, and
@@ -132,7 +135,7 @@ impl LimitSpec for DeliveryLaneBytes {
 const _: LimitDomain = DeliveryLaneBytes::DOMAIN;
 
 /// How `DELIVERY_LANE_BYTES` is held: in no byte when its domain is one value.
-type DeliveryLaneBytesHeld = Limited<DeliveryLaneBytes, { DeliveryLaneBytes::HELD }>;
+pub type DeliveryLaneBytesHeld = Limited<DeliveryLaneBytes, { DeliveryLaneBytes::HELD }>;
 
 /// `DELIVERY_LANE_CALLBACKS`: How many callback invocations a delivery lane owes at once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -150,7 +153,9 @@ impl LimitSpec for DeliveryLaneCallbacks {
 const _: LimitDomain = DeliveryLaneCallbacks::DOMAIN;
 
 /// How `DELIVERY_LANE_CALLBACKS` is held: in no byte when its domain is one value.
-type DeliveryLaneCallbacksHeld = Limited<DeliveryLaneCallbacks, { DeliveryLaneCallbacks::HELD }>;
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type DeliveryLaneCallbacksHeld =
+    Limited<DeliveryLaneCallbacks, { DeliveryLaneCallbacks::HELD }>;
 
 /// `MAX_QUERYABLES`: The queryables a session holds at once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -168,7 +173,8 @@ impl LimitSpec for MaxQueryables {
 const _: LimitDomain = MaxQueryables::DOMAIN;
 
 /// How `MAX_QUERYABLES` is held: in no byte when its domain is one value.
-type MaxQueryablesHeld = Limited<MaxQueryables, { MaxQueryables::HELD }>;
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type MaxQueryablesHeld = Limited<MaxQueryables, { MaxQueryables::HELD }>;
 
 /// `MAX_PENDING_QUERIES`: The queries (gets) a session has waiting for their replies at
 /// once.
@@ -187,7 +193,8 @@ impl LimitSpec for MaxPendingQueries {
 const _: LimitDomain = MaxPendingQueries::DOMAIN;
 
 /// How `MAX_PENDING_QUERIES` is held: in no byte when its domain is one value.
-type MaxPendingQueriesHeld = Limited<MaxPendingQueries, { MaxPendingQueries::HELD }>;
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type MaxPendingQueriesHeld = Limited<MaxPendingQueries, { MaxPendingQueries::HELD }>;
 
 /// `LINK_NOTED_REQUESTS`: How many queries a peer sent over one link the node remembers the
 /// key form of at once, so that its replies name the key as the query did, when the link
@@ -208,7 +215,7 @@ impl LimitSpec for LinkNotedRequests {
 const _: LimitDomain = LinkNotedRequests::DOMAIN;
 
 /// How `LINK_NOTED_REQUESTS` is held: in no byte when its domain is one value.
-type LinkNotedRequestsHeld = Limited<LinkNotedRequests, { LinkNotedRequests::HELD }>;
+pub type LinkNotedRequestsHeld = Limited<LinkNotedRequests, { LinkNotedRequests::HELD }>;
 
 /// `MAX_DECL_OBSERVERS`: The observers an application installs on the declarations of its
 /// peers (subscribers, queryables and liveliness tokens appearing or leaving), per kind and
@@ -228,7 +235,8 @@ impl LimitSpec for MaxDeclObservers {
 const _: LimitDomain = MaxDeclObservers::DOMAIN;
 
 /// How `MAX_DECL_OBSERVERS` is held: in no byte when its domain is one value.
-type MaxDeclObserversHeld = Limited<MaxDeclObservers, { MaxDeclObservers::HELD }>;
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type MaxDeclObserversHeld = Limited<MaxDeclObservers, { MaxDeclObservers::HELD }>;
 
 /// `MAX_LIVELINESS_SUBSCRIPTIONS`: The liveliness subscribers a session holds at once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -246,7 +254,8 @@ impl LimitSpec for MaxLivelinessSubscriptions {
 const _: LimitDomain = MaxLivelinessSubscriptions::DOMAIN;
 
 /// How `MAX_LIVELINESS_SUBSCRIPTIONS` is held: in no byte when its domain is one value.
-type MaxLivelinessSubscriptionsHeld =
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type MaxLivelinessSubscriptionsHeld =
     Limited<MaxLivelinessSubscriptions, { MaxLivelinessSubscriptions::HELD }>;
 
 /// `MAX_LOCAL_TOKENS`: The liveliness tokens a session itself declares and holds at once.
@@ -265,7 +274,8 @@ impl LimitSpec for MaxLocalTokens {
 const _: LimitDomain = MaxLocalTokens::DOMAIN;
 
 /// How `MAX_LOCAL_TOKENS` is held: in no byte when its domain is one value.
-type MaxLocalTokensHeld = Limited<MaxLocalTokens, { MaxLocalTokens::HELD }>;
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type MaxLocalTokensHeld = Limited<MaxLocalTokens, { MaxLocalTokens::HELD }>;
 
 /// `MAX_PENDING_LIVELINESS_GETS`: The liveliness gets (snapshots of the tokens alive) a
 /// session has waiting for their answer at once.
@@ -284,7 +294,8 @@ impl LimitSpec for MaxPendingLivelinessGets {
 const _: LimitDomain = MaxPendingLivelinessGets::DOMAIN;
 
 /// How `MAX_PENDING_LIVELINESS_GETS` is held: in no byte when its domain is one value.
-type MaxPendingLivelinessGetsHeld =
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type MaxPendingLivelinessGetsHeld =
     Limited<MaxPendingLivelinessGets, { MaxPendingLivelinessGets::HELD }>;
 
 /// `MAX_PENDING_DECLARES`: The declarations a session can have ready to send in answer to
@@ -305,7 +316,8 @@ impl LimitSpec for MaxPendingDeclares {
 const _: LimitDomain = MaxPendingDeclares::DOMAIN;
 
 /// How `MAX_PENDING_DECLARES` is held: in no byte when its domain is one value.
-type MaxPendingDeclaresHeld = Limited<MaxPendingDeclares, { MaxPendingDeclares::HELD }>;
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type MaxPendingDeclaresHeld = Limited<MaxPendingDeclares, { MaxPendingDeclares::HELD }>;
 
 /// `MAX_INBOUND_SUB_INTERESTS`: The peers' interests in this session's subscribers that the
 /// session remembers, so that a subscriber declared later is announced to them: one per
@@ -325,7 +337,9 @@ impl LimitSpec for MaxInboundSubInterests {
 const _: LimitDomain = MaxInboundSubInterests::DOMAIN;
 
 /// How `MAX_INBOUND_SUB_INTERESTS` is held: in no byte when its domain is one value.
-type MaxInboundSubInterestsHeld = Limited<MaxInboundSubInterests, { MaxInboundSubInterests::HELD }>;
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type MaxInboundSubInterestsHeld =
+    Limited<MaxInboundSubInterests, { MaxInboundSubInterests::HELD }>;
 
 /// `MAX_PEER_KEYEXPR_ALIASES`: The key expressions one peer may have declared to this
 /// session at a time, to name them by a short id.
@@ -344,7 +358,9 @@ impl LimitSpec for MaxPeerKeyexprAliases {
 const _: LimitDomain = MaxPeerKeyexprAliases::DOMAIN;
 
 /// How `MAX_PEER_KEYEXPR_ALIASES` is held: in no byte when its domain is one value.
-type MaxPeerKeyexprAliasesHeld = Limited<MaxPeerKeyexprAliases, { MaxPeerKeyexprAliases::HELD }>;
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type MaxPeerKeyexprAliasesHeld =
+    Limited<MaxPeerKeyexprAliases, { MaxPeerKeyexprAliases::HELD }>;
 
 /// `MAX_SHARED_KEY_IDS`: The entries of the key-id dictionary every node of a deployment
 /// shares (shared-key-ids) that one session may be given.
@@ -363,7 +379,8 @@ impl LimitSpec for MaxSharedKeyIds {
 const _: LimitDomain = MaxSharedKeyIds::DOMAIN;
 
 /// How `MAX_SHARED_KEY_IDS` is held: in no byte when its domain is one value.
-type MaxSharedKeyIdsHeld = Limited<MaxSharedKeyIds, { MaxSharedKeyIds::HELD }>;
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type MaxSharedKeyIdsHeld = Limited<MaxSharedKeyIds, { MaxSharedKeyIds::HELD }>;
 
 /// `MAX_REMOTE_DECLS`: The declarations of one kind (subscribers, queryables, liveliness
 /// tokens) one peer may hold open to this session at a time.
@@ -382,7 +399,8 @@ impl LimitSpec for MaxRemoteDecls {
 const _: LimitDomain = MaxRemoteDecls::DOMAIN;
 
 /// How `MAX_REMOTE_DECLS` is held: in no byte when its domain is one value.
-type MaxRemoteDeclsHeld = Limited<MaxRemoteDecls, { MaxRemoteDecls::HELD }>;
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type MaxRemoteDeclsHeld = Limited<MaxRemoteDecls, { MaxRemoteDecls::HELD }>;
 
 /// `MAX_PENDING_REPLIES`: The replies a session's queryables may have ready to send between
 /// two sends.
@@ -401,7 +419,8 @@ impl LimitSpec for MaxPendingReplies {
 const _: LimitDomain = MaxPendingReplies::DOMAIN;
 
 /// How `MAX_PENDING_REPLIES` is held: in no byte when its domain is one value.
-type MaxPendingRepliesHeld = Limited<MaxPendingReplies, { MaxPendingReplies::HELD }>;
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type MaxPendingRepliesHeld = Limited<MaxPendingReplies, { MaxPendingReplies::HELD }>;
 
 /// `MAX_PENDING_FINALS`: The queries a session may owe the end of an answer between two
 /// sends.
@@ -420,7 +439,8 @@ impl LimitSpec for MaxPendingFinals {
 const _: LimitDomain = MaxPendingFinals::DOMAIN;
 
 /// How `MAX_PENDING_FINALS` is held: in no byte when its domain is one value.
-type MaxPendingFinalsHeld = Limited<MaxPendingFinals, { MaxPendingFinals::HELD }>;
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type MaxPendingFinalsHeld = Limited<MaxPendingFinals, { MaxPendingFinals::HELD }>;
 
 /// `MAX_REPLY_PAYLOAD_BYTES`: The largest payload of one reply, in bytes, and the largest
 /// attachment beside it.
@@ -439,7 +459,8 @@ impl LimitSpec for MaxReplyPayloadBytes {
 const _: LimitDomain = MaxReplyPayloadBytes::DOMAIN;
 
 /// How `MAX_REPLY_PAYLOAD_BYTES` is held: in no byte when its domain is one value.
-type MaxReplyPayloadBytesHeld = Limited<MaxReplyPayloadBytes, { MaxReplyPayloadBytes::HELD }>;
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type MaxReplyPayloadBytesHeld = Limited<MaxReplyPayloadBytes, { MaxReplyPayloadBytes::HELD }>;
 
 /// `MAX_MULTICAST_REPLIES`: The replies a node holds for a multicast group before it sends
 /// them, with or without an allocator.
@@ -458,7 +479,8 @@ impl LimitSpec for MaxMulticastReplies {
 const _: LimitDomain = MaxMulticastReplies::DOMAIN;
 
 /// How `MAX_MULTICAST_REPLIES` is held: in no byte when its domain is one value.
-type MaxMulticastRepliesHeld = Limited<MaxMulticastReplies, { MaxMulticastReplies::HELD }>;
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type MaxMulticastRepliesHeld = Limited<MaxMulticastReplies, { MaxMulticastReplies::HELD }>;
 
 /// `MAX_LOCATOR_LEN`: The longest locator, in bytes, a node stores: one it is told to
 /// connect to, or one it listens on (for example udp/192.168.1.10:7447).
@@ -477,7 +499,8 @@ impl LimitSpec for MaxLocatorLen {
 const _: LimitDomain = MaxLocatorLen::DOMAIN;
 
 /// How `MAX_LOCATOR_LEN` is held: in no byte when its domain is one value.
-type MaxLocatorLenHeld = Limited<MaxLocatorLen, { MaxLocatorLen::HELD }>;
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type MaxLocatorLenHeld = Limited<MaxLocatorLen, { MaxLocatorLen::HELD }>;
 
 /// `MAX_STATIC_CONNECT`: The locators a node is told to connect to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -495,7 +518,8 @@ impl LimitSpec for MaxStaticConnect {
 const _: LimitDomain = MaxStaticConnect::DOMAIN;
 
 /// How `MAX_STATIC_CONNECT` is held: in no byte when its domain is one value.
-type MaxStaticConnectHeld = Limited<MaxStaticConnect, { MaxStaticConnect::HELD }>;
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type MaxStaticConnectHeld = Limited<MaxStaticConnect, { MaxStaticConnect::HELD }>;
 
 /// `QUERIER_MAX_PENDING_QUERIES`: The queries one declared querier may have in flight at
 /// once; one more is refused until a pending one ends.
@@ -514,7 +538,8 @@ impl LimitSpec for QuerierMaxPendingQueries {
 const _: LimitDomain = QuerierMaxPendingQueries::DOMAIN;
 
 /// How `QUERIER_MAX_PENDING_QUERIES` is held: in no byte when its domain is one value.
-type QuerierMaxPendingQueriesHeld =
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type QuerierMaxPendingQueriesHeld =
     Limited<QuerierMaxPendingQueries, { QuerierMaxPendingQueries::HELD }>;
 
 /// `TX_NO_PROGRESS_WINDOW_US`: How long, in microseconds, a blocking message may wait with
@@ -535,7 +560,7 @@ impl LimitSpec for TxNoProgressWindowUs {
 const _: LimitDomain = TxNoProgressWindowUs::DOMAIN;
 
 /// How `TX_NO_PROGRESS_WINDOW_US` is held: in no byte when its domain is one value.
-type TxNoProgressWindowUsHeld = Limited<TxNoProgressWindowUs, { TxNoProgressWindowUs::HELD }>;
+pub type TxNoProgressWindowUsHeld = Limited<TxNoProgressWindowUs, { TxNoProgressWindowUs::HELD }>;
 
 /// `TX_EXPIRY_CLOSE_AFTER`: How many blocking messages in a row may find no room within
 /// their deadline before the session is closed as unresponsive, when the tx-expiry-keeps-
@@ -556,7 +581,8 @@ impl LimitSpec for TxExpiryCloseAfter {
 const _: LimitDomain = TxExpiryCloseAfter::DOMAIN;
 
 /// How `TX_EXPIRY_CLOSE_AFTER` is held: in no byte when its domain is one value.
-type TxExpiryCloseAfterHeld = Limited<TxExpiryCloseAfter, { TxExpiryCloseAfter::HELD }>;
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type TxExpiryCloseAfterHeld = Limited<TxExpiryCloseAfter, { TxExpiryCloseAfter::HELD }>;
 
 /// `DATAGRAM_FRAGMENT_BURST`: How many fragments of a message a UDP link's writer writes in
 /// a row when the datagram-fragment-pacing policy is on, before the next one waits for
@@ -577,7 +603,8 @@ impl LimitSpec for DatagramFragmentBurst {
 const _: LimitDomain = DatagramFragmentBurst::DOMAIN;
 
 /// How `DATAGRAM_FRAGMENT_BURST` is held: in no byte when its domain is one value.
-type DatagramFragmentBurstHeld = Limited<DatagramFragmentBurst, { DatagramFragmentBurst::HELD }>;
+pub type DatagramFragmentBurstHeld =
+    Limited<DatagramFragmentBurst, { DatagramFragmentBurst::HELD }>;
 
 /// `DATAGRAM_FRAGMENT_GAP_US`: How long, in microseconds, must pass after the last fragment
 /// was written before a UDP link's writer writes another one past the burst, when the
@@ -598,7 +625,8 @@ impl LimitSpec for DatagramFragmentGapUs {
 const _: LimitDomain = DatagramFragmentGapUs::DOMAIN;
 
 /// How `DATAGRAM_FRAGMENT_GAP_US` is held: in no byte when its domain is one value.
-type DatagramFragmentGapUsHeld = Limited<DatagramFragmentGapUs, { DatagramFragmentGapUs::HELD }>;
+pub type DatagramFragmentGapUsHeld =
+    Limited<DatagramFragmentGapUs, { DatagramFragmentGapUs::HELD }>;
 
 /// `QUERY_PARAMETERS_MAX_BYTES`: The most bytes of selector parameters a query from a peer
 /// may carry for this node to run it.
@@ -617,7 +645,8 @@ impl LimitSpec for QueryParametersMaxBytes {
 const _: LimitDomain = QueryParametersMaxBytes::DOMAIN;
 
 /// How `QUERY_PARAMETERS_MAX_BYTES` is held: in no byte when its domain is one value.
-type QueryParametersMaxBytesHeld =
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type QueryParametersMaxBytesHeld =
     Limited<QueryParametersMaxBytes, { QueryParametersMaxBytes::HELD }>;
 
 /// `QUERY_ATTACHMENT_MAX_BYTES`: The most bytes of attachment a query from a peer may carry
@@ -637,7 +666,8 @@ impl LimitSpec for QueryAttachmentMaxBytes {
 const _: LimitDomain = QueryAttachmentMaxBytes::DOMAIN;
 
 /// How `QUERY_ATTACHMENT_MAX_BYTES` is held: in no byte when its domain is one value.
-type QueryAttachmentMaxBytesHeld =
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type QueryAttachmentMaxBytesHeld =
     Limited<QueryAttachmentMaxBytes, { QueryAttachmentMaxBytes::HELD }>;
 
 /// `PICO_TX_QUEUE_SIZE`: How many batches each priority's outbound queue holds for the pico
@@ -659,7 +689,7 @@ impl LimitSpec for PicoTxQueueSize {
 const _: LimitDomain = PicoTxQueueSize::DOMAIN;
 
 /// How `PICO_TX_QUEUE_SIZE` is held: in no byte when its domain is one value.
-type PicoTxQueueSizeHeld = Limited<PicoTxQueueSize, { PicoTxQueueSize::HELD }>;
+pub type PicoTxQueueSizeHeld = Limited<PicoTxQueueSize, { PicoTxQueueSize::HELD }>;
 
 /// `SNAPSHOT_PERIOD_MS`: How often, in milliseconds, the node takes a snapshot of itself:
 /// what it spends and how its messages are spaced.
@@ -679,7 +709,7 @@ impl LimitSpec for SnapshotPeriodMs {
 const _: LimitDomain = SnapshotPeriodMs::DOMAIN;
 
 /// How `SNAPSHOT_PERIOD_MS` is held: in no byte when its domain is one value.
-type SnapshotPeriodMsHeld = Limited<SnapshotPeriodMs, { SnapshotPeriodMs::HELD }>;
+pub type SnapshotPeriodMsHeld = Limited<SnapshotPeriodMs, { SnapshotPeriodMs::HELD }>;
 
 /// `SNAPSHOT_HISTOGRAM_BUCKETS`: How many buckets the snapshot's message-interval histogram
 /// has, each 8 bytes.
@@ -699,7 +729,7 @@ impl LimitSpec for SnapshotHistogramBuckets {
 const _: LimitDomain = SnapshotHistogramBuckets::DOMAIN;
 
 /// How `SNAPSHOT_HISTOGRAM_BUCKETS` is held: in no byte when its domain is one value.
-type SnapshotHistogramBucketsHeld =
+pub type SnapshotHistogramBucketsHeld =
     Limited<SnapshotHistogramBuckets, { SnapshotHistogramBuckets::HELD }>;
 
 /// `SUPERVISION_CHECKPOINTS`: How many checkpoints the node's supervisor watches.
@@ -719,7 +749,8 @@ impl LimitSpec for SupervisionCheckpoints {
 const _: LimitDomain = SupervisionCheckpoints::DOMAIN;
 
 /// How `SUPERVISION_CHECKPOINTS` is held: in no byte when its domain is one value.
-type SupervisionCheckpointsHeld = Limited<SupervisionCheckpoints, { SupervisionCheckpoints::HELD }>;
+pub type SupervisionCheckpointsHeld =
+    Limited<SupervisionCheckpoints, { SupervisionCheckpoints::HELD }>;
 
 /// `E2E_SUPERVISED_STREAMS`: How many periodic streams one reception supervisor holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -737,7 +768,8 @@ impl LimitSpec for E2eSupervisedStreams {
 const _: LimitDomain = E2eSupervisedStreams::DOMAIN;
 
 /// How `E2E_SUPERVISED_STREAMS` is held: in no byte when its domain is one value.
-type E2eSupervisedStreamsHeld = Limited<E2eSupervisedStreams, { E2eSupervisedStreams::HELD }>;
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type E2eSupervisedStreamsHeld = Limited<E2eSupervisedStreams, { E2eSupervisedStreams::HELD }>;
 
 /// `APP_LINK_QUEUE_BYTES`: The most bytes one link of a transport the program supplies
 /// queues in either direction: what the program handed in and the session has not read, and
@@ -757,7 +789,8 @@ impl LimitSpec for AppLinkQueueBytes {
 const _: LimitDomain = AppLinkQueueBytes::DOMAIN;
 
 /// How `APP_LINK_QUEUE_BYTES` is held: in no byte when its domain is one value.
-type AppLinkQueueBytesHeld = Limited<AppLinkQueueBytes, { AppLinkQueueBytes::HELD }>;
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type AppLinkQueueBytesHeld = Limited<AppLinkQueueBytes, { AppLinkQueueBytes::HELD }>;
 
 /// `EVENT_RING_SLOTS`: How many event records the node's event ring holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -776,7 +809,7 @@ impl LimitSpec for EventRingSlots {
 const _: LimitDomain = EventRingSlots::DOMAIN;
 
 /// How `EVENT_RING_SLOTS` is held: in no byte when its domain is one value.
-type EventRingSlotsHeld = Limited<EventRingSlots, { EventRingSlots::HELD }>;
+pub type EventRingSlotsHeld = Limited<EventRingSlots, { EventRingSlots::HELD }>;
 
 /// `CLOCK_SOURCES`: How many clock sources an application can register with the node at
 /// once, when the clock-source capability is on.
@@ -795,7 +828,8 @@ impl LimitSpec for ClockSources {
 const _: LimitDomain = ClockSources::DOMAIN;
 
 /// How `CLOCK_SOURCES` is held: in no byte when its domain is one value.
-type ClockSourcesHeld = Limited<ClockSources, { ClockSources::HELD }>;
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type ClockSourcesHeld = Limited<ClockSources, { ClockSources::HELD }>;
 
 /// `E2E_SENDER_SLOTS`: How many senders one receiving judge of end-to-end protected frames
 /// keeps a counter for, when the e2e-sender-demux capability is on.
@@ -814,7 +848,8 @@ impl LimitSpec for E2eSenderSlots {
 const _: LimitDomain = E2eSenderSlots::DOMAIN;
 
 /// How `E2E_SENDER_SLOTS` is held: in no byte when its domain is one value.
-type E2eSenderSlotsHeld = Limited<E2eSenderSlots, { E2eSenderSlots::HELD }>;
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type E2eSenderSlotsHeld = Limited<E2eSenderSlots, { E2eSenderSlots::HELD }>;
 
 /// `REPLAY_DEPTH_MAX`: The deepest replay a message may keep: how many of the frames it
 /// last sent, as they were sent, a publisher holds for a subscriber that arrives later and
@@ -834,7 +869,8 @@ impl LimitSpec for ReplayDepthMax {
 const _: LimitDomain = ReplayDepthMax::DOMAIN;
 
 /// How `REPLAY_DEPTH_MAX` is held: in no byte when its domain is one value.
-type ReplayDepthMaxHeld = Limited<ReplayDepthMax, { ReplayDepthMax::HELD }>;
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type ReplayDepthMaxHeld = Limited<ReplayDepthMax, { ReplayDepthMax::HELD }>;
 
 /// `MESSAGE_CATALOG_ENTRIES`: How many messages one message catalog declares, when the
 /// message-catalog capability is on.
@@ -853,7 +889,9 @@ impl LimitSpec for MessageCatalogEntries {
 const _: LimitDomain = MessageCatalogEntries::DOMAIN;
 
 /// How `MESSAGE_CATALOG_ENTRIES` is held: in no byte when its domain is one value.
-type MessageCatalogEntriesHeld = Limited<MessageCatalogEntries, { MessageCatalogEntries::HELD }>;
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type MessageCatalogEntriesHeld =
+    Limited<MessageCatalogEntries, { MessageCatalogEntries::HELD }>;
 
 /// `INSTANCE_KEY_FIELDS`: How many fields of a payload one message's instance key names,
 /// when the instance-key capability is on.
@@ -872,7 +910,8 @@ impl LimitSpec for InstanceKeyFields {
 const _: LimitDomain = InstanceKeyFields::DOMAIN;
 
 /// How `INSTANCE_KEY_FIELDS` is held: in no byte when its domain is one value.
-type InstanceKeyFieldsHeld = Limited<InstanceKeyFields, { InstanceKeyFields::HELD }>;
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type InstanceKeyFieldsHeld = Limited<InstanceKeyFields, { InstanceKeyFields::HELD }>;
 
 /// `INSTANCES_PER_MESSAGE`: How many instances one message's instance key may tell apart,
 /// when the instance-key capability is on: the product of the lengths of the lists of
@@ -892,7 +931,8 @@ impl LimitSpec for InstancesPerMessage {
 const _: LimitDomain = InstancesPerMessage::DOMAIN;
 
 /// How `INSTANCES_PER_MESSAGE` is held: in no byte when its domain is one value.
-type InstancesPerMessageHeld = Limited<InstancesPerMessage, { InstancesPerMessage::HELD }>;
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type InstancesPerMessageHeld = Limited<InstancesPerMessage, { InstancesPerMessage::HELD }>;
 
 /// `CLOCK_MAX_FORWARD_STEP_MS`: How far ahead of the node's clock, in milliseconds, a
 /// timestamp from another node may be before the node's hybrid logical clock refuses it, as
@@ -913,7 +953,8 @@ impl LimitSpec for ClockMaxForwardStepMs {
 const _: LimitDomain = ClockMaxForwardStepMs::DOMAIN;
 
 /// How `CLOCK_MAX_FORWARD_STEP_MS` is held: in no byte when its domain is one value.
-type ClockMaxForwardStepMsHeld = Limited<ClockMaxForwardStepMs, { ClockMaxForwardStepMs::HELD }>;
+pub type ClockMaxForwardStepMsHeld =
+    Limited<ClockMaxForwardStepMs, { ClockMaxForwardStepMs::HELD }>;
 
 /// `DECLARATION_SYNC_BURST_MESSAGES`: How many declarations one turn of a paced declaration
 /// replay sends, when the declaration-sync-pacing policy is on.
@@ -933,7 +974,7 @@ impl LimitSpec for DeclarationSyncBurstMessages {
 const _: LimitDomain = DeclarationSyncBurstMessages::DOMAIN;
 
 /// How `DECLARATION_SYNC_BURST_MESSAGES` is held: in no byte when its domain is one value.
-type DeclarationSyncBurstMessagesHeld =
+pub type DeclarationSyncBurstMessagesHeld =
     Limited<DeclarationSyncBurstMessages, { DeclarationSyncBurstMessages::HELD }>;
 
 /// `DECLARATION_SYNC_FINAL_TIMEOUT_MS`: How long, in milliseconds, a node waits for the
@@ -955,7 +996,7 @@ impl LimitSpec for DeclarationSyncFinalTimeoutMs {
 const _: LimitDomain = DeclarationSyncFinalTimeoutMs::DOMAIN;
 
 /// How `DECLARATION_SYNC_FINAL_TIMEOUT_MS` is held: in no byte when its domain is one value.
-type DeclarationSyncFinalTimeoutMsHeld =
+pub type DeclarationSyncFinalTimeoutMsHeld =
     Limited<DeclarationSyncFinalTimeoutMs, { DeclarationSyncFinalTimeoutMs::HELD }>;
 
 /// `DECLARATION_SYNC_INTERVAL_MS`: How long, in milliseconds, a paced declaration replay
@@ -976,7 +1017,7 @@ impl LimitSpec for DeclarationSyncIntervalMs {
 const _: LimitDomain = DeclarationSyncIntervalMs::DOMAIN;
 
 /// How `DECLARATION_SYNC_INTERVAL_MS` is held: in no byte when its domain is one value.
-type DeclarationSyncIntervalMsHeld =
+pub type DeclarationSyncIntervalMsHeld =
     Limited<DeclarationSyncIntervalMs, { DeclarationSyncIntervalMs::HELD }>;
 
 /// `DECLARATION_SYNC_RX_NO_PROGRESS_MS`: How long, in milliseconds, a session waits for the
@@ -998,7 +1039,7 @@ impl LimitSpec for DeclarationSyncRxNoProgressMs {
 const _: LimitDomain = DeclarationSyncRxNoProgressMs::DOMAIN;
 
 /// How `DECLARATION_SYNC_RX_NO_PROGRESS_MS` is held: in no byte when its domain is one value.
-type DeclarationSyncRxNoProgressMsHeld =
+pub type DeclarationSyncRxNoProgressMsHeld =
     Limited<DeclarationSyncRxNoProgressMs, { DeclarationSyncRxNoProgressMs::HELD }>;
 
 /// `DECLARATION_SYNC_RETRY_INTERVAL_MS`: How long, in milliseconds, a paced declaration
@@ -1020,7 +1061,7 @@ impl LimitSpec for DeclarationSyncRetryIntervalMs {
 const _: LimitDomain = DeclarationSyncRetryIntervalMs::DOMAIN;
 
 /// How `DECLARATION_SYNC_RETRY_INTERVAL_MS` is held: in no byte when its domain is one value.
-type DeclarationSyncRetryIntervalMsHeld =
+pub type DeclarationSyncRetryIntervalMsHeld =
     Limited<DeclarationSyncRetryIntervalMs, { DeclarationSyncRetryIntervalMs::HELD }>;
 
 /// `DECLARATION_SYNC_TX_NO_PROGRESS_MS`: How long, in milliseconds, a paced declaration
@@ -1043,7 +1084,7 @@ impl LimitSpec for DeclarationSyncTxNoProgressMs {
 const _: LimitDomain = DeclarationSyncTxNoProgressMs::DOMAIN;
 
 /// How `DECLARATION_SYNC_TX_NO_PROGRESS_MS` is held: in no byte when its domain is one value.
-type DeclarationSyncTxNoProgressMsHeld =
+pub type DeclarationSyncTxNoProgressMsHeld =
     Limited<DeclarationSyncTxNoProgressMs, { DeclarationSyncTxNoProgressMs::HELD }>;
 
 /// `PICO_UNICAST_BATCH_BYTES`: The batch size, in bytes, a session of the zenoh-pico
@@ -1065,7 +1106,8 @@ impl LimitSpec for PicoUnicastBatchBytes {
 const _: LimitDomain = PicoUnicastBatchBytes::DOMAIN;
 
 /// How `PICO_UNICAST_BATCH_BYTES` is held: in no byte when its domain is one value.
-type PicoUnicastBatchBytesHeld = Limited<PicoUnicastBatchBytes, { PicoUnicastBatchBytes::HELD }>;
+pub type PicoUnicastBatchBytesHeld =
+    Limited<PicoUnicastBatchBytes, { PicoUnicastBatchBytes::HELD }>;
 
 /// `PICO_MULTICAST_BATCH_BYTES`: The batch size, in bytes, a session of the zenoh-pico
 /// interface advertises in the Join of a multicast group, as zenoh-pico's
@@ -1086,7 +1128,7 @@ impl LimitSpec for PicoMulticastBatchBytes {
 const _: LimitDomain = PicoMulticastBatchBytes::DOMAIN;
 
 /// How `PICO_MULTICAST_BATCH_BYTES` is held: in no byte when its domain is one value.
-type PicoMulticastBatchBytesHeld =
+pub type PicoMulticastBatchBytesHeld =
     Limited<PicoMulticastBatchBytes, { PicoMulticastBatchBytes::HELD }>;
 
 /// `PICO_LEASE_MS`: The lease, in milliseconds, a session of the zenoh-pico interface
@@ -1107,7 +1149,7 @@ impl LimitSpec for PicoLeaseMs {
 const _: LimitDomain = PicoLeaseMs::DOMAIN;
 
 /// How `PICO_LEASE_MS` is held: in no byte when its domain is one value.
-type PicoLeaseMsHeld = Limited<PicoLeaseMs, { PicoLeaseMs::HELD }>;
+pub type PicoLeaseMsHeld = Limited<PicoLeaseMs, { PicoLeaseMs::HELD }>;
 
 /// `PICO_SOCKET_TIMEOUT_MS`: How long, in milliseconds, one read step of the cooperative
 /// zenoh-pico session waits on its link before it returns with nothing, as zenoh-pico's
@@ -1128,7 +1170,7 @@ impl LimitSpec for PicoSocketTimeoutMs {
 const _: LimitDomain = PicoSocketTimeoutMs::DOMAIN;
 
 /// How `PICO_SOCKET_TIMEOUT_MS` is held: in no byte when its domain is one value.
-type PicoSocketTimeoutMsHeld = Limited<PicoSocketTimeoutMs, { PicoSocketTimeoutMs::HELD }>;
+pub type PicoSocketTimeoutMsHeld = Limited<PicoSocketTimeoutMs, { PicoSocketTimeoutMs::HELD }>;
 
 /// `PICO_CONNECT_TIMEOUT_MS`: How long, in milliseconds, each open of an endpoint by a
 /// zenoh-pico session waits for the dial and the handshake before it fails, on either
@@ -1149,7 +1191,7 @@ impl LimitSpec for PicoConnectTimeoutMs {
 const _: LimitDomain = PicoConnectTimeoutMs::DOMAIN;
 
 /// How `PICO_CONNECT_TIMEOUT_MS` is held: in no byte when its domain is one value.
-type PicoConnectTimeoutMsHeld = Limited<PicoConnectTimeoutMs, { PicoConnectTimeoutMs::HELD }>;
+pub type PicoConnectTimeoutMsHeld = Limited<PicoConnectTimeoutMs, { PicoConnectTimeoutMs::HELD }>;
 
 /// `PICO_FRAG_MAX_BYTES`: The largest message, in bytes, a session of the zenoh-pico
 /// interface rejoins from fragments, unicast and in a multicast group, as zenoh-pico's
@@ -1169,7 +1211,8 @@ impl LimitSpec for PicoFragMaxBytes {
 const _: LimitDomain = PicoFragMaxBytes::DOMAIN;
 
 /// How `PICO_FRAG_MAX_BYTES` is held: in no byte when its domain is one value.
-type PicoFragMaxBytesHeld = Limited<PicoFragMaxBytes, { PicoFragMaxBytes::HELD }>;
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type PicoFragMaxBytesHeld = Limited<PicoFragMaxBytes, { PicoFragMaxBytes::HELD }>;
 
 /// `PICO_ACCEPT_TIMEOUT_MS`: How long, in milliseconds, a listening session of the zenoh-
 /// pico interface gives an inbound link to complete its whole handshake, link handshake
@@ -1191,7 +1234,7 @@ impl LimitSpec for PicoAcceptTimeoutMs {
 const _: LimitDomain = PicoAcceptTimeoutMs::DOMAIN;
 
 /// How `PICO_ACCEPT_TIMEOUT_MS` is held: in no byte when its domain is one value.
-type PicoAcceptTimeoutMsHeld = Limited<PicoAcceptTimeoutMs, { PicoAcceptTimeoutMs::HELD }>;
+pub type PicoAcceptTimeoutMsHeld = Limited<PicoAcceptTimeoutMs, { PicoAcceptTimeoutMs::HELD }>;
 
 /// `PICO_KEEPALIVES_PER_LEASE`: How many keepalives a session of the zenoh-pico interface
 /// sends in one lease, as zenoh-pico's Z_TRANSPORT_LEASE_EXPIRE_FACTOR: whenever the line
@@ -1212,7 +1255,8 @@ impl LimitSpec for PicoKeepalivesPerLease {
 const _: LimitDomain = PicoKeepalivesPerLease::DOMAIN;
 
 /// How `PICO_KEEPALIVES_PER_LEASE` is held: in no byte when its domain is one value.
-type PicoKeepalivesPerLeaseHeld = Limited<PicoKeepalivesPerLease, { PicoKeepalivesPerLease::HELD }>;
+pub type PicoKeepalivesPerLeaseHeld =
+    Limited<PicoKeepalivesPerLease, { PicoKeepalivesPerLease::HELD }>;
 
 /// The value of every limit a session holds, as one snapshot: what a creator resolved and
 /// hands the machines of its scope. A machine reads a limit through the accessor of its
@@ -1389,6 +1433,12 @@ impl SessionLimits {
         self.max_keyexpr_bytes.get()
     }
 
+    /// `MAX_KEYEXPR_BYTES` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn max_keyexpr_bytes_held(&self) -> MaxKeyexprBytesHeld {
+        self.max_keyexpr_bytes
+    }
+
     /// Selects `MAX_KEYEXPR_BYTES`, when the build's domain holds `value`.
     pub fn select_max_keyexpr_bytes(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
         self.max_keyexpr_bytes = Limited::select(value)?;
@@ -1398,6 +1448,12 @@ impl SessionLimits {
     /// `MAX_SUBSCRIPTIONS` as this snapshot holds it.
     pub const fn max_subscriptions(&self) -> Quota {
         self.max_subscriptions.get()
+    }
+
+    /// `MAX_SUBSCRIPTIONS` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn max_subscriptions_held(&self) -> MaxSubscriptionsHeld {
+        self.max_subscriptions
     }
 
     /// Selects `MAX_SUBSCRIPTIONS`, when the build's domain holds `value`.
@@ -1422,6 +1478,12 @@ impl SessionLimits {
         self.delivery_lane_events.get()
     }
 
+    /// `DELIVERY_LANE_EVENTS` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn delivery_lane_events_held(&self) -> DeliveryLaneEventsHeld {
+        self.delivery_lane_events
+    }
+
     /// Selects `DELIVERY_LANE_EVENTS`, when the build's domain holds `value`.
     pub fn select_delivery_lane_events(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
         self.delivery_lane_events = Limited::select(value)?;
@@ -1444,6 +1506,12 @@ impl SessionLimits {
         self.delivery_lane_callbacks.get()
     }
 
+    /// `DELIVERY_LANE_CALLBACKS` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn delivery_lane_callbacks_held(&self) -> DeliveryLaneCallbacksHeld {
+        self.delivery_lane_callbacks
+    }
+
     /// Selects `DELIVERY_LANE_CALLBACKS`, when the build's domain holds `value`.
     pub fn select_delivery_lane_callbacks(
         &mut self,
@@ -1458,6 +1526,12 @@ impl SessionLimits {
         self.max_queryables.get()
     }
 
+    /// `MAX_QUERYABLES` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn max_queryables_held(&self) -> MaxQueryablesHeld {
+        self.max_queryables
+    }
+
     /// Selects `MAX_QUERYABLES`, when the build's domain holds `value`.
     pub fn select_max_queryables(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
         self.max_queryables = Limited::select(value)?;
@@ -1467,6 +1541,12 @@ impl SessionLimits {
     /// `MAX_PENDING_QUERIES` as this snapshot holds it.
     pub const fn max_pending_queries(&self) -> Quota {
         self.max_pending_queries.get()
+    }
+
+    /// `MAX_PENDING_QUERIES` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn max_pending_queries_held(&self) -> MaxPendingQueriesHeld {
+        self.max_pending_queries
     }
 
     /// Selects `MAX_PENDING_QUERIES`, when the build's domain holds `value`.
@@ -1491,6 +1571,12 @@ impl SessionLimits {
         self.max_decl_observers.get()
     }
 
+    /// `MAX_DECL_OBSERVERS` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn max_decl_observers_held(&self) -> MaxDeclObserversHeld {
+        self.max_decl_observers
+    }
+
     /// Selects `MAX_DECL_OBSERVERS`, when the build's domain holds `value`.
     pub fn select_max_decl_observers(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
         self.max_decl_observers = Limited::select(value)?;
@@ -1500,6 +1586,12 @@ impl SessionLimits {
     /// `MAX_LIVELINESS_SUBSCRIPTIONS` as this snapshot holds it.
     pub const fn max_liveliness_subscriptions(&self) -> Quota {
         self.max_liveliness_subscriptions.get()
+    }
+
+    /// `MAX_LIVELINESS_SUBSCRIPTIONS` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn max_liveliness_subscriptions_held(&self) -> MaxLivelinessSubscriptionsHeld {
+        self.max_liveliness_subscriptions
     }
 
     /// Selects `MAX_LIVELINESS_SUBSCRIPTIONS`, when the build's domain holds `value`.
@@ -1516,6 +1608,12 @@ impl SessionLimits {
         self.max_local_tokens.get()
     }
 
+    /// `MAX_LOCAL_TOKENS` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn max_local_tokens_held(&self) -> MaxLocalTokensHeld {
+        self.max_local_tokens
+    }
+
     /// Selects `MAX_LOCAL_TOKENS`, when the build's domain holds `value`.
     pub fn select_max_local_tokens(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
         self.max_local_tokens = Limited::select(value)?;
@@ -1525,6 +1623,12 @@ impl SessionLimits {
     /// `MAX_PENDING_LIVELINESS_GETS` as this snapshot holds it.
     pub const fn max_pending_liveliness_gets(&self) -> Quota {
         self.max_pending_liveliness_gets.get()
+    }
+
+    /// `MAX_PENDING_LIVELINESS_GETS` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn max_pending_liveliness_gets_held(&self) -> MaxPendingLivelinessGetsHeld {
+        self.max_pending_liveliness_gets
     }
 
     /// Selects `MAX_PENDING_LIVELINESS_GETS`, when the build's domain holds `value`.
@@ -1541,6 +1645,12 @@ impl SessionLimits {
         self.max_pending_declares.get()
     }
 
+    /// `MAX_PENDING_DECLARES` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn max_pending_declares_held(&self) -> MaxPendingDeclaresHeld {
+        self.max_pending_declares
+    }
+
     /// Selects `MAX_PENDING_DECLARES`, when the build's domain holds `value`.
     pub fn select_max_pending_declares(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
         self.max_pending_declares = Limited::select(value)?;
@@ -1550,6 +1660,12 @@ impl SessionLimits {
     /// `MAX_INBOUND_SUB_INTERESTS` as this snapshot holds it.
     pub const fn max_inbound_sub_interests(&self) -> Quota {
         self.max_inbound_sub_interests.get()
+    }
+
+    /// `MAX_INBOUND_SUB_INTERESTS` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn max_inbound_sub_interests_held(&self) -> MaxInboundSubInterestsHeld {
+        self.max_inbound_sub_interests
     }
 
     /// Selects `MAX_INBOUND_SUB_INTERESTS`, when the build's domain holds `value`.
@@ -1566,6 +1682,12 @@ impl SessionLimits {
         self.max_peer_keyexpr_aliases.get()
     }
 
+    /// `MAX_PEER_KEYEXPR_ALIASES` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn max_peer_keyexpr_aliases_held(&self) -> MaxPeerKeyexprAliasesHeld {
+        self.max_peer_keyexpr_aliases
+    }
+
     /// Selects `MAX_PEER_KEYEXPR_ALIASES`, when the build's domain holds `value`.
     pub fn select_max_peer_keyexpr_aliases(
         &mut self,
@@ -1580,6 +1702,12 @@ impl SessionLimits {
         self.max_shared_key_ids.get()
     }
 
+    /// `MAX_SHARED_KEY_IDS` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn max_shared_key_ids_held(&self) -> MaxSharedKeyIdsHeld {
+        self.max_shared_key_ids
+    }
+
     /// Selects `MAX_SHARED_KEY_IDS`, when the build's domain holds `value`.
     pub fn select_max_shared_key_ids(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
         self.max_shared_key_ids = Limited::select(value)?;
@@ -1589,6 +1717,12 @@ impl SessionLimits {
     /// `MAX_REMOTE_DECLS` as this snapshot holds it.
     pub const fn max_remote_decls(&self) -> Quota {
         self.max_remote_decls.get()
+    }
+
+    /// `MAX_REMOTE_DECLS` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn max_remote_decls_held(&self) -> MaxRemoteDeclsHeld {
+        self.max_remote_decls
     }
 
     /// Selects `MAX_REMOTE_DECLS`, when the build's domain holds `value`.
@@ -1602,6 +1736,12 @@ impl SessionLimits {
         self.max_pending_replies.get()
     }
 
+    /// `MAX_PENDING_REPLIES` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn max_pending_replies_held(&self) -> MaxPendingRepliesHeld {
+        self.max_pending_replies
+    }
+
     /// Selects `MAX_PENDING_REPLIES`, when the build's domain holds `value`.
     pub fn select_max_pending_replies(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
         self.max_pending_replies = Limited::select(value)?;
@@ -1613,6 +1753,12 @@ impl SessionLimits {
         self.max_pending_finals.get()
     }
 
+    /// `MAX_PENDING_FINALS` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn max_pending_finals_held(&self) -> MaxPendingFinalsHeld {
+        self.max_pending_finals
+    }
+
     /// Selects `MAX_PENDING_FINALS`, when the build's domain holds `value`.
     pub fn select_max_pending_finals(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
         self.max_pending_finals = Limited::select(value)?;
@@ -1622,6 +1768,12 @@ impl SessionLimits {
     /// `MAX_REPLY_PAYLOAD_BYTES` as this snapshot holds it.
     pub const fn max_reply_payload_bytes(&self) -> Quota {
         self.max_reply_payload_bytes.get()
+    }
+
+    /// `MAX_REPLY_PAYLOAD_BYTES` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn max_reply_payload_bytes_held(&self) -> MaxReplyPayloadBytesHeld {
+        self.max_reply_payload_bytes
     }
 
     /// Selects `MAX_REPLY_PAYLOAD_BYTES`, when the build's domain holds `value`.
@@ -1638,6 +1790,12 @@ impl SessionLimits {
         self.max_multicast_replies.get()
     }
 
+    /// `MAX_MULTICAST_REPLIES` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn max_multicast_replies_held(&self) -> MaxMulticastRepliesHeld {
+        self.max_multicast_replies
+    }
+
     /// Selects `MAX_MULTICAST_REPLIES`, when the build's domain holds `value`.
     pub fn select_max_multicast_replies(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
         self.max_multicast_replies = Limited::select(value)?;
@@ -1647,6 +1805,12 @@ impl SessionLimits {
     /// `QUERIER_MAX_PENDING_QUERIES` as this snapshot holds it.
     pub const fn querier_max_pending_queries(&self) -> Quota {
         self.querier_max_pending_queries.get()
+    }
+
+    /// `QUERIER_MAX_PENDING_QUERIES` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn querier_max_pending_queries_held(&self) -> QuerierMaxPendingQueriesHeld {
+        self.querier_max_pending_queries
     }
 
     /// Selects `QUERIER_MAX_PENDING_QUERIES`, when the build's domain holds `value`.
@@ -1675,6 +1839,12 @@ impl SessionLimits {
     /// `TX_EXPIRY_CLOSE_AFTER` as this snapshot holds it.
     pub const fn tx_expiry_close_after(&self) -> Quota {
         self.tx_expiry_close_after.get()
+    }
+
+    /// `TX_EXPIRY_CLOSE_AFTER` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn tx_expiry_close_after_held(&self) -> TxExpiryCloseAfterHeld {
+        self.tx_expiry_close_after
     }
 
     /// Selects `TX_EXPIRY_CLOSE_AFTER`, when the build's domain holds `value`.
@@ -1716,6 +1886,12 @@ impl SessionLimits {
         self.query_parameters_max_bytes.get()
     }
 
+    /// `QUERY_PARAMETERS_MAX_BYTES` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn query_parameters_max_bytes_held(&self) -> QueryParametersMaxBytesHeld {
+        self.query_parameters_max_bytes
+    }
+
     /// Selects `QUERY_PARAMETERS_MAX_BYTES`, when the build's domain holds `value`.
     pub fn select_query_parameters_max_bytes(
         &mut self,
@@ -1728,6 +1904,12 @@ impl SessionLimits {
     /// `QUERY_ATTACHMENT_MAX_BYTES` as this snapshot holds it.
     pub const fn query_attachment_max_bytes(&self) -> Quota {
         self.query_attachment_max_bytes.get()
+    }
+
+    /// `QUERY_ATTACHMENT_MAX_BYTES` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn query_attachment_max_bytes_held(&self) -> QueryAttachmentMaxBytesHeld {
+        self.query_attachment_max_bytes
     }
 
     /// Selects `QUERY_ATTACHMENT_MAX_BYTES`, when the build's domain holds `value`.
@@ -1755,6 +1937,12 @@ impl SessionLimits {
         self.app_link_queue_bytes.get()
     }
 
+    /// `APP_LINK_QUEUE_BYTES` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn app_link_queue_bytes_held(&self) -> AppLinkQueueBytesHeld {
+        self.app_link_queue_bytes
+    }
+
     /// Selects `APP_LINK_QUEUE_BYTES`, when the build's domain holds `value`.
     pub fn select_app_link_queue_bytes(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
         self.app_link_queue_bytes = Limited::select(value)?;
@@ -1764,6 +1952,12 @@ impl SessionLimits {
     /// `E2E_SENDER_SLOTS` as this snapshot holds it.
     pub const fn e2e_sender_slots(&self) -> Quota {
         self.e2e_sender_slots.get()
+    }
+
+    /// `E2E_SENDER_SLOTS` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn e2e_sender_slots_held(&self) -> E2eSenderSlotsHeld {
+        self.e2e_sender_slots
     }
 
     /// Selects `E2E_SENDER_SLOTS`, when the build's domain holds `value`.
@@ -1777,6 +1971,12 @@ impl SessionLimits {
         self.replay_depth_max.get()
     }
 
+    /// `REPLAY_DEPTH_MAX` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn replay_depth_max_held(&self) -> ReplayDepthMaxHeld {
+        self.replay_depth_max
+    }
+
     /// Selects `REPLAY_DEPTH_MAX`, when the build's domain holds `value`.
     pub fn select_replay_depth_max(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
         self.replay_depth_max = Limited::select(value)?;
@@ -1788,6 +1988,12 @@ impl SessionLimits {
         self.instance_key_fields.get()
     }
 
+    /// `INSTANCE_KEY_FIELDS` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn instance_key_fields_held(&self) -> InstanceKeyFieldsHeld {
+        self.instance_key_fields
+    }
+
     /// Selects `INSTANCE_KEY_FIELDS`, when the build's domain holds `value`.
     pub fn select_instance_key_fields(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
         self.instance_key_fields = Limited::select(value)?;
@@ -1797,6 +2003,12 @@ impl SessionLimits {
     /// `INSTANCES_PER_MESSAGE` as this snapshot holds it.
     pub const fn instances_per_message(&self) -> Quota {
         self.instances_per_message.get()
+    }
+
+    /// `INSTANCES_PER_MESSAGE` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn instances_per_message_held(&self) -> InstancesPerMessageHeld {
+        self.instances_per_message
     }
 
     /// Selects `INSTANCES_PER_MESSAGE`, when the build's domain holds `value`.
@@ -1959,6 +2171,12 @@ impl SessionLimits {
     /// `PICO_FRAG_MAX_BYTES` as this snapshot holds it.
     pub const fn pico_frag_max_bytes(&self) -> Quota {
         self.pico_frag_max_bytes.get()
+    }
+
+    /// `PICO_FRAG_MAX_BYTES` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn pico_frag_max_bytes_held(&self) -> PicoFragMaxBytesHeld {
+        self.pico_frag_max_bytes
     }
 
     /// Selects `PICO_FRAG_MAX_BYTES`, when the build's domain holds `value`.
@@ -2607,6 +2825,12 @@ impl RuntimeLimits {
         self.max_locator_len.get()
     }
 
+    /// `MAX_LOCATOR_LEN` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn max_locator_len_held(&self) -> MaxLocatorLenHeld {
+        self.max_locator_len
+    }
+
     /// Selects `MAX_LOCATOR_LEN`, when the build's domain holds `value`.
     pub fn select_max_locator_len(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
         self.max_locator_len = Limited::select(value)?;
@@ -2616,6 +2840,12 @@ impl RuntimeLimits {
     /// `MAX_STATIC_CONNECT` as this snapshot holds it.
     pub const fn max_static_connect(&self) -> Quota {
         self.max_static_connect.get()
+    }
+
+    /// `MAX_STATIC_CONNECT` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn max_static_connect_held(&self) -> MaxStaticConnectHeld {
+        self.max_static_connect
     }
 
     /// Selects `MAX_STATIC_CONNECT`, when the build's domain holds `value`.
@@ -2668,6 +2898,12 @@ impl RuntimeLimits {
         self.e2e_supervised_streams.get()
     }
 
+    /// `E2E_SUPERVISED_STREAMS` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn e2e_supervised_streams_held(&self) -> E2eSupervisedStreamsHeld {
+        self.e2e_supervised_streams
+    }
+
     /// Selects `E2E_SUPERVISED_STREAMS`, when the build's domain holds `value`.
     pub fn select_e2e_supervised_streams(
         &mut self,
@@ -2693,6 +2929,12 @@ impl RuntimeLimits {
         self.clock_sources.get()
     }
 
+    /// `CLOCK_SOURCES` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn clock_sources_held(&self) -> ClockSourcesHeld {
+        self.clock_sources
+    }
+
     /// Selects `CLOCK_SOURCES`, when the build's domain holds `value`.
     pub fn select_clock_sources(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
         self.clock_sources = Limited::select(value)?;
@@ -2702,6 +2944,12 @@ impl RuntimeLimits {
     /// `MESSAGE_CATALOG_ENTRIES` as this snapshot holds it.
     pub const fn message_catalog_entries(&self) -> Quota {
         self.message_catalog_entries.get()
+    }
+
+    /// `MESSAGE_CATALOG_ENTRIES` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn message_catalog_entries_held(&self) -> MessageCatalogEntriesHeld {
+        self.message_catalog_entries
     }
 
     /// Selects `MESSAGE_CATALOG_ENTRIES`, when the build's domain holds `value`.

@@ -297,6 +297,11 @@ pub use crate::keyexpr_match::{keyexpr_intersects, keyexpr_matches};
 /// need cross-task sharing wrap in `Arc<Mutex<…>>`.
 pub struct SubscriberTable<C: SampleSink, P: Storage = Profile> {
     subscribers: BoundedVec<Subscriber<C, P>, { caps::MAX_SUBSCRIPTIONS }, P>,
+    /// The most subscriptions the table admits (`MAX_SUBSCRIPTIONS`): what the creator of the
+    /// table resolved ([`Self::limit_to`]), the build's value until it does. A growable table
+    /// refuses nothing by its storage, so this is what bounds it; where the build fixes the
+    /// bound to the storage's capacity it is held in no byte and the storage refuses alone.
+    quota: crate::limits::MaxSubscriptionsHeld,
     /// The declaration id the next subscription or aggregate reply takes. It
     /// starts at 1, as upstream's counter does (0 is the routing core's), and
     /// it is a `u64` only so that it can stand one past `u32::MAX`, which is
@@ -746,6 +751,7 @@ impl<C: SampleSink, P: Storage> Default for SubscriberTable<C, P> {
     fn default() -> Self {
         Self {
             subscribers: BoundedVec::default(),
+            quota: Default::default(),
             next_id: 1,
             epoch: 0,
             #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
@@ -764,6 +770,13 @@ impl<C: SampleSink, P: Storage> Default for SubscriberTable<C, P> {
 }
 
 impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
+    /// Hold the table to the `MAX_SUBSCRIPTIONS` its creator resolved: a registration that would
+    /// leave more subscriptions than `quota` admits is refused ([`RegisterError::TableFull`]),
+    /// and the subscriptions already in are kept, as a lowered soft limit keeps what it holds.
+    pub fn limit_to(&mut self, quota: crate::limits::MaxSubscriptionsHeld) {
+        self.quota = quota;
+    }
+
     /// Replace the gate that decides which keys a message from a peer may be on, which starts as
     /// what the build's `key-set` policy states. A closed image hands it the gate over its
     /// generated table. The counts of the gate it replaces are not carried over.
@@ -1031,6 +1044,11 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
                     raw
                 }
             };
+        // The quota first, before the key gate numbers an entity or an id is taken: a refused
+        // registration changes nothing.
+        if !self.quota.admits(self.subscribers.len() + 1) {
+            return Err(RegisterError::TableFull);
+        }
         // A closed key set admits a subscription only on a pattern the image declares as one, and
         // numbers it: the entity it is delivered by. An open table has none.
         let entity = self

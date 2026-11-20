@@ -579,6 +579,33 @@ impl<L: LimitSpec, const HELD: usize> Limited<L, HELD> {
     }
 }
 
+impl<L: LimitSpec<Value = Quota>, const HELD: usize> Limited<L, HELD> {
+    /// Whether the table this bound limits admits a holder that would leave `count` in it. Asked
+    /// before any state changes, with the count the request would leave (`occupied + 1`, or a
+    /// size), so a quota lowered under what is held keeps what is in and refuses what is new.
+    ///
+    /// Where the build's domain is one value and that value is the capacity the storage was sized
+    /// by, the storage is the bound: it refuses the same request this would. Nothing is read or
+    /// compared then, decided in a `const` block when the build is compiled, so an image that
+    /// fixes the bound carries no comparison of its own.
+    pub const fn admits(&self, count: usize) -> bool {
+        if const { L::DOMAIN.is_singleton() && storage_is_the_bound::<L>() } {
+            true
+        } else {
+            self.get().admits(count)
+        }
+    }
+}
+
+/// Whether the build's value of `L` is the capacity its storage was sized by, so that storage
+/// refuses past the value by itself.
+const fn storage_is_the_bound<L: LimitSpec<Value = Quota>>() -> bool {
+    match (L::CAPACITY, L::DEFAULT.most()) {
+        (Some(capacity), Some(most)) => capacity == most,
+        _ => false,
+    }
+}
+
 impl<L: LimitSpec, const HELD: usize> Default for Limited<L, HELD> {
     /// The build's value.
     fn default() -> Self {
