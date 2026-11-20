@@ -93,12 +93,60 @@ pub trait GroupTransport {
     /// non-fatal (the next cadence retries), and the error is dropped.
     fn send_to_group(&mut self, datagram: &[u8]);
 
+    /// Multicast one datagram to the group if the socket takes it now, and say whether it did:
+    /// [`GroupSend::Full`] is a socket with no room for it, which nothing was sent to and which
+    /// the caller may offer the same datagram again; [`GroupSend::Failed`] is a send the stack
+    /// refused for any other reason, after which the datagram is lost. The loop's data emit sends
+    /// this way, so a datagram a full socket would have lost waits for room as the tokio group's
+    /// writer waits for it.
+    ///
+    /// A stack that cannot tell a full socket from a sent datagram answers [`GroupSend::Sent`]
+    /// after [`Self::send_to_group`], which is what the provided form does.
+    fn try_send_to_group(&mut self, datagram: &[u8]) -> GroupSend {
+        self.send_to_group(datagram);
+        GroupSend::Sent
+    }
+
+    /// Wait up to `timeout_us` microseconds for the socket to take another datagram: `true` once
+    /// it will (or once it has failed, which the send that follows reports), `false` when it still
+    /// would not when the time is up. A sender whose message found the group's queue full waits
+    /// here, as a unicast link's sender waits on its stream. A stack that cannot tell answers
+    /// `true` at once, which is what the provided form does.
+    fn wait_for_room(&self, timeout_us: u64) -> bool {
+        let _ = timeout_us;
+        true
+    }
+
+    /// [`Self::wait_for_room`] made from outside the loop that owns the transport, by a sender
+    /// with nothing of the session held: the group's half of
+    /// [`SessionDatagramLink::writability`](crate::session_drive::SessionDatagramLink::writability).
+    /// `None` for a stack that gives none; the heap profile's, as that one is.
+    #[cfg(all(
+        feature = "session-unicast",
+        feature = "alloc",
+        not(feature = "session-slot")
+    ))]
+    fn writability(&self) -> Option<alloc::boxed::Box<dyn crate::session_drive::LinkWritability>> {
+        None
+    }
+
     /// Lend the next inbound datagram and its source address to `f` WHERE THE
     /// TRANSPORT HOLDS IT, and let it go once `f` returns; `false` when nothing
     /// is queued. The source is the §3.2 peer key: an opaque equality key, so the
     /// only requirement is that one peer's datagrams always carry the same one.
     /// `f` must not call back into the transport.
     fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool;
+}
+
+/// What a group's socket did with a datagram it was offered ([`GroupTransport::try_send_to_group`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupSend {
+    /// The socket took it.
+    Sent,
+    /// The socket has no room for it now; nothing was sent.
+    Full,
+    /// The send failed otherwise; the datagram is lost.
+    Failed,
 }
 
 /// A transport a stack handed out boxed (`SessionLinks::open_group` on the heap profile) is the
@@ -123,6 +171,19 @@ impl<T: GroupTransport + ?Sized> GroupTransport for alloc::boxed::Box<T> {
 
     fn send_to_group(&mut self, datagram: &[u8]) {
         (**self).send_to_group(datagram)
+    }
+
+    fn try_send_to_group(&mut self, datagram: &[u8]) -> GroupSend {
+        (**self).try_send_to_group(datagram)
+    }
+
+    fn wait_for_room(&self, timeout_us: u64) -> bool {
+        (**self).wait_for_room(timeout_us)
+    }
+
+    #[cfg(feature = "session-unicast")]
+    fn writability(&self) -> Option<alloc::boxed::Box<dyn crate::session_drive::LinkWritability>> {
+        (**self).writability()
     }
 
     fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
@@ -195,5 +256,90 @@ mod tests {
         assert!(!address.names_for(&v6));
         assert!(index.names_for(&v6));
         assert!(!index.names_for(&v4));
+    }
+
+    /// A transport that states only what it must, and counts the datagrams it was sent.
+    #[derive(Default)]
+    struct Socket {
+        sent: usize,
+    }
+
+    impl GroupTransport for Socket {
+        fn open(&mut self) -> bool {
+            true
+        }
+
+        fn close(&mut self) {}
+
+        fn service(&self) {}
+
+        fn carrier_up(&self) -> bool {
+            true
+        }
+
+        fn send_to_group(&mut self, _datagram: &[u8]) {
+            self.sent += 1;
+        }
+
+        fn recv_with(&mut self, _f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
+            false
+        }
+    }
+
+    /// A stack that cannot tell a full socket from a sent datagram sends the datagram and answers
+    /// that it was sent, and has room whenever it is asked.
+    #[test]
+    fn a_stack_that_cannot_tell_sends_and_answers_sent() {
+        let mut socket = Socket::default();
+        assert_eq!(socket.try_send_to_group(b"d"), GroupSend::Sent);
+        assert_eq!(socket.sent, 1, "the datagram went to the plain send");
+        assert!(socket.wait_for_room(1_000));
+    }
+
+    /// A stack the session holds boxed answers through the box as it answers itself: a socket
+    /// with no room is full through it, and has none to wait for.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[test]
+    fn a_boxed_stack_answers_as_the_stack_does() {
+        struct Full;
+
+        impl GroupTransport for Full {
+            fn open(&mut self) -> bool {
+                true
+            }
+
+            fn close(&mut self) {}
+
+            fn service(&self) {}
+
+            fn carrier_up(&self) -> bool {
+                true
+            }
+
+            fn send_to_group(&mut self, _datagram: &[u8]) {}
+
+            fn try_send_to_group(&mut self, _datagram: &[u8]) -> GroupSend {
+                GroupSend::Full
+            }
+
+            fn wait_for_room(&self, _timeout_us: u64) -> bool {
+                false
+            }
+
+            fn recv_with(&mut self, _f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
+                false
+            }
+        }
+
+        let mut boxed: alloc::boxed::Box<dyn GroupTransport> = alloc::boxed::Box::new(Full);
+        assert_eq!(boxed.try_send_to_group(b"d"), GroupSend::Full);
+        assert!(!boxed.wait_for_room(1_000));
+        let mut plain: alloc::boxed::Box<dyn GroupTransport> =
+            alloc::boxed::Box::new(Socket::default());
+        assert_eq!(
+            plain.try_send_to_group(b"d"),
+            GroupSend::Sent,
+            "CONTROL: a stack that cannot tell"
+        );
     }
 }
