@@ -31,6 +31,7 @@ use wz_capi_port::tls_material::CapiTlsConfig;
 use wz_runtime_coop::session_drive::LinkOpenError;
 use wz_runtime_coop::stream_link::{StreamDial, StreamListen, StreamSocket};
 use wz_runtime_posix::stream::PosixTcpDial;
+use wz_runtime_posix::PosixClock;
 
 const LOOPBACK: [u8; 4] = [127, 0, 0, 1];
 
@@ -42,7 +43,7 @@ const ACCEPT_MS: u64 = 5_000;
 /// September 2020, inside the year the lapsed certificate below was valid for.
 const WITHIN_2020: i64 = 1_600_000_000;
 
-type Provider = HostTls<PosixTcpDial>;
+type Provider = HostTls<PosixTcpDial, PosixClock>;
 type Stream = <Provider as StreamDial>::Stream;
 type Listener = Box<dyn StreamListen<Stream = Stream>>;
 
@@ -75,7 +76,7 @@ fn listen_config(server: &End, client_roots: Option<&Authority>) -> CapiTlsConfi
 }
 
 fn provider(config: &CapiTlsConfig) -> Provider {
-    Provider::from_config(PosixTcpDial, config, ACCEPT_MS)
+    Provider::from_config(PosixTcpDial, config, ACCEPT_MS, &PosixClock)
         .unwrap_or_else(|e| panic!("the config makes a provider: {e}"))
 }
 
@@ -263,7 +264,7 @@ fn a_config_that_cannot_make_a_channel_is_a_typed_error() {
         listen_cert_pem: Some(bytes(server.chain_pem())),
         ..CapiTlsConfig::default()
     };
-    let refused = Provider::from_config(PosixTcpDial, &half, ACCEPT_MS).err();
+    let refused = Provider::from_config(PosixTcpDial, &half, ACCEPT_MS, &PosixClock).err();
     assert!(
         matches!(refused, Some(HostTlsError::Config(_))),
         "half a listener: {refused:?}"
@@ -274,7 +275,7 @@ fn a_config_that_cannot_make_a_channel_is_a_typed_error() {
         require_client_auth: true,
         ..listen_config(&server, None)
     };
-    let refused = Provider::from_config(PosixTcpDial, &no_roots, ACCEPT_MS).err();
+    let refused = Provider::from_config(PosixTcpDial, &no_roots, ACCEPT_MS, &PosixClock).err();
     assert!(
         matches!(refused, Some(HostTlsError::Config(_))),
         "a mutual listener without roots: {refused:?}"
@@ -286,7 +287,7 @@ fn a_config_that_cannot_make_a_channel_is_a_typed_error() {
         listen_key_pem: Some(bytes(other.key_pem())),
         ..listen_config(&server, None)
     };
-    let refused = Provider::from_config(PosixTcpDial, &crossed, ACCEPT_MS).err();
+    let refused = Provider::from_config(PosixTcpDial, &crossed, ACCEPT_MS, &PosixClock).err();
     assert!(
         matches!(refused, Some(HostTlsError::Tls(_))),
         "a key that is not the chain's: {refused:?}"
@@ -297,7 +298,7 @@ fn a_config_that_cannot_make_a_channel_is_a_typed_error() {
         root_ca_pem: Some(b"-----BEGIN CERTIFICATE-----\0".to_vec()),
         ..CapiTlsConfig::default()
     };
-    let refused = Provider::from_config(PosixTcpDial, &nul, ACCEPT_MS).err();
+    let refused = Provider::from_config(PosixTcpDial, &nul, ACCEPT_MS, &PosixClock).err();
     assert!(
         matches!(refused, Some(HostTlsError::Config(_))),
         "a PEM with a NUL: {refused:?}"

@@ -26,6 +26,7 @@ use core::net::{IpAddr, SocketAddr};
 
 use wz_runtime_coop::session_drive::{LinkOpenError, LinkProto};
 use wz_runtime_coop::stream_link::{StreamDial, StreamListen, StreamSocket};
+use wz_runtime_coop::ClockSource;
 
 use crate::channel::{Identity, Io, Role, Session, Step, TlsError, Transport, Trust, Want, Zid};
 
@@ -326,10 +327,26 @@ impl core::fmt::Write for AddressText {
     }
 }
 
+/// How a listener times one inbound handshake: the time now, on the clock the deadline is kept
+/// on, and how long a handshake may take on that clock. The accept never blocks on the network
+/// (the node's loop is what waits), so a handshake that is waiting for its peer is looked at
+/// again on the next accept and ends by this deadline, not by a count of waits.
+///
+/// The clock is the one the listener's sessions run on, so that a program that moves its
+/// session's time itself (paused, or faster than the wall) moves this deadline with it:
+/// [`AcceptBudget`] reads a clock an image supplies as a function, [`ClockedAccept`] reads the
+/// clock source a session of the cooperative runtime is driven by.
+pub trait AcceptTimer: Clone {
+    /// The time now, in milliseconds of a monotonic clock.
+    fn now_ms(&self) -> u64;
+
+    /// The time one inbound handshake may take, in milliseconds of that clock.
+    fn timeout_ms(&self) -> u64;
+}
+
 /// How long a listener lets one inbound handshake take before it drops the connection, on a
-/// clock the deploy supplies. The accept never blocks on the network (the node's loop is what
-/// waits), so a handshake that is waiting for its peer is looked at again on the next accept and
-/// ends by this deadline, not by a count of waits.
+/// clock the deploy supplies as a function: an image whose sessions run on the platform's own
+/// monotonic clock.
 #[derive(Clone, Copy)]
 pub struct AcceptBudget {
     /// A monotonic clock, in milliseconds.
@@ -338,16 +355,48 @@ pub struct AcceptBudget {
     pub timeout_ms: u64,
 }
 
+impl AcceptTimer for AcceptBudget {
+    fn now_ms(&self) -> u64 {
+        (self.clock)()
+    }
+
+    fn timeout_ms(&self) -> u64 {
+        self.timeout_ms
+    }
+}
+
+/// How long a listener lets one inbound handshake take, on the clock source its sessions are
+/// driven by: the same clock their lease, keepalive and handshake deadlines read, whether the
+/// host's or one a program moves.
+#[derive(Clone, Copy)]
+pub struct ClockedAccept<C> {
+    /// The sessions' clock source.
+    pub clock: C,
+    /// The time one inbound handshake may take, in milliseconds of that clock.
+    pub timeout_ms: u64,
+}
+
+impl<C: ClockSource + Clone> AcceptTimer for ClockedAccept<C> {
+    fn now_ms(&self) -> u64 {
+        self.clock.now_us() / 1_000
+    }
+
+    fn timeout_ms(&self) -> u64 {
+        self.timeout_ms
+    }
+}
+
 /// The dial of a secure channel: the stream `D` connects, then a TLS 1.3 handshake under the
 /// policy the dial was made with. The link sees the stream only once the peer is known by it.
 /// The same value listens (`StreamDial::listen`, which a build without `alloc` or with
-/// `session-slot` does not have, and [`TlsDial::listener`]) once it has an [`AcceptBudget`].
+/// `session-slot` does not have, and [`TlsDial::listener`]) once it has an [`AcceptTimer`]
+/// (`A`), an [`AcceptBudget`] unless it was given another.
 #[derive(Clone, Copy)]
-pub struct TlsDial<D> {
+pub struct TlsDial<D, A = AcceptBudget> {
     inner: D,
     policy: Policy,
     budget: HandshakeBudget,
-    accept: Option<AcceptBudget>,
+    accept: Option<A>,
 }
 
 impl<D> TlsDial<D> {
@@ -370,7 +419,9 @@ impl<D> TlsDial<D> {
             accept: None,
         }
     }
+}
 
+impl<D, A> TlsDial<D, A> {
     /// The dial with another handshake budget.
     #[must_use]
     pub const fn with_budget(mut self, budget: HandshakeBudget) -> Self {
@@ -380,18 +431,24 @@ impl<D> TlsDial<D> {
 
     /// The dial that can also listen, dropping an inbound handshake that outlasts `accept`.
     #[must_use]
-    pub const fn with_accept(mut self, accept: AcceptBudget) -> Self {
-        self.accept = Some(accept);
-        self
+    pub fn with_accept<B: AcceptTimer>(self, accept: B) -> TlsDial<D, B> {
+        TlsDial {
+            inner: self.inner,
+            policy: self.policy,
+            budget: self.budget,
+            accept: Some(accept),
+        }
     }
+}
 
+impl<D, A: AcceptTimer> TlsDial<D, A> {
     /// The listener over the one `inner` a platform opened, under this dial's policy. A dial
-    /// with no [`AcceptBudget`] does not listen: [`LinkOpenError::Unsupported`].
-    pub fn listener<L: StreamListen>(&self, inner: L) -> Result<TlsListener<L>, LinkOpenError>
+    /// with no [`AcceptTimer`] does not listen: [`LinkOpenError::Unsupported`].
+    pub fn listener<L: StreamListen>(&self, inner: L) -> Result<TlsListener<L, A>, LinkOpenError>
     where
         L::Stream: 'static,
     {
-        let accept = self.accept.ok_or(LinkOpenError::Unsupported)?;
+        let accept = self.accept.clone().ok_or(LinkOpenError::Unsupported)?;
         Ok(TlsListener {
             inner,
             policy: self.policy,
@@ -442,7 +499,7 @@ fn established<S: StreamSocket + 'static>(
     }
 }
 
-impl<D: StreamDial> StreamDial for TlsDial<D>
+impl<D: StreamDial, A: AcceptTimer + 'static> StreamDial for TlsDial<D, A>
 where
     D::Stream: 'static,
 {
@@ -496,7 +553,7 @@ where
 }
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-impl<D: StreamDial> TlsDial<D>
+impl<D: StreamDial, A: AcceptTimer + 'static> TlsDial<D, A>
 where
     D::Stream: 'static,
 {
@@ -506,10 +563,14 @@ where
     pub fn listen_counted(
         &self,
         at: SocketAddr,
-    ) -> Result<TlsListener<alloc::boxed::Box<dyn StreamListen<Stream = D::Stream>>>, LinkOpenError>
-    {
+    ) -> Result<
+        TlsListener<alloc::boxed::Box<dyn StreamListen<Stream = D::Stream>>, A>,
+        LinkOpenError,
+    > {
         // Checked before the port is bound, so a dial that cannot accept does not take the port.
-        self.accept.ok_or(LinkOpenError::Unsupported)?;
+        if self.accept.is_none() {
+            return Err(LinkOpenError::Unsupported);
+        }
         let inner = self.inner.listen(at)?;
         self.listener(inner)
     }
@@ -530,23 +591,23 @@ struct Pending<S: StreamSocket + 'static> {
 /// One handshake runs at a time, and each [`StreamListen::accept`] advances it without blocking
 /// on the network: a connection arriving behind it waits in `L`'s own queue, the arena holds one
 /// inbound session and not a table of them, and a peer that stalls is dropped by the
-/// [`AcceptBudget`]. A handshake that fails (a peer that is not trusted, a plain TCP client, a
+/// [`AcceptTimer`]. A handshake that fails (a peer that is not trusted, a plain TCP client, a
 /// reset) is dropped and is not the listener's failure, but it is counted: [`Self::dropped`] and
 /// [`Self::last_drop`] are how a program sees that the arena or the key store had no room for a
 /// handshake, which the caller of `accept` otherwise sees only as nothing to accept.
-pub struct TlsListener<L: StreamListen>
+pub struct TlsListener<L: StreamListen, A = AcceptBudget>
 where
     L::Stream: 'static,
 {
     inner: L,
     policy: Policy,
-    accept: AcceptBudget,
+    accept: A,
     pending: RefCell<Option<Pending<L::Stream>>>,
     dropped: Cell<u32>,
     last_drop: Cell<Option<TlsError>>,
 }
 
-impl<L: StreamListen> TlsListener<L>
+impl<L: StreamListen, A> TlsListener<L, A>
 where
     L::Stream: 'static,
 {
@@ -559,7 +620,7 @@ where
 
     /// How many inbound connections this listener took and ended without a stream: a handshake
     /// that failed, a peer the policy did not accept, a peer that stalled past the
-    /// [`AcceptBudget`]. Saturates at `u32::MAX`.
+    /// [`AcceptTimer`]. Saturates at `u32::MAX`.
     pub fn dropped(&self) -> u32 {
         self.dropped.get()
     }
@@ -574,7 +635,7 @@ where
     }
 }
 
-impl<L: StreamListen> StreamListen for TlsListener<L>
+impl<L: StreamListen, A: AcceptTimer> StreamListen for TlsListener<L, A>
 where
     L::Stream: 'static,
 {
@@ -602,7 +663,7 @@ where
                     *slot = Some(Pending {
                         lower,
                         session,
-                        since_ms: (self.accept.clock)(),
+                        since_ms: self.accept.now_ms(),
                     });
                 }
                 Err(e) => {
@@ -637,8 +698,8 @@ where
                 }
                 Ok(Step::Wait(Want::Write)) => {}
                 Ok(Step::Wait(Want::Read)) => {
-                    let waited = (self.accept.clock)().saturating_sub(pending.since_ms);
-                    if waited > self.accept.timeout_ms {
+                    let waited = self.accept.now_ms().saturating_sub(pending.since_ms);
+                    if waited > self.accept.timeout_ms() {
                         self.drop_pending(pending, None);
                     } else {
                         *slot = Some(pending);
@@ -685,5 +746,51 @@ mod tests {
             let name = AddressText::of(ip);
             assert_eq!(name.as_c_str().to_str(), Ok(text), "{ip}");
         }
+    }
+
+    /// A clock source that stands at the microsecond it was made with.
+    #[derive(Clone, Copy)]
+    struct At(u64);
+
+    impl ClockSource for At {
+        fn now_us(&self) -> u64 {
+            self.0
+        }
+    }
+
+    /// A listener's deadline reads the clock its timer was given: an image's function as it
+    /// answers, and a session's clock source in whole milliseconds of its microseconds, so a
+    /// handshake is timed on the clock the session runs on and on no other.
+    #[test]
+    fn an_accept_timer_reads_the_clock_it_was_given() {
+        fn seven() -> u64 {
+            7
+        }
+        let budget = AcceptBudget {
+            clock: seven,
+            timeout_ms: 30,
+        };
+        assert_eq!(budget.now_ms(), 7);
+        assert_eq!(AcceptTimer::timeout_ms(&budget), 30);
+
+        let clocked = ClockedAccept {
+            clock: At(2_500_999),
+            timeout_ms: 40,
+        };
+        assert_eq!(
+            clocked.now_ms(),
+            2_500,
+            "microseconds read as whole milliseconds"
+        );
+        assert_eq!(AcceptTimer::timeout_ms(&clocked), 40);
+        let later = ClockedAccept {
+            clock: At(2_541_000),
+            ..clocked
+        };
+        assert_eq!(
+            later.now_ms() - clocked.now_ms(),
+            41,
+            "the time waited is the session clock's"
+        );
     }
 }

@@ -27,13 +27,14 @@ use std::cell::Cell;
 use std::ffi::CString;
 use std::net::SocketAddr;
 use std::sync::{Mutex, OnceLock};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use wz_capi_port::tls_material::CapiTlsConfig;
 use wz_runtime_coop::session_drive::LinkOpenError;
 use wz_runtime_coop::stream_link::{StreamDial, StreamListen, StreamSocket};
+use wz_runtime_coop::ClockSource;
 use wz_tls_mbedtls::channel::{self, Identity, TlsError, Trust};
-use wz_tls_mbedtls::stream::{AcceptBudget, ChainTrust, TlsDial, TlsListener, TlsStream};
+use wz_tls_mbedtls::stream::{ChainTrust, ClockedAccept, TlsDial, TlsListener, TlsStream};
 
 /// The bytes the library's allocations come from on a host. The memory is zeroed and so reserved
 /// and not touched until the library uses it; a session's use is measured by
@@ -139,12 +140,6 @@ fn unix_now() -> Option<i64> {
     i64::try_from(since.as_secs()).ok()
 }
 
-/// A monotonic clock in milliseconds, the one an inbound handshake is timed by.
-fn host_clock_ms() -> u64 {
-    static START: OnceLock<Instant> = OnceLock::new();
-    u64::try_from(START.get_or_init(Instant::now).elapsed().as_millis()).unwrap_or(u64::MAX)
-}
-
 /// State the time of this dial or accept to the roots it verifies against.
 fn state_the_time(roots: Option<&'static Trust>) {
     if let Some(roots) = roots {
@@ -158,26 +153,30 @@ fn state_the_time(roots: Option<&'static Trust>) {
 /// A role the config gives no material for is not carried: a `tls/` dial without roots, or a
 /// `tls/` listen without a certificate chain and key, is [`LinkOpenError::Unsupported`], as the
 /// tokio engine reports it, and never a connection in the clear.
+///
+/// An inbound handshake is timed on `C`, the clock the sessions it serves run on, so a session
+/// on a time base the program moves gives its peers the time that base says has passed.
 #[derive(Clone, Copy)]
-pub struct HostTls<D> {
+pub struct HostTls<D, C> {
     dialer: Option<TlsDial<D>>,
     dial_roots: Option<&'static Trust>,
-    listener: Option<TlsDial<D>>,
+    listener: Option<TlsDial<D, ClockedAccept<C>>>,
     listen_roots: Option<&'static Trust>,
 }
 
-impl<D: StreamDial + Copy> HostTls<D>
+impl<D: StreamDial + Copy, C: ClockSource + Clone> HostTls<D, C>
 where
     D::Stream: 'static,
 {
     /// The dial over `inner`'s streams that `config` states. An inbound handshake that takes
-    /// longer than `accept_timeout_ms` is dropped.
+    /// longer than `accept_timeout_ms` on `clock`, the sessions' clock, is dropped.
     ///
     /// A config with no TLS material makes a value that carries no `tls/` link.
     pub fn from_config(
         inner: D,
         config: &CapiTlsConfig,
         accept_timeout_ms: u64,
+        clock: &C,
     ) -> Result<Self, HostTlsError> {
         let has_material = config.root_ca_pem.is_some()
             || config.listen_cert_pem.is_some()
@@ -234,8 +233,8 @@ where
                         verify_name: false,
                     },
                 )
-                .with_accept(AcceptBudget {
-                    clock: host_clock_ms,
+                .with_accept(ClockedAccept {
+                    clock: clock.clone(),
                     timeout_ms: accept_timeout_ms,
                 });
                 (Some(dial), roots)
@@ -273,7 +272,7 @@ where
     }
 }
 
-impl<D: StreamDial + Copy> StreamDial for HostTls<D>
+impl<D: StreamDial + Copy, C: ClockSource + Clone> StreamDial for HostTls<D, C>
 where
     D::Stream: 'static,
 {
@@ -304,15 +303,15 @@ where
 /// A listener that states the time to its roots before each accept, so a client chain that
 /// lapsed while the program ran is refused at its handshake, and that tells the node's event log
 /// of each connection the channel took and ended without a stream (`event-ring`).
-struct Timed<S: StreamSocket + 'static> {
-    inner: TlsListener<Box<dyn StreamListen<Stream = S>>>,
+struct Timed<S: StreamSocket + 'static, C> {
+    inner: TlsListener<Box<dyn StreamListen<Stream = S>>, ClockedAccept<C>>,
     roots: Option<&'static Trust>,
     /// How many of the inner listener's drops the event log has been told of.
     #[cfg(feature = "event-ring")]
     told: Cell<u32>,
 }
 
-impl<S: StreamSocket + 'static> StreamListen for Timed<S> {
+impl<S: StreamSocket + 'static, C: ClockSource + Clone> StreamListen for Timed<S, C> {
     type Stream = TlsStream<S>;
 
     fn local(&self) -> SocketAddr {
@@ -327,7 +326,7 @@ impl<S: StreamSocket + 'static> StreamListen for Timed<S> {
     }
 }
 
-impl<S: StreamSocket + 'static> Timed<S> {
+impl<S: StreamSocket + 'static, C> Timed<S, C> {
     /// One event for each drop since the last accept: why the connection ended, and the
     /// channel's own code. An arena or a key store with no room is `TLS_DROP_NO_ROOM`: both reach
     /// the channel as `OutOfMemory` (measured, `wz-tls-mbedtls/tests/arena_exhaustion.rs` and

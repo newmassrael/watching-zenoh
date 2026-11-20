@@ -29,6 +29,7 @@ use wz_capi_coop::tls::{HostTls, HOST_ARENA};
 use wz_capi_port::tls_material::CapiTlsConfig;
 use wz_runtime_coop::stream_link::{StreamDial, StreamListen, StreamSocket};
 use wz_runtime_posix::stream::PosixTcpDial;
+use wz_runtime_posix::PosixClock;
 use wz_tls_mbedtls::channel::arena_peak;
 
 const LOOPBACK: [u8; 4] = [127, 0, 0, 1];
@@ -43,7 +44,7 @@ const ACCEPT_MS: u64 = 5_000;
 /// keys in this process, so 24 of them are 192 keys), and well within the arena.
 const HELD: usize = 24;
 
-type Provider = HostTls<PosixTcpDial>;
+type Provider = HostTls<PosixTcpDial, PosixClock>;
 
 fn bytes(pem: std::ffi::CString) -> Vec<u8> {
     pem.as_bytes().to_vec()
@@ -65,7 +66,7 @@ fn dial_config(roots: &Authority) -> CapiTlsConfig {
 }
 
 fn provider(config: &CapiTlsConfig) -> Provider {
-    Provider::from_config(PosixTcpDial, config, ACCEPT_MS)
+    Provider::from_config(PosixTcpDial, config, ACCEPT_MS, &PosixClock)
         .unwrap_or_else(|e| panic!("the config makes a provider: {e}"))
 }
 

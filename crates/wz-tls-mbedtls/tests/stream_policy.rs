@@ -19,6 +19,7 @@ mod common;
 
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -31,10 +32,11 @@ use rustls::{ClientConfig, ClientConnection, DigitallySignedStruct, SignatureSch
 use common::{library, now_unix, rustls_client, serve, server_config, Authority, End};
 use wz_runtime_coop::session_drive::LinkOpenError;
 use wz_runtime_coop::stream_link::{StreamDial, StreamListen, StreamSocket};
+use wz_runtime_coop::ClockSource;
 use wz_runtime_posix::stream::PosixTcpDial;
 use wz_session_core::credential_identity::zid_from_spki_der;
 use wz_tls_mbedtls::channel::{Identity, Trust};
-use wz_tls_mbedtls::stream::{AcceptBudget, ChainTrust, HandshakeBudget, TlsDial};
+use wz_tls_mbedtls::stream::{AcceptBudget, ChainTrust, ClockedAccept, HandshakeBudget, TlsDial};
 
 const LOOPBACK: Ipv4Addr = Ipv4Addr::LOCALHOST;
 
@@ -358,6 +360,66 @@ fn a_peer_that_stalls_or_speaks_junk_is_dropped_and_the_next_is_served() {
     serve_echo(&stream);
     client.join().expect("thread").expect("the client verified");
     assert_eq!(listener.dropped(), 2, "a served client is not counted");
+}
+
+/// A clock source the test moves by hand, as a program moves the time its session runs on.
+#[derive(Clone)]
+struct HandClock(Arc<AtomicU64>);
+
+impl ClockSource for HandClock {
+    fn now_us(&self) -> u64 {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+#[test]
+fn a_stalled_handshake_is_timed_by_the_sessions_clock_and_not_by_the_wall() {
+    let _library = library();
+    let authority = Authority::new();
+    let server = authority.issue(ExtendedKeyUsagePurpose::ServerAuth);
+    let now_us = Arc::new(AtomicU64::new(0));
+    let inner = PosixTcpDial.listen(at(0)).expect("the port opens");
+    let listener = chain_listener(&server, None)
+        .with_accept(ClockedAccept {
+            clock: HandClock(now_us.clone()),
+            timeout_ms: 300,
+        })
+        .listener(inner)
+        .expect("a listener");
+    let port = listener.local().port();
+
+    // A connection that sends nothing, held for three times the budget on the wall while the
+    // session's clock stands still: its handshake is still waited for.
+    let mut stalled = TcpStream::connect((LOOPBACK, port)).expect("connects");
+    stalled
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("a timeout");
+    let until = Instant::now() + Duration::from_millis(900);
+    while Instant::now() < until {
+        assert!(listener.accept().expect("the listener is sound").is_none());
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        listener.dropped(),
+        0,
+        "the wall clock ended a handshake the session's clock had not timed out"
+    );
+
+    // The session's clock passes the budget: the next accept drops the connection, which the
+    // peer sees as the end of the stream.
+    now_us.store(301_000, Ordering::SeqCst);
+    assert!(listener.accept().expect("the listener is sound").is_none());
+    assert_eq!(
+        listener.dropped(),
+        1,
+        "the stall past the session's budget is counted"
+    );
+    assert_eq!(listener.last_drop(), None, "a stall has no channel error");
+    let mut byte = [0u8; 1];
+    assert!(
+        matches!(stalled.read(&mut byte), Ok(0) | Err(_)),
+        "the stalled connection was left open"
+    );
 }
 
 /// A rustls client that accepts any server certificate and still checks the handshake signature
