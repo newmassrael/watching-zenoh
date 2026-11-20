@@ -12852,7 +12852,9 @@ layer_c1co_pico_client_dials_a_listener() {
 #   5. linked-crates  the unit tests of every crate of the workspace either engine links.
 #
 # The legs read the tree and not each other's builds, so the lane is a leg ledger: one red does
-# not hide the rest. The host needs the target's standard library (rust-toolchain.toml installs
+# not hide the rest. Within a leg, `--no-fail-fast` does the same for test executables: a leg
+# that runs several (the profile's targets, eighteen crates' unit tests) runs them all, so a width
+# defect in one crate does not hide one in the crate after it. The host needs the target's standard library (rust-toolchain.toml installs
 # it with the pinned toolchain) and a C compiler that emits 32-bit code (`cc -m32`, from
 # `gcc-multilib` on Debian and Ubuntu), which the build scripts of `ring` and the linker use and
 # the pthread probe of `wz-capi-pico`'s unix host layer compiles with. Without either the lane
@@ -12889,13 +12891,14 @@ layer_c1p32_pico_i686() {
     _runci_leg kconfig -- bash scripts/provision-kconfiglib.sh
     _runci_leg pico-tokio --after kconfig -- _c1p32_pico_profile_tests "$target"
     _runci_leg pico-coop -- _runci_guarded_test "C1p32 pico cooperative engine" + \
-        cargo test -p wz-capi-pico --target "$target" --no-default-features --features "$coop" --lib
+        cargo test -p wz-capi-pico --target "$target" --no-default-features --features "$coop" --lib \
+        --no-fail-fast
     wz_test_args wz-capi-pico mutual_dial
     _runci_leg coop-mutual-dial -- _runci_guarded_test "C1p32 engine-coop mutual dial" 2 \
         cargo test -p wz-capi-pico --target "$target" --no-default-features \
         --features "engine-coop,peer,multi-thread,link-udp,connectivity" "${WZ_TEST_ARGS[@]}"
     _runci_leg linked-crates -- _runci_guarded_test "C1p32 the crates the library links" + \
-        cargo test --target "$target" --lib -p wz-abi-stamp -p wz-app-frame -p wz-capi-core \
+        cargo test --target "$target" --lib --no-fail-fast -p wz-abi-stamp -p wz-app-frame -p wz-capi-core \
         -p wz-capi-coop -p wz-capi-port -p wz-codecs -p wz-ext-pubsub -p wz-host-net \
         -p wz-node-time -p wz-routing-graph -p wz-runtime-coop -p wz-runtime-core \
         -p wz-runtime-posix -p wz-runtime-tokio -p wz-session-core -p wz-session-mcu \
@@ -12915,7 +12918,7 @@ _c1p32_pico_profile_tests() {
     fi
     read -r -a args <<<"$resolved"
     _runci_guarded_test "C1p32 pico host-peer-ext (tokio engine)" + \
-        cargo test -p wz-capi-pico --target "$target" "${args[@]}" --tests
+        cargo test -p wz-capi-pico --target "$target" "${args[@]}" --tests --no-fail-fast
 }
 
 # ─── Layer C1cn — every crate LINTS CLEAN behind its non-default ────
