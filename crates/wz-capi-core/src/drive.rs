@@ -56,10 +56,10 @@ use wz_runtime_tokio::session_open::{
 };
 #[cfg(feature = "peer")]
 use wz_runtime_tokio::startup_phase::{
-    drive_bind_phase, drive_phase, endpoint_policy, retry_until_bound, PhaseArm,
+    drive_bind_phase_on, drive_phase_on, endpoint_policy, retry_until_bound_on, PhaseArm,
 };
 use wz_runtime_tokio::startup_phase::{
-    drive_connect_phase, endpoint_schedule, PhaseBudget, PhasePolicy,
+    drive_connect_phase_on, endpoint_schedule, PhaseBudget, PhasePolicy,
 };
 
 use crate::caller_span::CallerSpan;
@@ -1883,7 +1883,11 @@ async fn connect_first(
     let (intents_tx, mut intents) = tokio::sync::mpsc::unbounded_channel();
     let scouting = link.autoconnect(plan, zid, &intents_tx);
     tokio::pin!(scouting);
-    let deadline = tokio::time::sleep(plan.timeout);
+    // `scouting/timeout` of the session's clock, as the opens it makes are.
+    use wz_runtime_core::TimeSource as _;
+    let deadline = dialer
+        .clock
+        .sleep(wz_runtime_tokio::runtime_impl::whole_ms(plan.timeout));
     tokio::pin!(deadline);
     loop {
         tokio::select! {
@@ -1970,7 +1974,7 @@ async fn drive_client(
     // that did not open.
     let first = match scouted {
         Some(first) => first.map_err(|()| OpenError::DriveFailed),
-        None => drive_connect_phase(phase.policy.budget, &scheduled, &attempt)
+        None => drive_connect_phase_on(&dialer.clock, phase.policy.budget, &scheduled, &attempt)
             .await
             .map_err(|e| {
                 log_open_failure(&format!("connect to {endpoints:?}"), &e);
@@ -2036,7 +2040,12 @@ async fn drive_client(
         if stop.load(Ordering::SeqCst) || rescheduled.is_empty() {
             return;
         }
-        let redialing = drive_connect_phase(PhaseBudget::UNBOUNDED, &rescheduled, &attempt);
+        let redialing = drive_connect_phase_on(
+            &dialer.clock,
+            PhaseBudget::UNBOUNDED,
+            &rescheduled,
+            &attempt,
+        );
         session = tokio::select! {
             again = redialing => match again {
                 Ok(again) => again,
@@ -2305,11 +2314,14 @@ async fn drive_peer(
             // R3089 -- and the listeners whose bind goes on in the background, each served from
             // the moment it binds.
             faces.extend(late.spawn(&shared, &gate, &closing_rx));
-            let deadline = phase
-                .policy
-                .budget
-                .deadline()
-                .map(|d| tokio::time::Instant::now() + d);
+            // The walk's budget, on the session's clock as every wait of the open is.
+            use wz_runtime_core::TimeSource as _;
+            let clock = dialer.clock;
+            let deadline = phase.policy.budget.deadline().map(|d| {
+                clock
+                    .now_monotonic_ms()
+                    .saturating_add(wz_runtime_tokio::runtime_impl::whole_ms(d))
+            });
             let mut failed = false;
             // Why the walk failed, for the open's report: a link that did not open unless an
             // attempt named its own cause.
@@ -2331,7 +2343,7 @@ async fn drive_peer(
                 };
                 match arm {
                     PhaseArm::OnceThenFail | PhaseArm::OnceThenSkip => {
-                        match within(deadline, dialer.open_or_held(endpoint)).await {
+                        match within(&clock, deadline, dialer.open_or_held(endpoint)).await {
                             // The walk's budget ran out: upstream's outer
                             // timeout fails the whole connect.
                             None => {
@@ -2356,7 +2368,8 @@ async fn drive_peer(
                         }
                     }
                     PhaseArm::RetryThenFail => {
-                        let retried = drive_phase(
+                        let retried = drive_phase_on(
+                            &clock,
                             PhasePolicy {
                                 budget: PhaseBudget::UNBOUNDED,
                                 ..policy
@@ -2364,7 +2377,7 @@ async fn drive_peer(
                             schedule,
                             |_| dialer.open_or_held(endpoint),
                         );
-                        match within(deadline, retried).await {
+                        match within(&clock, deadline, retried).await {
                             Some(Ok(Some(session))) => {
                                 let (owed, registered) = FaceOwed::awaited_by_the_walk();
                                 registered_faces.push(registered);
@@ -2470,11 +2483,15 @@ async fn drive_peer(
             match router_hold {
                 // R3125 -- a router sleeps `scouting/delay` out, whatever its connects did and
                 // whether or not it scouts, as upstream's `start_router` ends.
-                Some(hold) => tokio::time::sleep(hold).await,
+                Some(hold) => {
+                    clock
+                        .sleep(wz_runtime_tokio::runtime_impl::whole_ms(hold))
+                        .await
+                }
                 // The start window: the background endpoints, up to the window.
                 None => {
                     if let Some(span) = phase.start_window {
-                        window.wait(span).await;
+                        window.wait(&clock, span).await;
                     }
                 }
             }
@@ -2693,14 +2710,22 @@ fn pay(owed: &StdMutex<FaceOwed>) {
     }
 }
 
-/// `fut`, bounded by `deadline` when there is one.
+/// `fut`, bounded by `deadline` when there is one: a time of `clock`, in its milliseconds.
 #[cfg(feature = "peer")]
 async fn within<T>(
-    deadline: Option<tokio::time::Instant>,
+    clock: &TokioTime,
+    deadline: Option<u64>,
     fut: impl std::future::Future<Output = T>,
 ) -> Option<T> {
+    use wz_runtime_core::TimeSource as _;
     match deadline {
-        Some(at) => tokio::time::timeout_at(at, fut).await.ok(),
+        Some(at) => wz_runtime_tokio::runtime_impl::timeout_on(
+            clock,
+            at.saturating_sub(clock.now_monotonic_ms()),
+            fut,
+        )
+        .await
+        .ok(),
         None => Some(fut.await),
     }
 }
@@ -2725,11 +2750,15 @@ impl StartWindow {
         self.connected.notify_one();
     }
 
-    /// Until every expected endpoint connected, or `span` passed.
-    async fn wait(&self, span: std::time::Duration) {
-        let until = tokio::time::Instant::now() + span;
+    /// Until every expected endpoint connected, or `span` of `clock` passed.
+    async fn wait(&self, clock: &TokioTime, span: std::time::Duration) {
+        use wz_runtime_core::TimeSource as _;
+        let until = clock
+            .now_monotonic_ms()
+            .saturating_add(wz_runtime_tokio::runtime_impl::whole_ms(span));
         while self.pending.load(Ordering::SeqCst) > 0 {
-            if tokio::time::timeout_at(until, self.connected.notified())
+            let left = until.saturating_sub(clock.now_monotonic_ms());
+            if wz_runtime_tokio::runtime_impl::timeout_on(clock, left, self.connected.notified())
                 .await
                 .is_err()
             {
@@ -2843,7 +2872,8 @@ impl FaceLeg {
                         return;
                     };
                     let mut closing = self.closing.clone();
-                    let dialed = drive_phase(
+                    let dialed = drive_phase_on(
+                        &self.dialer.clock,
                         PhasePolicy {
                             budget: PhaseBudget::UNBOUNDED,
                             exit_on_failure: false,
@@ -3234,7 +3264,7 @@ impl LateBinds {
                 let (locators, bound_before) = (locators.clone(), bound_before.clone());
                 let mut closing = closing.clone();
                 tokio::task::spawn_local(CallerSpan::current().carry(async move {
-                    let bound = retry_until_bound(pending.schedule, |_| {
+                    let bound = retry_until_bound_on(&clock, pending.schedule, |_| {
                         bind_one(&pending.endpoint, &tls, &app, zid, link_conf, whatami)
                     });
                     let listening = tokio::select! {
@@ -3275,6 +3305,7 @@ impl LateBinds {
             app,
             zid,
             link_conf,
+            clock,
             locators,
             bound_before,
             gossiping,
@@ -3292,7 +3323,7 @@ impl LateBinds {
                         let locators = locators.clone();
                         let (shared, bound_before) = (shared.clone(), bound_before.clone());
                         tokio::task::spawn_local(CallerSpan::current().carry(async move {
-                            let listening = retry_until_bound(pending.schedule, |_| {
+                            let listening = retry_until_bound_on(&clock, pending.schedule, |_| {
                                 bind_one(&pending.endpoint, &tls, &app, zid, link_conf, whatami)
                             })
                             .await;
@@ -3388,9 +3419,13 @@ async fn bind_listeners(
 ) -> Result<BoundListeners, OpenError> {
     // A phase that fails names why its last attempt did; one cut off before any answered is a
     // link that did not open.
-    let outcome = drive_bind_phase(phase.policy, phase.schedule, endpoints, |position, _| {
-        bind_one(&endpoints[position], tls, app, zid, link_conf, whatami)
-    })
+    let outcome = drive_bind_phase_on(
+        &clock,
+        phase.policy,
+        phase.schedule,
+        endpoints,
+        |position, _| bind_one(&endpoints[position], tls, app, zid, link_conf, whatami),
+    )
     .await
     .map_err(|e| {
         log_open_failure("bind phase", &e);

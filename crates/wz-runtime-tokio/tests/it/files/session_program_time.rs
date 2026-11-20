@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use sce_rust_runtime::Engine;
 use wz_runtime_core::{TimeSource, TimeoutElapsed};
+use wz_runtime_tokio::retry_period::RetryPolicy;
 use wz_runtime_tokio::runtime_impl::{timeout_on, TokioTime};
 use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy, SessionFsmUnicastState as S,
@@ -28,6 +29,7 @@ use wz_runtime_tokio::session_glue::{
     DriverOutcome, IterationEvent, LeaseCheckOutcome, SessionActionsBinding, SessionLinkActions,
 };
 use wz_runtime_tokio::session_open::{open_within_on, OpenError};
+use wz_runtime_tokio::startup_phase::{drive_phase_on, PhaseBudget, PhasePolicy};
 use wz_runtime_tokio::time_base::{ProgramTime, TimeBaseHold};
 use wz_runtime_tokio::{LinkDriver, LinkEvent, Reliability, TxFrame};
 use wz_runtime_tokio_test_support::{fixture_session_init_params, NoopOutboundDriver};
@@ -215,6 +217,84 @@ async fn an_open_bounded_on_the_programs_time_is_given_up_only_when_that_time_pa
         matches!(outcome, Err(OpenError::OpenTimeout(held)) if held == bound),
         "{outcome:?}"
     );
+}
+
+/// A connect phase on the session's clock (`drive_phase_on`, the retries of a dial and a redial)
+/// waits between its attempts on the program's time: a refused first attempt is not followed by
+/// a second while that time stands still, and is once it passes the wait.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retry_on_the_programs_time_waits_for_that_time_between_attempts() {
+    let (now, hold) = program_time();
+    let clock = TokioTime::on_time_base(hold.time());
+    let attempts = Arc::new(AtomicU64::new(0));
+    let counted = attempts.clone();
+    let phase = tokio::spawn(async move {
+        drive_phase_on(
+            &clock,
+            PhasePolicy {
+                budget: PhaseBudget::UNBOUNDED,
+                exit_on_failure: true,
+            },
+            RetryPolicy::constant(50),
+            move |n| {
+                counted.store(u64::from(n), Ordering::SeqCst);
+                async move {
+                    if n >= 2 {
+                        Ok(n)
+                    } else {
+                        Err("refused")
+                    }
+                }
+            },
+        )
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        1,
+        "the wall clock ended the wait between two attempts"
+    );
+    now.fetch_add(50 * MS, Ordering::SeqCst);
+    hold.advanced();
+    let outcome = tokio::time::timeout(Duration::from_secs(5), phase)
+        .await
+        .expect("the second attempt runs once the program's time passes the wait")
+        .expect("the phase task");
+    assert_eq!(outcome.map_err(|failed| failed.attempts), Ok(2));
+}
+
+/// A phase's budget on the session's clock cuts an attempt that never answers off only when the
+/// program's time passes the budget.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_phase_budget_on_the_programs_time_ends_only_when_that_time_passes() {
+    let (now, hold) = program_time();
+    let clock = TokioTime::on_time_base(hold.time());
+    let phase = tokio::spawn(async move {
+        drive_phase_on(
+            &clock,
+            PhasePolicy {
+                budget: PhaseBudget::from_ms(40),
+                exit_on_failure: true,
+            },
+            RetryPolicy::constant(10),
+            |_| std::future::pending::<Result<(), &'static str>>(),
+        )
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !phase.is_finished(),
+        "the wall clock spent a budget of the program's time"
+    );
+    now.fetch_add(40 * MS, Ordering::SeqCst);
+    hold.advanced();
+    let outcome = tokio::time::timeout(Duration::from_secs(5), phase)
+        .await
+        .expect("the phase gives up once the program's time passes its budget")
+        .expect("the phase task");
+    let failed = outcome.expect_err("an attempt that never answers does not open");
+    assert_eq!((failed.attempts, failed.last), (1, None));
 }
 
 /// A silent peer and a lease of 20 ms: over a second of the wall clock with the program's time
