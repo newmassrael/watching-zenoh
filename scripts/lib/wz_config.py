@@ -2381,10 +2381,14 @@ def limit_snapshot_rust(snapshot: str, lims: list[dict], what: str) -> list[str]
     else:
         out += ["        Self {"] + [f"            {init}," for init in inits] + ["        }"]
     out += ["    }", "",
-            "    /// The build defaults ([`Self::from_build`]): the snapshot a creator starts from. A machine",
+            "    /// The build defaults, evaluated when the build is compiled: one value every creator",
+            "    /// copies, so no caller carries a store per field of its own.",
+            "    pub const BUILD: Self = Self::from_build();",
+            "",
+            "    /// The build defaults ([`Self::BUILD`]): the snapshot a creator starts from. A machine",
             "    /// does not call it; it reads the snapshot its creator handed it.",
             "    pub const fn defaults() -> Self {",
-            "        Self::from_build()",
+            "        Self::BUILD",
             "    }"]
     for lim in lims:
         field = lim["id"].lower()
@@ -2406,7 +2410,7 @@ def limit_snapshot_rust(snapshot: str, lims: list[dict], what: str) -> list[str]
                     "    ) -> Result<(), OutsideLimitDomain> {"]
         out += [f"        self.{field} = Limited::select(value)?;", "        Ok(())", "    }"]
     out += ["}", "", f"impl Default for {snapshot} {{", "    fn default() -> Self {",
-            "        Self::from_build()", "    }", "}"]
+            "        Self::BUILD", "    }", "}"]
     for lim in lims:
         field, name = lim["id"].lower(), camel_limit(lim["id"])
         ty = "Quota" if lim["kind"] == "bound" else "usize"

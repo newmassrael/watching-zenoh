@@ -1422,10 +1422,14 @@ impl SessionLimits {
         }
     }
 
-    /// The build defaults ([`Self::from_build`]): the snapshot a creator starts from. A machine
+    /// The build defaults, evaluated when the build is compiled: one value every creator
+    /// copies, so no caller carries a store per field of its own.
+    pub const BUILD: Self = Self::from_build();
+
+    /// The build defaults ([`Self::BUILD`]): the snapshot a creator starts from. A machine
     /// does not call it; it reads the snapshot its creator handed it.
     pub const fn defaults() -> Self {
-        Self::from_build()
+        Self::BUILD
     }
 
     /// `MAX_KEYEXPR_BYTES` as this snapshot holds it.
@@ -2216,7 +2220,7 @@ impl SessionLimits {
 
 impl Default for SessionLimits {
     fn default() -> Self {
-        Self::from_build()
+        Self::BUILD
     }
 }
 
@@ -2814,10 +2818,14 @@ impl RuntimeLimits {
         }
     }
 
-    /// The build defaults ([`Self::from_build`]): the snapshot a creator starts from. A machine
+    /// The build defaults, evaluated when the build is compiled: one value every creator
+    /// copies, so no caller carries a store per field of its own.
+    pub const BUILD: Self = Self::from_build();
+
+    /// The build defaults ([`Self::BUILD`]): the snapshot a creator starts from. A machine
     /// does not call it; it reads the snapshot its creator handed it.
     pub const fn defaults() -> Self {
-        Self::from_build()
+        Self::BUILD
     }
 
     /// `MAX_LOCATOR_LEN` as this snapshot holds it.
@@ -2978,7 +2986,7 @@ impl RuntimeLimits {
 
 impl Default for RuntimeLimits {
     fn default() -> Self {
-        Self::from_build()
+        Self::BUILD
     }
 }
 
