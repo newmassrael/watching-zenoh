@@ -457,3 +457,67 @@ mod asked {
         SessionDrive::close(&*first);
     }
 }
+
+/// The members of a group as a connectivity plane reads them: each a multicast transport of its
+/// own, with one UDP link to the address its datagrams come from over the group, which a watcher
+/// is told of as the member comes and as it goes.
+#[cfg(feature = "connectivity")]
+mod watched {
+    use std::sync::{Arc, Mutex};
+
+    use wz_capi_port::{SessionDrive, SessionEngine};
+    use wz_session_core::face::{FaceEventKind, FaceSnapshot};
+    use wz_session_core::link::LinkKind;
+
+    use super::{
+        eventually, member_config, open_member, until_members_know_each_other, Network, GROUP,
+    };
+
+    #[test]
+    fn each_member_is_a_transport_a_watcher_is_told_of_as_it_comes_and_goes() {
+        let network = Arc::new(Network::default());
+        let first = open_member(&network, 1, member_config(1, GROUP)).expect("the first joins");
+        let told: Arc<Mutex<Vec<(FaceEventKind, FaceSnapshot)>>> = Arc::default();
+        let into = Arc::clone(&told);
+        let _watcher =
+            first.watch_faces(Arc::new(move |kind: FaceEventKind, face: &FaceSnapshot| {
+                into.lock().unwrap().push((kind, face.clone()));
+            }));
+        SessionDrive::start_read_task(&*first).expect("the first's read task starts");
+        let second = open_member(&network, 2, member_config(2, GROUP)).expect("the second joins");
+        SessionDrive::start_read_task(&*second).expect("the second's read task starts");
+        until_members_know_each_other(&first, &second);
+        eventually("the watcher to be told the second came", || {
+            told.lock()
+                .unwrap()
+                .iter()
+                .any(|(kind, face)| *kind == FaceEventKind::Up && face.zid[..4] == [2; 4])
+        });
+
+        let faces = first.face_snapshots();
+        assert_eq!(faces.len(), 1, "one member, one transport");
+        let face = &faces[0];
+        assert_eq!(face.zid[..4], [2; 4]);
+        assert_eq!(face.whatami, 1, "a peer, in its wire form");
+        assert!(face.is_multicast);
+        assert_eq!(face.links.len(), 1);
+        let link = &face.links[0];
+        assert_eq!(link.kind, Some(LinkKind::Udp));
+        assert_eq!(link.dst, "udp/192.0.2.2:7447", "the member's address");
+        assert_eq!(link.src, "udp/239.7.7.7:7447", "the group's locator");
+        assert_eq!(
+            link.group.as_ref().map(|group| group.endpoint.as_str()),
+            Some(GROUP)
+        );
+
+        SessionDrive::close(&*second);
+        eventually("the watcher to be told the second went", || {
+            told.lock()
+                .unwrap()
+                .iter()
+                .any(|(kind, face)| *kind == FaceEventKind::Down && face.zid[..4] == [2; 4])
+        });
+        assert!(first.face_snapshots().is_empty(), "no member stands");
+        SessionDrive::close(&*first);
+    }
+}

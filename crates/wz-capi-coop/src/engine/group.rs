@@ -28,17 +28,21 @@ use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet};
 use wz_session_core::driver_loop::IterationEvent;
 use wz_session_core::metadata::PushMetadata;
 use wz_session_core::multicast_dispatch::MulticastConfig;
+use wz_session_core::multicast_dispatch::MulticastMember;
 use wz_session_core::multicast_params::{MulticastOutcome, MulticastParams};
-use wz_session_core::multicast_peer_lost::MulticastPeerId;
 use wz_session_core::multicast_reply_sink::{MulticastReplyEnqueue, MulticastReplySink};
 use wz_session_core::multicast_tx::MulticastTxItem;
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::push_build;
 use wz_session_core::qos::Priority;
 use wz_session_core::sample::SampleKind;
-use wz_session_core::WhatAmI;
 use wz_session_mcu::group_drive::{
     spawn_multicast_session_seeded, MulticastReplyQueue, MulticastSessionSeed,
+};
+#[cfg(feature = "connectivity")]
+use {
+    super::faces::FacePlane,
+    wz_session_core::face::{FaceEventKind, FaceSnapshot, GroupMemberLink},
 };
 #[cfg(feature = "query")]
 use {
@@ -66,10 +70,60 @@ pub(super) const GROUP_TICK_MS: u32 = 50;
 /// What a group's dispatch hands what it staged to: the group's queue, which its task drains.
 pub(super) type GroupReplies = MulticastReplySink<MulticastReplyQueue>;
 
-/// A member the group's JOINs admitted: who it is and the role it announced.
-struct Member {
-    peer: MulticastPeerId,
-    whatami: Option<WhatAmI>,
+/// How the session reports a member of a group as a transport of its own: the group's locator,
+/// which this node's end of the member's link is labelled by too (the address the program's stack
+/// sends from is the stack's to know, as on the tokio engine's group over a program's stack), the
+/// endpoint the group was joined by, and whether its transports are shared-memory ones.
+#[cfg(feature = "connectivity")]
+struct GroupLabel {
+    group: String,
+    endpoint: String,
+    is_shm: bool,
+}
+
+#[cfg(feature = "connectivity")]
+impl GroupLabel {
+    fn of(join: &GroupJoin) -> Self {
+        let group = join
+            .endpoint
+            .split(['#', '?'])
+            .next()
+            .unwrap_or(&join.endpoint);
+        Self {
+            group: String::from(group),
+            endpoint: join.endpoint.clone(),
+            is_shm: join.is_shm,
+        }
+    }
+
+    /// `member` as a transport: the session core's snapshot of a group member, over a UDP link.
+    fn snapshot(&self, member: &MulticastMember) -> Option<FaceSnapshot> {
+        FaceSnapshot::of_group_member(
+            member,
+            GroupMemberLink::udp(&self.group, member, &self.group, &self.endpoint),
+            self.is_shm,
+        )
+    }
+}
+
+/// The face events a group's members are, for the session's watchers of its faces: a member the
+/// group admits came up, and one it lost went down (`connectivity`).
+#[cfg(feature = "connectivity")]
+struct MemberEvents {
+    watchers: alloc::sync::Arc<FacePlane>,
+    label: GroupLabel,
+}
+
+#[cfg(feature = "connectivity")]
+impl MemberEvents {
+    fn tell(&self, kind: FaceEventKind, member: &MulticastMember) {
+        if !self.watchers.watched() {
+            return;
+        }
+        if let Some(snapshot) = self.label.snapshot(member) {
+            self.watchers.happened(kind, snapshot);
+        }
+    }
 }
 
 /// The stack's group transport as the group's task holds it, marked each time it hands the task
@@ -123,6 +177,9 @@ pub(super) struct GroupJoining {
     /// The generation a member's query is held and answered under (`queryable`).
     #[cfg(feature = "queryable")]
     pub(super) generation: u64,
+    /// The session's watchers of its faces, told of each member (`connectivity`).
+    #[cfg(feature = "connectivity")]
+    pub(super) watchers: alloc::sync::Arc<FacePlane>,
 }
 
 /// One group of the session: its face, its task, its queue, its members and its stop.
@@ -134,9 +191,12 @@ pub(super) struct GroupFace {
     /// When the group, whose session ended on its own, is joined again.
     rejoin_at_us: Option<u64>,
     tx: MulticastReplyQueue,
-    members: Rc<RefCell<Vec<Member>>>,
+    members: Rc<RefCell<Vec<MulticastMember>>>,
     took: Rc<Cell<bool>>,
     stop: Rc<Cell<bool>>,
+    /// What the session's watchers of its faces are told of the members (`connectivity`).
+    #[cfg(feature = "connectivity")]
+    events: Rc<MemberEvents>,
     /// The generation a member's query is held and answered under, and the sink its answers are
     /// queued through (`queryable`).
     #[cfg(feature = "queryable")]
@@ -167,9 +227,16 @@ impl GroupFace {
             policy,
             #[cfg(feature = "queryable")]
             generation,
+            #[cfg(feature = "connectivity")]
+            watchers,
         } = joining;
+        #[cfg(feature = "connectivity")]
+        let events = Rc::new(MemberEvents {
+            watchers,
+            label: GroupLabel::of(&join),
+        });
         let tx = MulticastReplyQueue::new();
-        let members: Rc<RefCell<Vec<Member>>> = Rc::new(RefCell::new(Vec::new()));
+        let members: Rc<RefCell<Vec<MulticastMember>>> = Rc::new(RefCell::new(Vec::new()));
         let took = Rc::new(Cell::new(false));
         let stop = Rc::new(Cell::new(false));
         let config = MulticastConfig::new(params.lease_ms)
@@ -189,6 +256,8 @@ impl GroupFace {
             Rc::clone(&members),
             MulticastReplySink::new(tx.clone()),
             dispatch,
+            #[cfg(feature = "connectivity")]
+            Rc::clone(&events),
         );
         let next_tx = {
             let tx = tx.clone();
@@ -214,6 +283,8 @@ impl GroupFace {
             members,
             took,
             stop,
+            #[cfg(feature = "connectivity")]
+            events,
         }
     }
 
@@ -299,7 +370,14 @@ impl GroupFace {
             return None;
         }
         let task = self.task.take()?;
-        self.members.borrow_mut().clear();
+        // The members go with the group's link, and a watcher of the faces is told each went.
+        let gone = core::mem::take(&mut *self.members.borrow_mut());
+        #[cfg(feature = "connectivity")]
+        for member in &gone {
+            self.events.tell(FaceEventKind::Down, member);
+        }
+        #[cfg(not(feature = "connectivity"))]
+        drop(gone);
         // A finished task's output is taken without stepping anything.
         local.block_on_local(task).ok()
     }
@@ -342,6 +420,20 @@ impl GroupFace {
             .collect()
     }
 
+    /// The members the group holds, each as the transport it is reported as (`connectivity`); a
+    /// group whose session ended holds none.
+    #[cfg(feature = "connectivity")]
+    pub(super) fn member_snapshots(&self) -> Vec<FaceSnapshot> {
+        if self.has_ended() {
+            return Vec::new();
+        }
+        self.members
+            .borrow()
+            .iter()
+            .filter_map(|member| self.events.label.snapshot(member))
+            .collect()
+    }
+
     /// Put a publication on the group, naming its key in full: the group is told no keyexpr the
     /// session declares unless its declarations say so (`GroupDeclarations::declares_keyexprs`),
     /// which a group whose session tells it its entities, or less, does not. Built by the session
@@ -368,12 +460,13 @@ impl GroupFace {
 }
 
 /// The `on_event` of a group's session: the members its JOINs admit and the ones it loses are
-/// noted, and then the event goes through `dispatch` with the sink the group's replies are queued
-/// on.
+/// noted, each told to the session's watchers of its faces (`connectivity`), and then the event
+/// goes through `dispatch` with the sink the group's replies are queued on.
 fn noting_members<D>(
-    members: Rc<RefCell<Vec<Member>>>,
+    members: Rc<RefCell<Vec<MulticastMember>>>,
     replies: GroupReplies,
     mut dispatch: D,
+    #[cfg(feature = "connectivity")] events: Rc<MemberEvents>,
 ) -> impl FnMut(IterationEvent<'_, '_>) + 'static
 where
     D: FnMut(IterationEvent<'_, '_>, &GroupReplies) + 'static,
@@ -381,15 +474,27 @@ where
     move |event| {
         match &event {
             IterationEvent::MulticastPeerArrived(arrived) => {
-                members.borrow_mut().push(Member {
+                let member = MulticastMember {
                     peer: arrived.peer,
                     whatami: arrived.whatami,
-                });
+                    locator: arrived.locator,
+                };
+                members.borrow_mut().push(member);
+                #[cfg(feature = "connectivity")]
+                events.tell(FaceEventKind::Up, &member);
             }
             IterationEvent::MulticastPeerLost(lost) => {
-                members
-                    .borrow_mut()
-                    .retain(|member| member.peer != lost.peer);
+                let gone = {
+                    let mut held = members.borrow_mut();
+                    let at = held.iter().position(|member| member.peer == lost.peer);
+                    at.map(|at| held.remove(at))
+                };
+                #[cfg(feature = "connectivity")]
+                if let Some(member) = gone {
+                    events.tell(FaceEventKind::Down, &member);
+                }
+                #[cfg(not(feature = "connectivity"))]
+                let _ = gone;
             }
             _ => {}
         }

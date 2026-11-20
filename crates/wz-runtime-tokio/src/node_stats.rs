@@ -505,6 +505,7 @@ mod tests {
         face.peer_arrived(&MulticastPeerArrived {
             peer,
             whatami: Some(WhatAmI::Peer),
+            locator: std::net::SocketAddr::from(([10, 0, 0, 2], 7446)),
         });
 
         let all = MetricsQuery {

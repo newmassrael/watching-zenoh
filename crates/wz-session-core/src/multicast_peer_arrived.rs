@@ -68,11 +68,22 @@ pub struct MulticastPeerArrived {
     /// face-builder classifies the new face by, and because "this node does not
     /// know the role" is a different fact from any role it does know.
     pub whatami: Option<WhatAmI>,
+    /// The address the member's datagrams come from, which the group keys it by and which
+    /// upstream records as the member's locator, the `dst` of its one link: what a host that
+    /// reports the member as a transport of its own names that link by, as it would from the
+    /// member table's `MulticastMember`.
+    pub locator: core::net::SocketAddr,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The address a member's datagrams come from, in the tests.
+    const SOURCE: core::net::SocketAddr = core::net::SocketAddr::V4(core::net::SocketAddrV4::new(
+        core::net::Ipv4Addr::new(192, 0, 2, 7),
+        7447,
+    ));
     use crate::multicast_peer_lost::OBSERVER_ZID_MAX;
 
     /// The arrival surface is usable with no allocator at all — the value-side
@@ -85,9 +96,11 @@ mod tests {
         let arrived = MulticastPeerArrived {
             peer: MulticastPeerId::from_wire(&[0xAA, 0xBB, 0xCC]),
             whatami: Some(WhatAmI::Router),
+            locator: SOURCE,
         };
         assert_eq!(arrived.peer.as_slice(), &[0xAA, 0xBB, 0xCC]);
         assert_eq!(arrived.whatami, Some(WhatAmI::Router));
+        assert_eq!(arrived.locator, SOURCE);
         // `Copy` by contract — one observer callback fans the same event to
         // several consumers without reconstructing it.
         let fanned = arrived;
@@ -103,6 +116,7 @@ mod tests {
         let unknown = MulticastPeerArrived {
             peer: MulticastPeerId::from_wire(&[0x01]),
             whatami: None,
+            locator: SOURCE,
         };
         for known in [WhatAmI::Router, WhatAmI::Peer, WhatAmI::Client] {
             assert_ne!(
@@ -121,6 +135,7 @@ mod tests {
         let arrived = MulticastPeerArrived {
             peer: MulticastPeerId::from_wire(&[0x22; OBSERVER_ZID_MAX + 3]),
             whatami: None,
+            locator: SOURCE,
         };
         assert_eq!(arrived.peer.as_slice().len(), OBSERVER_ZID_MAX);
     }

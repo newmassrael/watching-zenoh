@@ -1497,6 +1497,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 policy: self.policy,
                 #[cfg(feature = "queryable")]
                 generation,
+                #[cfg(feature = "connectivity")]
+                watchers: Arc::clone(&self.watchers),
             },
             dispatch,
         );
@@ -1663,15 +1665,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// The faces that stand: those whose links have completed their handshakes.
     #[cfg(feature = "connectivity")]
     fn standing_faces(&self) -> Vec<FaceSnapshot> {
-        self.faces
-            .iter()
-            .filter_map(|face| match &face.link {
-                Link::Up(wire) if wire.actions.is_established() => {
-                    FaceSnapshot::of_actions(&*wire.actions)
-                }
-                _ => None,
-            })
-            .collect()
+        let links = self.faces.iter().filter_map(|face| match &face.link {
+            Link::Up(wire) if wire.actions.is_established() => {
+                FaceSnapshot::of_actions(&*wire.actions)
+            }
+            _ => None,
+        });
+        // And each member of a group the session joined, a transport of its own as both
+        // upstreams report it (`group`).
+        #[cfg(feature = "group")]
+        let links = links.chain(self.groups.iter().flat_map(GroupFace::member_snapshots));
+        links.collect()
     }
 
     /// What a lost link takes with it: every subscriber and queryable its peer declared, so a

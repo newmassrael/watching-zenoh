@@ -72,25 +72,19 @@ use super::TokenId;
 #[cfg(feature = "queryable")]
 use super::{queryable_options, QblEntry, QblId};
 use super::{
-    FaceEventKind, FaceSnapshot, FilterId, FilterPlane, GroupLink, Inner, LinkSnapshot,
-    SharedSession, SubEntry, SubId, WireKey,
+    FaceEventKind, FaceSnapshot, FilterId, FilterPlane, Inner, SharedSession, SubEntry, SubId,
+    WireKey,
 };
 use crate::drive::GroupDeclarations;
 use wz_runtime_tokio::session::{GroupDeclaration, GroupKey, InterestKinds, RetractionKey};
+use wz_session_core::face::GroupMemberLink;
 use wz_session_core::wire_id::EntityId;
 
-/// One member of a group as the transport both upstreams report it as: its zid and role,
-/// shared memory as the calling ABI says (`is_shm`), and one link from this node's locator on
-/// the group to the member's address, over the group (`src`, `group` and `endpoint` label it;
-/// see [`GroupLink`]). `None` for a member whose JOIN named a role this node does not know,
-/// which a transport cannot report, as [`FaceSnapshot`] refuses a face with no role.
-///
-/// Not QoS: zenoh reports a member's QoS as its JOIN advertised it, and the member table this
-/// reads does not keep that, so a member whose JOIN carries the QoS extension is reported
-/// without it. A group with QoS is off by default on both upstreams.
-///
-/// The link is the group's: a UDP datagram link, whose MTU each ABI reports by its own table,
-/// or a raweth one ([`member_link_label`]).
+/// One member of a group as the transport both upstreams report it as: the session core's
+/// snapshot of a member (`FaceSnapshot::of_group_member`), which the cooperative engine's
+/// group reports too, over the one link from this node's locator on the group (`src`) to the
+/// member, labelled by [`member_link_label`]: a UDP datagram link, or a raweth one. `None` for a
+/// member whose JOIN named a role this node does not know.
 fn member_snapshot(
     member: &MulticastMember,
     src: &str,
@@ -98,33 +92,18 @@ fn member_snapshot(
     endpoint: &str,
     is_shm: bool,
 ) -> Option<FaceSnapshot> {
-    let whatami = member.whatami?.to_wire();
-    let peer = member.peer.as_slice();
-    let mut zid = [0u8; 16];
-    let n = peer.len().min(16);
-    zid[..n].copy_from_slice(&peer[..n]);
     let (dst, kind) = member_link_label(endpoint, member);
-    Some(FaceSnapshot {
-        zid,
-        whatami,
-        is_qos: false,
-        is_multicast: true,
-        is_shm,
-        links: vec![LinkSnapshot {
-            src: src.to_owned(),
+    FaceSnapshot::of_group_member(
+        member,
+        GroupMemberLink {
+            src,
             dst,
             kind,
-            interfaces: None,
-            mtu: 0,
-            group: Some(GroupLink {
-                locator: group.to_owned(),
-                endpoint: endpoint.to_owned(),
-            }),
-            cert_common_name: None,
-            priorities: None,
-            reliable: None,
-        }],
-    })
+            group,
+            endpoint,
+        },
+        is_shm,
+    )
 }
 
 /// The member's end of a link over the group joined by `endpoint`, and the link's kind: a UDP

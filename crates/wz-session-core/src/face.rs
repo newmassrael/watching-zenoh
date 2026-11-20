@@ -234,6 +234,97 @@ pub enum FaceEventKind {
 /// invokes any of them: a sink may reach code that re-enters the registry.
 pub type FaceEventSink = Arc<dyn Fn(FaceEventKind, &FaceSnapshot) + Send + Sync>;
 
+/// The one link of a group member's transport, as the host that joined the group labels it:
+/// this node's end on the group (`src`), the member's end and the kind of link the group is
+/// (`dst`, `kind`), and the group under it, by its locator and by the endpoint the session
+/// joined it by (see [`GroupLink`]).
+#[cfg(feature = "session-multicast")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupMemberLink<'a> {
+    /// This node's end on the group.
+    pub src: &'a str,
+    /// The member's end.
+    pub dst: String,
+    /// The kind of link the group is, `None` for one no [`LinkKind`] names.
+    pub kind: Option<LinkKind>,
+    /// The group's locator.
+    pub group: &'a str,
+    /// The endpoint the session joined the group by.
+    pub endpoint: &'a str,
+}
+
+#[cfg(feature = "session-multicast")]
+impl<'a> GroupMemberLink<'a> {
+    /// The link to `member` of a UDP group: its end is the address its datagrams come from, as
+    /// upstream records a member's locator, and the link a UDP one.
+    pub fn udp(
+        src: &'a str,
+        member: &crate::multicast_dispatch::MulticastMember,
+        group: &'a str,
+        endpoint: &'a str,
+    ) -> Self {
+        Self {
+            src,
+            dst: alloc::format!("udp/{}", member.locator),
+            kind: Some(LinkKind::Udp),
+            group,
+            endpoint,
+        }
+    }
+}
+
+#[cfg(feature = "session-multicast")]
+impl FaceSnapshot {
+    /// One member of a group as the transport both upstreams report it as: its zid and role,
+    /// shared memory as the calling ABI says (`is_shm`), and the one link `link` labels. `None`
+    /// for a member whose JOIN named a role this node does not know, which a transport cannot
+    /// report, as a face with no role is not reported.
+    ///
+    /// Not QoS: zenoh reports a member's QoS as its JOIN advertised it, and the member table
+    /// does not keep that, so a member whose JOIN carries the QoS extension is reported without
+    /// it. A group with QoS is off by default on both upstreams. The link's MTU is each ABI's to
+    /// report by its own table, so it is 0 here.
+    pub fn of_group_member(
+        member: &crate::multicast_dispatch::MulticastMember,
+        link: GroupMemberLink<'_>,
+        is_shm: bool,
+    ) -> Option<Self> {
+        let whatami = member.whatami?.to_wire();
+        let peer = member.peer.as_slice();
+        let mut zid = [0u8; 16];
+        let n = peer.len().min(16);
+        zid[..n].copy_from_slice(&peer[..n]);
+        let GroupMemberLink {
+            src,
+            dst,
+            kind,
+            group,
+            endpoint,
+        } = link;
+        Some(Self {
+            zid,
+            whatami,
+            is_qos: false,
+            is_multicast: true,
+            is_shm,
+            links: alloc::vec![LinkSnapshot {
+                src: String::from(src),
+                dst,
+                kind,
+                interfaces: None,
+                mtu: 0,
+                group: Some(GroupLink {
+                    locator: String::from(group),
+                    endpoint: String::from(endpoint),
+                }),
+                cert_common_name: None,
+                priorities: None,
+                reliable: None,
+            }],
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,5 +400,54 @@ mod tests {
         subject.cert_common_name = None;
         let link = LinkSnapshot::unicast("a", "b", Some(&subject), 1);
         assert_eq!(link.auth_identifier(), None);
+    }
+
+    /// A member of a UDP group is a multicast transport of its own, of its zid and role, with one
+    /// UDP link to the address its datagrams come from, over the group; a member whose role this
+    /// node does not know is no transport it can report.
+    #[cfg(feature = "session-multicast")]
+    #[test]
+    fn a_group_member_is_a_multicast_transport_with_one_link_over_the_group() {
+        use crate::multicast_dispatch::MulticastMember;
+        use crate::multicast_peer_lost::MulticastPeerId;
+        let member = MulticastMember {
+            peer: MulticastPeerId::from_wire(&[0x0a, 0x0b]),
+            whatami: Some(crate::WhatAmI::Peer),
+            locator: core::net::SocketAddr::from(([192, 0, 2, 9], 7447)),
+        };
+        let group = "udp/239.1.2.3:7447";
+        let endpoint = "udp/239.1.2.3:7447#iface=lan7";
+        let face = FaceSnapshot::of_group_member(
+            &member,
+            GroupMemberLink::udp(group, &member, group, endpoint),
+            false,
+        )
+        .expect("a member of a role this node knows");
+        assert_eq!(&face.zid[..2], &[0x0a, 0x0b]);
+        assert!(face.zid[2..].iter().all(|byte| *byte == 0));
+        assert_eq!(face.whatami, crate::WhatAmI::Peer.to_wire());
+        assert!(face.is_multicast && !face.is_qos && !face.is_shm);
+        assert_eq!(face.links.len(), 1);
+        let link = &face.links[0];
+        assert_eq!(link.src, group);
+        assert_eq!(link.dst, "udp/192.0.2.9:7447");
+        assert_eq!(link.kind, Some(LinkKind::Udp));
+        assert_eq!(
+            link.group,
+            Some(GroupLink {
+                locator: String::from(group),
+                endpoint: String::from(endpoint),
+            })
+        );
+        let unknown = MulticastMember {
+            whatami: None,
+            ..member
+        };
+        assert!(FaceSnapshot::of_group_member(
+            &unknown,
+            GroupMemberLink::udp(group, &unknown, group, endpoint),
+            false
+        )
+        .is_none());
     }
 }

@@ -572,6 +572,9 @@ transport-link-unixpipe,transport-link-ws|"
     # and `queryable`): a get of the group is answered by a member's queryable and ends with its
     # Final, and one asked while the group holds no member asks nobody.
     "wz-capi-coop|hook|app-transport,group,query,queryable|tests::group::"
+    # And with `connectivity` (`tests::group::watched::`): each member is a multicast transport of
+    # its own, which a watcher of the faces is told of as it comes and as it goes.
+    "wz-capi-coop|hook|app-transport,group,connectivity|tests::group::"
     # What a hosted OS tells a node about its network, and the multicast sockets built from it,
     # which the tokio runtime and the cooperative host both open. The `#iface=` honor (the v4 and
     # v6 interface selectors and the tests that read them off the loopback) is compiled only with
