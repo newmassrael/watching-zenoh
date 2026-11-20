@@ -4586,11 +4586,19 @@ mod tests {
             } => {
                 assert_eq!(keyexpr_literal, "demo/a");
                 assert_eq!(payload, b"v1");
-                let ts = timestamp
-                    .as_ref()
-                    .expect("the reply carries the value timestamp");
-                assert_eq!(ts.time, 0x1234);
-                assert_eq!(ts.zid.as_slice(), &[0x07]);
+                #[cfg(feature = "pubsub-timestamp")]
+                {
+                    let ts = timestamp
+                        .as_ref()
+                        .expect("the reply carries the value timestamp");
+                    assert_eq!(ts.time, 0x1234);
+                    assert_eq!(ts.zid.as_slice(), &[0x07]);
+                }
+                #[cfg(not(feature = "pubsub-timestamp"))]
+                assert!(
+                    timestamp.is_none(),
+                    "a build that does not send a reply's timestamp does not stage it"
+                );
                 let enc = encoding
                     .as_ref()
                     .expect("the reply carries the value encoding");
@@ -5348,10 +5356,16 @@ mod tests {
                     keyexpr_literal, "demo/data",
                     "the CONCRETE key, not the `demo/**` the responder is bound to",
                 );
+                #[cfg(feature = "pubsub-timestamp")]
                 assert_eq!(
                     timestamp.as_ref().map(|t| t.time),
                     Some(0x1234),
                     "the Del reply is timestamped",
+                );
+                #[cfg(not(feature = "pubsub-timestamp"))]
+                assert!(
+                    timestamp.is_none(),
+                    "a build that does not send a reply's timestamp does not stage it"
                 );
                 assert!(source_info.is_some(), "the Del reply carries source_info");
             }
