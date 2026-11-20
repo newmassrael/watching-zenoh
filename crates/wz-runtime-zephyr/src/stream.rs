@@ -241,6 +241,9 @@ pub struct ZephyrTcpDial;
 impl StreamDial for ZephyrTcpDial {
     type Stream = ZephyrTcpSocket;
 
+    // As the datagram socket's: Zephyr refuses an IPv6 socket on an image without it.
+    const IPV6: bool = cfg!(wz_net_ipv6);
+
     fn dial(&self, to: SocketAddr) -> Result<ZephyrTcpSocket, LinkOpenError> {
         ZephyrTcpSocket::connect(to).map_err(|e| match e {
             // The stack had no socket to give: worth a later try, as a full table is.

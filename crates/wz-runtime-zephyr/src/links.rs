@@ -88,6 +88,9 @@ impl ZephyrLinks {
 impl SessionLinks for ZephyrLinks {
     type Pump = Rc<ZephyrUdpDriver>;
 
+    // Its links are the datagram socket's, which opens IPv6 only on an image whose stack has it.
+    const IPV6: bool = <ZephyrUdpSocket as wz_runtime_coop::udp_link::DatagramSocket>::IPV6;
+
     fn open_acceptor(&self, port: u16) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
         // The peer is whoever opens a session first; the driver is bound by its InitSyn.
         let socket = ZephyrUdpSocket::bind(SocketAddr::new(self.local, port))

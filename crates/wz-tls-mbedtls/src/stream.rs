@@ -448,6 +448,9 @@ where
 {
     type Stream = TlsStream<D::Stream>;
 
+    // The channel connects over the dial it wraps, so it reaches the families that dial does.
+    const IPV6: bool = D::IPV6;
+
     fn dial(&self, to: SocketAddr) -> Result<Self::Stream, LinkOpenError> {
         // The policy first: one that cannot make a session never connects.
         let mut session = self

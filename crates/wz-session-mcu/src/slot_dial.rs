@@ -34,7 +34,7 @@ use wz_session_core::session_timeouts::SessionTimeouts;
 
 use crate::app_layer::SessionEvents;
 use crate::connect_manager::{ConnectManager, DialFailed, Dialer, Ended};
-use crate::dial::{dial_failed, parse_locator};
+use crate::dial::{dial_failed, parse_locator_for};
 use crate::slot_host::{DialRefused, OpenedSession, SessionHost};
 
 /// What the node needs from the image to make a session: the entropy source the session's
@@ -292,7 +292,7 @@ where
         endpoint: &str,
         expected_zid: Option<[u8; wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES]>,
     ) -> Result<SlotSession<C, T::Driver>, DialFailed> {
-        let to = parse_locator(endpoint).map_err(DialFailed::Refused)?;
+        let to = parse_locator_for(endpoint, B::IPV6).map_err(DialFailed::Refused)?;
         let entropy = self.factory.borrow_mut().entropy();
         let factory = self.factory;
         let bind = &mut self.bind;
@@ -336,7 +336,7 @@ where
     type Session = SlotSession<C, T::Driver>;
 
     fn classify(endpoint: &str) -> Result<(), crate::connect_manager::DialRefused> {
-        parse_locator(endpoint).map(|_| ())
+        parse_locator_for(endpoint, B::IPV6).map(|_| ())
     }
 
     /// The slot host's handshake holds a session to the node it was made for, so a node may be

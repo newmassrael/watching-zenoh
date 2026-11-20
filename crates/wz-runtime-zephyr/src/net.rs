@@ -823,6 +823,10 @@ impl DatagramSocket for ZephyrUdpSocket {
 
     const CAN_SET_RECEIVE_TIMEOUT: bool = true;
 
+    // The image's Kconfig (`CONFIG_NET_IPV6`, read by build.rs): without it Zephyr refuses an
+    // IPv6 socket, so what reads an endpoint for this stack reads IPv4 alone.
+    const IPV6: bool = cfg!(wz_net_ipv6);
+
     /// Re-arm `SO_RCVTIMEO` through the board hook that armed it when the socket was opened. A
     /// socket whose first arming was refused takes none, because a read of it blocks for ever
     /// when the timeout is not there to end it.
@@ -1060,6 +1064,19 @@ impl<const RX: usize> Drop for ZephyrGroupTransport<RX> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Whether a stack of `S` opens IPv6 sockets, through a function so that the assertion is on
+    /// its answer and not on a constant.
+    fn opens_ipv6<S: DatagramSocket>() -> bool {
+        S::IPV6
+    }
+
+    /// The socket opens IPv6 addresses exactly when the image's stack has IPv6: a host build names
+    /// no family to build.rs and is an IPv4 image, and one that names `WZ_NET_IPV6=1` is not.
+    #[test]
+    fn the_socket_opens_ipv6_only_on_an_image_whose_stack_has_it() {
+        assert_eq!(opens_ipv6::<ZephyrUdpSocket>(), cfg!(wz_net_ipv6));
+    }
 
     /// An address goes into Zephyr's form and comes back as it was, on either family: Zephyr's
     /// own family numbers, the port in network order, the scope of a link-local end in its one

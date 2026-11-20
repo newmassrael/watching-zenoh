@@ -146,6 +146,12 @@ pub trait DatagramSocket: Sized {
     /// `StreamDial::CARRIED`.
     const CARRIED: bool = true;
 
+    /// Whether the platform opens IPv6 sockets: `false` on a stack built without IPv6, whose bind
+    /// of an IPv6 address is refused for its family ([`Self::refuses_address`]). A constant, so
+    /// that a stack of these sockets says so where an endpoint is read (`Bind::IPV6`,
+    /// `SessionLinks::IPV6`) and an image of one carries no reader of IPv6 text.
+    const IPV6: bool = true;
+
     /// Whether `error`, from a [`Self::bind`], says the stack can never open a socket for the
     /// address (the stack has no such family, as an IPv6 address on a stack without IPv6, or the
     /// stack cannot name it): a dial that meets it is `LinkOpenError::Unsupported` and not
@@ -177,6 +183,9 @@ impl DatagramSocket for NoDatagram {
     type Error = ();
 
     const CARRIED: bool = false;
+
+    // A socket that opens nothing opens no IPv6 address either.
+    const IPV6: bool = false;
 
     fn bind(_at: SocketAddr) -> Result<Self, ()> {
         Err(())
@@ -749,6 +758,8 @@ impl<S: DatagramSocket + 'static> UdpStack<S> {
 
 #[cfg(feature = "session-slot")]
 impl<S: DatagramSocket + 'static> Bind<FixedUdpDriver<S>> for UdpStack<S> {
+    const IPV6: bool = S::IPV6;
+
     fn bind(&mut self, to: Locator) -> Result<FixedUdpDriver<S>, LinkOpenError> {
         match to.proto {
             LinkProto::Udp => self.bind_initiator(to.at),
