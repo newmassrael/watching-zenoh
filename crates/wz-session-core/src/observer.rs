@@ -533,6 +533,17 @@ impl ApplicationLayerObserver {
         self.token_interest_chains_refused
     }
 
+    /// State the `query-unanswerable-final` value of the session about to be dispatched, from
+    /// the snapshot that session holds. An observer may serve more than one session (a unicast
+    /// session and the group it also joins), so the session says it before every dispatch, as
+    /// the slot profile's observer (`SlotObserverOf::set_unanswerable_final`) is told it.
+    pub fn set_unanswerable_final(&mut self, value: crate::policy::QueryUnanswerableFinal) {
+        #[cfg(feature = "query-queryable")]
+        self.queryables.set_unanswerable_final(value);
+        #[cfg(not(feature = "query-queryable"))]
+        let _ = value;
+    }
+
     /// Phase 1 — fan an [`IterationEvent`] into every contained
     /// registry. The subscriber registry runs first so its
     /// `absorb_declare` path updates `peer_keyexpr_table` BEFORE the

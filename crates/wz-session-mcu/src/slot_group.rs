@@ -256,11 +256,13 @@ impl<const P: usize> GroupPublisher<P> {
 }
 
 /// What the group's task is made of besides its pump: the state it shares with the loop, the
-/// observer its events are dispatched to, the clock its offers read, and what it publishes and
-/// counts. Plain values the task's two callbacks are built from ([`group_task`]).
+/// observer its events are dispatched to and the snapshot it states to that observer, the clock
+/// its offers read, and what it publishes and counts. Plain values the task's two callbacks are
+/// built from ([`group_task`]).
 struct GroupTaskParts<C: ClockSource + 'static, const P: usize> {
     state: &'static GroupState,
     observer: &'static ObserverCell<DocumentSinks>,
+    policy: SessionPolicy,
     clock: CoopTime<C>,
     publications: [Publication; P],
     counts: &'static PublishCounts<P>,
@@ -284,6 +286,7 @@ where
     let GroupTaskParts {
         state,
         observer,
+        policy,
         clock,
         publications,
         counts,
@@ -296,9 +299,11 @@ where
             _ => {}
         }
         let mut peers = state.peers.borrow_mut();
-        observer
-            .borrow_mut()
-            .dispatch_event(&mut peers, &mut requesters, event);
+        let mut observer = observer.borrow_mut();
+        // The observer is the node's and serves its sessions too: the group states its own
+        // answer to a query it cannot resolve, as each session does before its dispatch.
+        observer.set_unanswerable_final(policy.query_unanswerable_final());
+        observer.dispatch_event(&mut peers, &mut requesters, event);
     };
     let mut publisher = GroupPublisher::<P>::new();
     let next_tx = move || publisher.offer(clock.now_monotonic_ms(), &publications, counts);
@@ -414,6 +419,7 @@ where
         let parts = GroupTaskParts {
             state,
             observer: self.observer,
+            policy: self.policy,
             clock: CoopTime::new(&self.runtime),
             publications: self.plane.publications,
             counts: self.plane.counts,

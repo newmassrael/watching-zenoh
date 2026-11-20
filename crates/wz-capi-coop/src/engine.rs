@@ -1139,7 +1139,15 @@ fn dispatch_all<C: ClockSource + 'static>(
     face: FaceId,
     actions: Rc<McuActions<C>>,
 ) -> impl FnMut(wz_session_core::driver_loop::IterationEvent<'_, '_>) + 'static {
-    move |event| registry.borrow_mut().dispatch(face, event, &*actions)
+    move |event| {
+        let mut registry = registry.borrow_mut();
+        // The application's tables serve every face: this face's session states its own answer
+        // to a query it cannot resolve before its frame is dispatched, as one with queryables does.
+        registry
+            .app
+            .set_unanswerable_final(actions.params.policy.query_unanswerable_final());
+        registry.dispatch(face, event, &*actions);
+    }
 }
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
