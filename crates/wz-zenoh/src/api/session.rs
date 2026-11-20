@@ -7132,9 +7132,14 @@ mod tests {
                 "the child under `{stated}` failed:\n{stdout}\n{}",
                 String::from_utf8_lossy(&output.stderr)
             );
+            // The test harness prints the child's line after the test's own name on the same
+            // line, so the mark is looked for anywhere in a line.
             stdout
                 .lines()
-                .find_map(|line| line.strip_prefix("CLOCK-BOUND-OPEN "))
+                .find_map(|line| {
+                    line.split_once("CLOCK-BOUND-OPEN ")
+                        .map(|(_, verdict)| verdict)
+                })
                 .map(str::to_owned)
                 .unwrap_or_else(|| panic!("the child under `{stated}` ran no open:\n{stdout}"))
         };
