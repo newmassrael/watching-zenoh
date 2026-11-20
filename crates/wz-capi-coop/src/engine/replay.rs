@@ -392,12 +392,22 @@ mod tests {
         cursor
     }
 
-    /// With no retry wait, the pace a policy states by default, a refused turn gives the replay
-    /// up and the link with it, as the tokio host's does: it is not tried again at the turn
-    /// interval, and nothing more is owed over that link.
+    /// A pace of two a turn every 10 ms that answers a refused turn by waiting `retry_ms` and
+    /// gives up after `bound_ms` with nothing told: values inside a host build's domains of the
+    /// two retry limits.
+    fn pace_answering(retry_ms: usize, bound_ms: usize) -> Option<ReplayPacing> {
+        ReplayPacing::new(2, 10).map(|pace| {
+            pace.with_refusal(retry_ms, bound_ms)
+                .expect("a host build's domains hold every retry value")
+        })
+    }
+
+    /// With no retry wait, the retry limit's default, a refused turn gives the replay up and the
+    /// link with it, as the tokio host's does: it is not tried again at the turn interval, and
+    /// nothing more is owed over that link.
     #[test]
     fn a_refused_turn_ends_the_link_when_the_pace_retries_nothing() {
-        let mut replay = Replay::with_pacing(ReplayPacing::new(2, 10));
+        let mut replay = Replay::with_pacing(pace_answering(0, 0));
         replay.begin(5, 100);
         let cursor = refused_at_once(&replay, 2);
         assert_eq!(replay.settle(cursor, false, true, 100), TurnEnd::EndsLink);
@@ -410,7 +420,7 @@ mod tests {
     /// start of the replay when none has.
     #[test]
     fn a_refused_turn_is_retried_at_the_retry_wait_until_no_progress_ends_the_link() {
-        let pace = ReplayPacing::new(2, 10).map(|pace| pace.with_refusal(3, 50));
+        let pace = pace_answering(3, 50);
         let mut replay = Replay::with_pacing(pace);
         replay.begin(5, 100);
         let cursor = refused_at_once(&replay, 2);
@@ -435,7 +445,7 @@ mod tests {
     /// then cut short; and a no-progress bound of 0 never gives up.
     #[test]
     fn a_declaration_told_starts_the_no_progress_stretch_again() {
-        let pace = ReplayPacing::new(2, 10).map(|pace| pace.with_refusal(3, 50));
+        let pace = pace_answering(3, 50);
         let mut replay = Replay::with_pacing(pace);
         replay.begin(5, 100);
         let mut cursor = replay.cursor;
@@ -447,7 +457,7 @@ mod tests {
         let cursor = refused_at_once(&replay, 2);
         assert_eq!(replay.settle(cursor, false, true, 190), TurnEnd::EndsLink);
 
-        let patient = ReplayPacing::new(2, 10).map(|pace| pace.with_refusal(3, 0));
+        let patient = pace_answering(3, 0);
         let mut replay = Replay::with_pacing(patient);
         replay.begin(5, 0);
         let cursor = refused_at_once(&replay, 2);
