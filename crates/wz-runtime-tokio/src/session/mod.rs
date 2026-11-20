@@ -190,6 +190,7 @@ use wz_runtime_core::TimeSource;
 // (the runtime-tier owner of `R::LinkSink`). `SessionRuntime: Runtime`,
 // so the `<R as Runtime>::Mutex<...>` field types still resolve.
 use wz_session_core::link::SessionRuntime;
+use wz_session_core::registry_error::RegisterError;
 
 use crate::runtime_impl::TokioRuntime;
 // R311cw — `TokioTime` is the AP-profile default binding for the
@@ -3306,7 +3307,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         keyexpr: &str,
         options: &SubscribeOptions,
         mut callback: impl FnMut(&dyn SampleView) + Send + 'static,
-    ) -> (SubscriptionId, SampleCell<R>) {
+    ) -> Result<(SubscriptionId, SampleCell<R>), RegisterError> {
         // `entity-timestamp-opt-in`: the one place a subscriber's samples are handed to its
         // callback, so the one place the declaration's choice about the timestamp is applied.
         let expose_timestamp = options.expose_timestamp_by(&self.policy);
@@ -3321,11 +3322,12 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         };
         let (cell, sink) = self.deferred_sample_sink(callback);
         // R311de — observer access via R::with_mutex_mut closure form.
+        // The table admits what the quota its creator stated admits, on every backing, so a
+        // refusal is the caller's to report.
         let id = R::with_mutex_mut(&self.observer, |observer| {
             let id = observer
                 .subscribers
-                .register_sink(keyexpr, options.allowed_origin, sink)
-                .expect("register on the alloc backing never exceeds declared capacity");
+                .register_sink(keyexpr, options.allowed_origin, sink)?;
             // R311y788 — a LOCAL declaration can flip a publisher's
             // matching status just as an inbound remote one can, and pico
             // reports both (`_z_write_filter_ctx_add_local_match`,
@@ -3339,9 +3341,9 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                     c.locality.allows_local() && subscribers.has_local_matching(&c.keyexpr)
                 });
             }
-            id
-        });
-        (id, cell)
+            Ok(id)
+        })?;
+        Ok((id, cell))
     }
 }
 
@@ -3976,19 +3978,21 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
     /// announce a subscription to — the B4 local-filter model — so unlike the
     /// unicast [`Session::declare_subscriber`] there is no
     /// `Declare(DeclSubscriber)` emit and no RAII retraction (`retraction:
-    /// None`). Infallible: the keyexpr never reaches the outbound wire, so the
-    /// R300 outbound pico-safety gate (run by the unicast routed path) does not
-    /// apply. Whole-group subscriber-declaration exchange among multicast peers
-    /// is a separate, later concern.
+    /// None`). The keyexpr never reaches the outbound wire, so the R300
+    /// outbound pico-safety gate (run by the unicast routed path) does not
+    /// apply; the one refusal is the subscriber table's ([`RegisterError`]),
+    /// which holds the quota the session's creator stated. Whole-group
+    /// subscriber-declaration exchange among multicast peers is a separate,
+    /// later concern.
     pub fn declare_subscriber(
         &self,
         keyexpr: impl Into<String>,
         options: SubscribeOptions,
         callback: impl FnMut(&dyn SampleView) + Send + 'static,
-    ) -> Subscriber<R> {
+    ) -> Result<Subscriber<R>, RegisterError> {
         let keyexpr_string = keyexpr.into();
-        let (id, cell) = self.register_subscriber_local(&keyexpr_string, &options, callback);
-        Subscriber {
+        let (id, cell) = self.register_subscriber_local(&keyexpr_string, &options, callback)?;
+        Ok(Subscriber {
             observer: self.observer.clone(),
             id,
             keyexpr: keyexpr_string,
@@ -3996,7 +4000,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
             cell,
             armed: true,
             retraction: None,
-        }
+        })
     }
 
     /// Declare a [`Queryable`] on a MULTICAST session: registered in this session's queryable
@@ -4005,8 +4009,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
     /// ([`Self::dispatch_multicast_iteration_event`]). It emits NO wire declaration, as
     /// [`Self::declare_subscriber`] emits none: a group member answers every query the group
     /// carries whether or not anyone was told of the queryable, which is how zenoh-pico's
-    /// multicast transport behaves without `Z_FEATURE_MULTICAST_DECLARATIONS`. Infallible for
-    /// the same reason the subscriber is: the keyexpr never reaches the outbound wire.
+    /// multicast transport behaves without `Z_FEATURE_MULTICAST_DECLARATIONS`. No outbound
+    /// keyexpr gate applies, for the reason the subscriber's does not: the keyexpr never reaches
+    /// the outbound wire.
     #[cfg(all(feature = "transport-unicast", feature = "query-queryable"))]
     pub fn declare_queryable(
         &self,
@@ -8172,6 +8177,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 SubscribeAliasError::FragmentChainAbandoned => {
                     SubscribeError::FragmentChainAbandoned
                 }
+                SubscribeAliasError::Refused(refusal) => SubscribeError::Refused(refusal),
                 // A literal announce names no mapping, so none can be unknown.
                 SubscribeAliasError::UnknownMapping(id) => {
                     unreachable!("a literal subscriber declare reported unknown mapping {id}")
@@ -8205,7 +8211,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         T: 'static,
     {
         let keyexpr_string = literal;
-        let (id, cell) = self.register_subscriber_local(&keyexpr_string, &options, callback);
+        let (id, cell) = self
+            .register_subscriber_local(&keyexpr_string, &options, callback)
+            .map_err(SubscribeAliasError::Refused)?;
         let wire_suffix = if mapping_id == 0 {
             Some(keyexpr_string.as_str())
         } else {

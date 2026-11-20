@@ -558,6 +558,9 @@ pub enum SubscribeAliasError {
     /// mid-flight. Projected from
     /// [`SubscribeError::FragmentChainAbandoned`].
     FragmentChainAbandoned,
+    /// The session's subscriber table refused the local registration, and
+    /// nothing was announced. Projected from [`SubscribeError::Refused`].
+    Refused(RegisterError),
 }
 
 #[cfg(feature = "transport-unicast")]
@@ -569,6 +572,7 @@ impl From<SubscribeError> for SubscribeAliasError {
             SubscribeError::FeatureDisabled => SubscribeAliasError::FeatureDisabled,
             SubscribeError::TransportUnavailable => SubscribeAliasError::TransportUnavailable,
             SubscribeError::FragmentChainAbandoned => SubscribeAliasError::FragmentChainAbandoned,
+            SubscribeError::Refused(refusal) => SubscribeAliasError::Refused(refusal),
         }
     }
 }
@@ -604,6 +608,10 @@ impl std::fmt::Display for SubscribeAliasError {
                 "SubscribeAliasError: the session's fragment TX budget ran out while \
                  emitting this DECLARE's chain, so it was abandoned; nothing was \
                  cached — re-declare once the budget is refilled"
+            ),
+            SubscribeAliasError::Refused(refusal) => write!(
+                f,
+                "SubscribeAliasError: the session refused the subscriber: {refusal}"
             ),
         }
     }
@@ -657,6 +665,12 @@ pub enum SubscribeError {
     /// "no wire bytes emitted", and this one may have emitted some. Nothing
     /// was cached, so re-declaring once the budget is refilled is the repair.
     FragmentChainAbandoned,
+    /// The session's subscriber table refused the local registration
+    /// ([`RegisterError`]): it holds the quota its creator stated
+    /// (`MAX_SUBSCRIPTIONS`) or its capacity, the key is not in a closed key
+    /// set, or the declaration ids are spent. Nothing was registered and
+    /// nothing announced.
+    Refused(RegisterError),
 }
 
 #[cfg(feature = "transport-unicast")]
@@ -687,6 +701,10 @@ impl std::fmt::Display for SubscribeError {
                  emitting this DECLARE's chain, so it was abandoned (a 0x3 Drop \
                  stop fragment followed any fragments already sent); nothing was \
                  cached — re-declare once the budget is refilled"
+            ),
+            SubscribeError::Refused(refusal) => write!(
+                f,
+                "SubscribeError: the session refused the subscriber: {refusal}"
             ),
         }
     }
