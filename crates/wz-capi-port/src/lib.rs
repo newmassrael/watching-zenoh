@@ -17,7 +17,8 @@
 //! [`MatchingSink`], [`LivelinessSink`]), the
 //! form a key takes on the wire ([`WireKey`]), what a write filter counts ([`FilterPlane`]) and
 //! what a filtered put did ([`FilteredPut`], [`FanoutError`]). They lived in `wz-capi-core`'s
-//! face registry, which re-exports them, so the zenoh-c ABI keeps its paths.
+//! face registry, which re-exports them, so the zenoh-c ABI keeps its paths. The multicast groups
+//! an ABI asks a session to join, and what it tells them, are [`group`]'s, read by either engine.
 //!
 //! The operations an engine implements are [`SessionEngine`]: what a zenoh-pico client asks of a
 //! session, which an ABI reaches through `Arc<dyn SessionEngine>` and nothing else; and
@@ -63,6 +64,7 @@ pub mod cancellation;
 pub mod decl_watch;
 mod drive;
 mod engine;
+pub mod group;
 pub mod listeners;
 // What the doors of the observation plane do, for every C ABI: one behaviour, named by each ABI
 // for itself. Only the features of the instruments compile it.

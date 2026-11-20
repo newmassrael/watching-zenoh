@@ -183,8 +183,8 @@ const fn pico_socket_timeout(ms: usize) -> u32 {
 /// ([`wz_session_core::policy::SnResolution`]) states another width of the sequence number for a
 /// group whose members are built with one, as pico refuses a Join that states another than its own.
 #[cfg(feature = "multicast-transport")]
-const fn pico_group(sn_resolution: SnResolution) -> wz_capi_core::drive::GroupProfile {
-    wz_capi_core::drive::GroupProfile {
+const fn pico_group(sn_resolution: SnResolution) -> wz_capi_port::group::GroupProfile {
+    wz_capi_port::group::GroupProfile {
         lease_ms: wz_session_core::caps::PICO_LEASE_MS as u64,
         join_interval_ms: 2_500,
         // pico has no cap on a group's members: its list grows while its allocator gives.
@@ -993,7 +993,7 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
         Some(endpoint) if joins_a_group => (
             None,
             Vec::new(),
-            vec![wz_capi_core::drive::GroupJoin {
+            vec![wz_capi_port::group::GroupJoin {
                 endpoint,
                 profile: pico_group(sn_resolution),
                 is_shm: false,
@@ -1002,9 +1002,9 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
                 // `Z_FEATURE_MULTICAST_DECLARATIONS` its keyexprs and write filters as well
                 // (MEASURED: `decl_kexpr(1, demo/mc/zp)`, `Interest(3, .., 1:)`).
                 #[cfg(not(feature = "multicast-declarations"))]
-                declarations: wz_capi_core::drive::GroupDeclarations::Entities,
+                declarations: wz_capi_port::group::GroupDeclarations::Entities,
                 #[cfg(feature = "multicast-declarations")]
-                declarations: wz_capi_core::drive::GroupDeclarations::Mapped,
+                declarations: wz_capi_port::group::GroupDeclarations::Mapped,
             }],
         ),
         listen => (listen, connect, Vec::new()),
