@@ -14215,7 +14215,10 @@ layer_c1m_session_lwip() {
     # list is finished at once, an unpaced node sends the whole list and a paced one its burst, and
     # a paced replay waits the interval until it has told the peer everything: 6 = what that command
     # PRINTED.
-    _runci_guarded_test "C1m mcu slot declaration replay" 6 \
+    # 6 -> 10, counted from the source: the session's own snapshot states its pace (a test the
+    # count above left out), and a refused turn is answered as the pace says (no retry wait ends
+    # the session, a retry wait until the no-progress bound, and what a turn reports).
+    _runci_guarded_test "C1m mcu slot declaration replay" 10 \
         cargo test -p wz-session-mcu --features client-slot --lib slot_client::tests:: --quiet || return 1
     # Fixed-memory step S6, the exhaustion cases of the N-session pool (R1, R2, R6):
     # a node holds at most the generated MAX_SESSIONS sessions, and every table a

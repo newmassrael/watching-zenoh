@@ -39,7 +39,7 @@ use wz_session_core::query::QueryableRegistry;
 use wz_session_core::query_sink::{FnQuerySink, QueryView, ReplyOut};
 use wz_session_core::registry_error::RegisterError;
 use wz_session_core::replay_cursor::ReplayCursor;
-use wz_session_core::replay_pacing::ReplayPacing;
+use wz_session_core::replay_pacing::{RefusalStep, ReplayPacing};
 use wz_session_core::sample_kind::SampleKind;
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::slot_observer::{NoSink, ObserverSinks};
@@ -272,7 +272,9 @@ where
             end_released_inbound(&mut self.manager, self.accepted.iter());
         }
         for session in self.live() {
-            if session.actions().is_established() && !session.declared() {
+            // A session whose task has ended, with its link or because the pace gave its replay
+            // up, is told nothing more while it waits to be let go of.
+            if session.actions().is_established() && !session.declared() && !session.is_finished() {
                 let pacing = session_pacing(self.stated_pacing, &session.actions().params.policy);
                 replay_declarations(session, self.declarations, pacing, now_ms);
             }
@@ -357,14 +359,44 @@ const fn replay_burst(pacing: Option<ReplayPacing>) -> usize {
     }
 }
 
-/// When the next turn of a replay may send, after a turn at `now_ms`: `None` when nothing is to be
-/// waited for (the node is not paced, or the replay has told the peer everything), else the end of
-/// the interval. A turn a refused send cut short is not finished, so it waits the interval too: the
-/// stage that refused is given the time a pace is meant to give it.
-fn next_turn_after(pacing: Option<ReplayPacing>, finished: bool, now_ms: u64) -> Option<u64> {
-    match pacing {
-        Some(pace) if !finished => Some(now_ms.saturating_add(pace.interval_ms())),
-        _ => None,
+/// What a replay does after a turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AfterTurn {
+    /// Nothing is waited for: the node is not paced, or the replay has told the peer everything.
+    Due,
+    /// The next turn sends no sooner than this time, in the node's milliseconds.
+    At(u64),
+    /// The pace gave the replay up on a turn the stage refused: the session ends, and its peer is
+    /// told everything again over the next one.
+    EndsSession,
+}
+
+/// What follows a turn at `now_ms` that left the replay `finished` or not, and in which the
+/// session's stage `refused` a send, `last_progress_ms` being when the replay last told the peer a
+/// declaration or began. A paced turn the stage took whole waits the interval; one it refused is
+/// answered as the pace answers a refusal ([`ReplayPacing::after_refusal`]), as the tokio host
+/// answers it: tried again after the pace's own retry wait, or, with no retry wait or once no
+/// declaration has gone out for the no-progress bound, given up with the session. A node that is
+/// not paced asks again on its next tick, as it tells everything in one turn.
+fn after_turn(
+    pacing: Option<ReplayPacing>,
+    finished: bool,
+    refused: bool,
+    last_progress_ms: u64,
+    now_ms: u64,
+) -> AfterTurn {
+    let Some(pace) = pacing else {
+        return AfterTurn::Due;
+    };
+    if finished {
+        return AfterTurn::Due;
+    }
+    if !refused {
+        return AfterTurn::At(now_ms.saturating_add(pace.interval_ms()));
+    }
+    match pace.after_refusal(last_progress_ms, now_ms) {
+        RefusalStep::RetryIn(wait_ms) => AfterTurn::At(now_ms.saturating_add(wait_ms)),
+        RefusalStep::EndsLink => AfterTurn::EndsSession,
     }
 }
 
@@ -374,7 +406,11 @@ fn next_turn_after(pacing: Option<ReplayPacing>, finished: bool, now_ms: u64) ->
 /// declaration it sees twice under one id as the first, so a repeat was harmless on the wire and
 /// wasted a frame each, and a node with many declarations on a busy stage could repeat them for as
 /// long as the stage stayed busy. A paced node sends a burst a turn and leaves the interval between
-/// turns, and does nothing at all at a time before the session's next turn.
+/// turns, and does nothing at all at a time before the session's next turn. A refused turn the
+/// pace gives up on ends the session with no Close, as zenoh-pico clears a transport its reopen
+/// could not send its declarations over (`vendor/zenoh-pico/src/net/session.c` @
+/// `_z_transport_clear(&s->_tp);`): the connect manager dials a dialled one again and the accept
+/// pass frees the row of an accepted one, and the next session's peer is told from the start.
 fn replay_declarations<C: ClockSource + 'static, D: BoxedLinkDriver + ?Sized + 'static>(
     session: &SlotSession<C, D>,
     declarations: &[Declaration],
@@ -384,24 +420,60 @@ fn replay_declarations<C: ClockSource + 'static, D: BoxedLinkDriver + ?Sized + '
     if !session.replay_due(now_ms) {
         return;
     }
-    let mut cursor = session.replay(declarations.len());
-    replay_turn(&mut cursor, replay_burst(pacing), |at| {
+    let mut cursor = session.replay(declarations.len(), now_ms);
+    let turn = replay_turn(&mut cursor, replay_burst(pacing), |at| {
         listed_entity_id(at).is_some_and(|id| declare(session.actions(), id, &declarations[at]))
     });
-    if let Some(at_ms) = next_turn_after(pacing, cursor.finished(), now_ms) {
-        session.set_next_turn(at_ms);
+    if turn.told {
+        session.note_progress(now_ms);
+    }
+    let after = after_turn(
+        pacing,
+        cursor.finished(),
+        turn.refused,
+        session.last_progress_ms(),
+        now_ms,
+    );
+    match after {
+        AfterTurn::Due => {}
+        AfterTurn::At(at_ms) => session.set_next_turn(at_ms),
+        AfterTurn::EndsSession => {
+            session.abort();
+            return;
+        }
     }
     session.set_replay(cursor);
 }
 
+/// What one turn of a replay did: whether the stage took any declaration of it, and whether it
+/// refused one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Turn {
+    told: bool,
+    refused: bool,
+}
+
 /// One turn of a replay: ask `send` for each entry of the turn in order, and on the first it
 /// refuses stop and put the cursor back on that entry.
-fn replay_turn(cursor: &mut ReplayCursor, burst: usize, mut send: impl FnMut(usize) -> bool) {
+fn replay_turn(
+    cursor: &mut ReplayCursor,
+    burst: usize,
+    mut send: impl FnMut(usize) -> bool,
+) -> Turn {
+    let mut told = false;
     for at in cursor.turn(burst) {
         if !send(at) {
             cursor.refused(at);
-            return;
+            return Turn {
+                told,
+                refused: true,
+            };
         }
+        told = true;
+    }
+    Turn {
+        told,
+        refused: false,
     }
 }
 
@@ -514,14 +586,92 @@ mod tests {
     #[test]
     fn a_paced_replay_waits_the_interval_until_it_has_told_the_peer_everything() {
         let pace = ReplayPacing::new(3, 10);
-        // Mid-replay, or cut short by a refused send: the next turn is an interval on.
-        assert_eq!(next_turn_after(pace, false, 1_000), Some(1_010));
+        // Mid-replay, the stage having taken the whole turn: the next turn is an interval on.
+        assert_eq!(
+            after_turn(pace, false, false, 1_000, 1_000),
+            AfterTurn::At(1_010)
+        );
         // Everything told: nothing to wait for, and the session is not asked again.
-        assert_eq!(next_turn_after(pace, true, 1_000), None);
-        // Not paced: never a wait, whatever the cursor says.
-        assert_eq!(next_turn_after(None, false, 1_000), None);
+        assert_eq!(after_turn(pace, true, false, 1_000, 1_000), AfterTurn::Due);
+        // Not paced: never a wait, whatever the cursor or the stage says.
+        assert_eq!(after_turn(None, false, false, 1_000, 1_000), AfterTurn::Due);
+        assert_eq!(after_turn(None, false, true, 0, 1_000), AfterTurn::Due);
         // A clock at the end of its range does not wrap into the past and release the wait.
-        assert_eq!(next_turn_after(pace, false, u64::MAX), Some(u64::MAX));
+        assert_eq!(
+            after_turn(pace, false, false, u64::MAX, u64::MAX),
+            AfterTurn::At(u64::MAX)
+        );
+    }
+
+    /// With no retry wait, the pace a policy states by default, a turn the stage refused gives
+    /// the replay up and ends the session, as the tokio host's does: it is not tried again at the
+    /// turn interval.
+    #[test]
+    fn a_refused_turn_ends_the_session_when_the_pace_retries_nothing() {
+        let pace = ReplayPacing::new(3, 10);
+        assert_eq!(
+            after_turn(pace, false, true, 1_000, 1_000),
+            AfterTurn::EndsSession
+        );
+    }
+
+    /// With a retry wait, a refused turn is tried again after that wait and not the interval,
+    /// until no declaration has gone out for the no-progress bound; a bound of 0 never gives up.
+    #[test]
+    fn a_refused_turn_is_retried_at_the_retry_wait_until_no_progress_ends_the_session() {
+        let pace = ReplayPacing::new(3, 10).map(|pace| pace.with_refusal(4, 50));
+        assert_eq!(
+            after_turn(pace, false, true, 1_000, 1_020),
+            AfterTurn::At(1_024),
+            "the retry wait (4 ms), not the turn interval (10 ms)"
+        );
+        assert_eq!(
+            after_turn(pace, false, true, 1_000, 1_049),
+            AfterTurn::At(1_053)
+        );
+        assert_eq!(
+            after_turn(pace, false, true, 1_000, 1_050),
+            AfterTurn::EndsSession,
+            "50 ms with nothing told"
+        );
+        let patient = ReplayPacing::new(3, 10).map(|pace| pace.with_refusal(4, 0));
+        assert_eq!(
+            after_turn(patient, false, true, 0, u64::MAX),
+            AfterTurn::At(u64::MAX)
+        );
+    }
+
+    /// A turn reports whether the stage took any declaration and whether it refused one, which
+    /// is what starts the no-progress stretch again and what asks the pace about a refusal.
+    #[test]
+    fn a_turn_reports_what_the_stage_took_and_refused() {
+        let mut cursor = ReplayCursor::begin(5);
+        assert_eq!(
+            replay_turn(&mut cursor, 3, |at| at != 1),
+            Turn {
+                told: true,
+                refused: true
+            }
+        );
+        assert_eq!(
+            cursor.next(),
+            1,
+            "the next turn starts at the refused entry"
+        );
+        assert_eq!(
+            replay_turn(&mut cursor, 3, |_| false),
+            Turn {
+                told: false,
+                refused: true
+            }
+        );
+        assert_eq!(
+            replay_turn(&mut cursor, 3, |_| true),
+            Turn {
+                told: true,
+                refused: false
+            }
+        );
     }
 }
 

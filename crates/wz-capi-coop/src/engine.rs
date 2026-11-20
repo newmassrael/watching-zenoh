@@ -116,7 +116,7 @@ use registry::LOCAL_FACE;
 use registry::{FaceId, Registry, DIAL_FACE};
 
 mod replay;
-use replay::{Kind, Replay};
+use replay::{Kind, Replay, TurnEnd};
 
 #[cfg(feature = "ticker")]
 mod ticker;
@@ -1173,7 +1173,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
 
     /// Move the link of the face at `at` on. A handshake that completed brings the link up and
     /// begins to declare over it what the session holds, and a link that is up goes on with the
-    /// telling when a turn of it is due (`replay`). The dial role's face is kept: a link that
+    /// telling when a turn of it is due (`replay`), or ends when the pace gives up a turn the link
+    /// refused, and is then lost as any other link is. The dial role's face is kept: a link that
     /// ended or ran out of time gives way to the next endpoint, and a lost link takes what its
     /// peer declared with it and is dialled again. Any other face is not dialled again: its lost
     /// or failed link takes the face with it. `Err` when the session ends: the dial role's link
@@ -1184,6 +1185,20 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let now_ms = now_us / 1000;
         let id = self.faces[at].id;
         let link = core::mem::replace(&mut self.faces[at].link, Link::Waiting { at_us: now_us });
+        // A link that is up goes on telling its peer what the session holds, when a turn is due.
+        // A turn whose refusal the pace gives up on ends the link here, with no Close, as
+        // zenoh-pico clears a transport its reopen could not send its declarations over
+        // (`vendor/zenoh-pico/src/net/session.c` @ `_z_transport_clear(&s->_tp);`); the arm for a
+        // lost link below then takes it as lost, so the dial role's face dials again and tells
+        // everything over the next link, and any other face goes.
+        if let Link::Up(wire) = &link {
+            if !wire.task.is_finished()
+                && self.replay_turn(at, &wire.actions, now_ms) == TurnEnd::EndsLink
+            {
+                wire.task.abort();
+                self.local.run_until_idle();
+            }
+        }
         let polled = match link {
             // zenoh-pico's client reopens whatever ended its link: a lease that ran out, a read
             // that failed, a Close from the router (`vendor/zenoh-pico/src/transport/unicast/read.c` @
@@ -1202,12 +1217,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     return Err(OpenError::Unreachable(String::from("the link was lost")));
                 }
                 self.dial_or_wait(0, OpenError::NoEndpoint, now_us, redial_ms)?
-            }
-            // A link that is up goes on telling its peer what the session holds, when a turn is
-            // due.
-            Link::Up(wire) if !self.faces[at].replay.finished() => {
-                self.replay_turn(at, &wire.actions, now_ms);
-                Link::Up(wire)
             }
             Link::Opening {
                 wire,
@@ -1305,6 +1314,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// Tell the peer of every face whose link is up everything the session holds again, as a link
     /// that has just come up is told (`begin_replay`), at the session's pace; the count of faces.
     /// What the application asks for when it holds that a peer lost declarations the session made.
+    /// A face whose first turn the pace gives up on is not counted: its link ends, and the next
+    /// pass over the faces takes it as lost (`poll_face`).
     fn redeclare(&mut self) -> usize {
         let now_ms = self.clock.now_us() / 1000;
         let mut told = 0;
@@ -1313,18 +1324,27 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 Link::Up(wire) => Rc::clone(&wire.actions),
                 _ => continue,
             };
-            self.begin_replay(at, &actions, now_ms);
-            told += 1;
+            match self.begin_replay(at, &actions, now_ms) {
+                TurnEnd::Kept => told += 1,
+                TurnEnd::EndsLink => {
+                    if let Link::Up(wire) = &self.faces[at].link {
+                        wire.task.abort();
+                    }
+                }
+            }
         }
         told
     }
 
     /// The link of the face at `at` is `wire`, up: what the session holds is declared over it from
-    /// here on, and the watchers of the faces are told it came up.
+    /// here on, and the watchers of the faces are told it came up. A first turn the pace gives up
+    /// on ends the link at once, and the next pass over the faces takes it as lost (`poll_face`).
     fn bring_up(&mut self, at: usize, wire: Wire<C>, now_us: u64) {
         #[cfg(feature = "listen")]
         wire.admitted.grant();
-        self.begin_replay(at, &wire.actions, now_us / 1000);
+        if self.begin_replay(at, &wire.actions, now_us / 1000) == TurnEnd::EndsLink {
+            wire.task.abort();
+        }
         let snapshot = self.face_of(&wire.actions);
         self.faces[at].link = Link::Up(wire);
         self.report_face(FaceEventKind::Up, snapshot);
