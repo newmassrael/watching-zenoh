@@ -4380,6 +4380,9 @@ pub struct OpenStance {
     /// created it (`open_plan::resolve_policy` for a plan, the ABI's own open otherwise). Every
     /// session, link and face the open makes is handed it; none reads the build.
     pub session_policy: SessionPolicy,
+    /// The snapshot of the session limits, resolved by the same open and handed to the same
+    /// sessions as [`Self::session_policy`]: their tables read their bounds here.
+    pub session_limits: wz_session_core::limits::SessionLimits,
     /// The transport the program supplies, which carries every link the session dials or listens
     /// on in place of the system's sockets; `None` opens on the sockets the locators name. A
     /// locator the transport does not carry fails the open as a scheme this build does not know.
@@ -4716,6 +4719,7 @@ pub fn open_blocking(
         groups,
         session_defaults,
         session_policy,
+        session_limits,
         #[cfg(feature = "app-transport")]
         app_transport,
         ..
@@ -4855,6 +4859,7 @@ pub fn open_blocking(
                 namespace,
                 aggregation: session_defaults.aggregation.clone(),
                 session_policy,
+                session_limits,
                 #[cfg(feature = "shared-key-ids")]
                 key_ids,
             },
@@ -6214,6 +6219,7 @@ mod tests {
             groups: Vec::new(),
             session_defaults: Default::default(),
             session_policy: SessionPolicy::defaults(),
+            session_limits: wz_session_core::limits::SessionLimits::defaults(),
             #[cfg(feature = "app-transport")]
             app_transport: None,
         }

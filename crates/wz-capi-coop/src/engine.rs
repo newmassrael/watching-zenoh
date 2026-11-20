@@ -70,6 +70,7 @@ use wz_session_core::declare_form::{InterestForm, RetractionKey};
 use wz_session_core::driver_loop::DriverOutcome;
 use wz_session_core::entropy::{EntropySource, EntropyUnavailable};
 use wz_session_core::interest_build::InterestKinds;
+use wz_session_core::limits::SessionLimits;
 #[cfg(feature = "listen")]
 use wz_session_core::link_admission::{LinkAdmission, LinkRegistry};
 use wz_session_core::locality::Locality;
@@ -224,6 +225,13 @@ pub const DEFAULT_MAX_FACES: usize = 1000;
 /// ABI's door for one is a key of its own.
 fn resolve_policy(_config: &CoopConfig) -> SessionPolicy {
     SessionPolicy::defaults()
+}
+
+/// The session limits a session [`CoopEngine::open`] opens from `config` holds its tables to: the
+/// one place that open decides them. The build's, for the reason [`resolve_policy`] gives: the
+/// config has no field for a limit yet.
+fn resolve_limits(_config: &CoopConfig) -> SessionLimits {
+    SessionLimits::defaults()
 }
 
 /// Why no session was opened.
@@ -1775,7 +1783,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             local,
             runtime,
             clock,
-            registry: Rc::new(RefCell::new(Registry::new())),
+            registry: Rc::new(RefCell::new(Registry::new(&resolve_limits(&config)))),
             faces: vec![Face {
                 id: DIAL_FACE,
                 link: Link::Waiting { at_us: u64::MAX },

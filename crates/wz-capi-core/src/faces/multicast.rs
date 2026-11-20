@@ -484,7 +484,9 @@ impl SharedSession {
         membership: &McastGroupMembership,
         is_shm: bool,
     ) -> TokioMulticastSession {
-        let observer = Arc::new(WzMutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(WzMutex::new(ApplicationLayerObserver::with_limits(
+            self.session_limits(),
+        )));
         // The node's snapshot, the one its group's parameters carry to the drive loop.
         let session = TokioMulticastSession::new_multicast(
             observer,

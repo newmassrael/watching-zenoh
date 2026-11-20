@@ -405,6 +405,16 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
         }
     }
 
+    /// [`Self::new`], each registry held to the limits `limits` states: what the creator of the
+    /// session resolved for it. A table reads its bound here and never from the build.
+    pub fn with_limits(limits: &crate::limits::SessionLimits) -> Self {
+        let mut observer = Self::new();
+        observer
+            .subscribers
+            .limit_to(limits.max_subscriptions_held());
+        observer
+    }
+
     /// Write an observer with nothing registered at `at`, one registry at a time, so the
     /// observer is never a value of its own on any stack: the largest value this holds
     /// is one registry. The single list of fields, which [`Self::new`] shares.

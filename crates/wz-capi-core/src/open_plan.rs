@@ -45,6 +45,7 @@ use wz_runtime_tokio::zenoh_config::{
 };
 #[cfg(feature = "routing-namespace")]
 use wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr;
+use wz_session_core::limits::SessionLimits;
 use wz_session_core::region_partition::SouthPartition;
 
 use crate::drive::{
@@ -923,6 +924,10 @@ pub struct OpenPlan {
     /// machine the open makes: the sessions of the registry or the node, their links and their
     /// faces. A machine reads a policy here and never from the build.
     pub session_policy: SessionPolicy,
+    /// The snapshot of the session limits the open resolved, handed to the same machines as
+    /// [`Self::session_policy`]: a table reads its bound here and never from the build. The
+    /// document states no limit yet, so it holds the build's.
+    pub session_limits: SessionLimits,
 }
 
 /// The policies an open from `node` (the document the open read, or `None` when it read none)
@@ -1401,6 +1406,7 @@ impl OpenPlan {
             ignored,
             session,
             session_policy,
+            session_limits: SessionLimits::defaults(),
         })
     }
 
@@ -1522,6 +1528,7 @@ impl OpenPlan {
                 groups,
                 session_defaults: self.session,
                 session_policy: self.session_policy,
+                session_limits: self.session_limits,
                 // A plan reads a zenoh configuration document, which names no transport of the
                 // program's.
                 #[cfg(feature = "app-transport")]
