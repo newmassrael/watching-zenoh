@@ -575,6 +575,9 @@ transport-link-unixpipe,transport-link-ws|"
     # And with `connectivity` (`tests::group::watched::`): each member is a multicast transport of
     # its own, which a watcher of the faces is told of as it comes and as it goes.
     "wz-capi-coop|hook|app-transport,group,connectivity|tests::group::"
+    # And with `liveliness` (`tests::group::alive::`): a liveliness subscriber asks the group for
+    # its members' tokens, which a member answers from the tokens its session holds.
+    "wz-capi-coop|hook|app-transport,group,liveliness|tests::group::"
     # What a hosted OS tells a node about its network, and the multicast sockets built from it,
     # which the tokio runtime and the cooperative host both open. The `#iface=` honor (the v4 and
     # v6 interface selectors and the tests that read them off the loopback) is compiled only with

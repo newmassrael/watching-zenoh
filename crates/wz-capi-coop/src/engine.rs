@@ -1552,7 +1552,23 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             if self.groups[at].rejoin_due(now_us) {
                 let join = self.groups[at].group_join().clone();
                 match self.join_group(id, join) {
-                    Ok(face) => self.groups[at] = face,
+                    Ok(face) => {
+                        // The liveliness subscribers ask the group again, as they would have
+                        // had it been there when they were declared, as the tokio engine's
+                        // group asks again when it comes up. What the session announced is
+                        // not told again: neither upstream tells a group that comes up of
+                        // the entities a session already holds.
+                        #[cfg(feature = "liveliness")]
+                        for entry in &self.live_subs {
+                            face.ask_liveliness(
+                                entry.id,
+                                &entry.keyexpr,
+                                &entry.wire,
+                                entry.history,
+                            );
+                        }
+                        self.groups[at] = face;
+                    }
                     Err(_) => {
                         if let Some(ms) = redial_ms {
                             self.groups[at].wait_to_rejoin(again_at(ms));
@@ -2934,6 +2950,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let at = core.live_subs.iter().position(|s| s.id == id)?;
             let links = core.retract(Kind::LiveSub, at);
             let entry = core.live_subs.remove(at);
+            // The groups asked for it are told the asking ended.
+            #[cfg(feature = "group")]
+            for group in &core.groups {
+                group.end_liveliness_ask(id);
+            }
             core.registry
                 .borrow_mut()
                 .app
@@ -3770,7 +3791,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             retraction,
         };
         core.announce(Kind::Token, |actions| entry.declare(actions));
-        // A token takes no traffic of its own, so every group that is told tokens is told it.
+        // A token takes no traffic of its own, so every group that is told tokens is told it. It is
+        // held before it is announced (the registration above, in the tables a group's
+        // dispatch answers a member's Interest from), so a member that asks right after it
+        // hears the announcement finds it held: the tokio engine's group holds it the same way.
         #[cfg(feature = "group")]
         core.announce_to_groups(GroupEntity {
             what: GroupDeclaration::Token,
@@ -3845,6 +3869,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             history,
         };
         core.announce(Kind::LiveSub, |actions| entry.ask(actions));
+        // And each group the session joined is asked, as its declarations say.
+        #[cfg(feature = "group")]
+        for group in &core.groups {
+            group.ask_liveliness(id, &entry.keyexpr, &entry.wire, entry.history);
+        }
         core.live_subs.push(entry);
         drop(guard);
         self.deliver();

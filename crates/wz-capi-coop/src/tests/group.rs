@@ -567,3 +567,72 @@ mod watched {
         SessionDrive::close(&*first);
     }
 }
+
+/// Liveliness over the group: a liveliness subscriber asks the group for its members' tokens,
+/// and a member answers from the tokens its session holds, which it holds before it announces
+/// any of them.
+#[cfg(feature = "liveliness")]
+mod alive {
+    use std::sync::{Arc, Mutex};
+
+    use wz_capi_port::{LivelinessSink, SessionDrive, SessionEngine, SubId, WireKey};
+    use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
+
+    use super::{
+        eventually, member_config, open_member, until_members_know_each_other, Engine, Network,
+        GROUP,
+    };
+
+    /// What a liveliness subscriber heard: each sample as its kind and key.
+    type Heard = Arc<Mutex<Vec<(LivelinessSampleKind, String)>>>;
+
+    /// Subscribe to the tokens on `keyexpr` of `engine`, with `history`.
+    fn subscribe(engine: &Engine, keyexpr: &str, history: bool) -> (SubId, Heard) {
+        let heard: Heard = Arc::default();
+        let into = heard.clone();
+        let sink: LivelinessSink = Arc::new(move || {
+            let into = into.clone();
+            Box::new(move |sample: LivelinessSample<'_>| {
+                into.lock()
+                    .unwrap()
+                    .push((sample.kind, sample.keyexpr.to_owned()));
+            })
+        });
+        let id = engine
+            .declare_liveliness_subscriber_on_wire(
+                keyexpr.to_owned(),
+                WireKey::literal(),
+                history,
+                sink,
+            )
+            .expect("the engine has liveliness");
+        (id, heard)
+    }
+
+    /// A token the first member declared while it was alone in the group, whose announcement no
+    /// one heard, reaches the second member's liveliness subscriber by the Interest the
+    /// subscriber asks the group with: the first answers it from the tokens its session holds.
+    #[test]
+    fn a_liveliness_subscriber_asks_the_group_for_the_tokens_its_members_hold() {
+        let network = Arc::new(Network::default());
+        let first = open_member(&network, 1, member_config(1, GROUP)).expect("the first joins");
+        SessionDrive::start_read_task(&*first).expect("the first's read task starts");
+        let _token = first
+            .declare_liveliness_token_on_wire("demo/alive/one".to_owned(), WireKey::literal(), None)
+            .expect("the engine has liveliness");
+        let second = open_member(&network, 2, member_config(2, GROUP)).expect("the second joins");
+        SessionDrive::start_read_task(&*second).expect("the second's read task starts");
+        until_members_know_each_other(&first, &second);
+
+        let (_subscriber, heard) = subscribe(&second, "demo/alive/**", true);
+        eventually("the first's token to reach the second's subscriber", || {
+            heard
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(kind, key)| *kind == LivelinessSampleKind::Put && key == "demo/alive/one")
+        });
+        SessionDrive::close(&*second);
+        SessionDrive::close(&*first);
+    }
+}

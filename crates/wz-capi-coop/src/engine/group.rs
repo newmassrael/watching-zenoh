@@ -29,6 +29,8 @@ use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet};
 use wz_session_core::declare_build::{build_group_announcement, build_group_retraction};
 use wz_session_core::declare_form::{GroupDeclaration, GroupKey, RetractionKey};
 use wz_session_core::driver_loop::IterationEvent;
+#[cfg(feature = "liveliness")]
+use wz_session_core::interest_build::{build_interest_exact, build_interest_final, InterestKinds};
 use wz_session_core::locality::Locality;
 use wz_session_core::metadata::PushMetadata;
 use wz_session_core::multicast_dispatch::MulticastConfig;
@@ -500,6 +502,50 @@ impl GroupFace {
                 declare: alloc::boxed::Box::new(declare),
             });
         }
+    }
+
+    /// Ask the group for its members' liveliness tokens on the key of the liveliness subscriber
+    /// `id` (the Interest is the subscriber's, by its id): the ones to come, and with `history`
+    /// the ones alive now. Asked when the group's declarations say so
+    /// (`GroupDeclarations::asks_for_liveliness`), as the tokio engine's group asks: zenoh-pico
+    /// sends the subscriber's `Interest` over whatever transport it holds (`liveliness`).
+    #[cfg(feature = "liveliness")]
+    pub(super) fn ask_liveliness(
+        &self,
+        id: EntityId,
+        keyexpr: &str,
+        wire: &WireKey,
+        history: bool,
+    ) {
+        let told = self.join.declarations;
+        if self.has_ended() || !told.asks_for_liveliness() {
+            return;
+        }
+        let key = told.key(keyexpr, wire);
+        if let Ok(interest) = build_interest_exact(
+            u64::from(id),
+            InterestKinds::TOKENS,
+            history,
+            /*future=*/ true,
+            Some((key.mapping_id, key.suffix)),
+        ) {
+            self.tx.enqueue(MulticastTxItem::Interest {
+                interest: alloc::boxed::Box::new(interest),
+            });
+        }
+    }
+
+    /// End on the group the Interest [`Self::ask_liveliness`] asked for the liveliness subscriber
+    /// `id`: its `Interest(Final)`, as zenoh-pico sends one when it undeclares the subscriber
+    /// (`liveliness`).
+    #[cfg(feature = "liveliness")]
+    pub(super) fn end_liveliness_ask(&self, id: EntityId) {
+        if self.has_ended() || !self.join.declarations.asks_for_liveliness() {
+            return;
+        }
+        self.tx.enqueue(MulticastTxItem::Interest {
+            interest: alloc::boxed::Box::new(build_interest_final(u64::from(id))),
+        });
     }
 
     /// Put a publication on the group, naming its key in full: the group is told no keyexpr the
