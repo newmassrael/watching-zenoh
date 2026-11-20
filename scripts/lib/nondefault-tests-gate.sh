@@ -462,10 +462,19 @@ transport-link-unixpipe,transport-link-ws|"
     "wz-capi-pico|hook|message-catalog|--test=message_catalog_doors"
     "wz-capi-pico|hook|message-catalog,e2e-sender,e2e-receiver,e2e-supervision|--test=message_catalog_doors"
     "wz-capi-pico|hook|message-catalog,e2e-sender,e2e-sender-demux|--test=message_catalog_doors"
+    # A catalog message's payload driven from C (`wz_ext_payload_schema_*`,
+    # `wz_ext_message_payload_*`): the file that makes a schema and a payload, sets, encodes,
+    # decodes and reads back, and refuses each misuse by its own code (`message_payload_doors`,
+    # whose module is behind the feature). The payload's own tests are `wz-app-frame`'s, a leg
+    # below.
+    "wz-capi-pico|hook|message-payload|--test=message_payload_doors"
     # Instance keys (`wz_app_frame::instance_key`): the model tests of the keyer, its last values
     # and its two stream doors, with the tests of the schema reader's tokenizer and parser, which
     # moved to this crate with the reader and compile only with `proto` (which this implies).
     "wz-app-frame|hook|instance-key|"
+    # The message payload (`wz_app_frame::message_payload`): the model tests of a message set and
+    # read by path, its bytes laid by hand, decoded, merged and kept, on a synthetic schema.
+    "wz-app-frame|hook|message-payload|message_payload_tests::"
     # The keyer driven from C (`wz_ext_instance_keyer_*`): alone, where the file indexes, keeps
     # the last values and counts the drops; and with both end-to-end doors, the receiver's sender
     # slots and the event log, where it also judges and protects in the stream of an instance,

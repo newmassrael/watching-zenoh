@@ -387,6 +387,21 @@ message-catalog = [
     "dep:wz-app-frame",
     "wz-capi-core?/message-catalog",
 ]
+# `message-payload`: the payload of a catalog message set and read field by field, by path, under
+# `.proto` files the program hands over when it runs (`wz_ext_payload_schema_*`,
+# `wz_ext_message_payload_*`): values set and read, the protobuf bytes encoded and decoded. wz's
+# own, off as the reference build is, part of the unstable surface, and made for a message of the
+# catalog, so it implies `message-catalog`. The payload is `wz-app-frame`'s; a payload is held
+# under the host's lock and its schema is shared by the host's reference count, so it selects
+# `std`, and neither engine.
+message-payload = [
+    "std",
+    "unstable-api",
+    "message-catalog",
+    "dep:wz-app-frame",
+    "wz-app-frame/message-payload",
+    "wz-capi-core?/message-payload",
+]
 # `instance-key`: the instance a sample of a message is, read from fields of its payload through
 # the message's schema (`wz_ext_instance_keyer_*`), its last value per instance in the program's
 # storage, and with `e2e-receiver` or `e2e-sender` the doors that judge or protect a frame in its

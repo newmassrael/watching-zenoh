@@ -604,6 +604,14 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # two `wz_ext_internal_instance_keyer_*` doors, and the types and constants they take,
         # declared in `wz_ext.h`; `e2e-receiver` and `e2e-sender` gate its `_judge` and `_protect`
         # doors inside it. Off by default, as upstream has no such doors.
+        # `message-payload` gates `pub mod message_payload`, whose public items are wz's own doors
+        # `wz_ext_payload_schema_new`, `_loan`, `_move`, `_drop`, `wz_ext_message_payload_new`,
+        # `_key_expr`, the six `_set_*` and six `_get_*` doors, `_count`, `_clear`, `_reset`,
+        # `_encode`, `_decode`, `_refusal`, `_loan`, `_move`, `_drop`, the four `wz_ext_internal_*`
+        # doors of the two handles, and the types they take, declared in `wz_ext.h`; off by
+        # default, as upstream has no such doors. It and `instance-key` each gate
+        # `pub mod proto_file` (either one is enough), whose one public item is the
+        # `wz_ext_proto_file_t` struct both take, declared in `wz_ext.h`.
         frozenset(
             {
                 "admin-space",
@@ -618,6 +626,7 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "event-ring",
                 "instance-key",
                 "message-catalog",
+                "message-payload",
                 "remote-declaration-watch",
                 "replay-cache",
                 "resource-snapshot",

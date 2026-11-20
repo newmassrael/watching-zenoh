@@ -386,6 +386,15 @@ config WZ_CAP_MESSAGE_CATALOG
 	  A deployment's messages declared once, as data, and read at run time: the entry of each message, and the e2e sender, receiver and supervision rows made from it (wz_ext_message_catalog_*, wz-own doors).
 	  Exported by: pico.
 
+config WZ_CAP_MESSAGE_PAYLOAD
+	bool "message-payload"
+	default n
+	select WZ_CAP_UNSTABLE_API
+	select WZ_CAP_MESSAGE_CATALOG
+	help
+	  The payload of a catalog message set and read field by field, by path, under .proto files read at run time, and its protobuf bytes encoded and decoded (wz_ext_payload_schema_*, wz_ext_message_payload_*, wz-own doors).
+	  Exported by: pico.
+
 config WZ_CAP_APP_TRANSPORT
 	bool "app-transport"
 	default n

@@ -1150,6 +1150,12 @@ round_fed_gates=(
     # read, no build. The Rust half, which reads the same corpus and compares the tables with the
     # reader's resolved form, is crates/wz-app-frame/src/message_catalog_tests.rs.
     "message_catalog.py --selftest"
+    # A deployment's JSON mapped into a message catalog by a declarative mapping, and the
+    # deployment's generator run as the user configured it. Round-fed through what it imports:
+    # the catalog's shape and judge (message_catalog.py) and the declaration's limits. The
+    # selftest maps synthetic JSON with synthetic mappings and runs synthetic generators made of
+    # this interpreter. A text read and a few short child processes, no build.
+    "message_catalog_map.py --selftest"
     # R3440 -- the pico drop-in header against zenoh-pico's own, and wz_ext.h. Round-fed by
     # the two headers and the pico submodule. MEASURED: 0.66s, three `cc -E` runs, no build.
     "drop_in_header_gate.py"

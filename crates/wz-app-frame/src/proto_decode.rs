@@ -342,6 +342,13 @@ impl SchemaSet {
         self.msgs.get(index)
     }
 
+    /// The enum at `index`, as a field of enum type names it
+    /// ([`FieldKind::Enum`]): its values' names and numbers, and whether it is
+    /// closed; `None` for an index the set has not.
+    pub fn enum_at(&self, index: usize) -> Option<&EnumInfo> {
+        self.enums.get(index)
+    }
+
     /// Read `bytes` as one `message`, on [`LinkedSchema::decode`]'s rules.
     ///
     /// # Errors

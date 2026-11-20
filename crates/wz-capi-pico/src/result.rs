@@ -181,6 +181,27 @@ pub const WZ_EXT_ERR_LINK_KIND: ZResult = -7;
 /// program hands the same bytes in again after its `drained` call for the link.
 pub const WZ_EXT_ERR_LINK_FULL: ZResult = -8;
 
+/// A message payload's door (`wz_ext_message_payload_*`) was given a field path that names no field
+/// it addresses: not a path, a name the message has not, an index on a field that is not repeated,
+/// a repeated field where an element is named or the other way round, a map or a group. Nothing
+/// changed. wz's own code, for the reason [`WZ_EXT_ERR_POLICY_OFF`] is, as are the four after it.
+pub const WZ_EXT_ERR_PAYLOAD_PATH: ZResult = -20;
+
+/// The value given to a field is not of its type, or the field's value was asked for as another.
+pub const WZ_EXT_ERR_PAYLOAD_TYPE: ZResult = -21;
+
+/// The value does not fit its field (or what it was asked for as), or an index is past the end of
+/// its list.
+pub const WZ_EXT_ERR_PAYLOAD_RANGE: ZResult = -22;
+
+/// The field is not set: one with presence, a field of a message that is not there, or a required
+/// field of an encoding.
+pub const WZ_EXT_ERR_PAYLOAD_ABSENT: ZResult = -23;
+
+/// The bytes handed to the decoding door are not a message of the schema; the payload is as it
+/// was.
+pub const WZ_EXT_ERR_PAYLOAD_WIRE: ZResult = -24;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,6 +238,11 @@ mod tests {
             WZ_EXT_ERR_LINK_CLOSED,
             WZ_EXT_ERR_LINK_KIND,
             WZ_EXT_ERR_LINK_FULL,
+            WZ_EXT_ERR_PAYLOAD_PATH,
+            WZ_EXT_ERR_PAYLOAD_TYPE,
+            WZ_EXT_ERR_PAYLOAD_RANGE,
+            WZ_EXT_ERR_PAYLOAD_ABSENT,
+            WZ_EXT_ERR_PAYLOAD_WIRE,
         ];
         for (at, code) in wz.iter().enumerate() {
             assert!(*code < 0, "{code} must read as a failure");

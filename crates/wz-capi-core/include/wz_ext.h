@@ -2006,4 +2006,201 @@ void wz_ext_internal_message_catalog_null(
 bool wz_ext_internal_message_catalog_check(
     const wz_ext_owned_message_catalog_t *this_);
 
+/* ================================================ the payload of a catalog message
+ *
+ * A catalog message's payload set and read field by field, under .proto
+ * files the program hands over when it runs: a program that knows its
+ * messages by name and its fields by path, with no code generated for them.
+ * It reads a SCHEMA once (every file of wz_ext_proto_file_t, with what each
+ * imports), makes a PAYLOAD for message index of a catalog, naming the
+ * message type of the schema it is (its full name, package included), sets
+ * values at field paths, encodes the protobuf bytes to put on the key
+ * wz_ext_message_payload_key_expr gives, decodes the bytes a sample carries
+ * and reads values back. Part of the unstable surface, and present only in a
+ * build with the message-payload capability, which implies message-catalog.
+ *
+ * A PATH names a field as the .proto file spells it, a field inside a message
+ * field as holder.field, and an element of a repeated field by its index:
+ * "origin.x", "path[2].y", "tags[0]". A value is set and read with an index
+ * on a repeated field, which is counted and cleared without one. An element
+ * is replaced below the list's length and appended at it. A map field and a
+ * group are not addressed; a decoded map, and every field the schema does not
+ * know, is kept as its wire bytes and encoded again.
+ *
+ * A VALUE goes into a field of its kind only: an integer into an integer or
+ * enum field it fits (a closed proto2 enum takes only its values' numbers), a
+ * double into a float or a double (a finite one a float cannot hold is
+ * refused), a string into a string or into an enum by its value's name, bytes
+ * into bytes. Setting a member of a oneof clears the others. A field that is
+ * not set reads as protobuf reads it: one without presence (a proto3 singular
+ * field not optional, not in a oneof, not a message) as its default, one with
+ * presence, or any field of a message that is not there, as
+ * WZ_EXT_ERR_PAYLOAD_ABSENT. The bytes are written in ascending field
+ * number, a field without presence left out at its default, repeated numbers
+ * packed in proto3 and unpacked in proto2 unless [packed = ...] says
+ * otherwise; a proto2 required field that is not set refuses the encoding.
+ *
+ * A refused call returns one of the codes below, or Z_ERR_OVERFLOW (-74) for
+ * a buffer too small, and changes nothing; wz_ext_message_payload_refusal
+ * gives the sentence of the last refused call on the payload.
+ *
+ * OWNERSHIP AND THREADS. A schema does not change once read and each payload
+ * holds the schema it was made from, so a schema may be dropped while its
+ * payloads live. A payload may be called from several threads, one call at a
+ * time: each call holds its lock. */
+
+#define WZ_EXT_ERR_PAYLOAD_PATH (-20)   /* the path names no field the payload
+                                           addresses */
+#define WZ_EXT_ERR_PAYLOAD_TYPE (-21)   /* a value of another type than the
+                                           field's, or read as another */
+#define WZ_EXT_ERR_PAYLOAD_RANGE (-22)  /* a value the field (or the reader)
+                                           cannot hold, or an index past the
+                                           end of its list */
+#define WZ_EXT_ERR_PAYLOAD_ABSENT (-23) /* not set: a field with presence, a
+                                           field of an absent message, a
+                                           required field of an encoding */
+#define WZ_EXT_ERR_PAYLOAD_WIRE (-24)   /* the bytes are not a message of the
+                                           schema; the payload is as it was */
+
+typedef struct wz_ext_owned_payload_schema_t {
+  void *_handle;
+} wz_ext_owned_payload_schema_t;
+typedef struct wz_ext_loaned_payload_schema_t {
+  void *_handle;
+} wz_ext_loaned_payload_schema_t;
+typedef struct wz_ext_moved_payload_schema_t {
+  wz_ext_owned_payload_schema_t _this;
+} wz_ext_moved_payload_schema_t;
+
+typedef struct wz_ext_owned_message_payload_t {
+  void *_handle;
+} wz_ext_owned_message_payload_t;
+typedef struct wz_ext_loaned_message_payload_t {
+  void *_handle;
+} wz_ext_loaned_message_payload_t;
+typedef struct wz_ext_moved_message_payload_t {
+  wz_ext_owned_message_payload_t _this;
+} wz_ext_moved_message_payload_t;
+
+/* Read every file (each with what it imports) into a schema. this_ holds the
+ * null state on every error; on _Z_ERR_CONFIG_INVALID_VALUE (-89) refusal
+ * (which may be NULL) holds the reader's diagnostic. Z_ERR_NULL (-127) for a
+ * NULL this_, NULL files with a count, or a file with a NULL name or text;
+ * Z_EINVAL (-75) for text that is not UTF-8. */
+z_result_t wz_ext_payload_schema_new(wz_ext_owned_payload_schema_t *this_,
+                                     const wz_ext_proto_file_t *files,
+                                     size_t file_count,
+                                     z_owned_string_t *refusal);
+const wz_ext_loaned_payload_schema_t *wz_ext_payload_schema_loan(
+    const wz_ext_owned_payload_schema_t *this_);
+wz_ext_moved_payload_schema_t *wz_ext_payload_schema_move(
+    wz_ext_owned_payload_schema_t *this_);
+void wz_ext_payload_schema_drop(wz_ext_moved_payload_schema_t *this_);
+void wz_ext_internal_payload_schema_null(wz_ext_owned_payload_schema_t *this_);
+bool wz_ext_internal_payload_schema_check(
+    const wz_ext_owned_payload_schema_t *this_);
+
+/* An empty payload of message index of catalog, of the message type named
+ * message in schema. Z_OK; Z_ERR_INVALID (-1) for a message the catalog has
+ * not; _Z_ERR_CONFIG_INVALID_VALUE for a name the schema has no message of,
+ * refusal saying why; Z_EINVAL for a name that is not UTF-8; Z_ERR_NULL for a
+ * NULL argument. this_ holds the null state on every error. */
+z_result_t wz_ext_message_payload_new(
+    wz_ext_owned_message_payload_t *this_,
+    const wz_ext_loaned_message_catalog_t *catalog, size_t index,
+    const wz_ext_loaned_payload_schema_t *schema, const char *message,
+    z_owned_string_t *refusal);
+
+/* The key expression the payload's message is put on, valid while the
+ * payload lives; NULL for a NULL payload. */
+const char *wz_ext_message_payload_key_expr(
+    const wz_ext_loaned_message_payload_t *this_);
+
+/* Set the field path names. Z_OK; WZ_EXT_ERR_PAYLOAD_PATH, _TYPE or _RANGE;
+ * Z_EINVAL for a path or a string that is not UTF-8; Z_ERR_NULL for a NULL
+ * argument (data may be NULL with a len of 0). */
+z_result_t wz_ext_message_payload_set_int(
+    const wz_ext_loaned_message_payload_t *this_, const char *path,
+    int64_t value);
+z_result_t wz_ext_message_payload_set_uint(
+    const wz_ext_loaned_message_payload_t *this_, const char *path,
+    uint64_t value);
+z_result_t wz_ext_message_payload_set_double(
+    const wz_ext_loaned_message_payload_t *this_, const char *path,
+    double value);
+z_result_t wz_ext_message_payload_set_bool(
+    const wz_ext_loaned_message_payload_t *this_, const char *path,
+    bool value);
+z_result_t wz_ext_message_payload_set_string(
+    const wz_ext_loaned_message_payload_t *this_, const char *path,
+    const char *value);
+z_result_t wz_ext_message_payload_set_bytes(
+    const wz_ext_loaned_message_payload_t *this_, const char *path,
+    const uint8_t *data, size_t len);
+
+/* Read the field path names into out, which is written only on Z_OK.
+ * WZ_EXT_ERR_PAYLOAD_PATH, _TYPE, _RANGE or _ABSENT; Z_EINVAL; Z_ERR_NULL.
+ * The string door writes the text and a NUL, the bytes door the bytes, and
+ * len their length (without the NUL); when capacity is too small they answer
+ * Z_ERR_OVERFLOW with len set and out untouched, so a capacity of 0 asks for
+ * the length. The string door reads an enum field as its value's name. */
+z_result_t wz_ext_message_payload_get_int(
+    const wz_ext_loaned_message_payload_t *this_, const char *path,
+    int64_t *out);
+z_result_t wz_ext_message_payload_get_uint(
+    const wz_ext_loaned_message_payload_t *this_, const char *path,
+    uint64_t *out);
+z_result_t wz_ext_message_payload_get_double(
+    const wz_ext_loaned_message_payload_t *this_, const char *path,
+    double *out);
+z_result_t wz_ext_message_payload_get_bool(
+    const wz_ext_loaned_message_payload_t *this_, const char *path,
+    bool *out);
+z_result_t wz_ext_message_payload_get_string(
+    const wz_ext_loaned_message_payload_t *this_, const char *path,
+    char *out, size_t capacity, size_t *len);
+z_result_t wz_ext_message_payload_get_bytes(
+    const wz_ext_loaned_message_payload_t *this_, const char *path,
+    uint8_t *out, size_t capacity, size_t *len);
+
+/* How many elements the repeated field path names holds (0 inside a message
+ * that is not there); clear the field, or the one element, path names (the
+ * elements after it moving down); clear every field. */
+z_result_t wz_ext_message_payload_count(
+    const wz_ext_loaned_message_payload_t *this_, const char *path,
+    size_t *out);
+z_result_t wz_ext_message_payload_clear(
+    const wz_ext_loaned_message_payload_t *this_, const char *path);
+z_result_t wz_ext_message_payload_reset(
+    const wz_ext_loaned_message_payload_t *this_);
+
+/* The protobuf bytes of the payload into out, their count into written.
+ * Z_ERR_OVERFLOW when capacity is less, written then holding the count and
+ * out untouched (a capacity of 0 asks for the size); WZ_EXT_ERR_PAYLOAD_ABSENT
+ * for a required field not set; _Z_ERR_CONFIG_INVALID_VALUE for a packed
+ * option the writer cannot act on. */
+z_result_t wz_ext_message_payload_encode(
+    const wz_ext_loaned_message_payload_t *this_, uint8_t *out,
+    size_t capacity, size_t *written);
+/* Replace the payload's values with those the bytes carry.
+ * WZ_EXT_ERR_PAYLOAD_WIRE for bytes that are not a message of the schema,
+ * the payload then as it was. */
+z_result_t wz_ext_message_payload_decode(
+    const wz_ext_loaned_message_payload_t *this_, const uint8_t *bytes,
+    size_t len);
+/* Why the last call on the payload was refused; the null state when it was
+ * not. */
+z_result_t wz_ext_message_payload_refusal(
+    const wz_ext_loaned_message_payload_t *this_, z_owned_string_t *out);
+
+const wz_ext_loaned_message_payload_t *wz_ext_message_payload_loan(
+    const wz_ext_owned_message_payload_t *this_);
+wz_ext_moved_message_payload_t *wz_ext_message_payload_move(
+    wz_ext_owned_message_payload_t *this_);
+void wz_ext_message_payload_drop(wz_ext_moved_message_payload_t *this_);
+void wz_ext_internal_message_payload_null(
+    wz_ext_owned_message_payload_t *this_);
+bool wz_ext_internal_message_payload_check(
+    const wz_ext_owned_message_payload_t *this_);
+
 #endif /* WZ_EXT_H */

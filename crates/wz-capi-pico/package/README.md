@@ -93,6 +93,7 @@ this build are listed in `RELEASE-NOTES.md` and `build-statement.json`. Its exte
 | e2e-supervision | `wz_ext_stream_supervisor_*` | a deadline per periodic stream, a loss told once, error counts |
 | instance-key | `wz_ext_instance_keyer_*` | the instance of a message read from fields of its payload, a last value per instance |
 | message-catalog | `wz_ext_message_catalog_*` | a deployment's messages declared once as JSON5, and the senders, receivers and supervision rows made from it |
+| message-payload | `wz_ext_payload_schema_*`, `wz_ext_message_payload_*` | a catalog message's payload set and read by field path under `.proto` files read at run time, its protobuf bytes encoded and decoded |
 | replay-cache | `wz_ext_replay_publisher_*`, `wz_ext_replay_subscriber_*` | what each publisher last sent, replayed to a subscriber that arrives later |
 | replay-cache | `wz_ext_decl_watch_*` | the declarations a session's peers make and retract, told to the program |
 | shared-key-ids | `wz_ext_config_key_ids`, `wz_ext_config_key_wire_form_for` | key ids every node of a deployment shares, used with no declaration first |
@@ -103,7 +104,9 @@ Each door returns zenoh-pico's result codes, and wz's own two outside their rang
 `WZ_EXT_ERR_POLICY_OFF` (-2), a call the build's policy does not allow, and
 `WZ_EXT_ERR_UNSUPPORTED` (-3), a call this engine or build does not do. A door that refuses a text
 it reads (a profile, a catalog) writes why into the `z_owned_string_t` it is handed, which the
-program drops.
+program drops. The message payload's doors answer a refused call with `WZ_EXT_ERR_PAYLOAD_PATH`
+(-20), `_TYPE` (-21), `_RANGE` (-22), `_ABSENT` (-23) or `_WIRE` (-24), and
+`wz_ext_message_payload_refusal` gives the sentence of the last one.
 
 ## Configuration
 

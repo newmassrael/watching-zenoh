@@ -48,6 +48,12 @@ proto = ["alloc"]
 # instance. Off, a node whose messages have one instance each links none of it.
 instance-key = ["proto"]
 
+# `message_payload`: one message of a `.proto` schema read at run time, its fields set and read by
+# path and its protobuf bytes encoded and decoded: what a host program that knows its messages by name
+# and its fields by path needs when no code is generated for them. The schema and the bytes are read
+# by `proto`'s reader and typed reader, which this implies. Off, a node links none of it.
+message-payload = ["proto"]
+
 # `segment_profile::synthetic`: a synthetic segment profile and a builder of its pieces, for the
 # tests of crates above this one. A `#[cfg(test)]` module cannot cross a crate boundary, so the
 # capture crate turns this on for its own tests and forwards it from its `fixtures` feature.
