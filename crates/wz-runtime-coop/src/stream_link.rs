@@ -40,8 +40,8 @@ use wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES;
 #[cfg(feature = "alloc")]
 use wz_session_core::link::RxFrame;
 use wz_session_core::link::{
-    BoxedLinkDriver, LinkDropCause, LinkEndpoints, LinkSendOutcome, LostCause, TxSlot, TxSlotGrant,
-    DEFAULT_LINK_MTU, STREAM_BATCH_LENGTH_BYTES,
+    BoxedLinkDriver, LinkDropCause, LinkEndpoints, LinkRoom, LinkSendOutcome, LostCause,
+    RoomAnswer, RoomWait, TxSlot, TxSlotGrant, DEFAULT_LINK_MTU, STREAM_BATCH_LENGTH_BYTES,
 };
 use wz_session_core::qos::Priority;
 use wz_session_core::reliability::Reliability;
@@ -49,9 +49,9 @@ use wz_session_core::reliability::Reliability;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::link_storage::HeapTx;
 use crate::link_storage::{TxLender, TxStore};
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-use crate::session_drive::LinkReadiness;
 use crate::session_drive::{LinkOpenError, LinkProto, SessionDatagramLink};
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use crate::session_drive::{LinkReadiness, LinkWritability};
 use crate::udp_link::{link_endpoints, SERVICE_WAIT_MS};
 
 /// The receive buffer of a link that takes the largest batch zenoh can negotiate: its length and
@@ -86,6 +86,18 @@ pub trait StreamSocket: Sized {
     /// reports the error.
     fn wait_readable(&self, timeout_ms: c_int);
 
+    /// Wait up to `timeout_us` microseconds for the stack to take more bytes: `true` once it
+    /// will (or the stream has failed, which the write that follows reports), `false` when it
+    /// still would not when the time is up. This is the link's room: zenoh's queue that has no
+    /// batch for a message within its deadline, here a stream whose peer has not read what it
+    /// was sent.
+    ///
+    /// A stream that cannot tell answers `true` at once, and a send to it waits in the write.
+    fn wait_writable(&self, timeout_us: u64) -> bool {
+        let _ = timeout_us;
+        true
+    }
+
     /// Read what is queued into `buf` without blocking: `Ok(Some(n))` for `n` bytes, `Ok(Some(0))`
     /// when the peer has closed the stream, `Ok(None)` when nothing is queued.
     fn try_read(&self, buf: &mut [u8]) -> Result<Option<usize>, Self::Error>;
@@ -105,6 +117,15 @@ pub trait StreamSocket: Sized {
     /// stream waits in its own loop whatever it was asked.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
+        None
+    }
+
+    /// [`Self::wait_writable`] made by a thread other than the link's
+    /// ([`SessionDatagramLink::writability`]), on a handle of its own that outlives the stream
+    /// safely; `None` when the platform gives none, and then a sender that finds the session held
+    /// waits for it.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn writability(&self) -> Option<alloc::boxed::Box<dyn LinkWritability>> {
         None
     }
 }
@@ -426,6 +447,28 @@ impl<S: StreamSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static> 
         self.send(&[&len.to_le_bytes(), bytes])
     }
 
+    // The room is the stream's: the session asks before it builds a frame, and a stream that
+    // will not take more bytes within the wait has none, as zenoh's queue has no batch for a
+    // message by its deadline (`io/zenoh-transport/src/common/pipeline.rs` @
+    // `// Wait for an available batch until deadline`). A droppable message is then dropped and a
+    // blocking one closes the session, which is the session's decision and not the link's. A
+    // stream that took more within the wait is counted as having answered at once: the stream
+    // tells no time. A link that has ended answers room, so the send that follows reports the end.
+    fn wait_for_room(&self, _priority: Priority, wait: RoomWait) -> RoomAnswer {
+        if self.lost.get().is_some() {
+            return RoomAnswer::at_once(LinkRoom::Free);
+        }
+        let wait_us = wait.wait_us();
+        if self.socket.wait_writable(wait_us) {
+            RoomAnswer::at_once(LinkRoom::Free)
+        } else {
+            RoomAnswer {
+                room: LinkRoom::Congested,
+                waited_us: wait_us,
+            }
+        }
+    }
+
     // The session encodes a batch straight into the driver's own storage behind the room its
     // length takes, and the length is written there at the send: length and batch are one write
     // from the slot, and no buffer is allocated for either.
@@ -527,6 +570,14 @@ impl<S: StreamSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static> 
         }
     }
 
+    // Whoever waits for input, room is the socket's alone: the driver queues nothing of its own
+    // ahead of it (`wait_for_room` asks the socket too), so a wait on the socket from outside
+    // answers what the session's own wait would.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn writability(&self) -> Option<alloc::boxed::Box<dyn LinkWritability>> {
+        self.socket.writability()
+    }
+
     #[cfg(feature = "alloc")]
     fn try_recv(&self) -> Option<RxFrame> {
         let mut frame = None;
@@ -567,6 +618,10 @@ mod tests {
         shut: Cell<bool>,
         /// The connection's two ends, local then peer; `None` is an IPv4 pair.
         ends_at: Option<(SocketAddr, SocketAddr)>,
+        /// The peer reads nothing: the stream takes no more bytes, however long it is waited on.
+        full: Cell<bool>,
+        /// Each wait for the stream to take bytes, in microseconds.
+        room_waits: RefCell<Vec<u64>>,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -596,6 +651,11 @@ mod tests {
             self.waits.set(self.waits.get() + 1);
         }
 
+        fn wait_writable(&self, timeout_us: u64) -> bool {
+            self.room_waits.borrow_mut().push(timeout_us);
+            !self.full.get()
+        }
+
         fn try_read(&self, buf: &mut [u8]) -> Result<Option<usize>, Broken> {
             self.reads.set(self.reads.get() + 1);
             if self.fails.get() {
@@ -617,6 +677,41 @@ mod tests {
         fn shutdown(&self) {
             self.shut.set(true);
         }
+
+        #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+        fn writability(&self) -> Option<alloc::boxed::Box<dyn LinkWritability>> {
+            Some(alloc::boxed::Box::new(Room(!self.full.get())))
+        }
+    }
+
+    /// The pipe's room when its wait was handed out, as a wait from outside answers it.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    struct Room(bool);
+
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    impl LinkWritability for Room {
+        fn wait_writable(&self, _timeout_us: u64) -> bool {
+            self.0
+        }
+    }
+
+    /// A link hands out its socket's wait for room whether or not its owner waits for its input
+    /// (none does here): a sender that finds the session held asks it from outside, and it
+    /// answers as the socket does.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[test]
+    fn a_link_hands_out_its_sockets_wait_for_room() {
+        let free = link();
+        let wait = free.writability().expect("the socket's wait for room");
+        assert!(wait.wait_writable(1_000), "a stream that takes bytes");
+
+        let full = link();
+        full.socket.full.set(true);
+        let wait = full.writability().expect("the socket's wait for room");
+        assert!(
+            !wait.wait_writable(1_000),
+            "a stream whose peer reads nothing"
+        );
     }
 
     /// Two slots of 32 bytes, for any profile.
@@ -916,5 +1011,198 @@ mod tests {
         link.close_blocking();
         assert!(link.socket.shut.get());
         assert_eq!(link.lost(), Some(LostCause::PeerClosed));
+    }
+
+    /// The stream is the link's room: one that takes bytes within the wait has room, one that
+    /// does not has none, asked for exactly the message's wait, and a link that has ended has
+    /// room at once, so the send that follows reports the end.
+    #[test]
+    fn a_stream_that_takes_no_bytes_within_the_wait_has_no_room() {
+        let link = link();
+        assert_eq!(
+            link.wait_for_room(Priority::DEFAULT, RoomWait::Drop { wait_us: 1_000 }),
+            RoomAnswer::at_once(LinkRoom::Free)
+        );
+        link.socket.full.set(true);
+        assert_eq!(
+            link.wait_for_room(Priority::DEFAULT, RoomWait::Drop { wait_us: 1_000 }),
+            RoomAnswer {
+                room: LinkRoom::Congested,
+                waited_us: 1_000
+            }
+        );
+        assert_eq!(
+            link.wait_for_room(Priority::DEFAULT, RoomWait::Block { wait_us: 5_000_000 }),
+            RoomAnswer {
+                room: LinkRoom::Congested,
+                waited_us: 5_000_000
+            }
+        );
+        assert_eq!(*link.socket.room_waits.borrow(), [1_000, 1_000, 5_000_000]);
+        link.end(LostCause::PeerClosed);
+        assert_eq!(
+            link.wait_for_room(Priority::DEFAULT, RoomWait::Block { wait_us: 5_000_000 }),
+            RoomAnswer::at_once(LinkRoom::Free)
+        );
+        assert_eq!(
+            link.socket.room_waits.borrow().len(),
+            3,
+            "an ended link waits for nothing"
+        );
+    }
+
+    /// A session of this engine over the stream link, and what a droppable and a blocking message
+    /// do when the stream takes no more bytes: the same decisions the tokio engine's session makes
+    /// over its writer's queue. Built where the session sends a Push: `switchboard` is the feature
+    /// of this crate that brings the session core's Push codec into its build.
+    #[cfg(all(
+        feature = "switchboard",
+        feature = "alloc",
+        not(feature = "session-slot")
+    ))]
+    mod session_room {
+        extern crate std;
+
+        use alloc::rc::Rc;
+        use std::vec::Vec;
+        use wz_session_core::link::BoxedLinkDriver;
+        use wz_session_core::metadata::PushMetadata;
+        use wz_session_core::qos::CongestionControl;
+        use wz_session_core::qos::Priority;
+        use wz_session_core::sample::QosLevel;
+        use wz_session_core::session_init_params::{SessionInitParams, TxQueueConf};
+        use wz_session_core::signing_key::SigningKey;
+
+        use super::Pipe;
+        use crate::link_storage::HeapTx;
+        use crate::session_runtime::new_session_actions;
+        use crate::stream_link::{StreamDriver, STREAM_RX_CAPACITY};
+        use crate::time::{ClockSource, CoopTime};
+        use crate::CoopRuntime;
+
+        /// The session's waits, each of its own so an ask names the one it spent.
+        const DROP_WAIT_US: u64 = 1_234;
+        const CLOSE_WAIT_US: u64 = 4_242;
+
+        #[derive(Clone, Copy)]
+        struct Stopped;
+
+        impl ClockSource for Stopped {
+            fn now_us(&self) -> u64 {
+                1_000_000
+            }
+        }
+
+        struct Counting(u8);
+
+        impl wz_session_core::entropy::EntropySource for Counting {
+            fn try_fill_bytes(
+                &mut self,
+                buf: &mut [u8],
+            ) -> Result<(), wz_session_core::entropy::EntropyUnavailable> {
+                for slot in buf.iter_mut() {
+                    *slot = self.0;
+                    self.0 = self.0.wrapping_add(1);
+                }
+                Ok(())
+            }
+        }
+
+        type Heap = StreamDriver<Pipe, Vec<u8>, HeapTx>;
+
+        /// A session whose frames each leave at once (no batch window), with the waits above.
+        fn params() -> SessionInitParams {
+            SessionInitParams {
+                whatami: wz_session_core::WhatAmI::Peer,
+                zid: [0x0A, 0x0B, 0x0C, 0x0D].into(),
+                seq_num_res: 2,
+                req_id_res: 2,
+                batch_size: 1024,
+                lease_ms: 10_000,
+                keep_alive: wz_session_core::session_init_params::KeepAliveConf::PICO,
+                initial_sn: 0,
+                cookie: std::vec![0u8; 16],
+                tx_queue: TxQueueConf {
+                    wait_before_drop_us: DROP_WAIT_US,
+                    wait_before_close_us: CLOSE_WAIT_US,
+                    batching: false,
+                    ..TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults())
+                },
+                link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
+                policy: wz_session_core::policy::SessionPolicy::defaults(),
+                cookie_signing_key: SigningKey::new(std::vec![7u8; 32]).expect(">=32-byte key"),
+            }
+        }
+
+        fn link() -> Rc<Heap> {
+            Rc::new(StreamDriver::with_buffers(
+                Pipe::default(),
+                STREAM_RX_CAPACITY,
+                HeapTx::new(4, 2048),
+            ))
+        }
+
+        /// A droppable message on a stream that takes no more bytes waits its
+        /// `wait_before_drop` for them, is dropped, closes nothing and reaches nothing; once the
+        /// stream takes bytes again the next message is written.
+        #[test]
+        fn a_droppable_message_on_a_full_stream_is_dropped_within_its_own_wait() {
+            let runtime = CoopRuntime::new(Stopped);
+            let link = link();
+            let sink: Rc<dyn BoxedLinkDriver> = link.clone();
+            let actions = new_session_actions(sink, params(), CoopTime::new(&runtime), Counting(0));
+            link.socket.full.set(true);
+            actions
+                .send_push_literal_qos("home/drop", b"D", true, Priority::DEFAULT)
+                .expect("a congestion drop is not the caller's error");
+            assert_eq!(
+                *link.socket.room_waits.borrow(),
+                [DROP_WAIT_US],
+                "the message waited `wait_before_drop` for the stream"
+            );
+            assert!(
+                link.socket.writes.borrow().is_empty(),
+                "nothing reached the stream"
+            );
+            assert!(
+                !actions.take_congestion_close(),
+                "dropping a droppable message closes nothing"
+            );
+            link.socket.full.set(false);
+            actions
+                .send_push_literal_qos("home/next", b"N", true, Priority::DEFAULT)
+                .expect("a stream that takes bytes is written");
+            assert_eq!(link.socket.writes.borrow().len(), 1);
+        }
+
+        /// A blocking message on a stream that takes no more bytes waits its `wait_before_close`
+        /// for them and then has its session closed, as zenoh closes a transport a blocking
+        /// message found no room on; nothing reached the stream.
+        #[test]
+        fn a_blocking_message_on_a_full_stream_closes_the_session_after_its_wait() {
+            let runtime = CoopRuntime::new(Stopped);
+            let link = link();
+            let sink: Rc<dyn BoxedLinkDriver> = link.clone();
+            let actions = new_session_actions(sink, params(), CoopTime::new(&runtime), Counting(0));
+            link.socket.full.set(true);
+            let meta = PushMetadata {
+                qos: Some(QosLevel::DEFAULT.with_congestion(CongestionControl::Block)),
+                ..PushMetadata::default()
+            };
+            let _ = actions.send_push_with_meta_literal("home/block", b"B", true, &meta);
+            assert_eq!(
+                *link.socket.room_waits.borrow(),
+                [CLOSE_WAIT_US],
+                "the message waited `wait_before_close` for the stream"
+            );
+            assert!(
+                link.socket.writes.borrow().is_empty(),
+                "nothing reached the stream"
+            );
+            assert!(
+                actions.take_congestion_close(),
+                "the session's close is staged for its loop"
+            );
+        }
     }
 }

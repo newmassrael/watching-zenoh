@@ -840,6 +840,26 @@ pub fn multicast_tx_conduit(
     frame_meta(item, params).priority
 }
 
+/// Whether a push of `item` onto a group of `params` may be dropped: zenoh's `is_droppable`, read
+/// off the item as the push reads it. A producer that holds its conduit across a wait for room
+/// asks this before it takes the conduit, so that a droppable push is not held behind a blocking
+/// one for the whole of that one's `wait_before_close`.
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        any(feature = "liveliness-token", feature = "declare-subscriber")
+    )
+))]
+pub fn multicast_tx_droppable(
+    item: &MulticastTxItem,
+    params: &crate::multicast_params::MulticastParams,
+) -> bool {
+    frame_meta(item, params).droppable
+}
+
 /// R2937 — where a push mints its sequence numbers: the whole set of a group's
 /// conduits ([`MulticastTxConduits`](crate::sn::MulticastTxConduits)), or the
 /// one conduit a producer holds ([`MulticastTxConduit`]).
@@ -1954,6 +1974,25 @@ mod push_tests {
         assert_eq!(outcome, PushOutcome::Pushed);
         assert_eq!(queue.enqueued.len(), 1);
         assert_eq!(tx.advertise_default().next_reliable, 1);
+    }
+
+    /// A producer reads off an item whether it may be dropped, as the push reads it: a
+    /// best-effort put may, a blocking terminator may not.
+    #[cfg(feature = "codec-response-final")]
+    #[test]
+    fn a_producer_reads_whether_a_push_may_be_dropped() {
+        let params = params(2_048);
+        assert!(multicast_tx_droppable(&put(false, b"v"), &params));
+        let blocking = crate::sample::QosLevel::from_parts(
+            Priority::DEFAULT,
+            crate::qos::CongestionControl::Block,
+            false,
+        );
+        let terminal = MulticastTxItem::ResponseFinal {
+            request_id: 1,
+            qos: blocking,
+        };
+        assert!(!multicast_tx_droppable(&terminal, &params));
     }
 
     /// A droppable message asks with `wait_before_drop`; a blocking one with

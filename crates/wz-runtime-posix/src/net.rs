@@ -41,7 +41,7 @@ const IPV6_JOIN: c_int = libc::IPV6_JOIN_GROUP;
 // own features are (`wz_runtime_coop::with_heap_link_seams!`), as is every implementation of it here.
 wz_runtime_coop::with_heap_link_seams! {
     #[cfg(feature = "alloc")]
-    use wz_runtime_coop::session_drive::LinkReadiness;
+    use wz_runtime_coop::session_drive::{LinkReadiness, LinkWritability};
 }
 use wz_runtime_coop::udp_link::{DatagramSocket, Received, SERVICE_WAIT_MS};
 
@@ -95,23 +95,41 @@ pub enum PosixNetError {
 }
 
 wz_runtime_coop::with_heap_link_seams! {
-/// A wait on a socket that a thread other than its link's makes ([`LinkReadiness`]): `poll` on a
-/// duplicate of the socket's descriptor, which this owns and closes. A duplicate and not the
-/// number itself, so a wait that outlives the socket never reaches a descriptor number its close
-/// has freed for another file.
+/// A wait on a socket that a thread other than its link's makes, for input ([`LinkReadiness`]) or
+/// for room ([`LinkWritability`]): `poll` on a duplicate of the socket's descriptor, which this
+/// owns and closes. A duplicate and not the number itself, so a wait that outlives the socket
+/// never reaches a descriptor number its close has freed for another file.
 #[cfg(feature = "alloc")]
 pub(crate) struct FdReadiness(c_int);
 
 #[cfg(feature = "alloc")]
 impl FdReadiness {
     /// A wait on `fd`, or `None` when the descriptor cannot be duplicated.
-    pub(crate) fn of(fd: c_int) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
+    fn duplicate(fd: c_int) -> Option<Self> {
         // SAFETY: `fd` is the caller's live descriptor; `fcntl` duplicates it or fails.
         let dup = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
         if dup < 0 {
             return None;
         }
-        Some(alloc::boxed::Box::new(FdReadiness(dup)))
+        Some(FdReadiness(dup))
+    }
+
+    /// A wait for input on `fd`, or `None` when the descriptor cannot be duplicated.
+    pub(crate) fn of(fd: c_int) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
+        Some(alloc::boxed::Box::new(Self::duplicate(fd)?))
+    }
+
+    /// A wait for room on the stream socket `fd`, or `None` when the descriptor cannot be
+    /// duplicated.
+    pub(crate) fn writable_of(fd: c_int) -> Option<alloc::boxed::Box<dyn LinkWritability>> {
+        Some(alloc::boxed::Box::new(Self::duplicate(fd)?))
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl LinkWritability for FdReadiness {
+    fn wait_writable(&self, timeout_us: u64) -> bool {
+        poll_writable(self.0, timeout_us)
     }
 }
 
@@ -178,6 +196,26 @@ pub(crate) fn errno() -> c_int {
     // SAFETY: `__errno_location` returns the address of the calling thread's `errno`, valid for
     // the thread's life.
     unsafe { *libc::__errno_location() }
+}
+
+/// Wait up to `timeout_us` microseconds for the stream socket `fd` to take more bytes: `true` on
+/// `POLLOUT`, or on an error or hang-up the write that follows reports; `false` when the time is
+/// up first, or when the wait itself failed otherwise.
+pub(crate) fn poll_writable(fd: c_int, timeout_us: u64) -> bool {
+    let timeout_ms = c_int::try_from(timeout_us.div_ceil(1_000)).unwrap_or(c_int::MAX);
+    let mut pfd = libc::pollfd {
+        fd,
+        events: libc::POLLOUT,
+        revents: 0,
+    };
+    loop {
+        // SAFETY: one live `pollfd`; the timeout bounds the wait.
+        let ready = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+        if ready < 0 && errno() == libc::EINTR {
+            continue;
+        }
+        return ready > 0 && pfd.revents != 0;
+    }
 }
 
 /// The calling thread's `errno`: bionic's `__errno()`, the same address by another name.

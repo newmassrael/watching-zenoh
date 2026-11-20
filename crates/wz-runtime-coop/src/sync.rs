@@ -126,6 +126,23 @@ pub(crate) fn with<T, U>(mutex: &Mutex<T>, f: impl FnOnce(&mut T) -> U) -> U {
     }
 }
 
+/// [`with`] that does not wait: `None` when another thread holds `mutex` now, and `f` has not
+/// run. On a host each value has its lock and another thread may hold it; under a critical
+/// section no other context runs while this one does, so there is never a holder to find and `f`
+/// always runs.
+#[cfg(feature = "runtime")]
+#[inline]
+pub(crate) fn try_with<T, U>(mutex: &Mutex<T>, f: impl FnOnce(&mut T) -> U) -> Option<U> {
+    #[cfg(not(feature = "host-lock"))]
+    {
+        Some(with(mutex, f))
+    }
+    #[cfg(feature = "host-lock")]
+    {
+        mutex.try_with(f)
+    }
+}
+
 /// MCU-profile reader-writer lock alias (R311w option (a)).
 ///
 /// Aliased to the same `critical_section::Mutex<RefCell<T>>` as

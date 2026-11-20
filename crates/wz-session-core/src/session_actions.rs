@@ -10918,11 +10918,42 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // name (measured: the registration of a face on a node whose own puts kept the link
         // full took 4.9 s, all of it in the flood of link state, and no wait for room was seen):
         // a lane that is held has no room for it, and the message is the caller's to send again.
+        //
+        // A droppable message waits `wait_before_drop` in all, and the wait for its conduit is
+        // part of it (`commons/zenoh-config/src/defaults.rs` @ `wait_before_drop: 1000,`): taken
+        // by waiting, the lock would hold it behind a blocking sender for that sender's whole
+        // `wait_before_close`, and deliver it once the link drained. Upstream's pipeline does
+        // queue it so, behind the stage lock a blocking push keeps across its wait
+        // (`io/zenoh-transport/src/common/pipeline.rs` @ `let mut queue = zlock!(self.stage_in[idx]);`);
+        // zenoh-pico's dropping send tries its lock and returns (`vendor/zenoh-pico/src/transport/common/tx.c`
+        // @ `ret = _z_transport_tx_mutex_lock(ztc, cong_ctrl == Z_CONGESTION_CONTROL_BLOCK);`). So
+        // it takes the lock only when the lock is free, and while it is held it waits for room
+        // out of its own deadline, without the lock: no room within it is a congestion drop, and
+        // room means the holder is about to let go. A sender under a reservation holds room
+        // already and waits for the lock as before. Whether a droppable message behind a held
+        // conduit waits for room at all is the queue profile's (`HeldDrop`): the pico profile
+        // drops it at once and asks the link nothing, as pico's try-lock does.
         #[cfg(feature = "alloc")]
         let push = if probing {
             match R::try_with_mutex_mut(self.tx_conduits.conduit(priority), stage_and_emit) {
                 Some(push) => push,
                 None => return Ok(Dispatched::NoRoom),
+            }
+        } else if droppable && !reserved {
+            let mut stage = Some(stage_and_emit);
+            loop {
+                let taken = R::try_with_mutex_mut(self.tx_conduits.conduit(priority), |batch| {
+                    (stage.take().expect("a conduit is staged in once"))(batch)
+                });
+                if let Some(push) = taken {
+                    break push;
+                }
+                let drop_at_once = self.params.tx_queue.held_drop
+                    == crate::session_init_params::HeldDrop::DropAtOnce;
+                if drop_at_once || congested() {
+                    break Ok(UnicastPush::Congested);
+                }
+                core::hint::spin_loop();
             }
         } else {
             R::with_mutex_mut(self.tx_conduits.conduit(priority), stage_and_emit)

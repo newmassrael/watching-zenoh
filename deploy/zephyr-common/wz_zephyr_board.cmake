@@ -213,7 +213,7 @@ function(wz_zephyr_rust_app)
     wzApplicationGetRandom wzApplicationGetTimeSinceEpoch)
   if(CONFIG_WZ_OS)
     list(APPEND kept
-      wz_os_mutex_new wz_os_mutex_lock wz_os_mutex_unlock wz_os_mutex_free
+      wz_os_mutex_new wz_os_mutex_lock wz_os_mutex_try_lock wz_os_mutex_unlock wz_os_mutex_free
       wz_os_condvar_new wz_os_condvar_wait wz_os_condvar_notify_one wz_os_condvar_notify_all
       wz_os_condvar_free
       wz_os_thread_current wz_os_thread_spawn wz_os_thread_join wz_os_thread_is_finished

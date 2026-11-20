@@ -762,6 +762,29 @@ impl AppLinkTable {
         AcceptRead::Empty
     }
 
+    /// Whether the program would take bytes sent on `handle` now: the link is open and holds no
+    /// remainder for it. `waker` is kept when it would not, and woken when the program reports
+    /// the link writable, up or closed. A link that is closing, closed or unknown answers `true`:
+    /// the send that follows meets its end and reports it. Nothing is begun, unlike
+    /// [`Self::begin_send`]: this is the room a writer waits for before it builds what it sends.
+    pub fn poll_writable(&mut self, handle: LinkHandle, waker: Option<&Waker>) -> bool {
+        let Some(link) = self.links.get_mut(&handle) else {
+            return true;
+        };
+        match link.state() {
+            AppLinkState::Open if link.remainder.is_empty() => true,
+            AppLinkState::Closing | AppLinkState::Closed => true,
+            AppLinkState::Opening => {
+                keep(&mut link.opener, waker);
+                false
+            }
+            _ => {
+                keep(&mut link.writer, waker);
+                false
+            }
+        }
+    }
+
     /// Whether a send on `handle` may go to the program now. `waker` is kept when it may not and
     /// will later.
     pub fn begin_send(&mut self, handle: LinkHandle, waker: Option<&Waker>) -> SendGate {
@@ -1210,6 +1233,54 @@ mod tests {
         assert_eq!(count.0.load(Ordering::SeqCst), 1);
         assert_eq!(table.state(handle), Some(AppLinkState::Open));
         assert!(matches!(table.begin_send(handle, None), SendGate::Go(_)));
+    }
+
+    /// A link takes bytes when it is open and holds nothing for the program. A blocked one does
+    /// not, keeps the waiter and wakes it with the program's writable, which nothing the poll did
+    /// begins; one that holds a remainder does not either; a closed one answers that it does, so
+    /// the send that follows meets its end.
+    #[test]
+    fn a_link_is_writable_when_it_is_open_and_holds_nothing() {
+        let mut table = AppLinkTable::new();
+        let handle = open_stream(&mut table);
+        assert!(
+            table.poll_writable(handle, None),
+            "an open link with nothing held"
+        );
+        let SendGate::Go(ticket) = table.begin_send(handle, None) else {
+            panic!("an open link takes a send");
+        };
+        let (step, _) = table.send_answered(ticket, 8, ProgramSend::WouldBlock);
+        assert_eq!(step, SendStep::Blocked);
+        let (count, waker) = counter();
+        assert!(
+            !table.poll_writable(handle, Some(&waker)),
+            "a blocked link takes nothing"
+        );
+        assert_eq!(
+            wakes(table.event(handle, ProgramEvent::Writable).unwrap()),
+            1
+        );
+        assert_eq!(count.0.load(Ordering::SeqCst), 1, "the waiter is woken");
+        assert!(table.poll_writable(handle, None), "writable again");
+        assert!(
+            matches!(table.begin_send(handle, None), SendGate::Go(_)),
+            "the poll began no send"
+        );
+        table
+            .hold_remainder(handle, b"held")
+            .expect("an open link holds a remainder");
+        assert!(
+            !table.poll_writable(handle, None),
+            "a link holding bytes for the program takes no more"
+        );
+        let mut closed = AppLinkTable::new();
+        let gone = open_stream(&mut closed);
+        let _ = closed.event(gone, ProgramEvent::Closed).expect("closed");
+        assert!(
+            closed.poll_writable(gone, None),
+            "a closed link answers at once"
+        );
     }
 
     #[test]

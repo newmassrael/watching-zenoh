@@ -28,7 +28,8 @@ use wz_session_core::byte_cells::ByteBuf;
 #[cfg(feature = "session-slot")]
 use wz_session_core::byte_cells::ByteSource;
 use wz_session_core::link::{
-    BoxedLinkDriver, LinkEndpoints, LinkSendOutcome, LostCause, TxSlot, TxSlotGrant,
+    BoxedLinkDriver, LinkEndpoints, LinkSendOutcome, LostCause, RoomAnswer, RoomWait, TxSlot,
+    TxSlotGrant,
 };
 #[cfg(feature = "alloc")]
 use wz_session_core::link::{LinkKind, LinkSubject, RxFrame};
@@ -42,8 +43,6 @@ use crate::group_transport::{GroupJoiner, GroupTransport, NoGroups};
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::link_storage::HeapTx;
 use crate::link_storage::TxStore;
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-use crate::session_drive::LinkReadiness;
 use crate::session_drive::SessionDatagramLink;
 #[cfg(feature = "session-slot")]
 use crate::session_drive::{Accept, Bind, DriverPump, SlotStack};
@@ -51,6 +50,8 @@ use crate::session_drive::{Accept, Bind, DriverPump, SlotStack};
 use crate::session_drive::{LinkListener, OpenedLink, SessionLinks};
 #[cfg(any(feature = "session-slot", feature = "alloc"))]
 use crate::session_drive::{LinkOpenError, LinkProto, Locator};
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use crate::session_drive::{LinkReadiness, LinkWritability};
 #[cfg(any(feature = "session-slot", feature = "alloc"))]
 use crate::stream_link::NoDial;
 #[cfg(any(feature = "session-slot", feature = "alloc"))]
@@ -112,6 +113,11 @@ where
 {
     fn send_blocking(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome {
         either!(self, link => link.send_blocking(bytes, reliability))
+    }
+
+    // Forwarded, or every session over this driver would find room on a stream that has none.
+    fn wait_for_room(&self, priority: Priority, wait: RoomWait) -> RoomAnswer {
+        either!(self, link => link.wait_for_room(priority, wait))
     }
 
     fn tx_slot_acquire(&self, want: usize, priority: Priority) -> Option<TxSlotGrant> {
@@ -232,6 +238,11 @@ where
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
         either!(self, link => link.readiness())
+    }
+
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn writability(&self) -> Option<alloc::boxed::Box<dyn LinkWritability>> {
+        either!(self, link => link.writability())
     }
 }
 
