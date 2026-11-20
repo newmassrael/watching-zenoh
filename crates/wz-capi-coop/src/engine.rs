@@ -37,7 +37,7 @@ use core::cell::RefCell;
 use core::sync::atomic::{AtomicBool, Ordering};
 // A 64-bit atomic where the target has one, and a critical section where it does not (a
 // Cortex-M7 has 32-bit atomics only).
-use portable_atomic::AtomicU64;
+use portable_atomic::{AtomicU64, AtomicUsize};
 
 #[allow(unused_imports)]
 use crate::prelude::*;
@@ -468,6 +468,10 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     rooms: Arc<LinkRooms>,
     wait_before_drop_us: u64,
     held_drop: HeldDrop,
+    /// The publishes sending on the session now ([`Sending`]): what holds the session for a
+    /// send, which pico's profile drops a droppable publish behind, as against a read step, a
+    /// timer or the drive, which it waits for.
+    sending: AtomicUsize,
     /// The droppable publishes dropped before they reached a link: behind a held session, for
     /// want of room or by the profile's drop at once ([`Self::live_to_publish`]). Charged to the
     /// transport's drops in [`Self::transport_stats`], where a link's session charges its own.
@@ -531,9 +535,29 @@ pub(crate) enum Room {
     Congested,
     /// No link that is up gives a wait to ask.
     Unasked,
-    /// Nothing was asked: the queue profile drops a message behind a held session at once and
-    /// reports it to the caller, as pico's try-lock drop does.
+    /// Nothing was asked: the session is held by another publish sending on it, and the queue
+    /// profile drops a message behind it at once and reports it to the caller, as pico's
+    /// try-lock drop does.
     Held,
+}
+
+/// A publish sending on the session, counted for as long as this lives ([`CoopEngine`]'s
+/// `sending`): what tells a droppable publish that finds the session held whether a send holds
+/// it, as pico's transmit lock is held by a send, or something that is not one (a read step, a
+/// timer, the drive), which lets go once its step is done.
+struct Sending<'a>(&'a AtomicUsize);
+
+impl<'a> Sending<'a> {
+    fn enter(count: &'a AtomicUsize) -> Self {
+        count.fetch_add(1, Ordering::SeqCst);
+        Self(count)
+    }
+}
+
+impl Drop for Sending<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl LinkRooms {
@@ -545,12 +569,15 @@ impl LinkRooms {
     }
 
     /// What a droppable publish that found the session held is told, by the queue profile's
-    /// `held_drop`: zenoh's asks the links for room within `wait_us` ([`Self::within`]); pico's is
-    /// dropped at once and asks nothing ([`Room::Held`]), as pico's try-lock drops the message.
-    pub(crate) fn for_held(&self, held_drop: HeldDrop, wait_us: u64) -> Room {
+    /// `held_drop`: zenoh's asks the links for room within `wait_us` ([`Self::within`]). Pico's
+    /// asks nothing: behind another publish `sending` on the session it is dropped at once
+    /// ([`Room::Held`]), as pico's try-lock fails on a transmit lock another send holds, and
+    /// behind a holder that is not one it waits for the session ([`Room::Free`]).
+    pub(crate) fn for_held(&self, held_drop: HeldDrop, sending: bool, wait_us: u64) -> Room {
         match held_drop {
             HeldDrop::WaitForRoom => self.within(wait_us),
-            HeldDrop::DropAtOnce => Room::Held,
+            HeldDrop::DropAtOnce if sending => Room::Held,
+            HeldDrop::DropAtOnce => Room::Free,
         }
     }
 
@@ -2247,6 +2274,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             rooms,
             wait_before_drop_us,
             held_drop,
+            sending: AtomicUsize::new(0),
             #[cfg(feature = "transport-stats")]
             unsent_drops: AtomicU64::new(0),
             samples: Arc::new(Mutex::new(VecDeque::new())),
@@ -2417,9 +2445,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 }
                 return Ok(Some(guard));
             }
+            let sending = self.sending.load(Ordering::SeqCst) > 0;
             match self
                 .rooms
-                .for_held(self.held_drop, self.wait_before_drop_us)
+                .for_held(self.held_drop, sending, self.wait_before_drop_us)
             {
                 Room::Free => core::hint::spin_loop(),
                 Room::Congested => {
@@ -2635,6 +2664,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let Some(core) = self.live_to_publish(droppable)? else {
             return Ok(0);
         };
+        // Declared after the session's guard, so it is let go first: a publish that then finds
+        // the session held finds a holder that is not sending, and waits for it.
+        let _sending = Sending::enter(&self.sending);
         let express = meta.is_express();
         let priority = opts.priority_band();
         // Each face is sent the put, and one a face's link could not have carried is the one that

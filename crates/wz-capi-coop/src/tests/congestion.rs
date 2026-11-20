@@ -69,22 +69,32 @@ fn each_link_is_asked_and_one_without_room_is_congestion() {
     );
 }
 
-/// Under the pico profile a publish that finds the session held is a congestion drop at once, as
-/// pico's try-lock drops the message: no link is asked for room, though one has room to give.
-/// Under zenoh's the same publish asks it.
+/// Under the pico profile a publish that finds the session held by another publish sending on it
+/// is a congestion drop at once, as pico's try-lock drops the message behind a transmit lock
+/// another send holds: no link is asked for room, though one has room to give. A session held by
+/// what is not a send (a read step, a timer) is waited for, with nothing asked either. Under
+/// zenoh's profile the same publish asks the link.
 #[test]
 fn under_the_pico_profile_a_held_session_drops_without_asking() {
     use wz_session_core::session_init_params::HeldDrop;
     let rooms = LinkRooms::default();
     let free = answer(true);
     held(&rooms, &free);
-    assert_eq!(rooms.for_held(HeldDrop::DropAtOnce, 1_000), Room::Held);
+    assert_eq!(
+        rooms.for_held(HeldDrop::DropAtOnce, true, 1_000),
+        Room::Held
+    );
+    assert_eq!(
+        rooms.for_held(HeldDrop::DropAtOnce, false, 1_000),
+        Room::Free,
+        "a holder that is not sending is waited for"
+    );
     assert!(
         free.asked.lock().unwrap().is_empty(),
         "the link was asked for room"
     );
     assert_eq!(
-        rooms.for_held(HeldDrop::WaitForRoom, 1_000),
+        rooms.for_held(HeldDrop::WaitForRoom, false, 1_000),
         Room::Free,
         "CONTROL: zenoh's profile asks the link"
     );
