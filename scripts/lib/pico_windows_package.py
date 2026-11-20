@@ -357,12 +357,24 @@ def write_zip(directory: pathlib.Path, out: pathlib.Path, epoch: int) -> None:
             archive.writestr(info, path.read_bytes(), compresslevel=9)
 
 
+def extracts_under(root: pathlib.Path, member: str) -> bool:
+    """Whether an archive member lands under `root`: the member's path, joined to the root and
+    resolved, is relative to the resolved root. A `..` that climbs out, an absolute name and a
+    Windows drive name each resolve elsewhere, on either host's path rules."""
+    base = root.resolve()
+    try:
+        (base / member).resolve().relative_to(base)
+    except ValueError:
+        return False
+    return True
+
+
 def extract_zip(archive: pathlib.Path, into: pathlib.Path) -> pathlib.Path:
     """Extract a package zip and return its one top directory; a zip of anything else is refused."""
     with zipfile.ZipFile(archive) as z:
         names = z.namelist()
         tops = {name.split("/", 1)[0] for name in names}
-        if len(tops) != 1 or any(".." in pathlib.PurePosixPath(n).parts or n.startswith("/") for n in names):
+        if len(tops) != 1 or not all(extracts_under(into, name) for name in names):
             raise Refusal(f"{archive.name} is not one package directory")
         z.extractall(into)
     return into / tops.pop()
@@ -872,6 +884,20 @@ def selftest() -> int:
             expect("a zip of two directories is not a package", False)
         except Refusal:
             pass
+        climbing = pathlib.Path(tmp) / "climbing.zip"
+        with zipfile.ZipFile(climbing, "w") as z:
+            z.writestr("pkg/a", "a")
+            z.writestr("pkg/../../outside", "b")
+        try:
+            extract_zip(climbing, pathlib.Path(tmp) / "z")
+            expect("a member that climbs out of the extraction directory is refused", False)
+        except Refusal:
+            pass
+        expect("a member under the package's directory extracts under the root",
+               extracts_under(pathlib.Path(tmp) / "z", "pkg/include/zenoh-pico.h"))
+        expect("an absolute member does not", not extracts_under(pathlib.Path(tmp) / "z", "/etc/passwd"))
+        expect("a member that climbs out does not",
+               not extracts_under(pathlib.Path(tmp) / "z", "pkg/../../outside"))
 
     report = "\n".join([
         "warning text",
