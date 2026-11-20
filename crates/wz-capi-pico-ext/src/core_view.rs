@@ -5,6 +5,9 @@
 //! their own: the items of its C ABI and of the extension interface that they name, declared the
 //! way a C program declares them from the headers, and imported from the core library through C.
 //!
+//! It declares what the doors' sources name, their tests included: the doors' tests are the core
+//! crate's to run, but a check of this crate compiles them too, so what they name is declared here.
+//!
 //! Each module has the name of the core module the doors name it by (`crate::bytes`,
 //! `crate::ext_interface`, ...), so the doors' sources compile unchanged over it. Nothing here is
 //! defined: a function is an import, and a type is one the core writes and reads, the program's
@@ -37,6 +40,12 @@ pub mod abi {
     /// A loaned string (pico `z_loaned_string_t`), only pointed at.
     #[repr(C)]
     pub struct z_loaned_string_t {
+        _opaque: [u8; 0],
+    }
+
+    /// A moved string (pico `z_moved_string_t`), only pointed at.
+    #[repr(C)]
+    pub struct z_moved_string_t {
         _opaque: [u8; 0],
     }
 
@@ -116,6 +125,14 @@ pub mod bytes {
             bytes: *mut super::abi::z_owned_bytes_t,
         ) -> *mut super::abi::z_moved_bytes_t;
         pub fn z_internal_string_null(string: *mut super::abi::z_owned_string_t);
+        pub fn z_internal_string_check(string: *const super::abi::z_owned_string_t) -> bool;
+        pub fn z_string_loan(
+            string: *const super::abi::z_owned_string_t,
+        ) -> *const super::abi::z_loaned_string_t;
+        pub fn z_string_move(
+            string: *mut super::abi::z_owned_string_t,
+        ) -> *mut super::abi::z_moved_string_t;
+        pub fn z_string_drop(string: *mut super::abi::z_moved_string_t);
         pub fn z_string_copy_from_substr(
             string: *mut super::abi::z_owned_string_t,
             value: *const core::ffi::c_char,
@@ -146,6 +163,11 @@ pub mod keyexpr {
         pub fn z_keyexpr_as_view_string(
             keyexpr: *const super::abi::z_loaned_keyexpr_t,
             string: *mut super::abi::z_view_string_t,
+        ) -> crate::result::ZResult;
+        pub fn z_view_keyexpr_empty(keyexpr: *mut super::abi::z_view_keyexpr_t);
+        pub fn z_view_keyexpr_from_str(
+            keyexpr: *mut super::abi::z_view_keyexpr_t,
+            name: *const core::ffi::c_char,
         ) -> crate::result::ZResult;
         pub fn z_view_keyexpr_from_substr(
             keyexpr: *mut super::abi::z_view_keyexpr_t,

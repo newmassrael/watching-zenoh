@@ -60,14 +60,20 @@ pub unsafe extern "C" fn wz_ext_additional_interface(
         if code != Z_OK {
             return code;
         }
+        let needed = (WZ_EXT_INTERFACE_MAJOR, WZ_EXT_INTERFACE_MINOR);
         if wz_ext_interface_major_1() != WZ_EXT_INTERFACE_MAJOR
-            || answered.major != WZ_EXT_INTERFACE_MAJOR
-            || answered.minor < WZ_EXT_INTERFACE_MINOR
+            || !runs_on(needed, (answered.major, answered.minor))
         {
             return WZ_EXT_ERR_UNSUPPORTED;
         }
         Z_OK
     })
+}
+
+/// Whether doors built against the interface version `needed` (major, minor) run over a core that
+/// answers `answered`: the same major version, and the same minor version or a later one.
+fn runs_on(needed: (u16, u16), answered: (u16, u16)) -> bool {
+    answered.0 == needed.0 && answered.1 >= needed.1
 }
 
 #[cfg(test)]
@@ -91,6 +97,21 @@ mod tests {
                 minor: WZ_EXT_INTERFACE_MINOR,
             }
         );
+    }
+
+    #[test]
+    fn a_core_of_the_same_major_and_no_older_minor_version_is_one_the_doors_run_on() {
+        assert!(runs_on((1, 0), (1, 0)));
+        assert!(
+            runs_on((1, 2), (1, 3)),
+            "a later minor version adds, so it runs"
+        );
+        assert!(
+            !runs_on((1, 2), (1, 1)),
+            "an older minor version lacks what was added"
+        );
+        assert!(!runs_on((1, 0), (2, 0)), "another major version is refused");
+        assert!(!runs_on((2, 0), (1, 9)), "another major version is refused");
     }
 
     #[test]

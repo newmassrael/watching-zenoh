@@ -97,6 +97,7 @@ stands_for!(
     view::abi::z_owned_bytes_t => crate::abi::z_owned_bytes_t,
     view::abi::z_loaned_bytes_t => crate::abi::z_loaned_bytes_t,
     view::abi::z_moved_bytes_t => crate::abi::z_moved_bytes_t,
+    view::abi::z_moved_string_t => crate::abi::z_moved_string_t,
     view::session::z_loaned_session_t => crate::session::z_loaned_session_t,
     view::session::z_subscriber_options_t => crate::session::z_subscriber_options_t,
     view::ext_interface::wz_ext_interface_version_t => crate::ext_interface::wz_ext_interface_version_t,
@@ -190,10 +191,16 @@ fn every_function_the_view_imports_has_the_core_s_signature() {
     same_fn!(bytes::z_bytes_copy_from_buf(_, _, _));
     same_fn!(bytes::z_bytes_move(_));
     same_fn!(bytes::z_internal_string_null(_));
+    same_fn!(bytes::z_internal_string_check(_));
+    same_fn!(bytes::z_string_loan(_));
+    same_fn!(bytes::z_string_move(_));
+    same_fn!(bytes::z_string_drop(_));
     same_fn!(bytes::z_string_copy_from_substr(_, _, _));
     same_fn!(bytes::z_string_data(_));
     same_fn!(bytes::z_string_len(_));
     same_fn!(keyexpr::z_keyexpr_as_view_string(_, _));
+    same_fn!(keyexpr::z_view_keyexpr_empty(_));
+    same_fn!(keyexpr::z_view_keyexpr_from_str(_, _));
     same_fn!(keyexpr::z_view_keyexpr_from_substr(_, _, _));
     same_fn!(keyexpr::z_view_keyexpr_loan(_));
     same_fn!(keyexpr::z_view_string_loan(_));
