@@ -37,7 +37,7 @@
 //!
 //! ```text
 //! let mut observer = ApplicationLayerObserver::new();
-//! observer.subscribers.register("home/temp", on_temp);
+//! observer.subscribers.register("home/temp", on_temp)?;
 //! observer.queryables.register("metrics/**", on_metric);
 //! observer.replies.register(rid, expected_finals, on_reply, on_final);
 //! // … later, inside the drive_session observer closure:
@@ -383,7 +383,8 @@ impl ApplicationLayerObserver {
     /// New observer with empty registries, held to the build's limits. Callers register
     /// callbacks on each contained registry directly
     /// (`observer.subscribers.register(...)` etc.) before driving
-    /// the session loop.
+    /// the session loop; a registration the subscriber table's quota
+    /// refuses comes back as [`RegisterError`](crate::registry_error::RegisterError).
     pub fn new() -> Self {
         Self {
             subscribers: SubscriberRegistry::new(),
@@ -1163,9 +1164,12 @@ mod tests {
         let mut observer = ApplicationLayerObserver::new();
         let fired = Arc::new(AtomicUsize::new(0));
         let f = fired.clone();
-        observer.subscribers.register("anything", move |_p| {
-            f.fetch_add(1, Ordering::SeqCst);
-        });
+        observer
+            .subscribers
+            .register("anything", move |_p| {
+                f.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
 
         let event = IterationEvent::Lease(crate::lease::LeaseCheckOutcome::WithinLease);
         observer.dispatch_event(event);
@@ -1311,9 +1315,12 @@ mod tests {
             let mut observer = ApplicationLayerObserver::new();
             let fired = Arc::new(AtomicUsize::new(0));
             let fired_cb = fired.clone();
-            observer.subscribers.register("home/temp", move |_push| {
-                fired_cb.fetch_add(1, Ordering::SeqCst);
-            });
+            observer
+                .subscribers
+                .register("home/temp", move |_push| {
+                    fired_cb.fetch_add(1, Ordering::SeqCst);
+                })
+                .expect("no quota is stated on this table");
 
             let outcome = make_outcome(vec![NetworkMessage::Push(Box::new(push_literal(
                 "home/temp",
@@ -1396,9 +1403,12 @@ mod tests {
             let l_fired = Arc::new(AtomicUsize::new(0));
 
             let s = sub_fired.clone();
-            observer.subscribers.register("a", move |_p| {
-                s.fetch_add(1, Ordering::SeqCst);
-            });
+            observer
+                .subscribers
+                .register("a", move |_p| {
+                    s.fetch_add(1, Ordering::SeqCst);
+                })
+                .expect("no quota is stated on this table");
             let rs = r_sub_fired.clone();
             observer
                 .remote_subscribers
@@ -1510,13 +1520,19 @@ mod tests {
             let ours_fired = Arc::new(AtomicUsize::new(0));
             let theirs_fired = Arc::new(AtomicUsize::new(0));
             let o = ours_fired.clone();
-            observer.subscribers.register("ours/x", move |_p| {
-                o.fetch_add(1, Ordering::SeqCst);
-            });
+            observer
+                .subscribers
+                .register("ours/x", move |_p| {
+                    o.fetch_add(1, Ordering::SeqCst);
+                })
+                .expect("no quota is stated on this table");
             let t = theirs_fired.clone();
-            observer.subscribers.register("theirs/x", move |_p| {
-                t.fetch_add(1, Ordering::SeqCst);
-            });
+            observer
+                .subscribers
+                .register("theirs/x", move |_p| {
+                    t.fetch_add(1, Ordering::SeqCst);
+                })
+                .expect("no quota is stated on this table");
 
             let seen: Arc<Mutex<alloc::vec::Vec<alloc::string::String>>> =
                 Arc::new(Mutex::new(alloc::vec::Vec::new()));
@@ -1581,9 +1597,12 @@ mod tests {
 
             let fired = Arc::new(AtomicUsize::new(0));
             let f = fired.clone();
-            observer.subscribers.register("theirs/x", move |_p| {
-                f.fetch_add(1, Ordering::SeqCst);
-            });
+            observer
+                .subscribers
+                .register("theirs/x", move |_p| {
+                    f.fetch_add(1, Ordering::SeqCst);
+                })
+                .expect("no quota is stated on this table");
             let seen: Arc<Mutex<alloc::vec::Vec<alloc::string::String>>> =
                 Arc::new(Mutex::new(alloc::vec::Vec::new()));
             let s1 = seen.clone();
@@ -2036,7 +2055,10 @@ mod sub_interest_reply_tests {
     /// [`SubInterestReply`] the chain stages.
     fn staged(aggregate: bool) -> (ApplicationLayerObserver, crate::pubsub::SubscriptionId) {
         let mut observer = ApplicationLayerObserver::new();
-        let id = observer.subscribers.register("reenter/**", |_| {});
+        let id = observer
+            .subscribers
+            .register("reenter/**", |_| {})
+            .expect("no quota is stated on this table");
         let count = observer
             .subscribers
             .respond_to_subscriber_interest_borrowed(
@@ -2070,7 +2092,10 @@ mod sub_interest_reply_tests {
     #[test]
     fn a_member_interest_on_its_own_alias_is_answered() {
         let mut observer = ApplicationLayerObserver::new();
-        let _ = observer.subscribers.register("demo/mc/**", |_| {});
+        observer
+            .subscribers
+            .register("demo/mc/**", |_| {})
+            .expect("no quota is stated on this table");
         let kexpr = crate::declare_build::build_declare_kexpr(1, "demo/mc/cross")
             .expect("a literal key builds");
         let interest = crate::interest_build::build_interest_subscribers(3, true, false, 1, None)
@@ -2313,8 +2338,14 @@ mod sub_interest_reply_tests {
     #[test]
     fn an_aggregate_declaration_survives_while_another_subscription_matches() {
         let mut observer = ApplicationLayerObserver::new();
-        let first = observer.subscribers.register("reenter/a", |_| {});
-        let _second = observer.subscribers.register("reenter/b", |_| {});
+        let first = observer
+            .subscribers
+            .register("reenter/a", |_| {})
+            .expect("no quota is stated on this table");
+        let _second = observer
+            .subscribers
+            .register("reenter/b", |_| {})
+            .expect("no quota is stated on this table");
         let staged_count = observer
             .subscribers
             .respond_to_subscriber_interest_borrowed(
@@ -2367,8 +2398,14 @@ mod sub_interest_reply_tests {
     #[test]
     fn an_unrelated_unregister_stages_no_aggregate_retraction() {
         let mut observer = ApplicationLayerObserver::new();
-        let unrelated = observer.subscribers.register("elsewhere/a", |_| {});
-        let _matching = observer.subscribers.register("reenter/a", |_| {});
+        let unrelated = observer
+            .subscribers
+            .register("elsewhere/a", |_| {})
+            .expect("no quota is stated on this table");
+        let _matching = observer
+            .subscribers
+            .register("reenter/a", |_| {})
+            .expect("no quota is stated on this table");
         observer
             .subscribers
             .respond_to_subscriber_interest_borrowed(
@@ -2452,7 +2489,10 @@ mod sub_interest_reply_tests {
     #[test]
     fn one_session_never_announces_two_things_under_one_id() {
         let mut observer = ApplicationLayerObserver::new();
-        let sub = observer.subscribers.register("reenter/a", |_| {});
+        let sub = observer
+            .subscribers
+            .register("reenter/a", |_| {})
+            .expect("no quota is stated on this table");
         observer
             .subscribers
             .respond_to_subscriber_interest_borrowed(

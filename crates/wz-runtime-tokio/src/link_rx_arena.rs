@@ -727,9 +727,11 @@ mod tests {
             let messages = parse_frame_payload_in(&payload).expect("the batch parses");
             let sink = Arc::clone(&kept);
             let mut registry = SubscriberRegistry::new();
-            registry.register("demo/kept", move |view| {
-                *sink.lock().unwrap() = Some(Sample::from_view(view));
-            });
+            registry
+                .register("demo/kept", move |view| {
+                    *sink.lock().unwrap() = Some(Sample::from_view(view));
+                })
+                .expect("no quota is stated on this table");
             registry.dispatch(&messages[0], crate::Reliability::Reliable);
         }
         let sample = kept.lock().unwrap().take().expect("the subscriber fired");

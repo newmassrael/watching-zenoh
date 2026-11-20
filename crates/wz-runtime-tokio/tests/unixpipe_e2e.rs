@@ -117,15 +117,18 @@ async fn wz_to_wz_over_unixpipe_reaches_established_and_delivers_put() {
     {
         let fired = fired.clone();
         let expect = payload.clone();
-        observer.subscribers.register(KEYEXPR, move |sample| {
-            assert_eq!(sample.keyexpr(), KEYEXPR);
-            assert_eq!(
-                sample.payload(),
-                &expect[..],
-                "the payload delivered over unixpipe matches the Put byte-for-byte"
-            );
-            fired.fetch_add(1, Ordering::SeqCst);
-        });
+        observer
+            .subscribers
+            .register(KEYEXPR, move |sample| {
+                assert_eq!(sample.keyexpr(), KEYEXPR);
+                assert_eq!(
+                    sample.payload(),
+                    &expect[..],
+                    "the payload delivered over unixpipe matches the Put byte-for-byte"
+                );
+                fired.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
     }
 
     let publisher = TokioSession::new(
@@ -292,15 +295,18 @@ async fn wz_accepts_a_session_over_unixpipe_via_the_bind_endpoint_seam() {
     {
         let fired = fired.clone();
         let expect = payload.clone();
-        observer.subscribers.register(KEYEXPR, move |sample| {
-            assert_eq!(sample.keyexpr(), KEYEXPR);
-            assert_eq!(
-                sample.payload(),
-                &expect[..],
-                "the payload delivered over the unixpipe seam matches the Put byte-for-byte"
-            );
-            fired.fetch_add(1, Ordering::SeqCst);
-        });
+        observer
+            .subscribers
+            .register(KEYEXPR, move |sample| {
+                assert_eq!(sample.keyexpr(), KEYEXPR);
+                assert_eq!(
+                    sample.payload(),
+                    &expect[..],
+                    "the payload delivered over the unixpipe seam matches the Put byte-for-byte"
+                );
+                fired.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
     }
 
     let publisher = TokioSession::new(

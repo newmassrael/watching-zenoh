@@ -220,12 +220,16 @@ async fn run_pico_put_against_wz_acceptor(payload: &str, expect_match: bool) -> 
         let deliveries = deliveries.clone();
         let byte_exact = byte_exact.clone();
         let expect = payload.as_bytes().to_vec();
-        observer.subscribers.register(KEYEXPR, move |sample| {
-            if expect_match && (sample.keyexpr() != KEYEXPR || sample.payload() != &expect[..]) {
-                byte_exact.store(false, Ordering::SeqCst);
-            }
-            deliveries.fetch_add(1, Ordering::SeqCst);
-        });
+        observer
+            .subscribers
+            .register(KEYEXPR, move |sample| {
+                if expect_match && (sample.keyexpr() != KEYEXPR || sample.payload() != &expect[..])
+                {
+                    byte_exact.store(false, Ordering::SeqCst);
+                }
+                deliveries.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
     }
 
     // RX-side fragment / parse-error observation: the structural proof that

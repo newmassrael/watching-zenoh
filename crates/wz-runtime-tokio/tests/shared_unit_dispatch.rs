@@ -220,10 +220,12 @@ fn a_subscriber_is_handed_a_sample_whose_payload_is_the_buffer_the_link_read() {
     let delivered = Arc::new(Mutex::new(None::<(usize, Vec<u8>)>));
     let sink = Arc::clone(&delivered);
     let mut registry = SubscriberRegistry::new();
-    registry.register("demo/shared", move |view| {
-        let payload = view.payload();
-        *sink.lock().unwrap() = Some((payload.as_ptr() as usize, payload.to_vec()));
-    });
+    registry
+        .register("demo/shared", move |view| {
+            let payload = view.payload();
+            *sink.lock().unwrap() = Some((payload.as_ptr() as usize, payload.to_vec()));
+        })
+        .expect("no quota is stated on this table");
     registry.dispatch(&messages[0], Reliability::Reliable);
 
     let (at, bytes) = delivered
@@ -261,9 +263,11 @@ fn a_sample_the_application_keeps_holds_the_lent_storage_until_it_is_dropped() {
     let kept = Arc::new(Mutex::new(None::<wz_session_core::sample::Sample>));
     let sink = Arc::clone(&kept);
     let mut registry = SubscriberRegistry::new();
-    registry.register("demo/shared", move |view| {
-        *sink.lock().unwrap() = Some(wz_session_core::sample::Sample::from_view(view));
-    });
+    registry
+        .register("demo/shared", move |view| {
+            *sink.lock().unwrap() = Some(wz_session_core::sample::Sample::from_view(view));
+        })
+        .expect("no quota is stated on this table");
     registry.dispatch(&messages[0], Reliability::Reliable);
     let sample = kept.lock().unwrap().take().expect("the subscriber fired");
 
@@ -450,9 +454,11 @@ fn large_allocations_to_a_kept_sample(wire: Vec<u8>) -> (Vec<usize>, Vec<usize>)
     let kept = Arc::new(Mutex::new(None::<wz_session_core::sample::Sample>));
     let sink = Arc::clone(&kept);
     let mut registry = SubscriberRegistry::new();
-    registry.register("demo/census", move |view| {
-        *sink.lock().unwrap() = Some(wz_session_core::sample::Sample::from_view(view));
-    });
+    registry
+        .register("demo/census", move |view| {
+            *sink.lock().unwrap() = Some(wz_session_core::sample::Sample::from_view(view));
+        })
+        .expect("no quota is stated on this table");
     let ((), delivery) =
         census::large_allocations(|| registry.dispatch(&messages[0], Reliability::Reliable));
     let sample = kept.lock().unwrap().take().expect("the subscriber fired");
@@ -548,9 +554,11 @@ fn a_sample_the_application_keeps_holds_the_lent_storage_through_its_attachment(
     let kept = Arc::new(Mutex::new(None::<wz_session_core::sample::Sample>));
     let sink = Arc::clone(&kept);
     let mut registry = SubscriberRegistry::new();
-    registry.register("demo/census", move |view| {
-        *sink.lock().unwrap() = Some(wz_session_core::sample::Sample::from_view(view));
-    });
+    registry
+        .register("demo/census", move |view| {
+            *sink.lock().unwrap() = Some(wz_session_core::sample::Sample::from_view(view));
+        })
+        .expect("no quota is stated on this table");
     registry.dispatch(&messages[0], Reliability::Reliable);
     let mut sample = kept.lock().unwrap().take().expect("the subscriber fired");
 
