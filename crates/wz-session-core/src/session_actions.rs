@@ -10930,7 +10930,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // it takes the lock only when the lock is free, and while it is held it waits for room
         // out of its own deadline, without the lock: no room within it is a congestion drop, and
         // room means the holder is about to let go. A sender under a reservation holds room
-        // already and waits for the lock as before.
+        // already and waits for the lock as before. Whether a droppable message behind a held
+        // conduit waits for room at all is the queue profile's (`HeldDrop`): the pico profile
+        // drops it at once and asks the link nothing, as pico's try-lock does.
         #[cfg(feature = "alloc")]
         let push = if probing {
             match R::try_with_mutex_mut(self.tx_conduits.conduit(priority), stage_and_emit) {
@@ -10946,7 +10948,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 if let Some(push) = taken {
                     break push;
                 }
-                if congested() {
+                let drop_at_once = self.params.tx_queue.held_drop
+                    == crate::session_init_params::HeldDrop::DropAtOnce;
+                if drop_at_once || congested() {
                     break Ok(UnicastPush::Congested);
                 }
                 core::hint::spin_loop();
