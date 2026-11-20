@@ -2361,7 +2361,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     }
 
     /// How many messages of `priority` the session put on its groups were dropped for want of
-    /// room on the group's queue. Compiled where its readers are, as [`Self::rooms`] is.
+    /// room on the group's stage. Compiled where its readers are, as [`Self::rooms`] is.
     #[cfg(all(test, feature = "group", feature = "app-transport"))]
     pub(crate) fn group_congestion_drops(&self, priority: wz_session_core::qos::Priority) -> u32 {
         self.live().map_or(0, |core| {
@@ -3726,7 +3726,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let Some(core) = self.live() else {
             return FilteredPut::Sent(Ok(0));
         };
-        // A group is sent a put by the general publish, which puts it on the group's queue.
+        // A group is sent a put by the general publish, which pushes it onto the group's stage.
         #[cfg(feature = "group")]
         if !core.0.groups.is_empty() {
             return FilteredPut::NotPlain;

@@ -1116,3 +1116,243 @@ mod congested {
         SessionDrive::close(&*member);
     }
 }
+
+/// A put whose fragment chain finds its lane full part of the way: the session pushes a chain onto
+/// the group's stage fragment by fragment, as the tokio engine's group producer pushes it, so a
+/// chain whose lane stays full between two fragments is stopped by the drop marker, and the other
+/// member drops what it had of it; and each JOIN the member sends advertises the sequence number
+/// its socket takes next, not one numbered ahead of it.
+mod cut {
+    use std::sync::atomic::AtomicBool;
+
+    use wz_session_core::inbound::{parse_inbound, InboundFrame};
+    use wz_session_core::join_decode::decode_join;
+    use wz_session_core::qos::{CongestionControl, Priority};
+    use wz_session_core::session_init_params::TxQueueConf;
+
+    use super::*;
+
+    /// A payload whose put is a chain of several more fragments than a lane of one batch holds.
+    const LARGE: [u8; 12_000] = [0x6c; 12_000];
+    /// The group's batch, which every fragment of a chain fits.
+    const BATCH: usize = 2_048;
+
+    /// A member's stack whose group socket can be made full: while it is, the socket takes nothing
+    /// and answers would-block; otherwise it is the member's stack. It keeps each datagram it
+    /// takes, in order.
+    struct Gated {
+        stack: MemberStack,
+        full: Arc<AtomicBool>,
+        wire: Arc<Mutex<Vec<Vec<u8>>>>,
+        link: Arc<Mutex<Option<LinkHandle>>>,
+    }
+
+    impl AppPort for Gated {
+        fn open(&self, link: LinkHandle, kind: AppLinkKind, locator: &str) -> ProgramOpen {
+            let opened = self.stack.open(link, kind, locator);
+            if matches!(opened, ProgramOpen::Up) {
+                *self.link.lock().unwrap() = Some(link);
+            }
+            opened
+        }
+
+        fn send(&self, link: LinkHandle, bytes: &[u8]) -> ProgramSend {
+            if self.full.load(Ordering::SeqCst) {
+                return ProgramSend::WouldBlock;
+            }
+            self.wire.lock().unwrap().push(bytes.to_vec());
+            self.stack.send(link, bytes)
+        }
+
+        fn close(&self, link: LinkHandle) {
+            self.stack.close(link);
+        }
+    }
+
+    /// A member over a [`Gated`] stack, whose lanes hold one batch each.
+    struct GatedMember {
+        engine: Arc<Engine>,
+        transport: Arc<AppTransport>,
+        full: Arc<AtomicBool>,
+        wire: Arc<Mutex<Vec<Vec<u8>>>>,
+        link: Arc<Mutex<Option<LinkHandle>>>,
+    }
+
+    impl GatedMember {
+        fn open(network: &Arc<Network>, member: u8) -> Self {
+            let own = Arc::new(Mutex::new(Weak::new()));
+            let full = Arc::new(AtomicBool::new(false));
+            let wire = Arc::new(Mutex::new(Vec::new()));
+            let link = Arc::new(Mutex::new(None));
+            let transport = Arc::new(AppTransport::new(
+                Box::new(Table(Mutex::new(AppLinkTable::new()))),
+                Box::new(Gated {
+                    stack: MemberStack {
+                        network: Arc::clone(network),
+                        member,
+                        transport: Arc::clone(&own),
+                    },
+                    full: Arc::clone(&full),
+                    wire: Arc::clone(&wire),
+                    link: Arc::clone(&link),
+                }),
+            ));
+            *own.lock().unwrap() = Arc::downgrade(&transport);
+            let config = CoopConfig {
+                tx_queue: TxQueueConf {
+                    sizes: [1; Priority::NUM],
+                    wait_before_drop_us: 20_000,
+                    no_progress_us: None,
+                    ..client_config().tx_queue
+                },
+                ..member_config(member, GROUP)
+            };
+            let engine = Engine::open(
+                AppLinks::new(Arc::clone(&transport)),
+                PosixClock,
+                PosixEntropy,
+                config,
+            )
+            .expect("the member joins");
+            Self {
+                engine,
+                transport,
+                full,
+                wire,
+                link,
+            }
+        }
+
+        /// The stack takes datagrams again and says so.
+        fn writable(&self) {
+            self.full.store(false, Ordering::SeqCst);
+            let link = self.link.lock().unwrap().expect("the group was joined");
+            let _ = self.transport.event(link, ProgramEvent::Writable);
+        }
+    }
+
+    /// The sequence number of a datagram on the reliable channel: a frame's, or a fragment's.
+    fn reliable_sn(datagram: &[u8]) -> Option<u64> {
+        match parse_inbound(datagram) {
+            Ok(InboundFrame::Frame {
+                reliable: true, sn, ..
+            })
+            | Ok(InboundFrame::Fragment {
+                reliable: true, sn, ..
+            }) => Some(sn),
+            _ => None,
+        }
+    }
+
+    /// The first member's socket is full when it puts a chain: the first fragment is queued, the
+    /// group's writer takes it and finds no room, the second takes the room that made, and the
+    /// third finds the lane full for the whole of the put's wait, so the chain is cut with the
+    /// drop marker and the put counted as a congestion drop. Once the socket takes datagrams
+    /// again, the second member reads two fragments and the marker, and drops the chain: it hears
+    /// the put that follows and never the large one. Every JOIN the first sent advertises the
+    /// sequence number of the next reliable datagram its socket took, the one asked for while the
+    /// socket was full among them.
+    #[test]
+    fn a_chain_the_lane_has_no_room_for_is_cut_with_the_drop_marker_and_dropped() {
+        let network = Arc::new(Network::default());
+        let second = open_member(&network, 2, member_config(2, GROUP)).expect("the second joins");
+        SessionDrive::start_read_task(&*second).expect("the second's read task starts");
+        let heard = subscribe(&second, "demo/group/**");
+        // The first's JOIN at its open admits it at the second, which reads its frames from then.
+        let first = GatedMember::open(&network, 1);
+        eventually("the second to list the first", || {
+            second.group_member_zids() == [vec![1u8; 4]]
+        });
+
+        first.full.store(true, Ordering::SeqCst);
+        let sent = first.engine.publish_on_wire_all(
+            "demo/group/large",
+            &WireKey::literal(),
+            &LARGE,
+            &PublishOptions::put()
+                .with_locality(Locality::Remote)
+                .with_congestion_control(CongestionControl::Drop),
+        );
+        assert_eq!(sent, Ok(0), "a dropped put succeeds, as zenoh's does");
+        assert_eq!(
+            first.engine.group_congestion_drops(Priority::DEFAULT),
+            1,
+            "the chain found no room for a fragment"
+        );
+
+        // A JOIN asked while the socket is full waits for it, behind what the writer holds.
+        assert_eq!(first.engine.send_join_on_groups(), 1);
+        first.writable();
+        put(&first.engine, "demo/group/small", b"after-the-cut");
+        SessionDrive::start_read_task(&*first.engine).expect("the first's read task starts");
+        eventually("the second to hear the put after the cut", || {
+            heard
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|payload| payload == b"after-the-cut")
+        });
+        assert!(
+            !heard
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|payload| payload.len() == LARGE.len()),
+            "the second dropped the chain that was cut"
+        );
+        SessionDrive::close(&*first.engine);
+        SessionDrive::close(&*second);
+
+        let wire = first.wire.lock().unwrap().clone();
+        // The chain as the socket took it: fragments that say more follows, then the marker.
+        let fragments: Vec<(u64, bool, bool)> = wire
+            .iter()
+            .filter_map(|datagram| match parse_inbound(datagram) {
+                Ok(InboundFrame::Fragment {
+                    sn, more, markers, ..
+                }) => Some((sn, more, markers.dropped)),
+                _ => None,
+            })
+            .collect();
+        let (marker, run) = fragments
+            .split_last()
+            .expect("the chain's fragments were sent");
+        assert!(
+            marker.2 && marker.1,
+            "the chain ends with the drop marker: {fragments:?}"
+        );
+        assert!(
+            !run.is_empty() && run.iter().all(|(_, more, dropped)| *more && !*dropped),
+            "{fragments:?}"
+        );
+        assert!(
+            run.len() < LARGE.len() / BATCH,
+            "the chain was cut, not sent whole: {fragments:?}"
+        );
+        assert!(
+            fragments.windows(2).all(|pair| pair[1].0 == pair[0].0 + 1),
+            "one sequence number after another, the marker's too: {fragments:?}"
+        );
+
+        let mut joins = 0;
+        for (at, datagram) in wire.iter().enumerate() {
+            let Some(join) = decode_join(datagram) else {
+                continue;
+            };
+            if let Some(next) = wire[at + 1..]
+                .iter()
+                .find_map(|later| reliable_sn(later.as_slice()))
+            {
+                assert_eq!(
+                    join.next_sn_reliable, next,
+                    "the JOIN at {at} advertises the next reliable datagram written"
+                );
+                joins += 1;
+            }
+        }
+        assert!(
+            joins >= 2,
+            "the JOIN of the open and the one asked during the cut: {joins}"
+        );
+    }
+}
