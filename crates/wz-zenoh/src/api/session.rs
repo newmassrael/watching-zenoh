@@ -4171,6 +4171,12 @@ mod tokio_engine {
                 statement
             )
             .into(),
+            FanoutError::HeldConduit => zerror!(
+                "the publication on {} was dropped: another sender held its conduit and the \
+                 session's queue profile drops such a publication at once and reports it",
+                publication.key
+            )
+            .into(),
         }
     }
 

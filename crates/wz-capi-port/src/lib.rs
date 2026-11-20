@@ -213,6 +213,12 @@ pub enum FanoutError {
     /// The publish stated something the engine does not honour ([`StatementNotHonoured`] names
     /// which): nothing was sent, to a link or to a subscriber of the session.
     NotHonoured(StatementNotHonoured),
+    /// The publish may be dropped, another sender held the conduit (or the session) it would
+    /// have been sent on, and the session's queue profile drops it at once and reports it
+    /// (`HeldDrop::DropAtOnce`, the pico profile): a congestion drop its caller is told of, as
+    /// zenoh-pico's put fails. Nothing was sent on that face. Under zenoh's profile a congestion
+    /// drop is the publish's success, and this is never answered.
+    HeldConduit,
 }
 
 impl From<StatementNotHonoured> for FanoutError {
