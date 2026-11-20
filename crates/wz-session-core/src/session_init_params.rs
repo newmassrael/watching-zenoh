@@ -425,16 +425,19 @@ const fn no_progress_us(policy: &SessionPolicy) -> Option<u64> {
     }
 }
 
-/// `TX_EXPIRY_CLOSE_AFTER` as [`TxQueueConf::expiry_close_after`] carries it: a count of 16 bits,
-/// which is as long a run of expiries as a session is asked to count, so a larger limit is that
-/// count. 16 bits and not 32 so that the count and the run it is compared with sit in the
-/// padding the session already has.
+// `TX_EXPIRY_CLOSE_AFTER` is held in 16 bits (`TxQueueConf::expiry_close_after` and the run it
+// is compared with, `tx_deadline::ExpiryRun`), so that both sit in the padding the session already
+// has. A larger limit would be a run the session cannot count, so it is refused when the build is
+// made rather than read as a smaller one.
+const _: () = assert!(
+    crate::caps::TX_EXPIRY_CLOSE_AFTER <= u16::MAX as usize,
+    "TX_EXPIRY_CLOSE_AFTER is at most 65535: a session counts the run of expiries in a u16"
+);
+
+/// `TX_EXPIRY_CLOSE_AFTER` as [`TxQueueConf::expiry_close_after`] carries it, which the
+/// assertion above holds in range.
 const fn build_expiry_close_after() -> u16 {
-    if crate::caps::TX_EXPIRY_CLOSE_AFTER > u16::MAX as usize {
-        u16::MAX
-    } else {
-        crate::caps::TX_EXPIRY_CLOSE_AFTER as u16
-    }
+    crate::caps::TX_EXPIRY_CLOSE_AFTER as u16
 }
 
 /// `PICO_TX_QUEUE_SIZE` as the size of a queue: upstream's `MIN_SIZE..=MAX_SIZE`, the nearest end
@@ -797,6 +800,18 @@ mod no_progress_tests {
         assert!(!pico_queue().expiry_keeps_session);
         assert_eq!(zenoh_queue().expiry_close_after, 0);
         assert_eq!(pico_queue().expiry_close_after, 0);
+    }
+
+    /// Every queue carries `TX_EXPIRY_CLOSE_AFTER` exactly as the build states it: a value the
+    /// 16-bit run cannot count is refused when the build is made, never read as a smaller one.
+    #[test]
+    fn every_queue_carries_the_stated_expiry_close_after_exactly() {
+        for queue in [TxQueueConf::upstream(), zenoh_queue(), pico_queue()] {
+            assert_eq!(
+                usize::from(queue.expiry_close_after),
+                crate::caps::TX_EXPIRY_CLOSE_AFTER
+            );
+        }
     }
 
     /// Upstream's queue is the queue of a snapshot whose two queue policies are upstream's
