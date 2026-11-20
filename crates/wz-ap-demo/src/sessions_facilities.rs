@@ -62,11 +62,11 @@ fn session_requires(spec: &SessionSpec) -> DeviceRequires {
 #[cfg(feature = "scouting-responder")]
 fn responder_group(spec: &SessionSpec) -> Option<String> {
     let socket = spec.scouting.as_ref()?;
-    let (group, port) =
-        socket.group_and_port(crate::runner::SCOUT_GROUP, crate::runner::SCOUT_PORT);
+    // A socket's text is a locator's address: an IPv6 group in brackets, as a locator names one.
+    let group = socket.socket();
     Some(match socket.interface.as_deref() {
-        Some(interface) => format!("udp/{group}:{port}#iface={interface}"),
-        None => format!("udp/{group}:{port}"),
+        Some(interface) => format!("udp/{group}#iface={interface}"),
+        None => format!("udp/{group}"),
     })
 }
 

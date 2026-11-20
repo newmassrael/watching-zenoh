@@ -19,8 +19,8 @@
 use std::ffi::{c_int, c_void};
 use std::net::SocketAddr;
 
+use wz_capi_core::runtime::config::scout_multicast_socket;
 use wz_capi_core::runtime::runtime_impl::TokioTime;
-use wz_capi_core::runtime::zenoh_config::scout_multicast_socket;
 use wz_capi_core::scouting::{run_scout, SCOUTING_TIMEOUT_DEFAULT_MS, SCOUTING_WHAT_DEFAULT};
 use wz_session_core::session_zid::SessionZid;
 

@@ -174,7 +174,7 @@ impl<C: QuerySink, P: crate::bounded::Storage> QueryableRegistry<C, P> {
         };
         match self.dispatch_lent(request, spaces, envelope, pending_replies) {
             Ok(outcome) => {
-                if outcome.owes_final(self.answers_unresolved) {
+                if outcome.owes_final(self.answers_unresolved_queries()) {
                     // The terminator carries the query's QoS, read by the rule
                     // the owned path reads it by.
                     pending_final_rids.owe(request.rid, qos);
