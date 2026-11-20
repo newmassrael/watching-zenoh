@@ -4402,11 +4402,18 @@ struct AppSlot;
 
 /// The slot of a role that carries no program transport, in either build: the one spelling a
 /// role written for both uses, so neither build constructs the other's shape. Its readers are the
-/// router node, which binds over the system's sockets alone, and the tests.
-#[cfg(all(feature = "app-transport", any(feature = "router-node", test)))]
+/// router node, which binds over the system's sockets alone, and the scouting tests, which build
+/// only with `scout` (a test build without it has no reader, and the constant would be dead).
+#[cfg(all(
+    feature = "app-transport",
+    any(feature = "router-node", all(test, feature = "scout"))
+))]
 const NO_APP: AppSlot = None;
 /// See the constant of the same name.
-#[cfg(all(not(feature = "app-transport"), any(feature = "router-node", test)))]
+#[cfg(all(
+    not(feature = "app-transport"),
+    any(feature = "router-node", all(test, feature = "scout"))
+))]
 const NO_APP: AppSlot = AppSlot;
 
 /// `cfg` dialling over the program's transport when the session has one.
