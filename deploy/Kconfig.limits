@@ -103,6 +103,17 @@ config WZ_LIMIT_MAX_PENDING_QUERIES
 	  The queries (gets) a session has waiting for their replies at once.
 	  Issuing one more is refused while the table is full.
 
+config WZ_LIMIT_LINK_NOTED_REQUESTS
+	int "LINK_NOTED_REQUESTS"
+	range 1 4294967295
+	default 16
+	help
+	  How many queries a peer sent over one link the node remembers the key form of
+	  at once, so that its replies name the key as the query did, when the link names
+	  keys by the shared key ids. A query never ended gives way to the newest, so a
+	  peer cannot grow the table. It sizes a memory, not a bound: a query past it is
+	  still answered.
+
 config WZ_LIMIT_MAX_DECL_OBSERVERS
 	int "MAX_DECL_OBSERVERS"
 	default 8
@@ -282,8 +293,8 @@ config WZ_LIMIT_QUERIER_MAX_PENDING_QUERIES
 	  deadline passes, or its handle is unregistered. The bound is per querier,
 	  not per session, so one busy querier cannot starve another. 0 is no bound,
 	  which is upstream's behaviour. Unlike the other limits this one sizes no
-	  table: it only refuses the one more. It binds the Rust session API; the C
-	  ABIs and the cooperative engine do not hold to it yet.
+	  table: it only refuses the one more. It binds the queriers of the Rust session
+	  API and the replay subscriber of the zenoh-pico interface.
 
 config WZ_LIMIT_TX_NO_PROGRESS_WINDOW_US
 	int "TX_NO_PROGRESS_WINDOW_US"
@@ -545,8 +556,8 @@ config WZ_LIMIT_DECLARATION_SYNC_INTERVAL_MS
 	help
 	  How long, in milliseconds, a paced declaration replay waits between two of its
 	  turns, when the declaration-sync-pacing policy is on. The session keeps being
-	  served during the wait. It is read only when that policy is on, and must be at
-	  least 1.
+	  served during the wait. Waiting for the declarations to be stable steps by it
+	  whether or not that policy is on. Must be at least 1.
 
 config WZ_LIMIT_DECLARATION_SYNC_RX_NO_PROGRESS_MS
 	int "DECLARATION_SYNC_RX_NO_PROGRESS_MS"
@@ -589,22 +600,23 @@ config WZ_LIMIT_DECLARATION_SYNC_TX_NO_PROGRESS_MS
 
 config WZ_LIMIT_PICO_UNICAST_BATCH_BYTES
 	int "PICO_UNICAST_BATCH_BYTES"
-	range 0 65535
+	range 1 65535
 	default 2048
 	help
 	  The batch size, in bytes, a session of the zenoh-pico interface advertises when
 	  it opens a unicast session, as zenoh-pico's BATCH_UNICAST_SIZE. The two sides
-	  send frames no larger than the smaller of the two sizes. At most 65535.
+	  send frames no larger than the smaller of the two sizes. At least 1 and at most
+	  65535: a batch of no byte carries no frame.
 
 config WZ_LIMIT_PICO_MULTICAST_BATCH_BYTES
 	int "PICO_MULTICAST_BATCH_BYTES"
-	range 0 65535
+	range 1 65535
 	default 2048
 	help
 	  The batch size, in bytes, a session of the zenoh-pico interface advertises in
 	  the Join of a multicast group, as zenoh-pico's BATCH_MULTICAST_SIZE. zenoh-pico
 	  refuses a member whose Join states another size, so every member of a group
-	  states the same. At most 65535.
+	  states the same. At least 1 and at most 65535.
 
 config WZ_LIMIT_PICO_LEASE_MS
 	int "PICO_LEASE_MS"

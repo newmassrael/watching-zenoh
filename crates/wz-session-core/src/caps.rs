@@ -174,10 +174,14 @@ pub const QUERY_ATTACHMENT_MAX_BYTES: usize = generated::QUERY_ATTACHMENT_MAX_BY
 /// Maximum number of concurrently-outstanding pending z_get queries in a
 /// [`crate::reply::ReplyRegistry`]. Bounds the registry's pending table
 /// on the no-alloc backing; a `register` past this is rejected
-/// (`RegisterError::TableFull`) rather than growing the table. Also
-/// bounds the `keep` / `fired` partitions the no-alloc `fire_final_for` /
-/// `sweep_timed_out` build on the stack.
+/// (`RegisterError::TableFull`) rather than growing the table.
 pub const MAX_PENDING_QUERIES: usize = generated::MAX_PENDING_QUERIES;
+
+/// How many queries a peer sent over one link the link remembers the key form of at once
+/// (`crate::shared_key_ids::LinkKeys`), so that a reply names its key as the query did. The
+/// queries are the peer's, not this node's, so the count is not [`MAX_PENDING_QUERIES`]: a query
+/// never ended gives way to the newest, and one past it is still answered, in the link's own form.
+pub const LINK_NOTED_REQUESTS: usize = generated::LINK_NOTED_REQUESTS;
 
 /// Maximum number of installed declaration observers per list
 /// (`on_decl` / `on_undecl`) in each of the remote-declaration
@@ -211,8 +215,7 @@ pub const MAX_LOCAL_TOKENS: usize = generated::MAX_LOCAL_TOKENS;
 /// [`crate::declare::liveliness_get::LivelinessGetRegistry`]. Bounds the
 /// registry's pending table on the no-alloc backing; a `register` past
 /// this is rejected (`RegisterError::TableFull`) rather than growing the
-/// table. Also bounds the `keep` / `fired` partitions the no-alloc
-/// `dispatch_final` / `sweep_timed_out` build on the stack. A liveliness
+/// table; the table of finalized gets beside it shares the same rows. A liveliness
 /// snapshot get is short-lived (one CURRENT Interest, drained on the
 /// terminating `Declare(DeclFinal)`), so few are outstanding at once;
 /// the default mirrors [`MAX_LIVELINESS_SUBSCRIPTIONS`].

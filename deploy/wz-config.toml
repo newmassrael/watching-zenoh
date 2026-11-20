@@ -2185,6 +2185,27 @@ Issuing one more is refused while the table is full.
 '''
 
 [[limit]]
+id = "LINK_NOTED_REQUESTS"
+kconfig = "WZ_LIMIT_LINK_NOTED_REQUESTS"
+kind = "parameter"
+range = [1, 4294967295]
+default = 16
+storage = "quota"
+scope = "link"
+binding_heap = "open"
+binding_fixed = "open"
+# `wire` is none: a reply whose request's key form was let go names its key in the link's own form,
+# which the peer reads as it reads any reply.
+wire = "none"
+help = '''
+How many queries a peer sent over one link the node remembers the key form of
+at once, so that its replies name the key as the query did, when the link names
+keys by the shared key ids. A query never ended gives way to the newest, so a
+peer cannot grow the table. It sizes a memory, not a bound: a query past it is
+still answered.
+'''
+
+[[limit]]
 id = "MAX_DECL_OBSERVERS"
 kconfig = "WZ_LIMIT_MAX_DECL_OBSERVERS"
 kind = "bound"
@@ -2587,8 +2608,8 @@ refused until a pending one ends. A query ends when its final arrives, its
 deadline passes, or its handle is unregistered. The bound is per querier,
 not per session, so one busy querier cannot starve another. 0 is no bound,
 which is upstream's behaviour. Unlike the other limits this one sizes no
-table: it only refuses the one more. It binds the Rust session API; the C
-ABIs and the cooperative engine do not hold to it yet.
+table: it only refuses the one more. It binds the queriers of the Rust session
+API and the replay subscriber of the zenoh-pico interface.
 '''
 
 [[limit]]
@@ -3089,8 +3110,8 @@ wire = "timing"
 help = '''
 How long, in milliseconds, a paced declaration replay waits between two of its
 turns, when the declaration-sync-pacing policy is on. The session keeps being
-served during the wait. It is read only when that policy is on, and must be at
-least 1.
+served during the wait. Waiting for the declarations to be stable steps by it
+whether or not that policy is on. Must be at least 1.
 '''
 
 [[limit]]
@@ -3164,7 +3185,7 @@ the link itself ends. Only the tokio engine reads it.
 id = "PICO_UNICAST_BATCH_BYTES"
 kconfig = "WZ_LIMIT_PICO_UNICAST_BATCH_BYTES"
 kind = "parameter"
-range = [0, 65535]
+range = [1, 65535]
 default = 2048
 storage = "quota"
 scope = "link"
@@ -3174,14 +3195,15 @@ wire = "negotiated"
 help = '''
 The batch size, in bytes, a session of the zenoh-pico interface advertises when
 it opens a unicast session, as zenoh-pico's BATCH_UNICAST_SIZE. The two sides
-send frames no larger than the smaller of the two sizes. At most 65535.
+send frames no larger than the smaller of the two sizes. At least 1 and at most
+65535: a batch of no byte carries no frame.
 '''
 
 [[limit]]
 id = "PICO_MULTICAST_BATCH_BYTES"
 kconfig = "WZ_LIMIT_PICO_MULTICAST_BATCH_BYTES"
 kind = "parameter"
-range = [0, 65535]
+range = [1, 65535]
 default = 2048
 storage = "quota"
 scope = "session"
@@ -3193,7 +3215,7 @@ help = '''
 The batch size, in bytes, a session of the zenoh-pico interface advertises in
 the Join of a multicast group, as zenoh-pico's BATCH_MULTICAST_SIZE. zenoh-pico
 refuses a member whose Join states another size, so every member of a group
-states the same. At most 65535.
+states the same. At least 1 and at most 65535.
 '''
 
 [[limit]]

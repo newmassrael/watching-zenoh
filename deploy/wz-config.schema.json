@@ -546,6 +546,19 @@
               "x-wz-binding-fixed": "build",
               "x-wz-wire": "none"
             },
+            "LINK_NOTED_REQUESTS": {
+              "description": "How many queries a peer sent over one link the node remembers the key form of at once, so that its replies name the key as the query did, when the link names keys by the shared key ids.",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4294967295,
+              "default": 16,
+              "x-wz-kind": "parameter",
+              "x-wz-storage": "quota",
+              "x-wz-scope": "link",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "open",
+              "x-wz-wire": "none"
+            },
             "MAX_DECL_OBSERVERS": {
               "description": "The observers an application installs on the declarations of its peers (subscribers, queryables and liveliness tokens appearing or leaving), per kind and per direction.",
               "oneOf": [
@@ -1244,7 +1257,7 @@
             "PICO_UNICAST_BATCH_BYTES": {
               "description": "The batch size, in bytes, a session of the zenoh-pico interface advertises when it opens a unicast session, as zenoh-pico's BATCH_UNICAST_SIZE.",
               "type": "integer",
-              "minimum": 0,
+              "minimum": 1,
               "maximum": 65535,
               "default": 2048,
               "x-wz-kind": "parameter",
@@ -1257,7 +1270,7 @@
             "PICO_MULTICAST_BATCH_BYTES": {
               "description": "The batch size, in bytes, a session of the zenoh-pico interface advertises in the Join of a multicast group, as zenoh-pico's BATCH_MULTICAST_SIZE.",
               "type": "integer",
-              "minimum": 0,
+              "minimum": 1,
               "maximum": 65535,
               "default": 2048,
               "x-wz-kind": "parameter",

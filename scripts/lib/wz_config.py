@@ -2715,10 +2715,12 @@ def statement_vectors(decl: dict) -> list[dict]:
     - Per ABI: nothing stated; every name of the ABI on; every name of every ABI on (the other
       ABIs' names count for nothing); every limit and policy stated at its default (equal to
       nothing stated); each capability and layout switch on alone.
-    - Each limit one above its default, and one at the largest value read. Each policy at each
-      value other than upstream's. Reading these does not depend on the ABI, so the ABIs take
-      turns.
-    - Seeded random builds: each name, limit and policy stated with probability one half.
+    - Each limit one above its default (one below, for a parameter at the top of its range), and
+      one bound at the largest value read. Each policy at each value other than upstream's.
+      Reading these does not depend on the ABI, so the ABIs take turns.
+    - Seeded random builds: each name, limit and policy stated with probability one half. A
+      parameter is drawn inside its declared range, as a build that states one outside it does
+      not compile; a bound, which has no range, from 32 bits.
     """
     out: list[dict] = []
 
@@ -2746,9 +2748,13 @@ def statement_vectors(decl: dict) -> list[dict]:
     add("the zephyr platform", "pico", ["os-zephyr"], {})
     add("the tokio engine beside a cooperative feature", "pico", ["engine-tokio", "engine-coop"], {})
     for i, lim in enumerate(decl["limits"]):
+        if lim["kind"] == "parameter" and lim["default"] == lim["range"][1]:
+            add(f"{lim['id']} one below its default", ABIS[i % len(ABIS)], [],
+                {lim["kconfig"]: str(lim["default"] - 1)})
+            continue
         add(f"{lim['id']} one above its default", ABIS[i % len(ABIS)], [],
             {lim["kconfig"]: str(lim["default"] + 1)})
-    first = decl["limits"][0]
+    first = next(lim for lim in decl["limits"] if lim["kind"] == "bound")
     add(f"{first['id']} at the largest value read", "pico", [], {first["kconfig"]: str((1 << 64) - 1)})
     turn = 0
     for pol in decl["policies"]:
@@ -2763,7 +2769,12 @@ def statement_vectors(decl: dict) -> list[dict]:
             env: dict[str, str] = {}
             for lim in decl["limits"]:
                 if next(draw) % 2:
-                    env[lim["kconfig"]] = str(next(draw) % (1 << 32))
+                    if lim["kind"] == "parameter":
+                        least, most = lim["range"]
+                        value = least + next(draw) % (most - least + 1)
+                    else:
+                        value = next(draw) % (1 << 32)
+                    env[lim["kconfig"]] = str(value)
             for pol in decl["policies"]:
                 if next(draw) % 2:
                     values = policy_values(pol)
@@ -5508,6 +5519,11 @@ def cmd_selftest() -> int:
            "    type Value = usize;" in psnap
            and "LimitDomain::of_parameter(1, 8, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY)"
            in psnap)
+    shipped = load_decl()
+    ranges = {lim["kconfig"]: lim["range"] for lim in shipped["limits"] if lim["kind"] == "parameter"}
+    outside = [(v["case"], k, x) for v in statement_vectors(shipped) for k, x in v["env"].items()
+               if k in ranges and not ranges[k][0] <= int(x) <= ranges[k][1]]
+    expect("every statement vector states a parameter inside its range, as a build can", outside == [])
     expect("every limit's domain is evaluated in every build, read or not",
            "}\n\nconst _: LimitDomain = MaxA::DOMAIN;\n" in psnap
            and "}\n\nconst _: LimitDomain = MaxA::DOMAIN;\n" in bsnap)

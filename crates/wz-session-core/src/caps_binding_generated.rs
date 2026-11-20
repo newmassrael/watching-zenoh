@@ -130,6 +130,18 @@ pub const MAX_PENDING_QUERIES: LimitBinding = LimitBinding {
     wire: Wire::None,
 };
 
+/// Where [`super::LINK_NOTED_REQUESTS`] is bound.
+pub const LINK_NOTED_REQUESTS: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((1, 4294967295)),
+    storage: Storage::Quota,
+    scope: &[Scope::Link],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Open),
+    wire: Wire::None,
+};
+
 /// Where [`super::MAX_DECL_OBSERVERS`] is bound.
 pub const MAX_DECL_OBSERVERS: LimitBinding = LimitBinding {
     kind: LimitKind::Bound,
@@ -734,7 +746,7 @@ pub const DECLARATION_SYNC_TX_NO_PROGRESS_MS: LimitBinding = LimitBinding {
 pub const PICO_UNICAST_BATCH_BYTES: LimitBinding = LimitBinding {
     kind: LimitKind::Parameter,
     driven: None,
-    range: Some((0, 65535)),
+    range: Some((1, 65535)),
     storage: Storage::Quota,
     scope: &[Scope::Link],
     binding_heap: Some(Binding::Open),
@@ -746,7 +758,7 @@ pub const PICO_UNICAST_BATCH_BYTES: LimitBinding = LimitBinding {
 pub const PICO_MULTICAST_BATCH_BYTES: LimitBinding = LimitBinding {
     kind: LimitKind::Parameter,
     driven: None,
-    range: Some((0, 65535)),
+    range: Some((1, 65535)),
     storage: Storage::Quota,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),

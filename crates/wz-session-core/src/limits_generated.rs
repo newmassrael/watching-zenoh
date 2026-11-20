@@ -189,6 +189,27 @@ const _: LimitDomain = MaxPendingQueries::DOMAIN;
 /// How `MAX_PENDING_QUERIES` is held: in no byte when its domain is one value.
 type MaxPendingQueriesHeld = Limited<MaxPendingQueries, { MaxPendingQueries::HELD }>;
 
+/// `LINK_NOTED_REQUESTS`: How many queries a peer sent over one link the node remembers the
+/// key form of at once, so that its replies name the key as the query did, when the link
+/// names keys by the shared key ids.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LinkNotedRequests;
+
+impl LimitSpec for LinkNotedRequests {
+    type Value = usize;
+    const LIMIT: &'static str = "LINK_NOTED_REQUESTS";
+    const DRIVEN: Option<Driven> = None;
+    const CAPACITY: Option<usize> = None;
+    const DOMAIN: LimitDomain =
+        LimitDomain::of_parameter(1, 4294967295, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DEFAULT: usize = caps::LINK_NOTED_REQUESTS;
+}
+
+const _: LimitDomain = LinkNotedRequests::DOMAIN;
+
+/// How `LINK_NOTED_REQUESTS` is held: in no byte when its domain is one value.
+type LinkNotedRequestsHeld = Limited<LinkNotedRequests, { LinkNotedRequests::HELD }>;
+
 /// `MAX_DECL_OBSERVERS`: The observers an application installs on the declarations of its
 /// peers (subscribers, queryables and liveliness tokens appearing or leaving), per kind and
 /// per direction.
@@ -1017,7 +1038,7 @@ impl LimitSpec for PicoUnicastBatchBytes {
     const DRIVEN: Option<Driven> = None;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
-        LimitDomain::of_parameter(0, 65535, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+        LimitDomain::of_parameter(1, 65535, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: usize = caps::PICO_UNICAST_BATCH_BYTES;
 }
 
@@ -1038,7 +1059,7 @@ impl LimitSpec for PicoMulticastBatchBytes {
     const DRIVEN: Option<Driven> = None;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
-        LimitDomain::of_parameter(0, 65535, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+        LimitDomain::of_parameter(1, 65535, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: usize = caps::PICO_MULTICAST_BATCH_BYTES;
 }
 
@@ -1197,6 +1218,8 @@ pub struct SessionLimits {
     max_queryables: MaxQueryablesHeld,
     /// `MAX_PENDING_QUERIES`.
     max_pending_queries: MaxPendingQueriesHeld,
+    /// `LINK_NOTED_REQUESTS`.
+    link_noted_requests: LinkNotedRequestsHeld,
     /// `MAX_DECL_OBSERVERS`.
     max_decl_observers: MaxDeclObserversHeld,
     /// `MAX_LIVELINESS_SUBSCRIPTIONS`.
@@ -1289,6 +1312,7 @@ impl SessionLimits {
             delivery_lane_callbacks: Limited::build_default(),
             max_queryables: Limited::build_default(),
             max_pending_queries: Limited::build_default(),
+            link_noted_requests: Limited::build_default(),
             max_decl_observers: Limited::build_default(),
             max_liveliness_subscriptions: Limited::build_default(),
             max_local_tokens: Limited::build_default(),
@@ -1425,6 +1449,17 @@ impl SessionLimits {
     /// Selects `MAX_PENDING_QUERIES`, when the build's domain holds `value`.
     pub fn select_max_pending_queries(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
         self.max_pending_queries = Limited::select(value)?;
+        Ok(())
+    }
+
+    /// `LINK_NOTED_REQUESTS` as this snapshot holds it.
+    pub const fn link_noted_requests(&self) -> usize {
+        self.link_noted_requests.get()
+    }
+
+    /// Selects `LINK_NOTED_REQUESTS`, when the build's domain holds `value`.
+    pub fn select_link_noted_requests(&mut self, value: usize) -> Result<(), OutsideLimitDomain> {
+        self.link_noted_requests = Limited::select(value)?;
         Ok(())
     }
 
@@ -2013,6 +2048,16 @@ impl LimitField<SessionLimits> for MaxPendingQueries {
     }
 }
 
+impl LimitField<SessionLimits> for LinkNotedRequests {
+    fn select_in(snapshot: &mut SessionLimits, value: usize) -> Result<(), OutsideLimitDomain> {
+        snapshot.select_link_noted_requests(value)
+    }
+
+    fn held_in(snapshot: &SessionLimits) -> usize {
+        snapshot.link_noted_requests()
+    }
+}
+
 impl LimitField<SessionLimits> for MaxDeclObservers {
     fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
         snapshot.select_max_decl_observers(value)
@@ -2404,7 +2449,7 @@ impl LimitField<SessionLimits> for PicoKeepalivesPerLease {
 }
 
 /// How many limits [`SessionLimits`] holds: the length of [`SESSION_LIMITS`].
-pub const SESSION_LIMIT_COUNT: usize = 47;
+pub const SESSION_LIMIT_COUNT: usize = 48;
 
 /// Every limit of [`SessionLimits`] as a reader that names it by its id sees it, in the order of
 /// its fields.
@@ -2417,6 +2462,7 @@ pub static SESSION_LIMITS: [LimitEntry<SessionLimits>; SESSION_LIMIT_COUNT] = [
     LimitEntry::of::<DeliveryLaneCallbacks>(),
     LimitEntry::of::<MaxQueryables>(),
     LimitEntry::of::<MaxPendingQueries>(),
+    LimitEntry::of::<LinkNotedRequests>(),
     LimitEntry::of::<MaxDeclObservers>(),
     LimitEntry::of::<MaxLivelinessSubscriptions>(),
     LimitEntry::of::<MaxLocalTokens>(),
