@@ -137,11 +137,14 @@ mod stalled_link {
         let publisher = open_with(CoopConfig {
             endpoints: vec![endpoint],
             zid: Some(vec![0xb7; 4]),
+            // Each message is written as it is sent, so what fills the stream is what was
+            // published, whether or not the session is stepped.
             tx_queue: TxQueueConf {
                 wait_before_drop_us: DROP_WAIT_US,
                 wait_before_close_us: CLOSE_WAIT.as_micros() as u64,
                 no_progress_us: None,
                 expiry_keeps_session: false,
+                batching: false,
                 ..client_config().tx_queue
             },
             ..client_config()
