@@ -153,6 +153,8 @@ use wz_session_core::zid_hex::zenoh_hex_to_zid;
 // spans, which is exactly the kind of near-copy this module has been paying
 // off all round.
 use wz_session_core::locator::{parse_any_locator, AnyLocator, Proto};
+// The one reading of `scouting/multicast/address`, which builds without this module read too.
+use crate::config::scout_multicast_socket;
 
 /// Link protocols a stock zenoh 1.5.0 can carry, read off the reference's own
 /// `io/zenoh-links/*/src/lib.rs` `*_LOCATOR_PREFIX` constants plus
@@ -2524,32 +2526,6 @@ pub const UPSTREAM_OPEN_TIMEOUT_MS: u64 = 10_000;
 /// Upstream's `transport/multicast/max_sessions`, which a file that states none resolves to
 /// (`commons/zenoh-config/src/defaults.rs` @ `max_sessions: Some(1000),`).
 pub const UPSTREAM_MULTICAST_MAX_SESSIONS: usize = 1_000;
-
-/// Upstream's `scouting/multicast/address`, the group and port a config that states none scouts
-/// on (`commons/zenoh-config/src/defaults.rs` @
-/// `pub const address: ([u8; 4], u16) = ([224, 0, 0, 224], 7446);`).
-pub const UPSTREAM_SCOUT_MULTICAST_ADDRESS: std::net::SocketAddr = std::net::SocketAddr::V4(
-    std::net::SocketAddrV4::new(std::net::Ipv4Addr::new(224, 0, 0, 224), 7446),
-);
-
-/// The socket `scouting/multicast/address` names: the text `stated`, upstream's default
-/// ([`UPSTREAM_SCOUT_MULTICAST_ADDRESS`]) where the config states none, or the text itself
-/// (`Err`) where it names no socket, which a reader refuses rather than scouting somewhere the
-/// config did not ask about.
-///
-/// The one reading of the key, for every reader of it: the ingest of a node's document, the
-/// scouting of a session the open plans, and the zenoh-c ABI's `z_scout`. Upstream types the
-/// field as a socket address (`commons/zenoh-config/src/lib.rs` @ `address: Option<SocketAddr>,`)
-/// and its own scout reads it so (`zenoh/src/api/scouting.rs` @
-/// `let default_addr = SocketAddr::from(zenoh_config::defaults::scouting::multicast::address);`):
-/// `<ipv4>:<port>` or `[<ipv6>]:<port>`, and not the `udp/<ip>:<port>` locator a zenoh-pico
-/// config names its group by, which is another library's key.
-pub fn scout_multicast_socket(stated: Option<&str>) -> Result<std::net::SocketAddr, &str> {
-    match stated {
-        None => Ok(UPSTREAM_SCOUT_MULTICAST_ADDRESS),
-        Some(text) => text.parse().map_err(|_| text),
-    }
-}
 
 /// R2925 — upstream's `transport/link/tx/queue/size` leaves, each with the
 /// `Priority` wire byte whose queue it sizes, as upstream's transport manager
@@ -10622,30 +10598,6 @@ mod tests {
             r#"{ "scouting": { "multicast": { "address": "ff05::231:7999" } } }"#,
         )
         .is_err());
-    }
-
-    /// The one reading of `scouting/multicast/address` every reader of the key shares: a socket in
-    /// upstream's form, upstream's default where none is stated, and the text itself handed back
-    /// where it names no socket, a zenoh-pico locator among them.
-    #[test]
-    fn the_scouting_address_is_read_as_upstreams_socket_or_its_default() {
-        let socket = |text: &str| text.parse::<std::net::SocketAddr>().expect("a socket");
-        assert_eq!(
-            scout_multicast_socket(None),
-            Ok(socket("224.0.0.224:7446")),
-            "upstream's default"
-        );
-        assert_eq!(
-            scout_multicast_socket(Some("224.0.0.231:7511")),
-            Ok(socket("224.0.0.231:7511"))
-        );
-        assert_eq!(
-            scout_multicast_socket(Some("[ff05::231]:7511")),
-            Ok(socket("[ff05::231]:7511"))
-        );
-        for refused in ["udp/224.0.0.231:7511", "224.0.0.231", "ff05::231:7511", ""] {
-            assert_eq!(scout_multicast_socket(Some(refused)), Err(refused));
-        }
     }
 
     /// Every entry of [`HONOURED_CONFIG_KEYS`] is genuinely READ.
