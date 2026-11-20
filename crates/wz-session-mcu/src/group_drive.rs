@@ -350,7 +350,8 @@ impl MulticastReplyQueue {
     /// of its lane is room again.
     pub fn pop(&self) -> Option<MulticastTxItem> {
         let mut staged = self.queue.borrow_mut();
-        let (item, priority, bytes) = staged.items.pop_front()?;
+        let at = next_out(&staged.items)?;
+        let (item, priority, bytes) = staged.items.remove(at)?;
         if let Some((lanes, _)) = staged.bound.as_mut() {
             lanes.written(priority, bytes);
         }
@@ -406,6 +407,37 @@ impl MulticastReplyQueue {
             .as_ref()
             .map_or(0, |(lanes, _)| lanes.drops(priority))
     }
+}
+
+/// Which queued item the group's writer takes next: the oldest of the most urgent lane, as the
+/// tokio engine's group writer serves its lanes, highest first. A Control item waits behind what
+/// the other lanes queued before it, as that writer's fence holds a control datagram behind the
+/// data queued ahead of it, so a declaration never passes a put it was queued after. A queue that
+/// is not bounded counts every item on one lane, and is taken in the order it was queued.
+#[cfg(all(
+    not(feature = "session-slot"),
+    feature = "alloc",
+    any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    )
+))]
+fn next_out(
+    items: &VecDeque<(MulticastTxItem, wz_session_core::qos::Priority, usize)>,
+) -> Option<usize> {
+    use wz_session_core::qos::Priority;
+    // `min_by_key` keeps the first of equals: the oldest of a lane.
+    let at = (0..items.len()).min_by_key(|&at| items[at].1.wire_byte())?;
+    if items[at].1 == Priority::Control && at > 0 {
+        // Nothing before `at` is a Control item, so the fence holds: the other lanes are served,
+        // highest first, until what they queued before it has left.
+        return (0..items.len())
+            .filter(|&other| items[other].1 != Priority::Control)
+            .min_by_key(|&other| items[other].1.wire_byte());
+    }
+    Some(at)
 }
 
 // R311md — the single enqueue backing the shared MulticastReplySink<Q> drains
@@ -2157,7 +2189,7 @@ mod tests {
     use wz_session_core::multicast_reply_sink::MulticastReplyEnqueue;
     use wz_session_core::qos::Priority;
 
-    use super::{GroupSend, GroupTransport, MulticastPump, MulticastReplyQueue};
+    use super::{next_out, GroupSend, GroupTransport, MulticastPump, MulticastReplyQueue};
 
     /// A clock that never moves: the beacon, due at every step, is what moves the test.
     #[derive(Clone, Default)]
@@ -2316,6 +2348,40 @@ mod tests {
         assert_eq!(
             taken(&wire),
             ["join", "first", "second", "join", "third", "join", "join"]
+        );
+    }
+
+    /// The writer takes the oldest item of the most urgent lane first, as the tokio group's writer
+    /// serves its lanes; a Control item waits behind what other lanes queued before it, while a
+    /// lane more urgent than that data is still served first.
+    #[test]
+    fn the_writer_takes_the_most_urgent_lane_first_and_control_waits_behind_earlier_data() {
+        fn order(priorities: &[Priority]) -> Vec<Priority> {
+            let mut items: VecDeque<(MulticastTxItem, Priority, usize)> = priorities
+                .iter()
+                .map(|priority| (put("first"), *priority, 0))
+                .collect();
+            let mut out = Vec::new();
+            while let Some(at) = next_out(&items) {
+                out.push(items.remove(at).expect("the item chosen").1);
+            }
+            out
+        }
+        use Priority::{Background, Control, Data, RealTime};
+        assert_eq!(
+            order(&[Data, RealTime, Background]),
+            [RealTime, Data, Background]
+        );
+        assert_eq!(
+            order(&[Data, Control, RealTime]),
+            [RealTime, Data, Control],
+            "the Control item waits for the data queued before it"
+        );
+        assert_eq!(order(&[Control, Data]), [Control, Data]);
+        assert_eq!(
+            order(&[Data, Data, Data]),
+            [Data, Data, Data],
+            "CONTROL: one lane"
         );
     }
 
