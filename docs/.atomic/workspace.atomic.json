@@ -5772,6 +5772,21 @@
       "carry_forward_bullets": [
         "The hosted macOS and Windows C ABI jobs are the platform witnesses of this fix; read them on this landing's Platform run."
       ]
+    },
+    "Round 4560": {
+      "decision_summary": "Repay the hosted C1m red of run 44646497313 (job 136021110729, at 7e14fb72d): the guard \"C1m mcu slot node with verbs\" expected 32 passed and the leg printed 33. Read from the log, not inferred: the three slot_node arms printed 32, 32 and 33. The verbs arm is, by its own comment, the base set and one more (the verbs declared under the node's own key once named, refused unnamed); Round 4521 added the snapshot test to the base set and moved the base and tokens arms from 31 to 32, and not this one. A count left behind, not a lost or added test: the guard moves to 33.",
+      "changes_bullets": [
+        "run-ci.sh: Layer C1m guard \"C1m mcu slot node with verbs\" 32 -> 33, with the reason beside the two arms Round 4521 moved."
+      ],
+      "verification_bullets": [
+        "On a build host: `cargo test -p wz-session-mcu --features client-verbs,lifecycle-close,lifecycle-reset,lifecycle-status --lib slot_node` prints 33 passed (70 filtered out), as the hosted run did; guarded_count_gate --range measured the one guard this moves (33, OK); count_guard_lint passes."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "C1bzr (7 broken doc links), C1cn (13 app_link tests unclaimed in the wide wz-runtime-tokio leg) and C1cs (pico-peer, pico-default, capic-router-node over the Round 4551 budgets), all red at 7e14fb72d, are repaid by the session landing the PoC wave 3, which edits the same files and moves the same images."
+      ]
     }
   },
   "inventory_entries": {
