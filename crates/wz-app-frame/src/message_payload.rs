@@ -26,8 +26,7 @@
 //! without one where its elements are counted or all cleared. A `map` field and
 //! a `group` are not addressed: a map's entries and a group's body are not
 //! fields of the message that holds them, and a decoded map is carried as its
-//! wire bytes. A path is at most
-//! [`MAX_DECODE_DEPTH`](crate::proto_decode::MAX_DECODE_DEPTH) names long.
+//! wire bytes. A path is at most [`MAX_DECODE_DEPTH`] names long.
 //!
 //! ## Setting a value
 //!
