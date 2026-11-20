@@ -301,7 +301,17 @@ impl MulticastTxQueue for StageQueue<'_> {
         let Some(pace) = self.pace else {
             return RoomAnswer::at_once(LinkRoom::Free);
         };
-        let at_once = self.lanes.borrow_mut().bound.room_at_once(priority, wait);
+        let mut at_once = self.lanes.borrow_mut().bound.room_at_once(priority, wait);
+        // A lane answers congested at once on what its writer last did: a droppable message meets
+        // the mark of a drop, or one that may not wait meets the lane full. A writer on a thread of
+        // its own drains the moment its socket takes again, lowering the mark before the next
+        // producer reads it; this stage's writer runs only in a pass of the host, so once the
+        // socket takes again the pass is given first, and the lane is asked again on what it wrote.
+        // A socket that is still full leaves the answer standing, with nothing run.
+        if at_once == Some(LinkRoom::Congested) && !pace.ended() && pace.wait_writable(0) {
+            pace.pass();
+            at_once = self.lanes.borrow_mut().bound.room_at_once(priority, wait);
+        }
         if let Some(room) = at_once {
             return RoomAnswer::at_once(room);
         }
@@ -592,12 +602,14 @@ mod tests {
             .collect()
     }
 
-    /// A host whose socket never has room, on a clock it moves by the whole of each wait: what a
-    /// push that waits spends is that wait. `on_pass` is what a pass of its tasks does.
+    /// A host whose socket has no room unless it is `writable`, on a clock it moves by the whole
+    /// of each wait: what a push that waits spends is that wait. `on_pass` is what a pass of its
+    /// tasks does.
     struct FullHost<'a> {
         passes: Cell<usize>,
         now_us: Cell<u64>,
         ended: bool,
+        writable: bool,
         on_pass: &'a dyn Fn(),
     }
 
@@ -607,6 +619,7 @@ mod tests {
                 passes: Cell::new(0),
                 now_us: Cell::new(0),
                 ended: false,
+                writable: false,
                 on_pass,
             }
         }
@@ -623,6 +636,9 @@ mod tests {
         }
 
         fn wait_writable(&self, wait_us: u64) -> bool {
+            if self.writable {
+                return true;
+            }
             self.now_us.set(self.now_us.get() + wait_us);
             false
         }
@@ -968,5 +984,52 @@ mod tests {
         assert!(pump.step(&mut quiet, &mut next_tx, None).is_none());
         assert!(seam.borrow().is_empty(), "a free slot: the offer is pulled");
         assert_eq!(stage.dropped(), 0);
+    }
+
+    /// A lane's mark is its writer's word that it could not drain the lane. A droppable push that
+    /// meets it while the socket is still full is answered at once, with nothing run; one that
+    /// meets it once the socket takes again gives the pump a pass first, as a writer on a thread
+    /// of its own drains the moment its socket takes: the pump's take lowers the mark and makes
+    /// room, and the push is queued without waiting and is no drop.
+    #[test]
+    fn a_mark_is_read_after_the_pump_had_a_pass_on_a_socket_that_takes_again() {
+        let stage = GroupTxStage::new(&one_batch_lanes());
+        let best_effort = |item: MulticastTxItem| match item {
+            MulticastTxItem::Push { push, priority, .. } => MulticastTxItem::Push {
+                push,
+                reliable: false,
+                priority,
+            },
+            other => other,
+        };
+        push_at_once(&stage, fill());
+        push_at_once(&stage, fill());
+        let nothing = || {};
+        let full = FullHost::new(&nothing);
+        assert_eq!(
+            stage.push(best_effort(put("second")), &full),
+            PushOutcome::Congested
+        );
+        assert_eq!(
+            stage.push(best_effort(put("second")), &full),
+            PushOutcome::Congested,
+            "a socket still full leaves the mark standing"
+        );
+        assert_eq!(full.passes.get(), 1, "only the first push waited");
+        assert_eq!(stage.drops(Priority::DEFAULT), 2);
+
+        // The socket takes again: a pass of this host is the pump writing what the lane holds.
+        let pump = stage.clone();
+        let writes = move || while pump.take().is_some() {};
+        let mut taking = FullHost::new(&writes);
+        taking.writable = true;
+        assert_eq!(
+            stage.push(best_effort(put("third")), &taking),
+            PushOutcome::Pushed
+        );
+        assert_eq!(taking.passes.get(), 1, "the pump had its pass first");
+        assert_eq!(taking.now_us.get(), 0, "and nothing was waited for");
+        assert_eq!(stage.drops(Priority::DEFAULT), 2, "the put is no drop");
+        assert!(!stage.is_empty(), "the put is queued for the pump");
     }
 }
