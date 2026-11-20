@@ -60,7 +60,7 @@ use wz_session_core::locator_directory::{
 };
 use wz_session_core::peer_connection::PeerConnectionState;
 use wz_session_core::peer_planner::{DialEnd, PeerAction, PeerPlanner, PeerPorts};
-use wz_session_core::retry_period::{RetryPeriod, RetryPolicy};
+use wz_session_core::retry_period::{FixedRetryPeriod, ZenohDefaultRetry};
 
 /// Where a [`ConnectManager`] reads the endpoints it should hold sessions with.
 ///
@@ -1246,8 +1246,12 @@ impl<S> Row<S> {
 /// only be a defect and is hung up and refused rather than grown (`reconcile`).
 type Rows<S> = BoundedVec<Row<S>, PEERS>;
 
+/// The retry schedule a manager runs: upstream's default. No door sets another, so it is a
+/// constant of the build, and a period of it is the index of its next wait.
+type Schedule = ZenohDefaultRetry;
+
 /// The retry schedule of each peer that is in an outage.
-type Periods = BoundedVec<(Key, RetryPeriod), PEERS>;
+type Periods = BoundedVec<(Key, FixedRetryPeriod<Schedule>), PEERS>;
 
 /// The sessions nodes opened that their machines hold, by node and face. Only a node is waited for
 /// (an endpoint is dialled), and each is held once, so there are no more than the nodes the node
@@ -1261,7 +1265,6 @@ struct Ports<'a, D: Dialer> {
     rows: &'a Rows<D::Session>,
     periods: &'a mut Periods,
     directory: &'a LocatorDirectory<DIRECTORY_ROWS>,
-    policy: RetryPolicy,
     now_ms: u64,
 }
 
@@ -1307,7 +1310,7 @@ impl<D: Dialer> PeerPorts<Key> for Ports<'_, D> {
         if let Some((_, period)) = self.periods.iter_mut().find(|(k, _)| k == key) {
             return period.next_ms();
         }
-        let mut period = self.policy.period();
+        let mut period = FixedRetryPeriod::<Schedule>::new();
         let wait = period.next_ms();
         // A table of as many rows as there are endpoints holds every endpoint in an outage; an
         // endpoint it could not hold would start from the first wait again.
@@ -1339,7 +1342,6 @@ fn first_dialable<'a>(
 pub struct ConnectManager<D: Dialer> {
     control: &'static dyn EndpointSource,
     dialer: D,
-    policy: RetryPolicy,
     generation: Option<u32>,
     rows: Rows<D::Session>,
     periods: Periods,
@@ -1371,7 +1373,6 @@ impl<D: Dialer> ConnectManager<D> {
             control,
             dialer,
             StoreRef::Boxed(alloc::boxed::Box::default()),
-            RetryPolicy::ZENOH_DEFAULT,
         )
     }
 
@@ -1383,26 +1384,15 @@ impl<D: Dialer> ConnectManager<D> {
         dialer: D,
         store: &'static PeerStore,
     ) -> Self {
-        Self::in_store(
-            control,
-            dialer,
-            StoreRef::Static(store),
-            RetryPolicy::ZENOH_DEFAULT,
-        )
+        Self::in_store(control, dialer, StoreRef::Static(store))
     }
 
-    fn in_store(
-        control: &'static dyn EndpointSource,
-        dialer: D,
-        store: StoreRef,
-        policy: RetryPolicy,
-    ) -> Self {
+    fn in_store(control: &'static dyn EndpointSource, dialer: D, store: StoreRef) -> Self {
         // What this dialer can do is the store's to say to an opener, which has no dialer.
         store.get().with(|t| t.verifies_nodes = D::VERIFIES_NODES);
         Self {
             control,
             dialer,
-            policy,
             generation: None,
             rows: BoundedVec::new(),
             periods: BoundedVec::new(),
@@ -1950,7 +1940,6 @@ impl<D: Dialer> ConnectManager<D> {
                 rows: &self.rows,
                 periods: &mut self.periods,
                 directory: &tables.directory,
-                policy: self.policy,
                 now_ms,
             };
             call(&mut tables.planner, &mut ports, next_id, &mut |action| {
