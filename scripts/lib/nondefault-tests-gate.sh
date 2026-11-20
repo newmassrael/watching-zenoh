@@ -423,6 +423,19 @@ transport-link-unixpipe,transport-link-ws|"
     # transport (`app_transport_doors`) and puts and gets by a shared id (`key_ids_tokio`), each
     # file behind its feature on top of the default peer, query and queryable.
     "wz-capi-pico|hook|app-transport|--test=app_transport_doors"
+    # The same transport on the cooperative engine, with no tokio engine in the build: the
+    # library's unit tests of the door and the file of sessions over the pipe, whose datagram pair
+    # this engine carries too. `multi-thread` gives each session the read task that steps it while
+    # the test thread waits. The filter names both module paths.
+    "wz-capi-pico|hook|\
+        -default,\
+        engine-coop,\
+        app-transport,\
+        peer,\
+        query,\
+        queryable,\
+        multi-thread\
+        |app_transport"
     "wz-capi-pico|hook|shared-key-ids|--test=key_ids_tokio"
     # Whether a reply of a replay reaches the receiving judge (`replay_admission`, behind `replay`):
     # its model tests on a synthetic profile, and the receiver's baseline CRC they read.

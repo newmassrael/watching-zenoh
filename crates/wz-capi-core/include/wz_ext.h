@@ -1580,10 +1580,10 @@ z_result_t wz_ext_config_key_wire_form_for(z_loaned_config_t *config,
  * hands in what arrives on the link that returns.
  * Either engine of the library runs a session over it. z_open refuses a config
  * whose transport cannot carry what it names: another scheme (tls/, serial/,
- * ...), or a kind this build has no link of (a udp/ dial on the tokio engine
- * without the udp link, a group without the multicast transport, which the
- * cooperative engine has not, a datagram listener but on the tokio engine with
- * the udp link), with _Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN
+ * ...), or a kind this build has no link of (a udp/ dial or a datagram
+ * listener on the tokio engine without the udp link, a group without the
+ * multicast transport, which the cooperative engine has not), with
+ * _Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN
  * (-92), as the same locator over the system's sockets is; a config with
  * neither connect nor listen (it would scout on the system's sockets) with
  * WZ_EXT_ERR_UNSUPPORTED (-3). A stream is framed by the session exactly as a

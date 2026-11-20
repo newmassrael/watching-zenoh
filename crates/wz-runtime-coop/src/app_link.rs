@@ -9,6 +9,16 @@
 //! over a group the program joins, and [`AppLinks`], the session shell's [`SessionLinks`] over all
 //! of them, so a session of this engine opens no socket of the system's when a transport is given.
 //!
+//! # Listening
+//!
+//! A listener carries nothing itself: the program accepts on it each stream, or each source that
+//! sends datagrams to it, and the table holds each as a link of its own
+//! (`wz_session_core::app_link_table`). A `tcp/` listener yields a stream link for each accepted
+//! stream, a `udp/` one a datagram link for each accepted source, and each is the link of a
+//! session run as the acceptor, as a connection taken off a socket's port is. The program has told
+//! the sources apart, so a datagram link it accepted is one source's alone: each of its datagrams
+//! is read as that source's, whatever the program names with it.
+//!
 //! # The remainder
 //!
 //! This engine's stream seam takes every byte or fails ([`StreamSocket::send_parts`]), where the
@@ -389,6 +399,10 @@ pub struct AppDatagramSocket {
     held: Held,
     /// Where each datagram is said to come from when the program names no source.
     peer: SocketAddr,
+    /// Whether the source the program names with a datagram is read. A link the session dialled
+    /// reads it; a source the program accepted on a listener is one link alone, so each of its
+    /// datagrams is `peer`'s whatever the program names.
+    reads_sources: bool,
 }
 
 impl AppDatagramSocket {
@@ -402,7 +416,21 @@ impl AppDatagramSocket {
                 handle,
             },
             peer: to,
+            reads_sources: true,
         })
+    }
+
+    /// The datagram link of the source the program accepted on a datagram listener as `handle`,
+    /// naming it `remote`.
+    fn accepted(transport: &Arc<AppTransport>, handle: LinkHandle, remote: &str) -> Self {
+        Self {
+            held: Held {
+                transport: Arc::clone(transport),
+                handle,
+            },
+            peer: socket_of(remote),
+            reads_sources: false,
+        }
     }
 
     /// Take the next datagram into `buf`: its length (cut to `buf`) and source.
@@ -417,7 +445,10 @@ impl AppDatagramSocket {
             DatagramRead::Datagram(datagram) => {
                 let n = datagram.bytes.len().min(buf.len());
                 buf[..n].copy_from_slice(&datagram.bytes[..n]);
-                let source = datagram.source.as_deref().map_or(self.peer, socket_of);
+                let source = match datagram.source.as_deref() {
+                    Some(named) if self.reads_sources => socket_of(named),
+                    _ => self.peer,
+                };
                 Ok(Some((n, source)))
             }
             DatagramRead::Empty => Ok(None),
@@ -550,8 +581,8 @@ impl GroupTransport for AppGroupTransport {
 }
 
 /// The session shell's links over the program's transport: a `tcp/` dial and listen open
-/// streams through the program, a `udp/` dial a datagram link, and nothing is a socket of the
-/// system's. A `tls/` locator is not carried.
+/// streams through the program, a `udp/` dial a datagram link and a `udp/` listen a datagram
+/// listener, and nothing is a socket of the system's. A `tls/` locator is not carried.
 pub struct AppLinks {
     transport: Arc<AppTransport>,
     dial: AppStreamDial,
@@ -587,7 +618,8 @@ impl SessionLinks for AppLinks {
 
     fn open_acceptor(&self, _port: u16) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
         // A datagram port that takes whoever sends first is a socket of the system's; the
-        // program's transport accepts streams on a listener.
+        // program's transport accepts streams and datagram sources on listeners
+        // (`open_listener`).
         Err(LinkOpenError::Unsupported)
     }
 
@@ -621,8 +653,61 @@ impl SessionLinks for AppLinks {
             LinkProto::Tcp => Ok(Box::new(AppLinkListener {
                 listener: self.dial.listen(at.at)?,
             })),
-            LinkProto::Udp | LinkProto::Tls => Err(LinkOpenError::Unsupported),
+            LinkProto::Udp => {
+                let locator = Locator::udp(at.at).to_string();
+                let handle = open_link(&self.transport, AppLinkKind::DatagramListen, &locator)?;
+                Ok(Box::new(AppDatagramListener {
+                    held: Held {
+                        transport: Arc::clone(&self.transport),
+                        handle,
+                    },
+                    at: at.at,
+                    datagram_rx: self.datagram_rx,
+                }))
+            }
+            LinkProto::Tls => Err(LinkOpenError::Unsupported),
         }
+    }
+}
+
+/// A `udp/` listener of [`AppLinks`]: each source the program accepts on it is a datagram link.
+struct AppDatagramListener {
+    held: Held,
+    at: SocketAddr,
+    /// The receive buffer each accepted link reads into, as [`AppLinks::with_rx_capacity`] set it.
+    datagram_rx: usize,
+}
+
+impl LinkListener<Rc<AppDriver>> for AppDatagramListener {
+    fn local(&self) -> Locator {
+        Locator::udp(self.at)
+    }
+
+    fn accept(&self) -> Result<Option<OpenedLink<Rc<AppDriver>>>, LinkOpenError> {
+        let next = self
+            .held
+            .transport
+            .with(|table| table.next_accepted(self.held.handle, None));
+        let socket = match next {
+            AcceptRead::Accepted(handle, remote) => {
+                AppDatagramSocket::accepted(&self.held.transport, handle, &remote)
+            }
+            AcceptRead::Empty => return Ok(None),
+            AcceptRead::End => return Err(LinkOpenError::Unsupported),
+        };
+        // The program told this source apart from the others, so the link's remote end is known
+        // from the start, as a dialled link's is; the session over it still runs as the acceptor.
+        let peer = socket.peer;
+        let driver = Rc::new(IpDriver::Udp(UdpDriver::initiator_with_buffers(
+            socket,
+            peer,
+            self.datagram_rx,
+            HeapTx::new(0, 0),
+        )));
+        Ok(Some(OpenedLink {
+            sink: driver.clone(),
+            pump: driver,
+        }))
     }
 }
 
@@ -910,5 +995,82 @@ mod tests {
             .accepted(listening, "tcp/198.51.100.3:50000")
             .unwrap();
         assert!(matches!(listener.accept(), Ok(Some(_))));
+    }
+
+    /// The handle the program was asked to open as a datagram listener, and the locator it was
+    /// asked for.
+    fn datagram_listener_of(script: &Script) -> (LinkHandle, String) {
+        script
+            .opens
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, kind, _)| *kind == AppLinkKind::DatagramListen)
+            .map(|(handle, _, locator)| (*handle, locator.clone()))
+            .expect("the program was asked to listen for datagrams")
+    }
+
+    #[test]
+    fn a_datagram_listener_hands_out_each_source_the_program_accepts_as_a_datagram_link() {
+        let (script, transport) = transport(64);
+        let links = AppLinks::new(Arc::clone(&transport));
+        let listener = links
+            .open_listener(Locator::udp(PEER))
+            .expect("a udp/ listen is carried");
+        assert_eq!(listener.local(), Locator::udp(PEER));
+        let (listening, locator) = datagram_listener_of(&script);
+        assert_eq!(locator, "udp/192.0.2.9:7447");
+        assert!(matches!(listener.accept(), Ok(None)), "no source yet");
+        transport
+            .accepted(listening, "udp/198.51.100.3:50000")
+            .expect("a datagram listener accepts");
+        let opened = listener
+            .accept()
+            .expect("the listener stands")
+            .expect("the accepted source is a link");
+        assert!(
+            !wz_session_core::link::BoxedLinkDriver::batch_length_prefixed(&*opened.sink),
+            "an accepted source carries datagrams, each a batch"
+        );
+        assert!(matches!(listener.accept(), Ok(None)), "one link per source");
+        // A listener the program closed is broken for good, and the engine lets it go.
+        transport.event(listening, ProgramEvent::Closed).unwrap();
+        assert!(matches!(listener.accept(), Err(LinkOpenError::Unsupported)));
+    }
+
+    #[test]
+    fn an_accepted_source_reads_every_datagram_as_its_own() {
+        let (script, transport) = transport(64);
+        let links = AppLinks::new(Arc::clone(&transport));
+        let _listener = links.open_listener(Locator::udp(PEER)).unwrap();
+        let (listening, _) = datagram_listener_of(&script);
+        transport
+            .accepted(listening, "udp/198.51.100.3:50000")
+            .unwrap();
+        let AcceptRead::Accepted(handle, remote) =
+            transport.with(|table| table.next_accepted(listening, None))
+        else {
+            panic!("the accepted source waits on the listener");
+        };
+        let socket = AppDatagramSocket::accepted(&transport, handle, &remote);
+        // The program names another source, and then none: both are the accepted source's.
+        transport
+            .received(handle, b"one", Some("udp/203.0.113.7:9"))
+            .unwrap();
+        transport.received(handle, b"two", None).unwrap();
+        let source = SocketAddr::from(([198, 51, 100, 3], 50000));
+        let mut buf = [0u8; 8];
+        assert_eq!(socket.try_recv(&mut buf), Ok(Some((3, source))));
+        assert_eq!(socket.try_recv(&mut buf), Ok(Some((3, source))));
+        assert_eq!(socket.try_recv(&mut buf), Ok(None));
+        // A dialled link reads the source the program names.
+        let dialled = AppDatagramSocket::dial(&transport, PEER).unwrap();
+        transport
+            .received(dialled.held.handle, b"in", Some("udp/203.0.113.7:9"))
+            .unwrap();
+        assert_eq!(
+            dialled.try_recv(&mut buf),
+            Ok(Some((2, SocketAddr::from(([203, 0, 113, 7], 9)))))
+        );
     }
 }
