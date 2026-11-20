@@ -449,8 +449,9 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "clock registry, event log, supervisor and resource sampler that the doors of both C ABIs "
         "call; each function in it is run by this crate's own tests and again through each ABI's "
         "doors (`wz-capi-pico`'s `observation_links` and `wz-capi-c`'s door tests). "
-        "`shared-key-ids` gates `wire_on_link`, a key as one link's key-wire form names it, which "
-        "both engines call for each link and the cooperative engine's `shared_key_ids` tests run",
+        "`shared-key-ids` gates `wire_on_link` and `interest_on_link`, a key and an Interest's "
+        "key as one link's key-wire form names them, which both engines call for each link, this "
+        "crate's `link_form_tests` run and the cooperative engine's `shared_key_ids` tests run",
         frozenset(
             {"clock-source", "event-ring", "resource-snapshot", "shared-key-ids", "supervision"}
         ),

@@ -749,6 +749,32 @@ fn on_link<'w, C: ClockSource + 'static>(
     Cow::Borrowed(wire)
 }
 
+/// `form`, an Interest about the key `keyexpr`, as the link of `actions` names that key: by the
+/// link's key-wire form, as `on_link` names the key of a put or a declaration, the declared
+/// form keeping `form` as the ABI made it (`shared-key-ids`).
+#[cfg(feature = "shared-key-ids")]
+fn interest_on_link<'f, C: ClockSource + 'static>(
+    actions: &McuActions<C>,
+    keyexpr: &str,
+    form: &'f InterestForm,
+) -> Cow<'f, InterestForm> {
+    match wz_capi_port::interest_on_link(actions.key_wire_on_link(keyexpr), keyexpr, form) {
+        Some(linked) => Cow::Owned(linked),
+        None => Cow::Borrowed(form),
+    }
+}
+
+/// A build without the shared key ids names the key of every Interest as the ABI made it.
+#[cfg(not(feature = "shared-key-ids"))]
+#[inline(always)]
+fn interest_on_link<'f, C: ClockSource + 'static>(
+    _actions: &McuActions<C>,
+    _keyexpr: &str,
+    form: &'f InterestForm,
+) -> Cow<'f, InterestForm> {
+    Cow::Borrowed(form)
+}
+
 /// One queryable: its registration with the observer and what its declaration says on the wire.
 #[cfg(feature = "queryable")]
 struct QblEntry {
@@ -816,18 +842,19 @@ struct InterestHold {
 }
 
 impl InterestHold {
-    /// Send this Interest over `actions`, for what is declared now and what is declared later:
-    /// whether the link took it.
+    /// Send this Interest over `actions`, for what is declared now and what is declared later,
+    /// naming its key as the link's key-wire form says: whether the link took it.
     fn send<C: ClockSource + 'static>(&self, actions: &McuActions<C>) -> bool {
+        let form = interest_on_link(actions, &self.keyexpr, &self.form);
         actions
             .send_interest_kinds(
                 self.interest_id,
                 kinds(self.plane),
                 /* current */ true,
                 /* future */ true,
-                self.form.aggregate,
-                self.form.mapping_id,
-                self.form.suffix.as_deref(),
+                form.aggregate,
+                form.mapping_id,
+                form.suffix.as_deref(),
             )
             .is_ok()
     }
@@ -3333,6 +3360,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 continue;
             }
             self.hold_leg(leg_id, leg());
+            // The Interest names the key as the link's own key-wire form says, as a query does.
+            let wire = on_link(&actions, keyexpr, wire);
             let (mapping_id, suffix) = if wire.is_literal() {
                 (0, Some(keyexpr))
             } else {

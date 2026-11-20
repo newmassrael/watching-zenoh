@@ -457,6 +457,9 @@ transport-link-unixpipe,transport-link-ws|"
     # What those doors do, once, in the port both C ABIs and both engines share
     # (`wz-capi-port`'s `observation`): the unit tests of the clock callback and of the refusals.
     "wz-capi-port|hook|clock-source,event-ring,supervision,resource-snapshot|"
+    # How an Interest names its key on a link of each key-wire form, the rule both engines take
+    # from the port (`interest_on_link`): its unit tests compile only with `shared-key-ids`.
+    "wz-capi-port|hook|shared-key-ids|link_form_tests::"
     # The same four as the zenoh-c ABI's doors (`wz_capi_c_*`): the unit tests of each module, which
     # a build made as the reference is compiles none of.
     "wz-capi-c|hook|clock-source,event-ring,supervision,resource-snapshot,identity-make,lifecycle-doors,switch-doors,segment-sender,rx-callback-offload|"
@@ -547,9 +550,11 @@ transport-link-unixpipe,transport-link-ws|"
     # feature) starts the provider's own arena and so runs in a binary of its own.
     "wz-capi-coop|hook|connectivity,listen,liveliness,liveliness-get,local-queryable,local-subscriber,query,queryable,scout,ticker,tls-mbedtls|"
     # The keys a session names by a dictionary it shares with its peers (`tests::shared_key_ids::`,
-    # 14), compiled with `shared-key-ids` beside `listen`, `query` and `queryable`, the four the
-    # module's `cfg` names; the rest of the crate's tests are the leg above's.
-    "wz-capi-coop|hook|listen,query,queryable,shared-key-ids|tests::shared_key_ids::"
+    # 19), compiled with `shared-key-ids` beside `listen`, `query` and `queryable`, the four the
+    # module's `cfg` names; the rest of the crate's tests are the leg above's. `liveliness` and
+    # `liveliness-get` join so that the Interests of a liveliness subscriber and of a liveliness
+    # get are held to the link's key-wire form too (one test each, compiled only with them).
+    "wz-capi-coop|hook|listen,liveliness,liveliness-get,query,queryable,shared-key-ids|tests::shared_key_ids::"
     # What a hosted OS tells a node about its network, and the multicast sockets built from it,
     # which the tokio runtime and the cooperative host both open. The `#iface=` honor (the v4 and
     # v6 interface selectors and the tests that read them off the loopback) is compiled only with
