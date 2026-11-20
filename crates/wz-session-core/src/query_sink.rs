@@ -1208,8 +1208,8 @@ mod tests {
             key_len: usize,
             rid: crate::wire_id::RequestId,
         }
-        impl QuerySinkOf<BorrowedQuery<'_>, CountingReplyOut> for Typed {
-            fn handle_typed(&mut self, query: &BorrowedQuery<'_>, out: &mut CountingReplyOut) {
+        impl<'q> QuerySinkOf<BorrowedQuery<'q>, CountingReplyOut> for Typed {
+            fn handle_typed(&mut self, query: &BorrowedQuery<'q>, out: &mut CountingReplyOut) {
                 // The fields themselves, which only a sink handed the concrete view can read.
                 self.key_len = query.keyexpr.len();
                 self.rid = query.rid;
