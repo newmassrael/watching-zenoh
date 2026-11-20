@@ -496,8 +496,10 @@ fn a_token_and_a_liveliness_subscription_through_the_port_tell_each_other() {
 }
 
 /// A liveliness get through the port finds the tokens alive that meet its key, the other node's
-/// and the node's own, in one leg that has ended when the get returns; a token that went is found
-/// no more, and a key nothing meets finds nothing.
+/// and the node's own, in one leg that ends on the face's thread after the get returns (a node
+/// that asks no router ends it at the face's next turn, as upstream tells a get's end by its
+/// callback and not by the call's return); a token that went is found no more, and a key nothing
+/// meets finds nothing.
 #[cfg(feature = "liveliness-get")]
 #[test]
 fn a_liveliness_get_through_the_port_finds_the_tokens_alive() {
@@ -511,8 +513,8 @@ fn a_liveliness_get_through_the_port_finds_the_tokens_alive() {
             self.0.fetch_add(1, Ordering::SeqCst);
         }
     }
-    // The keys a get through the port finds, in order, and whether every leg it issued had ended
-    // when the get returned.
+    // The keys a get through the port finds, in order, read once every leg it issued has ended,
+    // and whether they all ended within the wait.
     let alive = |key: &str| -> (Vec<String>, bool) {
         let keys = Arc::new(Mutex::new(Vec::<String>::new()));
         let ended = Arc::new(AtomicUsize::new(0));
@@ -528,9 +530,10 @@ fn a_liveliness_get_through_the_port_finds_the_tokens_alive() {
                 })
             })
             .expect("a node asks liveliness queries");
+        let all_ended = eventually(|| ended.load(Ordering::SeqCst) == issued);
         let mut keys = keys.lock().unwrap().clone();
         keys.sort();
-        (keys, ended.load(Ordering::SeqCst) == issued)
+        (keys, all_ended)
     };
 
     let from_peer = other
@@ -545,10 +548,7 @@ fn a_liveliness_get_through_the_port_finds_the_tokens_alive() {
         "a get through the port did not find the client's token and the node's own: {:?}",
         alive("wz/port/lg/**").0
     );
-    assert!(
-        alive("wz/port/lg/**").1,
-        "a leg of the get had not ended when the get returned"
-    );
+    assert!(alive("wz/port/lg/**").1, "a leg of the get never ended");
     assert_eq!(alive("wz/port/other/**").0, Vec::<String>::new());
 
     other.undeclare_liveliness_token(from_peer);
