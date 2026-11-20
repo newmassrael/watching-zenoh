@@ -109,12 +109,25 @@ pub(crate) fn is_group_endpoint(endpoint: &str) -> bool {
     locator.starts_with("udp/") && metadata.split(';').any(|pair| pair.starts_with("iface="))
 }
 
-/// A batch size of this ABI as the wire carries it, in two bytes: a number of
-/// [`wz_session_core::caps`], refused when the build is made if it states one past `u16::MAX`.
+/// The batch size a unicast session of this ABI advertises in its InitSyn, on either engine:
+/// pico's `BATCH_UNICAST_SIZE` as the build states it
+/// ([`wz_session_core::caps::PICO_UNICAST_BATCH_BYTES`]). A `const` item, so its range is
+/// checked when the build is made and never at an open.
+const PICO_UNICAST_BATCH: u16 = pico_batch(wz_session_core::caps::PICO_UNICAST_BATCH_BYTES);
+
+/// The batch size pico's Join advertises on a group: its `BATCH_MULTICAST_SIZE` as the build
+/// states it ([`wz_session_core::caps::PICO_MULTICAST_BATCH_BYTES`]), checked when the build is
+/// made as [`PICO_UNICAST_BATCH`] is.
+#[cfg(feature = "multicast-transport")]
+const PICO_MULTICAST_BATCH: u16 = pico_batch(wz_session_core::caps::PICO_MULTICAST_BATCH_BYTES);
+
+/// A batch size of this ABI as the wire carries it, in two bytes. Called only to make a `const`
+/// item, so a number outside `1..=65535` stops the build: a batch of 0 would size a session that
+/// sends nothing, and one past `u16::MAX` does not fit the field.
 const fn pico_batch(bytes: usize) -> u16 {
     assert!(
-        bytes <= u16::MAX as usize,
-        "a zenoh-pico batch size is at most 65535 bytes"
+        bytes >= 1 && bytes <= u16::MAX as usize,
+        "a zenoh-pico batch size is 1 to 65535 bytes"
     );
     bytes as u16
 }
@@ -160,8 +173,15 @@ const fn pico_keepalives_per_lease(factor: usize) -> u32 {
     factor as u32
 }
 
-/// The cooperative engine's read wait, in milliseconds: a number of [`wz_session_core::caps`],
-/// refused when the build is made if it is past what the engine's wait holds.
+/// How long one read step of the cooperative engine waits on its links, in milliseconds: pico's
+/// `Z_CONFIG_SOCKET_TIMEOUT` as the build states it
+/// ([`wz_session_core::caps::PICO_SOCKET_TIMEOUT_MS`]). A `const` item, so its range is checked
+/// when the build is made and never at an open.
+#[cfg(not(feature = "engine-tokio"))]
+const PICO_SOCKET_TIMEOUT: u32 = pico_socket_timeout(wz_session_core::caps::PICO_SOCKET_TIMEOUT_MS);
+
+/// The cooperative engine's read wait as the engine holds it. Called only to make a `const` item,
+/// so a number past what the wait holds stops the build.
 #[cfg(not(feature = "engine-tokio"))]
 const fn pico_socket_timeout(ms: usize) -> u32 {
     assert!(
@@ -191,7 +211,7 @@ const fn pico_group(sn_resolution: SnResolution) -> wz_capi_core::drive::GroupPr
         max_sessions: None,
         seq_num_res: sn_resolution.wire_code(),
         req_id_res: 0x02,
-        batch_size: pico_batch(wz_session_core::caps::PICO_MULTICAST_BATCH_BYTES),
+        batch_size: PICO_MULTICAST_BATCH,
         is_qos: false,
         compression: false,
         join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
@@ -1027,7 +1047,7 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             // `Z_BATCH_UNICAST_SIZE` (`vendor/zenoh-pico/src/protocol/definitions/transport.c` @
             // `msg._body._init._batch_size = Z_BATCH_UNICAST_SIZE;`), 2048 by default and not
             // zenoh's 65535, so this advertises the numbers the build states for them.
-            batch_size: pico_batch(wz_session_core::caps::PICO_UNICAST_BATCH_BYTES),
+            batch_size: PICO_UNICAST_BATCH,
             lease_ms: wz_session_core::caps::PICO_LEASE_MS as u64,
             keep_alive: PICO_KEEP_ALIVE,
             sn_resolution,
@@ -1166,9 +1186,9 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
 /// with an interface) is the tokio engine's alone: a build that joins one selects that engine, so
 /// this one answers it as a build without the multicast transport does.
 ///
-/// What zenoh-pico's client advertises, as the tokio engine's open does: zenoh's default batch
-/// size (`transport/link/tx/batch_size`, 65535, which the link's own capacity caps), pico's lease
-/// (`Z_TRANSPORT_LEASE`, 10000 ms) and pico's transmit model ([`TxQueueConf::pico_of_policy`]).
+/// What zenoh-pico's client advertises, as the tokio engine's open does: pico's batch size
+/// ([`PICO_UNICAST_BATCH`], `BATCH_UNICAST_SIZE`), pico's lease (`Z_TRANSPORT_LEASE`) and pico's
+/// transmit model ([`TxQueueConf::pico_of_policy`]).
 /// The zid is the one `Z_CONFIG_SESSION_ZID_KEY` names, and otherwise minted, as this ABI's tokio
 /// open does.
 ///
@@ -1230,7 +1250,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         // `Z_TRANSPORT_LEASE`), the largest message it rejoins (`FRAG_MAX_SIZE`), how often
         // its keepalive speaks (`Z_TRANSPORT_LEASE_EXPIRE_FACTOR`) and its handshake's
         // receive deadline (`Z_TRANSPORT_CONNECT_TIMEOUT`).
-        batch_size: pico_batch(wz_session_core::caps::PICO_UNICAST_BATCH_BYTES),
+        batch_size: PICO_UNICAST_BATCH,
         lease_ms: wz_session_core::caps::PICO_LEASE_MS as u64,
         keep_alive: PICO_KEEP_ALIVE,
         sn_resolution,
@@ -1254,7 +1274,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         redial_ms: Some(1000),
         // A read waits on the link as long as pico's socket receive times out, its
         // `Z_CONFIG_SOCKET_TIMEOUT` as this build states it.
-        idle_wait_ms: pico_socket_timeout(wz_session_core::caps::PICO_SOCKET_TIMEOUT_MS),
+        idle_wait_ms: PICO_SOCKET_TIMEOUT,
         // The bounds of an accept are upstream's, as the tokio engine's are
         // (`PICO_ACCEPT`): pico bounds no count of pending accepts or of sessions.
         listen,
@@ -2269,6 +2289,33 @@ pub extern "C" fn z_reliability_default() -> core::ffi::c_int {
 #[cfg(test)]
 mod build_numbers {
     use super::*;
+
+    /// The batch sizes the opens advertise and the cooperative engine's read wait are the
+    /// numbers the build states, held in `const` items: each is named here in a `const`
+    /// context, which compiles only for a constant, so its range check is evaluated when the
+    /// build is made and an open cannot reach it.
+    #[test]
+    fn the_numbers_an_open_reads_are_the_builds_and_checked_when_it_is_made() {
+        const UNICAST: u16 = PICO_UNICAST_BATCH;
+        assert_eq!(
+            usize::from(UNICAST),
+            wz_session_core::caps::PICO_UNICAST_BATCH_BYTES
+        );
+        #[cfg(feature = "multicast-transport")]
+        {
+            const GROUP: u16 = PICO_MULTICAST_BATCH;
+            assert_eq!(
+                usize::from(GROUP),
+                wz_session_core::caps::PICO_MULTICAST_BATCH_BYTES
+            );
+            assert_eq!(pico_group(SnResolution::Bits32).batch_size, GROUP);
+        }
+        #[cfg(not(feature = "engine-tokio"))]
+        {
+            const WAIT: u32 = PICO_SOCKET_TIMEOUT;
+            assert_eq!(WAIT as usize, wz_session_core::caps::PICO_SOCKET_TIMEOUT_MS);
+        }
+    }
 
     /// The keepalive of this ABI divides the ADOPTED lease by the factor the build states for
     /// pico's `Z_TRANSPORT_LEASE_EXPIRE_FACTOR`, as pico's task does, and not the session's own
