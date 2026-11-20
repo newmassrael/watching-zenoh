@@ -3485,13 +3485,10 @@ impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T>
             return;
         };
         let qos = parts.qos;
-        // The reply's own size, counted by running its writer into a sink that keeps nothing: a
-        // Response has no size constant (its payload's bound is a u32 length), and the link lends
-        // a slot of this size. A reply the writer refuses is refused by the encode below too.
-        let size = {
-            let mut count = sce_forge_runtime::codec::CountSink::new();
-            writer.encode(&mut count).map_or(0, |()| count.len())
-        };
+        // The reply's own size: a Response has no size constant (its payload's bound is a u32
+        // length), and the link lends a slot of this size. A reply the writer refuses is refused
+        // by the encode below too.
+        let size = writer.encoded_len().unwrap_or(0);
         let _ = self
             .dispatch_network_message_at(
                 DispatchStage::Fresh,

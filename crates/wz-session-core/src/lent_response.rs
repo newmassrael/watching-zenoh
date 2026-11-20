@@ -406,6 +406,21 @@ impl<'a> ResponseWriter<'a> {
         }
     }
 
+    /// The bytes [`Self::encode_tx`] writes for this reply, counted with nothing written: the size
+    /// a session asks its link to lend for it. A plain reply is counted by the direct writer's own
+    /// layout, so a build whose replies are all plain links no counting pass of the codec's encoder;
+    /// any other reply is counted by running that encoder into a sink that keeps nothing. A reply
+    /// past a protocol bound is refused with the error [`Self::encode_tx`] refuses it with.
+    pub fn encoded_len(&self) -> Result<usize, CodecError> {
+        if GENERIC_REACHABLE && !self.is_direct() {
+            let mut count = sce_forge_runtime::codec::CountSink::new();
+            self.encode_generic(&mut count)?;
+            return Ok(count.len());
+        }
+        self.direct_bounds()?;
+        Ok(self.direct_len())
+    }
+
     /// The protocol bounds the codec's encoder holds a reply to, held by the direct writer too, so
     /// both paths refuse the same reply with the same `LengthOutOfRange`: the keyexpr's `u16`
     /// length, the schema's `u8` length and the payload's `u32` length.
@@ -860,6 +875,11 @@ mod tests {
         let mut sink = SliceSink::new(&mut buffer);
         writer.encode(&mut sink).expect("the buffer holds it");
         let len = sink.position();
+        assert_eq!(
+            writer.encoded_len(),
+            Ok(len),
+            "the count is the bytes written"
+        );
         buffer[..len].to_vec()
     }
 
@@ -983,6 +1003,7 @@ mod tests {
                             // The bytes through a window of a slice buffer, of a capped one,
                             // and of a vector, against the codec's own encoder.
                             assert_eq!(writer.direct_len(), generic_len, "the measure");
+                            assert_eq!(writer.encoded_len(), Ok(generic_len), "the count");
                             let mut storage = [0u8; 2048];
                             let mut slice = crate::tx_buf::SliceTxBuf::new(&mut storage);
                             let mut tx = crate::tx_buf::TxSink::over(&mut slice);
@@ -1082,6 +1103,11 @@ mod tests {
             let mut sink = SliceSink::new(&mut room);
             let generic = writer.encode_generic(&mut sink).err();
             assert_eq!(direct, generic, "both paths answer alike");
+            assert_eq!(
+                writer.encoded_len().err(),
+                direct,
+                "the count refuses it alike"
+            );
             direct
         }
         let past_key = "k".repeat(usize::from(u16::MAX) + 1);
@@ -1165,6 +1191,7 @@ mod tests {
         writer.encode_generic(&mut sink).expect("fits");
         let generic_len = sink.position();
         assert_eq!(writer.direct_len(), generic_len, "the measure");
+        assert_eq!(writer.encoded_len(), Ok(generic_len), "the count");
         let mut storage = [0u8; 2048];
         let mut slice = crate::tx_buf::SliceTxBuf::new(&mut storage);
         let mut tx = crate::tx_buf::TxSink::over(&mut slice);
