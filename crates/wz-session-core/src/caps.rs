@@ -364,12 +364,12 @@ pub const MAX_ADMIN_LOCATORS: usize = generated::MAX_ADMIN_LOCATORS;
 /// is refused and counted, not listed in part.
 pub const MAX_ADMIN_SESSION_LINKS: usize = generated::MAX_ADMIN_SESSION_LINKS;
 
-/// Maximum number of replies a multicast pump of a node with no allocator holds
-/// between the observer that stages one and the loop that frames and sends it (the
-/// deploy `session_pool.process.multicast_replies` key). A reply past it is dropped and
-/// counted by the queue (`wz_session_lwip::multicast_drive::MulticastReplyQueue`),
-/// never queued without bound: multicast to a group is best effort, and a querier
-/// whose reply was dropped asks again.
+/// Maximum number of replies a multicast pump holds between the observer that stages one
+/// and the loop that frames and sends it (the deploy `session_pool.process.multicast_replies`
+/// key): the size of the fixed queue of a node with no allocator, and the bound of the
+/// growable one of a node with one. A reply past it is dropped and counted by the queue
+/// (`wz_session_mcu::group_drive::MulticastReplyQueue`), never queued without bound:
+/// multicast to a group is best effort, and a querier whose reply was dropped asks again.
 pub const MAX_MULTICAST_REPLIES: usize = generated::MAX_MULTICAST_REPLIES;
 
 /// The most tasks a fixed-memory machine's runtime may hold (the deploy

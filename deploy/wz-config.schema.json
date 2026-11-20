@@ -787,6 +787,25 @@
               "x-wz-binding-fixed": "build",
               "x-wz-wire": "none"
             },
+            "MAX_MULTICAST_REPLIES": {
+              "description": "The replies a node holds for a multicast group before it sends them, with or without an allocator.",
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "const": "unbounded"
+                }
+              ],
+              "x-wz-kind": "bound",
+              "x-wz-driven": "remote",
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "build",
+              "x-wz-wire": "none"
+            },
             "MAX_LOCATOR_LEN": {
               "description": "The longest locator, in bytes, a node stores: one it is told to connect to, or one it listens on (for example udp/192.168.1.10:7447).",
               "oneOf": [

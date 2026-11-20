@@ -327,9 +327,9 @@ pub const MAX_MULTICAST_REPLIES: LimitBinding = LimitBinding {
     kind: LimitKind::Bound,
     driven: Some(Driven::Remote),
     range: None,
-    storage: Storage::Capacity,
+    storage: Storage::Both,
     scope: &[Scope::Session],
-    binding_heap: None,
+    binding_heap: Some(Binding::Open),
     binding_fixed: Some(Binding::Build),
     wire: Wire::None,
 };

@@ -2489,15 +2489,16 @@ kconfig = "WZ_LIMIT_MAX_MULTICAST_REPLIES"
 kind = "bound"
 driven = "remote"
 default = 8
-storage = "capacity"
+on_heap = "quota"
+storage = "both"
 scope = "session"
-binding_heap = "none"
+binding_heap = "open"
 binding_fixed = "build"
 wire = "none"
 help = '''
-The replies a node without an allocator holds for a multicast group before
-it sends them. One more is dropped and counted: a group is best effort, and
-an asker whose reply was dropped asks again.
+The replies a node holds for a multicast group before it sends them, with or
+without an allocator. One more is dropped and counted: a group is best
+effort, and an asker whose reply was dropped asks again.
 '''
 
 [[limit]]

@@ -237,9 +237,9 @@ config WZ_LIMIT_MAX_MULTICAST_REPLIES
 	int "MAX_MULTICAST_REPLIES"
 	default 8
 	help
-	  The replies a node without an allocator holds for a multicast group before
-	  it sends them. One more is dropped and counted: a group is best effort, and
-	  an asker whose reply was dropped asks again.
+	  The replies a node holds for a multicast group before it sends them, with or
+	  without an allocator. One more is dropped and counted: a group is best
+	  effort, and an asker whose reply was dropped asks again.
 
 config WZ_LIMIT_MAX_TASKS
 	int "MAX_TASKS"
