@@ -251,6 +251,9 @@ impl wz_session_core::entropy::EntropySource for OsEntropy {
 /// names it where it names the configuration.
 pub use wz_session_core::link::QueueAllocation;
 pub use wz_session_core::session_init_params::SessionInitParams;
+/// Why [`TxQueueConf::validate`] refuses a queue, named where the configuration is, for a
+/// caller that fills one from its own input and reports the refusal in its own words.
+pub use wz_session_core::session_init_params::TxQueueConfError;
 /// R2924 — the outbound queue configuration a [`SessionInitParams`] carries.
 pub use wz_session_core::session_init_params::{KeepAliveConf, LinkRxConf, TxQueueConf};
 /// The type of [`SessionInitParams::zid`], named where the bundle is.

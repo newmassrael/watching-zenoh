@@ -10970,11 +10970,12 @@ impl TransportTuning {
                 })?;
         }
         // R2925 — a size outside upstream's `1..=16` is refused, as upstream's
-        // config refuses it; the waits take any microsecond count.
+        // config refuses it; the waits take any microsecond count the queue's own
+        // rule allows. Both are judged by that rule once every flag is read
+        // (`TxQueueConf::validate`, below).
         for (byte, flag) in TX_QUEUE_SIZE_FLAGS.iter().enumerate() {
             if let Some(v) = parse_pair(rest, flag) {
-                let size = v.parse::<usize>().ok().filter(|n| (1..=16).contains(n));
-                out.tx_queue.sizes[byte] = size.ok_or_else(|| {
+                out.tx_queue.sizes[byte] = v.parse::<usize>().map_err(|_| {
                     format!("{flag} expects a queue size in 1..=16 batches, got '{v}'")
                 })?;
             }
@@ -11016,6 +11017,26 @@ impl TransportTuning {
                     || format!("--tx-queue-allocation expects init or lazy, got '{v}'"),
                 )?;
         }
+        // The queue as the flags left it, under the window the snapshot's
+        // `tx-no-progress-deadline` gives it: a total wait shorter than that window
+        // would make the window a bound that never comes first.
+        out.tx_queue.validate().map_err(|refused| {
+            use wz::runtime_tokio::session_glue::TxQueueConfError;
+            match refused {
+                TxQueueConfError::SizeOutOfRange(size) => format!(
+                    "{} expects a queue size in 1..=16 batches, got '{}'",
+                    TX_QUEUE_SIZE_FLAGS[usize::from(size.priority_byte)],
+                    size.size
+                ),
+                TxQueueConfError::NoProgressWindow {
+                    window_us,
+                    total_us,
+                } => format!(
+                    "--wait-before-close-us {total_us} is shorter than the {window_us} us \
+                     window the tx-no-progress-deadline policy holds a blocking message to"
+                ),
+            }
+        })?;
         if let Some(v) = parse_pair(rest, "--open-timeout-ms") {
             out.open_timeout = std::time::Duration::from_millis(
                 v.parse::<u64>()
@@ -12798,5 +12819,41 @@ mod transport_tuning_policy_tests {
             wz::runtime_tokio::policy::SnResolution::Bits16
         );
         assert_eq!(stated.policy, chosen);
+    }
+
+    /// The window the snapshot's `tx-no-progress-deadline` gives the queue is held against the
+    /// total wait the flags state: a total shorter than the window is refused and names its
+    /// flag, and one as long as the window is read. A build whose domain cannot select the
+    /// policy on gives no window, and has nothing to hold the wait against.
+    #[test]
+    fn a_total_wait_shorter_than_the_no_progress_window_is_refused() {
+        use wz::runtime_tokio::policy::TxNoProgressDeadline;
+        let mut on = SessionPolicy::defaults();
+        if on
+            .select_tx_no_progress_deadline(TxNoProgressDeadline::On)
+            .is_err()
+        {
+            return;
+        }
+        let window = TransportTuning::of_policy(on)
+            .tx_queue
+            .no_progress_us
+            .expect("the policy on gives the queue its window");
+        let at = |total_us: u64| {
+            let total_us = total_us.to_string();
+            TransportTuning::from_argv_under(
+                &argv(&["--wait-before-close-us", total_us.as_str()]),
+                on,
+            )
+        };
+        let err = at(window - 1).expect_err("a total wait shorter than the window");
+        assert!(err.contains("--wait-before-close-us"), "{err}");
+        assert_eq!(
+            at(window)
+                .expect("a total wait as long as the window")
+                .tx_queue
+                .wait_before_close_us,
+            window
+        );
     }
 }
