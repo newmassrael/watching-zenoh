@@ -308,6 +308,71 @@ fn listed_senders_bind_the_receivers_slots_and_give_a_row_each() {
     );
 }
 
+/// One message sent on an event and one sent every 10 ms, under two profiles that differ only in
+/// their silence limit: the event message's states none (`timeout_ms: 0`).
+const EVENT_AND_PERIODIC: &str = r#"{
+  nodes: [{name: 'src'}, {name: 'dst'}],
+  e2e_profiles: {
+    ev: {name: 'ev',
+         fields: [{name: 'crc', bytes: 1}, {name: 'counter', bytes: 1},
+                  {name: 'length', bytes: 1}],
+         crc: {field: 'crc', width: 8, poly: '0x2F', init: '0xFF', refin: false, refout: false,
+               xorout: '0x00', cover: ['counter', 'length', '@payload']},
+         length: {field: 'length', counts: 'frame'},
+         counter: {field: 'counter', max_gap: 2, timeout_ms: 0}},
+    pe: {name: 'pe',
+         fields: [{name: 'crc', bytes: 1}, {name: 'counter', bytes: 1},
+                  {name: 'length', bytes: 1}],
+         crc: {field: 'crc', width: 8, poly: '0x2F', init: '0xFF', refin: false, refout: false,
+               xorout: '0x00', cover: ['counter', 'length', '@payload']},
+         length: {field: 'length', counts: 'frame'},
+         counter: {field: 'counter', max_gap: 2, timeout_ms: 50}},
+  },
+  messages: [
+    {key_expr: 'demo/event', id: 21, publishers: ['src'], subscribers: ['dst'],
+     protection: {profile: 'ev', values: {}}},
+    {key_expr: 'demo/periodic', id: 22, publishers: ['src'], subscribers: ['dst'],
+     period_ms: 10, protection: {profile: 'pe', values: {}}},
+  ],
+}"#;
+
+#[test]
+fn an_event_message_never_times_out_and_a_periodic_one_still_does() {
+    let catalog = Catalog::parse(EVENT_AND_PERIODIC, LIMITS).expect("accepted");
+    let (src, dst) = (0, 1);
+    let (event, periodic) = (0, 1);
+    // A frame of `message` received, then received again `silence` ms later: the repetition is
+    // not a valid reception, so its timeout is judged against the first.
+    let repeated_after = |message: usize, silence: u64| -> Verdict {
+        let mut sender = catalog
+            .sender(message, src, SenderOptions::default())
+            .expect("made");
+        let mut receiver = catalog
+            .receiver(message, dst, LIMITS.sender_slots)
+            .expect("made");
+        let frame = sender.protect(0, b"v").expect("protects").bytes;
+        assert_eq!(
+            receiver.receive(0, &frame, 0).expect("judged").status,
+            Status::First
+        );
+        receiver.receive(0, &frame, silence).expect("judged")
+    };
+    let quiet = repeated_after(event, 60_000);
+    assert_eq!(quiet.status, Status::Repeated);
+    assert!(
+        !quiet.timeout,
+        "an event message has no limit on its silence"
+    );
+    assert_eq!(quiet.silence_ms, Some(60_000), "the silence is still told");
+    let late = repeated_after(periodic, 60_000);
+    assert_eq!(late.status, Status::Repeated);
+    assert!(late.timeout, "a periodic message keeps its limit");
+    assert!(
+        !repeated_after(periodic, 50).timeout,
+        "equal to the limit is not over it"
+    );
+}
+
 #[test]
 fn a_catalog_over_the_builds_message_limit_is_refused() {
     let tight = Limits {

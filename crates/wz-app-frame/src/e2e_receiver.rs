@@ -107,7 +107,8 @@ pub struct Verdict {
     /// See [`Verdict::kind`].
     pub sender: Option<u64>,
     /// The silence before the frame exceeded the profile's timeout (see
-    /// [`crate::e2e_judge`]); false for a frame judged in no stream.
+    /// [`crate::e2e_judge`]); false for a frame judged in no stream, and
+    /// always under a profile that states no timeout (`timeout_ms` 0).
     pub timeout: bool,
     /// The silence before the frame, when the stream has an instant to measure
     /// it from.

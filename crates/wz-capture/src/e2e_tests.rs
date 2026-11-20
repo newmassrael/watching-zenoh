@@ -1102,10 +1102,15 @@ fn the_counter_rule_is_validated() {
         .is_ok(),
         "the largest step a 2-byte counter can take is allowed"
     );
-    assert_refused(
-        &counter(r#"{"field": "seq", "max_gap": 10, "timeout_ms": 0}"#),
-        "/counter/timeout_ms",
-        "at least 1",
+    // 0 states that the silence has no limit (a profile of event streams).
+    assert_eq!(
+        Profile::parse(&counter(
+            r#"{"field": "seq", "max_gap": 10, "timeout_ms": 0}"#
+        ))
+        .expect("a profile may state no timeout")
+        .counter()
+        .timeout_ms,
+        0
     );
     assert_refused(
         &counter(r#"{"field": "len", "max_gap": 10, "timeout_ms": 1}"#),

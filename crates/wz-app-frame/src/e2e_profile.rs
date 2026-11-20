@@ -62,7 +62,10 @@
 //!   of the listed fields). Which of them a sender used is not on the wire, so
 //!   opening reports the length as INFORMATION beside the CRC verdict.
 //! * `counter` names the field the judge reads, the largest forward step it
-//!   accepts and the silence it tolerates.
+//!   accepts and the silence it tolerates. A `timeout_ms` of 0 states no limit
+//!   on the silence: a receiver never reports a timeout on a stream of the
+//!   profile, which is what a message sent on an event, with no period, needs.
+//!   A periodic message's profile states its limit (see [`crate::e2e_judge`]).
 //! * `slot` (optional) says which frames of a CAPTURE share one counter, for
 //!   the pipeline that keeps a judge per slot (`e2e_slots`, in the capture
 //!   crate); the stateless doors ignore it. A slot is the key expression the
@@ -318,7 +321,8 @@ pub struct CounterSpec {
     pub field: usize,
     /// The largest forward step that is not an error.
     pub max_gap: u64,
-    /// The longest silence between valid receptions that is not an error.
+    /// The longest silence between valid receptions that is not an error; 0
+    /// ([`JudgeConfig::NO_TIMEOUT`]) when no silence is.
     pub timeout_ms: u64,
     /// The largest `max_gap` a receiver may be given in place of the profile's
     /// own; `None` for the largest step the counter field can make.
@@ -1247,14 +1251,12 @@ fn read_counter(value: &Json5Value, fields: &[Field]) -> Result<CounterSpec, Doc
             ),
         ));
     }
-    let timeout_path = child(path, "timeout_ms");
-    let timeout_ms = read_uint(required(entries, "timeout_ms", path)?, &timeout_path)?;
-    if timeout_ms == 0 {
-        return Err(DocError::invalid(
-            timeout_path,
-            "timeout_ms is at least 1: a limit of zero would time out every gap",
-        ));
-    }
+    // Required, 0 included: a stream with no limit states it, so a profile that
+    // forgot the key is still refused rather than read as never timing out.
+    let timeout_ms = read_uint(
+        required(entries, "timeout_ms", path)?,
+        &child(path, "timeout_ms"),
+    )?;
     let max_gap_ceiling = match optional(entries, "max_gap_ceiling") {
         None => None,
         Some(v) => {

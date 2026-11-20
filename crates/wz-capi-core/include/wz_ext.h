@@ -829,7 +829,8 @@ typedef struct wz_ext_e2e_verdict_t {
   uint8_t failed;    /* WZ_EXT_E2E_FAILED_* bits */
   uint8_t has;       /* WZ_EXT_E2E_HAS_* bits */
   uint8_t timeout;   /* 1 when the silence before it exceeded the profile's
-                        timeout */
+                        timeout; never when the profile's timeout_ms is 0,
+                        which states no timeout */
   uint8_t unslotted; /* WZ_EXT_E2E_SLOTTED, _NOT_LISTED or _SLOTS_FULL */
   uint8_t reserved[3];
   uint64_t counter;

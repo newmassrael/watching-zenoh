@@ -125,7 +125,8 @@ pub struct wz_ext_e2e_verdict_t {
     pub failed: u8,
     /// The `WZ_EXT_E2E_HAS_*` bits.
     pub has: u8,
-    /// 1 when the silence before the frame exceeded the profile's timeout.
+    /// 1 when the silence before the frame exceeded the profile's timeout; never under a profile
+    /// whose `timeout_ms` is 0, which states no timeout.
     pub timeout: u8,
     /// For `WZ_EXT_E2E_UNSLOTTED`, why: `WZ_EXT_E2E_NOT_LISTED` or `_SLOTS_FULL`.
     pub unslotted: u8,
