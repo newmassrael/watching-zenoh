@@ -172,6 +172,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-coop/src/tests/local.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/local_query.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/one_face.rs` | excluded: test | Test-only file by its name. |
+| `crates/wz-capi-coop/src/tests/program_clock.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/queryable.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/replay.rs` | S7 | |
 | `crates/wz-capi-coop/src/tests/shared_key_ids.rs` | excluded: test | Test-only file by its name. |
@@ -268,6 +269,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-pico/src/string_array.rs` | S7 | |
 | `crates/wz-capi-pico/src/supervision.rs` | S7 | |
 | `crates/wz-capi-pico/src/sync.rs` | S7 | |
+| `crates/wz-capi-pico/src/time_base.rs` | S12 | |
 | `crates/wz-capi-pico/src/whatami.rs` | S7 | |
 | `crates/wz-capi-pico/src/write_filter.rs` | S7 | |
 | `crates/wz-capi-pico/src/zid.rs` | S7 | |
@@ -349,6 +351,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-node-time/src/node_clock.rs` | S9 | |
 | `crates/wz-node-time/src/node_clock/tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-node-time/src/standing_cell.rs` | S9 | |
+| `crates/wz-node-time/src/time_base.rs` | S9 | |
 | `crates/wz-node-time/src/timestamp_source.rs` | S9 | |
 | `crates/wz-node-time/src/timestamp_source/tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-oa-tc6/src/lib.rs` | S9 | |
