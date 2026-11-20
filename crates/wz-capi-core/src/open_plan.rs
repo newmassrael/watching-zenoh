@@ -255,6 +255,10 @@ pub fn session_defaults_of(node: &ZenohNodeConfig) -> Result<SessionDefaults, Op
         // The key ids the document's `wz/key-ids` states, read with its policies.
         #[cfg(feature = "shared-key-ids")]
         key_ids: node.key_ids.clone(),
+        // A document states no time base: one is the program's object, which only a door that
+        // takes it from the program hands an open.
+        #[cfg(feature = "time-base")]
+        time_base: None,
     })
 }
 

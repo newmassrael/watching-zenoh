@@ -4761,6 +4761,15 @@ pub fn open_blocking(
         accept,
         policy: session_policy,
     };
+    // The session's clock, which every face, its drive loop and its lease read: the program's time
+    // base when the defaults name one, held by the session's state for as long as it runs, and the
+    // system's otherwise.
+    #[cfg(feature = "time-base")]
+    let clock = match &session_defaults.time_base {
+        Some(time_base) => TokioTime::on_time_base(time_base.time()),
+        None => TokioTime::new(),
+    };
+    #[cfg(not(feature = "time-base"))]
     let clock = TokioTime::new();
     // R3074 -- where the nodes a peer is told of are posted. Made here because both ends are
     // needed before the drive thread starts: the registry's plane holds the sender, and the
