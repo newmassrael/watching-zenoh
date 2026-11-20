@@ -20772,22 +20772,31 @@ layer_s_pico_stability() {
             echo "  Layer S FAIL: valgrind is not on PATH, and WZ_S_REQUIRE is set" >&2
             return 1
         fi
-        echo "  Layer S: valgrind is not on PATH, so the leak checker's leg is NOT-MEASURED" \
-             "(WZ_S_REQUIRE=1 makes that a failure)"
+        echo "  Layer S: valgrind is not on PATH, so the leak checker's leg is NOT-MEASURED (WZ_S_REQUIRE=1 makes that a failure)"
         return 0
     fi
-    # The executable the leg above built. Cargo prints it relative to the workspace or absolute
-    # under an artifact root; the suffix is the same in both, and the prefix is ours (Layer C1bs).
+    # The executable the leg above built, as cargo names it in its `executable` field: an absolute
+    # path wherever the artifact root puts the target directory, so no prefix is guessed here.
     local bin
     wz_test_args wz-capi-pico stability
-    bin="$(cd crates && cargo test -p wz-capi-pico --features "$features" \
-        "${WZ_TEST_TARGET[@]}" --no-run --message-format=short 2>&1 \
-        | grep -oE 'target/debug/deps/stability-[a-f0-9]+' | tail -1)"
-    if [[ -z "$bin" ]]; then
-        echo "  Layer S FAIL: could not locate the built stress executable" >&2
+    if ! bin="$(cd crates && cargo test -p wz-capi-pico --features "$features" \
+        "${WZ_TEST_TARGET[@]}" --no-run --message-format=json 2>/dev/null \
+        | python3 -c 'import json, sys
+found = []
+for line in sys.stdin:
+    if not line.startswith("{"):
+        continue
+    msg = json.loads(line)
+    target = msg.get("target") or {}
+    if (msg.get("reason") == "compiler-artifact" and msg.get("executable")
+            and target.get("name") == "stability" and "test" in target.get("kind", [])):
+        found.append(msg["executable"])
+if len(found) != 1:
+    sys.exit(f"cargo named {len(found)} stress executable(s), not one")
+print(found[0])')" || [[ -z "$bin" ]]; then
+        echo "  Layer S FAIL: cargo named no single stress executable for the valgrind leg" >&2
         return 1
     fi
-    bin="$WZ_ARTIFACTS/crates/$bin"
     local out
     if ! out="$(WZ_STABILITY_CYCLES="${WZ_STABILITY_VALGRIND_CYCLES:-6}" WZ_STABILITY_TIME_SCALE=20 \
         valgrind --error-exitcode=97 --leak-check=full --errors-for-leak-kinds=definite \
