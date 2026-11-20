@@ -70,7 +70,7 @@ pub const CAPABILITIES: &[(&str, &[&str])] = &[
     ("replay-cache", &["core", "pico"]),
     ("message-catalog", &["core", "pico"]),
     ("app-transport", &["core", "pico"]),
-    ("time-base", &["core", "pico"]),
+    ("time-base", &["core", "pico", "c"]),
     ("shared-key-ids", &["core", "pico", "c"]),
     ("rx-callback-offload", &["core", "c"]),
     ("switch-doors", &["core", "c"]),

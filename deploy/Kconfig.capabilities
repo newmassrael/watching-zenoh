@@ -399,8 +399,8 @@ config WZ_CAP_TIME_BASE
 	default n
 	select WZ_CAP_UNSTABLE_API
 	help
-	  A time base the program supplies in place of the system's clock: the timers of a session opened from a config that names it (lease, keep-alive, handshake and the other deadlines) run on the program's time, which the program reads to the library and says when it has moved on (wz_ext_time_base_*, wz_ext_config_time_base, wz-own doors).
-	  Exported by: pico.
+	  A time base the program supplies in place of the system's clock: the timers of a session opened from a config that names it (lease, keep-alive, handshake and the other deadlines) run on the program's time, which the program reads to the library and says when it has moved on (wz_ext_time_base_* and wz_ext_config_time_base, wz_capi_c_time_base_* and wz_capi_c_config_time_base, wz-own doors).
+	  Exported by: pico, c.
 
 config WZ_CAP_SHARED_KEY_IDS
 	bool "shared-key-ids"
