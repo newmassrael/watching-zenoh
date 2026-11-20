@@ -58,16 +58,26 @@
 //!
 //! ## The bytes
 //!
-//! Written as the capture crate's writer (`proto_encode`) writes the same
-//! message: fields in ascending number; a field without presence left out at
-//! its default (a `float` or `double` whose bits are all zero, so `-0.0` is
-//! written); a repeated numeric, `bool` or enum field packed in proto3 unless it
-//! says `[packed = false]` and unpacked in proto2 unless it says
-//! `[packed = true]`; `int32` and an enum sign-extended (a negative one is ten
-//! bytes), `sint32` and `sint64` zigzagged. A proto2 `required` field that is not
-//! set refuses the encoding. Unlike that writer, this one takes no values from
-//! JSON and so no `(nanopb).int_size` narrowing: the values are the program's,
-//! held to the field's own type.
+//! Written by the workspace's one protobuf writer ([`crate::proto_write`]), the
+//! one the capture crate's writer of values given as JSON writes through too:
+//! fields in ascending number; a field without presence left out at its default
+//! (a `float` or `double` whose bits are all zero, so `-0.0` is written); a
+//! repeated numeric, `bool` or enum field packed in proto3 unless it says
+//! `[packed = false]` and unpacked in proto2 unless it says `[packed = true]`;
+//! `int32` and an enum sign-extended (a negative one is ten bytes), `sint32` and
+//! `sint64` zigzagged. A proto2 `required` field that is not set refuses the
+//! encoding.
+//!
+//! ## Narrowing
+//!
+//! An integer is held to its field's type unless the payload was made for a
+//! receiver that links nanopb ([`Payload::narrowed`] with
+//! [`Narrowing::NanopbIntSize`]): then a varint field takes only what the C
+//! integer its `(nanopb).int_size` chooses can hold, and a field whose nanopb
+//! options leave that unknown (an `int_size` the reader cannot read, a
+//! `type_override`) takes no integer at all. The range is judged where the value
+//! is set, so a value the receiver would refuse is refused to the program.
+//! Bytes a payload decodes are taken as they are.
 //!
 //! Decoding replaces the payload's values with those of the bytes, read as a
 //! protobuf parser reads them: the last occurrence of a singular field wins,
@@ -96,13 +106,10 @@ use core::fmt;
 use crate::proto_decode::{
     DecodedField, SchemaMessage, SchemaSet, Value, WireError, MAX_DECODE_DEPTH,
 };
-use crate::proto_parse::{Label, OptionValue, ScalarKind, Syntax};
+use crate::proto_parse::{Label, ScalarKind, Syntax};
+use crate::proto_range::{RangeRefusal, RangeSource, ValueRange};
 use crate::proto_schema::{FieldKind, Fld, Msg};
-
-const WIRE_VARINT: u64 = 0;
-const WIRE_I64: u64 = 1;
-const WIRE_LEN: u64 = 2;
-const WIRE_I32: u64 = 5;
+use crate::proto_write::{self, has_presence, Narrowing, Wire};
 
 /// A value as the program gives it to a field.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -194,7 +201,9 @@ pub enum Refusal {
     /// field of an encoding, or a field of a message that is not there; `at` is
     /// the first part of the path that is absent.
     Absent { path: String, at: String },
-    /// The schema states an option of a field the writer cannot act on.
+    /// The schema states an option of a field the writer cannot act on: a
+    /// `packed` it cannot follow, or, for a payload that narrows by nanopb, an
+    /// integer field whose nanopb options leave its range unknown.
     Schema { path: String, reason: String },
     /// The bytes are not a message of the schema.
     Wire(WireError),
@@ -401,29 +410,6 @@ fn type_name(schema: &SchemaSet, field: &Fld) -> String {
     }
 }
 
-/// Whether a field has presence: whether "not set" is a state of its own.
-fn has_presence(holder: &Msg, field: &Fld) -> bool {
-    field.label != Label::Implicit
-        || field.oneof.is_some()
-        || holder.syntax == Syntax::Proto2
-        || matches!(field.kind, FieldKind::Message(_))
-}
-
-/// The integers a scalar kind holds.
-fn bounds(kind: ScalarKind) -> Option<(i128, i128)> {
-    match kind {
-        ScalarKind::Int32 | ScalarKind::Sint32 | ScalarKind::Sfixed32 => {
-            Some((i128::from(i32::MIN), i128::from(i32::MAX)))
-        }
-        ScalarKind::Int64 | ScalarKind::Sint64 | ScalarKind::Sfixed64 => {
-            Some((i128::from(i64::MIN), i128::from(i64::MAX)))
-        }
-        ScalarKind::Uint32 | ScalarKind::Fixed32 => Some((0, i128::from(u32::MAX))),
-        ScalarKind::Uint64 | ScalarKind::Fixed64 => Some((0, i128::from(u64::MAX))),
-        _ => None,
-    }
-}
-
 fn unsigned(kind: ScalarKind) -> bool {
     matches!(
         kind,
@@ -431,8 +417,48 @@ fn unsigned(kind: ScalarKind) -> bool {
     )
 }
 
-/// The value `given` as field `field` holds it.
-fn held_of(schema: &SchemaSet, field: &Fld, given: Given<'_>, path: &str) -> Result<Held, Refusal> {
+/// The integers field `field` of `holder` takes under `narrowing`, for an
+/// integer kind; the refusal when its nanopb options leave the range unknown.
+fn integer_range(
+    schema: &SchemaSet,
+    holder: &Msg,
+    field: &Fld,
+    kind: ScalarKind,
+    narrowing: Narrowing,
+    path: &str,
+) -> Result<ValueRange, Refusal> {
+    match narrowing.field_range(schema, holder, field) {
+        Ok(range) => Ok(range),
+        Err(RangeRefusal::UnmodelledOption) => Err(Refusal::Schema {
+            path: String::from(path),
+            reason: format!(
+                "the field's nanopb options (an int_size this reader cannot read, or a \
+                 type_override) leave unknown the range of the values nanopb takes for this {}, \
+                 so no value is set",
+                kind.keyword()
+            ),
+        }),
+        // An integer kind always has its type's range; the type is the honest
+        // bound should the judgement ever say otherwise.
+        Err(RangeRefusal::NotAnInteger | RangeRefusal::Enum | RangeRefusal::Map) => {
+            ValueRange::of_type(kind).ok_or_else(|| Refusal::Type {
+                path: String::from(path),
+                reason: format!("the field is {}, which holds no integer", kind.keyword()),
+            })
+        }
+    }
+}
+
+/// The value `given` as field `field` of `holder` holds it, an integer held to
+/// the range `narrowing` chooses.
+fn held_of(
+    schema: &SchemaSet,
+    holder: &Msg,
+    field: &Fld,
+    given: Given<'_>,
+    narrowing: Narrowing,
+    path: &str,
+) -> Result<Held, Refusal> {
     let mismatch = || Refusal::Type {
         path: String::from(path),
         reason: format!(
@@ -452,15 +478,24 @@ fn held_of(schema: &SchemaSet, field: &Fld, given: Given<'_>, path: &str) -> Res
     };
     match field.kind {
         FieldKind::Scalar(kind) => {
-            if let Some((low, high)) = bounds(kind) {
+            if ValueRange::of_type(kind).is_some() {
                 let Some(v) = integer else {
                     return Err(mismatch());
                 };
+                let ValueRange { low, high, source } =
+                    integer_range(schema, holder, field, kind, narrowing, path)?;
                 if !(low..=high).contains(&v) {
-                    return Err(range(format!(
-                        "{v} does not fit a {}, whose values are {low} to {high}",
-                        kind.keyword()
-                    )));
+                    return Err(range(match source {
+                        RangeSource::Type => format!(
+                            "{v} does not fit a {}, whose values are {low} to {high}",
+                            kind.keyword()
+                        ),
+                        RangeSource::NanopbIntSize { bits } => format!(
+                            "{v} does not fit a {} with (nanopb).int_size = IS_{bits}, whose \
+                             values are {low} to {high}",
+                            kind.keyword()
+                        ),
+                    }));
                 }
                 return Ok(if unsigned(kind) {
                     Held::Uint(v as u64)
@@ -632,6 +667,7 @@ pub struct Payload<S> {
     schema: S,
     message: SchemaMessage,
     fields: Fields,
+    narrowing: Narrowing,
 }
 
 impl<S> fmt::Debug for Payload<S> {
@@ -645,12 +681,20 @@ impl<S> fmt::Debug for Payload<S> {
 
 impl<S: Borrow<SchemaSet>> Payload<S> {
     /// An empty payload of `message`, which `schema` found
-    /// ([`SchemaSet::message`]).
+    /// ([`SchemaSet::message`]), whose integers are held to their fields' types.
     pub fn new(schema: S, message: SchemaMessage) -> Self {
+        Self::narrowed(schema, message, Narrowing::Type)
+    }
+
+    /// An empty payload of `message` whose integers are held to the range
+    /// `narrowing` chooses: [`Narrowing::NanopbIntSize`] for a receiver that
+    /// links nanopb. See the module documentation.
+    pub fn narrowed(schema: S, message: SchemaMessage, narrowing: Narrowing) -> Self {
         Self {
             schema,
             message,
             fields: Fields::default(),
+            narrowing,
         }
     }
 
@@ -664,8 +708,9 @@ impl<S: Borrow<SchemaSet>> Payload<S> {
     ///
     /// # Errors
     ///
-    /// [`Refusal::Path`], [`Refusal::Type`] or [`Refusal::Range`]; the payload
-    /// is then as it was.
+    /// [`Refusal::Path`], [`Refusal::Type`] or [`Refusal::Range`], and
+    /// [`Refusal::Schema`] for an integer field whose range the payload's
+    /// narrowing cannot know; the payload is then as it was.
     pub fn set(&mut self, path: &str, value: Given<'_>) -> Result<(), Refusal> {
         let schema: &SchemaSet = self.schema.borrow();
         let steps = steps(schema, schema.linked(self.message), path)?;
@@ -675,7 +720,7 @@ impl<S: Borrow<SchemaSet>> Payload<S> {
         if last.repeated() && last.index.is_none() {
             return Err(list_named(path, last));
         }
-        let held = held_of(schema, last.field, value, path)?;
+        let held = held_of(schema, last.holder, last.field, value, self.narrowing, path)?;
         reach(&self.fields, &steps, path)?;
         let mut fields = &mut self.fields;
         for step in inner {
@@ -812,7 +857,8 @@ impl<S: Borrow<SchemaSet>> Payload<S> {
         Ok(())
     }
 
-    /// Clear every field: the payload is as [`Payload::new`] made it.
+    /// Clear every field: the payload is as [`Payload::new`] or
+    /// [`Payload::narrowed`] made it, its narrowing kept.
     pub fn reset(&mut self) {
         self.fields = Fields::default();
     }
@@ -967,114 +1013,30 @@ fn descend<'f>(fields: &'f mut Fields, step: &Step<'_>) -> &'f mut Fields {
 
 // ---- the bytes ------------------------------------------------------------
 
-fn put_varint(out: &mut Vec<u8>, mut v: u64) {
-    while v >= 0x80 {
-        out.push((v & 0x7f) as u8 | 0x80);
-        v >>= 7;
-    }
-    out.push(v as u8);
-}
-
-fn put_len(out: &mut Vec<u8>, bytes: &[u8]) {
-    put_varint(out, bytes.len() as u64);
-    out.extend_from_slice(bytes);
-}
-
-/// The wire type a value of a field of this kind is written with, alone.
-fn wire_of(kind: FieldKind) -> u64 {
-    match kind {
-        FieldKind::Scalar(ScalarKind::Fixed64 | ScalarKind::Sfixed64 | ScalarKind::Double) => {
-            WIRE_I64
-        }
-        FieldKind::Scalar(ScalarKind::Fixed32 | ScalarKind::Sfixed32 | ScalarKind::Float) => {
-            WIRE_I32
-        }
-        FieldKind::Scalar(ScalarKind::String | ScalarKind::Bytes)
-        | FieldKind::Message(_)
-        | FieldKind::Map { .. }
-        | FieldKind::Group => WIRE_LEN,
-        FieldKind::Scalar(_) | FieldKind::Enum(_) => WIRE_VARINT,
-    }
-}
-
-/// Whether the value is its type's default: zero, all bits clear, or empty.
-fn is_default(held: &Held) -> bool {
-    match held {
-        Held::Int(v) => *v == 0,
-        Held::Uint(v) => *v == 0,
-        Held::Float(v) => v.to_bits() == 0,
-        Held::Double(v) => v.to_bits() == 0,
-        Held::Bool(v) => !*v,
-        Held::Text(v) => v.is_empty(),
-        Held::Bytes(v) => v.is_empty(),
-        Held::Message(_) => false,
-    }
-}
-
-/// Whether the repeated field is written packed: the message's syntax gives
-/// the default and `[packed = ...]` overrides it.
-fn packed(holder: &Msg, field: &Fld, path: &str) -> Result<bool, Refusal> {
-    let packable = match field.kind {
-        FieldKind::Enum(_) => true,
-        FieldKind::Scalar(kind) => !matches!(kind, ScalarKind::String | ScalarKind::Bytes),
-        FieldKind::Message(_) | FieldKind::Map { .. } | FieldKind::Group => false,
-    };
-    let default = holder.syntax == Syntax::Proto3 && packable;
-    let Some(option) = field.options.iter().find(|o| o.name == "packed") else {
-        return Ok(default);
-    };
-    match &option.value {
-        OptionValue::Ident(word) if word == "false" => Ok(false),
-        OptionValue::Ident(word) if word == "true" && packable => Ok(true),
-        _ => Err(Refusal::Schema {
-            path: String::from(path),
-            reason: format!(
-                "`{}` states `packed`, which takes `true` or `false`, and `true` only on a \
-                 repeated numeric, bool or enum field",
-                field.name
-            ),
-        }),
-    }
-}
-
-/// The value without its tag.
-fn put_value(
+/// The wire form of one value of `field`, from the one writer.
+fn wire_of<'h>(
     schema: &SchemaSet,
     field: &Fld,
-    held: &Held,
-    out: &mut Vec<u8>,
+    held: &'h Held,
     path: &str,
-) -> Result<(), Refusal> {
-    match (field.kind, held) {
-        (FieldKind::Scalar(ScalarKind::Sint32), Held::Int(v)) => {
-            let n = *v as i32;
-            put_varint(out, u64::from(((n << 1) ^ (n >> 31)) as u32));
+) -> Result<Wire<'h>, Refusal> {
+    let integer =
+        |kind: ScalarKind, v: i128| ValueRange::of_type(kind).map(|_| Wire::integer(kind, v));
+    let wire = match (field.kind, held) {
+        (FieldKind::Scalar(kind), Held::Int(v)) => integer(kind, i128::from(*v)),
+        (FieldKind::Scalar(kind), Held::Uint(v)) => integer(kind, i128::from(*v)),
+        (FieldKind::Enum(_), Held::Int(v)) => i32::try_from(*v).ok().map(Wire::enum_number),
+        (FieldKind::Scalar(ScalarKind::Float), Held::Float(v)) => Some(Wire::Fixed32(v.to_bits())),
+        (FieldKind::Scalar(ScalarKind::Double), Held::Double(v)) => {
+            Some(Wire::Fixed64(v.to_bits()))
         }
-        (FieldKind::Scalar(ScalarKind::Sint64), Held::Int(v)) => {
-            put_varint(out, ((*v << 1) ^ (*v >> 63)) as u64);
+        (FieldKind::Scalar(ScalarKind::Bool), Held::Bool(v)) => Some(Wire::Varint(u64::from(*v))),
+        (FieldKind::Scalar(ScalarKind::String), Held::Text(v)) => {
+            Some(Wire::delimited(v.as_bytes()))
         }
-        (FieldKind::Scalar(ScalarKind::Sfixed32), Held::Int(v)) => {
-            out.extend_from_slice(&(*v as i32).to_le_bytes());
+        (FieldKind::Scalar(ScalarKind::Bytes), Held::Bytes(v)) => {
+            Some(Wire::delimited(v.as_slice()))
         }
-        (FieldKind::Scalar(ScalarKind::Sfixed64), Held::Int(v)) => {
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        (FieldKind::Scalar(ScalarKind::Fixed32), Held::Uint(v)) => {
-            out.extend_from_slice(&(*v as u32).to_le_bytes());
-        }
-        (FieldKind::Scalar(ScalarKind::Fixed64), Held::Uint(v)) => {
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        // `int32`, `int64` and an enum: the value sign-extended to 64 bits.
-        (FieldKind::Scalar(_) | FieldKind::Enum(_), Held::Int(v)) => put_varint(out, *v as u64),
-        (FieldKind::Scalar(_), Held::Uint(v)) => put_varint(out, *v),
-        (FieldKind::Scalar(_), Held::Float(v)) => out.extend_from_slice(&v.to_bits().to_le_bytes()),
-        (FieldKind::Scalar(_), Held::Double(v)) => {
-            out.extend_from_slice(&v.to_bits().to_le_bytes());
-        }
-        (FieldKind::Scalar(_), Held::Bool(v)) => put_varint(out, u64::from(*v)),
-        (FieldKind::Scalar(_), Held::Text(v)) => put_len(out, v.as_bytes()),
-        (FieldKind::Scalar(_), Held::Bytes(v)) => put_len(out, v),
         (FieldKind::Message(m), Held::Message(inner)) => {
             let Some(msg) = schema.linked_at(m) else {
                 return Err(Refusal::Schema {
@@ -1084,16 +1046,14 @@ fn put_value(
             };
             let mut body = Vec::new();
             write_message(schema, msg, inner, path, &mut body)?;
-            put_len(out, &body);
+            Some(Wire::delimited(body))
         }
-        _ => {
-            return Err(Refusal::Type {
-                path: String::from(path),
-                reason: format!("the field is {}", type_name(schema, field)),
-            })
-        }
-    }
-    Ok(())
+        _ => None,
+    };
+    wire.ok_or_else(|| Refusal::Type {
+        path: String::from(path),
+        reason: format!("the field is {}", type_name(schema, field)),
+    })
 }
 
 /// The path of field `name` inside the message at `prefix`.
@@ -1127,29 +1087,26 @@ fn write_message(
             continue;
         };
         let here = child(prefix, &field.name);
-        let tag = (number << 3) | wire_of(field.kind);
         if field.label == Label::Repeated {
             if list.is_empty() {
                 continue;
             }
-            if packed(msg, field, &here)? {
-                let mut run = Vec::new();
-                for (i, held) in list.iter().enumerate() {
-                    put_value(schema, field, held, &mut run, &format!("{here}[{i}]"))?;
-                }
-                put_varint(out, (number << 3) | WIRE_LEN);
-                put_len(out, &run);
-            } else {
-                for (i, held) in list.iter().enumerate() {
-                    put_varint(out, tag);
-                    put_value(schema, field, held, out, &format!("{here}[{i}]"))?;
-                }
+            let packed = proto_write::packed(msg, field).map_err(|_| Refusal::Schema {
+                path: here.clone(),
+                reason: format!(
+                    "`{}` states `packed`, which takes `true` or `false`, and `true` only on a \
+                     repeated numeric, bool or enum field",
+                    field.name
+                ),
+            })?;
+            let mut elements = Vec::with_capacity(list.len());
+            for (i, held) in list.iter().enumerate() {
+                elements.push(wire_of(schema, field, held, &format!("{here}[{i}]"))?);
             }
+            proto_write::put_repeated(out, number, packed, &elements);
         } else if let Some(held) = list.last() {
-            if has_presence(msg, field) || !is_default(held) {
-                put_varint(out, tag);
-                put_value(schema, field, held, out, &here)?;
-            }
+            let wire = wire_of(schema, field, held, &here)?;
+            proto_write::put_singular(out, number, has_presence(msg, field), &wire);
         }
     }
     out.extend_from_slice(&fields.kept);

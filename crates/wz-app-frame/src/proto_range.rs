@@ -2,8 +2,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! The integers a field of a `.proto` schema may hold: the ONE place that range
-//! is judged, for the writer that refuses a value outside it and the
-//! description document of the capture crate that shows it.
+//! is judged, for the writer that refuses a value outside it when it narrows
+//! ([`crate::proto_write::Narrowing`]) and the description document of the
+//! capture crate that shows it.
 //!
 //! ## Why the type is not the whole answer
 //!

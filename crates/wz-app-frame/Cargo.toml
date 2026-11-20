@@ -38,9 +38,11 @@ default = ["alloc"]
 alloc = ["dep:wz-session-core", "wz-session-core/alloc"]
 
 # The `.proto` schema reader and the typed reader of a payload (`proto_lex`, `proto_parse`,
-# `proto_schema`, `proto_decode`): what a node that reads a payload by its fields needs, and what the
-# capture crate's schema documents and payload formats read, re-exported there at the paths they had.
-# Off, a node that only frames its payloads links none of it.
+# `proto_schema`, `proto_decode`), the one writer of the wire format (`proto_write`), and the nanopb
+# options and integer ranges a writer may narrow by (`proto_nanopb`, `proto_range`): what a node that
+# reads or writes a payload by its fields needs, and what the capture crate's schema documents,
+# payload formats and value writer read, re-exported there at the paths they had. Off, a node that
+# only frames its payloads links none of it.
 proto = ["alloc"]
 
 # `instance_key`: which instance of a message a sample is, read from fields of its payload through

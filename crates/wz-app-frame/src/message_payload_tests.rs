@@ -16,6 +16,7 @@ use alloc::vec::Vec;
 use crate::message_payload::{Given, Got, Payload, Refusal, Wanted};
 use crate::proto_decode::SchemaSet;
 use crate::proto_schema::ProtoFile;
+use crate::proto_write::Narrowing;
 
 const SHAPES: &str = r#"
 syntax = "proto3";
@@ -572,4 +573,152 @@ fn a_refusal_says_what_is_absent() {
         alloc::format!("{why}"),
         "`origin.x` is not set: `origin` is absent"
     );
+}
+
+const NARROW: &str = r#"
+syntax = "proto3";
+package syn.narrow;
+option (nanopb_fileopt).int_size = IS_16;
+
+enum Mood {
+  MOOD_NONE = 0;
+  MOOD_HIGH = 300;
+}
+
+message Gauge {
+  uint32 by_file = 1;
+  uint32 small = 2 [(nanopb).int_size = IS_8];
+  sint32 signed_small = 3 [(nanopb).int_size = IS_8];
+  uint32 odd = 4 [(nanopb).int_size = IS_12];
+  fixed32 fixed = 5 [(nanopb).int_size = IS_8];
+  uint32 swapped = 6 [(nanopb).type_override = TYPE_UINT64];
+  Mood mood = 7 [(nanopb).int_size = IS_8];
+  repeated uint32 levels = 8 [(nanopb).int_size = IS_8];
+  double level = 9;
+}
+"#;
+
+fn narrow_schema() -> SchemaSet {
+    let files = [ProtoFile {
+        name: "syn/narrow.proto",
+        text: NARROW.as_bytes(),
+    }];
+    SchemaSet::read(&files).expect("the synthetic schema reads")
+}
+
+fn narrowed(schema: &SchemaSet) -> Payload<&SchemaSet> {
+    let gauge = schema
+        .message("syn.narrow.Gauge")
+        .expect("the message is in the schema");
+    Payload::narrowed(schema, gauge, Narrowing::NanopbIntSize)
+}
+
+#[test]
+fn a_narrowed_payload_holds_an_integer_to_its_nanopb_width() {
+    let schema = narrow_schema();
+    let mut p = narrowed(&schema);
+    set(&mut p, "small", Given::Unsigned(255));
+    assert_eq!(
+        p.set("small", Given::Unsigned(256)),
+        Err(Refusal::Range {
+            path: String::from("small"),
+            reason: String::from(
+                "256 does not fit a uint32 with (nanopb).int_size = IS_8, whose values are 0 \
+                 to 255"
+            ),
+        })
+    );
+    // The refused value changed nothing.
+    assert_eq!(p.get("small", Wanted::Unsigned), Ok(Got::Unsigned(255)));
+    set(&mut p, "signed_small", Given::Signed(-128));
+    assert!(matches!(
+        p.set("signed_small", Given::Signed(128)),
+        Err(Refusal::Range { .. })
+    ));
+    // The file's option narrows a field that states none.
+    set(&mut p, "by_file", Given::Unsigned(65_535));
+    assert!(matches!(
+        p.set("by_file", Given::Unsigned(65_536)),
+        Err(Refusal::Range { .. })
+    ));
+    // A fixed width is not narrowed, and an element is held as its field is.
+    set(&mut p, "fixed", Given::Unsigned(u64::from(u32::MAX)));
+    assert!(matches!(
+        p.set("levels[0]", Given::Unsigned(256)),
+        Err(Refusal::Range { .. })
+    ));
+    assert_eq!(p.count("levels"), Ok(0));
+    // An enum takes its own values, whatever its int_size.
+    set(&mut p, "mood", Given::Text("MOOD_HIGH"));
+    assert_eq!(
+        bytes(&p),
+        [
+            0x08, 0xFF, 0xFF, 0x03, // by_file: 65535
+            0x10, 0xFF, 0x01, // small: 255
+            0x18, 0xFF, 0x01, // signed_small: -128, zigzagged
+            0x2D, 0xFF, 0xFF, 0xFF, 0xFF, // fixed
+            0x38, 0xAC, 0x02, // mood: 300
+        ]
+    );
+}
+
+#[test]
+fn a_narrowed_payload_refuses_an_integer_whose_nanopb_width_is_unknown() {
+    let schema = narrow_schema();
+    let mut p = narrowed(&schema);
+    for path in ["odd", "swapped"] {
+        assert!(
+            matches!(p.set(path, Given::Unsigned(1)), Err(Refusal::Schema { .. })),
+            "{path}"
+        );
+    }
+    // A field that holds no integer is not judged by its nanopb options.
+    set(&mut p, "level", Given::Real(0.5));
+    assert_eq!(
+        bytes(&p),
+        [0x49, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xE0, 0x3F]
+    );
+}
+
+#[test]
+fn a_payload_that_does_not_narrow_holds_an_integer_to_its_type() {
+    let schema = narrow_schema();
+    let mut p = payload(&schema, "syn.narrow.Gauge");
+    set(&mut p, "small", Given::Unsigned(256));
+    set(&mut p, "odd", Given::Unsigned(1));
+    set(&mut p, "swapped", Given::Unsigned(u64::from(u32::MAX)));
+    assert_eq!(
+        p.set("small", Given::Unsigned(1 << 32)),
+        Err(Refusal::Range {
+            path: String::from("small"),
+            reason: String::from(
+                "4294967296 does not fit a uint32, whose values are 0 to 4294967295"
+            ),
+        })
+    );
+    assert_eq!(
+        bytes(&p),
+        [
+            0x10, 0x80, 0x02, // small: 256
+            0x20, 0x01, // odd
+            0x30, 0xFF, 0xFF, 0xFF, 0xFF, 0x0F, // swapped
+        ]
+    );
+}
+
+#[test]
+fn a_narrowed_payload_keeps_its_narrowing_and_decodes_bytes_as_they_are() {
+    let schema = narrow_schema();
+    let mut p = narrowed(&schema);
+    set(&mut p, "small", Given::Unsigned(7));
+    p.reset();
+    assert!(matches!(
+        p.set("small", Given::Unsigned(256)),
+        Err(Refusal::Range { .. })
+    ));
+    assert!(bytes(&p).is_empty());
+    // Bytes are the sender's: a value past the width is read, not judged.
+    p.decode(&[0x10, 0x80, 0x02]).expect("the bytes decode");
+    assert_eq!(p.get("small", Wanted::Unsigned), Ok(Got::Unsigned(256)));
+    assert_eq!(bytes(&p), [0x10, 0x80, 0x02]);
 }
