@@ -1178,6 +1178,15 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             );
             #[cfg(not(feature = "connectivity"))]
             let ext = crate::session_ext::PicoSessionExt::new(session_mode, &zid, policy);
+            // The session's own clock, which pico always gives, was refused: the bound
+            // `UHLC_MAX_DELTA_MS` states is one it does not honour. The open fails as it does for
+            // a stated value the build refuses, after the engine's session is closed.
+            #[cfg(any(feature = "advanced", feature = "clock-source"))]
+            if ext.clock_refused().is_some() {
+                drop(ext);
+                drive.close();
+                return crate::result::Z_ERR_CONFIG_INVALID_VALUE;
+            }
             #[cfg(feature = "admin-space")]
             let ext = ext.with_transport_endpoint(transport_endpoint);
             let handle = PicoSessionHandle::new(drive, ext);
@@ -1201,6 +1210,9 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
         Err(OpenError::DriveFailed) => Z_ERR_GENERIC,
         Err(OpenError::LinkFailed) => crate::result::Z_ERR_TRANSPORT_OPEN_FAILED,
         Err(OpenError::SchemeUnknown) => crate::result::Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN,
+        // The node's clock was refused for the bound `UHLC_MAX_DELTA_MS` states: a stated value
+        // the open cannot honour, answered as a refused policy statement is.
+        Err(OpenError::ClockRefused(_)) => crate::result::Z_ERR_CONFIG_INVALID_VALUE,
     }
 }
 
@@ -1355,6 +1367,14 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     let ext = crate::session_ext::PicoSessionExt::new(dial_whatami, &zid, policy, &drive.engine());
     #[cfg(not(feature = "connectivity"))]
     let ext = crate::session_ext::PicoSessionExt::new(dial_whatami, &zid, policy);
+    // A refused session clock fails the open as the tokio engine's does, the engine's session
+    // closed first.
+    #[cfg(any(feature = "advanced", feature = "clock-source"))]
+    if ext.clock_refused().is_some() {
+        drop(ext);
+        drive.close();
+        return crate::result::Z_ERR_CONFIG_INVALID_VALUE;
+    }
     #[cfg(feature = "admin-space")]
     let ext = ext.with_transport_endpoint(transport_endpoint);
     let handle = PicoSessionHandle::new(drive, ext);

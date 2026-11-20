@@ -629,6 +629,9 @@ pub(crate) fn open_router_blocking(
     // The node's machines read the snapshot the open resolved, as its links do.
     let forwarder =
         RouterForwarder::for_node(role.whatami(), own_zid, timestamping, &session_policy);
+    // The forwarder built the node's clock: a stated bound it refused fails the open here, before
+    // any listener is bound, as the registry's open does.
+    refuse_a_refused_clock(&forwarder.node_hlc())?;
     #[cfg(feature = "routing-namespace")]
     let forwarder = match namespace {
         Some(prefix) => forwarder.with_local_namespace(prefix),

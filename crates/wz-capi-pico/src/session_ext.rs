@@ -79,6 +79,10 @@ impl PicoSessionExt {
     /// not per listener: pico dispatches a peer's arrival or departure to every
     /// listener itself, in an order of its own (see `Connectivity`), and a
     /// registration per listener would leave that order to the engine.
+    ///
+    /// Its clock may have been refused (`UHLC_MAX_DELTA_MS` states a bound the clock does not
+    /// honour): the open asks `clock_refused` and refuses such a session, which would stamp
+    /// nothing in place of the clock pico always gives one. Dropping it lets go of the watch.
     pub(crate) fn new(
         mode: WhatAmI,
         zid: &[u8],
@@ -122,6 +126,14 @@ impl PicoSessionExt {
             #[cfg(feature = "query")]
             policy,
         }
+    }
+
+    /// Why the session's clock was refused (`NodeHlc::clock_refused`): the bound
+    /// `UHLC_MAX_DELTA_MS` states is one the clock does not honour. `None` for a clock that was
+    /// built. The open refuses a session for which this is `Some`.
+    #[cfg(any(feature = "advanced", feature = "clock-source"))]
+    pub(crate) fn clock_refused(&self) -> Option<&wz_node_time::node_clock::MaxDeltaRefused> {
+        self.hlc.clock_refused()
     }
 
     /// The session was closed: let go of its connectivity listeners, which runs their closures'
