@@ -1567,6 +1567,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 transport,
                 params,
                 policy: self.policy,
+                // A message the session puts on the group waits for room by running the session's
+                // tasks, the group's among them, on the session's clock.
+                pace: Rc::new(group::SessionPace {
+                    local: self.local.clone(),
+                    clock: self.clock.clone(),
+                }),
                 #[cfg(feature = "queryable")]
                 generation,
                 #[cfg(feature = "connectivity")]
@@ -1579,6 +1585,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             return Err(OpenError::Group(format!(
                 "{endpoint}: the group's link did not open"
             )));
+        }
+        // A droppable publish that finds the session held asks the group's socket for room as it
+        // asks a link's, and its wait goes with the face.
+        if let Some(wait) = face.room() {
+            self.rooms.hold(wait);
         }
         Ok(face)
     }
@@ -2183,6 +2194,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let deadline_us = core.open_deadline_us();
         core.push_opening(id, wire, deadline_us);
         Ok(id)
+    }
+
+    /// How many messages of `priority` the session put on its groups were dropped for want of
+    /// room on the group's queue.
+    #[cfg(all(test, feature = "group"))]
+    pub(crate) fn group_congestion_drops(&self, priority: wz_session_core::qos::Priority) -> u32 {
+        self.live().map_or(0, |core| {
+            core.0
+                .groups
+                .iter()
+                .map(|group| group.congestion_drops(priority))
+                .sum()
+        })
     }
 
     /// The endpoints the session listens on, as bound: a port the config named as 0 is the one

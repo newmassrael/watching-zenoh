@@ -782,3 +782,186 @@ mod mapped {
         SessionDrive::close(&*first);
     }
 }
+
+/// A member whose group socket fills: the session's puts follow the stage rule the tokio
+/// engine's group does, on a queue bounded by its lanes. No read task runs, so what moves the
+/// group's task is the session's own puts.
+mod congested {
+    use std::sync::atomic::AtomicBool;
+
+    use wz_session_core::qos::{CongestionControl, Priority};
+    use wz_session_core::session_init_params::TxQueueConf;
+
+    use super::*;
+
+    /// What a droppable put waits for room, at most.
+    const DROP_WAIT: Duration = Duration::from_millis(20);
+    /// What a blocking put waits for room, at most.
+    const CLOSE_WAIT: Duration = Duration::from_millis(300);
+    /// A payload two of which fill a lane of one 2 KiB batch.
+    const PAYLOAD: [u8; 1_500] = [0x5a; 1_500];
+
+    /// A stack whose group socket takes every datagram until it is told it is full, and then
+    /// none, answering would-block, until it is told it is writable again.
+    #[derive(Default)]
+    struct Filling {
+        full: AtomicBool,
+        sent: AtomicUsize,
+        closes: AtomicUsize,
+        link: Mutex<Option<LinkHandle>>,
+    }
+
+    struct FillingPort(Arc<Filling>);
+
+    impl AppPort for FillingPort {
+        fn open(&self, link: LinkHandle, kind: AppLinkKind, locator: &str) -> ProgramOpen {
+            if kind != AppLinkKind::Group || locator != GROUP {
+                return ProgramOpen::Refused;
+            }
+            *self.0.link.lock().unwrap() = Some(link);
+            ProgramOpen::Up
+        }
+
+        fn send(&self, _link: LinkHandle, bytes: &[u8]) -> ProgramSend {
+            if self.0.full.load(Ordering::SeqCst) {
+                return ProgramSend::WouldBlock;
+            }
+            self.0.sent.fetch_add(1, Ordering::SeqCst);
+            ProgramSend::Wrote(bytes.len())
+        }
+
+        fn close(&self, _link: LinkHandle) {
+            self.0.closes.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// A member over a filling stack whose lanes hold one batch each, with the two waits above.
+    fn open_filling() -> (Arc<Engine>, Arc<Filling>, Arc<AppTransport>) {
+        let stack = Arc::new(Filling::default());
+        let transport = Arc::new(AppTransport::new(
+            Box::new(Table(Mutex::new(AppLinkTable::new()))),
+            Box::new(FillingPort(Arc::clone(&stack))),
+        ));
+        let config = CoopConfig {
+            tx_queue: TxQueueConf {
+                sizes: [1; Priority::NUM],
+                wait_before_drop_us: DROP_WAIT.as_micros() as u64,
+                wait_before_close_us: CLOSE_WAIT.as_micros() as u64,
+                no_progress_us: None,
+                ..client_config().tx_queue
+            },
+            ..member_config(1, GROUP)
+        };
+        let engine = Engine::open(
+            AppLinks::new(Arc::clone(&transport)),
+            PosixClock,
+            PosixEntropy,
+            config,
+        )
+        .expect("the member joins");
+        (engine, stack, transport)
+    }
+
+    /// Put [`PAYLOAD`] on the group with `congestion`, and how long the put took.
+    fn put_with(engine: &Engine, congestion: CongestionControl) -> Duration {
+        let started = Instant::now();
+        let sent = engine.publish_on_wire_all(
+            "demo/group/full",
+            &WireKey::literal(),
+            &PAYLOAD,
+            &PublishOptions::put()
+                .with_locality(Locality::Remote)
+                .with_congestion_control(congestion),
+        );
+        assert_eq!(sent, Ok(0), "a dropped put succeeds, as zenoh's does");
+        started.elapsed()
+    }
+
+    /// The stack takes datagrams again and says so.
+    fn writable(stack: &Filling, transport: &AppTransport) {
+        stack.full.store(false, Ordering::SeqCst);
+        let link = stack.link.lock().unwrap().expect("the group was joined");
+        let _ = transport.event(link, ProgramEvent::Writable);
+    }
+
+    /// On a full socket the lane fills with what the session puts, and a droppable put that
+    /// finds it full waits its `wait_before_drop` for room and is dropped and counted; the lane's
+    /// mark then drops the next one at once. Once the socket takes datagrams again, the group's
+    /// task, stepped by the session's read, drains what was queued.
+    #[test]
+    fn a_droppable_put_on_a_full_group_is_dropped_within_its_wait_and_counted() {
+        let (member, stack, transport) = open_filling();
+        stack.full.store(true, Ordering::SeqCst);
+
+        // Two fill the lane; the third finds room once the group's task takes the first, which
+        // the socket then keeps it from writing.
+        for _ in 0..3 {
+            let took = put_with(&member, CongestionControl::Drop);
+            assert!(
+                took < Duration::from_secs(1),
+                "a put on a lane with room took {took:?}"
+            );
+        }
+        assert_eq!(member.group_congestion_drops(Priority::DEFAULT), 0);
+
+        let took = put_with(&member, CongestionControl::Drop);
+        assert_eq!(
+            member.group_congestion_drops(Priority::DEFAULT),
+            1,
+            "a droppable put on the full lane is dropped and counted"
+        );
+        assert!(took >= DROP_WAIT, "dropped after {took:?}, before its wait");
+        assert!(
+            took < Duration::from_secs(1),
+            "a droppable put waited {took:?}"
+        );
+
+        let took = put_with(&member, CongestionControl::Drop);
+        assert_eq!(member.group_congestion_drops(Priority::DEFAULT), 2);
+        assert!(
+            took < DROP_WAIT,
+            "the lane's mark drops a put at once, not after {took:?}"
+        );
+
+        let before = stack.sent.load(Ordering::SeqCst);
+        writable(&stack, &transport);
+        SessionDrive::start_read_task(&*member).expect("the read task starts");
+        eventually("what was queued to leave", || {
+            stack.sent.load(Ordering::SeqCst) >= before + 3
+        });
+        SessionDrive::close(&*member);
+    }
+
+    /// A blocking put that finds the lane full waits its whole `wait_before_close` for room, and
+    /// is then dropped and counted, as the tokio engine's group drops it: a multicast transport
+    /// closes nothing on a congestion drop. The group is still joined, and carries the next put
+    /// once the socket takes datagrams again.
+    #[test]
+    fn a_blocking_put_on_a_full_group_waits_its_close_wait_and_closes_nothing() {
+        let (member, stack, transport) = open_filling();
+        stack.full.store(true, Ordering::SeqCst);
+        for _ in 0..3 {
+            put_with(&member, CongestionControl::Drop);
+        }
+
+        let took = put_with(&member, CongestionControl::Block);
+        assert!(took >= CLOSE_WAIT, "a blocking put returned after {took:?}");
+        assert!(
+            took < Duration::from_secs(5),
+            "a blocking put waited {took:?}"
+        );
+        assert_eq!(member.group_congestion_drops(Priority::DEFAULT), 1);
+        assert!(!SessionDrive::is_closed(&*member), "the session is open");
+        assert_eq!(
+            stack.closes.load(Ordering::SeqCst),
+            0,
+            "the group was not left"
+        );
+
+        let before = stack.sent.load(Ordering::SeqCst);
+        writable(&stack, &transport);
+        put_with(&member, CongestionControl::Block);
+        assert!(stack.sent.load(Ordering::SeqCst) >= before + 2);
+        SessionDrive::close(&*member);
+    }
+}

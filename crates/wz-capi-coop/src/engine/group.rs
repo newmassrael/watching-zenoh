@@ -22,9 +22,12 @@ use alloc::rc::Rc;
 use core::cell::{Cell, RefCell};
 use core::net::SocketAddr;
 
+use alloc::sync::Arc;
+
 use wz_capi_port::group::{GroupDeclarations, GroupJoin};
 use wz_capi_port::{FanoutError, FilterId, FilterPlane, WireKey};
-use wz_runtime_coop::group_transport::GroupTransport;
+use wz_runtime_coop::group_transport::{GroupSend, GroupTransport};
+use wz_runtime_coop::session_drive::LinkWritability;
 use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet};
 use wz_session_core::declare_build::{
     build_declare_kexpr, build_group_announcement, build_group_retraction, build_undeclare_kexpr,
@@ -32,6 +35,7 @@ use wz_session_core::declare_build::{
 use wz_session_core::declare_form::{GroupDeclaration, GroupKey, RetractionKey};
 use wz_session_core::driver_loop::IterationEvent;
 use wz_session_core::interest_build::{build_interest_exact, build_interest_final, InterestKinds};
+use wz_session_core::link::LinkRoom;
 use wz_session_core::locality::Locality;
 use wz_session_core::metadata::PushMetadata;
 use wz_session_core::multicast_dispatch::MulticastConfig;
@@ -40,11 +44,12 @@ use wz_session_core::multicast_params::{MulticastOutcome, MulticastParams};
 use wz_session_core::multicast_reply_sink::{
     asks_for_declarations, GroupKeyexprAnswers, MulticastReplyEnqueue, MulticastReplySink,
 };
-use wz_session_core::multicast_tx::MulticastTxItem;
+use wz_session_core::multicast_tx::{multicast_tx_droppable, MulticastTxItem};
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::push_build;
 use wz_session_core::qos::Priority;
 use wz_session_core::sample::SampleKind;
+use wz_session_core::tx_deadline::{PushDeadline, PushOutcome};
 use wz_session_core::wire_id::{EntityId, ExprId};
 use wz_session_mcu::group_drive::{
     spawn_multicast_session_seeded, JoinAsk, MulticastReplyQueue, MulticastSessionSeed,
@@ -166,6 +171,18 @@ impl GroupTransport for Watched {
         self.inner.send_to_group(datagram);
     }
 
+    fn try_send_to_group(&mut self, datagram: &[u8]) -> GroupSend {
+        self.inner.try_send_to_group(datagram)
+    }
+
+    fn wait_for_room(&self, timeout_us: u64) -> bool {
+        self.inner.wait_for_room(timeout_us)
+    }
+
+    fn writability(&self) -> Option<alloc::boxed::Box<dyn LinkWritability>> {
+        self.inner.writability()
+    }
+
     fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
         let took = self.inner.recv_with(f);
         if took {
@@ -175,15 +192,42 @@ impl GroupTransport for Watched {
     }
 }
 
+/// What a message of the session waits with when the group's queue has no room for it: a pass of
+/// the session's tasks, in which the group's own task writes what the group's socket takes, and
+/// the session's clock, which the wait is spent on.
+pub(super) trait Pace {
+    /// One pass of the session's tasks.
+    fn pass(&self);
+    /// The session's clock, in microseconds.
+    fn now_us(&self) -> u64;
+}
+
+/// The session's own tasks and clock, as a group's waits use them.
+pub(super) struct SessionPace<C: ClockSource> {
+    pub(super) local: CoopLocalSet<C>,
+    pub(super) clock: C,
+}
+
+impl<C: ClockSource> Pace for SessionPace<C> {
+    fn pass(&self) {
+        self.local.run_until_idle();
+    }
+
+    fn now_us(&self) -> u64 {
+        self.clock.now_us()
+    }
+}
+
 /// What a group is joined with: the face its tables are in, the group as the ABI stated it (where
-/// it is, what the session advertises and tells it), the stack's transport and the parameters its
-/// session runs with.
+/// it is, what the session advertises and tells it), the stack's transport, the parameters its
+/// session runs with, and what the session's messages wait with on a full queue.
 pub(super) struct GroupJoining {
     pub(super) id: FaceId,
     pub(super) join: GroupJoin,
     pub(super) transport: alloc::boxed::Box<dyn GroupTransport>,
     pub(super) params: MulticastParams,
     pub(super) policy: SessionPolicy,
+    pub(super) pace: Rc<dyn Pace>,
     /// The generation a member's query is held and answered under (`queryable`).
     #[cfg(feature = "queryable")]
     pub(super) generation: u64,
@@ -200,7 +244,15 @@ pub(super) struct GroupFace {
     task: Option<CoopLocalJoinHandle<MulticastOutcome>>,
     /// When the group, whose session ended on its own, is joined again.
     rejoin_at_us: Option<u64>,
+    /// The group's queue, bounded by its lanes, which its task drains.
     tx: MulticastReplyQueue,
+    /// The group's parameters: its lanes, and the waits a message of the session spends on them.
+    params: MulticastParams,
+    /// What a message of the session waits with on a full queue ([`Self::push`]).
+    pace: Rc<dyn Pace>,
+    /// The group socket's wait for room, asked from outside its task; `None` for a stack that
+    /// gives none.
+    room: Option<Arc<dyn LinkWritability>>,
     members: Rc<RefCell<Vec<MulticastMember>>>,
     took: Rc<Cell<bool>>,
     stop: Rc<Cell<bool>>,
@@ -247,6 +299,7 @@ impl GroupFace {
             transport,
             params,
             policy,
+            pace,
             #[cfg(feature = "queryable")]
             generation,
             #[cfg(feature = "connectivity")]
@@ -257,7 +310,11 @@ impl GroupFace {
             watchers,
             label: GroupLabel::of(&join),
         });
-        let tx = MulticastReplyQueue::new();
+        // Bounded as the tokio engine bounds its group's pipeline: the queue's sizes, in batches
+        // of the group's batch, one lane when it runs no QoS.
+        let tx = MulticastReplyQueue::bounded(&params);
+        let tx_params = params.clone();
+        let room = transport.writability().map(Arc::from);
         let members: Rc<RefCell<Vec<MulticastMember>>> = Rc::new(RefCell::new(Vec::new()));
         let took = Rc::new(Cell::new(false));
         let stop = Rc::new(Cell::new(false));
@@ -311,6 +368,9 @@ impl GroupFace {
             #[cfg(feature = "query")]
             next_request: Cell::new(0),
             tx,
+            params: tx_params,
+            pace,
+            room,
             members,
             took,
             stop,
@@ -322,6 +382,64 @@ impl GroupFace {
             #[cfg(feature = "connectivity")]
             events,
         }
+    }
+
+    /// Put `item`, a message of the session, on the group's queue by the stage rule the tokio
+    /// engine's group follows (`MulticastTxProducer::push`): the lane of its conduit is asked for
+    /// room ([`MulticastReplyQueue::room_at_once`]) within the message's deadline, its
+    /// `wait_before_drop` when it may be dropped and its `wait_before_close` when it may not
+    /// ([`PushDeadline`]); while the lane is full, the session's tasks are run, in which the
+    /// group's own writes what its socket takes, and the socket is waited on for room. A message
+    /// that finds none within its deadline is a congestion drop, counted on its lane, blocking or
+    /// not: a multicast transport closes nothing on one, where a unicast one closes its link
+    /// (`io/zenoh-transport/src/multicast/tx.rs` @ `fn schedule_on_link(&self, msg: NetworkMessageRef) -> ZResult<bool> {`).
+    /// A group whose session ended takes nothing.
+    fn push(&self, item: MulticastTxItem) -> PushOutcome {
+        let mut deadline = PushDeadline::new(
+            multicast_tx_droppable(&item, &self.params),
+            &self.params.tx_queue,
+        );
+        loop {
+            match self.tx.room_at_once(&item, deadline.ask()) {
+                Some(LinkRoom::Free) => {
+                    self.tx.enqueue(item);
+                    return PushOutcome::Pushed;
+                }
+                Some(LinkRoom::Congested | LinkRoom::Gone) => {
+                    self.tx.dropped(&item);
+                    return PushOutcome::Congested;
+                }
+                None => {}
+            }
+            // Nothing drains the queue of a group whose session ended.
+            if self.has_ended() {
+                return PushOutcome::Congested;
+            }
+            let wait_us = deadline.ask().wait_us();
+            let started = self.pace.now_us();
+            self.pace.pass();
+            // Room the pass made is answered by the next ask; a socket that has none is waited on,
+            // and one that stays full spends the whole wait.
+            let room = self.tx.has_room(&item)
+                || match &self.room {
+                    Some(room) => room.wait_writable(wait_us),
+                    None => true,
+                };
+            let waited = self.pace.now_us().saturating_sub(started);
+            deadline.spend(if room { waited } else { waited.max(wait_us) });
+        }
+    }
+
+    /// The group socket's wait for room, which a message of the session that finds the session
+    /// held asks as it asks a link's.
+    pub(super) fn room(&self) -> Option<&Arc<dyn LinkWritability>> {
+        self.room.as_ref()
+    }
+
+    /// How many messages of `priority` the session put on the group were dropped for want of room.
+    #[cfg(test)]
+    pub(super) fn congestion_drops(&self, priority: Priority) -> u32 {
+        self.tx.drops(priority)
     }
 
     /// Ask the group's session for its JOIN at its next step, between two beacons, as the tokio
@@ -374,7 +492,7 @@ impl GroupFace {
     pub(super) fn ask(&self, rid: RequestId, keyexpr: &str, meta: &QueryMetadata) -> bool {
         match build_request_query_with_meta(rid, 0, Some(keyexpr), meta) {
             Ok(request) => {
-                self.tx.enqueue(MulticastTxItem::Request {
+                self.push(MulticastTxItem::Request {
                     request: alloc::boxed::Box::new(request),
                 });
                 true
@@ -495,7 +613,7 @@ impl GroupFace {
         if let Ok(declare) =
             build_group_announcement(entity.what, id, told.key(entity.keyexpr, entity.wire))
         {
-            self.tx.enqueue(MulticastTxItem::Declare {
+            self.push(MulticastTxItem::Declare {
                 declare: alloc::boxed::Box::new(declare),
             });
         }
@@ -531,7 +649,7 @@ impl GroupFace {
             suffix: announced.suffix.as_deref(),
         };
         if let Ok(declare) = build_group_retraction(announced.what, announced.id, key) {
-            self.tx.enqueue(MulticastTxItem::Declare {
+            self.push(MulticastTxItem::Declare {
                 declare: alloc::boxed::Box::new(declare),
             });
         }
@@ -562,7 +680,7 @@ impl GroupFace {
             /*future=*/ true,
             Some((key.mapping_id, key.suffix)),
         ) {
-            self.tx.enqueue(MulticastTxItem::Interest {
+            self.push(MulticastTxItem::Interest {
                 interest: alloc::boxed::Box::new(interest),
             });
         }
@@ -576,7 +694,7 @@ impl GroupFace {
         if self.has_ended() || !self.join.declarations.asks_for_liveliness() {
             return;
         }
-        self.tx.enqueue(MulticastTxItem::Interest {
+        self.push(MulticastTxItem::Interest {
             interest: alloc::boxed::Box::new(build_interest_final(u64::from(id))),
         });
     }
@@ -590,7 +708,7 @@ impl GroupFace {
         }
         if let Ok(declare) = build_declare_kexpr(id, keyexpr) {
             self.keyexprs.borrow_mut().declared(id, keyexpr);
-            self.tx.enqueue(MulticastTxItem::Declare {
+            self.push(MulticastTxItem::Declare {
                 declare: alloc::boxed::Box::new(declare),
             });
         }
@@ -602,7 +720,7 @@ impl GroupFace {
             return;
         }
         self.keyexprs.borrow_mut().retracted(id);
-        self.tx.enqueue(MulticastTxItem::Declare {
+        self.push(MulticastTxItem::Declare {
             declare: alloc::boxed::Box::new(build_undeclare_kexpr(id)),
         });
     }
@@ -625,7 +743,7 @@ impl GroupFace {
             /*future=*/ false,
             None,
         ) {
-            self.tx.enqueue(MulticastTxItem::Interest {
+            self.push(MulticastTxItem::Interest {
                 interest: alloc::boxed::Box::new(interest),
             });
         }
@@ -662,7 +780,7 @@ impl GroupFace {
             /*future=*/ false,
             Some((key.mapping_id, key.suffix)),
         ) {
-            self.tx.enqueue(MulticastTxItem::Interest {
+            self.push(MulticastTxItem::Interest {
                 interest: alloc::boxed::Box::new(interest),
             });
             self.filters.borrow_mut().push((filter, interest_id));
@@ -677,7 +795,7 @@ impl GroupFace {
             at.map(|at| filters.remove(at).1)
         };
         if let (Some(interest_id), false) = (asked, self.has_ended()) {
-            self.tx.enqueue(MulticastTxItem::Interest {
+            self.push(MulticastTxItem::Interest {
                 interest: alloc::boxed::Box::new(build_interest_final(interest_id)),
             });
         }
@@ -713,7 +831,7 @@ impl GroupFace {
             }
         }
         .map_err(|_| FanoutError::ExceedsCapacity)?;
-        self.tx.enqueue(MulticastTxItem::Push {
+        self.push(MulticastTxItem::Push {
             push: alloc::boxed::Box::new(push),
             reliable: put.reliable,
             priority: put.priority,
