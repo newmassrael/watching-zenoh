@@ -218,6 +218,14 @@ IMAGES = (
     # 216 bytes the chain fell since ff6a235d9d are the commits of 2026-11-05 to 2026-11-16 (they
     # were not bisected: no hosted run reached Qzb between them) and 32 the handshake held to
     # `open_timeout` alone, which the dial path is. The kit's reading was not taken again.
+    #
+    # 13,512 bytes over 15 frames on hosted run 44740160167 (`581714684`): the same head to the
+    # dialer's `dial_expecting` 4,840, then the slot claim 464, `LwipUdpDriver::new` 280,
+    # `note_endpoints` 416 and the end's locator text (`Locator::text` 128, `push_ipv4` 40,
+    # `push_u64` 64 and the u64 division 88). 3dd108842 names a link's ends by the engine's locator
+    # rule instead of `write!` into fixed text: `core::fmt` writes through a register, which the
+    # reader does not follow, and the rule's text writer is direct calls, so the chain now reaches
+    # a path it could not see before. The kit's reading was not taken again.
     Image(
         key="zephyr-fixed",
         elf=None,
@@ -225,7 +233,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=13376,
+        peak=13512,
     ),
     # The same node over `tcp/` (`overlays/t2g_tcp.conf` after `overlays/t2g_fixed.conf`, the node of
     # `fixed_tcp.rs`): the stack is the fixed-memory overlay's, which the TCP overlay does not state
