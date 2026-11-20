@@ -41,8 +41,6 @@ use wz_session_core::session_slot::SlotDriver;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::link_storage::HeapTx;
 use crate::link_storage::TxStore;
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-use crate::session_drive::LinkReadiness;
 use crate::session_drive::SessionDatagramLink;
 #[cfg(feature = "session-slot")]
 use crate::session_drive::{Accept, Bind, DriverPump, SlotStack};
@@ -50,6 +48,8 @@ use crate::session_drive::{Accept, Bind, DriverPump, SlotStack};
 use crate::session_drive::{LinkListener, OpenedLink, SessionLinks};
 #[cfg(any(feature = "session-slot", feature = "alloc"))]
 use crate::session_drive::{LinkOpenError, LinkProto, Locator};
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use crate::session_drive::{LinkReadiness, LinkWritability};
 #[cfg(any(feature = "session-slot", feature = "alloc"))]
 use crate::stream_link::NoDial;
 #[cfg(any(feature = "session-slot", feature = "alloc"))]
@@ -236,6 +236,11 @@ where
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
         either!(self, link => link.readiness())
+    }
+
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn writability(&self) -> Option<alloc::boxed::Box<dyn LinkWritability>> {
+        either!(self, link => link.writability())
     }
 }
 

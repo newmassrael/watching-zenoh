@@ -158,6 +158,16 @@ impl<S: StreamSocket + 'static> StreamSocket for TlsStream<S> {
         self.lower.socket.wait_writable(timeout_us)
     }
 
+    // The same room, waited on from another thread: the stream's own wait, handed out.
+    wz_runtime_coop::with_heap_link_seams! {
+        #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+        fn writability(
+            &self,
+        ) -> Option<alloc::boxed::Box<dyn wz_runtime_coop::session_drive::LinkWritability>> {
+            self.lower.socket.writability()
+        }
+    }
+
     fn try_read(&self, buf: &mut [u8]) -> Result<Option<usize>, Self::Error> {
         let mut session = self
             .session

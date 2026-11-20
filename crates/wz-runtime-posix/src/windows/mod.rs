@@ -42,7 +42,7 @@ use crate::windows_arith;
 // every implementation of them in this module is.
 wz_runtime_coop::with_heap_link_seams! {
     #[cfg(feature = "alloc")]
-    use wz_runtime_coop::session_drive::LinkReadiness;
+    use wz_runtime_coop::session_drive::{LinkReadiness, LinkWritability};
 }
 
 wz_runtime_coop::with_heap_link_seams! {
@@ -487,17 +487,29 @@ fn wait_ms(timeout_ms: u32) -> i32 {
     i32::try_from(timeout_ms).unwrap_or(i32::MAX)
 }
 
-/// A wait on a socket that a thread other than its link's makes ([`LinkReadiness`]): `WSAPoll`
-/// on a duplicate of the socket, which this owns and closes. A duplicate and not the handle
-/// itself, so a wait that outlives the socket never reaches a handle value its close has freed
-/// for another object.
+/// A wait on a socket that a thread other than its link's makes, for input ([`LinkReadiness`])
+/// or for room ([`LinkWritability`]): `WSAPoll` on a duplicate of the socket, which this owns and
+/// closes. A duplicate and not the handle itself, so a wait that outlives the socket never
+/// reaches a handle value its close has freed for another object.
 #[cfg(feature = "alloc")]
 pub(crate) struct SocketReadiness(ws::SOCKET);
 
 #[cfg(feature = "alloc")]
 impl SocketReadiness {
-    /// A wait on `socket`, or `None` when the socket cannot be duplicated.
+    /// A wait for input on `socket`, or `None` when the socket cannot be duplicated.
     pub(crate) fn of(socket: ws::SOCKET) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
+        Some(alloc::boxed::Box::new(Self::duplicate(socket)?))
+    }
+
+    /// A wait for room on the stream `socket`, or `None` when the socket cannot be duplicated.
+    pub(crate) fn writable_of(
+        socket: ws::SOCKET,
+    ) -> Option<alloc::boxed::Box<dyn LinkWritability>> {
+        Some(alloc::boxed::Box::new(Self::duplicate(socket)?))
+    }
+
+    /// A wait on `socket`, or `None` when the socket cannot be duplicated.
+    fn duplicate(socket: ws::SOCKET) -> Option<Self> {
         let mut info = ws::WSAPROTOCOL_INFOW::default();
         // SAFETY: `info` is a live description the call writes; `socket` is the caller's open
         // socket, and the process the duplicate is for is this one.
@@ -526,7 +538,17 @@ impl SocketReadiness {
         if duplicate == ws::INVALID_SOCKET {
             return None;
         }
-        Some(alloc::boxed::Box::new(SocketReadiness(duplicate)))
+        Some(SocketReadiness(duplicate))
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl LinkWritability for SocketReadiness {
+    fn wait_writable(&self, timeout_us: u64) -> bool {
+        poll_writable(
+            self.0,
+            i32::try_from(timeout_us.div_ceil(1_000)).unwrap_or(i32::MAX),
+        )
     }
 }
 

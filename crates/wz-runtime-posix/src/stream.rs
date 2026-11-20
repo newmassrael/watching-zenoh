@@ -23,12 +23,13 @@ use wz_runtime_coop::session_drive::LinkOpenError;
 // implementation of them below is.
 wz_runtime_coop::with_heap_link_seams! {
     #[cfg(feature = "alloc")]
-    use wz_runtime_coop::session_drive::LinkReadiness;
+    use wz_runtime_coop::session_drive::{LinkReadiness, LinkWritability};
 }
 use wz_runtime_coop::stream_link::{StreamDial, StreamListen, StreamSocket};
 
 use crate::net::{
-    errno, family_of, name_of, set_close_on_exec, set_flag, set_nonblocking, PosixNetError, RawAddr,
+    errno, family_of, name_of, poll_writable, set_close_on_exec, set_flag, set_nonblocking,
+    PosixNetError, RawAddr,
 };
 
 /// The most parts one write gathers: a length and its batch, with room to spare.
@@ -305,22 +306,7 @@ impl StreamSocket for PosixTcpSocket {
     }
 
     fn wait_writable(&self, timeout_us: u64) -> bool {
-        let timeout_ms = c_int::try_from(timeout_us.div_ceil(1_000)).unwrap_or(c_int::MAX);
-        let mut pfd = libc::pollfd {
-            fd: self.fd,
-            events: libc::POLLOUT,
-            revents: 0,
-        };
-        loop {
-            // SAFETY: one live `pollfd`; the timeout bounds the wait.
-            let ready = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
-            if ready < 0 && errno() == libc::EINTR {
-                continue;
-            }
-            // POLLOUT, or an error or hang-up the write that follows reports. A wait that failed
-            // otherwise is a stream that did not become writable.
-            return ready > 0 && pfd.revents != 0;
-        }
+        poll_writable(self.fd, timeout_us)
     }
 
     fn try_read(&self, buf: &mut [u8]) -> Result<Option<usize>, PosixNetError> {
@@ -352,6 +338,11 @@ impl StreamSocket for PosixTcpSocket {
         #[cfg(feature = "alloc")]
         fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
             crate::net::FdReadiness::of(self.fd)
+        }
+
+        #[cfg(feature = "alloc")]
+        fn writability(&self) -> Option<alloc::boxed::Box<dyn LinkWritability>> {
+            crate::net::FdReadiness::writable_of(self.fd)
         }
     }
 }
@@ -474,6 +465,33 @@ mod tests {
             near.wait_writable(1_000),
             "read down, the stream takes bytes again"
         );
+    }
+
+    wz_runtime_coop::with_heap_link_seams! {
+        /// The wait for room handed to another thread answers as the socket's own wait does: it
+        /// has room while the stream takes bytes, and none once the peer has stopped reading.
+        #[cfg(feature = "alloc")]
+        #[test]
+        fn the_wait_for_room_handed_out_answers_as_the_socket_does() {
+            let (near, _far) = pair();
+            let wait = near.writability().expect("a duplicate of the descriptor");
+            assert!(wait.wait_writable(1_000), "an empty stream takes bytes");
+            let chunk = [0x5au8; 1024];
+            let mut written = 0usize;
+            while near.wait_writable(1_000) {
+                near.send_parts(&[&chunk])
+                    .expect("a write the stream said it would take");
+                written += chunk.len();
+                assert!(
+                    written < 256 << 20,
+                    "the stream took {written} bytes and never filled"
+                );
+            }
+            assert!(
+                !wait.wait_writable(1_000),
+                "the wait handed out sees the stream full as the socket does"
+            );
+        }
     }
 
     #[test]

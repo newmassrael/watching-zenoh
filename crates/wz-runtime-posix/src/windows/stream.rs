@@ -25,7 +25,7 @@ use wz_runtime_coop::stream_link::{StreamDial, StreamListen, StreamSocket};
 
 wz_runtime_coop::with_heap_link_seams! {
     #[cfg(feature = "alloc")]
-    use wz_runtime_coop::session_drive::LinkReadiness;
+    use wz_runtime_coop::session_drive::{LinkReadiness, LinkWritability};
 }
 
 use super::{
@@ -327,6 +327,11 @@ impl StreamSocket for WindowsTcpSocket {
         fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
             super::SocketReadiness::of(self.socket)
         }
+
+        #[cfg(feature = "alloc")]
+        fn writability(&self) -> Option<alloc::boxed::Box<dyn LinkWritability>> {
+            super::SocketReadiness::writable_of(self.socket)
+        }
     }
 }
 
@@ -614,5 +619,32 @@ mod tests {
         drop(near);
         drop(far);
         WindowsTcpListener::bind(at(port)).expect("the closed connections do not hold the port");
+    }
+
+    wz_runtime_coop::with_heap_link_seams! {
+        /// The wait for room handed to another thread answers as the socket's own wait does: it
+        /// has room while the stream takes bytes, and none once the peer has stopped reading.
+        #[cfg(feature = "alloc")]
+        #[test]
+        fn the_wait_for_room_handed_out_answers_as_the_socket_does() {
+            let (near, _far) = pair();
+            let wait = near.writability().expect("a duplicate of the socket");
+            assert!(wait.wait_writable(1_000), "an empty stream takes bytes");
+            let chunk = [0x5au8; 1024];
+            let mut written = 0usize;
+            while near.wait_writable(1_000) {
+                near.send_parts(&[&chunk])
+                    .expect("a write the stream said it would take");
+                written += chunk.len();
+                assert!(
+                    written < 256 << 20,
+                    "the stream took {written} bytes and never filled"
+                );
+            }
+            assert!(
+                !wait.wait_writable(1_000),
+                "the wait handed out sees the stream full as the socket does"
+            );
+        }
     }
 }

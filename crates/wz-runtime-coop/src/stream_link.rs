@@ -49,9 +49,9 @@ use wz_session_core::reliability::Reliability;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::link_storage::HeapTx;
 use crate::link_storage::{TxLender, TxStore};
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-use crate::session_drive::LinkReadiness;
 use crate::session_drive::{LinkOpenError, LinkProto, SessionDatagramLink};
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use crate::session_drive::{LinkReadiness, LinkWritability};
 use crate::udp_link::{link_endpoints, SERVICE_WAIT_MS};
 
 /// The receive buffer of a link that takes the largest batch zenoh can negotiate: its length and
@@ -117,6 +117,15 @@ pub trait StreamSocket: Sized {
     /// stream waits in its own loop whatever it was asked.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
+        None
+    }
+
+    /// [`Self::wait_writable`] made by a thread other than the link's
+    /// ([`SessionDatagramLink::writability`]), on a handle of its own that outlives the stream
+    /// safely; `None` when the platform gives none, and then a sender that finds the session held
+    /// waits for it.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn writability(&self) -> Option<alloc::boxed::Box<dyn LinkWritability>> {
         None
     }
 }
@@ -561,6 +570,14 @@ impl<S: StreamSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static> 
         }
     }
 
+    // Whoever waits for input, room is the socket's alone: the driver queues nothing of its own
+    // ahead of it (`wait_for_room` asks the socket too), so a wait on the socket from outside
+    // answers what the session's own wait would.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn writability(&self) -> Option<alloc::boxed::Box<dyn LinkWritability>> {
+        self.socket.writability()
+    }
+
     #[cfg(feature = "alloc")]
     fn try_recv(&self) -> Option<RxFrame> {
         let mut frame = None;
@@ -660,6 +677,41 @@ mod tests {
         fn shutdown(&self) {
             self.shut.set(true);
         }
+
+        #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+        fn writability(&self) -> Option<alloc::boxed::Box<dyn LinkWritability>> {
+            Some(alloc::boxed::Box::new(Room(!self.full.get())))
+        }
+    }
+
+    /// The pipe's room when its wait was handed out, as a wait from outside answers it.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    struct Room(bool);
+
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    impl LinkWritability for Room {
+        fn wait_writable(&self, _timeout_us: u64) -> bool {
+            self.0
+        }
+    }
+
+    /// A link hands out its socket's wait for room whether or not its owner waits for its input
+    /// (none does here): a sender that finds the session held asks it from outside, and it
+    /// answers as the socket does.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[test]
+    fn a_link_hands_out_its_sockets_wait_for_room() {
+        let free = link();
+        let wait = free.writability().expect("the socket's wait for room");
+        assert!(wait.wait_writable(1_000), "a stream that takes bytes");
+
+        let full = link();
+        full.socket.full.set(true);
+        let wait = full.writability().expect("the socket's wait for room");
+        assert!(
+            !wait.wait_writable(1_000),
+            "a stream whose peer reads nothing"
+        );
     }
 
     /// Two slots of 32 bytes, for any profile.
