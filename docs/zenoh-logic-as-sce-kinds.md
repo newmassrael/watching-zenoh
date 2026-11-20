@@ -270,24 +270,50 @@ binding before ADR 0100):
    landed on SCE main on 2026-11-19. Step 6 is C11. At step 7 wz moves its pin,
    once, and U1's rows open.
 2. **The literal-shift fix.** `(1 << m)` typed as the literal's width in every
-   backend; the keyexpr dynamic programmes carry a local `one` until then.
+   backend; the keyexpr dynamic programmes carry a local `one` until wz's pin
+   moves. Landed on SCE main on 2026-11-20; a shift count at or past the width is
+   still unstated, and wz's are below 64.
 3. **A freestanding C11 gate.** Every fixture is compiled and linked for a
    Cortex-M target with no host library, with a per-fixture size ratchet and a
    run under qemu. Until it exists, nothing says the C11 emission is a C build.
-4. **The boundary-binding ADR, with the lend contract.** U4, W4 and W5.
+4. **The boundary-binding ADR, with the lend contract.** U4, W4 and W5, and the
+   build entry another repository calls: the `sce-codegen` command line with its
+   diagnostics, a CMake module for a C build and a `build.rs` helper for a Rust
+   one (section 5.1's binding 1 is a deployment's build). wz's `xtask`, which
+   links `sce_build` directly, moves to that entry afterwards.
 5. **ADR 0100.** The codec census's L1 to L5: a masked tag, refusal by rule,
-   fixed values, value ranges, and where a list ends.
-   **5b. A field over several bit runs and under a mask**, an ADR amending ADR
-   0095, written beside 0100 and landed right after it (section 5.1).
+   fixed values, value ranges, and where a list ends. Then, in this order:
+   - **5b. A field over several bit runs, and a word under a mask** (amends ADR
+     0095): a field's value is its runs joined in declared order; a mask belongs
+     to a declared run of bytes, the word, and is applied after every field is
+     placed, so a bit no field owns carries the mask's bit, and decoding undoes
+     the mask and reads the fields' bits only.
+   - **5c. Derived elements** (extends ADR 0058): a checksum of the Rocksoft
+     model over a cover list in the document's order, which need not be the
+     wire's; a length over a cover; for each, `on-mismatch` refuse or report,
+     a report being a typed verdict in the decoded result; and codec inputs, a
+     typed bounded value the caller gives, read by a derived field's expression
+     (with `& | ^ << >>`) and folded to a constant when a deployment fixes it.
+   - **5d. A `message-catalog` kind**: a typed table over imported codecs whose
+     references, uniqueness and ranges SCE checks, generating its tables and row
+     types for Rust and C11, a header adapter per message, `const` tables and
+     adapter tables of function pointers in read-only memory, and (once item 8
+     exists) the descriptor binding 3 reads. W13's single source.
 6. **The text-grammar codec ADR.** U2a and U2b.
 7. **ADR 0109's C11 lane and SHAKE128.** U11. ADR 0109 builds for Rust and C++
    first (its D0), and opens C11 on wz's request.
 8. **A codec document read at run time** (U15's binding 3, section 5.1): the
-   descriptor schema, the generated bounded interpreter, and the build-time
-   `.proto` schema compiler.
+   descriptor schema, its canonical form ADR 0101's deterministic CBOR; the
+   generated interpreter of the encode and decode plan; the differential
+   `interpret(descriptor(d), b) == compile(d)(b)` over every byte case of the
+   conformance reference; a `protobuf` codec format (varint, tag dispatch,
+   unknown fields kept in a bounded list, packed and unpacked repeated fields),
+   which a positional layout does not describe; and the build-time `.proto`
+   compiler into it.
 
-The SCE session placed 5b and 8 on 2026-11-20, after section 5.1's decision;
-items 1 to 7 did not move.
+The SCE session placed 5b to 5d and 8 on 2026-11-20, after section 5.1's
+decision and the questions of watching-zenoh-79's catalogue design; items 1 to
+7 did not move.
 
 Not yet scheduled with the SCE session: U3 (a record that holds a list), U5, U6
 and U7 (trees, graphs and pools of instances), U13 and U14, and the four

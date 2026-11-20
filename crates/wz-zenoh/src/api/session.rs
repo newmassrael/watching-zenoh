@@ -7086,18 +7086,29 @@ mod tests {
         assert!(!session.is_closed());
     }
 
-    /// A value of `subscriber-overload` other than the build's default that the build allows, if
-    /// any: what a configuration can state and a session be seen to run under.
-    fn another_overload() -> Option<&'static str> {
+    /// A value of `subscriber-overload` other than the build's default that the build allows:
+    /// what a configuration can state and a session be seen to run under.
+    ///
+    /// This crate builds for hosted targets only, and a hosted build allows every value of a
+    /// policy unless `WZ_POLICY_DOMAINS=defaults` narrows it to the default
+    /// (`wz_session_core::policy::policy_defaults_only`). The tests that read this value are about
+    /// a stated value taking effect, so a build narrowed that way fails them here, by name, rather
+    /// than passing them without running their subject.
+    fn another_overload() -> &'static str {
         let entry = wz_session_core::policy::POLICIES
             .iter()
-            .find(|entry| entry.id() == "subscriber-overload")?;
+            .find(|entry| entry.id() == "subscriber-overload")
+            .expect("`subscriber-overload` is a policy of the build");
         let held = entry.value_in(&wz_session_core::policy::SessionPolicy::defaults());
         entry
             .values()
             .iter()
             .copied()
             .find(|value| *value != held && entry.domain().contains(value))
+            .expect(
+                "a hosted build allows a second value of `subscriber-overload`; \
+                 WZ_POLICY_DOMAINS=defaults narrows it, and these tests need it wide",
+            )
     }
 
     /// The peer `peer` makes, with a `wz` member that states `subscriber-overload`.
@@ -7115,10 +7126,7 @@ mod tests {
     /// with none runs under the build defaults.
     #[test]
     fn a_session_runs_under_the_policies_its_wz_member_states() {
-        let Some(value) = another_overload() else {
-            // The build allows one value: there is nothing to state but the default.
-            return;
-        };
+        let value = another_overload();
         let session = open(peer_stating_overload("c8a1a1", value))
             .wait()
             .expect("the member resolves");
@@ -7167,9 +7175,7 @@ mod tests {
     fn the_opens_own_statement_wins_over_the_document_and_says_so() {
         use crate::config::Origin;
 
-        let Some(value) = another_overload() else {
-            return;
-        };
+        let value = another_overload();
         let default = wz_session_core::policy::SessionPolicy::defaults()
             .subscriber_overload()
             .id();
@@ -7197,14 +7203,11 @@ mod tests {
     fn the_profile_the_open_names_is_read_below_the_document() {
         use crate::config::Origin;
 
-        let Some(value) = another_overload() else {
-            return;
-        };
+        let value = another_overload();
         let mut config = peer_stating_overload("c8a1d1", value);
-        if config.state_profile("upstream").is_err() {
-            // The build leaves a value of the profile out of a domain: refused when stated.
-            return;
-        }
+        config.state_profile("upstream").expect(
+            "a hosted build allows every value the `upstream` profile states (see `another_overload`)",
+        );
         let session = open(config).wait().expect("opens");
         let resolved = session.resolved_policies();
         assert_eq!(
