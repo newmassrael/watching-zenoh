@@ -816,6 +816,21 @@ pub const HELD_ANSWER_SLOTS: usize =
         0
     };
 
+/// Whether the establishment message a lend-only writer writes as `role` is held for a replay:
+/// the acceptor's InitAck and the initiator's OpenSyn, where the build's domain of
+/// `handshake-stray-message` has a slot for one ([`HELD_ANSWER_SLOTS`]). A constant `false` where
+/// it has none, so a writer that asks this before the hold keeps nothing of the message's place
+/// (its start and the bounds check of its slice) across the encode, for a hold it never makes.
+#[cfg(all(
+    feature = "tx-lend-only",
+    any(feature = "codec-init-body", feature = "codec-open-body"),
+    any(feature = "session-unicast-open", feature = "session-unicast-accept")
+))]
+#[inline(always)]
+const fn holds_answer(role: ExtChainRole) -> bool {
+    HELD_ANSWER_SLOTS != 0 && matches!(role, ExtChainRole::InitAck | ExtChainRole::OpenSyn)
+}
+
 /// R2923 / R2924 — the outbound queue configuration and its upstream
 /// defaults live with the per-session parameters that carry them
 /// ([`crate::session_init_params::TxQueueConf`]).
@@ -5777,7 +5792,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 )
             })?;
             // The acceptor's InitAck is the answer a replay sends again, as written.
-            if role == ExtChainRole::InitAck {
+            if holds_answer(role) {
                 self.hold_handshake_answer(&buf.as_slice()[start..]);
             }
             Ok(())
@@ -5845,7 +5860,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 crate::ext_chain::encode_ext_chain_into(buf, chain)
             })?;
             // The initiator's OpenSyn is the answer a replay sends again, as written.
-            if role == ExtChainRole::OpenSyn {
+            if holds_answer(role) {
                 self.hold_handshake_answer(&buf.as_slice()[start..]);
             }
             Ok(())
@@ -17558,6 +17573,34 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // is this one. The carrier's faithfulness is now witnessed where it
         // is used -- the rebuilt head IS what the session runs on.
         carried.nonce == nonce
+    }
+}
+
+#[cfg(all(
+    test,
+    feature = "tx-lend-only",
+    any(feature = "codec-init-body", feature = "codec-open-body"),
+    any(feature = "session-unicast-open", feature = "session-unicast-accept")
+))]
+mod held_answer_tests {
+    use super::{holds_answer, HELD_ANSWER_SLOTS};
+    use crate::ext_chain_role::ExtChainRole;
+    use crate::policy::HandshakeStrayMessage;
+    use crate::policy_binding::PolicyValue;
+
+    /// A lend-only writer holds the acceptor's InitAck and the initiator's OpenSyn, the two
+    /// answers a replay sends again, and only where the build's domain of
+    /// `handshake-stray-message` allows the replay; never the InitSyn or the OpenAck, which no
+    /// peer's repeat is answered with.
+    #[test]
+    fn a_lend_only_writer_holds_the_two_replayed_answers_only_where_the_domain_allows_it() {
+        let replays = HandshakeStrayMessage::DOMAIN
+            .contains_index(HandshakeStrayMessage::IgnoreAndReplay as usize);
+        assert_eq!(HELD_ANSWER_SLOTS, usize::from(replays));
+        assert_eq!(holds_answer(ExtChainRole::InitAck), replays);
+        assert_eq!(holds_answer(ExtChainRole::OpenSyn), replays);
+        assert!(!holds_answer(ExtChainRole::InitSyn));
+        assert!(!holds_answer(ExtChainRole::OpenAck));
     }
 }
 
