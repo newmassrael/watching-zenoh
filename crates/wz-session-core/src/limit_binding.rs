@@ -214,9 +214,19 @@ impl LimitDomain {
     /// refused by the document's own rule, not by the domain.
     pub const fn bound(capacity: Option<usize>) -> Self {
         // `usize::MAX` is the quota no bound is held as ([`Quota`]), so the integers stop under it.
+        Self::bound_within(capacity, usize::MAX - 1)
+    }
+
+    /// [`Self::bound`] of a bound whose code holds no count above `most` (a counter of a narrower
+    /// type): `0..=most` and `unbounded` where the build has no capacity, and no more than the
+    /// capacity where it has one. A count above `most` is refused as outside its range.
+    pub const fn bound_within(capacity: Option<usize>, most: usize) -> Self {
         match capacity {
-            None => Self::with(LimitKind::Bound, true, 0, usize::MAX - 1, false),
-            Some(capacity) => Self::with(LimitKind::Bound, false, 0, capacity, true),
+            None => Self::with(LimitKind::Bound, true, 0, most, false),
+            Some(capacity) if capacity <= most => {
+                Self::with(LimitKind::Bound, false, 0, capacity, true)
+            }
+            Some(_) => Self::with(LimitKind::Bound, false, 0, most, false),
         }
     }
 
@@ -236,6 +246,17 @@ impl LimitDomain {
     /// `value`: [`Self::bound`], kept to `value` alone where `defaults_only`.
     pub const fn of_bound(capacity: Option<usize>, value: Quota, defaults_only: bool) -> Self {
         Self::bound(capacity).keeping(value.as_value(), defaults_only)
+    }
+
+    /// [`Self::of_bound`] of a bound whose code holds no count above `most`
+    /// ([`Self::bound_within`]).
+    pub const fn of_bound_within(
+        capacity: Option<usize>,
+        most: usize,
+        value: Quota,
+        defaults_only: bool,
+    ) -> Self {
+        Self::bound_within(capacity, most).keeping(value.as_value(), defaults_only)
     }
 
     /// The domain a build allows of a parameter whose range is `least..=most`, whose capacity is
@@ -810,6 +831,33 @@ mod tests {
         let none = LimitDomain::bound(Some(0));
         assert!(none.is_singleton());
         assert!(none.contains(LimitValue::Integer(0)));
+    }
+
+    #[test]
+    fn a_bound_its_code_holds_in_a_narrower_count_stops_there() {
+        let open = LimitDomain::bound_within(None, 65535);
+        assert!(open.allows_unbounded());
+        assert!(open.contains(LimitValue::Integer(65535)));
+        assert_eq!(
+            open.check(LimitValue::Integer(65536)),
+            Err(Outside::OutsideRange {
+                least: 0,
+                most: 65535
+            })
+        );
+        // A capacity under the count is the capacity; one over it is the count.
+        assert_eq!(
+            LimitDomain::bound_within(Some(8), 65535).check(LimitValue::Integer(9)),
+            Err(Outside::OverCapacity { capacity: 8 })
+        );
+        assert_eq!(
+            LimitDomain::bound_within(Some(70000), 65535).integers(),
+            Some((0, 65535))
+        );
+        assert_eq!(
+            LimitDomain::bound(None),
+            LimitDomain::bound_within(None, usize::MAX - 1)
+        );
     }
 
     #[test]

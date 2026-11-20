@@ -2637,6 +2637,8 @@ kconfig = "WZ_LIMIT_TX_EXPIRY_CLOSE_AFTER"
 kind = "bound"
 driven = "remote"
 zero_unbounded = true
+# A session counts the run of expiries in 16 bits.
+most = 65535
 default = 0
 storage = "quota"
 scope = "session"
@@ -2648,7 +2650,8 @@ How many blocking messages in a row may find no room within their deadline
 before the session is closed as unresponsive, when the tx-expiry-keeps-session
 policy is on. A blocking message that does find room ends the run. 0 never
 closes the session, which is the policy as it was before this limit. At most
-65535: a larger value counts as 65535. It is read only when that policy is on.
+65535, the count a session holds: a build that states more does not compile.
+It is read only when that policy is on.
 '''
 
 [[limit]]

@@ -422,7 +422,7 @@ pub const TX_NO_PROGRESS_WINDOW_US: LimitBinding = LimitBinding {
 pub const TX_EXPIRY_CLOSE_AFTER: LimitBinding = LimitBinding {
     kind: LimitKind::Bound,
     driven: Some(Driven::Remote),
-    range: None,
+    range: Some((0, 65535)),
     storage: Storage::Quota,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Live),
