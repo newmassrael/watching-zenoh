@@ -2492,7 +2492,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         if let Some(core) = self.live() {
             for group in &core.0.groups {
                 for _ in 0..count {
-                    group.reply_queue().enqueue(reply());
+                    group.reply_stage().enqueue(reply());
                 }
             }
         }

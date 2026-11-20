@@ -427,7 +427,7 @@ impl GroupFace {
 
     /// How many messages the group dropped before they reached its socket (`transport-stats`):
     /// the session's own, of every priority, that found no room on their lane, and the replies its
-    /// dispatch staged past the reply limit (`MulticastReplyQueue::dropped`), as the tokio engine's
+    /// dispatch staged past the reply limit (`GroupTxStage::dropped`), as the tokio engine's
     /// group counts every message it drops, a reply among them, as the transport's.
     #[cfg(feature = "transport-stats")]
     pub(super) fn drops_total(&self) -> u32 {
@@ -436,10 +436,10 @@ impl GroupFace {
             .fold(self.tx.dropped(), u32::saturating_add)
     }
 
-    /// The group's queue, as its dispatch stages a reply on it. Read only by
+    /// The group's stage, as its dispatch stages a reply on it. Read only by
     /// `CoopEngine::stage_group_replies`, and compiled where it is.
     #[cfg(all(test, feature = "app-transport", feature = "transport-stats"))]
-    pub(super) fn reply_queue(&self) -> &MulticastReplyQueue {
+    pub(super) fn reply_stage(&self) -> &GroupTxStage {
         &self.tx
     }
 
