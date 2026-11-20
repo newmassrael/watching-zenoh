@@ -255,6 +255,11 @@ shared-key-ids = ["wz-session-core/shared-key-ids", "wz-capi-port/shared-key-ids
 # pico's build (pico has no transport counters), no counter is kept and the text has none of them.
 # A Rust surface only: neither zenoh-c nor zenoh-pico reports transport counters through C.
 transport-stats = ["wz-session-core/transport-stats"]
+# A clock the program moves (a time base it supplies, `wz-capi-pico`'s `time-base`): the word that
+# tells a read the clock moved on (`CoopConfig::clock_moves`), which ends the read's wait beside
+# its links. Off, which is pico's build, no program moves the clock, the config's field holds no
+# value and the text has none of the wait it would end (the capability-cost gate measures it).
+time-base = []
 
 [dev-dependencies]
 # The `tls/` provider's tests (`tests/tls_provider.rs`) make a certificate authority and its end

@@ -443,6 +443,7 @@ time-base = [
     "wz-node-time/time-base",
     "wz-capi-port/time-base",
     "wz-capi-core?/time-base",
+    "wz-capi-coop?/time-base",
 ]
 # `remote-declaration-watch` and `declarations-synced-event`: the declaration watch, the doors that
 # tell a program what a peer declares and retracts (`wz_ext_decl_watch_declare`,

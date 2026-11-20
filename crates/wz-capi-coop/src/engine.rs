@@ -229,21 +229,36 @@ pub struct CoopConfig {
     /// What tells a read that the session's clock moved on, for a clock the program moves (a time
     /// base it supplies): a read that waits for its next dial waits on it, and one that waits on
     /// its links waits on it beside them, so the program's word ends the wait. `None` for a clock
-    /// that moves by itself, whose waits the wall bounds.
-    pub clock_moves: Option<Arc<dyn ClockMoves>>,
+    /// that moves by itself, whose waits the wall bounds. Always `None` in a build without
+    /// `time-base`, whose [`ClockMovesWord`] has no value.
+    pub clock_moves: Option<ClockMovesWord>,
 }
 
 /// The program's word that a clock it moves has moved on, as a read of this engine waits on it
 /// ([`CoopConfig::clock_moves`]).
+#[cfg(feature = "time-base")]
 pub trait ClockMoves: Send + Sync {
     /// A wait that is ready once the clock has moved on after this call.
     fn moved(&self) -> Arc<dyn LinkReadiness>;
 }
 
+/// What [`CoopConfig::clock_moves`] holds: the program's word that a clock it moves has moved on
+/// (`time-base`).
+#[cfg(feature = "time-base")]
+pub type ClockMovesWord = Arc<dyn ClockMoves>;
+
+/// What [`CoopConfig::clock_moves`] holds in a build without `time-base`: no program moves the
+/// clock, so the type has no value and the field is `None`. Uninhabited rather than left out, so a
+/// config written for one build is written for the other and the wait the word would end, and the
+/// drop of a word, are not in the text.
+#[cfg(not(feature = "time-base"))]
+pub enum ClockMovesWord {}
+
 /// `wait`, ended also by the program's word that the clock moved on when `moves` gives one: a
 /// sleep becomes a wait on the word, and a wait on links waits on it too. With no word, or no
 /// wait, it is `wait` as it was.
-fn ended_by_clock_moves(wait: IdleWait, moves: Option<&Arc<dyn ClockMoves>>) -> IdleWait {
+#[cfg(feature = "time-base")]
+fn ended_by_clock_moves(wait: IdleWait, moves: Option<&ClockMovesWord>) -> IdleWait {
     let Some(moves) = moves else {
         return wait;
     };
@@ -255,6 +270,15 @@ fn ended_by_clock_moves(wait: IdleWait, moves: Option<&Arc<dyn ClockMoves>>) -> 
             IdleWait::Input(waits, ms)
         }
     }
+}
+
+/// `wait` as it was: a build without `time-base` has no word to end it with.
+#[cfg(not(feature = "time-base"))]
+fn ended_by_clock_moves(wait: IdleWait, moves: Option<&ClockMovesWord>) -> IdleWait {
+    if let Some(word) = moves {
+        match *word {}
+    }
+    wait
 }
 
 /// Inbound links in their handshake at once, when the config states none: zenoh's
@@ -4552,7 +4576,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopE
     }
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(all(test, feature = "std", feature = "time-base"))]
 mod clock_moves_tests {
     use super::*;
     use std::sync::{Condvar, Mutex as StdMutex};

@@ -621,6 +621,10 @@ transport-link-unixpipe,transport-link-ws|"
     # only a `udp/` endpoint that names a multicast group is joined, and the session's two link
     # policies reach its sockets. The group a real host joins is `#[ignore]`d and Layer M's.
     "wz-capi-coop|hook|group-host|host_group::"
+    # The word of a clock the program moves, which ends a read's wait (`clock_moves_tests::`, 2,
+    # compiled with `time-base`): a wait for the next dial ends at the word, and the word joins a
+    # wait on links and makes none where there was none.
+    "wz-capi-coop|hook|time-base|clock_moves_tests::"
     # What a hosted OS tells a node about its network, and the multicast sockets built from it,
     # which the tokio runtime and the cooperative host both open. The `#iface=` honor (the v4 and
     # v6 interface selectors and the tests that read them off the loopback) is compiled only with
