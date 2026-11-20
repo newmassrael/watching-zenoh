@@ -57,7 +57,6 @@
 //! and let its peers' leases lapse (see `runtime_pool`, "The sixth subsystem").
 
 use std::sync::{Arc, Weak};
-use std::time::Duration;
 
 use wz_runtime_core::{Runtime, TimeSource};
 use wz_session_core::capacity::LatenessWindows;
@@ -130,7 +129,9 @@ fn worker_runs(weak: &Weak<SessionLinkActions>) -> bool {
 async fn pace(weak: Weak<SessionLinkActions>, clock: TokioTime, generation: u64) {
     while let Some(wait_ms) = step(&weak, &clock, generation) {
         let planned = clock.now_monotonic_ms().saturating_add(wait_ms);
-        tokio::time::sleep(Duration::from_millis(wait_ms)).await;
+        // On the session's clock, as its deadlines are: a time base the program supplies holds
+        // the backstop with the rest of the session's timers.
+        clock.sleep(wait_ms).await;
         if worker_runs(&weak) {
             note_wake_lateness(clock.now_monotonic_ms().saturating_sub(planned));
         }

@@ -685,8 +685,19 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "clock registry an application registers sources in, which the node clock then reads) "
         "and `pubsub-ts-stack` (the clock the interceptions of a timestamp stack are recorded "
         "with, which a forwarder takes a stamp from), and `event-ring` (the node's event log, "
-        "one ring the node writes events into, stamped with the node clock)",
-        frozenset({"clock-source", "codec-push", "event-ring", "pubsub-ts-stack", "time-hlc"}),
+        "one ring the node writes events into, stamped with the node clock), and `time-base` "
+        "(the time base a program supplies, which the tokio runtime's `program-time` re-exports "
+        "and the pico ABI's door makes, and which a session's timers then read and wait on)",
+        frozenset(
+            {
+                "clock-source",
+                "codec-push",
+                "event-ring",
+                "pubsub-ts-stack",
+                "time-base",
+                "time-hlc",
+            }
+        ),
     ),
     "wz-rest": (
         "the REST bridge: the facade re-exports the whole crate as `wz::rest` "

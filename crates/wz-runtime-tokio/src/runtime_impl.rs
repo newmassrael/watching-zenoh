@@ -389,9 +389,55 @@ where
 /// truncation is therefore unobservable in practice; the cast is
 /// also the canonical pattern for "milliseconds since boot" in
 /// embedded systems where the wider `u128` would just bloat code.
+///
+/// ## A time base the program supplies (`program-time`)
+///
+/// A clock made over a program's time base (`TokioTime::on_time_base`) reads and waits on the
+/// program's time in place of tokio's: a session timed by it is unmoved by the wall clock, and a
+/// wait of it ends when the program's time passes it and the program says so. tokio's own timers
+/// (`tokio::time::pause` and `advance`) are a test facility of one runtime and not a clock a
+/// program can drive, so the waits are the time base's own (`wz_node_time::time_base`). Still
+/// `Copy`: the clock holds a reference to the time base, and the session it times holds the time
+/// base itself for as long as it runs.
 #[derive(Debug, Clone, Copy)]
 pub struct TokioTime {
     epoch: tokio::time::Instant,
+    /// The program's time base and the reading this clock counts from, which every reading and
+    /// every wait of the clock follows when it is set.
+    #[cfg(feature = "program-time")]
+    program: Option<ProgramEpoch>,
+}
+
+/// A program's time base and the reading a [`TokioTime`] made over it counts from.
+#[cfg(feature = "program-time")]
+#[derive(Debug, Clone, Copy)]
+struct ProgramEpoch {
+    time: wz_node_time::time_base::TimeBaseRef,
+    epoch_ns: u64,
+}
+
+#[cfg(feature = "program-time")]
+impl ProgramEpoch {
+    /// The program's time since this clock was made, in nanoseconds.
+    fn elapsed_ns(&self) -> u64 {
+        self.time.now_ns().saturating_sub(self.epoch_ns)
+    }
+
+    /// A wait of `ms` milliseconds of the program's time, from its reading now.
+    fn sleep_ms(&self, ms: u64) -> wz_node_time::time_base::ProgramSleep {
+        let deadline_ns = self
+            .time
+            .now_ns()
+            .saturating_add(ms.saturating_mul(1_000_000));
+        self.time.sleep_until(deadline_ns)
+    }
+}
+
+/// The wait a [`TokioTime`] makes: on the program's time base, or tokio's.
+#[cfg(feature = "program-time")]
+enum Wait {
+    Program(wz_node_time::time_base::ProgramSleep),
+    Wall(tokio::time::Sleep),
 }
 
 impl TokioTime {
@@ -400,6 +446,23 @@ impl TokioTime {
     pub fn new() -> Self {
         Self {
             epoch: tokio::time::Instant::now(),
+            #[cfg(feature = "program-time")]
+            program: None,
+        }
+    }
+
+    /// A clock that reads `time`, a time base the program supplies, in place of tokio's: its
+    /// readings count from `time`'s reading now, and each of its waits ends when the program's
+    /// time passes it and the program says so (`TimeBaseHold::advanced`), however long the wall
+    /// clock has run.
+    #[cfg(feature = "program-time")]
+    pub fn on_time_base(time: wz_node_time::time_base::TimeBaseRef) -> Self {
+        Self {
+            epoch: tokio::time::Instant::now(),
+            program: Some(ProgramEpoch {
+                time,
+                epoch_ns: time.now_ns(),
+            }),
         }
     }
 }
@@ -412,16 +475,63 @@ impl Default for TokioTime {
 
 impl TimeSource for TokioTime {
     fn now_monotonic_ms(&self) -> u64 {
+        #[cfg(feature = "program-time")]
+        if let Some(program) = self.program {
+            return program.elapsed_ns() / 1_000_000;
+        }
         // Saturating cast u128 → u64; see struct doc-comment on
         // why truncation is unobservable in practice.
         self.epoch.elapsed().as_millis() as u64
     }
 
     fn now_monotonic_us(&self) -> u64 {
+        #[cfg(feature = "program-time")]
+        if let Some(program) = self.program {
+            return program.elapsed_ns() / 1_000;
+        }
         // The same truncation as the millisecond reading, and the same epoch.
         self.epoch.elapsed().as_micros() as u64
     }
 
+    #[cfg(feature = "program-time")]
+    fn sleep(&self, ms: u64) -> impl Future<Output = ()> + Send + '_ {
+        // The wait is made here, as tokio's sleep fixes its deadline when it is made, and the
+        // future only awaits it.
+        let wait = match self.program {
+            Some(program) => Wait::Program(program.sleep_ms(ms)),
+            None => Wait::Wall(tokio::time::sleep(Duration::from_millis(ms))),
+        };
+        async move {
+            match wait {
+                Wait::Program(program) => program.await,
+                Wait::Wall(wall) => wall.await,
+            }
+        }
+    }
+
+    #[cfg(feature = "program-time")]
+    async fn timeout<F>(&self, ms: u64, fut: F) -> Result<F::Output, TimeoutElapsed>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send,
+    {
+        let Some(program) = self.program else {
+            return tokio::time::timeout(Duration::from_millis(ms), fut)
+                .await
+                .map_err(|_elapsed| TimeoutElapsed);
+        };
+        let deadline = program.sleep_ms(ms);
+        tokio::pin!(fut);
+        // The future first, as tokio's timeout polls it first: a future that is ready when the
+        // deadline passes has finished in time.
+        tokio::select! {
+            biased;
+            out = &mut fut => Ok(out),
+            () = deadline => Err(TimeoutElapsed),
+        }
+    }
+
+    #[cfg(not(feature = "program-time"))]
     fn sleep(&self, ms: u64) -> impl Future<Output = ()> + Send + '_ {
         // `tokio::time::sleep` returns a `'static` Sleep future
         // (no borrow from `self`), so the RPITIT bound `+ '_`
@@ -432,6 +542,7 @@ impl TimeSource for TokioTime {
         tokio::time::sleep(Duration::from_millis(ms))
     }
 
+    #[cfg(not(feature = "program-time"))]
     async fn timeout<F>(&self, ms: u64, fut: F) -> Result<F::Output, TimeoutElapsed>
     where
         F: Future + Send + 'static,

@@ -578,7 +578,10 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # that stamps no data, the `trusted-only` policy not refusing one, a node with no identity).
     # `event-ring` joins: the node's event log and its seven tests (a record's fields, a clock that
     # stamps and one that does not, the two full-ring policies, producers on four threads).
-    "wz-node-time|hook|clock-source,codec-push,event-ring,pubsub-timestamp,pubsub-ts-stack,time-hlc|"
+    # `time-base` joins: the time base a program supplies and its six tests (a reading held
+    # monotonic, a wait woken on the program's word, a wait already due, a dropped wait, the read
+    # let go with the last hold, a reference of an earlier lease).
+    "wz-node-time|hook|clock-source,codec-push,event-ring,pubsub-timestamp,pubsub-ts-stack,time-base,time-hlc|"
     # Open-debt item 913 -- the in-memory group every group test of the workspace runs over
     # (`multicast_bus`) holds a member's place while a send half of its link lives, as a socket
     # does, which the departure test of the group face depends on. The module exists only with
@@ -1539,6 +1542,10 @@ wz-session-core/query-reply-err|"
     # `transport-link-app`'s, its datagram tests `transport-link-udp`'s (a default) and its group
     # test `transport-multicast`'s.
     "wz-runtime-tokio|hook|transport-link-app,transport-multicast|app_link::"
+    # A `TokioTime` over a time base the program supplies (`tests/it/files/session_program_time.rs`,
+    # 4, built with `program-time`): its readings, its waits and its timeouts on the program's
+    # time, and a session's lease timed by it in the drive loop.
+    "wz-runtime-tokio|hook|program-time|--test=session_program_time"
     # The router's routing events (`router_forward::routing_spans`, built with `routing-router-hat`
     # and `tracing-spans`) and the span a spawned task runs in (`runtime_pool::span_tests`, whose
     # claim is the `tracing-instrument` arm). The wide leg names neither tracing feature, so the
