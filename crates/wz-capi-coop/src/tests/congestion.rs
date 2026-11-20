@@ -78,7 +78,7 @@ fn under_the_pico_profile_a_held_session_drops_without_asking() {
     let rooms = LinkRooms::default();
     let free = answer(true);
     held(&rooms, &free);
-    assert_eq!(rooms.for_held(HeldDrop::DropAtOnce, 1_000), Room::Congested);
+    assert_eq!(rooms.for_held(HeldDrop::DropAtOnce, 1_000), Room::Held);
     assert!(
         free.asked.lock().unwrap().is_empty(),
         "the link was asked for room"
@@ -107,6 +107,38 @@ fn a_link_that_has_gone_is_not_asked() {
     assert_eq!(rooms.within(1_000), Room::Unasked);
 }
 
+/// The session's counters are its links': puts it sent on the link it holds are counted there and
+/// reported through the engine, and a session that dropped nothing reports no drop.
+#[cfg(feature = "transport-stats")]
+#[test]
+fn the_sessions_counters_are_its_links_counters() {
+    use wz_capi_port::{SessionEngine, WireKey};
+    use wz_session_core::locality::Locality;
+    use wz_session_core::publish_options::PublishOptions;
+
+    let router = super::Router::start(super::CatchAll::None);
+    let engine = super::open(&router);
+    let before = engine.transport_stats();
+    for _ in 0..3 {
+        engine
+            .publish_on_wire_all(
+                "demo/stats",
+                &WireKey::literal(),
+                b"v",
+                &PublishOptions::put().with_locality(Locality::Remote),
+            )
+            .expect("a put the link carries");
+    }
+    let after = engine.transport_stats();
+    assert!(
+        after.tx.n_msgs_total() >= before.tx.n_msgs_total() + 3,
+        "three puts were counted on the link: {} before, {} after",
+        before.tx.n_msgs_total(),
+        after.tx.n_msgs_total()
+    );
+    assert_eq!(after.tx.n_dropped, 0, "nothing was dropped");
+}
+
 /// The engine over a link whose peer took the connection, brought the session up and then read
 /// nothing more: what the session sends fills the stream, and a blocking publish waits on it.
 #[cfg(feature = "listen")]
@@ -115,11 +147,12 @@ mod stalled_link {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use wz_capi_port::{SessionDrive, SessionEngine, WireKey};
+    use wz_capi_port::{FanoutError, SessionDrive, SessionEngine, WireKey};
     use wz_session_core::locality::Locality;
+    use wz_session_core::policy::SessionPolicy;
     use wz_session_core::publish_options::PublishOptions;
     use wz_session_core::qos::CongestionControl;
-    use wz_session_core::session_init_params::{HeldDrop, TxQueueConf};
+    use wz_session_core::session_init_params::{HeldDrop, TxQueueConf, WAIT_BEFORE_CLOSE_US};
     use wz_session_core::WhatAmI;
 
     use super::super::{client_config, open_with, until};
@@ -143,11 +176,41 @@ mod stalled_link {
             .with_congestion_control(congestion)
     }
 
-    /// While a blocking publish holds the session waiting for room on the full link, a droppable
-    /// one returns within a second with success and does not close the session; the blocking one
-    /// waits out its `wait_before_close`, and the session is closed after it.
-    #[test]
-    fn a_droppable_publish_is_not_held_behind_a_blocking_one_on_a_full_link() {
+    /// What a droppable publish did while a blocking one held the session, waiting for room on
+    /// the full link.
+    struct Behind {
+        /// The droppable publish's answer, and how long it took to give it.
+        dropped: Result<usize, FanoutError>,
+        took: Duration,
+        /// Whether the blocking publish was still waiting when the droppable one returned.
+        blocking_still_waiting: bool,
+        /// Whether the session was closed when the droppable one returned.
+        closed_by_the_drop: bool,
+        /// How long the blocking publish took before it returned.
+        waited: Duration,
+        /// The transport's drops the closed session reports: its links' counters left with
+        /// them, so these are the publishes the engine dropped before they reached a link.
+        #[cfg(feature = "transport-stats")]
+        unsent_drops: usize,
+    }
+
+    /// `tx_queue` with each message written as it is sent, so what fills the stream is what was
+    /// published whether or not the session is stepped, and a blocking publish that finds no
+    /// room within `CLOSE_WAIT` closing the session.
+    fn stalling(tx_queue: TxQueueConf) -> TxQueueConf {
+        TxQueueConf {
+            wait_before_close_us: CLOSE_WAIT.as_micros() as u64,
+            no_progress_us: None,
+            expiry_keeps_session: false,
+            batching: false,
+            ..tx_queue
+        }
+    }
+
+    /// Fill the link of a publisher whose queue is `tx_queue` with blocking publishes until one
+    /// holds the session waiting for room, publish one droppable sample beside it, then wait for
+    /// the blocking one to end and for the session to close after it.
+    fn behind_a_blocking_publish(tx_queue: TxQueueConf) -> Behind {
         let peer = open_with(CoopConfig {
             whatami: WhatAmI::Peer,
             zid: Some(vec![0xa7; 4]),
@@ -159,18 +222,7 @@ mod stalled_link {
         let publisher = open_with(CoopConfig {
             endpoints: vec![endpoint],
             zid: Some(vec![0xb7; 4]),
-            // Each message is written as it is sent, so what fills the stream is what was
-            // published, whether or not the session is stepped. zenoh's profile: a droppable
-            // publish behind the held session asks the link for room.
-            tx_queue: TxQueueConf {
-                wait_before_drop_us: DROP_WAIT_US,
-                wait_before_close_us: CLOSE_WAIT.as_micros() as u64,
-                no_progress_us: None,
-                expiry_keeps_session: false,
-                batching: false,
-                held_drop: HeldDrop::WaitForRoom,
-                ..client_config().tx_queue
-            },
+            tx_queue,
             ..client_config()
         });
         let started = Instant::now();
@@ -233,33 +285,112 @@ mod stalled_link {
             &publish(CongestionControl::Drop),
         );
         let took = started.elapsed();
-        assert_eq!(dropped, Ok(0), "a dropped put succeeds, as zenoh's does");
-        assert!(
-            took < Duration::from_secs(1),
-            "a droppable publish waited {took:?} behind a blocking one"
-        );
-        assert!(
-            !blocking.is_finished(),
-            "the droppable publish returned only once the blocking one had let go"
-        );
-        assert!(
-            !SessionDrive::is_closed(&*publisher),
-            "a dropped publish does not close the session"
-        );
+        let blocking_still_waiting = !blocking.is_finished();
+        let closed_by_the_drop = SessionDrive::is_closed(&*publisher);
 
         let waited = blocking
             .join()
             .expect("the blocking publisher")
             .expect("a blocking publish waited for room");
-        assert!(
-            waited >= CLOSE_WAIT,
-            "a blocking publish returned after {waited:?}, before its {CLOSE_WAIT:?}"
-        );
         until(
             &publisher,
             "the session to close after the blocking publish's wait",
             || SessionDrive::is_closed(&*publisher),
         );
         SessionDrive::close(&*peer);
+        Behind {
+            dropped,
+            took,
+            blocking_still_waiting,
+            closed_by_the_drop,
+            waited,
+            #[cfg(feature = "transport-stats")]
+            unsent_drops: publisher.transport_stats().tx.n_dropped,
+        }
+    }
+
+    /// Under zenoh's profile, while a blocking publish holds the session waiting for room on the
+    /// full link, a droppable one asks the link for room out of its own `wait_before_drop`, finds
+    /// none, and returns within a second with success, closing nothing; the blocking one waits
+    /// out its `wait_before_close`, and the session is closed after it.
+    #[test]
+    fn a_droppable_publish_is_not_held_behind_a_blocking_one_on_a_full_link() {
+        let seen = behind_a_blocking_publish(stalling(TxQueueConf {
+            wait_before_drop_us: DROP_WAIT_US,
+            held_drop: HeldDrop::WaitForRoom,
+            ..client_config().tx_queue
+        }));
+        assert_eq!(
+            seen.dropped,
+            Ok(0),
+            "a dropped put succeeds, as zenoh's does"
+        );
+        assert!(
+            seen.took < Duration::from_secs(1),
+            "a droppable publish waited {:?} behind a blocking one",
+            seen.took
+        );
+        assert!(
+            seen.blocking_still_waiting,
+            "the droppable publish returned only once the blocking one had let go"
+        );
+        assert!(
+            !seen.closed_by_the_drop,
+            "a dropped publish does not close the session"
+        );
+        assert!(
+            seen.waited >= CLOSE_WAIT,
+            "a blocking publish returned after {:?}, before its {CLOSE_WAIT:?}",
+            seen.waited
+        );
+        #[cfg(feature = "transport-stats")]
+        assert_eq!(
+            seen.unsent_drops, 1,
+            "the dropped publish is counted as the transport's drop"
+        );
+    }
+
+    /// Under the pico profile, read when the session was opened, a droppable publish that finds
+    /// the session held is dropped at once and its caller is told, as pico's put fails when its
+    /// held transmit lock drops the message. It asks the link nothing: the profile's own
+    /// `wait_before_drop` is `wait_before_close`'s five seconds, which an ask on the full link
+    /// would spend before it answered.
+    #[test]
+    fn under_the_pico_profile_a_publish_behind_a_held_session_is_dropped_at_once_and_told() {
+        let pico = TxQueueConf::pico_of_policy(&SessionPolicy::defaults());
+        assert_eq!(
+            pico.held_drop,
+            HeldDrop::DropAtOnce,
+            "CONTROL: pico's profile"
+        );
+        assert_eq!(
+            pico.wait_before_drop_us, WAIT_BEFORE_CLOSE_US,
+            "CONTROL: an ask would wait this long"
+        );
+        let seen = behind_a_blocking_publish(stalling(pico));
+        assert_eq!(seen.dropped, Err(FanoutError::HeldConduit));
+        assert!(
+            seen.took < Duration::from_secs(1),
+            "the droppable publish took {:?}: it asked the full link for room",
+            seen.took
+        );
+        assert!(
+            seen.blocking_still_waiting,
+            "the droppable publish returned only once the blocking one had let go"
+        );
+        assert!(
+            !seen.closed_by_the_drop,
+            "a dropped publish does not close the session"
+        );
+        assert!(
+            seen.waited >= CLOSE_WAIT,
+            "a blocking publish returned after {:?}, before its {CLOSE_WAIT:?}",
+            seen.waited
+        );
+        #[cfg(feature = "transport-stats")]
+        assert_eq!(
+            seen.unsent_drops, 1,
+            "the dropped publish is counted as the transport's drop"
+        );
     }
 }

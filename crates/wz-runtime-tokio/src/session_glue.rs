@@ -6021,6 +6021,7 @@ mod link_congestion_tests {
     /// room: how long it took, what the link was asked, how many frames reached the link, and
     /// whether a close was staged.
     struct BehindABlockingSender {
+        sent: Result<(), wz_session_core::send_wire_error::SendWireError>,
         took: std::time::Duration,
         asked: Vec<RoomWait>,
         frames: usize,
@@ -6061,9 +6062,7 @@ mod link_congestion_tests {
             .recv_timeout(Duration::from_secs(10))
             .expect("the blocking sender waits for room, holding its conduit");
         let started = Instant::now();
-        actions
-            .send_push_literal_qos("home/drop", b"D", true, Priority::DEFAULT)
-            .expect("a congestion drop is not the caller's error");
+        let sent = actions.send_push_literal_qos("home/drop", b"D", true, Priority::DEFAULT);
         let took = started.elapsed();
         let _ = release_tx.send(());
         blocking
@@ -6073,6 +6072,7 @@ mod link_congestion_tests {
         let asked = link.asked.lock().expect("asked").clone();
         let frames = link.frames.lock().expect("frames").len();
         BehindABlockingSender {
+            sent,
             took,
             asked,
             frames,
@@ -6093,6 +6093,11 @@ mod link_congestion_tests {
             "CONTROL: zenoh's profile"
         );
         let seen = drop_behind_a_blocking_sender(queue);
+        assert_eq!(
+            seen.sent,
+            Ok(()),
+            "under zenoh's profile a congestion drop is not the caller's error"
+        );
         assert!(
             seen.took < std::time::Duration::from_secs(1),
             "the droppable message took {:?}: it waited for the blocking sender's conduit \
@@ -6111,12 +6116,17 @@ mod link_congestion_tests {
 
     /// Under the pico profile a droppable message whose conduit is held is dropped at once, as
     /// pico's try-lock drops it: the link is asked for no room on its behalf, only the blocking
-    /// sender's own ask is seen, and nothing is closed.
+    /// sender's own ask is seen, nothing is closed, and the sender is told the message was
+    /// dropped (`SendWireError::HeldConduit`), as pico's put fails.
     #[test]
     fn under_the_pico_profile_a_droppable_message_behind_a_held_conduit_asks_nothing() {
         let queue =
             super::TxQueueConf::pico_of_policy(&wz_session_core::policy::SessionPolicy::defaults());
         let seen = drop_behind_a_blocking_sender(queue);
+        assert_eq!(
+            seen.sent,
+            Err(wz_session_core::send_wire_error::SendWireError::HeldConduit)
+        );
         assert!(
             seen.took < std::time::Duration::from_secs(1),
             "the droppable message took {:?} behind the held conduit",

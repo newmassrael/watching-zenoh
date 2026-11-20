@@ -431,6 +431,11 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     rooms: Arc<LinkRooms>,
     wait_before_drop_us: u64,
     held_drop: HeldDrop,
+    /// The droppable publishes dropped before they reached a link: behind a held session, for
+    /// want of room or by the profile's drop at once ([`Self::live_to_publish`]). Charged to the
+    /// transport's drops in [`Self::transport_stats`], where a link's session charges its own.
+    #[cfg(feature = "transport-stats")]
+    unsent_drops: AtomicU64,
     /// What the session delivered under the lock, handed out after it: the samples for its
     /// subscribers, in the order they arrived, and the changes of its matching statuses. Two
     /// queues and not one of an enum, so a sample is queued as it was built and a matching flip
@@ -489,6 +494,9 @@ pub(crate) enum Room {
     Congested,
     /// No link that is up gives a wait to ask.
     Unasked,
+    /// Nothing was asked: the queue profile drops a message behind a held session at once and
+    /// reports it to the caller, as pico's try-lock drop does.
+    Held,
 }
 
 impl LinkRooms {
@@ -501,11 +509,11 @@ impl LinkRooms {
 
     /// What a droppable publish that found the session held is told, by the queue profile's
     /// `held_drop`: zenoh's asks the links for room within `wait_us` ([`Self::within`]); pico's is
-    /// a congestion drop at once and asks nothing, as pico's try-lock drops the message.
+    /// dropped at once and asks nothing ([`Room::Held`]), as pico's try-lock drops the message.
     pub(crate) fn for_held(&self, held_drop: HeldDrop, wait_us: u64) -> Room {
         match held_drop {
             HeldDrop::WaitForRoom => self.within(wait_us),
-            HeldDrop::DropAtOnce => Room::Congested,
+            HeldDrop::DropAtOnce => Room::Held,
         }
     }
 
@@ -964,6 +972,9 @@ fn leg(result: Result<(), SendWireError>) -> Result<usize, FanoutError> {
     match result.map_err(PublishError::from) {
         Ok(()) => Ok(0),
         Err(PublishError::TransportUnavailable | PublishError::RequiresUnicast) => Ok(0),
+        // The link's queue profile dropped the put behind a held conduit and says so: the other
+        // links are still sent it, and the publish is answered as dropped.
+        Err(PublishError::HeldConduit) => Err(FanoutError::HeldConduit),
         Err(_) => Err(FanoutError::ExceedsCapacity),
     }
 }
@@ -2144,6 +2155,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             rooms,
             wait_before_drop_us,
             held_drop,
+            #[cfg(feature = "transport-stats")]
+            unsent_drops: AtomicU64::new(0),
             samples: Arc::new(Mutex::new(VecDeque::new())),
             matching: Arc::new(Mutex::new(VecDeque::new())),
             targets: Mutex::new(Vec::new()),
@@ -2293,33 +2306,68 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// for room with nothing of the session held. No room within `wait_before_drop` is the
     /// congestion drop, which zenoh answers the put with success; room means the holder is not
     /// waiting on a link, and the session is tried again. A session whose links give no wait to
-    /// ask is waited for. Under the pico profile a held session is a congestion drop at once,
-    /// with nothing asked ([`LinkRooms::for_held`]). `None` once the session is closed, or when
-    /// the publish was dropped.
-    fn live_to_publish(&self, droppable: bool) -> Option<MutexGuard<'_, Confined<Core<L, C>>>> {
+    /// ask is waited for. `Ok(None)` once the session is closed, or when the publish was dropped
+    /// for want of room. Under the pico profile a held session drops the publish at once, with
+    /// nothing asked ([`LinkRooms::for_held`]), and the caller is told
+    /// ([`FanoutError::HeldConduit`]), as pico's put fails when its held transmit lock drops it.
+    fn live_to_publish(
+        &self,
+        droppable: bool,
+    ) -> Result<Option<MutexGuard<'_, Confined<Core<L, C>>>>, FanoutError> {
         if !droppable {
-            return self.live();
+            return Ok(self.live());
         }
         loop {
             if self.closed.load(Ordering::Acquire) {
-                return None;
+                return Ok(None);
             }
             if let Some(guard) = self.core.try_lock() {
                 // A close that took the session first is seen under it, as `live` sees it.
                 if self.closed.load(Ordering::Acquire) {
-                    return None;
+                    return Ok(None);
                 }
-                return Some(guard);
+                return Ok(Some(guard));
             }
             match self
                 .rooms
                 .for_held(self.held_drop, self.wait_before_drop_us)
             {
                 Room::Free => core::hint::spin_loop(),
-                Room::Congested => return None,
-                Room::Unasked => return self.live(),
+                Room::Congested => {
+                    #[cfg(feature = "transport-stats")]
+                    self.unsent_drops.fetch_add(1, Ordering::Relaxed);
+                    return Ok(None);
+                }
+                Room::Unasked => return Ok(self.live()),
+                Room::Held => {
+                    #[cfg(feature = "transport-stats")]
+                    self.unsent_drops.fetch_add(1, Ordering::Relaxed);
+                    return Err(FanoutError::HeldConduit);
+                }
             }
         }
+    }
+
+    /// What the session's transports counted (`transport-stats`), in the report a tokio session
+    /// gives (`OpenedSession::stats`): the counters of each link that is up, summed, and in
+    /// `tx.n_dropped`, where a link's session charges the messages it dropped for congestion,
+    /// the droppable publishes this engine dropped before they reached a link (one each,
+    /// whatever the number of links). A link's counters leave with it, as a tokio session's
+    /// leave with that session; a closed session reports the engine's drops alone.
+    #[cfg(feature = "transport-stats")]
+    pub fn transport_stats(&self) -> wz_session_core::stats::TransportStatsReport {
+        let mut report = wz_session_core::stats::TransportStatsReport::default();
+        if let Some(core) = self.live() {
+            for actions in core.0.ups() {
+                report.absorb(&actions.stats_report());
+            }
+        }
+        let unsent = self.unsent_drops.load(Ordering::Relaxed);
+        report.tx.n_dropped = report
+            .tx
+            .n_dropped
+            .saturating_add(usize::try_from(unsent).unwrap_or(usize::MAX));
+        report
     }
 
     /// Run the periodic jobs that are due, with no lock held: what a job does (a beacon is a
@@ -2487,7 +2535,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // A message with no QoS of its own is sent with the default's, as the send reads it.
         let congestion = meta.qos.unwrap_or(QosLevel::DEFAULT).congestion();
         let droppable = !reliable || congestion == CongestionControl::Drop;
-        let Some(core) = self.live_to_publish(droppable) else {
+        let Some(core) = self.live_to_publish(droppable)? else {
             return Ok(0);
         };
         let express = meta.is_express();

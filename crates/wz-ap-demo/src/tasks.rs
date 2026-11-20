@@ -1008,6 +1008,16 @@ fn emit_one_push(
                  told to discard it; skipping this iteration"
             );
         }
+        // A droppable Put whose conduit another sender held, dropped at once by a queue profile
+        // that reports it: a congestion drop, transient as the reconnect window is; the next
+        // cycle's Put finds the conduit free. The demo's sessions run zenoh's profile, which
+        // never reports it, and the exhaustive match keeps the arm.
+        Err(e @ PublishAliasError::HeldConduit) => {
+            log::warn!(
+                "wz-ap-demo: publisher_task publish dropped on idx={idx}: {e}; \
+                 skipping this iteration"
+            );
+        }
     }
 }
 

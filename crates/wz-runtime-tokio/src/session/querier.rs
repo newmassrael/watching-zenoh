@@ -134,6 +134,9 @@ pub enum LivelinessGetError {
     /// Interest was not emitted rather than carry an id a standing Interest
     /// may still hold.
     IdsExhausted,
+    /// The Interest may be dropped, another sender held its conduit, and the session's queue
+    /// profile drops it at once (`SendWireError::HeldConduit`). The Interest was not emitted.
+    HeldConduit,
 }
 
 impl std::fmt::Display for LivelinessGetError {
@@ -180,6 +183,12 @@ impl std::fmt::Display for LivelinessGetError {
                 "LivelinessGetError: the session has handed out every 32-bit \
                  interest id; the Interest was not emitted"
             ),
+            LivelinessGetError::HeldConduit => write!(
+                f,
+                "LivelinessGetError: another sender held this droppable \
+                 Interest's conduit and the queue profile drops it at once; \
+                 the Interest was not emitted"
+            ),
         }
     }
 }
@@ -201,6 +210,7 @@ impl From<SendWireError> for LivelinessGetError {
             // R2238 — NOT folded in above: that pair's shared claim includes
             // "no wire bytes emitted", which this one breaks.
             SendWireError::FragmentTxBudgetExhausted => LivelinessGetError::FragmentChainAbandoned,
+            SendWireError::HeldConduit => LivelinessGetError::HeldConduit,
         }
     }
 }
@@ -274,6 +284,11 @@ pub enum QueryAliasError {
         /// The bound that was reached.
         limit: usize,
     },
+    /// The query may be dropped (its congestion control is `Drop`), another sender held its
+    /// conduit, and the session's queue profile drops it at once
+    /// (`SendWireError::HeldConduit`), as zenoh-pico's get fails. The Request(Query) was not
+    /// emitted.
+    HeldConduit,
 }
 
 impl std::fmt::Display for QueryAliasError {
@@ -318,6 +333,12 @@ impl std::fmt::Display for QueryAliasError {
                 "QueryAliasError: this querier already has {limit} quer(ies) in flight, \
                  its bound; the Request(Query) was not emitted — retry once one ends"
             ),
+            QueryAliasError::HeldConduit => write!(
+                f,
+                "QueryAliasError: another sender held this droppable query's conduit \
+                 and the queue profile drops it at once; the Request(Query) was not \
+                 emitted"
+            ),
         }
     }
 }
@@ -337,6 +358,7 @@ impl From<SendWireError> for QueryAliasError {
             // R2238 — NOT folded in above: that pair's shared claim includes
             // "no wire bytes emitted", which this one breaks.
             SendWireError::FragmentTxBudgetExhausted => QueryAliasError::FragmentChainAbandoned,
+            SendWireError::HeldConduit => QueryAliasError::HeldConduit,
         }
     }
 }

@@ -615,6 +615,47 @@ impl DirectionReport {
         }
         total
     }
+
+    /// Add `other`'s counters to these: the report of a session that stands on several links,
+    /// each link's session counting what it carried. Every counter is named here, so one added
+    /// to the report is summed or the build refuses this function.
+    pub fn absorb(&mut self, other: &DirectionReport) {
+        let DirectionReport {
+            bytes,
+            t_msgs,
+            n_msgs,
+            n_dropped,
+            payload,
+            downsampler_dropped_msgs,
+            low_pass_dropped_msgs,
+            low_pass_dropped_bytes,
+        } = other;
+        self.bytes = self.bytes.saturating_add(*bytes);
+        self.t_msgs = self.t_msgs.saturating_add(*t_msgs);
+        for (mine, theirs) in self.n_msgs.iter_mut().zip(n_msgs) {
+            *mine = mine.saturating_add(*theirs);
+        }
+        self.n_dropped = self.n_dropped.saturating_add(*n_dropped);
+        for (mine, theirs) in self
+            .payload
+            .iter_mut()
+            .flatten()
+            .zip(payload.iter().flatten())
+        {
+            let PayloadCounters { msgs, pl_bytes } = theirs;
+            mine.msgs = mine.msgs.saturating_add(*msgs);
+            mine.pl_bytes = mine.pl_bytes.saturating_add(*pl_bytes);
+        }
+        self.downsampler_dropped_msgs = self
+            .downsampler_dropped_msgs
+            .saturating_add(*downsampler_dropped_msgs);
+        self.low_pass_dropped_msgs = self
+            .low_pass_dropped_msgs
+            .saturating_add(*low_pass_dropped_msgs);
+        self.low_pass_dropped_bytes = self
+            .low_pass_dropped_bytes
+            .saturating_add(*low_pass_dropped_bytes);
+    }
 }
 
 /// An immutable snapshot of a [`TransportStats`] — the serializable value the
@@ -625,6 +666,14 @@ pub struct TransportStatsReport {
     pub tx: DirectionReport,
     /// The inbound half.
     pub rx: DirectionReport,
+}
+
+impl TransportStatsReport {
+    /// Add `other`'s counters to these, both halves ([`DirectionReport::absorb`]).
+    pub fn absorb(&mut self, other: &TransportStatsReport) {
+        self.tx.absorb(&other.tx);
+        self.rx.absorb(&other.rx);
+    }
 }
 
 /// Per-session counters. Interior-mutable (atomic), so a shared
@@ -857,6 +906,50 @@ mod tests {
         let copied = r;
         assert_eq!(copied, r);
         assert_ne!(r, TransportStatsReport::default());
+    }
+
+    /// The report of a session on several links is the sum of its links' reports, counter by
+    /// counter and half by half, and an empty report adds nothing.
+    #[test]
+    fn a_report_absorbs_another_counter_by_counter() {
+        let mut one = TransportStatsReport::default();
+        one.tx.bytes = 100;
+        one.tx.t_msgs = 2;
+        one.tx.n_msgs[StatMedium::Net.index()] = 3;
+        one.tx.n_dropped = 1;
+        one.tx.payload[StatMessage::Put.index()][StatSpace::User.index()] = PayloadCounters {
+            msgs: 3,
+            pl_bytes: 30,
+        };
+        one.rx.bytes = 7;
+        one.rx.low_pass_dropped_bytes = 5;
+        let mut other = one;
+        other.tx.n_dropped = 4;
+        other.rx.downsampler_dropped_msgs = 2;
+
+        let mut sum = TransportStatsReport::default();
+        sum.absorb(&TransportStatsReport::default());
+        assert_eq!(
+            sum,
+            TransportStatsReport::default(),
+            "CONTROL: nothing added"
+        );
+        sum.absorb(&one);
+        sum.absorb(&other);
+        assert_eq!(sum.tx.bytes, 200);
+        assert_eq!(sum.tx.t_msgs, 4);
+        assert_eq!(sum.tx.n_msgs_on(StatMedium::Net), 6);
+        assert_eq!(sum.tx.n_dropped, 5);
+        assert_eq!(
+            sum.tx.payload_of(StatMessage::Put, StatSpace::User),
+            PayloadCounters {
+                msgs: 6,
+                pl_bytes: 60
+            }
+        );
+        assert_eq!(sum.rx.bytes, 14);
+        assert_eq!(sum.rx.low_pass_dropped_bytes, 10);
+        assert_eq!(sum.rx.downsampler_dropped_msgs, 2);
     }
 
     /// The axis enums ARE the population: every `index()` is a distinct slot

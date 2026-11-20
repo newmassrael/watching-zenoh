@@ -430,7 +430,10 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "`app_link` re-export of the runtime's links over a transport the program supplies, "
         "which the pico ABI's `app_transport_doors` opens a session over; `group-host` gates "
         "`host_group::HostGroups` and its transport, the groups a session joins on the host's "
-        "own sockets, which `host_group`'s unit tests run and Layer M runs over a real group",
+        "own sockets, which `host_group`'s unit tests run and Layer M runs over a real group; "
+        "`transport-stats` gates `CoopEngine::transport_stats`, the session's transport "
+        "counters, a Rust surface neither C ABI reports, which the crate's own "
+        "`tests::congestion` reads",
         frozenset(
             {
                 "app-transport",
@@ -440,6 +443,7 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "scout-datagram",
                 "shared-key-ids",
                 "tls-mbedtls",
+                "transport-stats",
             }
         ),
     ),
