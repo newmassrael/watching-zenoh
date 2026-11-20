@@ -581,6 +581,9 @@ transport-link-unixpipe,transport-link-ws|"
     # its members' tokens, which a member answers from the tokens its session holds. Each of the
     # four runs the module's own tests too, a JOIN asked between two beacons among them.
     "wz-capi-coop|hook|app-transport,group,liveliness|tests::group::"
+    # And with `transport-stats` (`tests::group::congested::`): what a group's queue drops for
+    # congestion is the transport's `tx.n_dropped`, as the tokio engine's group counts it.
+    "wz-capi-coop|hook|app-transport,group,transport-stats|tests::group::congested::"
     # The groups joined on the host's own sockets (`host_group::`, compiled with `group-host`):
     # only a `udp/` endpoint that names a multicast group is joined, and the session's two link
     # policies reach its sockets. The group a real host joins is `#[ignore]`d and Layer M's.
@@ -703,6 +706,12 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # full task table refuses and counts, a finished task's cell is reused, what a
     # task held is dropped once, a full timer table makes the sleep wake itself.
     "wz-runtime-coop|hook|alloc,reassembly,session-slot,session-unicast|"
+    # The links over a transport the program supplies (`app_link::`): a dial, a listener and its
+    # accepted streams and sources, a datagram that goes whole or not at all, a group joined, read
+    # by member and left, and a group's room answered from the table, inside the loop and out.
+    # `app-link` is a feature no row above names, so before this row none of these ran; `host-lock`
+    # is the host's wait, a parked thread.
+    "wz-runtime-coop|hook|app-link,host-lock|app_link::"
     # The fixed-memory profile's secure channel (decision D9): its tests run the channel, so they
     # link the Mbed TLS `vendored` builds from the pinned submodules, which is not a default.
     # `host-lock` serialises the library's calls for the tests that run two engines on two threads.
@@ -1232,6 +1241,11 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         group,\
         query-get\
         |"
+    # The group pump and its queue on the heap profile (`group_drive::`): a datagram the socket
+    # has no room for kept for the next step with the beacon behind it, the queue bounded by its
+    # lanes, and the most urgent lane written first. `transport-multicast` builds the module and
+    # `codec-push` the items; the row above is the slot profile, where none of this is built.
+    "wz-session-mcu|hook|codec-push,transport-multicast|group_drive::"
     # S9d: the receive path of the slot profile lends the control records (a
     # Declare, an Interest, a ResponseFinal) where their frame lies, and every
     # registry that consumes one reads the lent form and the owned form through one
