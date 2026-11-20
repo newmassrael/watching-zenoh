@@ -5678,6 +5678,22 @@
       "carry_forward_bullets": [
         "The SCE session agreed and placed the work: a field over several bit runs and under a constant mask is an amendment of ADR 0095 (order item 5b, beside and right after ADR 0100), and the generated interpreter of codec documents with its descriptor schema and the build-time `.proto` schema compiler are order item 8, after the text-grammar codec. U15's rows stay G until 0100 and 5b land. watching-zenoh-79's message-catalogue single source (W13) now has its target, a document SCE reads; its design is under review. `silent_skip_gate.py` is red on main for three `wz-zenoh` session tests from the policy work's phase 5 (a helper that returns `None` and says nothing); its owner is not reachable, and it is repaid in the next round."
       ]
+    },
+    "Round 4556": {
+      "decision_summary": "Two things. First, `silent_skip_gate.py` was red on main: three `wz-zenoh` session tests from the policy work's phase 5 (Round 4551) bailed out when `another_overload()` returned `None`, and that helper said nothing, so a build that allowed one value of `subscriber-overload` passed them without running their subject. The pre-push hook grades this gate only for a round that touches the file, so it had stood unseen; the owning session could not be reached. This crate builds for hosted targets only, and a hosted build allows every value of a policy unless `WZ_POLICY_DOMAINS=defaults` narrows it, which no lane does; so the helper now states that as its precondition and fails by name when it does not hold, and the profile test's own quiet return on a refused `upstream` profile became the same kind of failure. Second, the SCE session answered the questions watching-zenoh-79's catalogue design (W13) put to it and set the order of the work U15's decision asks for; the census records it: the mask of ADR 0095's amendment applies to a word, its unowned bits included, a new derived-element ADR (checksum, length, a decode that reports a mismatch, codec inputs) and a `message-catalog` kind follow ADR 0100, the boundary-binding item includes the build entry a deployment's repository calls, and the run-time reading of codec documents brings a `protobuf` codec format with the `.proto` compiler.",
+      "changes_bullets": [
+        "`crates/wz-zenoh/src/api/session.rs` (tests only): `another_overload()` returns the value and fails by name when the build allows no second value of `subscriber-overload`, saying why a hosted build has one; the three tests that read it no longer return early, and the profile test fails by name where it returned when the `upstream` profile was refused. `docs/zenoh-logic-as-sce-kinds.md` section 5: item 2 records the literal-shift fix as landed, item 4 gains the build entry another repository calls, item 5 gains 5b's word mask, 5c's derived elements and codec inputs and 5d's `message-catalog` kind, and item 8 gains the descriptor's canonical form, the differential over the conformance reference, the `protobuf` codec format and the `.proto` compiler."
+      ],
+      "verification_bullets": [
+        "`silent_skip_gate.py --check` passes on this tree (22 tests bail out on an `Option` helper, none on a silent one); on main before this round it failed on the three tests. On pc2 the four policy tests of `wz-zenoh` ran with `open-policies` (4 ran, 4 passed, 192 filtered out), and `cargo clippy -p zenoh --features open-policies --tests -D warnings` is clean; `rustfmt --check` passes on the file. All 152 round-fed static gates pass on this tree, and the upstream citation gate passes. The census's section 5 order is the SCE session's answer of 2026-11-20, as it wrote it."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.a-new-kind-algorithm",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage"
+      ],
+      "carry_forward_bullets": [
+        "Other quiet returns may stand in tests the silent-skip gate does not read (a `return` after a refused call rather than a `let`-`else` on a helper); this round fixed the one beside the three it graded. watching-zenoh-79 starts the parts of the catalogue design that do not wait on SCE (the two fixed records as SCE documents, the differential test first, run-time profile doors tied to `std`) after its wave 3 lands. wz moves its SCE pin once, at ADR 0108 step 7."
+      ]
     }
   },
   "inventory_entries": {
