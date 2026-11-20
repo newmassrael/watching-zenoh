@@ -4671,7 +4671,10 @@ jobs:
 
       - name: Layer Qzk — the client images build under the gates they are held to
         # The kit lane's build step for each client image: the board's own limits (an arena
-        # outgrown fails the build), the stack chain and bound, and the text. Nothing boots.
+        # outgrown fails the build), the stack chain and bound, and the text. Then the ceiling
+        # under zenoh-pico (docs/upstream-parity.md D8): each image the committed matrix pairs
+        # with a pico reference and that reference, built here as compare builds from this
+        # tree's vendor/zenoh-pico, held cell by cell; only a WIN passes. Nothing boots.
         env:
           WZ_QZ_REQUIRE: "1"
         run: |

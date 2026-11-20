@@ -2547,6 +2547,9 @@ layer_c0_test_discipline() {
     # The text of an image told by who owns it: the symbol reader and the rule driven over a small
     # table. The ELF half is the kit lane's build step, where the images are built.
     _runci_leg text_owner_gate.selftest -- python3 scripts/lib/text_owner_gate.py --selftest
+    # The ceiling of the kit images under zenoh-pico's (docs/upstream-parity.md D8): the pairs read off
+    # the matrix, the stack reader and the rule, over synthetic outputs. The ELF half is Layer Qzk's.
+    _runci_leg pico_ceiling_gate.selftest -- python3 scripts/lib/pico_ceiling_gate.py --selftest
     # R3449 -- the resource budget (a committed figure per image): each image whose worst chain
     # the stack gate commits has a row of figures the kit measured, the row copies that chain, and a
     # measured peak lies under it. No hardware here; `--measure` is the kit lane's.
@@ -28515,6 +28518,12 @@ layer_qzb_zephyr_board_matrix() {
 #
 # The kit lane's memory floor is for a workstation that can be taken down by a build; a hosted runner is
 # discarded, so the floor is the runner's (`WZ_QZK_MIN_AVAIL_MB`, 4000).
+#
+# Then the ceiling (docs/upstream-parity.md D8): each image the committed matrix pairs with a zenoh-pico
+# reference is built again as a compare build, the reference with it from this tree's vendor/zenoh-pico,
+# and scripts/lib/pico_ceiling_gate.py holds the image under the reference in every cell the build
+# decides. Only a WIN passes; a cell that is not one fails the layer whatever the image's own budget row
+# says, because a row that moved with its image is no ceiling.
 layer_qzk_client_images_build() {
     local rc image images lane_home fail=0 n=0 log_dir out log
     _qz_toolchain thumbv7em-none-eabi && rc=0 || rc=$?
@@ -28549,8 +28558,59 @@ layer_qzk_client_images_build() {
         fi
         rm -rf "$lane_home/build"
     done
+    _qzk_pico_ceiling "$lane_home" "$log_dir" "$images" || fail=1
     rm -rf "$lane_home"
     (( n > 0 )) || fail=1
+    return "$fail"
+}
+
+# _qzk_pico_ceiling <lane home> <log dir> <the lane's images>
+#
+# The pairs are the matrix's (`--pairs`), never a list of this file's. Each image and reference is
+# built once, by the kit lane's own compare build, and its ELF kept beside the lane home while the build
+# directory goes, as the loop above does, so that a runner's disk holds one build at a time.
+_qzk_pico_ceiling() {
+    local lane_home="$1" log_dir="$2" images="$3" pairs key image reference out fail=0
+    local keys
+    local -A elf_of=()
+    # shellcheck disable=SC2086  # the lane prints one image key per line, and each is one argument
+    pairs="$(python3 scripts/lib/pico_ceiling_gate.py --pairs $images)" \
+        || { echo "  Qzk ceiling FAIL — the matrix gives no pair to hold (above)" >&2; return 1; }
+    mkdir -p "$lane_home/ceiling"
+    # Each key once, every reference before its images.
+    keys="$(awk '{print $2; print $1}' <<< "$pairs" | awk '!seen[$0]++')"
+    for key in $keys; do
+        if ZEPHYR_HOME="$(dirname "$_QZ_BASE")" KIT_LANE_HOME="$lane_home" \
+            KIT_LANE_MIN_AVAIL_MB="${WZ_QZK_MIN_AVAIL_MB:-4000}" BUILD_VARIANT=compare \
+            bash scripts/kit-lane.sh build "$key" >"$log_dir/ceiling-$key.verdicts" 2>&1 \
+            && out="$(cat "$lane_home/last-out-compare-$key")" \
+            && cp "$(cat "$out/elf.path")" "$lane_home/ceiling/$key.elf"; then
+            elf_of[$key]="$lane_home/ceiling/$key.elf"
+            echo "  Qzk ceiling $key BUILT (compare build)"
+        else
+            echo "  Qzk ceiling $key FAIL — the kit lane's compare build refused it:" >&2
+            cat "$log_dir/ceiling-$key.verdicts" >&2
+            for out in "$lane_home"/out/*-compare-"$key"; do
+                [[ -d "$out" ]] || continue
+                tail -40 "$out/build.log" 2>/dev/null | sed 's/^/    build.log: /' >&2
+            done
+            fail=1
+        fi
+        rm -rf "$lane_home/build"
+    done
+    while read -r image reference; do
+        [[ -n "${elf_of[$image]:-}" && -n "${elf_of[$reference]:-}" ]] || continue
+        if python3 scripts/lib/pico_ceiling_gate.py --check "$image" "$reference" \
+            --image-elf "${elf_of[$image]}" --reference-elf "${elf_of[$reference]}" \
+            </dev/null >"$log_dir/ceiling-$image-$reference.log" 2>&1; then
+            echo "  Qzk ceiling $image under $reference HELD"
+            sed 's/^/    /' "$log_dir/ceiling-$image-$reference.log"
+        else
+            echo "  Qzk ceiling $image under $reference FAIL:" >&2
+            sed 's/^/    /' "$log_dir/ceiling-$image-$reference.log" >&2
+            fail=1
+        fi
+    done <<< "$pairs"
     return "$fail"
 }
 
