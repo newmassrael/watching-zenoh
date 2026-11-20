@@ -453,14 +453,41 @@ mod tests {
         );
     }
 
+    /// A loopback port that refuses every connect for as long as the value lives: a TCP socket
+    /// bound and never listening, which holds the number so no other `bind(:0)` is handed it.
+    /// The shape of `wz_runtime_tokio_test_support::refusing_port`, over this module's own Winsock
+    /// calls: that crate pulls the tokio runtime, and with it `wz-session-core/alloc`, which feature
+    /// unification would put into this crate's no-allocator test build.
+    struct RefusingPort {
+        socket: ws::SOCKET,
+        port: u16,
+    }
+
+    impl RefusingPort {
+        fn hold() -> Self {
+            let socket =
+                open_socket(&at(0), ws::SOCK_STREAM, ws::IPPROTO_TCP).expect("a TCP socket");
+            let raw = RawAddr::of(at(0));
+            // SAFETY: `raw` is a live socket address of the length passed.
+            let rc = unsafe { ws::bind(socket, raw.as_ptr(), raw.size()) };
+            assert_eq!(rc, 0, "bind without listen");
+            let port = name_of(socket, ws::getsockname)
+                .expect("the bound number")
+                .port();
+            Self { socket, port }
+        }
+    }
+
+    impl Drop for RefusingPort {
+        fn drop(&mut self) {
+            close(self.socket);
+        }
+    }
+
     #[test]
     fn a_connection_to_a_port_nobody_listens_on_is_refused() {
-        // A port std bound and let go: nothing listens there now.
-        let port = {
-            let held = TcpListener::bind("127.0.0.1:0").expect("a listener");
-            held.local_addr().expect("its port").port()
-        };
-        match WindowsTcpSocket::connect(at(port)) {
+        let held = RefusingPort::hold();
+        match WindowsTcpSocket::connect(at(held.port)) {
             Err(WindowsNetError::Connect(e)) => assert_eq!(e, ws::WSAECONNREFUSED),
             Err(other) => panic!("a different error: {other:?}"),
             Ok(_) => panic!("nothing listens there"),
