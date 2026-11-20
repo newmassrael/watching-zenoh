@@ -480,6 +480,10 @@ transport-link-unixpipe,transport-link-ws|"
     # filter is the integration target, so a test added to it under the feature is claimed without
     # touching the row; the `cfg(not(..))` twin it replaces runs in the default build.
     "wz-capi-c|hook|router-node|--test=session_roles"
+    # A time base the program supplies, through this ABI's doors (`time-base`): the doors' unit
+    # tests (`time_base::tests`) and the integration file (`time_base_open`), an open whose connect
+    # budget is the program's time and a node refused on one. The filter is the shared word.
+    "wz-capi-c|hook|time-base|time_base"
     # The config's `wz/key-ids` through this ABI's doors, read into what the open hands its
     # session (`config::tests::wz_member`, its key-id tests built with `shared-key-ids`).
     "wz-capi-c|hook|shared-key-ids|config::tests::wz_member::"
@@ -526,6 +530,9 @@ transport-link-unixpipe,transport-link-ws|"
     # `router-node` too). The same module path, so the row's build adds one feature to the row
     # above and a test added there under the feature is claimed.
     "wz-capi-core|hook|router-node,scout,shared-key-ids|open_plan::"
+    # The node that refuses a time base the program supplies by name (`open_plan::`, its test built
+    # with `router-node` and `time-base`): the same module path, one feature added to the row above.
+    "wz-capi-core|hook|router-node,scout,time-base|open_plan::"
     # The span of the code that opens a session, carried onto the engine's tasks and threads
     # (`caller_span`, built with `tracing-instrument`), and the copy a session promotes a large
     # payload into (`session_defaults`, whose copy test is built with `transport-shm`). No leg

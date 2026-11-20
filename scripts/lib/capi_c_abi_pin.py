@@ -159,10 +159,22 @@ HEADER = ROOT / "crates" / "wz-capi-c" / "include" / "wz_capi_c.h"
 # revision that commit introduced with the revision door. A new door is pinned at
 # the revision its own commit moves `EXPECTED_REVISION` to, which `pin_findings`
 # holds.
-EXPECTED_REVISION = 18
+EXPECTED_REVISION = 19
 EXPECTED_SYMBOLS: dict[str, int] = {
     # R2301 (item 634) — the revision door itself.
     "wz_capi_c_abi_version": 1,
+    # Revision 19 — a time base the program supplies, which the timers of a session opened from a
+    # config naming it run on (`time-base`, off by default and on in the lane's build): the owned
+    # handle's set, the config's door, the program's word that its time moved, and the internal
+    # pair.
+    "wz_capi_c_time_base_new": 19,
+    "wz_capi_c_config_time_base": 19,
+    "wz_capi_c_time_base_advanced": 19,
+    "wz_capi_c_time_base_loan": 19,
+    "wz_capi_c_time_base_move": 19,
+    "wz_capi_c_time_base_drop": 19,
+    "wz_capi_c_internal_time_base_null": 19,
+    "wz_capi_c_internal_time_base_check": 19,
     # Revision 17 — a subscriber whose callback runs off the receive path, behind a bounded lane
     # (`rx-callback-offload`, off by default and on in the lane's build): the declaration, the
     # default of its statement, and the snapshot of its lane.

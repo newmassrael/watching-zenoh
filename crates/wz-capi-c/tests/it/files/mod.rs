@@ -42,5 +42,6 @@ mod session_roles;
 mod source_info_roundtrip;
 mod subscriber_offload;
 mod switch_doors;
+mod time_base_open;
 mod timestamp_roundtrip;
 mod transport_events_roundtrip;

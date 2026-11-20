@@ -486,6 +486,10 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # `rx-callback-offload` the same: it gates `pub mod offload`, whose public items are the
         # three `wz_capi_c_*offload*` doors and the structs and constants they take, declared in
         # `wz_capi_c.h`; off by default, as upstream runs a callback where the sample arrives.
+        # `time-base` the same: it gates `pub mod time_base`, whose public items are the
+        # `wz_capi_c_time_base_*` doors, `wz_capi_c_config_time_base` and the structs and function
+        # types they take, declared in `wz_capi_c.h`; off by default, as upstream times its sessions
+        # by the system's clock alone.
         frozenset(
             {
                 "clock-source",
@@ -497,6 +501,7 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "segment-sender",
                 "supervision",
                 "switch-doors",
+                "time-base",
                 "zenoh-c-no-unstable-api",
                 "zenoh-c-shared-memory",
             }

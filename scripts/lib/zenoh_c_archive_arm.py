@@ -297,6 +297,10 @@ CAPABILITY_FEATURES = frozenset({
     # The key ids every node shares, read from the config's `wz/key-ids` member: no door and no
     # type, so no footprint moves; off in the default and in every arm.
     "shared-key-ids",
+    # A time base the program supplies (`wz_capi_c_time_base_*`): wz-own doors and the structs they
+    # take, no zenoh-c type; a config holds it beside its document, which no footprint carries.
+    # Off in the default and in every arm.
+    "time-base",
 })
 
 CAPI_C_MANIFEST = "crates/wz-capi-c/Cargo.toml"

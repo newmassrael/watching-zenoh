@@ -144,6 +144,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-c/src/switch_doors.rs` | S8 | |
 | `crates/wz-capi-c/src/sync.rs` | S8 | |
 | `crates/wz-capi-c/src/task.rs` | S8 | |
+| `crates/wz-capi-c/src/time_base.rs` | S8 | |
 | `crates/wz-capi-c/src/timestamp.rs` | S8 | |
 | `crates/wz-capi-c/src/zenoh_ext.rs` | S8 | |
 | `crates/wz-capi-c/src/zid.rs` | S8 | |

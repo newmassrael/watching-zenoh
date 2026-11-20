@@ -3191,6 +3191,45 @@ mod tests {
         }
     }
 
+    /// A node's timers run on the system's clock, so a node handed a time base the program
+    /// supplies is refused by name and not opened on the wall clock's time.
+    #[cfg(all(feature = "router-node", feature = "time-base"))]
+    #[test]
+    fn a_node_refuses_a_time_base_it_is_not_timed_by() {
+        use wz_runtime_tokio::time_base::{ProgramTime, TimeBaseHold};
+
+        struct Stopped;
+        impl ProgramTime for Stopped {
+            fn now_ns(&self) -> u64 {
+                0
+            }
+        }
+        let mut arguments = plan_of(
+            WhatAmI::Router,
+            &[],
+            &["tcp/127.0.0.1:0"],
+            r#"{ scouting: { multicast: { enabled: false } } }"#,
+        )
+        .expect("opens")
+        .into_arguments(AbiChoices {
+            tx_queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
+            start_read_task: true,
+            local_delivery: LocalDeliveryDrain::Caller,
+            liveliness_to_self: true,
+            initial_interest: true,
+            face_drive: FaceDrive::PerFace,
+            shm_clients: crate::faces::no_shm_clients(),
+            offer_shm: false,
+            groups_report_shm: false,
+        });
+        assert_eq!(arguments.router_refusal(), None, "CONTROL: none handed");
+        arguments.stance.session_defaults.time_base = Some(TimeBaseHold::new(Box::new(Stopped)));
+        assert_eq!(
+            arguments.router_refusal(),
+            Some("a time base the program supplies")
+        );
+    }
+
     /// `transport/link/protocols` is a whitelist of the unicast links the node makes: an endpoint
     /// to listen on or dial that it leaves out refuses the open, one it names opens, and a
     /// document that states none leaves every protocol open.

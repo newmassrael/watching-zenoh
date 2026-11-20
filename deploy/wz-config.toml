@@ -1427,18 +1427,19 @@ help = "A transport the program supplies in place of the system's sockets: the s
 [[capability]]
 id = "time-base"
 kconfig = "WZ_CAP_TIME_BASE"
-# Off by default: zenoh-pico times its sessions by the system's monotonic clock, and so does a build
-# made as it is. A program that runs its sessions on a time of its own (a simulation, paused, or
-# faster or slower than the wall clock) turns it on and hands each config the time base its
-# session's timers run on. It asks nothing of the operating system. The pico ABI's doors are
-# wz_ext_* and part of its unstable surface; the model makes the session's clock over the time base,
-# for either engine.
+# Off by default: zenoh-pico, zenoh-c and zenoh time their sessions by the system's monotonic clock,
+# and so does a build made as any of them is. A program that runs its sessions on a time of its own
+# (a simulation, paused, or faster or slower than the wall clock) turns it on and hands each config
+# the time base its session's timers run on. It asks nothing of the operating system. The pico ABI's
+# doors are wz_ext_* and part of its unstable surface, the zenoh-c ABI's are wz_capi_c_*; the model
+# makes the session's clock over the time base, for either engine. A node that forwards between its
+# faces is not timed by one, and its open refuses a config that names one.
 default = "off"
 os_needs = []
-upstream_off = ["zenoh-pico"]
-abis = ["core", "pico"]
+upstream_off = ["zenoh", "zenoh-c", "zenoh-pico"]
+abis = ["core", "pico", "c"]
 implies = ["unstable-api"]
-help = "A time base the program supplies in place of the system's clock: the timers of a session opened from a config that names it (lease, keep-alive, handshake and the other deadlines) run on the program's time, which the program reads to the library and says when it has moved on (wz_ext_time_base_*, wz_ext_config_time_base, wz-own doors)."
+help = "A time base the program supplies in place of the system's clock: the timers of a session opened from a config that names it (lease, keep-alive, handshake and the other deadlines) run on the program's time, which the program reads to the library and says when it has moved on (wz_ext_time_base_* and wz_ext_config_time_base, wz_capi_c_time_base_* and wz_capi_c_config_time_base, wz-own doors)."
 
 [[capability]]
 id = "shared-key-ids"

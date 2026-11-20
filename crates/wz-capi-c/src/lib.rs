@@ -244,6 +244,11 @@ pub mod sync;
 /// last of upstream's C-shaped concurrency helpers this crate did not export.
 /// Its mutex and condvar siblings are [`crate::sync`].
 pub mod task;
+// A time base the program supplies, which the timers of a session opened from a config naming it
+// run on (`wz_capi_c_time_base_*`). A wz-own door set upstream has no counterpart of, off by
+// default.
+#[cfg(feature = "time-base")]
+pub mod time_base;
 pub mod timestamp;
 /// R311y573 — zenoh-ext's DEPRECATED standalone families
 /// (`ze_publication_cache` / `ze_querying_subscriber`). Upstream declares BOTH
