@@ -4992,6 +4992,7 @@ mod tests {
             rx: LinkRxConf {
                 buffer_size: 4 * 65_535,
                 max_message_size: 4096,
+                ..LinkRxConf::default()
             },
             accept: AcceptBounds::default(),
             policy: SessionPolicy::defaults(),

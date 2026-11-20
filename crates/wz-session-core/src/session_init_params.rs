@@ -220,12 +220,21 @@ pub const RX_MAX_MESSAGE_SIZE: usize = 1 << 30;
 /// (`io/zenoh-transport/src/unicast/lowlatency/link.rs` @ `let mut n = rx_buffer_size / mtu;`).
 /// A frame read while every pooled buffer is still held gets storage of its
 /// own, so the value bounds what is reused and never what is received.
+///
+/// `tcp_mtu` is how a link over a TCP connection (TCP, and TLS over it) sizes
+/// its MTU, the largest batch it reads and the one it sends: the session
+/// advertises no larger a batch, divides `buffer_size` by the smaller of it
+/// and the negotiated batch, and fragments to it. It is not a key of the
+/// document; the ABI states it, zenoh's rule for the zenoh-c ABI and the Rust
+/// API, zenoh-pico's for the pico ABI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LinkRxConf {
     /// `transport/link/rx/buffer_size`, in bytes.
     pub buffer_size: usize,
     /// `transport/link/rx/max_message_size`, in bytes.
     pub max_message_size: usize,
+    /// How a link over a TCP connection sizes its MTU.
+    pub tcp_mtu: TcpLinkMtu,
 }
 
 /// Upstream's default `transport/link/rx/buffer_size`, one batch of the
@@ -237,6 +246,68 @@ impl Default for LinkRxConf {
         Self {
             buffer_size: RX_BUFFER_SIZE,
             max_message_size: RX_MAX_MESSAGE_SIZE,
+            tcp_mtu: TcpLinkMtu::HalfMssMultiple,
+        }
+    }
+}
+
+/// How a link over a TCP connection sizes its MTU: the two rules wz's presets
+/// differ by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TcpLinkMtu {
+    /// zenoh's: the widest batch less the IP header of the connection's local
+    /// address (40 bytes for IPv4, 60 for IPv6), and on unix down to the
+    /// largest multiple of half the connection's MSS below that
+    /// (`io/zenoh-links/zenoh-link-tcp/src/unicast.rs` @
+    /// `let mss = socket.mss().unwrap_or(mtu as u32) / 2;`; the TLS link reads
+    /// the same of its TCP socket). A number of the host and the connection:
+    /// on a Linux loopback the accepting socket reads an MSS of 32,768 before
+    /// any data, which gives 49,152.
+    HalfMssMultiple,
+    /// zenoh-pico's: the widest batch, whatever the connection
+    /// (`vendor/zenoh-pico/src/link/unicast/tcp.c` @ `// Maximum MTU for TCP`).
+    Widest,
+}
+
+/// What a TCP connection's MSS read gave, for [`TcpLinkMtu::mtu`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TcpMss {
+    /// The read gave this many bytes.
+    Read(u32),
+    /// The platform reads one and the read failed: zenoh then takes the MTU
+    /// before the MSS is applied as the MSS.
+    Failed,
+    /// The platform reads none (zenoh reads it on unix only), so the MTU stays
+    /// at the header rule.
+    Unread,
+}
+
+impl TcpLinkMtu {
+    /// The MTU of a connection whose local address is IPv6 when `v6`, and
+    /// whose MSS read gave `mss`.
+    ///
+    /// One divergence: an MSS of 0 or 1 halves to 0, on which zenoh's search
+    /// for the multiple never ends; here it leaves the MTU at the header rule.
+    pub fn mtu(self, v6: bool, mss: TcpMss) -> usize {
+        const WIDEST: u32 = u16::MAX as u32;
+        match self {
+            Self::Widest => WIDEST as usize,
+            Self::HalfMssMultiple => {
+                let mtu = WIDEST - if v6 { 60 } else { 40 };
+                let half = match mss {
+                    TcpMss::Read(mss) => mss / 2,
+                    TcpMss::Failed => mtu / 2,
+                    TcpMss::Unread => return mtu as usize,
+                };
+                if half == 0 {
+                    return mtu as usize;
+                }
+                let mut multiple = half;
+                while multiple + half < mtu {
+                    multiple += half;
+                }
+                mtu.min(multiple) as usize
+            }
         }
     }
 }
@@ -695,6 +766,46 @@ mod shape_tests {
         let shaped = configured.shape(true, 65535, 65535).pipeline;
         assert_eq!(shaped.batching_time_limit_us, 3_000);
         assert_eq!(shaped.allocation, crate::link::QueueAllocation::Init);
+    }
+}
+
+#[cfg(test)]
+mod tcp_mtu_tests {
+    use super::{TcpLinkMtu, TcpMss};
+
+    /// zenoh's rule over the MSS values a Linux loopback reads: the accepting socket's 32,768
+    /// before any data, the dialling socket's 32,741, and an Ethernet path's 1,440 over IPv6.
+    #[test]
+    fn zenohs_rule_rounds_down_to_a_multiple_of_half_the_mss() {
+        let rule = TcpLinkMtu::HalfMssMultiple;
+        assert_eq!(rule.mtu(false, TcpMss::Read(32_768)), 49_152);
+        assert_eq!(rule.mtu(false, TcpMss::Read(32_741)), 65_480);
+        assert_eq!(rule.mtu(true, TcpMss::Read(1_440)), 64_800);
+    }
+
+    /// The header alone where no MSS is read, half the header rule's MTU where the read failed,
+    /// and the header alone for an MSS that halves to nothing.
+    #[test]
+    fn zenohs_rule_without_an_mss_keeps_to_the_header() {
+        let rule = TcpLinkMtu::HalfMssMultiple;
+        assert_eq!(rule.mtu(false, TcpMss::Unread), 65_495);
+        assert_eq!(rule.mtu(true, TcpMss::Unread), 65_475);
+        assert_eq!(rule.mtu(false, TcpMss::Failed), 65_494);
+        assert_eq!(rule.mtu(false, TcpMss::Read(1)), 65_495);
+    }
+
+    /// zenoh-pico's rule is the widest batch whatever the connection reads.
+    #[test]
+    fn picos_rule_is_the_widest_batch() {
+        for mss in [
+            TcpMss::Read(32_768),
+            TcpMss::Read(1_440),
+            TcpMss::Failed,
+            TcpMss::Unread,
+        ] {
+            assert_eq!(TcpLinkMtu::Widest.mtu(false, mss), 65_535);
+            assert_eq!(TcpLinkMtu::Widest.mtu(true, mss), 65_535);
+        }
     }
 }
 

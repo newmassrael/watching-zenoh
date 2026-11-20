@@ -137,13 +137,17 @@ pub async fn accept_tls(
 /// `transport/link/tls/close_link_on_expiration` is the tls kind's default for
 /// the same flag, laid under the locator's by
 /// `crate::link_socket::LinkDefaults::closes_on_expiration` before the value
-/// arrives here. `rx_buffer_size` is the session's
-/// `transport/link/rx/buffer_size`: the read storage the link pools.
+/// arrives here. `link_rx` is the session's `transport/link/rx` section:
+/// `buffer_size` is the read storage the link pools, and `tcp_mtu` sizes the
+/// link's MTU off its TCP socket, as upstream's TLS link does
+/// (`io/zenoh-links/zenoh-link-tls/src/unicast.rs` @
+/// `let mut mtu = *TLS_DEFAULT_MTU - header;`).
 pub fn wire_tls_stream(
     stream: TlsStream<TcpStream>,
     closes_on_expiration: bool,
-    rx_buffer_size: usize,
+    link_rx: wz_session_core::session_init_params::LinkRxConf,
 ) -> (TlsReadDriver, Arc<StreamWriteDriver>, WriterHandle) {
+    let mtu = crate::link_pipeline::tcp_link_mtu(stream.get_ref().0, link_rx.tcp_mtu);
     // R311y453 — the §5.16 subject: a TLS link is a TCP socket underneath, so
     // its local address comes from the wrapped stream.
     // R2698 — the ACL's cert-common-name axis is filled HERE and only here, in
@@ -182,7 +186,7 @@ pub fn wire_tls_stream(
     let mut inbound = StreamReadDriver::new(
         reader,
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        rx_buffer_size,
+        link_rx.buffer_size,
     );
     if let Some(deadline) = expiry {
         // An absent chain is NOT an immediate expiry — `peer_chain_deadline`
@@ -205,7 +209,8 @@ pub fn wire_tls_stream(
             subject,
             endpoints,
         )
-        .settling_rx(inbound.rx_settler()),
+        .settling_rx(inbound.rx_settler())
+        .with_link_mtu(mtu),
     );
     (inbound, outbound, writer_handle)
 }
