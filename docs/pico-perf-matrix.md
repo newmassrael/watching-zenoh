@@ -204,11 +204,31 @@ A run is left in `target/pico-compare/perf-runs/host-<UTC time>/` under the arti
 throughput window that did not lie inside the publisher's loop, nothing delivered). A lost cell is not
 retried: what an arm cannot do it cannot do again. `not-applicable`: the arm has no such transport.
 
+**A throughput cell that delivered nothing** says which side stopped. The publisher reports when it was
+first seen to match no subscriber (looked at every 100 ms) and the peers it listed at its end; the
+subscriber reports when its count last grew (looked at every 10 ms) and its peers at its end. A
+publisher that lost its match or its peer put into nothing, since a zenoh-pico put with no subscriber or
+no peer returns success and sends nothing; its put count then runs far past what the link can carry. A
+publisher that still matched at its end, beside a subscriber whose count stopped growing, points at the
+receiving side. The send path that sends to the peer list only when it is not empty:
+
+`vendor/zenoh-pico/src/transport/common/tx.c` @ `!_z_transport_peer_unicast_slist_is_empty(zn->_tp._transport._unicast._peers)`
+
+A run on a build host lost every throughput cell of arm P on tcp with batching on, and some with it
+off, with put counts no tcp loopback carries in the time, while arm P on multicast and arm W on tcp
+delivered; the next run's `why` says which side stopped. Until it does, the cell stays a lost cell of
+the reference, not a cell it does not have.
+
 **Validity.** A cell counts only when the CPUs it was pinned to were used by nothing else while it
 ran: their busy time (`/proc/stat`) less the CPU of the two processes, over the CPU seconds the cell
 had, at most 10 percent (`nodrop.py`'s rule). A disturbed cell is run again, up to six times, and
-`foreign_share` records what the accepted run had. On a shared host many cells may be run several
-times; a cell disturbed six times is lost with that reason.
+`foreign_share` records what the accepted run had. A cell disturbed in all six is run once more after
+the last repetition (`second_pass` in its record), because a shared host is busy in stretches: in the
+run above, nearly every cell of the first repetition was disturbed, far past the limit, and those of
+the second were not, which is the host's other runs coming and going, not the first repetition's start,
+warm-up or ports. `bx` reserves cores for a run and admits others beside it, while the matrix pins eight
+CPUs, so a run on a host other runs share meets them on its pinned CPUs; run it where nothing else is
+admitted while it lasts.
 
 **Ratios.** `w_over_p` divides medians. For a figure whose better direction is `lower`, a ratio below
 1 is wz ahead; for `higher`, above 1. A ratio is a reading of one run on one host; it is not a verdict.
