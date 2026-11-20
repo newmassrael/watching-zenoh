@@ -3836,6 +3836,11 @@ layer_c0_test_discipline() {
     # site that stopped reading is refused too. The selftest drives each rule over a fixture tree.
     _runci_leg policy_read_gate.selftest -- python3 scripts/lib/policy_read_gate.py --selftest
     _runci_leg policy_read_gate --after policy_read_gate.selftest -- python3 scripts/lib/policy_read_gate.py --check
+    # The same rule for the limits: a table reads its limit from the snapshot its creator hands
+    # it and the build's constant only to size storage. The pending limits (readers not moved
+    # yet) and the allowed sites are held to the code both ways.
+    _runci_leg limit_read_gate.selftest -- python3 scripts/lib/limit_read_gate.py --selftest
+    _runci_leg limit_read_gate --after limit_read_gate.selftest -- python3 scripts/lib/limit_read_gate.py --check
     # R3733 -- the feature model a crate's state machines are gated by (sources/features/, SCE's
     # element gate) is generated from the crate's own cargo features, and is held to them: a model
     # that drifted from the manifest lets a machine gate on a feature the crate does not have.
