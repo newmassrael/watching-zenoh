@@ -585,7 +585,8 @@ config WZ_LIMIT_DECLARATION_SYNC_RETRY_INTERVAL_MS
 	  DECLARATION_SYNC_INTERVAL_MS, and the turn starts again at the declaration the
 	  link refused. 0 tries nothing again: a refused turn ends the replay and the
 	  link, and a reconnecting session replays again on the next one, as before this
-	  limit. Only the tokio engine reads it.
+	  limit. The tokio engine, the cooperative engine and the fixed-memory slot
+	  client read it alike.
 
 config WZ_LIMIT_DECLARATION_SYNC_TX_NO_PROGRESS_MS
 	int "DECLARATION_SYNC_TX_NO_PROGRESS_MS"
@@ -596,7 +597,8 @@ config WZ_LIMIT_DECLARATION_SYNC_TX_NO_PROGRESS_MS
 	  turns (DECLARATION_SYNC_RETRY_INTERVAL_MS not 0) goes on with no declaration
 	  sent before it gives up, which ends the link as a refused turn does without
 	  retries. Each declaration sent starts the stretch again. 0 gives up only when
-	  the link itself ends. Only the tokio engine reads it.
+	  the link itself ends. The tokio engine, the cooperative engine and the
+	  fixed-memory slot client read it alike.
 
 config WZ_LIMIT_PICO_UNICAST_BATCH_BYTES
 	int "PICO_UNICAST_BATCH_BYTES"
@@ -634,16 +636,17 @@ config WZ_LIMIT_PICO_SOCKET_TIMEOUT_MS
 	help
 	  How long, in milliseconds, one read step of the cooperative zenoh-pico session
 	  waits on its link before it returns with nothing, as zenoh-pico's
-	  Z_CONFIG_SOCKET_TIMEOUT.
+	  Z_CONFIG_SOCKET_TIMEOUT. The tokio engine has no such wait: its read is woken
+	  by what arrives.
 
 config WZ_LIMIT_PICO_CONNECT_TIMEOUT_MS
 	int "PICO_CONNECT_TIMEOUT_MS"
 	range 1 4294967295
 	default 10000
 	help
-	  How long, in milliseconds, opening a cooperative zenoh-pico session waits for
-	  the session to be established before the open fails, as zenoh-pico's
-	  Z_TRANSPORT_CONNECT_TIMEOUT.
+	  How long, in milliseconds, each open of an endpoint by a zenoh-pico session
+	  waits for the dial and the handshake before it fails, on either engine, as
+	  zenoh-pico's Z_TRANSPORT_CONNECT_TIMEOUT.
 
 config WZ_LIMIT_PICO_FRAG_MAX_BYTES
 	int "PICO_FRAG_MAX_BYTES"

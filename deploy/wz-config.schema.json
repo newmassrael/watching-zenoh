@@ -1231,7 +1231,7 @@
               "x-wz-storage": "quota",
               "x-wz-scope": "session",
               "x-wz-binding-heap": "live",
-              "x-wz-binding-fixed": "none",
+              "x-wz-binding-fixed": "open",
               "x-wz-wire": "timing"
             },
             "DECLARATION_SYNC_RX_NO_PROGRESS_MS": {
@@ -1257,7 +1257,7 @@
               "x-wz-storage": "quota",
               "x-wz-scope": "session",
               "x-wz-binding-heap": "open",
-              "x-wz-binding-fixed": "none",
+              "x-wz-binding-fixed": "open",
               "x-wz-wire": "timing"
             },
             "DECLARATION_SYNC_TX_NO_PROGRESS_MS": {
@@ -1270,7 +1270,7 @@
               "x-wz-storage": "quota",
               "x-wz-scope": "session",
               "x-wz-binding-heap": "open",
-              "x-wz-binding-fixed": "none",
+              "x-wz-binding-fixed": "open",
               "x-wz-wire": "none"
             },
             "PICO_UNICAST_BATCH_BYTES": {
@@ -1326,7 +1326,7 @@
               "x-wz-wire": "timing"
             },
             "PICO_CONNECT_TIMEOUT_MS": {
-              "description": "How long, in milliseconds, opening a cooperative zenoh-pico session waits for the session to be established before the open fails, as zenoh-pico's Z_TRANSPORT_CONNECT_TIMEOUT.",
+              "description": "How long, in milliseconds, each open of an endpoint by a zenoh-pico session waits for the dial and the handshake before it fails, on either engine, as zenoh-pico's Z_TRANSPORT_CONNECT_TIMEOUT.",
               "type": "integer",
               "minimum": 1,
               "maximum": 4294967295,

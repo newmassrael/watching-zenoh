@@ -543,9 +543,9 @@ pub const INSTANCES_PER_MESSAGE: usize = generated::INSTANCES_PER_MESSAGE;
 pub const CLOCK_MAX_FORWARD_STEP_MS: usize = generated::CLOCK_MAX_FORWARD_STEP_MS;
 
 /// How many declarations one turn of a paced declaration replay sends, when the
-/// `declaration-sync-pacing` policy is on. It is read only then, by the reconnect supervisor of
-/// the heap runtime, and must be at least `1`: a turn that sends nothing never finishes. A count
-/// of messages and not a table size: it sizes no memory.
+/// `declaration-sync-pacing` policy is on. It is read only then, by every host that replays
+/// paced ([`crate::replay_pacing::ReplayPacing`]), and must be at least `1`: a turn that sends
+/// nothing never finishes. A count of messages and not a table size: it sizes no memory.
 pub const DECLARATION_SYNC_BURST_MESSAGES: usize = generated::DECLARATION_SYNC_BURST_MESSAGES;
 
 /// How long, in milliseconds, a node waits for the peer's answer to an interest it sent before it
@@ -556,8 +556,8 @@ pub const DECLARATION_SYNC_BURST_MESSAGES: usize = generated::DECLARATION_SYNC_B
 pub const DECLARATION_SYNC_FINAL_TIMEOUT_MS: usize = generated::DECLARATION_SYNC_FINAL_TIMEOUT_MS;
 
 /// How long, in milliseconds, a paced declaration replay waits between two turns, when the
-/// `declaration-sync-pacing` policy is on. It is read only then, and must be at least `1`. A time
-/// and not a table size: it sizes no memory.
+/// `declaration-sync-pacing` policy is on; waiting for the declarations to be stable steps by it
+/// whatever the policy. Must be at least `1`. A time and not a table size: it sizes no memory.
 pub const DECLARATION_SYNC_INTERVAL_MS: usize = generated::DECLARATION_SYNC_INTERVAL_MS;
 
 /// How long, in milliseconds, a paced declaration replay waits before it tries a turn the link
@@ -600,11 +600,12 @@ pub const PICO_MULTICAST_BATCH_BYTES: usize = generated::PICO_MULTICAST_BATCH_BY
 pub const PICO_LEASE_MS: usize = generated::PICO_LEASE_MS;
 
 /// How long, in milliseconds, one read step of the pico ABI's cooperative engine waits on its
-/// link: pico's `Z_CONFIG_SOCKET_TIMEOUT`, its socket's receive timeout.
+/// link: pico's `Z_CONFIG_SOCKET_TIMEOUT`, its socket's receive timeout. The tokio engine reads
+/// nothing by it: its read task is woken by what arrives.
 pub const PICO_SOCKET_TIMEOUT_MS: usize = generated::PICO_SOCKET_TIMEOUT_MS;
 
-/// How long, in milliseconds, the pico ABI's cooperative engine gives an endpoint to complete the
-/// handshake: pico's `Z_TRANSPORT_CONNECT_TIMEOUT`, its handshake's receive deadline
+/// How long, in milliseconds, the pico ABI gives an endpoint to complete its dial and handshake,
+/// on either engine: pico's `Z_TRANSPORT_CONNECT_TIMEOUT`, its handshake's receive deadline
 /// (`vendor/zenoh-pico/src/transport/unicast/transport.c` @
 /// `z_clock_advance_ms(&recv_deadline, Z_TRANSPORT_CONNECT_TIMEOUT);`).
 pub const PICO_CONNECT_TIMEOUT_MS: usize = generated::PICO_CONNECT_TIMEOUT_MS;

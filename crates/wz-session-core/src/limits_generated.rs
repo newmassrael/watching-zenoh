@@ -1129,9 +1129,9 @@ const _: LimitDomain = PicoSocketTimeoutMs::DOMAIN;
 /// How `PICO_SOCKET_TIMEOUT_MS` is held: in no byte when its domain is one value.
 type PicoSocketTimeoutMsHeld = Limited<PicoSocketTimeoutMs, { PicoSocketTimeoutMs::HELD }>;
 
-/// `PICO_CONNECT_TIMEOUT_MS`: How long, in milliseconds, opening a cooperative zenoh-pico
-/// session waits for the session to be established before the open fails, as zenoh-pico's
-/// Z_TRANSPORT_CONNECT_TIMEOUT.
+/// `PICO_CONNECT_TIMEOUT_MS`: How long, in milliseconds, each open of an endpoint by a
+/// zenoh-pico session waits for the dial and the handshake before it fails, on either
+/// engine, as zenoh-pico's Z_TRANSPORT_CONNECT_TIMEOUT.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PicoConnectTimeoutMs;
 

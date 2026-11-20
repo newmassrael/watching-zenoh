@@ -702,7 +702,7 @@ pub const DECLARATION_SYNC_INTERVAL_MS: LimitBinding = LimitBinding {
     storage: Storage::Quota,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Live),
-    binding_fixed: None,
+    binding_fixed: Some(Binding::Open),
     wire: Wire::Timing,
 };
 
@@ -726,7 +726,7 @@ pub const DECLARATION_SYNC_RETRY_INTERVAL_MS: LimitBinding = LimitBinding {
     storage: Storage::Quota,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
-    binding_fixed: None,
+    binding_fixed: Some(Binding::Open),
     wire: Wire::Timing,
 };
 
@@ -738,7 +738,7 @@ pub const DECLARATION_SYNC_TX_NO_PROGRESS_MS: LimitBinding = LimitBinding {
     storage: Storage::Quota,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
-    binding_fixed: None,
+    binding_fixed: Some(Binding::Open),
     wire: Wire::None,
 };
 

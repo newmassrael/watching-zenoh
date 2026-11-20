@@ -1833,7 +1833,7 @@ original = "zenoh-pico"
 switch = "Z_TRANSPORT_CONNECT_TIMEOUT"
 class = "maps"
 anchor = "limit:PICO_CONNECT_TIMEOUT_MS"
-note = "how long the cooperative engine's open waits for the session to be established"
+note = "how long each open of an endpoint waits for its dial and handshake, on either engine"
 
 [[upstream_switch]]
 original = "zenoh-pico"
@@ -3106,7 +3106,7 @@ default = 10
 storage = "quota"
 scope = "session"
 binding_heap = "live"
-binding_fixed = "none"
+binding_fixed = "open"
 wire = "timing"
 help = '''
 How long, in milliseconds, a paced declaration replay waits between two of its
@@ -3147,7 +3147,7 @@ default = 0
 storage = "quota"
 scope = "session"
 binding_heap = "open"
-binding_fixed = "none"
+binding_fixed = "open"
 wire = "timing"
 help = '''
 How long, in milliseconds, a paced declaration replay waits before it tries
@@ -3156,7 +3156,8 @@ declaration-sync-pacing policy is on. The wait is its own and not
 DECLARATION_SYNC_INTERVAL_MS, and the turn starts again at the declaration the
 link refused. 0 tries nothing again: a refused turn ends the replay and the
 link, and a reconnecting session replays again on the next one, as before this
-limit. Only the tokio engine reads it.
+limit. The tokio engine, the cooperative engine and the fixed-memory slot
+client read it alike.
 '''
 
 [[limit]]
@@ -3168,14 +3169,15 @@ default = 0
 storage = "quota"
 scope = "session"
 binding_heap = "open"
-binding_fixed = "none"
+binding_fixed = "open"
 wire = "none"
 help = '''
 How long, in milliseconds, a paced declaration replay that retries refused
 turns (DECLARATION_SYNC_RETRY_INTERVAL_MS not 0) goes on with no declaration
 sent before it gives up, which ends the link as a refused turn does without
 retries. Each declaration sent starts the stretch again. 0 gives up only when
-the link itself ends. Only the tokio engine reads it.
+the link itself ends. The tokio engine, the cooperative engine and the
+fixed-memory slot client read it alike.
 '''
 
 # The numbers of zenoh-pico's value switches (the `maps` rows above that anchor to a limit), as the
@@ -3250,7 +3252,8 @@ wire = "timing"
 help = '''
 How long, in milliseconds, one read step of the cooperative zenoh-pico session
 waits on its link before it returns with nothing, as zenoh-pico's
-Z_CONFIG_SOCKET_TIMEOUT.
+Z_CONFIG_SOCKET_TIMEOUT. The tokio engine has no such wait: its read is woken
+by what arrives.
 '''
 
 [[limit]]
@@ -3265,9 +3268,9 @@ binding_heap = "open"
 binding_fixed = "none"
 wire = "timing"
 help = '''
-How long, in milliseconds, opening a cooperative zenoh-pico session waits for
-the session to be established before the open fails, as zenoh-pico's
-Z_TRANSPORT_CONNECT_TIMEOUT.
+How long, in milliseconds, each open of an endpoint by a zenoh-pico session
+waits for the dial and the handshake before it fails, on either engine, as
+zenoh-pico's Z_TRANSPORT_CONNECT_TIMEOUT.
 '''
 
 [[limit]]
