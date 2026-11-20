@@ -20,9 +20,9 @@
 # `cc`: the hosted runners of the `capi` job are macOS and Windows, and the C examples'
 # job (`capi-examples`) runs on Linux and Windows.
 #
-# On a Unix the language is pico's own build's: its CMake asks for C11 and leaves the
-# extensions on (`CMAKE_C_STANDARD 11` with no `CMAKE_C_EXTENSIONS`, so `-std=gnu11`), which
-# its Unix header relies on. That header types the clock as `struct timespec` and includes
+# On a Unix the language is pico's own build's: its CMake asks for C11
+# (`vendor/zenoh-pico/CMakeLists.txt` @ `set(CMAKE_C_STANDARD 11)`) and never turns CMake's
+# compiler extensions off, so it compiles with `-std=gnu11`, which its Unix header relies on. That header types the clock as `struct timespec` and includes
 # only `<sys/time.h>` for it, plus `<pthread.h>` in the multi-threaded arm; under strict
 # `-std=c11` glibc's `<sys/time.h>` declares no `timespec`, so the single-threaded arm, which
 # has no `<pthread.h>` to bring in `<time.h>`, does not compile, while pico's own build of the
