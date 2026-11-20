@@ -56,6 +56,30 @@ left listening and a fresh dialling one. Each storm asserts that every kind of c
 sessions were reopened, and that each fault of its shape was injected, so a run that exercised
 nothing fails.
 
+## The link legs, against the real zenoh-pico
+
+The second leg (`crates/wz-integration-tests/tests/it/files/pico_link_qos_on_wz_capi.rs`) asks
+what a pico program's QoS settings do on a link that is full. One C program is compiled twice,
+against the real `libzenohpico.so` and against `libwz_capi_pico.so`; a run starts a subscriber
+that listens and a publisher that dials it through a relay in the test, and the relay injects
+the fault on the system's own sockets, so the real zenoh-pico and wz meet the same fault from the
+same code. The real zenoh-pico runs first in every test: a control that fails says the harness or
+the host cannot carry the measurement, and nothing about wz.
+
+| Test | Fault | Control | wz is held to |
+|---|---|---|---|
+| `link_qos_drop_and_block_on_a_full_stream_in_client_mode` | the relay stops reading the publisher's stream until a `Block` put has waited 300 ms, and for a second of `Drop` puts after it | the real zenoh-pico in client mode, held to the same | a `Drop` put returns within 250 ms and not every one is delivered; a `Block` put waits (one for at least a second) and every one is delivered, in order |
+| `link_qos_drop_and_block_on_a_full_stream_in_peer_mode` | the same, the publisher in peer mode | the client run of the real zenoh-pico; its peer run is printed as the reference and not held | the same, in peer mode |
+
+The peer mode of the real zenoh-pico is a reference and not a control because its congestion
+control does not hold on a full link: a peer takes the peers' mutex before the transmit mutex's
+try-lock, and its socket is non-blocking, so a `Block` put on a full link fails instead of
+waiting. The test file cites the lines.
+
+A red reads as the finding it names: `full` false, `Block` did not wait for the full link; a long
+`Drop` put, a dropping put waited for room; every `Drop` sample delivered, nothing was dropped; a
+`Block` sample missing, failed or out of order, a waiting put did not deliver.
+
 ## What it detects
 
 | Defect | How |

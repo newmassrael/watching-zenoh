@@ -331,7 +331,9 @@
 #   Layer S  — the pico C ABI under load: threads calling while sessions
 #              close and reopen over a transport that injects faults, a
 #              stall watchdog, the lock-order checker, closure and
-#              allocation counts, and a sequential run under valgrind.
+#              allocation counts, a sequential run under valgrind, and
+#              the link legs: what congestion control does on a full
+#              stream, the real zenoh-pico first as the control.
 #              Opt-in via `--layer S` or `WZ_RUN_LAYER_S=1`; the build
 #              host runs it long (docs/pico-stability-lane.md).
 #
@@ -19261,12 +19263,17 @@ layer_e_ap_demo_round_trip() {
     # machine that has one, all 56 ran and refused the library an earlier lane had left in the
     # checkout ("OLDER than the wz-capi-c sources it links", fleet run of 2026-11-08). The gate
     # names the `wz_capi_c_*` resolvers now, and this token removes exactly those 56.
+    # `link_qos`, the module and every fn of `pico_link_qos_on_wz_capi.rs`: they measure what a
+    # stalled, lossy or cut link does to the real zenoh-pico and to the drop-in, and the timing of
+    # a stall is what they read, so they run one at a time in Layer S and not in this parallel
+    # sweep.
     (cd crates && cargo test -p wz-integration-tests --quiet -- --ignored \
         --skip wz_e2e_ --skip multicast --skip zenohd --skip wz_router --skip wz_peer \
         --skip wz_storage_host --skip zenoh_ext --skip inert --skip apfull \
         --skip wz_plugin --skip capi_c --skip analyzer --skip zenoh_zget \
         --skip fs_shared_dir --skip sce_b6 --skip from_a_config_file --skip held_listener \
-        --skip wz_dialer --skip netns --skip resets_the_router_it_holds --skip zenoh_c_) || return 1
+        --skip wz_dialer --skip netns --skip resets_the_router_it_holds --skip zenoh_c_ \
+        --skip link_qos) || return 1
     # The same upstream C programs against the cooperative engine's library
     # (`docs/capi-pico-on-coop-engine.md`, the open item of step L4): one file, linked to a
     # build of wz-capi-pico of its own whose features are the reference arm's but for the
@@ -20766,6 +20773,22 @@ layer_s_pico_stability() {
     wz_test_args wz-capi-pico stability
     _runci_guarded_test S 3 cargo test -p wz-capi-pico --features "$features" \
         "${WZ_TEST_ARGS[@]}" -- --ignored --nocapture --test-threads=1 || return 1
+
+    # The link legs (`crates/wz-integration-tests/tests/it/files/pico_link_qos_on_wz_capi.rs`): one
+    # C probe compiled against the real zenoh-pico and against the drop-in, two processes of one
+    # build joined through a relay in the test that stalls the link, and the real zenoh-pico's
+    # run first in each test as the control. Congestion control on a full stream, client and
+    # peer. The drop-in is the default build (the reference header arm's) and is built here
+    # because the leg above left its own feature set's library in the target directory; the
+    # build script makes the real library and its headers. One test at a time, since the timing
+    # of a stall is what is measured. Count-guarded: the legs are `#[ignore]`, so a rename
+    # would select nothing and pass.
+    (cd crates && cargo build -p wz-capi-pico --quiet) || return 1
+    bash scripts/build-zenoh-pico-cli.sh || return 1
+    wz_test_args wz-integration-tests pico_link_qos_on_wz_capi
+    _runci_guarded_test "S link qos against the real zenoh-pico" 2 \
+        cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" \
+        -- --ignored --nocapture --test-threads=1 || return 1
 
     if ! command -v valgrind >/dev/null 2>&1; then
         if (( s_required )); then
