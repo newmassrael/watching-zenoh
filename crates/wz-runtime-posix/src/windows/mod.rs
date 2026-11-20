@@ -12,9 +12,13 @@
 //!    (`GetSystemTimePreciseAsFileTime`).
 //! 4. [`net`] -- UDP over Winsock ([`net::WindowsUdpSocket`]), with the group membership a member
 //!    of a multicast group asks for; [`stream`] -- TCP over Winsock
-//!    ([`stream::WindowsTcpSocket`], its dial and its listener); and [`links`](mod@links), the
+//!    ([`stream::WindowsTcpSocket`], its dial and its listener); [`links`](mod@links), the
 //!    two as the session shell's links on the heap profile, which is what the pico C ABI's
-//!    cooperative engine is opened over.
+//!    cooperative engine is opened over; under `session-slot`, the crate's `slot`
+//!    holds the two as the stack the slot profile's session host is given
+//!    (`slot::WindowsStack`), whose links take their buffers from the program's tables; and
+//!    [`group`](mod@group), a multicast group's two sockets as the group transport the shared
+//!    group drive loop runs on.
 //!
 //! A socket is made non-inheritable (a child the program starts holds none of them, as a
 //! close-on-exec descriptor is not held by a program the process executes), and is waited on
@@ -23,11 +27,11 @@
 //! socket the process asks for and stays started for the life of the process.
 //!
 //! What the POSIX half has and this one does not: the console and panic glue of a `#![no_std]`
-//! `#![no_main]` program, the control line, the file reads, the multicast group transport of a
-//! node built on the slot profile, the slot profile's stack, and the interface lookup a group
-//! join falls back to. Each serves a program built from this crate alone with no allocator, a
-//! node of the kit's kind; the Windows host serves the pico C ABI's cooperative engine, which a
-//! program with a heap links and which opens no group of its own.
+//! `#![no_main]` program, the control line, the file reads, and the interface lookup a group
+//! join falls back to. The first three serve a program built from this crate alone, a node of
+//! the kit's kind, which a Windows process is not: what runs the slot profile here is a library a
+//! program with its own entry point links. In place of the last, Winsock picks the interface when a
+//! join names the unspecified one.
 
 use core::mem::size_of;
 use core::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
@@ -49,6 +53,7 @@ wz_runtime_coop::with_heap_link_seams! {
     #[cfg(feature = "alloc")]
     pub mod links;
 }
+pub mod group;
 pub mod net;
 pub mod stream;
 
