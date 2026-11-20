@@ -546,6 +546,10 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # `wz_ext_config_transport` and the two `wz_ext_internal_transport_*` doors, and the types
         # and constants they take, declared in `wz_ext.h`; off by default, as upstream has no such
         # doors.
+        # `time-base` gates `pub mod time_base`, whose public items are wz's own doors
+        # `wz_ext_time_base_new`, `_advanced`, `_loan`, `_move`, `_drop`,
+        # `wz_ext_config_time_base` and the two `wz_ext_internal_time_base_*` doors, and the types
+        # they take, declared in `wz_ext.h`; off by default, as upstream has no such doors.
         # `shared-key-ids` gates the doors `wz_ext_config_key_ids` and
         # `wz_ext_config_key_wire_form_for` of `pub mod key_ids`, declared in `wz_ext.h`; off by
         # default, as upstream has no such doors.
@@ -593,6 +597,7 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "segment-sender",
                 "shared-key-ids",
                 "supervision",
+                "time-base",
             }
         ),
     ),

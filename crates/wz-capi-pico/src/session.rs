@@ -652,6 +652,9 @@ pub unsafe extern "C" fn z_open(
             #[cfg(not(any(feature = "scout", feature = "scout-mcu")))]
             (None, None) => return crate::result::Z_ERR_SCOUT_NO_RESULTS,
         };
+        // The time base the config names, which the session holds from here on.
+        #[cfg(feature = "time-base")]
+        let time_base = cfg.time_base.clone();
         drop(cfg);
         // A build without the `peer` feature is a client build: it opens to the endpoint it is
         // given, and a listener or `mode=peer` is a role it does not have. (zenoh-pico's own
@@ -684,6 +687,8 @@ pub unsafe extern "C" fn z_open(
             app_transport,
             #[cfg(any(not(feature = "engine-tokio"), feature = "shared-key-ids"))]
             key_ids,
+            #[cfg(feature = "time-base")]
+            time_base,
         };
         #[cfg(feature = "engine-tokio")]
         return open_on_tokio(zs, request);
@@ -936,6 +941,9 @@ struct OpenRequest {
     /// See the cooperative engine's twin.
     #[cfg(all(feature = "engine-tokio", feature = "shared-key-ids"))]
     key_ids: wz_session_core::shared_key_ids::KeyIdsAtOpen,
+    /// The time base the program supplies, when the config names one: the session's clock.
+    #[cfg(feature = "time-base")]
+    time_base: Option<wz_node_time::time_base::TimeBaseHold>,
 }
 
 /// Open `request` on the tokio engine and install the session in `zs`.
@@ -958,6 +966,8 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
         app_transport,
         #[cfg(feature = "shared-key-ids")]
         key_ids,
+        #[cfg(feature = "time-base")]
+        time_base,
     } = request;
     let (tx_queue, sn_resolution) = pico_link_policy(&policy);
     // This ABI stays on one attempt: the retry the zenoh-c open gained reads
@@ -1106,13 +1116,22 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             groups,
             // pico's config has no `qos/publication` and no `transport/shared_memory` keys, so
             // its session applies nothing above its links.
-            // And the key ids every node shares, when the config states them (`crate::key_ids`).
+            // And the key ids every node shares, when the config states them (`crate::key_ids`),
+            // and the time base the program supplies, when the config names one
+            // (`crate::time_base`), which the session's clock is made over.
             #[cfg(feature = "shared-key-ids")]
             session_defaults: wz_capi_core::session_defaults::SessionDefaults {
                 key_ids,
+                #[cfg(feature = "time-base")]
+                time_base,
                 ..Default::default()
             },
-            #[cfg(not(feature = "shared-key-ids"))]
+            #[cfg(all(not(feature = "shared-key-ids"), feature = "time-base"))]
+            session_defaults: wz_capi_core::session_defaults::SessionDefaults {
+                time_base,
+                ..Default::default()
+            },
+            #[cfg(not(any(feature = "shared-key-ids", feature = "time-base")))]
             session_defaults: wz_capi_core::session_defaults::SessionDefaults::default(),
             session_policy: policy,
             #[cfg(feature = "app-transport")]
@@ -1228,6 +1247,11 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         Ok(tls) => links.with_tls(tls),
         Err(_) => return crate::result::Z_ERR_INVALID,
     };
+    // The clock every timer of the session reads: the time base the config names, or the host's.
+    #[cfg(feature = "time-base")]
+    let clock = crate::time_base::session_clock(request.time_base);
+    #[cfg(not(feature = "time-base"))]
+    let clock = crate::coop_host::clock();
     let config = wz_capi_coop::CoopConfig {
         endpoints: connect,
         whatami: dial_whatami,
@@ -1276,7 +1300,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         Some(transport) => wz_capi_coop::CoopEngine::open_with_key_ids(
             wz_capi_coop::app_link::AppLinks::new(transport)
                 .with_rx_capacity(wz_session_core::caps::PICO_UNICAST_BATCH_BYTES),
-            crate::coop_host::clock(),
+            clock,
             crate::coop_host::entropy(),
             config,
             policy,
@@ -1285,7 +1309,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         .map(wz_capi_coop::CoopEngine::into_drive),
         None => wz_capi_coop::CoopEngine::open_with_key_ids(
             links.waited_by_owner(),
-            crate::coop_host::clock(),
+            clock,
             crate::coop_host::entropy(),
             config,
             policy,
@@ -1296,7 +1320,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     #[cfg(not(feature = "app-transport"))]
     let opened = wz_capi_coop::CoopEngine::open_with_key_ids(
         links.waited_by_owner(),
-        crate::coop_host::clock(),
+        clock,
         crate::coop_host::entropy(),
         config,
         policy,

@@ -274,6 +274,11 @@ pub mod supervision;
 // pico's multi-threaded arm's host surface: mutex, condvar and task.
 #[cfg(feature = "multi-thread")]
 pub mod sync;
+// A time base the program supplies, which the timers of a session run on in place of the system's
+// clock: wz doors (`wz_ext.h`) of the unstable surface, over the time base of `wz-node-time`, for
+// whichever engine the build has.
+#[cfg(feature = "time-base")]
+pub mod time_base;
 pub mod whatami;
 mod write_filter;
 pub mod zid;

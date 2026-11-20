@@ -404,6 +404,20 @@ app-transport = [
     "wz-capi-core?/app-transport",
     "wz-capi-coop?/app-transport",
 ]
+# `time-base`: a time base the program supplies (`wz_ext_time_base_*`, `wz_ext_config_time_base`),
+# which the timers of a session opened from the config that names it run on in place of the
+# system's clock, for a program that runs its sessions on a time of its own (a simulation, paused,
+# or faster or slower than the wall clock). wz's own, which zenoh-pico has not, so off as the
+# reference build is, and part of the unstable surface as the other wz doors are. The time base is
+# `wz-node-time`'s and serves either engine: the cooperative engine's clock, or the clock the tokio
+# engine's session is made with (`wz-capi-core`'s).
+time-base = [
+    "std",
+    "unstable-api",
+    "dep:wz-node-time",
+    "wz-node-time/time-base",
+    "wz-capi-core?/time-base",
+]
 # `remote-declaration-watch` and `declarations-synced-event`: the declaration watch, the doors that
 # tell a program what a peer declares and retracts (`wz_ext_decl_watch_declare`,
 # `wz_ext_decl_watch_drop`). wz's own, which zenoh-pico has not, so off as the reference build is.

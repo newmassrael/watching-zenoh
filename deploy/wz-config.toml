@@ -1425,6 +1425,22 @@ implies = ["unstable-api"]
 help = "A transport the program supplies in place of the system's sockets: the session calls the program's open, send and close, and the program hands in what its stack received and what happened to each link (wz_ext_transport_*, wz_ext_config_transport, wz-own doors)."
 
 [[capability]]
+id = "time-base"
+kconfig = "WZ_CAP_TIME_BASE"
+# Off by default: zenoh-pico times its sessions by the system's monotonic clock, and so does a build
+# made as it is. A program that runs its sessions on a time of its own (a simulation, paused, or
+# faster or slower than the wall clock) turns it on and hands each config the time base its
+# session's timers run on. It asks nothing of the operating system. The pico ABI's doors are
+# wz_ext_* and part of its unstable surface; the model makes the session's clock over the time base,
+# for either engine.
+default = "off"
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = ["unstable-api"]
+help = "A time base the program supplies in place of the system's clock: the timers of a session opened from a config that names it (lease, keep-alive, handshake and the other deadlines) run on the program's time, which the program reads to the library and says when it has moved on (wz_ext_time_base_*, wz_ext_config_time_base, wz-own doors)."
+
+[[capability]]
 id = "shared-key-ids"
 kconfig = "WZ_CAP_SHARED_KEY_IDS"
 # Off by default: a node that names a key by an id it never declared cannot be read by a stock
