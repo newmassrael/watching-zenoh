@@ -226,6 +226,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-pico/src/encoding.rs` | S7 | |
 | `crates/wz-capi-pico/src/entity.rs` | S7 | |
 | `crates/wz-capi-pico/src/event_log.rs` | S7 | |
+| `crates/wz-capi-pico/src/ext_interface.rs` | S12 | |
 | `crates/wz-capi-pico/src/ffi.rs` | S7 | |
 | `crates/wz-capi-pico/src/get.rs` | S7 | |
 | `crates/wz-capi-pico/src/get_to_peer.rs` | S7 | |

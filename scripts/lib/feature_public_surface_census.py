@@ -572,6 +572,11 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # two `wz_ext_internal_instance_keyer_*` doors, and the types and constants they take,
         # declared in `wz_ext.h`; `e2e-receiver` and `e2e-sender` gate its `_judge` and `_protect`
         # doors inside it. Off by default, as upstream has no such doors.
+        # Each of `e2e-sender`, `e2e-receiver`, `e2e-supervision`, `instance-key`,
+        # `message-catalog` and `replay-cache` also gates `pub mod ext_interface`, the versioned
+        # interface the doors of those capabilities reach the core through, whose public items are
+        # wz's own doors `wz_ext_interface_version`, `_session_facts`, `_bytes_view` and
+        # `_run_in_callback`, and the types and constants they take, declared in `wz_ext.h`.
         frozenset(
             {
                 "admin-space",

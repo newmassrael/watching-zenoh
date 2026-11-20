@@ -1929,4 +1929,83 @@ void wz_ext_internal_message_catalog_null(
 bool wz_ext_internal_message_catalog_check(
     const wz_ext_owned_message_catalog_t *this_);
 
+/* ================================================ the extension interface
+ *
+ * What the doors of the additional features (end-to-end protection,
+ * reception supervision, instance keys, the replay cache, the message
+ * catalog) ask of the library beyond the drop-in API, as a versioned C
+ * interface: those doors reach a session through the drop-in API and these
+ * functions only, so a library of those features built apart from this one
+ * calls the same. Part of the unstable surface, and present only in a build
+ * with any of those capabilities; wz_ext_interface_session_facts also needs
+ * the query plane, which every door that reads it has.
+ *
+ * Each struct states its size in its first field: the caller sets
+ * struct_size to the size of the struct it was compiled with; the library
+ * refuses a struct smaller than its own version's with Z_EINVAL and writes
+ * nothing, and otherwise writes the fields of its version and sets
+ * struct_size to the bytes it wrote. The major version moves when a function
+ * or a field changes meaning or goes, the minor when one is added, a field
+ * always at the end of its struct: a caller written against major M and
+ * minor N runs over a library of major M and minor N or later. Nothing one
+ * side allocates is freed by the other. */
+
+#define WZ_EXT_INTERFACE_MAJOR 1
+#define WZ_EXT_INTERFACE_MINOR 0
+
+typedef struct wz_ext_interface_version_t {
+    uint32_t struct_size;
+    uint16_t major;
+    uint16_t minor;
+} wz_ext_interface_version_t;
+
+/* Z_OK; Z_ERR_NULL for a NULL out; Z_EINVAL as above. */
+z_result_t wz_ext_interface_version(wz_ext_interface_version_t *out);
+
+#define WZ_EXT_REPLAY_SHAPE_FRAME_PER_SAMPLE 0 /* one reply per frame */
+#define WZ_EXT_REPLAY_SHAPE_SEGMENTED 1        /* a frame as its pieces */
+#define WZ_EXT_REPLAY_LIVE_DELIVER 0           /* live samples as they come */
+#define WZ_EXT_REPLAY_LIVE_HOLD_BACK 1         /* after the first round */
+
+/* What the library says of a session, a closed one included (closed is then
+ * 1): its replay policies (replay-reply-shape, replay-serve-holds-sends as 1
+ * on and 0 off, replay-live-before-answer), whether a get it asks may be
+ * addressed to one node (targeted-query on, in a build whose domain of it
+ * holds on), and how many queries one querier of it may have in flight (0 for
+ * no bound). 24 bytes on a 64-bit target, 20 on a 32-bit one.
+ *
+ * Z_OK; Z_ERR_NULL for a NULL out, a NULL session or the gravestone;
+ * Z_EINVAL as above. */
+typedef struct wz_ext_session_facts_t {
+    uint32_t struct_size;
+    uint8_t closed;
+    uint8_t replay_reply_shape;
+    uint8_t replay_serve_holds_sends;
+    uint8_t replay_live_before_answer;
+    uint8_t targeted_query;
+    uint8_t reserved[7];
+    size_t querier_max_pending_queries;
+} wz_ext_session_facts_t;
+z_result_t wz_ext_interface_session_facts(const z_loaned_session_t *session,
+                                          wz_ext_session_facts_t *out);
+
+/* Where the bytes of a payload are, in place: the library keeps a payload in
+ * one buffer, so the view is the whole payload, copied from nothing and
+ * valid while the loan is; an empty payload is a length of 0.
+ *
+ * Z_OK; Z_ERR_NULL for a NULL data or len, and for a NULL payload or the
+ * gravestone, with *data NULL and *len 0. */
+z_result_t wz_ext_interface_bytes_view(const z_loaned_bytes_t *bytes,
+                                       const uint8_t **data, size_t *len);
+
+/* Run body(context) on the calling thread as one of the program's callbacks:
+ * a call of this library that waits for the program's callbacks to finish
+ * (an undeclare, a close) and is made from inside body returns without
+ * waiting, as it does from a callback the library runs itself, since the
+ * wait would be for the callback that is waiting.
+ *
+ * Z_OK once body returned; Z_ERR_NULL for a NULL body, which runs nothing. */
+z_result_t wz_ext_interface_run_in_callback(void (*body)(void *context),
+                                            void *context);
+
 #endif /* WZ_EXT_H */

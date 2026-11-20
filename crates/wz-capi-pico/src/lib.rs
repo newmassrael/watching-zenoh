@@ -206,6 +206,20 @@ pub mod encoding;
 pub mod entity;
 #[cfg(feature = "event-ring")]
 pub mod event_log;
+// What the doors of the additional features (end-to-end protection, reception supervision, instance
+// keys, the replay cache, the message catalog) ask of the core beyond the pico ABI: wz doors
+// (`wz_ext.h`) of a versioned interface, in a build with any of those capabilities. Those doors
+// name the core through the pico ABI and this module only, and the core names none of them
+// (`scripts/lib/layer_direction_gate.py`).
+#[cfg(any(
+    feature = "e2e-sender",
+    feature = "e2e-receiver",
+    feature = "e2e-supervision",
+    feature = "instance-key",
+    feature = "message-catalog",
+    feature = "replay-cache"
+))]
+pub mod ext_interface;
 // The node's supervisor, driven from C: wz doors (`wz_ext.h`) of the unstable surface
 // (the supervision deadline of the observation plane).
 mod ffi;
