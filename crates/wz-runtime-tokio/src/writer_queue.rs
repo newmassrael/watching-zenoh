@@ -163,8 +163,8 @@ pub fn outbound_channel_with_capacity(
             in_flight: [None; Priority::NUM],
             closed: false,
             senders: 1,
-            spare: Vec::new(),
-            spare_max: SPARE_MAX,
+            spare: std::array::from_fn(|_| Vec::new()),
+            spare_max: [SPARE_MAX; Priority::NUM],
             spare_keep_max: SPARE_CAPACITY_MAX,
             carry: None,
             next_seq: 0,
@@ -404,7 +404,7 @@ impl Lanes {
     /// The handle on what `take_next` took.
     fn make_wire(self: &Arc<Self>, out: Out) -> WireFrame {
         match out {
-            Out::Heap(bytes) => WireFrame(Wire::Heap(bytes), None),
+            Out::Heap(bytes, lane) => WireFrame(Wire::Heap(bytes, Some(lane)), None),
             #[cfg(feature = "runtime-zero-copy")]
             Out::Slot {
                 class,
@@ -507,11 +507,12 @@ impl Lanes {
     fn recycle_wire(&self, wire: WireFrame) {
         self.note_wire_write();
         match wire.0 {
-            Wire::Heap(bytes) => self
+            Wire::Heap(bytes, Some(lane)) => self
                 .state
                 .lock()
                 .expect("outbound lanes poisoned")
-                .give_spare(bytes),
+                .give_spare(lane, bytes),
+            Wire::Heap(_, None) => {}
             #[cfg(feature = "runtime-zero-copy")]
             Wire::Slot(mut slot) => slot.written = true,
         }
@@ -806,11 +807,20 @@ struct LaneState {
     /// be lent again so a link in steady state allocates none. Bounded in count
     /// and in size (`spare_max`, `spare_keep_max`) so a burst of large
     /// frames cannot make a link hoard memory.
-    spare: Vec<Vec<u8>>,
-    /// The most buffers kept spare: [`SPARE_MAX`], or every batch the lanes may hold once a
-    /// shape asked for its batches up front (`allocate_batches`), which are kept for as long as
-    /// the queue lives, as upstream keeps an `init` pipeline's.
-    spare_max: usize,
+    ///
+    /// Open-debt item 952 — one pool PER LANE, as upstream's stage keeps a refill ring per
+    /// priority: a buffer comes back to the lane it was lent for, and a lane lends only its
+    /// own. With one pool for every lane, a lazy queue's data lane was lent the buffers the
+    /// handshake's control lane had made, and made none of its own when traffic wanted them,
+    /// where upstream's makes them (`io/zenoh-transport/src/common/pipeline.rs` @
+    /// `None if self.batch_allocs < self.batch_config.0 => {`).
+    spare: [Vec<Vec<u8>>; Priority::NUM],
+    /// The most buffers each lane keeps spare: [`SPARE_MAX`] until the session's shape, then
+    /// the lane's queue size in batches, the most upstream's stage of that priority ever makes
+    /// (`reshape`). An `init` shape fills each lane to it up front (`allocate_batches`), and
+    /// the buffers are kept for as long as the queue lives, as upstream keeps an `init`
+    /// pipeline's.
+    spare_max: [usize; Priority::NUM],
     /// The largest buffer kept spare: [`SPARE_CAPACITY_MAX`] until a sender asks for a buffer
     /// of the size the session builds its frames in (a batch), then that size up to
     /// [`SPARE_CAPACITY_CEIL`]. A buffer the link itself asked for is the one it will ask for
@@ -963,7 +973,9 @@ impl Taken {
 
 /// The parts of a taken item; [`OutboundRx`] makes the [`WireFrame`].
 enum Out {
-    Heap(Vec<u8>),
+    /// A frame in a vector, with the lane whose spare pool its buffer goes back to
+    /// ([`LaneState::spare`]).
+    Heap(Vec<u8>, usize),
     #[cfg(feature = "runtime-zero-copy")]
     Slot {
         class: usize,
@@ -987,30 +999,38 @@ const SPARE_CAPACITY_MAX: usize = 16 * 1024;
 const SPARE_CAPACITY_CEIL: usize = u16::MAX as usize + 8;
 
 impl LaneState {
-    /// A spare buffer with room for `min` bytes, if one is kept: the smallest
+    /// A spare buffer of `lane` with room for `min` bytes, if the lane keeps one: the smallest
     /// that fits, so a small frame does not take the one a large frame needs.
-    fn take_spare(&mut self, min: usize) -> Option<Vec<u8>> {
-        let best = self
-            .spare
+    fn take_spare(&mut self, lane: usize, min: usize) -> Option<Vec<u8>> {
+        let pool = &mut self.spare[lane];
+        let best = pool
             .iter()
             .enumerate()
             .filter(|(_, buf)| buf.capacity() >= min)
             .min_by_key(|(_, buf)| buf.capacity())
             .map(|(i, _)| i)?;
-        Some(self.spare.swap_remove(best))
+        Some(pool.swap_remove(best))
     }
 
-    /// Keep `buf` to be lent again, emptied, unless the pool is full or the buffer
-    /// is not worth keeping.
-    fn give_spare(&mut self, mut buf: Vec<u8>) {
+    /// Keep `buf` to be lent again by `lane`, emptied, unless the lane's pool is full, the
+    /// buffer is not worth keeping, or no frame can take the lane any more (a session without
+    /// QoS has one lane, and the handshake's buffers coming back to another are freed).
+    fn give_spare(&mut self, lane: usize, mut buf: Vec<u8>) {
         if buf.capacity() == 0
             || buf.capacity() > self.spare_keep_max
-            || self.spare.len() >= self.spare_max
+            || !self.reaches(lane)
+            || self.spare[lane].len() >= self.spare_max[lane]
         {
             return;
         }
         buf.clear();
-        self.spare.push(buf);
+        self.spare[lane].push(buf);
+    }
+
+    /// Whether a frame queued from now on can take `lane`: every lane, except under a session
+    /// that runs no QoS, whose frames all take its one lane.
+    fn reaches(&self, lane: usize) -> bool {
+        !self.single_lane || lane == self.single_lane_index()
     }
 
     /// R2924 — the lane a frame of `priority` takes: its own, or the one lane
@@ -1049,6 +1069,20 @@ impl LaneState {
             let default = Priority::DEFAULT.wire_byte() as usize;
             self.capacity = [self.capacity[default]; Priority::NUM];
         }
+        // Each lane keeps no more spare buffers than its queue holds batches, the most upstream's
+        // stage of that priority makes; the lanes no frame can take any more keep none.
+        for lane in 0..Priority::NUM {
+            if self.reaches(lane) {
+                self.spare_max[lane] = if self.single_lane {
+                    shape.sizes[Priority::DEFAULT.wire_byte() as usize]
+                } else {
+                    shape.sizes[lane]
+                };
+                self.spare[lane].truncate(self.spare_max[lane]);
+            } else {
+                self.spare[lane] = Vec::new();
+            }
+        }
         // A pooled queue's slots were allocated with the queue, which is the `init` mode
         // already; a heap queue takes its batches now when the shape asks for them up front.
         #[cfg(feature = "runtime-zero-copy")]
@@ -1069,20 +1103,22 @@ impl LaneState {
     /// priority sizes, as upstream's non-QoS pipeline has one queue. Each buffer holds a batch
     /// and the length prefix of a stream frame, the size the session asks for when it builds
     /// a frame ([`OutboundTx::take_buffer`]), so its first frames allocate nothing.
+    ///
+    /// Each lane's batches are its own ([`LaneState::spare`]): `reshape` has set each reachable
+    /// lane's bound to its size, and this fills it.
     fn allocate_batches(&mut self, shape: &wz_session_core::link::TxQueueShape) {
-        let batches: usize = if self.single_lane {
-            shape.sizes[Priority::DEFAULT.wire_byte() as usize]
-        } else {
-            shape.sizes.iter().sum()
-        };
         let capacity = shape
             .batch_bytes
             .saturating_add(SPARE_CAPACITY_CEIL - u16::MAX as usize)
             .min(SPARE_CAPACITY_CEIL);
-        self.spare_max = self.spare_max.max(batches);
         self.spare_keep_max = self.spare_keep_max.max(capacity);
-        while self.spare.len() < batches {
-            self.spare.push(Vec::with_capacity(capacity));
+        for lane in 0..Priority::NUM {
+            if !self.reaches(lane) {
+                continue;
+            }
+            while self.spare[lane].len() < self.spare_max[lane] {
+                self.spare[lane].push(Vec::with_capacity(capacity));
+            }
         }
     }
 
@@ -1219,9 +1255,10 @@ impl LaneState {
 
     /// The next urgent frame, if one is waiting: the keepalive that passes the lanes.
     fn take_urgent(&mut self) -> Option<Taken> {
+        let home = self.lane_of(Priority::Control);
         self.urgent
             .pop_front()
-            .map(|frame| Taken::Frame(Priority::Control, Out::Heap(frame)))
+            .map(|frame| Taken::Frame(Priority::Control, Out::Heap(frame, home)))
     }
 
     /// The urgent frames alone, made the taker's: what a thread that carries only the
@@ -1267,7 +1304,7 @@ impl LaneState {
         match entry {
             Entry::Heap(priority, frame, _) => {
                 self.in_flight[lane] = Some(frame.len());
-                Taken::Frame(priority, Out::Heap(frame))
+                Taken::Frame(priority, Out::Heap(frame, lane))
             }
             #[cfg(feature = "runtime-zero-copy")]
             Entry::Batch(batch) => {
@@ -1473,7 +1510,9 @@ impl LaneState {
         // What is queued now: the occupancy minus nothing, the previous take
         // having just been released by the caller.
         let queued: usize = self.occupied.iter().sum();
-        let mut first: Option<(Priority, Vec<u8>)> = None;
+        // The first frame with the lane it was queued on, whose pool the take's buffer goes
+        // back to: the first frame's own, or the joined one built for it.
+        let mut first: Option<(Priority, usize, Vec<u8>)> = None;
         let mut joined: Option<Vec<u8>> = None;
         // What this take may weigh: the batch until the first frame is known, then
         // `write_bound` for its size (kept here, because the first frame's buffer is
@@ -1481,7 +1520,7 @@ impl LaneState {
         let mut bound = budget;
         'lanes: for lane in lanes {
             while let Some(Entry::Heap(_, frame, _)) = self.lanes[lane].front() {
-                if let Some((_, head)) = first.as_ref() {
+                if let Some((_, _, head)) = first.as_ref() {
                     let so_far = joined.as_ref().map_or(head.len(), Vec::len);
                     if so_far.saturating_add(frame.len()) > bound {
                         break 'lanes;
@@ -1495,29 +1534,34 @@ impl LaneState {
                     // The first frame of the take: held as it is, in case it is
                     // the only one.
                     bound = write_bound(budget, frame.len());
-                    first = Some((priority, frame));
+                    first = Some((priority, lane, frame));
                     continue;
                 }
+                // A joined frame's buffer goes back to the lane it was queued on.
                 if let Some(buffer) = joined.as_mut() {
                     buffer.extend_from_slice(&frame);
-                    self.give_spare(frame);
+                    self.give_spare(lane, frame);
                     continue;
                 }
                 // The second frame: only now is there something to join.
-                let (_, head) = first.as_mut().expect("the first frame was held above");
+                let (_, head_lane, head) = first.as_mut().expect("the first frame was held above");
+                let head_lane = *head_lane;
                 let mut buffer =
                     Vec::with_capacity(queued.min(bound).max(head.len() + frame.len()));
                 buffer.extend_from_slice(head);
                 buffer.extend_from_slice(&frame);
-                self.give_spare(std::mem::take(head));
-                self.give_spare(frame);
+                let head = std::mem::take(head);
+                self.give_spare(head_lane, head);
+                self.give_spare(lane, frame);
                 joined = Some(buffer);
             }
         }
         match (first, joined) {
             (None, _) => Taken::Empty,
-            (Some((priority, _)), Some(buffer)) => Taken::Frame(priority, Out::Heap(buffer)),
-            (Some((priority, frame)), None) => Taken::Frame(priority, Out::Heap(frame)),
+            (Some((priority, lane, _)), Some(buffer)) => {
+                Taken::Frame(priority, Out::Heap(buffer, lane))
+            }
+            (Some((priority, lane, frame)), None) => Taken::Frame(priority, Out::Heap(frame, lane)),
         }
     }
 }
@@ -1803,31 +1847,32 @@ impl OutboundTx {
     }
 
     /// An empty buffer with room for at least `min_capacity` bytes, to build a
-    /// frame in: one the writer has finished with when the lane set keeps one that
-    /// fits, a fresh allocation otherwise.
-    pub fn take_buffer(&self, min_capacity: usize) -> Vec<u8> {
+    /// frame in: one the writer has finished with when the lane a frame of `priority` takes
+    /// keeps one that fits, a fresh allocation otherwise. A lane lends only the buffers that
+    /// came back to it (open-debt item 952), as upstream's stage of a priority refills from
+    /// its own ring.
+    pub fn take_buffer(&self, priority: Priority, min_capacity: usize) -> Vec<u8> {
         let spare = {
             let mut st = self.shared.state.lock().expect("outbound lanes poisoned");
             // The size asked for is the size the session builds its frames in, and the
             // buffer comes back to the pool at that size: keep what is asked for.
             st.spare_keep_max = st.spare_keep_max.max(min_capacity.min(SPARE_CAPACITY_CEIL));
-            st.take_spare(min_capacity)
+            let lane = st.lane_of(priority);
+            st.take_spare(lane, min_capacity)
         };
         spare.unwrap_or_else(|| Vec::with_capacity(min_capacity))
     }
 
-    /// Give back a buffer that was taken with [`Self::take_buffer`] and never
-    /// sent (a lend that was abandoned), so it is lent again and not freed.
-    pub fn return_buffer(&self, buf: Vec<u8>) {
-        self.shared
-            .state
-            .lock()
-            .expect("outbound lanes poisoned")
-            .give_spare(buf);
+    /// Give back a buffer that was taken with [`Self::take_buffer`] for `priority` and never
+    /// sent (a lend that was abandoned), so its lane lends it again and it is not freed.
+    pub fn return_buffer(&self, priority: Priority, buf: Vec<u8>) {
+        let mut st = self.shared.state.lock().expect("outbound lanes poisoned");
+        let lane = st.lane_of(priority);
+        st.give_spare(lane, buf);
     }
 
-    /// How many spare buffers are kept. For a test to wait until the writer has
-    /// given one back.
+    /// How many spare buffers are kept, over every lane. For a test to wait until the writer
+    /// has given one back.
     #[cfg(test)]
     pub(crate) fn spare_count(&self) -> usize {
         self.shared
@@ -1835,7 +1880,9 @@ impl OutboundTx {
             .lock()
             .expect("outbound lanes poisoned")
             .spare
-            .len()
+            .iter()
+            .map(Vec::len)
+            .sum()
     }
 
     /// Have the writer run `hook` whenever it is about to wait with nothing queued: the
@@ -2863,15 +2910,14 @@ pub struct OutboundRx {
 }
 
 impl OutboundRx {
-    /// The writer is done with `frame`: keep its buffer to be lent again. Called
+    /// The writer is done with `frame`, which it received with `priority`
+    /// ([`Self::recv_tagged`]): keep its buffer for that priority's lane to lend again. Called
     /// after the bytes are written, never before — the buffer is overwritten by the
     /// next frame built in it.
-    pub fn recycle(&self, frame: Vec<u8>) {
-        self.shared
-            .state
-            .lock()
-            .expect("outbound lanes poisoned")
-            .give_spare(frame);
+    pub fn recycle(&self, priority: Priority, frame: Vec<u8>) {
+        let mut st = self.shared.state.lock().expect("outbound lanes poisoned");
+        let lane = st.lane_of(priority);
+        st.give_spare(lane, frame);
     }
 
     /// R3264 — the pool's counters, its free slots and its capacity, by the
@@ -2885,17 +2931,12 @@ impl OutboundRx {
     }
 
     /// R3264 — the writer has written `wire` out: a heap frame's buffer is kept
-    /// to be lent again ([`Self::recycle`]); a pooled frame's slot goes home
+    /// for the lane it was taken from to lend again; a pooled frame's slot goes home
     /// through the completion edge, counted as written. For a writer that holds
     /// the receiving half itself (the multicast transmit task) as well as for
     /// [`OutboundQueue::recycle_wire`].
     pub fn recycle_wire(&self, wire: WireFrame) {
-        self.shared.note_wire_write();
-        match wire.0 {
-            Wire::Heap(bytes) => self.recycle(bytes),
-            #[cfg(feature = "runtime-zero-copy")]
-            Wire::Slot(mut slot) => slot.written = true,
-        }
+        self.shared.recycle_wire(wire);
     }
 
     /// The next frame, highest priority first; `None` once the queue is
@@ -3255,7 +3296,10 @@ impl Drop for OutboundRx {
 pub struct WireFrame(Wire, Option<RoleGuard>);
 
 enum Wire {
-    Heap(Vec<u8>),
+    /// A frame in a vector, with the lane whose spare pool its buffer goes back to when it has
+    /// been written; `None` for a vector the queue never lent ([`From<Vec<u8>>`]), which is
+    /// freed.
+    Heap(Vec<u8>, Option<usize>),
     #[cfg(feature = "runtime-zero-copy")]
     Slot(SlotWire),
 }
@@ -3267,7 +3311,7 @@ impl WireFrame {
     /// production writer of a pooled queue is.
     pub fn into_vec(self) -> Vec<u8> {
         match self.0 {
-            Wire::Heap(bytes) => bytes,
+            Wire::Heap(bytes, _) => bytes,
             #[cfg(feature = "runtime-zero-copy")]
             Wire::Slot(slot) => slot.as_bytes().to_vec(),
         }
@@ -3275,13 +3319,13 @@ impl WireFrame {
 
     /// Whether the bytes lie in a slot of the link's transmit pool.
     pub fn is_pooled(&self) -> bool {
-        !matches!(self.0, Wire::Heap(_))
+        !matches!(self.0, Wire::Heap(..))
     }
 
     /// The slot of the link's transmit pool the bytes lie in, if they do.
     pub fn slot_index(&self) -> Option<usize> {
         match &self.0 {
-            Wire::Heap(_) => None,
+            Wire::Heap(..) => None,
             #[cfg(feature = "runtime-zero-copy")]
             Wire::Slot(slot) => Some(slot.idx),
         }
@@ -3290,7 +3334,7 @@ impl WireFrame {
     /// The size class of that slot (0 the smallest), if the bytes lie in one.
     pub fn slot_class(&self) -> Option<usize> {
         match &self.0 {
-            Wire::Heap(_) => None,
+            Wire::Heap(..) => None,
             #[cfg(feature = "runtime-zero-copy")]
             Wire::Slot(slot) => Some(slot.class),
         }
@@ -3312,7 +3356,7 @@ impl WireFrame {
     pub fn into_bytes(mut self) -> bytes::Bytes {
         self.begin_write();
         match self.0 {
-            Wire::Heap(bytes) => bytes::Bytes::from(bytes),
+            Wire::Heap(bytes, _) => bytes::Bytes::from(bytes),
             #[cfg(feature = "runtime-zero-copy")]
             Wire::Slot(mut slot) => {
                 slot.written = true;
@@ -3353,7 +3397,7 @@ impl WireFrame {
     /// down; a pooled one moves where its bytes start, and goes home whole as it always does.
     fn advance(&mut self, n: usize) {
         match &mut self.0 {
-            Wire::Heap(bytes) => {
+            Wire::Heap(bytes, _) => {
                 bytes.drain(..n);
             }
             #[cfg(feature = "runtime-zero-copy")]
@@ -3375,7 +3419,7 @@ impl std::ops::Deref for WireFrame {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
         match &self.0 {
-            Wire::Heap(bytes) => bytes,
+            Wire::Heap(bytes, _) => bytes,
             #[cfg(feature = "runtime-zero-copy")]
             Wire::Slot(slot) => slot.as_bytes(),
         }
@@ -3390,7 +3434,7 @@ impl AsRef<[u8]> for WireFrame {
 
 impl From<Vec<u8>> for WireFrame {
     fn from(bytes: Vec<u8>) -> Self {
-        Self(Wire::Heap(bytes), None)
+        Self(Wire::Heap(bytes, None), None)
     }
 }
 
@@ -3538,10 +3582,10 @@ pub struct OutboundQueue {
 }
 
 impl OutboundQueue {
-    /// The writer is done with `frame`, which it has written out: keep its buffer
-    /// to be lent again (see [`OutboundRx::recycle`]).
-    pub fn recycle(&self, frame: Vec<u8>) {
-        self.rx.recycle(frame);
+    /// The writer is done with `frame`, which it took with `priority` and has written out:
+    /// keep its buffer to be lent again (see [`OutboundRx::recycle`]).
+    pub fn recycle(&self, priority: Priority, frame: Vec<u8>) {
+        self.rx.recycle(priority, frame);
     }
 
     /// R3239 — the writer has written `wire` out: a heap frame's buffer is kept
@@ -4189,7 +4233,7 @@ mod tests {
             all,
             "every lane's batches, before any frame"
         );
-        let first = tx.take_buffer(BATCH + 2);
+        let first = tx.take_buffer(Priority::DEFAULT, BATCH + 2);
         assert!(
             first.capacity() >= BATCH + 2,
             "a whole batch and its prefix"
@@ -4199,11 +4243,19 @@ mod tests {
             all - 1,
             "the first frame is built in one of them"
         );
-        let rest: Vec<Vec<u8>> = (1..all).map(|_| tx.take_buffer(BATCH + 2)).collect();
+        // Each lane lends its own three, and a fourth on a lane is a fresh one.
+        let mut rest: Vec<(Priority, Vec<u8>)> = Vec::new();
+        for wire in 0..Priority::NUM as u8 {
+            let priority = Priority::from_wire(wire);
+            let own = if priority == Priority::DEFAULT { 2 } else { 3 };
+            for _ in 0..own {
+                rest.push((priority, tx.take_buffer(priority, BATCH + 2)));
+            }
+        }
         assert_eq!(tx.spare_count(), 0);
-        tx.return_buffer(first);
-        for buf in rest {
-            tx.return_buffer(buf);
+        tx.return_buffer(Priority::DEFAULT, first);
+        for (priority, buf) in rest {
+            tx.return_buffer(priority, buf);
         }
         assert_eq!(
             tx.spare_count(),
@@ -4217,6 +4269,14 @@ mod tests {
             3,
             "a session without QoS has the one lane"
         );
+        let other = tx.take_buffer(Priority::Control, BATCH + 2);
+        assert_eq!(
+            tx.spare_count(),
+            2,
+            "every priority takes the one lane, and lends its batches"
+        );
+        tx.return_buffer(Priority::Control, other);
+        assert_eq!(tx.spare_count(), 3);
 
         // CONTROL: the lazy shape, which the same sizes leave with nothing taken up front.
         let (tx, _rx) = shaped(QueueAllocation::Lazy, true);
@@ -4225,6 +4285,90 @@ mod tests {
             0,
             "a lazy queue takes nothing until a frame wants it"
         );
+    }
+
+    /// Open-debt item 952 — a lane lends only the buffers that came back to it, as upstream's
+    /// stage of a priority refills from its own ring: the buffers the handshake built on the
+    /// control lane are not the data lane's, so a lazy queue's data lane makes its own when
+    /// traffic wants them (`io/zenoh-transport/src/common/pipeline.rs` @
+    /// `None if self.batch_allocs < self.batch_config.0 => {`). Once a session without QoS has
+    /// its one lane, a buffer coming back to another is freed, and each lane keeps no more than
+    /// its queue's size.
+    #[test]
+    fn a_lane_lends_only_its_own_buffers_and_a_lane_no_frame_takes_keeps_none() {
+        use wz_session_core::link::{QueueAllocation, TxPipeline, TxQueueShape};
+        const BATCH: usize = 1_024;
+        let shape = |qos: bool| TxQueueShape {
+            sizes: [2; Priority::NUM],
+            qos,
+            batch_bytes: BATCH,
+            queue_unit_bytes: BATCH,
+            pipeline: TxPipeline {
+                allocation: QueueAllocation::Lazy,
+                ..TxPipeline::DEFAULT
+            },
+        };
+
+        // The handshake's frame, built and written on the control lane before the shape.
+        let (tx, rx) = outbound_channel();
+        let handshake = tx.take_buffer(Priority::Control, BATCH + 2);
+        let handshake_at = handshake.as_ptr();
+        rx.recycle(Priority::Control, handshake);
+        assert_eq!(tx.spare_count(), 1, "CONTROL: the control lane keeps it");
+        tx.reshape(shape(true));
+        let data = tx.take_buffer(Priority::DEFAULT, BATCH + 2);
+        assert!(
+            data.as_ptr() != handshake_at,
+            "the data lane makes its own buffer, not the control lane's"
+        );
+        assert_eq!(tx.spare_count(), 1, "the control lane still keeps its own");
+        let control = tx.take_buffer(Priority::Control, BATCH + 2);
+        assert_eq!(
+            control.as_ptr(),
+            handshake_at,
+            "CONTROL: its own lane lends it"
+        );
+
+        // A session without QoS: every frame takes the DEFAULT lane, so the control lane's
+        // buffer is freed when the shape comes, and so is the handshake's frame the writer
+        // took from the control lane and gives back after the shape.
+        let (tx, mut rx) = outbound_channel();
+        rx.recycle(Priority::Control, Vec::with_capacity(BATCH + 2));
+        rx.recycle(Priority::Control, Vec::with_capacity(BATCH + 2));
+        let mut frame = tx.take_buffer(Priority::Control, BATCH + 2);
+        assert_eq!(
+            tx.spare_count(),
+            1,
+            "CONTROL: the control lane keeps the other"
+        );
+        frame.extend_from_slice(b"handshake");
+        tx.send(Priority::Control, frame).expect("queued");
+        let (_, wire) = rx.try_recv_wire_tagged().expect("the handshake's frame");
+        tx.reshape(shape(false));
+        assert_eq!(
+            tx.spare_count(),
+            0,
+            "the shape frees the lane no frame takes"
+        );
+        rx.recycle_wire(wire);
+        assert_eq!(tx.spare_count(), 0, "and the frame written from it");
+        rx.recycle(Priority::Control, Vec::with_capacity(BATCH));
+        assert_eq!(
+            tx.spare_count(),
+            1,
+            "CONTROL: a frame of any priority now takes, and gives back to, the one lane"
+        );
+
+        // Each lane keeps no more than its queue's size.
+        let (tx, rx) = outbound_channel();
+        tx.reshape(shape(true));
+        let held: Vec<Vec<u8>> = (0..4)
+            .map(|_| tx.take_buffer(Priority::DEFAULT, BATCH + 2))
+            .collect();
+        for buf in held {
+            rx.recycle(Priority::DEFAULT, buf);
+        }
+        assert_eq!(tx.spare_count(), 2, "the DEFAULT lane's size");
     }
 
     /// A sender that finds a flush has just run does not flush its own message, however few
@@ -4428,11 +4572,11 @@ mod tests {
     #[test]
     fn a_recycled_buffer_is_lent_again_emptied() {
         let (tx, rx) = outbound_channel();
-        let mut b = tx.take_buffer(100);
+        let mut b = tx.take_buffer(Priority::DEFAULT, 100);
         b.extend_from_slice(b"the previous frame");
         let at = b.as_ptr();
-        rx.recycle(b);
-        let again = tx.take_buffer(100);
+        rx.recycle(Priority::DEFAULT, b);
+        let again = tx.take_buffer(Priority::DEFAULT, 100);
         assert_eq!(again.as_ptr(), at, "the buffer comes back, not a new one");
         assert!(
             again.is_empty(),
@@ -4447,10 +4591,12 @@ mod tests {
         let (tx, rx) = outbound_channel();
         // Measured on the pool itself: comparing addresses would be fooled by the
         // allocator handing a freed buffer's address to the next allocation.
-        let held: Vec<Vec<u8>> = (0..SPARE_MAX + 3).map(|_| tx.take_buffer(64)).collect();
+        let held: Vec<Vec<u8>> = (0..SPARE_MAX + 3)
+            .map(|_| tx.take_buffer(Priority::DEFAULT, 64))
+            .collect();
         assert_eq!(tx.spare_count(), 0, "CONTROL: nothing kept yet");
         for (i, b) in held.into_iter().enumerate() {
-            rx.recycle(b);
+            rx.recycle(Priority::DEFAULT, b);
             assert_eq!(
                 tx.spare_count(),
                 (i + 1).min(SPARE_MAX),
@@ -4465,14 +4611,10 @@ mod tests {
     #[test]
     fn a_buffer_past_the_size_bound_is_not_kept() {
         let (tx, rx) = outbound_channel();
-        rx.recycle(buffer_of(SPARE_CAPACITY_MAX + 1));
-        assert_eq!(tx.shared.state.lock().expect("lanes").spare.len(), 0);
-        rx.recycle(buffer_of(SPARE_CAPACITY_MAX));
-        assert_eq!(
-            tx.shared.state.lock().expect("lanes").spare.len(),
-            1,
-            "CONTROL: one at the bound is kept"
-        );
+        rx.recycle(Priority::DEFAULT, buffer_of(SPARE_CAPACITY_MAX + 1));
+        assert_eq!(tx.spare_count(), 0);
+        rx.recycle(Priority::DEFAULT, buffer_of(SPARE_CAPACITY_MAX));
+        assert_eq!(tx.spare_count(), 1, "CONTROL: one at the bound is kept");
     }
 
     /// A link that asks for a batch-sized buffer gets that buffer back: the session builds
@@ -4483,13 +4625,13 @@ mod tests {
         let batch = 49_154;
         let (tx, rx) = outbound_channel();
         // CONTROL: before the link has asked for that size, a buffer of it is freed.
-        rx.recycle(buffer_of(batch));
+        rx.recycle(Priority::DEFAULT, buffer_of(batch));
         assert_eq!(tx.spare_count(), 0, "CONTROL: past the default bound");
-        let first = tx.take_buffer(batch);
+        let first = tx.take_buffer(Priority::DEFAULT, batch);
         let at = first.as_ptr();
-        rx.recycle(first);
+        rx.recycle(Priority::DEFAULT, first);
         assert_eq!(tx.spare_count(), 1, "the buffer the link asked for is kept");
-        let again = tx.take_buffer(batch);
+        let again = tx.take_buffer(Priority::DEFAULT, batch);
         assert_eq!(again.as_ptr(), at, "and it is the one lent again");
         assert!(again.is_empty());
     }
@@ -4498,10 +4640,10 @@ mod tests {
     #[test]
     fn a_request_past_the_largest_frame_does_not_raise_the_bound_past_it() {
         let (tx, rx) = outbound_channel();
-        let huge = tx.take_buffer(SPARE_CAPACITY_CEIL * 4);
-        rx.recycle(huge);
+        let huge = tx.take_buffer(Priority::DEFAULT, SPARE_CAPACITY_CEIL * 4);
+        rx.recycle(Priority::DEFAULT, huge);
         assert_eq!(tx.spare_count(), 0, "a buffer past the ceiling is freed");
-        rx.recycle(buffer_of(SPARE_CAPACITY_CEIL));
+        rx.recycle(Priority::DEFAULT, buffer_of(SPARE_CAPACITY_CEIL));
         assert_eq!(tx.spare_count(), 1, "CONTROL: one at the ceiling is kept");
     }
 
@@ -4512,15 +4654,15 @@ mod tests {
         let (tx, rx) = outbound_channel();
         let (small, large) = (buffer_of(1000), buffer_of(4000));
         let (small_at, large_at) = (small.as_ptr(), large.as_ptr());
-        rx.recycle(large);
-        rx.recycle(small);
+        rx.recycle(Priority::DEFAULT, large);
+        rx.recycle(Priority::DEFAULT, small);
         // Each taken buffer is HELD, so the next take cannot be handed the same
         // address back by the allocator and pass for a recycled one.
-        let first = tx.take_buffer(500);
+        let first = tx.take_buffer(Priority::DEFAULT, 500);
         assert_eq!(first.as_ptr(), small_at, "the smaller one that fits");
-        let second = tx.take_buffer(500);
+        let second = tx.take_buffer(Priority::DEFAULT, 500);
         assert_eq!(second.as_ptr(), large_at, "the other, next");
-        let third = tx.take_buffer(500);
+        let third = tx.take_buffer(Priority::DEFAULT, 500);
         assert!(third.capacity() >= 500, "and a fresh one when none is kept");
         assert!(third.as_ptr() != small_at && third.as_ptr() != large_at);
     }

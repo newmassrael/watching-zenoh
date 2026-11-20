@@ -15,7 +15,7 @@ what the census found on the wz side.
 
 About 565k production lines of hand-written Rust were classified in twelve
 slices. 7.2k already run through generated SCE code (A), 85k are expressible
-with a kind SCE has today (K), and 202k are blocked (G). The rest is platform
+with a kind SCE has today (K), and 203k are blocked (G). The rest is platform
 seam (S, 79k), diagnostics (D, 36k) and glue (X, 155k), which do not move or
 move by a separate decision. Slices S1 to S6 were taken first (369k lines); S7
 to S10 added the C ABI crates, the MCU runtimes and network stacks, and the
@@ -24,13 +24,16 @@ frame layer, its replay and the application transport. `crates.md` names a
 slice or a reason for every crate, and `files.md` does the same for every file
 of the crates a slice reads (section 2, Coverage).
 
-The blocked lines do not need 202k lines' worth of new language. They meet a
+The blocked lines do not need 203k lines' worth of new language. They meet a
 small set of missing elements, and one of them dominates: a machine cannot own a
 table keyed by a runtime value (U1, 143 rows, in every slice). After it come
 text as data (U2a, 63 rows), unbounded data (U10, 54 rows), shared state with a
 stated memory ordering (U8, 39 rows in S1 to S6, a request now withdrawn,
 section 5), in-flight request tables (U9, 36 rows, most of which reduce to U1),
-and JSON documents (U12, 26 rows).
+and JSON documents (U12, 27 rows). A layout known only at run time (U15) is
+decided in section 5.1: the shape is a codec document compiled at build, and a
+description that arrives at run time is read by a generated interpreter of the
+same language.
 
 The first SCE change is SCE ADR 0108, a statechart that holds a table by key as
 a bounded map; its Rust part landed on 2026-11-19 and its C11 part is next
@@ -38,7 +41,7 @@ a bounded map; its Rust part landed on 2026-11-19 and its C11 part is next
 
 The C build reaches the zenoh-pico preset's C ABI first (S7). On the
 cooperative path (`wz-capi-pico` over `wz-capi-port` over `wz-capi-coop`) about
-11.8k lines are protocol logic, 8.7k of them blocked. Their completion, cancel,
+12.0k lines are protocol logic, 8.9k of them blocked. Their completion, cancel,
 undeclare and close semantics rest on the count of an `Arc` or the order of a
 `Drop`; the S7 and S8 Summaries list each place, and the target structure needs
 each as an explicit event. The pico doors S12 adds (end-to-end protection,
@@ -121,11 +124,11 @@ image.
 |---|---|---|
 | A | 7,172 | 1 % |
 | K | 85,163 | 15 % |
-| G | 202,355 | 36 % |
+| G | 202,588 | 36 % |
 | S | 78,928 | 14 % |
 | D | 36,220 | 6 % |
 | X | 155,415 | 27 % |
-| Total | 565,253 | |
+| Total | 565,486 | |
 
 | Slice | A | K | G | S | D | X |
 |---|---|---|---|---|---|---|
@@ -135,7 +138,7 @@ image.
 | S4 | 3,513 | 5,352 | 46,356 | 6,609 | 4,610 | 9,431 |
 | S5 | 870 | 11,800 | 24,180 | 30,100 | 980 | 9,750 |
 | S6 | 0 | 16,930 | 25,946 | 6,829 | 5,133 | 34,322 |
-| S7 | 0 | 3,889 | 22,273 | 5,565 | 1,587 | 25,534 |
+| S7 | 0 | 3,889 | 22,506 | 5,565 | 1,587 | 25,534 |
 | S8 | 0 | 10,624 | 3,438 | 2,766 | 1,294 | 24,631 |
 | S9 | 2,452 | 4,147 | 6,393 | 13,655 | 1,497 | 4,986 |
 | S10 | 108 | 7,976 | 10,132 | 2,744 | 1,371 | 17,923 |
@@ -178,10 +181,10 @@ them; section 4.1 maps each slice's letters.
 | U9 | Many requests in flight, each with its own deadline and cancellation; executor `select` loops | 36 (S1 2, S4 14, S5 2, S6 6, S7 12) | see 4.2: a single deadline is expressible; the table of in-flight requests is U1 |
 | U10 | Unbounded data: growable buffers, payload arenas, caches, reorder buffers | 54 (S2 2, S3 1, S4 10, S5 11, S6 8, S7 2, S8 3, S9 5, S10 4, S11 6, S12 2) | AP may hold it; on MCU it is a permanent constraint (`ARCHITECTURE.md` §2.3) |
 | U11 | A value-returning host or library function inside a step: HMAC, SHAKE/keccak, lz4, RSA, xxh3, SipHash, RFC 3339, float formatting, a logarithm | 20 (S1 6, S3 1, S4 2, S5 1, S6 5, S9 4, S10 1) | only a procedure's `<sce:helper>` returns a host value; `sce:extern` is absent. SCE ADR 0109 D5 to D7 answer part of it |
-| U12 | A JSON / JSON5 document used as data (configuration, admin replies, profiles) | 26 (S5 10, S7 1, S8 1, S10 11, S11 3) | no codec encoding is JSON; `text-template` has no list or record hole |
+| U12 | A JSON / JSON5 document used as data (configuration, admin replies, profiles) | 27 (S5 10, S7 2, S8 1, S10 11, S11 3) | no codec encoding is JSON; `text-template` has no list or record hole |
 | U13 | A step that reads a value another component computed in the same macrostep (Q), or a host effect per element of a collection (I) | 6 (S3 5, S9 1) | `<sce:action>` returns only whether it ran; `<sce:action>` inside `<foreach>` is refused |
 | U14 | A document generic over the application's types | 1 (S3) | `docs/rfc-sce-protocol-synthesis.md` §5.G deferred it |
-| U15 | A wire layout known only at run time: a header whose widths, byte order, masks, marks and CRC model arrive as a profile on every call, or a `.proto` schema a deployment hands over at run time | 7 (S10 4, S11 3) | a codec fixes each field's offset, size and order in the document; nothing in SCE reads a layout description at run time |
+| U15 | A wire layout known only at run time: a header whose widths, byte order, masks, marks and CRC model arrive as a profile on every call, or a `.proto` schema a deployment hands over at run time | 7 (S10 4, S11 3) | a codec fixes each field's offset, size and order in the document; nothing in SCE reads a layout description at run time. Decided in section 5.1: the shape is a codec document compiled at build, a run-time description is read by a generated interpreter of the same language |
 | U16 | A queue or pool whose capacity is a run-time value (a C program states a channel's capacity when it makes it; W4's lend book) | 7 (S7 1, S11 5, S12 1), and W4 | a `queue` is bounded at build, segmented or intrusive |
 | U17 | A full queue that drops the newest or evicts the oldest, with one consumer that removes and several producers | 3 (S7 1, S8 1, S11 1) | a `queue` gives back only its oldest element, and `overwrite-oldest` was refused on it; `broadcast-log` forgets its oldest but is read without removal, with one producer |
 | U18 | A post from a thread that is not the machine's owner whose effects must be applied before the posting call returns (zenoh-c runs a session's delivery to itself inside the call) | 1 (S8) | ADR 0084: "no input waits for a macrostep"; only start, stop and the destructor wait |
@@ -274,24 +277,90 @@ binding before ADR 0100):
 4. **The boundary-binding ADR, with the lend contract.** U4, W4 and W5.
 5. **ADR 0100.** The codec census's L1 to L5: a masked tag, refusal by rule,
    fixed values, value ranges, and where a list ends.
+   **5b. A field over several bit runs and under a mask**, an ADR amending ADR
+   0095, written beside 0100 and landed right after it (section 5.1).
 6. **The text-grammar codec ADR.** U2a and U2b.
 7. **ADR 0109's C11 lane and SHAKE128.** U11. ADR 0109 builds for Rust and C++
    first (its D0), and opens C11 on wz's request.
+8. **A codec document read at run time** (U15's binding 3, section 5.1): the
+   descriptor schema, the generated bounded interpreter, and the build-time
+   `.proto` schema compiler.
+
+The SCE session placed 5b and 8 on 2026-11-20, after section 5.1's decision;
+items 1 to 7 did not move.
 
 Not yet scheduled with the SCE session: U3 (a record that holds a list), U5, U6
 and U7 (trees, graphs and pools of instances), U13 and U14, and the four
 elements S7 to S10 found: U16 and U17 (a queue's run-time capacity and its full
 policy, which the C ABIs' channels need), U18 (a delivery applied inside the
-call that posted it, which zenoh-c's contract needs), and U15. U15 is first a
-decision for the owner: either a deployment writes its profile as a codec
-document in its own repository and generates from it, and its rows become K,
-or SCE gains a kind whose input is a layout description. U9 is
+call that posted it, which zenoh-c's contract needs). U15 is decided below. U9 is
 U1 once a single deadline is a statechart timer (section 4.2). U10 and U12 are
 per preset: on MCU, `ARCHITECTURE.md` §2.3 excludes them, and whether they move
 for AP is a decision. P rows are measured one by one when their slice moves.
 
 Of the slices, S7 (the zenoh-pico preset's C ABI on the cooperative engine) and
 the MCU rows of S5 and S9 are what the C build reaches first.
+
+### 5.1 U15: a layout is a type, with one language and two bindings (2026-11-20)
+
+The owner asked for the structure that is right in the long run with cost
+ignored, and left the choice to this track. U15's rows take a frame's layout as
+a profile on every call so that a deployment's constants never enter this public
+repository (`crates/wz-app-frame/src/e2e_profile.rs:18`); the decision keeps
+that, and moves the layout from a value the product interprets to a type the
+build compiles.
+
+1. **The shape is written in SCE's codec language.** Which fields a header has,
+   their widths, byte order, masks, bit splits and marks, the CRC model and the
+   order the CRC covers are a codec document, in the same language as every other
+   codec. A deployment whose shape is confidential keeps that document in its own
+   repository and generates from it there; this repository holds the language,
+   never the shape. This compiled binding is the only one an MCU image or the
+   zenoh-pico preset carries. U15's rows become K once the codec language states
+   what these headers need (ADR 0095's bit fields, ADR 0100), the cover order
+   being an algorithm.
+2. **What does not change the shape is run-time data.** A data id, `max_gap`, a
+   timeout, a CRC's initial value at a fixed width: a declared record checked
+   against a bound fixed at build, as ADR 0108 D3 and D4 treat a capacity.
+3. **Where a shape is known only at run time, the description is a message and
+   its reader is generated.** An analyzer reading another deployment's capture
+   has no build to compile the shape into. There the layout description is a
+   message of one fixed descriptor schema, itself a codec document (as protobuf's
+   `FileDescriptorProto` describes a `.proto` file in protobuf), and SCE
+   generates a bounded interpreter of the codec language for it. Its meaning is
+   defined as the compiled binding's: for every document `d` and input `b`,
+   `interpret(d, b) = compile(d)(b)`, which is a differential test between the
+   two bindings of the kind section 5's N-version testing asks for. It is not a
+   kind with semantics of its own, and it is not on an MCU image.
+4. **A `.proto` schema is a layout in another language.** A schema compiler
+   imports it into a codec document at build time (the role `protoc` has for
+   generated code); reading `.proto` text is the text-grammar codec (U2), and
+   reading one at run time is binding 3.
+5. **A deployment's message catalogue has one source, a document SCE reads**
+   (W13). The JSON schema, `scripts/lib/message_catalog.py` and the Rust reader
+   are generated from it or removed.
+
+Rejected: a run-time layout kind as the primary form (the census's option (b)).
+It is a second codec language with its own semantics and checker, it puts an
+interpreter of untrusted layout text on the device, and it configures a frame's
+protection at run time where the practice for end-to-end protection (AUTOSAR's
+E2E profiles) fixes each profile at integration. Rejected also: keeping the
+profile text and checking it at run time against a closed list, which is
+binding 3 everywhere with a smaller language.
+
+What it changes: the pico and zenoh-c doors that take profile text at run time
+(S12, S8) belong to binding 3, which selects `std` and does not reach the Zephyr
+image (section 1); a device build reaches binding 1 through a door generated
+for its deployment. Binding 1 rests on ADR 0095 and ADR 0100, and on what
+neither states, according to the SCE session: a field may be several bit runs,
+its value their concatenation in declared order, and may be carried under a
+constant mask, the wire being the value XOR the mask after the runs are joined
+(S10 rows 3-5 and 9). That is an amendment of ADR 0095 with one encode-plan step
+every lane prints, order item 5b. Binding 3 and the schema compiler are order
+item 8, after the text-grammar codec: the identity `interpret(d, b) =
+compile(d)(b)` means something only once the language it interprets is whole,
+and the interpreter reads the same encode and decode plan every backend prints,
+not the document's text, so the differential compares one plan read two ways.
 
 ## 6. Behaviour a migration must carry
 
@@ -452,7 +521,8 @@ Recorded, not changed.
   only once the writable counter moves into `app_link.scxml`.
 - S11 reads a `.proto` schema handed over at run time as U15 and its wire
   decode (row 26) as part of this census, although a fixed protobuf layout
-  would be codec layout; it follows U15's owner decision.
+  would be codec layout. Under section 5.1 a fixed one is codec layout
+  (binding 1) and a run-time one is binding 3.
 
 ## 9. How much reaches C11 today
 
