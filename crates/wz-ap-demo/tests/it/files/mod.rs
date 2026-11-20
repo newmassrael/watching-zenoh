@@ -11,6 +11,7 @@ mod client_node_binary;
 mod config_listen_endpoints_binary;
 mod exclusive_transport_modes_binary;
 mod mesh_offer_multilink_binary;
+mod node_clock_bound_binary;
 mod peer_gateway_south_binary;
 mod peer_stack_budget_binary;
 mod peer_start_window_binary;
