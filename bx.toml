@@ -208,14 +208,15 @@ needed_by = ["--layer 0"]
 # run of its own version, and moving the pin re-measures the rows. A machine whose store lacks it
 # does not receive a unit of the lane (`needed_by` is matched against the unit's argv), and
 # `bx-provision <alias> --apply` builds it with the repository's own installer, which reads the pin
-# from the table and checks the version of what it built. The installer reads no other input, so it
-# is the one `install_inputs`; the version is in the entry already.
+# from the table and checks the version of what it built. The tool store copies only the
+# `install_inputs` to the machine that builds it, so they are the installer and the table it reads
+# the pin from; the version is in the entry already.
 [tools.cargo-mutants]
 version_file = "deploy/mutation_ratchet.json"
 version_pattern = '"cargo_mutants_version": *"([0-9.]+)"'
 path = "~/.local/bin/cargo-mutants"
 install = "PREFIX={prefix} CARGO_HOME={scratch}/cargo bash scripts/install-cargo-mutants.sh --force"
-install_inputs = ["scripts/install-cargo-mutants.sh"]
+install_inputs = ["scripts/install-cargo-mutants.sh", "deploy/mutation_ratchet.json"]
 prefix_file = "cargo-mutants"
 needed_by = ["--layer Cmut"]
 
