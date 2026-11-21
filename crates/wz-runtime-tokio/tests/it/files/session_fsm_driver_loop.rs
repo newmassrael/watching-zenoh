@@ -28,7 +28,7 @@ use wz_runtime_tokio::session_fsm_unicast::{
 };
 use wz_runtime_tokio::session_glue::{
     new_session_actions, new_session_engine, poll_and_dispatch_one, BoxedLinkDriver,
-    DriverLoopOutcome, SessionActionsBinding, SessionLinkActions,
+    DriverLoopOutcome, SessionActionsBinding, SessionLinkActions, WiderInitAckBatch,
 };
 // `NetworkMessage` is referenced only by the two codec-decode tests
 // below: `r74_rx_frame_unknown_network_mid_absorbs_as_unknown`
@@ -841,6 +841,7 @@ async fn r311kc_rx_init_ack_enlarged_caps_rejects_session() {
 //               a CONFIGURED 512 (the fixture's unset 0 advertises the
 //               65535 ceiling on the wire since R311kj, so an unset own
 //               side can no longer be "enlarged" by any u16 peer value).
+//               The refusal is zenoh-pico's rule, which its ABI states.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn r311kc_rx_init_ack_enlarged_batch_size_rejects_session() {
     use wz_session_wire_fixtures::craft_initack_wire_with_caps;
@@ -848,6 +849,7 @@ async fn r311kc_rx_init_ack_enlarged_batch_size_rejects_session() {
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopOutboundDriver::default());
     let mut params = fixture_session_init_params();
     params.batch_size = 512;
+    params.link_rx.wider_init_ack_batch = WiderInitAckBatch::Refuse;
     let actions = new_session_actions(outbound, params, TokioTime::new());
     let mut engine = new_session_engine(&actions);
     engine.initialize().unwrap_or_else(|never| match never {});
@@ -863,6 +865,43 @@ async fn r311kc_rx_init_ack_enlarged_batch_size_rejects_session() {
         "enlarged batch_size must reject independently; got {outcome:?}"
     );
     assert_eq!(engine.get_current_state(), S::Closing);
+}
+
+// The same InitAck under zenoh's rule, the default: the session keeps it and
+// uses the smaller batch (`io/zenoh-transport/src/unicast/establishment/open.rs` @
+// `state.transport.batch_size = state.transport.batch_size.min(init_ack.batch_size);`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_init_ack_naming_a_larger_batch_is_adopted_under_zenohs_rule() {
+    use wz_session_wire_fixtures::craft_initack_wire_with_caps;
+
+    let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopOutboundDriver::default());
+    let mut params = fixture_session_init_params();
+    params.batch_size = 512;
+    assert_eq!(
+        params.link_rx.wider_init_ack_batch,
+        WiderInitAckBatch::Adopt,
+        "zenoh's rule is the default"
+    );
+    let actions = new_session_actions(outbound, params, TokioTime::new());
+    let mut engine = new_session_engine(&actions);
+    engine.initialize().unwrap_or_else(|never| match never {});
+    drive_to_sent_init_syn(&mut engine);
+
+    // seq/req = 0/0 conform; batch_size 1024 > advertised 512.
+    let wire = craft_initack_wire_with_caps(&[0xC0, 0x01], 0x00, 1024);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(wire))]);
+
+    let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert!(
+        !matches!(outcome, DriverLoopOutcome::InitAckCapsRejected),
+        "a larger batch is adopted under zenoh's rule; got {outcome:?}"
+    );
+    assert_ne!(engine.get_current_state(), S::Closing);
+    assert_eq!(
+        actions.negotiated_batch_mtu(),
+        512,
+        "the smaller batch of the two"
+    );
 }
 
 // ── R311ke Scenario: per-channel RX SN gate — a duplicate/stale Frame

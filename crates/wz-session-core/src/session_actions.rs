@@ -10141,7 +10141,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// [`Self::half_open_cap_available`]: every InitAck size parameter
     /// must be `<=` our InitSyn advertisement (`self.params`), the
     /// zenoh-pico `_Z_ERR_TRANSPORT_OPEN_SN_RESOLUTION` rejection
-    /// condition (unicast/transport.c:123-140). `false` means the peer
+    /// condition (unicast/transport.c:123-140), the batch size only where the
+    /// ABI states zenoh-pico's rule for it (`link_rx.wider_init_ack_batch`,
+    /// [`crate::peer_init_caps::WiderInitAckBatch`]). `false` means the peer
     /// ENLARGED a parameter and the session must be rejected — the
     /// dispatcher drives the FSM's `framing.error` arm (Closing with
     /// `CloseReason::Invalid`, the wire's "invalid parameters" close
@@ -10165,6 +10167,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // i.e. exactly the value the InitSyn put on the wire (0 =
             // unset never reaches the wire), link-capped as it was sent.
             self.own_batch_advertisement(),
+            self.params.link_rx.wider_init_ack_batch,
             sn_res_byte,
             batch_size,
         )
