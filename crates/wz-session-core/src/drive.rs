@@ -1899,6 +1899,17 @@ pub fn dispatch_datagram<R: SessionRuntime, T: TimeSource>(
     path
 }
 
+/// How [`dispatch_kept`] reads one unit of a datagram: the unit, where the next record of a `Frame`
+/// an earlier step stopped in starts, and the sink; answered with the path it took, the bytes of
+/// the unit it went through, and whether it stopped before a record.
+#[cfg(all(feature = "alloc", feature = "codec-frame"))]
+type ReadUnit<'a> = dyn FnMut(
+        &[u8],
+        Option<usize>,
+        &mut dyn crate::driver_loop::EventSink,
+    ) -> (DatagramPath, usize, bool)
+    + 'a;
+
 /// The dispatch of a datagram its link keeps ([`crate::driver_loop::EventSink::holds_datagram`]):
 /// its transport messages one after the other where the datagram lies, from where the last step
 /// stopped, `unit_at` reading each (its unit, where the next record of a `Frame` stopped in
@@ -1912,11 +1923,7 @@ fn dispatch_kept<R: SessionRuntime, T: TimeSource>(
     datagram: &[u8],
     actions: &SessionLinkActions<R, T>,
     on_event: &mut dyn crate::driver_loop::EventSink,
-    unit_at: &mut dyn FnMut(
-        &[u8],
-        Option<usize>,
-        &mut dyn crate::driver_loop::EventSink,
-    ) -> (DatagramPath, usize, bool),
+    unit_at: &mut ReadUnit<'_>,
 ) -> DatagramPath {
     use crate::session_actions::DatagramResume;
     let resume = actions.take_datagram_resume();
