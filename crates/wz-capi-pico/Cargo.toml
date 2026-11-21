@@ -291,6 +291,12 @@ resource-snapshot = [
     "wz-capi-port/resource-snapshot",
     "wz-capi-core?/resource-snapshot",
 ]
+# `session-memory`: the most memory a session holds, part by part, computed from the limits it
+# opened under (`wz_ext_session_memory`, `wz_ext_session_memory_row`). wz's own, which zenoh-pico
+# has not, so off as the reference build is, and part of the unstable surface. The tables' rows are
+# `wz-session-core`'s; the rows of the handle and of each link are this ABI's and read what either
+# engine is opened with, so it selects neither, and nothing of it is linked into a build without it.
+session-memory = ["unstable-api", "wz-capi-core?/session-memory"]
 # `segment-sender`: the sending side of a declared segment profile and the doors that drive it
 # (`wz_ext_segment_sender_*`): one message of the application's own cut into the pieces the
 # profile's header describes, put on a publisher or handed to a callback. wz's own, which zenoh-pico

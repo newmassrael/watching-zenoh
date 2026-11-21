@@ -1019,6 +1019,22 @@ abis = ["core"]
 implies = []
 help = "Record how full each of the node's fixed pools has been and list every pool's occupancy and refusals."
 
+# The most memory a session holds, part by part, computed from the limits it opened under: each
+# table the session keeps to a limit (its entries times the bytes of one, read from the table's own
+# row type) and what the ABI and each link hold, summed. A program reads it once its session is
+# open, to know what the limits it chose cost before the session runs. wz's own, with no
+# counterpart in an upstream library, so off in every original; a build without it links none of
+# the computation. The pico ABI's doors are wz_ext_* and part of its unstable surface.
+[[capability]]
+id = "session-memory"
+kconfig = "WZ_CAP_SESSION_MEMORY"
+os_needs = []
+upstream_off = ["zenoh-pico"]
+default = "off"
+abis = ["core", "pico"]
+implies = ["unstable-api"]
+help = "Report the most memory a session holds, part by part, computed from the limits it opened under: its tables, its handle and the queues and buffers of its links (wz_ext_session_memory, wz_ext_session_memory_row, wz-own doors)."
+
 # The peer's initial declarations are final (the declarations-synced event): a declaration
 # listener is told, once, that the declarations it has been given are everything the peer held
 # when the session was established and the ones after are live. wz's own, with no counterpart in

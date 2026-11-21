@@ -466,6 +466,32 @@ impl z_owned_session_t {
     }
 }
 
+/// The session limits a session of this ABI opens under: the build's, since pico's config states no
+/// session limit this ABI reads. The cooperative engine opens its session under the same, which it
+/// resolves itself.
+#[cfg(any(feature = "engine-tokio", feature = "session-memory"))]
+fn pico_session_limits() -> wz_session_core::limits::SessionLimits {
+    wz_session_core::limits::SessionLimits::defaults()
+}
+
+/// What a session's report of its memory is computed from (`crate::session_memory`): the limits
+/// it opens under, how many links it may hold by what it listens on, and the numbers its links are
+/// opened with, `tx_queue` and the read storage the engine is handed.
+#[cfg(feature = "session-memory")]
+fn memory_basis(
+    listen: Option<&str>,
+    tx_queue: &TxQueueConf,
+) -> crate::session_memory::MemoryBasis {
+    crate::session_memory::MemoryBasis {
+        limits: pico_session_limits(),
+        links: crate::session_memory::links_of(listen),
+        queue_batches: tx_queue.sizes.iter().sum(),
+        batch_bytes: usize::from(PICO_UNICAST_BATCH),
+        rx_bytes: PICO_LINK_RX.buffer_size,
+        message_bytes: PICO_LINK_RX.max_message_size,
+    }
+}
+
 /// What a C session handle points at: the engine's session, behind the port, and what this ABI
 /// keeps per session itself (`docs/capi-pico-on-coop-engine.md`, decision D7).
 pub(crate) struct PicoSessionHandle {
@@ -478,6 +504,9 @@ pub(crate) struct PicoSessionHandle {
     /// by (`z_declare_background_*`), and of the gets it issued. A close waits on them, as an
     /// undeclare waits on its own.
     background: crate::ffi::LatchList,
+    /// What the session's report of its memory is computed from, as its open decided it.
+    #[cfg(feature = "session-memory")]
+    pub(crate) memory: crate::session_memory::MemoryBasis,
 }
 
 impl PicoSessionHandle {
@@ -489,7 +518,16 @@ impl PicoSessionHandle {
             drive,
             ext,
             background: crate::ffi::LatchList::default(),
+            #[cfg(feature = "session-memory")]
+            memory: crate::session_memory::MemoryBasis::default(),
         }
+    }
+
+    /// The handle, its memory reported from `memory`.
+    #[cfg(feature = "session-memory")]
+    fn with_memory(mut self, memory: crate::session_memory::MemoryBasis) -> Self {
+        self.memory = memory;
+        self
     }
 
     /// Whether the session has been closed. A declaration or a get made after it is refused with
@@ -1030,6 +1068,8 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
         time_base,
     } = request;
     let (tx_queue, sn_resolution) = pico_link_policy(&policy);
+    #[cfg(feature = "session-memory")]
+    let memory = memory_basis(listen.as_deref(), &tx_queue);
     // This ABI stays on one attempt: the retry the zenoh-c open gained reads
     // zenoh's `connect/retry` and `connect/timeout_ms`, which are zenoh-c
     // config keys, and this shim resolves pico's numeric keys instead.
@@ -1187,9 +1227,7 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             #[cfg(not(any(feature = "shared-key-ids", feature = "time-base")))]
             session_defaults: wz_capi_core::session_defaults::SessionDefaults::default(),
             session_policy: policy,
-            // pico's config states no session limit this ABI reads yet, so its session runs
-            // under the build's.
-            session_limits: wz_session_core::limits::SessionLimits::defaults(),
+            session_limits: pico_session_limits(),
             #[cfg(feature = "app-transport")]
             app_transport,
         },
@@ -1226,6 +1264,8 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             #[cfg(feature = "admin-space")]
             let ext = ext.with_transport_endpoint(transport_endpoint);
             let handle = PicoSessionHandle::new(drive, ext);
+            #[cfg(feature = "session-memory")]
+            let handle = handle.with_memory(memory);
             *zs = z_owned_session_t {
                 _val: Box::into_raw(Box::new(handle)) as *mut c_void,
                 _cnt: core::ptr::null_mut(),
@@ -1322,6 +1362,8 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     let dial_whatami = request.dial_whatami;
     let policy = request.policy;
     let (tx_queue, sn_resolution) = pico_link_policy(&policy);
+    #[cfg(feature = "session-memory")]
+    let memory = memory_basis(request.listen.as_deref(), &tx_queue);
     // The engine takes the id as the config states it, up to sixteen bytes: the form an INIT
     // carries.
     let zid = request.zid;
@@ -1503,6 +1545,8 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     #[cfg(feature = "admin-space")]
     let ext = ext.with_transport_endpoint(transport_endpoint);
     let handle = PicoSessionHandle::new(drive, ext);
+    #[cfg(feature = "session-memory")]
+    let handle = handle.with_memory(memory);
     // The multi-threaded arm's read task starts with the open unless the options say not to.
     #[cfg(feature = "multi-thread")]
     if request.start_read_task {

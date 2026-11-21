@@ -220,6 +220,11 @@ e2e-sender = []
 # the judge of `wz-app-frame`, so these features only carry the capabilities' names.
 e2e-receiver = []
 e2e-sender-demux = ["e2e-receiver"]
+# The report of the most memory a session holds. The model has nothing behind it: the rows of the
+# tables are `wz-session-core`'s (`session_memory`) and the doors are the pico ABI's own
+# (`wz-capi-pico/session-memory`), so this feature only carries the capability's name, as
+# `e2e-sender`'s does.
+session-memory = []
 # The instance a sample of a message is, read from fields of its payload. The model has nothing
 # behind it: the doors are the pico ABI's own (`wz-capi-pico/instance-key`) over the keyer of
 # `wz-app-frame`, so this feature only carries the capability's name, as `e2e-receiver`'s does.
