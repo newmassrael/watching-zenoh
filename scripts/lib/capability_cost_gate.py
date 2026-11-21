@@ -172,6 +172,10 @@ MULTICAST = r"multicast_glue|multicast_pipeline|MulticastLinkDriver"
 # panic strategy, and one built without it (`os-posix`, docs/c-abi-engine-and-memory.md P4) has none
 # of.
 STD_RUNTIME = r"std::backtrace_rs::|rustc_demangle::|addr2line::"
+# The Keccak permutation of zenoh's SHAKE128 derivation of a session's initial sequence number,
+# which the tokio engine announces by and the cooperative pico client does not
+# (`wz-session-core`'s `initial-sn-compact`, zenoh-pico drawing that origin at random).
+KECCAK = r"keccak::"
 # The engine a pico build runs its sessions on (`engine-tokio` / `engine-coop`,
 # docs/capi-pico-on-coop-engine.md): a build of one links none of the other.
 TOKIO_ENGINE = r"wz_capi_core::|wz_runtime_tokio::"
@@ -475,7 +479,7 @@ CASES: tuple[Case, ...] = (
          # 2,007,557 hosted, +9,344 on one machine.
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
                  CONNECTIVITY, MULTICAST, COOP_ENGINE),
-         require=(SINGLE_THREADED, TOKIO_ENGINE),
+         require=(SINGLE_THREADED, TOKIO_ENGINE, KECCAK),
          note="a single-threaded pub/sub client that dials TCP: no listener, no scouting, "
               "no UDP, no clock, no unstable API. 1,794,085 measured, down from 1,868,267 "
               "with the unstable API and the connectivity plane. Hosted reads run higher than "
@@ -651,7 +655,7 @@ CASES: tuple[Case, ...] = (
          # 1,047,506 hosted, +9,488 on one machine.
          1_060_500,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
-                 MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
+                 MULTICAST, TOKIO_ENGINE, COOP_LISTEN, KECCAK),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE, STD_RUNTIME),
          exports=444,
          note="444 exports with the config doors of the open's policies "
@@ -716,7 +720,7 @@ CASES: tuple[Case, ...] = (
     Case("pico-client-coop-nostd", "wz-capi-pico", "libwz_capi_pico.so", "os-posix,link-udp",
          1_049_200,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
-                 MULTICAST, TOKIO_ENGINE, COOP_LISTEN, STD_RUNTIME),
+                 MULTICAST, TOKIO_ENGINE, COOP_LISTEN, STD_RUNTIME, KECCAK),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
          exports=444, profile="capi-nostd", cargo_config=".cargo/capi-nostd.toml",
          note="pico-client-coop's capabilities and its 444 exports: the form adds no C symbol "

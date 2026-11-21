@@ -100,8 +100,20 @@ std = ["wz-capi-port/std", "wz-capi-coop?/std"]
 #
 # Both are a host's: `engine-coop` is the cooperative engine over the host's sockets
 # (`wz-runtime-posix`: Linux, Android, QNX Neutrino, and Winsock on Windows), so each selects `std`.
+#
+# The cooperative engine on a host (`engine-coop`, `os-posix`) announces a session's initial
+# sequence number by the session core's compact function of the two zids
+# (`wz-session-core/initial-sn-compact`) in place of zenoh's SHAKE128 of them: zenoh-pico draws
+# that origin from its random source, so zenoh's derivation is no part of this ABI's contract, and
+# without it the Keccak permutation is not linked. The origin keeps what a derivation is for (one
+# pair of zids, one origin; each end its own). A build of the tokio engine alone keeps zenoh's.
 engine-tokio = ["std", "dep:wz-capi-core", "dep:tokio"]
-engine-coop = ["std", "dep:wz-capi-coop", "dep:wz-runtime-posix"]
+engine-coop = [
+    "std",
+    "dep:wz-capi-coop",
+    "dep:wz-runtime-posix",
+    "wz-session-core/initial-sn-compact",
+]
 # `os-zephyr`: the library in a Zephyr image, without `std`: the cooperative engine over Zephyr's
 # own sockets, kernel tick and random source (`wz-runtime-zephyr`, `src/coop_host.rs`), the host
 # layer of `src/os/zephyr.rs` under the platform exports (the kernel heap, Zephyr's POSIX clocks
@@ -128,6 +140,7 @@ os-posix = [
     "dep:wz-runtime-posix",
     "wz-capi-coop/host-sys",
     "wz-capi-port/os-sys",
+    "wz-session-core/initial-sn-compact",
 ]
 # The capabilities pico's own CMake switches name (`Z_FEATURE_QUERY`, `Z_FEATURE_QUERYABLE`,
 # `Z_FEATURE_LIVELINESS`, `Z_FEATURE_ADVANCED_PUBLICATION` / `_SUBSCRIPTION`), each one feature
