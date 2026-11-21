@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""Which census members a hosted Layer C1cn shard examines.
+"""R4576 (no register item) -- which census members a hosted Layer C1cn shard examines.
 
 ## Why this exists
 
