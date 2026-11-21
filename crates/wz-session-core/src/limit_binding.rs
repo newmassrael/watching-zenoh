@@ -369,7 +369,12 @@ impl LimitDomain {
             return Ok(());
         }
         if self.pinned {
-            return Err(Outside::Pinned);
+            let only = if self.unbounded {
+                LimitValue::Unbounded
+            } else {
+                LimitValue::Integer(self.least)
+            };
+            return Err(Outside::Pinned { only });
         }
         Err(match value {
             LimitValue::Unbounded => match self.kind {
@@ -397,7 +402,10 @@ impl LimitDomain {
 pub enum Outside {
     /// The build keeps its own value alone (`WZ_LIMIT_DOMAINS`, or a target with no operating
     /// system), and this is another.
-    Pinned,
+    Pinned {
+        /// The one value the build allows.
+        only: LimitValue,
+    },
     /// `unbounded` for a parameter, which has no such value.
     UnboundedParameter,
     /// `unbounded` for a bound the build sized storage by: its quota is at most the capacity.
@@ -440,44 +448,54 @@ pub struct OutsideLimitDomain {
 
 impl fmt::Display for OutsideLimitDomain {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (limit, value) = (self.limit, self.value);
-        match self.why {
-            Outside::Pinned => match self.domain.integers() {
-                Some((only, _)) => write!(
-                    f,
-                    "the build fixes the limit `{limit}` at {only}; `{value}` is another value"
-                ),
-                None => write!(
-                    f,
-                    "the build fixes the limit `{limit}` at `{UNBOUNDED}`; `{value}` is another value"
-                ),
-            },
-            Outside::UnboundedParameter => write!(
-                f,
-                "the limit `{limit}` is a parameter, which is never `{UNBOUNDED}`"
-            ),
-            Outside::UnboundedOverCapacity { capacity } => write!(
-                f,
-                "the build sizes the storage of the limit `{limit}` at {capacity}, so it is not \
-                 `{UNBOUNDED}`"
-            ),
-            Outside::Below { least } => write!(
-                f,
-                "the limit `{limit}` is at least {least}; `{value}` is less"
-            ),
-            Outside::OverCapacity { capacity } => write!(
-                f,
-                "the build sizes the storage of the limit `{limit}` at {capacity}; `{value}` is more"
-            ),
-            Outside::OutsideRange { least, most } => write!(
-                f,
-                "the limit `{limit}` is between {least} and {most}; `{value}` is outside"
-            ),
-        }
+        write_outside(f, self.limit, self.value, self.why)
     }
 }
 
 impl core::error::Error for OutsideLimitDomain {}
+
+/// Why `value` is outside the domain of the limit `limit`, as a sentence: what
+/// [`OutsideLimitDomain`] says, and what a document's refusal of the value says after it.
+pub(crate) fn write_outside(
+    f: &mut fmt::Formatter<'_>,
+    limit: &str,
+    value: LimitValue,
+    why: Outside,
+) -> fmt::Result {
+    match why {
+        Outside::Pinned { only } => match only {
+            LimitValue::Integer(only) => write!(
+                f,
+                "the build fixes the limit `{limit}` at {only}; `{value}` is another value"
+            ),
+            LimitValue::Unbounded => write!(
+                f,
+                "the build fixes the limit `{limit}` at `{UNBOUNDED}`; `{value}` is another value"
+            ),
+        },
+        Outside::UnboundedParameter => write!(
+            f,
+            "the limit `{limit}` is a parameter, which is never `{UNBOUNDED}`"
+        ),
+        Outside::UnboundedOverCapacity { capacity } => write!(
+            f,
+            "the build sizes the storage of the limit `{limit}` at {capacity}, so it is not \
+             `{UNBOUNDED}`"
+        ),
+        Outside::Below { least } => write!(
+            f,
+            "the limit `{limit}` is at least {least}; `{value}` is less"
+        ),
+        Outside::OverCapacity { capacity } => write!(
+            f,
+            "the build sizes the storage of the limit `{limit}` at {capacity}; `{value}` is more"
+        ),
+        Outside::OutsideRange { least, most } => write!(
+            f,
+            "the limit `{limit}` is between {least} and {most}; `{value}` is outside"
+        ),
+    }
+}
 
 /// Whether a limit's domain keeps only the build's value: what `WZ_LIMIT_DOMAINS` states (`full`
 /// keeps every value the build allows, `defaults` only its own), else whether the target has no
@@ -926,13 +944,22 @@ mod tests {
         );
         assert_eq!(
             Pinned4::DOMAIN.check(LimitValue::Integer(5)),
-            Err(Outside::Pinned)
+            Err(Outside::Pinned {
+                only: LimitValue::Integer(4)
+            })
         );
         assert_eq!(Limited::<Pinned4, 0>::default().get(), 4);
         let unbounded = LimitDomain::bound(None).keeping(LimitValue::Unbounded, true);
         assert!(unbounded.is_singleton());
         assert!(unbounded.contains(LimitValue::Unbounded));
         assert!(!unbounded.contains(LimitValue::Integer(3)));
+        // The refusal names the value the build keeps, so a reader that holds no domain can say it.
+        assert_eq!(
+            unbounded.check(LimitValue::Integer(3)),
+            Err(Outside::Pinned {
+                only: LimitValue::Unbounded
+            })
+        );
         // Without the rule the domain is what the build allows.
         assert_eq!(
             LimitDomain::bound(None).keeping(LimitValue::Unbounded, false),
@@ -1016,6 +1043,11 @@ mod tests {
         assert_eq!(
             std::format!("{}", refused(pinned, LimitValue::Integer(5))),
             "the build fixes the limit `X` at 4; `5` is another value"
+        );
+        let unbounded = LimitDomain::bound(None).keeping(LimitValue::Unbounded, true);
+        assert_eq!(
+            std::format!("{}", refused(unbounded, LimitValue::Integer(5))),
+            "the build fixes the limit `X` at `unbounded`; `5` is another value"
         );
     }
 

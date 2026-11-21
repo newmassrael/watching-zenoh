@@ -15251,11 +15251,11 @@ mod wz_member_tests {
     }
 
     /// One refusal refuses the document, and the error names every refusal found: a member of
-    /// `wz` this build does not read, `wz/limits` by its name, and a value the policy lacks.
+    /// `wz` this build does not read, a value the policy lacks, and a limit the build lacks.
     #[test]
     fn a_refused_wz_member_fails_the_ingest_naming_each_refusal() {
         let error = ZenohNodeConfig::from_json5(
-            r#"{ mode: "peer", wz: { colour: "blue", limits: {}, policies: { "key-set": "ajar" } } }"#,
+            r#"{ mode: "peer", wz: { colour: "blue", limits: { NO_SUCH_LIMIT: 1 }, policies: { "key-set": "ajar" } } }"#,
         )
         .unwrap_err();
         let ConfigIngestError::PoliciesRefused {
@@ -15269,7 +15269,7 @@ mod wz_member_tests {
         assert_eq!(*unreported, 0);
         let text = error.to_string();
         assert!(text.starts_with("the `wz` member is refused: "), "{text}");
-        for named in ["`wz/colour`", "`wz/limits`", "`key-set` = `ajar`"] {
+        for named in ["`wz/colour`", "`NO_SUCH_LIMIT`", "`key-set` = `ajar`"] {
             assert!(text.contains(named), "{named} is not named: {text}");
         }
     }

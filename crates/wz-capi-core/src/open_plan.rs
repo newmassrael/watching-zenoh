@@ -1845,7 +1845,7 @@ mod tests {
                 WhatAmI::Client,
                 &[],
                 &[],
-                r#"{ scouting: { multicast: { enabled: false } }, wz: { limits: {} } }"#
+                r#"{ scouting: { multicast: { enabled: false } }, wz: { limits: { NO_SUCH_LIMIT: 1 } } }"#
             ),
             OpenRefusal::Policies
         );

@@ -71,6 +71,7 @@ impl PolicyStatements {
         let overrides = Overrides {
             profile: self.profile.as_deref(),
             statements: &api,
+            limits: &[],
         };
         #[cfg(feature = "config-document")]
         if let Some(document) = &self.document {

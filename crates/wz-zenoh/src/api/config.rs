@@ -177,6 +177,7 @@ impl Config {
         judge_alone(wz_session_core::policy_document::Overrides {
             profile: None,
             statements: &statement,
+            limits: &[],
         })?;
         match self
             .1
@@ -199,6 +200,7 @@ impl Config {
         judge_alone(wz_session_core::policy_document::Overrides {
             profile: Some(profile),
             statements: &[],
+            limits: &[],
         })?;
         self.1.profile = Some(profile.to_owned());
         Ok(())
@@ -372,6 +374,7 @@ impl WzStatements {
         let overrides = Overrides {
             profile: self.profile.as_deref(),
             statements: &statements,
+            limits: &[],
         };
         resolve_document_under(SessionPolicy::defaults(), &tree, overrides)
             .map_err(|refusals| zerror!("the `wz` member is refused: {refusals}").into())

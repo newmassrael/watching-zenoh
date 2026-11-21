@@ -1147,7 +1147,8 @@ mod policy_document_tests {
 
     /// An insert the member stores and the resolution refuses fails the open with the code of a
     /// configuration refused for what it states: a value the policy does not have, a policy the
-    /// build does not have, a profile it does not have, and a member that is no object.
+    /// build does not have, a profile it does not have, a member that is no object, and a limit
+    /// the build does not have.
     #[test]
     fn a_refused_insert_fails_the_open_as_a_refused_configuration() {
         for refused in [
@@ -1155,7 +1156,7 @@ mod policy_document_tests {
             ("wz/policies/no-such-policy", r#""on""#),
             ("wz/profile", r#""no-such-profile""#),
             ("wz", r#""upstream""#),
-            ("wz/limits", "{}"),
+            ("wz/limits", "{ NO_SUCH_LIMIT: 1 }"),
         ] {
             // SAFETY: as above; the open makes no session, so there is none to close.
             unsafe {

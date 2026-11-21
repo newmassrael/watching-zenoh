@@ -3107,3 +3107,19 @@ pub static RUNTIME_LIMITS: [LimitEntry<RuntimeLimits>; RUNTIME_LIMIT_COUNT] = [
     LimitEntry::of::<MessageCatalogEntries>(),
     LimitEntry::of::<ClockMaxForwardStepMs>(),
 ];
+
+/// Every limit that is a capacity alone, by its id: the build sizes storage by it and no later
+/// stage decides it, so neither snapshot holds it and a document that states it is refused by
+/// name.
+pub static CAPACITY_LIMITS: [&str; 10] = [
+    "MATCH_MEMO_FIXED_SLOTS",
+    "MATCH_MEMO_KEY_BYTES",
+    "MAX_ADMIN_REPLY_BYTES",
+    "MAX_ADMIN_LOCATORS",
+    "MAX_ADMIN_SESSION_LINKS",
+    "MAX_TASKS",
+    "MAX_TIMERS",
+    "MAX_PEER_NODES",
+    "HANDSHAKE_COOKIE_BYTES",
+    "EVENT_RECORD_ARGS",
+];
