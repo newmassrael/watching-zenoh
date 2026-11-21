@@ -9,6 +9,8 @@
 //! of the unstable surface: the `e2e-sender` capability implies `unstable-api`. The sender is
 //! [`wz_app_frame::e2e_stream_sender`]; ownership and threads are as `crate::e2e` describes.
 
+use alloc::format;
+use alloc::string::ToString;
 use core::ffi::{c_char, c_void};
 
 use wz_app_frame::e2e_frame::Values;

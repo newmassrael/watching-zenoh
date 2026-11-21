@@ -365,10 +365,10 @@ e2e-supervision = [
 # payload protected by a profile and the program's values, the counter kept per stream. On in the
 # zenoh-c ABI's default and off in this one's (`default_off_abis` in the declaration): wz's own,
 # which zenoh-pico has not, and part of the unstable surface. The frame writer is `wz-app-frame`'s.
-# Each sender is held under the host's lock, so it selects `std`; it touches no session, so it
-# selects neither engine and forwards weakly.
+# Each sender is held under the host's lock, `std`'s or, in a host library without `std`,
+# `wz-host-sync`'s (`os-posix`), so it selects no `std`; it touches no session, so it selects
+# neither engine and forwards weakly.
 e2e-sender = [
-    "std",
     "unstable-api",
     "dep:wz-app-frame",
     "wz-capi-core?/e2e-sender",
@@ -376,9 +376,8 @@ e2e-sender = [
 # `e2e-receiver`: the receiving judge of end-to-end protected frames (`wz_ext_e2e_receiver_*`):
 # per-stream state in storage the program sizes, the judging rules the profile states, and a
 # status beside every sample. wz's own, off as the reference build is, part of the unstable
-# surface. The judge is `wz-app-frame`'s; like the sender it selects `std` and neither engine.
+# surface. The judge is `wz-app-frame`'s; like the sender it selects no `std` and neither engine.
 e2e-receiver = [
-    "std",
     "unstable-api",
     "dep:wz-app-frame",
     "wz-capi-core?/e2e-receiver",

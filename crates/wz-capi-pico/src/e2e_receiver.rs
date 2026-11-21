@@ -11,6 +11,7 @@
 //! (`WZ_EXT_ERR_UNSUPPORTED`). The judge is [`wz_app_frame::e2e_receiver`]; ownership and threads
 //! are as `crate::e2e` describes.
 
+use alloc::format;
 use core::ffi::{c_char, c_void};
 
 use wz_app_frame::e2e_frame::Values;

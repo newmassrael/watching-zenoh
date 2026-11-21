@@ -148,6 +148,26 @@ compile_error!(
      names one"
 );
 
+// The doors of the additional features hold their state behind a host's lock, and supervision
+// polls on a host's thread: `std`'s, or `wz-host-sync`'s in a host library without `std`
+// (`os-posix`). A build with neither has no lock for them, and is refused here by name.
+#[cfg(all(
+    not(feature = "std"),
+    not(feature = "os-posix"),
+    any(
+        feature = "e2e-sender",
+        feature = "e2e-receiver",
+        feature = "e2e-supervision",
+        feature = "instance-key",
+        feature = "message-catalog",
+        feature = "replay-cache"
+    )
+))]
+compile_error!(
+    "wz-capi-pico: the doors of the additional features need a host's lock and threads: `std`, or \
+     `os-posix` for a host library without it"
+);
+
 // `scout-mcu` is the cooperative engine's window over one datagram socket; the tokio engine scouts
 // on the host's sockets, which is `scout`.
 #[cfg(all(
