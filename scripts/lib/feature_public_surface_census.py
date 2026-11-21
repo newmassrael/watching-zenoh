@@ -625,7 +625,8 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # `message-catalog` and `replay-cache` also gates `pub mod ext_interface`, the versioned
         # interface the doors of those capabilities reach the core through, whose public items are
         # wz's own doors `wz_ext_interface_version`, `_session_facts`, `_bytes_view` and
-        # `_run_in_callback`, and the types and constants they take, declared in `wz_ext.h`.
+        # `_run_in_callback`, and the types and constants they take, declared in `wz_ext.h`; and
+        # `pub mod additional`, whose public item is wz's own door `wz_ext_additional_interface`.
         frozenset(
             {
                 "admin-space",

@@ -135,6 +135,27 @@ compile_error!(
 );
 
 pub mod abi;
+// The doors of the additional features (end-to-end protection, stream supervision, instance keys, the
+// replay cache, the message catalog) are a layer over this core that names it only through its C
+// ABI and the extension interface (`ext_interface`). The default build links them into this library.
+// The same sources also build as two: this crate compiled with `--cfg wz_additional_apart` is the
+// core alone, and `wz-capi-pico-ext` compiles the doors' files again as a library of its own that
+// imports the core through C (`docs/capi-pico-additional-library.md`); each door module below is
+// left out of the core alone.
+//
+// Which version of the extension interface the doors were built against, asked of them and compared
+// with the core's: a wz door (`wz_ext.h`) in a build with any of those capabilities, one of the
+// doors.
+#[cfg(any(
+    feature = "e2e-sender",
+    feature = "e2e-receiver",
+    feature = "e2e-supervision",
+    feature = "instance-key",
+    feature = "message-catalog",
+    feature = "replay-cache"
+))]
+#[cfg(not(wz_additional_apart))]
+pub mod additional;
 #[cfg(feature = "admin-space")]
 pub mod admin_space;
 #[cfg(feature = "advanced")]
@@ -191,13 +212,16 @@ pub mod device_requires;
     feature = "instance-key",
     feature = "message-payload"
 ))]
+#[cfg(not(wz_additional_apart))]
 mod e2e;
 // The receiving judge of end-to-end protected frames: wz doors (`wz_ext.h`) of the unstable
 // surface.
 #[cfg(feature = "e2e-receiver")]
+#[cfg(not(wz_additional_apart))]
 pub mod e2e_receiver;
 // The sending side of end-to-end protection: wz doors (`wz_ext.h`) of the unstable surface.
 #[cfg(feature = "e2e-sender")]
+#[cfg(not(wz_additional_apart))]
 pub mod e2e_sender;
 // `wz_ext_redeclare`: tell a session's peers what it holds again.
 #[cfg(feature = "unstable-api")]
@@ -239,6 +263,7 @@ pub mod header_internals;
 // The instance of a message a sample is, read from fields of its payload: wz doors (`wz_ext.h`)
 // of the unstable surface.
 #[cfg(feature = "instance-key")]
+#[cfg(not(wz_additional_apart))]
 pub mod instance_key;
 // The key ids every node of a deployment shares: a wz door (`wz_ext.h`) of the unstable surface
 // with the capability, and in every build the open's judgement of the key-wire form.
@@ -254,10 +279,12 @@ pub mod matching;
 // A deployment's message catalog, read from one JSON5 declaration: wz doors (`wz_ext.h`) of the
 // unstable surface, over the reader of `wz-app-frame`.
 #[cfg(feature = "message-catalog")]
+#[cfg(not(wz_additional_apart))]
 pub mod message_catalog;
 // A catalog message's payload set and read field by field under the program's `.proto` files:
 // wz doors (`wz_ext.h`) of the unstable surface, over the message payload of `wz-app-frame`.
 #[cfg(feature = "message-payload")]
+#[cfg(not(wz_additional_apart))]
 pub mod message_payload;
 // Fixed pools, one per slot size, that the objects behind the owned handles are taken from in
 // place of the heap: wz doors (`wz_ext.h`) of the unstable surface.
@@ -272,6 +299,7 @@ pub mod platform;
 // One `.proto` file as a program hands it over (`wz_ext_proto_file_t`, `wz_ext.h`), for the doors
 // that read a schema: the instance keys' and the message payloads'.
 #[cfg(any(feature = "instance-key", feature = "message-payload"))]
+#[cfg(not(wz_additional_apart))]
 pub mod proto_file;
 pub mod pubsub;
 pub mod qos;
@@ -282,8 +310,10 @@ pub mod query;
 // The replay cache, the publisher's ring and answer and the subscriber's asking and order: wz
 // doors (`wz_ext.h`) of the unstable surface, over the models of `wz-session-core`.
 #[cfg(feature = "replay-cache")]
+#[cfg(not(wz_additional_apart))]
 pub mod replay_publisher;
 #[cfg(feature = "replay-cache")]
+#[cfg(not(wz_additional_apart))]
 pub mod replay_subscriber;
 #[cfg(any(feature = "query", feature = "queryable"))]
 pub mod reply_keyexpr;
@@ -302,6 +332,7 @@ pub mod snapshot;
 // Reception supervision per stream: wz doors (`wz_ext.h`) of the unstable surface, over the
 // supervisor of `wz-session-core`.
 #[cfg(feature = "e2e-supervision")]
+#[cfg(not(wz_additional_apart))]
 pub mod stream_supervision;
 pub mod string_array;
 #[cfg(feature = "supervision")]
@@ -525,3 +556,19 @@ mod layout_pins {
         assert_eq!(size_of::<crate::query::z_owned_query_t>(), 16);
     }
 }
+
+// The additional library's view of this core (`wz-capi-pico-ext/src/core_view.rs`), held to the
+// core's own declarations: the layout of each type it allocates or reads, the value of each
+// constant and the signature of each function it imports.
+#[cfg(all(
+    test,
+    any(
+        feature = "e2e-sender",
+        feature = "e2e-receiver",
+        feature = "e2e-supervision",
+        feature = "instance-key",
+        feature = "message-catalog",
+        feature = "replay-cache"
+    )
+))]
+mod additional_view_tests;

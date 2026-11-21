@@ -2390,4 +2390,38 @@ z_result_t wz_ext_interface_bytes_view(const z_loaned_bytes_t *bytes,
 z_result_t wz_ext_interface_run_in_callback(void (*body)(void *context),
                                             void *context);
 
+/* The major version, as the name of a function that answers it: a library of
+ * the additional features built apart from this one calls it, so the system's
+ * loader does not load that library over a library of another major version,
+ * whose function has another name. */
+uint16_t wz_ext_interface_major_1(void);
+
+/* ================================================ one library or two
+ *
+ * The doors of the additional features are in this library (the default
+ * build) or in a library of their own beside it, built from the same sources
+ * and the same feature list (docs/capi-pico-additional-library.md): the core
+ * (wz_capi_pico) and the additional library (wz_capi_pico_ext), which reaches
+ * the core through the drop-in API and the extension interface above only. A
+ * program is written the same for both: it links the one library, or the two.
+ *
+ * ACROSS THE TWO. A handle is opaque to the side that did not make it; what a
+ * library allocates, that library frees (a refusal string an additional door
+ * writes is made by the core's z_string_* and dropped by the program with the
+ * core's z_string_drop; storage the program hands a door stays the program's);
+ * no object of a language runtime (a FILE, a heap block of one C runtime to be
+ * freed by another, a Rust value) crosses; and the version of the interface is
+ * asked, by the loader through wz_ext_interface_major_1 and at run time below.
+ *
+ * The version of the extension interface the doors of the additional features
+ * were built against, written into out (struct_size set as above), compared
+ * with the version this library's core answers. Present in a build with any
+ * of those capabilities, in whichever library holds the doors.
+ *
+ * Z_OK when the core answers the same major version and the same or a later
+ * minor one; WZ_EXT_ERR_UNSUPPORTED (-3) when it does not, out written all the
+ * same with the version the doors need; Z_ERR_NULL for a NULL out; Z_EINVAL
+ * for a struct_size smaller than the struct, nothing written. */
+z_result_t wz_ext_additional_interface(wz_ext_interface_version_t *out);
+
 #endif /* WZ_EXT_H */

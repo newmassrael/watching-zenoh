@@ -412,6 +412,14 @@ transport-link-unixpipe,transport-link-ws|"
     # behind the feature). The round, the ring and the admission have model tests of their own in
     # `wz-session-core` and `wz-app-frame`, each a leg below.
     "wz-capi-pico|hook|replay-cache|"
+    # The doors' library's view of the core (`wz-capi-pico-ext/src/core_view.rs`) held to the core's
+    # declarations (`additional_view_tests`, behind any door capability): the replay cache's leg
+    # above runs its replay half; these run the event log's constants the instance keys report with
+    # (`event-ring`), the local queryable's field of the get options the replay subscriber sets
+    # (`local-queryable`), and the door that asks the interface's version (`additional`).
+    "wz-capi-pico|hook|instance-key,event-ring|additional_view_tests::"
+    "wz-capi-pico|hook|replay-cache,local-queryable|additional_view_tests::"
+    "wz-capi-pico|hook|message-catalog|additional::tests::"
     # The library's own unit tests of three wz doors, each behind its feature: the program's
     # transport (`app_transport`, `app-transport`), the config's document door (`config_policy`,
     # the tests behind `config-document`) and the key ids a config states (`key_ids`, its tests

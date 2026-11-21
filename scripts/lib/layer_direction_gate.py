@@ -259,6 +259,8 @@ EXTENSION_DOORS: frozenset[str] = frozenset(
         "message_payload",
         # The `.proto` files the instance keys and the message payloads both read.
         "proto_file",
+        # The interface version the doors were built against, asked of them.
+        "additional",
     }
 )
 

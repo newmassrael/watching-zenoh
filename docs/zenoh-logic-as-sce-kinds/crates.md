@@ -30,6 +30,7 @@ The `Where` column holds the slices that read the crate (`S1, S2`), or
 | `wz-capi-core` | S7 | |
 | `wz-capi-dissect` | excluded: analyzer | The C ABI of the analyzer's dissection; follows `wz-capture`. |
 | `wz-capi-pico` | S7, S12 | |
+| `wz-capi-pico-ext` | excluded: binding | The doors of `wz-capi-pico`'s additional features compiled again as a library of their own over the core library's C ABI: its sources are `wz-capi-pico`'s door files, which S12 reads there, and an import declaration of the core (`src/core_view.rs`). |
 | `wz-capi-port` | S7 | |
 | `wz-capi-replay` | excluded: analyzer | The C ABI of capture replay; follows `wz-replay`. |
 | `wz-capture` | excluded: analyzer | The analyzer (pcap reading, dissection, flow verdicts); its place in the migration is the open point of section 8. |

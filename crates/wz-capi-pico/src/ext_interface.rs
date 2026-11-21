@@ -25,6 +25,14 @@
 //! field changes meaning or goes; the minor when one is added, a field always at the end of its
 //! struct. A library written against major M and minor N runs over a core of major M and minor N
 //! or later.
+//!
+//! The major version is also the name of a function the core exports, `wz_ext_interface_major_1`
+//! for major 1. The doors of the additional features call it, so a library of them built apart
+//! from the core (`docs/capi-pico-additional-library.md`) names it among its imports, and the
+//! system's loader refuses to load that library over a core of another major version before any
+//! door runs. A minor version adds functions, which that library imports by name too, so a core
+//! older than its minor version is refused the same way. `wz_ext_additional_interface` asks both
+//! at run time.
 
 use core::ffi::c_void;
 use core::mem::size_of;
@@ -117,6 +125,13 @@ pub unsafe extern "C" fn wz_ext_interface_version(out: *mut wz_ext_interface_ver
         };
         Z_OK
     })
+}
+
+/// The major version of this interface, exported under a name that carries it: a library that calls
+/// it cannot be loaded over a core of another major version, whose function has another name.
+#[no_mangle]
+pub extern "C" fn wz_ext_interface_major_1() -> u16 {
+    WZ_EXT_INTERFACE_MAJOR
 }
 
 /// Write what the core says of `session` into `out`, whose `struct_size` the caller has set. A
@@ -240,6 +255,15 @@ mod tests {
             16
         );
         assert_eq!(size_of::<wz_ext_session_facts_t>(), 16 + size_of::<usize>());
+    }
+
+    #[test]
+    fn the_function_named_by_the_major_version_answers_it() {
+        assert_eq!(wz_ext_interface_major_1(), WZ_EXT_INTERFACE_MAJOR);
+        assert_eq!(
+            WZ_EXT_INTERFACE_MAJOR, 1,
+            "a new major version renames wz_ext_interface_major_1 with its number"
+        );
     }
 
     #[test]

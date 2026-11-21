@@ -22,6 +22,7 @@ mod link_emitter_b6;
 mod pcap_dlt_header_adjudicator;
 mod pico_abi_symbol_census;
 mod pico_accept_replies_twice_and_diff;
+mod pico_additional_split_wire;
 mod pico_bytes_alias_twice_and_diff;
 mod pico_c_examples_on_wz_capi_dropin;
 mod pico_cancellation_token_twice_and_diff;
