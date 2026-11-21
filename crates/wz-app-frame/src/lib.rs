@@ -116,6 +116,11 @@ mod proto_write_tests;
 // tables of it, and the corpus of refused catalogs.
 #[cfg(all(test, feature = "alloc"))]
 mod message_catalog_tests;
+// The conformance corpus of the fixed records a protected frame is opened into and judged by
+// (`conformance/`), run through the hand-written builder and opener, and through the codecs SCE
+// generates from the same layouts behind `sce-generated-codec`.
+#[cfg(all(test, feature = "alloc"))]
+mod fixed_records_tests;
 #[cfg(feature = "replay")]
 pub mod replay_admission;
 #[cfg(feature = "replay")]
