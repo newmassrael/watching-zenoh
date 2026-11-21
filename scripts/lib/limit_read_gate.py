@@ -115,6 +115,7 @@ ALLOWED: tuple[tuple[str, str, str], ...] = (
     ("crates/wz-session-core/src/pubsub.rs", "_", "a build-time assertion on the storage the constant sizes: a fixed table's rows fit the u16 positions of the match cache"),
     ("crates/wz-app-frame/src/message_catalog.rs", "build_limits", "the catalog's door reads a deployment's catalog with no session in reach, so it judges a message's replay depth against the build's REPLAY_DEPTH_MAX; the replay cache made on a session judges it again against that session's"),
     ("crates/wz-session-core/src/reply_stage.rs", "payload_most", "a reply stage of a policy that enforces its capacity sized its arena for MAX_PENDING_REPLIES replies of this payload, so it keeps the build's value beside the stated one where the profile grows and a statement could raise the bound past what that arena was sized for"),
+    ("crates/wz-session-core/src/lent_control.rs", "NAMED_KEYEXPR_BYTES", "the length of the body array a NamedKeyexpr holds (header, widest id, a key of the build's capacity); the constructor refuses past the session's quota, which the domain keeps at most that capacity"),
 )
 
 #: (path pattern relative to the root, innermost item, reason): a site that reads a snapshot it

@@ -101,6 +101,9 @@ impl<R: ReplySink, G: ReplySink> Requesters<R, G> {
         requesters
             .replies
             .limit_to(limits.max_pending_queries_held());
+        requesters
+            .replies
+            .limit_keys_to(limits.max_keyexpr_bytes_held());
         #[cfg(feature = "liveliness-get")]
         requesters
             .liveliness_gets
@@ -434,6 +437,19 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
         observer
             .subscribers
             .limit_to(limits.max_subscriptions_held());
+        observer
+            .subscribers
+            .limit_memo_to(limits.match_memo_slots());
+        // The longest key every table the application registers in stores; the tables each
+        // peer fills are held to it by `PeerTables::limit_to`.
+        let keys = limits.max_keyexpr_bytes_held();
+        observer.subscribers.limit_keys_to(keys);
+        #[cfg(feature = "query-queryable")]
+        observer.queryables.limit_keys_to(keys);
+        #[cfg(feature = "liveliness-token")]
+        observer.local_tokens.limit_keys_to(keys);
+        #[cfg(feature = "liveliness-subscriber")]
+        observer.liveliness_subscribers.limit_keys_to(keys);
         #[cfg(feature = "query-queryable")]
         observer.queryables.limit_to(limits.max_queryables_held());
         #[cfg(feature = "query-queryable")]

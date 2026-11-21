@@ -1854,6 +1854,121 @@ mod enforcement {
         );
     }
 
+    /// `MAX_KEYEXPR_BYTES` with nothing stated: the build's bound is the rows' capacity on every
+    /// profile, so a subscription takes a pattern of that length and refuses one byte more, and
+    /// a retraction that names its key does the same beside the widest id.
+    #[test]
+    fn max_keyexpr_bytes_with_nothing_stated_admits_what_the_build_admitted() {
+        let mut observer = ApplicationLayerObserver::with_limits(&SessionLimits::defaults());
+        let at_build = "k".repeat(caps::MAX_KEYEXPR_BYTES);
+        let past_build = "k".repeat(caps::MAX_KEYEXPR_BYTES + 1);
+        assert_eq!(
+            observer.subscribers.register(&past_build, |_| {}).err(),
+            Some(RegisterError::KeyexprTooLong)
+        );
+        observer
+            .subscribers
+            .register(&at_build, |_| {})
+            .expect("a pattern of the build's length");
+        assert_eq!(observer.subscribers.len(), 1);
+        #[cfg(all(feature = "storage-profile", feature = "codec-declare"))]
+        {
+            use crate::lent_control::NamedKeyexpr;
+            let held = SessionLimits::defaults().max_keyexpr_bytes_held();
+            let widest = crate::wire_id::ExprId::MAX;
+            assert!(NamedKeyexpr::new(widest, &at_build, held).is_ok());
+            assert!(NamedKeyexpr::new(widest, &past_build, held).is_err());
+            assert!(NamedKeyexpr::literal(&past_build, held).is_err());
+        }
+    }
+
+    /// `MAX_KEYEXPR_BYTES` stated as two: every table the session registers in refuses a key of
+    /// three bytes as one its row cannot hold and keeps what it holds, and takes a key of two.
+    #[test]
+    fn max_keyexpr_bytes_stated_refuses_the_next() {
+        held_to_two(
+            SessionLimits::select_max_keyexpr_bytes,
+            MaxKeyexprBytes::DOMAIN.is_singleton(),
+            |limits| {
+                let mut observer = ApplicationLayerObserver::with_limits(limits);
+                let too_long = Some(RegisterError::KeyexprTooLong);
+                observer
+                    .subscribers
+                    .register("ab", |_| {})
+                    .expect("at the quota");
+                assert_eq!(observer.subscribers.register("abc", |_| {}).err(), too_long);
+                assert_eq!(
+                    observer.subscribers.len(),
+                    1,
+                    "a refusal keeps what is held"
+                );
+                #[cfg(feature = "query-queryable")]
+                {
+                    assert_eq!(
+                        observer.queryables.register("abc", |_, _| {}).err(),
+                        too_long
+                    );
+                    assert!(observer.queryables.register("ab", |_, _| {}).is_ok());
+                    assert_eq!(observer.queryables.len(), 1);
+                }
+                #[cfg(feature = "liveliness-token")]
+                {
+                    assert_eq!(
+                        observer.local_tokens.register(1, "abc"),
+                        Err(RegisterError::KeyexprTooLong)
+                    );
+                    assert_eq!(observer.local_tokens.register(2, "ab"), Ok(true));
+                    assert_eq!(observer.local_tokens.len(), 1);
+                }
+                #[cfg(feature = "liveliness-subscriber")]
+                {
+                    let sink = || {
+                        crate::declare::liveliness_sample::BoxedLivelinessSampleSink::new(|_| {})
+                    };
+                    assert_eq!(
+                        observer
+                            .liveliness_subscribers
+                            .register(1, "abc", false, sink())
+                            .err(),
+                        too_long
+                    );
+                    assert_eq!(
+                        observer
+                            .liveliness_subscribers
+                            .register(2, "ab", false, sink()),
+                        Ok(true)
+                    );
+                    assert_eq!(observer.liveliness_subscribers.slot_count(), 1);
+                }
+                let asked = |observer: &mut ApplicationLayerObserver, rid: u32, keyexpr: &str| {
+                    observer
+                        .replies
+                        .register(
+                            rid,
+                            1,
+                            None,
+                            crate::reply_acceptance::ReplyAcceptance::Matching(keyexpr),
+                            |_| {},
+                            |_| {},
+                        )
+                        .err()
+                };
+                assert_eq!(asked(&mut observer, 1, "abc"), too_long);
+                assert_eq!(asked(&mut observer, 2, "ab"), None);
+                assert_eq!(observer.replies.len(), 1);
+                #[cfg(all(feature = "storage-profile", feature = "codec-declare"))]
+                {
+                    use crate::lent_control::NamedKeyexpr;
+                    let held = limits.max_keyexpr_bytes_held();
+                    assert!(NamedKeyexpr::literal("abc", held).is_err());
+                    assert!(NamedKeyexpr::new(1, "abc", held).is_err());
+                    assert!(NamedKeyexpr::literal("ab", held).is_ok());
+                    assert!(NamedKeyexpr::new(crate::wire_id::ExprId::MAX, "ab", held).is_ok());
+                }
+            },
+        );
+    }
+
     /// The build's sampler under `limits`, with one snapshot taken at time 0, so the next is due
     /// a period on.
     fn sampled_at_zero(limits: &RuntimeLimits) -> crate::resource_snapshot::BuildSampler {
@@ -1968,6 +2083,41 @@ mod enforcement {
                 replay_cache(limits, 2, &mut storage).expect("under the quota");
             },
         );
+    }
+
+    /// `MATCH_MEMO_SLOTS` with nothing stated: the receive match cache of the session's
+    /// subscriptions holds the build's count of slots, `MATCH_MEMO_FIXED_SLOTS` on a table of
+    /// fixed size.
+    #[test]
+    fn match_memo_slots_with_nothing_stated_holds_the_build_value() {
+        let observer = ApplicationLayerObserver::with_limits(&SessionLimits::defaults());
+        let build = if crate::bounded::ENFORCES_CAPACITY {
+            caps::MATCH_MEMO_FIXED_SLOTS
+        } else {
+            caps::MATCH_MEMO_SLOTS
+        };
+        assert_eq!(observer.subscribers.memo_slot_count(), build);
+    }
+
+    /// `MATCH_MEMO_SLOTS` stated: the cache of a table that grows holds the stated count of
+    /// slots, and a table of fixed size keeps the slots its build holds in RAM.
+    #[test]
+    fn match_memo_slots_stated_is_the_count_the_cache_holds() {
+        let other = if caps::MATCH_MEMO_SLOTS == 3 { 2 } else { 3 };
+        let mut limits = SessionLimits::defaults();
+        let stated = limits.select_match_memo_slots(other);
+        if MatchMemoSlots::DOMAIN.is_singleton() {
+            assert!(stated.is_err(), "a build of one value refuses another");
+        } else {
+            stated.expect("inside the declared range");
+            let observer = ApplicationLayerObserver::with_limits(&limits);
+            let held = if crate::bounded::ENFORCES_CAPACITY {
+                caps::MATCH_MEMO_FIXED_SLOTS
+            } else {
+                other
+            };
+            assert_eq!(observer.subscribers.memo_slot_count(), held);
+        }
     }
 }
 

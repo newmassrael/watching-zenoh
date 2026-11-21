@@ -20,7 +20,7 @@
 
 use core::cell::{Cell, RefCell};
 
-use wz_session_core::caps::MAX_KEYEXPR_BYTES;
+use wz_session_core::caps;
 use wz_session_core::query_mode::{ConsolidationMode, QueryTarget};
 use wz_session_core::sample::QosLevel;
 
@@ -29,12 +29,17 @@ use crate::app_layer::GetRequest;
 /// The longest selector parameters a row holds.
 pub const GET_PARAMETERS_BYTES: usize = 64;
 
+/// The bytes a row keeps a key in, `MAX_KEYEXPR_BYTES` of them as the build sizes it. A key is
+/// refused when it is posted by what this storage holds: the mailbox is the image's, posted to
+/// before any session's limits are known.
+type KeyBytes = [u8; caps::MAX_KEYEXPR_BYTES];
+
 /// Why a query was not left in the mailbox. Nothing was kept.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PostError {
     /// Every row holds a query that has not been asked yet.
     Full,
-    /// The key is longer than a row keeps ([`MAX_KEYEXPR_BYTES`], the image's limit).
+    /// The key is longer than a row keeps ([`caps::MAX_KEYEXPR_BYTES`], the image's limit).
     KeyTooLong,
     /// The key is empty: the wire has no way to say a query of nothing.
     EmptyKey,
@@ -56,7 +61,7 @@ pub enum Disposition {
 
 /// One query by value.
 struct Row<R> {
-    key: [u8; MAX_KEYEXPR_BYTES],
+    key: KeyBytes,
     key_len: usize,
     parameters: [u8; GET_PARAMETERS_BYTES],
     parameters_len: usize,
@@ -97,7 +102,7 @@ impl<R, const N: usize> GetMailbox<R, N> {
         if request.keyexpr.is_empty() {
             return Err(PostError::EmptyKey);
         }
-        if request.keyexpr.len() > MAX_KEYEXPR_BYTES {
+        if request.keyexpr.len() > core::mem::size_of::<KeyBytes>() {
             return Err(PostError::KeyTooLong);
         }
         if request.parameters.len() > GET_PARAMETERS_BYTES {
@@ -108,7 +113,7 @@ impl<R, const N: usize> GetMailbox<R, N> {
             if row.is_some() {
                 continue;
             }
-            let mut key = [0u8; MAX_KEYEXPR_BYTES];
+            let mut key: KeyBytes = [0u8; caps::MAX_KEYEXPR_BYTES];
             key[..request.keyexpr.len()].copy_from_slice(request.keyexpr.as_bytes());
             let mut parameters = [0u8; GET_PARAMETERS_BYTES];
             parameters[..request.parameters.len()].copy_from_slice(request.parameters);
@@ -192,6 +197,7 @@ mod tests {
     use super::*;
     use alloc::string::ToString;
     use alloc::vec::Vec;
+    use wz_session_core::caps::MAX_KEYEXPR_BYTES;
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     struct Sink(u8);

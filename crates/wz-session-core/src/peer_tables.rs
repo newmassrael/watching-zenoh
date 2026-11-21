@@ -163,6 +163,11 @@ impl<P: Storage> PeerTables<P> {
         self.remote_subscribers.limit_to(remote_decls);
         self.remote_queryables.limit_to(remote_decls);
         self.tokens.limit_to(remote_decls);
+        let keys = limits.max_keyexpr_bytes_held();
+        self.subscribers.limit_keys_to(keys);
+        self.remote_subscribers.limit_keys_to(keys);
+        self.remote_queryables.limit_keys_to(keys);
+        self.tokens.limit_keys_to(keys);
     }
 
     /// Forget everything the peer said and everything owed to it, in place: the
@@ -281,6 +286,72 @@ mod tests {
                 ),
                 (2, round + 1, 2, round + 1),
                 "round {round}: two held and the third refused, the counts kept across a forget"
+            );
+            tables.forget_peer();
+        }
+    }
+
+    /// The tables take the key bound their creator states: held to two bytes, a peer's alias
+    /// and declared subscriber on a key of three are refused (the subscriber counted, as a row
+    /// that cannot hold its key is), what fits is taken, and the bound outlives a forgotten peer.
+    #[cfg(all(feature = "alloc", feature = "codec-declare"))]
+    #[test]
+    fn the_tables_take_the_key_bound_their_creator_states() {
+        use crate::limit_binding::{LimitSpec, Quota};
+        use crate::limits::{MaxKeyexprBytes, SessionLimits};
+        use crate::transport_profile::owned::DeclareOwnedVariant;
+        use wz_session_core_test_support as fx;
+
+        let mut limits = SessionLimits::defaults();
+        let stated = limits.select_max_keyexpr_bytes(Quota::at_most(2));
+        if MaxKeyexprBytes::DOMAIN.is_singleton() {
+            assert!(stated.is_err(), "a build of one value refuses two");
+            return;
+        }
+        stated.expect("two is inside the domain");
+        let mut tables = PeerTables::new();
+        tables.limit_to(&limits);
+        let two = Quota::at_most(2);
+        assert_eq!(
+            (
+                tables.subscribers.key_quota().get(),
+                tables.remote_subscribers.key_quota().get(),
+                tables.remote_queryables.key_quota().get(),
+                tables.tokens.key_quota().get(),
+            ),
+            (two, two, two, two),
+            "every table the peer fills is handed the key bound"
+        );
+        let mut subscribers = crate::declare::subscriber::RemoteSubscriberTable::<
+            crate::decl_sink::BoxedDeclSink,
+            crate::decl_sink::BoxedUndeclSink,
+        >::default();
+        let none: hashbrown::HashMap<u64, std::string::String> = hashbrown::HashMap::new();
+        for round in 0..2u32 {
+            for (id, key) in [(1u64, "abc"), (2, "ab")] {
+                tables
+                    .subscribers
+                    .absorb_declare(&DeclareOwnedVariant::CodecZenohDeclKexpr(fx::decl_kexpr(
+                        id, key,
+                    )));
+                subscribers.dispatch_declare(
+                    &mut tables.remote_subscribers,
+                    &DeclareOwnedVariant::CodecZenohDeclSubscriber(fx::decl_subscriber(
+                        id,
+                        0,
+                        Some(key),
+                    )),
+                    &none,
+                );
+            }
+            assert_eq!(
+                (
+                    tables.subscribers.alias_count(),
+                    tables.remote_subscribers.declared_count(),
+                    tables.remote_subscribers.refusals(),
+                ),
+                (1, 1, round + 1),
+                "round {round}: the key of two is held and the key of three refused"
             );
             tables.forget_peer();
         }

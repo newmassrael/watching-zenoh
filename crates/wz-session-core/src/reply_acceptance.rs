@@ -123,8 +123,8 @@ impl<'a> ReplyAcceptance<'a> {
     }
 
     /// The stored form, or [`crate::registry_error::RegisterError::KeyexprTooLong`]
-    /// when the queried keyexpr exceeds [`caps::MAX_KEYEXPR_BYTES`] on a
-    /// no-alloc backing.
+    /// when the queried keyexpr is longer than `key_quota` admits, the session's
+    /// `MAX_KEYEXPR_BYTES`, or than [`caps::MAX_KEYEXPR_BYTES`] on a no-alloc backing.
     ///
     /// Refusing is the only sound answer there: a truncated keyexpr would gate
     /// on a DIFFERENT expression than the one queried, and would do it in the
@@ -133,12 +133,16 @@ impl<'a> ReplyAcceptance<'a> {
     /// pattern at register time for the same reason.
     pub(crate) fn store<P: Storage>(
         self,
+        key_quota: crate::limits::MaxKeyexprBytesHeld,
     ) -> Result<ReplyAcceptanceStored<P>, crate::registry_error::RegisterError> {
         let mut stored = ReplyAcceptanceStored {
             mode: ReplyKeyExpr::Any,
             keyexpr: BoundedString::default(),
         };
         if let Self::Matching(keyexpr) = self {
+            if !key_quota.admits(keyexpr.len()) {
+                return Err(crate::registry_error::RegisterError::KeyexprTooLong);
+            }
             stored.mode = ReplyKeyExpr::MatchingQuery;
             stored
                 .keyexpr

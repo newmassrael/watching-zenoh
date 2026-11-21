@@ -62,7 +62,7 @@
 use core::fmt;
 
 use crate::bounded::{BoundedString, BoundedVec, Profile, Storage};
-use crate::caps::MAX_KEYEXPR_BYTES;
+use crate::caps;
 use crate::keyexpr_match::MAX_KEYEXPR_CHUNKS;
 
 /// Errors produced by [`canonize_keyexpr`] when the input violates
@@ -95,7 +95,7 @@ pub enum KeyexprCanonError {
     /// `Z_KEYEXPR_CANON_CONTAINS_UNBOUND_DOLLAR`.
     ContainsUnboundDollar,
     /// R311gb (Track 2) — the canonical form would exceed the
-    /// no-alloc output buffer: more than [`MAX_KEYEXPR_BYTES`] bytes
+    /// no-alloc output buffer: more than [`MAX_KEYEXPR_BYTES`](caps::MAX_KEYEXPR_BYTES) bytes
     /// or more than [`MAX_KEYEXPR_CHUNKS`] `/`-separated chunks. This
     /// variant has **no zenoh-pico mirror** (it is a wz-side bounded-
     /// backing concern, not a grammar status); it is only ever
@@ -161,8 +161,8 @@ enum ChunkShape {
 /// only ever shrinks or preserves length (collapsing runs, dropping
 /// redundant `*`/`**` chunks), the output is bounded by the input
 /// size. On the no-alloc backing an input longer than
-/// [`MAX_KEYEXPR_BYTES`] (or deeper than [`MAX_KEYEXPR_CHUNKS`])
-/// surfaces as [`KeyexprCanonError::ExceedsCapacity`].
+/// [`MAX_KEYEXPR_BYTES`](caps::MAX_KEYEXPR_BYTES) (or deeper than
+/// [`MAX_KEYEXPR_CHUNKS`]) surfaces as [`KeyexprCanonError::ExceedsCapacity`].
 ///
 /// # Examples
 ///
@@ -187,7 +187,7 @@ enum ChunkShape {
 /// ```
 pub fn canonize_keyexpr(
     input: &str,
-) -> Result<BoundedString<MAX_KEYEXPR_BYTES>, KeyexprCanonError> {
+) -> Result<BoundedString<{ caps::MAX_KEYEXPR_BYTES }>, KeyexprCanonError> {
     canonize_keyexpr_in(input, KeyexprDialect::Pico)
 }
 
@@ -228,7 +228,7 @@ pub enum KeyexprDialect {
 pub fn canonize_keyexpr_in(
     input: &str,
     dialect: KeyexprDialect,
-) -> Result<BoundedString<MAX_KEYEXPR_BYTES>, KeyexprCanonError> {
+) -> Result<BoundedString<{ caps::MAX_KEYEXPR_BYTES }>, KeyexprCanonError> {
     canonize_keyexpr_as::<Profile>(input, dialect)
 }
 
@@ -236,12 +236,13 @@ pub fn canonize_keyexpr_in(
 /// and the OUTPUT are all held by `P`, so what a table of that policy stores a keyexpr
 /// pattern in is written once where it is made and not copied into place afterwards,
 /// and the bound that refuses an over-long input is the policy's own: it is refused as
-/// [`KeyexprCanonError::ExceedsCapacity`] where `P` enforces [`MAX_KEYEXPR_BYTES`] (or
-/// [`MAX_KEYEXPR_CHUNKS`]), and taken where it does not.
+/// [`KeyexprCanonError::ExceedsCapacity`] where `P` enforces
+/// [`MAX_KEYEXPR_BYTES`](caps::MAX_KEYEXPR_BYTES) (or [`MAX_KEYEXPR_CHUNKS`]), and taken where
+/// it does not.
 pub fn canonize_keyexpr_as<P: Storage>(
     input: &str,
     dialect: KeyexprDialect,
-) -> Result<BoundedString<MAX_KEYEXPR_BYTES, P>, KeyexprCanonError> {
+) -> Result<BoundedString<{ caps::MAX_KEYEXPR_BYTES }, P>, KeyexprCanonError> {
     // A text with no `$` and no `*` has no wild chunk: there is no `$*` run to collapse and no wild
     // run to reorder, so its canonical form is the text itself once every chunk has been judged.
     // This is the shape of nearly every key a program names (`demo/doc`), and it is made in one
@@ -268,7 +269,7 @@ pub fn canonize_keyexpr_as<P: Storage>(
 fn canonize_in_two_passes<P: Storage>(
     input: &str,
     dialect: KeyexprDialect,
-) -> Result<BoundedString<MAX_KEYEXPR_BYTES, P>, KeyexprCanonError> {
+) -> Result<BoundedString<{ caps::MAX_KEYEXPR_BYTES }, P>, KeyexprCanonError> {
     let collapsed = collapse_dsl_runs::<P>(input)?;
     canonize_chunks::<P>(&collapsed, dialect)
 }
@@ -284,7 +285,7 @@ fn canonize_in_two_passes<P: Storage>(
 /// result as once.
 fn collapse_dsl_runs<P: Storage>(
     input: &str,
-) -> Result<BoundedString<MAX_KEYEXPR_BYTES, P>, KeyexprCanonError> {
+) -> Result<BoundedString<{ caps::MAX_KEYEXPR_BYTES }, P>, KeyexprCanonError> {
     const DSL: &str = "$*";
     let mut out = BoundedString::default();
     let mut cursor = 0;
@@ -335,7 +336,7 @@ fn collapse_dsl_runs<P: Storage>(
 fn canonize_chunks<P: Storage>(
     input: &str,
     dialect: KeyexprDialect,
-) -> Result<BoundedString<MAX_KEYEXPR_BYTES, P>, KeyexprCanonError> {
+) -> Result<BoundedString<{ caps::MAX_KEYEXPR_BYTES }, P>, KeyexprCanonError> {
     let mut out_chunks: BoundedVec<&str, MAX_KEYEXPR_CHUNKS, P> = BoundedVec::default();
     // The wild run being accumulated: how many `*` chunks it has
     // contained so far, and whether any of them was a `**`.
@@ -1052,8 +1053,8 @@ mod tests {
         .iter()
         .map(|s| (*s).to_owned())
         .collect();
-        texts.push("x".repeat(MAX_KEYEXPR_BYTES));
-        texts.push("x".repeat(MAX_KEYEXPR_BYTES + 1));
+        texts.push("x".repeat(caps::MAX_KEYEXPR_BYTES));
+        texts.push("x".repeat(caps::MAX_KEYEXPR_BYTES + 1));
         for chunks in [
             MAX_KEYEXPR_CHUNKS - 1,
             MAX_KEYEXPR_CHUNKS,

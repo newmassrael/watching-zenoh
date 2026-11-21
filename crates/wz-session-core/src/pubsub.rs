@@ -105,7 +105,7 @@ use crate::caps;
 #[allow(unused_imports)]
 use crate::held_list::HeldList;
 #[cfg(all(feature = "storage-profile", feature = "codec-declare"))]
-use crate::id_map::key_text_as;
+use crate::id_map::key_text_within;
 #[cfg(feature = "storage-profile")]
 use crate::id_map::{IdMap, PeerAliases};
 use crate::key_gate::{Admitted, ClassId, EntityId, EntityKind, KeyGate, KeyId, PeerOp, Refused};
@@ -302,6 +302,11 @@ pub struct SubscriberTable<C: SampleSink, P: Storage = Profile> {
     /// refuses nothing by its storage, so this is what bounds it; where the build fixes the
     /// bound to the storage's capacity it is held in no byte and the storage refuses alone.
     quota: crate::limits::MaxSubscriptionsHeld,
+    /// The longest key the table stores (`MAX_KEYEXPR_BYTES`), a subscription's pattern or the
+    /// keyexpr of a peer's interest: what the creator of the table resolved
+    /// ([`Self::limit_keys_to`]), the build's value until it does. Where the build fixes the
+    /// bound to the rows' capacity it is held in no byte and the rows refuse alone.
+    key_quota: crate::limits::MaxKeyexprBytesHeld,
     /// The most interests one peer's side remembers (`MAX_INBOUND_SUB_INTERESTS`), applied to
     /// every [`SubscriberPeer`] this table answers: what the creator of the table resolved
     /// ([`Self::limit_interests_to`]), the build's value until it does. Held here and not on the
@@ -430,6 +435,10 @@ struct PeerNaming<P: Storage = Profile> {
     /// where the build fixes the bound to the table's capacity it is held in no byte and the
     /// table refuses alone.
     alias_quota: crate::limits::MaxPeerKeyexprAliasesHeld,
+    /// The longest keyexpr an alias row holds (`MAX_KEYEXPR_BYTES`): what the creator of the
+    /// session's tables resolved ([`SubscriberPeer::limit_keys_to`]), the build's value until it
+    /// does. A `DeclKexpr` whose keyexpr is longer is dropped, as one a fixed row cannot hold is.
+    key_quota: crate::limits::MaxKeyexprBytesHeld,
     /// R311y739 — OUR id space, the other half of the pair the `M` bit picks
     /// between. Installed (not owned) so there is exactly ONE copy of the fact:
     /// the table itself lives on `SessionActions::outbound_mappings`, written by
@@ -776,6 +785,7 @@ impl<C: SampleSink, P: Storage> Default for SubscriberTable<C, P> {
         Self {
             subscribers: BoundedVec::default(),
             quota: Default::default(),
+            key_quota: Default::default(),
             #[cfg(feature = "declare-subscriber")]
             interest_quota: Default::default(),
             #[cfg(feature = "declare-subscriber")]
@@ -784,7 +794,9 @@ impl<C: SampleSink, P: Storage> Default for SubscriberTable<C, P> {
             epoch: 0,
             #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
             local_live: alloc::sync::Arc::new(core::sync::atomic::AtomicUsize::new(0)),
-            memo: MatchMemo::new(),
+            memo: MatchMemo::new(
+                <crate::limits::MatchMemoSlots as crate::limit_binding::LimitSpec>::DEFAULT,
+            ),
             key_gate: KeyGate::of_build(),
             #[cfg(feature = "transport-shm")]
             shm: crate::extshm::ShmReceiveState::default(),
@@ -803,6 +815,30 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     /// and the subscriptions already in are kept, as a lowered soft limit keeps what it holds.
     pub fn limit_to(&mut self, quota: crate::limits::MaxSubscriptionsHeld) {
         self.quota = quota;
+    }
+
+    /// Hold the table to the `MAX_KEYEXPR_BYTES` its creator resolved: a subscription whose
+    /// pattern is longer than `quota` admits is refused ([`RegisterError::KeyexprTooLong`]), and
+    /// a peer's interest whose keyexpr is longer is answered by its `Final` alone, as a fixed row
+    /// that cannot hold the key refuses them. What the table holds is kept.
+    pub fn limit_keys_to(&mut self, quota: crate::limits::MaxKeyexprBytesHeld) {
+        self.key_quota = quota;
+    }
+
+    /// Size the receive match cache to the `MATCH_MEMO_SLOTS` its creator resolved: how many
+    /// distinct keys it remembers at once, `0` leaving it out. The keys it remembered are
+    /// forgotten, which changes no delivery: a key not remembered is matched afresh. A table of
+    /// the fixed storage policy keeps the `MATCH_MEMO_FIXED_SLOTS` its build holds in RAM.
+    pub fn limit_memo_to(&mut self, slots: usize) {
+        if !P::ENFORCES_CAPACITY {
+            self.memo = MatchMemo::new(slots);
+        }
+    }
+
+    /// How many distinct keys the receive match cache remembers at once
+    /// ([`Self::limit_memo_to`]).
+    pub fn memo_slot_count(&self) -> usize {
+        self.memo.slot_count()
     }
 
     /// Hold every peer's side this table answers to the `MAX_INBOUND_SUB_INTERESTS` its creator
@@ -1096,6 +1132,10 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
                     raw
                 }
             };
+        // A pattern past the session's key bound is refused as one the row cannot hold.
+        if !self.key_quota.admits(pattern.len()) {
+            return Err(RegisterError::KeyexprTooLong);
+        }
         // The quota first, before the key gate numbers an entity or an id is taken: a refused
         // registration changes nothing.
         if !self.quota.admits(self.subscribers.len() + 1) {
@@ -1523,7 +1563,8 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
             true
         } else {
             let mut keyexpr = BoundedString::<{ caps::MAX_KEYEXPR_BYTES }, P>::default();
-            if keyexpr.push_str(pattern.unwrap_or("**")).is_err() {
+            let text = pattern.unwrap_or("**");
+            if !self.key_quota.admits(text.len()) || keyexpr.push_str(text).is_err() {
                 // A keyexpr past the bounded field cannot be replied with
                 // anyway; terminate the chain honestly instead of half-
                 // answering it. The terminator is a chain of one, staged
@@ -2367,16 +2408,17 @@ fn fire_by_selection<C: SampleSink, P: Storage>(
     fired
 }
 
-/// How many distinct keys a `MatchMemo` of policy `P` remembers at once. A table that grows
-/// with the allocator states it as `MATCH_MEMO_SLOTS`, its slots filling as keys arrive; a table
-/// of fixed size holds every slot in RAM from the start and so states its own count,
-/// `MATCH_MEMO_FIXED_SLOTS`, which is `0` unless the image asks for the memory. Zero leaves the
-/// memory out, and every message is matched afresh.
-const fn memo_slots<P: Storage>() -> usize {
+/// How many distinct keys a `MatchMemo` of policy `P` remembers at once, where its creator
+/// states `stated` (`MATCH_MEMO_SLOTS`). A table that grows with the allocator holds the stated
+/// count, its slots filling as keys arrive; a table of fixed size holds every slot in RAM from the
+/// start and so holds its own count, `MATCH_MEMO_FIXED_SLOTS`, which the build sizes and which is
+/// `0` unless the image asks for the memory. Zero leaves the memory out, and every message is
+/// matched afresh.
+const fn memo_slots<P: Storage>(stated: usize) -> usize {
     if P::ENFORCES_CAPACITY {
         caps::MATCH_MEMO_FIXED_SLOTS
     } else {
-        caps::MATCH_MEMO_SLOTS
+        stated
     }
 }
 
@@ -2430,9 +2472,10 @@ struct MatchMemo<P: Storage> {
 }
 
 impl<P: Storage> MatchMemo<P> {
-    fn new() -> Self {
+    /// A memory of `memo_slots::<P>(stated)` empty slots.
+    fn new(stated: usize) -> Self {
         let mut slots = BoundedVec::default();
-        for _ in 0..memo_slots::<P>() {
+        for _ in 0..memo_slots::<P>(stated) {
             // A fixed table's capacity is its slot count, so this never refuses.
             let _ = slots.push(None);
         }
@@ -2443,9 +2486,15 @@ impl<P: Storage> MatchMemo<P> {
         }
     }
 
+    /// How many slots the memory holds: the count it was made with. A fixed table's is the
+    /// build's, decided when the build is compiled.
+    fn slot_count(&self) -> usize {
+        memo_slots::<P>(self.slots.len())
+    }
+
     /// The slot `key` maps to: a hash of its bytes (FNV-1a, which is a handful of
     /// instructions per byte and has no setup), folded to the table's size.
-    fn slot_of(key: &str) -> usize {
+    fn slot_of(&self, key: &str) -> usize {
         let mut hash: u32 = 0x811c_9dc5;
         for byte in key.as_bytes() {
             hash ^= u32::from(*byte);
@@ -2453,7 +2502,7 @@ impl<P: Storage> MatchMemo<P> {
         }
         // `max(1)` only keeps the remainder defined where there are no slots: nothing reaches
         // this function then (see `fire_into_memoized`).
-        (hash ^ (hash >> 15)) as usize % memo_slots::<P>().max(1)
+        (hash ^ (hash >> 15)) as usize % self.slot_count().max(1)
     }
 }
 
@@ -2481,7 +2530,7 @@ fn fire_into_memoized<C: SampleSink, P: Storage>(
     mut deliver: impl FnMut(&mut C),
 ) -> usize {
     // No slots: the memory is out, and the message is matched by the scan alone.
-    if memo_slots::<P>() == 0 {
+    if memo.slot_count() == 0 {
         return scan_subscribers(subscribers, key, is_remote, deliver, |_| {}).unwrap_or(0);
     }
     if repeats_previous {
@@ -2501,7 +2550,7 @@ fn fire_into_memoized<C: SampleSink, P: Storage>(
         }
     }
     memo.last = None;
-    let at = MatchMemo::<P>::slot_of(key);
+    let at = memo.slot_of(key);
     if let Some(slot) = &memo.slots[at] {
         if slot.epoch == epoch && slot.remote == is_remote && slot.key == key {
             memo.last = Some((at, memo.writes));
@@ -2852,6 +2901,7 @@ impl<P: Storage> Default for SubscriberPeer<P> {
             naming: PeerNaming {
                 aliases: PeerAliases::<P>::default(),
                 alias_quota: crate::limits::MaxPeerKeyexprAliasesHeld::build_default(),
+                key_quota: crate::limits::MaxKeyexprBytesHeld::build_default(),
                 #[cfg(feature = "alloc")]
                 own_mapping_space: None,
                 #[cfg(feature = "shared-key-ids")]
@@ -2875,6 +2925,7 @@ impl SubscriberPeer<crate::bounded::Static> {
             naming: PeerNaming {
                 aliases: crate::id_map::FixedIdMap::new(),
                 alias_quota: crate::limits::MaxPeerKeyexprAliasesHeld::build_default(),
+                key_quota: crate::limits::MaxKeyexprBytesHeld::build_default(),
                 #[cfg(feature = "alloc")]
                 own_mapping_space: None,
                 #[cfg(feature = "shared-key-ids")]
@@ -3052,6 +3103,21 @@ impl<P: Storage> SubscriberPeer<P> {
         self.naming.alias_quota = quota;
     }
 
+    /// Hold the peer's alias table to the `MAX_KEYEXPR_BYTES` the creator of the session's
+    /// tables resolved: a `DeclKexpr` whose keyexpr is longer than `quota` admits is dropped, as
+    /// one longer than a fixed row holds is, and the aliases already held are kept.
+    #[cfg(feature = "storage-profile")]
+    pub fn limit_keys_to(&mut self, quota: crate::limits::MaxKeyexprBytesHeld) {
+        self.naming.key_quota = quota;
+    }
+
+    /// The quota the peer's alias keyexprs are held to (`MAX_KEYEXPR_BYTES`): what the creator
+    /// of the session's tables stated ([`Self::limit_keys_to`]), the build's value until it did.
+    #[cfg(feature = "storage-profile")]
+    pub fn key_quota(&self) -> crate::limits::MaxKeyexprBytesHeld {
+        self.naming.key_quota
+    }
+
     /// The quota the peer's alias table is held to (`MAX_PEER_KEYEXPR_ALIASES`): what the
     /// creator of the session's tables stated ([`Self::limit_aliases_to`]), the build's value
     /// until it did.
@@ -3180,7 +3246,7 @@ impl<P: Storage> SubscriberPeer<P> {
                     // Unresolvable, or too long for the table's text.
                     Ok(None) | Err(_) => return,
                 };
-                let Ok(text) = key_text_as::<P>(literal) else {
+                let Ok(text) = key_text_within::<P>(literal, self.naming.key_quota) else {
                     return;
                 };
                 // A refusal, for want of room or past the quota, is counted by the
@@ -3257,7 +3323,7 @@ impl<P: Storage> SubscriberPeer<P> {
                     // Unresolvable, or too long for the table's text.
                     Ok(None) | Err(_) => return,
                 };
-                let Ok(text) = key_text_as::<P>(literal) else {
+                let Ok(text) = key_text_within::<P>(literal, self.naming.key_quota) else {
                     return;
                 };
                 // A refusal is counted by the table itself, as for the owned form.
@@ -3553,6 +3619,12 @@ impl<C: SampleSink, P: Storage> SubscriberRegistry<C, P> {
     #[cfg(feature = "storage-profile")]
     pub fn limit_peer_aliases_to(&mut self, quota: crate::limits::MaxPeerKeyexprAliasesHeld) {
         self.peer.limit_aliases_to(quota);
+    }
+
+    /// [`SubscriberPeer::limit_keys_to`] for this registry's peer.
+    #[cfg(feature = "storage-profile")]
+    pub fn limit_peer_keys_to(&mut self, quota: crate::limits::MaxKeyexprBytesHeld) {
+        self.peer.limit_keys_to(quota);
     }
 
     /// [`SubscriberTable::register_sink`], and then what the registration owes
@@ -7646,7 +7718,11 @@ mod tests {
         };
         // `SubscriberRegistry::new()` is of this build's profile, so the count that applies is the
         // one its storage policy reads.
-        let remembered = if memo_slots::<Profile>() == 0 { 5 } else { 1 };
+        let remembered = if memo_slots::<Profile>(caps::MATCH_MEMO_SLOTS) == 0 {
+            5
+        } else {
+            1
+        };
         let mut reg = SubscriberRegistry::new();
         reg.register("a/*", |_: &dyn SampleView| {})
             .expect("no quota is stated on this table");
@@ -8247,6 +8323,42 @@ mod match_memo_position_tests {
             scans() - start,
             3,
             "the key is matched by the scan each time, never answered from a slot"
+        );
+    }
+
+    /// The count a heap table's creator states is the count its cache holds: none matches a
+    /// repeated key every time, one remembers it after the first, and each delivers the same.
+    #[test]
+    fn a_heap_table_remembers_as_many_keys_as_its_creator_states() {
+        let scans = || MATCH_SCANS.with(|count| count.get());
+        let delivered = Arc::new(AtomicUsize::new(0));
+        let mut table: SubscriberTable<Count, Heap> = SubscriberTable::default();
+        table
+            .register_sink("a/*", Locality::Any, Count(delivered.clone()))
+            .expect("a heap table grows");
+        let sample = BorrowedSample {
+            keyexpr: "a/x",
+            payload: b"x",
+            kind: SampleKind::Put,
+            reliability: Reliability::Reliable,
+        };
+        for (stated, matched) in [(0, 5), (1, 1)] {
+            table.limit_memo_to(stated);
+            assert_eq!(table.memo_slot_count(), stated);
+            let start = scans();
+            for _ in 0..5 {
+                assert_eq!(table.dispatch_borrowed(&sample, true), 1);
+            }
+            assert_eq!(
+                scans() - start,
+                matched,
+                "{stated} slots, five messages on one key"
+            );
+        }
+        assert_eq!(
+            delivered.load(Ordering::Relaxed),
+            10,
+            "every message is delivered"
         );
     }
 }

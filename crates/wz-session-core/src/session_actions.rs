@@ -3683,6 +3683,17 @@ impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R
     // `ext_qos` reads as).
     #[cfg(all(feature = "liveliness-token", not(feature = "alloc")))]
     fn send_declare_token_reply(&self, token_id: u64, keyexpr: &str, interest_id: u64) {
+        // A keyexpr past the session's `MAX_KEYEXPR_BYTES` is not answered, as the subscriber
+        // reply skips one. A build that fixes the bound compares nothing here: the token
+        // table's rows refused such a key when it was registered.
+        if !self
+            .params
+            .limits
+            .max_keyexpr_bytes_held()
+            .admits(keyexpr.len())
+        {
+            return;
+        }
         let _ = self
             .dispatch_network_message_at(
                 DispatchStage::Fresh,
@@ -3697,8 +3708,17 @@ impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R
     }
     #[cfg(all(feature = "liveliness-token", feature = "alloc"))]
     fn send_declare_token_reply(&self, token_id: u64, keyexpr: &str, interest_id: u64) {
-        // A keyexpr past the protocol's bound is not answered, as the subscriber reply
-        // below skips one: the chain's `DeclFinal` still terminates the interest.
+        // A keyexpr past the session's `MAX_KEYEXPR_BYTES` or the protocol's bound is not
+        // answered, as the subscriber reply below skips one: the chain's `DeclFinal` still
+        // terminates the interest. A build that fixes the bound compares nothing here.
+        if !self
+            .params
+            .limits
+            .max_keyexpr_bytes_held()
+            .admits(keyexpr.len())
+        {
+            return;
+        }
         if let Ok(declare) = build_token_reply(token_id, keyexpr, interest_id).and_then(|reply| {
             reply.try_into_owned_in::<crate::transport_profile::TransportStorage>()
         }) {
@@ -3725,11 +3745,12 @@ impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R
         self.send_declare(crate::declare_build::build_declare_final_reply(interest_id));
     }
     // With no allocator the reply is written from the caller's own text through the
-    // borrowed writer of `lent_control`; a keyexpr longer than the session holds text for
-    // is skipped, as the heap form skips one the bounded codec field cannot hold.
+    // borrowed writer of `lent_control`; a keyexpr longer than the session's
+    // `MAX_KEYEXPR_BYTES` is skipped, as the heap form skips one. Nothing here is sized by
+    // the bound, so the value is compared even where the build fixes it.
     #[cfg(all(feature = "declare-subscriber", not(feature = "alloc")))]
     fn send_declare_subscriber_reply(&self, subscriber_id: u64, keyexpr: &str, interest_id: u64) {
-        if keyexpr.len() > crate::caps::MAX_KEYEXPR_BYTES {
+        if !self.params.limits.max_keyexpr_bytes().admits(keyexpr.len()) {
             return;
         }
         let _ = self.dispatch_declare_lent(&LentDeclaration::SubscriberReply {
@@ -3740,10 +3761,20 @@ impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R
     }
     #[cfg(all(feature = "declare-subscriber", feature = "alloc"))]
     fn send_declare_subscriber_reply(&self, subscriber_id: u64, keyexpr: &str, interest_id: u64) {
-        // A reply keyexpr longer than the bounded codec field cannot be encoded;
-        // the chain's `DeclFinal` still terminates the peer's CURRENT interest,
-        // so a skipped reply degrades to "no matching subscriber" rather than
-        // leaving the peer's query unresolved.
+        // A reply keyexpr past the session's `MAX_KEYEXPR_BYTES`, or longer than the
+        // bounded codec field, is not answered; the chain's `DeclFinal` still terminates
+        // the peer's CURRENT interest, so a skipped reply degrades to "no matching
+        // subscriber" rather than leaving the peer's query unresolved. A build that fixes
+        // the bound compares nothing here, as before it could be stated: its codec field
+        // refuses what it cannot hold.
+        if !self
+            .params
+            .limits
+            .max_keyexpr_bytes_held()
+            .admits(keyexpr.len())
+        {
+            return;
+        }
         if let Ok(declare) = crate::declare_build::build_declare_subscriber_reply_with_id(
             interest_id,
             subscriber_id,

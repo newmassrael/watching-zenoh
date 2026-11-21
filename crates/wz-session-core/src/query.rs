@@ -2166,6 +2166,11 @@ pub struct QueryableRegistry<C, P: Storage = Profile> {
     /// refuses nothing by its storage, so this is what bounds it; where the build fixes the
     /// bound to the storage's capacity it is held in no byte and the storage refuses alone.
     quota: crate::limits::MaxQueryablesHeld,
+    /// The longest pattern the registry stores (`MAX_KEYEXPR_BYTES`): what the creator of the
+    /// registry resolved ([`Self::limit_keys_to`]), the build's value until it does. Where the
+    /// build fixes the bound to the rows' capacity it is held in no byte and the rows refuse
+    /// alone.
+    key_quota: crate::limits::MaxKeyexprBytesHeld,
     /// The declaration id the next queryable takes, from 1. A `u64` only so
     /// that it can stand one past `u32::MAX`, which is how the registry knows
     /// every id has been handed out.
@@ -2205,6 +2210,7 @@ impl<C, P: Storage> Default for QueryableRegistry<C, P> {
         Self {
             queryables: BoundedVec::default(),
             quota: Default::default(),
+            key_quota: Default::default(),
             next_id: 1,
             requester: None,
             max_parameters: Default::default(),
@@ -2253,6 +2259,13 @@ impl<C, P: Storage> QueryableRegistry<C, P> {
         &self,
     ) -> (crate::limit_binding::Quota, crate::limit_binding::Quota) {
         (self.max_parameters.get(), self.max_attachment.get())
+    }
+
+    /// Hold the registry to the `MAX_KEYEXPR_BYTES` its creator resolved: a queryable whose
+    /// pattern is longer than `quota` admits is refused ([`RegisterError::KeyexprTooLong`]), as
+    /// a fixed row that cannot hold it refuses it, and the queryables already in are kept.
+    pub fn limit_keys_to(&mut self, quota: crate::limits::MaxKeyexprBytesHeld) {
+        self.key_quota = quota;
     }
 
     /// How many queries from a peer were refused for their size: not run by any queryable, and
@@ -2442,6 +2455,10 @@ impl<C, P: Storage> QueryableRegistry<C, P> {
                     raw
                 }
             };
+        // A pattern past the session's key bound is refused as one the row cannot hold.
+        if !self.key_quota.admits(pattern.len()) {
+            return Err(RegisterError::KeyexprTooLong);
+        }
         // The quota before an id is taken: a refused registration changes nothing.
         if !self.quota.admits(self.queryables.len() + 1) {
             return Err(RegisterError::TableFull);
@@ -8215,19 +8232,18 @@ mod storage_policy_tests {
         assert_eq!(reg.len(), caps::MAX_QUERYABLES);
     }
 
-    /// A pattern past `MAX_KEYEXPR_BYTES` is refused, never truncated, where the
-    /// capacity is hard; the growable policy never had that bound.
+    /// A pattern past `MAX_KEYEXPR_BYTES` is refused, never truncated, on every policy: by the
+    /// row where the capacity is hard, and by the quota the registry holds where it grows.
     fn pattern_past_the_bound<P: Storage>() {
         let long = "k".repeat(caps::MAX_KEYEXPR_BYTES + 1);
         let mut reg: QueryableRegistry<Noop, P> = QueryableRegistry::default();
         let outcome = reg.register_sink(&long, Locality::Any, false, Noop);
-        if P::ENFORCES_CAPACITY {
-            assert_eq!(outcome.err(), Some(RegisterError::KeyexprTooLong));
-            assert_eq!(reg.len(), 0, "a refused pattern leaves the table empty");
-        } else {
-            assert!(outcome.is_ok());
-            assert_eq!(reg.len(), 1);
-        }
+        assert_eq!(outcome.err(), Some(RegisterError::KeyexprTooLong));
+        assert_eq!(reg.len(), 0, "a refused pattern leaves the table empty");
+        let at_bound = "k".repeat(caps::MAX_KEYEXPR_BYTES);
+        assert!(reg
+            .register_sink(&at_bound, Locality::Any, false, Noop)
+            .is_ok());
     }
 
     /// The canonizer's output is held by the policy asked for, and says the same

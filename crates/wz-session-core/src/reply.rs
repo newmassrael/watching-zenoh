@@ -1074,6 +1074,11 @@ pub struct ReplyRegistry<C: ReplySink, P: Storage = Profile> {
     /// table refuses nothing by its storage, so this is what bounds it; where the build fixes the
     /// bound to the storage's capacity it is held in no byte and the storage refuses alone.
     quota: crate::limits::MaxPendingQueriesHeld,
+    /// The longest keyexpr a pending query is gated on (`MAX_KEYEXPR_BYTES`): what the creator
+    /// of the registry resolved ([`Self::limit_keys_to`]), the build's value until it does.
+    /// Where the build fixes the bound to the rows' capacity it is held in no byte and the rows
+    /// refuse alone.
+    key_quota: crate::limits::MaxKeyexprBytesHeld,
     /// Which keys a reply from a peer may be on: open takes every key, closed takes the keys of the
     /// image's key set. Starts as the build's `key-set` policy; see [`Self::set_key_gate`].
     key_gate: KeyGate<'static>,
@@ -1095,6 +1100,7 @@ impl<C: ReplySink, P: Storage> Default for ReplyRegistry<C, P> {
         Self {
             pending: BoundedVec::default(),
             quota: Default::default(),
+            key_quota: Default::default(),
             key_gate: KeyGate::of_build(),
             #[cfg(feature = "transport-shm")]
             shm: crate::extshm::ShmReceiveState::default(),
@@ -1131,6 +1137,13 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     /// soft limit keeps what it holds.
     pub fn limit_to(&mut self, quota: crate::limits::MaxPendingQueriesHeld) {
         self.quota = quota;
+    }
+
+    /// Hold the registry to the `MAX_KEYEXPR_BYTES` its creator resolved: a query asked under a
+    /// keyexpr longer than `quota` admits, whose replies are gated on it, is refused
+    /// ([`RegisterError::KeyexprTooLong`]), as a fixed row that cannot hold it refuses it.
+    pub fn limit_keys_to(&mut self, quota: crate::limits::MaxKeyexprBytesHeld) {
+        self.key_quota = quota;
     }
 
     /// Replace the gate that decides which keys a reply from a peer may be on; it starts as what the
@@ -1229,8 +1242,9 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     /// delivered replies both upstreams drop.
     ///
     /// Fails with [`RegisterError::KeyexprTooLong`] when a
-    /// [`ReplyAcceptance::Matching`] keyexpr exceeds
-    /// [`caps::MAX_KEYEXPR_BYTES`] on the no-alloc backing — see
+    /// [`ReplyAcceptance::Matching`] keyexpr is longer than the quota the creator
+    /// stated ([`Self::limit_keys_to`]), or than [`caps::MAX_KEYEXPR_BYTES`] on the
+    /// no-alloc backing — see
     /// `ReplyAcceptance::store` (private) for why refusing beats truncating.
     pub fn register_sink(
         &mut self,
@@ -1240,7 +1254,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
         accept: ReplyAcceptance<'_>,
         sink: C,
     ) -> Result<ReplyHandle, RegisterError> {
-        let accept = accept.store()?;
+        let accept = accept.store(self.key_quota)?;
         if !self.quota.admits(self.pending.len() + 1) {
             return Err(RegisterError::TableFull);
         }
