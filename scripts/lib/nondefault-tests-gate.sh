@@ -653,6 +653,12 @@ transport-link-unixpipe,transport-link-ws|"
     # v6 interface selectors and the tests that read them off the loopback) is compiled only with
     # `locator-iface`. MEASURED: 32 passed with default features, 41 with it, under 1 s.
     "wz-host-net|hook|locator-iface|"
+    # The host's multicast sockets without `std`, which the cooperative engine scouts and joins a
+    # group on in either form of the pico library (`host-multicast`): the interface table read on
+    # tables made for it and on the host's, the group's keys resolved before any socket, a sender
+    # bound and pinned as its keys say, the group transport's room and input over loopback, and a
+    # scouting window's sockets asking, reading and waiting.
+    "wz-runtime-posix|hook|host-multicast|"
     # lwIP's TCP (`lwip-sys`'s `tcp`, which compiles the stack's TCP sources in): the raw API's
     # own smoke test, a loopback connection that carries bytes both ways and closes. The census
     # found it claimed by nothing when the feature arrived; the filter is its module.

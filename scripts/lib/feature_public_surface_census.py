@@ -429,8 +429,8 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "session, which `tests/shared_key_ids.rs` runs over loopback; `app-transport` gates the "
         "`app_link` re-export of the runtime's links over a transport the program supplies, "
         "which the pico ABI's `app_transport_doors` opens a session over; `group-host` gates "
-        "`host_group::HostGroups` and its transport, the groups a session joins on the host's "
-        "own sockets, which `host_group`'s unit tests run and Layer M runs over a real group; "
+        "`host_group::HostGroups`, the groups a session joins on the host's own sockets, which "
+        "`host_group`'s unit tests run and Layer M runs over a real group; "
         "`transport-stats` gates `CoopEngine::transport_stats`, the session's transport "
         "counters, a Rust surface neither C ABI reports, which the crate's own "
         "`tests::congestion` reads; `time-base` gates `ClockMoves`, the word of a clock the "
@@ -1047,19 +1047,22 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         frozenset({"session-slot"}),
     ),
     # The host cooperative single-thread profile with no allocator: the Zephyr profile's
-    # shape over a POSIX libc. Its one feature that gates a public item is `session-slot`,
-    # which builds `net::PosixStack` and `net::PosixUdpDriver`, the stack the slot
-    # profile's session host is given. The default (`alloc`) only lets the crate compile
-    # beside the crates that need the heap form of the cooperative runtime in a
-    # workspace-wide build; it has no heap code of its own. Its one consumer is
-    # `deploy/host-slot-node`, a crate outside this workspace built with a fixed feature
-    # set (`--no-default-features --features session-slot`), so no probe of this
-    # workspace can name the gated items.
+    # shape over a POSIX libc. `session-slot` builds `net::PosixStack` and
+    # `net::PosixUdpDriver`, the stack the slot profile's session host is given; its one
+    # consumer is `deploy/host-slot-node`, a crate outside this workspace built with a fixed
+    # feature set (`--no-default-features --features session-slot`), so no probe of this
+    # workspace can name the gated items. `host-multicast` builds the host's multicast
+    # sockets (`interfaces`, `multicast`, `scouting`) the cooperative engine scouts and joins
+    # groups on, a heap-profile surface of the host library and no diagnostic surface. The
+    # default (`alloc`) only lets the crate compile beside the crates that need the heap form
+    # of the cooperative runtime in a workspace-wide build.
     "wz-runtime-posix": (
-        "the host cooperative runtime profile with no allocator; its consumer is "
-        "`deploy/host-slot-node`, a crate outside this workspace built with a fixed "
-        "feature set",
-        frozenset({"session-slot"}),
+        "the host cooperative runtime profile with no allocator; the consumer of "
+        "`session-slot` is `deploy/host-slot-node`, a crate outside this workspace built with "
+        "a fixed feature set; `host-multicast` gates the host's interface table, a group's "
+        "sockets and a scouting window's sockets (`interfaces`, `multicast`, `scouting`), which "
+        "the cooperative engine's `scout` and `group-host` open and this crate's own tests run",
+        frozenset({"host-multicast", "session-slot"}),
     ),
     "wz-tls-record": (
         "`publish = false`, and the only workspace edge that turns `fixtures` "
@@ -1490,9 +1493,10 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
     ),
     "wz-runtime-core": frozenset({"alloc"}),
     "wz-runtime-zephyr": frozenset({"session-slot"}),
-    # The host profile: `session-slot` gates one crate-root `pub mod slot`, the simple shape
-    # the axis names, so the row is excused only while the axis could take it for free.
-    "wz-runtime-posix": frozenset({"session-slot"}),
+    # The host profile: `session-slot` gates one crate-root `pub mod slot`, and `host-multicast`
+    # three crate-root modules, the simple shape the axis names, so the row is excused only while
+    # the axis could take it for free.
+    "wz-runtime-posix": frozenset({"host-multicast", "session-slot"}),
     # Fixed-memory step S9c -- `wz-mcu-session-acceptor` joins. Its one row,
     # `fixed-memory`, gates `pub mod fixed` and its re-export behind
     # `all(feature = .., lwip_real_build)`, a compound the derivation reads.
