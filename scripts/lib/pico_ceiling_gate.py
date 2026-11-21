@@ -48,6 +48,17 @@ written a second time. The kit lane's Layer Qzk judges the pairs whose image is 
 it builds (`scripts/kit-lane.sh images`); a pair of two zenoh-pico arms records which arm is the
 reference and is not a wz image under a ceiling.
 
+## The parts
+
+Layer Qzk can be run one part of its images at a time (`WZ_QZK_PART`), so that a build machine is
+held for one part and not for every build of the lane. A part is a ceiling group: a reference with
+every image the pairs hold under it, and any other reference one of those images is held under, so
+that a reference is built in the same run as each image it holds (the point of D8: no committed
+figure stands in for it). An image with no pair is a part of its own. A group is named by its
+references, joined with `+`; a part of one image by the image. Every image of the lane is in
+exactly one part, and a cut that is not is refused: a part list that leaves an image out would pass
+a run of every part without building that image.
+
 ## The same conditions
 
 Both sides are compare builds (`BUILD_VARIANT=compare`, `deploy/zephyr-common/memory_report.conf`):
@@ -59,7 +70,8 @@ is refused, naming the side.
 ## Modes
 
 `--pairs IMAGE...` prints `<image> <reference>` for each pair of the latest run whose image is
-named; `--check IMAGE REFERENCE --image-elf ELF --reference-elf ELF` judges one pair;
+named; `--parts IMAGE...` prints `<part> <image>...` for each part of the named images;
+`--check IMAGE REFERENCE --image-elf ELF --reference-elf ELF` judges one pair;
 `--selftest` drives the readers and the rule on synthetic outputs.
 """
 
@@ -138,6 +150,63 @@ def pairs_of(run: dict) -> list[tuple[str, str]]:
 def held_pairs(run: dict, images: Iterable[str]) -> list[tuple[str, str]]:
     names = set(images)
     return [pair for pair in pairs_of(run) if pair[0] in names]
+
+
+def parts_of(run: dict, images: Iterable[str]) -> list[tuple[str, list[str]]]:
+    """The images cut into parts (the docstring's `## The parts`), in the order of `images`: each
+    part where its first image stands, its images in their own order."""
+    names = list(dict.fromkeys(images))
+    references_of: dict[str, list[str]] = {}
+    images_of: dict[str, list[str]] = {}
+    for image, reference in held_pairs(run, names):
+        references_of.setdefault(image, []).append(reference)
+        images_of.setdefault(reference, []).append(image)
+    parts: list[tuple[str, list[str]]] = []
+    placed: set[str] = set()
+    for first in names:
+        if first in placed:
+            continue
+        group: set[str] = set()
+        references: list[str] = []
+        todo = [first]
+        while todo:
+            image = todo.pop()
+            if image in group:
+                continue
+            group.add(image)
+            for reference in references_of.get(image, []):
+                if reference not in references:
+                    references.append(reference)
+                    todo.extend(images_of[reference])
+        members = [name for name in names if name in group]
+        placed.update(members)
+        parts.append(("+".join(sorted(references)) if references else first, members))
+    return parts
+
+
+def part_findings(parts: list[tuple[str, list[str]]], images: list[str]) -> list[str]:
+    """What keeps `parts` from holding each of `images` exactly once, under names that differ."""
+    out: list[str] = []
+    where: dict[str, list[str]] = {}
+    for name, members in parts:
+        if not members:
+            out.append(f"part {name} holds no image")
+        for image in members:
+            where.setdefault(image, []).append(name)
+    names = [name for name, _ in parts]
+    for name in sorted({name for name in names if names.count(name) > 1}):
+        out.append(f"part {name} is named {names.count(name)} times")
+    for image in sorted({image for image in images if images.count(image) > 1}):
+        out.append(f"the lane names {image} {images.count(image)} times")
+    for image in dict.fromkeys(images):
+        if image not in where:
+            out.append(f"{image} is in no part: a run of every part would not build it")
+        elif len(where[image]) > 1:
+            out.append(f"{image} is in {len(where[image])} parts ({', '.join(where[image])})")
+    for image in where:
+        if image not in images:
+            out.append(f"part {', '.join(where[image])} holds {image}, which is no image of the lane")
+    return out
 
 
 def reference_heap_peak(run: dict, image: str, reference: str) -> int | None:
@@ -411,20 +480,43 @@ def check(image: str, reference: str, image_elf: str, reference_elf: str,
     return 0
 
 
-def pairs_mode(images: list[str]) -> int:
+def _held_run(images: list[str]) -> dict | None:
+    """The matrix's latest run when it holds one of `images` under a reference; None, said, when
+    it does not: a ceiling with no population is not a pass."""
     try:
         run = latest_run(load_matrix())
     except (Refused, OSError, ValueError) as error:
         print(f"pico-ceiling: FAIL {error}", file=sys.stderr)
-        return 1
-    held = held_pairs(run, images)
-    if not held:
+        return None
+    if not held_pairs(run, images):
         print(f"pico-ceiling: FAIL the matrix's run {run.get('run')} pairs none of "
               f"{', '.join(images) or 'no image'} with a reference: a ceiling with no "
               "population is not a pass", file=sys.stderr)
+        return None
+    return run
+
+
+def pairs_mode(images: list[str]) -> int:
+    run = _held_run(images)
+    if run is None:
         return 1
-    for image, reference in held:
+    for image, reference in held_pairs(run, images):
         print(f"{image} {reference}")
+    return 0
+
+
+def parts_mode(images: list[str]) -> int:
+    run = _held_run(images)
+    if run is None:
+        return 1
+    parts = parts_of(run, images)
+    findings = part_findings(parts, images)
+    for finding in findings:
+        print(f"pico-ceiling: FAIL {finding}", file=sys.stderr)
+    if findings:
+        return 1
+    for name, members in parts:
+        print(" ".join([name, *members]))
     return 0
 
 
@@ -533,6 +625,37 @@ def selftest() -> int:
            [("wz-heap", "pico-st"), ("wz-fixed", "pico-st")])
     expect("a lane with no image in the matrix holds nothing", held_pairs(run, ["wz-get"]), [])
 
+    lane = ["wz-fixed", "wz-heap", "wz-get", "wz-tls"]
+    cut = parts_of(run, lane)
+    expect("a reference and the images it holds are one part, each unpaired image its own", cut,
+           [("pico-st", ["wz-fixed", "wz-heap"]), ("wz-get", ["wz-get"]), ("wz-tls", ["wz-tls"])])
+    expect("the cut holds every image once", part_findings(cut, lane), [])
+    bridged = {"run": "x", "rows": [
+        {"image": "wz-a", "reference": "pico-st"}, {"image": "wz-b", "reference": "pico-mt"},
+        {"image": "wz-b", "reference": "pico-st"}, {"image": "wz-c", "reference": "pico-mt"},
+        {"image": "wz-d", "reference": "pico-x"}]}
+    expect("an image held under two references joins their groups into one part",
+           parts_of(bridged, ["wz-a", "wz-b", "wz-c", "wz-d", "wz-e"]),
+           [("pico-mt+pico-st", ["wz-a", "wz-b", "wz-c"]), ("pico-x", ["wz-d"]), ("wz-e", ["wz-e"])])
+    expect("a lane with no pair is one part per image", parts_of(run, ["wz-get", "wz-tls"]),
+           [("wz-get", ["wz-get"]), ("wz-tls", ["wz-tls"])])
+    found = part_findings([("pico-st", ["wz-fixed"]), ("wz-get", ["wz-get"])],
+                          ["wz-fixed", "wz-heap", "wz-get"])
+    expect("an image left out of every part is a finding", found,
+           ["wz-heap is in no part: a run of every part would not build it"])
+    found = part_findings([("pico-st", ["wz-fixed", "wz-heap"]), ("wz-heap", ["wz-heap"])],
+                          ["wz-fixed", "wz-heap"])
+    expect("an image in two parts is a finding", found, ["wz-heap is in 2 parts (pico-st, wz-heap)"])
+    found = part_findings([("pico-st", ["wz-fixed"]), ("pico-st", ["wz-heap"]), ("x", [])],
+                          ["wz-fixed", "wz-heap"])
+    expect("a name given twice and an empty part are findings", found,
+           ["part x holds no image", "part pico-st is named 2 times"])
+    found = part_findings([("pico-st", ["wz-fixed", "wz-other"])], ["wz-fixed"])
+    expect("a part holding an image the lane does not have is a finding", found,
+           ["part pico-st holds wz-other, which is no image of the lane"])
+    found = part_findings([("wz-fixed", ["wz-fixed"])], ["wz-fixed", "wz-fixed"])
+    expect("a lane naming an image twice is a finding", found, ["the lane names wz-fixed 2 times"])
+
     pico = read_build("pico-st", _size(144844, 1620, 113696), _nm(0x2040, 0x640, 13312, None, True),
                       stacks)
     expect("the reference's stack objects are its main and network stacks", pico.stack_objects,
@@ -605,7 +728,7 @@ def selftest() -> int:
             print(f"pico-ceiling: selftest FAIL -- {failure}")
         return 1
     print("pico-ceiling: selftest OK -- reads the pairs of the latest run and holds only the "
-          "lane's images, finds stack objects by type through typedefs, qualifiers and "
+          "lane's images, cuts them into ceiling groups that hold each image once, finds stack objects by type through typedefs, qualifiers and "
           "declarations, judges WIN, TIE and LOSS cell by cell with both figures, holds a heap "
           "image's storage block under the reference's heap peak, and refuses a build without "
           "the memory report on either side, a heap image with no block, a pair with no heap "
@@ -618,6 +741,8 @@ def main() -> int:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--pairs", nargs="*", metavar="IMAGE",
                       help="print the pairs of the latest run whose image is named")
+    mode.add_argument("--parts", nargs="*", metavar="IMAGE",
+                      help="print the named images cut into the parts Layer Qzk can run alone")
     mode.add_argument("--check", nargs=2, metavar=("IMAGE", "REFERENCE"), help="judge one pair")
     mode.add_argument("--selftest", action="store_true", help="drive the readers and the rule")
     parser.add_argument("--image-elf", help="the wz image's ELF, built as a compare build")
@@ -630,6 +755,8 @@ def main() -> int:
         return selftest()
     if args.pairs is not None:
         return pairs_mode(args.pairs)
+    if args.parts is not None:
+        return parts_mode(args.parts)
     if not args.image_elf or not args.reference_elf:
         parser.error("--check needs --image-elf and --reference-elf")
     return check(args.check[0], args.check[1], args.image_elf, args.reference_elf,
