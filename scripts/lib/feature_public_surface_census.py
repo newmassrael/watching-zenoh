@@ -457,8 +457,11 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "the two gate together is `channel::HOST_KEY_SLOTS`, the number of keys the host build's "
         "key store holds (`host-lock` selects the host configuration, `vendored` builds it), "
         "which this crate's own tests hold to the library's store (`tests.rs` and "
-        "`tests/key_store_exhaustion.rs`)",
-        frozenset({"host-lock", "vendored"}),
+        "`tests/key_store_exhaustion.rs`). `session-slot` (with `alloc`) selects the slot form of "
+        "the cooperative engine's task, and what it gates off, `CountedTlsListener` and "
+        "`TlsDial::listen_counted`, is the heap form's accept counting that the cooperative "
+        "engine's listener calls, run by its `stream` tests",
+        frozenset({"host-lock", "vendored", "session-slot"}),
     ),
     "wz-capi-port": (
         "the port between a wz C ABI and its engine: a workspace-internal rlib with no path a C "
