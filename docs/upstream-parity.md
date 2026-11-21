@@ -430,7 +430,8 @@ derived from the declaration and never chosen by hand:
   5. **The debt loop (D5).** Every case that is not locked is an open-debt item, paid largest
      ratio first, each paid in its own round with the ratio read again in that round and the row
      tightened by the reading. A row without a registered item fails. The loop ends when every row
-     is locked.
+     is locked. What the host libraries carry that zenoh-pico does not, plane by plane, and the
+     order the planes are paid in: `docs/host-size-debt.md`.
   6. **The byte budget stays.** A case's text budget in the gate still holds its own size, with
      its reason, as before. The ceiling adds the reference to it; it does not replace it.
   7. **Unfilled rows do not land.** A row whose `ratio_at_most` is null fails `--check` with the
