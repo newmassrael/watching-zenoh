@@ -1284,11 +1284,12 @@ typedef struct wz_ext_moved_replay_publisher_t {
  * instance or frame room, or one whose size overflows. */
 size_t wz_ext_replay_publisher_storage_size(const wz_ext_replay_shape_t *shape);
 
-/* A cache of shape over storage, on session (whose policies it reads once),
- * putting the message on publisher. this_ holds the null state on every
- * error; refusal may be NULL. Z_OK; Z_ERR_NULL for a NULL argument;
- * Z_ERR_SESSION_CLOSED; _Z_ERR_CONFIG_INVALID_VALUE (-89) for a shape out of
- * range or storage too short, refusal saying why. */
+/* A cache of shape over storage, on session (whose policies and
+ * REPLAY_DEPTH_MAX it reads once), putting the message on publisher. this_
+ * holds the null state on every error; refusal may be NULL. Z_OK; Z_ERR_NULL
+ * for a NULL argument; Z_ERR_SESSION_CLOSED; _Z_ERR_CONFIG_INVALID_VALUE (-89)
+ * for a shape out of range (a depth past the session's REPLAY_DEPTH_MAX among
+ * them) or storage too short, refusal saying why. */
 z_result_t wz_ext_replay_publisher_new(wz_ext_owned_replay_publisher_t *this_,
                                        const z_loaned_session_t *session,
                                        const z_loaned_publisher_t *publisher,
@@ -2337,7 +2338,7 @@ bool wz_ext_internal_message_payload_check(
  * side allocates is freed by the other. */
 
 #define WZ_EXT_INTERFACE_MAJOR 1
-#define WZ_EXT_INTERFACE_MINOR 0
+#define WZ_EXT_INTERFACE_MINOR 1
 
 typedef struct wz_ext_interface_version_t {
     uint32_t struct_size;
@@ -2357,8 +2358,10 @@ z_result_t wz_ext_interface_version(wz_ext_interface_version_t *out);
  * 1): its replay policies (replay-reply-shape, replay-serve-holds-sends as 1
  * on and 0 off, replay-live-before-answer), whether a get it asks may be
  * addressed to one node (targeted-query on, in a build whose domain of it
- * holds on), and how many queries one querier of it may have in flight (0 for
- * no bound). 24 bytes on a 64-bit target, 20 on a 32-bit one.
+ * holds on), how many queries one querier of it may have in flight (0 for no
+ * bound), and how many frames one instance's ring of a replay cache made on it
+ * may keep (REPLAY_DEPTH_MAX, 0 for no bound; added in minor version 1). 32
+ * bytes on a 64-bit target, 24 on a 32-bit one.
  *
  * Z_OK; Z_ERR_NULL for a NULL out, a NULL session or the gravestone;
  * Z_EINVAL as above. */
@@ -2371,6 +2374,7 @@ typedef struct wz_ext_session_facts_t {
     uint8_t targeted_query;
     uint8_t reserved[7];
     size_t querier_max_pending_queries;
+    size_t replay_depth_max;
 } wz_ext_session_facts_t;
 z_result_t wz_ext_interface_session_facts(const z_loaned_session_t *session,
                                           wz_ext_session_facts_t *out);
