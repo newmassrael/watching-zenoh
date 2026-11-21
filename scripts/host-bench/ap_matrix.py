@@ -359,6 +359,15 @@ def short_list(names: list[str], limit: int = 6) -> str:
     return shown if len(names) <= limit else f"{shown} and {len(names) - limit} more"
 
 
+def by_status(statuses) -> str:
+    """How many rows have each status, the commonest first: an unmeasured row is told from one that
+    was measured short."""
+    counts: dict[str, int] = {}
+    for status in statuses:
+        counts[status] = counts.get(status, 0) + 1
+    return ", ".join(f"{n} {s}" for s, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
+
+
 def completeness_figures(tests_text: str | None = None, examples_text: str | None = None,
                          unhonoured: list[str] | None = None) -> dict[str, tuple[int, str]]:
     """Each completeness cell that has a reader, as (shortfall, what it says). The figures are read
@@ -381,11 +390,13 @@ def completeness_figures(tests_text: str | None = None, examples_text: str | Non
                    if status not in ("pass", "empty"))
     out["api/complete/z8-tests/0"] = (
         len(short), f"{len(tests) - len(short)} of {len(tests)} files of upstream's tests pass (or run no "
-                    f"test upstream either) against wz-zenoh by docs/z8-expected.tsv; the rest: {short_list(short)}")
+                    f"test upstream either) against wz-zenoh by docs/z8-expected.tsv "
+                    f"({by_status(s for s, _m, _l, _r in tests.values())}); the rest: {short_list(short)}")
     short = sorted(name for name, scenario in scenarios.items() if scenario.status != "same")
     out["api/complete/z8-examples/0"] = (
         len(short), f"{len(scenarios) - len(short)} of {len(scenarios)} scenarios of upstream's examples show "
-                    f"the same on wz-zenoh by docs/z8-examples-expected.tsv; the rest: {short_list(short)}")
+                    f"the same on wz-zenoh by docs/z8-examples-expected.tsv "
+                    f"({by_status(s.status for s in scenarios.values())}); the rest: {short_list(short)}")
     out["router/complete/config-keys/0"] = (
         len(keys), f"{len(keys)} key(s) of zenohd's configuration the wz reader does not honour "
                    f"(UNHONOURED_UPSTREAM_CONFIG_KEYS): {short_list(sorted(keys))}")
@@ -495,6 +506,17 @@ def size_readings(sizes: dict) -> dict[str, pm.Reading]:
             ratio = wz / ref
             out[key] = pm.Reading("ratio", point=ratio, lo=ratio, hi=ratio, verdict=pm.verdict_of(ratio, ratio))
     return out
+
+
+def reading_document(cells: list[dict], sizes: dict | None = None, completeness: dict | None = None,
+                     record: dict | None = None, not_measured: dict | None = None) -> dict:
+    """The one shape of a reading: what the runner writes, what the gate reads (check_reading) and
+    what the selftest builds. `cells` is a list of cell records ({cell, arm, rep, status, figures |
+    why}), `sizes` maps a size cell to {W, U}, `completeness` maps a completeness cell to {shortfall,
+    said}. Nothing is coerced, so a value of the wrong shape reaches check_reading and is refused."""
+    return {"schema": READING_SCHEMA, "record": {} if record is None else record, "cells": cells,
+            "sizes": {} if sizes is None else sizes, "completeness": {} if completeness is None else completeness,
+            "not_measured": {} if not_measured is None else not_measured}
 
 
 def load_reading(path: pathlib.Path) -> dict:
@@ -1263,8 +1285,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"ap-matrix: {run} is not empty; a run writes a directory of its own", file=sys.stderr)
         return 2
     run.mkdir(parents=True, exist_ok=True)
-    doc: dict = {"schema": READING_SCHEMA, "record": host_record(args), "cells": [], "sizes": {},
-                 "completeness": {}, "not_measured": {}}
+    doc = reading_document([], record=host_record(args))
     for cell in cells:
         why = no_harness(cell)
         if why:
@@ -1418,8 +1439,9 @@ def cmd_selftest() -> int:
     slow = readings(cells_of(lat, [{"rtt_p50_us": v, "rtt_p99_us": v} for v in (20, 21, 22)],
                              [{"rtt_p50_us": v, "rtt_p99_us": v} for v in (10, 11, 12)]))
     expect("wz slower on a figure better lower is a LOSS", slow[f"{lat}/rtt_p50_us"].verdict == "LOSS")
-    tie = readings(cells_of(lat, [{"rtt_p50_us": v, "rtt_p99_us": v} for v in (10, 12, 14)],
-                            [{"rtt_p50_us": v, "rtt_p99_us": v} for v in (9, 11, 13)]))
+    tie_cells = cells_of(lat, [{"rtt_p50_us": v, "rtt_p99_us": v} for v in (10, 12, 14)],
+                         [{"rtt_p50_us": v, "rtt_p99_us": v} for v in (9, 11, 13)])
+    tie = readings(tie_cells)
     expect("intervals that straddle 1 are a TIE", tie[f"{lat}/rtt_p50_us"].verdict == "TIE")
     lost = fast + [{"cell": rate, "arm": "W", "rep": 4, "status": "lost", "why": "z_sub_thr reported nothing"}]
     expect("a repetition wz lost on its own fails its rows", readings(lost)[f"{rate}/msgs_per_s"].state == "wz-lost")
@@ -1441,8 +1463,7 @@ def cmd_selftest() -> int:
     # The gate.
     def judged_of(cells_read: list[dict], rows: dict, sizes_read: dict | None = None,
                   complete: dict | None = None) -> dict[str, pm.Judged]:
-        reading = check_reading({"schema": READING_SCHEMA, "cells": cells_read, "sizes": sizes_read or {},
-                                 "completeness": complete or {}}, "the selftest's reading")
+        reading = check_reading(reading_document(cells_read, sizes_read, complete), "the selftest's reading")
         return {j.key: j for j in grade(reading, rows, 0.05)}
 
     j = judged_of(fast, blank)
@@ -1457,7 +1478,7 @@ def cmd_selftest() -> int:
     expect("a locked row that reads a WIN passes",
            all(judged_of(fast, locked)[f"{rate}/{m}"].outcome == "PASS" for m in THR))
     expect("a locked row that reads a TIE fails",
-           judged_of(tie, dict(blank, **{f"{lat}/rtt_p50_us": {"held": {"locked": True}, "debt": None}}))
+           judged_of(tie_cells, dict(blank, **{f"{lat}/rtt_p50_us": {"held": {"locked": True}, "debt": None}}))
            [f"{lat}/rtt_p50_us"].outcome == "FAIL")
     over = cells_of(lat, [{"rtt_p50_us": 110, "rtt_p99_us": 110}] * 3, [{"rtt_p50_us": 100, "rtt_p99_us": 100}] * 3)
 
@@ -1519,6 +1540,9 @@ def cmd_selftest() -> int:
            figures["api/complete/z8-tests/0"][0] == 2)
     expect("the shortfall of upstream's examples counts every scenario that is not the same",
            figures["api/complete/z8-examples/0"][0] == 1)
+    expect("a figure says how many rows have each status",
+           "(1 differs, 1 same)" in figures["api/complete/z8-examples/0"][1]
+           and "(1 empty, 1 fail, 1 pass, 1 unmeasured)" in figures["api/complete/z8-tests/0"][1])
     expect("the shortfall of zenohd's configuration is the keys the reader does not honour",
            figures["router/complete/config-keys/0"][0] == 2)
     expect("every completeness cell has a reader or a reason it has none",
@@ -1578,8 +1602,13 @@ def cmd_selftest() -> int:
     expect("the router's file is read from cargo's report",
            artifact_of(f"Compiling\n{built}\n", "wz-ap-demo", "bin") == pathlib.Path("/t/release/wz-ap-demo")
            and artifact_of(built, "wz-ap-demo", "example") is None)
-    other = {"schema": "x", "cells": [], "sizes": {}, "completeness": {}}
+    other = dict(reading_document([]), schema="x")
     expect("a reading of another schema is refused", raises(pm.Refused, lambda: check_reading(other, "r")))
+    expect("a reading whose cells are not a list of records is refused",
+           raises(pm.Refused, lambda: check_reading(reading_document({rate: fast}), "r"))
+           and raises(pm.Refused, lambda: check_reading(reading_document([{"cell": rate, "arm": "W"}]), "r")))
+    expect("the reading the runner starts from is one the gate reads",
+           check_reading(reading_document([], record={"host": "h"}), "r")["cells"] == [])
     print(f"  ap-matrix selftest: {ok}/{ok + bad} arm(s) pass")
     return 0 if bad == 0 else 1
 
