@@ -294,7 +294,7 @@ impl SessionFactory<Clock, Driver> for Factory {
             keep_alive: wz_session_core::session_init_params::KeepAliveConf::PICO,
             initial_sn: 0,
             cookie: cookie_bytes(&[]),
-            tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(&self.policy),
+            tx_queue: wz_session_core::session_init_params::TxQueueConf::of_snapshot(&self.policy, &self.limits),
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
             policy: self.policy,
             limits: self.limits,

@@ -177,7 +177,7 @@ fn params(signing_key: &[u8], policy: &SessionPolicy, limits: &SessionLimits) ->
         keep_alive: wz_session_core::session_init_params::KeepAliveConf::PICO,
         initial_sn: 0,
         cookie: Vec::new(),
-        tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(policy),
+        tx_queue: wz_session_core::session_init_params::TxQueueConf::of_snapshot(policy, limits),
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         policy: *policy,
         limits: *limits,
