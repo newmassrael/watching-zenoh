@@ -436,6 +436,14 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
         observer.queryables.limit_to(limits.max_queryables_held());
         #[cfg(feature = "declare-subscriber")]
         observer
+            .subscribers
+            .limit_interests_to(limits.max_inbound_sub_interests_held());
+        #[cfg(feature = "declare-subscriber")]
+        observer
+            .subscribers
+            .limit_interest_replies_to(limits.max_pending_declares_held());
+        #[cfg(feature = "declare-subscriber")]
+        observer
             .remote_subscribers
             .limit_observers_to(limits.max_decl_observers_held());
         #[cfg(feature = "declare-queryable")]
@@ -450,6 +458,10 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
         observer
             .local_tokens
             .limit_to(limits.max_local_tokens_held());
+        #[cfg(feature = "liveliness-token")]
+        observer
+            .local_tokens
+            .limit_interest_replies_to(limits.max_pending_declares_held());
         #[cfg(feature = "liveliness-subscriber")]
         observer
             .liveliness_subscribers

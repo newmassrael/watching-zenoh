@@ -339,8 +339,9 @@ pub struct ApplicationLayerObserver {
     /// Inbound liveliness-token Interests whose reply chain `pending_declares`
     /// could not take WHOLE, and which were therefore staged not at all
     /// (`LocalTokenRegistry::respond_to_interest_borrowed` refuses rather than
-    /// truncate). Reachable only on the fixed backing, where one frame's
-    /// Interests share the buffer up to [`caps::MAX_PENDING_DECLARES`] items.
+    /// truncate). Reachable where one frame's Interests share the buffer up to
+    /// a count: [`caps::MAX_PENDING_DECLARES`] items on the fixed backing, and
+    /// the quota [`Self::with_limits`] hands `local_tokens` on every backing.
     #[cfg(feature = "liveliness-token")]
     token_interest_chains_refused: u32,
     /// The interest-response chains owed to peers' QUERYABLE Interests, in stage
@@ -382,6 +383,14 @@ impl ApplicationLayerObserver {
         observer.queryables.limit_to(limits.max_queryables_held());
         #[cfg(feature = "declare-subscriber")]
         observer
+            .subscribers
+            .limit_interests_to(limits.max_inbound_sub_interests_held());
+        #[cfg(feature = "declare-subscriber")]
+        observer
+            .subscribers
+            .limit_interest_replies_to(limits.max_pending_declares_held());
+        #[cfg(feature = "declare-subscriber")]
+        observer
             .remote_subscribers
             .limit_observers_to(limits.max_decl_observers_held());
         #[cfg(feature = "declare-queryable")]
@@ -396,6 +405,10 @@ impl ApplicationLayerObserver {
         observer
             .local_tokens
             .limit_to(limits.max_local_tokens_held());
+        #[cfg(feature = "liveliness-token")]
+        observer
+            .local_tokens
+            .limit_interest_replies_to(limits.max_pending_declares_held());
         #[cfg(feature = "liveliness-subscriber")]
         observer
             .liveliness_subscribers
