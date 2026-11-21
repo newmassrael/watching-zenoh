@@ -9,8 +9,9 @@
 # session, and the advanced publisher. It was in `wz-runtime-tokio` because that crate was the
 # first and, for a while, the only host; an engine that is not the tokio one (the cooperative
 # engine behind the pico C ABI) needs the same node clock and the same stamp rules, and linking the
-# tokio crate for them is what its size gate refuses. So it is here, with no runtime in it: `std`
-# for `SystemTime`, the session core's clock arithmetic for the HLC, and the session core's types.
+# tokio crate for them is what its size gate refuses. So it is here, with no runtime in it: the
+# wall clock (`std`'s, or the host's own without `std`), the session core's clock arithmetic for
+# the HLC, and the session core's types.
 #
 # `rlib` only: a Rust-internal seam, like `wz-host-net` and `wz-ext-pubsub`.
 

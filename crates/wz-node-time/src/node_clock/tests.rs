@@ -511,6 +511,24 @@ fn a_bound_that_is_not_a_whole_number_of_milliseconds_is_refused_and_not_default
 }
 
 /// A node whose stated bound is refused is built without the clock it was to have, and says why;
+/// A build without `std` reads no environment: its node opens with nothing stated, which is the
+/// build's own bound, the one a `std` build opens with when the variable is unset.
+#[cfg(feature = "time-hlc")]
+#[test]
+fn nothing_stated_is_the_bound_a_build_without_std_opens_with() {
+    use wz_session_core::ntp64::Ntp64;
+    assert_eq!(
+        max_delta_of(Stated::Absent),
+        Ok(Ntp64::from_duration(core::time::Duration::from_millis(
+            DEFAULT_MAX_DELTA_MS
+        )))
+    );
+    assert_eq!(
+        max_delta_of(Stated::Absent),
+        max_delta_from(Err(std::env::VarError::NotPresent))
+    );
+}
+
 /// a node that builds no clock is not refused for a bound it would not use.
 #[cfg(feature = "time-hlc")]
 #[test]
