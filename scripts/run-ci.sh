@@ -13915,7 +13915,9 @@ layer_c1m_session_lwip() {
     # counts above missed four; the limits rounds add none to this leg.
     _runci_guarded_test "C1m mcu adminspace-write" 61 \
         cargo test -p wz-session-mcu --features adminspace-write --quiet || return 1
-    _runci_guarded_test "C1m mcu peer nodes" 27 \
+    # 27 -> 29, printed: hosted run 44895098050 on `c72460b30` printed 29 (the +2 above was counted
+    # from the source and missed two).
+    _runci_guarded_test "C1m mcu peer nodes" 29 \
         env WZ_LIMIT_MAX_PEER_NODES=2 \
         cargo test -p wz-session-mcu --features adminspace-write --lib connect_manager \
         --quiet || return 1
@@ -13924,7 +13926,9 @@ layer_c1m_session_lwip() {
     # 31 -> 32: the text a build states a list in reads as the bytes a link's key proves.
     # 32 -> 35, counted from the source: the two passive tests of the legs above, and the verbs
     # reaching the session a passive node opened (its link, a reset and a close through the shell).
-    _runci_guarded_test "C1m mcu lifecycle verbs" 35 \
+    # 35 -> 37, printed: main at `c72460b30` printed 37 on a build host; no hosted run reached this
+    # leg, the one above failing first.
+    _runci_guarded_test "C1m mcu lifecycle verbs" 37 \
         env WZ_LIMIT_MAX_PEER_NODES=2 \
         cargo test -p wz-session-mcu \
         --features adminspace-write,lifecycle-close,lifecycle-reset,lifecycle-status --lib \
@@ -14502,7 +14506,9 @@ layer_c1m_session_lwip() {
     # 9 = what that command PRINTED, five of them the accepting side. 10, counted from the source:
     # a dial to an IPv6 locator opens a socket of that family (the heap form of the same test is
     # `alloc` without `session-slot`, so not here).
-    _runci_guarded_test "C1m coop ip stack links" 10 \
+    # 10 -> 11, printed: main at `c72460b30` printed 11 on a build host; no hosted run reached this
+    # leg, an earlier one failing first.
+    _runci_guarded_test "C1m coop ip stack links" 11 \
         cargo test -p wz-runtime-coop --features session-slot \
         --lib ip_stack:: --quiet || return 1
     # The host's TCP seam (`wz_runtime_posix::stream`): the connection a dial makes and the port a
@@ -14563,7 +14569,9 @@ layer_c1m_session_lwip() {
     # the session, a retry wait until the no-progress bound, and what a turn reports).
     # 10 -> 13, counted from the source: a refusal is told apart as a stage with no room or a
     # failed send, and a failed send ends the session paced or not, as upstream's reopen does.
-    _runci_guarded_test "C1m mcu slot declaration replay" 13 \
+    # 13 -> 14, printed: main at `c72460b30` printed 14 on a build host; no hosted run
+    # reached this leg, an earlier one failing first.
+    _runci_guarded_test "C1m mcu slot declaration replay" 14 \
         cargo test -p wz-session-mcu --features client-slot --lib slot_client::tests:: --quiet || return 1
     # Fixed-memory step S6, the exhaustion cases of the N-session pool (R1, R2, R6):
     # a node holds at most the generated MAX_SESSIONS sessions, and every table a
