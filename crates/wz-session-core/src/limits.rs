@@ -1183,6 +1183,75 @@ mod enforcement {
             },
         );
     }
+
+    /// `MAX_KEYEXPR_BYTES` with nothing stated: a retraction that names its key takes a key of
+    /// the build's length beside the widest id, and refuses one byte more.
+    #[cfg(all(feature = "storage-profile", feature = "codec-declare"))]
+    #[test]
+    fn max_keyexpr_bytes_with_nothing_stated_admits_what_the_build_admitted() {
+        use crate::lent_control::NamedKeyexpr;
+        let held = SessionLimits::defaults().max_keyexpr_bytes_held();
+        let widest = crate::wire_id::ExprId::MAX;
+        let at_build = "k".repeat(caps::MAX_KEYEXPR_BYTES);
+        let past_build = "k".repeat(caps::MAX_KEYEXPR_BYTES + 1);
+        assert!(NamedKeyexpr::new(widest, &at_build, held).is_ok());
+        assert!(NamedKeyexpr::new(widest, &past_build, held).is_err());
+        assert!(NamedKeyexpr::literal(&past_build, held).is_err());
+    }
+
+    /// `MAX_KEYEXPR_BYTES` stated as two: a key of three bytes is refused whatever the id beside
+    /// it, and the refusal leaves the quota as stated, so a key of two is still taken.
+    #[cfg(all(feature = "storage-profile", feature = "codec-declare"))]
+    #[test]
+    fn max_keyexpr_bytes_stated_refuses_the_next() {
+        use crate::lent_control::NamedKeyexpr;
+        held_to_two(
+            SessionLimits::select_max_keyexpr_bytes,
+            MaxKeyexprBytes::DOMAIN.is_singleton(),
+            |limits| {
+                let held = limits.max_keyexpr_bytes_held();
+                assert!(NamedKeyexpr::literal("abc", held).is_err());
+                assert!(NamedKeyexpr::new(1, "abc", held).is_err());
+                assert!(NamedKeyexpr::literal("ab", held).is_ok());
+                assert!(NamedKeyexpr::new(crate::wire_id::ExprId::MAX, "ab", held).is_ok());
+            },
+        );
+    }
+
+    /// `MATCH_MEMO_SLOTS` with nothing stated: the receive match cache of the session's
+    /// subscriptions holds the build's count of slots, `MATCH_MEMO_FIXED_SLOTS` on a table of
+    /// fixed size.
+    #[test]
+    fn match_memo_slots_with_nothing_stated_holds_the_build_value() {
+        let observer = ApplicationLayerObserver::with_limits(&SessionLimits::defaults());
+        let build = if crate::bounded::ENFORCES_CAPACITY {
+            caps::MATCH_MEMO_FIXED_SLOTS
+        } else {
+            caps::MATCH_MEMO_SLOTS
+        };
+        assert_eq!(observer.subscribers.memo_slot_count(), build);
+    }
+
+    /// `MATCH_MEMO_SLOTS` stated: the cache of a table that grows holds the stated count of
+    /// slots, and a table of fixed size keeps the slots its build holds in RAM.
+    #[test]
+    fn match_memo_slots_stated_is_the_count_the_cache_holds() {
+        let other = if caps::MATCH_MEMO_SLOTS == 3 { 2 } else { 3 };
+        let mut limits = SessionLimits::defaults();
+        let stated = limits.select_match_memo_slots(other);
+        if MatchMemoSlots::DOMAIN.is_singleton() {
+            assert!(stated.is_err(), "a build of one value refuses another");
+        } else {
+            stated.expect("inside the declared range");
+            let observer = ApplicationLayerObserver::with_limits(&limits);
+            let held = if crate::bounded::ENFORCES_CAPACITY {
+                caps::MATCH_MEMO_FIXED_SLOTS
+            } else {
+                other
+            };
+            assert_eq!(observer.subscribers.memo_slot_count(), held);
+        }
+    }
 }
 
 #[cfg(test)]

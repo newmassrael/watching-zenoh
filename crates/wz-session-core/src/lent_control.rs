@@ -51,12 +51,12 @@
 //!
 //! Nothing here allocates, truncates or falls back. A keyexpr longer than the
 //! link's lent slot is refused by the ENCODE (`CodecError::BufferOverflow` from
-//! the lent sink), which the session counts; a keyexpr longer than a
-//! `NamedKeyexpr` holds is refused by its constructor
-//! (`CodecError::BufferOverflow`). The writers that mirror a builder with an
-//! `assert!` on a zero mapping id keep it, for the same reason the builder has it
-//! (id `0` is the literal-keyexpr sentinel, and a declaration of it has no
-//! meaning), and say so.
+//! the lent sink), which the session counts; a keyexpr longer than the
+//! session's `MAX_KEYEXPR_BYTES` is refused by the constructor of
+//! `NamedKeyexpr` (`CodecError::BufferOverflow`). The writers that mirror a
+//! builder with an `assert!` on a zero mapping id keep it, for the same reason the
+//! builder has it (id `0` is the literal-keyexpr sentinel, and a declaration of it
+//! has no meaning), and say so.
 
 use sce_forge_runtime::codec::{Bounded, CodecError};
 #[cfg(feature = "codec-declare")]
@@ -145,13 +145,21 @@ pub const NAMED_KEYEXPR_BYTES: usize = 1 + 9 + crate::caps::MAX_KEYEXPR_BYTES;
 #[cfg(feature = "codec-declare")]
 impl NamedKeyexpr {
     /// The body for the key `mapping_id` + `suffix` (`0` + the whole keyexpr names
-    /// a literal). `CodecError::BufferOverflow` when `suffix` is longer than
-    /// [`crate::caps::MAX_KEYEXPR_BYTES`]: the refusal of a key this session holds
-    /// no text for, never a truncated one.
-    pub fn new(mapping_id: crate::wire_id::ExprId, suffix: &str) -> Result<Self, CodecError> {
+    /// a literal). `CodecError::BufferOverflow` when `suffix` is longer than `limit`,
+    /// the session's `MAX_KEYEXPR_BYTES`
+    /// ([`SessionLimits::max_keyexpr_bytes_held`](crate::limits::SessionLimits::max_keyexpr_bytes_held)):
+    /// the refusal of a key this session holds no text for, never a truncated one. The
+    /// limit's domain keeps it at most the capacity the body is sized by.
+    pub fn new(
+        mapping_id: crate::wire_id::ExprId,
+        suffix: &str,
+        limit: crate::limits::MaxKeyexprBytesHeld,
+    ) -> Result<Self, CodecError> {
         // The bound is on the suffix, whatever the id's VLE costs: a key is
         // refused by what it IS, not by how wide the id beside it happens to be.
-        if suffix.len() > crate::caps::MAX_KEYEXPR_BYTES {
+        // The value is compared even where the build fixes it: the body is wider than the
+        // bound by the id, so the body alone would not refuse at the bound.
+        if !limit.get().admits(suffix.len()) {
             return Err(CodecError::BufferOverflow);
         }
         let mut body = [0u8; NAMED_KEYEXPR_BYTES];
@@ -170,8 +178,11 @@ impl NamedKeyexpr {
 
     /// The body for a LITERAL keyexpr (mapping id `0`), the form a sourced
     /// retraction carries.
-    pub fn literal(keyexpr: &str) -> Result<Self, CodecError> {
-        Self::new(0, keyexpr)
+    pub fn literal(
+        keyexpr: &str,
+        limit: crate::limits::MaxKeyexprBytesHeld,
+    ) -> Result<Self, CodecError> {
+        Self::new(0, keyexpr, limit)
     }
 
     /// The extension entry, borrowing this body. The borrowed twin of the entry
@@ -1028,6 +1039,11 @@ mod tests {
         interest.try_as_borrowed().expect("a view").encode_to_vec()
     }
 
+    /// The `MAX_KEYEXPR_BYTES` a session holds when its creator states none.
+    fn build_keys() -> crate::limits::MaxKeyexprBytesHeld {
+        crate::limits::SessionLimits::defaults().max_keyexpr_bytes_held()
+    }
+
     /// `(mapping id, suffix)` of every shape a declaration names a keyexpr by:
     /// a literal, an alias alone, an alias with a suffix, an empty suffix, a
     /// multi-byte VLE id and a long suffix.
@@ -1332,7 +1348,7 @@ mod tests {
     #[test]
     fn a_retraction_that_names_its_key_is_written_as_its_builder_writes_it() {
         for keyexpr in ["demo/data", "a", "x/y/z/**"] {
-            let key = NamedKeyexpr::literal(keyexpr).unwrap();
+            let key = NamedKeyexpr::literal(keyexpr, build_keys()).unwrap();
             assert_eq!(
                 undeclare_subscriber_naming(0, &key).encode_to_vec(),
                 owned_declare(&owned::build_undeclare_subscriber_with_keyexpr(keyexpr).unwrap()),
@@ -1355,7 +1371,7 @@ mod tests {
             (1 << 33, 300, "k/l"),
             (5, crate::wire_id::ExprId::MAX, "z"),
         ] {
-            let key = NamedKeyexpr::new(mapping, suffix).unwrap();
+            let key = NamedKeyexpr::new(mapping, suffix, build_keys()).unwrap();
             assert_eq!(
                 undeclare_subscriber_naming(id, &key).encode_to_vec(),
                 owned_declare(
@@ -1384,18 +1400,18 @@ mod tests {
         let past_bound = "k".repeat(crate::caps::MAX_KEYEXPR_BYTES + 1);
         // Even the widest id (three VLE bytes) leaves room for a suffix at the bound.
         let widest = crate::wire_id::ExprId::MAX;
-        let key = NamedKeyexpr::new(widest, &at_bound).expect("at the bound");
+        let key = NamedKeyexpr::new(widest, &at_bound, build_keys()).expect("at the bound");
         assert_eq!(
             undeclare_token_naming(1, &key).encode_to_vec(),
             owned_declare(&owned::build_undeclare_token_on_wire(1, widest, &at_bound).unwrap())
         );
         assert_eq!(
-            NamedKeyexpr::new(widest, &past_bound).err(),
+            NamedKeyexpr::new(widest, &past_bound, build_keys()).err(),
             Some(CodecError::BufferOverflow),
             "past the bound is refused, not cut"
         );
         assert_eq!(
-            NamedKeyexpr::literal(&past_bound).err(),
+            NamedKeyexpr::literal(&past_bound, build_keys()).err(),
             Some(CodecError::BufferOverflow)
         );
     }

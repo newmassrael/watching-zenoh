@@ -113,6 +113,7 @@ def declared_pending(decl: dict) -> dict[str, str]:
 #: stay a read of the build. One line per allowed site.
 ALLOWED: tuple[tuple[str, str, str], ...] = (
     ("crates/wz-session-core/src/pubsub.rs", "_", "a build-time assertion on the storage the constant sizes: a fixed table's rows fit the u16 positions of the match cache"),
+    ("crates/wz-session-core/src/lent_control.rs", "NAMED_KEYEXPR_BYTES", "the length of the body array a NamedKeyexpr holds (header, widest id, a key of the build's capacity); the constructor refuses past the session's quota, which the domain keeps at most that capacity"),
 )
 
 #: (path pattern relative to the root, innermost item, reason): a site that reads a snapshot it

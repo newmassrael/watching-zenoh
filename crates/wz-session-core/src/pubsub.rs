@@ -784,7 +784,9 @@ impl<C: SampleSink, P: Storage> Default for SubscriberTable<C, P> {
             epoch: 0,
             #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
             local_live: alloc::sync::Arc::new(core::sync::atomic::AtomicUsize::new(0)),
-            memo: MatchMemo::new(),
+            memo: MatchMemo::new(
+                <crate::limits::MatchMemoSlots as crate::limit_binding::LimitSpec>::DEFAULT,
+            ),
             key_gate: KeyGate::of_build(),
             #[cfg(feature = "transport-shm")]
             shm: crate::extshm::ShmReceiveState::default(),
@@ -803,6 +805,22 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     /// and the subscriptions already in are kept, as a lowered soft limit keeps what it holds.
     pub fn limit_to(&mut self, quota: crate::limits::MaxSubscriptionsHeld) {
         self.quota = quota;
+    }
+
+    /// Size the receive match cache to the `MATCH_MEMO_SLOTS` its creator resolved: how many
+    /// distinct keys it remembers at once, `0` leaving it out. The keys it remembered are
+    /// forgotten, which changes no delivery: a key not remembered is matched afresh. A table of
+    /// the fixed storage policy keeps the `MATCH_MEMO_FIXED_SLOTS` its build holds in RAM.
+    pub fn limit_memo_to(&mut self, slots: usize) {
+        if !P::ENFORCES_CAPACITY {
+            self.memo = MatchMemo::new(slots);
+        }
+    }
+
+    /// How many distinct keys the receive match cache remembers at once
+    /// ([`Self::limit_memo_to`]).
+    pub fn memo_slot_count(&self) -> usize {
+        self.memo.slot_count()
     }
 
     /// Hold every peer's side this table answers to the `MAX_INBOUND_SUB_INTERESTS` its creator
@@ -2367,16 +2385,17 @@ fn fire_by_selection<C: SampleSink, P: Storage>(
     fired
 }
 
-/// How many distinct keys a `MatchMemo` of policy `P` remembers at once. A table that grows
-/// with the allocator states it as `MATCH_MEMO_SLOTS`, its slots filling as keys arrive; a table
-/// of fixed size holds every slot in RAM from the start and so states its own count,
-/// `MATCH_MEMO_FIXED_SLOTS`, which is `0` unless the image asks for the memory. Zero leaves the
-/// memory out, and every message is matched afresh.
-const fn memo_slots<P: Storage>() -> usize {
+/// How many distinct keys a `MatchMemo` of policy `P` remembers at once, where its creator
+/// states `stated` (`MATCH_MEMO_SLOTS`). A table that grows with the allocator holds the stated
+/// count, its slots filling as keys arrive; a table of fixed size holds every slot in RAM from the
+/// start and so holds its own count, `MATCH_MEMO_FIXED_SLOTS`, which the build sizes and which is
+/// `0` unless the image asks for the memory. Zero leaves the memory out, and every message is
+/// matched afresh.
+const fn memo_slots<P: Storage>(stated: usize) -> usize {
     if P::ENFORCES_CAPACITY {
         caps::MATCH_MEMO_FIXED_SLOTS
     } else {
-        caps::MATCH_MEMO_SLOTS
+        stated
     }
 }
 
@@ -2430,9 +2449,10 @@ struct MatchMemo<P: Storage> {
 }
 
 impl<P: Storage> MatchMemo<P> {
-    fn new() -> Self {
+    /// A memory of `memo_slots::<P>(stated)` empty slots.
+    fn new(stated: usize) -> Self {
         let mut slots = BoundedVec::default();
-        for _ in 0..memo_slots::<P>() {
+        for _ in 0..memo_slots::<P>(stated) {
             // A fixed table's capacity is its slot count, so this never refuses.
             let _ = slots.push(None);
         }
@@ -2443,9 +2463,15 @@ impl<P: Storage> MatchMemo<P> {
         }
     }
 
+    /// How many slots the memory holds: the count it was made with. A fixed table's is the
+    /// build's, decided when the build is compiled.
+    fn slot_count(&self) -> usize {
+        memo_slots::<P>(self.slots.len())
+    }
+
     /// The slot `key` maps to: a hash of its bytes (FNV-1a, which is a handful of
     /// instructions per byte and has no setup), folded to the table's size.
-    fn slot_of(key: &str) -> usize {
+    fn slot_of(&self, key: &str) -> usize {
         let mut hash: u32 = 0x811c_9dc5;
         for byte in key.as_bytes() {
             hash ^= u32::from(*byte);
@@ -2453,7 +2479,7 @@ impl<P: Storage> MatchMemo<P> {
         }
         // `max(1)` only keeps the remainder defined where there are no slots: nothing reaches
         // this function then (see `fire_into_memoized`).
-        (hash ^ (hash >> 15)) as usize % memo_slots::<P>().max(1)
+        (hash ^ (hash >> 15)) as usize % self.slot_count().max(1)
     }
 }
 
@@ -2481,7 +2507,7 @@ fn fire_into_memoized<C: SampleSink, P: Storage>(
     mut deliver: impl FnMut(&mut C),
 ) -> usize {
     // No slots: the memory is out, and the message is matched by the scan alone.
-    if memo_slots::<P>() == 0 {
+    if memo.slot_count() == 0 {
         return scan_subscribers(subscribers, key, is_remote, deliver, |_| {}).unwrap_or(0);
     }
     if repeats_previous {
@@ -2501,7 +2527,7 @@ fn fire_into_memoized<C: SampleSink, P: Storage>(
         }
     }
     memo.last = None;
-    let at = MatchMemo::<P>::slot_of(key);
+    let at = memo.slot_of(key);
     if let Some(slot) = &memo.slots[at] {
         if slot.epoch == epoch && slot.remote == is_remote && slot.key == key {
             memo.last = Some((at, memo.writes));
@@ -7646,7 +7672,11 @@ mod tests {
         };
         // `SubscriberRegistry::new()` is of this build's profile, so the count that applies is the
         // one its storage policy reads.
-        let remembered = if memo_slots::<Profile>() == 0 { 5 } else { 1 };
+        let remembered = if memo_slots::<Profile>(caps::MATCH_MEMO_SLOTS) == 0 {
+            5
+        } else {
+            1
+        };
         let mut reg = SubscriberRegistry::new();
         reg.register("a/*", |_: &dyn SampleView| {})
             .expect("no quota is stated on this table");
@@ -8247,6 +8277,42 @@ mod match_memo_position_tests {
             scans() - start,
             3,
             "the key is matched by the scan each time, never answered from a slot"
+        );
+    }
+
+    /// The count a heap table's creator states is the count its cache holds: none matches a
+    /// repeated key every time, one remembers it after the first, and each delivers the same.
+    #[test]
+    fn a_heap_table_remembers_as_many_keys_as_its_creator_states() {
+        let scans = || MATCH_SCANS.with(|count| count.get());
+        let delivered = Arc::new(AtomicUsize::new(0));
+        let mut table: SubscriberTable<Count, Heap> = SubscriberTable::default();
+        table
+            .register_sink("a/*", Locality::Any, Count(delivered.clone()))
+            .expect("a heap table grows");
+        let sample = BorrowedSample {
+            keyexpr: "a/x",
+            payload: b"x",
+            kind: SampleKind::Put,
+            reliability: Reliability::Reliable,
+        };
+        for (stated, matched) in [(0, 5), (1, 1)] {
+            table.limit_memo_to(stated);
+            assert_eq!(table.memo_slot_count(), stated);
+            let start = scans();
+            for _ in 0..5 {
+                assert_eq!(table.dispatch_borrowed(&sample, true), 1);
+            }
+            assert_eq!(
+                scans() - start,
+                matched,
+                "{stated} slots, five messages on one key"
+            );
+        }
+        assert_eq!(
+            delivered.load(Ordering::Relaxed),
+            10,
+            "every message is delivered"
         );
     }
 }
