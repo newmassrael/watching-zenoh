@@ -33,13 +33,14 @@
 //! callback reads once `wz_ext_decl_watch_drop` returns, as after an undeclare of pico's own
 //! entities; dropped from inside the callback, the drop runs when the callback returns.
 
-use std::ffi::{c_char, c_void};
-use std::sync::Arc;
+use alloc::sync::Arc;
+use core::ffi::{c_char, c_void};
 
 use wz_capi_port::{DeclPlane, DeclWatchEvent, DeclWatchId, DeclWatchRefused, DeclWatchSink};
 use wz_session_core::session_zid::ZID_MAX;
 
 use crate::ffi::{catch, guarded, CClosure, InCallback, ReleaseLatch};
+use crate::prelude::Box;
 use crate::result::{
     ZResult, WZ_EXT_ERR_UNSUPPORTED, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SESSION_CLOSED,
     Z_ERR_SYSTEM_OUT_OF_MEMORY, Z_OK,

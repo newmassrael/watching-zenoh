@@ -492,14 +492,13 @@ object-pool-region = ["object-pool", "wz-capi-core?/object-pool-region"]
 # The doors are in a build that has either; the first names the peer of each event, the second
 # tells a watch once per establishment that the peer has sent everything it held. Both engines
 # watch, so they select neither: the tokio engine watches its faces, and the cooperative one the
-# dispatch of what each of its links receives.
+# dispatch of what each of its links receives. The doors are `core` and `alloc`, so they select
+# no `std`.
 remote-declaration-watch = [
-    "std",
     "wz-capi-core?/remote-declaration-watch",
     "wz-capi-coop?/remote-declaration-watch",
 ]
 declarations-synced-event = [
-    "std",
     "wz-capi-core?/declarations-synced-event",
     "wz-capi-coop?/declarations-synced-event",
 ]
