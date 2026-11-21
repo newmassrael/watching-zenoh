@@ -230,6 +230,15 @@ exits 0 when every check held. Every example but `pico_app_transport.c` includes
 repository's `scripts/lib/pico_windows_package.py --verify <package>` checks every file at once,
 and reports a file that differs, one that is missing and one the manifest does not list.
 
+## Where a release's packages are
+
+A release of watching-zenoh (a `v<version>` tag) carries the four packages, x64 and x86, each as
+one library and as two, as assets of its GitHub release, each zip with its `.zip.sha256`, and one
+`SHA256SUMS` naming the four. `sha256sum -c SHA256SUMS` in the download directory (or
+`Get-FileHash -Algorithm SHA256` of a zip, compared with its line) checks that a download is the zip
+the release workflow built and tested; `docs/release.md` in the repository says how a release is
+made and how to check one.
+
 ## Licence
 
 The library is watching-zenoh, under the watching-zenoh Non-Commercial License 1.0 (`LICENSE`) or a

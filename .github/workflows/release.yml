@@ -24,6 +24,14 @@
 #     GitHub release archive only; crates.io publication is gated
 #     on the manual `cargo publish` invocation after the package
 #     metadata (repository URL, README, exclude list) lands.
+#
+# The Windows packages of the pico C ABI library (x64 and x86, each as
+# one library and as two) are built and tested by `windows-packages`
+# with the composite action the Platform workflow's `package-windows`
+# job runs, and `windows-packages-attach` attaches them to the release
+# with their `.zip.sha256` files and a combined SHA256SUMS once the
+# release job has made it. How a release is cut and checked:
+# docs/release.md.
 
 name: Release
 
@@ -269,3 +277,92 @@ jobs:
           generate_release_notes: true
           draft: true
           prerelease: ${{ contains(github.event.inputs.tag || github.ref_name, '-mvp') || contains(github.event.inputs.tag || github.ref_name, '-rc') || contains(github.event.inputs.tag || github.ref_name, '-beta') || contains(github.event.inputs.tag || github.ref_name, '-alpha') }}
+
+  # The Windows packages of the pico C ABI library, one matrix row per width and form, made and
+  # tested by the composite action the Platform workflow's `package-windows` job runs, so a release
+  # ships the package that job tests. Unlike that job this one is not `continue-on-error`: a row whose
+  # build or test fails fails the run, and `windows-packages-attach`, which needs every row, attaches
+  # nothing. It runs beside the release job rather than after it, so the release waits on the longer
+  # of the two and not on their sum. No Rust cache, for the reasons the release job and the Platform
+  # job each give.
+  windows-packages:
+    name: pico library package ${{ matrix.arch }} ${{ matrix.form }} (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, x86]
+        form: [single, split]
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: build the package and run its regression test
+        id: package
+        uses: ./.github/actions/pico-windows-package
+        with:
+          arch: ${{ matrix.arch }}
+          form: ${{ matrix.form }}
+
+      - name: Upload the package
+        uses: actions/upload-artifact@v4
+        with:
+          name: pico-windows-package-${{ matrix.arch }}-${{ matrix.form }}
+          path: |
+            ${{ steps.package.outputs.directory }}/*.zip
+            ${{ steps.package.outputs.directory }}/*.zip.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  # The packages attached to the release the release job made (a draft), after the checks a
+  # recipient can repeat: `pico_windows_package.py --release` holds the downloaded set to this tag
+  # and its commit (one package of every width and form the packager makes, each matching its
+  # `.zip.sha256` and its manifest, built from the tag's commit with no uncommitted change, all of the
+  # version the tag names) and writes SHA256SUMS; a finding fails the job before anything is
+  # attached. `--clobber` lets a re-run replace the assets of the same names.
+  windows-packages-attach:
+    name: attach the pico library packages to the release
+    needs:
+      - release
+      - windows-packages
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Set up Python (the packager is python)
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: .github/python-version
+
+      - name: Download the packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: pico-windows-package-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/pico-release
+
+      - name: hold the packages to this release and write SHA256SUMS
+        env:
+          WZ_RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: python scripts/lib/pico_windows_package.py --release "$RUNNER_TEMP/pico-release" "$WZ_RELEASE_TAG"
+
+      - name: attach the packages and their sums to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WZ_RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/pico-release"
+          gh release upload "$WZ_RELEASE_TAG" "$dir"/*.zip "$dir"/*.zip.sha256 "$dir/SHA256SUMS" --clobber --repo "$GITHUB_REPOSITORY"

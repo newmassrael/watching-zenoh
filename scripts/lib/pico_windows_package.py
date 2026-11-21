@@ -8,6 +8,7 @@ width of Windows: x64 and x86.
     pico_windows_package.py --build OUT --profile ID [--arch x64|x86] [--form single|split]
     pico_windows_package.py --verify DIR|ZIP
     pico_windows_package.py --test ZIP
+    pico_windows_package.py --release DIR TAG
     pico_windows_package.py --selftest
 
 `--build` makes, on a Windows host with the MSVC toolchain, a package of `wz-capi-pico` built from a
@@ -39,6 +40,14 @@ import library with MSVC's `cl` of the package's width (its manifest's `target`)
 the release build, and runs each with the package's `bin/` on the path. The check program holds the
 DLL to the conformance digest of the package's `build-statement.json` and reads the configuration
 sample through it.
+
+`--release` holds the packages a release workflow is about to attach (the zips and their
+`.zip.sha256` files in `DIR`) to the release cut at `TAG` from the checkout's `HEAD`, on any host:
+exactly one package of every width and form, each zip matching its `.zip.sha256` and its manifest,
+each built from `HEAD` with no change uncommitted and named as `--build` names it, all of one
+version and profile, and `TAG` naming that version (`v<version>` or `v<version>-<suffix>`). Then
+it writes `DIR/SHA256SUMS`, the `.zip.sha256` lines of every zip in name order; nothing is written
+on a finding.
 
 ## Why each piece is what it is
 
@@ -889,6 +898,87 @@ def test(archive: pathlib.Path) -> int:
 
 
 # ---------------------------------------------------------------------------
+# The release set (any host)
+# ---------------------------------------------------------------------------
+
+# A release tag names the packages' version, with an optional suffix (`v0.1.0`, `v0.1.0-rc1`).
+RELEASE_TAG_SUFFIX = r"(-[0-9A-Za-z][0-9A-Za-z.-]*)?"
+SUMS = "SHA256SUMS"
+
+
+def sha256_line(archive: pathlib.Path) -> str:
+    """The `.zip.sha256` line of a zip, as `--build` writes it (`sha256sum`'s format)."""
+    return f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive.name}\n"
+
+
+def release_findings(directory: pathlib.Path, commit: str, tag: str) -> tuple[list[str], str]:
+    """What keeps the packages in `directory` off the release cut at `tag` from `commit`, and the
+    text of the SHA256SUMS that names them (meant to be written only when there is no finding)."""
+    findings: list[str] = []
+    sums: list[str] = []
+    seen: dict[tuple[str, str], str] = {}
+    versions: set[str] = set()
+    profiles: set[str] = set()
+    archives = sorted(directory.glob("*.zip"))
+    for side in sorted(directory.glob("*.zip.sha256")):
+        if not side.with_name(side.name[: -len(".sha256")]).is_file():
+            findings.append(f"{side.name}: no zip of that name beside it")
+    for archive in archives:
+        line = sha256_line(archive)
+        sums.append(line)
+        side = archive.with_name(archive.name + ".sha256")
+        if not side.is_file():
+            findings.append(f"{archive.name}: no {side.name} beside it")
+        elif side.read_bytes() != line.encode("utf-8"):
+            findings.append(f"{side.name} does not state the sha256 of {archive.name}")
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                package = extract_zip(archive, pathlib.Path(tmp))
+            except (Refusal, zipfile.BadZipFile) as err:
+                findings.append(f"{archive.name}: {err}")
+                continue
+            verified = verify_findings(package)
+            findings += [f"{archive.name}: {finding}" for finding in verified]
+            if verified:
+                continue
+            manifest = json.loads((package / MANIFEST).read_text(encoding="utf-8"))
+        try:
+            arch = arch_of_target(str(manifest.get("target", "")))
+            form = form_of(manifest)
+        except Refusal as err:
+            findings.append(f"{archive.name}: {err}")
+            continue
+        version = str(manifest.get("version", ""))
+        profile = str(manifest.get("profile", ""))
+        built = manifest.get("built_from")
+        if not isinstance(built, dict):
+            built = {}
+        if built.get("commit") != commit:
+            findings.append(f"{archive.name}: built from commit {built.get('commit')}, the release is of {commit}")
+        if built.get("tree_clean") is not True:
+            findings.append(f"{archive.name}: built from a tree with changes not committed")
+        name = package_name(version, profile, arch, commit, form)
+        if archive.name != f"{name}.zip" or manifest.get("name") != name:
+            findings.append(f"{archive.name}: its manifest makes it {name}.zip")
+        if (arch, form) in seen:
+            findings.append(f"{archive.name}: a second package of {arch} {form}, beside {seen[(arch, form)]}")
+        seen.setdefault((arch, form), archive.name)
+        versions.add(version)
+        profiles.add(profile)
+    missing = [f"{arch} {form}" for arch in ARCHES for form in FORMS if (arch, form) not in seen]
+    if missing:
+        findings.append(f"no package of {', '.join(missing)}")
+    if len(versions) > 1:
+        findings.append(f"the packages are of versions {', '.join(sorted(versions))}, not one")
+    if len(profiles) > 1:
+        findings.append(f"the packages are of profiles {', '.join(sorted(profiles))}, not one")
+    for version in sorted(versions):
+        if not re.fullmatch(rf"v{re.escape(version)}{RELEASE_TAG_SUFFIX}", tag):
+            findings.append(f"the tag `{tag}` does not name version {version} (v{version} or v{version}-<suffix>)")
+    return findings, "".join(sums)
+
+
+# ---------------------------------------------------------------------------
 # selftest
 # ---------------------------------------------------------------------------
 
@@ -1179,6 +1269,85 @@ def selftest() -> int:
            "The libraries of this package (`release/bin/wz_capi_pico.dll`" in two
            and "`release/bin/wz_capi_pico_ext.dll`" in two
            and f"`{CRATE}` and `{EXT_CRATE}` built with" in two)
+    with tempfile.TemporaryDirectory() as tmp:
+        commit = "0123456789abcdef0123456789abcdef01234567"
+
+        def release_dir(rows: list[tuple[str, str, dict]]) -> pathlib.Path:
+            """A directory of packages as a release job downloads them: (width, form, what differs)."""
+            out = pathlib.Path(tempfile.mkdtemp(dir=tmp))
+            for arch, form, differs in rows:
+                built = {"commit": differs.get("commit", commit), "tree_clean": differs.get("clean", True)}
+                version = differs.get("version", "0.1.0")
+                name = package_name(version, "p", arch, built["commit"], form)
+                stage = pathlib.Path(tempfile.mkdtemp(dir=tmp)) / name
+                stage.mkdir()
+                (stage / "README.md").write_text("r\n", encoding="utf-8")
+                manifest = {"format": FORMAT, "format_version": FORMAT_VERSION, "name": name, "version": version,
+                            "profile": "p", "target": ARCHES[arch][0], "form": form, "built_from": built,
+                            "files": file_rows(stage)}
+                (stage / MANIFEST).write_text(render_json(manifest), encoding="utf-8")
+                archive = out / f"{name}.zip"
+                write_zip(stage, archive, 1700000000)
+                (out / f"{name}.zip.sha256").write_text(sha256_line(archive), encoding="ascii", newline="\n")
+            return out
+
+        every = [(arch, form, {}) for arch in ARCHES for form in FORMS]
+        good = release_dir(every)
+        findings, sums = release_findings(good, commit, "v0.1.0")
+        expect(f"one package of every width and form, of the release's commit, is a release ({findings})",
+               findings == [])
+        expect("the sums are every zip's own .zip.sha256 line, in name order",
+               sums == "".join(p.read_text(encoding="ascii") for p in sorted(good.glob("*.zip.sha256")))
+               and len(sums.splitlines()) == len(ARCHES) * len(FORMS))
+        expect("a tag with a suffix names the version", release_findings(good, commit, "v0.1.0-rc1")[0] == [])
+        expect("a tag of another version is a finding",
+               release_findings(good, commit, "v0.2.0")[0]
+               == ["the tag `v0.2.0` does not name version 0.1.0 (v0.1.0 or v0.1.0-<suffix>)"])
+        expect("a tag that runs on past the version is a finding", len(release_findings(good, commit, "v0.1.00")[0]) == 1)
+        other = "f" * 40
+        findings, _ = release_findings(good, other, "v0.1.0")
+        expect("packages of another commit are each a finding",
+               sum(f.endswith(f"the release is of {other}") for f in findings) == len(every))
+        findings, _ = release_findings(release_dir(every[:-1]), commit, "v0.1.0")
+        expect("a width and form with no package is named",
+               findings == [f"no package of {every[-1][0]} {every[-1][1]}"])
+        findings, _ = release_findings(release_dir(every[:-1] + [(every[-1][0], every[-1][1], {"clean": False})]),
+                                       commit, "v0.1.0")
+        expect("a package built from a tree with changes is a finding",
+               len(findings) == 1 and findings[0].endswith("built from a tree with changes not committed"))
+        findings, _ = release_findings(release_dir(every[:-1] + [(every[-1][0], every[-1][1], {"version": "0.2.0"})]),
+                                       commit, "v0.1.0")
+        expect("packages of two versions are a finding, and the tag misses one of them",
+               "the packages are of versions 0.1.0, 0.2.0, not one" in findings
+               and any(f.startswith("the tag `v0.1.0` does not name version 0.2.0") for f in findings))
+        tampered = release_dir(every)
+        side = sorted(tampered.glob("*.zip.sha256"))[0]
+        side.write_text("0" * 64 + side.read_text(encoding="ascii")[64:], encoding="ascii", newline="\n")
+        findings, _ = release_findings(tampered, commit, "v0.1.0")
+        expect("a .zip.sha256 that states another digest is a finding",
+               findings == [f"{side.name} does not state the sha256 of {side.name[: -len('.sha256')]}"])
+        bare = release_dir(every)
+        lone = sorted(bare.glob("*.zip"))[0]
+        lone.with_name(lone.name + ".sha256").unlink()
+        expect("a zip with no .zip.sha256 is a finding",
+               release_findings(bare, commit, "v0.1.0")[0] == [f"{lone.name}: no {lone.name}.sha256 beside it"])
+        stray = release_dir(every)
+        (stray / "gone.zip.sha256").write_text("0" * 64 + "  gone.zip\n", encoding="ascii")
+        expect("a .zip.sha256 with no zip is a finding",
+               release_findings(stray, commit, "v0.1.0")[0] == ["gone.zip.sha256: no zip of that name beside it"])
+        twice = release_dir(every)
+        first = sorted(twice.glob("*.zip"))[0]
+        copy_name = first.name[: -len(".zip")] + "-copy.zip"
+        shutil.copyfile(first, twice / copy_name)
+        (twice / f"{copy_name}.sha256").write_text(sha256_line(twice / copy_name), encoding="ascii", newline="\n")
+        findings, _ = release_findings(twice, commit, "v0.1.0")
+        expect("a second package of one width and form, under another name, is a finding",
+               any(f.startswith(f"{copy_name}: its manifest makes it") for f in findings)
+               and any(": a second package of " in f for f in findings))
+        expect("an empty directory names every width and form", release_findings(
+            pathlib.Path(tempfile.mkdtemp(dir=tmp)), commit, "v0.1.0")[0]
+            == ["no package of " + ", ".join(f"{arch} {form}" for arch in ARCHES for form in FORMS)])
+
     # A pipe read as text without a stated encoding is decoded with the host's code page, which on a
     # Windows runner is not the UTF-8 the tools write: every read of a tool here names its encoding.
     import ast
@@ -1221,6 +1390,17 @@ def main(argv: list[str]) -> int:
             return 1 if findings else 0
         if len(argv) == 3 and argv[1] == "--test":
             return test(pathlib.Path(argv[2]))
+        if len(argv) == 4 and argv[1] == "--release":
+            directory = pathlib.Path(argv[2])
+            findings, sums = release_findings(directory, git("rev-parse", "HEAD"), argv[3])
+            for finding in findings:
+                print(f"  pico-package release: {finding}", file=sys.stderr)
+            if findings:
+                print(f"  pico-package release: {argv[3]}: FAIL")
+                return 1
+            (directory / SUMS).write_text(sums, encoding="ascii", newline="\n")
+            print(f"  pico-package release: {argv[3]}: {len(sums.splitlines())} packages, {SUMS} written: OK")
+            return 0
     except Refusal as err:
         print(f"  pico-package REFUSED: {err}", file=sys.stderr)
         return 2
