@@ -19,8 +19,10 @@
 //! with the AP, where it is), and the MCU session bundle is `Rc` because
 //! `alloc::sync::Arc` does not exist on ARMv6-M. A node's connection control
 //! lives as long as the firmware does, so it is a `&'static` behind a
-//! `critical_section::Mutex`: `Send + Sync` on every target, no `Arc`, and the
-//! same primitive the cooperative runtime already locks with.
+//! `wz_runtime_coop::cs::Mutex`: `Send + Sync` on every target, no `Arc`, and the
+//! same primitive the cooperative runtime already locks with, entered through its
+//! `cs::with` so a host build takes the runtime's host lock and an image its own
+//! critical section.
 //!
 //! ## What a refused write changes: nothing
 //!
@@ -34,11 +36,11 @@
 use alloc::string::String;
 use core::cell::RefCell;
 
-use critical_section::Mutex;
 use wz_admin::admin_config_space::write_config_space_pattern;
 use wz_admin::admin_connect::{
     parse_connect_endpoints_write, ConnectEndpoints, ConnectWriteOutcome,
 };
+use wz_runtime_coop::cs::Mutex;
 
 /// The write as it arrived, which [`ConnectControl::apply`] takes: named here as well as in
 /// `wz_admin::admin_connect`, so a host that drives this module names the types of its
@@ -97,14 +99,14 @@ impl ConnectControl {
     /// Change the write permit at runtime, as upstream's
     /// `adminspace/permissions/write` does.
     pub fn set_write_permit(&self, permit: bool) {
-        critical_section::with(|cs| self.state.borrow(cs).borrow_mut().permit_write = permit);
+        wz_runtime_coop::cs::with(|cs| self.state.borrow(cs).borrow_mut().permit_write = permit);
     }
 
     /// The endpoint list and the generation it was written at. The generation
     /// moves on every applied write, so a dial layer that remembers the last
     /// one it acted on knows when to act again.
     pub fn endpoints(&self) -> (u32, ConnectEndpoints) {
-        critical_section::with(|cs| {
+        wz_runtime_coop::cs::with(|cs| {
             let s = self.state.borrow(cs).borrow();
             (s.generation, s.live.clone())
         })
@@ -114,13 +116,13 @@ impl ConnectControl {
     /// that only asks whether a write has landed reads on every pass, the list being read only
     /// when it has.
     pub fn generation(&self) -> u32 {
-        critical_section::with(|cs| self.state.borrow(cs).borrow().generation)
+        wz_runtime_coop::cs::with(|cs| self.state.borrow(cs).borrow().generation)
     }
 
     /// The verdict on the most recent write this node received, applied or
     /// not. `None` before the first.
     pub fn last_outcome(&self) -> Option<ConnectWriteOutcome> {
-        critical_section::with(|cs| self.state.borrow(cs).borrow().last.clone())
+        wz_runtime_coop::cs::with(|cs| self.state.borrow(cs).borrow().last.clone())
     }
 
     /// A permitted PUT of `payload` on this node's own key, for tests of the
@@ -147,7 +149,7 @@ impl ConnectControl {
     /// [`last_outcome`](Self::last_outcome).
     pub fn apply(&self, zid_hex: &str, whatami: &str, keyexpr: &str, body: ConfigWriteBody<'_>) {
         let mut scratch = ConnectEndpoints::new();
-        critical_section::with(|cs| {
+        wz_runtime_coop::cs::with(|cs| {
             let mut s = self.state.borrow(cs).borrow_mut();
             let outcome = parse_connect_endpoints_write(
                 zid_hex,
@@ -192,7 +194,7 @@ impl crate::connect_manager::EndpointSource for ConnectControl {
 #[cfg(feature = "adminspace-fixed")]
 impl crate::admin_status::ConfigView for ConnectControl {
     fn write_config_json(&self, out: &mut dyn TextOut) {
-        let (permit_write, list) = critical_section::with(|cs| {
+        let (permit_write, list) = wz_runtime_coop::cs::with(|cs| {
             let s = self.state.borrow(cs).borrow();
             (s.permit_write, s.live.clone())
         });
@@ -212,7 +214,7 @@ impl crate::admin_status::ConfigView for ConnectControl {
 #[cfg(feature = "adminspace-fixed")]
 impl crate::admin_status::ConnectStatusSource for ConnectControl {
     fn write_permit(&self) -> bool {
-        critical_section::with(|cs| self.state.borrow(cs).borrow().permit_write)
+        wz_runtime_coop::cs::with(|cs| self.state.borrow(cs).borrow().permit_write)
     }
 
     /// R2851 — every verdict carries `seq`, the number of writes
@@ -221,7 +223,7 @@ impl crate::admin_status::ConnectStatusSource for ConnectControl {
     /// `seq` answers a write made after that read. Verdict and number are read
     /// under one lock, so they always belong to the same write.
     fn write_last_write_json(&self, out: &mut dyn TextOut) {
-        let (last, seq) = critical_section::with(|cs| {
+        let (last, seq) = wz_runtime_coop::cs::with(|cs| {
             let s = self.state.borrow(cs).borrow();
             (s.last.clone(), s.writes)
         });

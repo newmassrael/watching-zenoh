@@ -35,9 +35,9 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 
 #[cfg(not(feature = "session-slot"))]
-use critical_section::Mutex;
-#[cfg(not(feature = "session-slot"))]
 use wz_admin::adminspace::{admin_queryable_key, answer_admin_query, AdminAnswerCtx, AdminSession};
+#[cfg(not(feature = "session-slot"))]
+use wz_runtime_coop::cs::Mutex;
 #[cfg(not(feature = "session-slot"))]
 use wz_session_core::locality::Locality;
 #[cfg(not(feature = "session-slot"))]
@@ -232,13 +232,13 @@ impl NodeStatus {
 
     /// Replace the sessions the node reports.
     pub fn set_sessions(&self, sessions: Vec<AdminSession>) {
-        critical_section::with(|cs| self.state.borrow(cs).borrow_mut().sessions = sessions);
+        wz_runtime_coop::cs::with(|cs| self.state.borrow(cs).borrow_mut().sessions = sessions);
     }
 
     /// Change the read permit at runtime, as upstream's
     /// `adminspace/permissions/read` does.
     pub fn set_read_permit(&self, permit: bool) {
-        critical_section::with(|cs| self.state.borrow(cs).borrow_mut().permit_read = permit);
+        wz_runtime_coop::cs::with(|cs| self.state.borrow(cs).borrow_mut().permit_read = permit);
     }
 
     /// R2837 — the sessions the node currently reports.
@@ -248,27 +248,27 @@ impl NodeStatus {
 
     /// R2846 — replace the endpoint statuses the `status/connect` leg reports.
     pub fn set_endpoints(&self, endpoints: Vec<EndpointStatus>) {
-        critical_section::with(|cs| self.state.borrow(cs).borrow_mut().endpoints = endpoints);
+        wz_runtime_coop::cs::with(|cs| self.state.borrow(cs).borrow_mut().endpoints = endpoints);
     }
 
     /// R2846 — the endpoint statuses the node currently reports.
     pub fn endpoints(&self) -> Vec<EndpointStatus> {
-        critical_section::with(|cs| self.state.borrow(cs).borrow().endpoints.clone())
+        wz_runtime_coop::cs::with(|cs| self.state.borrow(cs).borrow().endpoints.clone())
     }
 
     /// How many sessions the node reports, without copying them: what a loop that only asks
     /// whether the list changed reads on every pass.
     pub fn session_count(&self) -> usize {
-        critical_section::with(|cs| self.state.borrow(cs).borrow().sessions.len())
+        wz_runtime_coop::cs::with(|cs| self.state.borrow(cs).borrow().sessions.len())
     }
 
     /// Whether the node answers admin GETs (`adminspace.permissions.read`).
     fn read_permitted(&self) -> bool {
-        critical_section::with(|cs| self.state.borrow(cs).borrow().permit_read)
+        wz_runtime_coop::cs::with(|cs| self.state.borrow(cs).borrow().permit_read)
     }
 
     fn snapshot(&self) -> (bool, Vec<AdminSession>) {
-        critical_section::with(|cs| {
+        wz_runtime_coop::cs::with(|cs| {
             let s = self.state.borrow(cs).borrow();
             (s.permit_read, s.sessions.clone())
         })

@@ -52,8 +52,9 @@
 #[cfg(any(not(feature = "session-slot"), test))]
 extern crate alloc;
 
-// Host tests: the shell's synchronization is `critical_section`, whose std
-// implementation the dev-dependency supplies. A production `#![no_std]` build
+// Host tests: the shell's critical sections are the runtime's (`wz_runtime_coop::cs`),
+// which a test build without `host-lock` enters through `critical-section`, whose
+// std implementation the dev-dependency supplies. A production `#![no_std]` build
 // never pulls std.
 #[cfg(test)]
 extern crate std;
