@@ -543,12 +543,12 @@ const fn build_expiry_close_after() -> u16 {
     crate::caps::TX_EXPIRY_CLOSE_AFTER as u16
 }
 
-/// `PICO_TX_QUEUE_SIZE` as the size of a queue: upstream's `MIN_SIZE..=MAX_SIZE`, the nearest end
-/// for a limit outside it, so that a build which states one cannot make the configuration the
-/// session refuses at `validate`.
-const fn build_pico_queue_size() -> usize {
+/// `PICO_TX_QUEUE_SIZE` as `limits` holds it, as the size of a queue: upstream's
+/// `MIN_SIZE..=MAX_SIZE`, the nearest end for a value outside it, so that no snapshot can make the
+/// configuration the session refuses at `validate`.
+const fn pico_queue_size(limits: &SessionLimits) -> usize {
     use crate::link::TxQueueShape;
-    let size = crate::caps::PICO_TX_QUEUE_SIZE;
+    let size = limits.pico_tx_queue_size();
     if size < TxQueueShape::MIN_SIZE {
         TxQueueShape::MIN_SIZE
     } else if size > TxQueueShape::MAX_SIZE {
@@ -647,11 +647,11 @@ impl TxQueueConf {
     /// pico writes on its own thread, where here a second thread writes, and a lane of four
     /// frames of 1 KiB made the two wait for each other after every four.
     ///
-    /// The two policies the queue carries are taken from `policy`, the snapshot of the session
-    /// the queue is built for.
-    pub const fn pico_of_policy(policy: &SessionPolicy) -> Self {
+    /// The two policies the queue carries are taken from `policy`, and the queue size from
+    /// `limits`, the two snapshots of the session the queue is built for.
+    pub const fn pico_of_snapshot(policy: &SessionPolicy, limits: &SessionLimits) -> Self {
         Self {
-            sizes: [build_pico_queue_size(); crate::qos::Priority::NUM],
+            sizes: [pico_queue_size(limits); crate::qos::Priority::NUM],
             wait_before_drop_us: WAIT_BEFORE_CLOSE_US,
             max_wait_before_drop_fragments_us: 0,
             wait_before_close_us: WAIT_BEFORE_CLOSE_US,
@@ -663,6 +663,12 @@ impl TxQueueConf {
             allocation: crate::link::QueueAllocation::Lazy,
             held_drop: HeldDrop::DropAtOnce,
         }
+    }
+
+    /// [`Self::pico_of_snapshot`] under the build's limits ([`SessionLimits::BUILD`]): the queue
+    /// of a creator that holds a policy snapshot and no snapshot of limits.
+    pub const fn pico_of_policy(policy: &SessionPolicy) -> Self {
+        Self::pico_of_snapshot(policy, &SessionLimits::BUILD)
     }
 
     /// Refuse a size outside `1..=16`, as upstream's config does, and a no-progress window
@@ -920,6 +926,7 @@ mod cookie_bound_tests {
 #[cfg(test)]
 mod no_progress_tests {
     use super::{TxQueueConf, TxQueueConfError, WAIT_BEFORE_CLOSE_US};
+    use crate::limits::SessionLimits;
     use crate::policy::SessionPolicy;
 
     /// Upstream's queue under the build defaults' policies.
@@ -1033,6 +1040,44 @@ mod no_progress_tests {
         assert_eq!(
             TxQueueConf::of_policy(&on).sizes,
             TxQueueConf::of_policy(&off).sizes
+        );
+    }
+
+    /// `PICO_TX_QUEUE_SIZE` with nothing stated: the pico queue holds the build's size for every
+    /// priority, the queue it held while it read the build's constant.
+    #[test]
+    fn pico_tx_queue_size_with_nothing_stated_holds_the_builds_value() {
+        let queue =
+            TxQueueConf::pico_of_snapshot(&SessionPolicy::defaults(), &SessionLimits::defaults());
+        let size = crate::caps::PICO_TX_QUEUE_SIZE.clamp(
+            crate::link::TxQueueShape::MIN_SIZE,
+            crate::link::TxQueueShape::MAX_SIZE,
+        );
+        assert!(queue.sizes.iter().all(|&s| s == size));
+        assert_eq!(queue, pico_queue());
+    }
+
+    /// `PICO_TX_QUEUE_SIZE` stated: the pico queue holds the stated size for every priority, and
+    /// nothing else of the queue moves with it. A build that keeps the build's value alone refuses
+    /// the statement itself.
+    #[test]
+    fn pico_tx_queue_size_stated_is_the_size_the_queue_holds() {
+        let build = crate::caps::PICO_TX_QUEUE_SIZE;
+        let other = if build > 1 { build - 1 } else { build + 1 };
+        let mut limits = SessionLimits::defaults();
+        if let Err(refused) = limits.select_pico_tx_queue_size(other) {
+            assert!(refused.domain.is_singleton(), "{other} is inside 1..=16");
+            assert_eq!(limits, SessionLimits::defaults());
+            return;
+        }
+        let queue = TxQueueConf::pico_of_snapshot(&SessionPolicy::defaults(), &limits);
+        assert!(queue.sizes.iter().all(|&s| s == other));
+        assert_eq!(
+            TxQueueConf {
+                sizes: pico_queue().sizes,
+                ..queue
+            },
+            pico_queue()
         );
     }
 

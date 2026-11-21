@@ -66,6 +66,7 @@ use wz_session_core::scouting_host::{
     SCOUTING_WHAT_DEFAULT,
 };
 
+use wz_session_core::limits::SessionLimits;
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::session_zid::SessionZid;
 
@@ -97,11 +98,14 @@ pub const Z_CONFIG_SCOUTING_WHAT_KEY: u8 = 0x48;
 /// otherwise. A scout needs no session, so the window is a plane beside the engine and not one of
 /// its methods; each engine's is the host that pumps the session's window rules over its sockets.
 ///
-/// Each window is handed the snapshot of the scout's config. The tokio engine opens its sockets
-/// under it; the cooperative engine's sockets read no policy of it.
+/// Each window is handed the two snapshots of the scout's config. The tokio engine opens its
+/// sockets under its policies; the cooperative engine's sockets read no policy of it, and its
+/// window over one datagram socket (`scout-mcu`) reads each datagram into a buffer of the
+/// multicast batch its limits hold (`PICO_MULTICAST_BATCH_BYTES`), as zenoh-pico reads a scout.
 mod window {
     use core::net::IpAddr;
 
+    use wz_session_core::limits::SessionLimits;
     use wz_session_core::policy::SessionPolicy;
     use wz_session_core::scouting_host::ScoutedHello;
     use wz_session_core::session_zid::SessionZid;
@@ -159,6 +163,7 @@ mod window {
         zid: Option<SessionZid>,
         budget_ms: u64,
         policy: &SessionPolicy,
+        _limits: &SessionLimits,
         on_hello: impl FnMut(&ScoutedHello),
     ) -> usize {
         wz_capi_core::scouting::run_scout(
@@ -168,6 +173,7 @@ mod window {
 
     /// Scout and answer the first node that replies, or `None` when none does in the window.
     #[cfg(feature = "engine-tokio")]
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn first(
         clock: &Clock,
         group: IpAddr,
@@ -176,6 +182,7 @@ mod window {
         zid: Option<SessionZid>,
         budget_ms: u64,
         policy: &SessionPolicy,
+        _limits: &SessionLimits,
     ) -> Option<ScoutedHello> {
         wz_capi_core::scouting::scout_first(*clock, group, port, what, zid, budget_ms, policy)
     }
@@ -191,12 +198,14 @@ mod window {
         zid: Option<SessionZid>,
         budget_ms: u64,
         _policy: &SessionPolicy,
+        _limits: &SessionLimits,
         on_hello: impl FnMut(&ScoutedHello),
     ) -> usize {
         wz_capi_coop::scout::run_scout(clock, group, port, what, zid, budget_ms, on_hello)
     }
 
     #[cfg(all(not(feature = "engine-tokio"), feature = "scout"))]
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn first(
         clock: &Clock,
         group: IpAddr,
@@ -205,6 +214,7 @@ mod window {
         zid: Option<SessionZid>,
         budget_ms: u64,
         _policy: &SessionPolicy,
+        _limits: &SessionLimits,
     ) -> Option<ScoutedHello> {
         wz_capi_coop::scout::scout_first(clock, group, port, what, zid, budget_ms)
     }
@@ -221,12 +231,23 @@ mod window {
         zid: Option<SessionZid>,
         budget_ms: u64,
         _policy: &SessionPolicy,
+        limits: &SessionLimits,
         on_hello: impl FnMut(&ScoutedHello),
     ) -> usize {
-        crate::coop_host::run_scout(clock, group, port, what, zid, budget_ms, on_hello)
+        crate::coop_host::run_scout(
+            clock,
+            group,
+            port,
+            what,
+            zid,
+            budget_ms,
+            limits.pico_multicast_batch_bytes(),
+            on_hello,
+        )
     }
 
     #[cfg(all(not(feature = "engine-tokio"), not(feature = "scout")))]
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn first(
         clock: &Clock,
         group: IpAddr,
@@ -235,8 +256,17 @@ mod window {
         zid: Option<SessionZid>,
         budget_ms: u64,
         _policy: &SessionPolicy,
+        limits: &SessionLimits,
     ) -> Option<ScoutedHello> {
-        crate::coop_host::scout_first(clock, group, port, what, zid, budget_ms)
+        crate::coop_host::scout_first(
+            clock,
+            group,
+            port,
+            what,
+            zid,
+            budget_ms,
+            limits.pico_multicast_batch_bytes(),
+        )
     }
 }
 
@@ -699,10 +729,12 @@ impl ScoutConfig {
 /// pico's lookup names the session's zid, which it minted when the config stated none; the
 /// engine mints this session's later, so a config that states none asks with a fresh one.
 ///
-/// `policy` is the snapshot the open resolved, which the lookup's sockets are opened under.
+/// `policy` and `limits` are the snapshots the open resolved, which the lookup's window is run
+/// under.
 pub(crate) fn locators_by_scout(
     cfg: &ConfigState,
     policy: &SessionPolicy,
+    limits: &SessionLimits,
 ) -> Result<Vec<String>, ZResult> {
     let read = ScoutConfig::read(Some(cfg))?;
     let Some((group, port)) = parse_multicast_locator(&read.locator) else {
@@ -712,10 +744,19 @@ pub(crate) fn locators_by_scout(
     // On the time base the config names, which `cfg` holds for the window, as the session opened
     // from it will run on.
     let clock = window::clock_of(Some(cfg));
-    window::first(&clock, group, port, read.what, zid, read.budget_ms, policy)
-        .map(|hello| hello.locators)
-        .filter(|locators| !locators.is_empty())
-        .ok_or(crate::result::Z_ERR_SCOUT_NO_RESULTS)
+    window::first(
+        &clock,
+        group,
+        port,
+        read.what,
+        zid,
+        read.budget_ms,
+        policy,
+        limits,
+    )
+    .map(|hello| hello.locators)
+    .filter(|locators| !locators.is_empty())
+    .ok_or(crate::result::Z_ERR_SCOUT_NO_RESULTS)
 }
 
 /// Active multicast scouting (pico `z_scout`).
@@ -764,18 +805,18 @@ pub unsafe extern "C" fn z_scout(
         Some(Box::from_raw(config_handle as *mut ConfigState))
     };
     let read = ScoutConfig::read(cfg.as_deref());
-    // The scout's snapshot, resolved as `z_open` resolves one from its config: a scout handed
-    // no config reads pico's defaults, the empty config, and one whose policies the build refuses
-    // is refused with the open's code.
+    // The scout's two snapshots, resolved as `z_open` resolves them from its config: a scout
+    // handed no config reads pico's defaults, the empty config, and one whose policies or limits
+    // the build refuses is refused with the open's code.
     let unstated = PolicyStatements::default();
-    let policy =
+    let snapshots =
         crate::session::resolve_policy(cfg.as_deref().map_or(&unstated, |cfg| &cfg.policies))
-            .map(|resolved| resolved.policy);
+            .map(|resolved| (resolved.policy, resolved.limits.session));
     // The window's clock: the time base the config names, which `cfg` holds and is kept for the
     // window, or the system's.
     let clock = window::clock_of(cfg.as_deref());
-    let (read, policy) = match (read, policy) {
-        (Ok(read), Ok(policy)) => (read, policy),
+    let (read, (policy, limits)) = match (read, snapshots) {
+        (Ok(read), Ok(snapshots)) => (read, snapshots),
         (Err(code), _) | (Ok(_), Err(code)) => {
             if let Some(drop_fn) = user_drop {
                 drop_fn(user_ctx);
@@ -804,6 +845,7 @@ pub unsafe extern "C" fn z_scout(
         zid,
         budget_ms,
         &policy,
+        &limits,
         |hello| {
             // The callback takes a MUTABLE loaned pointer (pico's signature), but
             // this side keeps ownership: the state is dropped when `run_scout`'s
@@ -845,7 +887,8 @@ pub unsafe extern "C" fn z_scout(
 /// twice here and there.
 ///
 /// All this side keeps is the ABI mapping: a scouted hello becomes the `HelloState` behind
-/// pico's `z_loaned_hello_t`. `policy` is the scout's snapshot, handed to the window.
+/// pico's `z_loaned_hello_t`. `policy` and `limits` are the scout's snapshots, handed to the
+/// window.
 #[allow(clippy::too_many_arguments)]
 fn run_scout(
     clock: &window::Clock,
@@ -855,17 +898,28 @@ fn run_scout(
     zid: Option<SessionZid>,
     budget_ms: u64,
     policy: &SessionPolicy,
+    limits: &SessionLimits,
     mut on_hello: impl FnMut(&mut HelloState),
 ) -> usize {
-    window::run(clock, group, port, what, zid, budget_ms, policy, |hello| {
-        let whatami = hello.whatami.map_or(0, |w| u32::from(w.to_api()));
-        let mut state = HelloState::new(
-            z_id_t::from_wire(&hello.zid),
-            whatami,
-            hello.locators.clone(),
-        );
-        on_hello(&mut state);
-    })
+    window::run(
+        clock,
+        group,
+        port,
+        what,
+        zid,
+        budget_ms,
+        policy,
+        limits,
+        |hello| {
+            let whatami = hello.whatami.map_or(0, |w| u32::from(w.to_api()));
+            let mut state = HelloState::new(
+                z_id_t::from_wire(&hello.zid),
+                whatami,
+                hello.locators.clone(),
+            );
+            on_hello(&mut state);
+        },
+    )
 }
 
 /// Adopt a loaned hello into an owned one (pico `z_hello_take_from_loaned`).

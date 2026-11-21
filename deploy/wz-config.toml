@@ -3046,7 +3046,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "none"
-read = "build"
+read = "snapshot"
 wire = "timing"
 help = '''
 How many batches each priority's outbound queue holds for the pico C ABI, in
@@ -3582,7 +3582,7 @@ storage = "quota"
 scope = "link"
 binding_heap = "open"
 binding_fixed = "none"
-read = "build"
+read = "snapshot"
 wire = "negotiated"
 help = '''
 The batch size, in bytes, a session of the zenoh-pico interface advertises when
@@ -3605,7 +3605,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "none"
-read = "build"
+read = "snapshot"
 # `wire` is visible: the Join states it, and a member that states another size is refused.
 wire = "visible"
 help = '''
@@ -3629,7 +3629,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "none"
-read = "build"
+read = "snapshot"
 wire = "negotiated"
 help = '''
 The lease, in milliseconds, a session of the zenoh-pico interface advertises,
@@ -3651,7 +3651,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "none"
-read = "build"
+read = "snapshot"
 wire = "timing"
 help = '''
 How long, in milliseconds, one read step of the cooperative zenoh-pico session
@@ -3674,7 +3674,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "none"
-read = "build"
+read = "snapshot"
 wire = "timing"
 help = '''
 How long, in milliseconds, each open of an endpoint by a zenoh-pico session
@@ -3696,7 +3696,7 @@ storage = "quota"
 scope = "link"
 binding_heap = "open"
 binding_fixed = "none"
-read = "build"
+read = "snapshot"
 wire = "none"
 help = '''
 The largest message, in bytes, a session of the zenoh-pico interface rejoins
@@ -3720,7 +3720,7 @@ storage = "quota"
 scope = "link"
 binding_heap = "open"
 binding_fixed = "none"
-read = "build"
+read = "snapshot"
 wire = "timing"
 help = '''
 How long, in milliseconds, a listening session of the zenoh-pico interface gives
@@ -3744,7 +3744,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "none"
-read = "build"
+read = "snapshot"
 wire = "timing"
 help = '''
 How many keepalives a session of the zenoh-pico interface sends in one lease,
