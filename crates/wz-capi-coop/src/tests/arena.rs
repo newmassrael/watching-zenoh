@@ -517,6 +517,29 @@ fn each_link_is_lent_reassembly_buffers_of_the_snapshots_length() {
     }
 }
 
+/// The ends of the session's legs are lent a row for each get every table of pending gets holds,
+/// the only place an end waits for its delivery.
+#[cfg(feature = "query")]
+#[test]
+fn the_plan_lends_a_row_for_the_end_of_each_get() {
+    let plan = ArenaPlan::of(
+        &CoopConfig {
+            max_faces: 2,
+            ..client_config()
+        },
+        &SessionLimits::defaults(),
+    )
+    .expect("lays an arena out");
+    let gets = plan.gets();
+    let legs = gets.tables * (gets.rows.queries + gets.rows.liveliness_gets);
+    assert_eq!(gets.legs(), Some(legs));
+    assert_eq!(row(&plan, "ended legs").count, legs);
+    assert_eq!(
+        row(&plan, "ended legs").entry_bytes,
+        core::mem::size_of::<u64>()
+    );
+}
+
 /// The queries held for their callbacks are the value of `MAX_PENDING_FINALS` the open resolved,
 /// the build's for a session that states none.
 #[cfg(feature = "queryable")]

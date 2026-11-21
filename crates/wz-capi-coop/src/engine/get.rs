@@ -14,11 +14,18 @@
 //! leg's END when the entry is dropped (its Final, its deadline, its cancellation, the loss of its
 //! link), said by a guard the sink owns. The deliveries hand both out with no lock held, the end
 //! as the drop of the leg's callback, which is how a C program learns its get is over.
+//!
+//! The ends wait in a table the session's arena lent ([`EndedLegs`]), a row for each get the
+//! session's tables of pending gets can hold. A leg ends when its row in those tables goes, and the
+//! deliveries that follow every step take every end out, so the ends waiting never outnumber the
+//! rows; a leg the session ends itself (cancelled, or never sent) drops its callback where it ends
+//! it and leaves no end waiting.
 
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 
 use wz_capi_port::os::Mutex;
+use wz_session_core::bounded::{BoundedVec, Lent};
 
 use wz_session_core::reply::InboundReply;
 use wz_session_core::reply_sink::{BoxedReplySink, ReplyView};
@@ -26,23 +33,60 @@ use wz_session_core::reply_sink::{BoxedReplySink, ReplyView};
 use super::lock;
 use super::registry::{FaceId, Registry};
 
-/// What a get leg's sink queued, in the order it happened.
-///
-/// Nearly every event is a reply and a leg ends once, so a slot sized for the reply wastes
-/// nothing a boxed reply would save, and boxing would cost each reply an allocation.
-#[allow(clippy::large_enum_variant)]
-pub(super) enum GetEvent {
-    /// A reply for the leg's callback.
-    Reply(u64, InboundReply),
-    /// The leg is over: its callback is dropped.
-    End(u64),
+/// The legs whose entries went and whose callbacks are still to be dropped, a row for each get the
+/// session's tables of pending gets hold (see the module).
+pub(super) struct EndedLegs {
+    legs: BoundedVec<u64, { usize::MAX }, Lent>,
+}
+
+impl EndedLegs {
+    /// A table over the rows `legs` an arena lent.
+    pub(super) fn over(legs: BoundedVec<u64, { usize::MAX }, Lent>) -> Self {
+        Self { legs }
+    }
+
+    /// Leg `leg` ended: its callback is to be dropped.
+    fn note(&mut self, leg: u64) {
+        let kept = self.legs.push(leg);
+        debug_assert!(
+            kept.is_ok(),
+            "the ends waiting outnumber the rows of the tables of pending gets"
+        );
+    }
+
+    /// A leg whose callback is still to be dropped, if any.
+    pub(super) fn take(&mut self) -> Option<u64> {
+        self.legs.pop()
+    }
+
+    /// Leg `leg`'s callback was dropped where its end was decided: nothing is left to do for it.
+    pub(super) fn forget(&mut self, leg: u64) {
+        self.legs.retain(|ended| *ended != leg);
+    }
+
+    /// Drop every end still waiting: the session is closed, and its legs' callbacks with it.
+    pub(super) fn clear(&mut self) {
+        self.legs.clear();
+    }
 }
 
 /// What the get plane shares between the session's state, the observer's reply sinks and the
 /// deliveries.
-#[derive(Default)]
 pub(super) struct GetPlane {
-    pub(super) events: Mutex<VecDeque<GetEvent>>,
+    /// The replies the legs' sinks queued, in the order they came.
+    pub(super) replies: Mutex<VecDeque<(u64, InboundReply)>>,
+    /// The legs that ended, handed out after the replies queued before them.
+    pub(super) ended: Mutex<EndedLegs>,
+}
+
+impl GetPlane {
+    /// A plane with nothing queued, its ends waiting in `ended`.
+    pub(super) fn new(ended: EndedLegs) -> Self {
+        Self {
+            replies: Mutex::new(VecDeque::new()),
+            ended: Mutex::new(ended),
+        }
+    }
 }
 
 /// Which of the observer's registries a pending leg's entry is in, and the id it is registered
@@ -91,7 +135,7 @@ struct LegEnd {
 
 impl Drop for LegEnd {
     fn drop(&mut self) {
-        lock(&self.plane.events).push_back(GetEvent::End(self.leg));
+        lock(&self.plane.ended).note(self.leg);
     }
 }
 
@@ -106,11 +150,68 @@ pub(super) fn reply_sink(leg: u64, plane: &Arc<GetPlane>) -> BoxedReplySink {
     };
     BoxedReplySink::new(
         move |view: &dyn ReplyView| {
-            lock(&replies.events).push_back(GetEvent::Reply(leg, InboundReply::from_view(view)));
+            lock(&replies.replies).push_back((leg, InboundReply::from_view(view)));
         },
         move |_rid| {
             // Owned by this closure so it is dropped with the sink.
             let _ = &end;
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    //! The ends of the legs wait in rows an arena lent, each handed out once.
+    use super::*;
+    use crate::arena::{AllocatorMemory, SessionArena};
+
+    /// A table of ends and the arena it was lent from, the table first so it goes before the memory
+    /// it lies in.
+    struct Held {
+        ends: EndedLegs,
+        _arena: SessionArena,
+    }
+
+    /// A table of `rows` ends over an arena of its own.
+    fn ended(rows: usize) -> Held {
+        let mut arena =
+            SessionArena::of_bytes(1 << 12, &AllocatorMemory).expect("the host has the memory");
+        let legs = arena.lend(rows).expect("the arena has the rows");
+        Held {
+            ends: EndedLegs::over(legs),
+            _arena: arena,
+        }
+    }
+
+    /// Each end noted is taken once, an end its leg's maker handled itself is not taken, and a
+    /// closed session's ends are all let go.
+    #[test]
+    fn each_end_is_taken_once_and_a_forgotten_one_never() {
+        let mut held = ended(3);
+        let ends = &mut held.ends;
+        ends.note(1);
+        ends.note(2);
+        ends.note(3);
+        ends.forget(2);
+        let mut taken = [ends.take(), ends.take(), ends.take()];
+        taken.sort();
+        assert_eq!(taken, [None, Some(1), Some(3)]);
+        ends.note(4);
+        ends.clear();
+        assert_eq!(ends.take(), None, "a closed session hands out no end");
+    }
+
+    /// A table lent no rows is the defect the plan rules out: the end is not kept, and a debug
+    /// build stops there.
+    #[test]
+    #[cfg_attr(
+        debug_assertions,
+        should_panic(expected = "the ends waiting outnumber")
+    )]
+    fn an_end_past_the_rows_is_a_defect() {
+        let mut held = ended(0);
+        let ends = &mut held.ends;
+        ends.note(1);
+        assert_eq!(ends.take(), None);
+    }
 }

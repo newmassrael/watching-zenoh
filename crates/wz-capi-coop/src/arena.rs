@@ -15,7 +15,8 @@
 //! - one table of the gets pending on a face (`MAX_PENDING_QUERIES`, and with `liveliness-get`
 //!   `MAX_PENDING_LIVELINESS_GETS`) for each face the session may hold at once, which a face
 //!   takes when it comes and gives back when it goes, and with `local-queryable` one of those
-//!   pending on the session's own queryables, which no face holds ([`GetTables`]);
+//!   pending on the session's own queryables, which no face holds ([`GetTables`]), and with
+//!   `query` a row for the end of each get those tables hold, waiting for its delivery;
 //! - one table of what a face's peer writes and is owed for each face the session may hold at once,
 //!   taken and given back as the face's gets are ([`FacePeers`]): its subscriber interests
 //!   (`MAX_INBOUND_SUB_INTERESTS`), the answers staged back to them and to its liveliness
@@ -119,7 +120,7 @@ impl ArenaRow {
 }
 
 /// The most rows a plan holds: every row of the build with every feature.
-pub const ARENA_ROWS: usize = 22;
+pub const ARENA_ROWS: usize = 23;
 
 /// The slots each link is lent to encode its frames into: a batching session holds a batch open in
 /// one slot while it encodes the next message, which does not join it, into another.
@@ -188,6 +189,17 @@ pub struct GetTables {
     pub rows: RequesterRows,
     /// How many tables.
     pub tables: usize,
+}
+
+impl GetTables {
+    /// How many gets every table together holds pending at once: the rows of the table of the ends
+    /// of the legs (`crate::engine`'s `EndedLegs`). `None` past the address space.
+    pub const fn legs(&self) -> Option<usize> {
+        match self.rows.queries.checked_add(self.rows.liveliness_gets) {
+            Some(each) => each.checked_mul(self.tables),
+            None => None,
+        }
+    }
 }
 
 /// One face's table of pending gets, as the arena lends it.
@@ -380,6 +392,14 @@ impl ArenaPlan {
             "MAX_PENDING_QUERIES + MAX_PENDING_LIVELINESS_GETS",
             plan.gets.tables,
             FaceGets::arena_bytes(plan.gets.rows).ok_or(ArenaRefused::TooLarge)?,
+        );
+        // The ends of the legs, a row for each get every table holds (`GetTables::legs`).
+        #[cfg(feature = "query")]
+        plan.put(
+            "ended legs",
+            "MAX_PENDING_QUERIES + MAX_PENDING_LIVELINESS_GETS",
+            plan.gets.legs().ok_or(ArenaRefused::TooLarge)?,
+            core::mem::size_of::<u64>(),
         );
         // A row of tables, each what one face's peer writes and is owed: a face takes one whole.
         plan.peers = FacePeers {
@@ -703,9 +723,8 @@ impl SessionArena {
         Self::of_bytes(plan.reserved_bytes().ok_or(ArenaRefused::TooLarge)?, memory)
     }
 
-    /// Reserve an arena of `bytes` from `memory`: what a session takes past its plan when the
-    /// thing it is for comes (a face attached beyond the faces the open planned for). Refused,
-    /// having taken nothing, when the memory has none to give.
+    /// Reserve an arena of `bytes` from `memory`. Refused, having taken nothing, when the memory has
+    /// none to give.
     pub(crate) fn of_bytes(
         bytes: usize,
         memory: &'static dyn ArenaMemory,

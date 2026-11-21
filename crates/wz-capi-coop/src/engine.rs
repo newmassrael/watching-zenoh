@@ -187,7 +187,7 @@ use {
 mod get;
 #[cfg(feature = "query")]
 use {
-    get::{GetEvent, GetKind, GetPlane, PendingGet},
+    get::{EndedLegs, GetKind, GetPlane, PendingGet},
     wz_capi_port::{cancellation::CancellableFan, NoRoomToHold, ReplyCallback},
     wz_session_core::query_options::QueryOptions,
     wz_session_core::registry_error::RegisterError,
@@ -2624,9 +2624,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             },
             plan.gets(),
             plan.peers(),
-            memory,
         )
         .map_err(|lend| OpenError::Arena(ArenaRefused::Lend(lend)))?;
+        // The ends of the session's legs wait in rows the plan counts for them.
+        #[cfg(feature = "query")]
+        let ended = EndedLegs::over(
+            arena
+                .lend(
+                    plan.gets()
+                        .legs()
+                        .ok_or(OpenError::Arena(ArenaRefused::TooLarge))?,
+                )
+                .map_err(OpenError::Arena)?,
+        );
         let runtime = CoopRuntime::new(clock.clone());
         let local = CoopLocalSet::new(&runtime);
         // The dial role's link, each port, each group and the clock's word: what a session waits on
@@ -2688,7 +2698,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             #[cfg(feature = "query")]
             pending_gets: Vec::new(),
             #[cfg(feature = "query")]
-            gets: Arc::new(GetPlane::default()),
+            gets: Arc::new(GetPlane::new(ended)),
             #[cfg(feature = "liveliness")]
             tokens,
             #[cfg(feature = "liveliness")]
@@ -3173,32 +3183,33 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         }
         #[cfg(feature = "query")]
         loop {
-            let next = lock(&self.gets.events).pop_front();
-            match next {
-                None => break,
-                Some(GetEvent::Reply(leg, reply)) => {
-                    let callback =
-                        lock(&self.targets)
-                            .iter()
-                            .find_map(|(t, target)| match target {
-                                Target::Reply(cb) if *t == TargetKey::Reply(leg) => {
-                                    Some(cb.clone())
-                                }
-                                _ => None,
-                            });
-                    if let Some(callback) = callback {
-                        (lock(&callback))(&reply);
-                    }
-                }
-                // The leg is over: its callback is dropped here, with no lock held, which is
-                // how the C program learns it (the reply closure's `drop(context)`).
-                Some(GetEvent::End(leg)) => {
-                    if let Some(mut core) = self.live() {
-                        core.0.pending_gets.retain(|pending| pending.leg != leg);
-                    }
-                    drop(self.take_target(TargetKey::Reply(leg)));
-                }
+            let next = lock(&self.gets.replies).pop_front();
+            let Some((leg, reply)) = next else {
+                break;
+            };
+            let callback = lock(&self.targets)
+                .iter()
+                .find_map(|(t, target)| match target {
+                    Target::Reply(cb) if *t == TargetKey::Reply(leg) => Some(cb.clone()),
+                    _ => None,
+                });
+            if let Some(callback) = callback {
+                (lock(&callback))(&reply);
             }
+        }
+        // The legs that are over, after every reply queued before their ends: each callback is
+        // dropped here, with no lock held, which is how the C program learns it (the reply
+        // closure's `drop(context)`).
+        #[cfg(feature = "query")]
+        loop {
+            let next = lock(&self.gets.ended).take();
+            let Some(leg) = next else {
+                break;
+            };
+            if let Some(mut core) = self.live() {
+                core.0.pending_gets.retain(|pending| pending.leg != leg);
+            }
+            drop(self.take_target(TargetKey::Reply(leg)));
         }
     }
 
@@ -3475,6 +3486,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 pending.unregister(&mut core.registry.borrow_mut());
             }
         }
+        self.end_leg_now(leg);
+    }
+
+    /// Drop leg `leg`'s callback here, its end decided by the session itself (cancelled, or never
+    /// sent), and leave no end of it waiting for a delivery.
+    #[cfg(feature = "query")]
+    fn end_leg_now(&self, leg: u64) {
+        lock(&self.gets.ended).forget(leg);
         drop(self.take_target(TargetKey::Reply(leg)));
     }
 
@@ -4780,7 +4799,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                     tables.gets.replies.unregister(rid);
                 }
                 drop(guard);
-                drop(self.take_target(TargetKey::Reply(leg_id)));
+                self.end_leg_now(leg_id);
                 continue;
             }
             core.pending_gets.push(PendingGet {
@@ -4861,7 +4880,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                     tables.gets.replies.unregister(rid);
                 }
                 drop(guard);
-                drop(self.take_target(TargetKey::Reply(leg_id)));
+                self.end_leg_now(leg_id);
                 continue;
             }
             core.pending_gets.push(PendingGet {
@@ -5006,7 +5025,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                     tables.gets.liveliness_gets.unregister(interest_id);
                 }
                 drop(guard);
-                drop(self.take_target(TargetKey::Reply(leg_id)));
+                self.end_leg_now(leg_id);
                 continue;
             }
             core.pending_gets.push(PendingGet {
@@ -5275,7 +5294,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         let handed = core::mem::take(&mut *lock(&self.handed));
         drop(handed);
         #[cfg(feature = "query")]
-        drop(core::mem::take(&mut *lock(&self.gets.events)));
+        drop(core::mem::take(&mut *lock(&self.gets.replies)));
+        #[cfg(feature = "query")]
+        lock(&self.gets.ended).clear();
         // The queries no callback will now answer, and the callbacks' C contexts, are dropped
         // with no lock held.
         #[cfg(feature = "queryable")]
