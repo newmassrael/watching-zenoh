@@ -4402,6 +4402,10 @@ pub struct OpenStance {
     /// The snapshot of the session limits, resolved by the same open and handed to the same
     /// sessions as [`Self::session_policy`]: their tables read their bounds here.
     pub session_limits: wz_session_core::limits::SessionLimits,
+    /// The snapshot of the node's runtime limits, resolved by the same open: the node a router
+    /// or forwarding peer open runs reads its limits here, the directory of the locators it dials
+    /// from among them.
+    pub runtime_limits: wz_session_core::limits::RuntimeLimits,
     /// The transport the program supplies, which carries every link the session dials or listens
     /// on in place of the system's sockets; `None` opens on the sockets the locators name. A
     /// locator the transport does not carry fails the open as a scheme this build does not know.
@@ -6194,6 +6198,7 @@ mod tests {
             session_defaults: Default::default(),
             session_policy: SessionPolicy::defaults(),
             session_limits: wz_session_core::limits::SessionLimits::defaults(),
+            runtime_limits: wz_session_core::limits::RuntimeLimits::defaults(),
             #[cfg(feature = "app-transport")]
             app_transport: None,
         }

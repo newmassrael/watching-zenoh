@@ -1203,6 +1203,9 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             session_defaults: wz_capi_core::session_defaults::SessionDefaults::default(),
             session_policy: policy,
             session_limits: limits,
+            // pico's configuration states no limit of a node, so a node its open runs holds the
+            // build's.
+            runtime_limits: wz_session_core::limits::RuntimeLimits::defaults(),
             #[cfg(feature = "app-transport")]
             app_transport,
         },

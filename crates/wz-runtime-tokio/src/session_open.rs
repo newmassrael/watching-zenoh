@@ -34,6 +34,7 @@ use tokio::net::{TcpListener, TcpStream};
 use wz_runtime_core::TimeSource;
 #[cfg(feature = "routing-namespace")]
 use wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr;
+use wz_session_core::limits::RuntimeLimits;
 // R311y473 — the single dialable-locator scheme table `advertised_locator`
 // delegates to (and the adminspace per-link emitter shares).
 use wz_session_core::link::LinkKind;
@@ -328,6 +329,11 @@ pub struct DialConfig {
     /// the system's sockets. `None` (the default) dials the sockets the locator names.
     #[cfg(feature = "transport-link-app")]
     pub app: Option<Arc<AppTransport>>,
+    /// The runtime limits of the node that dials with this config, as its creator resolved them:
+    /// the loop that dials from a directory of hints holds the directory to them. The build's
+    /// ([`RuntimeLimits::BUILD`]) unless the node states its own
+    /// ([`Self::with_runtime_limits`]).
+    pub runtime_limits: RuntimeLimits,
 }
 
 impl Default for DialConfig {
@@ -341,6 +347,7 @@ impl Default for DialConfig {
             open_timeout: OPEN_TIMEOUT,
             #[cfg(feature = "transport-link-app")]
             app: None,
+            runtime_limits: RuntimeLimits::BUILD,
         }
     }
 }
@@ -398,6 +405,14 @@ impl DialConfig {
     pub fn handshake_timeouts(&self) -> SessionTimeouts {
         SessionTimeouts::from_build().with_open_timeout(self.open_timeout)
     }
+
+    /// The runtime limits of the node that dials with this config, resolved by its creator from
+    /// the node's document; a machine of the node reads a limit of the node here.
+    pub fn with_runtime_limits(mut self, runtime_limits: RuntimeLimits) -> Self {
+        self.runtime_limits = runtime_limits;
+        self
+    }
+
     /// R2592 — supply the per-link-kind socket configuration every dial layers
     /// its locator's options over. Ungated, like the layer itself.
     pub fn with_link_defaults(mut self, link_defaults: LinkDefaults) -> Self {
@@ -6868,6 +6883,22 @@ pub async fn open_session_static_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A dial config holds the build's runtime limits until the node states its own, and then
+    /// the node's, which the loop that dials with it reads.
+    #[test]
+    fn a_dial_config_holds_the_runtime_limits_its_node_states() {
+        use wz_session_core::limit_binding::Quota;
+        assert_eq!(DialConfig::default().runtime_limits, RuntimeLimits::BUILD);
+        let mut stated = RuntimeLimits::BUILD;
+        if stated.select_max_locator_len(Quota::at_most(2)).is_err() {
+            // The build allows one value: there is no other snapshot to state.
+            return;
+        }
+        let config = DialConfig::default().with_runtime_limits(stated);
+        assert_eq!(config.runtime_limits, stated);
+        assert_eq!(config.runtime_limits.max_locator_len(), Quota::at_most(2));
+    }
 
     /// R2944 — a dial's offer carries the QoS metadata of the ENDPOINT that
     /// names the link, and only that: read under a QoS offer (upstream's

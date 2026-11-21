@@ -46,7 +46,7 @@ use wz_runtime_tokio::zenoh_config::{
 };
 #[cfg(feature = "routing-namespace")]
 use wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr;
-use wz_session_core::limits::SessionLimits;
+use wz_session_core::limits::{RuntimeLimits, SessionLimits};
 use wz_session_core::region_partition::SouthPartition;
 
 use crate::drive::{
@@ -934,6 +934,10 @@ pub struct OpenPlan {
     /// the same machines as [`Self::session_policy`]: a table reads its bound here and never from
     /// the build.
     pub session_limits: SessionLimits,
+    /// The snapshot of the node's runtime limits the open resolved ([`resolve_snapshot`]),
+    /// handed to the machines of the node the open runs: the directory of the locators it dials
+    /// from reads its bound here and never from the build.
+    pub runtime_limits: RuntimeLimits,
 }
 
 /// The policies and the limits an open from `node` (the document the open read, or `None` when
@@ -1419,6 +1423,7 @@ impl OpenPlan {
             session,
             session_policy,
             session_limits: snapshot.limits.session,
+            runtime_limits: snapshot.limits.runtime,
         })
     }
 
@@ -1541,6 +1546,7 @@ impl OpenPlan {
                 session_defaults: self.session,
                 session_policy: self.session_policy,
                 session_limits: self.session_limits,
+                runtime_limits: self.runtime_limits,
                 // A plan reads a zenoh configuration document, which names no transport of the
                 // program's.
                 #[cfg(feature = "app-transport")]
@@ -1901,6 +1907,39 @@ mod tests {
         assert_eq!(
             resolve_snapshot(None).limits.session,
             SessionLimits::defaults()
+        );
+    }
+
+    /// The plan holds the runtime limits the document's `wz/limits` states for the node, for
+    /// each member of the corpus the plan takes, and the build's with no document.
+    #[test]
+    fn the_plan_holds_the_runtime_limits_the_document_states() {
+        use wz_session_core::limit_corpus::cases;
+
+        for case in cases() {
+            let Ok(plan) = plan_of(
+                WhatAmI::Client,
+                &["tcp/127.0.0.1:7447"],
+                &[],
+                &case.document(),
+            ) else {
+                assert!(!case.node.is_selected(), "{}: refused", case.name);
+                continue;
+            };
+            if let Err(why) = case.node.check_runtime(&plan.runtime_limits) {
+                panic!("{}: {why}", case.name);
+            }
+            let node = node_of(&case.document());
+            assert_eq!(
+                resolve_snapshot(Some(&node)).limits.runtime,
+                plan.runtime_limits,
+                "{}",
+                case.name
+            );
+        }
+        assert_eq!(
+            resolve_snapshot(None).limits.runtime,
+            RuntimeLimits::defaults()
         );
     }
 

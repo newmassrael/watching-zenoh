@@ -2770,7 +2770,7 @@ storage = "both"
 scope = ["runtime", "link"]
 binding_heap = "open"
 binding_fixed = "build"
-read = "build"
+read = "snapshot"
 wire = "none"
 help = '''
 The longest locator, in bytes, a node stores: one it is told to connect

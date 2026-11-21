@@ -113,6 +113,8 @@ def declared_pending(decl: dict) -> dict[str, str]:
 #: stay a read of the build. One line per allowed site.
 ALLOWED: tuple[tuple[str, str, str], ...] = (
     ("crates/wz-session-core/src/pubsub.rs", "_", "a build-time assertion on the storage the constant sizes: a fixed table's rows fit the u16 positions of the match cache"),
+    ("crates/wz-runtime-coop/src/session_drive.rs", "_", "a build-time assertion on the storage the constant sizes: the cooperative engine's locator text holds every IPv4 locator"),
+    ("crates/wz-session-mcu/src/connect_manager.rs", "new", "a compile-time check of the endpoints a fixed image names against the locator rows the build sizes; the fixed connect manager holds no snapshot"),
 )
 
 #: (path pattern relative to the root, innermost item, reason): a site that reads a snapshot it

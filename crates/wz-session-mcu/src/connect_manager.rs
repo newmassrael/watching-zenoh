@@ -44,7 +44,7 @@ use core::convert::Infallible;
 
 use heapless::Vec as FixedVec;
 use wz_session_core::bounded::BoundedVec;
-use wz_session_core::caps::{MAX_LOCATOR_LEN, MAX_PEER_NODES, MAX_STATIC_CONNECT};
+use wz_session_core::caps::{self, MAX_PEER_NODES, MAX_STATIC_CONNECT};
 use wz_session_core::connect_endpoints::{group_len, ConnectEndpoints, ConnectEntry, EndpointText};
 use wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES;
 #[cfg(any(
@@ -96,7 +96,7 @@ impl StaticEndpoints {
         let mut i = 0;
         while i < list.len() {
             assert!(
-                list[i].len() <= MAX_LOCATOR_LEN,
+                list[i].len() <= caps::MAX_LOCATOR_LEN,
                 "an endpoint longer than a locator row"
             );
             i += 1;
