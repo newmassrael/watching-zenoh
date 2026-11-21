@@ -38,3 +38,28 @@ config WZ_ROLE_ROUTER
 	  by default.
 
 endchoice
+
+choice WZ_ENGINE
+	prompt "The engine a pico ABI build runs its sessions on"
+	default WZ_ENGINE_TOKIO
+	help
+	  The tokio engine runs every capability of the pico ABI; the cooperative engine is the one
+	  sans-I/O engine the C ABI presets move to, and runs every capability but those of the tokio
+	  engine's own drive (its drive thread, its busy read) and the planes not yet ported to it.
+
+config WZ_ENGINE_TOKIO
+	bool "The tokio engine: each session on a runtime of its own"
+	help
+	  `engine-tokio` with the two switches of its drive (`serial-drive-own-thread`, `rx-busy-poll`),
+	  as the base of the pico ABI names them.
+
+config WZ_ENGINE_COOP
+	bool "The cooperative engine: each session stepped by the program or its read task"
+	help
+	  `engine-coop`: a session is stepped by the program's own calls (zp_read, zp_spin_once) in
+	  zenoh-pico's single-threaded arm, and by the read task the program starts in its multi-threaded
+	  arm, as zenoh-pico's are. The base's tokio switches are left out of the build; a configuration
+	  that also turns on a capability only the tokio engine runs is refused when it is resolved, by the
+	  capability's name.
+
+endchoice
