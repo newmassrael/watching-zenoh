@@ -85,12 +85,14 @@ pub enum AppLinkError {
 
 /// Waiting on a link: parking the host's thread (`wait_parked`), or looking for a bounded number
 /// of turns on an image (`wait_turns`). The build names one of them `wait`.
-#[cfg(feature = "host-lock")]
+#[cfg(all(feature = "host-lock", not(feature = "host-lock-sys")))]
 use wait_parked as wait;
+#[cfg(feature = "host-lock-sys")]
+use wait_parked_sys as wait;
 #[cfg(not(feature = "host-lock"))]
 use wait_turns as wait;
 
-#[cfg(feature = "host-lock")]
+#[cfg(all(feature = "host-lock", not(feature = "host-lock-sys")))]
 mod wait_parked {
     extern crate std;
 
@@ -140,6 +142,63 @@ mod wait_parked {
                 return;
             }
             std::thread::park();
+        }
+    }
+}
+
+/// `wait_parked` in a host library without `std` (`host-lock-sys`): the thread waits on a
+/// parker of its own (`wz-host-sync`), which the waker wakes, and the deadline is on the host's
+/// monotonic clock, as `std`'s park and `Instant` are.
+#[cfg(feature = "host-lock-sys")]
+mod wait_parked_sys {
+    use alloc::sync::Arc;
+    use alloc::task::Wake;
+    use core::task::{Context, Waker};
+
+    use wz_host_sync::{monotonic_ns, Parker};
+
+    struct Unpark(Parker);
+
+    impl Wake for Unpark {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+
+    /// Wait up to `timeout_ms` while `pending` answers `true`, handing it the waker the
+    /// program's calls wake this thread by.
+    pub(super) fn wait_while(timeout_ms: u64, mut pending: impl FnMut(Option<&Waker>) -> bool) {
+        let unpark = Arc::new(Unpark(Parker::new()));
+        let waker = Waker::from(Arc::clone(&unpark));
+        let deadline = monotonic_ns().saturating_add(timeout_ms.saturating_mul(1_000_000));
+        while pending(Some(&waker)) {
+            let now = monotonic_ns();
+            if now >= deadline {
+                return;
+            }
+            unpark.0.park_timeout_ns(deadline - now);
+        }
+    }
+
+    /// Wait while `pending` answers `true` and `bound`, a sleep of the session's clock, has not
+    /// ended: the thread waits until the program's calls or the clock's move wake it, both by the
+    /// one waker, and the wall clock bounds nothing.
+    pub(super) fn wait_while_bound(
+        mut bound: super::BoundSleep,
+        mut pending: impl FnMut(Option<&Waker>) -> bool,
+    ) {
+        let unpark = Arc::new(Unpark(Parker::new()));
+        let waker = Waker::from(Arc::clone(&unpark));
+        let mut cx = Context::from_waker(&waker);
+        while pending(Some(&waker)) {
+            if bound.as_mut().poll(&mut cx).is_ready() {
+                return;
+            }
+            unpark.0.park();
         }
     }
 }

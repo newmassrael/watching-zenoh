@@ -450,9 +450,10 @@ instance-key = [
 # as the reference build is, and part of the unstable surface as the other wz doors are. The
 # transport object is the session core's and its table is held under the port's lock, so it serves
 # either engine and selects neither: the tokio engine's links over the program's stack, or the
-# cooperative engine's, whichever the build has.
+# cooperative engine's, whichever the build has. A link's wait parks the thread, which a host
+# without `std` does through `wz-host-sync` (`wz-runtime-coop`'s `host-lock-sys`), so it selects no
+# `std`.
 app-transport = [
-    "std",
     "unstable-api",
     "wz-session-core/app-link",
     "wz-capi-core?/app-transport",

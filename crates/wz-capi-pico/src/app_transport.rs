@@ -31,8 +31,8 @@
 //! own thread before `open` returns finds it. A stream the program accepts on a listener is named
 //! by `wz_ext_transport_accepted`, which returns its handle. A handle is never reused.
 
+use alloc::sync::Arc;
 use core::ffi::{c_char, c_void, CStr};
-use std::sync::Arc;
 
 use wz_session_core::app_link_table::AppLinkTable;
 use wz_session_core::app_link_table::{
@@ -43,6 +43,7 @@ use wz_session_core::app_transport::{AppPort, AppTransport, TableLock};
 use crate::abi::z_loaned_config_t;
 use crate::config::ConfigState;
 use crate::ffi::{guard_val, guarded};
+use crate::prelude::Box;
 use crate::result::{ZResult, Z_EINVAL, Z_ERR_NULL, Z_OK};
 
 /// A link of a transport the program supplies. 0 never names one.
@@ -169,7 +170,7 @@ unsafe impl Sync for ProgramPort {}
 
 impl AppPort for ProgramPort {
     fn open(&self, link: LinkHandle, kind: AppLinkKind, locator: &str) -> ProgramOpen {
-        let Ok(text) = std::ffi::CString::new(locator) else {
+        let Ok(text) = alloc::ffi::CString::new(locator) else {
             // A locator with a NUL in it is one the program could not read.
             return ProgramOpen::Refused;
         };
