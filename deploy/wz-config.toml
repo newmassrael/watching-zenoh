@@ -3126,6 +3126,9 @@ storage = "both"
 scope = "runtime"
 binding_heap = "open"
 binding_fixed = "build"
+# Read from the build: no RuntimeLimits exists where the supervisor is made. Only the tokio node
+# holds one, and it makes no supervisor; the one supervisor of the process is made by the first
+# call of a supervision door of the pico or C ABI, and those doors hold no RuntimeLimits.
 read = "build"
 wire = "none"
 help = '''
@@ -3148,6 +3151,9 @@ storage = "quota"
 scope = "runtime"
 binding_heap = "open"
 binding_fixed = "open"
+# Read from the build: no RuntimeLimits exists where a reception supervisor is made. Only the
+# tokio node holds one, and it makes no reception supervisor; `wz_ext_stream_supervisor_new`
+# makes it, and the pico and C doors hold no RuntimeLimits.
 read = "build"
 wire = "none"
 help = '''
@@ -3271,6 +3277,9 @@ storage = "both"
 scope = "entity"
 binding_heap = "open"
 binding_fixed = "build"
+# Read from the build: the judge is no entity of a session. `wz_ext_e2e_receiver_new` and the
+# catalog's receiver door make it from a profile with no session, a program makes it before it
+# opens one, and the replay subscriber takes one made apart; no SessionLimits is in reach.
 read = "build"
 wire = "none"
 help = '''
@@ -3325,6 +3334,9 @@ storage = "both"
 scope = "runtime"
 binding_heap = "open"
 binding_fixed = "build"
+# Read from the build: no RuntimeLimits exists where a catalog is made. Only the tokio node holds
+# one, and it makes no catalog; `wz_ext_message_catalog_new` makes it, and the pico and C doors
+# hold no RuntimeLimits.
 read = "build"
 wire = "none"
 help = '''
@@ -3350,6 +3362,9 @@ storage = "both"
 scope = "entity"
 binding_heap = "open"
 binding_fixed = "build"
+# Read from the build: the keyer is no entity of a session. `wz_ext_instance_keyer_new` and the
+# catalog read a description with no session, and a program makes a keyer before it opens one; no
+# SessionLimits is in reach.
 read = "build"
 wire = "none"
 help = '''
@@ -3377,6 +3392,9 @@ storage = "both"
 scope = "entity"
 binding_heap = "open"
 binding_fixed = "build"
+# Read from the build: the keyer is no entity of a session. `wz_ext_instance_keyer_new` and the
+# catalog read a description with no session, and a program makes a keyer before it opens one; no
+# SessionLimits is in reach.
 read = "build"
 wire = "none"
 help = '''
