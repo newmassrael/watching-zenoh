@@ -1142,6 +1142,7 @@ fn what_is_written_is_read_back_under_the_names_the_schema_declares() {
 /// narrowed as this writer narrows) and the same values given as JSON here come
 /// out as the same bytes, because both are written by `wz_app_frame::proto_write`;
 /// and both are the bytes the encoding rules give, laid out by hand below.
+#[cfg(feature = "message-payload")]
 #[test]
 fn the_json_writer_and_a_programs_payload_write_one_message_alike() {
     use wz_app_frame::message_payload::{Given, Payload};

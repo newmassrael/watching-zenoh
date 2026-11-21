@@ -959,7 +959,7 @@ jobs:
           if compgen -G "/usr/lib/llvm-*/lib/libclang*.so*" > /dev/null; then
             echo "libclang: $(compgen -G '/usr/lib/llvm-*/lib/libclang*.so*' | head -n 1)"
           else
-            sudo apt-get update -q && sudo apt-get install -y --no-install-recommends libclang-dev
+            bash scripts/lib/apt-install.sh libclang-dev
           fi
 
       - name: the cooperative engine's host and library on this host (observed)
@@ -1071,7 +1071,7 @@ jobs:
           if compgen -G "/usr/lib/llvm-*/lib/libclang*.so*" > /dev/null; then
             echo "libclang: $(compgen -G '/usr/lib/llvm-*/lib/libclang*.so*' | head -n 1)"
           else
-            sudo apt-get update -q && sudo apt-get install -y --no-install-recommends libclang-dev
+            bash scripts/lib/apt-install.sh libclang-dev
           fi
 
       # The group of the transport example needs an interface the host carries multicast

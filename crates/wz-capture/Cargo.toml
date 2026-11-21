@@ -57,6 +57,14 @@ reassembly = ["wz-session-core/reassembly"]
 # consumers that build split-message captures name it through this crate.
 fixtures = ["network-codecs", "wz-app-frame/fixtures"]
 
+# `wz-app-frame`'s `message-payload` (a program's payload set field by field), for the one test
+# that holds it to this crate's JSON value writer byte for byte (`proto_encode_tests`): the two
+# write through one writer. A feature rather than a dev-dependency feature, because a
+# dev-dependency's features are unified into the workspace: Layer C1 tests the workspace without
+# this crate (it is the C1cap shard) and must resolve `wz-app-frame` to the same features with
+# and without it. Layer C1cap runs the test with this on.
+message-payload = ["wz-app-frame/message-payload"]
+
 # R311y855 — the FIELD walker, and DEFAULT-OFF, which is the one place this
 # crate's default set says no.
 #
@@ -333,11 +341,11 @@ path = "../wz-session-wire-fixtures"
 # profile lived here; across the crate boundary it is `wz-app-frame`'s
 # `fixtures` feature, which the tests here use with their own `fixtures`
 # feature on or off. It is a dev-dependency: a consumer's build is charged nothing.
-# `message-payload` is a program's payload set field by field, which a test
-# holds to the value writer here byte for byte: the two write through one writer.
+# The test that holds a program's payload to the value writer here turns on
+# `message-payload` through this crate's own feature of that name, not here.
 [dev-dependencies.wz-app-frame]
 path = "../wz-app-frame"
-features = ["fixtures", "message-payload"]
+features = ["fixtures"]
 
 # R2107 (open-debt item 527) — `wire_const::T_MID_KEEP_ALIVE`, so the decode
 # bench's payload is REAL zenoh session traffic rather than filler. Its first

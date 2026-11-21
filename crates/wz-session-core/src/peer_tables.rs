@@ -15,7 +15,7 @@
 //!   [`crate::declare::queryable::RemoteQueryablePeer`],
 //!   [`crate::declare::liveliness_subscriber::PeerTokens`], each
 //!   bound by `MAX_REMOTE_DECLS`), each held to the value the creator of the
-//!   session states ([`PeerTables::limit_to`]);
+//!   session states ([`crate::peer_tables::PeerTables::limit_to`]);
 //! - what it ASKED to be told, and what is staged back to it: its subscriber
 //!   interests ([`crate::caps::MAX_INBOUND_SUB_INTERESTS`]) and the staged
 //!   answers ([`crate::caps::MAX_PENDING_DECLARES`]), the interest answers of the

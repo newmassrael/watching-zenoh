@@ -28,10 +28,15 @@
 //! # A policy the build fixes
 //!
 //! A re-dialler whose policy no door can set (the MCU connection manager runs upstream's default
-//! and nothing else) holds a [`FixedRetryPolicy`]: its waits are computed when the build is
-//! compiled ([`fixed_waits`]), by the same arithmetic, and a period of it is the index of its next
-//! wait ([`FixedRetryPeriod`]). The growth arithmetic, a 128-bit product and its rounding, is then
-//! not in the image, and a period is one byte where it was a policy and a wait.
+//! and nothing else) holds a [`FixedRetryPolicy`](crate::retry_period::FixedRetryPolicy): its
+//! waits are computed when the build is compiled
+//! ([`fixed_waits`](crate::retry_period::fixed_waits)), by the same arithmetic, and a period of
+//! it is the index of its next wait ([`FixedRetryPeriod`](crate::retry_period::FixedRetryPeriod)).
+//! The growth arithmetic, a 128-bit product and its rounding, is then not in the image, and a
+//! period is one byte where it was a policy and a wait.
+//!
+//! The links above are written as paths: this module also has an outer doc comment (on its
+//! `mod` item), and rustdoc resolves a module's combined docs in the parent's scope.
 //!
 //! # Where this diverges from upstream, and why
 //!

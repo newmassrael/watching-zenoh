@@ -18,7 +18,7 @@
 //! or by its storage, REFUSES it, COUNTS it, and tells whoever asked:
 //!
 //! - a reply the stage has no room for, or whose payload is longer than the stage's
-//!   payload bound (`MAX_REPLY_PAYLOAD_BYTES`, held in [`ReplyBounds`] beside the
+//!   payload bound (`MAX_REPLY_PAYLOAD_BYTES`, held in [`crate::reply_stage::ReplyBounds`] beside the
 //!   count), is an `Err` to the queryable's handler
 //!   ([`crate::query_sink::ReplyError::StagingFull`],
 //!   [`crate::query_sink::ReplyError::PayloadTooLarge`]) and is counted

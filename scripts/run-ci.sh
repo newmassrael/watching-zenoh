@@ -6444,10 +6444,20 @@ layer_c1cap_capture_shard() {
         echo "  C1cap: $n wz-capture test(s) passed at Layer C1's features"
     }
 
+    # The one test behind wz-capture's `message-payload`, which Layer C1's selection does not
+    # turn on: a dev-dependency feature in its place made the partition leg red (wz-app-frame
+    # resolved with `message-payload` only when wz-capture was in the selection).
+    _c1cap_message_payload() {
+        _runci_guarded_test "C1cap message-payload 1" 1 \
+            cargo test -p wz-capture --features "$feats,message-payload" --lib --quiet -- \
+            proto_encode_tests::the_json_writer_and_a_programs_payload_write_one_message_alike
+    }
+
     _runci_legs_open C1cap || return 1
     _runci_leg features -- _c1cap_features
     _runci_leg partition -- _c1cap_partition
     _runci_leg tests --after features -- _c1cap_tests
+    _runci_leg message_payload --after features -- _c1cap_message_payload
     _runci_legs_close
 }
 

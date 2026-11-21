@@ -145,7 +145,8 @@ impl DialPhase {
 /// schedule that paces it ([`RetryPolicy`]), already resolved for the role the session plays.
 ///
 /// R3089 -- the bind twin of [`DialPhase`], and run by the runtime's own transcription of
-/// upstream's `bind_listeners` ([`drive_bind_phase`]), so a C open cannot drift from the node's.
+/// upstream's `bind_listeners`
+/// ([`drive_bind_phase`](wz_runtime_tokio::startup_phase::drive_bind_phase)), so a C open cannot drift from the node's.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ListenPhase {
     /// `listen/timeout_ms` + `listen/exit_on_failure`.
