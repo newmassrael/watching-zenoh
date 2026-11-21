@@ -462,6 +462,10 @@ transport-link-unixpipe,transport-link-ws|"
     # cooperative one (8), where the session's clock itself and its read's word run too.
     "wz-capi-pico|hook|time-base|time_base"
     "wz-capi-pico|hook|-default,engine-coop,peer,multi-thread,link-udp,connectivity,time-base|time_base"
+    # The code a refused open of the cooperative engine answers (`coop_open_refusal_tests`, behind
+    # the engine the default build does not name): an arena the memory cannot give is pico's out of
+    # memory, a session limit over the build's value an invalid value.
+    "wz-capi-pico|hook|-default,engine-coop,peer,multi-thread,link-udp|coop_open_refusal"
     # Whether a reply of a replay reaches the receiving judge (`replay_admission`, behind `replay`):
     # its model tests on a synthetic profile, and the receiver's baseline CRC they read.
     "wz-app-frame|hook|replay|"

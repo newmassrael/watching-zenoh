@@ -42,6 +42,8 @@ use portable_atomic::AtomicU64;
 #[allow(unused_imports)]
 use crate::prelude::*;
 
+use crate::arena::{AllocatorMemory, ArenaMemory, ArenaPlan, ArenaRefused, SessionArena};
+
 // The operating system the engine runs on: its mutex, its threads and its sleep are `std`'s on a
 // host and the kernel's on an MCU (`docs/upstream-parity.md` section 5a, E1).
 #[cfg(feature = "listen")]
@@ -357,6 +359,9 @@ pub enum OpenError {
         /// How many the session's limit admits.
         limit: usize,
     },
+    /// The session's arena could not be reserved (see [`ArenaRefused`]), so nothing was bound,
+    /// joined or dialled.
+    Arena(ArenaRefused),
 }
 
 /// Why the `key-wire-form` a session was opened under cannot be honoured.
@@ -598,6 +603,8 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     /// The threads handing deliveries out for this engine now ([`Delivering`]): a callback that
     /// steps its session again from one of them queues what it delivers for the outer delivery.
     delivering: Lock<Vec<ThreadId>>,
+    /// The bytes the open reserved for the session's arena ([`Self::arena_bytes`]).
+    arena_bytes: usize,
     this: Weak<Self>,
 }
 
@@ -929,6 +936,9 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// The periodic jobs the program started on the session ([`SessionEngine::start_ticker`]).
     #[cfg(feature = "ticker")]
     tickers: Tickers,
+    /// The memory the open reserved for what the session's limits size (`crate::arena`). Last,
+    /// so every table lent from it is dropped before it gives its memory back.
+    arena: SessionArena,
 }
 
 /// A port the session listens on, and the wait for a connection on it.
@@ -2404,6 +2414,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// `declared` in a build without the feature, is [`OpenError::KeyWireForm`], and a
     /// dictionary of more entries than the config's limits admit is
     /// [`OpenError::KeyIdsOverLimit`].
+    ///
+    /// The session's arena is the allocator's ([`AllocatorMemory`]); an ABI that reserves it
+    /// elsewhere opens with [`Self::open_in`].
+    #[inline]
     pub fn open_with_key_ids(
         links: L,
         clock: C,
@@ -2412,10 +2426,36 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         policy: SessionPolicy,
         key_ids: OpenKeyIds,
     ) -> Result<Arc<Self>, OpenError> {
+        Self::open_in(
+            links,
+            clock,
+            entropy,
+            config,
+            policy,
+            key_ids,
+            &AllocatorMemory,
+        )
+    }
+
+    /// [`Self::open_with_key_ids`], the session's arena reserved from `memory`. The arena is
+    /// reserved once the key-wire form is judged and before anything else, as the limits the open
+    /// resolved lay it out ([`ArenaPlan`]): a session whose memory cannot be given binds no port,
+    /// joins no group and dials no endpoint, and is [`OpenError::Arena`].
+    pub fn open_in(
+        links: L,
+        clock: C,
+        entropy: impl EntropySource + Send + 'static,
+        config: CoopConfig,
+        policy: SessionPolicy,
+        key_ids: OpenKeyIds,
+        memory: &'static dyn ArenaMemory,
+    ) -> Result<Arc<Self>, OpenError> {
         #[cfg(feature = "shared-key-ids")]
         let key_forms = key_ids.admit(&policy, &resolve_limits(&config))?;
         #[cfg(not(feature = "shared-key-ids"))]
         key_ids.admit(&policy)?;
+        let plan = ArenaPlan::of(&config, &resolve_limits(&config)).map_err(OpenError::Arena)?;
+        let arena = SessionArena::reserve(&plan, memory).map_err(OpenError::Arena)?;
         let mut entropy = SharedEntropy::new(entropy);
         let wire = match (&config.zid, policy.zid_derivation()) {
             (Some(zid), _) => wire_zid(zid)?,
@@ -2491,6 +2531,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             live_subs: Vec::new(),
             #[cfg(feature = "ticker")]
             tickers: Tickers::default(),
+            arena,
         };
         #[cfg(feature = "queryable")]
         let plane = core.plane.clone();
@@ -2509,6 +2550,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let handed_at_most = core.config.tx_queue.sizes;
         #[cfg(feature = "queryable")]
         let reply_bounds = ReplyBounds::of(&resolve_limits(&core.config));
+        let arena_bytes = core.arena.bytes();
         // The ports are bound and the groups joined before anything is dialled: a session that
         // cannot listen, or join a group, where it was told to does not open.
         core.listen_on_config()?;
@@ -2562,8 +2604,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             next_local: AtomicU64::new(1),
             reader: Mutex::new(None),
             delivering: Lock::new(Vec::new()),
+            arena_bytes,
             this: this.clone(),
         }))
+    }
+
+    /// The bytes the session's open reserved for its arena: the sum of its plan's spans
+    /// ([`ArenaPlan::reserved_bytes`]).
+    pub fn arena_bytes(&self) -> usize {
+        self.arena_bytes
     }
 
     /// Dial `endpoint` as a face of its own, beside the dial role's, and return the id it is

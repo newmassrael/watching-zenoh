@@ -1,0 +1,356 @@
+// SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+// SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+
+//! A session's arena: one block of memory its open reserves for what the limits it opened under
+//! size, before anything is bound or dialled (`docs/c-abi-no-heap-pools.md`, section 5).
+//!
+//! # The rows
+//!
+//! [`ArenaPlan::of`] states what the arena holds as rows, each `count` items of `entry_bytes`,
+//! from the limits and the config the open was handed:
+//!
+//! - the application's tables, once for the session: its subscribers (`MAX_SUBSCRIPTIONS`), with
+//!   `queryable` its queryables (`MAX_QUERYABLES`), with `liveliness` its tokens
+//!   (`MAX_LOCAL_TOKENS`) and its liveliness subscribers (`MAX_LIVELINESS_SUBSCRIPTIONS`);
+//! - the gets pending on each face (`MAX_PENDING_QUERIES`, and with `liveliness-get`
+//!   `MAX_PENDING_LIVELINESS_GETS`), and with `local-queryable` those pending on the session's
+//!   own queryables, which no face holds.
+//!
+//! A table's entry is the registry's own `ROW_BYTES` as the lent policy lays the row out
+//! ([`Lent`]), and its count the value of its limit the open resolved, under the build's value
+//! ([`Quota::lent_under`]): a stage after the build chooses within the memory the build fixes and
+//! never adds to it, so a value over the build's refuses the open.
+//!
+//! A session holds the dial role's face and a face for each group it joins; one that listens
+//! holds besides them as many faces as `max_faces` and `accept_pending` admit. These are the tables
+//! whose limits bind at the open (`binding_fixed = "open"`). A link's batches and reassembly, what
+//! a face's peer writes and what a group's members rejoin join the plan with the units that lend
+//! them from the arena and bound them by limits of their own (`docs/c-abi-no-heap-pools.md`,
+//! units U2 and U12 and section 4.5): reserved before then, they would be memory nothing uses, and
+//! a link's reassembly is sized by `max_message_size`, which upstream's default leaves at a
+//! gibibyte.
+//!
+//! # The reservation is the report
+//!
+//! Each row is one span of the arena and every span starts on an [`ARENA_ALIGN`] boundary, so the
+//! arena is the sum of its rows' spans ([`ArenaPlan::reserved_bytes`]), and lending every row
+//! brings its high-water mark to its size and no further. The plan the open reserves by is the one
+//! a report reads.
+//!
+//! # Where the memory comes from
+//!
+//! An [`ArenaMemory`]: on a host the allocator, asked once for the whole arena, whose answer of
+//! none refuses the open rather than ending the process ([`AllocatorMemory`], as the ABI's object
+//! pools reserve theirs); a region an image places is another implementation of it.
+
+use core::alloc::Layout;
+use core::ptr::NonNull;
+
+use wz_session_core::bounded::{Arena, Lent, ARENA_ALIGN};
+use wz_session_core::caps;
+use wz_session_core::limit_binding::{Quota, UnlentRows};
+use wz_session_core::limits::SessionLimits;
+use wz_session_core::pubsub::SubscriberTable;
+use wz_session_core::reply::ReplyRegistry;
+use wz_session_core::reply_sink::{BoxedReplySink, ConsolidatingSink};
+use wz_session_core::sink::BoxedSink;
+
+use crate::CoopConfig;
+
+/// One part of what an arena holds: `count` items of `entry_bytes` each.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ArenaRow {
+    /// What holds the bytes.
+    pub part: &'static str,
+    /// The limit whose number sizes the row.
+    pub basis: &'static str,
+    /// How many items the row counts.
+    pub count: usize,
+    /// The bytes of one item.
+    pub entry_bytes: usize,
+}
+
+impl ArenaRow {
+    /// The row's bytes: its count times its entry. `None` past the address space.
+    pub const fn bytes(&self) -> Option<usize> {
+        self.count.checked_mul(self.entry_bytes)
+    }
+
+    /// The bytes the row takes in an arena, its bytes as one span. `None` past the address space.
+    pub const fn span(&self) -> Option<usize> {
+        match self.bytes() {
+            Some(bytes) => Arena::span(bytes),
+            None => None,
+        }
+    }
+}
+
+/// The most rows a plan holds: every row of the build with every feature.
+pub const ARENA_ROWS: usize = 6;
+
+/// A row of a plan that has none yet.
+const NO_ROW: ArenaRow = ArenaRow {
+    part: "",
+    basis: "",
+    count: 0,
+    entry_bytes: 0,
+};
+
+/// Why a session's open reserved no arena, and so bound, joined and dialled nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArenaRefused {
+    /// A limit the arena is sized by gives no length under the build's value: it is over it, or
+    /// the build states none.
+    Limit {
+        /// The limit's id.
+        limit: &'static str,
+        /// Why.
+        why: UnlentRows,
+    },
+    /// The arena is past the address space.
+    TooLarge,
+    /// The memory had none to give.
+    NoMemory {
+        /// The bytes asked for.
+        bytes: usize,
+    },
+}
+
+/// What a session's arena holds, row by row, in the order the rows are lent from it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ArenaPlan {
+    rows: [ArenaRow; ARENA_ROWS],
+    len: usize,
+}
+
+impl ArenaPlan {
+    /// The rows of a session `config` opens under `limits` (see the module). Refused when a limit
+    /// is over the build's value or the arena is past the address space.
+    pub fn of(config: &CoopConfig, limits: &SessionLimits) -> Result<Self, ArenaRefused> {
+        let mut plan = Self {
+            rows: [NO_ROW; ARENA_ROWS],
+            len: 0,
+        };
+        let faces = faces_of(config).ok_or(ArenaRefused::TooLarge)?;
+        plan.put(
+            "subscribers",
+            "MAX_SUBSCRIPTIONS",
+            lent(
+                "MAX_SUBSCRIPTIONS",
+                limits.max_subscriptions(),
+                caps::MAX_SUBSCRIPTIONS,
+            )?,
+            SubscriberTable::<BoxedSink, Lent>::ROW_BYTES,
+        );
+        #[cfg(feature = "queryable")]
+        plan.put(
+            "queryables",
+            "MAX_QUERYABLES",
+            lent(
+                "MAX_QUERYABLES",
+                limits.max_queryables(),
+                caps::MAX_QUERYABLES,
+            )?,
+            wz_session_core::query::QueryableRegistry::<
+                wz_session_core::query_sink::BoxedQuerySink,
+                Lent,
+            >::ROW_BYTES,
+        );
+        #[cfg(feature = "liveliness")]
+        {
+            plan.put(
+                "liveliness tokens",
+                "MAX_LOCAL_TOKENS",
+                lent(
+                    "MAX_LOCAL_TOKENS",
+                    limits.max_local_tokens(),
+                    caps::MAX_LOCAL_TOKENS,
+                )?,
+                wz_session_core::declare::local_token::LocalTokenRegistry::<Lent>::ROW_BYTES,
+            );
+            plan.put(
+                "liveliness subscribers",
+                "MAX_LIVELINESS_SUBSCRIPTIONS",
+                lent(
+                    "MAX_LIVELINESS_SUBSCRIPTIONS",
+                    limits.max_liveliness_subscriptions(),
+                    caps::MAX_LIVELINESS_SUBSCRIPTIONS,
+                )?,
+                wz_session_core::declare::liveliness_subscriber::LivelinessSubscriberTable::<
+                    wz_session_core::declare::liveliness_sample::BoxedLivelinessSampleSink,
+                    Lent,
+                >::ROW_BYTES,
+            );
+        }
+        let get_tables = faces
+            .checked_add(usize::from(cfg!(feature = "local-queryable")))
+            .ok_or(ArenaRefused::TooLarge)?;
+        plan.put(
+            "pending queries",
+            "MAX_PENDING_QUERIES",
+            times(
+                get_tables,
+                lent(
+                    "MAX_PENDING_QUERIES",
+                    limits.max_pending_queries(),
+                    caps::MAX_PENDING_QUERIES,
+                )?,
+            )?,
+            ReplyRegistry::<ConsolidatingSink<BoxedReplySink>, Lent>::ROW_BYTES,
+        );
+        #[cfg(feature = "liveliness-get")]
+        plan.put(
+            "pending liveliness gets",
+            "MAX_PENDING_LIVELINESS_GETS",
+            times(
+                get_tables,
+                lent(
+                    "MAX_PENDING_LIVELINESS_GETS",
+                    limits.max_pending_liveliness_gets(),
+                    caps::MAX_PENDING_LIVELINESS_GETS,
+                )?,
+            )?,
+            wz_session_core::declare::liveliness_get::LivelinessGetRegistry::<
+                BoxedReplySink,
+                Lent,
+            >::ROW_BYTES,
+        );
+        plan.reserved_bytes().ok_or(ArenaRefused::TooLarge)?;
+        Ok(plan)
+    }
+
+    /// Add a row. A plan has room for every row of the build with every feature (`ARENA_ROWS`).
+    fn put(&mut self, part: &'static str, basis: &'static str, count: usize, entry_bytes: usize) {
+        self.rows[self.len] = ArenaRow {
+            part,
+            basis,
+            count,
+            entry_bytes,
+        };
+        self.len += 1;
+    }
+
+    /// The rows, in the order they are lent.
+    pub fn rows(&self) -> &[ArenaRow] {
+        &self.rows[..self.len]
+    }
+
+    /// The bytes the arena reserves: the sum of the rows' spans. `None` past the address space.
+    pub fn reserved_bytes(&self) -> Option<usize> {
+        self.rows()
+            .iter()
+            .try_fold(0usize, |sum, row| sum.checked_add(row.span()?))
+    }
+}
+
+/// The rows a table of the limit `limit` is lent: `value`, the open's, under `build`, the build's.
+fn lent(limit: &'static str, value: Quota, build: usize) -> Result<usize, ArenaRefused> {
+    value
+        .lent_under(Quota::at_most(build))
+        .map_err(|why| ArenaRefused::Limit { limit, why })
+}
+
+/// `count` items for each of `each` holders.
+fn times(each: usize, count: usize) -> Result<usize, ArenaRefused> {
+    each.checked_mul(count).ok_or(ArenaRefused::TooLarge)
+}
+
+/// The faces a session `config` opens may hold at once: the dial role's, one for each group it
+/// joins, and for a listener as many as it admits and as many in their handshake. `None` past
+/// the address space.
+fn faces_of(config: &CoopConfig) -> Option<usize> {
+    let listening = if config.listen.is_empty() {
+        0
+    } else {
+        config.max_faces.checked_add(config.accept_pending)?
+    };
+    1usize
+        .checked_add(config.groups.len())?
+        .checked_add(listening)
+}
+
+/// Where a session's arena is reserved from.
+pub trait ArenaMemory: Sync {
+    /// `layout.size()` bytes aligned to `layout.align()`, or `None` when there are none to give.
+    /// Never asked for zero bytes.
+    fn reserve(&self, layout: Layout) -> Option<NonNull<u8>>;
+
+    /// Give back what [`Self::reserve`] gave.
+    ///
+    /// # Safety
+    /// `base` is what [`Self::reserve`] gave for `layout`, it is given back once, and nothing
+    /// uses it after.
+    unsafe fn release(&self, base: NonNull<u8>, layout: Layout);
+}
+
+/// The allocator, asked once for the whole arena and given it back when the session is let go:
+/// the memory of a host library until the operating system's layer reserves it
+/// (`docs/c-abi-engine-and-memory.md`, phase P4). An allocator with none to give is an answer,
+/// not the end of the process.
+pub struct AllocatorMemory;
+
+impl ArenaMemory for AllocatorMemory {
+    fn reserve(&self, layout: Layout) -> Option<NonNull<u8>> {
+        // SAFETY: the layout is not of zero bytes, which the trait's contract rules out.
+        NonNull::new(unsafe { alloc::alloc::alloc(layout) })
+    }
+
+    unsafe fn release(&self, base: NonNull<u8>, layout: Layout) {
+        // SAFETY: the caller's contract: the allocator gave `base` for `layout`, given back once.
+        unsafe { alloc::alloc::dealloc(base.as_ptr(), layout) }
+    }
+}
+
+/// A session's arena: the memory its open reserved by its plan, given back when the session is let
+/// go.
+pub(crate) struct SessionArena {
+    arena: Arena,
+    base: NonNull<u8>,
+    layout: Layout,
+    memory: &'static dyn ArenaMemory,
+}
+
+impl SessionArena {
+    /// Reserve the arena `plan` lays out from `memory`. Refused, having taken nothing, when the
+    /// arena is past the address space or the memory has none to give.
+    pub(crate) fn reserve(
+        plan: &ArenaPlan,
+        memory: &'static dyn ArenaMemory,
+    ) -> Result<Self, ArenaRefused> {
+        let bytes = plan.reserved_bytes().ok_or(ArenaRefused::TooLarge)?;
+        // At least one span, so the memory is never asked for nothing.
+        let layout = Layout::from_size_align(bytes.max(ARENA_ALIGN), ARENA_ALIGN)
+            .map_err(|_| ArenaRefused::TooLarge)?;
+        let base = memory
+            .reserve(layout)
+            .ok_or(ArenaRefused::NoMemory { bytes })?;
+        // SAFETY: the memory gave `layout`, aligned to `ARENA_ALIGN` and at least `bytes` long, to
+        // this arena alone, until `Drop` gives it back.
+        let arena = unsafe { Arena::over(base, bytes) };
+        Ok(Self {
+            arena,
+            base,
+            layout,
+            memory,
+        })
+    }
+
+    /// The bytes reserved: the plan's.
+    pub(crate) fn bytes(&self) -> usize {
+        self.arena.bytes()
+    }
+
+    /// The arena, to lend from.
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn arena_mut(&mut self) -> &mut Arena {
+        &mut self.arena
+    }
+}
+
+impl Drop for SessionArena {
+    fn drop(&mut self) {
+        // SAFETY: `base` is what the memory gave for `layout`, given back here once, and the
+        // session that held the arena dropped every table lent from it first.
+        unsafe { self.memory.release(self.base, self.layout) }
+    }
+}

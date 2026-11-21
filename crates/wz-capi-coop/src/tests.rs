@@ -1416,6 +1416,7 @@ fn a_build_without_groups_refuses_a_session_that_joins_one() {
 
 #[cfg(all(feature = "ticker", feature = "query", feature = "liveliness"))]
 mod advanced;
+mod arena;
 mod congestion;
 mod decl_watch;
 #[cfg(all(feature = "query", feature = "queryable", feature = "local-queryable"))]

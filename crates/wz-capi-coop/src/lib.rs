@@ -96,6 +96,8 @@ compile_error!(
 
 #[cfg(feature = "listen")]
 mod admission_gate;
+// The memory a session's open reserves for what its limits size, and the rows it is laid out by.
+pub mod arena;
 mod engine;
 #[cfg(feature = "group-host")]
 pub mod host_group;

@@ -1557,11 +1557,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     .map(wz_capi_coop::CoopEngine::into_drive);
     let drive = match opened {
         Ok(drive) => drive,
-        Err(wz_capi_coop::OpenError::EntropyUnavailable) => return crate::result::Z_ERR_GENERIC,
-        // `z_open` judged the form before this (`crate::key_ids::admit_at_open`), and the engine
-        // judges it again with the same rule.
-        Err(wz_capi_coop::OpenError::KeyWireForm(_)) => return crate::result::Z_ERR_INVALID,
-        Err(_) => return crate::result::Z_ERR_TRANSPORT_OPEN_FAILED,
+        Err(refused) => return coop_open_refusal(&refused),
     };
     let zid = drive.zid();
     #[cfg(feature = "connectivity")]
@@ -1614,6 +1610,72 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         }
     }
     Z_OK
+}
+
+/// The code a refused open of the cooperative engine answers, as pico answers the same refusal.
+/// An arena the memory cannot give is pico's out of memory, and a limit over the build's value is a
+/// value the build refuses; either way the engine bound and dialled nothing, and the handle's slot
+/// goes back with the request.
+#[cfg(not(feature = "engine-tokio"))]
+fn coop_open_refusal(refused: &wz_capi_coop::OpenError) -> ZResult {
+    use wz_capi_coop::arena::ArenaRefused;
+    use wz_capi_coop::OpenError;
+    match refused {
+        OpenError::EntropyUnavailable => crate::result::Z_ERR_GENERIC,
+        // `z_open` judged the form before this (`crate::key_ids::admit_at_open`), and the engine
+        // judges it again with the same rule.
+        OpenError::KeyWireForm(_) => crate::result::Z_ERR_INVALID,
+        OpenError::Arena(ArenaRefused::Limit { .. }) => crate::result::Z_ERR_CONFIG_INVALID_VALUE,
+        OpenError::Arena(ArenaRefused::TooLarge | ArenaRefused::NoMemory { .. }) => {
+            crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY
+        }
+        _ => crate::result::Z_ERR_TRANSPORT_OPEN_FAILED,
+    }
+}
+
+#[cfg(all(test, not(feature = "engine-tokio")))]
+mod coop_open_refusal_tests {
+    use super::coop_open_refusal;
+    use crate::result::{
+        Z_ERR_CONFIG_INVALID_VALUE, Z_ERR_SYSTEM_OUT_OF_MEMORY, Z_ERR_TRANSPORT_OPEN_FAILED,
+    };
+    use wz_capi_coop::arena::ArenaRefused;
+    use wz_capi_coop::OpenError;
+    use wz_session_core::limit_binding::Quota;
+
+    /// An open whose arena the memory cannot give, or that is past the address space, answers
+    /// pico's out of memory, as a full pool of this ABI does.
+    #[test]
+    fn an_arena_that_cannot_be_reserved_is_out_of_memory() {
+        assert_eq!(
+            coop_open_refusal(&OpenError::Arena(ArenaRefused::NoMemory { bytes: 4096 })),
+            Z_ERR_SYSTEM_OUT_OF_MEMORY
+        );
+        assert_eq!(
+            coop_open_refusal(&OpenError::Arena(ArenaRefused::TooLarge)),
+            Z_ERR_SYSTEM_OUT_OF_MEMORY
+        );
+    }
+
+    /// A limit the config states over the build's value is a value this build refuses; an open
+    /// with nothing to dial stays a failed transport.
+    #[test]
+    fn a_limit_over_the_builds_value_is_an_invalid_value() {
+        let why = Quota::at_most(9)
+            .lent_under(Quota::at_most(8))
+            .expect_err("nine is over eight");
+        assert_eq!(
+            coop_open_refusal(&OpenError::Arena(ArenaRefused::Limit {
+                limit: "MAX_SUBSCRIPTIONS",
+                why,
+            })),
+            Z_ERR_CONFIG_INVALID_VALUE
+        );
+        assert_eq!(
+            coop_open_refusal(&OpenError::NoEndpoint),
+            Z_ERR_TRANSPORT_OPEN_FAILED
+        );
+    }
 }
 
 /// Close a session (pico `z_close`): stop the drive loop and join the driver
