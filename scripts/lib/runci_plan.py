@@ -43,8 +43,8 @@ dispatch table -- run by itself, the way a hosted job runs it:
 
     python3 scripts/lib/runci_plan.py --layer <id>
 
-which reads `ci.yml` where the unit runs and does what the hosted job does for
-that lane, in its order:
+which reads the hosted workflows where the unit runs and does what the hosted job
+does for that lane, in its order:
 
   1. Every provisioning line of the lane's job that comes before the lane
      (`bash scripts/build-*.sh`, `install-*.sh`, `provision-*.sh`: the zenohd,
@@ -137,7 +137,7 @@ plan, and so does a lane whose function does not read its key, whose every
 part would run the whole lane: a part missing from the plan is a part no
 machine judges.
 
-Layer Qzk is the one so far. Measured 2026-11-21: run whole, it builds six
+Layer Qzk was the first. Measured 2026-11-21: run whole, it builds six
 images and, for the ceiling under zenoh-pico (docs/upstream-parity.md D8), each
 paired image again with its reference, one build after another; the fleet
 learned its peak as about 24 GB and reserved it as one block, which on build
@@ -148,6 +148,23 @@ built in the run that holds those images under it) and each unpaired image
 alone (`scripts/kit-lane.sh parts`). The lane holds the parts to its images
 before it builds, and run with no part it runs every part in turn, so the units
 together judge what the hosted job judges.
+
+Layer Cmut is the second. Its parts are the scopes of `deploy/mutation_ratchet.json`
+(`mutation_ratchet_gate.py --parts`), each a crate's files mutated one change at a time
+and the crate's tests run against each, which takes hours a scope. A part is a whole
+scope and not a shard of one (cargo-mutants' `--shard k/n`): a shard takes the mutants
+at its positions in the list of all of them, so one mutant added anywhere moves every
+later one to another shard, and no shard's counts can be held to a row run after run.
+A scope's row is held in the unit that measures the whole scope.
+
+## A lane a schedule runs
+
+A lane is wired when a step of a hosted workflow runs it, and the hosted workflows are
+`HOSTED_WORKFLOWS`: `ci.yml`, which judges every push, and `mutation.yml`, which runs
+Layer Cmut nightly because no push can wait hours for it. A lane of the nightly
+workflow is planned like any other, from the job that runs it there: the fleet judges
+the whole gate, and how often the hosted runner pool can afford a lane is that pool's
+question, not the gate's.
 
 Every unit names the same `exclusive` token. A hosted job has a machine to
 itself; the lanes were written for that, and some of them bind fixed ports and
@@ -175,6 +192,10 @@ import armed_oracle_census as census
 
 RUNCI = Path("scripts/run-ci.sh")
 CI_YML = Path(".github/workflows/ci.yml")
+# The nightly workflow of Layer Cmut (see "A lane a schedule runs").
+MUTATION_YML = Path(".github/workflows/mutation.yml")
+# Every workflow whose steps wire a lane, the push gate first. `unwired_lane_lint.py` reads the same.
+HOSTED_WORKFLOWS = (CI_YML, MUTATION_YML)
 
 # A provisioning line of a hosted step: the repository's own script, by itself, with plain
 # arguments (`install-zenoh-c-arm.sh unstable`). A line that does anything else is not one.
@@ -225,6 +246,8 @@ JOB_ARMED_COMMANDS: dict[str, list[str]] = {"C1cc": ["valgrind"], "C1p32": ["cc"
 #   C1ob: "bwrap is not on PATH; the offline build is measured in a bwrap sandbox", and
 #         "the declared tool 'cc' (...) has no 'as' on PATH" for each command of the tools
 #         `deploy/offline-build.json` declares (`offline_build.py`)
+#   Cmut: "the table pins cargo-mutants <pin> and this machine runs 'none'" (`[tools.cargo-mutants]`
+#         in bx.toml provisions the pin)
 # A program is `needs` (bx runs it), never a package name: the package's NAME differs between
 # releases and machines, and the program is what the lane calls.
 LANE_COMMANDS: dict[str, list[str]] = {
@@ -237,6 +260,7 @@ LANE_COMMANDS: dict[str, list[str]] = {
     "Qza": ["qemu-system-arm"],
     "C1st": ["bwrap", "strace"],
     "C1ob": ["ar", "as", "bwrap", "c++", "cc", "ld"],
+    "Cmut": ["cargo-mutants"],
 }
 
 # Packages a lane refuses to run without that are no program: `python3-venv`, the venv the pinned
@@ -261,6 +285,7 @@ LANE_PACKAGES: dict[str, list[str]] = {
 # the command, run from the repository root, that prints the parts one per line, the name first.
 PARTED_LANES: dict[str, tuple[str, list[str]]] = {
     "Qzk": ("WZ_QZK_PART", ["bash", "scripts/kit-lane.sh", "parts"]),
+    "Cmut": ("WZ_CMUT_PART", ["python3", "scripts/lib/mutation_ratchet_gate.py", "--parts"]),
 }
 
 # A part's name as a unit's name and an argument carry it: no space and no separator of either.
@@ -367,28 +392,30 @@ def _carried(env: dict) -> dict[str, str]:
     return out
 
 
-def hosted_runs(workflow: dict) -> dict[str, Hosted]:
-    """Each lane of the workflow and what its job does for it. A lane run by more than one
-    job (a part each) is run whole: the env keys those jobs agree on, and every provisioning
-    line any of them runs before it, in order."""
-    top = workflow.get("env") or {}
+def hosted_runs(workflows: dict | list[dict]) -> dict[str, Hosted]:
+    """Each lane of the workflows (one, or `HOSTED_WORKFLOWS` read in order) and what its
+    job does for it. A lane run by more than one job (a part each) is run whole: the env
+    keys those jobs agree on, and every provisioning line any of them runs before it, in
+    order. Each job reads the top-level env of its own workflow."""
     found: dict[str, list[Hosted]] = {}
-    for job in (workflow.get("jobs") or {}).values():
-        job_env = job.get("env") or {}
-        prep: list[tuple[dict[str, str], list[str]]] = []
-        for step in job.get("steps") or []:
-            env = _carried({**top, **job_env, **(step.get("env") or {})})
-            for raw in (step.get("run") or "").splitlines():
-                line = raw.strip()
-                if not line or line.startswith("#"):
-                    continue
-                m = PREP.match(line)
-                if m:
-                    prep.append((env, [m.group(1), *m.group(2).split()]))
-                    continue
-                m = LANE.match(line)
-                if m:
-                    found.setdefault(m.group(1), []).append(Hosted(env, list(prep)))
+    for workflow in workflows if isinstance(workflows, list) else [workflows]:
+        top = workflow.get("env") or {}
+        for job in (workflow.get("jobs") or {}).values():
+            job_env = job.get("env") or {}
+            prep: list[tuple[dict[str, str], list[str]]] = []
+            for step in job.get("steps") or []:
+                env = _carried({**top, **job_env, **(step.get("env") or {})})
+                for raw in (step.get("run") or "").splitlines():
+                    line = raw.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    m = PREP.match(line)
+                    if m:
+                        prep.append((env, [m.group(1), *m.group(2).split()]))
+                        continue
+                    m = LANE.match(line)
+                    if m:
+                        found.setdefault(m.group(1), []).append(Hosted(env, list(prep)))
     merged: dict[str, Hosted] = {}
     for lane, runs in found.items():
         env = {k: v for k, v in runs[0].env.items() if all(r.env.get(k) == v for r in runs[1:])}
@@ -401,10 +428,10 @@ def hosted_runs(workflow: dict) -> dict[str, Hosted]:
     return merged
 
 
-def read_workflow() -> dict:
+def read_workflows() -> list[dict]:
     import yaml  # the gates that read ci.yml use PyYAML too
 
-    return yaml.safe_load(CI_YML.read_text(encoding="utf-8"))
+    return [yaml.safe_load(path.read_text(encoding="utf-8")) for path in HOSTED_WORKFLOWS]
 
 
 def read_parts(lane: str, argv: list[str]) -> list[str]:
@@ -468,7 +495,8 @@ def plan(
         ids = [i for i in ids if i in only]
     unwired = [i for i in ids if i not in hosted]
     if unwired:
-        raise ValueError(f"lane(s) no step of {CI_YML} runs: {', '.join(unwired)}")
+        raise ValueError(f"lane(s) no step of {' or '.join(map(str, HOSTED_WORKFLOWS))} runs: "
+                         f"{', '.join(unwired)}")
     stale = sorted((set(commands) | set(packages_by_lane) | set(parted)) - set(lanes(text)))
     if stale:
         raise ValueError(f"a lane table of this planner names lane(s) the dispatch table no longer "
@@ -492,7 +520,8 @@ def run_lane(lane: str, hosted: dict[str, Hosted], part: str | None = None) -> i
     """Do for `lane` what its hosted job does (the docstring's two steps), for one part of it
     when `part` is given."""
     if lane not in hosted:
-        print(f"runci_plan: no step of {CI_YML} runs lane {lane}", file=sys.stderr)
+        print(f"runci_plan: no step of {' or '.join(map(str, HOSTED_WORKFLOWS))} runs lane {lane}",
+              file=sys.stderr)
         return 2
     if part is not None and lane not in PARTED_LANES:
         print(f"runci_plan: lane {lane} is not one of PARTED_LANES; it has no part to run", file=sys.stderr)
@@ -631,6 +660,31 @@ def selftest() -> int:
         else:
             raise AssertionError(f"parts of {what} were planned instead of refused")
     assert PARTED_LANES["Qzk"][0] == "WZ_QZK_PART", PARTED_LANES
+    assert PARTED_LANES["Cmut"][0] == "WZ_CMUT_PART", PARTED_LANES
+    cases += 1
+    # A lane of the nightly workflow: wired by it alone, planned from its job there (the
+    # tool installer before it, its own workflow's env, the matrix-chosen part dropped),
+    # and the lanes of the first workflow are read as they were without it.
+    nightly = {
+        "env": {"WZ_DECLINED_EXPECT": ""},
+        "jobs": {"mutants": {
+            "env": {"WZ_N_PART": "${{ matrix.scope }}"},
+            "steps": [{"run": "bash scripts/install-tool.sh"}, {"run": "bash scripts/run-ci.sh --layer N"}],
+        }},
+    }
+    both = hosted_runs([workflow, nightly])
+    assert both["N"] == Hosted({"WZ_DECLINED_EXPECT": ""}, [({"WZ_DECLINED_EXPECT": ""}, ["scripts/install-tool.sh"])]), (
+        f"lane N of the nightly workflow is {both['N']}"
+    )
+    assert both["A"] == hosted["A"] and both["C1"] == hosted["C1"], "a second workflow changed the first one's lanes"
+    with_n = table + "layer_n_x() {\n    :\n}\nrun_layer N layer_n_x || overall=1\n"
+    assert [u["name"] for u in plan(with_n, None, both, {}, {}, {})] == ["A", "C1", "N"]
+    try:
+        plan(with_n, None, hosted, {}, {}, {})
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("a lane only a workflow not read runs was planned instead of refused")
     cases += 1
     a = hosted["A"]
     assert a.env == {"WZ_DECLINED_EXPECT": "", "RUST_BACKTRACE": "1", "WZ_PICO_REQUIRE": "1"}, (
@@ -683,11 +737,11 @@ def main() -> int:
         ap.error("--part runs a part of the lane --layer names, and no --layer was given")
     if args.selftest:
         return selftest()
-    for path in (RUNCI, CI_YML):
+    for path in (RUNCI, *HOSTED_WORKFLOWS):
         if not path.is_file():
             print(f"runci_plan: {path} not found (run from the repository root)", file=sys.stderr)
             return 2
-    hosted = hosted_runs(read_workflow())
+    hosted = hosted_runs(read_workflows())
     if args.layer is not None:
         return run_lane(args.layer, hosted, args.part)
     only = [o for o in args.only.split(",") if o] if args.only is not None else None

@@ -137,6 +137,14 @@ git config core.hooksPath .githooks
   waiting for a hosted run; read its result when it arrives. Never skip a
   failing gate and never bypass the hooks.
 
+**How complete the tests are.** Two lanes measure the suite rather than the code: a
+change is made to the code and a test has to fail. Layer C0mut does it to every leg of
+the analyzer's verdict on every push (`scripts/lib/verdict_leg_mutation.py`). Layer Cmut
+does it to the scopes of `deploy/mutation_ratchet.json` with cargo-mutants, nightly
+(`.github/workflows/mutation.yml`), and holds each scope's kill rate and missed count to
+its committed row; every missed mutant it prints is a test to write
+(`docs/mutation-testing.md`).
+
 **A lane's legs (open-debt item 938).** A lane of `scripts/run-ci.sh` either
 stops at its first red (`|| return 1`, the right shape when each step reads the
 previous one's build) or declares its legs in a leg ledger:
