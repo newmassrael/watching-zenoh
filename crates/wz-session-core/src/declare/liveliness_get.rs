@@ -64,7 +64,7 @@
 //!    [`wz_codecs::declare::DeclareOwned`] + resolve its keyexpr through
 //!    the shared peer table, then funnel through the no-heap SSOT.
 
-use crate::bounded::{BoundedVec, Profile, Storage};
+use crate::bounded::{Arena, BoundedVec, LendRefused, Lent, Profile, Storage};
 use crate::caps;
 use crate::registry_error::RegisterError;
 use crate::reply_sink::{BorrowedReply, ReplyKind, ReplySink};
@@ -184,6 +184,32 @@ impl<C: ReplySink> LivelinessGetRegistry<C, Profile> {
     }
 }
 
+impl<C: ReplySink> LivelinessGetRegistry<C, Lent> {
+    /// An empty registry whose pending gets, and the markers they leave when they end, are `rows`
+    /// rows each lent from `arena`, at most `MAX_PENDING_LIVELINESS_GETS`: the snapshots a session
+    /// holds pending on one face, at its open. Refused past that ceiling or past what the arena has
+    /// left, the rows lent so far going back with the arena.
+    pub fn lent(arena: &mut Arena, rows: usize) -> Result<Self, LendRefused> {
+        Ok(Self {
+            pending: arena.lend(rows)?,
+            finalized: arena.lend(rows)?,
+            ..Self::default()
+        })
+    }
+
+    /// The bytes of an arena [`Self::lent`] takes for `rows` rows: its two tables, each a span of
+    /// its own. `None` past the address space.
+    pub const fn arena_bytes(rows: usize) -> Option<usize> {
+        match (
+            Arena::table_bytes::<PendingGet<C>>(rows),
+            Arena::table_bytes::<u64>(rows),
+        ) {
+            (Some(pending), Some(finalized)) => pending.checked_add(finalized),
+            _ => None,
+        }
+    }
+}
+
 impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
     /// The bytes one pending get takes in the registry's storage: its row, and the marker it leaves
     /// in the finalized ids when it ends, which the same count bounds.
@@ -212,9 +238,20 @@ impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
     /// `ResponseSink::prune_liveliness_get_interest` so the
     /// session-reconnect declaration cache drops the finished one-shot
     /// Interest (see the `finalized` field docs). Returns the staged ids
-    /// by value, leaving the staging empty.
-    pub fn take_finalized(&mut self) -> BoundedVec<u64, { caps::MAX_PENDING_LIVELINESS_GETS }, P> {
-        core::mem::take(&mut self.finalized)
+    /// by value, leaving the staging empty and keeping its storage: a table lent its rows at open
+    /// has no others to be given, so the ids are copied out into a working buffer of the policy's
+    /// scratch and the staging is cleared in place.
+    pub fn take_finalized(
+        &mut self,
+    ) -> BoundedVec<u64, { caps::MAX_PENDING_LIVELINESS_GETS }, P::Scratch> {
+        let mut taken = BoundedVec::default();
+        for &interest_id in self.finalized.iter() {
+            // The staging and the buffer share one ceiling, so every id fits.
+            let kept = taken.push(interest_id).is_ok();
+            debug_assert!(kept, "a finalized id fits a buffer of the same ceiling");
+        }
+        self.finalized.clear();
+        taken
     }
 
     /// Register a pending get keyed by `interest_id`. Fresh ids come

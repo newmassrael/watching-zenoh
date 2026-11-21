@@ -107,7 +107,7 @@ use alloc::vec::Vec;
 
 // R311gb (Track 2) — bounded backing + the capacity SSOT for the no-alloc
 // pending table.
-use crate::bounded::{BoundedVec, Profile, Storage};
+use crate::bounded::{Arena, BoundedVec, LendRefused, Lent, Profile, Storage};
 use crate::caps;
 use crate::key_gate::KeyGate;
 use crate::registry_error::RegisterError;
@@ -1130,6 +1130,23 @@ impl<C: ReplySink> ReplyRegistry<C, Profile> {
     }
 }
 
+impl<C: ReplySink> ReplyRegistry<C, Lent> {
+    /// An empty registry whose pending queries are `rows` rows lent from `arena`, at most
+    /// `MAX_PENDING_QUERIES`: the gets a session holds pending on one face, at its open. Refused,
+    /// taking nothing, past that ceiling or past what the arena has left.
+    pub fn lent(arena: &mut Arena, rows: usize) -> Result<Self, LendRefused> {
+        Ok(Self {
+            pending: arena.lend(rows)?,
+            ..Self::default()
+        })
+    }
+
+    /// The bytes of an arena [`Self::lent`] takes for `rows` rows. `None` past the address space.
+    pub const fn arena_bytes(rows: usize) -> Option<usize> {
+        Arena::table_bytes::<Pending<C, Lent>>(rows)
+    }
+}
+
 impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     /// The bytes one pending query takes in the table's storage: the key its replies are held to
     /// with it where the storage policy keeps the text in the row, and its sink as the table holds
@@ -1260,7 +1277,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
         sink: C,
     ) -> Result<ReplyHandle, RegisterError> {
         let accept = accept.store(self.key_quota)?;
-        if !self.quota.admits(self.pending.len() + 1) {
+        if !self.has_room() {
             return Err(RegisterError::TableFull);
         }
         self.pending
@@ -1273,6 +1290,13 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
             })
             .map_err(|_| RegisterError::TableFull)?;
         Ok(ReplyHandle(rid))
+    }
+
+    /// Whether one more query may be held pending: inside the quota its creator stated and in a
+    /// row its storage has free. A table lent no rows has none, so a get it cannot hold is refused
+    /// before anything is put in it.
+    pub fn has_room(&self) -> bool {
+        self.pending.free_slots() > 0 && self.quota.admits(self.pending.len() + 1)
     }
 
     /// Remove a previously-registered pending entry by rid. Returns

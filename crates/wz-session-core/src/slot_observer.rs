@@ -72,13 +72,17 @@ use crate::switchboard::{EventInjector, SwitchboardRegistry};
 /// request and interest ids this session minted, so two sessions' ids collide in
 /// one registry: each session has its own, placed beside its slot by whoever owns
 /// the session.
-pub struct Requesters<R: ReplySink, G: ReplySink> {
+///
+/// `P` is the storage of both registries: the build's [`Profile`], or [`Lent`] for the
+/// requesters of one face of a session whose rows its arena lent at its open
+/// ([`Requesters::lent`]).
+pub struct Requesters<R: ReplySink, G: ReplySink, P: Storage = Profile> {
     /// The pending queries (`z_get`), bounded by [`crate::caps::MAX_PENDING_QUERIES`].
-    pub replies: ReplyRegistry<R>,
+    pub replies: ReplyRegistry<R, P>,
     /// The pending liveliness snapshots, bounded by
     /// [`crate::caps::MAX_PENDING_LIVELINESS_GETS`].
     #[cfg(feature = "liveliness-get")]
-    pub liveliness_gets: LivelinessGetRegistry<G>,
+    pub liveliness_gets: LivelinessGetRegistry<G, P>,
     #[cfg(not(feature = "liveliness-get"))]
     _gets: core::marker::PhantomData<G>,
 }
@@ -101,7 +105,65 @@ impl<R: ReplySink, G: ReplySink> Requesters<R, G> {
         requesters.limit_to(limits);
         requesters
     }
+}
 
+/// How many rows each registry of [`Requesters`] of the lent policy is lent
+/// ([`Requesters::lent`]): the values of their limits the session's open resolved.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RequesterRows {
+    /// The pending queries (`MAX_PENDING_QUERIES`).
+    pub queries: usize,
+    /// The pending liveliness snapshots (`MAX_PENDING_LIVELINESS_GETS`); lent none in a build
+    /// without `liveliness-get`.
+    pub liveliness_gets: usize,
+}
+
+impl<R: ReplySink, G: ReplySink> Requesters<R, G, Lent> {
+    /// No query pending, each registry's rows lent from `arena` as `rows` states and held to
+    /// `limits` as [`Requesters::with_limits`] holds one. Refused when the arena has not the
+    /// room, the rows lent so far going back with the arena.
+    pub fn lent(
+        arena: &mut Arena,
+        rows: RequesterRows,
+        limits: &crate::limits::SessionLimits,
+    ) -> Result<Self, LendRefused> {
+        let mut requesters = Self {
+            replies: ReplyRegistry::lent(arena, rows.queries)?,
+            #[cfg(feature = "liveliness-get")]
+            liveliness_gets: LivelinessGetRegistry::lent(arena, rows.liveliness_gets)?,
+            #[cfg(not(feature = "liveliness-get"))]
+            _gets: core::marker::PhantomData,
+        };
+        requesters.limit_to(limits);
+        Ok(requesters)
+    }
+
+    /// The bytes of an arena [`Self::lent`] takes for `rows`: each registry's spans. `None` past
+    /// the address space.
+    pub const fn arena_bytes(rows: RequesterRows) -> Option<usize> {
+        match (
+            ReplyRegistry::<R, Lent>::arena_bytes(rows.queries),
+            liveliness_get_bytes::<G>(rows.liveliness_gets),
+        ) {
+            (Some(queries), Some(gets)) => queries.checked_add(gets),
+            _ => None,
+        }
+    }
+}
+
+/// The bytes of an arena the pending liveliness snapshots of one face take for `rows` rows.
+#[cfg(feature = "liveliness-get")]
+const fn liveliness_get_bytes<G: ReplySink>(rows: usize) -> Option<usize> {
+    LivelinessGetRegistry::<G, Lent>::arena_bytes(rows)
+}
+
+/// A build without `liveliness-get` lends the snapshots no rows.
+#[cfg(not(feature = "liveliness-get"))]
+const fn liveliness_get_bytes<G: ReplySink>(_rows: usize) -> Option<usize> {
+    Some(0)
+}
+
+impl<R: ReplySink, G: ReplySink, P: Storage> Requesters<R, G, P> {
     /// Hold each registry to the limits `limits` states: what the creator of the session resolved
     /// for it. What each registry holds is kept, and what it is asked for next is held to the new
     /// quota.
@@ -114,9 +176,16 @@ impl<R: ReplySink, G: ReplySink> Requesters<R, G> {
     }
 }
 
-impl<R: ReplySink, G: ReplySink> Default for Requesters<R, G> {
+impl<R: ReplySink, G: ReplySink, P: Storage> Default for Requesters<R, G, P> {
+    /// No query pending. Of the lent policy, a requester lent no rows, which refuses every get.
     fn default() -> Self {
-        Self::new()
+        Self {
+            replies: ReplyRegistry::default(),
+            #[cfg(feature = "liveliness-get")]
+            liveliness_gets: LivelinessGetRegistry::default(),
+            #[cfg(not(feature = "liveliness-get"))]
+            _gets: core::marker::PhantomData,
+        }
     }
 }
 
@@ -622,6 +691,7 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
         #[cfg(feature = "liveliness-subscriber")]
         self.liveliness_subscribers
             .limit_to(limits.max_liveliness_subscriptions_held());
+    }
 
     /// Say which zid the key of the link of the session about to be dispatched PROVED, or `None`
     /// (decision D12): the queryables answer the queries of that dispatch with it as
@@ -655,10 +725,10 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
     // in, and inlined into the session's `on_event` they are all there for the length of the
     // application layer's call.
     #[inline(never)]
-    pub fn dispatch_event<R: ReplySink, G: ReplySink>(
+    pub fn dispatch_event<R: ReplySink, G: ReplySink, Q: Storage>(
         &mut self,
         peers: &mut PeerTables,
-        requesters: &mut Requesters<R, G>,
+        requesters: &mut Requesters<R, G, Q>,
         event: IterationEvent<'_, '_>,
     ) {
         self.dispatch_event_among(peers, requesters, event, &NoOtherPeers);
@@ -667,10 +737,10 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
     /// [`Self::dispatch_event`] for a session that holds other faces: `others` is what their
     /// peers declare, counted by the matching verdicts beside this face's own.
     #[inline(never)]
-    pub fn dispatch_event_among<R: ReplySink, G: ReplySink, O: OtherPeers>(
+    pub fn dispatch_event_among<R: ReplySink, G: ReplySink, Q: Storage, O: OtherPeers>(
         &mut self,
         peers: &mut PeerTables,
-        requesters: &mut Requesters<R, G>,
+        requesters: &mut Requesters<R, G, Q>,
         event: IterationEvent<'_, '_>,
         others: &O,
     ) {
@@ -788,10 +858,10 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
     /// through its send path: the replies, the answers to its interests, the
     /// terminated-get prunes, and last the `Final`s, so every Reply for a request
     /// precedes the `Final` that ends it.
-    pub fn flush_pending<S, R: ReplySink, G: ReplySink>(
+    pub fn flush_pending<S, R: ReplySink, G: ReplySink, Q: Storage>(
         &mut self,
         peers: &mut PeerTables,
-        requesters: &mut Requesters<R, G>,
+        requesters: &mut Requesters<R, G, Q>,
         actions: &S,
     ) where
         S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
@@ -814,10 +884,10 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
     /// `peers.finals` its quota, and sends each when the last of them has, so no `Final`
     /// overtakes a reply. The replies it drains are one burst, as
     /// `flush_pending`'s are.
-    pub fn flush_pending_replies<S, R: ReplySink, G: ReplySink>(
+    pub fn flush_pending_replies<S, R: ReplySink, G: ReplySink, Q: Storage>(
         &mut self,
         peers: &mut PeerTables,
-        requesters: &mut Requesters<R, G>,
+        requesters: &mut Requesters<R, G, Q>,
         actions: &S,
     ) where
         S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
@@ -831,10 +901,10 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
 
     /// Fan and drain in one call: [`Self::dispatch_event`] then
     /// [`Self::flush_pending`], the shape a session's `on_event` takes.
-    pub fn dispatch<S, R: ReplySink, G: ReplySink>(
+    pub fn dispatch<S, R: ReplySink, G: ReplySink, Q: Storage>(
         &mut self,
         peers: &mut PeerTables,
-        requesters: &mut Requesters<R, G>,
+        requesters: &mut Requesters<R, G, Q>,
         event: IterationEvent<'_, '_>,
         actions: &S,
     ) where
@@ -1030,9 +1100,9 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
 
     /// The liveliness gets that terminated, through `prune_liveliness_get_interest`.
     #[inline(never)]
-    fn drain_get_prunes<S: LivelinessGetPrune, R: ReplySink, G: ReplySink>(
+    fn drain_get_prunes<S: LivelinessGetPrune, R: ReplySink, G: ReplySink, Q: Storage>(
         &mut self,
-        requesters: &mut Requesters<R, G>,
+        requesters: &mut Requesters<R, G, Q>,
         sink: &S,
     ) {
         #[cfg(feature = "liveliness-get")]
@@ -1232,7 +1302,11 @@ mod lent_tests {
     use crate::limits::SessionLimits;
     use crate::locality::Locality;
     use crate::registry_error::RegisterError;
+    use crate::reply::ReplyHandle;
+    use crate::reply_acceptance::ReplyAcceptance;
+    use crate::reply_sink::{BoxedReplySink, ReplyView};
     use crate::sink::{BoxedSink, SampleView};
+    use crate::wire_id::RequestId;
     use core::ptr::NonNull;
 
     /// One block of an arena's memory, aligned as an arena's spans start.
@@ -1317,6 +1391,111 @@ mod lent_tests {
             &SessionLimits::defaults(),
         );
         assert!(refused.is_err());
+    }
+
+    /// The requesters of one face, with the heap profile's reply sinks.
+    type Lending = Requesters<BoxedReplySink, BoxedReplySink, Lent>;
+
+    /// The requesters of one face, `queries` rows of pending queries and `gets` of liveliness
+    /// snapshots lent from an arena of their own.
+    fn requesters(queries: usize, gets: usize) -> Lending {
+        Lending::lent(
+            &mut arena(1 << 16),
+            RequesterRows {
+                queries,
+                liveliness_gets: gets,
+            },
+            &SessionLimits::defaults(),
+        )
+        .expect("the arena has the rows")
+    }
+
+    fn reply_sink() -> BoxedReplySink {
+        BoxedReplySink::new(|_reply: &dyn ReplyView| {}, |_rid: RequestId| {})
+    }
+
+    /// Hold query `rid` pending in `requesters`, accepting a reply on any key.
+    fn hold(requesters: &mut Lending, rid: RequestId) -> Result<ReplyHandle, RegisterError> {
+        requesters
+            .replies
+            .register_sink(rid, 1, None, ReplyAcceptance::Any, reply_sink())
+    }
+
+    /// Two pending queries lent: the third get finds no room and is refused as a full table, and
+    /// the row its end gives back holds the next.
+    #[test]
+    fn lent_requesters_refuse_a_get_past_their_rows() {
+        let mut requesters = requesters(2, 1);
+        assert!(requesters.replies.has_room());
+        hold(&mut requesters, 1).expect("a row is free");
+        hold(&mut requesters, 2).expect("the last row is free");
+        assert!(!requesters.replies.has_room(), "both rows hold a query");
+        assert!(matches!(
+            hold(&mut requesters, 3),
+            Err(RegisterError::TableFull)
+        ));
+        assert_eq!(requesters.replies.len(), 2, "the refusal held nothing");
+        assert!(requesters.replies.unregister(1));
+        assert!(requesters.replies.has_room());
+        hold(&mut requesters, 3).expect("the row given back holds the next");
+    }
+
+    /// A requester of the lent policy that no arena lent rows to has no room, and refuses a get
+    /// before anything is put in it: the fallback of a face no table was planned for.
+    #[test]
+    fn an_unlent_requester_refuses_every_get_before_holding_it() {
+        let mut requesters = Lending::default();
+        assert!(!requesters.replies.has_room());
+        assert!(matches!(
+            hold(&mut requesters, 1),
+            Err(RegisterError::TableFull)
+        ));
+        assert!(requesters.replies.is_empty());
+    }
+
+    /// What lending a face's requesters takes from an arena is what their plan states, to the byte.
+    #[test]
+    fn lent_requesters_take_the_bytes_their_plan_states() {
+        let rows = RequesterRows {
+            queries: 3,
+            liveliness_gets: 2,
+        };
+        let mut memory = arena(1 << 16);
+        let lent = Lending::lent(&mut memory, rows, &SessionLimits::defaults())
+            .expect("the arena has the rows");
+        let planned = Lending::arena_bytes(rows).expect("within the address space");
+        assert_eq!(memory.high_water(), planned);
+        drop(lent);
+    }
+
+    /// An arena short of one face's requesters refuses them.
+    #[test]
+    fn lent_requesters_the_arena_cannot_hold_are_refused() {
+        let rows = RequesterRows {
+            queries: 1,
+            liveliness_gets: 0,
+        };
+        let refused = Lending::lent(&mut arena(0), rows, &SessionLimits::defaults());
+        assert!(refused.is_err());
+    }
+
+    /// A liveliness snapshot that ends leaves its marker, and draining the markers keeps the rows
+    /// the arena lent: the next snapshot is held in them.
+    #[cfg(feature = "liveliness-get")]
+    #[test]
+    fn lent_liveliness_gets_keep_their_rows_across_a_drain() {
+        let mut requesters = requesters(1, 1);
+        let gets = &mut requesters.liveliness_gets;
+        assert_eq!(gets.register(7, Some(10), reply_sink()), Ok(true));
+        assert_eq!(gets.sweep_timed_out(11), 1);
+        let drained: std::vec::Vec<u64> = gets.take_finalized().into_iter().collect();
+        assert_eq!(drained, std::vec![7]);
+        assert!(gets.take_finalized().is_empty());
+        assert_eq!(
+            gets.register(8, None, reply_sink()),
+            Ok(true),
+            "the drain kept the rows the arena lent"
+        );
     }
 
     /// A lent table answers a peer side of the build's profile: a subscription registered after
