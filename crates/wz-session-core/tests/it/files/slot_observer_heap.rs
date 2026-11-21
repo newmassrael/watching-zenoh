@@ -281,7 +281,7 @@ fn the_replies_can_be_drained_with_the_final_held_back() {
     assert_eq!(log.len(), 2, "two replies and no Final: {log:?}");
     assert!(log.iter().all(|line| line.starts_with("reply")));
 
-    let owed = core::mem::take(&mut peers.finals);
+    let owed = peers.finals.take_owed();
     let owed: Vec<(wz_session_core::wire_id::RequestId, _)> = owed.into_iter().collect();
     assert_eq!(owed.len(), 1, "the Final is still owed");
     assert_eq!(owed[0].0, 7);

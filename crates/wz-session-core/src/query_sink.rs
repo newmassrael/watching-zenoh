@@ -399,9 +399,10 @@ pub enum ReplyError {
     /// truncated and never staged. Answered only on the fixed backing
     /// (`bounded-heapless`); the growable one holds any length.
     PayloadTooLarge,
-    /// The session's table of staged replies is full
-    /// ([`crate::caps::MAX_PENDING_REPLIES`]) until the next drain. Counted, and
-    /// answered only on the fixed backing.
+    /// The session's table of staged replies is full until the next drain: it holds as
+    /// many as the quota its creator stated admits (`MAX_PENDING_REPLIES`), or as many as
+    /// the fixed backing's capacity ([`crate::caps::MAX_PENDING_REPLIES`]). Counted.
+    /// Never answered on the growable backing with no quota stated.
     StagingFull,
 }
 
@@ -439,10 +440,11 @@ impl core::fmt::Display for ReplyError {
 pub trait ReplyOut {
     /// Emit a Put-form data reply with the given payload bytes.
     ///
-    /// Infallible in signature, and on the growable backing in fact. On the fixed
-    /// backing a reply the session cannot hold is refused and COUNTED (see
-    /// [`ReplyError::PayloadTooLarge`] and [`ReplyError::StagingFull`]); a handler
-    /// that has to know calls [`Self::try_reply`], which hands the refusal back.
+    /// Infallible in signature, and on the growable backing with no quota stated in
+    /// fact. A reply the session cannot hold, on the fixed backing or past the quota
+    /// its creator stated, is refused and COUNTED (see [`ReplyError::PayloadTooLarge`]
+    /// and [`ReplyError::StagingFull`]); a handler that has to know calls
+    /// [`Self::try_reply`], which hands the refusal back.
     fn reply(&mut self, payload: &[u8]);
     /// [`Self::reply`] that says whether the reply was staged. The default stages
     /// through [`Self::reply`] and answers `Ok`, which is the truth for a sink that

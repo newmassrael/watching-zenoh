@@ -147,6 +147,16 @@ impl PeerTables<Profile> {
 }
 
 impl<P: Storage> PeerTables<P> {
+    /// Hold the tables to the limits `limits` states: what the creator of the session resolved
+    /// for it. In place, as a slot's tables are placed before a session is opened in them; what
+    /// each table holds is kept, and what it is asked for next is held to the new quota.
+    /// [`Self::forget_peer`] keeps the quotas; a session opened in the slot next states its own
+    /// here.
+    pub fn limit_to(&mut self, limits: &crate::limits::SessionLimits) {
+        self.replies.limit_to(limits.max_pending_replies_held());
+        self.finals.limit_to(limits.max_pending_finals_held());
+    }
+
     /// Forget everything the peer said and everything owed to it, in place: the
     /// session ended, or its slot is being handed to the next one. What the session
     /// itself installed (its own id space and zid) goes too, because the next

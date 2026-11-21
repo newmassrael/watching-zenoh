@@ -313,16 +313,17 @@ pub struct ApplicationLayerObserver {
     /// `query-queryable` so wire-emit only runs when the queryable
     /// dispatch path is in.
     ///
-    /// S9a — a [`ReplyStage`]: the `Vec` it always was on the growable backing,
-    /// and on the fixed one a table of [`crate::caps::MAX_PENDING_REPLIES`] rows that
-    /// refuses and counts.
+    /// S9a — a [`ReplyStage`]: rows that grow on the growable backing, and on the
+    /// fixed one a table of [`crate::caps::MAX_PENDING_REPLIES`] rows; on both held to
+    /// the quota [`Self::with_limits`] states, past which a reply is refused and counted.
     pending_replies: ReplyStage,
     /// R2595 — `(rid, qos)`: the terminator owed, and the QUERY's QoS it must
     /// carry. The rid alone could not say what the final should read as, so
     /// every final wz emitted read as DEFAULT.
     ///
     /// S9a — a [`FinalStage`], bounded by [`crate::caps::MAX_PENDING_FINALS`] on the
-    /// fixed backing, where a request that would need one more is refused.
+    /// fixed backing and by the quota [`Self::with_limits`] states on both, where a
+    /// request that would need one more is refused.
     pending_final_rids: FinalStage,
     /// R283 — staging buffer for the declarer-side interest-response
     /// (`Declare(DeclToken)` + `Declare(DeclFinal)`). Populated by
@@ -418,6 +419,12 @@ impl ApplicationLayerObserver {
             .liveliness_gets
             .limit_to(limits.max_pending_liveliness_gets_held());
         observer.replies.limit_to(limits.max_pending_queries_held());
+        observer
+            .pending_replies
+            .limit_to(limits.max_pending_replies_held());
+        observer
+            .pending_final_rids
+            .limit_to(limits.max_pending_finals_held());
         observer
     }
 
@@ -1142,21 +1149,25 @@ impl ApplicationLayerObserver {
     /// empty `Vec` — the same OFF projection its sibling drains
     /// (`Self::drain_query_replies` / `Self::drain_query_finals`) already
     /// document, and the shape a `pub` accessor owes its callers.
+    ///
+    /// The table left behind keeps the quota [`Self::with_limits`] stated and the count of
+    /// what it refused ([`FinalStage::take_owed`]).
     pub fn take_pending_final_rids(&mut self) -> FinalStage {
-        core::mem::take(&mut self.pending_final_rids)
+        self.pending_final_rids.take_owed()
     }
 
     /// What the staged-reply table has refused since this observer was built, by
-    /// why. All zero on the growable backing, which refuses nothing.
-    #[cfg(feature = "bounded-heapless")]
+    /// why: past its capacity on the fixed backing, and past the quota
+    /// [`Self::with_limits`] stated on either. All zero on the growable backing with no
+    /// quota stated, which refuses nothing.
     pub fn reply_refusals(&self) -> crate::reply_stage::ReplyRefusals {
         self.pending_replies.refusals()
     }
 
     /// How many requests were refused because no `Final` could be owed for them
-    /// ([`crate::caps::MAX_PENDING_FINALS`] held). All zero on the growable
-    /// backing, which refuses nothing.
-    #[cfg(feature = "bounded-heapless")]
+    /// (`MAX_PENDING_FINALS` held, by the capacity on the fixed backing or by the
+    /// quota [`Self::with_limits`] stated on either). All zero on the growable backing
+    /// with no quota stated, which refuses nothing.
     pub fn request_refusals(&self) -> u32 {
         self.pending_final_rids.refusals()
     }
