@@ -122,6 +122,23 @@ unsafe fn on_the_monotonic_clock(cond: *mut libc::pthread_cond_t) {
 #[cfg(target_os = "macos")]
 unsafe fn on_the_monotonic_clock(_cond: *mut libc::pthread_cond_t) {}
 
+/// `CLOCK_REALTIME`: the seconds and nanoseconds since the Unix epoch, `None` before it.
+pub(crate) fn wall_clock() -> Option<(u64, u32)> {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: a live local the call writes; the clock always exists.
+    if unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, &mut now) } != 0 {
+        return None;
+    }
+    let secs = u64::try_from(now.tv_sec).ok()?;
+    let nanos = u32::try_from(now.tv_nsec)
+        .ok()
+        .filter(|n| *n < 1_000_000_000)?;
+    Some((secs, nanos))
+}
+
 /// `CLOCK_MONOTONIC` in nanoseconds.
 pub(crate) fn monotonic_ns() -> u64 {
     let mut now = libc::timespec {

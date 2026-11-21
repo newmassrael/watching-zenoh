@@ -42,13 +42,15 @@ libc = { version = "0.2", default-features = false }
 # The Windows host's: the slim reader/writer lock and condition variable, the threads and `Sleep`
 # (`System_Threading`), the handle a thread is (`Foundation`) and the attributes `CreateThread`
 # is declared with (`Security`) and the performance counter the monotonic clock reads
-# (`System_Performance`). Already in this workspace's graph at this version.
+# (`System_Performance`), and the precise system time the wall clock reads (`System_SystemInformation`).
+# Already in this workspace's graph at this version.
 [target.'cfg(windows)'.dependencies.windows-sys]
 version = "0.61"
 features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_System_Performance",
+    "Win32_System_SystemInformation",
     "Win32_System_Threading",
 ]
 

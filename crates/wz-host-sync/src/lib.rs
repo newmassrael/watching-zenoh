@@ -101,6 +101,13 @@ fn unpark_all() {
     }
 }
 
+/// The host's wall clock: the seconds and nanoseconds since the Unix epoch, `None` for a clock set
+/// before it. `CLOCK_REALTIME` on a POSIX host, the precise system time on Windows. Set by the
+/// host's administrator, so it may step; a deadline is on [`monotonic_ns`] instead.
+pub fn wall_clock() -> Option<(u64, u32)> {
+    sys::wall_clock()
+}
+
 /// The host's monotonic clock in nanoseconds: `CLOCK_MONOTONIC` on a POSIX host, the performance
 /// counter on Windows. It never steps back, and a date set on the host moves it not at all.
 pub fn monotonic_ns() -> u64 {
@@ -807,6 +814,18 @@ mod tests {
         thread.join();
         assert_eq!(seen.load(Ordering::SeqCst), id);
         assert_ne!(id, current_thread());
+    }
+
+    /// The wall clock reads the date the standard library reads, within a second.
+    #[test]
+    fn the_wall_clock_is_the_date() {
+        let (secs, nanos) = wall_clock().expect("the host's date is after 1970");
+        let std_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("after 1970")
+            .as_secs();
+        assert!(secs.abs_diff(std_secs) <= 1, "{secs} against {std_secs}");
+        assert!(nanos < 1_000_000_000);
     }
 
     #[test]

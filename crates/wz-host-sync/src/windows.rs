@@ -7,8 +7,9 @@
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
 
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, HANDLE};
 use windows_sys::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
+use windows_sys::Win32::System::SystemInformation::GetSystemTimePreciseAsFileTime;
 use windows_sys::Win32::System::Threading::{
     AcquireSRWLockExclusive, CreateThread, GetCurrentThreadId, ReleaseSRWLockExclusive, Sleep,
     SleepConditionVariableSRW, WaitForSingleObject, WakeAllConditionVariable, CONDITION_VARIABLE,
@@ -76,6 +77,22 @@ impl ParkCond {
     pub(crate) unsafe fn notify_all(&self) {
         WakeAllConditionVariable(self.0.get());
     }
+}
+
+/// The hundreds of nanoseconds from 1601-01-01, where a `FILETIME` counts from, to the Unix epoch.
+const FILETIME_UNIX_EPOCH: u64 = 116_444_736_000_000_000;
+
+/// The precise system time: the seconds and nanoseconds since the Unix epoch, `None` before it.
+pub(crate) fn wall_clock() -> Option<(u64, u32)> {
+    let mut now = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    // SAFETY: a live local the call writes.
+    unsafe { GetSystemTimePreciseAsFileTime(&mut now) };
+    let ticks = (u64::from(now.dwHighDateTime) << 32) | u64::from(now.dwLowDateTime);
+    let since = ticks.checked_sub(FILETIME_UNIX_EPOCH)?;
+    Some((since / 10_000_000, ((since % 10_000_000) * 100) as u32))
 }
 
 /// The performance counter in nanoseconds.
