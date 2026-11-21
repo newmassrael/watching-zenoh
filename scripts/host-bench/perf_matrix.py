@@ -11,9 +11,9 @@ committed rows.
 
     perf_matrix.py reference --out DIR
         zenoh-pico built as the same build as wz-capi-pico's default features: the build the
-        capability cost gate measures (`capability_cost_gate.pico_reference_tree`, its switches from
-        `wz_config.pico_reference`), its library copied to DIR/lib-P, its headers to DIR/include-P, and
-        what both arms are built as (the reference's pin, toolchain and switches, the wz features) to
+        capability cost gate measures (`capability_cost_gate.pico_reference_tree` under the gate's
+        `build_env`, its switches from `wz_config.pico_reference`), its library copied to DIR/lib-P,
+        its headers to DIR/include-P, and what both arms are built as (the reference's pin, toolchain and switches, the wz features) to
         DIR/reference.json
     perf_matrix.py pico-sys-include REPORT
         the include directory of the one zenoh-pico-sys build cargo's JSON REPORT names
@@ -111,6 +111,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import hashlib
+import inspect
 import io
 import json
 import math
@@ -739,7 +740,14 @@ def cmd_reference(out: pathlib.Path) -> int:
     features = wz_config.pico_build_features("tokio", [], table)
     program_features = wz_config.pico_build_features("tokio", ["app-transport"], table)
     asked = wz_config.pico_reference(wz_config.load_decl(), features)
-    work, pin, toolchain = cost.pico_reference_tree(asked)
+    # The gate's build rule too: the reference's key holds the rule's C flags and epoch, so the
+    # library timed here is the one the gate's size and ratio are read from.
+    try:
+        env, _ = cost.build_env()
+    except ValueError as error:
+        print(f"perf-matrix: NOT-MEASURED, the build normalisation refused this host: {error}", flush=True)
+        return 2
+    work, pin, toolchain = cost.pico_reference_tree(asked, env)
     header = work / "build" / "include" / "zenoh-pico" / "config.h"
     refused = cost.refused_switches(asked, header.read_text(encoding="utf-8"))
     lib = out / "lib-P"
@@ -1338,10 +1346,13 @@ def cmd_selftest() -> int:
     # The reference is the cost gate's own build, called by name from `cmd_reference`: a merge that
     # took the gate's file from one side dropped `pico_reference_tree` once, and every run after it
     # ended NOT-MEASURED with no static check saying why (2026-11-21, merge 32aae4911).
+    # The build is asked for under the gate's rule, so a builder that no longer takes the rule's
+    # environment would build a library the gate never measured.
     import capability_cost_gate as cost
-    expect("the cost gate still builds the reference this matrix links",
+    expect("the cost gate still builds the reference this matrix links, under its build rule",
            all(callable(getattr(cost, name, None))
-               for name in ("pico_reference_tree", "refused_switches")))
+               for name in ("pico_reference_tree", "refused_switches", "build_env"))
+           and "env" in inspect.signature(cost.pico_reference_tree).parameters)
     # -- arm X ------------------------------------------------------------------------------------------
     expect("arm X runs every transport but the program's, from a probe of its own",
            binary_name("X", "udp") == "perf_probe_X" and binary_name("X", "tcp") == "perf_probe_X"

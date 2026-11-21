@@ -27,8 +27,9 @@ nothing to a build, so the default build is the one the other transports are mea
 every `Z_FEATURE_*` switch the declaration (`deploy/wz-config.toml`) answers is set from that answer
 for `wz-capi-pico`'s default features (`wz_config.pico_reference`), the rest keep pico's defaults,
 Release, shared. `perf_matrix.py reference` asks the gate's own builder for it, so the library timed
-here and the library whose size the gate prints are one build, found again by the same key (pin,
-compiler, switches). A switch pico built otherwise than asked is listed in the run's record.
+here and the library whose size the gate prints are one build, built under the gate's build rule
+(`build_env`: no path of the host and the commit's time in its bytes) and found again by the same
+key (pin, compiler, switches, and the rule's C flags and epoch). A switch pico built otherwise than asked is listed in the run's record.
 
 **Arm X, an external library of the pico API.** A library this repository does not hold, such as a
 deployment's own build of a library of the pico API, is measured by the same program when the

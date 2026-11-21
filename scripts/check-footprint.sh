@@ -1252,16 +1252,6 @@ if ! command -v arm-none-eabi-size >/dev/null 2>&1; then
          "install binutils-arm-none-eabi)"
     exit 0
 fi
-# The path-purity gate below detects pollution with `strings`; a detection tool
-# that is ABSENT must FAIL, never silently pass a polluted binary (R311y274, the
-# whole-session review's Finding B2 — proven: with `strings` off PATH the gate
-# reported a clean +0 on a binary carrying the repo path). Unconditional: unlike
-# the binary/size prereqs there is no legitimate "measure without it" mode.
-if ! command -v strings >/dev/null 2>&1; then
-    echo "  footprint[$artifact] $target FAIL — strings not on PATH;" \
-         "cannot verify path purity (install binutils)" >&2
-    exit 1
-fi
 
 # ─── path-normalisation gate (the measurement's precondition) ───────
 #
@@ -1280,22 +1270,24 @@ fi
 # binary built outside that path (a bare `cargo build`, a future lane that
 # forgets the export) FAILS here rather than being silently measured against a
 # baseline it is not comparable to. A SKIP would be green — hence a FAIL.
-cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+#
+# The judgment is scripts/lib/build_normalization.py's, the rule that made the
+# flags, so the prefixes checked here (the checkout, the artifact root when it is
+# not the checkout, the cargo home) are the prefixes mapped there. It searches
+# the whole file's bytes, which needs no tool that can be absent: R311y274 found
+# a gate whose `strings` was off PATH reporting a clean +0 on a binary carrying
+# the repo path. A check that could not run is a FAIL here, never a pass.
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-leaked=""
-# Under an artifact root the build's own directories (OUT_DIR, generated sources) are there, and
-# footprint_remap_rustflags() maps it to the same prefix as the checkout; a binary that still
-# names it would measure a different size from the same tree built without the root.
-prefixes=("$repo_root" "$cargo_home")
-[[ "$WZ_ARTIFACTS" != "$repo_root" ]] && prefixes+=("$WZ_ARTIFACTS")
-for prefix in "${prefixes[@]}"; do
-    if strings "$bin" 2>/dev/null | grep -qF -- "$prefix"; then
-        leaked="${leaked:+$leaked, }$prefix"
-    fi
-done
-if [[ -n "$leaked" ]]; then
+python3 "$(dirname "${BASH_SOURCE[0]}")/lib/build_normalization.py" --check-binary "$bin" \
+    --repo-root "$repo_root" --artifacts "$WZ_ARTIFACTS"
+purity=$?
+if [[ "$purity" -ne 0 && "$purity" -ne 1 ]]; then
+    echo "  footprint[$artifact] $target FAIL — the path-purity check could not run" \
+         "(exit $purity, its reason above)" >&2
+    exit 1
+fi
+if [[ "$purity" -eq 1 ]]; then
     echo "  footprint[$artifact] $target FAIL — binary embeds absolute build paths" >&2
-    echo "    leaked prefix(es): $leaked" >&2
     echo "    The .rodata path strings make .text depend on WHERE the binary was" >&2
     echo "    built, so this measurement is not comparable to the baseline table." >&2
     echo "    Build the footprint artifacts via 'scripts/run-ci.sh --layer Q'," >&2
