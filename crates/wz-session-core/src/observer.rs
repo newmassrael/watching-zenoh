@@ -387,6 +387,11 @@ impl ApplicationLayerObserver {
             .limit_to(limits.max_subscriptions_held());
         #[cfg(feature = "query-queryable")]
         observer.queryables.limit_to(limits.max_queryables_held());
+        #[cfg(feature = "query-queryable")]
+        observer.queryables.limit_query_sizes_to(
+            limits.query_parameters_max_bytes_held(),
+            limits.query_attachment_max_bytes_held(),
+        );
         #[cfg(feature = "declare-subscriber")]
         observer
             .subscribers
@@ -444,7 +449,7 @@ impl ApplicationLayerObserver {
             .limit_peer_to(limits.max_remote_decls_held());
         observer
             .pending_replies
-            .limit_to(limits.max_pending_replies_held());
+            .limit_to(crate::reply_stage::ReplyBounds::of(limits));
         observer
             .pending_final_rids
             .limit_to(limits.max_pending_finals_held());
@@ -456,6 +461,15 @@ impl ApplicationLayerObserver {
     /// by [`Self::new`].
     pub const fn querier_max_pending_queries(&self) -> crate::limit_binding::Quota {
         self.querier_max_pending_queries.get()
+    }
+
+    /// The bounds the session's replies are staged under (`MAX_PENDING_REPLIES`,
+    /// `MAX_REPLY_PAYLOAD_BYTES`) as the session's creator stated them ([`Self::with_limits`]),
+    /// the build's for an observer made by [`Self::new`]. A runtime that stages the replies of
+    /// one query apart from this observer (a handler run outside its lock, a query held past its
+    /// handler) holds that stage to them.
+    pub const fn reply_bounds(&self) -> crate::reply_stage::ReplyBounds {
+        self.pending_replies.bounds()
     }
 
     /// New observer with empty registries, held to the build's limits. Callers register

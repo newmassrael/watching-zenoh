@@ -1123,6 +1123,320 @@ mod enforcement {
         );
     }
 
+    /// A reply on `bound/reply` whose payload and attachment are the ones given, as a queryable
+    /// of a peer's session describes it.
+    #[cfg(feature = "query-queryable")]
+    fn reply_carrying<'a>(
+        payload: &'a [u8],
+        attachment: Option<&'a [u8]>,
+    ) -> crate::reply_stage::ReplyParts<'a> {
+        use crate::reply_stage::{PartsBody, PartsKind, ReplyParts};
+        ReplyParts {
+            rid: 0,
+            keyexpr: "bound/reply",
+            responder: None,
+            qos: crate::sample::QosLevel::DEFAULT,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: None,
+            kind: PartsKind::Reply {
+                body: PartsBody::Put(payload),
+                encoding: None,
+                timestamp: None,
+                attachment,
+                source_info: None,
+            },
+        }
+    }
+
+    /// `MAX_REPLY_PAYLOAD_BYTES` with nothing stated: a reply one byte past the build's value is
+    /// staged on the heap, which never bounded it, as it was, and refused as too large by a
+    /// fixed stage, which holds the build's value.
+    #[cfg(feature = "query-queryable")]
+    #[test]
+    fn max_reply_payload_bytes_with_nothing_stated_admits_what_the_build_admitted() {
+        use crate::query_sink::ReplyError;
+        use std::sync::{Arc, Mutex};
+        let mut observer = ApplicationLayerObserver::with_limits(&SessionLimits::defaults());
+        let answers = Arc::new(Mutex::new(std::vec::Vec::new()));
+        let told = Arc::clone(&answers);
+        observer
+            .queryables
+            .register("bound/reply", move |_, responder| {
+                let past = std::vec![b'r'; caps::MAX_REPLY_PAYLOAD_BYTES + 1];
+                let answer = responder.try_reply(&past[..]);
+                told.lock().expect("not poisoned").push(answer);
+            })
+            .expect("no quota is stated on the queryables");
+        observer.dispatch_event(crate::driver_loop::IterationEvent::Poll(&queries(0..1)));
+        let fixed = crate::bounded::ENFORCES_CAPACITY;
+        let answer = if fixed {
+            Err(ReplyError::PayloadTooLarge)
+        } else {
+            Ok(())
+        };
+        assert_eq!(*answers.lock().expect("not poisoned"), [answer]);
+        assert_eq!(observer.pending_reply_count(), usize::from(!fixed));
+        assert_eq!(
+            observer.reply_refusals().payload_too_large,
+            u32::from(fixed)
+        );
+    }
+
+    /// `MAX_REPLY_PAYLOAD_BYTES` stated as two: a reply of three bytes is refused to the handler
+    /// as too large and counted, and stages nothing, while a reply of two is staged; an
+    /// attachment of three is refused the same. The stage a runtime makes to answer one query
+    /// apart from the observer, held to the observer's bounds, and a peer's tables are held the
+    /// same.
+    #[cfg(feature = "query-queryable")]
+    #[test]
+    fn max_reply_payload_bytes_stated_refuses_the_next() {
+        use crate::query_sink::ReplyError;
+        use crate::reply_stage::{ReplyBounds, ReplyStage, ReplyStaging};
+        use std::sync::{Arc, Mutex};
+        held_to_two(
+            SessionLimits::select_max_reply_payload_bytes,
+            MaxReplyPayloadBytes::DOMAIN.is_singleton(),
+            |limits| {
+                let mut observer = ApplicationLayerObserver::with_limits(limits);
+                let answers = Arc::new(Mutex::new(std::vec::Vec::new()));
+                let told = Arc::clone(&answers);
+                observer
+                    .queryables
+                    .register("bound/reply", move |_, responder| {
+                        let mut seen = told.lock().expect("not poisoned");
+                        seen.push(responder.try_reply(b"abc"));
+                        seen.push(responder.try_reply(b"ab"));
+                    })
+                    .expect("no quota is stated on the queryables");
+                observer.dispatch_event(crate::driver_loop::IterationEvent::Poll(&queries(0..1)));
+                assert_eq!(
+                    *answers.lock().expect("not poisoned"),
+                    [Err(ReplyError::PayloadTooLarge), Ok(())]
+                );
+                assert_eq!(
+                    observer.pending_reply_count(),
+                    1,
+                    "the refusal staged nothing"
+                );
+                assert_eq!(observer.reply_refusals().payload_too_large, 1);
+                assert_eq!(observer.reply_refusals().staging_full, 0);
+                assert_eq!(observer.reply_bounds(), ReplyBounds::of(limits));
+
+                let mut stage = ReplyStage::held_to(observer.reply_bounds());
+                assert_eq!(
+                    stage.stage_parts(reply_carrying(b"abc", None)),
+                    Err(ReplyError::PayloadTooLarge)
+                );
+                assert_eq!(
+                    stage.stage_parts(reply_carrying(b"a", Some(&b"abc"[..]))),
+                    Err(ReplyError::PayloadTooLarge)
+                );
+                assert_eq!(
+                    stage.stage_parts(reply_carrying(b"ab", Some(&b"ab"[..]))),
+                    Ok(())
+                );
+                assert_eq!(stage.staged(), 1);
+                assert_eq!(stage.refusals().payload_too_large, 2);
+
+                let mut peers = crate::peer_tables::PeerTables::new();
+                peers.limit_to(limits);
+                assert_eq!(
+                    peers.replies.stage_parts(reply_carrying(b"abc", None)),
+                    Err(ReplyError::PayloadTooLarge)
+                );
+                assert_eq!(
+                    peers.replies.stage_parts(reply_carrying(b"ab", None)),
+                    Ok(())
+                );
+                assert_eq!(peers.replies.staged(), 1);
+            },
+        );
+    }
+
+    /// One frame from a peer of one query on `bound/reply` for each `(rid, parameters,
+    /// attachment)`, a field left out where it is `None`.
+    #[cfg(all(
+        feature = "query-queryable",
+        any(feature = "query-selector-parameters", feature = "query-attachment")
+    ))]
+    fn sized_queries(
+        asked: &[(u32, Option<&[u8]>, Option<&[u8]>)],
+    ) -> crate::driver_loop::DriverLoopOutcome {
+        let messages = asked
+            .iter()
+            .map(|&(rid, parameters, attachment)| {
+                let mut builder =
+                    crate::request_build::RequestQueryBuilder::new(rid, 0, Some("bound/reply"));
+                if let Some(parameters) = parameters {
+                    builder = builder.parameters(parameters);
+                }
+                #[cfg(feature = "query-attachment")]
+                if let Some(attachment) = attachment {
+                    builder = builder.query_attachment(attachment);
+                }
+                #[cfg(not(feature = "query-attachment"))]
+                let _ = attachment;
+                let request = builder.build().expect("a literal key builds");
+                crate::network_message::NetworkMessage::Request(std::boxed::Box::new(request))
+            })
+            .collect();
+        crate::driver_loop::DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages,
+            has_ext: false,
+            extensions: std::vec::Vec::new(),
+            priority: crate::qos::Priority::DEFAULT,
+        }
+    }
+
+    /// An observer held to `limits` with one queryable on `bound/reply` that counts its runs.
+    #[cfg(all(
+        feature = "query-queryable",
+        any(feature = "query-selector-parameters", feature = "query-attachment")
+    ))]
+    fn counting_queryable(
+        limits: &SessionLimits,
+    ) -> (
+        ApplicationLayerObserver,
+        std::sync::Arc<core::sync::atomic::AtomicUsize>,
+    ) {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let mut observer = ApplicationLayerObserver::with_limits(limits);
+        let ran = Arc::new(AtomicUsize::new(0));
+        let runs = Arc::clone(&ran);
+        observer
+            .queryables
+            .register("bound/reply", move |_, _| {
+                runs.fetch_add(1, Ordering::Relaxed);
+            })
+            .expect("no quota is stated on the queryables");
+        (observer, ran)
+    }
+
+    /// The length one byte past a build's size bound of a query field, or the longest the
+    /// request builder writes where that is shorter or the build states no bound (`0`), and
+    /// whether a node of the build refuses it.
+    #[cfg(all(
+        feature = "query-queryable",
+        any(feature = "query-selector-parameters", feature = "query-attachment")
+    ))]
+    fn past_the_build(bound: usize) -> (usize, bool) {
+        let most = crate::request_build::REQUEST_QUERY_PARAMETERS_MAX_LEN;
+        let length = if bound == 0 {
+            most
+        } else {
+            (bound + 1).min(most)
+        };
+        (length, bound != 0 && length > bound)
+    }
+
+    /// `QUERY_PARAMETERS_MAX_BYTES` with nothing stated: a query from a peer whose parameters are
+    /// past the build's value runs nowhere and is counted, and one where the build states no
+    /// bound runs, as it did; its final is owed either way.
+    #[cfg(all(feature = "query-queryable", feature = "query-selector-parameters"))]
+    #[test]
+    fn query_parameters_max_bytes_with_nothing_stated_admits_what_the_build_admitted() {
+        use core::sync::atomic::Ordering;
+        let (mut observer, ran) = counting_queryable(&SessionLimits::defaults());
+        let (length, refused) = past_the_build(caps::QUERY_PARAMETERS_MAX_BYTES);
+        let long = std::vec![b'x'; length];
+        observer.dispatch_event(crate::driver_loop::IterationEvent::Poll(&sized_queries(&[
+            (0, Some(&long[..]), None),
+        ])));
+        assert_eq!(ran.load(Ordering::Relaxed), usize::from(!refused));
+        assert_eq!(observer.queryables.oversize_refusals(), u32::from(refused));
+        assert_eq!(
+            observer.pending_final_count(),
+            1,
+            "the query is owed its final"
+        );
+    }
+
+    /// `QUERY_PARAMETERS_MAX_BYTES` stated as two: a query from a peer with three bytes of
+    /// parameters reaches no queryable and is counted, one with two runs, and both are owed
+    /// their final; a refusal stages no reply.
+    #[cfg(all(feature = "query-queryable", feature = "query-selector-parameters"))]
+    #[test]
+    fn query_parameters_max_bytes_stated_refuses_the_next() {
+        use core::sync::atomic::Ordering;
+        held_to_two(
+            SessionLimits::select_query_parameters_max_bytes,
+            QueryParametersMaxBytes::DOMAIN.is_singleton(),
+            |limits| {
+                let (mut observer, ran) = counting_queryable(limits);
+                observer.dispatch_event(crate::driver_loop::IterationEvent::Poll(&sized_queries(
+                    &[(0, Some(&b"abc"[..]), None), (1, Some(&b"ab"[..]), None)],
+                )));
+                assert_eq!(
+                    ran.load(Ordering::Relaxed),
+                    1,
+                    "the longer query ran nowhere"
+                );
+                assert_eq!(observer.queryables.oversize_refusals(), 1);
+                assert_eq!(
+                    observer.pending_final_count(),
+                    2,
+                    "both are owed their final"
+                );
+                assert_eq!(observer.pending_reply_count(), 0);
+            },
+        );
+    }
+
+    /// `QUERY_ATTACHMENT_MAX_BYTES` with nothing stated: a query from a peer whose attachment is
+    /// past the build's value runs nowhere and is counted, and one where the build states no
+    /// bound runs, as it did; its final is owed either way.
+    #[cfg(all(feature = "query-queryable", feature = "query-attachment"))]
+    #[test]
+    fn query_attachment_max_bytes_with_nothing_stated_admits_what_the_build_admitted() {
+        use core::sync::atomic::Ordering;
+        let (mut observer, ran) = counting_queryable(&SessionLimits::defaults());
+        let (length, refused) = past_the_build(caps::QUERY_ATTACHMENT_MAX_BYTES);
+        let long = std::vec![b'x'; length];
+        observer.dispatch_event(crate::driver_loop::IterationEvent::Poll(&sized_queries(&[
+            (0, None, Some(&long[..])),
+        ])));
+        assert_eq!(ran.load(Ordering::Relaxed), usize::from(!refused));
+        assert_eq!(observer.queryables.oversize_refusals(), u32::from(refused));
+        assert_eq!(
+            observer.pending_final_count(),
+            1,
+            "the query is owed its final"
+        );
+    }
+
+    /// `QUERY_ATTACHMENT_MAX_BYTES` stated as two: a query from a peer with three bytes of
+    /// attachment reaches no queryable and is counted, one with two runs, and both are owed their
+    /// final; the parameters' bound, stated by nobody, refuses neither.
+    #[cfg(all(feature = "query-queryable", feature = "query-attachment"))]
+    #[test]
+    fn query_attachment_max_bytes_stated_refuses_the_next() {
+        use core::sync::atomic::Ordering;
+        held_to_two(
+            SessionLimits::select_query_attachment_max_bytes,
+            QueryAttachmentMaxBytes::DOMAIN.is_singleton(),
+            |limits| {
+                let (mut observer, ran) = counting_queryable(limits);
+                observer.dispatch_event(crate::driver_loop::IterationEvent::Poll(&sized_queries(
+                    &[(0, None, Some(&b"abc"[..])), (1, None, Some(&b"ab"[..]))],
+                )));
+                assert_eq!(
+                    ran.load(Ordering::Relaxed),
+                    1,
+                    "the longer query ran nowhere"
+                );
+                assert_eq!(observer.queryables.oversize_refusals(), 1);
+                assert_eq!(
+                    observer.pending_final_count(),
+                    2,
+                    "both are owed their final"
+                );
+            },
+        );
+    }
+
     /// The places of one querier, made as the runtime that declares the querier makes them: held
     /// to the bound the session's observer was handed.
     fn querier_places(limits: &SessionLimits) -> crate::quota::Quota {

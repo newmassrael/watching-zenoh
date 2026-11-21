@@ -113,6 +113,7 @@ def declared_pending(decl: dict) -> dict[str, str]:
 #: stay a read of the build. One line per allowed site.
 ALLOWED: tuple[tuple[str, str, str], ...] = (
     ("crates/wz-session-core/src/pubsub.rs", "_", "a build-time assertion on the storage the constant sizes: a fixed table's rows fit the u16 positions of the match cache"),
+    ("crates/wz-session-core/src/reply_stage.rs", "payload_most", "a reply stage of a policy that enforces its capacity sized its arena for MAX_PENDING_REPLIES replies of this payload, so it keeps the build's value beside the stated one where the profile grows and a statement could raise the bound past what that arena was sized for"),
 )
 
 #: (path pattern relative to the root, innermost item, reason): a site that reads a snapshot it

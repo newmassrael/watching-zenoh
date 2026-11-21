@@ -154,7 +154,8 @@ impl<P: Storage> PeerTables<P> {
     /// [`Self::forget_peer`] keeps the quotas; a session opened in the slot next states its own
     /// here.
     pub fn limit_to(&mut self, limits: &crate::limits::SessionLimits) {
-        self.replies.limit_to(limits.max_pending_replies_held());
+        self.replies
+            .limit_to(crate::reply_stage::ReplyBounds::of(limits));
         self.finals.limit_to(limits.max_pending_finals_held());
         self.subscribers
             .limit_aliases_to(limits.max_peer_keyexpr_aliases_held());
