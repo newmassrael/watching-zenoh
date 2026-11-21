@@ -918,7 +918,7 @@ pub const PICO_FRAG_MAX_BYTES: LimitBinding = LimitBinding {
     storage: Storage::Quota,
     scope: &[Scope::Link],
     binding_heap: Some(Binding::Open),
-    binding_fixed: None,
+    binding_fixed: Some(Binding::Open),
     wire: Wire::None,
 };
 
