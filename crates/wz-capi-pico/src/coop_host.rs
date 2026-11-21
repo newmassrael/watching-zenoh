@@ -55,6 +55,10 @@ mod posix_host {
     /// The datagram socket a scout over one socket asks by.
     #[cfg(all(feature = "scout-mcu", not(feature = "scout")))]
     pub(crate) type Datagram = wz_runtime_posix::net::PosixUdpSocket;
+
+    /// The socket a scouting window asks each interface by and a group is joined on.
+    #[cfg(all(feature = "scout", not(feature = "engine-tokio")))]
+    pub(crate) type Multicast = wz_runtime_posix::net::PosixUdpSocket;
 }
 
 // Windows: the same seams over the system's own calls (`wz_runtime_posix::windows`), the
@@ -99,6 +103,10 @@ mod windows_host {
     /// The datagram socket a scout over one socket asks by.
     #[cfg(all(feature = "scout-mcu", not(feature = "scout")))]
     pub(crate) type Datagram = wz_runtime_posix::windows::net::WindowsUdpSocket;
+
+    /// The socket a scouting window asks each interface by and a group is joined on.
+    #[cfg(all(feature = "scout", not(feature = "engine-tokio")))]
+    pub(crate) type Multicast = wz_runtime_posix::windows::net::WindowsUdpSocket;
 }
 
 // The cooperative engine's host is a system's calls, and a host whose calls no module above names

@@ -6,38 +6,25 @@
 //! A scouting window needs no session: one Scout is asked of the group, the Hellos that answer are
 //! collected for a budget, and the window ends. The rules of it are the session's
 //! (`wz_session_core::scouting_host`: what a Scout says, which datagrams are answers and which are
-//! named and dropped, when it is over) and the sockets are `wz_host_net`'s (the plan under a
-//! multicast socket, written once for every runtime). What this module adds is the blocking host
+//! named and dropped, when it is over) and the sockets are the host's
+//! (`wz_runtime_posix::scouting`: an ask socket pinned to each interface that can carry multicast,
+//! and the group socket, over either host's sockets). What this module adds is the blocking host
 //! that pumps the one with the other: it opens the sockets, sends the Scout, reads what arrives
 //! and reads the clock, on the calling thread, which is what a C program that calls `z_scout`
-//! expects, and what zenoh-pico's own `__z_scout_loop` does.
-//!
-//! ## The sockets, as the tokio window opens them
-//!
-//! The group socket (joined, bound on the group port) is an extra RECEIVE member and not a
-//! condition of the window: neither reference binds one to scout. Upstream's `scout` receives on
-//! its per-interface sockets alone, and zenoh-pico opens a link per interface when the config
-//! names none (`vendor/zenoh-pico/src/session/scout.c` @
-//! `_z_udp_unicast_interface_iterator_next(&iter)`). So the Scout leaves by an ASK socket pinned
-//! to each interface that can carry multicast, and the Hello comes back to the socket the Scout
-//! left from, because both references' responders reply unicast to the asker. A window whose
-//! group socket cannot be bound goes on with the ask sockets, and is empty only when there is
-//! nothing to ask or listen with. A build or host that cannot enumerate the interfaces offers
-//! nothing, and the group socket asks alone, as a floor.
-//!
-//! A scout is sent when AT LEAST ONE ask socket sent it (pico's rule, `scout.c` @
-//! `return sent ? _Z_RES_OK : _Z_ERR_TRANSPORT_TX_FAILED;`): a node with one dead interface
-//! among four must still discover.
+//! expects, and what zenoh-pico's own `__z_scout_loop` does. It needs no `std`: a host library
+//! built without it scouts as the one with it does.
 
-use std::io;
-use std::net::{IpAddr, SocketAddr, UdpSocket};
-use std::sync::Arc;
-use std::time::Duration;
+use alloc::sync::Arc;
+use core::ffi::c_int;
+use core::net::IpAddr;
 
-use wz_host_net::multicast::{bind_joined, bind_sender, Bound, RxBind, SocketConfig};
 use wz_runtime_coop::{ClockSource, CoopRuntime};
+use wz_runtime_posix::group::MulticastSocket;
+use wz_runtime_posix::scouting::ScoutMembers;
 use wz_session_core::scouting_host::{deliver_in_upstream_order, ScoutWindow, ScoutingActions};
 use wz_session_core::session_zid::SessionZid;
+
+use crate::prelude::*;
 
 pub use wz_session_core::scouting_host::{
     parse_multicast_locator, ScoutParams, ScoutedHello, MULTICAST_LOCATOR_DEFAULT,
@@ -47,145 +34,16 @@ pub use wz_session_core::scouting_host::{
 /// The most a single datagram can carry over UDP, which sizes the read buffer.
 const MAX_DATAGRAM: usize = 65507;
 
-/// How long a window sleeps when nothing arrived, so the loop answers a Hello within a few
-/// milliseconds without spinning. Shorter than the tokio window's 50 ms timer cadence, which is
-/// a timer and not that window's read latency.
-const IDLE_SLEEP: Duration = Duration::from_millis(2);
-
-/// One socket of a window: where it reads, where the Scout goes from it, and whether it asks.
-struct Member {
-    socket: UdpSocket,
-    /// Where the Scout is written from this member: the group, or in a test the responder.
-    peer: SocketAddr,
-    asks: bool,
-}
-
-/// The sockets a window holds. A member that errors on a read is dropped, as a link that is lost
-/// is, and the window goes on with the rest: one interface going down must not end a window the
-/// others can still answer on.
-struct Members {
-    members: Vec<Member>,
-    /// Where the next read starts, so one continuously ready socket cannot starve the others (a
-    /// group socket is one anybody can send to).
-    cursor: usize,
-}
-
-impl Members {
-    /// Open the group socket and one ask socket for each address in `locals`, the way the tokio
-    /// window does ([`Self::from_parts`] says what is kept when they fail).
-    fn open(group: IpAddr, port: u16, locals: &[IpAddr]) -> Self {
-        // `Group`, not the family wildcard: a scouting socket reads on the group address itself
-        // where a socket may be bound to one, as upstream's does (R3126).
-        let group_member = bind_joined(group, port, &SocketConfig::default(), RxBind::Group)
-            .ok()
-            .and_then(|bound| member(bound, false));
-        let mut asking = Vec::new();
-        for local in locals {
-            // `#iface=` takes an address literal as well as a name, so an enumerated address
-            // needs no lookup to become a pin.
-            let pinned = local.to_string();
-            let cfg = SocketConfig {
-                iface: Some(&pinned),
-                ..SocketConfig::default()
-            };
-            // A refusal is the address's alone: it is left out and the others stand.
-            if let Some(ask) = bind_sender(group, port, &cfg, false)
-                .ok()
-                .and_then(|bound| member(bound, true))
-            {
-                asking.push(ask);
-            }
-        }
-        Self::from_parts(group_member, asking)
-    }
-
-    /// Compose the group member with the ask members. With no ask member the group socket asks,
-    /// which is the floor a host whose enumeration fails still scouts on; with neither, there is
-    /// no window.
-    fn from_parts(group: Option<Member>, ask: Vec<Member>) -> Self {
-        let fell_back_to_group = ask.is_empty();
-        let mut members = Vec::with_capacity(ask.len() + 1);
-        if let Some(mut group) = group {
-            group.asks = fell_back_to_group;
-            members.push(group);
-        }
-        members.extend(ask);
-        log::debug!(
-            "scout: asking on {} socket(s); fell back to the group socket: {fell_back_to_group}",
-            members.iter().filter(|m| m.asks).count()
-        );
-        Self { members, cursor: 0 }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.members.is_empty()
-    }
-
-    /// Write `scout` from every ask member: whether at least one sent.
-    fn send(&self, scout: &[u8]) -> bool {
-        let mut sent = false;
-        for member in self.members.iter().filter(|m| m.asks) {
-            match member.socket.send_to(scout, member.peer) {
-                Ok(_) => sent = true,
-                Err(error) => {
-                    log::debug!("scout: a Scout did not leave by {}: {error}", member.peer)
-                }
-            }
-        }
-        sent
-    }
-
-    /// Read every datagram that is waiting, handing each to `on_datagram`, and say whether any
-    /// was. A read that fails for any reason but "nothing waits" drops its member.
-    fn drain(&mut self, buffer: &mut [u8], mut on_datagram: impl FnMut(&[u8])) -> bool {
-        let mut any = false;
-        let mut gone = Vec::new();
-        let count = self.members.len();
-        for step in 0..count {
-            let at = (self.cursor + step) % count;
-            loop {
-                match self.members[at].socket.recv_from(buffer) {
-                    Ok((n, _from)) => {
-                        any = true;
-                        on_datagram(&buffer[..n]);
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
-                    Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                    Err(error) => {
-                        log::debug!("scout: a member was lost: {error}");
-                        gone.push(at);
-                        break;
-                    }
-                }
-            }
-        }
-        if count > 0 {
-            self.cursor = (self.cursor + 1) % count;
-        }
-        gone.sort_unstable();
-        for at in gone.into_iter().rev() {
-            self.members.remove(at);
-        }
-        any
-    }
-}
-
-/// Make `bound` a window member. The builder hands it over non-blocking, which the poll loop
-/// needs; it is set again here so a member built from another source cannot block the window.
-fn member(bound: Bound, asks: bool) -> Option<Member> {
-    bound.socket.set_nonblocking(true).ok()?;
-    Some(Member {
-        socket: bound.socket.into(),
-        peer: bound.peer,
-        asks,
-    })
-}
+/// How long a window waits for a datagram when none has arrived, before it reads its clock again:
+/// a few milliseconds, so the window ends close to its budget without spinning, and a Hello that
+/// arrives ends the wait at once.
+const IDLE_WAIT_MS: c_int = 2;
 
 /// The interface addresses a window asks by: the first IPv4 address of every interface that is up
-/// and can carry multicast (the host's own reading; `None` when it cannot be read, which is a
-/// window on the group socket alone).
+/// and can carry multicast (the host's own reading; none when it cannot be read, which is a window
+/// on the group socket alone).
 fn interface_addresses() -> Vec<IpAddr> {
-    wz_host_net::link_interfaces::multicast_interface_addresses().unwrap_or_default()
+    wz_runtime_posix::interfaces::multicast_interface_addresses().unwrap_or_default()
 }
 
 /// One scouting window over `members`: send the Scout, read until the machine resolves, and answer
@@ -194,9 +52,9 @@ fn interface_addresses() -> Vec<IpAddr> {
 /// `clock` is the host's: the window's budget is measured against it. A window with no member, or
 /// whose Scout could not leave by any, ends at once (the machine returns to `Idle` on a failed
 /// send), as a window nobody answers does.
-fn run_window<C: ClockSource + Clone + 'static>(
+fn run_window<S: MulticastSocket, C: ClockSource + Clone + 'static>(
     clock: &C,
-    mut members: Members,
+    mut members: ScoutMembers<S>,
     params: ScoutParams,
 ) -> Arc<ScoutingActions<CoopRuntime<C>>> {
     let mut window = ScoutWindow::<CoopRuntime<C>>::new(params);
@@ -218,22 +76,22 @@ fn run_window<C: ClockSource + Clone + 'static>(
             break;
         }
         if !any {
-            std::thread::sleep(IDLE_SLEEP);
+            members.wait(IDLE_WAIT_MS);
         }
     }
     actions
 }
 
-/// Scout `group:port` for `budget_ms` and hand each peer that answered to `on_hello`, in the order
-/// upstream delivers them (after the window, last responder first), as both C ABIs' `z_scout`
-/// does. The number delivered.
+/// Scout `group:port` for `budget_ms` over the host's sockets `S` and hand each peer that answered
+/// to `on_hello`, in the order upstream delivers them (after the window, last responder first), as
+/// both C ABIs' `z_scout` does. The number delivered.
 ///
 /// A socket that cannot be bound is a smaller window, and no window at all is a window nobody
 /// answers: `0`, not an error, as both C ABIs report success and simply find nothing.
 ///
 /// `zid` is the asker the Scout names, `None` for none; a configured zid that is not one is the
 /// ABI's to refuse before it scouts.
-pub fn run_scout<C: ClockSource + Clone + 'static>(
+pub fn run_scout<S: MulticastSocket, C: ClockSource + Clone + 'static>(
     clock: &C,
     group: IpAddr,
     port: u16,
@@ -242,7 +100,7 @@ pub fn run_scout<C: ClockSource + Clone + 'static>(
     budget_ms: u64,
     on_hello: impl FnMut(&ScoutedHello),
 ) -> usize {
-    let hellos = window_hellos(clock, group, port, what, zid, budget_ms, false);
+    let hellos = window_hellos::<S, C>(clock, group, port, what, zid, budget_ms, false);
     deliver_in_upstream_order(&hellos, on_hello)
 }
 
@@ -251,7 +109,7 @@ pub fn run_scout<C: ClockSource + Clone + 'static>(
 /// (`vendor/zenoh-pico/src/net/session.c` @
 /// `_z_hello_slist_t *hellos = _z_scout_inner(what, *zid, &mcast_locator, timeout, true);`). The
 /// `true` is `exit_on_first`: the window ends at the first Hello.
-pub fn scout_first<C: ClockSource + Clone + 'static>(
+pub fn scout_first<S: MulticastSocket, C: ClockSource + Clone + 'static>(
     clock: &C,
     group: IpAddr,
     port: u16,
@@ -259,12 +117,12 @@ pub fn scout_first<C: ClockSource + Clone + 'static>(
     zid: Option<SessionZid>,
     budget_ms: u64,
 ) -> Option<ScoutedHello> {
-    window_hellos(clock, group, port, what, zid, budget_ms, true)
+    window_hellos::<S, C>(clock, group, port, what, zid, budget_ms, true)
         .into_iter()
         .next()
 }
 
-fn window_hellos<C: ClockSource + Clone + 'static>(
+fn window_hellos<S: MulticastSocket, C: ClockSource + Clone + 'static>(
     clock: &C,
     group: IpAddr,
     port: u16,
@@ -273,7 +131,7 @@ fn window_hellos<C: ClockSource + Clone + 'static>(
     budget_ms: u64,
     exit_on_first: bool,
 ) -> Vec<ScoutedHello> {
-    let members = Members::open(group, port, &interface_addresses());
+    let members = ScoutMembers::<S>::open(group, port, &interface_addresses());
     let params = ScoutParams {
         what,
         zid,
@@ -285,5 +143,6 @@ fn window_hellos<C: ClockSource + Clone + 'static>(
     run_window(clock, members, params).scouted_hellos()
 }
 
-#[cfg(test)]
+// The tests run responders on threads of `std`.
+#[cfg(all(test, feature = "std", unix))]
 mod tests;

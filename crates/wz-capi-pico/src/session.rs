@@ -1427,7 +1427,9 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     // A group is joined on the host's sockets, under the session's two link policies, as the
     // tokio engine's group sockets are.
     #[cfg(feature = "multicast-transport")]
-    let links = links.with_groups(wz_capi_coop::host_group::HostGroups::of_policy(&policy));
+    let links = links.with_groups(wz_capi_coop::host_group::HostGroups::<
+        crate::coop_host::Multicast,
+    >::of_policy(&policy));
     let config = wz_capi_coop::CoopConfig {
         endpoints: connect,
         whatami: dial_whatami,

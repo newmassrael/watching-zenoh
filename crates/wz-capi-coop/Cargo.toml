@@ -94,10 +94,12 @@ wz-session-mcu = { path = "../wz-session-mcu", default-features = false, feature
     "reassembly",
 ] }
 
-# The host's network: the interface table and the multicast sockets a scouting window opens
-# (`scout` below). Optional, so a build that does not scout links none of it.
-wz-host-net = { path = "../wz-host-net", optional = true }
-# The window says which sockets it asks on and which it lost, as the host crate beneath it does.
+# The host's own multicast sockets, without `std`: the interface table, a scouting window's sockets
+# and a group's two sockets made by its locator's keys (`host-multicast`), over the POSIX kernels'
+# calls or Winsock (`scout` and `group-host` below). Optional, so a build that neither scouts on a
+# host nor joins a host's group links none of it.
+wz-runtime-posix = { path = "../wz-runtime-posix", optional = true, features = ["host-multicast"] }
+# A group the host did not join says why, as the tokio engine's group link does.
 log = { version = "0.4", optional = true }
 # The secure channel (`tls-mbedtls` below): Mbed TLS, built from the pinned submodules.
 wz-tls-mbedtls = { path = "../wz-tls-mbedtls", optional = true }
@@ -121,16 +123,10 @@ ticker = []
 # Active multicast scouting (`Z_FEATURE_SCOUTING`): one Scout asked of the group, the Hellos that
 # answer collected for a budget, on the host's sockets and the session's own window rules
 # (`wz_session_core::scouting_host`). A window needs no session, so this is a plane beside the
-# engine and not a method of its port. The `#iface=` honor is named because the window pins one
-# ask socket to each interface that can carry multicast, which an unhonoured key would leave to
-# the kernel (one socket on the default route, which asks no other interface).
-scout = [
-    "std",
-    "scout-datagram",
-    "dep:wz-host-net",
-    "dep:log",
-    "wz-host-net/locator-iface",
-]
+# engine and not a method of its port. The window pins one ask socket to each interface that can
+# carry multicast (`wz_runtime_posix::scouting`), which needs no `std`, so a host library without
+# it scouts as one with it does.
+scout = ["scout-datagram", "dep:wz-runtime-posix"]
 # Active scouting over ONE datagram socket of the stack the engine runs on (`scout_datagram`),
 # without `std`: zenoh-pico's window on a platform with no interface iterator (Zephyr), a socket the
 # Scout leaves by and the Hellos come back to. The session's window rules and the two codecs, and
@@ -187,18 +183,12 @@ group = [
     "wz-session-mcu/codec-push",
 ]
 # The groups of `group` joined on the host's own sockets (`host_group::HostGroups`, which the
-# host's links are given with `IpLinks::with_groups`). The sockets are `wz-host-net`'s, built by
-# the plan the tokio runtime's group link is built by, so `#iface=`, `#join=`, `#ttl=`, `#bind=`,
-# `#dscp=`, the loopback and the refusal of an unpinned link are one decision for both engines.
-# A host's, so it selects `std`; the `#iface=` honor is named because a group's interface is what
-# the key names.
-group-host = [
-    "group",
-    "std",
-    "dep:wz-host-net",
-    "dep:log",
-    "wz-host-net/locator-iface",
-]
+# host's links are given with `IpLinks::with_groups`). The sockets are those of
+# `wz_runtime_posix::multicast`, made by the rules the tokio runtime's group link is made by, so
+# `#iface=`, `#join=`, `#ttl=`, `#bind=`, `#dscp=`, the loopback and the refusal of an unpinned
+# link are one decision for both engines. It needs no `std`: a host library without it joins a
+# group as one with it does.
+group-host = ["group", "dep:wz-runtime-posix", "dep:log"]
 # The `tls/` link on a host (`tls::HostTls`): the secure channel `wz-tls-mbedtls` runs, made from
 # the PEM material a C ABI resolved, for both roles. The library is built from the pinned
 # submodules (`vendored`), and every call into it is under one lock (`host-lock`), because the

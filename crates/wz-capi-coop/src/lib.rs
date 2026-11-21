@@ -32,7 +32,7 @@
 //! With `group` it also joins multicast groups: each group `CoopConfig::groups` names is a face of
 //! its own, whose session is the session shell's group session hosted as a task of the session's
 //! local set, over the group the network stack joins. With `group-host` the host's own sockets
-//! join it (`host_group`), as the tokio engine's group link does.
+//! join it (`host_group`), as the tokio engine's group link does, without `std`.
 //!
 //! With `remote-declaration-watch` or `declarations-synced-event` it tells a program's watch what
 //! the peers of its links declare and retract (`decl_watch`), as the tokio engine does.
@@ -49,9 +49,10 @@
 //! its read task's thread, its sleep) is `wz-capi-port`'s `os`; the `std` feature, on by default,
 //! gives it the host's, and the runtime's critical sections the process's lock (`host-lock`).
 //! Without it the image supplies both: the kernel's answers to `os` and a `critical-section`
-//! implementation. Scouting with a socket for each interface asks the host's multicast sockets and
-//! comes with `std` only (`scout`); scouting over one datagram socket of the stack, as zenoh-pico
-//! scouts where it has no interface iterator, needs neither (`scout-datagram`).
+//! implementation. Scouting with a socket for each interface (`scout`) and a group joined on the
+//! host's sockets (`group-host`) ask a host's multicast sockets and its interface table, which
+//! `wz-runtime-posix` gives without `std`; scouting over one datagram socket of the stack, as
+//! zenoh-pico scouts where it has no interface iterator, needs no host at all (`scout-datagram`).
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -75,6 +76,23 @@ mod prelude {
     pub(crate) use alloc::vec;
     pub(crate) use alloc::vec::Vec;
 }
+
+// The host's multicast sockets are the POSIX kernels' or Winsock's, and `wz-runtime-posix` is empty
+// on another system: a build for one is refused here by name, rather than by the paths it lacks.
+#[cfg(all(
+    any(feature = "scout", feature = "group-host"),
+    not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "nto",
+        windows
+    ))
+))]
+compile_error!(
+    "wz-capi-coop: `scout` and `group-host` open a host's multicast sockets, which \
+     `wz-runtime-posix` has on Linux, Android, QNX Neutrino and Windows; an image scouts with \
+     `scout-datagram` over its own stack"
+);
 
 #[cfg(feature = "listen")]
 mod admission_gate;

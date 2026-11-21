@@ -3937,7 +3937,6 @@ dependencies = [
  "rustls",
  "wz-capi-port",
  "wz-ext-pubsub",
- "wz-host-net",
  "wz-runtime-coop",
  "wz-runtime-posix",
  "wz-session-core",

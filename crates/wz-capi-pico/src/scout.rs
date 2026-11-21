@@ -201,7 +201,9 @@ mod window {
         _limits: &SessionLimits,
         on_hello: impl FnMut(&ScoutedHello),
     ) -> usize {
-        wz_capi_coop::scout::run_scout(clock, group, port, what, zid, budget_ms, on_hello)
+        wz_capi_coop::scout::run_scout::<crate::coop_host::Multicast, _>(
+            clock, group, port, what, zid, budget_ms, on_hello,
+        )
     }
 
     #[cfg(all(not(feature = "engine-tokio"), feature = "scout"))]
@@ -216,7 +218,9 @@ mod window {
         _policy: &SessionPolicy,
         _limits: &SessionLimits,
     ) -> Option<ScoutedHello> {
-        wz_capi_coop::scout::scout_first(clock, group, port, what, zid, budget_ms)
+        wz_capi_coop::scout::scout_first::<crate::coop_host::Multicast, _>(
+            clock, group, port, what, zid, budget_ms,
+        )
     }
 
     // The cooperative engine with `scout-mcu` alone: one datagram socket of the stack its links

@@ -31,7 +31,7 @@ use crate::host_group::HostGroups;
 use crate::{CoopConfig, CoopEngine};
 
 /// The host's links, joining groups on the host's sockets.
-type Links = IpLinks<PosixUdpSocket, PosixTcpDial, NoDial, HostGroups>;
+type Links = IpLinks<PosixUdpSocket, PosixTcpDial, NoDial, HostGroups<PosixUdpSocket>>;
 
 type Engine = CoopEngine<Links, PosixClock>;
 
@@ -67,7 +67,7 @@ fn open_member(member: u8, endpoint: &str, policy: SessionPolicy) -> Arc<Engine>
     };
     let links = PosixLinks::new([0, 0, 0, 0], PosixTcpDial)
         .waited_by_owner()
-        .with_groups(HostGroups::of_policy(&policy));
+        .with_groups(HostGroups::<PosixUdpSocket>::of_policy(&policy));
     Engine::open_with_policy(links, PosixClock, PosixEntropy, config, policy)
         .expect("the member joins the group on the host's sockets")
 }
