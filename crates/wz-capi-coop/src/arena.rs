@@ -19,7 +19,13 @@
 //!   advertises, a streamed batch's length counted inside it, and [`LINK_TX_SLOTS`] slots of that
 //!   length to encode its frames into, each table with the flags that say which buffers are lent
 //!   (`SessionArena::lend_links`). The batch is the config's, under the build's
-//!   `PICO_UNICAST_BATCH_BYTES`; these are the rows lent when the session opens, first.
+//!   `PICO_UNICAST_BATCH_BYTES`; these are the rows lent when the session opens, first;
+//! - the engine's own record of each declaration it announces and announces again over a new
+//!   link ([`EntityRows`]): its subscribers, queryables, tokens and liveliness subscribers under
+//!   the limits of the application's tables, the key expressions it declares
+//!   (`MAX_DECLARED_KEYEXPRS`), the write filters of its publishers (`MAX_PUBLISHERS`) and
+//!   queriers (`MAX_QUERIERS`), its matching listeners (`MAX_MATCHING_LISTENERS`), and the
+//!   Interests those filters and listeners hold open, at most one for each of them.
 //!
 //! A table's entry is the registry's own `ROW_BYTES` as the lent policy lays the row out
 //! ([`Lent`]), and its count the value of its limit the open resolved, under the build's value
@@ -53,7 +59,7 @@ use core::alloc::Layout;
 use core::ptr::NonNull;
 
 use wz_runtime_coop::link_storage::LinkTables;
-use wz_session_core::bounded::{Arena, LendRefused, Lent, ARENA_ALIGN};
+use wz_session_core::bounded::{Arena, BoundedVec, LendRefused, Lent, ARENA_ALIGN};
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::caps;
 use wz_session_core::limit_binding::{Quota, UnlentRows};
@@ -63,6 +69,7 @@ use wz_session_core::reply::ReplyRegistry;
 use wz_session_core::reply_sink::{BoxedReplySink, ConsolidatingSink};
 use wz_session_core::sink::BoxedSink;
 
+use crate::engine::EntryBytes;
 use crate::CoopConfig;
 
 /// One part of what an arena holds: `count` items of `entry_bytes` each.
@@ -94,7 +101,7 @@ impl ArenaRow {
 }
 
 /// The most rows a plan holds: every row of the build with every feature.
-pub const ARENA_ROWS: usize = 10;
+pub const ARENA_ROWS: usize = 18;
 
 /// The slots each link is lent to encode its frames into: a batching session holds a batch open in
 /// one slot while it encodes the next message, which does not join it, into another.
@@ -126,9 +133,48 @@ pub enum ArenaRefused {
         /// The bytes asked for.
         bytes: usize,
     },
-    /// The arena reserved by the plan had no room for a part of it: the plan and what is lent by
-    /// it disagree.
-    Unlent(LendRefused),
+    /// A table of the plan was not lent from the arena reserved by it: the plan and the tables
+    /// the open lends disagree, which no build should reach.
+    Lend(LendRefused),
+}
+
+/// How many rows each table the engine keeps of the session's own declarations is lent: the
+/// values of their limits the open resolved, under the build's.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EntityRows {
+    /// The subscribers (`MAX_SUBSCRIPTIONS`).
+    pub subscribers: usize,
+    /// The queryables (`MAX_QUERYABLES`); none in a build without `queryable`.
+    pub queryables: usize,
+    /// The liveliness tokens (`MAX_LOCAL_TOKENS`); none in a build without `liveliness`.
+    pub tokens: usize,
+    /// The liveliness subscribers (`MAX_LIVELINESS_SUBSCRIPTIONS`); none in a build without
+    /// `liveliness`.
+    pub liveliness_subscribers: usize,
+    /// The key expressions declared (`MAX_DECLARED_KEYEXPRS`).
+    pub keyexprs: usize,
+    /// The publishers' write filters (`MAX_PUBLISHERS`).
+    pub publishers: usize,
+    /// The queriers' write filters (`MAX_QUERIERS`).
+    pub queriers: usize,
+    /// The matching listeners (`MAX_MATCHING_LISTENERS`).
+    pub matching_listeners: usize,
+}
+
+impl EntityRows {
+    /// The rows of the write filters' one table: a publisher's and a querier's each.
+    pub const fn filters(&self) -> Option<usize> {
+        self.publishers.checked_add(self.queriers)
+    }
+
+    /// The rows of the Interests the session holds open: a write filter or a matching listener
+    /// opens at most one, and one that finds its key already asked opens none.
+    pub const fn interests(&self) -> Option<usize> {
+        match self.filters() {
+            Some(filters) => filters.checked_add(self.matching_listeners),
+            None => None,
+        }
+    }
 }
 
 /// What a session's arena holds, row by row, in the order the rows are lent from it.
@@ -140,6 +186,7 @@ pub struct ArenaPlan {
     links: usize,
     /// The length of a link's receive buffer and of each of its slots.
     link_bytes: usize,
+    entities: EntityRows,
 }
 
 impl ArenaPlan {
@@ -160,6 +207,7 @@ impl ArenaPlan {
             len: 0,
             links,
             link_bytes,
+            entities: EntityRows::default(),
         };
         let faces = faces_of(config).ok_or(ArenaRefused::TooLarge)?;
         // The links' rows are lent when the session opens, in this order (`SessionArena::lend_links`).
@@ -270,8 +318,73 @@ impl ArenaPlan {
                 Lent,
             >::ROW_BYTES,
         );
+        plan.entities = entity_rows(limits)?;
+        plan.put_entities()?;
         plan.reserved_bytes().ok_or(ArenaRefused::TooLarge)?;
         Ok(plan)
+    }
+
+    /// The rows of the engine's own record of the session's declarations ([`EntityRows`]).
+    fn put_entities(&mut self) -> Result<(), ArenaRefused> {
+        let rows = self.entities;
+        self.put(
+            "subscriber declarations",
+            "MAX_SUBSCRIPTIONS",
+            rows.subscribers,
+            EntryBytes::SUBSCRIBER,
+        );
+        #[cfg(feature = "queryable")]
+        self.put(
+            "queryable declarations",
+            "MAX_QUERYABLES",
+            rows.queryables,
+            EntryBytes::QUERYABLE,
+        );
+        #[cfg(feature = "liveliness")]
+        {
+            self.put(
+                "token declarations",
+                "MAX_LOCAL_TOKENS",
+                rows.tokens,
+                EntryBytes::TOKEN,
+            );
+            self.put(
+                "liveliness subscriber declarations",
+                "MAX_LIVELINESS_SUBSCRIPTIONS",
+                rows.liveliness_subscribers,
+                EntryBytes::LIVELINESS_SUBSCRIBER,
+            );
+        }
+        self.put(
+            "key expressions",
+            "MAX_DECLARED_KEYEXPRS",
+            rows.keyexprs,
+            EntryBytes::KEYEXPR,
+        );
+        self.put(
+            "write filters",
+            "MAX_PUBLISHERS + MAX_QUERIERS",
+            rows.filters().ok_or(ArenaRefused::TooLarge)?,
+            EntryBytes::FILTER,
+        );
+        self.put(
+            "matching listeners",
+            "MAX_MATCHING_LISTENERS",
+            rows.matching_listeners,
+            EntryBytes::MATCH,
+        );
+        self.put(
+            "interests",
+            "MAX_PUBLISHERS + MAX_QUERIERS + MAX_MATCHING_LISTENERS",
+            rows.interests().ok_or(ArenaRefused::TooLarge)?,
+            EntryBytes::INTEREST,
+        );
+        Ok(())
+    }
+
+    /// How many rows each table of the engine's record of the session's declarations is lent.
+    pub fn entities(&self) -> EntityRows {
+        self.entities
     }
 
     /// Add a row. A plan has room for every row of the build with every feature (`ARENA_ROWS`).
@@ -303,6 +416,60 @@ fn lent(limit: &'static str, value: Quota, build: usize) -> Result<usize, ArenaR
     value
         .lent_under(Quota::at_most(build))
         .map_err(|why| ArenaRefused::Limit { limit, why })
+}
+
+/// The rows of each table of the engine's record of the session's declarations, under `limits`.
+fn entity_rows(limits: &SessionLimits) -> Result<EntityRows, ArenaRefused> {
+    Ok(EntityRows {
+        subscribers: lent(
+            "MAX_SUBSCRIPTIONS",
+            limits.max_subscriptions(),
+            caps::MAX_SUBSCRIPTIONS,
+        )?,
+        queryables: if cfg!(feature = "queryable") {
+            lent(
+                "MAX_QUERYABLES",
+                limits.max_queryables(),
+                caps::MAX_QUERYABLES,
+            )?
+        } else {
+            0
+        },
+        tokens: if cfg!(feature = "liveliness") {
+            lent(
+                "MAX_LOCAL_TOKENS",
+                limits.max_local_tokens(),
+                caps::MAX_LOCAL_TOKENS,
+            )?
+        } else {
+            0
+        },
+        liveliness_subscribers: if cfg!(feature = "liveliness") {
+            lent(
+                "MAX_LIVELINESS_SUBSCRIPTIONS",
+                limits.max_liveliness_subscriptions(),
+                caps::MAX_LIVELINESS_SUBSCRIPTIONS,
+            )?
+        } else {
+            0
+        },
+        keyexprs: lent(
+            "MAX_DECLARED_KEYEXPRS",
+            limits.max_declared_keyexprs(),
+            caps::MAX_DECLARED_KEYEXPRS,
+        )?,
+        publishers: lent(
+            "MAX_PUBLISHERS",
+            limits.max_publishers(),
+            caps::MAX_PUBLISHERS,
+        )?,
+        queriers: lent("MAX_QUERIERS", limits.max_queriers(), caps::MAX_QUERIERS)?,
+        matching_listeners: lent(
+            "MAX_MATCHING_LISTENERS",
+            limits.max_matching_listeners(),
+            caps::MAX_MATCHING_LISTENERS,
+        )?,
+    })
 }
 
 /// `count` items for each of `each` holders.
@@ -409,12 +576,22 @@ impl SessionArena {
         let rx = self
             .arena
             .lend_byte_cells(plan.link_bytes, plan.links)
-            .map_err(ArenaRefused::Unlent)?;
+            .map_err(ArenaRefused::Lend)?;
         let tx = self
             .arena
             .lend_byte_cells(slots, plan.links)
-            .map_err(ArenaRefused::Unlent)?;
+            .map_err(ArenaRefused::Lend)?;
         Ok(LinkTables::new(rx, tx, plan.link_bytes))
+    }
+
+    /// Lend a table of `rows` rows, at most `N`, from the arena: the next span of it. Refused,
+    /// taking nothing, past `N` or past what is left, which an arena reserved by the plan that
+    /// counts the table never is.
+    pub(crate) fn lend<T, const N: usize>(
+        &mut self,
+        rows: usize,
+    ) -> Result<BoundedVec<T, N, Lent>, ArenaRefused> {
+        self.arena.lend(rows).map_err(ArenaRefused::Lend)
     }
 
     /// The arena, to lend from.

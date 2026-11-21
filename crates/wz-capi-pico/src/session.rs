@@ -1635,7 +1635,7 @@ fn coop_open_refusal(refused: &wz_capi_coop::OpenError) -> ZResult {
         OpenError::KeyWireForm(_) => crate::result::Z_ERR_INVALID,
         OpenError::Arena(ArenaRefused::Limit { .. }) => crate::result::Z_ERR_CONFIG_INVALID_VALUE,
         OpenError::Arena(
-            ArenaRefused::TooLarge | ArenaRefused::NoMemory { .. } | ArenaRefused::Unlent(_),
+            ArenaRefused::TooLarge | ArenaRefused::NoMemory { .. } | ArenaRefused::Lend(_),
         ) => crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY,
         _ => crate::result::Z_ERR_TRANSPORT_OPEN_FAILED,
     }
@@ -1664,7 +1664,7 @@ mod coop_open_refusal_tests {
             Z_ERR_SYSTEM_OUT_OF_MEMORY
         );
         assert_eq!(
-            coop_open_refusal(&OpenError::Arena(ArenaRefused::Unlent(
+            coop_open_refusal(&OpenError::Arena(ArenaRefused::Lend(
                 wz_session_core::bounded::LendRefused::Exhausted {
                     asked: Some(4096),
                     left: 0,

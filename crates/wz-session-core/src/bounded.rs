@@ -643,6 +643,13 @@ impl<T, const N: usize, P: Storage> BoundedVec<T, N, P> {
         self.inner.pop()
     }
 
+    /// Remove and return the entry at `index`, the entries after it moving down so the order
+    /// holds. A table whose index is its declaration order (a replay walks it by position) keeps
+    /// it. Panics when `index` is out of bounds, as `Vec::remove` does.
+    pub fn remove(&mut self, index: usize) -> T {
+        self.inner.remove(index)
+    }
+
     /// Retain only the entries for which `keep` returns `true`,
     /// preserving order. The registries use this for `undeclare`
     /// (drop the entry whose id matches).
@@ -1729,6 +1736,21 @@ mod tests {
         assert_eq!(v.pop(), None);
     }
 
+    /// Removing by position hands the entry back and keeps the order of the rest, and the room it
+    /// left is pushed into again, on every policy.
+    fn remove_at_keeps_order_and_frees_the_row<P: Fresh>() {
+        let mut v: BoundedVec<u32, 3, P> = P::table();
+        for i in 0..3 {
+            v.push(i).unwrap();
+        }
+        assert_eq!(v.remove(1), 1);
+        assert_eq!(v.as_ref(), &[0, 2]);
+        assert!(v.push(7).is_ok(), "the removed entry's row is free again");
+        assert_eq!(v.as_ref(), &[0, 2, 7]);
+        assert_eq!(v.remove(0), 0);
+        assert_eq!(v.as_ref(), &[2, 7]);
+    }
+
     /// The byte filler: grow, fill in place, give back what was not used. The
     /// refusal at `N` is the policy's, and a refusal leaves the bytes as they were.
     fn byte_filler_grows_fills_and_truncates<P: Fresh>() {
@@ -1823,6 +1845,7 @@ mod tests {
         fill_to_n_then_one_more,
         free_slots_counts_the_pushes_that_still_succeed,
         removal_and_partition_keep_order,
+        remove_at_keeps_order_and_frees_the_row,
         byte_filler_grows_fills_and_truncates,
         text_append_is_atomic_where_the_capacity_is_hard,
         default_is_empty,

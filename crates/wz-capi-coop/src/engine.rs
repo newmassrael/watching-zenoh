@@ -42,7 +42,11 @@ use portable_atomic::AtomicU64;
 #[allow(unused_imports)]
 use crate::prelude::*;
 
-use crate::arena::{AllocatorMemory, ArenaMemory, ArenaPlan, ArenaRefused, SessionArena};
+use crate::arena::{
+    AllocatorMemory, ArenaMemory, ArenaPlan, ArenaRefused, EntityRows, SessionArena,
+};
+use wz_session_core::bounded::{BoundedVec, Lent};
+use wz_session_core::caps;
 
 // The operating system the engine runs on: its mutex, its threads and its sleep are `std`'s on a
 // host and the kernel's on an MCU (`docs/upstream-parity.md` section 5a, E1).
@@ -855,6 +859,50 @@ struct ReadTask {
 /// What the read task's thread runs, handed to whatever makes the thread.
 pub(crate) type ReaderBody = Box<dyn FnOnce() + Send + 'static>;
 
+/// A table of the session's own declarations: rows lent from the session's arena at its open, as
+/// many as the limit the open resolved, `N` the build's ceiling. A declaration that finds it full
+/// is refused before anything is taken, registered or sent.
+type Rows<T, const N: usize> = BoundedVec<T, N, Lent>;
+
+/// The bytes of one row of each table the engine keeps of the session's own declarations, as the
+/// session's arena lays them out (`crate::arena::ArenaPlan`).
+pub(crate) struct EntryBytes;
+
+impl EntryBytes {
+    /// A subscriber's row.
+    pub(crate) const SUBSCRIBER: usize = core::mem::size_of::<SubEntry>();
+    /// A queryable's row.
+    #[cfg(feature = "queryable")]
+    pub(crate) const QUERYABLE: usize = core::mem::size_of::<QblEntry>();
+    /// A liveliness token's row.
+    #[cfg(feature = "liveliness")]
+    pub(crate) const TOKEN: usize = core::mem::size_of::<TokenEntry>();
+    /// A liveliness subscriber's row.
+    #[cfg(feature = "liveliness")]
+    pub(crate) const LIVELINESS_SUBSCRIBER: usize = core::mem::size_of::<LiveSubEntry>();
+    /// A declared key expression's row.
+    pub(crate) const KEYEXPR: usize = core::mem::size_of::<KexprEntry>();
+    /// A write filter's row.
+    pub(crate) const FILTER: usize = core::mem::size_of::<FilterEntry>();
+    /// A matching listener's row.
+    pub(crate) const MATCH: usize = core::mem::size_of::<MatchEntry>();
+    /// An Interest's row.
+    pub(crate) const INTEREST: usize = core::mem::size_of::<InterestHold>();
+}
+
+/// Keep `row` in `table`, whose room its declaration found free under the lock it still holds,
+/// before it took an id or sent anything.
+fn keep<T, const N: usize>(table: &mut Rows<T, N>, row: T) {
+    let kept = table.push(row).is_ok();
+    debug_assert!(kept, "the table had the row its declaration found free");
+}
+
+/// The bound of the write filters' table: a publisher's and a querier's each.
+const FILTER_ROWS: usize = caps::MAX_PUBLISHERS + caps::MAX_QUERIERS;
+
+/// The bound of the Interests' table: one for each write filter and matching listener at most.
+const INTEREST_ROWS: usize = FILTER_ROWS + caps::MAX_MATCHING_LISTENERS;
+
 struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     local: CoopLocalSet<C>,
     runtime: CoopRuntime<C>,
@@ -894,8 +942,11 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// runs (`install_link_admission`, `listen`).
     #[cfg(feature = "listen")]
     admission: Arc<dyn LinkAdmission>,
-    subscribers: Vec<SubEntry>,
-    keyexprs: Vec<KexprEntry>,
+    /// How many rows each table of the session's own declarations was lent: what a write filter
+    /// of each plane is held to, the filters sharing one table.
+    entities: EntityRows,
+    subscribers: Rows<SubEntry, { caps::MAX_SUBSCRIPTIONS }>,
+    keyexprs: Rows<KexprEntry, { caps::MAX_DECLARED_KEYEXPRS }>,
     next_mapping: ExprId,
     /// The key ids every node of the deployment shares, which the session was opened with: each
     /// link it opens is handed them, its key expressions are declared under ids past theirs, and
@@ -910,17 +961,17 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// the ids the links hand out (`local-queryable`).
     #[cfg(feature = "local-queryable")]
     next_local_request: wz_session_core::wire_id::RequestId,
-    filters: Vec<FilterEntry>,
+    filters: Rows<FilterEntry, { FILTER_ROWS }>,
     next_filter: FilterId,
-    interests: Vec<InterestHold>,
+    interests: Rows<InterestHold, { INTEREST_ROWS }>,
     /// The buffer a read's wait names its links' readiness in: lent to each wait
     /// ([`Self::idle_wait`]) and handed back after it ([`Self::give_back_waits`]), so a turn of
     /// the read allocates nothing once the buffer holds as many waits as the session has had.
     waits: Vec<Arc<dyn LinkReadiness>>,
-    matches: Vec<MatchEntry>,
+    matches: Rows<MatchEntry, { caps::MAX_MATCHING_LISTENERS }>,
     next_match: MatchId,
     #[cfg(feature = "queryable")]
-    queryables: Vec<QblEntry>,
+    queryables: Rows<QblEntry, { caps::MAX_QUERYABLES }>,
     #[cfg(feature = "queryable")]
     plane: Arc<QueryPlane>,
     /// The legs of the session's gets still pending on its link.
@@ -930,9 +981,9 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     gets: Arc<GetPlane>,
     /// The tokens the session holds, and its liveliness subscribers (`liveliness`).
     #[cfg(feature = "liveliness")]
-    tokens: Vec<TokenEntry>,
+    tokens: Rows<TokenEntry, { caps::MAX_LOCAL_TOKENS }>,
     #[cfg(feature = "liveliness")]
-    live_subs: Vec<LiveSubEntry>,
+    live_subs: Rows<LiveSubEntry, { caps::MAX_LIVELINESS_SUBSCRIPTIONS }>,
     /// The periodic jobs the program started on the session ([`SessionEngine::start_ticker`]).
     #[cfg(feature = "ticker")]
     tickers: Tickers,
@@ -1994,7 +2045,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                         // not told again: neither upstream tells a group that comes up of
                         // the entities a session already holds.
                         #[cfg(feature = "liveliness")]
-                        for entry in &self.live_subs {
+                        for entry in self.live_subs.iter() {
                             face.ask_liveliness(
                                 entry.id,
                                 &entry.keyexpr,
@@ -2471,6 +2522,36 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 derived_zid(&config.listen, &mut entropy)?
             }
         };
+        // The tables of the session's own declarations, lent from the arena as the plan counts
+        // them. Declared after the arena, so a refusal before `core` holds them drops them first.
+        let entities = plan.entities();
+        let subscribers = arena.lend(entities.subscribers).map_err(OpenError::Arena)?;
+        let keyexprs = arena.lend(entities.keyexprs).map_err(OpenError::Arena)?;
+        let filters = arena
+            .lend(
+                entities
+                    .filters()
+                    .ok_or(OpenError::Arena(ArenaRefused::TooLarge))?,
+            )
+            .map_err(OpenError::Arena)?;
+        let interests = arena
+            .lend(
+                entities
+                    .interests()
+                    .ok_or(OpenError::Arena(ArenaRefused::TooLarge))?,
+            )
+            .map_err(OpenError::Arena)?;
+        let matches = arena
+            .lend(entities.matching_listeners)
+            .map_err(OpenError::Arena)?;
+        #[cfg(feature = "queryable")]
+        let queryables = arena.lend(entities.queryables).map_err(OpenError::Arena)?;
+        #[cfg(feature = "liveliness")]
+        let tokens = arena.lend(entities.tokens).map_err(OpenError::Arena)?;
+        #[cfg(feature = "liveliness")]
+        let live_subs = arena
+            .lend(entities.liveliness_subscribers)
+            .map_err(OpenError::Arena)?;
         let runtime = CoopRuntime::new(clock.clone());
         let local = CoopLocalSet::new(&runtime);
         // The dial role's link, each port, each group and the clock's word: what a session waits on
@@ -2509,8 +2590,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 policy.link_tie_order(),
             )),
             wire_zid: wire,
-            subscribers: Vec::new(),
-            keyexprs: Vec::new(),
+            entities,
+            subscribers,
+            keyexprs,
             next_mapping: 1,
             #[cfg(feature = "shared-key-ids")]
             key_ids: key_ids.at_open.ids,
@@ -2518,14 +2600,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             key_forms,
             #[cfg(feature = "local-queryable")]
             next_local_request: 0,
-            filters: Vec::new(),
+            filters,
             next_filter: 1,
-            interests: Vec::new(),
+            interests,
             waits: Vec::with_capacity(wait_room),
-            matches: Vec::new(),
+            matches,
             next_match: 1,
             #[cfg(feature = "queryable")]
-            queryables: Vec::new(),
+            queryables,
             #[cfg(feature = "queryable")]
             plane: Arc::new(QueryPlane::default()),
             #[cfg(feature = "query")]
@@ -2533,9 +2615,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             #[cfg(feature = "query")]
             gets: Arc::new(GetPlane::default()),
             #[cfg(feature = "liveliness")]
-            tokens: Vec::new(),
+            tokens,
             #[cfg(feature = "liveliness")]
-            live_subs: Vec::new(),
+            live_subs,
             #[cfg(feature = "ticker")]
             tickers: Tickers::default(),
             arena,
@@ -3429,6 +3511,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             hold.holds += 1;
             return true;
         }
+        // A first holder takes a row of the Interests' table, which is lent one for each write
+        // filter and matching listener: each of them takes a row of its own table first.
+        if core.interests.free_slots() == 0 {
+            return false;
+        }
         // zenoh-pico's Interest takes the session's next entity id
         // (`vendor/zenoh-pico/src/net/primitives.c` @ `intr._id = _z_get_entity_id(zn);`).
         let Some(interest_id) = self.next_entity_id() else {
@@ -3442,8 +3529,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             holds: 1,
         };
         core.announce(Kind::Interest, |actions| hold.send(actions));
-        core.interests.push(hold);
-        true
+        // The row was found free above, under the lock still held.
+        let held = core.interests.push(hold).is_ok();
+        debug_assert!(held, "the Interests' table had the row the check found");
+        held
     }
 
     /// The id of something the session holds and never names to a peer (`next_local`).
@@ -3858,11 +3947,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         retraction: Option<RetractionKey>,
         sink: SubscriberSink,
     ) -> Option<SubId> {
-        let id = self.next_entity_id()?;
         let Some(mut guard) = self.live() else {
-            return Some(id);
+            return self.next_entity_id();
         };
         let core = &mut guard.0;
+        // A full table refuses the subscriber before it takes an id, registers or sends anything;
+        // the sink goes with the refusal.
+        if core.subscribers.free_slots() == 0 {
+            return None;
+        }
+        let id = self.next_entity_id()?;
         let queue = self.samples.clone();
         let registration = core.registry.borrow_mut().app.subscribers.register_sink(
             &keyexpr,
@@ -3898,7 +3992,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             retraction: entry.retraction.as_ref(),
             allowed_origin,
         });
-        core.subscribers.push(entry);
+        keep(&mut core.subscribers, entry);
         // A matching listener that counts the session's own subscribers may now match: it is
         // told, outside the lock.
         #[cfg(feature = "local-subscriber")]
@@ -3980,6 +4074,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             entry.holds += 1;
             return Some(entry.id);
         }
+        // A key no declaration holds yet takes a row; a full table refuses it before an id is
+        // taken or anything is sent.
+        if core.keyexprs.free_slots() == 0 {
+            return None;
+        }
         // The id space is the wire's `ExprId`; once it is spent the counter rests at 0, the
         // literal's id, and every further declaration is refused rather than re-issuing a live
         // id.
@@ -4010,11 +4109,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             group.announce_keyexpr(id, &keyexpr);
         }
         core.next_mapping = id.wrapping_add(1);
-        core.keyexprs.push(KexprEntry {
-            id,
-            keyexpr,
-            holds: 1,
-        });
+        keep(
+            &mut core.keyexprs,
+            KexprEntry {
+                id,
+                keyexpr,
+                holds: 1,
+            },
+        );
         Some(id)
     }
 
@@ -4067,6 +4169,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return 0;
         };
         let core = &mut guard.0;
+        // A full table refuses the listener before its Interest is asked; its sink goes with the
+        // refusal.
+        if core.matches.free_slots() == 0 {
+            return 0;
+        }
         // A listener whose Interest the session has no id left for is not declared, as a closed
         // session declares none: it would never hear a peer.
         if !self.acquire_interest(
@@ -4112,12 +4219,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         if now {
             lock(&self.matching).push_back((id, true));
         }
-        core.matches.push(MatchEntry {
-            id,
-            plane,
-            watch,
-            keyexpr,
-        });
+        keep(
+            &mut core.matches,
+            MatchEntry {
+                id,
+                plane,
+                watch,
+                keyexpr,
+            },
+        );
         drop(guard);
         self.deliver();
         id
@@ -4161,6 +4271,21 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return Some(0);
         };
         let core = &mut core.0;
+        // A publisher's filter is held to MAX_PUBLISHERS and a querier's to MAX_QUERIERS, in the
+        // one table lent for both: one past its plane's count is refused before its Interest is
+        // asked or an id taken.
+        let most = match plane {
+            FilterPlane::Subscribers => core.entities.publishers,
+            FilterPlane::Queryables { .. } => core.entities.queriers,
+        };
+        let held_of_plane = core
+            .filters
+            .iter()
+            .filter(|f| f.plane.same_kind(plane))
+            .count();
+        if held_of_plane >= most || core.filters.free_slots() == 0 {
+            return None;
+        }
         // The id this filter spent of its own, when it spent one: its Interest's, when it is the
         // first to hold it, or the one taken for a filter that sends none.
         let mut spent = None;
@@ -4206,13 +4331,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         }
         #[cfg(not(feature = "group"))]
         let _ = (spent, wire);
-        core.filters.push(FilterEntry {
-            id,
-            plane,
-            keyexpr,
-            asked: ask.is_some(),
-            count_local,
-        });
+        keep(
+            &mut core.filters,
+            FilterEntry {
+                id,
+                plane,
+                keyexpr,
+                asked: ask.is_some(),
+                count_local,
+            },
+        );
         Some(id)
     }
 
@@ -4373,9 +4501,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         retraction: Option<RetractionKey>,
         sink: QueryableSink,
     ) -> Option<QblId> {
-        let id = self.next_entity_id()?;
         let mut guard = self.live()?;
         let core = &mut guard.0;
+        // A full table refuses the queryable before it takes an id, registers or sends anything;
+        // the sink goes with the refusal.
+        if core.queryables.free_slots() == 0 {
+            return None;
+        }
+        let id = self.next_entity_id()?;
         // The registry's queryable only copies a query out and holds its Final; the callback
         // `sink` mints runs when the deliveries are handed out (`query`).
         let plane = self.plane.clone();
@@ -4418,7 +4551,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             retraction: entry.retraction.as_ref(),
             allowed_origin,
         });
-        core.queryables.push(entry);
+        keep(&mut core.queryables, entry);
         // A matching listener that counts the session's own queryables may now match: it is told,
         // outside the lock.
         #[cfg(feature = "local-queryable")]
@@ -4798,9 +4931,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     ) -> Option<TokenId> {
         // zenoh-pico's token takes the session's next entity id
         // (`vendor/zenoh-pico/src/net/liveliness.c` @ `uint32_t id = _z_get_entity_id(_Z_RC_IN_VAL(zn));`).
-        let id = self.next_entity_id()?;
         let mut core = self.live()?;
         let core = &mut core.0;
+        // A full table refuses the token before it takes an id, registers or sends anything.
+        if core.tokens.free_slots() == 0 {
+            return None;
+        }
+        let id = self.next_entity_id()?;
         core.registry
             .borrow_mut()
             .app
@@ -4827,7 +4964,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             retraction: entry.retraction.as_ref(),
             allowed_origin: Locality::Any,
         });
-        core.tokens.push(entry);
+        keep(&mut core.tokens, entry);
         Some(id)
     }
 
@@ -4862,11 +4999,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         history: bool,
         sink: LivelinessSink,
     ) -> Option<SubId> {
-        let id = self.next_entity_id()?;
         let Some(mut guard) = self.live() else {
-            return Some(id);
+            return self.next_entity_id();
         };
         let core = &mut guard.0;
+        // A full table refuses the subscriber before it takes an id, registers or asks anything;
+        // the sink goes with the refusal.
+        if core.live_subs.free_slots() == 0 {
+            return None;
+        }
+        let id = self.next_entity_id()?;
         lock(&self.targets).push((
             TargetKey::Liveliness(id),
             Target::Liveliness(Arc::new(Mutex::new(sink()))),
@@ -4897,7 +5039,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         for group in &core.groups {
             group.ask_liveliness(id, &entry.keyexpr, &entry.wire, entry.history);
         }
-        core.live_subs.push(entry);
+        keep(&mut core.live_subs, entry);
         drop(guard);
         self.deliver();
         Some(id)
@@ -4928,22 +5070,28 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         }
         let core = &mut guard.0;
         core.end_links();
+        // The rows go back to their tables with the session: a table lent from its arena keeps
+        // its rows, so each is emptied after its ids are read.
         let subscribers: Vec<TargetKey> = core
             .subscribers
-            .drain(..)
+            .iter()
             .map(|s| TargetKey::Subscriber(s.id))
             .collect();
+        core.subscribers.clear();
         let matches: Vec<TargetKey> = core
             .matches
-            .drain(..)
+            .iter()
             .map(|m| TargetKey::Matching(m.id))
             .collect();
+        core.matches.clear();
         #[cfg(feature = "queryable")]
         let queryables: Vec<TargetKey> = core
             .queryables
-            .drain(..)
+            .iter()
             .map(|q| TargetKey::Queryable(q.id))
             .collect();
+        #[cfg(feature = "queryable")]
+        core.queryables.clear();
         #[cfg(not(feature = "queryable"))]
         let queryables: Vec<TargetKey> = Vec::new();
         // A get still pending ends with its session: its entry and its leg's callback go.
@@ -4964,10 +5112,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         #[cfg(feature = "liveliness")]
         let live_subs: Vec<TargetKey> = {
             core.tokens.clear();
-            core.live_subs
-                .drain(..)
+            let ids: Vec<TargetKey> = core
+                .live_subs
+                .iter()
                 .map(|s| TargetKey::Liveliness(s.id))
-                .collect()
+                .collect();
+            core.live_subs.clear();
+            ids
         };
         #[cfg(not(feature = "liveliness"))]
         let live_subs: Vec<TargetKey> = Vec::new();

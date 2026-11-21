@@ -1419,6 +1419,7 @@ mod advanced;
 mod arena;
 mod congestion;
 mod decl_watch;
+mod entity_tables;
 #[cfg(all(feature = "query", feature = "queryable", feature = "local-queryable"))]
 mod face_table;
 #[cfg(feature = "connectivity")]
