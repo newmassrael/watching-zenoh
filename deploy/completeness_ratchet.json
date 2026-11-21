@@ -7,7 +7,7 @@
       "value": 2,
       "target": 0,
       "read": "2026-11-21",
-      "debt": "pending:completeness-pico-api-shortfall"
+      "debt": "debt-completeness-pico-api-shortfall"
     },
     "a.pico-api.wz-passes": {
       "state": "ratchet",
@@ -43,7 +43,7 @@
       "value": 2,
       "target": 0,
       "read": "2026-11-21",
-      "debt": "pending:completeness-partial-atoms"
+      "debt": "debt-completeness-partial-atoms"
     },
     "c.logic-census-unplaced": {
       "state": "locked",

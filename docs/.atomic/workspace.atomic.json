@@ -6910,6 +6910,16 @@
       "source": "open-debt register",
       "reason": "OPEN (M): domain-transport omits 5 atoms; not established whether the omissions are intentional."
     },
+    "debt-completeness-partial-atoms": {
+      "status": "active",
+      "source": "open-debt register",
+      "reason": "OPEN 2026-11-21 (docs/upstream-parity.md D11, deploy/completeness_ratchet.json c.partial-atoms = 2). The feature inventory grades two atoms PARTIAL: api-compat-rust and session-close-ingress, each with the residue its own reason states. Closed when both grade COMPLETE and the row is locked at 0."
+    },
+    "debt-completeness-pico-api-shortfall": {
+      "status": "active",
+      "source": "open-debt register",
+      "reason": "OPEN 2026-11-21 (docs/upstream-parity.md D11, deploy/completeness_ratchet.json a.pico-api.shortfall = 2). Two of zenoh-pico's own API tests pass against the original and not against wz: z_api_source_info_test and z_api_admin_space_test, which call internal `_z_*` functions wz does not export. Closed when both pass on wz (the export or the equivalent public path) and the row is locked at 0."
+    },
     "debt-d-m5": {
       "status": "active",
       "source": "open-debt register",
@@ -6981,6 +6991,11 @@
       "status": "active",
       "source": "open-debt register",
       "reason": "OPEN (M): no e2e format. The AUTOSAR profile CRC polynomial is not in this machine's sources (grep for 0x1021 / crc16 finds nothing). Inventing one is forbidden; open as a seam only."
+    },
+    "debt-pico-host-size-ceiling": {
+      "status": "active",
+      "source": "open-debt register",
+      "reason": "OPEN 2026-11-21 (owner: wz smaller than zenoh-pico, ratchet + debt loop, docs/upstream-parity.md D9). The pico C ABI host libraries read 2.49 (cooperative client) to 7.7 (peer, default) times the text of zenoh-pico built as the same build in the same run (Layer C1cs, deploy/pico_host_ceiling.json). Each case is a ratchet row that may only move toward pico; paid largest ratio first, one case or one cause per round, the row tightened by the round's reading. Closed when every row of deploy/pico_host_ceiling.json is locked at WIN."
     },
     "debt-reliable-gap-reconnect-without-a-door": {
       "status": "deprecated",
