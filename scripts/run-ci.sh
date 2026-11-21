@@ -18677,6 +18677,22 @@ _pico_cli_unavailable() {
 # lane — the register recorded that as §11.9 and it stayed true. A proof that
 # only ever runs when someone remembers is a proof the tree cannot depend on.
 layer_epico_library_oracles() {
+    # The two forms of wz's own pico library (docs/capi-pico-additional-library.md): the one
+    # library, and the core with the doors' library beside it, built from one feature list by
+    # scripts/pico-additional-forms.sh, and one C scenario compiled against each form and held to
+    # the same messages on the wire
+    # (`crates/wz-integration-tests/tests/it/files/pico_additional_split_wire.rs`). It is a leg of
+    # the pico library's lane and needs no foreign library, so it runs before the oracle check
+    # below. This lane builds the forms, so for the length of the leg their absence is a failure
+    # (`WZ_PICO_FORMS_REQUIRE=1`) and not the skip the test takes in a sweep that built none. One
+    # test, so the count is exact.
+    bash scripts/pico-additional-forms.sh || return 1
+    wz_test_args wz-integration-tests pico_additional_split_wire
+    _runci_guarded_test "Epico the two forms of the pico library on the wire" 1 \
+        env WZ_PICO_FORMS_REQUIRE=1 cargo test -p wz-integration-tests \
+        "${WZ_TEST_ARGS[@]}" -- --quiet \
+        || return 1
+    echo "  Epico: the one library and the core with the doors' library put the same messages on the wire"
     if [[ ! -f "$WZ_ARTIFACTS"/target/zenoh-pico-build/lib/libzenohpico.so ]]; then
         _pico_cli_unavailable "Layer Epico" || return 1
         return 0
@@ -20939,6 +20955,7 @@ layer_s_pico_stability() {
     _runci_guarded_test "S allocation faults, tokio engine" 8 \
         cargo test -p wz-capi-pico --features "$features" \
         "${WZ_TEST_ARGS[@]}" -- --ignored --nocapture --test-threads=1 || return 1
+    wz_test_args wz-capi-pico allocation_faults
     _runci_guarded_test "S allocation faults, cooperative engine" 8 \
         cargo test -p wz-capi-pico --no-default-features \
         --features engine-coop,app-transport,peer,query,queryable,multi-thread \

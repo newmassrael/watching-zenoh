@@ -100,7 +100,9 @@ state, allocator and runtime.
   recording relay between its two sessions, and compares the network messages each side sent. The
   scenario's zenoh ids are fixed, so the ids and the sequence numbers derived from them are the same
   in every run; the messages are compared as a multiset per side and channel, since which of two
-  threads of a session sends first is the scheduler's in either form.
+  threads of a session sends first is the scheduler's in either form. Layer Epico builds both forms
+  (`scripts/pico-additional-forms.sh`) and runs the test with `WZ_PICO_FORMS_REQUIRE=1`, so a form
+  missing there is a failure; any other run that finds no forms says so and passes.
 - **A program sees one library.** The Windows package's test compiles every example and the check
   program against each form's package and runs them; the check program asks
   `wz_ext_additional_interface` of the pair it links.
