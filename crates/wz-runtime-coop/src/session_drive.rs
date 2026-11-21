@@ -91,6 +91,8 @@ use wz_session_core::drive::report_outcome_reassembling;
 #[cfg(feature = "reassembly")]
 use wz_session_core::reassembly_dispatch::sweep_reporting;
 
+#[cfg(not(feature = "session-slot"))]
+use crate::link_storage::LinkTables;
 use crate::session_runtime::SessionHandle;
 use crate::{yield_now, ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTime};
 
@@ -475,6 +477,17 @@ pub trait SessionLinks {
     /// to the end it names. A protocol the stack has no link for is
     /// [`LinkOpenError::Unsupported`].
     fn open_initiator(&self, to: Locator) -> Result<OpenedLink<Self::Pump>, LinkOpenError>;
+
+    /// The buffers of every link the stack opens from now on, for the session the links serve:
+    /// tables the session laid out in the memory it reserved when it opened, a receive buffer and
+    /// outbound storage for each link it may hold. A stack that takes them opens each link over a
+    /// buffer of each, and a link the tables have no buffer left for is
+    /// [`LinkOpenError::Exhausted`], never one that allocates; told before the session listens, so
+    /// a listener it opens after takes them too. The default ignores them: a stack whose links
+    /// bring buffers of their own (an lwIP pool, a test network) keeps them.
+    fn lend_buffers(&mut self, tables: LinkTables) {
+        let _ = tables;
+    }
 
     /// A listener on `at`, which yields one link for each connection a peer opens to it. A stack
     /// that does not listen, or not for the locator's protocol, is

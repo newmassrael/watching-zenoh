@@ -54,7 +54,7 @@ use wz_session_core::app_transport::{AppTransport, SessionTransport};
 
 use crate::group_transport::{GroupSend, GroupTransport};
 use crate::ip_stack::{HeapIpDriver, IpDriver};
-use crate::link_storage::HeapTx;
+use crate::link_storage::{heap_link_buffers, LinkTables};
 use crate::session_drive::{
     LinkListener, LinkOpenError, LinkProto, LinkReadiness, LinkWritability, Locator, OpenedLink,
     SessionLinks,
@@ -946,6 +946,9 @@ pub struct AppLinks {
     dial: AppStreamDial,
     datagram_rx: usize,
     open_bound: Option<OpenBound>,
+    /// The tables of the session the links serve, when it lent some
+    /// ([`SessionLinks::lend_buffers`]): every link claims its buffers there, and none allocates.
+    lent: Option<LinkTables>,
 }
 
 impl AppLinks {
@@ -959,6 +962,7 @@ impl AppLinks {
             transport,
             datagram_rx: UDP_RX_CAPACITY,
             open_bound: None,
+            lent: None,
         }
     }
 
@@ -995,18 +999,26 @@ impl SessionLinks for AppLinks {
     }
 
     fn open_initiator(&self, to: Locator) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
+        // The buffers are claimed before the program is asked for a link, so a session whose
+        // tables are full asks it for none.
         let driver: AppDriver = match to.proto {
-            LinkProto::Udp => IpDriver::Udp(UdpDriver::initiator_with_buffers(
-                AppDatagramSocket::dial_bounded(&self.transport, to.at, self.open_bound.as_ref())?,
-                to.at,
-                self.datagram_rx,
-                HeapTx::new(0, 0),
-            )),
-            LinkProto::Tcp => IpDriver::Tcp(StreamDriver::with_buffers(
-                self.dial.dial(to.at)?,
-                STREAM_RX_CAPACITY,
-                HeapTx::new(0, 0),
-            )),
+            LinkProto::Udp => {
+                let (rx, tx) = heap_link_buffers(self.lent.as_ref(), self.datagram_rx, 0, 0)?;
+                IpDriver::Udp(UdpDriver::initiator_in(
+                    AppDatagramSocket::dial_bounded(
+                        &self.transport,
+                        to.at,
+                        self.open_bound.as_ref(),
+                    )?,
+                    to.at,
+                    rx,
+                    tx,
+                ))
+            }
+            LinkProto::Tcp => {
+                let (rx, tx) = heap_link_buffers(self.lent.as_ref(), STREAM_RX_CAPACITY, 0, 0)?;
+                IpDriver::Tcp(StreamDriver::over(self.dial.dial(to.at)?, rx, tx))
+            }
             LinkProto::Tls => return Err(LinkOpenError::Unsupported),
         };
         let driver = Rc::new(driver);
@@ -1023,6 +1035,7 @@ impl SessionLinks for AppLinks {
         match at.proto {
             LinkProto::Tcp => Ok(Box::new(AppLinkListener {
                 listener: self.dial.listen(at.at)?,
+                lent: self.lent,
             })),
             LinkProto::Udp => {
                 let locator = Locator::udp(at.at).to_string();
@@ -1036,6 +1049,7 @@ impl SessionLinks for AppLinks {
                     held,
                     at: at.at,
                     datagram_rx: self.datagram_rx,
+                    lent: self.lent,
                 }))
             }
             LinkProto::Tls => Err(LinkOpenError::Unsupported),
@@ -1045,6 +1059,12 @@ impl SessionLinks for AppLinks {
     /// The group the program joins for `endpoint`: a `udp/` listen locator naming an interface,
     /// which is what the table opens as a group. Any other endpoint is no group the program's
     /// transport carries, and is refused before the program is asked.
+    /// Every link opened from now on, and every one a listener opened after this takes, claims its
+    /// buffers from `tables`.
+    fn lend_buffers(&mut self, tables: LinkTables) {
+        self.lent = Some(tables);
+    }
+
     fn open_group(&self, endpoint: &str) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
         if kind_for_locator(endpoint, true) != Some(AppLinkKind::Group) {
             return Err(LinkOpenError::Unsupported);
@@ -1063,6 +1083,8 @@ struct AppDatagramListener {
     at: SocketAddr,
     /// The receive buffer each accepted link reads into, as [`AppLinks::with_rx_capacity`] set it.
     datagram_rx: usize,
+    /// The session's tables, which each accepted link claims its buffers from ([`AppLinks`]).
+    lent: Option<LinkTables>,
 }
 
 impl LinkListener<Rc<AppDriver>> for AppDatagramListener {
@@ -1085,12 +1107,10 @@ impl LinkListener<Rc<AppDriver>> for AppDatagramListener {
         // The program told this source apart from the others, so the link's remote end is known
         // from the start, as a dialled link's is; the session over it still runs as the acceptor.
         let peer = socket.peer;
-        let driver = Rc::new(IpDriver::Udp(UdpDriver::initiator_with_buffers(
-            socket,
-            peer,
-            self.datagram_rx,
-            HeapTx::new(0, 0),
-        )));
+        // Claimed once the source is taken, as an IP listener claims: one the session's tables
+        // have no buffers left for is let go of, not left waiting.
+        let (rx, tx) = heap_link_buffers(self.lent.as_ref(), self.datagram_rx, 0, 0)?;
+        let driver = Rc::new(IpDriver::Udp(UdpDriver::initiator_in(socket, peer, rx, tx)));
         Ok(Some(OpenedLink {
             sink: driver.clone(),
             pump: driver,
@@ -1101,6 +1121,8 @@ impl LinkListener<Rc<AppDriver>> for AppDatagramListener {
 /// A `tcp/` listener of [`AppLinks`]: each stream the program accepts is a link.
 struct AppLinkListener {
     listener: Box<dyn StreamListen<Stream = AppStreamSocket>>,
+    /// The session's tables, which each accepted link claims its buffers from ([`AppLinks`]).
+    lent: Option<LinkTables>,
 }
 
 impl LinkListener<Rc<AppDriver>> for AppLinkListener {
@@ -1112,11 +1134,8 @@ impl LinkListener<Rc<AppDriver>> for AppLinkListener {
         let Some(stream) = self.listener.accept()? else {
             return Ok(None);
         };
-        let driver = Rc::new(IpDriver::Tcp(StreamDriver::with_buffers(
-            stream,
-            STREAM_RX_CAPACITY,
-            HeapTx::new(0, 0),
-        )));
+        let (rx, tx) = heap_link_buffers(self.lent.as_ref(), STREAM_RX_CAPACITY, 0, 0)?;
+        let driver = Rc::new(IpDriver::Tcp(StreamDriver::over(stream, rx, tx)));
         Ok(Some(OpenedLink {
             sink: driver.clone(),
             pump: driver,

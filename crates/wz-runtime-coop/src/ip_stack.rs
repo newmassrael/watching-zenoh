@@ -9,7 +9,9 @@
 //!
 //! On the slot profile the stack is `IpStack`, whose links claim their buffers from the image's
 //! tables and live in the session slots. On the heap profile it is `IpLinks`, the session shell's
-//! `SessionLinks` over the same two sockets, whose links allocate their buffers when they open.
+//! `SessionLinks` over the same two sockets, whose links allocate their buffers when they open, or
+//! claim them from the tables a session lays out in the memory it reserved when it opened
+//! (`SessionLinks::lend_buffers`).
 //!
 //! A platform with both sockets (the host's) uses this stack; one with datagram sockets only uses
 //! the datagram stack alone, which refuses a `tcp/` dial as unsupported. Which links an image can
@@ -19,8 +21,6 @@
 use alloc::boxed::Box;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use alloc::rc::Rc;
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-use alloc::vec::Vec;
 #[cfg(any(feature = "session-slot", feature = "alloc"))]
 use core::net::{IpAddr, SocketAddr};
 
@@ -40,9 +40,9 @@ use wz_session_core::session_slot::SlotDriver;
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::group_transport::{GroupJoiner, GroupTransport, NoGroups};
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-use crate::link_storage::HeapTx;
 use crate::link_storage::TxStore;
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use crate::link_storage::{heap_link_buffers, LinkTables, RxBuffer, TxBuffer};
 use crate::session_drive::SessionDatagramLink;
 #[cfg(feature = "session-slot")]
 use crate::session_drive::{Accept, Bind, DriverPump, SlotStack};
@@ -73,8 +73,8 @@ use crate::udp_link::{PortPeer, UdpPort};
 /// secure-channel streams `L`: a datagram, a stream or a secure stream link, as its dial named.
 /// `L` is [`NoStream`] on a stack that carries no secure channel. `B` holds its receive buffer and
 /// `X` the memory it encodes its frames into: the image's byte tables on the slot profile (the
-/// defaults), a `Vec<u8>` and `HeapTx` on the heap profile (`HeapIpDriver`, which a slot build has
-/// not).
+/// defaults), an `RxBuffer` and a `TxBuffer` on the heap profile (`HeapIpDriver`, which a slot
+/// build has not).
 pub enum IpDriver<
     U: DatagramSocket + 'static,
     T: StreamSocket + 'static,
@@ -93,9 +93,10 @@ pub enum IpDriver<
     UdpListened(UdpDriver<PortPeer<U>, B, X>),
 }
 
-/// The heap profile's [`IpDriver`]: each link allocates its buffers when it opens.
+/// The heap profile's [`IpDriver`]: each link allocates its buffers when it opens, or claims them
+/// from its session's tables when the session lent the stack some ([`LinkTables`]).
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-pub type HeapIpDriver<U, T, L = NoStream> = IpDriver<U, T, L, Vec<u8>, HeapTx>;
+pub type HeapIpDriver<U, T, L = NoStream> = IpDriver<U, T, L, RxBuffer, TxBuffer>;
 
 /// Every method of the three links, answered by the one this driver is.
 macro_rules! either {
@@ -261,8 +262,10 @@ where
 /// its receive buffer when it opens, a datagram link's sized to the largest datagram and a stream
 /// link's to the largest batch with its length, and lends the session `tx_slots` buffers of
 /// `tx_capacity` bytes to encode its frames into (none by default: the session then builds each
-/// frame in a buffer of its own). A multicast group is joined by the host's joiner `G`
-/// ([`IpLinks::with_groups`]); links given none join no group.
+/// frame in a buffer of its own). A session that lends the stack its tables
+/// ([`SessionLinks::lend_buffers`]) has every link claim its buffers there instead, and none
+/// allocate. A multicast group is joined by the host's joiner `G` ([`IpLinks::with_groups`]);
+/// links given none join no group.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 pub struct IpLinks<U, D, L = NoDial, G = NoGroups> {
     local: IpAddr,
@@ -285,6 +288,9 @@ struct LinkShape {
     /// The receive buffer of a datagram link: the largest datagram until the stack is told the
     /// largest batch its sessions receive ([`IpLinks::with_rx_capacity`]).
     datagram_rx: usize,
+    /// The tables of the session the links serve, when it lent the stack some
+    /// ([`SessionLinks::lend_buffers`]): every link claims its buffers there, and none allocates.
+    lent: Option<LinkTables>,
 }
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
@@ -295,21 +301,25 @@ impl Default for LinkShape {
             tx_capacity: 0,
             owner_waits: false,
             datagram_rx: UDP_RX_CAPACITY,
+            lent: None,
         }
     }
 }
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 impl LinkShape {
-    fn tx(&self) -> HeapTx {
-        HeapTx::new(self.tx_slots, self.tx_capacity)
+    /// The buffers of a link that opens now, its own receive buffer `rx` bytes long: claimed from
+    /// the session's tables when it lent some, and [`LinkOpenError::Exhausted`] when they have none
+    /// left, so a session whose tables are full opens no link; allocated otherwise.
+    fn buffers(&self, rx: usize) -> Result<(RxBuffer, TxBuffer), LinkOpenError> {
+        heap_link_buffers(self.lent.as_ref(), rx, self.tx_slots, self.tx_capacity)
     }
 
     /// A stream link as the stack opens it: waited on by its owner when the shape says so.
     fn stream<S: StreamSocket>(
         &self,
-        link: StreamDriver<S, Vec<u8>, HeapTx>,
-    ) -> StreamDriver<S, Vec<u8>, HeapTx> {
+        link: StreamDriver<S, RxBuffer, TxBuffer>,
+    ) -> StreamDriver<S, RxBuffer, TxBuffer> {
         if self.owner_waits {
             link.waited_by_owner()
         } else {
@@ -320,8 +330,8 @@ impl LinkShape {
     /// A datagram link as the stack opens it: waited on by its owner when the shape says so.
     fn datagram<U: DatagramSocket>(
         &self,
-        link: UdpDriver<U, Vec<u8>, HeapTx>,
-    ) -> UdpDriver<U, Vec<u8>, HeapTx> {
+        link: UdpDriver<U, RxBuffer, TxBuffer>,
+    ) -> UdpDriver<U, RxBuffer, TxBuffer> {
         if self.owner_waits {
             link.waited_by_owner()
         } else {
@@ -424,10 +434,11 @@ where
         self.shape.datagram_rx
     }
 
-    /// The link of a dial to `to`, before it is shared. A stack that cannot make a socket is
-    /// [`LinkOpenError::Exhausted`]; a connection the other end does not take is
-    /// [`LinkOpenError::Refused`]; a `tls/` dial on links given no secure channel is
-    /// [`LinkOpenError::Unsupported`].
+    /// The link of a dial to `to`, before it is shared. A stack that cannot make a socket, or
+    /// whose session's tables have no buffers left, is [`LinkOpenError::Exhausted`]; a connection
+    /// the other end does not take is [`LinkOpenError::Refused`]; a protocol the links do not
+    /// carry (a `tls/` dial on links given no secure channel) is [`LinkOpenError::Unsupported`],
+    /// before any buffer is claimed; buffers claimed before a refusal go back with it.
     pub fn dial(
         &self,
         to: Locator,
@@ -435,28 +446,29 @@ where
         match to.proto {
             LinkProto::Udp if !U::CARRIED => Err(LinkOpenError::Unsupported),
             LinkProto::Udp => {
+                let (rx, tx) = self.shape.buffers(self.shape.datagram_rx)?;
                 // Port 0 has the stack choose a free one, one per initiator session.
                 let socket = U::bind(dial_bind(self.local, to.at)).map_err(bind_refused::<U>)?;
-                Ok(IpDriver::Udp(self.shape.datagram(
-                    UdpDriver::initiator_with_buffers(
-                        socket,
-                        to.at,
-                        self.shape.datagram_rx,
-                        self.shape.tx(),
-                    ),
-                )))
+                Ok(IpDriver::Udp(
+                    self.shape
+                        .datagram(UdpDriver::initiator_in(socket, to.at, rx, tx)),
+                ))
             }
+            LinkProto::Tcp if !D::CARRIED => Err(LinkOpenError::Unsupported),
             LinkProto::Tcp => {
+                let (rx, tx) = self.shape.buffers(STREAM_RX_CAPACITY)?;
                 let socket = self.dial.dial(to.at)?;
-                Ok(IpDriver::Tcp(self.shape.stream(
-                    StreamDriver::with_buffers(socket, STREAM_RX_CAPACITY, self.shape.tx()),
-                )))
+                Ok(IpDriver::Tcp(
+                    self.shape.stream(StreamDriver::over(socket, rx, tx)),
+                ))
             }
+            LinkProto::Tls if !L::CARRIED => Err(LinkOpenError::Unsupported),
             LinkProto::Tls => {
+                let (rx, tx) = self.shape.buffers(STREAM_RX_CAPACITY)?;
                 let channel = self.tls.dial(to.at)?;
-                Ok(IpDriver::Tls(self.shape.stream(
-                    StreamDriver::with_buffers(channel, STREAM_RX_CAPACITY, self.shape.tx()),
-                )))
+                Ok(IpDriver::Tls(
+                    self.shape.stream(StreamDriver::over(channel, rx, tx)),
+                ))
             }
         }
     }
@@ -485,11 +497,12 @@ where
     const IPV6: bool = opens_ipv6::<U, D, L>();
 
     fn open_acceptor(&self, port: u16) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
+        let (rx, tx) = self.shape.buffers(self.shape.datagram_rx)?;
         // The peer is whoever opens a session first; the driver is bound by its InitSyn.
         let socket = U::bind(SocketAddr::new(self.local, port)).map_err(bind_refused::<U>)?;
-        let driver = Rc::new(IpDriver::Udp(self.shape.datagram(
-            UdpDriver::acceptor_with_buffers(socket, self.shape.datagram_rx, self.shape.tx()),
-        )));
+        let driver = Rc::new(IpDriver::Udp(
+            self.shape.datagram(UdpDriver::acceptor_in(socket, rx, tx)),
+        ));
         Ok(OpenedLink {
             sink: driver.clone(),
             pump: driver,
@@ -502,6 +515,12 @@ where
             sink: driver.clone(),
             pump: driver,
         })
+    }
+
+    /// Every link these links open from now on, dialled or taken off a port that is listened on
+    /// after this, claims its buffers from `tables`.
+    fn lend_buffers(&mut self, tables: LinkTables) {
+        self.shape.lent = Some(tables);
     }
 
     /// A `tcp/` listener over the stack's stream dial, a `tls/` one over its secure channel's
@@ -622,9 +641,12 @@ where
         let Some(channel) = self.listener.accept()? else {
             return Ok(None);
         };
-        let driver = Rc::new(IpDriver::Tls(self.shape.stream(
-            StreamDriver::with_buffers(channel, STREAM_RX_CAPACITY, self.shape.tx()),
-        )));
+        // As the `tcp/` listener's: the connection is off the port before the buffers are claimed,
+        // so one the session's tables have none left for is closed, not left queued.
+        let (rx, tx) = self.shape.buffers(STREAM_RX_CAPACITY)?;
+        let driver = Rc::new(IpDriver::Tls(
+            self.shape.stream(StreamDriver::over(channel, rx, tx)),
+        ));
         Ok(Some(OpenedLink {
             sink: driver.clone(),
             pump: driver,
@@ -661,9 +683,12 @@ where
         let Some(stream) = self.listener.accept()? else {
             return Ok(None);
         };
-        let driver = Rc::new(IpDriver::Tcp(self.shape.stream(
-            StreamDriver::with_buffers(stream, STREAM_RX_CAPACITY, self.shape.tx()),
-        )));
+        // The connection is off the port before the buffers are claimed, so one the session's
+        // tables have none left for is closed, not left queued, as `IpAcceptor` closes it.
+        let (rx, tx) = self.shape.buffers(STREAM_RX_CAPACITY)?;
+        let driver = Rc::new(IpDriver::Tcp(
+            self.shape.stream(StreamDriver::over(stream, rx, tx)),
+        ));
         Ok(Some(OpenedLink {
             sink: driver.clone(),
             pump: driver,
@@ -1564,6 +1589,7 @@ mod tests {
     #[test]
     fn heap_links_given_a_joiner_join_the_group_it_joins() {
         use alloc::string::String;
+        use alloc::vec::Vec;
         use core::cell::RefCell;
 
         /// A group that carries nothing, for the joiner below to hand out.
@@ -1719,6 +1745,74 @@ mod tests {
             UDP_RX_CAPACITY,
             "and none is larger than the largest datagram"
         );
+    }
+
+    /// Links lent their session's tables claim every link's buffers there, a dial's and an
+    /// accepting link's alike, as many links as the tables hold: one past them is refused as
+    /// exhausted and never allocated, a protocol the links do not carry is still refused for good,
+    /// and the buffers are back once the link goes.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[test]
+    fn heap_links_lent_tables_claim_every_links_buffers_there() {
+        use wz_session_core::bounded::{Arena, ARENA_ALIGN};
+
+        #[derive(Clone, Copy)]
+        #[repr(C, align(16))]
+        struct Block([u8; ARENA_ALIGN]);
+
+        let (rx_len, slot_len) = (66, 34);
+        let bytes = Arena::byte_cells_bytes(rx_len, 1)
+            .and_then(|rx| Arena::byte_cells_bytes(2 * slot_len, 1).map(|tx| rx + tx))
+            .expect("within the address space");
+        let region: &'static mut [Block] =
+            alloc::vec![Block([0; ARENA_ALIGN]); bytes.div_ceil(ARENA_ALIGN)].leak();
+        // SAFETY: the region is aligned to `ARENA_ALIGN`, holds at least `bytes` bytes, and is
+        // leaked, so nothing else uses it and it outlives every link that claims from it.
+        let mut arena =
+            unsafe { Arena::over(core::ptr::NonNull::from(region).cast::<u8>(), bytes) };
+        let tables = LinkTables::new(
+            arena.lend_byte_cells(rx_len, 1).expect("the receive table"),
+            arena
+                .lend_byte_cells(2 * slot_len, 1)
+                .expect("the outbound table"),
+            slot_len,
+        );
+
+        let mut links = IpLinks::<Datagrams, Dial>::new(NODE, Dial);
+        links.lend_buffers(tables);
+        let stream = links
+            .open_initiator(Locator::tcp(ROUTER))
+            .expect("a stream link over the tables' buffers")
+            .pump;
+        assert_eq!(stream.link_rx_capacity(), rx_len);
+        assert_eq!(
+            stream.link_mtu(),
+            slot_len,
+            "its frames are the tables' slots"
+        );
+        assert_eq!(tables.in_use(), 1);
+        assert!(matches!(
+            links.open_initiator(Locator::udp(ROUTER)),
+            Err(LinkOpenError::Exhausted)
+        ));
+        assert!(matches!(
+            links.open_acceptor(7447),
+            Err(LinkOpenError::Exhausted)
+        ));
+        assert!(
+            matches!(
+                links.open_initiator(Locator::tls(ROUTER)),
+                Err(LinkOpenError::Unsupported)
+            ),
+            "a protocol the links do not carry is refused before any buffer is asked for"
+        );
+        drop(stream);
+        assert_eq!(tables.in_use(), 0);
+        let datagram = links
+            .open_initiator(Locator::udp(ROUTER))
+            .expect("a datagram link once the buffers are back")
+            .pump;
+        assert_eq!(datagram.link_rx_capacity(), rx_len);
     }
 
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
