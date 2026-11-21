@@ -41,6 +41,12 @@ use wz_session_core::registry_error::RegisterError;
 #[allow(unused_imports)]
 use crate::prelude::*;
 
+#[cfg(any(
+    feature = "remote-declaration-watch",
+    feature = "declarations-synced-event"
+))]
+use super::decl_watch::DeclWatches;
+
 /// A face of the session, named for as long as the session holds it.
 pub(super) type FaceId = u64;
 
@@ -115,6 +121,13 @@ pub(super) struct Registry {
     /// The session's own gets pending on its own queryables ([`LOCAL_FACE`]).
     #[cfg(feature = "local-queryable")]
     pub(super) local: Gets,
+    /// The program's watches of what the peers declare, which the application layer's observers
+    /// stage into while a frame is dispatched (`decl_watch`).
+    #[cfg(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ))]
+    pub(super) decl_watches: alloc::sync::Arc<DeclWatches>,
 }
 
 /// The application's part, one face's tables and the other faces', apart so each can be used as
@@ -135,6 +148,11 @@ impl Registry {
             limits: *limits,
             #[cfg(feature = "local-queryable")]
             local: Gets::new(),
+            #[cfg(any(
+                feature = "remote-declaration-watch",
+                feature = "declarations-synced-event"
+            ))]
+            decl_watches: alloc::sync::Arc::default(),
         }
     }
 
@@ -242,9 +260,42 @@ impl Registry {
     /// Fan one iteration's event of face `id` into the application layer, against that face's
     /// tables. A face the session no longer holds hears nothing.
     pub(super) fn dispatch_event(&mut self, id: FaceId, event: IterationEvent<'_, '_>) {
+        // What an earlier dispatch staged for the watches and nobody settled is a group's, whose
+        // members are not watched.
+        #[cfg(any(
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        ))]
+        self.decl_watches.drop_staged();
+        #[cfg(feature = "declarations-synced-event")]
+        let was_final = self.declarations_final(id);
         if let Some(Split { app, face, others }) = self.split(id) {
             app.dispatch_event_among(&mut face.peer, &mut face.gets, event, &others);
         }
+        #[cfg(feature = "declarations-synced-event")]
+        if !was_final && self.declarations_final(id) {
+            self.decl_watches.stage_synced();
+        }
+    }
+
+    /// Whether the peer of face `id` has ended its initial declarations since its link came up.
+    #[cfg(feature = "declarations-synced-event")]
+    fn declarations_final(&self, id: FaceId) -> bool {
+        self.faces
+            .iter()
+            .find(|face| face.id == id)
+            .is_some_and(|face| face.peer.remote_subscribers.initial_declarations_final())
+    }
+
+    /// Owe the watches what the last [`Self::dispatch_event`] staged, as the events of the peer
+    /// of the link it dispatched, whose zid `peer` reads: what a link's dispatch does after each
+    /// frame, and a group's does not.
+    #[cfg(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ))]
+    pub(super) fn settle_decl_events(&self, peer: impl FnOnce() -> Option<Vec<u8>>) {
+        self.decl_watches.settle(peer);
     }
 
     /// Stage for the peer of face `id` what the application did to its subscriptions since the

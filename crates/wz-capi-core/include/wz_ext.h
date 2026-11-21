@@ -1133,8 +1133,10 @@ typedef struct wz_ext_owned_decl_watch_t {
  *
  * Z_OK; Z_ERR_NULL for a NULL watch, call or session; Z_ERR_INVALID for
  * another entity kind; Z_ERR_SESSION_CLOSED for a closed session;
- * WZ_EXT_ERR_UNSUPPORTED when the session's engine does not watch (the
- * cooperative engine), or the build hears no declaration of that kind. */
+ * WZ_EXT_ERR_UNSUPPORTED when the session's engine does not watch, or the
+ * build hears no declaration of that kind; _Z_ERR_SYSTEM_OUT_OF_MEMORY when
+ * the session holds as many observers of what a peer declares as its bound
+ * allows. */
 z_result_t wz_ext_decl_watch_declare(const z_loaned_session_t *session,
                                      wz_ext_owned_decl_watch_t *watch,
                                      uint8_t entity,

@@ -93,6 +93,7 @@ use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::shared_key_ids::{KeyIdsAtOpen, KeyIdsRefused, LinkKeyForms, SharedKeyIds};
 use wz_session_core::signing_key::SigningKey;
 use wz_session_core::sink::{BoxedSink, SampleView};
+use wz_session_core::timestamp_visibility::{exposed_by, HiddenTimestamp};
 use wz_session_core::wire_id::{next_u32_id, u32_id_taken, EntityId, ExprId};
 use wz_session_core::wireexpr_resolve::{OwnMappingSpace, SharedOwnMappingSpace};
 #[cfg(feature = "listen")]
@@ -137,6 +138,20 @@ mod ticker;
 use ticker::Tickers;
 use wz_session_core::replay_pacing::ReplayPacing;
 
+#[cfg(any(
+    feature = "remote-declaration-watch",
+    feature = "declarations-synced-event"
+))]
+mod decl_watch;
+#[cfg(any(
+    feature = "remote-declaration-watch",
+    feature = "declarations-synced-event"
+))]
+use {
+    decl_watch::DeclWatches,
+    wz_capi_port::{DeclPlane, DeclWatchId, DeclWatchRefused, DeclWatchSink},
+};
+
 #[cfg(feature = "connectivity")]
 mod faces;
 #[cfg(feature = "connectivity")]
@@ -166,7 +181,8 @@ use {
     wz_capi_port::{cancellation::CancellableFan, ReplyCallback},
     wz_session_core::query_options::QueryOptions,
     wz_session_core::reply_acceptance::ReplyAcceptance,
-    wz_session_core::reply_sink::ConsolidatingSink,
+    wz_session_core::reply_sink::{ConsolidatingSink, ReplyView},
+    wz_session_core::timestamp_visibility::HiddenReplyTimestamp,
 };
 
 /// How a session is opened: what the ABI's config says, which the engine turns into the
@@ -207,11 +223,11 @@ pub struct CoopConfig {
     /// with nothing of the session held, on a link whose network stack lets its owner wait
     /// (`SessionDatagramLink::readiness`); a link whose stack does not waits in its own loop.
     pub idle_wait_ms: u32,
-    /// The endpoints to listen on (`tcp/a.b.c.d:port`; port 0 has the stack choose one, read back
-    /// with `CoopEngine::listening`), which the session takes inbound links from for as long as
-    /// it lives, each as a face of its own. A session that lists none and dials at least one is
-    /// the dial role alone; one that lists some and dials none is only a listener, and is open as
-    /// soon as it is bound (`listen`).
+    /// The endpoints to listen on (`tcp/a.b.c.d:port` or `udp/a.b.c.d:port`; port 0 has the stack
+    /// choose one, read back with `CoopEngine::listening`), which the session takes inbound links
+    /// from for as long as it lives, each as a face of its own. A session that lists none and
+    /// dials at least one is the dial role alone; one that lists some and dials none is only a
+    /// listener, and is open as soon as it is bound (`listen`).
     pub listen: Vec<String>,
     /// How many inbound links may be in their handshake at once; one that arrives past it is
     /// closed unread. `transport/unicast/accept_pending` of zenoh, [`DEFAULT_ACCEPT_PENDING`]
@@ -560,6 +576,13 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     /// What the liveliness subscribers' sinks queued for their callbacks (`liveliness`).
     #[cfg(feature = "liveliness")]
     live_samples: LivelinessQueue,
+    /// The program's watches of what the peers declare and what is owed to them, shared with the
+    /// registry whose observers stage it (`decl_watch`).
+    #[cfg(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ))]
+    decl_watches: Arc<DeclWatches>,
     zid: SessionZid,
     closed: AtomicBool,
     /// The entity ids the session's declarations and Interests take, from 1: `u32`, upstream's
@@ -773,9 +796,12 @@ impl Drop for Delivering<'_> {
     }
 }
 
+/// What a subscriber's sink mints: the callback a sample is handed to.
+type SubscriberCallbackFn = Box<dyn FnMut(&dyn SampleView) + Send + 'static>;
+
 /// A subscriber's callback, as the ABI's sink minted it. Locked while it runs, so a delivery
 /// from the read task and one from the program's own `zp_read` never overlap.
-type SubscriberCallback = Arc<Mutex<Box<dyn FnMut(&dyn SampleView) + Send + 'static>>>;
+type SubscriberCallback = Arc<Mutex<SubscriberCallbackFn>>;
 
 /// A queryable's callback, locked while it runs as a subscriber's is.
 #[cfg(feature = "queryable")]
@@ -1217,6 +1243,11 @@ fn dispatch_holding_finals<C: ClockSource + 'static>(
         #[cfg(feature = "shared-key-ids")]
         actions.note_requests(&event);
         registry.dispatch_event(face, event);
+        #[cfg(any(
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        ))]
+        registry.settle_decl_events(|| actions.peer_zid());
         registry.flush_pending_replies(face, &*actions);
         for (rid, qos) in registry.take_pending_final_rids(face) {
             if lock(&plane.holds).owe(generation, rid, qos) {
@@ -1224,6 +1255,25 @@ fn dispatch_holding_finals<C: ClockSource + 'static>(
             }
         }
     }
+}
+
+/// A subscriber's `callback`, shown each sample's timestamp when `expose` and none otherwise
+/// (`entity-timestamp-opt-in`): the one place a sample is handed to a subscriber's callback.
+fn sample_shown(expose: bool, mut callback: SubscriberCallbackFn) -> SubscriberCallbackFn {
+    if expose {
+        return callback;
+    }
+    Box::new(move |sample: &dyn SampleView| callback(&HiddenTimestamp(sample)))
+}
+
+/// A get's leg `callback`, shown each reply's timestamp when `expose` and none otherwise
+/// (`entity-timestamp-opt-in`): the one place a reply is handed to a get's callback.
+#[cfg(feature = "query")]
+fn reply_shown(expose: bool, mut callback: ReplyCallback) -> ReplyCallback {
+    if expose {
+        return callback;
+    }
+    Box::new(move |reply: &dyn ReplyView| callback(&HiddenReplyTimestamp(reply)))
 }
 
 /// The `on_event` of a link whose session has no queryable: the registry's dispatch, with
@@ -1242,6 +1292,11 @@ fn dispatch_all<C: ClockSource + 'static>(
             .app
             .set_unanswerable_final(actions.params.policy.query_unanswerable_final());
         registry.dispatch(face, event, &*actions);
+        #[cfg(any(
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        ))]
+        registry.settle_decl_events(|| actions.peer_zid());
     }
 }
 
@@ -2408,6 +2463,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let gets = core.gets.clone();
         #[cfg(feature = "connectivity")]
         let faces = core.watchers.clone();
+        #[cfg(any(
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        ))]
+        let decl_watches = core.registry.borrow().decl_watches.clone();
         let rooms = core.rooms.clone();
         let wait_before_drop_us = core.config.tx_queue.wait_before_drop_us;
         let held_drop = core.config.tx_queue.held_drop;
@@ -2454,6 +2514,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             faces,
             #[cfg(feature = "liveliness")]
             live_samples: Arc::new(Mutex::new(VecDeque::new())),
+            #[cfg(any(
+                feature = "remote-declaration-watch",
+                feature = "declarations-synced-event"
+            ))]
+            decl_watches,
             zid: wire,
             closed: AtomicBool::new(false),
             next_entity: AtomicU64::new(1),
@@ -2771,6 +2836,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             for sink in self.faces.sinks() {
                 sink(kind, &face);
             }
+        }
+        // What a peer declared or retracted, told to the watch it is owed to.
+        #[cfg(any(
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        ))]
+        while let Some((sink, told)) = self.decl_watches.next() {
+            sink(told.event());
         }
         loop {
             let next = lock(&self.matching).pop_front();
@@ -3532,6 +3605,64 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         self.faces.unwatch(id)
     }
 
+    /// The watch is told first what each link's peer holds now, then what the links' dispatch
+    /// stages from here on (`decl_watch`). A refused sink is let go of with no lock held.
+    #[cfg(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ))]
+    fn declare_decl_watch(
+        &self,
+        plane: DeclPlane,
+        sink: DeclWatchSink,
+    ) -> Result<DeclWatchId, DeclWatchRefused> {
+        if !decl_watch::hears(plane) {
+            return Err(DeclWatchRefused::PlaneNotBuilt);
+        }
+        let Some(guard) = self.live() else {
+            return Err(DeclWatchRefused::SessionClosed);
+        };
+        let core = &guard.0;
+        let observed = self
+            .decl_watches
+            .observe(&mut core.registry.borrow_mut().app, plane);
+        if let Err(refused) = observed {
+            drop(guard);
+            drop(sink);
+            return Err(refused);
+        }
+        let id = self.decl_watches.add(plane, sink);
+        let registry = core.registry.borrow();
+        for face in &core.faces {
+            let (Link::Up(wire) | Link::Opening { wire, .. }) = &face.link else {
+                continue;
+            };
+            if let Some(tables) = registry.faces().find(|tables| tables.id == face.id) {
+                self.decl_watches
+                    .tell_held(id, plane, tables, || wire.actions.peer_zid());
+            }
+        }
+        Ok(id)
+    }
+
+    #[cfg(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ))]
+    fn undeclare_decl_watch(&self, id: DeclWatchId) -> bool {
+        // A closed session let go of every watch at its close.
+        let sink = match self.live() {
+            Some(core) => {
+                let mut registry = core.0.registry.borrow_mut();
+                self.decl_watches.undeclare(&mut registry.app, id)
+            }
+            None => None,
+        };
+        let found = sink.is_some();
+        drop(sink);
+        found
+    }
+
     fn has_router_peer(&self) -> bool {
         self.live().is_some_and(|core| {
             core.0
@@ -3595,9 +3726,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let Ok(registration) = registration else {
             return Some(id);
         };
+        // The declaration states no choice about the timestamp, so it takes the session's
+        // `entity-timestamp-opt-in`, as the policy the session was opened under resolves it.
+        let callback = sample_shown(exposed_by(&core.policy), sink());
         lock(&self.targets).push((
             TargetKey::Subscriber(id),
-            Target::Subscriber(Arc::new(Mutex::new(sink()))),
+            Target::Subscriber(Arc::new(Mutex::new(callback))),
         ));
         let entry = SubEntry {
             id,
@@ -4170,16 +4304,21 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         if StatementNotHonoured::of_query(opts).is_err() {
             return Some(0);
         }
-        let faces = {
+        let (faces, expose) = {
             let Some(guard) = self.live() else {
                 return Some(0);
             };
-            if opts.allowed_destination.allows_remote() {
+            // `entity-timestamp-opt-in`: the query's choice, or the session's policy when it
+            // states none, applied to every leg's callback, after its replies are consolidated.
+            let expose = opts.expose_timestamp_by(&guard.0.policy);
+            let faces = if opts.allowed_destination.allows_remote() {
                 guard.0.up_faces()
             } else {
                 Vec::new()
-            }
+            };
+            (faces, expose)
         };
+        let mut leg = || reply_shown(expose, leg());
         let mut issued = 0;
         for face in faces {
             let leg_id = self.next_local_id();
@@ -4684,7 +4823,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         };
         #[cfg(not(feature = "liveliness"))]
         let live_subs: Vec<TargetKey> = Vec::new();
+        // The watches end with the session; their sinks, and the C contexts they hold, are let go
+        // of with no lock held.
+        #[cfg(any(
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        ))]
+        let watches = self.decl_watches.close();
         drop(guard);
+        #[cfg(any(
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        ))]
+        drop(watches);
         // What publishes handed to the session and it never sent goes with it, let go of with no
         // lock held, as a sent leg is.
         let handed = core::mem::take(&mut *lock(&self.handed));

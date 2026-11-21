@@ -549,9 +549,10 @@ def resolve_profile(decl: dict, profile: str) -> dict:
     try:
         kconf = wz_config.resolve([path])
         env_lines = wz_config.resolved_limit_env(decl, kconf) + wz_config.resolved_policy_env(decl, kconf)
+        # The profile's capabilities on the engine it chose, as `--resolve-features pico` prints them.
+        features = wz_config.resolved_features(decl, "pico", kconf)
     except wz_config.PresetError as err:
         raise Refusal(f"profile {profile} does not resolve: {err}") from err
-    features = wz_config.features_for(decl, "pico", wz_config.resolved_caps(decl, kconf))
     statement = wz_config.resolved_statement(decl, "pico", kconf, {"kind": "presets", "inputs": [path.name]})
     return {"features": features, "env": parse_env_lines(env_lines), "statement": statement}
 
