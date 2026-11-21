@@ -65,10 +65,13 @@ mod watched {
         Synced,
     }
 
+    /// Each event a watch was told, with the peer it named.
+    type Heard = Arc<Mutex<Vec<(Seen, Option<Vec<u8>>)>>>;
+
     /// A watch's sink and what it was told, with the peer each event named.
     struct Log {
         sink: DeclWatchSink,
-        seen: Arc<Mutex<Vec<(Seen, Option<Vec<u8>>)>>>,
+        seen: Heard,
     }
 
     impl Log {
