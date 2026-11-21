@@ -1885,6 +1885,12 @@ pub mod owed_replies;
 #[cfg(feature = "alloc")]
 pub mod observer;
 
+// The most memory a session's tables can hold, computed from the limits it runs under: the rows a
+// C ABI reports through its door and adds its own to. Over the observer's tables, so gated as the
+// observer is. Documented from inside.
+#[cfg(feature = "alloc")]
+pub mod session_memory;
+
 /// Fixed-memory step S9a — the observer of the fixed-memory profile: what the
 /// APPLICATION registers, once per process, with every table a peer writes taken
 /// out into the session slot ([`peer_tables`]) and the requester-side registries

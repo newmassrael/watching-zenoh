@@ -475,6 +475,10 @@ pub struct BoxedSink {
 
 #[cfg(feature = "alloc")]
 impl BoxedSink {
+    /// The heap bytes [`Self::new`] takes beside the closure's own: the box that holds the box
+    /// of the closure. A closure that captures nothing takes no byte of its own.
+    pub const WRAPPER_BYTES: usize = core::mem::size_of::<ClosureSink>();
+
     /// Wrap a capturing closure as a heap-stored sink.
     pub fn new(callback: impl FnMut(&dyn SampleView) + Send + 'static) -> Self {
         Self {

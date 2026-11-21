@@ -536,6 +536,10 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberTable<C, Profile> {
 }
 
 impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
+    /// The bytes one liveliness subscriber takes in the table's storage: its pattern's text with
+    /// it where the storage policy keeps the text in the row, and its sink as the table holds it.
+    pub const ROW_BYTES: usize = core::mem::size_of::<LivelinessSubscriberSlot<C, P>>();
+
     /// Hold the table to the `MAX_LIVELINESS_SUBSCRIPTIONS` its creator resolved: a registration
     /// that would leave more subscribers than `quota` admits is refused
     /// ([`RegisterError::TableFull`]), and the subscribers already in are kept, as a lowered soft

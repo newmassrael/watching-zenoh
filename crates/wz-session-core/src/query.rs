@@ -2210,6 +2210,10 @@ impl<C, P: Storage> Default for QueryableRegistry<C, P> {
 }
 
 impl<C, P: Storage> QueryableRegistry<C, P> {
+    /// The bytes one queryable takes in the table's storage: its pattern's text with it where the
+    /// storage policy keeps the text in the row, and its sink as the table holds it.
+    pub const ROW_BYTES: usize = core::mem::size_of::<Queryable<C, P>>();
+
     /// Hold the registry to the `MAX_QUERYABLES` its creator resolved: a registration that would
     /// leave more queryables than `quota` admits is refused ([`RegisterError::TableFull`]), and
     /// the queryables already in are kept, as a lowered soft limit keeps what it holds.

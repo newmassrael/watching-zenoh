@@ -770,6 +770,10 @@ impl<C: SampleSink, P: Storage> Default for SubscriberTable<C, P> {
 }
 
 impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
+    /// The bytes one subscription takes in the table's storage: its pattern's text with it where
+    /// the storage policy keeps the text in the row, and its sink as the table holds it.
+    pub const ROW_BYTES: usize = core::mem::size_of::<Subscriber<C, P>>();
+
     /// Hold the table to the `MAX_SUBSCRIPTIONS` its creator resolved: a registration that would
     /// leave more subscriptions than `quota` admits is refused ([`RegisterError::TableFull`]),
     /// and the subscriptions already in are kept, as a lowered soft limit keeps what it holds.
