@@ -266,16 +266,22 @@ fn demo_main() -> ExitCode {
     //
     // The node's snapshot of the policies is decided here too, once: what the file's `wz` member
     // resolved to, or the demo's own for a node no file describes. It is handed to the tuning
-    // below, and through it to every session, router and socket the node makes.
+    // below, and through it to every session, router and socket the node makes. The node's runtime
+    // limits are decided with it and reach, through the tuning, the clock and the resource
+    // snapshot the node makes for itself.
     #[cfg(feature = "zenoh-config")]
-    let (rest, node_policy) = match crate::args::expand_stock_zenoh_config(rest, |p| {
+    let (rest, node_policy, node_limits) = match crate::args::expand_stock_zenoh_config(rest, |p| {
         std::fs::read_to_string(p).map_err(|e| format!("--config: cannot read {p}: {e}"))
     }) {
         Err(message) => {
             eprintln!("wz-ap-demo: {message}");
             return ExitCode::from(2);
         }
-        Ok(None) => (rest, crate::args::resolve_policy()),
+        Ok(None) => (
+            rest,
+            crate::args::resolve_policy(),
+            crate::args::resolve_runtime_limits(),
+        ),
         Ok(Some(exp)) => {
             // R2081 (open-debt item 208) — READ and APPLIED are two facts and
             // this used to print them as one. The old line said "honoured" and
@@ -312,8 +318,9 @@ fn demo_main() -> ExitCode {
                 eprintln!("wz-ap-demo: --config {}: {label} {body}", exp.path);
             }
             let node_policy = exp.policies.policy;
+            let node_limits = exp.policies.limits.runtime;
             expanded = exp.argv;
-            (&expanded[..], node_policy)
+            (&expanded[..], node_policy, node_limits)
         }
     };
     #[cfg(not(feature = "zenoh-config"))]
@@ -326,6 +333,8 @@ fn demo_main() -> ExitCode {
     }
     #[cfg(not(feature = "zenoh-config"))]
     let node_policy = crate::args::resolve_policy();
+    #[cfg(not(feature = "zenoh-config"))]
+    let node_limits = crate::args::resolve_runtime_limits();
 
     // R311y843 — the two handshake values an operator can move, read ONCE from
     // the already-expanded command line so every run mode announces the same
@@ -334,7 +343,7 @@ fn demo_main() -> ExitCode {
     // digits were unreadable is the silent misconfiguration `--config` exists
     // to end.
     let tuning = match crate::args::TransportTuning::from_argv_under(rest, node_policy) {
-        Ok(t) => t,
+        Ok(t) => t.with_runtime_limits(node_limits),
         Err(message) => {
             eprintln!("wz-ap-demo: {message}");
             return ExitCode::from(2);

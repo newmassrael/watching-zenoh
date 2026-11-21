@@ -316,6 +316,7 @@ mod tests {
             TimestampingEnabled::all(true),
             SystemEpoch,
             &wz_session_core::policy::SessionPolicy::defaults(),
+            &wz_session_core::limits::RuntimeLimits::BUILD,
         )
         .with_trusted_only_stamping(trusted_only)
     }

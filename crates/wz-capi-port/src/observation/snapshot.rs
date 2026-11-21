@@ -116,7 +116,12 @@ fn doors() -> &'static Mutex<Doors> {
     static DOORS: OnceLock<Mutex<Doors>> = OnceLock::new();
     DOORS.get_or_init(|| {
         Mutex::new(Doors {
-            sampler: BuildSampler::for_build(features()),
+            // The doors are the process's and no node's, so they hold no runtime limits of their
+            // own: the sampler takes the build's period.
+            sampler: BuildSampler::of_limits(
+                &wz_session_core::limits::RuntimeLimits::BUILD,
+                features(),
+            ),
             source: None,
             origin: Instant::now(),
         })

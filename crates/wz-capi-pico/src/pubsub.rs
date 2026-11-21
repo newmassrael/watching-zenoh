@@ -895,6 +895,7 @@ mod one_session_time_tests {
             TimestampingEnabled::all(true),
             StandingClock,
             &wz_session_core::policy::SessionPolicy::defaults(),
+            &wz_session_core::limits::RuntimeLimits::BUILD,
         )
         .with_trusted_only_stamping(false)
     }
@@ -1051,6 +1052,7 @@ mod clock_reading_tests {
             TimestampingEnabled::all(true),
             SystemEpoch,
             &wz_session_core::policy::SessionPolicy::defaults(),
+            &wz_session_core::limits::RuntimeLimits::BUILD,
         )
         .with_trusted_only_stamping(true);
         assert!(

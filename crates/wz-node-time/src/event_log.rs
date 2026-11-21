@@ -257,6 +257,7 @@ mod tests {
             WhatAmI::Router,
             TimestampingEnabled::default(),
             &SessionPolicy::defaults(),
+            &wz_session_core::limits::RuntimeLimits::BUILD,
         );
         let none = NodeHlc::disabled();
         log.emit(&router, 0, 1, &[]);

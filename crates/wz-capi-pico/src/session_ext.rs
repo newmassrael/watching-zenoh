@@ -137,8 +137,16 @@ impl PicoSessionExt {
         // build.
         #[cfg(not(any(feature = "advanced", feature = "clock-source")))]
         let _ = zid;
+        // A pico session holds a session's limits alone: its clock runs under the build's runtime
+        // limits.
         #[cfg(any(feature = "advanced", feature = "clock-source"))]
-        let hlc = NodeHlc::for_node_by(zid, mode, TimestampingEnabled::all(true), &policy);
+        let hlc = NodeHlc::for_node_by(
+            zid,
+            mode,
+            TimestampingEnabled::all(true),
+            &policy,
+            &wz_session_core::limits::RuntimeLimits::BUILD,
+        );
         #[cfg(any(feature = "advanced", feature = "clock-source"))]
         let time = crate::last_timestamp::SessionTime::new().learned_by(hlc.clone());
         #[cfg(not(any(feature = "advanced", feature = "clock-source")))]

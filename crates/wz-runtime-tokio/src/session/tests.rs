@@ -7652,6 +7652,7 @@ fn plain_reply_stamp_seen_by(options: QueryableOptions) -> (Option<Vec<u8>>, Vec
         wz_codecs::whatami::WhatAmI::Router,
         crate::node_clock::TimestampingEnabled::default(),
         &wz_session_core::policy::SessionPolicy::defaults(),
+        &wz_session_core::limits::RuntimeLimits::BUILD,
     );
     let session = session.with_node_clock(hlc);
     let _queryable = session.declare_queryable("home/temp", options, |_query, out| {
@@ -18100,7 +18101,10 @@ fn a_sessions_clock_stamps_by_the_clock_quality_of_its_snapshot() {
             "made: {}",
             value.id()
         );
-        let session = session.with_timestamping(TimestampingEnabled::all(true));
+        let session = session.with_timestamping(
+            TimestampingEnabled::all(true),
+            &wz_session_core::limits::RuntimeLimits::BUILD,
+        );
         assert_eq!(
             session.node_hlc().data_stamp() == DataStamp::Withheld,
             trusted_only,
@@ -18110,6 +18114,37 @@ fn a_sessions_clock_stamps_by_the_clock_quality_of_its_snapshot() {
         opened += 1;
     }
     assert!(opened >= 1, "the build's domain holds at least its default");
+}
+
+/// A session's clock rebuilt by a host runs with the `CLOCK_MAX_FORWARD_STEP_MS` of the runtime
+/// limits the host hands it: the build's bound with nothing stated, and the stated one otherwise.
+#[cfg(feature = "time-hlc")]
+#[test]
+fn a_sessions_clock_rebuilt_by_a_host_is_bounded_by_the_runtime_limits_it_is_handed() {
+    use crate::node_clock::TimestampingEnabled;
+    use wz_session_core::limits::RuntimeLimits;
+    if std::env::var_os("UHLC_MAX_DELTA_MS").is_some() {
+        // The variable is selected over the snapshot, which the node clock's own tests hold.
+        return;
+    }
+    let bound = |limits: &RuntimeLimits| {
+        let (session, _driver) = build_session();
+        let session = session.with_timestamping(TimestampingEnabled::all(true), limits);
+        session.node_hlc().max_delta_word()
+    };
+    let word = |ms: usize| {
+        wz_session_core::ntp64::Ntp64::from_duration(core::time::Duration::from_millis(ms as u64))
+            .as_word()
+    };
+    let build = wz_session_core::caps::CLOCK_MAX_FORWARD_STEP_MS;
+    assert_eq!(bound(&RuntimeLimits::defaults()), Some(word(build)));
+    let value = if build == 20 { 30 } else { 20 };
+    let mut limits = RuntimeLimits::defaults();
+    if limits.select_clock_max_forward_step_ms(value).is_err() {
+        // A build that keeps the build's value alone refuses the statement itself.
+        return;
+    }
+    assert_eq!(bound(&limits), Some(word(value)));
 }
 
 /// On a time base the program supplies, the wait for stable declarations runs on the program's

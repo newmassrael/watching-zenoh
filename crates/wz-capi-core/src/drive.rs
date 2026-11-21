@@ -4736,8 +4736,15 @@ pub fn open_blocking(
     // session plays, and handed to the registry, which installs a clone on its plane and on every
     // face session it makes. `None` inside when the config does not enable timestamping for this
     // role, which is zenoh's own answer (`enabled().get(whatami)`) and the shipped one for a peer
-    // or client. Its `clock-quality-stamping` policy is the snapshot the open resolved.
-    let node_hlc = NodeHlc::for_node_by(&wire_zid, dial_whatami, timestamping, &session_policy);
+    // or client. Its `clock-quality-stamping` policy is the snapshot the open resolved. The open
+    // resolves a session's limits alone, so the clock's bound is the build's runtime limits'.
+    let node_hlc = NodeHlc::for_node_by(
+        &wire_zid,
+        dial_whatami,
+        timestamping,
+        &session_policy,
+        &wz_session_core::limits::RuntimeLimits::BUILD,
+    );
     // A bound `UHLC_MAX_DELTA_MS` states that the clock does not honour leaves the node without
     // the clock it was to have; the open fails with the reason rather than run a session that
     // stamps nothing, as upstream's node does not start on such a value.
