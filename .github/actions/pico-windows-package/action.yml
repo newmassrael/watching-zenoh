@@ -1,0 +1,82 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# The Windows package of the pico C ABI library for one width and one form, built and then tested
+# from its own zip (scripts/lib/pico_windows_package.py --build, then --test). The Platform
+# workflow's `package-windows` job and the release workflow's `windows-packages` job both run it, so
+# a package a release attaches is made and tested by the steps the Platform lane reads every push.
+# The caller checks the repository out first, with its submodules (a local action is read from the
+# checkout), and uploads `outputs.directory`, which holds the zip and its `.zip.sha256`.
+#
+# The profile is fixed here, not an input: the package a release ships is the one the Platform lane
+# tests. Composite steps take no `timeout-minutes`, so the caller's job timeout bounds the build.
+name: pico library Windows package
+description: Build the pico C ABI library's Windows package of one width and form, then test its zip
+inputs:
+  arch:
+    description: The width of Windows (`x64` or `x86`), as `pico_windows_package.py --arch` takes it
+    required: true
+  form:
+    description: The form of the library (`single` or `split`), as `pico_windows_package.py --form` takes it
+    required: true
+outputs:
+  directory:
+    description: The directory holding the package's zip and its `.zip.sha256`
+    value: ${{ steps.where.outputs.directory }}
+runs:
+  using: composite
+  steps:
+    - name: the directory the package is written to
+      id: where
+      shell: bash
+      env:
+        WZ_PACKAGE_ARCH: ${{ inputs.arch }}
+        WZ_PACKAGE_FORM: ${{ inputs.form }}
+      run: echo "directory=${RUNNER_TEMP}/pico-package-${WZ_PACKAGE_ARCH}-${WZ_PACKAGE_FORM}" >> "$GITHUB_OUTPUT"
+
+    - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+      shell: bash
+      run: bash scripts/lib/rust-toolchain-pinned.sh
+
+    - name: Set up Python (the packager and the configuration reader are python)
+      uses: actions/setup-python@v5
+      with:
+        python-version-file: .github/python-version
+
+    # The packager resolves the profile with the pinned interpreter; `wz_config.py` imports it
+    # from the running python, where this puts it, by version and hash.
+    - name: The pinned Kconfig interpreter
+      shell: bash
+      run: python -m pip install --quiet --no-deps --require-hashes -r scripts/requirements-kconfig.txt
+
+    # The transports example joins a group on the adapter of the default route, as the C ABI
+    # examples job does: the loopback adapter of Windows carries no group.
+    - name: name the interface the example's group is joined on
+      shell: bash
+      run: |
+        iface="$(powershell -NoProfile -Command "(Get-NetAdapter -InterfaceIndex (Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Sort-Object RouteMetric | Select-Object -First 1).ifIndex).InterfaceGuid" | tr -d '\r')"
+        echo "group interface: ${iface:-none}"
+        echo "WZ_EXAMPLE_GROUP_IFACE=${iface}" >> "$GITHUB_ENV"
+
+    - name: build the package
+      shell: bash
+      env:
+        WZ_PACKAGE_ARCH: ${{ inputs.arch }}
+        WZ_PACKAGE_FORM: ${{ inputs.form }}
+        WZ_PACKAGE_OUT: ${{ steps.where.outputs.directory }}
+      run: python scripts/lib/pico_windows_package.py --build "$WZ_PACKAGE_OUT" --profile host-peer-ext --arch "$WZ_PACKAGE_ARCH" --form "$WZ_PACKAGE_FORM"
+
+    - name: the package's regression test (its zip, extracted, verified, compiled against and run)
+      shell: bash
+      env:
+        WZ_PACKAGE_ARCH: ${{ inputs.arch }}
+        WZ_PACKAGE_FORM: ${{ inputs.form }}
+        WZ_PACKAGE_OUT: ${{ steps.where.outputs.directory }}
+      run: |
+        out="$(cygpath -u "$WZ_PACKAGE_OUT")"
+        set -- "$out"/*-windows-"$WZ_PACKAGE_ARCH"-*.zip
+        if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
+          echo "pico-package-test on Windows $WZ_PACKAGE_ARCH $WZ_PACKAGE_FORM: the build left no single zip in $out: FAIL" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit 1
+        fi
+        python scripts/lib/pico_windows_package.py --test "$(cygpath -w "$1")"

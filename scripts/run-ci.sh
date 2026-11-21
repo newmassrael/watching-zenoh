@@ -1668,8 +1668,10 @@ layer_0_preflight_lints() {
     # no workflow files -> rc=3 "no YAML file was found", no .github ->
     # rc=3 "no project was found". Verified all four ways at R311y417.
     # Known limit, recorded rather than implied: composite
-    # `.github/actions/*/action.yml` files are NOT linted by actionlint at
-    # all. This repo has none today.
+    # `.github/actions/*/action.yml` files are NOT linted by actionlint as
+    # files. This repo has two (`rocksdb-engine`, `pico-windows-package`);
+    # actionlint reads each one's metadata only where a workflow `uses:` it,
+    # to check the `with:` inputs, so their `run:` steps get no shellcheck.
     local al_version
     al_version=$(actionlint --version 2>/dev/null | head -1) || al_version=""
     [[ -n "$al_version" ]] || al_version="version unknown"
