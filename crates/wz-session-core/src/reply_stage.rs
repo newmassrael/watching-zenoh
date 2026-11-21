@@ -309,12 +309,23 @@ impl ReplyBounds {
     /// take: the stated bound, and on a policy that enforces its capacity no more than the
     /// build's value as well, since that policy's arena is sized for `MAX_PENDING_REPLIES`
     /// replies of it whatever the profile lets a statement raise the bound to.
+    ///
+    /// On a policy whose arena grows, a bound equal to the capacity the build sized the fixed
+    /// stages by is that storage's bound and not one a statement lowered: the snapshot of a
+    /// build on the fixed profile holds it when nothing is stated, and a growable stage, which
+    /// has no such storage, is not held to it. A lower value is a statement and holds every
+    /// stage.
     const fn payload_most<P: Storage>(self) -> Quota {
         let stated = self.payload.get();
         if P::ENFORCES_CAPACITY {
-            stated.tighter(Quota::at_most(caps::MAX_REPLY_PAYLOAD_BYTES))
-        } else {
-            stated
+            return stated.tighter(Quota::at_most(caps::MAX_REPLY_PAYLOAD_BYTES));
+        }
+        match (
+            <crate::limits::MaxReplyPayloadBytes as crate::limit_binding::LimitSpec>::CAPACITY,
+            stated.most(),
+        ) {
+            (Some(capacity), Some(most)) if most == capacity => Quota::UNBOUNDED,
+            _ => stated,
         }
     }
 }
