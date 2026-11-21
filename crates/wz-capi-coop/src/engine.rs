@@ -3995,8 +3995,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 lock(&queue).push_back((id, Sample::from_view(sample)));
             }),
         );
+        // A registration the observer refuses is a refused declaration, told as one: an id
+        // answered for it would name a subscriber that hears nothing and was never announced.
         let Ok(registration) = registration else {
-            return Some(id);
+            return None;
         };
         // The declaration states no choice about the timestamp, so it takes the session's
         // `entity-timestamp-opt-in`, as the policy the session was opened under resolves it.
@@ -5069,10 +5071,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             history,
             liveliness::sample_sink(id, &self.live_samples),
         );
+        // Refused by the observer, the declaration is refused, as a subscriber's is.
         if registered.is_err() {
             drop(guard);
             drop(self.take_target(TargetKey::Liveliness(id)));
-            return Some(id);
+            return None;
         }
         let entry = LiveSubEntry {
             id,

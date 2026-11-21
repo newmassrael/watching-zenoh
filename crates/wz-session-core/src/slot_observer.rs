@@ -1292,6 +1292,17 @@ mod lent_tests {
             .is_ok());
     }
 
+    /// A wild key is canonized in a working buffer of its own, not one of the table's lent
+    /// policy, so the lent tables take it as any other key.
+    #[test]
+    fn a_lent_observer_takes_a_wild_key() {
+        let mut observer = lent_with(1);
+        assert!(observer
+            .subscribers
+            .register_sink("demo/**", Locality::Any, sink())
+            .is_ok());
+    }
+
     /// An arena without the room refuses the observer: nothing past what it has is lent. (A build
     /// whose ceiling is under one row refuses it past the ceiling instead; either is a refusal.)
     #[test]

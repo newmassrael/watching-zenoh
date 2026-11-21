@@ -116,6 +116,11 @@ pub trait Storage {
     /// arena (`true`), so a sequence a table makes for itself by `Default` has none.
     const LENT_AT_OPEN: bool;
 
+    /// The policy of a working buffer an algorithm over a table of this policy keeps while it
+    /// runs (a key's chunks while it is canonized): this policy where it can make one for itself,
+    /// the static policy, on the stack, where its rows are only ever lent.
+    type Scratch: Storage;
+
     /// The element sequence of a [`BoundedVec<T, N, Self>`].
     type Seq<T, const N: usize>: SeqBacking<T>;
 
@@ -299,6 +304,7 @@ pub struct Heap;
 impl Storage for Heap {
     const ENFORCES_CAPACITY: bool = false;
     const LENT_AT_OPEN: bool = false;
+    type Scratch = Heap;
     type Seq<T, const N: usize> = Vec<T>;
     type Text<const N: usize> = String;
     type Offset = u32;
@@ -323,6 +329,7 @@ pub struct Static;
 impl Storage for Static {
     const ENFORCES_CAPACITY: bool = true;
     const LENT_AT_OPEN: bool = false;
+    type Scratch = Static;
     type Seq<T, const N: usize> = heapless::Vec<T, N>;
     type Text<const N: usize> = heapless::String<N>;
     type Offset = u16;
@@ -353,6 +360,7 @@ pub struct Lent;
 impl Storage for Lent {
     const ENFORCES_CAPACITY: bool = true;
     const LENT_AT_OPEN: bool = true;
+    type Scratch = Static;
     type Seq<T, const N: usize> = LentSeq<T>;
     type Text<const N: usize> = heapless::String<N>;
     // A span of a lent table addresses rows of an arena a host session may size past 64 KiB.
@@ -826,6 +834,9 @@ pub struct LentSeq<T> {
     len: usize,
     /// The rows the arena lent: the most the table holds.
     room: usize,
+    /// Whether an arena lent the rows. A table made by `Default` was lent none and is no table
+    /// to put a value in (`refuse_unlent`).
+    lent: bool,
     _owns: PhantomData<T>,
 }
 
@@ -847,8 +858,22 @@ impl<T> LentSeq<T> {
             base,
             len: 0,
             room,
+            lent: true,
             _owns: PhantomData,
         }
+    }
+
+    /// Stop a debug build at a value put in a table no arena lent rows to. Such a table refuses
+    /// every value as a full one does, so a release build refuses it; but it is a defect of the
+    /// table's maker, not a table at its limit, and a refusal that looks like the limit would hide
+    /// it.
+    #[inline(always)]
+    fn refuse_unlent(&self) {
+        debug_assert!(
+            self.lent,
+            "a value was put in a lent table no arena lent rows to: a table of this policy is \
+             made by `Arena::lend`, and a working buffer takes the policy's `Storage::Scratch`"
+        );
     }
 
     /// Drop the values from `len` on. The length is shortened first, so a value whose drop
@@ -883,6 +908,7 @@ impl<T> SeqBacking<T> for LentSeq<T> {
             base: NonNull::dangling(),
             len: 0,
             room: 0,
+            lent: false,
             _owns: PhantomData,
         }
     }
@@ -903,6 +929,7 @@ impl<T> SeqBacking<T> for LentSeq<T> {
     }
 
     fn push(&mut self, value: T) -> Result<(), CapacityFull<T>> {
+        self.refuse_unlent();
         if self.len == self.room {
             return Err(CapacityFull(value));
         }
@@ -913,6 +940,7 @@ impl<T> SeqBacking<T> for LentSeq<T> {
     }
 
     fn push_with<F: FnOnce() -> T>(&mut self, make: F) -> bool {
+        self.refuse_unlent();
         if self.len == self.room {
             return false;
         }
@@ -973,6 +1001,7 @@ impl<T> SeqBacking<T> for LentSeq<T> {
     where
         T: Clone,
     {
+        self.refuse_unlent();
         if len > self.room {
             return Err(CapacityFull(()));
         }
@@ -990,6 +1019,7 @@ impl<T> SeqBacking<T> for LentSeq<T> {
     where
         T: Clone,
     {
+        self.refuse_unlent();
         if src.len() > self.room - self.len {
             return Err(CapacityFull(()));
         }
@@ -1857,6 +1887,26 @@ mod tests {
         text_append_is_atomic_where_the_capacity_is_hard,
         default_is_empty,
     );
+
+    /// A table of the lent policy that no arena lent rows to is a defect of its maker, not a table
+    /// at its limit: a debug build stops at the value put in it rather than refusing it as full.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "no arena lent rows to")]
+    fn a_value_put_in_a_lent_table_no_arena_lent_stops_a_debug_build() {
+        let mut table: BoundedVec<u32, 4, Lent> = BoundedVec::default();
+        let _ = table.push(1);
+    }
+
+    /// A table lent no rows by its arena (a limit of 0) is a table at its limit: it refuses the
+    /// value as full, and nothing stops.
+    #[test]
+    fn a_lent_table_of_no_rows_refuses_as_full() {
+        let mut table: BoundedVec<u32, 4, Lent> = arena_of(ARENA_ALIGN)
+            .lend(0)
+            .expect("no rows fit any arena");
+        assert_eq!(table.push(1).map_err(|full| full.0), Err(1));
+    }
 
     /// A lent table holds the rows its open lent it, under the ceiling `N` its type names: the
     /// push past those rows is refused with the value handed back, as the push past `N` is on the

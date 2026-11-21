@@ -337,7 +337,9 @@ fn canonize_chunks<P: Storage>(
     input: &str,
     dialect: KeyexprDialect,
 ) -> Result<BoundedString<{ caps::MAX_KEYEXPR_BYTES }, P>, KeyexprCanonError> {
-    let mut out_chunks: BoundedVec<&str, MAX_KEYEXPR_CHUNKS, P> = BoundedVec::default();
+    // A working buffer of its own, not one of the key's policy: a policy whose rows are only lent
+    // makes none for itself (`Storage::Scratch`).
+    let mut out_chunks: BoundedVec<&str, MAX_KEYEXPR_CHUNKS, P::Scratch> = BoundedVec::default();
     // The wild run being accumulated: how many `*` chunks it has
     // contained so far, and whether any of them was a `**`.
     let mut run_single_stars: usize = 0;
@@ -1101,6 +1103,24 @@ mod tests {
     #[test]
     fn the_fast_path_agrees_with_the_passes_on_a_static_policy() {
         fast_path_agrees_with_the_passes::<crate::bounded::Static>();
+    }
+
+    /// The policy a session lends its tables from at open: the passes' chunk walk keeps its
+    /// chunks in a buffer of its own, so a wild key canonizes as it does on the static policy.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn the_fast_path_agrees_with_the_passes_on_a_lent_policy() {
+        fast_path_agrees_with_the_passes::<crate::bounded::Lent>();
+    }
+
+    /// A wild key, which only the passes canonize, is taken whole into a key of the lent policy.
+    #[test]
+    fn a_wild_key_canonizes_into_a_key_of_the_lent_policy() {
+        for (text, canon) in [("demo/**", "demo/**"), ("a/**/*", "a/*/**")] {
+            let key = canonize_keyexpr_as::<crate::bounded::Lent>(text, KeyexprDialect::Pico)
+                .expect("a wild key fits a row");
+            assert_eq!(key.as_str(), canon, "{text}");
+        }
     }
 
     // ── Identity (already-canonical input passes through) ──

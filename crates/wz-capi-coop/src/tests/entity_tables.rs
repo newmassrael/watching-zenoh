@@ -456,3 +456,19 @@ fn a_key_past_its_row_is_refused_and_sends_nothing() {
         "a key of the bound itself is taken"
     );
 }
+
+/// A wild key reaches the router as any other: the tables lent at open canonize it in a working
+/// buffer of their own, and a declaration the observer refused would answer `None`, not an id
+/// that was never announced.
+#[test]
+fn a_wild_key_is_declared_and_reaches_the_router() {
+    let router = Router::start(CatchAll::None);
+    let engine = open_under(&router, SessionLimits::defaults());
+    let minted = Arc::new(AtomicUsize::new(0));
+    let before = router.seen(|s| s.declares);
+    declare_subscriber(&engine, "demo/wild/**", &minted).expect("a wild subscriber is declared");
+    until(&engine, "the router to see the wild subscriber", || {
+        router.seen(|s| s.declares) > before
+    });
+    assert_eq!(minted.load(Ordering::SeqCst), 1);
+}
