@@ -6122,6 +6122,22 @@
       "carry_forward_bullets": [
         "A direct branch to another function (`b`/`b.w` to a function's start) is still counted by the stack bound as a call with the caller's frame kept, which overstates; reading it as the tail call it is would lower bounds and move rows across the images, a change of its own. The stack frame gate's chain of direct calls reads the same way. Next on this track: the SCE pin that takes the sorted vector of host-run starts (a `capic-default` reading with it), the TakeGeneration algorithm, then the census rows whose only gap is U1."
       ]
+    },
+    "Round 4575": {
+      "decision_summary": "Move the SCE pin from ffde4e10f15 to 8525a3e265b, the SCE session's item 339, and repay the two hosted reds the previous pin (Round 4573) left on main. In SCE 529c0b1d50f a host-run invocation counted its starts in a `BTreeMap<String,u64>`, a new instance of the map that took about two thirds of the 6,592 bytes `capic-default` grew by at that pin; 8525a3e265b counts them in a sorted vector, so the map's code leaves the C ABI builds. The hosted run 44790303307 on 0c7aa853b had `pico-default` 752 bytes and `capic-default-lean` 1,785 bytes over their budgets (Layer C1cs); measured at this pin they are 4,620 and 3,083 bytes under them, and no budget moves.\n\nThe second red is Layer B's two link emitter tests. Since the previous pin a link that declares events must import the codec its `<sce:framer ref>` names, because the link's event decode and encode are generated from that codec's document (SCE ADR 0106); `sources/links/lwip_udp_session.scxml` and `lwip_udp_scout.scxml` named `frame` (and the scout link's outbound `scout`) without importing them, and `sce-codegen` refused both with exit 7. Both documents now import the codecs they name from `sources/codecs`. No other generated file changes at this pin: the regeneration wrote nothing, the change being in the runtime's host processor.",
+      "changes_bullets": [
+        "`vendor/sce` moves to 8525a3e265b (21 SCE commits after ffde4e10f15: the host-run start count in a sorted vector, ADR 0109 re-seal and log-sensitivity steps, build-machine fixes); `out/**` and every `Cargo.lock` are unchanged. `sources/links/lwip_udp_session.scxml` imports `frame` and `sources/links/lwip_udp_scout.scxml` imports `frame` and `scout`, each `<sce:import kind=\"codec\">` from `../codecs/`, under the names their framer and outbound encode give."
+      ],
+      "verification_bullets": [
+        "At 8525a3e265b on main 0c7aa853b, `bx --action regen-codegen` (both stages) exits 0 and changes no file. `bash scripts/kit-lane.sh build <image>`, one image at a time, passes for all six Zephyr kit images at the committed stack bounds (3,520, 3,520, 3,616, 5,868, 3,520 and 11,996 bytes) and text rows; the get image reads 174,544 bytes, the same as main. `capability_cost_gate.py --measure` on hkl001 reads `capic-default` 11,461,825 of 11,466,600, `capic-default-lean` 9,664,217 of 9,667,300, `pico-default` 4,718,980 of 4,723,600 and `pico-client-small` 1,628,654 of 1,632,600 text bytes. With the pinned `sce-codegen` built by `scripts/build-sce.sh`, both link documents generate one header each, and the two Layer B tests (`link_emitter_b6`, run with `--ignored` and `WZ_SCE_ORACLE_REQUIRE=1`) pass, 2 run and 2 passed. The reason-review pin gate reads OK."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The four C ABI builds read 99% of their text budgets at this pin (`capic-default` 4,775 bytes, `pico-client-small` 3,946 bytes of room), so the next growth there moves a row with its reason. The kit lane's images share one Rust target directory inside the tree (`deploy/zephyr-admin-node/rust/target`), so two images built at once overwrite each other's library and the lane reports the other image's numbers; build them one at a time until each image has a directory of its own. The other reds of run 44790303307 were already red before the previous pin (run 44778189472 on 589a8884c9) and are not this round's. Next on this track: the TakeGeneration algorithm, then the census rows whose only gap is U1."
+      ]
     }
   },
   "inventory_entries": {
