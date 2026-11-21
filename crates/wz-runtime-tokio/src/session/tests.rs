@@ -7907,13 +7907,52 @@ fn a_querier_with_the_default_bound_never_refuses() {
     let (session, _driver) = build_session();
     let querier = session.declare_querier("home/temp", awaiting_options());
     assert_eq!(
-        wz_session_core::caps::QUERIER_MAX_PENDING_QUERIES,
-        0,
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .querier_max_pending_queries(),
+        wz_session_core::limit_binding::Quota::UNBOUNDED,
         "the build under test states no bound"
     );
     for _ in 0..200 {
         querier.get(|_| {}, |_| {}).expect("no bound");
     }
+}
+
+/// A querier is held to the bound the session's creator stated to its observer, with nothing set
+/// on the querier itself: stated as two, the third query is refused and sends nothing.
+#[cfg(feature = "query-get")]
+#[test]
+fn a_querier_takes_the_bound_its_sessions_creator_stated() {
+    use wz_session_core::limit_binding::{LimitSpec, Quota};
+    use wz_session_core::limits::{QuerierMaxPendingQueries, SessionLimits};
+
+    let mut limits = SessionLimits::defaults();
+    let stated = limits.select_querier_max_pending_queries(Quota::at_most(2));
+    if QuerierMaxPendingQueries::DOMAIN.is_singleton() {
+        assert!(stated.is_err(), "a build of one value refuses two");
+        return;
+    }
+    stated.expect("two is inside the domain");
+    let (actions, driver) = recording_actions();
+    let observer = Arc::new(crate::sync::PlainMutex::new(
+        ApplicationLayerObserver::with_limits(&limits),
+    ));
+    let session = TokioSession::new(actions, observer, Arc::new(TokioTime::new()));
+    let querier = session.declare_querier("home/temp", awaiting_options());
+    querier.get(|_| {}, |_| {}).expect("first place");
+    querier.get(|_| {}, |_| {}).expect("second place");
+    let on_the_wire = driver.frame_count();
+    assert!(
+        matches!(
+            querier.get(|_| {}, |_| {}),
+            Err(QueryAliasError::QuotaExceeded { limit: 2 })
+        ),
+        "the third query is refused with the stated bound"
+    );
+    assert_eq!(driver.frame_count(), on_the_wire, "and sends no frame");
+    assert_eq!(querier.slots.pending(), 2, "and takes no place");
 }
 
 /// The aliased querier holds the same bound.

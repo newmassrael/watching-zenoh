@@ -684,6 +684,12 @@ DEFERRED: dict[str, dict[str, str]] = {
                 # `adminspace-write` gone, `pub mod connect_endpoints` is behind the bare
                 # feature, a simple site the root probe reads.
                 "attachment-bytes",
+                # `bounded-heapless` joins from the methods list below: its two accessors of
+                # `ApplicationLayerObserver` (`reply_refusals`, `request_refusals`) carry no
+                # cfg since the reply and final stages hold the session's quota on every backing,
+                # and what it still gates is the choice of the storage policy, under compound
+                # attributes alone (`all(alloc, not(..))` and `any(not(alloc), ..)`).
+                "bounded-heapless",
                 # R3291 -- `bounded-heapless` LEFT this list by the R2686 route.
                 # It was here because every public item it gated sat behind
                 # `any(test, doc, not(feature = ..))` (the closure-taking
@@ -782,13 +788,6 @@ DEFERRED: dict[str, dict[str, str]] = {
                 "adjudicates"
             )
             for f in (
-                # `bounded-heapless` joins. It was probed through public items under a bare
-                # `#[cfg(feature = "bounded-heapless")]` in `reply_stage` (R3291, above); the
-                # storage-policy step made the staging tables generic over the policy, so
-                # those items carry no cfg any more. What the feature still gates in a
-                # public module is two accessors of `ApplicationLayerObserver`
-                # (`reply_refusals`, `request_refusals`), which are METHODS.
-                "bounded-heapless",
                 # `clock-source` gates `ClockStanding::holdover_expired`, the event of the
                 # host's holdover bound passing, a METHOD under a simple cfg; the rest of what
                 # it changes in this package is a match arm and the body of a method.

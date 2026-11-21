@@ -23,6 +23,7 @@
 //! its own ([`Others`], `slot_observer::OtherPeers`).
 
 use wz_session_core::driver_loop::IterationEvent;
+use wz_session_core::limits::SessionLimits;
 use wz_session_core::peer_tables::PeerTables;
 use wz_session_core::reply_sink::{BoxedReplySink, ConsolidatingSink};
 #[cfg(feature = "queryable")]
@@ -59,10 +60,13 @@ pub(super) struct FaceTables {
 }
 
 impl FaceTables {
-    fn new(id: FaceId) -> Self {
+    /// Empty tables for face `id`, the peer's held to the session's `limits`.
+    fn new(id: FaceId, limits: &SessionLimits) -> Self {
+        let mut peer = PeerTables::new();
+        peer.limit_to(limits);
         Self {
             id,
-            peer: PeerTables::new(),
+            peer,
             gets: Gets::new(),
         }
     }
@@ -103,6 +107,9 @@ pub(super) const LOCAL_FACE: FaceId = u64::MAX;
 /// The application layer of one session. See the module documentation.
 pub(super) struct Registry {
     pub(super) app: SlotObserver,
+    /// The limits the session's open resolved, which every face's tables are held to: a face
+    /// accepted after the open takes them as the dial role's face did.
+    limits: SessionLimits,
     /// The dial role's face first, then the accepted ones in the order they came.
     faces: Vec<FaceTables>,
     /// The session's own gets pending on its own queryables ([`LOCAL_FACE`]).
@@ -121,10 +128,11 @@ struct Split<'a> {
 impl Registry {
     /// A session that holds nothing and has been told nothing, with its dial face, its tables
     /// held to the session limits its open resolved.
-    pub(super) fn new(limits: &wz_session_core::limits::SessionLimits) -> Self {
+    pub(super) fn new(limits: &SessionLimits) -> Self {
         Self {
             app: SlotObserver::with_limits(limits),
-            faces: vec![FaceTables::new(DIAL_FACE)],
+            faces: vec![FaceTables::new(DIAL_FACE, limits)],
+            limits: *limits,
             #[cfg(feature = "local-queryable")]
             local: Gets::new(),
         }
@@ -166,7 +174,7 @@ impl Registry {
 
     /// Tables for a face that has come: empty, as its peer has said nothing yet.
     pub(super) fn add_face(&mut self, id: FaceId) {
-        self.faces.push(FaceTables::new(id));
+        self.faces.push(FaceTables::new(id, &self.limits));
     }
 
     /// The tables of face `id`, gone with the face. The dial role's face is never removed.
@@ -271,7 +279,7 @@ impl Registry {
     #[cfg(feature = "queryable")]
     pub(super) fn take_pending_final_rids(&mut self, id: FaceId) -> FinalStage {
         self.face_mut(id)
-            .map(|face| core::mem::take(&mut face.peer.finals))
+            .map(|face| face.peer.finals.take_owed())
             .unwrap_or_default()
     }
 

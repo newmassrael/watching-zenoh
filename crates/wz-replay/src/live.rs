@@ -262,6 +262,7 @@ fn session_init_params(
         tx_queue: wz::runtime_tokio::session_glue::TxQueueConf::of_policy(policy),
         link_rx: wz::runtime_tokio::session_glue::LinkRxConf::default(),
         policy: *policy,
+        limits: wz_session_core::limits::SessionLimits::BUILD,
         cookie_signing_key: wz::runtime_tokio::session_glue::SigningKey::from_entropy(
             &mut wz::runtime_tokio::session_glue::OsEntropy,
         )?,

@@ -570,6 +570,7 @@ fn peer_init_params() -> SessionInitParams {
         ),
         link_rx: wz::runtime_tokio::session_glue::LinkRxConf::default(),
         policy: wz_session_core::policy::SessionPolicy::defaults(),
+        limits: wz_session_core::limits::SessionLimits::BUILD,
         cookie_signing_key: SigningKey::new(vec![0xAB; 32]).expect("32 bytes"),
     }
 }

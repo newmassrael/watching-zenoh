@@ -59,7 +59,11 @@ z_result_t wz_ext_config_device_requires(const z_loaned_config_t *config,
  * list of { id, key }, and links, a list of { locator, form }), under what
  * wz_ext_config_key_ids and wz_ext_config_key_wire_form_for state; a build
  * without it refuses wz/key-ids, and a refused part of it refuses the
- * document, as a refused policy does. */
+ * document, as a refused policy does. The member's wz/limits states the
+ * limits of the session by their ids, each a whole number or "unbounded";
+ * a limit the build does not have, a limit only the build decides, a limit
+ * of a runtime and a value the build's domain leaves out refuse the
+ * document, and the session opens under the limits it states. */
 z_result_t wz_ext_config_policy(z_loaned_config_t *config, const char *policy,
                                 const char *value);
 z_result_t wz_ext_config_profile(z_loaned_config_t *config,

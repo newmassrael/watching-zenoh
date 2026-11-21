@@ -134,6 +134,8 @@ use wz_routing_graph::Zid;
 pub use wz_routing_graph::{link_weights_from_config, DuplicateLinkWeight, TransportWeight};
 use wz_session_core::json::escape_into;
 use wz_session_core::json5::{number_as_u64, Json5Value};
+use wz_session_core::limit_binding::{LimitValue, UNBOUNDED};
+use wz_session_core::limits::{RUNTIME_LIMITS, SESSION_LIMITS};
 // R2652 — the ACL subject axis `link_protocols` is TYPED in the retained inputs,
 // because upstream types it too; the reader therefore names the enum rather than
 // carrying protocol text it has already validated.
@@ -1580,13 +1582,16 @@ pub struct ZenohNodeConfig {
     /// `stats/filters`: the key expressions the node's transports count payloads under, each
     /// filter's `key` in the document's order. Empty, upstream's default, counts under no key.
     pub stats_filters: Vec<String>,
-    /// `wz`: the policies the document states for the node (`wz/profile`, `wz/policies`),
-    /// resolved over the build defaults, with the layer each value came from. A document with no
-    /// `wz` member, or one that states it `null`, leaves every value at the build default. The
-    /// snapshot is for the creator of a session the node opens to hand its machines; a member the
-    /// resolution refuses is [`ConfigIngestError::PoliciesRefused`], never this field at the
-    /// defaults. [`Self::to_json5`] writes it as a `wz` member that this build reads back to an
-    /// equal snapshot and provenance.
+    /// `wz`: the policies and the limits the document states for the node (`wz/profile`,
+    /// `wz/policies`, `wz/limits`), resolved over the build defaults, with the layer each value
+    /// came from. The limits are `policies.limits`, resolved in the same resolution: the
+    /// snapshot of a session's, and the snapshot of a runtime's, which the node holds
+    /// ([`Base::node`](crate::policy_document::Base::node)). A document with no `wz` member, or
+    /// one that states it `null`, leaves every value at the build default. The snapshots are for
+    /// the creator of a session the node opens to hand its machines; a member the resolution
+    /// refuses is [`ConfigIngestError::PoliciesRefused`], never this field at the defaults.
+    /// [`Self::to_json5`] writes it as a `wz` member that this build reads back to equal
+    /// snapshots and provenance.
     pub policies: crate::policy_document::Resolved,
     /// `wz/key-ids`: the key ids every node of the deployment shares and the endpoints whose
     /// key-wire form the document states apart from the session's, read with the policies of the
@@ -2387,8 +2392,8 @@ impl ZenohNodeConfig {
     }
 }
 
-/// The [`WZ_MEMBER`] that states `policies` again, written after the members already in `out`, or
-/// nothing when every value is the build default.
+/// The [`WZ_MEMBER`] that states `policies` and its limits again, written after the members
+/// already in `out`, or nothing when every value is the build default.
 ///
 /// It is written as a document states it, the layers named rather than flattened: the profile
 /// that set a value is named as `wz/profile`, and only the values a later layer set are written
@@ -2397,6 +2402,8 @@ impl ZenohNodeConfig {
 /// equal. A profile every value of which a later layer overrode set nothing in the snapshot, and
 /// is not named. A document has no layer for the open's overrides ([`Origin::Api`]), so a value
 /// one of them set is written as the document's own statement and reads back as the document's.
+/// The limits a layer set are written under `wz/limits` the same way, those of a session first
+/// and then those of a runtime, each in its table's order; no profile states a limit.
 ///
 /// [`Origin::Api`]: crate::policy_document::Origin::Api
 ///
@@ -2426,39 +2433,77 @@ fn push_wz_member(
         })
         .map(|(entry, _)| (entry.id(), entry.value_in(&policies.policy)))
         .collect();
-    if profile.is_none() && stated.is_empty() && key_ids.is_none() {
+    let limits = stated_limits(&policies.limits);
+    if profile.is_none() && stated.is_empty() && limits.is_empty() && key_ids.is_none() {
         return;
     }
+    // Each member of the `wz` member, in the order a document states them, with a comma between
+    // two.
+    let mut members: Vec<String> = Vec::new();
+    if let Some(id) = profile {
+        let mut member = String::from(" \"profile\": ");
+        escape_into(id, &mut member);
+        members.push(member);
+    }
+    if !stated.is_empty() {
+        let mut member = String::from(" \"policies\": {");
+        for (index, (policy, value)) in stated.iter().enumerate() {
+            if index > 0 {
+                member.push(',');
+            }
+            member.push(' ');
+            escape_into(policy, &mut member);
+            member.push_str(": ");
+            escape_into(value, &mut member);
+        }
+        member.push_str(" }");
+        members.push(member);
+    }
+    if !limits.is_empty() {
+        let mut member = String::from(" \"limits\": {");
+        for (index, (limit, value)) in limits.iter().enumerate() {
+            if index > 0 {
+                member.push(',');
+            }
+            member.push(' ');
+            escape_into(limit, &mut member);
+            member.push_str(": ");
+            match value {
+                LimitValue::Integer(number) => {
+                    let _ = write!(member, "{number}");
+                }
+                LimitValue::Unbounded => escape_into(UNBOUNDED, &mut member),
+            }
+        }
+        member.push_str(" }");
+        members.push(member);
+    }
+    members.extend(key_ids);
     out.push_str(",\n  ");
     escape_into(WZ_MEMBER, out);
     out.push_str(": {");
-    if let Some(id) = profile {
-        out.push_str(" \"profile\": ");
-        escape_into(id, out);
-        if !stated.is_empty() || key_ids.is_some() {
-            out.push(',');
-        }
-    }
-    if !stated.is_empty() {
-        out.push_str(" \"policies\": {");
-        for (index, (policy, value)) in stated.iter().enumerate() {
-            if index > 0 {
-                out.push(',');
-            }
-            out.push(' ');
-            escape_into(policy, out);
-            out.push_str(": ");
-            escape_into(value, out);
-        }
-        out.push_str(" }");
-        if key_ids.is_some() {
-            out.push(',');
-        }
-    }
-    if let Some(member) = key_ids {
-        out.push_str(&member);
-    }
+    out.push_str(&members.join(","));
     out.push_str(" }");
+}
+
+/// The limits a layer over the build defaults set in `limits`, each with its value: those of a
+/// session's snapshot and then those of a runtime's, each in the order of its table.
+fn stated_limits(
+    limits: &crate::policy_document::ResolvedLimits,
+) -> Vec<(&'static str, LimitValue)> {
+    let session = SESSION_LIMITS
+        .iter()
+        .map(|entry| entry.value_in(&limits.session));
+    let runtime = RUNTIME_LIMITS
+        .iter()
+        .map(|entry| entry.value_in(&limits.runtime));
+    limits
+        .provenance
+        .iter()
+        .zip(session.chain(runtime))
+        .filter(|((_, origin), _)| *origin != crate::policy_document::Origin::BuildDefault)
+        .map(|((limit, _), value)| (limit, value))
+        .collect()
 }
 
 impl ZenohNodeConfig {
@@ -5098,11 +5143,11 @@ pub enum ConfigIngestError {
         /// either of which compiles it.
         capability: &'static str,
     },
-    /// The `wz` member, wz's own statements about the node, is refused: a policy, a value or a
-    /// profile the build does not have, a value the build's domain leaves out, a member of `wz`
-    /// this build does not read, a member stated twice, a shape that is not the one it reads
-    /// ([`crate::policy_document::Reason`]). One refusal refuses the document, so a node is never
-    /// opened on part of what the member states.
+    /// The `wz` member, wz's own statements about the node, is refused: a policy, a value, a
+    /// profile or a limit the build does not have, a value the build's domain leaves out, a limit
+    /// only the build decides, a member of `wz` this build does not read, a member stated twice,
+    /// a shape that is not the one it reads ([`crate::policy_document::Reason`]). One refusal
+    /// refuses the document, so a node is never opened on part of what the member states.
     PoliciesRefused {
         /// Each refusal held, in the order found, as a sentence naming the policy, the value,
         /// the layer and the reason.
@@ -5169,16 +5214,19 @@ impl core::fmt::Display for ConfigIngestError {
 impl core::error::Error for ConfigIngestError {}
 
 /// The top-level member of a document that holds wz's own statements about the node: the profile
-/// it names (`wz/profile`) and the policies it states (`wz/policies`). No key of zenoh's is
-/// spelled with it, so a store of zenoh keys that also holds this member tells the two apart by
-/// this name.
+/// it names (`wz/profile`), the policies it states (`wz/policies`) and the limits it states
+/// (`wz/limits`). No key of zenoh's is spelled with it, so a store of zenoh keys that also holds
+/// this member tells the two apart by this name.
 pub const WZ_MEMBER: &str = "wz";
 
 /// Whether `path` is a part of the document's [`WZ_MEMBER`] that the open reads: the member
-/// itself, `wz/profile`, `wz/policies`, and `wz/policies/<id>` where `<id>` names a policy of
-/// the build, and, in a build with the `shared-key-ids` capability, `wz/key-ids` and its two
-/// lists. Any other path below the member is one the open refuses by name
-/// ([`ConfigIngestError::PoliciesRefused`]), and is no key wz honours.
+/// itself, `wz/profile`, `wz/policies`, `wz/policies/<id>` where `<id>` names a policy of the
+/// build, `wz/limits`, `wz/limits/<id>` where `<id>` names a limit a stage after the build may
+/// decide, of a session or of a runtime, whose machines read it from the snapshot, and, in a build
+/// with the `shared-key-ids` capability, `wz/key-ids` and its two lists. Any other path below the
+/// member, a limit only the build decides and a limit whose machines still read the build's value
+/// among them, is one the open refuses by name ([`ConfigIngestError::PoliciesRefused`]), and is
+/// no key wz honours.
 pub fn wz_member_path_is_read(path: &str) -> bool {
     if names_key_ids(path) {
         return cfg!(feature = "shared-key-ids");
@@ -5193,10 +5241,18 @@ pub fn wz_member_path_is_read(path: &str) -> bool {
         return false;
     };
     match below.split_once('/') {
-        None => matches!(below, "profile" | "policies"),
+        None => matches!(below, "profile" | "policies" | "limits"),
         Some(("policies", policy)) => crate::policy::POLICIES
             .iter()
             .any(|entry| entry.id() == policy),
+        Some(("limits", limit)) => {
+            SESSION_LIMITS
+                .iter()
+                .any(|entry| entry.id() == limit && entry.read_from_snapshot())
+                || RUNTIME_LIMITS
+                    .iter()
+                    .any(|entry| entry.id() == limit && entry.read_from_snapshot())
+        }
         Some(_) => false,
     }
 }
@@ -5239,13 +5295,16 @@ fn build_policies() -> crate::policy_document::Resolved {
 }
 
 /// The snapshot the `wz` member of a document resolves to over the build defaults, the profile it
-/// names and then its own policies ([`crate::policy_document::resolve_document`]), or every
-/// refusal found, as the sentences [`ConfigIngestError::PoliciesRefused`] carries.
+/// names and then its own policies and limits ([`crate::policy_document::resolve_document`]), or
+/// every refusal found, as the sentences [`ConfigIngestError::PoliciesRefused`] carries. The node
+/// holds the limits of a runtime as well as a session's
+/// ([`Base::node`](crate::policy_document::Base::node)), so a runtime's limit the member states
+/// is selected into its snapshot.
 fn policies_of(
     wz_member: &Json5Value,
 ) -> Result<crate::policy_document::Resolved, ConfigIngestError> {
-    crate::policy_document::resolve_document(build_policies().policy, wz_member)
-        .map_err(member_refused)
+    let base = crate::policy_document::Base::node(build_policies().policy);
+    crate::policy_document::resolve_document(base, wz_member).map_err(member_refused)
 }
 
 /// The key ids the `wz` member of a document states (`wz/key-ids`), read by the reader that
@@ -15203,11 +15262,11 @@ mod wz_member_tests {
     }
 
     /// One refusal refuses the document, and the error names every refusal found: a member of
-    /// `wz` this build does not read, `wz/limits` by its name, and a value the policy lacks.
+    /// `wz` this build does not read, a value the policy lacks, and a limit the build lacks.
     #[test]
     fn a_refused_wz_member_fails_the_ingest_naming_each_refusal() {
         let error = ZenohNodeConfig::from_json5(
-            r#"{ mode: "peer", wz: { colour: "blue", limits: {}, policies: { "key-set": "ajar" } } }"#,
+            r#"{ mode: "peer", wz: { colour: "blue", limits: { NO_SUCH_LIMIT: 1 }, policies: { "key-set": "ajar" } } }"#,
         )
         .unwrap_err();
         let ConfigIngestError::PoliciesRefused {
@@ -15221,7 +15280,7 @@ mod wz_member_tests {
         assert_eq!(*unreported, 0);
         let text = error.to_string();
         assert!(text.starts_with("the `wz` member is refused: "), "{text}");
-        for named in ["`wz/colour`", "`wz/limits`", "`key-set` = `ajar`"] {
+        for named in ["`wz/colour`", "`NO_SUCH_LIMIT`", "`key-set` = `ajar`"] {
             assert!(text.contains(named), "{named} is not named: {text}");
         }
     }
@@ -15294,6 +15353,8 @@ mod wz_member_tests {
             "wz/policies",
             "wz/policies/key-set",
             "wz/policies/subscriber-overload",
+            "wz/limits",
+            "wz/limits/MAX_SUBSCRIPTIONS",
         ] {
             assert!(wz_member_path_is_read(path), "{path}");
             assert_eq!(
@@ -15306,8 +15367,11 @@ mod wz_member_tests {
         }
         for path in [
             "wz/colour",
-            "wz/limits",
             "wz/limits/max",
+            "wz/limits/NO_SUCH_LIMIT",
+            "wz/limits/MAX_TASKS",
+            "wz/limits/PICO_TX_QUEUE_SIZE/4",
+            "wz/limitsx",
             "wz/policies/no-such-policy",
             "wz/policies/key-set/open",
             "wz/profile/upstream",
@@ -15319,6 +15383,29 @@ mod wz_member_tests {
             assert_eq!(
                 config_key_disposition(path),
                 ConfigKeyDisposition::Unknown,
+                "{path}"
+            );
+        }
+        // A limit a stage after the build may decide, of a session or of a runtime, is read where
+        // its machines read it from the snapshot, and refused by name where they read the build.
+        let limits = SESSION_LIMITS
+            .iter()
+            .map(|entry| (entry.id(), entry.read_from_snapshot()))
+            .chain(
+                RUNTIME_LIMITS
+                    .iter()
+                    .map(|entry| (entry.id(), entry.read_from_snapshot())),
+            );
+        for (limit, read) in limits {
+            let path = format!("wz/limits/{limit}");
+            assert_eq!(wz_member_path_is_read(&path), read, "{path}");
+            assert_eq!(
+                config_key_disposition(&path),
+                if read {
+                    ConfigKeyDisposition::Honoured
+                } else {
+                    ConfigKeyDisposition::Unknown
+                },
                 "{path}"
             );
         }
@@ -15527,5 +15614,83 @@ mod wz_member_tests {
             back.policies.provenance.origin("key-set"),
             Some(Origin::BuildDefault)
         );
+    }
+
+    /// The node reads each member of the corpus every door is held to as the reader of a
+    /// document does for a node, which holds the limits of a runtime too: the limits it selects,
+    /// from the document, with the build default for every other, or the refusals it meets, each
+    /// named in the error.
+    #[test]
+    fn the_node_reads_each_limits_member_of_the_corpus_as_a_node_does() {
+        use wz_session_core::limit_corpus::{cases, Expected};
+
+        for case in cases() {
+            let document = format!(r#"{{ mode: "peer", wz: {} }}"#, case.wz_member());
+            let read = ZenohNodeConfig::from_json5(&document);
+            match (&case.node, read) {
+                (Expected::Selected(selected), Ok(read)) => {
+                    let limits = read.config.policies.limits;
+                    if let Err(why) = case.node.check_session(&limits.session) {
+                        panic!("{}: {why}", case.name);
+                    }
+                    if let Err(why) = case.node.check_runtime(&limits.runtime) {
+                        panic!("{}: {why}", case.name);
+                    }
+                    for (limit, _) in selected {
+                        assert_eq!(
+                            limits.provenance.origin(limit),
+                            Some(Origin::Document),
+                            "{}: {limit}",
+                            case.name
+                        );
+                    }
+                    assert!(read.ignored.is_empty(), "{}: {:?}", case.name, read.ignored);
+                }
+                (
+                    Expected::Refused(_),
+                    Err(ConfigIngestError::PoliciesRefused {
+                        refusals,
+                        unreported,
+                    }),
+                ) => {
+                    assert_eq!(refusals, case.node.refusal_texts(), "{}", case.name);
+                    assert_eq!(unreported, 0, "{}", case.name);
+                }
+                (expected, read) => {
+                    panic!("{}: {read:?}, and the case expects {expected:?}", case.name)
+                }
+            }
+        }
+    }
+
+    /// The limits a document states are exported under `wz/limits` and read back to the same
+    /// snapshots and provenance; a document that states none exports no `wz/limits`.
+    #[test]
+    fn the_export_writes_the_limits_the_document_states() {
+        use wz_session_core::limit_corpus::cases;
+
+        for case in cases().into_iter().filter(|case| case.node.is_selected()) {
+            let document = format!(r#"{{ mode: "peer", wz: {} }}"#, case.wz_member());
+            let read = ZenohNodeConfig::from_json5(&document)
+                .unwrap_or_else(|error| panic!("{}: {error}", case.name))
+                .config;
+            let export = read.to_json5();
+            let back = ZenohNodeConfig::from_json5(&export)
+                .unwrap_or_else(|error| panic!("{}: {error}: {export}", case.name))
+                .config;
+            assert_eq!(back.policies, read.policies, "{}: {export}", case.name);
+            let tree = wz_session_core::json5::parse(&export).expect("the emitter writes JSON5");
+            for (limit, value) in case.node.selected() {
+                let path = format!("wz/limits/{limit}");
+                let written = match value {
+                    LimitValue::Unbounded => Json5Value::String(String::from(UNBOUNDED)),
+                    LimitValue::Integer(_) => Json5Value::Number(value.to_string()),
+                };
+                assert_eq!(tree.get(&path), Some(&written), "{}: {export}", case.name);
+            }
+            if case.node.selected().is_empty() {
+                assert_eq!(tree.get("wz/limits"), None, "{}: {export}", case.name);
+            }
+        }
     }
 }

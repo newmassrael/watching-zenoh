@@ -233,6 +233,9 @@ pub struct CoopConfig {
     /// that moves by itself, whose waits the wall bounds. Always `None` in a build without
     /// `time-base`, whose [`ClockMovesWord`] has no value.
     pub clock_moves: Option<ClockMovesWord>,
+    /// The session limits the ABI resolved for the session, which its tables are held to:
+    /// `SessionLimits::defaults()` for an ABI that states none.
+    pub limits: SessionLimits,
 }
 
 /// The program's word that a clock it moves has moved on, as a read of this engine waits on it
@@ -299,10 +302,10 @@ fn resolve_policy(_config: &CoopConfig) -> SessionPolicy {
 }
 
 /// The session limits a session [`CoopEngine::open`] opens from `config` holds its tables to: the
-/// one place that open decides them. The build's, for the reason [`resolve_policy`] gives: the
-/// config has no field for a limit yet.
-fn resolve_limits(_config: &CoopConfig) -> SessionLimits {
-    SessionLimits::defaults()
+/// one place that open decides them. The snapshot the ABI resolved and states in the config
+/// ([`CoopConfig::limits`]).
+fn resolve_limits(config: &CoopConfig) -> SessionLimits {
+    config.limits
 }
 
 /// Why no session was opened.
@@ -1325,6 +1328,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             tx_queue: self.config.tx_queue,
             link_rx: self.config.link_rx,
             policy: self.policy,
+            // The snapshot the registry's tables were held to: the open decides it from the
+            // config alone.
+            limits: resolve_limits(&self.config),
             cookie_signing_key: SigningKey::from_entropy(&mut self.entropy)
                 .map_err(|_| OpenError::EntropyUnavailable)?,
         };

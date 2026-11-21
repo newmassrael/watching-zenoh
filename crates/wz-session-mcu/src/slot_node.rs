@@ -725,6 +725,7 @@ impl NodeIdentity {
             tx_queue: TxQueueConf::of_policy(policy),
             link_rx: LinkRxConf::default(),
             policy: *policy,
+            limits: wz_session_core::limits::SessionLimits::BUILD,
             cookie_signing_key: SigningKey::from_slice(&self.key).expect("32-byte key"),
         }
     }

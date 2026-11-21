@@ -889,6 +889,11 @@ where
     /// A publish asks whether anything here wants it once per message; with no subscriber
     /// the answer is a load. Shared on `clone()`, as the observer is.
     local_live: Arc<core::sync::atomic::AtomicUsize>,
+    /// The bound of each querier declared on this session, `QUERIER_MAX_PENDING_QUERIES` as the
+    /// session's creator stated it to the observer the session is made with
+    /// ([`ApplicationLayerObserver::querier_max_pending_queries`]). Read from the observer once,
+    /// when the session is made, so a querier is declared without the observer's lock.
+    querier_max_pending_queries: wz_session_core::limit_binding::Quota,
     /// R311kz — per-session deferred-fire queue (the F-6 fix): the
     /// matching-listener sinks installed in the registries stage their
     /// fires here (under the observer lock), and the drive-loop
@@ -1429,6 +1434,7 @@ where
             declaration_order: self.declaration_order.clone(),
             // The count of the very observer shared above.
             local_live: self.local_live.clone(),
+            querier_max_pending_queries: self.querier_max_pending_queries,
             fires: self.fires.clone(),
             clock: self.clock.clone(),
             // An Arc bump, deliberately: a fork must SHARE the node clock, not
@@ -3256,6 +3262,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
         #[cfg(feature = "codec-push")] tx: crate::multicast_pipeline::MulticastTxProducer,
     ) -> Self {
         let local_live = R::with_mutex_mut(&observer, |o| o.subscribers.local_live());
+        let querier_max_pending_queries =
+            R::with_mutex_mut(&observer, |o| o.querier_max_pending_queries());
         let declaration_order = Arc::new(R::new_mutex_held_across_waits(
             wz_session_core::owed_replies::OwedReplies::new(),
         ));
@@ -3359,6 +3367,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
             observer,
             declaration_order,
             local_live,
+            querier_max_pending_queries,
             fires: wz_session_core::deferred_fire::DeferredFireQueue::new(),
             clock,
             // The holds on the Finals this session's queryables owe: a group's queryable answers
@@ -4011,6 +4020,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             &policy,
         );
         let local_live = R::with_mutex_mut(&observer, |o| o.subscribers.local_live());
+        let querier_max_pending_queries =
+            R::with_mutex_mut(&observer, |o| o.querier_max_pending_queries());
         let session = Self::from_inner(SessionInner {
             // R311y554 — the default is the pre-policy behaviour; a host that
             // needs the drive-task hand-off opts in with
@@ -4026,6 +4037,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 wz_session_core::owed_replies::OwedReplies::new(),
             )),
             local_live,
+            querier_max_pending_queries,
             // R311kz — fresh deferred-fire queue per logical session;
             // every deferred sink (matching, decl listeners, data
             // planes) clones a handle out of it at registration.
@@ -6671,7 +6683,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             session: self.clone(),
             keyexpr,
             options,
-            slots: querier::QuerierSlots::new(),
+            slots: querier::QuerierSlots::with_limit(self.querier_max_pending_queries),
         }
     }
 
@@ -6702,7 +6714,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             mapping_id,
             inline_suffix: inline_suffix.map(str::to_string),
             options,
-            slots: querier::QuerierSlots::new(),
+            slots: querier::QuerierSlots::with_limit(self.querier_max_pending_queries),
         }
     }
 

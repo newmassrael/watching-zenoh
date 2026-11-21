@@ -18,7 +18,10 @@
 //! A snapshot is resolved once by a creator, starting from the build defaults, and handed to the
 //! machines it creates, as a [`crate::policy::SessionPolicy`] is. Until each limit's reader moves
 //! to its snapshot, the readers still read [`crate::caps`]; the build defaults are what the build
-//! runs with today, so a snapshot that holds them changes nothing.
+//! runs with today, so a snapshot that holds them changes nothing. Which limits' readers have moved
+//! is declared once, by each limit's `read` in the declaration
+//! ([`crate::limit_binding::LimitSpec::READ_FROM_SNAPSHOT`]), and a document that states a limit
+//! whose readers still read the build is refused by name.
 
 #[path = "limits_generated.rs"]
 mod generated;
@@ -395,13 +398,798 @@ mod enforcement {
             },
         );
     }
+
+    /// One FUTURE interest of the peer, the `index`th, answered through the subscriber registry
+    /// the creator held to its limits. An interest the side cannot remember is counted, not
+    /// returned as an error; the count moving is what reads here as a refusal.
+    #[cfg(feature = "declare-subscriber")]
+    fn future_interest(
+        observer: &mut ApplicationLayerObserver,
+        index: usize,
+    ) -> Result<(), RegisterError> {
+        let refused = observer
+            .subscribers
+            .interest_staging_refusals()
+            .future_interests;
+        observer
+            .subscribers
+            .respond_to_subscriber_interest_borrowed(index as u64, None, false, false, true);
+        let now = observer
+            .subscribers
+            .interest_staging_refusals()
+            .future_interests;
+        if now == refused {
+            Ok(())
+        } else {
+            Err(RegisterError::TableFull)
+        }
+    }
+
+    /// `MAX_INBOUND_SUB_INTERESTS` with nothing stated.
+    #[cfg(feature = "declare-subscriber")]
+    #[test]
+    fn max_inbound_sub_interests_with_nothing_stated_admits_what_the_build_admitted() {
+        admits_what_the_build_admitted(caps::MAX_INBOUND_SUB_INTERESTS, future_interest, |o| {
+            o.subscribers.peer().interest_count()
+        });
+    }
+
+    /// `MAX_INBOUND_SUB_INTERESTS` stated as two: the third FUTURE interest is not remembered,
+    /// is counted, and takes no declaration id; the two rows are kept, and a row the peer
+    /// cancels frees its place.
+    #[cfg(feature = "declare-subscriber")]
+    #[test]
+    fn max_inbound_sub_interests_stated_refuses_the_next_and_takes_no_id() {
+        held_to_two(
+            SessionLimits::select_max_inbound_sub_interests,
+            MaxInboundSubInterests::DOMAIN.is_singleton(),
+            |limits| {
+                let mut observer = ApplicationLayerObserver::with_limits(limits);
+                let subscribers = &mut observer.subscribers;
+                for interest in 0..3 {
+                    subscribers.respond_to_subscriber_interest_borrowed(
+                        interest, None, false, false, true,
+                    );
+                }
+                assert_eq!(subscribers.peer().interest_count(), 2);
+                assert_eq!(
+                    subscribers.interest_staging_refusals(),
+                    crate::pubsub::SubInterestRefusals {
+                        future_interests: 1,
+                        ..Default::default()
+                    }
+                );
+                // The two rows took the ids 1 and 2; the refused interest took none.
+                let id = subscribers
+                    .register("bound/a", |_| {})
+                    .expect("no quota on subscriptions is stated");
+                assert_eq!(id.as_u64(), 3);
+                // The peer cancels its first interest: the place it held is taken again.
+                subscribers.respond_to_subscriber_interest_borrowed(0, None, false, false, false);
+                subscribers.respond_to_subscriber_interest_borrowed(3, None, false, false, true);
+                assert_eq!(subscribers.peer().interest_count(), 2);
+                assert_eq!(subscribers.interest_staging_refusals().future_interests, 1);
+            },
+        );
+    }
+
+    /// One frame of queries on `bound/reply`, one for each request id of `rids`, as a peer
+    /// sends them.
+    #[cfg(feature = "query-queryable")]
+    fn queries(rids: core::ops::Range<u32>) -> crate::driver_loop::DriverLoopOutcome {
+        let messages = rids
+            .map(|rid| {
+                let request =
+                    crate::request_build::build_request_query(rid, 0, Some("bound/reply"))
+                        .expect("a literal key builds");
+                crate::network_message::NetworkMessage::Request(std::boxed::Box::new(request))
+            })
+            .collect();
+        crate::driver_loop::DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages,
+            has_ext: false,
+            extensions: std::vec::Vec::new(),
+            priority: crate::qos::Priority::DEFAULT,
+        }
+    }
+
+    /// A one-byte reply on `bound/reply`, as a queryable of a peer's session describes it.
+    #[cfg(feature = "query-queryable")]
+    fn reply_parts() -> crate::reply_stage::ReplyParts<'static> {
+        use crate::reply_stage::{PartsBody, PartsKind, ReplyParts};
+        ReplyParts {
+            rid: 0,
+            keyexpr: "bound/reply",
+            responder: None,
+            qos: crate::sample::QosLevel::DEFAULT,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: None,
+            kind: PartsKind::Reply {
+                body: PartsBody::Put(b"r"),
+                encoding: None,
+                timestamp: None,
+                attachment: None,
+                source_info: None,
+            },
+        }
+    }
+
+    /// `MAX_PENDING_REPLIES` with nothing stated: a queryable answers one query once past the
+    /// build's count, and the heap stages every answer, as it did, while a fixed stage holds its
+    /// capacity and refuses the last.
+    #[cfg(feature = "query-queryable")]
+    #[test]
+    fn max_pending_replies_with_nothing_stated_admits_what_the_build_admitted() {
+        let mut observer = ApplicationLayerObserver::with_limits(&SessionLimits::defaults());
+        observer
+            .queryables
+            .register("bound/reply", |_, responder| {
+                for _ in 0..=caps::MAX_PENDING_REPLIES {
+                    responder.reply(b"r");
+                }
+            })
+            .expect("no quota is stated on the queryables");
+        observer.dispatch_event(crate::driver_loop::IterationEvent::Poll(&queries(0..1)));
+        let refused = usize::from(crate::bounded::ENFORCES_CAPACITY);
+        assert_eq!(
+            observer.pending_reply_count(),
+            caps::MAX_PENDING_REPLIES + 1 - refused
+        );
+        assert_eq!(
+            observer.reply_refusals().staging_full,
+            u32::from(crate::bounded::ENFORCES_CAPACITY)
+        );
+    }
+
+    /// `MAX_PENDING_REPLIES` stated as two: the third reply is refused to the handler as a full
+    /// stage and counted, the two staged and the query's `Final` are kept, and the stage keeps
+    /// its quota when its replies are taken to be sent. A peer's tables, where a slot observer
+    /// stages, are held the same, and keep the quota when the peer is forgotten.
+    #[cfg(feature = "query-queryable")]
+    #[test]
+    fn max_pending_replies_stated_refuses_the_next() {
+        use crate::query_sink::ReplyError;
+        use crate::reply_stage::ReplyStaging;
+        use std::sync::{Arc, Mutex};
+        held_to_two(
+            SessionLimits::select_max_pending_replies,
+            MaxPendingReplies::DOMAIN.is_singleton(),
+            |limits| {
+                let mut observer = ApplicationLayerObserver::with_limits(limits);
+                let answers = Arc::new(Mutex::new(std::vec::Vec::new()));
+                let told = Arc::clone(&answers);
+                observer
+                    .queryables
+                    .register("bound/reply", move |_, responder| {
+                        let mut seen = told.lock().expect("not poisoned");
+                        for _ in 0..3 {
+                            seen.push(responder.try_reply(b"r"));
+                        }
+                    })
+                    .expect("no quota is stated on the queryables");
+                observer.dispatch_event(crate::driver_loop::IterationEvent::Poll(&queries(0..1)));
+                assert_eq!(
+                    *answers.lock().expect("not poisoned"),
+                    [Ok(()), Ok(()), Err(ReplyError::StagingFull)]
+                );
+                assert_eq!(observer.pending_reply_count(), 2);
+                assert_eq!(observer.reply_refusals().staging_full, 1);
+                assert_eq!(
+                    observer.pending_final_count(),
+                    1,
+                    "the query still owes its Final"
+                );
+
+                let mut owed = crate::owed_replies::OwedReplies::new();
+                observer.take_owed_reply_bodies(&mut owed);
+                assert_eq!(observer.pending_reply_count(), 0);
+                observer.dispatch_event(crate::driver_loop::IterationEvent::Poll(&queries(1..2)));
+                assert_eq!(
+                    observer.pending_reply_count(),
+                    2,
+                    "the quota stayed with the stage"
+                );
+                assert_eq!(observer.reply_refusals().staging_full, 2);
+
+                let mut peers = crate::peer_tables::PeerTables::new();
+                peers.limit_to(limits);
+                assert_eq!(peers.replies.stage_parts(reply_parts()), Ok(()));
+                assert_eq!(peers.replies.stage_parts(reply_parts()), Ok(()));
+                assert_eq!(
+                    peers.replies.stage_parts(reply_parts()),
+                    Err(ReplyError::StagingFull)
+                );
+                assert_eq!(peers.replies.staged(), 2);
+                peers.forget_peer();
+                assert_eq!(peers.replies.stage_parts(reply_parts()), Ok(()));
+                assert_eq!(peers.replies.stage_parts(reply_parts()), Ok(()));
+                assert_eq!(
+                    peers.replies.stage_parts(reply_parts()),
+                    Err(ReplyError::StagingFull)
+                );
+                assert_eq!(peers.replies.refusals().staging_full, 2);
+            },
+        );
+    }
+
+    /// `MAX_PENDING_DECLARES` with nothing stated, on both tables it bounds: the answers to
+    /// the peer's subscriber interests and to its token interests. Each CURRENT interest that
+    /// nothing matches is answered by its `Final` alone, one item.
+    #[cfg(any(feature = "declare-subscriber", feature = "liveliness-token"))]
+    #[test]
+    fn max_pending_declares_with_nothing_stated_admits_what_the_build_admitted() {
+        let admitted = if crate::bounded::ENFORCES_CAPACITY {
+            caps::MAX_PENDING_DECLARES
+        } else {
+            caps::MAX_PENDING_DECLARES + 1
+        };
+        #[cfg(feature = "declare-subscriber")]
+        {
+            let mut observer = ApplicationLayerObserver::with_limits(&SessionLimits::defaults());
+            for interest in 0..admitted as u64 {
+                observer
+                    .subscribers
+                    .respond_to_subscriber_interest_borrowed(interest, None, false, true, false);
+            }
+            assert_eq!(observer.subscribers.interest_staging_refusals().chains, 0);
+            assert_eq!(
+                observer
+                    .subscribers
+                    .take_staged_sub_interest_replies()
+                    .len(),
+                admitted
+            );
+        }
+        #[cfg(feature = "liveliness-token")]
+        {
+            let observer = ApplicationLayerObserver::with_limits(&SessionLimits::defaults());
+            let mut pending: crate::bounded::BoundedVec<
+                crate::declare::local_token::DeclResponseItem,
+                { caps::MAX_PENDING_DECLARES },
+            > = crate::bounded::BoundedVec::new();
+            for interest in 0..admitted as u64 {
+                observer
+                    .local_tokens
+                    .respond_to_interest_borrowed(None, interest, &mut pending)
+                    .expect("no quota is stated");
+            }
+            assert_eq!(pending.len(), admitted);
+        }
+    }
+
+    /// `MAX_PENDING_DECLARES` stated as two, on both tables it bounds: a chain of one match and
+    /// its `Final` takes both places, the next chain is refused whole and stages nothing, and
+    /// the drain frees the places for the chain after it.
+    #[cfg(any(feature = "declare-subscriber", feature = "liveliness-token"))]
+    #[test]
+    fn max_pending_declares_stated_refuses_the_next_chain_whole() {
+        held_to_two(
+            SessionLimits::select_max_pending_declares,
+            MaxPendingDeclares::DOMAIN.is_singleton(),
+            |limits| {
+                #[cfg(feature = "declare-subscriber")]
+                {
+                    let mut observer = ApplicationLayerObserver::with_limits(limits);
+                    let subscribers = &mut observer.subscribers;
+                    subscribers
+                        .register("bound/a", |_| {})
+                        .expect("no quota on subscriptions is stated");
+                    assert_eq!(
+                        subscribers
+                            .respond_to_subscriber_interest_borrowed(1, None, false, true, false),
+                        1
+                    );
+                    assert_eq!(
+                        subscribers
+                            .respond_to_subscriber_interest_borrowed(2, None, false, true, false),
+                        0
+                    );
+                    assert_eq!(subscribers.interest_staging_refusals().chains, 1);
+                    let staged = subscribers.take_staged_sub_interest_replies();
+                    assert_eq!(staged.len(), 2);
+                    assert!(matches!(
+                        staged.last(),
+                        Some(crate::pubsub::SubInterestReply::Final { interest_id: 1 })
+                    ));
+                    assert_eq!(
+                        subscribers
+                            .respond_to_subscriber_interest_borrowed(3, None, false, true, false),
+                        1
+                    );
+                    assert_eq!(subscribers.take_staged_sub_interest_replies().len(), 2);
+                }
+                #[cfg(feature = "liveliness-token")]
+                {
+                    let mut observer = ApplicationLayerObserver::with_limits(limits);
+                    observer
+                        .local_tokens
+                        .register(1, "bound/token")
+                        .expect("no quota on tokens is stated");
+                    let mut pending: crate::bounded::BoundedVec<
+                        crate::declare::local_token::DeclResponseItem,
+                        { caps::MAX_PENDING_DECLARES },
+                    > = crate::bounded::BoundedVec::new();
+                    let tokens = &observer.local_tokens;
+                    assert_eq!(
+                        tokens
+                            .respond_to_interest_borrowed(None, 1, &mut pending)
+                            .expect("two places take the chain"),
+                        1
+                    );
+                    assert!(tokens
+                        .respond_to_interest_borrowed(None, 2, &mut pending)
+                        .is_err());
+                    assert_eq!(pending.len(), 2);
+                    pending.clear();
+                    assert_eq!(
+                        tokens
+                            .respond_to_interest_borrowed(None, 3, &mut pending)
+                            .expect("the drained places take the chain"),
+                        1
+                    );
+                    assert_eq!(pending.len(), 2);
+                }
+            },
+        );
+    }
+
+    /// A peer's declaration of the entity `id` in one of the tables it fills, handed to the
+    /// door the session's receive path hands it to. A table answers a peer with nothing: a
+    /// declaration it cannot take is dropped and counted.
+    #[cfg(feature = "codec-declare")]
+    type Declare = fn(&mut ApplicationLayerObserver, u64);
+    /// The peer's withdrawal of the entity `id`.
+    #[cfg(feature = "codec-declare")]
+    type Withdraw = fn(&mut ApplicationLayerObserver, u64);
+    /// How many entities the table holds, and how many declarations it refused.
+    #[cfg(feature = "codec-declare")]
+    type Tally = fn(&ApplicationLayerObserver) -> (usize, u32);
+
+    /// With nothing stated a peer's table takes one past the build's count on the heap and the
+    /// capacity on a fixed backing, refusing none of them, as it did when it read the build's
+    /// constant; the fixed table refuses the next by its room.
+    #[cfg(feature = "codec-declare")]
+    fn declarations_admit_what_the_build_admitted(build: usize, declare: Declare, tally: Tally) {
+        let mut observer = ApplicationLayerObserver::with_limits(&SessionLimits::defaults());
+        let admitted = if crate::bounded::ENFORCES_CAPACITY {
+            build
+        } else {
+            build + 1
+        };
+        for id in 1..=admitted as u64 {
+            declare(&mut observer, id);
+        }
+        assert_eq!(tally(&observer), (admitted, 0));
+        if crate::bounded::ENFORCES_CAPACITY {
+            declare(&mut observer, admitted as u64 + 1);
+            assert_eq!(
+                tally(&observer),
+                (admitted, 1),
+                "refused by the table's room"
+            );
+        }
+    }
+
+    /// Held to two: the third declaration is refused and counted as a full table refuses it,
+    /// and changes nothing held; an id held is declared again without a place, and a place the
+    /// peer withdraws is taken again.
+    #[cfg(feature = "codec-declare")]
+    fn refuses_the_third_declaration(
+        limits: &SessionLimits,
+        declare: Declare,
+        withdraw: Withdraw,
+        tally: Tally,
+    ) {
+        let mut observer = ApplicationLayerObserver::with_limits(limits);
+        declare(&mut observer, 1);
+        declare(&mut observer, 2);
+        assert_eq!(tally(&observer), (2, 0));
+        declare(&mut observer, 3);
+        assert_eq!(tally(&observer), (2, 1), "the third is refused and counted");
+        declare(&mut observer, 2);
+        assert_eq!(tally(&observer), (2, 1), "an id held needs no place");
+        withdraw(&mut observer, 1);
+        assert_eq!(tally(&observer), (1, 1));
+        declare(&mut observer, 3);
+        assert_eq!(tally(&observer), (2, 1), "a place withdrawn is taken again");
+    }
+
+    /// The keyexpr the peer declares the entity `id` of `plane` on: one per id, so no
+    /// declaration repeats another's.
+    #[cfg(feature = "codec-declare")]
+    fn declared_key(plane: &str, id: u64) -> std::string::String {
+        std::format!("bound/{plane}/{id}")
+    }
+
+    /// The peer's aliases the declarations resolve against: none, as every key is literal.
+    #[cfg(any(
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "liveliness-subscriber"
+    ))]
+    fn no_aliases() -> hashbrown::HashMap<u64, std::string::String> {
+        hashbrown::HashMap::new()
+    }
+
+    #[cfg(feature = "codec-declare")]
+    fn alias(observer: &mut ApplicationLayerObserver, id: u64) {
+        let declare = wz_session_core_test_support::declare_envelope_decl_kexpr(
+            wz_session_core_test_support::decl_kexpr(id, &declared_key("alias", id)),
+        );
+        observer.subscribers.dispatch(
+            &crate::network_message::NetworkMessage::Declare(std::boxed::Box::new(declare)),
+            crate::sample::Reliability::Reliable,
+        );
+    }
+
+    #[cfg(feature = "codec-declare")]
+    fn alias_withdrawn(observer: &mut ApplicationLayerObserver, id: u64) {
+        let undeclare = wz_session_core_test_support::declare_envelope_undecl_kexpr(
+            wz_session_core_test_support::undecl_kexpr(id),
+        );
+        observer.subscribers.dispatch(
+            &crate::network_message::NetworkMessage::Declare(std::boxed::Box::new(undeclare)),
+            crate::sample::Reliability::Reliable,
+        );
+    }
+
+    #[cfg(feature = "codec-declare")]
+    fn alias_tally(observer: &ApplicationLayerObserver) -> (usize, u32) {
+        let peer = observer.subscribers.peer();
+        (peer.alias_count(), peer.alias_refusals())
+    }
+
+    /// `MAX_PEER_KEYEXPR_ALIASES` with nothing stated.
+    #[cfg(feature = "codec-declare")]
+    #[test]
+    fn max_peer_keyexpr_aliases_with_nothing_stated_admits_what_the_build_admitted() {
+        declarations_admit_what_the_build_admitted(
+            caps::MAX_PEER_KEYEXPR_ALIASES,
+            alias,
+            alias_tally,
+        );
+    }
+
+    /// `MAX_PEER_KEYEXPR_ALIASES` stated as two: the third alias is refused and counted, and
+    /// a message that names it resolves to nothing, as one naming an id never declared does.
+    #[cfg(feature = "codec-declare")]
+    #[test]
+    fn max_peer_keyexpr_aliases_stated_refuses_the_next() {
+        held_to_two(
+            SessionLimits::select_max_peer_keyexpr_aliases,
+            MaxPeerKeyexprAliases::DOMAIN.is_singleton(),
+            |limits| {
+                refuses_the_third_declaration(limits, alias, alias_withdrawn, alias_tally);
+                let mut observer = ApplicationLayerObserver::with_limits(limits);
+                for id in 1..=3 {
+                    alias(&mut observer, id);
+                }
+                assert_eq!(
+                    observer.subscribers.resolve_inbound_mapping(3),
+                    None,
+                    "the refused alias names nothing"
+                );
+                assert_eq!(
+                    observer.subscribers.resolve_inbound_mapping(2),
+                    Some(declared_key("alias", 2))
+                );
+            },
+        );
+    }
+
+    #[cfg(feature = "declare-subscriber")]
+    fn remote_subscriber(observer: &mut ApplicationLayerObserver, id: u64) {
+        let body = crate::transport_profile::owned::DeclareOwnedVariant::CodecZenohDeclSubscriber(
+            wz_session_core_test_support::decl_subscriber(
+                id,
+                0,
+                Some(&declared_key("subscriber", id)),
+            ),
+        );
+        observer
+            .remote_subscribers
+            .dispatch_declare(&body, &no_aliases());
+    }
+
+    #[cfg(feature = "declare-subscriber")]
+    fn remote_subscriber_withdrawn(observer: &mut ApplicationLayerObserver, id: u64) {
+        let body = crate::transport_profile::owned::DeclareOwnedVariant::CodecZenohUndeclSubscriber(
+            wz_session_core_test_support::undecl_subscriber(id),
+        );
+        observer
+            .remote_subscribers
+            .dispatch_declare(&body, &no_aliases());
+    }
+
+    #[cfg(feature = "declare-subscriber")]
+    fn remote_subscriber_tally(observer: &ApplicationLayerObserver) -> (usize, u32) {
+        let peer = observer.remote_subscribers.peer();
+        (peer.declared_count(), peer.refusals())
+    }
+
+    #[cfg(feature = "declare-queryable")]
+    fn remote_queryable(observer: &mut ApplicationLayerObserver, id: u64) {
+        let body = crate::transport_profile::owned::DeclareOwnedVariant::CodecZenohDeclQueryable(
+            wz_session_core_test_support::decl_queryable(
+                id,
+                0,
+                Some(&declared_key("queryable", id)),
+            ),
+        );
+        observer
+            .remote_queryables
+            .dispatch_declare(&body, &no_aliases());
+    }
+
+    #[cfg(feature = "declare-queryable")]
+    fn remote_queryable_withdrawn(observer: &mut ApplicationLayerObserver, id: u64) {
+        let body = crate::transport_profile::owned::DeclareOwnedVariant::CodecZenohUndeclQueryable(
+            wz_session_core_test_support::undecl_queryable(id),
+        );
+        observer
+            .remote_queryables
+            .dispatch_declare(&body, &no_aliases());
+    }
+
+    #[cfg(feature = "declare-queryable")]
+    fn remote_queryable_tally(observer: &ApplicationLayerObserver) -> (usize, u32) {
+        let peer = observer.remote_queryables.peer();
+        (peer.declared_count(), peer.refusals())
+    }
+
+    #[cfg(feature = "liveliness-subscriber")]
+    fn peer_token(observer: &mut ApplicationLayerObserver, id: u64) {
+        let body = crate::transport_profile::owned::DeclareOwnedVariant::CodecZenohDeclToken(
+            wz_session_core_test_support::decl_token(id, 0, Some(&declared_key("token", id))),
+        );
+        observer
+            .liveliness_subscribers
+            .dispatch_declare(&body, &no_aliases());
+    }
+
+    #[cfg(feature = "liveliness-subscriber")]
+    fn peer_token_withdrawn(observer: &mut ApplicationLayerObserver, id: u64) {
+        let body = crate::transport_profile::owned::DeclareOwnedVariant::CodecZenohUndeclToken(
+            wz_session_core_test_support::undecl_token(id),
+        );
+        observer
+            .liveliness_subscribers
+            .dispatch_declare(&body, &no_aliases());
+    }
+
+    #[cfg(feature = "liveliness-subscriber")]
+    fn peer_token_tally(observer: &ApplicationLayerObserver) -> (usize, u32) {
+        (
+            observer.liveliness_subscribers.peer_token_count(),
+            observer.liveliness_subscribers.peer_token_refusals(),
+        )
+    }
+
+    /// `MAX_REMOTE_DECLS` with nothing stated, in each declaration table the build carries.
+    #[cfg(any(
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "liveliness-subscriber"
+    ))]
+    #[test]
+    fn max_remote_decls_with_nothing_stated_admits_what_the_build_admitted() {
+        #[cfg(feature = "declare-subscriber")]
+        declarations_admit_what_the_build_admitted(
+            caps::MAX_REMOTE_DECLS,
+            remote_subscriber,
+            remote_subscriber_tally,
+        );
+        #[cfg(feature = "declare-queryable")]
+        declarations_admit_what_the_build_admitted(
+            caps::MAX_REMOTE_DECLS,
+            remote_queryable,
+            remote_queryable_tally,
+        );
+        #[cfg(feature = "liveliness-subscriber")]
+        declarations_admit_what_the_build_admitted(
+            caps::MAX_REMOTE_DECLS,
+            peer_token,
+            peer_token_tally,
+        );
+    }
+
+    /// `MAX_REMOTE_DECLS` stated as two, in each declaration table the build carries: one
+    /// quota per table, so a peer's two subscribers leave room for its two queryables.
+    #[cfg(any(
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "liveliness-subscriber"
+    ))]
+    #[test]
+    fn max_remote_decls_stated_refuses_the_next() {
+        held_to_two(
+            SessionLimits::select_max_remote_decls,
+            MaxRemoteDecls::DOMAIN.is_singleton(),
+            |limits| {
+                #[cfg(feature = "declare-subscriber")]
+                refuses_the_third_declaration(
+                    limits,
+                    remote_subscriber,
+                    remote_subscriber_withdrawn,
+                    remote_subscriber_tally,
+                );
+                #[cfg(feature = "declare-queryable")]
+                refuses_the_third_declaration(
+                    limits,
+                    remote_queryable,
+                    remote_queryable_withdrawn,
+                    remote_queryable_tally,
+                );
+                #[cfg(feature = "liveliness-subscriber")]
+                refuses_the_third_declaration(
+                    limits,
+                    peer_token,
+                    peer_token_withdrawn,
+                    peer_token_tally,
+                );
+                #[cfg(all(feature = "declare-subscriber", feature = "declare-queryable"))]
+                {
+                    let mut observer = ApplicationLayerObserver::with_limits(limits);
+                    for id in 1..=2 {
+                        remote_subscriber(&mut observer, id);
+                        remote_queryable(&mut observer, id);
+                    }
+                    assert_eq!(remote_subscriber_tally(&observer), (2, 0));
+                    assert_eq!(remote_queryable_tally(&observer), (2, 0));
+                }
+            },
+        );
+    }
+
+    /// `MAX_PENDING_FINALS` with nothing stated: one query past the build's count in one frame
+    /// owes every `Final` on the heap, as it did, while a fixed table holds its capacity and
+    /// refuses the last request.
+    #[cfg(feature = "query-queryable")]
+    #[test]
+    fn max_pending_finals_with_nothing_stated_admits_what_the_build_admitted() {
+        let mut observer = ApplicationLayerObserver::with_limits(&SessionLimits::defaults());
+        observer
+            .queryables
+            .register("bound/reply", |_, _| {})
+            .expect("no quota is stated on the queryables");
+        let past = u32::try_from(caps::MAX_PENDING_FINALS + 1).expect("a test count");
+        observer.dispatch_event(crate::driver_loop::IterationEvent::Poll(&queries(0..past)));
+        let refused = usize::from(crate::bounded::ENFORCES_CAPACITY);
+        assert_eq!(
+            observer.pending_final_count(),
+            caps::MAX_PENDING_FINALS + 1 - refused
+        );
+        assert_eq!(
+            observer.request_refusals(),
+            u32::from(crate::bounded::ENFORCES_CAPACITY)
+        );
+    }
+
+    /// `MAX_PENDING_FINALS` stated as two: the third request is refused before its queryable
+    /// runs, so it stages no reply and owes no `Final`, and is counted; the table keeps its
+    /// quota and its count when the owed `Final`s are taken to be sent. A peer's tables are
+    /// held the same.
+    #[cfg(feature = "query-queryable")]
+    #[test]
+    fn max_pending_finals_stated_refuses_the_next() {
+        use crate::reply_stage::FinalStaging;
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        held_to_two(
+            SessionLimits::select_max_pending_finals,
+            MaxPendingFinals::DOMAIN.is_singleton(),
+            |limits| {
+                let mut observer = ApplicationLayerObserver::with_limits(limits);
+                let ran = Arc::new(AtomicUsize::new(0));
+                let runs = Arc::clone(&ran);
+                observer
+                    .queryables
+                    .register("bound/reply", move |_, responder| {
+                        runs.fetch_add(1, Ordering::Relaxed);
+                        responder.reply(b"r");
+                    })
+                    .expect("no quota is stated on the queryables");
+                observer.dispatch_event(crate::driver_loop::IterationEvent::Poll(&queries(0..3)));
+                assert_eq!(
+                    ran.load(Ordering::Relaxed),
+                    2,
+                    "the third request reached no queryable"
+                );
+                assert_eq!(observer.pending_reply_count(), 2);
+                assert_eq!(observer.pending_final_count(), 2);
+                assert_eq!(observer.request_refusals(), 1);
+
+                assert_eq!(observer.take_pending_final_rids().len(), 2);
+                assert_eq!(observer.pending_final_count(), 0);
+                observer.dispatch_event(crate::driver_loop::IterationEvent::Poll(&queries(3..6)));
+                assert_eq!(ran.load(Ordering::Relaxed), 4);
+                assert_eq!(
+                    observer.pending_final_count(),
+                    2,
+                    "the quota stayed with the table"
+                );
+                assert_eq!(observer.request_refusals(), 2, "and so did the count");
+
+                let mut peers = crate::peer_tables::PeerTables::new();
+                peers.limit_to(limits);
+                peers.finals.owe(1, crate::sample::QosLevel::DEFAULT);
+                peers.finals.owe(2, crate::sample::QosLevel::DEFAULT);
+                assert!(!peers.finals.has_room());
+                assert_eq!(peers.finals.take_owed().len(), 2);
+                assert!(peers.finals.has_room(), "a place is free under the quota");
+            },
+        );
+    }
+
+    /// The places of one querier, made as the runtime that declares the querier makes them: held
+    /// to the bound the session's observer was handed.
+    fn querier_places(limits: &SessionLimits) -> crate::quota::Quota {
+        let observer = ApplicationLayerObserver::with_limits(limits);
+        crate::quota::Quota::new(observer.querier_max_pending_queries())
+    }
+
+    /// `QUERIER_MAX_PENDING_QUERIES` with nothing stated: the build's value, whose `0` is no bound,
+    /// so a querier takes every place it asks for, or the build's number of places and no more.
+    #[test]
+    fn querier_max_pending_queries_with_nothing_stated_admits_what_the_build_admitted() {
+        let mut places = querier_places(&SessionLimits::defaults());
+        assert_eq!(
+            places.limit(),
+            Quota::from_build(caps::QUERIER_MAX_PENDING_QUERIES, true)
+        );
+        match caps::QUERIER_MAX_PENDING_QUERIES {
+            0 => {
+                for _ in 0..1_000 {
+                    places.try_acquire().expect("the build states no bound");
+                }
+                assert_eq!(places.live(), 1_000);
+            }
+            build => {
+                for _ in 0..build {
+                    places.try_acquire().expect("under the build's bound");
+                }
+                assert_eq!(
+                    places.try_acquire(),
+                    Err(crate::quota::QuotaExceeded { limit: build })
+                );
+                assert_eq!(places.live(), build);
+            }
+        }
+    }
+
+    /// `QUERIER_MAX_PENDING_QUERIES` stated as two: the third query is refused with the bound it
+    /// reached and takes no place, and a place given back is taken again.
+    #[test]
+    fn querier_max_pending_queries_stated_refuses_the_next() {
+        held_to_two(
+            SessionLimits::select_querier_max_pending_queries,
+            QuerierMaxPendingQueries::DOMAIN.is_singleton(),
+            |limits| {
+                let mut places = querier_places(limits);
+                places.try_acquire().expect("under the quota");
+                places.try_acquire().expect("under the quota");
+                assert_eq!(
+                    places.try_acquire(),
+                    Err(crate::quota::QuotaExceeded { limit: 2 })
+                );
+                assert_eq!(places.live(), 2, "a refusal takes no place");
+                places.release();
+                places
+                    .try_acquire()
+                    .expect("a place is free under the quota");
+                assert_eq!(places.live(), 2);
+            },
+        );
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::caps;
-    use crate::limit_binding::{LimitEntry, LimitSpec, LimitValue, Outside, Quota};
+    use crate::limit_binding::{LimitEntry, LimitSpec, Outside, Quota};
     use crate::policy_binding::{Driven, LimitKind, Storage};
 
     /// Every limit of `crate::caps` with its binding, by id.
@@ -535,8 +1323,8 @@ mod tests {
             .expect("an open limit");
         assert_eq!(entry.driven(), Some(Driven::Remote));
         if !entry.domain().is_singleton() {
-            let refused = entry
-                .select(&mut limits, LimitValue::Unbounded)
+            let refused = limits
+                .select_max_keyexpr_bytes(Quota::UNBOUNDED)
                 .unwrap_err();
             assert_eq!(
                 refused.why,

@@ -171,6 +171,7 @@ fn params(signing_key: &[u8], policy: &SessionPolicy) -> SessionInitParams {
         tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(policy),
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         policy: *policy,
+        limits: wz_session_core::limits::SessionLimits::BUILD,
         cookie_signing_key: SigningKey::new(signing_key.to_vec()).expect("32-byte key"),
     }
 }

@@ -37,11 +37,11 @@
 //!
 //! Each limit a stage after the build may decide has a type of its own in the generated
 //! `limits_generated.rs` (`crate::limits`) that implements [`LimitSpec`]: its id, kind, who makes
-//! it grow, its capacity in this build, its domain and the build's value. The snapshots that hold
-//! one value of each, `SessionLimits` and `RuntimeLimits`, are generated there too, and the tables
-//! `SESSION_LIMITS` and `RUNTIME_LIMITS` hold the [`LimitEntry`] a reader that names a limit by its
-//! id dispatches on. The types here are written by hand, so the generator emits only one row per
-//! limit.
+//! it grow, whether its machines read it from the snapshot, its capacity in this build, its domain
+//! and the build's value. The snapshots that hold one value of each, `SessionLimits` and
+//! `RuntimeLimits`, are generated there too, and the tables `SESSION_LIMITS` and `RUNTIME_LIMITS`
+//! hold the [`LimitEntry`] a reader that names a limit by its id dispatches on. The types here
+//! are written by hand, so the generator emits only one row per limit.
 
 use core::fmt;
 
@@ -119,6 +119,16 @@ impl Quota {
         match capacity {
             Some(capacity) => Self(capacity),
             None => uncapped,
+        }
+    }
+
+    /// The tighter of `self` and `other`: a holder bound by both is bound by this one. No bound
+    /// is the widest quota, so it is the other whenever one of the two has a number.
+    pub const fn tighter(self, other: Self) -> Self {
+        if self.0 <= other.0 {
+            self
+        } else {
+            other
         }
     }
 }
@@ -369,7 +379,12 @@ impl LimitDomain {
             return Ok(());
         }
         if self.pinned {
-            return Err(Outside::Pinned);
+            let only = if self.unbounded {
+                LimitValue::Unbounded
+            } else {
+                LimitValue::Integer(self.least)
+            };
+            return Err(Outside::Pinned { only });
         }
         Err(match value {
             LimitValue::Unbounded => match self.kind {
@@ -397,7 +412,10 @@ impl LimitDomain {
 pub enum Outside {
     /// The build keeps its own value alone (`WZ_LIMIT_DOMAINS`, or a target with no operating
     /// system), and this is another.
-    Pinned,
+    Pinned {
+        /// The one value the build allows.
+        only: LimitValue,
+    },
     /// `unbounded` for a parameter, which has no such value.
     UnboundedParameter,
     /// `unbounded` for a bound the build sized storage by: its quota is at most the capacity.
@@ -440,44 +458,54 @@ pub struct OutsideLimitDomain {
 
 impl fmt::Display for OutsideLimitDomain {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (limit, value) = (self.limit, self.value);
-        match self.why {
-            Outside::Pinned => match self.domain.integers() {
-                Some((only, _)) => write!(
-                    f,
-                    "the build fixes the limit `{limit}` at {only}; `{value}` is another value"
-                ),
-                None => write!(
-                    f,
-                    "the build fixes the limit `{limit}` at `{UNBOUNDED}`; `{value}` is another value"
-                ),
-            },
-            Outside::UnboundedParameter => write!(
-                f,
-                "the limit `{limit}` is a parameter, which is never `{UNBOUNDED}`"
-            ),
-            Outside::UnboundedOverCapacity { capacity } => write!(
-                f,
-                "the build sizes the storage of the limit `{limit}` at {capacity}, so it is not \
-                 `{UNBOUNDED}`"
-            ),
-            Outside::Below { least } => write!(
-                f,
-                "the limit `{limit}` is at least {least}; `{value}` is less"
-            ),
-            Outside::OverCapacity { capacity } => write!(
-                f,
-                "the build sizes the storage of the limit `{limit}` at {capacity}; `{value}` is more"
-            ),
-            Outside::OutsideRange { least, most } => write!(
-                f,
-                "the limit `{limit}` is between {least} and {most}; `{value}` is outside"
-            ),
-        }
+        write_outside(f, self.limit, self.value, self.why)
     }
 }
 
 impl core::error::Error for OutsideLimitDomain {}
+
+/// Why `value` is outside the domain of the limit `limit`, as a sentence: what
+/// [`OutsideLimitDomain`] says, and what a document's refusal of the value says after it.
+pub(crate) fn write_outside(
+    f: &mut fmt::Formatter<'_>,
+    limit: &str,
+    value: LimitValue,
+    why: Outside,
+) -> fmt::Result {
+    match why {
+        Outside::Pinned { only } => match only {
+            LimitValue::Integer(only) => write!(
+                f,
+                "the build fixes the limit `{limit}` at {only}; `{value}` is another value"
+            ),
+            LimitValue::Unbounded => write!(
+                f,
+                "the build fixes the limit `{limit}` at `{UNBOUNDED}`; `{value}` is another value"
+            ),
+        },
+        Outside::UnboundedParameter => write!(
+            f,
+            "the limit `{limit}` is a parameter, which is never `{UNBOUNDED}`"
+        ),
+        Outside::UnboundedOverCapacity { capacity } => write!(
+            f,
+            "the build sizes the storage of the limit `{limit}` at {capacity}, so it is not \
+             `{UNBOUNDED}`"
+        ),
+        Outside::Below { least } => write!(
+            f,
+            "the limit `{limit}` is at least {least}; `{value}` is less"
+        ),
+        Outside::OverCapacity { capacity } => write!(
+            f,
+            "the build sizes the storage of the limit `{limit}` at {capacity}; `{value}` is more"
+        ),
+        Outside::OutsideRange { least, most } => write!(
+            f,
+            "the limit `{limit}` is between {least} and {most}; `{value}` is outside"
+        ),
+    }
+}
 
 /// Whether a limit's domain keeps only the build's value: what `WZ_LIMIT_DOMAINS` states (`full`
 /// keeps every value the build allows, `defaults` only its own), else whether the target has no
@@ -520,6 +548,10 @@ pub trait LimitSpec: 'static {
     const LIMIT: &'static str;
     /// Who makes the table a bound limits grow; `None` for a parameter.
     const DRIVEN: Option<Driven>;
+    /// Whether the machines of the limit's scope read it from the snapshot their creator hands
+    /// them. Where they still read the build's value, a value a later stage states would be taken
+    /// and never read, so a reader of a document refuses a statement of the limit by name.
+    const READ_FROM_SNAPSHOT: bool;
     /// The capacity this build sized storage by, or `None` where it sized none by this limit.
     const CAPACITY: Option<usize>;
     /// The values the build allows a later stage to select.
@@ -624,14 +656,20 @@ pub trait LimitField<S>: LimitSpec {
     fn held_in(snapshot: &S) -> Self::Value;
 }
 
+/// How an entry selects a value in its snapshot.
+type Selector<S> = fn(&mut S, LimitValue) -> Result<(), OutsideLimitDomain>;
+
 /// One limit as a reader that names it by its id sees it, in the snapshot `S` that holds it.
 pub struct LimitEntry<S: 'static> {
     id: &'static str,
     kind: LimitKind,
     driven: Option<Driven>,
+    read_from_snapshot: bool,
     capacity: Option<usize>,
     domain: LimitDomain,
-    select: fn(&mut S, LimitValue) -> Result<(), OutsideLimitDomain>,
+    /// `None` for a limit no machine reads from the snapshot: a statement of it is refused before
+    /// any value is selected, so the entry links no selector for it.
+    select: Option<Selector<S>>,
     held: fn(&S) -> LimitValue,
 }
 
@@ -650,6 +688,7 @@ impl<S> fmt::Debug for LimitEntry<S> {
             .field("id", &self.id)
             .field("kind", &self.kind)
             .field("driven", &self.driven)
+            .field("read_from_snapshot", &self.read_from_snapshot)
             .field("capacity", &self.capacity)
             .field("domain", &self.domain)
             .finish()
@@ -663,9 +702,16 @@ impl<S> LimitEntry<S> {
             id: L::LIMIT,
             kind: <L::Value as LimitValueType>::KIND,
             driven: L::DRIVEN,
+            read_from_snapshot: L::READ_FROM_SNAPSHOT,
             capacity: L::CAPACITY,
             domain: L::DOMAIN,
-            select: select_at::<S, L>,
+            // Decided where the table is evaluated: a limit read from the build gets no selector,
+            // and a build links the selection of none of them.
+            select: if L::READ_FROM_SNAPSHOT {
+                Some(select_at::<S, L>)
+            } else {
+                None
+            },
             held: held_at::<S, L>,
         }
     }
@@ -685,6 +731,12 @@ impl<S> LimitEntry<S> {
         self.driven
     }
 
+    /// Whether the machines of the limit's scope read it from the snapshot their creator hands
+    /// them ([`LimitSpec::READ_FROM_SNAPSHOT`]).
+    pub const fn read_from_snapshot(&self) -> bool {
+        self.read_from_snapshot
+    }
+
     /// The capacity this build sized storage by ([`LimitSpec::CAPACITY`]).
     pub const fn capacity(&self) -> Option<usize> {
         self.capacity
@@ -695,9 +747,15 @@ impl<S> LimitEntry<S> {
         self.domain
     }
 
-    /// Selects `value` in `snapshot`. A refusal leaves `snapshot` as it was.
-    pub fn select(&self, snapshot: &mut S, value: LimitValue) -> Result<(), OutsideLimitDomain> {
-        (self.select)(snapshot, value)
+    /// Selects `value` in `snapshot`. A refusal leaves `snapshot` as it was. `None` for a limit no
+    /// machine reads from the snapshot ([`Self::read_from_snapshot`]), which has no selector: a
+    /// value selected in a field nothing reads would be accepted and never applied.
+    pub fn select(
+        &self,
+        snapshot: &mut S,
+        value: LimitValue,
+    ) -> Option<Result<(), OutsideLimitDomain>> {
+        self.select.map(|select| select(snapshot, value))
     }
 
     /// The value `snapshot` holds.
@@ -740,6 +798,7 @@ mod tests {
         type Value = Quota;
         const LIMIT: &'static str = "TEST_OPEN";
         const DRIVEN: Option<Driven> = Some(Driven::Remote);
+        const READ_FROM_SNAPSHOT: bool = true;
         const CAPACITY: Option<usize> = None;
         const DOMAIN: LimitDomain = LimitDomain::bound(Self::CAPACITY);
         const DEFAULT: Quota = Quota::UNBOUNDED;
@@ -753,6 +812,7 @@ mod tests {
         type Value = Quota;
         const LIMIT: &'static str = "TEST_SIZED";
         const DRIVEN: Option<Driven> = Some(Driven::Local);
+        const READ_FROM_SNAPSHOT: bool = false;
         const CAPACITY: Option<usize> = Some(8);
         const DOMAIN: LimitDomain = LimitDomain::bound(Self::CAPACITY);
         const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
@@ -766,6 +826,7 @@ mod tests {
         type Value = usize;
         const LIMIT: &'static str = "TEST_PINNED";
         const DRIVEN: Option<Driven> = None;
+        const READ_FROM_SNAPSHOT: bool = true;
         const CAPACITY: Option<usize> = None;
         const DOMAIN: LimitDomain =
             LimitDomain::parameter(1, 64, None).keeping(LimitValue::Integer(4), true);
@@ -825,6 +886,27 @@ mod tests {
             Quota::at_most(8)
         );
         assert_eq!(Quota::of_build(None, Quota::UNBOUNDED), Quota::UNBOUNDED);
+    }
+
+    #[test]
+    fn the_tighter_of_two_quotas_is_the_smaller_and_no_bound_is_the_widest() {
+        let unbounded = Quota::UNBOUNDED;
+        assert_eq!(unbounded.tighter(unbounded), unbounded, "neither bounds");
+        assert_eq!(unbounded.tighter(Quota::at_most(4)), Quota::at_most(4));
+        assert_eq!(Quota::at_most(4).tighter(unbounded), Quota::at_most(4));
+        assert_eq!(
+            Quota::at_most(3).tighter(Quota::at_most(4)),
+            Quota::at_most(3)
+        );
+        assert_eq!(
+            Quota::at_most(4).tighter(Quota::at_most(3)),
+            Quota::at_most(3)
+        );
+        assert_eq!(
+            Quota::at_most(0).tighter(unbounded),
+            Quota::at_most(0),
+            "a quota that admits nothing is the tightest"
+        );
     }
 
     #[test]
@@ -926,13 +1008,22 @@ mod tests {
         );
         assert_eq!(
             Pinned4::DOMAIN.check(LimitValue::Integer(5)),
-            Err(Outside::Pinned)
+            Err(Outside::Pinned {
+                only: LimitValue::Integer(4)
+            })
         );
         assert_eq!(Limited::<Pinned4, 0>::default().get(), 4);
         let unbounded = LimitDomain::bound(None).keeping(LimitValue::Unbounded, true);
         assert!(unbounded.is_singleton());
         assert!(unbounded.contains(LimitValue::Unbounded));
         assert!(!unbounded.contains(LimitValue::Integer(3)));
+        // The refusal names the value the build keeps, so a reader that holds no domain can say it.
+        assert_eq!(
+            unbounded.check(LimitValue::Integer(3)),
+            Err(Outside::Pinned {
+                only: LimitValue::Unbounded
+            })
+        );
         // Without the rule the domain is what the build allows.
         assert_eq!(
             LimitDomain::bound(None).keeping(LimitValue::Unbounded, false),
@@ -971,14 +1062,21 @@ mod tests {
         let sized = LimitEntry::<Snapshot>::of::<Sized8>();
         assert_eq!(open.id(), "TEST_OPEN");
         assert_eq!(open.driven(), Some(Driven::Remote));
+        // An entry carries whether the limit's machines read the snapshot, as its type states it.
+        assert!(open.read_from_snapshot());
+        assert!(!sized.read_from_snapshot());
         assert_eq!(sized.capacity(), Some(8));
         assert_eq!(open.value_in(&snapshot), LimitValue::Unbounded);
         open.select(&mut snapshot, LimitValue::Integer(12))
+            .expect("a limit read from the snapshot has a selector")
             .expect("inside");
         assert_eq!(open.value_in(&snapshot), LimitValue::Integer(12));
-        let refused = sized
-            .select(&mut snapshot, LimitValue::Unbounded)
-            .unwrap_err();
+        // A limit read from the build has no selector in its entry.
+        assert!(sized
+            .select(&mut snapshot, LimitValue::Integer(4))
+            .is_none());
+        let refused =
+            select_at::<Snapshot, Sized8>(&mut snapshot, LimitValue::Unbounded).unwrap_err();
         assert_eq!(refused.why, Outside::UnboundedOverCapacity { capacity: 8 });
         // A refusal leaves the snapshot as it was.
         assert_eq!(sized.value_in(&snapshot), LimitValue::Integer(8));
@@ -1016,6 +1114,11 @@ mod tests {
         assert_eq!(
             std::format!("{}", refused(pinned, LimitValue::Integer(5))),
             "the build fixes the limit `X` at 4; `5` is another value"
+        );
+        let unbounded = LimitDomain::bound(None).keeping(LimitValue::Unbounded, true);
+        assert_eq!(
+            std::format!("{}", refused(unbounded, LimitValue::Integer(5))),
+            "the build fixes the limit `X` at `unbounded`; `5` is another value"
         );
     }
 

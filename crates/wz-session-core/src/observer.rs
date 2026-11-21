@@ -307,22 +307,28 @@ pub struct ApplicationLayerObserver {
     /// directly — see `Session::query` in `wz-runtime-tokio`.
     pub replies:
         ReplyRegistry<crate::reply_sink::ConsolidatingSink<crate::reply_sink::BoxedReplySink>>,
+    /// `QUERIER_MAX_PENDING_QUERIES` as the session's creator stated it: how many queries one
+    /// querier declared on the session has in flight at once. The runtime that declares a querier
+    /// reads it here ([`Self::querier_max_pending_queries`]) and holds the querier's places to it
+    /// in a [`crate::quota::Quota`]; the pending entries themselves are rows of `replies`.
+    querier_max_pending_queries: crate::limits::QuerierMaxPendingQueriesHeld,
     /// R311r — staging buffers are unconditional so the observer
     /// struct shape is stable across consumer-feature subsets. The
     /// drain side in [`Self::flush_pending`] stays cfg-gated on
     /// `query-queryable` so wire-emit only runs when the queryable
     /// dispatch path is in.
     ///
-    /// S9a — a [`ReplyStage`]: the `Vec` it always was on the growable backing,
-    /// and on the fixed one a table of [`crate::caps::MAX_PENDING_REPLIES`] rows that
-    /// refuses and counts.
+    /// S9a — a [`ReplyStage`]: rows that grow on the growable backing, and on the
+    /// fixed one a table of [`crate::caps::MAX_PENDING_REPLIES`] rows; on both held to
+    /// the quota [`Self::with_limits`] states, past which a reply is refused and counted.
     pending_replies: ReplyStage,
     /// R2595 — `(rid, qos)`: the terminator owed, and the QUERY's QoS it must
     /// carry. The rid alone could not say what the final should read as, so
     /// every final wz emitted read as DEFAULT.
     ///
     /// S9a — a [`FinalStage`], bounded by [`crate::caps::MAX_PENDING_FINALS`] on the
-    /// fixed backing, where a request that would need one more is refused.
+    /// fixed backing and by the quota [`Self::with_limits`] states on both, where a
+    /// request that would need one more is refused.
     pending_final_rids: FinalStage,
     /// R283 — staging buffer for the declarer-side interest-response
     /// (`Declare(DeclToken)` + `Declare(DeclFinal)`). Populated by
@@ -339,8 +345,9 @@ pub struct ApplicationLayerObserver {
     /// Inbound liveliness-token Interests whose reply chain `pending_declares`
     /// could not take WHOLE, and which were therefore staged not at all
     /// (`LocalTokenRegistry::respond_to_interest_borrowed` refuses rather than
-    /// truncate). Reachable only on the fixed backing, where one frame's
-    /// Interests share the buffer up to [`caps::MAX_PENDING_DECLARES`] items.
+    /// truncate). Reachable where one frame's Interests share the buffer up to
+    /// a count: [`caps::MAX_PENDING_DECLARES`] items on the fixed backing, and
+    /// the quota [`Self::with_limits`] hands `local_tokens` on every backing.
     #[cfg(feature = "liveliness-token")]
     token_interest_chains_refused: u32,
     /// The interest-response chains owed to peers' QUERYABLE Interests, in stage
@@ -382,6 +389,14 @@ impl ApplicationLayerObserver {
         observer.queryables.limit_to(limits.max_queryables_held());
         #[cfg(feature = "declare-subscriber")]
         observer
+            .subscribers
+            .limit_interests_to(limits.max_inbound_sub_interests_held());
+        #[cfg(feature = "declare-subscriber")]
+        observer
+            .subscribers
+            .limit_interest_replies_to(limits.max_pending_declares_held());
+        #[cfg(feature = "declare-subscriber")]
+        observer
             .remote_subscribers
             .limit_observers_to(limits.max_decl_observers_held());
         #[cfg(feature = "declare-queryable")]
@@ -396,6 +411,10 @@ impl ApplicationLayerObserver {
         observer
             .local_tokens
             .limit_to(limits.max_local_tokens_held());
+        #[cfg(feature = "liveliness-token")]
+        observer
+            .local_tokens
+            .limit_interest_replies_to(limits.max_pending_declares_held());
         #[cfg(feature = "liveliness-subscriber")]
         observer
             .liveliness_subscribers
@@ -405,7 +424,38 @@ impl ApplicationLayerObserver {
             .liveliness_gets
             .limit_to(limits.max_pending_liveliness_gets_held());
         observer.replies.limit_to(limits.max_pending_queries_held());
+        observer.querier_max_pending_queries = limits.querier_max_pending_queries_held();
+        // What the session's peer fills: the alias table on every build, and the declaration
+        // tables of each plane the build carries.
         observer
+            .subscribers
+            .limit_peer_aliases_to(limits.max_peer_keyexpr_aliases_held());
+        #[cfg(feature = "declare-subscriber")]
+        observer
+            .remote_subscribers
+            .limit_peer_to(limits.max_remote_decls_held());
+        #[cfg(feature = "declare-queryable")]
+        observer
+            .remote_queryables
+            .limit_peer_to(limits.max_remote_decls_held());
+        #[cfg(feature = "liveliness-subscriber")]
+        observer
+            .liveliness_subscribers
+            .limit_peer_to(limits.max_remote_decls_held());
+        observer
+            .pending_replies
+            .limit_to(limits.max_pending_replies_held());
+        observer
+            .pending_final_rids
+            .limit_to(limits.max_pending_finals_held());
+        observer
+    }
+
+    /// The bound of each querier declared on the session: `QUERIER_MAX_PENDING_QUERIES` as the
+    /// session's creator stated it ([`Self::with_limits`]), the build's value for an observer made
+    /// by [`Self::new`].
+    pub const fn querier_max_pending_queries(&self) -> crate::limit_binding::Quota {
+        self.querier_max_pending_queries.get()
     }
 
     /// New observer with empty registries, held to the build's limits. Callers register
@@ -458,6 +508,7 @@ impl ApplicationLayerObserver {
             // surface can register pending entries even though
             // feature-OFF never reaches the registration path.
             replies: ReplyRegistry::new(),
+            querier_max_pending_queries: crate::limit_binding::Limited::build_default(),
             // R311r — staging buffers always allocated; drain path in
             // flush_pending stays cfg-gated on query-queryable.
             pending_replies: ReplyStage::new(),
@@ -1140,21 +1191,25 @@ impl ApplicationLayerObserver {
     /// empty `Vec` — the same OFF projection its sibling drains
     /// (`Self::drain_query_replies` / `Self::drain_query_finals`) already
     /// document, and the shape a `pub` accessor owes its callers.
+    ///
+    /// The table left behind keeps the quota [`Self::with_limits`] stated and the count of
+    /// what it refused ([`FinalStage::take_owed`]).
     pub fn take_pending_final_rids(&mut self) -> FinalStage {
-        core::mem::take(&mut self.pending_final_rids)
+        self.pending_final_rids.take_owed()
     }
 
     /// What the staged-reply table has refused since this observer was built, by
-    /// why. All zero on the growable backing, which refuses nothing.
-    #[cfg(feature = "bounded-heapless")]
+    /// why: past its capacity on the fixed backing, and past the quota
+    /// [`Self::with_limits`] stated on either. All zero on the growable backing with no
+    /// quota stated, which refuses nothing.
     pub fn reply_refusals(&self) -> crate::reply_stage::ReplyRefusals {
         self.pending_replies.refusals()
     }
 
     /// How many requests were refused because no `Final` could be owed for them
-    /// ([`crate::caps::MAX_PENDING_FINALS`] held). All zero on the growable
-    /// backing, which refuses nothing.
-    #[cfg(feature = "bounded-heapless")]
+    /// (`MAX_PENDING_FINALS` held, by the capacity on the fixed backing or by the
+    /// quota [`Self::with_limits`] stated on either). All zero on the growable backing
+    /// with no quota stated, which refuses nothing.
     pub fn request_refusals(&self) -> u32 {
         self.pending_final_rids.refusals()
     }

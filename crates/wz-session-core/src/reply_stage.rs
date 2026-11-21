@@ -8,11 +8,14 @@
 //! makes the session stage them, and a peer that sends requests faster than the
 //! session drains them decides how many there are. Each is ONE type over a storage
 //! policy ([`crate::bounded::Storage`]), written once. On the growable policy (the AP
-//! profile) the tables grow with the allocator and nothing is refused, as it always
-//! was. On the policy that enforces its capacity (the fixed backing, selected by
-//! `bounded-heapless`) each is a table of declared capacity
-//! ([`caps::MAX_PENDING_REPLIES`], [`caps::MAX_PENDING_FINALS`]) and a table that
-//! cannot take another entry REFUSES it, COUNTS it, and tells whoever asked:
+//! profile) the tables grow with the allocator. On the policy that enforces its capacity
+//! (the fixed backing, selected by `bounded-heapless`) each is a table of declared
+//! capacity ([`caps::MAX_PENDING_REPLIES`], [`caps::MAX_PENDING_FINALS`]). On either
+//! policy each table is also held to the quota its creator resolved for the session
+//! (the same two limits in [`crate::limits::SessionLimits`], handed over by `limit_to`):
+//! the build's value until one is stated, which is no bound on the growable policy and
+//! the capacity on the fixed one. A table that cannot take another entry, by its quota
+//! or by its storage, REFUSES it, COUNTS it, and tells whoever asked:
 //!
 //! - a reply the stage has no room for, or whose payload is longer than
 //!   [`caps::MAX_REPLY_PAYLOAD_BYTES`], is an `Err` to the queryable's handler
@@ -264,8 +267,9 @@ pub trait FinalStaging {
 /// What a [`ReplyStage`] refused since it was made, by why.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ReplyRefusals {
-    /// Replies the stage had no room for ([`caps::MAX_PENDING_REPLIES`] rows held,
-    /// or the byte arena had no room left for the reply's bytes).
+    /// Replies the stage had no room for (as many rows held as its quota or its
+    /// capacity of `MAX_PENDING_REPLIES` admits, or the byte arena had no room left
+    /// for the reply's bytes).
     pub staging_full: u32,
     /// Replies whose payload was longer than [`caps::MAX_REPLY_PAYLOAD_BYTES`].
     pub payload_too_large: u32,
@@ -341,10 +345,13 @@ struct Row<P: Storage> {
 /// stage holds [`caps::MAX_PENDING_REPLIES`] rows and [`caps::REPLY_STAGE_BYTES`] of
 /// bytes, no more: a full stage refuses and counts, and does not grow. On one that
 /// does not ([`Heap`](crate::bounded::Heap)) the same rows and the same arena grow
-/// with the allocator, nothing is refused and nothing is counted, as the AP always
-/// had it. One algorithm for both: the row table and the arena are
-/// [`BoundedVec`]s of the policy, the room check asks them how many pushes are
-/// still guaranteed, and the heap policy answers `usize::MAX`.
+/// with the allocator, and the storage refuses nothing. One algorithm for both: the
+/// row table and the arena are [`BoundedVec`]s of the policy, the room check asks
+/// them how many pushes are still guaranteed, and the heap policy answers
+/// `usize::MAX`.
+///
+/// On both, a reply that would leave more rows staged than the quota its creator
+/// stated ([`Self::limit_to`]) is refused and counted as a full stage is.
 ///
 /// The policy defaults to this build's [`Profile`], so `ReplyStage` alone is the
 /// build's stage.
@@ -352,6 +359,11 @@ pub struct ReplyStage<P: Storage = Profile> {
     rows: BoundedVec<Row<P>, { caps::MAX_PENDING_REPLIES }, P>,
     arena: BoundedVec<u8, { caps::REPLY_STAGE_BYTES }, P>,
     refusals: ReplyRefusals,
+    /// The most replies the stage holds (`MAX_PENDING_REPLIES`): what the creator of the
+    /// session resolved ([`Self::limit_to`]), the build's value until it does. A growable
+    /// stage refuses nothing by its storage, so this is what bounds it; where the build fixes
+    /// the bound to the storage's capacity it is held in no byte and the storage refuses alone.
+    quota: crate::limits::MaxPendingRepliesHeld,
 }
 
 impl ReplyStage<Static> {
@@ -365,6 +377,7 @@ impl ReplyStage<Static> {
                 staging_full: 0,
                 payload_too_large: 0,
             },
+            quota: crate::limits::MaxPendingRepliesHeld::build_default(),
         }
     }
 }
@@ -380,11 +393,20 @@ impl ReplyStage<Profile> {
                 staging_full: 0,
                 payload_too_large: 0,
             },
+            quota: crate::limits::MaxPendingRepliesHeld::build_default(),
         }
     }
 }
 
 impl<P: Storage> ReplyStage<P> {
+    /// Hold the stage to the `MAX_PENDING_REPLIES` its creator resolved: a reply that would
+    /// leave more rows staged than `quota` admits is refused
+    /// ([`ReplyError::StagingFull`], counted in [`ReplyRefusals::staging_full`]), and the
+    /// replies already staged are kept, as a lowered soft limit keeps what it holds.
+    pub fn limit_to(&mut self, quota: crate::limits::MaxPendingRepliesHeld) {
+        self.quota = quota;
+    }
+
     /// What this stage has refused since it was made.
     pub fn refusals(&self) -> ReplyRefusals {
         self.refusals
@@ -406,8 +428,8 @@ impl<P: Storage> ReplyStage<P> {
     }
 
     /// Exchange the staged replies of this stage and `other`, rows and the bytes they lie in, each
-    /// keeping its own counts of what it refused: the replies move to the stage that sends them,
-    /// and the counts stay with the stage that refused.
+    /// keeping its own counts of what it refused and its own quota: the replies move to the stage
+    /// that sends them, and the counts and the quota stay with the stage that refused.
     pub fn exchange_staged(&mut self, other: &mut Self) {
         core::mem::swap(&mut self.rows, &mut other.rows);
         core::mem::swap(&mut self.arena, &mut other.arena);
@@ -607,6 +629,7 @@ impl<P: Storage> Default for ReplyStage<P> {
             rows: BoundedVec::default(),
             arena: BoundedVec::default(),
             refusals: ReplyRefusals::default(),
+            quota: crate::limits::MaxPendingRepliesHeld::build_default(),
         }
     }
 }
@@ -649,7 +672,7 @@ impl<P: Storage> ReplyStaging for ReplyStage<P> {
                 "a staged reply's bytes are addressed by offsets of the policy's width"
             );
         }
-        if self.rows.free_slots() == 0 {
+        if self.rows.free_slots() == 0 || !self.quota.admits(self.rows.len() + 1) {
             self.refusals.staging_full = self.refusals.staging_full.saturating_add(1);
             return Err(ReplyError::StagingFull);
         }
@@ -778,8 +801,10 @@ impl<P: Storage> ReplyStaging for ReplyStage<P> {
 /// [`caps::MAX_PENDING_FINALS`] rows on a policy that enforces the capacity
 /// ([`Static`]), where a full table refuses the REQUEST that
 /// would have needed one ([`Self::refusals`] counts them) and does not grow; and as
-/// many as are owed on one that does not ([`Heap`](crate::bounded::Heap)), which
-/// refuses nothing and counts nothing, as it always did.
+/// many as are owed on one that does not ([`Heap`](crate::bounded::Heap)), whose
+/// storage refuses nothing. On both, a request that would leave more `Final`s owed than
+/// the quota its creator stated ([`Self::limit_to`]) is refused and counted as a full
+/// table's is.
 ///
 /// One algorithm for both: the table is a [`BoundedVec`] of its storage policy,
 /// `has_room` asks it how many pushes are still guaranteed, and the heap policy
@@ -788,6 +813,11 @@ impl<P: Storage> ReplyStaging for ReplyStage<P> {
 pub struct FinalStage<P: Storage = Profile> {
     rows: BoundedVec<(crate::wire_id::RequestId, QosLevel), { caps::MAX_PENDING_FINALS }, P>,
     refused_requests: u32,
+    /// The most `Final`s the table owes (`MAX_PENDING_FINALS`): what the creator of the
+    /// session resolved ([`Self::limit_to`]), the build's value until it does. A growable
+    /// table refuses nothing by its storage, so this is what bounds it; where the build fixes
+    /// the bound to the storage's capacity it is held in no byte and the storage refuses alone.
+    quota: crate::limits::MaxPendingFinalsHeld,
 }
 
 impl FinalStage<Static> {
@@ -797,6 +827,7 @@ impl FinalStage<Static> {
         Self {
             rows: BoundedVec::new_static(),
             refused_requests: 0,
+            quota: crate::limits::MaxPendingFinalsHeld::build_default(),
         }
     }
 }
@@ -808,11 +839,20 @@ impl FinalStage<Profile> {
         Self {
             rows: BoundedVec::new(),
             refused_requests: 0,
+            quota: crate::limits::MaxPendingFinalsHeld::build_default(),
         }
     }
 }
 
 impl<P: Storage> FinalStage<P> {
+    /// Hold the table to the `MAX_PENDING_FINALS` its creator resolved: a request that would
+    /// leave more `Final`s owed than `quota` admits has no room ([`FinalStaging::has_room`])
+    /// and is refused and counted, and the `Final`s already owed are kept, as a lowered soft
+    /// limit keeps what it holds.
+    pub fn limit_to(&mut self, quota: crate::limits::MaxPendingFinalsHeld) {
+        self.quota = quota;
+    }
+
     /// How many requests were refused because no `Final` could be owed for them.
     pub fn refusals(&self) -> u32 {
         self.refused_requests
@@ -821,6 +861,18 @@ impl<P: Storage> FinalStage<P> {
     /// Drop every owed `Final`; the count is kept.
     pub fn clear(&mut self) {
         self.rows.clear();
+    }
+
+    /// Take every owed `Final` out, in the order they were owed, as a table of its own. This
+    /// table is left empty, with its count of refused requests and its quota: the count says
+    /// what was asked of this table, and the quota is the one its creator stated, which a
+    /// table built by `Default` in its place would not hold.
+    pub fn take_owed(&mut self) -> Self {
+        Self {
+            rows: core::mem::take(&mut self.rows),
+            refused_requests: 0,
+            quota: self.quota,
+        }
     }
 }
 
@@ -842,6 +894,7 @@ impl<P: Storage> Default for FinalStage<P> {
         Self {
             rows: BoundedVec::default(),
             refused_requests: 0,
+            quota: crate::limits::MaxPendingFinalsHeld::build_default(),
         }
     }
 }
@@ -856,14 +909,14 @@ impl<P: Storage> core::ops::Deref for FinalStage<P> {
 
 impl<P: Storage> FinalStaging for FinalStage<P> {
     fn has_room(&self) -> bool {
-        self.rows.free_slots() > 0
+        self.rows.free_slots() > 0 && self.quota.admits(self.rows.len() + 1)
     }
 
     fn owe(&mut self, rid: crate::wire_id::RequestId, qos: QosLevel) {
         // Room was asked for before the request ran; a table that has none by
         // now is the caller's contract broken, and counted rather than dropped
         // in silence.
-        if self.rows.push((rid, qos)).is_err() {
+        if !self.quota.admits(self.rows.len() + 1) || self.rows.push((rid, qos)).is_err() {
             self.refused_requests = self.refused_requests.saturating_add(1);
         }
     }
@@ -924,9 +977,11 @@ mod tests {
 
     /// The finals table, written once and run on every policy: fill it to its
     /// declared capacity, then ask for one more. A policy that enforces the
-    /// capacity says there is no room and takes the refusal as counted; one that
-    /// does not says there is room and takes the entry. The expectations are read
-    /// from the policy's own contract, never from a feature gate.
+    /// capacity says there is no room and takes the refusal as counted, and so does
+    /// a table whose quota is the capacity: a fixed build states its capacity as
+    /// every table's quota, a table on the heap policy included. Otherwise there is
+    /// room and the entry is taken. The expectations are read from the policy's own
+    /// contract and the build's quota, never from a feature gate.
     fn fill_to_n_then_refuse_at_n_plus_one<P: Storage>() {
         let mut finals: FinalStage<P> = FinalStage::default();
         for rid in 0..N as u32 {
@@ -936,7 +991,9 @@ mod tests {
         assert_eq!(finals.owed(), N);
         assert_eq!(finals.refusals(), 0, "nothing was refused up to N");
 
-        if P::ENFORCES_CAPACITY {
+        let held_to_n =
+            P::ENFORCES_CAPACITY || !crate::limits::MaxPendingFinalsHeld::default().admits(N + 1);
+        if held_to_n {
             assert!(!finals.has_room(), "a full table has no room");
             finals.refuse_request();
             assert_eq!(finals.refusals(), 1, "the refused request is counted");
@@ -1097,7 +1154,8 @@ mod tests {
     }
 
     /// Fill the row table to `MAX_PENDING_REPLIES`, then stage one more: refused and
-    /// counted where the capacity is hard, taken where it is not.
+    /// counted where the capacity is hard or the build's quota is the capacity, taken
+    /// where neither refuses.
     fn rows_fill_to_n_then_refuse_at_n_plus_one<P: Storage>() {
         let mut stage: ReplyStage<P> = ReplyStage::default();
         for rid in 0..caps::MAX_PENDING_REPLIES as u32 {
@@ -1106,8 +1164,11 @@ mod tests {
         assert_eq!(stage.staged(), caps::MAX_PENDING_REPLIES);
         assert_eq!(stage.refusals(), ReplyRefusals::default());
 
+        let held_to_n = P::ENFORCES_CAPACITY
+            || !crate::limits::MaxPendingRepliesHeld::default()
+                .admits(caps::MAX_PENDING_REPLIES + 1);
         let beyond = stage.stage_parts(put_reply(99, "a/b", b"x"));
-        if P::ENFORCES_CAPACITY {
+        if held_to_n {
             assert_eq!(beyond, Err(ReplyError::StagingFull));
             assert_eq!(stage.staged(), caps::MAX_PENDING_REPLIES);
             assert_eq!(stage.refusals().staging_full, 1);

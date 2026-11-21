@@ -356,6 +356,14 @@ const _: () = assert!(
 // in the session's declare stage whole or refused. A match-all interest matches every row of the
 // table it asks about, so where capacity is enforced a stage shorter than the longest chain that
 // table can make refuses that interest every time it is asked.
+//
+// The assertions hold the build's capacities, and so the build's own quotas, which are those
+// capacities. A later stage may state a `MAX_PENDING_DECLARES` quota under them (or any quota on
+// a growable build, where nothing is asserted). It is neither refused nor raised: a snapshot holds
+// each limit to its own domain, and raising one would replace a value a stage stated. What the
+// stated quota does is the refusal it states: a chain longer than the quota is refused whole and
+// counted, never cut short, as a full fixed stage refuses it (`SubInterestRefusals::chains`, the
+// observers' `token_interest_chains_refused`).
 #[cfg(feature = "declare-subscriber")]
 const _: () = assert!(
     !crate::bounded::ENFORCES_CAPACITY || MAX_PENDING_DECLARES > MAX_SUBSCRIPTIONS,

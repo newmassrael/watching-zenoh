@@ -294,6 +294,7 @@ impl SessionFactory<Clock, Driver> for Factory {
             tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(&self.policy),
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
             policy: self.policy,
+            limits: wz_session_core::limits::SessionLimits::BUILD,
             cookie_signing_key: SigningKey::from_slice(&self.key).expect("32-byte key"),
         }
     }
