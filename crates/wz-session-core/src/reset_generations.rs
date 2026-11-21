@@ -54,6 +54,12 @@ mod generated {
 use generated::reset_peer_schema::ResetPeerSchemaPayload as Peer;
 use generated::take_generation_result::TakeGenerationResult;
 
+/// The seed a table is keyed by before its host has drawn one: zero, so that a table built under
+/// it where no allocator is is all zero bytes, and a `static` holding one is placed in `.bss`
+/// (SCE ADR 0108, D8). It is a key anyone knows: the host gives the table a drawn one with
+/// [`ResetGenerations::reseed`] once it has one.
+pub const UNDRAWN_SEED: MapSeed = MapSeed::from_halves(0, 0);
+
 /// The bound of a heap node's table: half the numbers a map's slot holds, the largest bound whose
 /// index (twice the bound) a 32-bit target can still count. A heap node's map takes its storage
 /// as it fills, never this much up front, so the bound is one no node reaches and a heap node
@@ -69,11 +75,18 @@ impl<const N: usize> ResetGenerations<N> {
     /// The empty table, its keys hashed under `seed` (SCE ADR 0108, D8). A host with an entropy
     /// source hands a seed drawn from it, so a peer cannot choose zids that crowd one chain of the
     /// table's index; a host with none hands a fixed one, which leaves a peer that knows it able
-    /// to make each look-up walk at most the `N` entries the table holds.
-    pub fn with_seed(seed: MapSeed) -> Self {
+    /// to make each look-up walk at most the `N` entries the table holds. `const`, so a `static`
+    /// can hold a table ([`UNDRAWN_SEED`]).
+    pub const fn with_seed(seed: MapSeed) -> Self {
         Self {
             taken: BoundedMap::with_seed(seed),
         }
+    }
+
+    /// Key the table by `seed` from now on, the generations it holds as they were: what a table
+    /// built in a const context under [`UNDRAWN_SEED`] is given a drawn seed by.
+    pub fn reseed(&mut self, seed: MapSeed) {
+        self.taken.reseed(seed);
     }
 
     /// Take `generation` as the latest of the peer `zid`, unless one as late was taken.
@@ -169,6 +182,18 @@ mod tests {
         let mut table = ResetGenerations::<0>::with_seed(SEED);
         assert_eq!(table.take(&zid(1), 1), Generation::NoRoom);
         assert!(table.is_empty());
+    }
+
+    #[test]
+    fn a_table_given_another_seed_keeps_what_it_holds() {
+        let mut table = ResetGenerations::<2>::with_seed(UNDRAWN_SEED);
+        assert_eq!(table.take(&zid(1), 4), Generation::Taken);
+        assert_eq!(table.take(&zid(2), 9), Generation::Taken);
+        table.reseed(SEED);
+        assert_eq!(table.take(&zid(1), 4), Generation::Duplicate { last: 4 });
+        assert_eq!(table.take(&zid(2), 10), Generation::Taken);
+        assert_eq!(table.take(&zid(3), 1), Generation::NoRoom);
+        assert_eq!(table.len(), 2);
     }
 
     #[test]

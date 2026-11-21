@@ -69,7 +69,8 @@
 # closes the Python statechart 6th-backend parity gap (R30 bump).
 #
 # Exit codes:
-#   0  all backends emit-success; Layer 2 body-match where it ran.
+#   0  all backends emit-success, or are refused in the words UNLOWERED_ON states for the stem;
+#      Layer 2 body-match where it ran.
 #   1  one or more backends fail emit, OR Layer 2 body-mismatch.
 #   2  usage error (missing input, missing fixture, sce-codegen
 #      binary not built).
@@ -126,6 +127,23 @@ if [[ -n "$_vc_want" && "$_vc_have" != "$_vc_want" ]]; then
 fi
 
 BACKENDS=("rust" "cpp" "kotlin" "go" "c11" "python")
+
+# The backends a document is known to be refused on, by name, for a construct SCE does not lower
+# there yet: a stem, the backends, and the words of the refusal, which is SCE's own statement of
+# why (`generate/unsupported-feature`, exit 7). A listed backend passes only when it is refused
+# with exactly those words; one that emits, or fails any other way, is a failure, so the entry
+# goes the day SCE lowers the construct there and cannot hide another fault meanwhile.
+#
+#   take_generation -- the table it writes is a `map<record, uint64>` it takes `inout`, and SCE
+#             lowers a map in an algorithm on Rust and C11 only (`ALGORITHM_MAP_BACKENDS` in
+#             vendor/sce/sce-build/src/forge/codegen_matrix.rs; docs/adr/0108, D10). wz builds
+#             it for Rust; C11 emits too.
+declare -A UNLOWERED_ON=(
+    [take_generation]="cpp kotlin go python"
+)
+declare -A UNLOWERED_BECAUSE=(
+    [take_generation]="does not lower a map or a set in an algorithm yet (docs/adr/0108, D10)"
+)
 
 # sce-codegen Go backend wants an import-path prefix; supply a stable
 # dummy so fixtures without explicit imports still emit cleanly.
@@ -372,6 +390,7 @@ normalize_tree() {
 
 n_pass=0
 n_fail=0
+n_unlowered=0
 n_diff_match=0
 n_diff_mismatch=0
 
@@ -406,7 +425,26 @@ for be in "${BACKENDS[@]}"; do
     files_in=$(count_emitted "$WORK/input/$be")
     note=""
 
-    if [[ "$code_in" -eq 0 && "$files_in" -gt 0 ]]; then
+    unlowered_here=0
+    if [[ " ${UNLOWERED_ON[$INPUT_STEM]:-} " == *" $be "* ]]; then
+        unlowered_here=1
+    fi
+    if [[ "$unlowered_here" -eq 1 ]]; then
+        # Known to be refused here: the refusal, in SCE's words, is the pass.
+        if [[ "$code_in" -eq 7 ]] \
+                && grep -qF "${UNLOWERED_BECAUSE[$INPUT_STEM]}" "$WORK/input/$be/.stderr"; then
+            layer1="unlowered"
+            n_unlowered=$((n_unlowered+1))
+        elif [[ "$code_in" -eq 0 ]]; then
+            layer1="EMITS"
+            n_fail=$((n_fail+1))
+            note="SCE lowers it here now: drop $be from UNLOWERED_ON[$INPUT_STEM]"
+        else
+            layer1="fail($code_in)"
+            n_fail=$((n_fail+1))
+            note="not the refusal UNLOWERED_BECAUSE[$INPUT_STEM] names"
+        fi
+    elif [[ "$code_in" -eq 0 && "$files_in" -gt 0 ]]; then
         layer1="ok"
         n_pass=$((n_pass+1))
     else
@@ -464,6 +502,9 @@ done
 
 echo
 printf "verify-codegen: emit pass=%d fail=%d" "$n_pass" "$n_fail"
+if [[ "$n_unlowered" -gt 0 ]]; then
+    printf " unlowered=%d" "$n_unlowered"
+fi
 if [[ -n "$UPSTREAM" ]]; then
     printf " | golden match=%d mismatch=%d" "$n_diff_match" "$n_diff_mismatch"
 fi
