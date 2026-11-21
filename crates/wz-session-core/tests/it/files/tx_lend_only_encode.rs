@@ -64,6 +64,7 @@ fn params(zid: &[u8], cookie: &[u8]) -> SessionInitParams {
         link_rx: LinkRxConf::default(),
         cookie_signing_key: SigningKey::new(vec![7u8; 32]).expect("key"),
         policy: wz_session_core::policy::SessionPolicy::defaults(),
+        limits: wz_session_core::limits::SessionLimits::BUILD,
     }
 }
 

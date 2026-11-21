@@ -129,6 +129,7 @@ fn init_params(whatami: WhatAmI) -> SessionInitParams {
         ),
         link_rx: wz_runtime_tokio::session_glue::LinkRxConf::default(),
         policy: wz_session_core::policy::SessionPolicy::defaults(),
+        limits: wz_session_core::limits::SessionLimits::BUILD,
         cookie_signing_key: SigningKey::new(vec![0xAB; 32]).expect("32-byte key"),
     }
 }
