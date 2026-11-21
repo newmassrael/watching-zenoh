@@ -50,7 +50,7 @@
 //! the stage's. The allocation has moved from the moment the handler replies to the
 //! moment the session sends, which is where the codec mirrors are replaced.
 
-use crate::bounded::{BoundedVec, Profile, SpanOffset, Static, Storage};
+use crate::bounded::{Arena, BoundedVec, LendRefused, Lent, Profile, SpanOffset, Static, Storage};
 use crate::caps;
 use crate::limit_binding::Quota;
 #[cfg(feature = "alloc")]
@@ -358,8 +358,10 @@ enum RowKind<P: Storage> {
     Reply {
         payload: RowPayload<P>,
         encoding: RowEncoding<P>,
+        // A zid is a few bytes of the row, not a table of its own: a policy whose rows are only
+        // lent holds it inline (`Storage::Scratch`).
         #[cfg(feature = "pubsub-timestamp")]
-        timestamp: Option<(u64, BoundedVec<u8, ZID_BYTES, P>)>,
+        timestamp: Option<(u64, BoundedVec<u8, ZID_BYTES, P::Scratch>)>,
         #[cfg(feature = "pubsub-attachment")]
         attachment: Option<Span<P>>,
         #[cfg(feature = "reply-source-info")]
@@ -377,7 +379,8 @@ struct Row<P: Storage> {
     rid: crate::wire_id::RequestId,
     qos: QosLevel,
     keyexpr: Span<P>,
-    responder: Option<(BoundedVec<u8, ZID_BYTES, P>, u32)>,
+    // Inline on a policy whose rows are only lent, as the timestamp's zid is.
+    responder: Option<(BoundedVec<u8, ZID_BYTES, P::Scratch>, u32)>,
     #[cfg(feature = "pubsub-ts-stack")]
     ts_stack: Option<crate::ts_stack::TsStack>,
     kind: RowKind<P>,
@@ -425,6 +428,46 @@ impl ReplyStage<Static> {
                 payload_too_large: 0,
             },
             bounds: ReplyBounds::BUILD,
+        }
+    }
+}
+
+impl ReplyStage<Lent> {
+    /// An empty stage whose `replies` rows and `bytes` bytes of reply text and payload are lent
+    /// from `arena`, held to the build's bounds until its creator states the session's
+    /// ([`Self::limit_to`]). Refused when either is over the build's capacity or the arena has not
+    /// the room, the rows lent so far going back with the arena.
+    pub fn lent(arena: &mut Arena, replies: usize, bytes: usize) -> Result<Self, LendRefused> {
+        Ok(Self {
+            rows: arena.lend(replies)?,
+            arena: arena.lend(bytes)?,
+            refusals: ReplyRefusals {
+                staging_full: 0,
+                payload_too_large: 0,
+            },
+            bounds: ReplyBounds::BUILD,
+        })
+    }
+
+    /// The bytes of an arena [`Self::lent`] takes for `replies` rows and `bytes` bytes. `None`
+    /// past the address space.
+    pub const fn arena_bytes(replies: usize, bytes: usize) -> Option<usize> {
+        match (
+            Arena::table_bytes::<Row<Lent>>(replies),
+            Arena::table_bytes::<u8>(bytes),
+        ) {
+            (Some(rows), Some(bytes)) => rows.checked_add(bytes),
+            _ => None,
+        }
+    }
+
+    /// The bytes of reply text and payload a stage of `replies` replies holds when each carries a
+    /// payload of `payload` bytes and a key of `key`: what [`caps::REPLY_STAGE_BYTES`] is of the
+    /// build's values, of the values a session's open resolved. `None` past the address space.
+    pub const fn area_bytes(replies: usize, payload: usize, key: usize) -> Option<usize> {
+        match payload.checked_add(key) {
+            Some(each) => replies.checked_mul(each),
+            None => None,
         }
     }
 }
@@ -904,6 +947,24 @@ impl FinalStage<Static> {
             refused_requests: 0,
             quota: crate::limits::MaxPendingFinalsHeld::build_default(),
         }
+    }
+}
+
+impl FinalStage<Lent> {
+    /// An empty table whose `rows` rows are lent from `arena`, held to the build's quota until its
+    /// creator states the session's ([`Self::limit_to`]). Refused when `rows` is over the build's
+    /// capacity or the arena has not the room.
+    pub fn lent(arena: &mut Arena, rows: usize) -> Result<Self, LendRefused> {
+        Ok(Self {
+            rows: arena.lend(rows)?,
+            refused_requests: 0,
+            quota: crate::limits::MaxPendingFinalsHeld::build_default(),
+        })
+    }
+
+    /// The bytes of an arena [`Self::lent`] takes for `rows` rows. `None` past the address space.
+    pub const fn arena_bytes(rows: usize) -> Option<usize> {
+        Arena::table_bytes::<(crate::wire_id::RequestId, QosLevel)>(rows)
     }
 }
 

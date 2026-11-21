@@ -2964,6 +2964,42 @@ impl SubscriberPeer<crate::bounded::Static> {
     }
 }
 
+impl SubscriberPeer<Lent> {
+    /// An empty side whose interest table (`interests` rows) and staging (`staged` rows) are lent
+    /// from `arena`. Refused when either is over the build's capacity or the arena has not the
+    /// room. The alias table is the policy's inline one.
+    #[cfg(feature = "declare-subscriber")]
+    pub fn lent(arena: &mut Arena, interests: usize, staged: usize) -> Result<Self, LendRefused> {
+        Ok(Self {
+            interests: InterestSide::lent(arena, interests, staged)?,
+            ..Self::default()
+        })
+    }
+
+    /// An empty side: a build without `declare-subscriber` keeps no interest of the peer, so
+    /// nothing is lent.
+    #[cfg(not(feature = "declare-subscriber"))]
+    pub fn lent(
+        _arena: &mut Arena,
+        _interests: usize,
+        _staged: usize,
+    ) -> Result<Self, LendRefused> {
+        Ok(Self::default())
+    }
+
+    /// The bytes of an arena [`Self::lent`] takes. `None` past the address space.
+    #[cfg(feature = "declare-subscriber")]
+    pub const fn arena_bytes(interests: usize, staged: usize) -> Option<usize> {
+        InterestSide::<Lent>::arena_bytes(interests, staged)
+    }
+
+    /// The bytes of an arena [`Self::lent`] takes: none without `declare-subscriber`.
+    #[cfg(not(feature = "declare-subscriber"))]
+    pub const fn arena_bytes(_interests: usize, _staged: usize) -> Option<usize> {
+        Some(0)
+    }
+}
+
 impl SubscriberPeer<Profile> {
     /// An empty side of this build's storage profile, for a session that has heard
     /// nothing yet. `const` where the profile is the static policy, so a session slot
@@ -3412,6 +3448,31 @@ impl<P: Storage> Default for InterestSide<P> {
 }
 
 #[cfg(feature = "declare-subscriber")]
+impl InterestSide<Lent> {
+    /// No interest registered, nothing staged, `interests` rows of interests and `staged` of the
+    /// answers staged back lent from `arena`.
+    fn lent(arena: &mut Arena, interests: usize, staged: usize) -> Result<Self, LendRefused> {
+        Ok(Self {
+            rows: arena.lend(interests)?,
+            staged: arena.lend(staged)?,
+            refusals: SubInterestRefusals::default(),
+            reconciled_epoch: 0,
+        })
+    }
+
+    /// The bytes of an arena [`Self::lent`] takes. `None` past the address space.
+    const fn arena_bytes(interests: usize, staged: usize) -> Option<usize> {
+        match (
+            Arena::table_bytes::<InboundSubInterest<Lent>>(interests),
+            Arena::table_bytes::<SubInterestReply>(staged),
+        ) {
+            (Some(rows), Some(staged)) => rows.checked_add(staged),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(feature = "declare-subscriber")]
 impl InterestSide<crate::bounded::Static> {
     /// No interest registered, nothing staged, of the static policy. `const`.
     const fn new_static() -> Self {
@@ -3509,10 +3570,22 @@ impl<P: Storage> SubscriberPeer<P> {
     /// Paired with [`SubscriberTable::sub_interest_reply`], which resolves each
     /// item to its `(DeclSubscriber.id, reply keyexpr)` against the tables that
     /// own them.
+    ///
+    /// The items move to a buffer of their own (`Storage::Scratch`) and the staging keeps its
+    /// rows: on a policy whose rows are only lent, a staging moved out would take them with it and
+    /// leave the side none to stage the next chain in.
     pub fn take_staged_sub_interest_replies(
         &mut self,
-    ) -> BoundedVec<SubInterestReply, { caps::MAX_PENDING_DECLARES }, P> {
-        core::mem::take(&mut self.interests.staged)
+    ) -> BoundedVec<SubInterestReply, { caps::MAX_PENDING_DECLARES }, P::Scratch> {
+        let mut taken: BoundedVec<SubInterestReply, { caps::MAX_PENDING_DECLARES }, P::Scratch> =
+            BoundedVec::default();
+        // Taken from the back and turned round, so each item moves once.
+        while let Some(item) = self.interests.staged.pop() {
+            let kept = taken.push(item);
+            debug_assert!(kept.is_ok(), "a buffer of the staging's capacity");
+        }
+        taken.reverse();
+        taken
     }
 
     /// R2292 (open-debt item 627) — record that the drain actually put a
@@ -3792,7 +3865,7 @@ impl<C: SampleSink, P: Storage> SubscriberRegistry<C, P> {
     #[cfg(feature = "declare-subscriber")]
     pub fn take_staged_sub_interest_replies(
         &mut self,
-    ) -> BoundedVec<SubInterestReply, { caps::MAX_PENDING_DECLARES }, P> {
+    ) -> BoundedVec<SubInterestReply, { caps::MAX_PENDING_DECLARES }, P::Scratch> {
         self.peer.take_staged_sub_interest_replies()
     }
 

@@ -45,7 +45,7 @@
 //! does (the registry is generic over the application's reply sink); it is
 //! bounded already ([`crate::caps::MAX_PENDING_QUERIES`]).
 
-use crate::bounded::{Profile, Static, Storage};
+use crate::bounded::{Arena, LendRefused, Lent, Profile, Static, Storage};
 use crate::declare::liveliness_subscriber::PeerTokens;
 use crate::declare::queryable::RemoteQueryablePeer;
 use crate::declare::subscriber::RemoteSubscriberPeer;
@@ -122,6 +122,81 @@ impl PeerTables<Static> {
             #[cfg(feature = "liveliness-token")]
             token_interest_chains_refused: 0,
         }
+    }
+}
+
+/// How many rows each table of [`PeerTables`] of the lent policy is lent ([`PeerTables::lent`]):
+/// the values of their limits the session's open resolved.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PeerRows {
+    /// The peer's subscriber interests (`MAX_INBOUND_SUB_INTERESTS`); lent none in a build without
+    /// `declare-subscriber`.
+    pub sub_interests: usize,
+    /// The answers staged back to the peer's interests (`MAX_PENDING_DECLARES`): the subscriber
+    /// plane's staging and, with `liveliness-token`, the liveliness plane's, each this many.
+    pub pending_declares: usize,
+    /// The replies staged for the peer's queries (`MAX_PENDING_REPLIES`).
+    pub replies: usize,
+    /// The bytes the staged replies' keys and payloads lie in (`ReplyStage::area_bytes` of the
+    /// replies, their payload bound and their key bound).
+    pub reply_bytes: usize,
+    /// The `Final`s owed to the peer's queries (`MAX_PENDING_FINALS`).
+    pub finals: usize,
+}
+
+impl PeerTables<Lent> {
+    /// Empty tables, for a peer that has said nothing yet, the rows of each table `rows` states
+    /// lent from `arena`, held to `limits` as [`PeerTables::limit_to`] holds them. Refused when a
+    /// table is over the build's capacity or the arena has not the room, the rows lent so far
+    /// going back with the arena. The tables keyed by the peer's ids are the policy's inline ones.
+    pub fn lent(
+        arena: &mut Arena,
+        rows: PeerRows,
+        limits: &crate::limits::SessionLimits,
+    ) -> Result<Self, LendRefused> {
+        let mut tables = Self {
+            subscribers: SubscriberPeer::lent(arena, rows.sub_interests, rows.pending_declares)?,
+            remote_subscribers: RemoteSubscriberPeer::default(),
+            remote_queryables: RemoteQueryablePeer::default(),
+            tokens: PeerTokens::default(),
+            replies: ReplyStage::lent(arena, rows.replies, rows.reply_bytes)?,
+            finals: FinalStage::lent(arena, rows.finals)?,
+            #[cfg(feature = "liveliness-token")]
+            pending_declares: arena.lend(rows.pending_declares)?,
+            #[cfg(feature = "liveliness-token")]
+            token_interest_chains_refused: 0,
+        };
+        tables.limit_to(limits);
+        Ok(tables)
+    }
+
+    /// The bytes of an arena [`Self::lent`] takes for `rows`: each table's spans. `None` past the
+    /// address space.
+    pub const fn arena_bytes(rows: PeerRows) -> Option<usize> {
+        // A build without `liveliness-token` stages no answer of the liveliness plane.
+        #[cfg(feature = "liveliness-token")]
+        let tokens = Arena::table_bytes::<DeclResponseItem>(rows.pending_declares);
+        #[cfg(not(feature = "liveliness-token"))]
+        let tokens = Some(0);
+        let spans = [
+            SubscriberPeer::<Lent>::arena_bytes(rows.sub_interests, rows.pending_declares),
+            ReplyStage::<Lent>::arena_bytes(rows.replies, rows.reply_bytes),
+            FinalStage::<Lent>::arena_bytes(rows.finals),
+            tokens,
+        ];
+        let mut sum = 0usize;
+        let mut at = 0;
+        while at < spans.len() {
+            sum = match spans[at] {
+                Some(span) => match sum.checked_add(span) {
+                    Some(sum) => sum,
+                    None => return None,
+                },
+                None => return None,
+            };
+            at += 1;
+        }
+        Some(sum)
     }
 }
 
@@ -367,5 +442,223 @@ mod tests {
         assert_eq!(tables.remote_subscribers.declared_count(), 0);
         assert_eq!(tables.remote_queryables.declared_count(), 0);
         assert_eq!(tables.tokens.count(), 0);
+    }
+}
+
+#[cfg(test)]
+mod lent_tests {
+    //! The tables of a peer lent from a session's arena: the rows lent are what bound them, what
+    //! they are lent is what their plan states, and a drain leaves them the rows it found.
+    use super::*;
+    use crate::bounded::ARENA_ALIGN;
+    use crate::caps;
+    use crate::limits::SessionLimits;
+    use crate::query_sink::ReplyError;
+    use crate::reply_stage::{
+        FinalStaging, PartsBody, PartsKind, ReplyParts, ReplyStaging, TimestampParts,
+    };
+    use crate::sample::QosLevel;
+    use core::ptr::NonNull;
+
+    /// One block of an arena's memory, aligned as an arena's spans start.
+    #[derive(Clone, Copy)]
+    #[repr(C, align(16))]
+    struct Block([u8; ARENA_ALIGN]);
+
+    /// An arena over `bytes` bytes the test process leaks, so it outlives every table lent from it.
+    fn arena(bytes: usize) -> Arena {
+        let blocks = bytes.div_ceil(ARENA_ALIGN).max(1);
+        let region: &'static mut [Block] = std::vec![Block([0; ARENA_ALIGN]); blocks].leak();
+        // SAFETY: the region is aligned to `ARENA_ALIGN`, as its blocks are, holds at least
+        // `bytes` bytes, and is leaked, so nothing else uses it and it outlives every lent table.
+        unsafe { Arena::over(NonNull::from(region).cast::<u8>(), bytes) }
+    }
+
+    /// `each` rows of every table, and room for `each` replies of 8 bytes on keys of 8.
+    fn rows(each: usize) -> PeerRows {
+        PeerRows {
+            sub_interests: each,
+            pending_declares: each,
+            replies: each,
+            reply_bytes: ReplyStage::<Lent>::area_bytes(each, 8, 8).expect("a small area"),
+            finals: each,
+        }
+    }
+
+    fn lent(rows: PeerRows) -> PeerTables<Lent> {
+        PeerTables::<Lent>::lent(&mut arena(1 << 16), rows, &SessionLimits::defaults())
+            .expect("the arena has the rows")
+    }
+
+    /// A one-byte Put on `"k"` for request `rid`, stamped by `responder` and `timestamp`.
+    fn reply<'a>(
+        rid: crate::wire_id::RequestId,
+        responder: Option<(&'a [u8], u32)>,
+        timestamp: Option<TimestampParts<'a>>,
+    ) -> ReplyParts<'a> {
+        ReplyParts {
+            rid,
+            keyexpr: "k",
+            responder,
+            qos: QosLevel::DEFAULT,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: None,
+            kind: PartsKind::Reply {
+                body: PartsBody::Put(b"v"),
+                encoding: None,
+                timestamp,
+                attachment: None,
+                source_info: None,
+            },
+        }
+    }
+
+    /// What lending a peer's tables takes from an arena is what their plan states, to the byte.
+    #[test]
+    fn lent_peer_tables_take_the_bytes_their_plan_states() {
+        let rows = rows(2);
+        let mut memory = arena(1 << 16);
+        let tables = PeerTables::<Lent>::lent(&mut memory, rows, &SessionLimits::defaults())
+            .expect("the arena has the rows");
+        let planned = PeerTables::<Lent>::arena_bytes(rows).expect("within the address space");
+        assert_eq!(memory.high_water(), planned);
+        assert!(planned > 0, "a plan of two rows each lends something");
+        drop(tables);
+    }
+
+    /// An arena one byte short of the plan refuses the tables as exhausted.
+    #[test]
+    fn lent_peer_tables_the_arena_cannot_hold_are_refused() {
+        let rows = rows(1);
+        let planned = PeerTables::<Lent>::arena_bytes(rows).expect("within the address space");
+        let refused =
+            PeerTables::<Lent>::lent(&mut arena(planned - 1), rows, &SessionLimits::defaults());
+        assert!(matches!(refused, Err(LendRefused::Exhausted { .. })));
+    }
+
+    /// A table asked for more rows than the build's capacity is refused, not lent its ceiling.
+    #[test]
+    fn lent_peer_tables_over_the_build_are_refused() {
+        let over = PeerRows {
+            finals: caps::MAX_PENDING_FINALS + 1,
+            ..rows(1)
+        };
+        let refused =
+            PeerTables::<Lent>::lent(&mut arena(1 << 20), over, &SessionLimits::defaults());
+        assert!(matches!(
+            refused,
+            Err(LendRefused::OverCeiling { rows: asked, ceiling })
+                if asked == caps::MAX_PENDING_FINALS + 1 && ceiling == caps::MAX_PENDING_FINALS
+        ));
+    }
+
+    /// One reply and one `Final` lent: the second of each is refused and counted, and a drain
+    /// leaves the rows it found, so the next of each is taken.
+    #[test]
+    fn a_lent_peer_refuses_past_its_rows_and_keeps_them_across_a_drain() {
+        let mut tables = lent(rows(1));
+        assert_eq!(tables.replies.stage_parts(reply(1, None, None)), Ok(()));
+        assert_eq!(
+            tables.replies.stage_parts(reply(2, None, None)),
+            Err(ReplyError::StagingFull)
+        );
+        assert_eq!(tables.replies.refusals().staging_full, 1);
+        let mut drained = 0;
+        tables.replies.drain_parts(|_| drained += 1);
+        assert_eq!(drained, 1);
+        assert_eq!(
+            tables.replies.stage_parts(reply(3, None, None)),
+            Ok(()),
+            "the drain kept the row the arena lent"
+        );
+
+        assert!(tables.finals.has_room());
+        tables.finals.owe(1, QosLevel::DEFAULT);
+        assert!(!tables.finals.has_room(), "the one row holds a Final");
+        let owed = tables.finals.take_owed();
+        assert_eq!(owed.len(), 1);
+        assert!(
+            tables.finals.has_room(),
+            "taking what is owed keeps the row the arena lent"
+        );
+        tables.finals.owe(2, QosLevel::DEFAULT);
+        assert_eq!(tables.finals.owed(), 1);
+    }
+
+    /// The identities a staged reply carries are inline in its row, not tables of their own: a
+    /// lent stage holds the responder's zid and, in a build that keeps a reply's timestamp, the
+    /// timestamp's.
+    #[test]
+    fn a_lent_stage_holds_a_replys_identities() {
+        let mut tables = lent(rows(1));
+        let stamp = TimestampParts {
+            time: 42,
+            zid: &[4, 5],
+        };
+        assert_eq!(
+            tables
+                .replies
+                .stage_parts(reply(1, Some((&[1, 2, 3], 7)), Some(stamp))),
+            Ok(())
+        );
+        let parts = tables.replies.parts(0).expect("one reply staged");
+        assert_eq!(parts.responder, Some((&[1u8, 2, 3][..], 7)));
+        let PartsKind::Reply {
+            body: PartsBody::Put(_),
+            timestamp,
+            ..
+        } = parts.kind
+        else {
+            panic!("a Put was staged");
+        };
+        assert_eq!(
+            timestamp.map(|ts| (ts.time, ts.zid)),
+            cfg!(feature = "pubsub-timestamp").then_some((42, &[4u8, 5][..]))
+        );
+    }
+
+    /// The answers staged to a peer's interest are taken out for the drain and the staging keeps
+    /// its rows: the next interest's answer is staged in them.
+    #[cfg(all(feature = "alloc", feature = "declare-subscriber"))]
+    #[test]
+    fn a_lent_peer_side_stages_again_after_a_take() {
+        use crate::pubsub::{SubInterestReply, SubscriberTable};
+        use crate::sink::BoxedSink;
+
+        let mut tables = lent(rows(2));
+        let mut table = SubscriberTable::<BoxedSink>::default();
+        for interest in [7u64, 8] {
+            table.respond_to_subscriber_interest_borrowed(
+                &mut tables.subscribers,
+                interest,
+                Some("demo/**"),
+                false,
+                true,
+                false,
+            );
+            let staged = tables.subscribers.take_staged_sub_interest_replies();
+            assert!(
+                staged.iter().any(|item| matches!(
+                    item,
+                    SubInterestReply::Final { interest_id } if *interest_id == interest
+                )),
+                "interest {interest}: its chain was staged in the side's rows"
+            );
+        }
+    }
+
+    /// The liveliness plane's staging is lent too: an answer is held in its row.
+    #[cfg(feature = "liveliness-token")]
+    #[test]
+    fn a_lent_peer_holds_a_liveliness_answer() {
+        let mut tables = lent(rows(1));
+        assert!(tables
+            .pending_declares
+            .push(DeclResponseItem::Final { interest_id: 1 })
+            .is_ok());
+        assert!(tables
+            .pending_declares
+            .push(DeclResponseItem::Final { interest_id: 2 })
+            .is_err());
     }
 }
