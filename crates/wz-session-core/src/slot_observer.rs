@@ -141,26 +141,16 @@ impl<R: ReplySink, G: ReplySink> Requesters<R, G, Lent> {
     /// The bytes of an arena [`Self::lent`] takes for `rows`: each registry's spans. `None` past
     /// the address space.
     pub const fn arena_bytes(rows: RequesterRows) -> Option<usize> {
-        match (
-            ReplyRegistry::<R, Lent>::arena_bytes(rows.queries),
-            liveliness_get_bytes::<G>(rows.liveliness_gets),
-        ) {
+        // A build without `liveliness-get` lends the snapshots no rows.
+        #[cfg(feature = "liveliness-get")]
+        let gets = LivelinessGetRegistry::<G, Lent>::arena_bytes(rows.liveliness_gets);
+        #[cfg(not(feature = "liveliness-get"))]
+        let gets = Some(0);
+        match (ReplyRegistry::<R, Lent>::arena_bytes(rows.queries), gets) {
             (Some(queries), Some(gets)) => queries.checked_add(gets),
             _ => None,
         }
     }
-}
-
-/// The bytes of an arena the pending liveliness snapshots of one face take for `rows` rows.
-#[cfg(feature = "liveliness-get")]
-const fn liveliness_get_bytes<G: ReplySink>(rows: usize) -> Option<usize> {
-    LivelinessGetRegistry::<G, Lent>::arena_bytes(rows)
-}
-
-/// A build without `liveliness-get` lends the snapshots no rows.
-#[cfg(not(feature = "liveliness-get"))]
-const fn liveliness_get_bytes<G: ReplySink>(_rows: usize) -> Option<usize> {
-    Some(0)
 }
 
 impl<R: ReplySink, G: ReplySink, P: Storage> Requesters<R, G, P> {

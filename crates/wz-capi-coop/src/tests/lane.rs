@@ -61,18 +61,19 @@ fn a_sample_is_handed_as_it_was_offered() {
         .with_source_info(source.clone())
         .with_reliability(Reliability::BestEffort);
     lane.offer(7, &sample);
-    let (id, view) = lane.take_front().expect("the sample is at the head");
-    assert_eq!(id, 7);
-    assert_eq!(view.keyexpr(), "demo/a");
-    assert_eq!(view.payload(), b"payload");
-    assert_eq!(view.kind(), SampleKind::Put);
-    assert_eq!(view.reliability(), Reliability::BestEffort);
-    assert_eq!(view.qos(), Some(QosLevel::from_raw(5)));
-    assert_eq!(view.attachment(), Some(&b"att"[..]));
-    assert_eq!(view.encoding_parts(), Some((7, Some(&b"text"[..]))));
-    assert_eq!(view.timestamp_parts(), Some((42, &[1u8, 2, 3][..])));
-    assert_eq!(view.source_info(), Some(&source));
-    drop(view);
+    {
+        let (id, view) = lane.take_front().expect("the sample is at the head");
+        assert_eq!(id, 7);
+        assert_eq!(view.keyexpr(), "demo/a");
+        assert_eq!(view.payload(), b"payload");
+        assert_eq!(view.kind(), SampleKind::Put);
+        assert_eq!(view.reliability(), Reliability::BestEffort);
+        assert_eq!(view.qos(), Some(QosLevel::from_raw(5)));
+        assert_eq!(view.attachment(), Some(&b"att"[..]));
+        assert_eq!(view.encoding_parts(), Some((7, Some(&b"text"[..]))));
+        assert_eq!(view.timestamp_parts(), Some((42, &[1u8, 2, 3][..])));
+        assert_eq!(view.source_info(), Some(&source));
+    }
     lane.complete();
     assert!(lane.take_front().is_none(), "nothing is left");
     assert_eq!(lane.counts(), LaneCounts::default());
@@ -85,14 +86,15 @@ fn a_sample_with_no_metadata_is_handed_with_none() {
         return;
     };
     lane.offer(1, &Sample::new_del("demo/gone"));
-    let (_, view) = lane.take_front().expect("the sample is at the head");
-    assert_eq!(view.keyexpr(), "demo/gone");
-    assert_eq!(view.kind(), SampleKind::Del);
-    assert!(view.payload().is_empty());
-    assert_eq!(view.attachment(), None);
-    assert_eq!(view.encoding_parts(), None);
-    assert_eq!(view.timestamp_parts(), None);
-    drop(view);
+    {
+        let (_, view) = lane.take_front().expect("the sample is at the head");
+        assert_eq!(view.keyexpr(), "demo/gone");
+        assert_eq!(view.kind(), SampleKind::Del);
+        assert!(view.payload().is_empty());
+        assert_eq!(view.attachment(), None);
+        assert_eq!(view.encoding_parts(), None);
+        assert_eq!(view.timestamp_parts(), None);
+    }
     lane.complete();
 }
 
@@ -105,10 +107,9 @@ fn a_second_delivery_finds_the_head_held() {
     };
     lane.offer(1, &best_effort(8));
     lane.offer(2, &best_effort(8));
-    let (first, view) = lane.take_front().expect("the first sample");
+    let (first, _) = lane.take_front().expect("the first sample");
     assert_eq!(first, 1);
     assert!(lane.take_front().is_none(), "the head is held");
-    drop(view);
     lane.complete();
     let (second, _view) = lane.take_front().expect("the second sample");
     assert_eq!(second, 2);
@@ -175,8 +176,7 @@ fn the_gate_reads_a_link_only_while_the_lane_takes_a_batch() {
     lane.offer(1, &best_effort(200));
     assert!(!lane.takes_a_batch(128), "the lane has no room for a batch");
     assert!(!lane.takes_a_batch(512), "nor for one longer than its area");
-    let (_, view) = lane.take_front().expect("the sample");
-    drop(view);
+    assert!(lane.take_front().is_some(), "the sample is at the head");
     lane.complete();
     assert!(lane.takes_a_batch(128), "the delivery gave the room back");
 }
