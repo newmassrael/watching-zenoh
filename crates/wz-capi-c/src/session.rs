@@ -340,7 +340,8 @@ fn refusal_code(refusal: OpenRefusal) -> ZResult {
         | OpenRefusal::PluginHostNotInBuild
         | OpenRefusal::Aggregation
         | OpenRefusal::StatsNotInBuild
-        | OpenRefusal::Policies => Z_EINVAL,
+        | OpenRefusal::Policies
+        | OpenRefusal::ConnectPastLimit => Z_EINVAL,
         OpenRefusal::QosWithLowlatency
         | OpenRefusal::GossipTarget
         | OpenRefusal::NothingToDial

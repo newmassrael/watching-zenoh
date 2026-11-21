@@ -114,7 +114,9 @@ def declared_pending(decl: dict) -> dict[str, str]:
 ALLOWED: tuple[tuple[str, str, str], ...] = (
     ("crates/wz-session-core/src/pubsub.rs", "_", "a build-time assertion on the storage the constant sizes: a fixed table's rows fit the u16 positions of the match cache"),
     ("crates/wz-runtime-coop/src/session_drive.rs", "_", "a build-time assertion on the storage the constant sizes: the cooperative engine's locator text holds every IPv4 locator"),
-    ("crates/wz-session-mcu/src/connect_manager.rs", "new", "a compile-time check of the endpoints a fixed image names against the locator rows the build sizes; the fixed connect manager holds no snapshot"),
+    ("crates/wz-session-mcu/src/connect_manager.rs", "new", "a compile-time check of the endpoints a fixed image names against the endpoint and locator rows the build sizes; the fixed connect manager holds no snapshot"),
+    ("crates/wz-session-mcu/src/connect_manager.rs", "PEERS", "a constant that sizes the fixed connect manager's peer and dial tables from the endpoint rows the build sizes"),
+    ("crates/wz-admin/src/admin_connect.rs", "push_entry", "the admin write fills a heapless list of the build's endpoint rows on every backing, and refuses the entry that list has no row for"),
 )
 
 #: (path pattern relative to the root, innermost item, reason): a site that reads a snapshot it

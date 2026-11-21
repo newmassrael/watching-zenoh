@@ -2788,17 +2788,18 @@ id = "MAX_STATIC_CONNECT"
 kconfig = "WZ_LIMIT_MAX_STATIC_CONNECT"
 kind = "bound"
 driven = "local"
-on_heap = "capacity"
+on_heap = "advisory"
 default = 8
 storage = "both"
 scope = "runtime"
 binding_heap = "open"
 binding_fixed = "build"
-read = "build"
+read = "snapshot"
 wire = "none"
 help = '''
-The locators a node is told to connect to. A list longer than this stops
-at the limit; a fixed deployment names a few peers.
+The locators a node is told to connect to. A fixed image holds this many
+rows and names a few peers; on the heap the list grows with no bound unless
+one is stated, and an open whose list is longer is refused by name.
 '''
 
 [limit.upstream]

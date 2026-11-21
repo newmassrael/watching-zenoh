@@ -213,6 +213,7 @@ impl ConfigIngestError {
             ConfigIngestError::UnknownMode { .. } => Some(KEY_MODE),
             ConfigIngestError::UnknownKey { path } => Some(path.as_str()),
             ConfigIngestError::PoliciesRefused { .. } => Some(KEY_WZ),
+            ConfigIngestError::ConnectPastLimit { .. } => Some(EndpointList::Connect.key()),
         };
         let keys: Vec<&str> = key.into_iter().collect();
         Finding::describing(self, None, sites_in(node, &keys))
