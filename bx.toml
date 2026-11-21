@@ -262,7 +262,8 @@ inputs = [
 outputs = ["docs/.atomic/**", "docs/rounds/pending/**"]
 
 # THE WHOLE GATE AS A SET OF CHECKS the fleet judges unit by unit (bx RFC 0004): `bx --checks ci`.
-# A unit is one lane of `scripts/run-ci.sh`, run the way a hosted job runs it; the planner reads the
+# A unit is one lane of `scripts/run-ci.sh`, run the way a hosted job runs it, or one part of a lane
+# the planner cuts into parts (Layer Qzk, a ceiling group a unit: `Qzk:<part>`); the planner reads the
 # lanes from the script's dispatch table and its header says why each field of a unit is what it is
 # (`scripts/lib/runci_plan.py`). This is the first step of judging every commit before it enters
 # `main`, in the fleet, instead of in the hosted runner pool this account shares with its other

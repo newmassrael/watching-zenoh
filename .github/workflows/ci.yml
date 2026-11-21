@@ -4752,6 +4752,10 @@ jobs:
         # under zenoh-pico (docs/upstream-parity.md D8): each image the committed matrix pairs
         # with a pico reference and that reference, built here as compare builds from this
         # tree's vendor/zenoh-pico, held cell by cell; only a WIN passes. Nothing boots.
+        # Run whole, every part in turn (`WZ_QZK_PART` unset). The parts are the fleet's
+        # (scripts/lib/runci_plan.py), where the lane's one peak waited for a whole machine;
+        # a hosted job has its runner to itself, and a job per part would spend a slot of
+        # the account's shared runner pool and a Zephyr cache restore for each.
         env:
           WZ_QZ_REQUIRE: "1"
         run: |

@@ -28671,8 +28671,20 @@ layer_qzb_zephyr_board_matrix() {
 # and scripts/lib/pico_ceiling_gate.py holds the image under the reference in every cell the build
 # decides. Only a WIN passes; a cell that is not one fails the layer whatever the image's own budget row
 # says, because a row that moved with its image is no ceiling.
+#
+# IN PARTS. Every build here runs one after another on one machine, so a run of the whole lane holds a
+# build machine for all of them, and the fleet learned that run's peak (about 24 GB, 2026-11-21) as one
+# block that waited for a whole idle machine. The images are therefore cut into parts
+# (`scripts/kit-lane.sh parts`): each ceiling group, a reference with every image the matrix pairs with
+# it, so that the reference is still built in the run that holds those images under it, and each image
+# with no pair alone. `WZ_QZK_PART=<part>` runs one part; unset, the lane runs every part in turn, so the
+# whole is the union of the parts on one code path. The fleet's planner gives each part a unit of its
+# own (`scripts/lib/runci_plan.py`). The parts are held to the images before anything is built: an image
+# in no part, or in two, fails the lane, because a cut that drops an image passes every part without
+# ever building it.
 layer_qzk_client_images_build() {
-    local rc image images lane_home fail=0 n=0 log_dir out log
+    local rc images parts pairs part members lane_home log_dir fail=0 n=0
+    local want="${WZ_QZK_PART:-}"
     _qz_toolchain thumbv7em-none-eabi && rc=0 || rc=$?
     [[ "$rc" -eq 10 ]] && return 0
     [[ "$rc" -ne 0 ]] && return 1
@@ -28680,11 +28692,64 @@ layer_qzk_client_images_build() {
         || { echo "  Qzk FAIL — the kit lane could not list its images" >&2; return 1; }
     [[ -n "$images" ]] \
         || { echo "  Qzk FAIL — the kit lane lists no image; a lane with no population is not a pass" >&2; return 1; }
+    parts="$(bash scripts/kit-lane.sh parts)" \
+        || { echo "  Qzk FAIL — the kit lane could not cut its images into parts (above)" >&2; return 1; }
+    _qzk_parts_cover "$images" "$parts" || return 1
+    # The pairs of every image, read once whatever the part: a matrix that pairs none of them fails
+    # each part's run too, and a part's pairs are the lines whose image is one of its own.
+    # shellcheck disable=SC2086  # the lane prints one image key per line, and each is one argument
+    pairs="$(python3 scripts/lib/pico_ceiling_gate.py --pairs $images)" \
+        || { echo "  Qzk ceiling FAIL — the matrix gives no pair to hold (above)" >&2; return 1; }
+    if [[ -n "$want" ]] && ! awk -v want="$want" '$1 == want { found = 1 } END { exit !found }' <<< "$parts"; then
+        echo "  Qzk FAIL — WZ_QZK_PART=$want is none of the lane's parts:" >&2
+        sed 's/^/    /' <<< "$parts" >&2
+        return 1
+    fi
     lane_home="$(mktemp -d)"
     log_dir="${RUNCI_LOG_DIR:-$WZ_ARTIFACTS/crates/target/run-ci-logs}/qzk"
     mkdir -p "$log_dir"
-    for image in $images; do
+    # Read through descriptor 3: the builds inside inherit stdin, and one that read it would take
+    # the parts still to come.
+    while read -r part members <&3; do
+        [[ -z "$want" || "$part" == "$want" ]] || continue
         n=$((n + 1))
+        echo "  Qzk part $part: $members"
+        _qzk_part "$lane_home" "$log_dir" "$members" \
+            "$(awk -v members=" $members " 'index(members, " " $1 " ")' <<< "$pairs")" || fail=1
+    done 3<<< "$parts"
+    rm -rf "$lane_home"
+    (( n > 0 )) || fail=1
+    return "$fail"
+}
+
+# _qzk_parts_cover <the lane's images> <the parts, `<part> <image>...` a line>
+#
+# The gate that cuts the parts holds its own cut to the images it was given; this holds the listing
+# the lane reads to the images it lists, which are two arms of the kit lane.
+_qzk_parts_cover() {
+    local images="$1" parts="$2" listed bad fail=0
+    listed="$(awk '{ for (i = 2; i <= NF; i++) print $i }' <<< "$parts" | sort)"
+    bad="$(awk 'NF < 2 { print $1 }' <<< "$parts")"
+    [[ -z "$bad" ]] || { echo "  Qzk FAIL — part(s) with no image: $bad" >&2; fail=1; }
+    bad="$(awk '{ print $1 }' <<< "$parts" | sort | uniq -d)"
+    [[ -z "$bad" ]] || { echo "  Qzk FAIL — part(s) named twice: $bad" >&2; fail=1; }
+    bad="$(uniq -d <<< "$listed")"
+    [[ -z "$bad" ]] || { echo "  Qzk FAIL — image(s) in more than one part: $bad" >&2; fail=1; }
+    bad="$(comm -23 <(sort -u <<< "$images") <(sort -u <<< "$listed"))"
+    [[ -z "$bad" ]] \
+        || { echo "  Qzk FAIL — image(s) in no part, which a run of every part would not build: $bad" >&2; fail=1; }
+    bad="$(comm -13 <(sort -u <<< "$images") <(sort -u <<< "$listed"))"
+    [[ -z "$bad" ]] || { echo "  Qzk FAIL — part(s) hold image(s) the lane does not list: $bad" >&2; fail=1; }
+    return "$fail"
+}
+
+# _qzk_part <lane home> <log dir> <the part's images> <the part's pairs, none for an image alone>
+#
+# Each image built as the kit lane builds it, its build directory gone before the next, then the
+# ceiling of the part's pairs.
+_qzk_part() {
+    local lane_home="$1" log_dir="$2" members="$3" pairs="$4" image out log fail=0
+    for image in $members; do
         if ZEPHYR_HOME="$(dirname "$_QZ_BASE")" KIT_LANE_HOME="$lane_home" \
             KIT_LANE_MIN_AVAIL_MB="${WZ_QZK_MIN_AVAIL_MB:-4000}" \
             bash scripts/kit-lane.sh build "$image" >"$log_dir/$image.verdicts" 2>&1; then
@@ -28705,24 +28770,22 @@ layer_qzk_client_images_build() {
         fi
         rm -rf "$lane_home/build"
     done
-    _qzk_pico_ceiling "$lane_home" "$log_dir" "$images" || fail=1
-    rm -rf "$lane_home"
-    (( n > 0 )) || fail=1
+    if [[ -n "$pairs" ]]; then
+        _qzk_pico_ceiling "$lane_home" "$log_dir" "$pairs" || fail=1
+    fi
     return "$fail"
 }
 
-# _qzk_pico_ceiling <lane home> <log dir> <the lane's images>
+# _qzk_pico_ceiling <lane home> <log dir> <pairs, `<image> <reference>` a line>
 #
 # The pairs are the matrix's (`--pairs`), never a list of this file's. Each image and reference is
 # built once, by the kit lane's own compare build, and its ELF kept beside the lane home while the build
-# directory goes, as the loop above does, so that a runner's disk holds one build at a time.
+# directory goes, as the loop above does, so that a runner's disk holds one build at a time; the ELFs
+# go with the part.
 _qzk_pico_ceiling() {
-    local lane_home="$1" log_dir="$2" images="$3" pairs key image reference out fail=0
+    local lane_home="$1" log_dir="$2" pairs="$3" key image reference out fail=0
     local keys
     local -A elf_of=()
-    # shellcheck disable=SC2086  # the lane prints one image key per line, and each is one argument
-    pairs="$(python3 scripts/lib/pico_ceiling_gate.py --pairs $images)" \
-        || { echo "  Qzk ceiling FAIL — the matrix gives no pair to hold (above)" >&2; return 1; }
     mkdir -p "$lane_home/ceiling"
     # Each key once, every reference before its images.
     keys="$(awk '{print $2; print $1}' <<< "$pairs" | awk '!seen[$0]++')"
@@ -28758,6 +28821,7 @@ _qzk_pico_ceiling() {
             fail=1
         fi
     done <<< "$pairs"
+    rm -rf "$lane_home/ceiling"
     return "$fail"
 }
 
