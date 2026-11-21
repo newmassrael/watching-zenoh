@@ -573,11 +573,29 @@ pub enum RoomWait {
 /// 200 microseconds.
 ///
 /// Upstream's default is a millisecond (`commons/zenoh-config/src/defaults.rs` @
-/// `time_limit: 1,`). The writer waits only while the producers are seen still to be staging
-/// (it reads their count a few microseconds apart), so a lone message or the end of a burst
-/// leaves at once whatever the bound, and the bound is reached only by a stream that does not
-/// stop; this is the bound the writer kept before the key was read.
+/// `time_limit: 1,`). The writer holds back only when its flush found a producer holding an
+/// open batch ([`IdleFlush::SenderHeld`]), so a lone message or the end of a burst leaves at
+/// once whatever the bound, and the bound is reached only by a stream that does not stop; this
+/// is the bound the writer kept before the key was read.
 pub const BATCHING_TIME_LIMIT_US: u64 = 200;
+
+/// What the flush a link's writer runs at idle found ([`BoxedLinkDriver::set_idle_flush`]):
+/// whether every open batch frame was taken, or a producer held one and it was left open.
+///
+/// The second answer is what upstream's writer reads off the batch's lock: it pulls the open
+/// batch when it can take the lock, and backs off for the batching threshold when a producer
+/// holds it (`io/zenoh-transport/src/common/pipeline.rs` @
+/// `if let Ok(mut g) = self.current.try_lock() {`). A writer told only that it ran the flush
+/// has to guess whether producers are still adding, and a guess from their progress over a few
+/// microseconds reads a producer that lost its CPU for one that stopped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IdleFlush {
+    /// Every open frame was taken and handed to the link, or there was none.
+    Drained,
+    /// A producer held an open frame's lock, so that frame was left open: the producer is in
+    /// the middle of adding to it.
+    SenderHeld,
+}
 
 /// When a link's queue takes the memory of its batches: `transport/link/tx/queue/allocation/mode`,
 /// upstream's `QueueAllocMode` (`commons/zenoh-config/src/lib.rs` @ `pub enum QueueAllocMode {`).
@@ -966,13 +984,14 @@ pub trait BoxedLinkDriver {
     /// whatever the producers have staged, so a burst leaves in few large batches and a lone
     /// message leaves at once, with no timer between them).
     ///
-    /// The hook is the session's flush of its open batch frames. It may take the session's
-    /// conduit locks and hand frames to this very link, so the writer calls it holding nothing
-    /// of its own. The default answers `false`, which keeps the session's frame-per-message
+    /// The hook is the session's flush of its open batch frames, answering what it found
+    /// ([`IdleFlush`]): a writer that is told a producer held a frame backs off for the batching
+    /// time limit, as upstream's does. It may take the session's conduit locks and hand frames
+    /// to this very link, so the writer calls it holding nothing of its own. The default answers `false`, which keeps the session's frame-per-message
     /// send: a driver that writes synchronously has no writer to ask, and a driver that WRAPS
     /// another must forward this or every session behind it stays unbatched.
     #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
-    fn set_idle_flush(&self, hook: alloc::sync::Arc<dyn Fn() + Send + Sync>) -> bool {
+    fn set_idle_flush(&self, hook: alloc::sync::Arc<dyn Fn() -> IdleFlush + Send + Sync>) -> bool {
         let _ = hook;
         false
     }

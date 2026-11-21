@@ -845,7 +845,10 @@ impl BoxedLinkDriver for QuicWriteDriver {
         self.streams.shape_tx_queue(shape)
     }
 
-    fn set_idle_flush(&self, hook: Arc<dyn Fn() + Send + Sync>) -> bool {
+    fn set_idle_flush(
+        &self,
+        hook: Arc<dyn Fn() -> wz_session_core::link::IdleFlush + Send + Sync>,
+    ) -> bool {
         self.streams.set_idle_flush(hook)
     }
 
