@@ -364,10 +364,15 @@ fn refusal_code(refusal: OpenRefusal) -> ZResult {
 /// What this ABI decides about an open, beyond what the config says.
 ///
 /// zenoh's own bounded queue and waits: this ABI stands for zenoh-c. The queue carries two
-/// policies, taken from `policy`, the plan's snapshot.
-fn abi_choices(shm_clients: OpenShmClients, policy: &SessionPolicy) -> AbiChoices {
+/// policies, taken from `policy`, and the window of one of them, taken from `limits`: the plan's
+/// snapshots.
+fn abi_choices(
+    shm_clients: OpenShmClients,
+    policy: &SessionPolicy,
+    limits: &wz_session_core::limits::SessionLimits,
+) -> AbiChoices {
     AbiChoices {
-        tx_queue: TxQueueConf::of_policy(policy),
+        tx_queue: TxQueueConf::of_snapshot(policy, limits),
         // zenoh-c has no switch for a session's read task: its runtime drives the session from
         // the open.
         start_read_task: true,
@@ -546,7 +551,7 @@ pub(crate) unsafe fn open_session(
     // without `router-node`.
     #[cfg(feature = "router-node")]
     let node = plan.node_role(plan.role);
-    let choices = abi_choices(shm_clients, &plan.session_policy);
+    let choices = abi_choices(shm_clients, &plan.session_policy, &plan.session_limits);
     // Mutable only where a shared-memory client set or a time base re-takes the stance below.
     #[allow(unused_mut)]
     let mut arguments = plan.into_arguments(choices);

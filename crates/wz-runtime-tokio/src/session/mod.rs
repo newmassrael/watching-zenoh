@@ -4953,10 +4953,11 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     ///
     /// A declaration made, or withdrawn, while the wait runs restarts the check: the set the peer
     /// must hold has changed, and a sync that was true of the old set says nothing of the new one.
-    /// The interval is `DECLARATION_SYNC_INTERVAL_MS`, the pace a paced replay is driven at. Both
-    /// the interval and `timeout` are of the session's clock, as the sync it reads is.
+    /// The interval is `DECLARATION_SYNC_INTERVAL_MS` of the session's snapshot, the pace a paced
+    /// replay is driven at. Both the interval and `timeout` are of the session's clock, as the
+    /// sync it reads is.
     pub async fn wait_declarations_stable(&self, timeout: std::time::Duration) -> bool {
-        let step = wz_session_core::caps::DECLARATION_SYNC_INTERVAL_MS as u64;
+        let step = self.actions().params.limits.declaration_sync_interval_ms() as u64;
         let deadline = self
             .clock
             .now_monotonic_ms()

@@ -270,59 +270,62 @@ fn demo_main() -> ExitCode {
     // limits are decided with it and reach, through the tuning, the clock and the resource
     // snapshot the node makes for itself.
     #[cfg(feature = "zenoh-config")]
-    let (rest, node_policy, node_limits) = match crate::args::expand_stock_zenoh_config(rest, |p| {
-        std::fs::read_to_string(p).map_err(|e| format!("--config: cannot read {p}: {e}"))
-    }) {
-        Err(message) => {
-            eprintln!("wz-ap-demo: {message}");
-            return ExitCode::from(2);
-        }
-        Ok(None) => (
-            rest,
-            crate::args::resolve_policy(),
-            crate::args::resolve_runtime_limits(),
-        ),
-        Ok(Some(exp)) => {
-            // R2081 (open-debt item 208) — READ and APPLIED are two facts and
-            // this used to print them as one. The old line said "honoured" and
-            // listed everything the READER took from the file; whether any of it
-            // reached this NODE was a separate line the operator had to diff
-            // against by hand.
-            //
-            // R2091 (open-debt item 508) — and the second line used to lie. It
-            // was derived from a per-BUILD list of keys with no sink, so every
-            // key whose flag carries an INVOCATION precondition was reported
-            // applied while the expansion silently withheld it. Measured before
-            // this round, on a file naming five such keys: all five printed as
-            // APPLIED beside an `argv +=` line that carried none of them. The
-            // verdicts are now decided where the flags are decided, and the
-            // not-applied half names WHY for each key — "no sink in this build"
-            // is one reason among several, and it is no longer the only one the
-            // report can express.
-            // R2124 (open-debt item 504) — THE REPORT IS DATA, AND THIS LOOP IS
-            // THE WHOLE OF IT.
-            //
-            // What stood here was one hand-written `eprintln!` per axis, so a
-            // fifth axis on the reader reached an operator only if somebody
-            // remembered to add a sixth line. MEASURED before the change:
-            // deleting the READ line — which is the report of WHICH honoured
-            // keys the file named — reded nothing across 41 tests. The one
-            // thing that ever caught it was `dead_code`, and only for a field
-            // whose LAST reader was the line being deleted.
-            //
-            // `report_lines` is where the axes live now, beside the struct that
-            // holds them, and `every_axis_the_reader_hands_over_reaches_a_line`
-            // is what refuses a field that reaches neither a line nor a stated
-            // reason for not being one.
-            for (label, body) in exp.report_lines() {
-                eprintln!("wz-ap-demo: --config {}: {label} {body}", exp.path);
+    let (rest, node_policy, node_limits, node_session_limits) =
+        match crate::args::expand_stock_zenoh_config(rest, |p| {
+            std::fs::read_to_string(p).map_err(|e| format!("--config: cannot read {p}: {e}"))
+        }) {
+            Err(message) => {
+                eprintln!("wz-ap-demo: {message}");
+                return ExitCode::from(2);
             }
-            let node_policy = exp.policies.policy;
-            let node_limits = exp.policies.limits.runtime;
-            expanded = exp.argv;
-            (&expanded[..], node_policy, node_limits)
-        }
-    };
+            Ok(None) => (
+                rest,
+                crate::args::resolve_policy(),
+                crate::args::resolve_runtime_limits(),
+                wz::runtime_tokio::limits::SessionLimits::BUILD,
+            ),
+            Ok(Some(exp)) => {
+                // R2081 (open-debt item 208) — READ and APPLIED are two facts and
+                // this used to print them as one. The old line said "honoured" and
+                // listed everything the READER took from the file; whether any of it
+                // reached this NODE was a separate line the operator had to diff
+                // against by hand.
+                //
+                // R2091 (open-debt item 508) — and the second line used to lie. It
+                // was derived from a per-BUILD list of keys with no sink, so every
+                // key whose flag carries an INVOCATION precondition was reported
+                // applied while the expansion silently withheld it. Measured before
+                // this round, on a file naming five such keys: all five printed as
+                // APPLIED beside an `argv +=` line that carried none of them. The
+                // verdicts are now decided where the flags are decided, and the
+                // not-applied half names WHY for each key — "no sink in this build"
+                // is one reason among several, and it is no longer the only one the
+                // report can express.
+                // R2124 (open-debt item 504) — THE REPORT IS DATA, AND THIS LOOP IS
+                // THE WHOLE OF IT.
+                //
+                // What stood here was one hand-written `eprintln!` per axis, so a
+                // fifth axis on the reader reached an operator only if somebody
+                // remembered to add a sixth line. MEASURED before the change:
+                // deleting the READ line — which is the report of WHICH honoured
+                // keys the file named — reded nothing across 41 tests. The one
+                // thing that ever caught it was `dead_code`, and only for a field
+                // whose LAST reader was the line being deleted.
+                //
+                // `report_lines` is where the axes live now, beside the struct that
+                // holds them, and `every_axis_the_reader_hands_over_reaches_a_line`
+                // is what refuses a field that reaches neither a line nor a stated
+                // reason for not being one.
+                for (label, body) in exp.report_lines() {
+                    eprintln!("wz-ap-demo: --config {}: {label} {body}", exp.path);
+                }
+                let node_policy = exp.policies.policy;
+                let node_limits = exp.policies.limits.runtime;
+                let node_session_limits = exp.policies.limits.session;
+                expanded = exp.argv;
+                (&expanded[..], node_policy, node_limits, node_session_limits)
+            }
+        };
     #[cfg(not(feature = "zenoh-config"))]
     if rest.iter().any(|a| a == "--config") {
         eprintln!(
@@ -335,6 +338,9 @@ fn demo_main() -> ExitCode {
     let node_policy = crate::args::resolve_policy();
     #[cfg(not(feature = "zenoh-config"))]
     let node_limits = crate::args::resolve_runtime_limits();
+    // A node no document describes resolves no session limits: the build's are named.
+    #[cfg(not(feature = "zenoh-config"))]
+    let node_session_limits = wz::runtime_tokio::limits::SessionLimits::BUILD;
 
     // R311y843 — the two handshake values an operator can move, read ONCE from
     // the already-expanded command line so every run mode announces the same
@@ -342,7 +348,11 @@ fn demo_main() -> ExitCode {
     // parse failure: a node that started with a default lease because the
     // digits were unreadable is the silent misconfiguration `--config` exists
     // to end.
-    let tuning = match crate::args::TransportTuning::from_argv_under(rest, node_policy) {
+    let tuning = match crate::args::TransportTuning::from_argv_under(
+        rest,
+        node_policy,
+        &node_session_limits,
+    ) {
         Ok(t) => t.with_runtime_limits(node_limits),
         Err(message) => {
             eprintln!("wz-ap-demo: {message}");

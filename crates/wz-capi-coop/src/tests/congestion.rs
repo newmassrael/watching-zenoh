@@ -405,7 +405,10 @@ mod stalled_link {
     /// would spend before it answered.
     #[test]
     fn under_the_pico_profile_a_publish_behind_a_held_session_is_dropped_at_once_and_told() {
-        let pico = TxQueueConf::pico_of_policy(&SessionPolicy::defaults());
+        let pico = TxQueueConf::pico_of_snapshot(
+            &SessionPolicy::defaults(),
+            &wz_session_core::limits::SessionLimits::BUILD,
+        );
         assert_eq!(
             pico.held_drop,
             HeldDrop::DropAtOnce,
@@ -581,8 +584,11 @@ mod stalled_link {
     /// after the blocking publish, as the tokio engine sends a put the other faces of a held one.
     #[test]
     fn under_the_pico_profile_a_publish_held_on_one_face_still_reaches_the_other() {
-        let seen =
-            beside_a_blocking_publish(TxQueueConf::pico_of_policy(&SessionPolicy::defaults()));
+        let pico = TxQueueConf::pico_of_snapshot(
+            &SessionPolicy::defaults(),
+            &wz_session_core::limits::SessionLimits::BUILD,
+        );
+        let seen = beside_a_blocking_publish(pico);
         assert_eq!(seen.dropped, Err(FanoutError::HeldConduit));
         assert!(
             seen.took < Duration::from_secs(1),

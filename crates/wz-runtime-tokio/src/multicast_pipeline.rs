@@ -1305,11 +1305,15 @@ mod writer_pacing_tests {
             batch_size: 2_048,
             is_qos: false,
             compression: false,
-            tx_queue: TxQueueConf::of_policy(&policy),
+            tx_queue: TxQueueConf::of_snapshot(
+                &policy,
+                &wz_session_core::limits::SessionLimits::BUILD,
+            ),
             link_rx: LinkRxConf::default(),
             join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
             max_sessions: None,
             policy,
+            limits: wz_session_core::limits::SessionLimits::BUILD,
         }
     }
 
@@ -1363,12 +1367,16 @@ mod tests {
                 sizes: [1; Priority::NUM],
                 wait_before_drop_us: 1_000,
                 wait_before_close_us: CLOSE_WAIT.as_micros() as u64,
-                ..TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults())
+                ..TxQueueConf::of_snapshot(
+                    &wz_session_core::policy::SessionPolicy::defaults(),
+                    &wz_session_core::limits::SessionLimits::BUILD,
+                )
             },
             link_rx: LinkRxConf::default(),
             join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
             max_sessions: None,
             policy: wz_session_core::policy::SessionPolicy::defaults(),
+            limits: wz_session_core::limits::SessionLimits::BUILD,
         }
     }
 
@@ -1549,7 +1557,10 @@ mod tests {
         let mut asked = Vec::new();
 
         // Answered as congested, so a push that asked would end here too and show in `asked`.
-        let mut pico = TxQueueConf::pico_of_policy(&SessionPolicy::defaults());
+        let mut pico = TxQueueConf::pico_of_snapshot(
+            &SessionPolicy::defaults(),
+            &wz_session_core::limits::SessionLimits::BUILD,
+        );
         let taken = droppable_stage(&stage, &sender, &mut pico, |wait| {
             asked.push(wait);
             RoomAnswer::at_once(LinkRoom::Congested)
@@ -1562,7 +1573,10 @@ mod tests {
 
         let mut zenoh = TxQueueConf {
             wait_before_drop_us: 1_000,
-            ..TxQueueConf::of_policy(&SessionPolicy::defaults())
+            ..TxQueueConf::of_snapshot(
+                &SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD,
+            )
         };
         let taken = droppable_stage(&stage, &sender, &mut zenoh, |wait| {
             asked.push(wait);
@@ -1609,7 +1623,10 @@ mod tests {
         });
         let started = Instant::now();
         let mut asked = 0usize;
-        let mut pico = TxQueueConf::pico_of_policy(&SessionPolicy::defaults());
+        let mut pico = TxQueueConf::pico_of_snapshot(
+            &SessionPolicy::defaults(),
+            &wz_session_core::limits::SessionLimits::BUILD,
+        );
         let taken = droppable_stage(&stage, &not_a_push, &mut pico, |_| {
             asked += 1;
             RoomAnswer::at_once(LinkRoom::Congested)
@@ -1641,7 +1658,10 @@ mod tests {
             // `fill` pushes droppable messages until one finds no room, each within this wait.
             wait_before_drop_us: 1_000,
             wait_before_close_us: CLOSE_WAIT.as_micros() as u64,
-            ..TxQueueConf::pico_of_policy(&SessionPolicy::defaults())
+            ..TxQueueConf::pico_of_snapshot(
+                &SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD,
+            )
         };
         let (producer, tap) = MulticastTxTap::attach(&pico);
         fill(&producer, Priority::DEFAULT);

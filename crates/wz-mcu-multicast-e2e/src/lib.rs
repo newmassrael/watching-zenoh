@@ -436,6 +436,8 @@ pub fn run_multicast_e2e_with_progress<C: ClockSource, S: FnMut(MulticastStage)>
 /// (and matches it on both sides so `validate_join` admits the peer).
 #[cfg(any(feature = "heap", feature = "fixed-memory"))]
 fn params(zid: &[u8], policy: &SessionPolicy) -> MulticastParams {
+    // The e2e reads no run-time document, so it resolves no limits: the build's are its group's.
+    let limits = wz_session_core::limits::SessionLimits::BUILD;
     MulticastParams {
         whatami: WhatAmI::Peer,
         zid: wz_session_core::multicast_params::zid_vec(zid),
@@ -446,11 +448,12 @@ fn params(zid: &[u8], policy: &SessionPolicy) -> MulticastParams {
         batch_size: 2_048,
         is_qos: false,
         compression: false,
-        tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(policy),
+        tx_queue: wz_session_core::session_init_params::TxQueueConf::of_snapshot(policy, &limits),
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
         max_sessions: None,
         policy: *policy,
+        limits,
     }
 }
 

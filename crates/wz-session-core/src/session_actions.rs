@@ -10024,12 +10024,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let outcome = TxExpiry::of(&self.params.tx_queue);
         match outcome {
             TxExpiry::Closing => self.request_congestion_close(),
-            // The link has stayed blocked for `TX_EXPIRY_CLOSE_AFTER` messages in a row: the
-            // session is not kept any more. The message that completes the run is still
-            // dropped and still reported, because it was: the sender is told the transport was
-            // not available, and the close is the drive loop's, as upstream's is.
+            // The link has stayed blocked for `TX_EXPIRY_CLOSE_AFTER` messages in a row, as the
+            // session's snapshot holds it: the session is not kept any more. The message that
+            // completes the run is still dropped and still reported, because it was: the sender
+            // is told the transport was not available, and the close is the drive loop's, as
+            // upstream's is.
             TxExpiry::Kept => {
-                let close_after = self.params.tx_queue.expiry_close_after;
+                let close_after = self.params.limits.tx_expiry_close_after();
                 if self
                     .core
                     .out_of_band
@@ -10590,8 +10591,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let wire_reliability = Reliability::from_reliable_bool(reliable);
         let count_pushed = || {
             // A message with room ends a run of expiries (`TX_EXPIRY_CLOSE_AFTER`); with no
-            // count stated there is no run to end.
-            if self.params.tx_queue.expiry_close_after != 0 {
+            // bound there is no run to end.
+            if !self.params.limits.tx_expiry_close_after().is_unbounded() {
                 self.core.out_of_band.take(|s| s.expiry_run.pushed());
             }
             #[cfg(feature = "transport-stats")]
@@ -16521,17 +16522,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// When the no-progress watch of the peer's initial declarations ends this session's link
     /// ([`crate::declaration_sync::stall_deadline`]), on the clock of the lease: a
-    /// `DECLARATION_SYNC_RX_NO_PROGRESS_MS` stretch after the later of the establishment and the
-    /// peer's last declaration, while `reliable-gap-reconnect` reacts and the peer's final has not
-    /// arrived. `None` before the establishment, while no engine notes the session's events, and
-    /// whenever the watch is off.
+    /// `DECLARATION_SYNC_RX_NO_PROGRESS_MS` stretch, as the session's snapshot holds it, after the
+    /// later of the establishment and the peer's last declaration, while `reliable-gap-reconnect`
+    /// reacts and the peer's final has not arrived. `None` before the establishment, while no
+    /// engine notes the session's events, and whenever the watch is off.
     #[cfg(feature = "alloc")]
     pub fn declaration_watch_deadline(&self) -> Option<u64> {
-        self.declaration_watch_deadline_for(crate::caps::DECLARATION_SYNC_RX_NO_PROGRESS_MS as u64)
+        self.declaration_watch_deadline_for(
+            self.params.limits.declaration_sync_rx_no_progress_ms() as u64
+        )
     }
 
     /// [`Self::declaration_watch_deadline`] for a window of `window_ms`, the form a test names
-    /// a window to where the build fixes one.
+    /// a window to where the snapshot holds another.
     #[cfg(feature = "alloc")]
     pub fn declaration_watch_deadline_for(&self, window_ms: u64) -> Option<u64> {
         let progress = self
@@ -16639,8 +16642,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// Whether this session's declarations are SYNCED with its peer: no paced replay owes the peer
     /// a declaration, and every interest the node sent that asks for what exists now has been
-    /// answered with a final, or has waited `DECLARATION_SYNC_FINAL_TIMEOUT_MS` and is given up on.
-    /// A session that sent no interest and runs no replay is synced.
+    /// answered with a final, or has waited `DECLARATION_SYNC_FINAL_TIMEOUT_MS`, as the session's
+    /// snapshot holds it, and is given up on. A session that sent no interest and runs no replay is
+    /// synced.
     ///
     /// The peer's own initial final is not required: a router sends none to a client.
     /// R311g1 — signature-stability: always `true` without `session-reconnect`, which has no
@@ -16656,12 +16660,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         {
             // The two locks are taken one after the other, never together.
             let replaying = R::with_mutex_mut(&self.declaration_cache, |cache| cache.replaying());
+            let timeout_ms = self.params.limits.declaration_sync_final_timeout_ms() as u64;
             !replaying
                 && R::with_mutex_mut(&self.declaration_sync, |sync| {
-                    sync.is_synced(
-                        now_ms,
-                        crate::caps::DECLARATION_SYNC_FINAL_TIMEOUT_MS as u64,
-                    )
+                    sync.is_synced(now_ms, timeout_ms)
                 })
         }
         #[cfg(not(feature = "session-reconnect"))]

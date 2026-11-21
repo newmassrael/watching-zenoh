@@ -112,8 +112,9 @@ fn init_params(whatami: WhatAmI) -> SessionInitParams {
         keep_alive: wz_runtime_tokio::session_glue::KeepAliveConf::default(),
         initial_sn: 0,
         cookie: Vec::new(),
-        tx_queue: wz_runtime_tokio::session_glue::TxQueueConf::of_policy(
+        tx_queue: wz_runtime_tokio::session_glue::TxQueueConf::of_snapshot(
             &wz_session_core::policy::SessionPolicy::defaults(),
+            &wz_session_core::limits::SessionLimits::BUILD,
         ),
         link_rx: wz_runtime_tokio::session_glue::LinkRxConf::default(),
         policy: wz_session_core::policy::SessionPolicy::defaults(),

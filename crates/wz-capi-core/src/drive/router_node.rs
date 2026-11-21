@@ -516,6 +516,7 @@ async fn join_group(
         link_conf.tx.queue,
         link_conf.rx,
         &link_conf.policy,
+        &link_conf.limits,
     )
     else {
         log_open_failure(
@@ -559,6 +560,7 @@ async fn join_group(
             join_rule: join.profile.join_rule,
             max_sessions: join.profile.max_sessions,
             policy: link_conf.policy,
+            limits: link_conf.limits,
         },
         opts,
         None,

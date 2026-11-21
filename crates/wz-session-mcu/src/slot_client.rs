@@ -31,6 +31,7 @@ use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::ClockSource;
 use wz_session_core::bounded::{BoundedVec, CapacityFull};
 use wz_session_core::encoding::PACKED_APPLICATION_JSON;
+use wz_session_core::limits::SessionLimits;
 use wz_session_core::link::{BoxedLinkDriver, LinkDropCause};
 use wz_session_core::locality::Locality;
 use wz_session_core::policy::SessionPolicy;
@@ -175,9 +176,9 @@ where
 
     /// State how the declarations of a session go out, for a caller that wants a pace regardless
     /// of the policy (a test, or a node whose image is built for another policy); each session's
-    /// snapshot states it otherwise ([`ReplayPacing::of_policy`]). `Some` sends the burst's worth
-    /// of declarations a turn, and waits at least the interval before the next: the wait is the
-    /// interval or the node's tick, whichever is longer, because the replay moves on a tick.
+    /// snapshots state it otherwise ([`ReplayPacing::of_snapshot`]). `Some` sends the burst's
+    /// worth of declarations a turn, and waits at least the interval before the next: the wait is
+    /// the interval or the node's tick, whichever is longer, because the replay moves on a tick.
     pub fn set_replay_pacing(&mut self, pacing: Option<ReplayPacing>) {
         self.stated_pacing = Some(pacing);
     }
@@ -276,7 +277,11 @@ where
             // A session whose task has ended, with its link or because the pace gave its replay
             // up, is told nothing more while it waits to be let go of.
             if session.actions().is_established() && !session.declared() && !session.is_finished() {
-                let pacing = session_pacing(self.stated_pacing, &session.actions().params.policy);
+                let pacing = session_pacing(
+                    self.stated_pacing,
+                    &session.actions().params.policy,
+                    &session.actions().params.limits,
+                );
                 replay_declarations(session, self.declarations, pacing, now_ms);
             }
         }
@@ -343,12 +348,14 @@ where
 }
 
 /// The pace of one session's replay: the one a caller stated for the node, or else the one the
-/// `declaration-sync-pacing` policy of `policy`, the session's own snapshot, states.
+/// session's own snapshots state, its `declaration-sync-pacing` policy in `policy` and its pace
+/// limits in `limits`.
 fn session_pacing(
     stated: Option<Option<ReplayPacing>>,
     policy: &SessionPolicy,
+    limits: &SessionLimits,
 ) -> Option<ReplayPacing> {
-    stated.unwrap_or_else(|| ReplayPacing::of_policy(policy))
+    stated.unwrap_or_else(|| ReplayPacing::of_snapshot(policy, limits))
 }
 
 /// How many declarations one turn of the replay sends: the pace's burst, or the whole list when the
@@ -606,6 +613,7 @@ mod tests {
     #[test]
     fn a_session_replays_at_the_pace_its_snapshot_states_unless_one_was_stated() {
         use wz_session_core::policy::DeclarationSyncPacing;
+        let limits = SessionLimits::defaults();
         let mut built = 0;
         for on in [false, true] {
             let mut policy = SessionPolicy::defaults();
@@ -616,17 +624,43 @@ mod tests {
                 // The build's domain leaves this value out: no creator can hand it.
                 continue;
             }
-            assert_eq!(session_pacing(None, &policy).is_some(), on, "{on}");
+            assert_eq!(session_pacing(None, &policy, &limits).is_some(), on, "{on}");
             assert_eq!(
-                session_pacing(None, &policy),
-                ReplayPacing::of_policy(&policy)
+                session_pacing(None, &policy, &limits),
+                ReplayPacing::of_snapshot(&policy, &limits)
             );
             let stated = ReplayPacing::new(3, 10);
-            assert_eq!(session_pacing(Some(stated), &policy), stated);
-            assert_eq!(session_pacing(Some(None), &policy), None);
+            assert_eq!(session_pacing(Some(stated), &policy, &limits), stated);
+            assert_eq!(session_pacing(Some(None), &policy, &limits), None);
             built += 1;
         }
         assert!(built >= 1, "the build's domain holds at least its default");
+    }
+
+    /// A paced session replays at the pace limits its own snapshot states: a burst and an interval
+    /// stated there are the pace's, not the build's, unless a caller stated a pace for the node.
+    #[test]
+    fn a_session_replays_at_the_pace_limits_its_snapshot_states() {
+        use wz_session_core::policy::DeclarationSyncPacing;
+        let mut policy = SessionPolicy::defaults();
+        if policy
+            .select_declaration_sync_pacing(DeclarationSyncPacing::On)
+            .is_err()
+        {
+            // The build keeps pacing off: no snapshot paces a replay.
+            return;
+        }
+        let mut limits = SessionLimits::defaults();
+        if limits.select_declaration_sync_burst_messages(3).is_err()
+            || limits.select_declaration_sync_interval_ms(25).is_err()
+        {
+            // A build of one value refuses another: there is no other snapshot to hand.
+            return;
+        }
+        let pace = session_pacing(None, &policy, &limits).expect("the policy paces the replay");
+        assert_eq!((pace.burst(), pace.interval_ms()), (3, 25));
+        let stated = ReplayPacing::new(5, 10);
+        assert_eq!(session_pacing(Some(stated), &policy, &limits), stated);
     }
 
     #[test]

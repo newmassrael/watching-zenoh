@@ -1130,7 +1130,10 @@ mod tests {
                     wait_before_drop_us: DROP_WAIT_US,
                     wait_before_close_us: CLOSE_WAIT_US,
                     batching: false,
-                    ..TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults())
+                    ..TxQueueConf::of_snapshot(
+                        &wz_session_core::policy::SessionPolicy::defaults(),
+                        &wz_session_core::limits::SessionLimits::BUILD,
+                    )
                 },
                 link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
                 policy: wz_session_core::policy::SessionPolicy::defaults(),
