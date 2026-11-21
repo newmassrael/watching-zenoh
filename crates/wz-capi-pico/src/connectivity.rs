@@ -69,17 +69,20 @@
 //! calling thread, and a peer that arrives meanwhile is QUEUED and delivered
 //! after the replay rather than interleaved with it or dropped.
 
-use std::collections::VecDeque;
-use std::ffi::{c_int, c_void};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use alloc::collections::VecDeque;
+use alloc::sync::Arc;
+use core::ffi::{c_int, c_void};
+
+use wz_capi_port::os::{Mutex, MutexGuard};
 
 use wz_capi_port::listeners::ListenerSet;
 use wz_session_core::face::{FaceEventKind, FaceSnapshot, LinkSnapshot};
 
 use crate::abi::z_owned_string_t;
 use crate::bytes::store_owned_string;
-use crate::ffi::{guarded, CClosure};
+use crate::ffi::{catch, guarded, CClosure};
 use crate::link_properties::pico_link_properties;
+use crate::prelude::*;
 use crate::pubsub::{
     z_closure_drop_callback_t, z_sample_kind_t, Z_SAMPLE_KIND_DELETE, Z_SAMPLE_KIND_PUT,
 };
@@ -137,7 +140,7 @@ unsafe impl Send for ConnText {}
 impl ConnText {
     const NULL: Self = Self {
         len: 0,
-        start: std::ptr::null(),
+        start: core::ptr::null(),
         _deleter: 0,
         _context: 0,
     };
@@ -162,7 +165,7 @@ impl ConnText {
             &[]
         } else {
             // SAFETY: a non-null start owns `len` bytes (see `new`).
-            unsafe { std::slice::from_raw_parts(self.start, self.len) }
+            unsafe { core::slice::from_raw_parts(self.start, self.len) }
         }
     }
 
@@ -181,7 +184,7 @@ impl ConnText {
     /// an independent one, a bitwise copy does not.
     unsafe fn release(&mut self) {
         if !self.start.is_null() {
-            drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+            drop(Box::from_raw(core::ptr::slice_from_raw_parts_mut(
                 self.start as *mut u8,
                 self.len,
             )));
@@ -531,7 +534,7 @@ struct Delivery<E: ConnValue + Send> {
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+    mutex.lock()
 }
 
 impl<E: ConnValue + Send> Delivery<E> {
@@ -569,9 +572,7 @@ impl<E: ConnValue + Send> Delivery<E> {
                     // A panic unwinding out of the C callback across this
                     // `extern "C"` boundary is UB and would tear down the drive
                     // thread.
-                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-                        call(&mut event as *mut E, context)
-                    }));
+                    let _ = catch(|| unsafe { call(&mut event as *mut E, context) });
                 }
             }
         }
@@ -823,7 +824,7 @@ macro_rules! closure_family {
         impl $owned {
             fn null_value() -> Self {
                 Self {
-                    context: std::ptr::null_mut(),
+                    context: core::ptr::null_mut(),
                     call: None,
                     drop: None,
                 }
@@ -866,7 +867,7 @@ macro_rules! closure_family {
             if closure.is_null() {
                 return;
             }
-            let taken = std::mem::replace(&mut (*closure)._this, $owned::null_value());
+            let taken = core::mem::replace(&mut (*closure)._this, $owned::null_value());
             if let Some(dropfn) = taken.drop {
                 dropfn(taken.context);
             }
@@ -890,7 +891,7 @@ macro_rules! closure_family {
             if closure.is_null() || src.is_null() {
                 return;
             }
-            *closure = std::mem::replace(&mut (*src)._this, $owned::null_value());
+            *closure = core::mem::replace(&mut (*src)._this, $owned::null_value());
         }
 
         /// Whether a closure carries a callback.
@@ -983,7 +984,7 @@ macro_rules! value_family {
         #[no_mangle]
         pub unsafe extern "C" fn $null(obj: *mut $owned) {
             if !obj.is_null() {
-                std::ptr::write(&mut (*obj)._val, <$val as ConnValue>::null());
+                core::ptr::write(&mut (*obj)._val, <$val as ConnValue>::null());
             }
         }
 
@@ -997,7 +998,7 @@ macro_rules! value_family {
         #[no_mangle]
         pub unsafe extern "C" fn $loan(obj: *const $owned) -> *const $loaned {
             if obj.is_null() {
-                return std::ptr::null();
+                return core::ptr::null();
             }
             &(*obj)._val as *const $val as *const $loaned
         }
@@ -1006,7 +1007,7 @@ macro_rules! value_family {
         #[no_mangle]
         pub unsafe extern "C" fn $loan_mut(obj: *mut $owned) -> *mut $loaned {
             if obj.is_null() {
-                return std::ptr::null_mut();
+                return core::ptr::null_mut();
             }
             &mut (*obj)._val as *mut $val as *mut $loaned
         }
@@ -1023,8 +1024,8 @@ macro_rules! value_family {
             if obj.is_null() || src.is_null() {
                 return;
             }
-            std::ptr::write(&mut (*obj)._val, <$val as ConnValue>::null());
-            std::mem::swap(&mut (*obj)._val, &mut (*src)._this._val);
+            core::ptr::write(&mut (*obj)._val, <$val as ConnValue>::null());
+            core::mem::swap(&mut (*obj)._val, &mut (*src)._this._val);
         }
 
         /// Move a loaned value into an owned one, nulling the source.
@@ -1034,8 +1035,8 @@ macro_rules! value_family {
                 return Z_ERR_NULL;
             }
             let src = &mut *(src as *mut $val);
-            std::ptr::write(&mut (*obj)._val, <$val as ConnValue>::null());
-            std::mem::swap(&mut (*obj)._val, src);
+            core::ptr::write(&mut (*obj)._val, <$val as ConnValue>::null());
+            core::mem::swap(&mut (*obj)._val, src);
             Z_OK
         }
 
@@ -1045,7 +1046,7 @@ macro_rules! value_family {
             if obj.is_null() || src.is_null() {
                 return Z_ERR_NULL;
             }
-            std::ptr::write(
+            core::ptr::write(
                 &mut (*obj)._val,
                 <$val as ConnValue>::duplicate(&*(src as *const $val)),
             );
@@ -1284,7 +1285,7 @@ pub unsafe extern "C" fn z_transport_event_transport(
     event: *const z_loaned_transport_event_t,
 ) -> *const z_loaned_transport_t {
     if event.is_null() {
-        return std::ptr::null();
+        return core::ptr::null();
     }
     &(*event).transport
 }
@@ -1296,7 +1297,7 @@ pub unsafe extern "C" fn z_transport_event_transport_mut(
     event: *mut z_loaned_transport_event_t,
 ) -> *mut z_loaned_transport_t {
     if event.is_null() {
-        return std::ptr::null_mut();
+        return core::ptr::null_mut();
     }
     &mut (*event).transport
 }
@@ -1316,7 +1317,7 @@ pub unsafe extern "C" fn z_link_event_link(
     event: *const z_loaned_link_event_t,
 ) -> *const z_loaned_link_t {
     if event.is_null() {
-        return std::ptr::null();
+        return core::ptr::null();
     }
     &(*event).link
 }
@@ -1327,7 +1328,7 @@ pub unsafe extern "C" fn z_link_event_link_mut(
     event: *mut z_loaned_link_event_t,
 ) -> *mut z_loaned_link_t {
     if event.is_null() {
-        return std::ptr::null_mut();
+        return core::ptr::null_mut();
     }
     &mut (*event).link
 }
@@ -1385,7 +1386,7 @@ pub struct z_info_links_options_t {
 #[no_mangle]
 pub unsafe extern "C" fn z_info_links_options_default(options: *mut z_info_links_options_t) {
     if !options.is_null() {
-        (*options).transport = std::ptr::null_mut();
+        (*options).transport = core::ptr::null_mut();
     }
 }
 
@@ -1425,7 +1426,7 @@ pub unsafe extern "C" fn z_info_links(
             |c| c._this = z_owned_closure_link_t::null_value(),
         );
         let transport = if options.is_null() {
-            std::ptr::null_mut()
+            core::ptr::null_mut()
         } else {
             (*options).transport
         };
@@ -1493,7 +1494,7 @@ pub unsafe extern "C" fn z_link_events_listener_options_default(
 ) {
     if !options.is_null() {
         (*options).history = false;
-        (*options).transport = std::ptr::null_mut();
+        (*options).transport = core::ptr::null_mut();
     }
 }
 
@@ -1552,15 +1553,15 @@ macro_rules! listener_family {
         impl $owned {
             fn null_value() -> Self {
                 Self {
-                    handle: std::ptr::null_mut(),
-                    _pad: [std::ptr::null_mut(); 4],
+                    handle: core::ptr::null_mut(),
+                    _pad: [core::ptr::null_mut(); 4],
                 }
             }
 
             fn of(handle: Box<ListenerHandle>) -> Self {
                 Self {
                     handle: Box::into_raw(handle).cast(),
-                    _pad: [std::ptr::null_mut(); 4],
+                    _pad: [core::ptr::null_mut(); 4],
                 }
             }
         }
@@ -1603,7 +1604,7 @@ macro_rules! listener_family {
             if listener.is_null() || src.is_null() {
                 return;
             }
-            *listener = std::mem::replace(&mut (*src)._this, $owned::null_value());
+            *listener = core::mem::replace(&mut (*src)._this, $owned::null_value());
         }
     };
 }
@@ -1633,7 +1634,7 @@ unsafe fn release_listener(handle: &mut *mut c_void) -> ZResult {
         return Z_OK;
     }
     let boxed = Box::from_raw((*handle).cast::<ListenerHandle>());
-    *handle = std::ptr::null_mut();
+    *handle = core::ptr::null_mut();
     boxed.undeclare();
     Z_OK
 }
@@ -1745,7 +1746,7 @@ pub unsafe extern "C" fn z_declare_link_events_listener(
             |c| c._this = z_owned_closure_link_event_t::null_value(),
         );
         let (history, transport) = if options.is_null() {
-            (false, std::ptr::null_mut())
+            (false, core::ptr::null_mut())
         } else {
             ((*options).history, (*options).transport)
         };
@@ -2294,7 +2295,7 @@ mod tests {
             };
             assert!(z_internal_link_check(&original));
 
-            let mut copy = std::mem::MaybeUninit::<z_owned_link_t>::uninit();
+            let mut copy = core::mem::MaybeUninit::<z_owned_link_t>::uninit();
             assert_eq!(
                 z_link_clone(copy.as_mut_ptr(), z_link_loan(&original)),
                 Z_OK
@@ -2314,7 +2315,7 @@ mod tests {
             let mut text = z_owned_string_t::null_value();
             assert_eq!(z_link_src(z_link_loan(&copy), &mut text), Z_OK);
             assert_eq!(
-                std::slice::from_raw_parts(
+                core::slice::from_raw_parts(
                     crate::bytes::z_string_data(crate::bytes::z_string_loan(&text)) as *const u8,
                     crate::bytes::z_string_len(crate::bytes::z_string_loan(&text)),
                 ),
@@ -2323,7 +2324,7 @@ mod tests {
             crate::bytes::z_string_drop(crate::bytes::z_string_move(&mut text));
 
             // take_from_loaned moves: the destination holds it, the source is null.
-            let mut moved = std::mem::MaybeUninit::<z_owned_link_t>::uninit();
+            let mut moved = core::mem::MaybeUninit::<z_owned_link_t>::uninit();
             assert_eq!(
                 z_link_take_from_loaned(moved.as_mut_ptr(), z_link_loan_mut(&mut copy)),
                 Z_OK
@@ -2410,7 +2411,7 @@ mod tests {
         unsafe {
             let log = log();
             let mut closure = z_owned_closure_link_event_t {
-                context: std::ptr::null_mut(),
+                context: core::ptr::null_mut(),
                 call: None,
                 drop: None,
             };
@@ -2420,7 +2421,7 @@ mod tests {
             );
             assert!(z_internal_closure_link_event_check(&closure));
 
-            let mut taken = std::mem::MaybeUninit::<z_owned_closure_link_event_t>::uninit();
+            let mut taken = core::mem::MaybeUninit::<z_owned_closure_link_event_t>::uninit();
             z_internal_closure_link_event_null(taken.as_mut_ptr());
             z_closure_link_event_take(taken.as_mut_ptr(), z_closure_link_event_move(&mut closure));
             assert!(

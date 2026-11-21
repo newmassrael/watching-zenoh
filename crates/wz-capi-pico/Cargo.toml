@@ -542,8 +542,9 @@ unstable-api = ["wz-capi-core?/unstable-api"]
 config-document = ["wz-capi-core?/config-document"]
 # `connectivity` (`Z_FEATURE_CONNECTIVITY`): the transport and link snapshots and the event
 # listeners of pico's connectivity plane. Upstream declares it only with the unstable API. Both
-# engines report their faces through the port, so it selects neither.
-connectivity = ["std", "unstable-api", "wz-capi-core?/connectivity", "wz-capi-coop?/connectivity"]
+# engines report their faces through the port, so it selects neither. Its doors are `core` and
+# `alloc` over the port's lock, so it selects no `std`.
+connectivity = ["unstable-api", "wz-capi-core?/connectivity", "wz-capi-coop?/connectivity"]
 # `gossip`: a session that is told of a node by one it holds a link to dials it (see the
 # runtime's feature of the same name). Pico itself has no such plane.
 gossip = ["engine-tokio", "peer", "wz-capi-core/gossip"]
