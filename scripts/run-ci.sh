@@ -2553,6 +2553,12 @@ layer_c0_test_discipline() {
     # The ceiling of the kit images under zenoh-pico's (docs/upstream-parity.md D8): the pairs read off
     # the matrix, the stack reader and the rule, over synthetic outputs. The ELF half is Layer Qzk's.
     _runci_leg pico_ceiling_gate.selftest -- python3 scripts/lib/pico_ceiling_gate.py --selftest
+    # The gate of the pico ABI performance matrix (docs/pico-perf-matrix.md section 5, upstream-parity D10):
+    # its reading and its rules over synthetic runs, and the committed table of W over P held to the rows of
+    # the default matrix, so a cell cannot join or leave it unseen. The runs it judges are a quiet host's
+    # (`scripts/pico-compare.sh perf` judges each of its own); no hosted runner pins two sides of four CPUs.
+    _runci_leg perf_matrix.selftest -- python3 scripts/host-bench/perf_matrix.py --selftest
+    _runci_leg perf_matrix.table --after perf_matrix.selftest -- python3 scripts/host-bench/perf_matrix.py --check-table deploy/pico_perf_ceiling.json
     # R3449 -- the resource budget (a committed figure per image): each image whose worst chain
     # the stack gate commits has a row of figures the kit measured, the row copies that chain, and a
     # measured peak lies under it. No hardware here; `--measure` is the kit lane's.

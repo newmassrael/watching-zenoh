@@ -37,7 +37,11 @@
 #                                             against zenoh-pico built as the same build (the capability cost
 #                                             gate's reference); run by scripts/host-bench/perf_matrix.py, left
 #                                             under target/pico-compare/perf-runs/host-<time>/ (perf.json,
-#                                             report.txt, cells.jsonl)
+#                                             report.txt, cells.jsonl), and judged by its gate against
+#                                             deploy/pico_perf_ceiling.json. With WZ_PERF_EXTERNAL_LIB and
+#                                             WZ_PERF_EXTERNAL_INCLUDE set, a third arm: the same program
+#                                             against that external library of the pico API, judged against
+#                                             the table WZ_PERF_EXTERNAL_TABLE names outside the repository
 #
 # Both sides of every pair are built from the SAME example source: once against the vendored zenoh-pico
 # library and once against `libwz_capi_pico`, in place of it. A number printed here is therefore the
@@ -547,6 +551,49 @@ perf_fail() {
     exit 2
 }
 
+# perf_external_arm <dir>: arm X, the same program against a library of the pico API this repository does not
+# hold, named by the environment (docs/pico-perf-matrix.md section 1): WZ_PERF_EXTERNAL_LIB the shared library,
+# WZ_PERF_EXTERNAL_INCLUDE its headers with its own zenoh-pico/config.h, WZ_PERF_EXTERNAL_CC_ARGS optional words
+# added to the probe's compile and link, WZ_PERF_EXTERNAL_NAME an optional label. The library is linked where it
+# lies, with its directory as the run path, because its own name may differ from the name it is loaded by. Unset,
+# or a probe that did not build against it, writes a record that says why, and the arm is NOT-MEASURED: the
+# matrix runs P and W, and the gate says so. The record (perf_matrix.py external-record) carries the label and the
+# digests of the library and its config.h into the run's local result file only.
+perf_external_arm() {
+    local dir="$1" lib="${WZ_PERF_EXTERNAL_LIB:-}" inc="${WZ_PERF_EXTERNAL_INCLUDE:-}" why="" lib_dir
+    local cc_args=()
+    rm -f "$dir/bin/perf_probe_X" "$dir/external.json"
+    if [ -z "$lib" ] || [ -z "$inc" ]; then
+        why="WZ_PERF_EXTERNAL_LIB and WZ_PERF_EXTERNAL_INCLUDE are not both set; docs/pico-perf-matrix.md says what they name"
+    elif [ ! -f "$lib" ]; then
+        echo "pico-compare: WZ_PERF_EXTERNAL_LIB=$lib is not a file" >&2
+        exit 2
+    elif [ ! -f "$inc/zenoh-pico.h" ] || [ ! -f "$inc/zenoh-pico/config.h" ]; then
+        echo "pico-compare: WZ_PERF_EXTERNAL_INCLUDE=$inc holds no zenoh-pico.h beside its zenoh-pico/config.h" >&2
+        exit 2
+    else
+        if [ -n "${WZ_PERF_EXTERNAL_CC_ARGS:-}" ]; then
+            read -r -a cc_args <<< "$WZ_PERF_EXTERNAL_CC_ARGS"
+        fi
+        lib_dir="$(cd "$(dirname "$lib")" && pwd)"
+        if ! cc -std=gnu11 -O2 "$root/scripts/host-bench/perf_probe.c" -DZENOH_LINUX -I"$inc" \
+            -o "$dir/bin/perf_probe_X" "$lib" "-Wl,-rpath,$lib_dir" -lpthread ${cc_args[@]+"${cc_args[@]}"} \
+            2>"$dir/build-probe-X.log"; then
+            rm -f "$dir/bin/perf_probe_X"
+            why="perf_probe did not build against the external library (see $dir/build-probe-X.log)"
+        fi
+    fi
+    if [ -n "$why" ]; then
+        echo "pico-compare: arm X NOT-MEASURED, $why"
+        python3 -I "$root/scripts/host-bench/perf_matrix.py" external-record "$dir/external.json" "$why" \
+            || perf_fail "the record of arm X could not be written"
+    else
+        python3 -I "$root/scripts/host-bench/perf_matrix.py" external-record "$dir/external.json" \
+            || perf_fail "the record of arm X could not be written"
+        echo "pico-compare: arm X built against the external library"
+    fi
+}
+
 # perf_wz_arm <dir> <arm> <features>: wz-capi-pico in release for its default features and <features> (a comma
 # list, empty for none), its library copied to <dir>/lib-<arm> and the pico headers of its own arm to
 # <dir>/include-<arm>: the headers its zenoh-pico-sys build installs, with the config.h of the same feature list
@@ -582,11 +629,15 @@ perf_probe_build() {
         || perf_fail "perf_probe against arm $arm did not build (see $dir/build-probe-$arm.log)"
 }
 
-# perf_matrix [reps] [sizes]: build the arms (unless PICO_CMP_NO_BUILD=1) and run the matrix. The cells can be
-# narrowed with PICO_CMP_PERF_TRANSPORTS, PICO_CMP_PERF_BATCHING and PICO_CMP_PERF_WORKLOADS (comma lists of
-# perf_matrix.py's words); the pinning is parity's, PICO_CMP_CLIENT_CPUS and PICO_CMP_SERVER_CPUS.
+# perf_matrix [reps] [sizes]: build the arms (unless PICO_CMP_NO_BUILD=1), run the matrix and judge the run. The
+# cells can be narrowed with PICO_CMP_PERF_TRANSPORTS, PICO_CMP_PERF_BATCHING and PICO_CMP_PERF_WORKLOADS (comma
+# lists of perf_matrix.py's words); the pinning is parity's, PICO_CMP_CLIENT_CPUS and PICO_CMP_SERVER_CPUS. The
+# exit is the gate's (docs/pico-perf-matrix.md section 5): 0 every row held, 1 a row failed, 2 an input refused,
+# 3 nothing failed but a row, or arm X when the environment names it, was not measured; a run that did not
+# finish exits as before, 2 when it measured nothing.
 perf_matrix() {
     local reps="${1:-3}" sizes="${2:-8,64,1024}" dir="$out/perf" run rc
+    local external_args=() gate_args=()
     if [ "${PICO_CMP_NO_BUILD:-0}" != 1 ]; then
         rm -rf "${dir:?}/bin"
         mkdir -p "$dir/bin"
@@ -600,18 +651,31 @@ perf_matrix() {
         perf_probe_build "$dir" P zenohpico
         perf_probe_build "$dir" W wz_capi_pico
         perf_probe_build "$dir" Wapp wz_capi_pico -DPERF_PROGRAM_TRANSPORT -I"$root/crates/wz-capi-core/include"
+        perf_external_arm "$dir"
+    fi
+    if [ -f "$dir/external.json" ]; then
+        external_args=(--external-record "$dir/external.json")
     fi
     run="$out/perf-runs/host-$(date -u +%Y%m%dT%H%M%S)"
     python3 -I "$root/scripts/host-bench/perf_matrix.py" run --bin-dir "$dir/bin" --run "$run" --reps "$reps" \
         --sizes "$sizes" --transports "${PICO_CMP_PERF_TRANSPORTS:-tcp,udp,multicast,program}" \
         --batching "${PICO_CMP_PERF_BATCHING:-off,on}" --workloads "${PICO_CMP_PERF_WORKLOADS:-rtt,thr}" \
         --client-cpus "${PICO_CMP_CLIENT_CPUS:-4-7}" --server-cpus "${PICO_CMP_SERVER_CPUS:-8-11}" \
-        --pings "${PICO_CMP_PINGS:-20000}" --reference-record "$dir/reference.json"
+        --pings "${PICO_CMP_PINGS:-20000}" --reference-record "$dir/reference.json" ${external_args[@]+"${external_args[@]}"}
     rc=$?
     if [ -f "$run/report.txt" ]; then
         cat "$run/report.txt"
     fi
-    return "$rc"
+    if [ "$rc" -ne 0 ]; then
+        return "$rc"
+    fi
+    # The question of a run is W over P, and W over X too when the environment names the external library: with
+    # the library unset the gate still prints that arm X was not measured, and does not count it.
+    if [ -z "${WZ_PERF_EXTERNAL_LIB:-}" ]; then
+        gate_args=(--without-external)
+    fi
+    python3 -I "$root/scripts/host-bench/perf_matrix.py" --gate "$run/perf.json" \
+        --table "$root/deploy/pico_perf_ceiling.json" ${gate_args[@]+"${gate_args[@]}"}
 }
 
 mode="${1:-}"

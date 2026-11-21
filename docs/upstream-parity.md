@@ -38,7 +38,7 @@ cell without a same-condition measurement makes no claim.
   throughput, by hand. Its `perf` mode runs one probe program against `libwz_capi_pico`
   and against zenoh-pico built as the same build, per transport (tcp, udp, multicast, a
   transport the program supplies) and with batching off and on, and writes the result as
-  a file (`docs/pico-perf-matrix.md`). On the MCU, `scripts/kit-lane.sh` runs wz images on the T2G kit and
+  a file (`docs/pico-perf-matrix.md`), which the gate of D9 judges. On the MCU, `scripts/kit-lane.sh` runs wz images on the T2G kit and
   holds each to its own row. The pico image (`deploy/zephyr-pico-compare`) is not in the
   lane. The alternating-boot and wire-turnaround method of the 2026-10-21 to 10-23
   comparisons on the T2G kit was run with scripts that live on the bench host and not in
@@ -436,6 +436,36 @@ derived from the declaration and never chosen by hand:
   7. **Unfilled rows do not land.** A row whose `ratio_at_most` is null fails `--check` with the
      row this run reads. `--measure` prints the rows of every pico case it builds, to paste, and
      so does `--check` after its findings.
+- **D10. The host performance matrix of the pico ABI is a ratchet and a debt loop (owner,
+  2026-11-21).** wz is to be faster than zenoh-pico and than a deployment's own build of a
+  library of the pico API, and gates hold it, not a reading taken now and then. The matrix is
+  `scripts/pico-compare.sh perf` (`docs/pico-perf-matrix.md`); the gate is
+  `scripts/host-bench/perf_matrix.py --gate`, run at the end of every run of it.
+  1. **A row is one figure of one cell, read by D1.** The cost ratio (wz's figure over the
+     reference's when lower is better, the reference's over wz's when higher is better, so
+     below 1 is wz ahead in every row), with its bootstrap 95% interval over the run's
+     repetitions, three at the least of each arm.
+  2. **The ratchet.** A row that is not WIN holds the upper end of the interval it was written
+     from (`ratio_at_most`); a later run fails when its upper end exceeds that by more than
+     the table's stated tolerance. A reading under it is written as the new value, so the row
+     only tightens.
+  3. **The lock.** A row that reads WIN is locked (`locked`), and a locked row fails anything
+     but WIN, with no tolerance.
+  4. **The debt loop.** Every row that is not WIN is a debt in the sense of D5, paid largest
+     ratio first; the gate prints them in that order after every run. A repetition wz lost on
+     its own fails its rows; a cell the reference lost every repetition of is a row that says
+     so, and fails once the reference measures it again.
+  5. **The population.** A cell with no row fails, and a null row fails with the row the run
+     writes, so no cell joins the matrix unjudged. The committed table's rows are exactly the
+     default matrix's, held in Layer C0 with the gate's selftest.
+  6. **Two pairs, one mechanism.** W over P is committed (`deploy/pico_perf_ceiling.json`). W
+     over X, the external library, is measured when the environment names that library, and
+     judged against a table the environment names outside the repository, because its figures
+     are the deployment's: the repository holds the mechanism and no name, path or figure of
+     the deployment. A run without it is NOT-MEASURED for W over X, never a pass of it.
+  7. **Where it runs.** On a quiet host, by the run itself. It is not a hosted lane: a hosted
+     runner cannot pin the matrix's two sides on cores of their own, and a ratchet read on a
+     noisy runner would fail on its neighbours rather than on wz.
 
 ## 5. Steps
 
