@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""R4582 (no register item) -- a crate built on the cooperative runtime enters a critical section
+"""R4583 (no register item) -- a crate built on the cooperative runtime enters a critical section
 only through the runtime's door.
 
 The round cited is main's at the hosted runs the defect below was read from; no register item
