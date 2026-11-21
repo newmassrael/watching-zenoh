@@ -4180,6 +4180,12 @@ mod tokio_engine {
                 publication.key
             )
             .into(),
+            FanoutError::LocalNoRoom => zerror!(
+                "the publication on {} reached none of the session's own subscribers: one of \
+                 them, whose callback was running, had no room left to wait in",
+                publication.key
+            )
+            .into(),
         }
     }
 

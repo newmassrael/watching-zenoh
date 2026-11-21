@@ -351,6 +351,10 @@ pub(crate) struct SampleLane {
     handing: bool,
     /// What is offered now is a record a link's gate let through ([`Self::offering_gated`]).
     gated: bool,
+    /// The subscribers the samples offered now are for, noted instead of queued
+    /// ([`Self::capture`]).
+    #[cfg(feature = "local-subscriber")]
+    capturing: Option<BoundedVec<SubId, { caps::MAX_SUBSCRIPTIONS }, Static>>,
     counts: LaneCounts,
 }
 
@@ -378,6 +382,8 @@ impl SampleLane {
             open: None,
             handing: false,
             gated: false,
+            #[cfg(feature = "local-subscriber")]
+            capturing: None,
             counts: LaneCounts::default(),
         }
     }
@@ -386,26 +392,42 @@ impl SampleLane {
     /// for it. The sample the lane holds open, offered again for a subscriber it is not for yet,
     /// is not written again: the subscriber's id joins the ones that follow it.
     pub(crate) fn offer(&mut self, subscriber: SubId, sample: &dyn SampleView) {
+        #[cfg(feature = "local-subscriber")]
+        if let Some(found) = &mut self.capturing {
+            let kept = found.push(subscriber);
+            debug_assert!(
+                kept.is_ok(),
+                "a session's subscribers fit the table of them"
+            );
+            return;
+        }
         let (record, parts) = Record::of(sample);
         let same =
             |event: &Event| matches!(event, Event::Sample { record: held, .. } if *held == record);
         if self.join_open(subscriber, &parts, same, record.holds_sender()) {
             return;
         }
+        self.open_sample(&[subscriber], record, &parts);
+    }
+
+    /// Write a sample of `record` and `parts` for `subscribers` and hold it open, the one held
+    /// open before published; or count it, for each of them, when the lane has no room for it.
+    fn open_sample(&mut self, subscribers: &[SubId], record: Record, parts: &[&[u8]; 5]) {
         self.seal();
-        let Some(bytes) = parts
+        let ids = subscribers.len().saturating_mul(SUBSCRIBER_ID_BYTES);
+        let bytes = parts
             .iter()
-            .try_fold(SUBSCRIBER_ID_BYTES, |sum, part| sum.checked_add(part.len()))
-        else {
-            self.refuse(&record);
-            return;
+            .try_fold(ids, |sum, part| sum.checked_add(part.len()));
+        let reservation = match bytes {
+            Some(bytes) if self.lane.admits_callbacks(subscribers.len()) => {
+                self.lane.reserve(bytes).ok()
+            }
+            _ => None,
         };
-        if !self.lane.admits_callbacks(1) {
-            self.refuse(&record);
-            return;
-        }
-        let Ok(reservation) = self.lane.reserve(bytes) else {
-            self.refuse(&record);
+        let Some(reservation) = reservation else {
+            for _ in subscribers {
+                self.refuse(&record);
+            }
             return;
         };
         let mut at = reservation.offset();
@@ -413,12 +435,55 @@ impl SampleLane {
             self.put(at, part);
             at += part.len();
         }
-        self.put(at, &subscriber.to_ne_bytes());
+        for subscriber in subscribers {
+            self.put(at, &subscriber.to_ne_bytes());
+            at += SUBSCRIBER_ID_BYTES;
+        }
         self.records[reservation.index()] = Some(Event::Sample {
             record,
-            subscribers: 1,
+            subscribers: subscribers.len(),
         });
         self.open = Some(reservation);
+    }
+
+    /// Note, instead of queueing, the subscribers the samples offered from here on are for, until
+    /// [`Self::captured`]: how the session's own put learns which of its subscribers it reaches,
+    /// to hand it to them itself.
+    #[cfg(feature = "local-subscriber")]
+    pub(crate) fn capture(&mut self) {
+        self.capturing = Some(BoundedVec::new_static());
+    }
+
+    /// The subscribers noted since [`Self::capture`], in the order the session reached them; the
+    /// lane queues what is offered again.
+    #[cfg(feature = "local-subscriber")]
+    pub(crate) fn captured(&mut self) -> BoundedVec<SubId, { caps::MAX_SUBSCRIPTIONS }, Static> {
+        self.capturing.take().unwrap_or_else(BoundedVec::new_static)
+    }
+
+    /// Whether the lane has room now for `sample` written once for `subscribers` subscribers.
+    #[cfg(feature = "local-subscriber")]
+    pub(crate) fn takes_sample(&self, sample: &dyn SampleView, subscribers: usize) -> bool {
+        let (_, parts) = Record::of(sample);
+        let ids = subscribers.saturating_mul(SUBSCRIBER_ID_BYTES);
+        let bytes = parts
+            .iter()
+            .fold(ids, |sum, part| sum.saturating_add(part.len()));
+        self.lane.can_ever_fit(bytes)
+            && self.takes_a_read(ReadRoom {
+                bytes,
+                callbacks: subscribers,
+            })
+    }
+
+    /// Queue `sample` once for `subscribers`, published at once: what the session's own put
+    /// leaves for the subscribers whose callbacks are running on its thread, having found the room
+    /// first ([`Self::takes_sample`]).
+    #[cfg(feature = "local-subscriber")]
+    pub(crate) fn offer_to(&mut self, subscribers: &[SubId], sample: &dyn SampleView) {
+        let (record, parts) = Record::of(sample);
+        self.open_sample(subscribers, record, &parts);
+        self.seal();
     }
 
     /// Add `subscriber` to the event held open when `same` says it is the one offered, `parts`

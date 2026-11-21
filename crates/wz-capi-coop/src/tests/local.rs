@@ -9,13 +9,13 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use wz_capi_port::{FilterPlane, FilteredPut, SessionEngine, SubId, WireKey};
+use wz_capi_port::{FanoutError, FilterPlane, FilteredPut, SessionEngine, SubId, WireKey};
 use wz_session_core::declare_form::InterestForm;
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::PublishOptions;
 use wz_session_core::sink::SampleView;
 
-use super::{open, until, CatchAll, Engine, Router};
+use super::{config, open, open_with, until, CatchAll, Engine, Router};
 
 /// A subscriber that counts what it is handed.
 fn subscribe(engine: &Engine, key: &str, origin: Locality) -> (SubId, Arc<AtomicUsize>) {
@@ -220,17 +220,83 @@ fn a_filter_and_a_listener_count_the_sessions_own_subscribers_when_asked() {
     assert!(engine.write_filter_active(counting_filter));
 }
 
-/// A put reaches each of the session's own subscribers once, the sample written once for all of
-/// them; a put one of their callbacks makes from inside itself reaches each of them once too,
-/// after the sample whose callback made it and not inside that callback.
+/// A put reaches each of the session's own subscribers once, inside the call. A put one of their
+/// callbacks makes from inside itself reaches each of them once too: the others inside that
+/// callback, as zenoh-pico's recursion does, and the subscriber whose callback made it once that
+/// callback has returned, where pico would call it again from inside itself.
 #[test]
-fn a_put_made_inside_a_callback_reaches_each_subscriber_once_after_it() {
+fn a_put_made_inside_a_callback_reaches_each_subscriber_once() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     let handed = Arc::new(Mutex::new(Vec::<(usize, Vec<u8>)>::new()));
-    let session = Arc::downgrade(&engine);
+    let inner = Arc::new(Mutex::new(None));
+    subscribe_putting(&engine, &handed, &inner, 0);
+
+    put_own(&engine, "demo/l/fan", b"outer").expect("the publish is accepted");
+    let outer = b"outer".to_vec();
+    let nested = b"inner".to_vec();
+    assert_eq!(
+        *inner.lock().unwrap(),
+        Some(Ok(3)),
+        "the inner put reached all three"
+    );
+    assert_eq!(
+        *handed.lock().unwrap(),
+        [
+            (0, outer.clone()),
+            (1, nested.clone()),
+            (2, nested.clone()),
+            (1, outer.clone()),
+            (2, outer),
+            (0, nested)
+        ],
+        "each subscriber once for each put; the one whose callback put, after it returned"
+    );
+}
+
+/// A put made inside a subscriber's callback that reaches that subscriber, and that the delivery
+/// lane cannot hold for it until its callback returns, is refused with nothing handed to any
+/// subscriber of the session: no subscriber has it and the others not.
+#[test]
+fn a_put_the_lane_cannot_hold_for_a_running_callback_reaches_no_subscriber() {
+    let router = Router::start(CatchAll::None);
+    let mut config = config(&router);
+    if config.limits.select_delivery_lane_bytes(8192).is_err() {
+        // A build that keeps the lane to its own value has no lane this short.
+        return;
+    }
+    let engine = open_with(config);
+    let handed = Arc::new(Mutex::new(Vec::<(usize, Vec<u8>)>::new()));
+    let inner = Arc::new(Mutex::new(None));
+    subscribe_putting(&engine, &handed, &inner, 10_000);
+
+    put_own(&engine, "demo/l/fan", b"outer").expect("the publish is accepted");
+    assert_eq!(
+        *inner.lock().unwrap(),
+        Some(Err(FanoutError::LocalNoRoom)),
+        "a sample longer than the whole lane cannot wait in it"
+    );
+    let outer = b"outer".to_vec();
+    assert_eq!(
+        *handed.lock().unwrap(),
+        [(0, outer.clone()), (1, outer.clone()), (2, outer)],
+        "the refused put reached no subscriber"
+    );
+}
+
+/// Three subscribers of the session's own on `demo/l/fan`, each recording what it is handed in
+/// `handed`; the first, handed `outer`, puts on the same key from inside its callback, `inner`
+/// itself or, when `inner_len` is not zero, that many bytes, and records the put's answer.
+fn subscribe_putting(
+    engine: &Arc<Engine>,
+    handed: &Arc<Mutex<Vec<(usize, Vec<u8>)>>>,
+    inner: &Arc<Mutex<Option<Result<usize, FanoutError>>>>,
+    inner_len: usize,
+) {
+    let session = Arc::downgrade(engine);
     for subscriber in 0..3usize {
         let handed = handed.clone();
+        let inner = inner.clone();
         let session = session.clone();
         engine
             .declare_subscriber_on_wire(
@@ -240,6 +306,7 @@ fn a_put_made_inside_a_callback_reaches_each_subscriber_once_after_it() {
                 None,
                 Arc::new(move || {
                     let handed = handed.clone();
+                    let inner = inner.clone();
                     let session = session.clone();
                     Box::new(move |sample: &dyn SampleView| {
                         handed
@@ -248,7 +315,13 @@ fn a_put_made_inside_a_callback_reaches_each_subscriber_once_after_it() {
                             .push((subscriber, sample.payload().to_vec()));
                         if subscriber == 0 && sample.payload() == b"outer" {
                             if let Some(engine) = session.upgrade() {
-                                put_own(&engine, b"inner");
+                                let payload = if inner_len == 0 {
+                                    b"inner".to_vec()
+                                } else {
+                                    vec![7u8; inner_len]
+                                };
+                                let sent = put_own(&engine, "demo/l/fan", &payload);
+                                *inner.lock().unwrap() = Some(sent);
                             }
                         }
                     })
@@ -256,28 +329,10 @@ fn a_put_made_inside_a_callback_reaches_each_subscriber_once_after_it() {
             )
             .expect("a session with ids left declares");
     }
-
-    put_own(&engine, b"outer");
-    let outer = b"outer".to_vec();
-    let inner = b"inner".to_vec();
-    assert_eq!(
-        *handed.lock().unwrap(),
-        [
-            (0, outer.clone()),
-            (1, outer.clone()),
-            (2, outer),
-            (0, inner.clone()),
-            (1, inner.clone()),
-            (2, inner)
-        ],
-        "each subscriber once for each put, the inner put after the outer"
-    );
 }
 
-/// A put of `payload` on `demo/l/fan` for the session's own subscribers alone.
-fn put_own(engine: &Engine, payload: &[u8]) {
+/// A put of `payload` on `key` for the session's own subscribers alone.
+fn put_own(engine: &Engine, key: &str, payload: &[u8]) -> Result<usize, FanoutError> {
     let opts = PublishOptions::put().with_locality(Locality::SessionLocal);
-    engine
-        .publish_on_wire_all("demo/l/fan", &WireKey::literal(), payload, &opts)
-        .expect("the publish is accepted");
+    engine.publish_on_wire_all(key, &WireKey::literal(), payload, &opts)
 }

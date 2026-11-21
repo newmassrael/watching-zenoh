@@ -616,6 +616,11 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     /// The threads handing deliveries out for this engine now ([`Delivering`]): a callback that
     /// steps its session again from one of them queues what it delivers for the outer delivery.
     delivering: Lock<Vec<ThreadId>>,
+    /// The subscribers whose callbacks run now, and the thread each runs on ([`Running`]): what
+    /// the session's own put asks to tell a subscriber it can hand a sample at once from one whose
+    /// callback the putting thread is inside of.
+    #[cfg(any(feature = "local-subscriber", feature = "liveliness"))]
+    running: Lock<Vec<(ThreadId, TargetKey)>>,
     /// The bytes the open reserved for the session's arena ([`Self::arena_bytes`]).
     arena_bytes: usize,
     this: Weak<Self>,
@@ -814,6 +819,43 @@ impl Drop for Delivering<'_> {
     fn drop(&mut self) {
         let thread = self.thread;
         self.set.with(|threads| threads.retain(|t| *t != thread));
+    }
+}
+
+/// A callback running on this thread, noted in the engine's table of them from its call to its
+/// return, or its unwinding.
+#[cfg(any(feature = "local-subscriber", feature = "liveliness"))]
+struct Running<'a> {
+    set: &'a Lock<Vec<(ThreadId, TargetKey)>>,
+    entry: (ThreadId, TargetKey),
+}
+
+#[cfg(any(feature = "local-subscriber", feature = "liveliness"))]
+impl<'a> Running<'a> {
+    fn enter(set: &'a Lock<Vec<(ThreadId, TargetKey)>>, key: TargetKey) -> Self {
+        let entry = (os::current(), key);
+        set.with(|running| running.push(entry));
+        Self { set, entry }
+    }
+
+    /// Whether the callback of `key` runs on this thread now: a call into it from here would
+    /// wait on itself.
+    #[cfg(feature = "local-subscriber")]
+    fn here(set: &Lock<Vec<(ThreadId, TargetKey)>>, key: TargetKey) -> bool {
+        let entry = (os::current(), key);
+        set.with(|running| running.contains(&entry))
+    }
+}
+
+#[cfg(any(feature = "local-subscriber", feature = "liveliness"))]
+impl Drop for Running<'_> {
+    fn drop(&mut self) {
+        let entry = self.entry;
+        self.set.with(|running| {
+            if let Some(at) = running.iter().rposition(|held| *held == entry) {
+                running.remove(at);
+            }
+        });
     }
 }
 
@@ -2818,6 +2860,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             next_local: AtomicU64::new(1),
             reader: Mutex::new(None),
             delivering: Lock::new(Vec::new()),
+            #[cfg(any(feature = "local-subscriber", feature = "liveliness"))]
+            running: Lock::new(Vec::new()),
             arena_bytes,
             this: this.clone(),
         }))
@@ -3140,16 +3184,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                     // A subscriber undeclared since the sample was queued has no callback left,
                     // and is passed over.
                     for id in sample.subscribers() {
-                        let callback =
-                            lock(&self.targets)
-                                .iter()
-                                .find_map(|(t, target)| match target {
-                                    Target::Subscriber(cb) if *t == TargetKey::Subscriber(id) => {
-                                        Some(cb.clone())
-                                    }
-                                    _ => None,
-                                });
-                        if let Some(callback) = callback {
+                        if let Some(callback) = self.subscriber_callback(id) {
+                            #[cfg(feature = "local-subscriber")]
+                            let _running = Running::enter(&self.running, TargetKey::Subscriber(id));
                             (lock(&callback))(&sample);
                         }
                     }
@@ -3167,6 +3204,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                                     _ => None,
                                 });
                         if let Some(callback) = callback {
+                            let _running = Running::enter(&self.running, TargetKey::Liveliness(id));
                             (lock(&callback))(sample.as_sample());
                         }
                     }
@@ -3474,34 +3512,76 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         legs
     }
 
+    /// The callback of subscriber `id`, while the subscriber is declared.
+    fn subscriber_callback(&self, id: SubId) -> Option<SubscriberCallback> {
+        lock(&self.targets)
+            .iter()
+            .find_map(|(t, target)| match target {
+                Target::Subscriber(cb) if *t == TargetKey::Subscriber(id) => Some(cb.clone()),
+                _ => None,
+            })
+    }
+
     /// A publish's leg to the session's own subscribers, when its destination admits them: the
-    /// sample goes through the registry's loopback, which fires the subscribers whose origin
-    /// admits it, and what they queued is handed out here with no lock held, so a callback runs
-    /// inside the put as zenoh-pico's does. The number of subscribers it reached.
+    /// subscribers whose origin admits it, as the registry's loopback finds them, are each handed
+    /// it here, with no lock of the session held, inside the put as zenoh-pico's does. A callback
+    /// another thread is running is waited for, as pico's lock is. One the putting thread is
+    /// inside of cannot be called again from inside itself, where pico's would be: it is handed
+    /// the sample from the delivery lane once it returns, and when the lane has no room for it
+    /// the put is refused before any subscriber is handed it. The number of subscribers reached.
     #[cfg(feature = "local-subscriber")]
     fn publish_to_subscribers(
         &self,
         keyexpr: &str,
         payload: &[u8],
         opts: &PublishOptions,
-    ) -> usize {
+    ) -> Result<usize, FanoutError> {
         if !opts.allowed_destination.allows_local() {
-            return 0;
+            return Ok(0);
         }
         let Some(core) = self.live() else {
-            return 0;
+            return Ok(0);
         };
         let sample = opts.loopback_sample(keyexpr, payload);
-        let reached = core
-            .0
+        lock(&self.samples).capture();
+        core.0
             .registry
             .borrow_mut()
             .app
             .subscribers
             .local_publish(&sample);
+        let reached = lock(&self.samples).captured();
         drop(core);
+        let inside = |id: &SubId| Running::here(&self.running, TargetKey::Subscriber(*id));
+        let mut later: BoundedVec<
+            SubId,
+            { caps::MAX_SUBSCRIPTIONS },
+            wz_session_core::bounded::Static,
+        > = BoundedVec::new_static();
+        for id in reached.iter().filter(|id| inside(id)) {
+            let kept = later.push(*id);
+            debug_assert!(kept.is_ok(), "no more subscribers than were reached");
+        }
+        if !later.is_empty() {
+            let mut lane = lock(&self.samples);
+            if !lane.takes_sample(&sample, later.len()) {
+                return Err(FanoutError::LocalNoRoom);
+            }
+            lane.offer_to(&later, &sample);
+        }
+        {
+            // A callback that steps the session from inside the put hands out nothing itself, as
+            // one inside a delivery does: what the lane holds may be for a callback running here.
+            let _delivering = Delivering::enter(&self.delivering);
+            for id in reached.iter().filter(|id| !inside(id)) {
+                if let Some(callback) = self.subscriber_callback(*id) {
+                    let _running = Running::enter(&self.running, TargetKey::Subscriber(*id));
+                    (lock(&callback))(&sample);
+                }
+            }
+        }
         self.deliver();
-        reached
+        Ok(reached.len())
     }
 
     /// Tell `fan`, when the get can be cancelled, how to undo leg `leg`: a token cancelled while
@@ -4092,7 +4172,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // and nothing local when the link refused it.
         let sent = self.publish_to_link(keyexpr, wire, payload, opts)?;
         #[cfg(feature = "local-subscriber")]
-        let sent = sent + self.publish_to_subscribers(keyexpr, payload, opts);
+        let sent = sent + self.publish_to_subscribers(keyexpr, payload, opts)?;
         Ok(sent)
     }
 

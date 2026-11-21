@@ -48,7 +48,7 @@ use crate::option_fields::unstable_option_fields;
 use crate::prelude::*;
 use crate::result::{
     ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SESSION_CLOSED,
-    Z_ERR_TIMESTAMP_GENERATION_FAILED, Z_ERR_TRANSPORT_TX_FAILED, Z_OK,
+    Z_ERR_SYSTEM_OUT_OF_MEMORY, Z_ERR_TIMESTAMP_GENERATION_FAILED, Z_ERR_TRANSPORT_TX_FAILED, Z_OK,
 };
 use crate::session::{engine_of, engine_ref, session_handle, z_loaned_session_t, Engine};
 use crate::write_filter::{PicoSession, WriteFilter};
@@ -57,11 +57,13 @@ use wz_capi_port::{FanoutError, FilterPlane, FilteredPut, SubId, WireKey};
 /// What a put, a delete or a publisher's put answers its caller for what the engine did with it:
 /// a publication its queue profile dropped behind a held conduit is pico's failed send
 /// (`Z_ERR_TRANSPORT_TX_FAILED`, which pico's put answers when its held transmit lock dropped the
-/// message), and any other refusal the generic error.
+/// message), one the session's own subscribers had no room for pico's resource error
+/// (`_Z_ERR_SYSTEM_OUT_OF_MEMORY`), and any other refusal the generic error.
 fn publish_code(sent: Result<usize, FanoutError>) -> ZResult {
     match sent {
         Ok(_) => Z_OK,
         Err(FanoutError::HeldConduit) => Z_ERR_TRANSPORT_TX_FAILED,
+        Err(FanoutError::LocalNoRoom) => Z_ERR_SYSTEM_OUT_OF_MEMORY,
         Err(_) => Z_ERR_GENERIC,
     }
 }
@@ -69,7 +71,9 @@ fn publish_code(sent: Result<usize, FanoutError>) -> ZResult {
 #[cfg(test)]
 mod publish_code_tests {
     use super::publish_code;
-    use crate::result::{Z_ERR_GENERIC, Z_ERR_TRANSPORT_TX_FAILED, Z_OK};
+    use crate::result::{
+        Z_ERR_GENERIC, Z_ERR_SYSTEM_OUT_OF_MEMORY, Z_ERR_TRANSPORT_TX_FAILED, Z_OK,
+    };
     use wz_capi_port::FanoutError;
 
     /// A publication dropped behind a held conduit answers pico's code for a failed send; one the
@@ -85,6 +89,10 @@ mod publish_code_tests {
         assert_eq!(
             publish_code(Err(FanoutError::ExceedsCapacity)),
             Z_ERR_GENERIC
+        );
+        assert_eq!(
+            publish_code(Err(FanoutError::LocalNoRoom)),
+            Z_ERR_SYSTEM_OUT_OF_MEMORY
         );
     }
 }

@@ -638,3 +638,27 @@ fn a_gated_record_that_finds_no_room_is_a_defect() {
     );
     assert_eq!(lane.counts().held_over, 1);
 }
+
+/// While the lane captures, an offer notes its subscriber and queues nothing; a sample queued for
+/// several subscribers at once is written once, and the room for it is asked first.
+#[cfg(feature = "local-subscriber")]
+#[test]
+fn a_captured_offer_queues_nothing_and_a_sample_for_several_is_written_once() {
+    let Some(mut lane) = lane(64, 4) else {
+        return;
+    };
+    lane.capture();
+    lane.offer(3, &filled(8, 1));
+    lane.offer(1, &filled(8, 1));
+    assert_eq!(lane.captured().to_vec(), [3, 1]);
+    assert!(lane.take_front().is_none(), "nothing was queued");
+    let sample = filled(40, 2);
+    assert!(lane.takes_sample(&sample, 2), "9 + 40 + 8 bytes of 64");
+    assert!(
+        !lane.takes_sample(&sample, 5),
+        "9 + 40 + 20 bytes are past 64"
+    );
+    lane.offer_to(&[3, 1], &sample);
+    assert_eq!(drain(&mut lane), [(vec![3, 1], 2)]);
+    assert_eq!(lane.counts(), LaneCounts::default());
+}
