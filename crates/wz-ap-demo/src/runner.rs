@@ -989,7 +989,7 @@ pub(crate) async fn scout_for_peer_locator(
         // A banner naming a group the node is not on is the same defect this
         // round exists to remove, one level down: the operator checks this line
         // to see where their config landed.
-        "wz-ap-demo: active multicast scouting on {group}:{port} \
+        "wz-ap-demo: active multicast scouting on {group} \
          (what=0x{SCOUT_WHAT:02x}, {SCOUT_CYCLE_MS}ms window, {budget_ms}ms budget)"
     );
     loop {
@@ -1046,7 +1046,7 @@ pub(crate) async fn scout_for_peer_locator(
                     return Err(io::Error::new(
                         io::ErrorKind::TimedOut,
                         format!(
-                            "wz-ap-demo: --scout found no peer on {group}:{port} \
+                            "wz-ap-demo: --scout found no peer on {group} \
                              within {budget_ms}ms ({} Scout(s) emitted, {} Hello(s) recorded)",
                             trace.scout_emit, trace.record_hello
                         ),
@@ -1136,7 +1136,7 @@ pub(crate) async fn spawn_scouting_responder(
     // discovering them, and a banner naming the compiled-in default would be the
     // one place that cannot tell them.
     log::info!(
-        "wz-ap-demo: SCOUT RESPONDER listening on {group}:{port} \
+        "wz-ap-demo: SCOUT RESPONDER listening on {group} \
          as {} zid {zid_hex} advertising {:?}",
         whatami.to_str(),
         locators
@@ -1311,7 +1311,7 @@ async fn spawn_scouting_autoconnect(
     // discipline. An operator reads this line to find out what their
     // `autoconnect` / `autoconnect_strategy` resolved to for THIS node's mode.
     log::info!(
-        "wz-ap-demo: SCOUT AUTOCONNECT on {group}:{port} \
+        "wz-ap-demo: SCOUT AUTOCONNECT on {group} \
          (roles {}, strategy {}{})",
         role_names(args.matcher),
         args.strategy.to_config_str(),
