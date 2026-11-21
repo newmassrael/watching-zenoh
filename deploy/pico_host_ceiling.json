@@ -46,6 +46,11 @@
         "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 3.28.3"
       }
     },
+    "pico-client-coop-nostd": {
+      "ratio_at_most": null,
+      "debt": "debt-pico-host-size-ceiling",
+      "reading": null
+    },
     "pico-client-coop-unstable": {
       "ratio_at_most": 2.8212,
       "debt": "debt-pico-host-size-ceiling",

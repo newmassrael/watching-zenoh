@@ -39,6 +39,12 @@
 # cooperative build replaces the default one in the same target directory, so a step that asks
 # for it comes after the steps that link the default library.
 #
+# WZ_PICO_FORM names the form of a cooperative library: `std` (or unset), the host's standard
+# library under the engine, or `nostd`, the same engine and capabilities without it (`os-posix` in
+# place of `engine-coop`), built as the host library without `std` is: the `capi-nostd` profile
+# and its configuration (`crates/.cargo/capi-nostd.toml`), for the host's own target, so it lives in
+# a target directory of its own. Its header arm is the cooperative one, as the capabilities are.
+#
 # WZ_PICO_PROGRAM_ROLES, when set, is a list of words the program is run with, one process each,
 # all at once, each given its role and one loopback port the script picks (`<exe> <role> <port>`):
 # the shape of a program whose sessions cannot share a thread, as two single-threaded sessions
@@ -70,6 +76,20 @@ case "$engine" in
     tokio | coop) ;;
     *)
         echo "pico-c-program: WZ_PICO_ENGINE is \`tokio\` or \`coop\`, not \`$engine\`" >&2
+        exit 2
+        ;;
+esac
+form="${WZ_PICO_FORM:-std}"
+case "$form" in
+    std) ;;
+    nostd)
+        if [ "$engine" != coop ]; then
+            echo "pico-c-program: WZ_PICO_FORM=nostd is a form of the cooperative engine: set WZ_PICO_ENGINE=coop" >&2
+            exit 2
+        fi
+        ;;
+    *)
+        echo "pico-c-program: WZ_PICO_FORM is \`std\` or \`nostd\`, not \`$form\`" >&2
         exit 2
         ;;
 esac
@@ -105,6 +125,17 @@ if [ "$engine" = coop ]; then
     build_features="engine-coop${features:+,$features}"
     engine_args=(--no-default-features)
     header_engine=(--engine coop)
+fi
+if [ "$form" = nostd ]; then
+    host_triple="$(rustc -vV | sed -n 's/^host: //p' | tr -d '\r')"
+    if [ -z "$host_triple" ]; then
+        say "pico-program-probe on ${os}: rustc named no host target NOT-MEASURED"
+        exit 1
+    fi
+    build_features="os-posix${features:+,$features}"
+    engine_args=(--no-default-features --profile capi-nostd --config .cargo/capi-nostd.toml
+        --target "$host_triple")
+    lib_dir="$WZ_ARTIFACTS/crates/target/$host_triple/capi-nostd"
 fi
 feature_args=()
 if [ -n "$build_features" ]; then

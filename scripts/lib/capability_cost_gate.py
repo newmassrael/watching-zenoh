@@ -167,6 +167,11 @@ CONNECTIVITY = r"^(z_info_transports|z_declare_transport_events_listener)$"
 # The multicast transport (`multicast-transport`, open-debt item 913): the group face and its
 # pipeline, which pico's default build has (`Z_FEATURE_MULTICAST_TRANSPORT`) and zenoh-c's too.
 MULTICAST = r"multicast_glue|multicast_pipeline|MulticastLinkDriver"
+# The standard library's own runtime: its panic hook's backtrace symbolizer and the demangler and
+# decompressor it reads debug information with, which a library built with `std` links whatever its
+# panic strategy, and one built without it (`os-posix`, docs/c-abi-engine-and-memory.md P4) has none
+# of.
+STD_RUNTIME = r"std::backtrace_rs::|rustc_demangle::|addr2line::"
 # The engine a pico build runs its sessions on (`engine-tokio` / `engine-coop`,
 # docs/capi-pico-on-coop-engine.md): a build of one links none of the other.
 TOKIO_ENGINE = r"wz_capi_core::|wz_runtime_tokio::"
@@ -204,6 +209,10 @@ class Case:
     # The cargo profile (`crates/Cargo.toml`). It is not a capability, so it leaves the pico
     # reference alone: that is derived from the features only.
     profile: str = "release"
+    # A cargo configuration file the build reads (`--config`, a path from `crates/`), with the
+    # host's own target named (`--target`), so that what the file gives the library's crates does
+    # not reach the build scripts. None: the profile alone.
+    cargo_config: str | None = None
     note: str = field(default="", compare=False)
 
 
@@ -643,7 +652,7 @@ CASES: tuple[Case, ...] = (
          1_060_500,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
-         require=(UDP, SINGLE_THREADED, COOP_ENGINE),
+         require=(UDP, SINGLE_THREADED, COOP_ENGINE, STD_RUNTIME),
          exports=444,
          note="444 exports with the config doors of the open's policies "
               "(`wz_ext_config_policy`, `wz_ext_config_profile`, in every build); "
@@ -698,6 +707,21 @@ CASES: tuple[Case, ...] = (
               "which reads 3,300 to 4,400 over pc2, so it is moved to the pc2 reading and "
               "5,500, an estimate the first hosted run replaces; the listening build's own "
               "text is a case of the step that gives pico a listener"),
+    # The same client built as the host library without `std` (`os-posix`, phase P4 of
+    # docs/c-abi-engine-and-memory.md): the same capabilities and C symbols, no standard library,
+    # the C library's heap and `abort` in its place, and no unwinding (`capi-nostd`, whose
+    # configuration drops the unwind tables). The budget is pico-client-coop's, a ceiling the
+    # form sits under by construction until its first reading sets its own; its ceiling row is
+    # unfilled until then (`--measure pico-client-coop-nostd` prints both).
+    Case("pico-client-coop-nostd", "wz-capi-pico", "libwz_capi_pico.so", "os-posix,link-udp",
+         1_049_200,
+         forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
+                 MULTICAST, TOKIO_ENGINE, COOP_LISTEN, STD_RUNTIME),
+         require=(UDP, SINGLE_THREADED, COOP_ENGINE),
+         exports=444, profile="capi-nostd", cargo_config=".cargo/capi-nostd.toml",
+         note="pico-client-coop's capabilities and its 444 exports: the form adds no C symbol "
+              "(no `critical-section` implementation, the locks being the host's own calls "
+              "through `wz-host-sync`, and no personality routine, nothing unwinding)"),
     # The cooperative client with the unstable API, which the reference pico of the test lanes is
     # built with (`-DZ_FEATURE_UNSTABLE_API`): entity global ids, source info, cancellation
     # tokens. Nothing of it is the engine's, so it costs the ABI's own code and no engine's.
@@ -1540,15 +1564,46 @@ def build_env() -> tuple[dict[str, str], build_normalization.Prefixes]:
     return build_normalization.normalized_env(os.environ, prefixes, epoch), prefixes
 
 
+def host_triple() -> str:
+    """The target the toolchain builds for by default: this host's."""
+    out = subprocess.run(["rustc", "-vV"], cwd=CRATES, capture_output=True, text=True,
+                         check=True).stdout
+    for line in out.splitlines():
+        if line.startswith("host:"):
+            return line.split(":", 1)[1].strip()
+    raise RuntimeError("rustc -vV names no host target")
+
+
+def configured_rustflags(env: Mapping[str, str], triple: str) -> tuple[dict[str, str], list[str]]:
+    """`env` without its rustc flags, and the cargo arguments that state them as the rustflags of
+    `triple`'s table: for a case built with a configuration file of its own (`Case.cargo_config`).
+    cargo takes the flags of the environment in place of every configured `rustflags` table, so
+    the normalized environment would drop the file's; the tables that match one target are joined,
+    so the environment's flags (the caller's and the normalization's) move into the triple's table
+    and the file's still apply."""
+    env = dict(env)
+    encoded = env.pop(build_normalization.ENCODED_RUSTFLAGS, None)
+    plain = env.pop(build_normalization.RUSTFLAGS, "")
+    # cargo reads the encoded form when it is set and the plain one, split on whitespace, if not.
+    flags = [f for f in encoded.split("\x1f") if f] if encoded is not None else plain.split()
+    return env, ["--config", f"target.{triple}.rustflags={json.dumps(flags)}"]
+
+
 def build(case: Case, env: Mapping[str, str], prefixes: build_normalization.Prefixes) -> Measured:
     cmd = ["cargo", "build", "--profile", case.profile, "-p", case.package, "--quiet",
            "--target-dir", str(TARGET)]
+    lib_dir = TARGET / case.profile
+    if case.cargo_config is not None:
+        triple = host_triple()
+        env, flags = configured_rustflags(env, triple)
+        cmd += ["--config", case.cargo_config, *flags, "--target", triple]
+        lib_dir = TARGET / triple / case.profile
     if case.features is not None:
         cmd += ["--no-default-features"]
         if case.features:
             cmd += ["--features", case.features]
     subprocess.run(cmd, cwd=CRATES, env=env, check=True)
-    lib = TARGET / case.profile / case.lib
+    lib = lib_dir / case.lib
     size_out = subprocess.run(["size", str(lib)], capture_output=True, text=True, check=True).stdout
     text = int(size_out.splitlines()[1].split()[0])
     names = subprocess.run(
