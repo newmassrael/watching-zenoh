@@ -6083,6 +6083,45 @@ mod stock_config_tests {
         assert!(refused.contains("`key-set` = `ajar`"), "{refused}");
     }
 
+    /// The runtime limits a file's `wz/limits` states reach the node: the expansion carries them,
+    /// the tuning `main` reads under them holds them for every dial, and a connect list longer
+    /// than a stated `MAX_STATIC_CONNECT` is refused by the limit's name.
+    #[test]
+    fn the_runtime_limits_a_file_states_reach_the_tuning() {
+        use wz::runtime_tokio::limits::RuntimeLimits;
+        let stated = expand(
+            &["--config", "z.json5"],
+            r#"{ connect: { endpoints: ["tcp/r:7447"] },
+                 wz: { limits: { MAX_LOCATOR_LEN: 32, MAX_STATIC_CONNECT: 1 } } }"#,
+        );
+        let stated = match stated {
+            Ok(stated) => stated,
+            // A build that keeps each limit at the build's value refuses the statement itself.
+            Err(refused) => {
+                assert!(
+                    refused.starts_with("--config: z.json5: the `wz` member is refused: "),
+                    "{refused}"
+                );
+                return;
+            }
+        };
+        let runtime = stated.policies.limits.runtime;
+        assert_ne!(runtime, RuntimeLimits::defaults());
+        let tuning = TransportTuning::from_argv_under(&stated.argv, stated.policies.policy)
+            .expect("the expansion's flags parse")
+            .with_runtime_limits(runtime);
+        assert_eq!(tuning.runtime_limits, runtime);
+
+        let refused = expand(
+            &["--config", "z.json5"],
+            r#"{ connect: { endpoints: ["tcp/r:7447", "tcp/s:7447"] },
+                 wz: { limits: { MAX_STATIC_CONNECT: 1 } } }"#,
+        )
+        .unwrap_err();
+        assert!(refused.starts_with("--config: z.json5: "), "{refused}");
+        assert!(refused.contains("MAX_STATIC_CONNECT (1)"), "{refused}");
+    }
+
     /// R311y843 — every key wz REPORTS as honoured, paired with whether the
     /// demo does anything at all with it.
     ///
@@ -10862,6 +10901,10 @@ pub(crate) struct TransportTuning {
     /// The snapshot of the node's policies ([`resolve_policy`]): every session the node opens is
     /// handed it, and the defaults above that a policy decides are taken from it.
     pub(crate) policy: wz::runtime_tokio::policy::SessionPolicy,
+    /// The node's runtime limits: the build's, or those a `--config` file's `wz/limits` states
+    /// (`StockConfigExpansion::policies`), which `main` hands the tuning
+    /// ([`Self::with_runtime_limits`]). Every dial config the node makes carries them.
+    pub(crate) runtime_limits: wz::runtime_tokio::limits::RuntimeLimits,
 }
 
 /// The snapshot of the policies of a demo node no `--config` file describes, and of the sessions
@@ -10907,7 +10950,18 @@ impl TransportTuning {
             open_timeout: wz::runtime_tokio::session_open::OPEN_TIMEOUT,
             stats_filters: Default::default(),
             policy,
+            runtime_limits: wz::runtime_tokio::limits::RuntimeLimits::defaults(),
         }
+    }
+
+    /// This tuning under `runtime_limits`, the node's runtime limits as its `--config` file
+    /// resolved them.
+    pub(crate) fn with_runtime_limits(
+        mut self,
+        runtime_limits: wz::runtime_tokio::limits::RuntimeLimits,
+    ) -> Self {
+        self.runtime_limits = runtime_limits;
+        self
     }
 
     /// Read `--batch-size <n>` / `--lease-ms <n>` off the command line.
