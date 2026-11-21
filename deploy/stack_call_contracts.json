@@ -26,6 +26,7 @@
     "planner-emit": {"zephyr-client-fixed": 3, "zephyr-client-heap": 3, "zephyr-client-fixed-batching": 3, "zephyr-client-fixed-get": 3, "zephyr-admin-fixed-tls": 3, "zephyr-client-fixed-tls": 3},
     "record": {"zephyr-client-fixed": 1, "zephyr-client-heap": 1, "zephyr-client-fixed-batching": 1, "zephyr-client-fixed-get": 3, "zephyr-admin-fixed-tls": 6, "zephyr-client-fixed-tls": 1},
     "own-mapping": {"zephyr-client-fixed": 0, "zephyr-client-heap": 0, "zephyr-client-fixed-batching": 0, "zephyr-client-fixed-get": 1, "zephyr-admin-fixed-tls": 2},
+    "wireexpr-suffix-tail-append": {"zephyr-client-fixed": 0, "zephyr-client-heap": 0, "zephyr-client-fixed-batching": 0, "zephyr-client-fixed-get": 0, "zephyr-admin-fixed-tls": 1, "zephyr-client-fixed-tls": 0},
     "answer-reply": {"zephyr-client-fixed": 0, "zephyr-client-heap": 0, "zephyr-client-fixed-batching": 0, "zephyr-client-fixed-get": 0, "zephyr-client-fixed-tls": 0},
     "byte-cells": {"zephyr-client-fixed": 2, "zephyr-client-heap": 2, "zephyr-client-fixed-batching": 2, "zephyr-client-fixed-get": 2, "zephyr-admin-fixed-tls": 2, "zephyr-client-fixed-tls": 2},
     "fmt-builders": {"zephyr-client-fixed": 0, "zephyr-client-heap": 0, "zephyr-client-fixed-batching": 0, "zephyr-client-fixed-get": 6},
