@@ -1,0 +1,20 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-9-preset-mcu-multicast-pub", "watching-zenoh/local-ci-gates"]
+decision = '''
+Two hosted reds of run 44895098050 (c72460b30) are paid, both read to the gate's own sentence and attributed before a fix. Layer Q's multicast-e2e footprint grew +5836 / +6040 bytes with the group send stage (23da5b6a2, bisected on one build host: 79076 before, 85320 after; the SCE pin 99e9dbb81 in the same window is +96), every new symbol the stage that landing meant to add and data and bss flat, so the baseline moves to the hosted reading 84112 / 84300 and section 6.9 records the attribution. Layer Q's session-slot-bytes record moves to 36128 / 36120, the cut the kit recovery round (b58b71c19) made and did not record; its owner agreed. Layer Z's tls expiry test failed in its adjudicator: stock zenohd kept a tls link after the certificate expired, because a client redials at once (`zenoh/src/net/runtime/orchestrator.rs` @ `fn closed_session`), the certificate check reads whole seconds and accepts a dial in the second the certificate ends on, and the new link's expiry task, spawned inside Arc::new_cyclic with its time already past (`io/zenoh-links/zenoh-link-tls/src/unicast.rs` @ `Arc::<LinkUnicastTls>::new_cyclic`), can run before the link is built and end without closing it (`io/zenoh-link-commons/src/tls.rs` @ `if let Some(link) = link.upgrade() {`). The rule the test holds is about the link the certificate was valid for, so the listener's verdict now names that link by its dialer's end, and a redial from another port is no longer read as the old link kept.
+'''
+changes = '''
+- crates/wz-integration-tests/tests/it/files/wz_tls_close_on_expiry_zenohd_interop.rs: the verdict reads the dialer's ends of the tls links the listener lists and asks whether the end listed before the expiry is listed after it; the module doc states upstream's same-second redial and the expiry task that can miss it.
+- scripts/check-footprint.sh: BASELINE_MC_TEXT 84112 / 84300 with the bisect and the symbol diff; deploy/session_slot_bytes.json: 36128 / 36120.
+- Section 6.9 (preset-mcu-multicast-pub): six caveats with the figures, the cause, the pin's share and the symbols.
+- docs/hosted-red-acks.md: a row for run 44895098050 naming what this push pays, what Round 4584 paid, what watching-zenoh-5e holds, and the C1cc batching leg left unpaid.
+'''
+verification = '''
+- The tls expiry test 3 of 3 on a build host (zenohd built from the pinned 1.10.2 tag, the demo with Layer Z's features): control and key, on zenohd and on wz, each run.
+- multicast-e2e built on one build host at 589a8884c (79076), 99e9dbb81 (79172), 68888eca7 (79076), 23da5b6a2 (85320) and 0c7aa853b (84856); nm symbol diff across 23da5b6a2 adds 5606 B; on hkl002 main's 7de14394c and c72460b30 read byte-equal (84892 / 85048), so the hosted reading of c72460b30 is the baseline.
+- session_slot_bytes.py --check on a build host: 36128 and 36120, equal to the record.
+- upstream_citation_anchor_gate.py --check --resolve passes; the pre-push hook's round-fed gates 166 of 166; validate-workspace T1 orphan delta 0, T3 warn 4 unchanged, entries and sections unchanged.
+'''
+carry = '''
+- C1cc a_longer_batching_time_limit_writes_a_contended_burst_in_fewer_batches_on_wz_and_libzenohc: wz writes about 4,500 batches under 0 ms and 100 ms alike while libzenohc goes 825 to 58; taken by watching-zenoh-43 next.
+- Layer Q's multicast-e2e figure is a hosted reading; the build hosts read it 780 B higher, so a local Layer Q is not its verdict.
+'''
