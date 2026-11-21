@@ -115,6 +115,7 @@ this build are listed in `RELEASE-NOTES.md` and `build-statement.json`. Its exte
 | Capability | Doors | What they do |
 |---|---|---|
 | app-transport | `wz_ext_transport_*`, `wz_ext_config_transport` | a network stack the program supplies, in place of the system's sockets |
+| config-document | `wz_ext_config_document` | a configuration document handed to a config: the profile, policies and limits a session opens under, chosen at run time |
 | e2e-sender | `wz_ext_e2e_sender_*` | end-to-end protection of a message: a frame built under a profile, a counter per stream |
 | e2e-receiver | `wz_ext_e2e_receiver_*` | the receiving judge of protected frames: a verdict per frame, the payload always handed on |
 | e2e-sender-demux | options of `wz_ext_e2e_receiver_new` | the judge kept one per sender, keyed by the frame's sender identity |
@@ -126,6 +127,7 @@ this build are listed in `RELEASE-NOTES.md` and `build-statement.json`. Its exte
 | replay-cache | `wz_ext_decl_watch_*` | the declarations a session's peers make and retract, told to the program |
 | shared-key-ids | `wz_ext_config_key_ids`, `wz_ext_config_key_wire_form_for` | key ids every node of a deployment shares, used with no declaration first |
 | (every build) | `wz_ext_conformance_digest` | the digest of this build's configuration, equal to `build-statement.json`'s `digest` |
+| (every build) | `wz_ext_config_policy`, `wz_ext_config_profile` | one policy, or the profile, of the sessions a config opens, stated from code |
 | (every build) | `wz_ext_config_device_requires`, `wz_ext_redeclare`, `wz_ext_get_to_peer` | what an open asks of the system; declarations re-sent; a get addressed to one node |
 
 Each door returns zenoh-pico's result codes, and wz's own two outside their range:
@@ -148,8 +150,50 @@ What is wz's own is in `config\`:
   reads it through `wz_ext_message_catalog_new` of the library it ships with. A program passes the
   text of its own catalog to that door.
 * `message-catalog.schema.json`: the shape of a catalog, with the words of each refusal.
-* `wz-config.schema.json`: the policies and limits a stage after the build may decide. Their values
-  in this build are in `build-statement.json`.
+* `wz-config.schema.json`: the policies and limits a stage after the build may decide, the shape
+  of the `wz` member of a configuration document (next section). Their values in this build are
+  in `build-statement.json`.
+
+## Choosing policies and limits at run time
+
+One library serves every profile: the policies and limits of a session are chosen when it opens,
+by a configuration document handed to its config before `z_open`:
+
+```c
+z_owned_session_t session;
+z_owned_config_t config;
+z_config_default(&config);
+zp_config_insert(z_config_loan_mut(&config), Z_CONFIG_CONNECT_KEY, "tcp/192.0.2.1:7447");
+z_result_t rc = wz_ext_config_document(z_config_loan_mut(&config),
+    "{ wz: { profile: \"upstream\", policies: { \"entity-timestamp-opt-in\": \"on\" } } }");
+if (rc != Z_OK) { /* refused: the config is as it was */ }
+z_open(&session, z_config_move(&config), NULL);
+```
+
+The document is the zenoh JSON5 document a zenoh-c program opens with; this library reads only
+its `wz` member, so one file configures both. A program reads the file and hands its text to
+`wz_ext_config_document`; a second call replaces the first. The members of `wz`, whose every
+name and value `config\wz-config.schema.json` lists:
+
+* `profile`: a named set of policy values the session starts from. `upstream` states every
+  policy at upstream's behaviour, whatever this build's defaults are.
+* `policies`: a policy's id mapped to one of its values' ids, over the profile.
+* `limits`: a session limit's id mapped to a whole number or `"unbounded"`, over the build's.
+* `key-ids`: the key ids every node of the deployment shares (the shared-key-ids capability).
+
+A session's policies are composed lowest first: this build's defaults, the profile
+(`wz_ext_config_profile`'s, else the document's), the document's `policies`, then each
+`wz_ext_config_policy` statement. A config handed no document opens under this build's defaults.
+
+The door checks the document when it is handed, as the open will compose it, and answers
+`_Z_ERR_CONFIG_INVALID_VALUE` (-89), leaving the config with what it held before, for: text
+that is no JSON5 object; a `wz` member that is not an object, that names a member other than
+these four, or that names one twice; a profile, a policy, a value or a limit this build does
+not have; a value of a policy that this build's domain leaves out; a policy or a limit only the
+build decides; a limit of a runtime rather than of a session; a limit's value that is neither a
+whole number nor `"unbounded"`; a refused part of `key-ids`. A NULL config or text answers
+`_Z_ERR_NULL`. The code is the whole answer: the door names no reason. `examples\profiles.c`
+hands it four refused documents and checks that each leaves the config as it was.
 
 ## Examples
 
@@ -161,7 +205,7 @@ exits 0 when every check held. Every example but `pico_app_transport.c` includes
 
 | File | What it shows |
 |---|---|
-| `profiles.c` | publication, subscription and a query under the upstream profile |
+| `profiles.c` | publication, subscription and a query under the build's defaults, then under two profiles chosen when the sessions open (`wz_ext_config_document`), and the documents the library refuses |
 | `transports.c` | tcp, udp and a multicast group over the system's sockets; the group is joined only when `WZ_EXAMPLE_GROUP_IFACE` names an interface in `#iface=` form (on Windows, an adapter's interface GUID) |
 | `own_transport.c` | the same three over a network stack of the program's own, registered with `wz_ext_transport_*`: the guide to plugging in a TCP/IP stack that is not the system's, with partial sends, would-blocks, an asynchronous connect and a refused one |
 | `pico_app_transport.c` | the same three over a transport the program supplies, with partial sends and would-blocks injected |

@@ -15,6 +15,7 @@ SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
   liveliness, scouting, unicast and multicast transports over tcp and udp, the advanced publisher
   and subscriber, and connectivity events.
 - wz's extension doors of the build's profile, `host-peer-ext`: a transport the program supplies;
+  the policies and limits of a session chosen when it opens, by a configuration document;
   end-to-end protection, its receiving judge and a judge per sender; supervision of periodic
   streams; message instances; the message catalog; the replay cache and the declaration watch;
   and key ids shared by every node of a deployment. `README.md` lists their doors.

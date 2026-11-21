@@ -997,7 +997,8 @@ jobs:
         run: bash scripts/pico-c-program.sh crates/wz-capi-pico/tests/c/pico_coop_single_thread.c "a single-threaded pico C program on the cooperative engine" peer,query,queryable
 
   # The C examples of the pico C ABI (crates/wz-capi-pico/examples/c/), on Linux and on
-  # Windows: the policy profile the library is built with, the three transport configs over
+  # Windows: the policy profile a session opens under, the build's and one a configuration
+  # document chooses when the session opens, the three transport configs over
   # the system's sockets and over a transport the program supplies (the program's own stack,
   # and the test program with injected faults), batching, end-to-end protection, stream
   # supervision, a program's own periodic task, a keyed topic and history for a late
@@ -1008,8 +1009,9 @@ jobs:
   # A job of its own and not steps of `capi`: that job's budget is spent by what it gates,
   # and Linux is not one of its hosts. Every example builds the library with ONE feature list
   # (`WZ_EXAMPLE_FEATURES`, the union of what the examples' doors need), so the library is
-  # built once; the profile example's second run builds it again under the other profile's
-  # policy default, last, because that build replaces the first.
+  # built once; the profile example's second run builds it again with the policy's build
+  # default on, last, because that build replaces the first. Both runs also open sessions
+  # from documents that name their profile, whose answers must not follow the build's default.
   #
   # Each step started as an observation, as every new program of this workflow does, and is
   # a GATE since two consecutive hosted runs read every step green on both hosts (Platform
@@ -1031,7 +1033,7 @@ jobs:
             host: windows
     env:
       WZ_HOST_SELECTED: ${{ (inputs.host == '' || inputs.host == 'both' || inputs.host == matrix.host) && 'true' || 'false' }}
-      WZ_EXAMPLE_FEATURES: app-transport,e2e-sender,e2e-receiver,e2e-supervision,instance-key,replay-cache
+      WZ_EXAMPLE_FEATURES: app-transport,config-document,e2e-sender,e2e-receiver,e2e-supervision,instance-key,replay-cache
     steps:
       - name: Checkout (with submodules)
         if: ${{ env.WZ_HOST_SELECTED == 'true' }}
@@ -1092,11 +1094,11 @@ jobs:
           echo "group interface: ${iface:-none}"
           echo "WZ_EXAMPLE_GROUP_IFACE=${iface}" >> "$GITHUB_ENV"
 
-      - name: example, pub/sub and query under the upstream profile (gated)
+      - name: example, pub/sub and query under profiles chosen at open (gated)
         if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
         timeout-minutes: 50
         shell: bash
-        run: bash scripts/pico-c-program.sh crates/wz-capi-pico/examples/c/profiles.c "example of pub/sub and query under the upstream profile" "$WZ_EXAMPLE_FEATURES"
+        run: bash scripts/pico-c-program.sh crates/wz-capi-pico/examples/c/profiles.c "example of pub/sub and query under profiles chosen at open" "$WZ_EXAMPLE_FEATURES"
 
       - name: example, tcp, udp and a group over the system's sockets (gated)
         if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
@@ -1162,13 +1164,13 @@ jobs:
 
       # Last: the policy's build default rebuilds the library, and every later step would
       # run against this profile instead of the upstream one.
-      - name: example, pub/sub and query under the entity-timestamp-opt-in profile (gated)
+      - name: example, profiles chosen at open over a build defaulting to timestamp opt-in (gated)
         if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
         timeout-minutes: 40
         shell: bash
         env:
           WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN: "on"
-        run: bash scripts/pico-c-program.sh crates/wz-capi-pico/examples/c/profiles.c "example of pub/sub and query under the entity-timestamp-opt-in profile" "$WZ_EXAMPLE_FEATURES"
+        run: bash scripts/pico-c-program.sh crates/wz-capi-pico/examples/c/profiles.c "example of profiles chosen at open over a build defaulting to timestamp opt-in" "$WZ_EXAMPLE_FEATURES"
 
   # The Windows release packages of the pico C ABI library (scripts/lib/pico_windows_package.py),
   # one per width of Windows, a row of the matrix each: x64 (`x86_64-pc-windows-msvc`) and x86
