@@ -1,0 +1,15 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport", "watching-zenoh/local-ci-gates"]
+decision = '''
+Round 4586's writer backoff compared the staged count across a yield at its second look: after the idle flush answered that a sender held a frame, the writer yielded and looked again, and a producer that lost its CPU for that moment had staged nothing, read as one that had stopped, and the writer flushed inside the bound. That is the very reading Round 4586 removed from the first look; watching-zenoh-5e saw it once on a loaded build host, and on one CPU main fails the backoff test 30 times in 30. The writer now enters the backoff with a wait for what is left of the limit or for a whole frame, so every look compares the count across a wait. Upstream's first look after a failed lock also comes after only a yield (`io/zenoh-transport/src/common/pipeline.rs` @ `tokio::task::yield_now().await;`), but with a producer that made progress it then waits the rest of its threshold, which is what this writer now does in every case.
+'''
+changes = '''
+- crates/wz-runtime-tokio/src/writer_queue.rs: `Backoff::look` answers flush now or how long to wait, `Backoff::wait` waits after a yield; the backoff is entered with a wait; the remaining time is a checked subtraction (an eager one overflowed past the limit in a debug build).
+- docs/hosted-red-acks.md: a row for run 44895098050 that pays nothing and says so.
+'''
+verification = '''
+- On one CPU (`taskset`) on one build host: the backoff test failed 30 of 30 on main (7032b581d) with the message watching-zenoh-5e reported, and passes 30 of 30 here; the writer_queue tests starting `a_` pass 15 times each on one and on two CPUs.
+- C1cc's time limit leg with two, four and every core: wz decides H1 (12, 8 and 8 steps); wz-runtime-tokio tests 1080 passed and clippy -D warnings with all targets; the pre-push hook's round-fed gates 166 of 166.
+'''
+carry = '''
+- C1cc a_session_without_batching_writes_each_put_in_a_batch_of_its_own_on_wz_and_libzenohc stays unpaid: the stream link's inline flush writes each put of a burst whose puts are more than 8 us apart; the fix trades request and reply latency and waits for the owner's direction.
+'''
