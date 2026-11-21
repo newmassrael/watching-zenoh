@@ -85,6 +85,13 @@ enum Command {
     /// routes to once the subscriber has declared a key expression to it: the id is one the
     /// session under test declared, and the key is what that declaration says.
     PushReceiverAlias(wz_session_core::wire_id::ExprId, &'static [u8]),
+    /// Send the final of the initial declarations, as a peer does once it has declared what it
+    /// held when the link came up.
+    #[cfg(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ))]
+    FinishInitial,
     /// Close the session and stop, as a router that goes away does.
     Close,
     /// Read nothing and send nothing from now on, the socket held open until the router is let
@@ -487,6 +494,14 @@ fn run_router(
                     );
                 let _ =
                     actions.send_network_message(NetworkMessage::Push(Box::new(push)), true, false);
+            }
+            #[cfg(any(
+                feature = "remote-declaration-watch",
+                feature = "declarations-synced-event"
+            ))]
+            Ok(Command::FinishInitial) => {
+                use wz_session_core::response_sink::DeclareReplySink;
+                actions.send_declare_final_reply(wz_session_core::extbound::INITIAL_INTEREST_ID);
             }
             Ok(Command::Close) => {
                 actions.send_close_with_reason(CloseReason::Generic);

@@ -642,6 +642,12 @@ transport-link-unixpipe,transport-link-ws|"
     # compiled with `time-base`): a wait for the next dial ends at the word, and the word joins a
     # wait on links and makes none where there was none.
     "wz-capi-coop|hook|time-base|clock_moves_tests::"
+    # The declaration watch (`decl_watch`, compiled with `remote-declaration-watch` or
+    # `declarations-synced-event`): the router's declarations told to the watches of their kind,
+    # what it held told first to a watch that came after, the end of its initial declarations told
+    # once, and a watch undeclared or a session closed letting go of its sink; `liveliness` joins
+    # for the watch of tokens. Without either feature the first row runs the refusal by name.
+    "wz-capi-coop|hook|declarations-synced-event,liveliness,remote-declaration-watch|decl_watch"
     # What a hosted OS tells a node about its network, and the multicast sockets built from it,
     # which the tokio runtime and the cooperative host both open. The `#iface=` honor (the v4 and
     # v6 interface selectors and the tests that read them off the loopback) is compiled only with

@@ -137,6 +137,20 @@ mod ticker;
 use ticker::Tickers;
 use wz_session_core::replay_pacing::ReplayPacing;
 
+#[cfg(any(
+    feature = "remote-declaration-watch",
+    feature = "declarations-synced-event"
+))]
+mod decl_watch;
+#[cfg(any(
+    feature = "remote-declaration-watch",
+    feature = "declarations-synced-event"
+))]
+use {
+    decl_watch::DeclWatches,
+    wz_capi_port::{DeclPlane, DeclWatchId, DeclWatchRefused, DeclWatchSink},
+};
+
 #[cfg(feature = "connectivity")]
 mod faces;
 #[cfg(feature = "connectivity")]
@@ -537,6 +551,13 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     /// What the liveliness subscribers' sinks queued for their callbacks (`liveliness`).
     #[cfg(feature = "liveliness")]
     live_samples: LivelinessQueue,
+    /// The program's watches of what the peers declare and what is owed to them, shared with the
+    /// registry whose observers stage it (`decl_watch`).
+    #[cfg(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ))]
+    decl_watches: Arc<DeclWatches>,
     zid: SessionZid,
     closed: AtomicBool,
     /// The entity ids the session's declarations and Interests take, from 1: `u32`, upstream's
@@ -1194,6 +1215,11 @@ fn dispatch_holding_finals<C: ClockSource + 'static>(
         #[cfg(feature = "shared-key-ids")]
         actions.note_requests(&event);
         registry.dispatch_event(face, event);
+        #[cfg(any(
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        ))]
+        registry.settle_decl_events(|| actions.peer_zid());
         registry.flush_pending_replies(face, &*actions);
         for (rid, qos) in registry.take_pending_final_rids(face) {
             if lock(&plane.holds).owe(generation, rid, qos) {
@@ -1219,6 +1245,11 @@ fn dispatch_all<C: ClockSource + 'static>(
             .app
             .set_unanswerable_final(actions.params.policy.query_unanswerable_final());
         registry.dispatch(face, event, &*actions);
+        #[cfg(any(
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        ))]
+        registry.settle_decl_events(|| actions.peer_zid());
     }
 }
 
@@ -2377,6 +2408,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let gets = core.gets.clone();
         #[cfg(feature = "connectivity")]
         let faces = core.watchers.clone();
+        #[cfg(any(
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        ))]
+        let decl_watches = core.registry.borrow().decl_watches.clone();
         let rooms = core.rooms.clone();
         let wait_before_drop_us = core.config.tx_queue.wait_before_drop_us;
         let held_drop = core.config.tx_queue.held_drop;
@@ -2419,6 +2455,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             faces,
             #[cfg(feature = "liveliness")]
             live_samples: Arc::new(Mutex::new(VecDeque::new())),
+            #[cfg(any(
+                feature = "remote-declaration-watch",
+                feature = "declarations-synced-event"
+            ))]
+            decl_watches,
             zid: wire,
             closed: AtomicBool::new(false),
             next_entity: AtomicU64::new(1),
@@ -2736,6 +2777,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             for sink in self.faces.sinks() {
                 sink(kind, &face);
             }
+        }
+        // What a peer declared or retracted, told to the watch it is owed to.
+        #[cfg(any(
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        ))]
+        while let Some((sink, told)) = self.decl_watches.next() {
+            sink(told.event());
         }
         loop {
             let next = lock(&self.matching).pop_front();
@@ -3495,6 +3544,64 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     #[cfg(feature = "connectivity")]
     fn unwatch_faces(&self, id: u64) -> bool {
         self.faces.unwatch(id)
+    }
+
+    /// The watch is told first what each link's peer holds now, then what the links' dispatch
+    /// stages from here on (`decl_watch`). A refused sink is let go of with no lock held.
+    #[cfg(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ))]
+    fn declare_decl_watch(
+        &self,
+        plane: DeclPlane,
+        sink: DeclWatchSink,
+    ) -> Result<DeclWatchId, DeclWatchRefused> {
+        if !decl_watch::hears(plane) {
+            return Err(DeclWatchRefused::PlaneNotBuilt);
+        }
+        let Some(guard) = self.live() else {
+            return Err(DeclWatchRefused::SessionClosed);
+        };
+        let core = &guard.0;
+        let observed = self
+            .decl_watches
+            .observe(&mut core.registry.borrow_mut().app, plane);
+        if let Err(refused) = observed {
+            drop(guard);
+            drop(sink);
+            return Err(refused);
+        }
+        let id = self.decl_watches.add(plane, sink);
+        let registry = core.registry.borrow();
+        for face in &core.faces {
+            let (Link::Up(wire) | Link::Opening { wire, .. }) = &face.link else {
+                continue;
+            };
+            if let Some(tables) = registry.faces().find(|tables| tables.id == face.id) {
+                self.decl_watches
+                    .tell_held(id, plane, tables, || wire.actions.peer_zid());
+            }
+        }
+        Ok(id)
+    }
+
+    #[cfg(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ))]
+    fn undeclare_decl_watch(&self, id: DeclWatchId) -> bool {
+        // A closed session let go of every watch at its close.
+        let sink = match self.live() {
+            Some(core) => {
+                let mut registry = core.0.registry.borrow_mut();
+                self.decl_watches.undeclare(&mut registry.app, id)
+            }
+            None => None,
+        };
+        let found = sink.is_some();
+        drop(sink);
+        found
     }
 
     fn has_router_peer(&self) -> bool {
@@ -4649,7 +4756,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         };
         #[cfg(not(feature = "liveliness"))]
         let live_subs: Vec<TargetKey> = Vec::new();
+        // The watches end with the session; their sinks, and the C contexts they hold, are let go
+        // of with no lock held.
+        #[cfg(any(
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        ))]
+        let watches = self.decl_watches.close();
         drop(guard);
+        #[cfg(any(
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        ))]
+        drop(watches);
         // What publishes handed to the session and it never sent goes with it, let go of with no
         // lock held, as a sent leg is.
         let handed = core::mem::take(&mut *lock(&self.handed));

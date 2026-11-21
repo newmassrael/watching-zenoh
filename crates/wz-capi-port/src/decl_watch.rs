@@ -130,6 +130,9 @@ pub enum DeclWatchRefused {
     PlaneNotBuilt,
     /// The session is closed.
     SessionClosed,
+    /// The session's table of observers of what a peer declares, which a watch is told through,
+    /// is at the bound the session was opened with (`MAX_DECL_OBSERVERS`).
+    Full,
 }
 
 impl core::fmt::Display for DeclWatchRefused {
@@ -140,6 +143,7 @@ impl core::fmt::Display for DeclWatchRefused {
                 "this build does not hear the peers' declarations of that kind of entity"
             }
             Self::SessionClosed => "the session is closed",
+            Self::Full => "the session holds as many declaration observers as its bound allows",
         })
     }
 }
@@ -205,6 +209,7 @@ mod tests {
             DeclWatchRefused::NotProvided,
             DeclWatchRefused::PlaneNotBuilt,
             DeclWatchRefused::SessionClosed,
+            DeclWatchRefused::Full,
         ] {
             assert!(!alloc::format!("{refusal}").is_empty());
         }

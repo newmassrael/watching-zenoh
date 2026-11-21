@@ -255,6 +255,15 @@ shared-key-ids = ["wz-session-core/shared-key-ids", "wz-capi-port/shared-key-ids
 # pico's build (pico has no transport counters), no counter is kept and the text has none of them.
 # A Rust surface only: neither zenoh-c nor zenoh-pico reports transport counters through C.
 transport-stats = ["wz-session-core/transport-stats"]
+# The declaration watch (`SessionEngine::declare_decl_watch`): what the peers of the session's links
+# declare and retract, told to a watch with the session's other deliveries, outside its lock. The
+# two features are the pico ABI's of the same names, which this engine honours as the tokio engine
+# does: with `remote-declaration-watch` each event names the peer its link's handshake gave, and
+# with `declarations-synced-event` a watch is also told when a link's peer ended its initial
+# declarations. The watch is in a build with either; without both a watch is refused by name, and
+# the observers, the queue and the settling after each frame are not in the text.
+remote-declaration-watch = []
+declarations-synced-event = []
 # A clock the program moves (a time base it supplies, `wz-capi-pico`'s `time-base`): the word that
 # tells a read the clock moved on (`CoopConfig::clock_moves`), which ends the read's wait beside
 # its links. Off, which is pico's build, no program moves the clock, the config's field holds no

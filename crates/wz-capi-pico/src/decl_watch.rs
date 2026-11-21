@@ -23,8 +23,8 @@
 //! declarations, then the peers' declarations from then on, on every link the session holds and
 //! every link that comes up later; of tokens, what comes after; and no undeclaration for what a
 //! peer held on a link that was lost.
-//! The engine decides whether it watches at all: the tokio engine does, and the cooperative engine
-//! refuses with `WZ_EXT_ERR_UNSUPPORTED`.
+//! Both engines watch: the tokio engine on each of its faces, the cooperative engine from the
+//! dispatch of what each link of the session receives.
 //!
 //! The callback runs where the session hands out its callbacks, the drive of its links, never
 //! under a lock of the library, so it may call into the session; the event and the key it points
@@ -41,7 +41,8 @@ use wz_session_core::session_zid::ZID_MAX;
 
 use crate::ffi::{catch, guarded, CClosure, InCallback, ReleaseLatch};
 use crate::result::{
-    ZResult, WZ_EXT_ERR_UNSUPPORTED, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK,
+    ZResult, WZ_EXT_ERR_UNSUPPORTED, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SESSION_CLOSED,
+    Z_ERR_SYSTEM_OUT_OF_MEMORY, Z_OK,
 };
 use crate::session::{engine_of, session_handle, z_loaned_session_t, Engine};
 
@@ -135,6 +136,7 @@ fn code(refusal: DeclWatchRefused) -> ZResult {
     match refusal {
         DeclWatchRefused::NotProvided | DeclWatchRefused::PlaneNotBuilt => WZ_EXT_ERR_UNSUPPORTED,
         DeclWatchRefused::SessionClosed => Z_ERR_SESSION_CLOSED,
+        DeclWatchRefused::Full => Z_ERR_SYSTEM_OUT_OF_MEMORY,
     }
 }
 
@@ -188,7 +190,8 @@ fn tell(closure: &WatchClosure, entity: u8, event: &DeclWatchEvent<'_>) {
 /// not null) before this returns, and `watch` is left null. `Z_ERR_NULL` for a null `watch`,
 /// `call` or session; `Z_ERR_INVALID` for an `entity` that is none of the three;
 /// `Z_ERR_SESSION_CLOSED` for a closed session; `WZ_EXT_ERR_UNSUPPORTED` when the session's engine
-/// does not watch, or this build hears no declaration of that kind.
+/// does not watch, or this build hears no declaration of that kind; `_Z_ERR_SYSTEM_OUT_OF_MEMORY`
+/// when the session holds as many observers of what a peer declares as its bound allows.
 ///
 /// # Safety
 /// `session` is a loaned session of this library or null; `watch` is writable or null; `call` and
@@ -312,6 +315,7 @@ mod tests {
             WZ_EXT_ERR_UNSUPPORTED
         );
         assert_eq!(code(DeclWatchRefused::SessionClosed), Z_ERR_SESSION_CLOSED);
+        assert_eq!(code(DeclWatchRefused::Full), Z_ERR_SYSTEM_OUT_OF_MEMORY);
     }
 
     #[test]

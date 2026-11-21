@@ -34,6 +34,9 @@
 //! local set, over the group the network stack joins. With `group-host` the host's own sockets
 //! join it (`host_group`), as the tokio engine's group link does.
 //!
+//! With `remote-declaration-watch` or `declarations-synced-event` it tells a program's watch what
+//! the peers of its links declare and retract (`decl_watch`), as the tokio engine does.
+//!
 //! With `listen` it also listens: the ports `CoopConfig::listen` names take inbound `tcp/` links,
 //! each a face of its own beside the dial role's (`docs/capi-pico-on-coop-engine.md`, step L3).
 //! What it does not do yet, a later step of the note: `udp/` and `tls/` faces, and the C ABI's
