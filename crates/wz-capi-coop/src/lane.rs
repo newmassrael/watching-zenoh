@@ -605,6 +605,11 @@ impl<P: SessionDatagramLink> SessionDatagramLink for LaneGate<P> {
         self.pump.holds_input()
     }
 
+    /// The rest of a datagram already read is held back with the link's next one.
+    fn takes_input(&self) -> bool {
+        !self.shut() && self.pump.takes_input()
+    }
+
     fn readiness(&self) -> Option<Box<dyn LinkReadiness>> {
         self.pump.readiness()
     }

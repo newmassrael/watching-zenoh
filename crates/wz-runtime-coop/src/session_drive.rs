@@ -197,6 +197,14 @@ pub trait SessionDatagramLink {
         false
     }
 
+    /// Whether the session may be handed input now. A link whose owner holds its input back (the
+    /// delivery lane of a session that cannot take another message) answers `false`, and the loop
+    /// then dispatches nothing this step: no datagram, and not the rest of one already read, so
+    /// what one step delivers is never more than one message. The provided form answers `true`.
+    fn takes_input(&self) -> bool {
+        true
+    }
+
     /// A wait for this link's next input that its OWNER makes, from any thread and with nothing
     /// of the session's held, for a link opened to be waited on that way: its [`Self::service`]
     /// then does not wait, so the loop that drives it never sleeps under its owner's lock. `None`
@@ -1207,7 +1215,13 @@ impl<
         // A build with no allocator parks nothing: it reads the rest of a datagram
         // where the link holds it, so there is no remainder to come back to.
         #[cfg(feature = "alloc")]
-        if let Some(outcome) = dispatch_pending(&self.actions, &mut self.engine) {
+        let pending = if self.link.takes_input() {
+            dispatch_pending(&self.actions, &mut self.engine)
+        } else {
+            None
+        };
+        #[cfg(feature = "alloc")]
+        if let Some(outcome) = pending {
             #[cfg(feature = "reassembly")]
             self.reasm
                 .pump_report(&outcome, &self.actions, now_ms, &mut |event| {
@@ -1934,6 +1948,8 @@ mod wake_budget_tests {
     struct Recording {
         budgets: RefCell<Vec<u64>>,
         gone: core::cell::Cell<Option<LostCause>>,
+        /// Whether the link's owner holds its input back.
+        holding: core::cell::Cell<bool>,
     }
 
     impl SessionDatagramLink for Recording {
@@ -1949,6 +1965,9 @@ mod wake_budget_tests {
         }
         fn lost(&self) -> Option<LostCause> {
             self.gone.get()
+        }
+        fn takes_input(&self) -> bool {
+            !self.holding.get()
         }
     }
 
@@ -2042,6 +2061,36 @@ mod wake_budget_tests {
             }
         });
         (wakes, actions.app_wake_deadline_ms())
+    }
+
+    /// The rest of a datagram already read waits while the link's owner holds its input back, and
+    /// is dispatched by the first step after it lets go: a step hands the session nothing while
+    /// held, not even what it had read.
+    #[test]
+    fn a_held_link_leaves_the_rest_of_a_datagram_parked() {
+        let runtime = CoopRuntime::new(Stopped);
+        let clock = CoopTime::new(&runtime);
+        let sink: Rc<dyn BoxedLinkDriver> = Rc::new(Null);
+        let actions = new_session_actions(sink, params(), clock.clone(), Counting(0));
+        let link = Rc::new(Recording::default());
+        let config = SessionDriveConfig {
+            timeouts: SessionTimeouts::from_build(),
+            role: SessionRole::Acceptor,
+            max_iters: None,
+        };
+        let mut pump = SessionPump::new(runtime, link.clone(), actions.clone(), clock, config);
+        link.holding.set(true);
+        actions.park_pending_batch(&[0xFF]);
+        let _ = pump.step(&mut |_event: IterationEvent<'_, '_>| {});
+        let kept = actions.take_pending_batch();
+        assert!(kept.is_some(), "held: the rest stays parked");
+        actions.park_pending_batch(&[0xFF]);
+        link.holding.set(false);
+        let _ = pump.step(&mut |_event: IterationEvent<'_, '_>| {});
+        assert!(
+            actions.take_pending_batch().is_none(),
+            "let go: the rest is dispatched"
+        );
     }
 
     #[test]

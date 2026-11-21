@@ -331,3 +331,35 @@ fn a_token_takes_the_lane_in_order_with_the_samples() {
     assert_eq!(lane.counts().held_over, 1, "a key past the whole lane");
     assert!(lane.take_front().is_none());
 }
+
+/// A link that has nothing to give: what a gate over it holds back is the gate's alone.
+struct Quiet;
+
+impl wz_runtime_coop::session_drive::SessionDatagramLink for Quiet {
+    fn service(&self) {}
+
+    fn try_recv(&self) -> Option<wz_session_core::link::RxFrame> {
+        None
+    }
+}
+
+/// The gate holds the session's input back, the rest of a datagram already read included, while
+/// the lane cannot take a batch, and lets it go once the lane has room again.
+#[test]
+fn the_gate_holds_back_what_was_read_while_the_lane_is_full() {
+    use crate::lane::LaneGate;
+    use wz_capi_port::os::Mutex;
+    use wz_runtime_coop::session_drive::SessionDatagramLink;
+
+    let Some(lane) = lane(64, 4) else {
+        return;
+    };
+    let lane = alloc::sync::Arc::new(Mutex::new(lane));
+    let gate = LaneGate::new(Quiet, lane.clone(), 32);
+    assert!(gate.takes_input(), "an empty lane takes a batch");
+    lane.lock().offer(1, &best_effort(40));
+    assert!(!gate.takes_input(), "fifteen bytes left: no batch of 32");
+    assert!(front(&mut lane.lock()).is_some());
+    lane.lock().complete();
+    assert!(gate.takes_input(), "emptied, the lane takes a batch again");
+}
