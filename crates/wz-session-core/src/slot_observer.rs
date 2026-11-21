@@ -426,7 +426,9 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
     }
 
     /// [`Self::new`], each registry held to the limits `limits` states: what the creator of the
-    /// session resolved for it. A table reads its bound here and never from the build.
+    /// session resolved for it. A table reads its bound here and never from the build. The
+    /// tables of each peer, which this observer does not hold, are held to the same limits by
+    /// [`PeerTables::limit_to`].
     pub fn with_limits(limits: &crate::limits::SessionLimits) -> Self {
         let mut observer = Self::new();
         observer
@@ -721,8 +723,9 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
     /// session's interests and the terminated-get prunes leave through `actions`, and
     /// what is owed in `peers.finals` stays staged. For a host that holds each `Final`
     /// behind the queries a callback may still answer, takes the owed ones with
-    /// `core::mem::take(&mut peers.finals)` and sends each when the last of them has,
-    /// so no `Final` overtakes a reply. The replies it drains are one burst, as
+    /// [`FinalStage::take_owed`](crate::reply_stage::FinalStage::take_owed), which leaves
+    /// `peers.finals` its quota, and sends each when the last of them has, so no `Final`
+    /// overtakes a reply. The replies it drains are one burst, as
     /// `flush_pending`'s are.
     pub fn flush_pending_replies<S, R: ReplySink, G: ReplySink>(
         &mut self,
