@@ -1292,6 +1292,12 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
         Ok(ReplyHandle(rid))
     }
 
+    /// Drop every pending query without firing its final: what the loss of the face the queries
+    /// were asked of does to them, each sink's drop being its end. The rows stay the table's.
+    pub fn clear(&mut self) {
+        self.pending.clear();
+    }
+
     /// Whether one more query may be held pending: inside the quota its creator stated and in a
     /// row its storage has free. A table lent no rows has none, so a get it cannot hold is refused
     /// before anything is put in it.

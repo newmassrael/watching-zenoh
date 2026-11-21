@@ -246,16 +246,17 @@ fn a_listener_lays_out_the_gets_of_each_face_it_admits() {
     .expect("lays an arena out");
     // The gets pending on the session's own queryables are held apart from every face's.
     let own = usize::from(cfg!(feature = "local-queryable"));
+    assert_eq!(row(&dial, "pending gets").count, 1 + own);
+    assert_eq!(row(&listening, "pending gets").count, 1 + 3 + 2 + own);
+    assert_eq!(listening.gets().tables, 1 + 3 + 2 + own);
     assert_eq!(
-        row(&dial, "pending queries").count,
-        (1 + own) * caps::MAX_PENDING_QUERIES
-    );
-    assert_eq!(
-        row(&listening, "pending queries").count,
-        (1 + 3 + 2 + own) * caps::MAX_PENDING_QUERIES
+        row(&listening, "pending gets").entry_bytes,
+        row(&dial, "pending gets").entry_bytes,
+        "every face's table is the same"
     );
     assert_eq!(row(&dial, "link receive buffers").count, 1);
     assert_eq!(row(&listening, "link receive buffers").count, 1 + 3 + 2);
+    assert_eq!(dial.gets().rows.queries, caps::MAX_PENDING_QUERIES);
     assert_eq!(
         row(&listening, "subscribers"),
         row(&dial, "subscribers"),

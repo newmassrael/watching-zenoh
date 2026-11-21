@@ -35,8 +35,8 @@ use crate::cancellation::CancellableFan;
 use crate::decl_watch::{DeclPlane, DeclWatchId, DeclWatchRefused, DeclWatchSink};
 use crate::{
     FanoutError, FilterId, FilterPlane, FilteredPut, LinksNotHonoured, LivelinessSink, MatchId,
-    MatchingSink, QblId, QueryableSink, ReplyCallback, StatementNotHonoured, SubId, SubscriberSink,
-    Tick, TickerId, TokenId, WireKey,
+    MatchingSink, NoRoomToHold, QblId, QueryableSink, ReplyCallback, StatementNotHonoured, SubId,
+    SubscriberSink, Tick, TickerId, TokenId, WireKey,
 };
 
 /// Why [`SessionEngine::redeclare`] told no peer anything.
@@ -469,6 +469,23 @@ pub trait SessionEngine: Send + Sync + 'static {
     ) -> Option<usize> {
         let _ = (keyexpr, wire, opts, fan, leg);
         None
+    }
+
+    /// [`Self::get_on_wire`], a get the session could not hold pending told apart from one that
+    /// reached nobody: `Err` when no leg was issued (`leg` was not called) and nothing was sent,
+    /// and a peer or queryable it had to ask found no room in the table that holds the session's
+    /// pending gets. Where some found room and some did not, the legs that found it are issued, as
+    /// [`Self::get_on_wire`] issues them. The provided answer is [`Self::get_on_wire`]'s, for an
+    /// engine whose pending gets are not held to a table of its own.
+    fn get_held(
+        &self,
+        keyexpr: &str,
+        wire: &WireKey,
+        opts: &QueryOptions,
+        fan: Option<&CancellableFan>,
+        leg: &mut dyn FnMut() -> ReplyCallback,
+    ) -> Result<Option<usize>, NoRoomToHold> {
+        Ok(self.get_on_wire(keyexpr, wire, opts, fan, leg))
     }
 
     /// [`Self::get_on_wire`] for a query whose VALUE is a buffer of shared memory some owner of a

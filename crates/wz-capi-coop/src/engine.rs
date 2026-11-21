@@ -185,8 +185,9 @@ mod get;
 #[cfg(feature = "query")]
 use {
     get::{GetEvent, GetKind, GetPlane, PendingGet},
-    wz_capi_port::{cancellation::CancellableFan, ReplyCallback},
+    wz_capi_port::{cancellation::CancellableFan, NoRoomToHold, ReplyCallback},
     wz_session_core::query_options::QueryOptions,
+    wz_session_core::registry_error::RegisterError,
     wz_session_core::reply_acceptance::ReplyAcceptance,
     wz_session_core::reply_sink::{ConsolidatingSink, ReplyView},
     wz_session_core::timestamp_visibility::HiddenReplyTimestamp,
@@ -2575,6 +2576,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 local_tokens: entities.tokens,
                 liveliness_subscribers: entities.liveliness_subscribers,
             },
+            plan.gets(),
+            memory,
         )
         .map_err(|lend| OpenError::Arena(ArenaRefused::Lend(lend)))?;
         let runtime = CoopRuntime::new(clock.clone());
@@ -4617,6 +4620,20 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         fan: Option<&CancellableFan>,
         leg: &mut dyn FnMut() -> ReplyCallback,
     ) -> Option<usize> {
+        // A get no table could hold issued no leg, as one that reached nobody.
+        self.get_held(keyexpr, wire, opts, fan, leg)
+            .unwrap_or(Some(0))
+    }
+
+    #[cfg(feature = "query")]
+    fn get_held(
+        &self,
+        keyexpr: &str,
+        wire: &WireKey,
+        opts: &QueryOptions,
+        fan: Option<&CancellableFan>,
+        leg: &mut dyn FnMut() -> ReplyCallback,
+    ) -> Result<Option<usize>, NoRoomToHold> {
         // One leg for each face whose link is up, when the destination admits a peer, and one to
         // the session's own queryables, when it admits the session and the build has them
         // (`local-queryable`: zenoh-pico's default build asks none, `Z_FEATURE_LOCAL_QUERYABLE`
@@ -4628,11 +4645,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // reads neither, and asking every link would widen it. `get_stated` is the door that
         // refuses it by name.
         if StatementNotHonoured::of_query(opts).is_err() {
-            return Some(0);
+            return Ok(Some(0));
         }
         let (faces, expose) = {
             let Some(guard) = self.live() else {
-                return Some(0);
+                return Ok(Some(0));
             };
             // `entity-timestamp-opt-in`: the query's choice, or the session's policy when it
             // states none, applied to every leg's callback, after its replies are consolidated.
@@ -4646,10 +4663,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         };
         let mut leg = || reply_shown(expose, leg());
         let mut issued = 0;
+        // The legs refused for want of a row in their face's table of pending gets: a get that
+        // issued none, and found no room for one, is refused whole.
+        let mut unheld = 0usize;
         for face in faces {
             let leg_id = self.next_local_id();
             let Some(mut guard) = self.live() else {
-                return Some(issued);
+                return Ok(Some(issued));
             };
             let core = &mut guard.0;
             let Some(actions) = core.up_actions(face).cloned() else {
@@ -4668,22 +4688,22 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             );
             // One Final: the face's peer's. Registered before the request goes out, so no answer
             // can arrive before its entry.
-            let registered = core
-                .registry
-                .borrow_mut()
-                .face_mut(face)
-                .map(|tables| {
-                    tables.gets.replies.register_sink(
-                        rid,
-                        1,
-                        deadline_ms,
-                        ReplyAcceptance::for_query(keyexpr, opts.effective_accept_replies()),
-                        sink,
-                    )
-                })
-                .is_some_and(|registered| registered.is_ok());
-            if !registered {
-                continue;
+            let registered = core.registry.borrow_mut().face_mut(face).map(|tables| {
+                tables.gets.replies.register_sink(
+                    rid,
+                    1,
+                    deadline_ms,
+                    ReplyAcceptance::for_query(keyexpr, opts.effective_accept_replies()),
+                    sink,
+                )
+            });
+            match registered {
+                Some(Ok(_)) => {}
+                Some(Err(RegisterError::TableFull)) => {
+                    unheld += 1;
+                    continue;
+                }
+                _ => continue,
             }
             self.hold_leg(leg_id, leg());
             // The link names the key as its own key-wire form says.
@@ -4714,7 +4734,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             issued += 1;
             // A fan cancelled while the legs are issued stops the issuing.
             if !self.cancelling(fan, leg_id) {
-                return Some(issued);
+                return Ok(Some(issued));
             }
         }
         // And one leg for each group the session asks queries of
@@ -4738,7 +4758,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         for face in groups {
             let leg_id = self.next_local_id();
             let Some(mut guard) = self.live() else {
-                return Some(issued);
+                return Ok(Some(issued));
             };
             let core = &mut guard.0;
             let Some(group) = core.groups.iter().find(|group| group.id() == face) else {
@@ -4759,22 +4779,22 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 get::reply_sink(leg_id, &self.gets),
             );
             // Registered before the query is queued, as a link's leg is before it is sent.
-            let registered = core
-                .registry
-                .borrow_mut()
-                .face_mut(face)
-                .map(|tables| {
-                    tables.gets.replies.register_sink(
-                        rid,
-                        finals,
-                        deadline_ms,
-                        ReplyAcceptance::for_query(keyexpr, opts.effective_accept_replies()),
-                        sink,
-                    )
-                })
-                .is_some_and(|registered| registered.is_ok());
-            if !registered {
-                continue;
+            let registered = core.registry.borrow_mut().face_mut(face).map(|tables| {
+                tables.gets.replies.register_sink(
+                    rid,
+                    finals,
+                    deadline_ms,
+                    ReplyAcceptance::for_query(keyexpr, opts.effective_accept_replies()),
+                    sink,
+                )
+            });
+            match registered {
+                Some(Ok(_)) => {}
+                Some(Err(RegisterError::TableFull)) => {
+                    unheld += 1;
+                    continue;
+                }
+                _ => continue,
             }
             self.hold_leg(leg_id, leg());
             if !group.ask(rid, keyexpr, wire, &opts.query_metadata()) {
@@ -4794,14 +4814,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             drop(guard);
             issued += 1;
             if !self.cancelling(fan, leg_id) {
-                return Some(issued);
+                return Ok(Some(issued));
             }
         }
         #[cfg(feature = "local-queryable")]
         if opts.allowed_destination.allows_local() {
             let leg_id = self.next_local_id();
             let Some(mut guard) = self.live() else {
-                return Some(issued);
+                return Ok(Some(issued));
             };
             let core = &mut guard.0;
             // The session's own request ids are a space of their own: the leg is registered in
@@ -4824,6 +4844,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 ReplyAcceptance::for_query(keyexpr, opts.effective_accept_replies()),
                 sink,
             );
+            if matches!(registered, Err(RegisterError::TableFull)) {
+                unheld += 1;
+            }
             if registered.is_ok() {
                 self.hold_leg(leg_id, leg());
                 core.pending_gets.push(PendingGet {
@@ -4843,7 +4866,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 self.deliver();
             }
         }
-        Some(issued)
+        // Asked of someone and held by none, with nothing sent: refused whole.
+        if issued == 0 && unheld > 0 {
+            return Err(NoRoomToHold);
+        }
+        Ok(Some(issued))
     }
 
     #[cfg(feature = "liveliness-get")]

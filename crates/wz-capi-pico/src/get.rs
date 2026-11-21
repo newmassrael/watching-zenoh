@@ -130,7 +130,7 @@ use alloc::sync::Arc;
 use core::ffi::{c_int, c_void};
 
 use wz_capi_port::cancellation::{register_fan, CancellableFan, CancellationToken, Registration};
-use wz_capi_port::ReplyCallback;
+use wz_capi_port::{NoRoomToHold, ReplyCallback};
 use wz_session_core::locality::Locality;
 use wz_session_core::query_mode::{ConsolidationMode, QueryTarget};
 use wz_session_core::query_options::QueryOptions;
@@ -1397,9 +1397,23 @@ pub(crate) fn issue_get(
     const TARGETED: bool = crate::get_to_peer::TARGETED_IN_DOMAIN;
     let target_peer = if TARGETED { target_peer } else { None };
     let Some(target_peer) = target_peer else {
-        return fan_get(closure, gate, token, |fan, leg| {
-            engine.get_on_wire(&keyexpr, &wire, &opts, fan, leg)
+        // A get the session has no room to hold pending issues no leg and sends nothing; the fan
+        // completes it with no reply, and the caller is told `_Z_ERR_SYSTEM_OUT_OF_MEMORY`, the
+        // code this ABI answers a full table of the session with.
+        let mut unheld = false;
+        let issued = fan_get(closure, gate, token, |fan, leg| {
+            engine
+                .get_held(&keyexpr, &wire, &opts, fan, leg)
+                .unwrap_or_else(|NoRoomToHold| {
+                    unheld = true;
+                    Some(0)
+                })
         });
+        return if unheld {
+            crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY
+        } else {
+            issued
+        };
     };
     let opts = opts.with_target_peer(target_peer);
     // The engine's refusal issues no leg, so the fan completes the get with no reply and answers

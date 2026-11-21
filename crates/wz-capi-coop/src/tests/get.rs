@@ -9,7 +9,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use wz_capi_port::cancellation::{register_fan, CancellableFan, CancellationToken, Registration};
-use wz_capi_port::{ReplyCallback, SessionDrive, SessionEngine, WireKey};
+use wz_capi_port::{NoRoomToHold, ReplyCallback, SessionDrive, SessionEngine, WireKey};
+use wz_session_core::limit_binding::Quota;
 use wz_session_core::query_options::QueryOptions;
 use wz_session_core::reply_sink::{ReplyKind, ReplyView};
 
@@ -182,6 +183,64 @@ fn a_cancelled_get_ends_without_a_step() {
     assert!(leg.ended, "cancel returns once the leg is over");
     assert!(leg.replies.is_empty(), "{:?}", leg.replies);
     assert_eq!(token.active(), 0);
+}
+
+/// The face's table of pending gets holds `MAX_PENDING_QUERIES` of them: a get past it is
+/// refused whole, before a leg's callback is minted or its query sent, and the row the first gives
+/// back at its deadline holds the next. The CONTROL is the first get, held and sent.
+#[test]
+fn a_get_past_its_table_is_refused_and_sends_nothing() {
+    let Some(limits) =
+        super::entity_tables::lowered(|l| l.select_max_pending_queries(Quota::at_most(1)).is_ok())
+    else {
+        return;
+    };
+    let router = Router::start(CatchAll::None);
+    let engine = super::entity_tables::open_under(&router, limits);
+    settle(&router, &engine, Command::Silence);
+    let mut opts = remote_get();
+    opts.timeout_ms = 300;
+    let (issued, first) = ask(&engine, "demo/g/a", &opts, None, None, None);
+    assert_eq!(issued, Some(1), "CONTROL: the one row holds the first get");
+    until(&engine, "the first query to reach the router", || {
+        router.seen(|s| s.queries) == 1
+    });
+
+    let minted = Arc::new(Mutex::new(0usize));
+    let counting = minted.clone();
+    let refused = engine.get_held(
+        "demo/g/b",
+        &WireKey::literal(),
+        &remote_get(),
+        None,
+        &mut || {
+            *counting.lock().unwrap() += 1;
+            Box::new(|_view: &dyn ReplyView| {}) as ReplyCallback
+        },
+    );
+    assert_eq!(refused, Err(NoRoomToHold));
+    let (through_wire, _) = ask(&engine, "demo/g/b", &remote_get(), None, None, None);
+    assert_eq!(
+        through_wire,
+        Some(0),
+        "the door without the refusal issues no leg"
+    );
+    assert_eq!(*minted.lock().unwrap(), 0, "no leg was minted");
+    let quiet = Instant::now() + Duration::from_millis(100);
+    while Instant::now() < quiet {
+        let _ = SessionDrive::read(&*engine, false);
+    }
+    assert_eq!(router.seen(|s| s.queries), 1, "nothing was sent");
+
+    until(&engine, "the first get to end at its deadline", || {
+        first.lock().unwrap().ended
+    });
+    let (issued, _next) = ask(&engine, "demo/g/c", &remote_get(), None, None, None);
+    assert_eq!(
+        issued,
+        Some(1),
+        "the row the first gave back holds the next"
+    );
 }
 
 /// A get whose link goes ends with it, long before its deadline: the peer that owed its Final is

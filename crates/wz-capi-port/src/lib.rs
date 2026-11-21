@@ -86,7 +86,9 @@ pub mod tls_material;
 pub use decl_watch::{DeclPlane, DeclWatchEvent, DeclWatchId, DeclWatchRefused, DeclWatchSink};
 pub use drive::{CalledFromReadTask, ReadTaskStartRefused, SessionClosed, SessionDrive};
 pub use engine::{RedeclareRefusal, SessionEngine};
-pub use query::{HeldQuery, QblId, QueryCallback, QueryHolder, QueryableSink, ReplyCallback};
+pub use query::{
+    HeldQuery, NoRoomToHold, QblId, QueryCallback, QueryHolder, QueryableSink, ReplyCallback,
+};
 
 /// A C-level subscription id — what a `z_owned_subscriber_t` handle carries. It keys whatever an
 /// engine holds for the one C subscription (the per-face subscribers it spawned, on an engine

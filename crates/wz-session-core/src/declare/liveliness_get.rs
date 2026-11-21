@@ -301,6 +301,14 @@ impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
         Ok(true)
     }
 
+    /// Drop every pending get and every staged marker without firing anything: what the loss of
+    /// the face the gets were asked of does to them, each sink's drop being its end. The rows stay
+    /// the tables'.
+    pub fn clear(&mut self) {
+        self.pending.clear();
+        self.finalized.clear();
+    }
+
     /// Remove a pending get by `interest_id` without firing `on_final`.
     /// Returns `true` when an entry was removed, `false` when none
     /// matched (idempotent). Used by the RAII / explicit-cancel path

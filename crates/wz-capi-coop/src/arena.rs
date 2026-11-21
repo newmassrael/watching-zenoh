@@ -12,9 +12,10 @@
 //! - the application's tables, once for the session: its subscribers (`MAX_SUBSCRIPTIONS`), with
 //!   `queryable` its queryables (`MAX_QUERYABLES`), with `liveliness` its tokens
 //!   (`MAX_LOCAL_TOKENS`) and its liveliness subscribers (`MAX_LIVELINESS_SUBSCRIPTIONS`);
-//! - the gets pending on each face (`MAX_PENDING_QUERIES`, and with `liveliness-get`
-//!   `MAX_PENDING_LIVELINESS_GETS`), and with `local-queryable` those pending on the session's
-//!   own queryables, which no face holds;
+//! - one table of the gets pending on a face (`MAX_PENDING_QUERIES`, and with `liveliness-get`
+//!   `MAX_PENDING_LIVELINESS_GETS`) for each face the session may hold at once, which a face
+//!   takes when it comes and gives back when it goes, and with `local-queryable` one of those
+//!   pending on the session's own queryables, which no face holds ([`GetTables`]);
 //! - the buffers of each link the session may hold: a receive buffer of the batch the session
 //!   advertises, a streamed batch's length counted inside it, and [`LINK_TX_SLOTS`] slots of that
 //!   length to encode its frames into, each table with the flags that say which buffers are lent
@@ -65,9 +66,9 @@ use wz_session_core::caps;
 use wz_session_core::limit_binding::{Quota, UnlentRows};
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::pubsub::SubscriberTable;
-use wz_session_core::reply::ReplyRegistry;
 use wz_session_core::reply_sink::{BoxedReplySink, ConsolidatingSink};
 use wz_session_core::sink::BoxedSink;
+use wz_session_core::slot_observer::{RequesterRows, Requesters};
 
 use crate::engine::EntryBytes;
 use crate::CoopConfig;
@@ -101,7 +102,7 @@ impl ArenaRow {
 }
 
 /// The most rows a plan holds: every row of the build with every feature.
-pub const ARENA_ROWS: usize = 18;
+pub const ARENA_ROWS: usize = 17;
 
 /// The slots each link is lent to encode its frames into: a batching session holds a batch open in
 /// one slot while it encodes the next message, which does not join it, into another.
@@ -161,6 +162,20 @@ pub struct EntityRows {
     pub matching_listeners: usize,
 }
 
+/// The tables of pending gets a session's arena lends: how many rows each registry of one is lent,
+/// and how many there are, one for each face the session may hold at once and, with
+/// `local-queryable`, one for the gets its own queryables answer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GetTables {
+    /// The rows of each registry of one table.
+    pub rows: RequesterRows,
+    /// How many tables.
+    pub tables: usize,
+}
+
+/// One face's table of pending gets, as the arena lends it.
+type FaceGets = Requesters<ConsolidatingSink<BoxedReplySink>, BoxedReplySink, Lent>;
+
 impl EntityRows {
     /// The rows of the write filters' one table: a publisher's and a querier's each.
     pub const fn filters(&self) -> Option<usize> {
@@ -187,6 +202,7 @@ pub struct ArenaPlan {
     /// The length of a link's receive buffer and of each of its slots.
     link_bytes: usize,
     entities: EntityRows,
+    gets: GetTables,
 }
 
 impl ArenaPlan {
@@ -208,6 +224,7 @@ impl ArenaPlan {
             links,
             link_bytes,
             entities: EntityRows::default(),
+            gets: GetTables::default(),
         };
         let faces = faces_of(config).ok_or(ArenaRefused::TooLarge)?;
         // The links' rows are lent when the session opens, in this order (`SessionArena::lend_links`).
@@ -285,38 +302,33 @@ impl ArenaPlan {
                 >::ROW_BYTES,
             );
         }
-        let get_tables = faces
-            .checked_add(usize::from(cfg!(feature = "local-queryable")))
-            .ok_or(ArenaRefused::TooLarge)?;
-        plan.put(
-            "pending queries",
-            "MAX_PENDING_QUERIES",
-            times(
-                get_tables,
-                lent(
+        plan.gets = GetTables {
+            rows: RequesterRows {
+                queries: lent(
                     "MAX_PENDING_QUERIES",
                     limits.max_pending_queries(),
                     caps::MAX_PENDING_QUERIES,
                 )?,
-            )?,
-            ReplyRegistry::<ConsolidatingSink<BoxedReplySink>, Lent>::ROW_BYTES,
-        );
-        #[cfg(feature = "liveliness-get")]
+                liveliness_gets: if cfg!(feature = "liveliness-get") {
+                    lent(
+                        "MAX_PENDING_LIVELINESS_GETS",
+                        limits.max_pending_liveliness_gets(),
+                        caps::MAX_PENDING_LIVELINESS_GETS,
+                    )?
+                } else {
+                    0
+                },
+            },
+            tables: faces
+                .checked_add(usize::from(cfg!(feature = "local-queryable")))
+                .ok_or(ArenaRefused::TooLarge)?,
+        };
+        // A row of tables, each the spans of one face's registries: a face takes one whole.
         plan.put(
-            "pending liveliness gets",
-            "MAX_PENDING_LIVELINESS_GETS",
-            times(
-                get_tables,
-                lent(
-                    "MAX_PENDING_LIVELINESS_GETS",
-                    limits.max_pending_liveliness_gets(),
-                    caps::MAX_PENDING_LIVELINESS_GETS,
-                )?,
-            )?,
-            wz_session_core::declare::liveliness_get::LivelinessGetRegistry::<
-                BoxedReplySink,
-                Lent,
-            >::ROW_BYTES,
+            "pending gets",
+            "MAX_PENDING_QUERIES + MAX_PENDING_LIVELINESS_GETS",
+            plan.gets.tables,
+            FaceGets::arena_bytes(plan.gets.rows).ok_or(ArenaRefused::TooLarge)?,
         );
         plan.entities = entity_rows(limits)?;
         plan.put_entities()?;
@@ -385,6 +397,11 @@ impl ArenaPlan {
     /// How many rows each table of the engine's record of the session's declarations is lent.
     pub fn entities(&self) -> EntityRows {
         self.entities
+    }
+
+    /// The tables of pending gets the arena lends, and the rows of each.
+    pub fn gets(&self) -> GetTables {
+        self.gets
     }
 
     /// Add a row. A plan has room for every row of the build with every feature (`ARENA_ROWS`).
@@ -545,7 +562,16 @@ impl SessionArena {
         plan: &ArenaPlan,
         memory: &'static dyn ArenaMemory,
     ) -> Result<Self, ArenaRefused> {
-        let bytes = plan.reserved_bytes().ok_or(ArenaRefused::TooLarge)?;
+        Self::of_bytes(plan.reserved_bytes().ok_or(ArenaRefused::TooLarge)?, memory)
+    }
+
+    /// Reserve an arena of `bytes` from `memory`: what a session takes past its plan when the
+    /// thing it is for comes (a face attached beyond the faces the open planned for). Refused,
+    /// having taken nothing, when the memory has none to give.
+    pub(crate) fn of_bytes(
+        bytes: usize,
+        memory: &'static dyn ArenaMemory,
+    ) -> Result<Self, ArenaRefused> {
         // At least one span, so the memory is never asked for nothing.
         let layout = Layout::from_size_align(bytes.max(ARENA_ALIGN), ARENA_ALIGN)
             .map_err(|_| ArenaRefused::TooLarge)?;

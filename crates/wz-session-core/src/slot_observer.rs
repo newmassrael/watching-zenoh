@@ -174,6 +174,14 @@ impl<R: ReplySink, G: ReplySink, P: Storage> Requesters<R, G, P> {
         self.liveliness_gets
             .limit_to(limits.max_pending_liveliness_gets_held());
     }
+
+    /// Drop every pending get of both registries without firing anything, keeping their rows: the
+    /// requesters of a face that went, emptied for the next.
+    pub fn clear(&mut self) {
+        self.replies.clear();
+        #[cfg(feature = "liveliness-get")]
+        self.liveliness_gets.clear();
+    }
 }
 
 impl<R: ReplySink, G: ReplySink, P: Storage> Default for Requesters<R, G, P> {

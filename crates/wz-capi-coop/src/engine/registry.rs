@@ -35,6 +35,9 @@ use wz_session_core::slot_observer::{
 };
 use wz_session_core::wireexpr_resolve::SharedOwnMappingSpace;
 
+use crate::arena::{ArenaMemory, GetTables, SessionArena};
+use wz_session_core::slot_observer::RequesterRows;
+
 use wz_session_core::declare::matching::BoxedMatchingSink;
 use wz_session_core::declare::queryable::QuerierCriterion;
 use wz_session_core::declare::subscriber::PublisherCriterion;
@@ -58,25 +61,42 @@ pub(super) type FaceId = u64;
 pub(super) const DIAL_FACE: FaceId = 1 << 62;
 
 /// The session's own pending gets on one face: a query's sink consolidates what its leg is
-/// handed.
-pub(super) type Gets = Requesters<ConsolidatingSink<BoxedReplySink>, BoxedReplySink>;
+/// handed. The rows are lent from the session's arena at its open, one table for each face the
+/// session may hold at once (`crate::arena::GetTables`).
+pub(super) type Gets = Requesters<ConsolidatingSink<BoxedReplySink>, BoxedReplySink, Lent>;
+
+/// Where the rows of a face's table of pending gets lie.
+enum GetsOrigin {
+    /// A spare table of the session's arena, which goes back to the spares when the face goes.
+    Spare,
+    /// An arena of the face's own, reserved from the session's memory when the face came past the
+    /// faces the open planned for, and given back after the table when the face goes.
+    Own(SessionArena),
+    /// Nowhere: the memory had none to give, and the table, lent no rows, refuses every get
+    /// before anything is sent.
+    Unlent,
+}
 
 /// What the session holds for one face: what its peer wrote and what the session asked of it.
 pub(super) struct FaceTables {
     pub(super) id: FaceId,
     pub(super) peer: PeerTables,
     pub(super) gets: Gets,
+    /// Declared after `gets`, so a table lent from the face's own arena is dropped before it.
+    origin: GetsOrigin,
 }
 
 impl FaceTables {
-    /// Empty tables for face `id`, the peer's held to the session's `limits`.
-    fn new(id: FaceId, limits: &SessionLimits) -> Self {
+    /// Empty tables for face `id`, the peer's held to the session's `limits`, and the session's
+    /// gets on it held in `gets`, whose rows lie where `origin` says.
+    fn new(id: FaceId, limits: &SessionLimits, gets: Gets, origin: GetsOrigin) -> Self {
         let mut peer = PeerTables::new();
         peer.limit_to(limits);
         Self {
             id,
             peer,
-            gets: Gets::new(),
+            gets,
+            origin,
         }
     }
 }
@@ -125,6 +145,14 @@ pub(super) struct Registry {
     limits: SessionLimits,
     /// The dial role's face first, then the accepted ones in the order they came.
     faces: Vec<FaceTables>,
+    /// The tables of pending gets the arena lent for faces the session may still come to hold,
+    /// each taken by a face when it comes and given back, emptied, when it goes.
+    spare: Vec<Gets>,
+    /// The rows of each table of pending gets, as the open resolved them.
+    get_rows: RequesterRows,
+    /// The memory the session's arena came from, which a face past the open's plan reserves its
+    /// table of pending gets from.
+    memory: &'static dyn ArenaMemory,
     /// The session's own gets pending on its own queryables ([`LOCAL_FACE`]).
     #[cfg(feature = "local-queryable")]
     pub(super) local: Gets,
@@ -147,20 +175,37 @@ struct Split<'a> {
 
 impl Registry {
     /// A session that holds nothing and has been told nothing, with its dial face, its tables
-    /// held to the session limits its open resolved and the application's lent from `arena`,
-    /// `rows` of each. Refused when the arena has not the rows, which one reserved by the plan
-    /// that counts them always has.
+    /// held to the session limits its open resolved, the application's lent from `arena`, `rows`
+    /// of each, and the tables of pending gets `gets` counts lent from it too: the dial face's,
+    /// the session's own where it answers its own gets, and the rest kept for the faces to come.
+    /// Refused when the arena has not the rows, which one reserved by the plan that counts them
+    /// always has.
     pub(super) fn new(
         limits: &SessionLimits,
         arena: &mut Arena,
         rows: ObserverRows,
+        gets: GetTables,
+        memory: &'static dyn ArenaMemory,
     ) -> Result<Self, LendRefused> {
+        let app = App::lent(arena, rows, limits)?;
+        let dial = Gets::lent(arena, gets.rows, limits)?;
+        #[cfg(feature = "local-queryable")]
+        let local = Gets::lent(arena, gets.rows, limits)?;
+        let held = 1 + usize::from(cfg!(feature = "local-queryable"));
+        let others = gets.tables.saturating_sub(held);
+        let mut spare = Vec::with_capacity(others);
+        for _ in 0..others {
+            spare.push(Gets::lent(arena, gets.rows, limits)?);
+        }
         Ok(Self {
-            app: App::lent(arena, rows, limits)?,
-            faces: vec![FaceTables::new(DIAL_FACE, limits)],
+            app,
+            faces: vec![FaceTables::new(DIAL_FACE, limits, dial, GetsOrigin::Spare)],
+            spare,
+            get_rows: gets.rows,
+            memory,
             limits: *limits,
             #[cfg(feature = "local-queryable")]
-            local: Gets::new(),
+            local,
             #[cfg(any(
                 feature = "remote-declaration-watch",
                 feature = "declarations-synced-event"
@@ -203,21 +248,69 @@ impl Registry {
         self.face_mut(id).map(|face| &mut face.gets)
     }
 
-    /// Tables for a face that has come: empty, as its peer has said nothing yet.
+    /// Tables for a face that has come: empty, as its peer has said nothing yet, its pending
+    /// gets in a spare table the arena lent, or past those in one of its own.
     pub(super) fn add_face(&mut self, id: FaceId) {
-        self.faces.push(FaceTables::new(id, &self.limits));
+        let (gets, origin) = match self.spare.pop() {
+            Some(gets) => (gets, GetsOrigin::Spare),
+            None => self.own_gets(),
+        };
+        self.faces
+            .push(FaceTables::new(id, &self.limits, gets, origin));
+    }
+
+    /// A table of pending gets for a face past those the open planned for, in an arena of its own
+    /// the session's memory reserves now; one lent no rows when it has none to give.
+    fn own_gets(&self) -> (Gets, GetsOrigin) {
+        let Some(bytes) = Gets::arena_bytes(self.get_rows) else {
+            return (Gets::default(), GetsOrigin::Unlent);
+        };
+        let Ok(mut own) = SessionArena::of_bytes(bytes, self.memory) else {
+            return (Gets::default(), GetsOrigin::Unlent);
+        };
+        match Gets::lent(own.arena_mut(), self.get_rows, &self.limits) {
+            Ok(gets) => (gets, GetsOrigin::Own(own)),
+            Err(_) => (Gets::default(), GetsOrigin::Unlent),
+        }
     }
 
     /// The tables of face `id`, gone with the face. The dial role's face is never removed.
     pub(super) fn remove_face(&mut self, id: FaceId) {
-        if id != DIAL_FACE {
-            self.faces.retain(|face| face.id != id);
+        if id == DIAL_FACE {
+            return;
+        }
+        if let Some(at) = self.faces.iter().position(|face| face.id == id) {
+            let face = self.faces.remove(at);
+            self.give_back(face);
         }
     }
 
     /// The tables of every face but the dial role's, gone with their faces.
     pub(super) fn remove_accepted_faces(&mut self) {
-        self.faces.truncate(1);
+        while self.faces.len() > 1 {
+            if let Some(face) = self.faces.pop() {
+                self.give_back(face);
+            }
+        }
+    }
+
+    /// The tables of a face that went: what its peer wrote is dropped, and its table of pending
+    /// gets, emptied, is kept for the next face when the session's arena lent it. Each get it held
+    /// ends, as the loss of the face it was asked of ends it.
+    fn give_back(&mut self, face: FaceTables) {
+        let FaceTables {
+            mut gets, origin, ..
+        } = face;
+        gets.clear();
+        match origin {
+            GetsOrigin::Spare => self.spare.push(gets),
+            // The rows go before the memory they lie in.
+            GetsOrigin::Own(own) => {
+                drop(gets);
+                drop(own);
+            }
+            GetsOrigin::Unlent => {}
+        }
     }
 
     /// The tables of face `id`, while the session holds it.
