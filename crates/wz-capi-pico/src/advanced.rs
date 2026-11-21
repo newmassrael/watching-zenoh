@@ -1483,7 +1483,7 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers(
             history,
             crate::liveliness::sample_sink(cclosure),
         ) else {
-            return Z_ERR_GENERIC;
+            return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
         };
         let placed = slot.fill(SubscriberState {
             shared: engine,

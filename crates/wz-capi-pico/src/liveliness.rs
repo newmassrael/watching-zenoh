@@ -48,7 +48,7 @@ use crate::pubsub::{
     z_moved_closure_sample_t, z_owned_closure_sample_t, z_owned_subscriber_t, CClosure,
     SubscriberState, Z_SAMPLE_KIND_DELETE, Z_SAMPLE_KIND_PUT,
 };
-use crate::result::{ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_OK};
+use crate::result::{ZResult, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SYSTEM_OUT_OF_MEMORY, Z_OK};
 use crate::session::{engine_of, session_handle, z_loaned_session_t, Engine};
 use crate::write_filter::PicoSession;
 
@@ -139,7 +139,8 @@ impl TokenState {
             key.wire(&*session.engine),
             Some(key.retraction_key(&*session.engine)),
         ) else {
-            return Err(Z_ERR_GENERIC);
+            // The session holds no more tokens: its table is full or its ids are spent.
+            return Err(Z_ERR_SYSTEM_OUT_OF_MEMORY);
         };
         Ok(Self {
             shared: session.engine.clone(),
@@ -378,7 +379,9 @@ pub unsafe extern "C" fn z_liveliness_declare_subscriber(
         let Some(id) =
             engine.declare_liveliness_subscriber_on_wire(ke, wire, history, sample_sink(cclosure))
         else {
-            return Z_ERR_GENERIC;
+            // The session holds no more liveliness subscribers: its table is full or its ids are
+            // spent. The sink was dropped with the refusal.
+            return Z_ERR_SYSTEM_OUT_OF_MEMORY;
         };
         let state = slot.fill(SubscriberState {
             shared: engine,
@@ -679,7 +682,7 @@ pub(crate) unsafe fn declare_background_liveliness_subscriber(
             sample_sink(cclosure),
         ) {
             Some(_) => Z_OK,
-            None => Z_ERR_GENERIC,
+            None => Z_ERR_SYSTEM_OUT_OF_MEMORY,
         }
     })
 }

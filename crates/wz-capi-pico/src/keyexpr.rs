@@ -328,8 +328,10 @@ impl DeclaredKeyexpr {
         if prefix_len == 0 {
             return Ok(Self::literal_only(literal.to_owned()));
         }
+        // A session that holds no more declarations, its table at the limit it opened under or
+        // its ids spent, refuses as pico refuses one it cannot hold, having sent nothing.
         let Some(id) = shared.acquire_keyexpr(literal[..prefix_len].to_owned()) else {
-            return Err(Z_ERR_GENERIC);
+            return Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY);
         };
         Ok(Self {
             literal: literal.to_owned(),
@@ -586,9 +588,10 @@ pub unsafe extern "C" fn z_view_string_loan(
 /// carries a whole-key declaration on this session shares it rather than
 /// declaring again, as upstream's does.
 ///
-/// Returns `Z_ERR_GENERIC` when the wire's `u16` alias space is exhausted.
-/// Refusing beats wrapping: a reused id would silently re-point a peer's live
-/// alias at a different keyexpr.
+/// Returns `_Z_ERR_SYSTEM_OUT_OF_MEMORY` when the session holds no more declarations:
+/// its table of them is at the `MAX_DECLARED_KEYEXPRS` it opened under, or the wire's
+/// alias space is exhausted. Refusing beats wrapping: a reused id would silently
+/// re-point a peer's live alias at a different keyexpr.
 #[no_mangle]
 pub unsafe extern "C" fn z_declare_keyexpr(
     zs: *const z_loaned_session_t,

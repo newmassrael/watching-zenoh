@@ -2503,16 +2503,16 @@ pub unsafe extern "C" fn z_declare_subscriber(
         // not the caller's key the announce went out on.
         let retraction = key.retraction_naming(&PicoSession::of(state));
         let released = cclosure.release_latch();
-        // A session that has handed out every declaration id refuses the subscriber with the
-        // code this ABI gives a refused queryable or token declaration; the engine dropped the
-        // sink, so the closure's drop has run.
+        // A session that holds no more subscribers, its table at the limit it opened under or
+        // its declaration ids spent, refuses the subscriber as pico refuses an entity it cannot
+        // hold; the engine dropped the sink, so the closure's drop has run.
         let Some(id) =
             engine.declare_subscriber_on_wire(ke, wire, subscriber_origin(options), retraction, {
                 let closure = Arc::new(cclosure);
                 Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>)
             })
         else {
-            return Z_ERR_GENERIC;
+            return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
         };
         let state = slot.fill(SubscriberState {
             shared: engine,
@@ -2602,7 +2602,7 @@ pub unsafe extern "C" fn z_declare_background_subscriber(
         }) {
             Some(_) => Z_OK,
             // As the owned form above refuses it.
-            None => Z_ERR_GENERIC,
+            None => crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY,
         }
     })
 }

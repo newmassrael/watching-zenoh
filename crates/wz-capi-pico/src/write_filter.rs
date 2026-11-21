@@ -56,7 +56,7 @@ use wz_session_core::WhatAmI;
 
 use crate::keyexpr::DeclaredKeyexpr;
 use crate::prelude::*;
-use crate::result::{ZResult, Z_ERR_GENERIC};
+use crate::result::{ZResult, Z_ERR_SYSTEM_OUT_OF_MEMORY};
 use crate::session::{engine_of, Engine, PicoSessionHandle};
 
 /// This session's own role: pico's `zn->_mode`, kept in the handle at open
@@ -138,8 +138,9 @@ impl WriteFilter {
     /// with the local switch (`vendor/zenoh-pico/src/net/filtering.c` @
     /// `_z_write_filter_session_register`).
     ///
-    /// Refused with `Z_ERR_GENERIC`, the code a refused declaration gets here, when the session
-    /// has no entity id left for the filter's Interest.
+    /// Refused with `_Z_ERR_SYSTEM_OUT_OF_MEMORY`, as pico refuses an entity it cannot hold, when
+    /// the session holds no more: its table of the entity's filters is at the limit it opened
+    /// under, or it has no entity id left for the filter's Interest. Nothing was sent.
     pub(crate) fn declare(
         session: &PicoSession,
         plane: FilterPlane,
@@ -154,7 +155,7 @@ impl WriteFilter {
         let keyexpr = key.literal().to_owned();
         let id = shared
             .declare_write_filter(plane, keyexpr.clone(), &wire, ask, count_local)
-            .ok_or(Z_ERR_GENERIC)?;
+            .ok_or(Z_ERR_SYSTEM_OUT_OF_MEMORY)?;
         Ok(Self {
             shared,
             id,

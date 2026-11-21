@@ -1227,10 +1227,10 @@ pub(crate) fn declare_queryable_on(
             key.retraction_naming(session),
             sink,
         )
-        // Every engine this build opens a session on answers queries when the
-        // build has queryables; one that does not is a build defect, and C is told
-        // so rather than handed a queryable that answers nothing.
-        .ok_or(crate::result::Z_ERR_GENERIC)?;
+        // The session holds no more queryables: its table is at the limit it opened
+        // under, or its ids are spent. Every engine this build opens a session on
+        // answers queries when the build has queryables.
+        .ok_or(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY)?;
     Ok((id, key))
 }
 
