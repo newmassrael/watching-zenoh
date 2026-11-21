@@ -1098,6 +1098,11 @@ round_fed_gates=(
     # generated limits module. A text read, no build.
     "limit_read_gate.py --selftest"
     "limit_read_gate.py --check"
+    # A crate on the cooperative runtime enters a critical section only through the runtime's
+    # door, which a host build makes the runtime's own lock. Round-fed by the sources of every
+    # crate on the runtime and their manifests. A text read and one `cargo metadata`, no build.
+    "coop_critical_section_gate.py --selftest"
+    "coop_critical_section_gate.py --check"
     "sce_feature_model.py --check"
     # R3521 -- the package entry's selftest. Round-fed by deploy/wz-config.toml (it loads the
     # declaration and holds its artifact, role, platform and runtime-feature rows to the entry's own

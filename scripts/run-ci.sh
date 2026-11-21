@@ -3859,6 +3859,11 @@ layer_c0_test_discipline() {
     # yet) and the allowed sites are held to the code both ways.
     _runci_leg limit_read_gate.selftest -- python3 scripts/lib/limit_read_gate.py --selftest
     _runci_leg limit_read_gate --after limit_read_gate.selftest -- python3 scripts/lib/limit_read_gate.py --check
+    # A crate on the cooperative runtime enters a critical section only through the runtime's
+    # door (`wz_runtime_coop::cs::with`), which a host build makes the runtime's own lock: a
+    # section past it leaves a name no host library defines, which only the Windows linker refuses.
+    _runci_leg coop_critical_section_gate.selftest -- python3 scripts/lib/coop_critical_section_gate.py --selftest
+    _runci_leg coop_critical_section_gate --after coop_critical_section_gate.selftest -- python3 scripts/lib/coop_critical_section_gate.py --check
     # R3733 -- the feature model a crate's state machines are gated by (sources/features/, SCE's
     # element gate) is generated from the crate's own cargo features, and is held to them: a model
     # that drifted from the manifest lets a machine gate on a feature the crate does not have.
