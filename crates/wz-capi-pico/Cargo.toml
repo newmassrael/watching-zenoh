@@ -435,10 +435,9 @@ message-payload = [
 # the message's schema (`wz_ext_instance_keyer_*`), its last value per instance in the program's
 # storage, and with `e2e-receiver` or `e2e-sender` the doors that judge or protect a frame in its
 # instance's stream. wz's own, off as the reference build is, part of the unstable surface. The
-# keyer is `wz-app-frame`'s; like the e2e doors it selects `std` and neither engine. A sample of no
-# instance is counted, and with `event-ring` also reported in the node's event log.
+# keyer is `wz-app-frame`'s; like the e2e doors it selects no `std` and neither engine. A sample of
+# no instance is counted, and with `event-ring` also reported in the node's event log.
 instance-key = [
-    "std",
     "unstable-api",
     "dep:wz-app-frame",
     "wz-app-frame/instance-key",

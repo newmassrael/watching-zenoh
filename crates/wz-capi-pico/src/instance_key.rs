@@ -19,6 +19,8 @@
 //! judging and protecting doors hold the keyer's lock and then the receiver's or the sender's, and
 //! no door takes them the other way round.
 
+use alloc::format;
+use alloc::string::ToString;
 use core::ffi::{c_char, c_void};
 use core::ptr::NonNull;
 

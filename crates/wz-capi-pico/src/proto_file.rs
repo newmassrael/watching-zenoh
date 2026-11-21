@@ -6,6 +6,7 @@
 //! (`crate::message_payload`), and the one reading of a list of them into the schema reader's
 //! files. Declared in `wz_ext.h` with the instance keys, which had it first.
 
+use alloc::vec::Vec;
 use core::ffi::c_char;
 
 use wz_app_frame::proto_schema::ProtoFile;
