@@ -12,9 +12,12 @@
 //! `crate::ext_interface`, ...), so the doors' sources compile unchanged over it. Nothing here is
 //! defined: a function is an import, and a type is one the core writes and reads, the program's
 //! storage of the core's size. A type the doors only point at is a type of no size here, and a
-//! type they allocate is as many words as the core's, so the doors hold the core's values as the
-//! program does and never look inside them; the fields of a type are declared only where the doors
-//! read or write them, as the C header declares them.
+//! type they allocate, or keep a copy of as a C program copies the struct its header declares, is
+//! as many words as the core's, so the doors hold the core's values as the program does and never
+//! look inside them; the fields of a type are declared only where the doors read or write them, as
+//! the C header declares them. A copy of a type of no size holds nothing, and a pointer to it
+//! points into the door's own memory, which the core then reads as its value: the extension arm of
+//! `scripts/lib/layer_direction_gate.py` refuses a door that holds one by value.
 //!
 //! Each block of imports names the core library it imports from on Windows, where a DLL resolves
 //! its imports when it is linked: `raw-dylib`, so the import is made from the DLL's name and needs
@@ -88,10 +91,11 @@ pub mod abi {
 
 /// The session the doors are handed (`crate::session`).
 pub mod session {
-    /// A loaned session (pico `z_loaned_session_t`), only pointed at.
+    /// A loaned session (pico `z_loaned_session_t`), two words of the core's: the replay doors
+    /// keep a copy of the loan they are handed.
     #[repr(C)]
     pub struct z_loaned_session_t {
-        _opaque: [u8; 0],
+        _opaque: [*mut core::ffi::c_void; 2],
     }
 
     /// A subscriber's options (pico `z_subscriber_options_t`), only pointed at.
@@ -309,10 +313,11 @@ pub mod zid {
 /// The publisher and the subscriber the replay doors drive (`crate::pubsub`).
 #[cfg(feature = "replay-cache")]
 pub mod pubsub {
-    /// A loaned publisher (pico `z_loaned_publisher_t`), only pointed at.
+    /// A loaned publisher (pico `z_loaned_publisher_t`), four words of the core's: the replay
+    /// publisher keeps a copy of the loan it is handed.
     #[repr(C)]
     pub struct z_loaned_publisher_t {
-        _opaque: [u8; 0],
+        _opaque: [*mut core::ffi::c_void; 4],
     }
 
     /// A publisher put's options (pico `z_publisher_put_options_t`), only pointed at.

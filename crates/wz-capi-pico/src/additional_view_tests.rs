@@ -255,6 +255,12 @@ fn every_function_the_replay_doors_import_has_the_core_s_signature() {
 #[test]
 fn every_value_the_doors_allocate_has_the_core_s_layout() {
     same_size!(view::abi::z_owned_string_t, crate::abi::z_owned_string_t);
+    // A loan the replay doors keep a copy of: a copy of fewer words than the core's would hand the
+    // core a pointer into the door's own memory to read as its session.
+    same_size!(
+        view::session::z_loaned_session_t,
+        crate::session::z_loaned_session_t
+    );
     same_size!(view::abi::z_view_string_t, crate::abi::z_view_string_t);
     same_size!(view::abi::z_view_keyexpr_t, crate::abi::z_view_keyexpr_t);
     same_size!(view::abi::z_owned_bytes_t, crate::abi::z_owned_bytes_t);
@@ -289,6 +295,11 @@ fn every_value_the_doors_allocate_has_the_core_s_layout() {
 #[test]
 fn every_value_the_replay_doors_allocate_has_the_core_s_layout() {
     same_size!(view::zid::z_id_t, crate::zid::z_id_t);
+    // The loan the replay publisher keeps a copy of, as the session's above.
+    same_size!(
+        view::pubsub::z_loaned_publisher_t,
+        crate::pubsub::z_loaned_publisher_t
+    );
     same_fields!(view::zid::z_id_t, crate::zid::z_id_t; id);
     same_size!(
         view::pubsub::z_owned_closure_sample_t,
