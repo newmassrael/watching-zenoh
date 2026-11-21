@@ -184,9 +184,10 @@ pub mod policy_binding;
 // `policy_binding`. Documented from inside.
 pub mod limit_binding;
 
-/// The limits a stage after the build may decide: one type per limit and the snapshots
-/// [`limits::SessionLimits`] and [`limits::RuntimeLimits`] that hold one value of each, generated
-/// from the declaration. Unconditional, no_std and no_alloc, like [`policy`].
+// The limits a stage after the build may decide: one type per limit and the snapshots
+// `SessionLimits` and `RuntimeLimits` that hold one value of each, generated from the
+// declaration. Unconditional, no_std and no_alloc, like `policy`. Documented from inside: an
+// outer doc here joins the module's own and rustdoc resolves its links from the crate root.
 pub mod limits;
 
 // The open stage of the policies: a document's statements composed in layers over a base into one
@@ -240,10 +241,10 @@ pub mod key_gate;
 #[cfg(feature = "shared-key-ids")]
 pub mod shared_key_ids;
 
-/// The pace of a paced declaration replay: [`replay_pacing::ReplayPacing`], the burst and the
-/// interval between turns, and the pace a session's snapshot states through the
-/// `declaration-sync-pacing` policy. A value and not a clock, so the heap runtime and the slot
-/// node hold the same type. Unconditional, no_std and no_alloc.
+// The pace of a paced declaration replay: `ReplayPacing`, the burst and the interval between
+// turns, and the pace a session's snapshot states through the `declaration-sync-pacing` policy.
+// A value and not a clock, so the heap runtime and the slot node hold the same type.
+// Unconditional, no_std and no_alloc. Documented from inside, as `limits` is.
 pub mod replay_pacing;
 
 /// Who sees a sample's timestamp: the `entity-timestamp-opt-in` policy's shared half, what an

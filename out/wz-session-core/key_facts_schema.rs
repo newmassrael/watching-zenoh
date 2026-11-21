@@ -1,5 +1,6 @@
 // SCE-GENERATED — DO NOT EDIT
-// source-hash: efe483b8c23efdefdaa54278e5db4cf384518b44642a21e3544dccee9803aa15
+// source-hash: 2adf93fe83d33fbdce4d30820f3ffd0ae4e530fc7fbdac76f3206664bb817bf2
+// source: key_facts_schema.scxml
 // SCE-MAP: key_facts_schema.scxml:16 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="event-schema")
@@ -25,10 +26,19 @@ pub const SCHEMA_ID: &str = "urn:sce:schema:key_facts_schema:1";
 /// The payload as a JSON Schema (2020-12): one spelling of each value, every
 /// bound as this build resolved it, a text's in UTF-8 bytes in `x-sce-max-bytes`.
 #[allow(dead_code)]
-pub const JSON_SCHEMA: &str = "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"$id\":\"urn:sce:schema:key_facts_schema:1\",\"x-sce-source-hash\":\"efe483b8c23efdefdaa54278e5db4cf384518b44642a21e3544dccee9803aa15\",\"description\":\"x-sce-max-bytes bounds a text in UTF-8 bytes; maxLength counts characters\",\"type\":\"object\",\"properties\":{\"wild\":{\"type\":\"boolean\"},\"key\":{\"type\":\"boolean\"}},\"required\":[\"wild\",\"key\"],\"additionalProperties\":false}";
+pub const JSON_SCHEMA: &str = "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"$id\":\"urn:sce:schema:key_facts_schema:1\",\"x-sce-source-hash\":\"2adf93fe83d33fbdce4d30820f3ffd0ae4e530fc7fbdac76f3206664bb817bf2\",\"description\":\"x-sce-max-bytes bounds a text in UTF-8 bytes; maxLength counts characters\",\"type\":\"object\",\"properties\":{\"wild\":{\"type\":\"boolean\"},\"key\":{\"type\":\"boolean\"}},\"required\":[\"wild\",\"key\"],\"additionalProperties\":false}";
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct KeyFactsSchemaPayload {
     pub wild: bool,
     pub key: bool,
+}
+
+/// docs/adr/0108, D1: a payload is a key of a map by its fields, in the order
+/// its schema declares them.
+impl ::sce_portable_bytes::MapKey for KeyFactsSchemaPayload {
+    fn feed_key(&self, into: &mut dyn ::sce_portable_bytes::KeyFeed) {
+        ::sce_portable_bytes::MapKey::feed_key(&self.wild, into);
+        ::sce_portable_bytes::MapKey::feed_key(&self.key, into);
+    }
 }

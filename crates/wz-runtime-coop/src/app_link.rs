@@ -55,7 +55,8 @@ use crate::group_transport::{GroupSend, GroupTransport};
 use crate::ip_stack::{HeapIpDriver, IpDriver};
 use crate::link_storage::HeapTx;
 use crate::session_drive::{
-    LinkListener, LinkOpenError, LinkProto, LinkWritability, Locator, OpenedLink, SessionLinks,
+    LinkListener, LinkOpenError, LinkProto, LinkReadiness, LinkWritability, Locator, OpenedLink,
+    SessionLinks,
 };
 use crate::stream_link::{
     StreamDial, StreamDriver, StreamListen, StreamSocket, STREAM_RX_CAPACITY,
@@ -362,6 +363,25 @@ impl LinkWritability for GroupRoom {
             timeout_us.div_ceil(1_000),
             || {},
         )
+    }
+}
+
+/// A group link's wait for its next datagram, made by a thread other than the one that reads it:
+/// the table's readable answer for the link, which the program's handing in of a datagram wakes.
+/// It names the link and holds nothing of it, so a wait made after the link was released answers
+/// at once.
+struct GroupInput {
+    transport: Arc<AppTransport>,
+    handle: LinkHandle,
+}
+
+impl LinkReadiness for GroupInput {
+    fn wait_readable(&self, timeout_ms: u32) {
+        wait::wait_while(u64::from(timeout_ms), |waker| {
+            !self
+                .transport
+                .with(|table| table.poll_readable(self.handle, waker))
+        });
     }
 }
 
@@ -710,6 +730,16 @@ impl GroupTransport for AppGroupTransport {
     fn writability(&self) -> Option<Box<dyn LinkWritability>> {
         let held = self.held.as_ref()?;
         Some(Box::new(GroupRoom {
+            transport: Arc::clone(&held.transport),
+            handle: held.handle,
+        }))
+    }
+
+    // The table's readable answer for the link, waited on from outside the group's loop; a group
+    // that was left gives none.
+    fn readiness(&self) -> Option<Box<dyn LinkReadiness>> {
+        let held = self.held.as_ref()?;
+        Some(Box::new(GroupInput {
             transport: Arc::clone(&held.transport),
             handle: held.handle,
         }))
@@ -1197,6 +1227,61 @@ mod tests {
         assert!(group.wait_for_room(0));
         assert!(
             outside.wait_writable(0),
+            "a wait made after the leave answers at once"
+        );
+    }
+
+    /// A group's wait for input, made from outside the group's loop through the box the links
+    /// hand the group out in: it is waited out while nothing is queued, returns once the program
+    /// hands in a datagram from another thread, and returns at once while one is queued and once
+    /// the group was left. A group that was left gives no wait.
+    #[cfg(feature = "host-lock")]
+    #[test]
+    fn a_groups_wait_for_input_returns_when_the_program_hands_in_a_datagram() {
+        use std::time::{Duration, Instant};
+        let (_script, transport) = transport(64);
+        let joined =
+            AppGroupTransport::join(&transport, "udp/239.7.7.7:7447#iface=lan7").expect("joined");
+        let handle = joined.held.as_ref().unwrap().handle;
+        let mut group: Box<dyn GroupTransport> = Box::new(joined);
+        let ready = group.readiness().expect("a wait from outside the loop");
+        let started = Instant::now();
+        ready.wait_readable(50);
+        assert!(
+            started.elapsed() >= Duration::from_millis(40),
+            "nothing queued: the wait is waited out"
+        );
+
+        let handing = {
+            let transport = Arc::clone(&transport);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(100));
+                transport
+                    .received(handle, b"member", Some("udp/198.51.100.20:7447"))
+                    .unwrap();
+            })
+        };
+        let started = Instant::now();
+        ready.wait_readable(10_000);
+        let waited = started.elapsed();
+        handing.join().expect("the program's thread");
+        assert!(
+            waited < Duration::from_secs(5),
+            "woken by the datagram, not the end of the wait: {waited:?}"
+        );
+        let started = Instant::now();
+        ready.wait_readable(10_000);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "a datagram is queued"
+        );
+
+        group.close();
+        assert!(group.readiness().is_none(), "a group left gives no wait");
+        let started = Instant::now();
+        ready.wait_readable(10_000);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
             "a wait made after the leave answers at once"
         );
     }

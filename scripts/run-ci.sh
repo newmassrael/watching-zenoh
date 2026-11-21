@@ -6689,7 +6689,10 @@ layer_c1v_cargo_test_ws() {
     # `the_counter_refuses_to_mint_a_reserved_id`); ungated, so C1y moves by the same +2. Read
     # off what the build host PRINTED (`18 passed; 723 filtered out`). 18 -> 19, the locator a
     # node cannot store is refused, counted and the rest taken; ungated, so C1y moves by +1 too.
-    _runci_guarded_test C1v 19 cargo test -p wz-runtime-tokio --features routing-accept,transport-link-ws --lib accept_loop --quiet \
+    # 19 -> 20: the init flood under a fixed cookie held to the pending bound (fc58d7c76,
+    # `under_a_fixed_cookie_a_flood_of_init_syns_is_bounded_by_the_pending_bound`); ungated, so
+    # C1y moves by +1 too. Hosted run 44740160167 printed 20 at 581714684.
+    _runci_guarded_test C1v 20 cargo test -p wz-runtime-tokio --features routing-accept,transport-link-ws --lib accept_loop --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-ws --quiet -- -D warnings \
@@ -10794,8 +10797,9 @@ layer_c1y_cargo_test_routing_peer() {
     # `router-connect-reconcile` compile under `routing-peer` now, and it adds
     # `a_configured_endpoint_is_dialled_again_until_its_listener_comes_up`. Hosted run
     # 44201914197 printed 27 at 4050dd889, 44412368690 printed 34 at 458774b1f; the build host
-    # printed 34 at 5f5342ae1. 34 -> 35, the locator a node cannot store (as C1v).
-    _runci_guarded_test "C1y accept_loop" 35 \
+    # printed 34 at 5f5342ae1. 34 -> 35, the locator a node cannot store (as C1v). 35 -> 36, the
+    # init flood under a fixed cookie (as C1v); hosted run 44740160167 printed 36 at 581714684.
+    _runci_guarded_test "C1y accept_loop" 36 \
         cargo test -p wz-runtime-tokio --features routing-peer --lib accept_loop --quiet || return 1
     # The loop-level witness of the link admission (two `peer_loop`s that dial each other with
     # one link each, and no face of either goes up on a link that is then closed). It needs
@@ -12430,8 +12434,11 @@ layer_c1cb_cargo_test_init_ack_admission() {
     # (hosted run 42505060630 read `37 passed`).
     # 37 -> 39: the batch read on behind a Frame the SN gate refuses (6a04e2c796) and every
     # link ended on a session-scope Close (363841a62a); hosted run 43914611055 and pc5 read 39.
+    # 39 -> 41: the declaration watch from establishment to the peer's final (8f3812304) and the
+    # quiet window that settles an accepted link's sync (7bbf9c0ea), which landed without moving
+    # this guard; hosted run 44740160167 read 41 at 581714684.
     wz_test_args wz-runtime-tokio session_fsm_driver_loop
-    _runci_guarded_test C1cb 39 \
+    _runci_guarded_test C1cb 41 \
         cargo test -p wz-runtime-tokio "${WZ_TEST_ARGS[@]}" --quiet || return 1
 }
 

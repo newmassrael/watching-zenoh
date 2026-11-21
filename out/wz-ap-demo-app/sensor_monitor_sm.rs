@@ -1,8 +1,9 @@
 // SCE-GENERATED — DO NOT EDIT
-// source-hash: 175794b839f4135c683b6ef5dec6d52362ceb5df5057358a033c5c29276ecd0c
+// source-hash: e08a71d34f152c90fc63b98ad04187863442f2585e3cf70b4260d757600ff3cf
+// source: sensor_monitor.scxml
 
 
-// SPDX-License-Identifier: AGPL-3.0-only WITH LicenseRef-SCE-Linking-Exception OR LicenseRef-SCE-Commercial
+// SPDX-License-Identifier: AGPL-3.0-only WITH AdditionRef-SCE-Linking-Exception OR LicenseRef-SCE-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 [Author of input SCXML file] (content derived from the input document)
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 newmassrael (content copied from SCE templates)
 //

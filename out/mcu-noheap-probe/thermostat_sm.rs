@@ -1,8 +1,9 @@
 // SCE-GENERATED — DO NOT EDIT
-// source-hash: f296658b690446e8fe154d2b3bfbe4cb792a4766abb04f472e516690b1a50a17
+// source-hash: e4edbebfbefe73ea5b473a288277dee14eff9d7cd93a8aa73f5969ffe722faec
+// source: thermostat.scxml
 
 
-// SPDX-License-Identifier: AGPL-3.0-only WITH LicenseRef-SCE-Linking-Exception OR LicenseRef-SCE-Commercial
+// SPDX-License-Identifier: AGPL-3.0-only WITH AdditionRef-SCE-Linking-Exception OR LicenseRef-SCE-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 [Author of input SCXML file] (content derived from the input document)
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 newmassrael (content copied from SCE templates)
 //

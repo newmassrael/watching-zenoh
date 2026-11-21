@@ -939,6 +939,7 @@ dependencies = [
  "hmac",
  "log",
  "sce-forge-runtime",
+ "sce-portable-bytes",
  "sha2",
  "wz-codecs",
  "wz-runtime-core",

@@ -328,6 +328,10 @@ impl<T: InterestSource + ?Sized> InterestSource for &T {
     }
 }
 
+/// The group `InterestHeaderCOrF` as `InterestParts` holds it.
+#[allow(dead_code)]
+pub type InterestHeaderCOrFParts<'a> = InterestHeaderCOrF<&'a super::interest_body::InterestBodyParts<'a>>;
+
 /// A value of `Interest` held in the types a caller already has: a source
 /// ([`InterestSource`]) whose lists are slices within their bounds and whose
 /// bodies are references.
@@ -341,7 +345,7 @@ pub struct InterestParts<'a> {
     /// The `extensions` field.
     pub extensions: Option<::sce_forge_runtime::codec::Bounded<&'a [super::ext_entry::ExtEntryParts<'a>], { usize::MAX }, 1>>,
     /// The fields `header.C || header.F` decides, held together (docs/adr/0065 §6 R4).
-    pub header_c_or_f: Option<InterestHeaderCOrF<&'a super::interest_body::InterestBodyParts<'a>>>,
+    pub header_c_or_f: Option<InterestHeaderCOrFParts<'a>>,
 }
 
 impl<'a> InterestSource for InterestParts<'a> {
@@ -506,12 +510,16 @@ impl ListWalk<0> for InterestExtensionsWalk {
     fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
 }
 
+/// The group `InterestHeaderCOrF` as `InterestView` holds it.
+#[allow(dead_code)]
+pub type InterestHeaderCOrFView<'a> = InterestHeaderCOrF<InterestBodyView<'a>>;
+
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct InterestView<'a> {
     pub header: u8,
     pub interest_id: u64,
-    pub header_c_or_f: Option<InterestHeaderCOrF<InterestBodyView<'a>>>,
+    pub header_c_or_f: Option<InterestHeaderCOrFView<'a>>,
     pub extensions: Option<Bounded<ListView<'a, InterestExtensionsWalk, 0>, { usize::MAX }, 1>>,
 }
 

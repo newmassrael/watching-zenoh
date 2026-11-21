@@ -2331,8 +2331,14 @@ version = "0.1.0"
 dependencies = [
  "sce-forge-runtime",
  "sce-portable-bytes",
+ "sce-rust-metrics",
  "sce-rust-runtime",
+ "sce-rust-session-store",
 ]
+
+[[package]]
+name = "sce-rust-metrics"
+version = "0.1.0"
 
 [[package]]
 name = "sce-rust-runtime"
@@ -2345,6 +2351,10 @@ dependencies = [
  "sce-portable-bytes",
  "thiserror",
 ]
+
+[[package]]
+name = "sce-rust-session-store"
+version = "0.1.0"
 
 [[package]]
 name = "schemars"
@@ -4525,6 +4535,7 @@ dependencies = [
  "lz4_flex",
  "portable-atomic",
  "sce-forge-runtime",
+ "sce-portable-bytes",
  "sce-rust-runtime",
  "serde",
  "serde_json",
