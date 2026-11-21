@@ -52,7 +52,9 @@ one lands in exactly one class:
                           from here.
   * `restricted-item`  -- `pub(crate)` / `pub(super)`; not reachable from
                           outside the crate, so not this trap.
-  * `private-item`     -- an item with no visibility.
+  * `private-item`     -- an item with no visibility, an empty foreign block
+                          (`extern "C" {}`, which only carries the `#[link]`
+                          attributes in front of it) among them.
   * `not-an-item`      -- a block, statement, expression, match arm, struct
                           field or assertion. The item's own prose says most
                           sites are these, and the measurement agrees.
@@ -161,6 +163,11 @@ CALL_OR_PATH = re.compile(
     r"^\s*[A-Za-z_][A-Za-z0-9_:<>\.]*\s*(?:[({,]|=>|=[^=]|\.|::<)"
 )
 BARE_NAME = re.compile(r"^\s*[A-Za-z_][A-Za-z0-9_:.]*\s*,?\s*$")
+# A foreign block that declares nothing: an item with no visibility whose only effect is the
+# `#[link]` attributes in front of it, naming a library for the linker. A foreign block that
+# declares functions makes each public or not by its own visibility, which the attribute in front
+# of the block does not show, so that shape stays unclassified and is decided where it occurs.
+EMPTY_FOREIGN_BLOCK = re.compile(r'^\s*(?:unsafe\s+)?extern\s*(?:"[^"]*"\s*)?\{\s*\}\s*$')
 
 DENOMINATOR_CLASSES = ("public-item", "macro-invocation")
 
@@ -1429,6 +1436,9 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
     # `app-link` joins with its OFF_AXIS row: its one site, `pub mod app_link`, is at the crate
     # root behind `all(app-link, alloc, not(session-slot))`, a compound the crate-root derivation
     # cannot name, which is the second clause's subject.
+    # `udp-listen` joins with its OFF_AXIS row: its sites (`UdpPort`, `PortPeer`, `PortPeerError`,
+    # `PORT_PEER_BACKLOG`) sit inside `pub mod udp_link` behind `all(udp-listen,
+    # not(session-slot))`, compound and nested, which the second clause reads off the sites.
     "wz-runtime-coop": frozenset(
         {
             "alloc",
@@ -1441,6 +1451,7 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
             "session-slot",
             "session-unicast",
             "switchboard",
+            "udp-listen",
         }
     ),
     # R2298 — the last three, and they failed R2297's first clause on ONE
@@ -1855,7 +1866,7 @@ def classify(following: str) -> str:
         return "public-item"
     if RESTRICTED_ITEM.match(following):
         return "restricted-item"
-    if PRIVATE_ITEM.match(following):
+    if PRIVATE_ITEM.match(following) or EMPTY_FOREIGN_BLOCK.match(following):
         return "private-item"
     if ASSERTION.match(following):
         return "not-an-item"
@@ -4071,6 +4082,20 @@ def attribute_selftest() -> int:
             print(
                 f"feature-public-surface: SELFTEST FAIL -- attribute reader, "
                 f"{label}: expected {want!r} and got {got!r}"
+            )
+            return 1
+    foreign = [
+        ("an empty foreign block", 'extern "C" {}', "private-item"),
+        ("an empty unsafe foreign block", 'unsafe extern "C" {}', "private-item"),
+        ("a foreign block that declares a function", 'extern "C" { pub fn f(); }',
+         "UNCLASSIFIED"),
+        ("a foreign block opened on its line", 'extern "C" {', "UNCLASSIFIED"),
+    ]
+    for label, line, want in foreign:
+        if classify(line) != want:
+            print(
+                f"feature-public-surface: SELFTEST FAIL -- classify, {label}: expected "
+                f"{want!r} and got {classify(line)!r}"
             )
             return 1
     if not is_cfg_attr("#[cfg_attr(feature = \"a\", derive(Debug))]") or is_cfg_attr(

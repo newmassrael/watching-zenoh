@@ -636,29 +636,20 @@ impl Bench {
     /// Undo what `open` set up, then close the pair: whether every closure was dropped and both
     /// transports were let go.
     unsafe fn close(self) -> (bool, bool) {
-        let Self {
-            pair,
-            batch: _,
-            #[cfg(feature = "liveliness-get")]
-            mut alive,
-            #[cfg(all(feature = "e2e-sender", feature = "e2e-receiver"))]
-            e2e,
-            #[cfg(feature = "replay-cache")]
-            replay,
-        } = self;
         #[cfg(feature = "liveliness-get")]
         {
             use wz_capi_pico::liveliness::{z_liveliness_token_move, z_liveliness_undeclare_token};
+            let mut alive = self.alive;
             assert_eq!(
                 z_liveliness_undeclare_token(z_liveliness_token_move(&mut alive)),
                 Z_OK
             );
         }
         #[cfg(all(feature = "e2e-sender", feature = "e2e-receiver"))]
-        e2e.drop_both();
+        self.e2e.drop_both();
         #[cfg(feature = "replay-cache")]
-        replay.drop_all();
-        pair.close()
+        self.replay.drop_all();
+        self.pair.close()
     }
 }
 
