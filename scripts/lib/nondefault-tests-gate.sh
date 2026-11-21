@@ -513,6 +513,11 @@ transport-link-unixpipe,transport-link-ws|"
     # How an Interest names its key on a link of each key-wire form, the rule both engines take
     # from the port (`interest_on_link`): its unit tests compile only with `shared-key-ids`.
     "wz-capi-port|hook|shared-key-ids|link_form_tests::"
+    # The port's `os` made of the host's own calls (`os-sys`, `wz-host-sync`), which a host library
+    # without `std` runs its read task and holds its locks on: a test build with `std` compiles the
+    # module beside `std`'s for its own tests (`os::sys::tests::`), a spawned thread's identity and
+    # end, the condition variable's wake and the mutex's try.
+    "wz-capi-port|hook|os-sys|os::sys::tests::"
     # The same four as the zenoh-c ABI's doors (`wz_capi_c_*`): the unit tests of each module, which
     # a build made as the reference is compiles none of.
     "wz-capi-c|hook|clock-source,event-ring,supervision,resource-snapshot,identity-make,lifecycle-doors,switch-doors,segment-sender,rx-callback-offload|"
