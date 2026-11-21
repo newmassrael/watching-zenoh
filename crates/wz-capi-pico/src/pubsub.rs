@@ -280,11 +280,11 @@ impl SampleMarshal {
         mut self,
         attachment: Option<&[u8]>,
         encoding: Option<(u32, Option<&[u8]>)>,
-        timestamp: Option<&wz_session_core::sample::TimestampHint>,
+        timestamp: Option<(u64, &[u8])>,
         source_info: Option<&wz_session_core::sample::SourceInfo>,
     ) -> Self {
         self.attachment = attachment.map(ByteBuf::from);
-        self.timestamp = timestamp.map(timestamp_of);
+        self.timestamp = timestamp.map(|(time, zid)| timestamp_from(time, zid));
         self.encoding = encoding.map(|(packed_id, schema)| {
             own_encoding(wz_session_core::sample::EncodingHint {
                 packed_id,
