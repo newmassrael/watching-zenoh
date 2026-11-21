@@ -395,6 +395,201 @@ mod enforcement {
             },
         );
     }
+
+    /// One FUTURE interest of the peer, the `index`th, answered through the subscriber registry
+    /// the creator held to its limits. An interest the side cannot remember is counted, not
+    /// returned as an error; the count moving is what reads here as a refusal.
+    #[cfg(feature = "declare-subscriber")]
+    fn future_interest(
+        observer: &mut ApplicationLayerObserver,
+        index: usize,
+    ) -> Result<(), RegisterError> {
+        let refused = observer
+            .subscribers
+            .interest_staging_refusals()
+            .future_interests;
+        observer
+            .subscribers
+            .respond_to_subscriber_interest_borrowed(index as u64, None, false, false, true);
+        let now = observer
+            .subscribers
+            .interest_staging_refusals()
+            .future_interests;
+        if now == refused {
+            Ok(())
+        } else {
+            Err(RegisterError::TableFull)
+        }
+    }
+
+    /// `MAX_INBOUND_SUB_INTERESTS` with nothing stated.
+    #[cfg(feature = "declare-subscriber")]
+    #[test]
+    fn max_inbound_sub_interests_with_nothing_stated_admits_what_the_build_admitted() {
+        admits_what_the_build_admitted(caps::MAX_INBOUND_SUB_INTERESTS, future_interest, |o| {
+            o.subscribers.peer().interest_count()
+        });
+    }
+
+    /// `MAX_INBOUND_SUB_INTERESTS` stated as two: the third FUTURE interest is not remembered,
+    /// is counted, and takes no declaration id; the two rows are kept, and a row the peer
+    /// cancels frees its place.
+    #[cfg(feature = "declare-subscriber")]
+    #[test]
+    fn max_inbound_sub_interests_stated_refuses_the_next_and_takes_no_id() {
+        held_to_two(
+            SessionLimits::select_max_inbound_sub_interests,
+            MaxInboundSubInterests::DOMAIN.is_singleton(),
+            |limits| {
+                let mut observer = ApplicationLayerObserver::with_limits(limits);
+                let subscribers = &mut observer.subscribers;
+                for interest in 0..3 {
+                    subscribers.respond_to_subscriber_interest_borrowed(
+                        interest, None, false, false, true,
+                    );
+                }
+                assert_eq!(subscribers.peer().interest_count(), 2);
+                assert_eq!(
+                    subscribers.interest_staging_refusals(),
+                    crate::pubsub::SubInterestRefusals {
+                        future_interests: 1,
+                        ..Default::default()
+                    }
+                );
+                // The two rows took the ids 1 and 2; the refused interest took none.
+                let id = subscribers
+                    .register("bound/a", |_| {})
+                    .expect("no quota on subscriptions is stated");
+                assert_eq!(id.as_u64(), 3);
+                // The peer cancels its first interest: the place it held is taken again.
+                subscribers.respond_to_subscriber_interest_borrowed(0, None, false, false, false);
+                subscribers.respond_to_subscriber_interest_borrowed(3, None, false, false, true);
+                assert_eq!(subscribers.peer().interest_count(), 2);
+                assert_eq!(subscribers.interest_staging_refusals().future_interests, 1);
+            },
+        );
+    }
+
+    /// `MAX_PENDING_DECLARES` with nothing stated, on both tables it bounds: the answers to
+    /// the peer's subscriber interests and to its token interests. Each CURRENT interest that
+    /// nothing matches is answered by its `Final` alone, one item.
+    #[cfg(any(feature = "declare-subscriber", feature = "liveliness-token"))]
+    #[test]
+    fn max_pending_declares_with_nothing_stated_admits_what_the_build_admitted() {
+        let admitted = if crate::bounded::ENFORCES_CAPACITY {
+            caps::MAX_PENDING_DECLARES
+        } else {
+            caps::MAX_PENDING_DECLARES + 1
+        };
+        #[cfg(feature = "declare-subscriber")]
+        {
+            let mut observer = ApplicationLayerObserver::with_limits(&SessionLimits::defaults());
+            for interest in 0..admitted as u64 {
+                observer
+                    .subscribers
+                    .respond_to_subscriber_interest_borrowed(interest, None, false, true, false);
+            }
+            assert_eq!(observer.subscribers.interest_staging_refusals().chains, 0);
+            assert_eq!(
+                observer
+                    .subscribers
+                    .take_staged_sub_interest_replies()
+                    .len(),
+                admitted
+            );
+        }
+        #[cfg(feature = "liveliness-token")]
+        {
+            let observer = ApplicationLayerObserver::with_limits(&SessionLimits::defaults());
+            let mut pending: crate::bounded::BoundedVec<
+                crate::declare::local_token::DeclResponseItem,
+                { caps::MAX_PENDING_DECLARES },
+            > = crate::bounded::BoundedVec::new();
+            for interest in 0..admitted as u64 {
+                observer
+                    .local_tokens
+                    .respond_to_interest_borrowed(None, interest, &mut pending)
+                    .expect("no quota is stated");
+            }
+            assert_eq!(pending.len(), admitted);
+        }
+    }
+
+    /// `MAX_PENDING_DECLARES` stated as two, on both tables it bounds: a chain of one match and
+    /// its `Final` takes both places, the next chain is refused whole and stages nothing, and
+    /// the drain frees the places for the chain after it.
+    #[cfg(any(feature = "declare-subscriber", feature = "liveliness-token"))]
+    #[test]
+    fn max_pending_declares_stated_refuses_the_next_chain_whole() {
+        held_to_two(
+            SessionLimits::select_max_pending_declares,
+            MaxPendingDeclares::DOMAIN.is_singleton(),
+            |limits| {
+                #[cfg(feature = "declare-subscriber")]
+                {
+                    let mut observer = ApplicationLayerObserver::with_limits(limits);
+                    let subscribers = &mut observer.subscribers;
+                    subscribers
+                        .register("bound/a", |_| {})
+                        .expect("no quota on subscriptions is stated");
+                    assert_eq!(
+                        subscribers
+                            .respond_to_subscriber_interest_borrowed(1, None, false, true, false),
+                        1
+                    );
+                    assert_eq!(
+                        subscribers
+                            .respond_to_subscriber_interest_borrowed(2, None, false, true, false),
+                        0
+                    );
+                    assert_eq!(subscribers.interest_staging_refusals().chains, 1);
+                    let staged = subscribers.take_staged_sub_interest_replies();
+                    assert_eq!(staged.len(), 2);
+                    assert!(matches!(
+                        staged.last(),
+                        Some(crate::pubsub::SubInterestReply::Final { interest_id: 1 })
+                    ));
+                    assert_eq!(
+                        subscribers
+                            .respond_to_subscriber_interest_borrowed(3, None, false, true, false),
+                        1
+                    );
+                    assert_eq!(subscribers.take_staged_sub_interest_replies().len(), 2);
+                }
+                #[cfg(feature = "liveliness-token")]
+                {
+                    let mut observer = ApplicationLayerObserver::with_limits(limits);
+                    observer
+                        .local_tokens
+                        .register(1, "bound/token")
+                        .expect("no quota on tokens is stated");
+                    let mut pending: crate::bounded::BoundedVec<
+                        crate::declare::local_token::DeclResponseItem,
+                        { caps::MAX_PENDING_DECLARES },
+                    > = crate::bounded::BoundedVec::new();
+                    let tokens = &observer.local_tokens;
+                    assert_eq!(
+                        tokens
+                            .respond_to_interest_borrowed(None, 1, &mut pending)
+                            .expect("two places take the chain"),
+                        1
+                    );
+                    assert!(tokens
+                        .respond_to_interest_borrowed(None, 2, &mut pending)
+                        .is_err());
+                    assert_eq!(pending.len(), 2);
+                    pending.clear();
+                    assert_eq!(
+                        tokens
+                            .respond_to_interest_borrowed(None, 3, &mut pending)
+                            .expect("the drained places take the chain"),
+                        1
+                    );
+                    assert_eq!(pending.len(), 2);
+                }
+            },
+        );
+    }
 }
 
 #[cfg(test)]
