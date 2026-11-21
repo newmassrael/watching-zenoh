@@ -480,6 +480,10 @@ derived from the declaration and never chosen by hand:
   debt, and a criterion met is locked. Criterion (b) is measured only where the catalogue is
   given (`WZ_FEATURE_CATALOGUE`), and its figure stays with the document. What each figure is and
   how it is read: `docs/completeness-scoreboard.md`.
+- **The engine and the memory of the C ABI presets (owner, 2026-11-21)** are decided in
+  `docs/c-abi-engine-and-memory.md`: one cooperative engine, no heap after open, host libraries
+  without `std`. Its phases P1 to P5 are the path by which the cooperative rows of D9 and the
+  cells of D10 reach WIN, and its no-heap gate extends criterion (d) of D11 to the host libraries.
 
 ## 5. Steps
 
