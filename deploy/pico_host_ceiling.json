@@ -47,9 +47,15 @@
       }
     },
     "pico-client-coop-nostd": {
-      "ratio_at_most": null,
+      "ratio_at_most": 1.4025,
       "debt": "debt-pico-host-size-ceiling",
-      "reading": null
+      "reading": {
+        "date": "2026-11-21",
+        "wz_text": 565295,
+        "pico_text": 403086,
+        "pico_pin": "6a881c21dad1",
+        "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 3.28.3"
+      }
     },
     "pico-client-coop-unstable": {
       "ratio_at_most": 2.8212,

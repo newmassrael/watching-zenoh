@@ -4,67 +4,67 @@
   "tolerance": 0.05,
   "families": {
     "idle": {
-      "allocs_per_round": null,
-      "locked": false,
-      "debt": "debt-TBD"
+      "allocs_per_round": 0,
+      "locked": true,
+      "debt": null
     },
     "publisher-declare": {
-      "allocs_per_round": 18.44,
+      "allocs_per_round": 7.1,
       "locked": false,
       "debt": "debt-c-abi-heap-after-open"
     },
     "put-small": {
-      "allocs_per_round": 7.89,
+      "allocs_per_round": 6.94,
       "locked": false,
       "debt": "debt-c-abi-heap-after-open"
     },
     "subscriber-receive-small": {
-      "allocs_per_round": 13.33,
+      "allocs_per_round": 10,
       "locked": false,
       "debt": "debt-c-abi-heap-after-open"
     },
     "put-batch": {
-      "allocs_per_round": 7.88,
+      "allocs_per_round": 6.94,
       "locked": false,
       "debt": "debt-c-abi-heap-after-open"
     },
     "subscriber-receive-batch": {
-      "allocs_per_round": 13.2,
+      "allocs_per_round": 10,
       "locked": false,
       "debt": "debt-c-abi-heap-after-open"
     },
     "get": {
-      "allocs_per_round": 20.99,
+      "allocs_per_round": 20,
       "locked": false,
       "debt": "debt-c-abi-heap-after-open"
     },
     "queryable-reply": {
-      "allocs_per_round": 64.43,
+      "allocs_per_round": 55,
       "locked": false,
       "debt": "debt-c-abi-heap-after-open"
     },
     "keyexpr-declare": {
-      "allocs_per_round": 41.59,
+      "allocs_per_round": 31.94,
       "locked": false,
       "debt": "debt-c-abi-heap-after-open"
     },
     "liveliness-token": {
-      "allocs_per_round": 83.08,
+      "allocs_per_round": 48.45,
       "locked": false,
       "debt": "debt-c-abi-heap-after-open"
     },
     "liveliness-get": {
-      "allocs_per_round": 51.37,
+      "allocs_per_round": 42.98,
       "locked": false,
       "debt": "debt-c-abi-heap-after-open"
     },
     "e2e": {
-      "allocs_per_round": 24.01,
+      "allocs_per_round": 24,
       "locked": false,
       "debt": "debt-c-abi-heap-after-open"
     },
     "replay": {
-      "allocs_per_round": 23.94,
+      "allocs_per_round": 15.91,
       "locked": false,
       "debt": "debt-c-abi-heap-after-open"
     },
