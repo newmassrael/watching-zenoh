@@ -1094,13 +1094,15 @@ mod batch_walk_tests {
             batch_size: 2_048,
             is_qos: false,
             compression: false,
-            tx_queue: crate::session_init_params::TxQueueConf::of_policy(
+            tx_queue: crate::session_init_params::TxQueueConf::of_snapshot(
                 &crate::policy::SessionPolicy::defaults(),
+                &crate::limits::SessionLimits::BUILD,
             ),
             link_rx: crate::session_init_params::LinkRxConf::default(),
             join_rule: GroupJoinRule::Pico,
             max_sessions: None,
             policy: crate::policy::SessionPolicy::defaults(),
+            limits: crate::limits::SessionLimits::BUILD,
         }
     }
 

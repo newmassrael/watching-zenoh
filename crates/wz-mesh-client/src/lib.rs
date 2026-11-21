@@ -323,7 +323,7 @@ fn session_params(policy: &SessionPolicy) -> Result<SessionInitParams, ClientErr
         batch_size: BATCH_SIZE,
         lease_ms: LEASE_MS,
         keep_alive: Default::default(),
-        tx_queue: TxQueueConf::of_policy(policy),
+        tx_queue: TxQueueConf::of_snapshot(policy, &wz_session_core::limits::SessionLimits::BUILD),
         link_rx: Default::default(),
         initial_sn: 0,
         cookie: Vec::new(),
@@ -656,7 +656,10 @@ mod tests {
             let params = session_params(&policy).expect("params");
             assert_eq!(params.policy, policy);
             assert_eq!(params.tx_queue.expiry_keeps_session, keeps, "{keeps}");
-            assert_eq!(params.tx_queue, TxQueueConf::of_policy(&policy));
+            assert_eq!(
+                params.tx_queue,
+                TxQueueConf::of_snapshot(&policy, &wz_session_core::limits::SessionLimits::BUILD)
+            );
             built += 1;
         }
         assert!(built >= 1, "the build's domain holds at least its default");

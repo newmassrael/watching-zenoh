@@ -268,14 +268,18 @@ fn demo_main() -> ExitCode {
     // resolved to, or the demo's own for a node no file describes. It is handed to the tuning
     // below, and through it to every session, router and socket the node makes.
     #[cfg(feature = "zenoh-config")]
-    let (rest, node_policy) = match crate::args::expand_stock_zenoh_config(rest, |p| {
+    let (rest, node_policy, node_limits) = match crate::args::expand_stock_zenoh_config(rest, |p| {
         std::fs::read_to_string(p).map_err(|e| format!("--config: cannot read {p}: {e}"))
     }) {
         Err(message) => {
             eprintln!("wz-ap-demo: {message}");
             return ExitCode::from(2);
         }
-        Ok(None) => (rest, crate::args::resolve_policy()),
+        Ok(None) => (
+            rest,
+            crate::args::resolve_policy(),
+            wz::runtime_tokio::limits::SessionLimits::BUILD,
+        ),
         Ok(Some(exp)) => {
             // R2081 (open-debt item 208) — READ and APPLIED are two facts and
             // this used to print them as one. The old line said "honoured" and
@@ -312,8 +316,9 @@ fn demo_main() -> ExitCode {
                 eprintln!("wz-ap-demo: --config {}: {label} {body}", exp.path);
             }
             let node_policy = exp.policies.policy;
+            let node_limits = exp.policies.limits.session;
             expanded = exp.argv;
-            (&expanded[..], node_policy)
+            (&expanded[..], node_policy, node_limits)
         }
     };
     #[cfg(not(feature = "zenoh-config"))]
@@ -326,6 +331,9 @@ fn demo_main() -> ExitCode {
     }
     #[cfg(not(feature = "zenoh-config"))]
     let node_policy = crate::args::resolve_policy();
+    // A node no document describes resolves no limits: the build's are named.
+    #[cfg(not(feature = "zenoh-config"))]
+    let node_limits = wz::runtime_tokio::limits::SessionLimits::BUILD;
 
     // R311y843 — the two handshake values an operator can move, read ONCE from
     // the already-expanded command line so every run mode announces the same
@@ -333,13 +341,14 @@ fn demo_main() -> ExitCode {
     // parse failure: a node that started with a default lease because the
     // digits were unreadable is the silent misconfiguration `--config` exists
     // to end.
-    let tuning = match crate::args::TransportTuning::from_argv_under(rest, node_policy) {
-        Ok(t) => t,
-        Err(message) => {
-            eprintln!("wz-ap-demo: {message}");
-            return ExitCode::from(2);
-        }
-    };
+    let tuning =
+        match crate::args::TransportTuning::from_argv_under(rest, node_policy, &node_limits) {
+            Ok(t) => t,
+            Err(message) => {
+                eprintln!("wz-ap-demo: {message}");
+                return ExitCode::from(2);
+            }
+        };
 
     // §5.23 `adminspace-core` — `--metadata <value>`, read ONCE beside the
     // tuning above for the same reason: every run-mode that hosts an

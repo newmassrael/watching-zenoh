@@ -1668,6 +1668,7 @@ fn router_group_params(
         join_rule,
         max_sessions,
         policy,
+        limits,
     } = profile;
     wz_session_core::multicast_params::MulticastParams {
         whatami: wz_session_core::WhatAmI::Router,
@@ -1684,6 +1685,7 @@ fn router_group_params(
         join_rule,
         max_sessions,
         policy,
+        limits,
     }
 }
 
@@ -1747,6 +1749,9 @@ pub struct RouterGroupProfile {
     /// The node's snapshot of its policies, which the face's drive loop, its writer and its
     /// session read ([`MulticastParams::policy`]).
     pub policy: wz_session_core::policy::SessionPolicy,
+    /// The node's snapshot of its limits, which the face's machines read and its queue is made
+    /// from ([`MulticastParams::limits`]).
+    pub limits: wz_session_core::limits::SessionLimits,
 }
 
 /// The future a group face's bind returns, borrowing the face's options.
@@ -2863,13 +2868,15 @@ mod tests {
             batch_size: 2_048,
             is_qos: false,
             compression: false,
-            tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(
+            tx_queue: wz_session_core::session_init_params::TxQueueConf::of_snapshot(
                 &wz_session_core::policy::SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD,
             ),
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
             join_rule: GroupJoinRule::Pico,
             max_sessions: None,
             policy: wz_session_core::policy::SessionPolicy::defaults(),
+            limits: wz_session_core::limits::SessionLimits::BUILD,
         }
     }
 
@@ -3057,11 +3064,17 @@ mod tests {
             wait_before_drop_us: 7,
             max_wait_before_drop_fragments_us: 13,
             wait_before_close_us: 11,
-            ..TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults())
+            ..TxQueueConf::of_snapshot(
+                &wz_session_core::policy::SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD,
+            )
         };
         assert_ne!(
             operator,
-            TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults())
+            TxQueueConf::of_snapshot(
+                &wz_session_core::policy::SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD
+            )
         );
         let group = router_group_params(RouterGroupProfile {
             zid: [0x0A].into(),
@@ -3079,6 +3092,7 @@ mod tests {
             join_rule: GroupJoinRule::Pico,
             max_sessions: None,
             policy: wz_session_core::policy::SessionPolicy::defaults(),
+            limits: wz_session_core::limits::SessionLimits::BUILD,
         });
         assert_eq!(group.tx_queue, operator);
         assert!(group.is_qos);
@@ -3104,14 +3118,16 @@ mod tests {
             zid: [0x0B].into(),
             qos: false,
             compression: false,
-            tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(
+            tx_queue: wz_session_core::session_init_params::TxQueueConf::of_snapshot(
                 &wz_session_core::policy::SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD,
             ),
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
             beacon,
             join_rule: GroupJoinRule::Zenoh,
             max_sessions: Some(9),
             policy: wz_session_core::policy::SessionPolicy::defaults(),
+            limits: wz_session_core::limits::SessionLimits::BUILD,
         });
         assert_eq!(group.join_rule, GroupJoinRule::Zenoh);
         assert_eq!(group.max_sessions, Some(9), "the node's member cap");
@@ -3144,7 +3160,10 @@ mod tests {
                 zid: [0x0C].into(),
                 qos: false,
                 compression: false,
-                tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(&policy),
+                tx_queue: wz_session_core::session_init_params::TxQueueConf::of_snapshot(
+                    &policy,
+                    &wz_session_core::limits::SessionLimits::BUILD,
+                ),
                 link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
                 beacon: GroupBeacon {
                     lease_ms: 5_000,
@@ -3156,6 +3175,7 @@ mod tests {
                 join_rule: GroupJoinRule::Pico,
                 max_sessions: None,
                 policy,
+                limits: wz_session_core::limits::SessionLimits::BUILD,
             });
             assert_eq!(group.policy, policy, "{value:?}");
             assert_eq!(group.policy.multicast_loopback(), value);

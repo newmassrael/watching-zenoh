@@ -2597,12 +2597,19 @@ def limit_snapshot_rust(snapshot: str, lims: list[dict], what: str) -> list[str]
         ty = "Quota" if lim["kind"] == "bound" else "usize"
         out += ["", f"    /// `{lim['id']}` as this snapshot holds it.",
                 f"    pub const fn {field}(&self) -> {ty} {{", f"        self.{field}.get()", "    }"]
+        name = camel_limit(lim["id"])
         if lim["kind"] == "bound":
-            name = camel_limit(lim["id"])
             out += ["", f"    /// `{lim['id']}` as the snapshot keeps it, for the table the bound limits to keep",
-                    "    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.",
-                    f"    pub const fn {field}_held(&self) -> {name}Held {{",
-                    f"        self.{field}", "    }"]
+                    "    /// and ask ([`Limited::admits`]): in no byte where the build allows one value."]
+        else:
+            out += ["", f"    /// `{lim['id']}` as the snapshot keeps it, for a machine that keeps the value beside",
+                    "    /// its own state: in no byte where the build allows one value."]
+        held = f"    pub const fn {field}_held(&self) -> {name}Held {{"
+        if len(held) <= RUST_MAX_WIDTH:
+            out.append(held)
+        else:
+            out += [f"    pub const fn {field}_held(", "        &self,", f"    ) -> {name}Held {{"]
+        out += [f"        self.{field}", "    }"]
         out += ["", f"    /// Selects `{lim['id']}`, when the build's domain holds `value`."]
         one = f"    pub fn select_{field}(&mut self, value: {ty}) -> Result<(), OutsideLimitDomain> {{"
         if len(one) <= RUST_MAX_WIDTH:

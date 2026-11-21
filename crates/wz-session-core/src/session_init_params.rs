@@ -191,8 +191,8 @@ pub struct SessionInitParams {
     /// The value of every policy this session's machines read: the snapshot its creator resolved
     /// for it, starting from [`SessionPolicy::defaults`]. A machine of the session reads a policy
     /// here and never from the build. It rides here for the reason [`Self::tx_queue`] does; the
-    /// queue's own policy values ([`TxQueueConf::of_policy`]) are derived from the same snapshot
-    /// by the creator.
+    /// queue's own policy values ([`TxQueueConf::of_snapshot`]) are derived from the same
+    /// snapshot by the creator.
     pub policy: SessionPolicy,
     /// The value of every limit this session's tables are held to: the snapshot its creator
     /// resolved for it, starting from [`SessionLimits::defaults`]. A table of the session reads its
@@ -468,13 +468,9 @@ pub struct TxQueueConf {
     /// The `tx-expiry-keeps-session` policy: what a blocking message that found no room in
     /// its deadline costs. `false`, upstream's behaviour, closes the session as unresponsive
     /// and tells the sender nothing. `true` drops the message, reports the transport as not
-    /// available, and keeps the session open.
+    /// available, and keeps the session open, until as many in a row as `TX_EXPIRY_CLOSE_AFTER`
+    /// of the session's snapshot ([`SessionInitParams::limits`]) close it after all.
     pub expiry_keeps_session: bool,
-    /// The `TX_EXPIRY_CLOSE_AFTER` limit of `tx-expiry-keeps-session`: how many blocking
-    /// messages in a row may find no room before the session is closed after all
-    /// ([`crate::tx_deadline::ExpiryRun`]). `0` never closes it. Read only when
-    /// [`Self::expiry_keeps_session`] is `true`.
-    pub expiry_close_after: u16,
     /// `batching/enabled`: whether the session stages its messages into an open frame per
     /// conduit that the link's writer flushes when it falls idle, so that a burst leaves in few
     /// large frames. `false` sends every message as a frame of its own as soon as it is staged,
@@ -518,37 +514,22 @@ pub enum HeldDrop {
 pub const MAX_WAIT_BEFORE_DROP_FRAGMENTS_US: u64 = 50_000;
 
 /// The `tx-no-progress-deadline` policy of `policy`, in the form [`TxQueueConf::no_progress_us`]
-/// carries it: the window of `TX_NO_PROGRESS_WINDOW_US` when the policy is on, and none
-/// (upstream's behaviour) when it is off.
-const fn no_progress_us(policy: &SessionPolicy) -> Option<u64> {
+/// carries it: the window of `TX_NO_PROGRESS_WINDOW_US` as `limits` holds it when the policy is
+/// on, and none (upstream's behaviour) when it is off.
+const fn no_progress_us(policy: &SessionPolicy, limits: &SessionLimits) -> Option<u64> {
     if policy.tx_no_progress_deadline() {
-        Some(crate::caps::TX_NO_PROGRESS_WINDOW_US as u64)
+        Some(limits.tx_no_progress_window_us() as u64)
     } else {
         None
     }
 }
 
-// `TX_EXPIRY_CLOSE_AFTER` is held in 16 bits (`TxQueueConf::expiry_close_after` and the run it
-// is compared with, `tx_deadline::ExpiryRun`), so that both sit in the padding the session already
-// has. A larger limit would be a run the session cannot count, so it is refused when the build is
-// made rather than read as a smaller one.
-const _: () = assert!(
-    crate::caps::TX_EXPIRY_CLOSE_AFTER <= u16::MAX as usize,
-    "TX_EXPIRY_CLOSE_AFTER is at most 65535: a session counts the run of expiries in a u16"
-);
-
-/// `TX_EXPIRY_CLOSE_AFTER` as [`TxQueueConf::expiry_close_after`] carries it, which the
-/// assertion above holds in range.
-const fn build_expiry_close_after() -> u16 {
-    crate::caps::TX_EXPIRY_CLOSE_AFTER as u16
-}
-
-/// `PICO_TX_QUEUE_SIZE` as the size of a queue: upstream's `MIN_SIZE..=MAX_SIZE`, the nearest end
-/// for a limit outside it, so that a build which states one cannot make the configuration the
-/// session refuses at `validate`.
-const fn build_pico_queue_size() -> usize {
+/// `PICO_TX_QUEUE_SIZE` as `limits` holds it, as the size of a queue: upstream's
+/// `MIN_SIZE..=MAX_SIZE`, the nearest end for a value outside it, so that no snapshot can make the
+/// configuration the session refuses at `validate`.
+const fn pico_queue_size(limits: &SessionLimits) -> usize {
     use crate::link::TxQueueShape;
-    let size = crate::caps::PICO_TX_QUEUE_SIZE;
+    let size = limits.pico_tx_queue_size();
     if size < TxQueueShape::MIN_SIZE {
         TxQueueShape::MIN_SIZE
     } else if size > TxQueueShape::MAX_SIZE {
@@ -592,11 +573,11 @@ pub struct TxQueueSizeOutOfRange {
 impl TxQueueConf {
     /// Upstream's queue sizes and waits, with the two policies the queue carries
     /// (`tx-no-progress-deadline`, `tx-expiry-keeps-session`) as `policy` holds them: the queue a
-    /// creator builds beside the snapshot it hands the session in
-    /// [`SessionInitParams::policy`].
-    pub const fn of_policy(policy: &SessionPolicy) -> Self {
+    /// creator builds beside the snapshots it hands the session in [`SessionInitParams::policy`]
+    /// and [`SessionInitParams::limits`], whose `TX_NO_PROGRESS_WINDOW_US` is the window.
+    pub const fn of_snapshot(policy: &SessionPolicy, limits: &SessionLimits) -> Self {
         Self {
-            no_progress_us: no_progress_us(policy),
+            no_progress_us: no_progress_us(policy, limits),
             expiry_keeps_session: policy.tx_expiry_keeps_session(),
             ..Self::upstream()
         }
@@ -607,8 +588,8 @@ impl TxQueueConf {
     ///
     /// This is the queue a zenoh configuration's `transport/link/tx/queue` section describes
     /// before any session holds it, and the queue of a push that is never made to wait. A
-    /// session's queue is built with [`Self::of_policy`] from the snapshot it is handed, which
-    /// is where the two policies are decided.
+    /// session's queue is built with [`Self::of_snapshot`] from the snapshots it is handed,
+    /// which is where the two policies and the window are decided.
     pub const fn upstream() -> Self {
         Self {
             sizes: [crate::link::TxQueueShape::DEFAULT_SIZE; crate::qos::Priority::NUM],
@@ -617,7 +598,6 @@ impl TxQueueConf {
             wait_before_close_us: WAIT_BEFORE_CLOSE_US,
             no_progress_us: None,
             expiry_keeps_session: false,
-            expiry_close_after: build_expiry_close_after(),
             batching: true,
             batching_time_limit_us: crate::link::BATCHING_TIME_LIMIT_US,
             allocation: crate::link::QueueAllocation::Lazy,
@@ -647,17 +627,17 @@ impl TxQueueConf {
     /// pico writes on its own thread, where here a second thread writes, and a lane of four
     /// frames of 1 KiB made the two wait for each other after every four.
     ///
-    /// The two policies the queue carries are taken from `policy`, the snapshot of the session
-    /// the queue is built for.
-    pub const fn pico_of_policy(policy: &SessionPolicy) -> Self {
+    /// The two policies the queue carries are taken from `policy`, and the queue size and the
+    /// window of `tx-no-progress-deadline` from `limits`, the two snapshots of the session the
+    /// queue is built for.
+    pub const fn pico_of_snapshot(policy: &SessionPolicy, limits: &SessionLimits) -> Self {
         Self {
-            sizes: [build_pico_queue_size(); crate::qos::Priority::NUM],
+            sizes: [pico_queue_size(limits); crate::qos::Priority::NUM],
             wait_before_drop_us: WAIT_BEFORE_CLOSE_US,
             max_wait_before_drop_fragments_us: 0,
             wait_before_close_us: WAIT_BEFORE_CLOSE_US,
-            no_progress_us: no_progress_us(policy),
+            no_progress_us: no_progress_us(policy, limits),
             expiry_keeps_session: policy.tx_expiry_keeps_session(),
-            expiry_close_after: build_expiry_close_after(),
             batching: true,
             batching_time_limit_us: crate::link::BATCHING_TIME_LIMIT_US,
             allocation: crate::link::QueueAllocation::Lazy,
@@ -745,7 +725,10 @@ mod shape_tests {
 
     /// Upstream's queue under the build defaults' policies.
     fn zenoh_queue() -> TxQueueConf {
-        TxQueueConf::of_policy(&crate::policy::SessionPolicy::defaults())
+        TxQueueConf::of_snapshot(
+            &crate::policy::SessionPolicy::defaults(),
+            &crate::limits::SessionLimits::BUILD,
+        )
     }
 
     /// A lane is bounded in the session's configured batch size, so a link
@@ -920,16 +903,23 @@ mod cookie_bound_tests {
 #[cfg(test)]
 mod no_progress_tests {
     use super::{TxQueueConf, TxQueueConfError, WAIT_BEFORE_CLOSE_US};
+    use crate::limits::SessionLimits;
     use crate::policy::SessionPolicy;
 
     /// Upstream's queue under the build defaults' policies.
     fn zenoh_queue() -> TxQueueConf {
-        TxQueueConf::of_policy(&SessionPolicy::defaults())
+        TxQueueConf::of_snapshot(
+            &SessionPolicy::defaults(),
+            &crate::limits::SessionLimits::BUILD,
+        )
     }
 
     /// The pico ABI's queue under the build defaults' policies.
     fn pico_queue() -> TxQueueConf {
-        TxQueueConf::pico_of_policy(&SessionPolicy::defaults())
+        TxQueueConf::pico_of_snapshot(
+            &SessionPolicy::defaults(),
+            &crate::limits::SessionLimits::BUILD,
+        )
     }
 
     fn conf(no_progress_us: Option<u64>) -> TxQueueConf {
@@ -947,20 +937,6 @@ mod no_progress_tests {
         assert!(!zenoh_queue().expiry_keeps_session);
         assert_eq!(pico_queue().no_progress_us, None);
         assert!(!pico_queue().expiry_keeps_session);
-        assert_eq!(zenoh_queue().expiry_close_after, 0);
-        assert_eq!(pico_queue().expiry_close_after, 0);
-    }
-
-    /// Every queue carries `TX_EXPIRY_CLOSE_AFTER` exactly as the build states it: a value the
-    /// 16-bit run cannot count is refused when the build is made, never read as a smaller one.
-    #[test]
-    fn every_queue_carries_the_stated_expiry_close_after_exactly() {
-        for queue in [TxQueueConf::upstream(), zenoh_queue(), pico_queue()] {
-            assert_eq!(
-                usize::from(queue.expiry_close_after),
-                crate::caps::TX_EXPIRY_CLOSE_AFTER
-            );
-        }
     }
 
     /// A droppable message behind a held conduit: zenoh's profile waits for room out of
@@ -1016,23 +992,61 @@ mod no_progress_tests {
             .expect("the domain holds both values");
         let window = Some(crate::caps::TX_NO_PROGRESS_WINDOW_US as u64);
         for queue in [
-            TxQueueConf::of_policy(&on),
-            TxQueueConf::pico_of_policy(&on),
+            TxQueueConf::of_snapshot(&on, &crate::limits::SessionLimits::BUILD),
+            TxQueueConf::pico_of_snapshot(&on, &crate::limits::SessionLimits::BUILD),
         ] {
             assert_eq!(queue.no_progress_us, window);
             assert!(queue.expiry_keeps_session);
         }
         for queue in [
-            TxQueueConf::of_policy(&off),
-            TxQueueConf::pico_of_policy(&off),
+            TxQueueConf::of_snapshot(&off, &crate::limits::SessionLimits::BUILD),
+            TxQueueConf::pico_of_snapshot(&off, &crate::limits::SessionLimits::BUILD),
         ] {
             assert_eq!(queue.no_progress_us, None);
             assert!(!queue.expiry_keeps_session);
         }
         // Everything else is the queue's own, whatever the snapshot says.
         assert_eq!(
-            TxQueueConf::of_policy(&on).sizes,
-            TxQueueConf::of_policy(&off).sizes
+            TxQueueConf::of_snapshot(&on, &crate::limits::SessionLimits::BUILD).sizes,
+            TxQueueConf::of_snapshot(&off, &crate::limits::SessionLimits::BUILD).sizes
+        );
+    }
+
+    /// `PICO_TX_QUEUE_SIZE` with nothing stated: the pico queue holds the build's size for every
+    /// priority, the queue it held while it read the build's constant.
+    #[test]
+    fn pico_tx_queue_size_with_nothing_stated_holds_the_builds_value() {
+        let queue =
+            TxQueueConf::pico_of_snapshot(&SessionPolicy::defaults(), &SessionLimits::defaults());
+        let size = crate::caps::PICO_TX_QUEUE_SIZE.clamp(
+            crate::link::TxQueueShape::MIN_SIZE,
+            crate::link::TxQueueShape::MAX_SIZE,
+        );
+        assert!(queue.sizes.iter().all(|&s| s == size));
+        assert_eq!(queue, pico_queue());
+    }
+
+    /// `PICO_TX_QUEUE_SIZE` stated: the pico queue holds the stated size for every priority, and
+    /// nothing else of the queue moves with it. A build that keeps the build's value alone refuses
+    /// the statement itself.
+    #[test]
+    fn pico_tx_queue_size_stated_is_the_size_the_queue_holds() {
+        let build = crate::caps::PICO_TX_QUEUE_SIZE;
+        let other = if build > 1 { build - 1 } else { build + 1 };
+        let mut limits = SessionLimits::defaults();
+        if let Err(refused) = limits.select_pico_tx_queue_size(other) {
+            assert!(refused.domain.is_singleton(), "{other} is inside 1..=16");
+            assert_eq!(limits, SessionLimits::defaults());
+            return;
+        }
+        let queue = TxQueueConf::pico_of_snapshot(&SessionPolicy::defaults(), &limits);
+        assert!(queue.sizes.iter().all(|&s| s == other));
+        assert_eq!(
+            TxQueueConf {
+                sizes: pico_queue().sizes,
+                ..queue
+            },
+            pico_queue()
         );
     }
 

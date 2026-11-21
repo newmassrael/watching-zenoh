@@ -15,6 +15,7 @@ use wz_session_core::multicast_params::MulticastParams;
 use wz_session_core::wire_id::EntityId;
 
 use crate::WireKey;
+use wz_session_core::limits::SessionLimits;
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::session_init_params::{LinkRxConf, TxQueueConf};
 use wz_session_core::session_zid::SessionZid;
@@ -202,7 +203,8 @@ pub struct GroupProfile {
 impl GroupProfile {
     /// The parameters a group session runs with: this profile as its beacon advertises it, for
     /// the session `zid` of role `whatami`, with the session's transmit model, what it rejoins
-    /// from fragments and the snapshot of its policies. One conversion for every engine, so the
+    /// from fragments and the snapshots of its policies and its limits. One conversion for every
+    /// engine, so the
     /// beacons the two engines send for one profile, and the members they admit, are the same.
     pub fn params(
         self,
@@ -211,6 +213,7 @@ impl GroupProfile {
         tx_queue: TxQueueConf,
         link_rx: LinkRxConf,
         policy: SessionPolicy,
+        limits: SessionLimits,
     ) -> MulticastParams {
         let Self {
             lease_ms,
@@ -238,6 +241,7 @@ impl GroupProfile {
             join_rule,
             max_sessions,
             policy,
+            limits,
         }
     }
 }
@@ -350,10 +354,12 @@ mod tests {
         let params = profile.params(
             WhatAmI::Router,
             zid,
-            TxQueueConf::of_policy(&policy),
+            TxQueueConf::of_snapshot(&policy, &SessionLimits::BUILD),
             LinkRxConf::default(),
             policy,
+            SessionLimits::BUILD,
         );
+        assert_eq!(params.limits, SessionLimits::BUILD);
         assert_eq!(params.whatami, WhatAmI::Router);
         assert_eq!(params.zid, zid);
         assert_eq!(

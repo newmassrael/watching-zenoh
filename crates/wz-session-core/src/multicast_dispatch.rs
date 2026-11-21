@@ -5473,11 +5473,15 @@ mod tests {
             batch_size: 2_048,
             is_qos: false,
             compression: false,
-            tx_queue: crate::session_init_params::TxQueueConf::of_policy(&policy),
+            tx_queue: crate::session_init_params::TxQueueConf::of_snapshot(
+                &policy,
+                &crate::limits::SessionLimits::BUILD,
+            ),
             link_rx: crate::session_init_params::LinkRxConf::default(),
             join_rule: crate::multicast_params::GroupJoinRule::Pico,
             max_sessions: Some(9),
             policy,
+            limits: crate::limits::SessionLimits::BUILD,
         };
         for scope in [false, true] {
             let config = MulticastConfig::of_group(&params, scope);

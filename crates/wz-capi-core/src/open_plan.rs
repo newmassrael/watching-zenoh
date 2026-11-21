@@ -1562,8 +1562,8 @@ const fn held(present: bool) -> &'static str {
 /// The decisions that belong to the calling ABI and not to the document. They join the plan at
 /// [`OpenPlan::into_arguments`], so the plan is one value for every ABI.
 pub struct AbiChoices {
-    /// The transmit model: zenoh's bounded queue ([`TxQueueConf::of_policy`]) or pico's
-    /// caller-thread write ([`TxQueueConf::pico_of_policy`]), each under the plan's
+    /// The transmit model: zenoh's bounded queue ([`TxQueueConf::of_snapshot`]) or pico's
+    /// caller-thread write ([`TxQueueConf::pico_of_snapshot`]), each under the plan's
     /// [`OpenPlan::session_policy`].
     pub tx_queue: TxQueueConf,
     /// Whether the session's read task runs from the start.
@@ -2167,7 +2167,10 @@ mod tests {
             .expect("a client with an endpoint opens")
         };
         let abi = |offer_shm| AbiChoices {
-            tx_queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
+            tx_queue: TxQueueConf::of_snapshot(
+                &SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD,
+            ),
             start_read_task: true,
             local_delivery: LocalDeliveryDrain::Caller,
             liveliness_to_self: true,
@@ -2197,7 +2200,10 @@ mod tests {
             plan_of(WhatAmI::Client, &["tcp/127.0.0.1:7447"], &[], document)
                 .expect("a client with an endpoint opens")
                 .into_arguments(AbiChoices {
-                    tx_queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
+                    tx_queue: TxQueueConf::of_snapshot(
+                        &SessionPolicy::defaults(),
+                        &wz_session_core::limits::SessionLimits::BUILD,
+                    ),
                     start_read_task: true,
                     local_delivery: LocalDeliveryDrain::Caller,
                     liveliness_to_self: true,
@@ -2256,19 +2262,50 @@ mod tests {
                 .tx_queue
         };
         let off = r#"{ transport: { link: { tx: { queue: { batching: { enabled: false } } } } } }"#;
-        assert!(!stance(off, TxQueueConf::of_policy(&SessionPolicy::defaults())).batching);
-        assert!(!stance(off, TxQueueConf::pico_of_policy(&SessionPolicy::defaults())).batching);
+        assert!(
+            !stance(
+                off,
+                TxQueueConf::of_snapshot(
+                    &SessionPolicy::defaults(),
+                    &wz_session_core::limits::SessionLimits::BUILD
+                )
+            )
+            .batching
+        );
+        assert!(
+            !stance(
+                off,
+                TxQueueConf::pico_of_snapshot(
+                    &SessionPolicy::defaults(),
+                    &wz_session_core::limits::SessionLimits::BUILD
+                )
+            )
+            .batching
+        );
         let bound =
             r#"{ transport: { link: { tx: { queue: { batching: { time_limit: 4 } } } } } }"#;
         assert_eq!(
-            stance(bound, TxQueueConf::of_policy(&SessionPolicy::defaults()))
-                .batching_time_limit_us,
+            stance(
+                bound,
+                TxQueueConf::of_snapshot(
+                    &SessionPolicy::defaults(),
+                    &wz_session_core::limits::SessionLimits::BUILD
+                )
+            )
+            .batching_time_limit_us,
             4_000
         );
         let init =
             r#"{ transport: { link: { tx: { queue: { allocation: { mode: "init" } } } } } }"#;
         assert_eq!(
-            stance(init, TxQueueConf::of_policy(&SessionPolicy::defaults())).allocation,
+            stance(
+                init,
+                TxQueueConf::of_snapshot(
+                    &SessionPolicy::defaults(),
+                    &wz_session_core::limits::SessionLimits::BUILD
+                )
+            )
+            .allocation,
             wz_session_core::link::QueueAllocation::Init
         );
         // A queue's size is laid over the model too: an `init` queue makes its batches by it,
@@ -2278,12 +2315,23 @@ mod tests {
         let data = wz_session_core::qos::Priority::DEFAULT.wire_byte() as usize;
         let wide =
             r#"{ transport: { link: { tx: { queue: { size: { data: 6, control: 2 } } } } } }"#;
-        let sizes = stance(wide, TxQueueConf::of_policy(&SessionPolicy::defaults())).sizes;
+        let sizes = stance(
+            wide,
+            TxQueueConf::of_snapshot(
+                &SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD,
+            ),
+        )
+        .sizes;
         assert_eq!(sizes[data], 6);
         assert_eq!(
             sizes,
             {
-                let mut expected = TxQueueConf::of_policy(&SessionPolicy::defaults()).sizes;
+                let mut expected = TxQueueConf::of_snapshot(
+                    &SessionPolicy::defaults(),
+                    &wz_session_core::limits::SessionLimits::BUILD,
+                )
+                .sizes;
                 expected[data] = 6;
                 expected
             },
@@ -2295,12 +2343,30 @@ mod tests {
                                                                       time_limit: 1 },
                                                           allocation: { mode: "lazy" } } } } } }"#;
         assert_eq!(
-            stance(on, TxQueueConf::pico_of_policy(&SessionPolicy::defaults())),
-            TxQueueConf::pico_of_policy(&SessionPolicy::defaults())
+            stance(
+                on,
+                TxQueueConf::pico_of_snapshot(
+                    &SessionPolicy::defaults(),
+                    &wz_session_core::limits::SessionLimits::BUILD
+                )
+            ),
+            TxQueueConf::pico_of_snapshot(
+                &SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD
+            )
         );
         assert_eq!(
-            stance("{}", TxQueueConf::of_policy(&SessionPolicy::defaults())),
-            TxQueueConf::of_policy(&SessionPolicy::defaults())
+            stance(
+                "{}",
+                TxQueueConf::of_snapshot(
+                    &SessionPolicy::defaults(),
+                    &wz_session_core::limits::SessionLimits::BUILD
+                )
+            ),
+            TxQueueConf::of_snapshot(
+                &SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD
+            )
         );
     }
 
@@ -2386,7 +2452,10 @@ mod tests {
         assert_eq!(plan.session_policy, handed);
         let stance = plan
             .into_arguments(AbiChoices {
-                tx_queue: TxQueueConf::of_policy(&handed),
+                tx_queue: TxQueueConf::of_snapshot(
+                    &handed,
+                    &wz_session_core::limits::SessionLimits::BUILD,
+                ),
                 start_read_task: true,
                 local_delivery: LocalDeliveryDrain::Caller,
                 liveliness_to_self: true,
@@ -2529,7 +2598,10 @@ mod tests {
             "the plan says what the document says: the key defaults on"
         );
         let abi = |groups_report_shm| AbiChoices {
-            tx_queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
+            tx_queue: TxQueueConf::of_snapshot(
+                &SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD,
+            ),
             start_read_task: true,
             local_delivery: LocalDeliveryDrain::Caller,
             liveliness_to_self: true,
@@ -2975,7 +3047,10 @@ mod tests {
 
         let expected = plan.session.clone();
         let arguments = plan.into_arguments(AbiChoices {
-            tx_queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
+            tx_queue: TxQueueConf::of_snapshot(
+                &SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD,
+            ),
             start_read_task: true,
             local_delivery: LocalDeliveryDrain::Caller,
             liveliness_to_self: true,
@@ -3103,7 +3178,10 @@ mod tests {
                 .expect("key expressions");
         assert_eq!(plan.session.aggregation, expected);
         let arguments = plan.into_arguments(AbiChoices {
-            tx_queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
+            tx_queue: TxQueueConf::of_snapshot(
+                &SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD,
+            ),
             start_read_task: true,
             local_delivery: LocalDeliveryDrain::Caller,
             liveliness_to_self: true,
@@ -3138,7 +3216,10 @@ mod tests {
             plan_of(WhatAmI::Router, &[], &["tcp/127.0.0.1:0"], document)
                 .expect("opens")
                 .into_arguments(AbiChoices {
-                    tx_queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
+                    tx_queue: TxQueueConf::of_snapshot(
+                        &SessionPolicy::defaults(),
+                        &wz_session_core::limits::SessionLimits::BUILD,
+                    ),
                     start_read_task: true,
                     local_delivery: LocalDeliveryDrain::Caller,
                     liveliness_to_self: true,
@@ -3213,7 +3294,10 @@ mod tests {
             plan_of(WhatAmI::Router, &[], &["tcp/127.0.0.1:0"], document)
                 .expect("opens")
                 .into_arguments(AbiChoices {
-                    tx_queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
+                    tx_queue: TxQueueConf::of_snapshot(
+                        &SessionPolicy::defaults(),
+                        &wz_session_core::limits::SessionLimits::BUILD,
+                    ),
                     start_read_task: true,
                     local_delivery: LocalDeliveryDrain::Caller,
                     liveliness_to_self: true,
@@ -3271,7 +3355,10 @@ mod tests {
         )
         .expect("opens")
         .into_arguments(AbiChoices {
-            tx_queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
+            tx_queue: TxQueueConf::of_snapshot(
+                &SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD,
+            ),
             start_read_task: true,
             local_delivery: LocalDeliveryDrain::Caller,
             liveliness_to_self: true,

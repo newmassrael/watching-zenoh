@@ -1336,6 +1336,227 @@ mod enforcement {
         );
     }
 
+    /// The pace a session's replay reads from a snapshot with `declaration-sync-pacing` on and
+    /// `limits`, as every host of a paced replay makes it; `None` where the build keeps the policy
+    /// off, so no snapshot paces a replay.
+    fn pace_of(limits: &SessionLimits) -> Option<crate::replay_pacing::ReplayPacing> {
+        use crate::policy::{DeclarationSyncPacing, SessionPolicy};
+        let mut policy = SessionPolicy::defaults();
+        policy
+            .select_declaration_sync_pacing(DeclarationSyncPacing::On)
+            .ok()?;
+        let pace = crate::replay_pacing::ReplayPacing::of_snapshot(&policy, limits);
+        assert!(
+            pace.is_some(),
+            "a snapshot's burst and interval make a pace"
+        );
+        pace
+    }
+
+    /// A parameter's statement in a snapshot.
+    type SelectValue =
+        fn(&mut SessionLimits, usize) -> Result<(), crate::limit_binding::OutsideLimitDomain>;
+
+    /// `value`, as `select` states it, and `check` run on the snapshot that states it. A build
+    /// that keeps the build's value alone (`singleton`) refuses the statement itself, and that
+    /// refusal is what the build is checked for.
+    fn stated_as(
+        select: SelectValue,
+        value: usize,
+        singleton: bool,
+        check: impl FnOnce(&SessionLimits),
+    ) {
+        let mut limits = SessionLimits::defaults();
+        let stated = select(&mut limits, value);
+        if singleton {
+            assert!(stated.is_err(), "a build of one value refuses another");
+        } else {
+            stated.expect("the value is inside the domain");
+            check(&limits);
+        }
+    }
+
+    /// `DECLARATION_SYNC_BURST_MESSAGES` with nothing stated: a paced replay sends the build's
+    /// burst a turn.
+    #[test]
+    fn declaration_sync_burst_messages_with_nothing_stated_is_the_builds_burst() {
+        if let Some(pace) = pace_of(&SessionLimits::defaults()) {
+            assert_eq!(pace.burst(), caps::DECLARATION_SYNC_BURST_MESSAGES);
+        }
+    }
+
+    /// `DECLARATION_SYNC_BURST_MESSAGES` stated as three: a paced replay sends three a turn.
+    #[test]
+    fn declaration_sync_burst_messages_stated_is_the_burst_a_replay_sends() {
+        stated_as(
+            SessionLimits::select_declaration_sync_burst_messages,
+            3,
+            DeclarationSyncBurstMessages::DOMAIN.is_singleton(),
+            |limits| {
+                if let Some(pace) = pace_of(limits) {
+                    assert_eq!(pace.burst(), 3);
+                }
+            },
+        );
+    }
+
+    /// `DECLARATION_SYNC_INTERVAL_MS` with nothing stated: a paced replay waits the build's
+    /// interval between turns.
+    #[test]
+    fn declaration_sync_interval_ms_with_nothing_stated_is_the_builds_interval() {
+        if let Some(pace) = pace_of(&SessionLimits::defaults()) {
+            assert_eq!(
+                pace.interval_ms(),
+                caps::DECLARATION_SYNC_INTERVAL_MS as u64
+            );
+        }
+    }
+
+    /// `DECLARATION_SYNC_INTERVAL_MS` stated as 25: a paced replay waits 25 ms between turns.
+    #[test]
+    fn declaration_sync_interval_ms_stated_is_the_interval_a_replay_waits() {
+        stated_as(
+            SessionLimits::select_declaration_sync_interval_ms,
+            25,
+            DeclarationSyncIntervalMs::DOMAIN.is_singleton(),
+            |limits| {
+                if let Some(pace) = pace_of(limits) {
+                    assert_eq!(pace.interval_ms(), 25);
+                }
+            },
+        );
+    }
+
+    /// `DECLARATION_SYNC_RETRY_INTERVAL_MS` with nothing stated: a refused turn is answered as
+    /// the build's retry interval says.
+    #[test]
+    fn declaration_sync_retry_interval_ms_with_nothing_stated_is_the_builds_retry_interval() {
+        if let Some(pace) = pace_of(&SessionLimits::defaults()) {
+            assert_eq!(
+                pace.retry_interval_ms(),
+                caps::DECLARATION_SYNC_RETRY_INTERVAL_MS as u64
+            );
+        }
+    }
+
+    /// `DECLARATION_SYNC_RETRY_INTERVAL_MS` stated as 7: a refused turn is tried again 7 ms on,
+    /// and the turn interval is left as it was.
+    #[test]
+    fn declaration_sync_retry_interval_ms_stated_is_the_wait_before_a_retry() {
+        stated_as(
+            SessionLimits::select_declaration_sync_retry_interval_ms,
+            7,
+            DeclarationSyncRetryIntervalMs::DOMAIN.is_singleton(),
+            |limits| {
+                if let Some(pace) = pace_of(limits) {
+                    assert_eq!(pace.retry_interval_ms(), 7);
+                    assert_eq!(
+                        pace.interval_ms(),
+                        caps::DECLARATION_SYNC_INTERVAL_MS as u64
+                    );
+                    assert_eq!(
+                        pace.after_refusal(0, 0),
+                        crate::replay_pacing::RefusalStep::RetryIn(7)
+                    );
+                }
+            },
+        );
+    }
+
+    /// `DECLARATION_SYNC_TX_NO_PROGRESS_MS` with nothing stated: a retrying replay gives up as
+    /// the build's bound says.
+    #[test]
+    fn declaration_sync_tx_no_progress_ms_with_nothing_stated_is_the_builds_bound() {
+        if let Some(pace) = pace_of(&SessionLimits::defaults()) {
+            assert_eq!(
+                pace.no_progress_ms(),
+                caps::DECLARATION_SYNC_TX_NO_PROGRESS_MS as u64
+            );
+        }
+    }
+
+    /// `DECLARATION_SYNC_TX_NO_PROGRESS_MS` stated as 40: a retrying replay gives up once 40 ms
+    /// pass with no declaration sent.
+    #[test]
+    fn declaration_sync_tx_no_progress_ms_stated_is_the_bound_a_replay_gives_up_at() {
+        stated_as(
+            SessionLimits::select_declaration_sync_tx_no_progress_ms,
+            40,
+            DeclarationSyncTxNoProgressMs::DOMAIN.is_singleton(),
+            |limits| {
+                if let Some(pace) = pace_of(limits) {
+                    assert_eq!(pace.no_progress_ms(), 40);
+                }
+            },
+        );
+    }
+
+    /// A snapshot with `tx-no-progress-deadline` on, or `None` where the build keeps it off, so
+    /// no queue holds a window.
+    #[cfg(feature = "storage-profile")]
+    fn no_progress_deadline_on() -> Option<crate::policy::SessionPolicy> {
+        use crate::policy::{SessionPolicy, TxNoProgressDeadline};
+        let mut policy = SessionPolicy::defaults();
+        policy
+            .select_tx_no_progress_deadline(TxNoProgressDeadline::On)
+            .ok()?;
+        Some(policy)
+    }
+
+    /// `TX_NO_PROGRESS_WINDOW_US` with nothing stated: the queue a creator builds from the
+    /// snapshots holds the build's window, and a blocking message asks for room no longer than it.
+    #[cfg(feature = "storage-profile")]
+    #[test]
+    fn tx_no_progress_window_us_with_nothing_stated_is_the_builds_window() {
+        use crate::link::RoomWait;
+        use crate::session_init_params::TxQueueConf;
+        use crate::tx_deadline::PushDeadline;
+        let Some(on) = no_progress_deadline_on() else {
+            return;
+        };
+        let queue = TxQueueConf::of_snapshot(&on, &SessionLimits::defaults());
+        let window = caps::TX_NO_PROGRESS_WINDOW_US as u64;
+        assert_eq!(queue.no_progress_us, Some(window));
+        assert_eq!(
+            PushDeadline::new(false, &queue).ask(),
+            RoomWait::Block {
+                wait_us: window.min(queue.wait_before_close_us)
+            }
+        );
+    }
+
+    /// `TX_NO_PROGRESS_WINDOW_US` stated as 250: the queue of either transmit model holds a
+    /// window of 250 microseconds, and a blocking message asks for room no longer than that,
+    /// while its total wait is left as it was.
+    #[cfg(feature = "storage-profile")]
+    #[test]
+    fn tx_no_progress_window_us_stated_is_the_window_a_blocking_message_waits() {
+        use crate::link::RoomWait;
+        use crate::session_init_params::{TxQueueConf, WAIT_BEFORE_CLOSE_US};
+        use crate::tx_deadline::PushDeadline;
+        stated_as(
+            SessionLimits::select_tx_no_progress_window_us,
+            250,
+            TxNoProgressWindowUs::DOMAIN.is_singleton(),
+            |limits| {
+                let Some(on) = no_progress_deadline_on() else {
+                    return;
+                };
+                for queue in [
+                    TxQueueConf::of_snapshot(&on, limits),
+                    TxQueueConf::pico_of_snapshot(&on, limits),
+                ] {
+                    assert_eq!(queue.no_progress_us, Some(250));
+                    assert_eq!(queue.wait_before_close_us, WAIT_BEFORE_CLOSE_US);
+                    assert_eq!(
+                        PushDeadline::new(false, &queue).ask(),
+                        RoomWait::Block { wait_us: 250 }
+                    );
+                }
+            },
+        );
+    }
+
     /// The places of one querier, made as the runtime that declares the querier makes them: held
     /// to the bound the session's observer was handed.
     fn querier_places(limits: &SessionLimits) -> crate::quota::Quota {

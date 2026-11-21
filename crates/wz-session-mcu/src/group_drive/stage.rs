@@ -546,11 +546,15 @@ mod tests {
             batch_size: 2_048,
             is_qos: false,
             compression: false,
-            tx_queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
+            tx_queue: TxQueueConf::of_snapshot(
+                &SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD,
+            ),
             link_rx: LinkRxConf::default(),
             join_rule: GroupJoinRule::Pico,
             max_sessions: None,
             policy: SessionPolicy::defaults(),
+            limits: wz_session_core::limits::SessionLimits::BUILD,
         }
     }
 

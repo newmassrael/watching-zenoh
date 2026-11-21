@@ -13951,13 +13951,15 @@ fn tapped_qos_group_session_under(
         batch_size: 2_048,
         is_qos: true,
         compression: false,
-        tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(
+        tx_queue: wz_session_core::session_init_params::TxQueueConf::of_snapshot(
             &wz_session_core::policy::SessionPolicy::defaults(),
+            &wz_session_core::limits::SessionLimits::BUILD,
         ),
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
         max_sessions: None,
         policy,
+        limits: wz_session_core::limits::SessionLimits::BUILD,
     };
     let (producer, tap) = crate::multicast_pipeline::MulticastTxTap::attach(&params);
     let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
@@ -17438,6 +17440,36 @@ async fn a_declaration_made_during_the_wait_restarts_it() {
     assert!(
         started.elapsed() >= interval * 2,
         "a change between the check and its confirmation restarts the wait"
+    );
+}
+
+/// `DECLARATION_SYNC_INTERVAL_MS` stated in the session's snapshot is the step of the wait for
+/// stable declarations: a session that owes nothing is stable only once a whole stated interval
+/// has passed with nothing changed.
+#[tokio::test]
+async fn declaration_sync_interval_ms_stated_is_the_step_of_the_wait_for_stable_declarations() {
+    let mut params = fixture_session_init_params();
+    if params
+        .limits
+        .select_declaration_sync_interval_ms(300)
+        .is_err()
+    {
+        // A build of one value refuses another: there is no other snapshot to hand.
+        return;
+    }
+    let (actions, _driver) = recording_actions_with_params(params);
+    let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
+    let session = TokioSession::new(actions, observer, Arc::new(TokioTime::new()));
+    let started = std::time::Instant::now();
+    assert!(
+        session
+            .wait_declarations_stable(std::time::Duration::from_secs(5))
+            .await,
+        "nothing owed"
+    );
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(300),
+        "the wait stepped by the stated interval"
     );
 }
 
