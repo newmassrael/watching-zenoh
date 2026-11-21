@@ -17,7 +17,7 @@ pub const CATALOG_VERSION: u32 = 2;
 
 /// The features of the pico ABI's crate that run its sessions on the cooperative engine, when
 /// the tokio engine is not in the build; every other build runs them on the tokio engine.
-pub const COOP_ENGINE_FEATURES: &[&str] = &["engine-coop", "os-zephyr"];
+pub const COOP_ENGINE_FEATURES: &[&str] = &["engine-coop", "os-posix", "os-zephyr"];
 /// The features that build a library for a platform other than a host, each with its word.
 pub const PLATFORM_FEATURES: &[(&str, &str)] = &[("os-zephyr", "zephyr")];
 
