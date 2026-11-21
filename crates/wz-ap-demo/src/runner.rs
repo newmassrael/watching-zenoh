@@ -4221,8 +4221,20 @@ fn host_session_lifecycle<D, I, M, P, E>(
 {
     use wz::runtime_tokio::lifecycle_query::LifecycleQueries;
     use wz::runtime_tokio::query_sink::{QueryView, ReplyOut};
+    // The reset table's seed comes from the OS; a host that cannot draw one serves no lifecycle
+    // query rather than a table a peer could crowd with zids chosen for a known seed.
+    let reset_seed = match wz::runtime_tokio::lifecycle_reset_seed_from_os_entropy() {
+        Ok(seed) => seed,
+        Err(e) => {
+            log::warn!(
+                "wz-ap-demo {whatami}: no entropy for the reset table's seed ({e}); \
+                 the session lifecycle queries are not hosted"
+            );
+            return;
+        }
+    };
     let queries = Arc::new(wz::runtime_tokio::sync::PlainMutex::new(
-        LifecycleQueries::new(zid_hex, whatami, ClosePermit(permit), directory)
+        LifecycleQueries::new(zid_hex, whatami, ClosePermit(permit), directory, reset_seed)
             .with_intent(loop_side.intent)
             .with_machines(loop_side.machines)
             .with_opener(loop_side.opener),

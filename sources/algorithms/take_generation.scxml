@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  The duplicate suppression of the lifecycle reset (docs/session-lifecycle-intent.md, decision D6;
+  at-most-once calls, Birrell and Nelson, 1984): `resets` holds the latest reset generation taken
+  for each peer. A generation newer than the one held, or the first of a peer, is put into the
+  table in place and taken; one the table already holds, or an older one, is a duplicate of the
+  last; a new peer the full table has no room for is refused, and the table never evicts, since
+  evicting a peer's entry would let a retransmission of its reset close the session once more.
+
+  The table is the caller's, lent `inout` and written where it stands; its bound is the caller's
+  too. The algorithm declares no may-fail: the put names its outcome, and the value at the peer's
+  key is read where `has` proves the key present.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="algorithm"
+       name="take_generation"
+       version="1.0">
+  <sce:import kind="event-schema" src="reset_peer_schema.scxml" as="Peer"/>
+  <sce:import kind="enum" src="take_generation_kind.scxml" as="TakeKind"/>
+  <sce:import kind="event-schema" src="take_generation_duplicate.scxml" as="Duplicate"/>
+  <sce:import kind="union" src="take_generation_result.scxml" as="TakeResult"/>
+  <sce:import kind="enum" src="sce:std/collection/put_outcome.scxml" as="PutOutcome"/>
+  <sce:signature>
+    <sce:param name="resets" type="map&lt;record:Peer, uint64&gt;" inout="true"/>
+    <sce:param name="peer" type="record:Peer"/>
+    <sce:param name="generation" type="uint64"/>
+    <sce:return type="union:TakeResult"/>
+  </sce:signature>
+  <sce:body>
+    <sce:if cond="has(resets, peer) &amp;&amp; resets[peer] &gt;= generation">
+      <sce:var name="duplicate" type="union:TakeResult">
+        <sce:set name="kind" expr="TakeKind.duplicate"/>
+        <sce:set name="last" expr="resets[peer]"/>
+      </sce:var>
+      <sce:return expr="duplicate"/>
+    </sce:if>
+    <sce:var name="stored" type="enum:PutOutcome" init="PutOutcome.inserted"/>
+    <sce:put target="resets" key="peer" expr="generation" outcome="stored"/>
+    <sce:if cond="stored === PutOutcome.full">
+      <sce:var name="no_room" type="union:TakeResult">
+        <sce:set name="kind" expr="TakeKind.no_room"/>
+      </sce:var>
+      <sce:return expr="no_room"/>
+    </sce:if>
+    <sce:var name="taken" type="union:TakeResult">
+      <sce:set name="kind" expr="TakeKind.taken"/>
+    </sce:var>
+    <sce:return expr="taken"/>
+  </sce:body>
+</scxml>

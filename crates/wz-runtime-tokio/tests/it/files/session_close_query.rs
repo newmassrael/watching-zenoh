@@ -157,6 +157,7 @@ fn node(permit: bool, actions: &Arc<SessionLinkActions>) -> LifecycleQueries<Aut
             actions: Arc::clone(actions),
             zid: wz_session_core::zid_hex::zenoh_hex_to_zid(PEER).expect("a zid"),
         }]),
+        wz_runtime_tokio::lifecycle_reset_seed_from_os_entropy().expect("os entropy"),
     )
 }
 

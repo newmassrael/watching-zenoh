@@ -539,8 +539,7 @@ impl Codegen {
     /// stripping inner attributes. The document's `name=` must be `stem`: the
     /// emit's file and its function are both named by it.
     pub fn emit_algorithm(&self, stem: &str, resource_dir: &Path, out_dir: &Path) {
-        self.run_generate(stem, resource_dir, out_dir);
-        strip_inner_attrs_file(&out_dir.join(format!("{stem}.rs")));
+        self.emit_unit(stem, resource_dir, out_dir);
     }
 
     /// Codegen one `sce:kind="event-schema"` document into `$OUT_DIR/{stem}.rs`, stripping
@@ -548,6 +547,27 @@ impl Codegen {
     /// schema's module as `super::{stem}`, so the consumer `include!`s the two as sibling
     /// modules and the schema is emitted beside the algorithm.
     pub fn emit_event_schema(&self, stem: &str, resource_dir: &Path, out_dir: &Path) {
+        self.emit_unit(stem, resource_dir, out_dir);
+    }
+
+    /// Codegen one `sce:kind="enum"` document into `$OUT_DIR/{stem}.rs`, stripping inner
+    /// attributes. An algorithm or a union that names an `enum:<alias>` names the enum's module
+    /// as `super::{stem}`, as it does a schema's, so the enum is emitted beside it. That holds
+    /// for an enum of SCE's standard library too (`sce:std/collection/put_outcome.scxml`, the
+    /// answer of a map's put), whose `resource_dir` is that directory of the pinned checkout.
+    pub fn emit_enum(&self, stem: &str, resource_dir: &Path, out_dir: &Path) {
+        self.emit_unit(stem, resource_dir, out_dir);
+    }
+
+    /// Codegen one `sce:kind="union"` document into `$OUT_DIR/{stem}.rs`, stripping inner
+    /// attributes. Named as `super::{stem}` by what takes or returns it, so emitted beside it.
+    pub fn emit_union(&self, stem: &str, resource_dir: &Path, out_dir: &Path) {
+        self.emit_unit(stem, resource_dir, out_dir);
+    }
+
+    /// The emit of a unit that is one `{stem}.rs` and names its siblings as `super::<stem>`:
+    /// an algorithm, an event schema, an enum or a union.
+    fn emit_unit(&self, stem: &str, resource_dir: &Path, out_dir: &Path) {
         self.run_generate(stem, resource_dir, out_dir);
         strip_inner_attrs_file(&out_dir.join(format!("{stem}.rs")));
     }
