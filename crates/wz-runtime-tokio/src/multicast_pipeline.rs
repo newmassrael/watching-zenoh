@@ -1305,7 +1305,7 @@ mod writer_pacing_tests {
             batch_size: 2_048,
             is_qos: false,
             compression: false,
-            tx_queue: TxQueueConf::of_snapshots(
+            tx_queue: TxQueueConf::of_snapshot(
                 &policy,
                 &wz_session_core::limits::SessionLimits::BUILD,
             ),
@@ -1366,7 +1366,7 @@ mod tests {
                 sizes: [1; Priority::NUM],
                 wait_before_drop_us: 1_000,
                 wait_before_close_us: CLOSE_WAIT.as_micros() as u64,
-                ..TxQueueConf::of_snapshots(
+                ..TxQueueConf::of_snapshot(
                     &wz_session_core::policy::SessionPolicy::defaults(),
                     &wz_session_core::limits::SessionLimits::BUILD,
                 )
@@ -1555,7 +1555,7 @@ mod tests {
         let mut asked = Vec::new();
 
         // Answered as congested, so a push that asked would end here too and show in `asked`.
-        let mut pico = TxQueueConf::pico_of_snapshots(
+        let mut pico = TxQueueConf::pico_of_snapshot(
             &SessionPolicy::defaults(),
             &wz_session_core::limits::SessionLimits::BUILD,
         );
@@ -1571,7 +1571,7 @@ mod tests {
 
         let mut zenoh = TxQueueConf {
             wait_before_drop_us: 1_000,
-            ..TxQueueConf::of_snapshots(
+            ..TxQueueConf::of_snapshot(
                 &SessionPolicy::defaults(),
                 &wz_session_core::limits::SessionLimits::BUILD,
             )
@@ -1621,7 +1621,7 @@ mod tests {
         });
         let started = Instant::now();
         let mut asked = 0usize;
-        let mut pico = TxQueueConf::pico_of_snapshots(
+        let mut pico = TxQueueConf::pico_of_snapshot(
             &SessionPolicy::defaults(),
             &wz_session_core::limits::SessionLimits::BUILD,
         );
@@ -1656,7 +1656,7 @@ mod tests {
             // `fill` pushes droppable messages until one finds no room, each within this wait.
             wait_before_drop_us: 1_000,
             wait_before_close_us: CLOSE_WAIT.as_micros() as u64,
-            ..TxQueueConf::pico_of_snapshots(
+            ..TxQueueConf::pico_of_snapshot(
                 &SessionPolicy::defaults(),
                 &wz_session_core::limits::SessionLimits::BUILD,
             )

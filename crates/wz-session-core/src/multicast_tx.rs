@@ -413,7 +413,7 @@ pub fn multicast_tx_emit(
         item,
         tx_sn,
         params,
-        &TxQueueConf::of_snapshots(&params.policy, &crate::limits::SessionLimits::BUILD),
+        &TxQueueConf::of_snapshot(&params.policy, &crate::limits::SessionLimits::BUILD),
         &mut collect,
     );
     MulticastTxFrames {
@@ -1825,7 +1825,7 @@ mod qos_emit_tests {
             batch_size: 2_048,
             is_qos,
             compression: false,
-            tx_queue: TxQueueConf::of_snapshots(
+            tx_queue: TxQueueConf::of_snapshot(
                 &crate::policy::SessionPolicy::defaults(),
                 &crate::limits::SessionLimits::BUILD,
             ),
@@ -1925,7 +1925,7 @@ mod push_tests {
             batch_size,
             is_qos: false,
             compression: false,
-            tx_queue: TxQueueConf::of_snapshots(
+            tx_queue: TxQueueConf::of_snapshot(
                 &crate::policy::SessionPolicy::defaults(),
                 &crate::limits::SessionLimits::BUILD,
             ),
@@ -2056,7 +2056,7 @@ mod push_tests {
     #[test]
     fn messages_in_a_window_leave_as_one_datagram_with_one_sequence_number() {
         let params = params(2_048);
-        let conf = TxQueueConf::of_snapshots(
+        let conf = TxQueueConf::of_snapshot(
             &crate::policy::SessionPolicy::defaults(),
             &crate::limits::SessionLimits::BUILD,
         );
@@ -2097,7 +2097,7 @@ mod push_tests {
     #[test]
     fn an_express_message_takes_the_open_frame_with_it() {
         let params = params(2_048);
-        let conf = TxQueueConf::of_snapshots(
+        let conf = TxQueueConf::of_snapshot(
             &crate::policy::SessionPolicy::defaults(),
             &crate::limits::SessionLimits::BUILD,
         );
@@ -2137,7 +2137,7 @@ mod push_tests {
     #[test]
     fn a_change_of_reliability_closes_the_open_frame() {
         let params = params(2_048);
-        let conf = TxQueueConf::of_snapshots(
+        let conf = TxQueueConf::of_snapshot(
             &crate::policy::SessionPolicy::defaults(),
             &crate::limits::SessionLimits::BUILD,
         );
@@ -2174,7 +2174,7 @@ mod push_tests {
     #[test]
     fn a_message_that_finds_no_room_spends_no_sequence_number() {
         let params = params(2_048);
-        let conf = TxQueueConf::of_snapshots(
+        let conf = TxQueueConf::of_snapshot(
             &crate::policy::SessionPolicy::defaults(),
             &crate::limits::SessionLimits::BUILD,
         );
@@ -2222,7 +2222,7 @@ mod push_tests {
         let conf = TxQueueConf {
             wait_before_drop_us: 7,
             wait_before_close_us: 11,
-            ..TxQueueConf::of_snapshots(
+            ..TxQueueConf::of_snapshot(
                 &crate::policy::SessionPolicy::defaults(),
                 &crate::limits::SessionLimits::BUILD,
             )
@@ -2268,7 +2268,7 @@ mod push_tests {
             put(true, &payload),
             &mut tx,
             &params,
-            &TxQueueConf::of_snapshots(
+            &TxQueueConf::of_snapshot(
                 &crate::policy::SessionPolicy::defaults(),
                 &crate::limits::SessionLimits::BUILD,
             ),
@@ -2334,7 +2334,7 @@ mod push_tests {
             compression: true,
             ..params(2_048)
         };
-        let conf = TxQueueConf::of_snapshots(
+        let conf = TxQueueConf::of_snapshot(
             &crate::policy::SessionPolicy::defaults(),
             &crate::limits::SessionLimits::BUILD,
         );
@@ -2386,7 +2386,7 @@ mod push_tests {
             compression: true,
             ..params(128)
         };
-        let conf = TxQueueConf::of_snapshots(
+        let conf = TxQueueConf::of_snapshot(
             &crate::policy::SessionPolicy::defaults(),
             &crate::limits::SessionLimits::BUILD,
         );
@@ -2446,7 +2446,7 @@ mod push_tests {
     fn a_chain_that_runs_out_part_way_ends_with_a_drop_marker_on_the_next_sn() {
         use crate::inbound::{parse_inbound, InboundFrame};
         let params = params(128);
-        let conf = TxQueueConf::of_snapshots(
+        let conf = TxQueueConf::of_snapshot(
             &crate::policy::SessionPolicy::defaults(),
             &crate::limits::SessionLimits::BUILD,
         );
@@ -2498,7 +2498,7 @@ mod push_tests {
     #[test]
     fn a_held_conduit_takes_the_push_on_its_own_ring() {
         let params = params(2_048);
-        let conf = TxQueueConf::of_snapshots(
+        let conf = TxQueueConf::of_snapshot(
             &crate::policy::SessionPolicy::defaults(),
             &crate::limits::SessionLimits::BUILD,
         );
@@ -2535,7 +2535,7 @@ mod push_tests {
             put(true, b"v"),
             &mut MulticastTxConduit::new(Priority::Background, &mut sn),
             &params,
-            &TxQueueConf::of_snapshots(
+            &TxQueueConf::of_snapshot(
                 &crate::policy::SessionPolicy::defaults(),
                 &crate::limits::SessionLimits::BUILD,
             ),
@@ -2566,7 +2566,7 @@ mod lend_tests {
             batch_size,
             is_qos,
             compression: false,
-            tx_queue: TxQueueConf::of_snapshots(
+            tx_queue: TxQueueConf::of_snapshot(
                 &crate::policy::SessionPolicy::defaults(),
                 &crate::limits::SessionLimits::BUILD,
             ),
@@ -2661,7 +2661,7 @@ mod lend_tests {
                 put(b"payload", priority),
                 &mut tx,
                 &params,
-                &TxQueueConf::of_snapshots(
+                &TxQueueConf::of_snapshot(
                     &crate::policy::SessionPolicy::defaults(),
                     &crate::limits::SessionLimits::BUILD,
                 ),
@@ -2693,7 +2693,7 @@ mod lend_tests {
             put(&payload, Priority::DEFAULT),
             &mut tx,
             &params,
-            &TxQueueConf::of_snapshots(
+            &TxQueueConf::of_snapshot(
                 &crate::policy::SessionPolicy::defaults(),
                 &crate::limits::SessionLimits::BUILD,
             ),
@@ -2722,7 +2722,7 @@ mod lend_tests {
             put(&payload, Priority::DEFAULT),
             &mut tx,
             &params,
-            &TxQueueConf::of_snapshots(
+            &TxQueueConf::of_snapshot(
                 &crate::policy::SessionPolicy::defaults(),
                 &crate::limits::SessionLimits::BUILD,
             ),
@@ -2752,7 +2752,7 @@ mod lend_tests {
                 put(b"v", Priority::DEFAULT),
                 &mut tx,
                 &params,
-                &TxQueueConf::of_snapshots(
+                &TxQueueConf::of_snapshot(
                     &crate::policy::SessionPolicy::defaults(),
                     &crate::limits::SessionLimits::BUILD,
                 ),
@@ -2790,7 +2790,7 @@ mod lent_emit_tests {
             batch_size,
             is_qos,
             compression: false,
-            tx_queue: TxQueueConf::of_snapshots(
+            tx_queue: TxQueueConf::of_snapshot(
                 &crate::policy::SessionPolicy::defaults(),
                 &crate::limits::SessionLimits::BUILD,
             ),

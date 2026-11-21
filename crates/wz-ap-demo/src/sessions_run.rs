@@ -649,7 +649,7 @@ fn group_params(
         batch_size: 2_048,
         is_qos: false,
         compression: false,
-        tx_queue: wz::runtime_tokio::session_glue::TxQueueConf::of_snapshots(
+        tx_queue: wz::runtime_tokio::session_glue::TxQueueConf::of_snapshot(
             policy,
             &wz::runtime_tokio::limits::SessionLimits::BUILD,
         ),

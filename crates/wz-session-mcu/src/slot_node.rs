@@ -722,7 +722,7 @@ impl NodeIdentity {
             keep_alive: wz_session_core::session_init_params::KeepAliveConf::PICO,
             initial_sn: 0,
             cookie: cookie_bytes(&[]),
-            tx_queue: TxQueueConf::of_snapshots(
+            tx_queue: TxQueueConf::of_snapshot(
                 policy,
                 &wz_session_core::limits::SessionLimits::BUILD,
             ),

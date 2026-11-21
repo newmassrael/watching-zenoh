@@ -176,7 +176,7 @@ where
 
     /// State how the declarations of a session go out, for a caller that wants a pace regardless
     /// of the policy (a test, or a node whose image is built for another policy); each session's
-    /// snapshots state it otherwise ([`ReplayPacing::of_snapshots`]). `Some` sends the burst's
+    /// snapshots state it otherwise ([`ReplayPacing::of_snapshot`]). `Some` sends the burst's
     /// worth of declarations a turn, and waits at least the interval before the next: the wait is
     /// the interval or the node's tick, whichever is longer, because the replay moves on a tick.
     pub fn set_replay_pacing(&mut self, pacing: Option<ReplayPacing>) {
@@ -355,7 +355,7 @@ fn session_pacing(
     policy: &SessionPolicy,
     limits: &SessionLimits,
 ) -> Option<ReplayPacing> {
-    stated.unwrap_or_else(|| ReplayPacing::of_snapshots(policy, limits))
+    stated.unwrap_or_else(|| ReplayPacing::of_snapshot(policy, limits))
 }
 
 /// How many declarations one turn of the replay sends: the pace's burst, or the whole list when the
@@ -627,7 +627,7 @@ mod tests {
             assert_eq!(session_pacing(None, &policy, &limits).is_some(), on, "{on}");
             assert_eq!(
                 session_pacing(None, &policy, &limits),
-                ReplayPacing::of_snapshots(&policy, &limits)
+                ReplayPacing::of_snapshot(&policy, &limits)
             );
             let stated = ReplayPacing::new(3, 10);
             assert_eq!(session_pacing(Some(stated), &policy, &limits), stated);

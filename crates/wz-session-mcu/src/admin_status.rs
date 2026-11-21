@@ -537,7 +537,7 @@ mod tests {
                     keep_alive: wz_session_core::session_init_params::KeepAliveConf::PICO,
                     initial_sn: 0,
                     cookie: vec![0u8; 16],
-                    tx_queue: wz_session_core::session_init_params::TxQueueConf::of_snapshots(
+                    tx_queue: wz_session_core::session_init_params::TxQueueConf::of_snapshot(
                         &wz_session_core::policy::SessionPolicy::defaults(),
                         &wz_session_core::limits::SessionLimits::BUILD,
                     ),
@@ -654,7 +654,7 @@ mod tests {
                     keep_alive: wz_session_core::session_init_params::KeepAliveConf::PICO,
                     initial_sn: 0,
                     cookie: vec![0u8; 16],
-                    tx_queue: wz_session_core::session_init_params::TxQueueConf::of_snapshots(
+                    tx_queue: wz_session_core::session_init_params::TxQueueConf::of_snapshot(
                         &wz_session_core::policy::SessionPolicy::defaults(),
                         &wz_session_core::limits::SessionLimits::BUILD,
                     ),

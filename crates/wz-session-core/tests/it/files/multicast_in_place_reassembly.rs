@@ -52,7 +52,7 @@ fn params(zid: &[u8]) -> MulticastParams {
         batch_size: 2_048,
         is_qos: false,
         compression: false,
-        tx_queue: TxQueueConf::of_snapshots(
+        tx_queue: TxQueueConf::of_snapshot(
             &wz_session_core::policy::SessionPolicy::defaults(),
             &wz_session_core::limits::SessionLimits::BUILD,
         ),

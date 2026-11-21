@@ -82,7 +82,7 @@ fn params(batch_size: u16, is_qos: bool) -> MulticastParams {
         batch_size,
         is_qos,
         compression: false,
-        tx_queue: TxQueueConf::of_snapshots(
+        tx_queue: TxQueueConf::of_snapshot(
             &wz_session_core::policy::SessionPolicy::defaults(),
             &wz_session_core::limits::SessionLimits::BUILD,
         ),

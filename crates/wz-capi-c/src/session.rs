@@ -361,7 +361,7 @@ fn abi_choices(
     limits: &wz_session_core::limits::SessionLimits,
 ) -> AbiChoices {
     AbiChoices {
-        tx_queue: TxQueueConf::of_snapshots(policy, limits),
+        tx_queue: TxQueueConf::of_snapshot(policy, limits),
         // zenoh-c has no switch for a session's read task: its runtime drives the session from
         // the open.
         start_read_task: true,

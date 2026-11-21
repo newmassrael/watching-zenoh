@@ -193,7 +193,7 @@ fn layer3_join_qos_sn_ext_byte_equals_pico() {
         batch_size: 8192,
         is_qos: true,
         compression: false,
-        tx_queue: wz_session_core::session_init_params::TxQueueConf::of_snapshots(
+        tx_queue: wz_session_core::session_init_params::TxQueueConf::of_snapshot(
             &wz_session_core::policy::SessionPolicy::defaults(),
             &wz_session_core::limits::SessionLimits::BUILD,
         ),

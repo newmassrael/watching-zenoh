@@ -737,7 +737,7 @@ impl Engine {
         };
         // Upstream's bounded queue and waits, with the two policies the queue carries and the
         // window of one of them taken from the snapshots the plan resolved for the session.
-        let tx_queue = wz_runtime_tokio::session_glue::TxQueueConf::of_snapshots(
+        let tx_queue = wz_runtime_tokio::session_glue::TxQueueConf::of_snapshot(
             &plan.session_policy,
             &plan.session_limits,
         );

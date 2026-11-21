@@ -7185,7 +7185,7 @@ mod tests {
         // What the session hands the link's write half at Established, with the
         // batch the handshake negotiated.
         let established = |outbound: &Arc<dyn BoxedLinkDriver + Send + Sync>, batch: usize| {
-            let shape = wz_session_core::session_init_params::TxQueueConf::of_snapshots(
+            let shape = wz_session_core::session_init_params::TxQueueConf::of_snapshot(
                 &wz_session_core::policy::SessionPolicy::defaults(),
                 &wz_session_core::limits::SessionLimits::BUILD,
             )

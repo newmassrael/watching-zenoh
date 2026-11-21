@@ -799,7 +799,7 @@ mod tests {
             keep_alive: crate::session_init_params::KeepAliveConf::default(),
             initial_sn: 0,
             cookie: crate::session_init_params::cookie_bytes(&[]),
-            tx_queue: crate::session_init_params::TxQueueConf::of_snapshots(
+            tx_queue: crate::session_init_params::TxQueueConf::of_snapshot(
                 &crate::policy::SessionPolicy::defaults(),
                 &crate::limits::SessionLimits::BUILD,
             ),

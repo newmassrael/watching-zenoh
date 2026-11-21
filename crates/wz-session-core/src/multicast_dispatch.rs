@@ -5473,7 +5473,7 @@ mod tests {
             batch_size: 2_048,
             is_qos: false,
             compression: false,
-            tx_queue: crate::session_init_params::TxQueueConf::of_snapshots(
+            tx_queue: crate::session_init_params::TxQueueConf::of_snapshot(
                 &policy,
                 &crate::limits::SessionLimits::BUILD,
             ),

@@ -350,7 +350,7 @@ mod tests {
         let params = profile.params(
             WhatAmI::Router,
             zid,
-            TxQueueConf::of_snapshots(&policy, &wz_session_core::limits::SessionLimits::BUILD),
+            TxQueueConf::of_snapshot(&policy, &wz_session_core::limits::SessionLimits::BUILD),
             LinkRxConf::default(),
             policy,
         );

@@ -13951,7 +13951,7 @@ fn tapped_qos_group_session_under(
         batch_size: 2_048,
         is_qos: true,
         compression: false,
-        tx_queue: wz_session_core::session_init_params::TxQueueConf::of_snapshots(
+        tx_queue: wz_session_core::session_init_params::TxQueueConf::of_snapshot(
             &wz_session_core::policy::SessionPolicy::defaults(),
             &wz_session_core::limits::SessionLimits::BUILD,
         ),

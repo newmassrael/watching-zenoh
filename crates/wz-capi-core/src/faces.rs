@@ -2749,7 +2749,7 @@ impl SharedSession {
             zid,
             crate::drive::LinkConf {
                 tx: crate::drive::LinkTx {
-                    queue: wz_runtime_tokio::session_glue::TxQueueConf::of_snapshots(
+                    queue: wz_runtime_tokio::session_glue::TxQueueConf::of_snapshot(
                         &session_policy,
                         &session_limits,
                     ),

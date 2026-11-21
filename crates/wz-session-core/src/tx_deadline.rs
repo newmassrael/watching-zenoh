@@ -257,7 +257,7 @@ mod tests {
     /// neither the ordinary nor the probing deadline carries.
     #[test]
     fn a_covered_deadline_is_the_ordinary_one_marked() {
-        let conf = TxQueueConf::of_snapshots(
+        let conf = TxQueueConf::of_snapshot(
             &crate::policy::SessionPolicy::defaults(),
             &crate::limits::SessionLimits::BUILD,
         );
@@ -329,7 +329,7 @@ mod tests {
     /// drops only on a contended TX mutex, never for a full socket.
     #[test]
     fn a_pico_droppable_message_waits_as_long_as_a_blocking_one() {
-        let pico = TxQueueConf::pico_of_snapshots(
+        let pico = TxQueueConf::pico_of_snapshot(
             &crate::policy::SessionPolicy::defaults(),
             &crate::limits::SessionLimits::BUILD,
         );
@@ -362,7 +362,7 @@ mod tests {
         TxQueueConf {
             wait_before_close_us: 1_000,
             no_progress_us,
-            ..TxQueueConf::of_snapshots(
+            ..TxQueueConf::of_snapshot(
                 &crate::policy::SessionPolicy::defaults(),
                 &crate::limits::SessionLimits::BUILD,
             )
@@ -448,7 +448,7 @@ mod tests {
                 wait_before_drop_us: 100,
                 max_wait_before_drop_fragments_us: 1_000,
                 no_progress_us,
-                ..TxQueueConf::of_snapshots(
+                ..TxQueueConf::of_snapshot(
                     &crate::policy::SessionPolicy::defaults(),
                     &crate::limits::SessionLimits::BUILD,
                 )
@@ -477,7 +477,7 @@ mod tests {
     #[test]
     fn an_expired_blocking_message_closes_the_session_by_default() {
         assert_eq!(
-            TxExpiry::of(&TxQueueConf::of_snapshots(
+            TxExpiry::of(&TxQueueConf::of_snapshot(
                 &crate::policy::SessionPolicy::defaults(),
                 &crate::limits::SessionLimits::BUILD
             )),
@@ -490,7 +490,7 @@ mod tests {
     fn with_the_policy_on_an_expired_blocking_message_keeps_the_session() {
         let conf = TxQueueConf {
             expiry_keeps_session: true,
-            ..TxQueueConf::of_snapshots(
+            ..TxQueueConf::of_snapshot(
                 &crate::policy::SessionPolicy::defaults(),
                 &crate::limits::SessionLimits::BUILD,
             )
@@ -501,7 +501,7 @@ mod tests {
     /// The control: zenoh's default still drops after `wait_before_drop`.
     #[test]
     fn a_zenoh_droppable_message_still_waits_only_wait_before_drop() {
-        let zenoh = TxQueueConf::of_snapshots(
+        let zenoh = TxQueueConf::of_snapshot(
             &crate::policy::SessionPolicy::defaults(),
             &crate::limits::SessionLimits::BUILD,
         );

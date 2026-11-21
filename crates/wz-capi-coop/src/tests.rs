@@ -65,7 +65,7 @@ pub(crate) fn params(whatami: WhatAmI, zid: u8) -> SessionInitParams {
         keep_alive: KeepAliveConf::PICO,
         initial_sn: 0,
         cookie: vec![],
-        tx_queue: TxQueueConf::of_snapshots(
+        tx_queue: TxQueueConf::of_snapshot(
             &wz_session_core::policy::SessionPolicy::defaults(),
             &wz_session_core::limits::SessionLimits::BUILD,
         ),
@@ -619,7 +619,7 @@ fn client_config() -> CoopConfig {
         keep_alive: KeepAliveConf::PICO,
         sn_resolution: wz_session_core::policy::SnResolution::default(),
         link_rx: LinkRxConf::default(),
-        tx_queue: TxQueueConf::pico_of_snapshots(
+        tx_queue: TxQueueConf::pico_of_snapshot(
             &wz_session_core::policy::SessionPolicy::defaults(),
             &wz_session_core::limits::SessionLimits::defaults(),
         ),

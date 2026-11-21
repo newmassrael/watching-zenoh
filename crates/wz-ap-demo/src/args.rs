@@ -9046,7 +9046,7 @@ mod stock_config_tests {
                 batching: false,
                 batching_time_limit_us: 5_000,
                 allocation: wz::runtime_tokio::session_glue::QueueAllocation::Init,
-                ..wz::runtime_tokio::session_glue::TxQueueConf::of_snapshots(
+                ..wz::runtime_tokio::session_glue::TxQueueConf::of_snapshot(
                     &wz::runtime_tokio::policy::SessionPolicy::defaults(),
                     &wz::runtime_tokio::limits::SessionLimits::BUILD
                 )
@@ -9071,7 +9071,7 @@ mod stock_config_tests {
         assert_eq!(bare.lease_ms, 10_000);
         assert_eq!(
             bare.tx_queue,
-            wz::runtime_tokio::session_glue::TxQueueConf::of_snapshots(
+            wz::runtime_tokio::session_glue::TxQueueConf::of_snapshot(
                 &wz::runtime_tokio::policy::SessionPolicy::defaults(),
                 &wz::runtime_tokio::limits::SessionLimits::BUILD
             )
@@ -9341,7 +9341,7 @@ mod stock_config_tests {
                 wait_before_drop_us: 2_500,
                 max_wait_before_drop_fragments_us: 40_000,
                 wait_before_close_us: 7_000_000,
-                ..wz::runtime_tokio::session_glue::TxQueueConf::of_snapshots(
+                ..wz::runtime_tokio::session_glue::TxQueueConf::of_snapshot(
                     &wz::runtime_tokio::policy::SessionPolicy::defaults(),
                     &wz::runtime_tokio::limits::SessionLimits::BUILD
                 )
@@ -10893,7 +10893,7 @@ pub(crate) const TX_QUEUE_SIZE_FLAGS: [&str; 8] = [
 impl Default for TransportTuning {
     fn default() -> Self {
         // A node no document describes resolves no limits: the build's are named.
-        Self::of_snapshots(
+        Self::of_snapshot(
             resolve_policy(),
             &wz::runtime_tokio::limits::SessionLimits::BUILD,
         )
@@ -10904,7 +10904,7 @@ impl TransportTuning {
     /// What a node that names no transport flag runs with, under `policy` and `limits`, the
     /// snapshots of the node: the width it offers, the two policies its queues carry and the
     /// window of one of them are the snapshots'.
-    pub(crate) fn of_snapshots(
+    pub(crate) fn of_snapshot(
         policy: wz::runtime_tokio::policy::SessionPolicy,
         limits: &wz::runtime_tokio::limits::SessionLimits,
     ) -> Self {
@@ -10913,7 +10913,7 @@ impl TransportTuning {
             lease_ms: 10_000,
             sn_resolution: policy.sn_resolution(),
             link_defaults: Default::default(),
-            tx_queue: wz::runtime_tokio::session_glue::TxQueueConf::of_snapshots(&policy, limits),
+            tx_queue: wz::runtime_tokio::session_glue::TxQueueConf::of_snapshot(&policy, limits),
             link_rx: Default::default(),
             open_timeout: wz::runtime_tokio::session_open::OPEN_TIMEOUT,
             stats_filters: Default::default(),
@@ -10946,14 +10946,14 @@ impl TransportTuning {
     }
 
     /// `from_argv` under `policy` and `limits`, the node's snapshots: the tuning starts from
-    /// [`Self::of_snapshots`], so the defaults a policy decides and [`Self::policy`] are the
+    /// [`Self::of_snapshot`], so the defaults a policy decides and [`Self::policy`] are the
     /// snapshot's, and every session the node opens is handed it.
     pub(crate) fn from_argv_under(
         rest: &[String],
         policy: wz::runtime_tokio::policy::SessionPolicy,
         limits: &wz::runtime_tokio::limits::SessionLimits,
     ) -> Result<Self, String> {
-        let mut out = Self::of_snapshots(policy, limits);
+        let mut out = Self::of_snapshot(policy, limits);
         if let Some(v) = parse_pair(rest, "--batch-size") {
             out.batch_size = v
                 .parse::<u16>()
@@ -12851,7 +12851,7 @@ mod transport_tuning_policy_tests {
             return;
         }
         let build = wz::runtime_tokio::limits::SessionLimits::BUILD;
-        let window = TransportTuning::of_snapshots(on, &build)
+        let window = TransportTuning::of_snapshot(on, &build)
             .tx_queue
             .no_progress_us
             .expect("the policy on gives the queue its window");

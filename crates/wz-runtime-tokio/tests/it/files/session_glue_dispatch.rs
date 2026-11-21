@@ -96,7 +96,7 @@ fn fixture_params() -> SessionInitParams {
         keep_alive: wz_runtime_tokio::session_glue::KeepAliveConf::default(),
         initial_sn: 0x42,
         cookie: vec![0xDE, 0xAD, 0xBE, 0xEF, 0x77],
-        tx_queue: wz_runtime_tokio::session_glue::TxQueueConf::of_snapshots(
+        tx_queue: wz_runtime_tokio::session_glue::TxQueueConf::of_snapshot(
             &wz_session_core::policy::SessionPolicy::defaults(),
             &wz_session_core::limits::SessionLimits::BUILD,
         ),

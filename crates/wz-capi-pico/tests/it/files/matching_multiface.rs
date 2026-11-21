@@ -600,7 +600,7 @@ fn vanishing_subscriber_peer(
                 keep_alive: wz_runtime_tokio::session_glue::KeepAliveConf::default(),
                 initial_sn: 0,
                 cookie: Vec::new(),
-                tx_queue: wz_runtime_tokio::session_glue::TxQueueConf::of_snapshots(
+                tx_queue: wz_runtime_tokio::session_glue::TxQueueConf::of_snapshot(
                     &wz_session_core::policy::SessionPolicy::defaults(),
                     &wz_session_core::limits::SessionLimits::BUILD,
                 ),

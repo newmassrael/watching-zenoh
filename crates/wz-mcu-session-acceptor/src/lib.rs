@@ -797,7 +797,7 @@ pub(crate) fn acceptor_params(
         // R311y820 — through the SAME §2.5 port the cookie nonce uses, so this
         // fixture demonstrates the production shape rather than the literal a
         // board would otherwise copy.
-        tx_queue: wz_session_core::session_init_params::TxQueueConf::of_snapshots(
+        tx_queue: wz_session_core::session_init_params::TxQueueConf::of_snapshot(
             policy,
             &wz_session_core::limits::SessionLimits::BUILD,
         ),

@@ -215,8 +215,8 @@ fn a_session_replays_at_the_pace_of_the_snapshot_it_is_handed() {
     let limits = wz_session_core::limits::SessionLimits::defaults();
     let (pacing, held) = engine.policy_in_force().expect("the session is open");
     assert_eq!(held, handed);
-    assert_eq!(pacing, ReplayPacing::of_snapshots(&handed, &limits));
-    assert_ne!(pacing, ReplayPacing::of_snapshots(&build, &limits));
+    assert_eq!(pacing, ReplayPacing::of_snapshot(&handed, &limits));
+    assert_ne!(pacing, ReplayPacing::of_snapshot(&build, &limits));
     SessionDrive::close(&*engine);
 
     // Control: the open that resolves its own snapshot holds the build's and its pace.
@@ -224,7 +224,7 @@ fn a_session_replays_at_the_pace_of_the_snapshot_it_is_handed() {
     let own = open_with(config(&second));
     let (pacing, held) = own.policy_in_force().expect("the session is open");
     assert_eq!(held, build);
-    assert_eq!(pacing, ReplayPacing::of_snapshots(&build, &limits));
+    assert_eq!(pacing, ReplayPacing::of_snapshot(&build, &limits));
     SessionDrive::close(&*own);
 }
 

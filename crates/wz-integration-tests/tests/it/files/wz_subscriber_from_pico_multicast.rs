@@ -105,7 +105,7 @@ fn wz_mc_params() -> MulticastParams {
         batch_size: PICO_BATCH_MULTICAST_SIZE,
         is_qos: false,
         compression: false,
-        tx_queue: wz_session_core::session_init_params::TxQueueConf::of_snapshots(
+        tx_queue: wz_session_core::session_init_params::TxQueueConf::of_snapshot(
             &wz_session_core::policy::SessionPolicy::defaults(),
             &wz_session_core::limits::SessionLimits::BUILD,
         ),

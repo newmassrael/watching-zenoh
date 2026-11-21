@@ -1132,7 +1132,7 @@ mod enforcement {
         policy
             .select_declaration_sync_pacing(DeclarationSyncPacing::On)
             .ok()?;
-        let pace = crate::replay_pacing::ReplayPacing::of_snapshots(&policy, limits);
+        let pace = crate::replay_pacing::ReplayPacing::of_snapshot(&policy, limits);
         assert!(
             pace.is_some(),
             "a snapshot's burst and interval make a pace"
@@ -1301,7 +1301,7 @@ mod enforcement {
         let Some(on) = no_progress_deadline_on() else {
             return;
         };
-        let queue = TxQueueConf::of_snapshots(&on, &SessionLimits::defaults());
+        let queue = TxQueueConf::of_snapshot(&on, &SessionLimits::defaults());
         let window = caps::TX_NO_PROGRESS_WINDOW_US as u64;
         assert_eq!(queue.no_progress_us, Some(window));
         assert_eq!(
@@ -1330,8 +1330,8 @@ mod enforcement {
                     return;
                 };
                 for queue in [
-                    TxQueueConf::of_snapshots(&on, limits),
-                    TxQueueConf::pico_of_snapshots(&on, limits),
+                    TxQueueConf::of_snapshot(&on, limits),
+                    TxQueueConf::pico_of_snapshot(&on, limits),
                 ] {
                     assert_eq!(queue.no_progress_us, Some(250));
                     assert_eq!(queue.wait_before_close_us, WAIT_BEFORE_CLOSE_US);

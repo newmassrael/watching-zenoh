@@ -8817,7 +8817,7 @@ impl ZenohNodeConfig {
         // Held as a session of this node holds it: the window of `tx-no-progress-deadline` is the
         // node's snapshots' (`wz/policies` and `TX_NO_PROGRESS_WINDOW_US` of `wz/limits`), not a
         // key of the file, so a total wait the file states shorter than it is refused here.
-        let windowed = wz_session_core::session_init_params::TxQueueConf::of_snapshots(
+        let windowed = wz_session_core::session_init_params::TxQueueConf::of_snapshot(
             &out.policies.policy,
             &out.policies.limits.session,
         );

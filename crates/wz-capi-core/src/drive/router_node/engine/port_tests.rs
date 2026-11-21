@@ -63,7 +63,7 @@ fn abi_choices() -> AbiChoices {
 /// [`abi_choices`], with the handshake offering shared memory when `offer_shm` says so.
 fn abi_choices_offering(offer_shm: bool) -> AbiChoices {
     AbiChoices {
-        tx_queue: TxQueueConf::of_snapshots(
+        tx_queue: TxQueueConf::of_snapshot(
             &wz_session_core::policy::SessionPolicy::defaults(),
             &wz_session_core::limits::SessionLimits::BUILD,
         ),

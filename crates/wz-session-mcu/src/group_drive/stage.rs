@@ -546,7 +546,7 @@ mod tests {
             batch_size: 2_048,
             is_qos: false,
             compression: false,
-            tx_queue: TxQueueConf::of_snapshots(
+            tx_queue: TxQueueConf::of_snapshot(
                 &SessionPolicy::defaults(),
                 &wz_session_core::limits::SessionLimits::BUILD,
             ),

@@ -1562,8 +1562,8 @@ const fn held(present: bool) -> &'static str {
 /// The decisions that belong to the calling ABI and not to the document. They join the plan at
 /// [`OpenPlan::into_arguments`], so the plan is one value for every ABI.
 pub struct AbiChoices {
-    /// The transmit model: zenoh's bounded queue ([`TxQueueConf::of_snapshots`]) or pico's
-    /// caller-thread write ([`TxQueueConf::pico_of_snapshots`]), each under the plan's
+    /// The transmit model: zenoh's bounded queue ([`TxQueueConf::of_snapshot`]) or pico's
+    /// caller-thread write ([`TxQueueConf::pico_of_snapshot`]), each under the plan's
     /// [`OpenPlan::session_policy`].
     pub tx_queue: TxQueueConf,
     /// Whether the session's read task runs from the start.
@@ -2167,7 +2167,7 @@ mod tests {
             .expect("a client with an endpoint opens")
         };
         let abi = |offer_shm| AbiChoices {
-            tx_queue: TxQueueConf::of_snapshots(
+            tx_queue: TxQueueConf::of_snapshot(
                 &SessionPolicy::defaults(),
                 &wz_session_core::limits::SessionLimits::BUILD,
             ),
@@ -2200,7 +2200,7 @@ mod tests {
             plan_of(WhatAmI::Client, &["tcp/127.0.0.1:7447"], &[], document)
                 .expect("a client with an endpoint opens")
                 .into_arguments(AbiChoices {
-                    tx_queue: TxQueueConf::of_snapshots(
+                    tx_queue: TxQueueConf::of_snapshot(
                         &SessionPolicy::defaults(),
                         &wz_session_core::limits::SessionLimits::BUILD,
                     ),
@@ -2265,7 +2265,7 @@ mod tests {
         assert!(
             !stance(
                 off,
-                TxQueueConf::of_snapshots(
+                TxQueueConf::of_snapshot(
                     &SessionPolicy::defaults(),
                     &wz_session_core::limits::SessionLimits::BUILD
                 )
@@ -2275,7 +2275,7 @@ mod tests {
         assert!(
             !stance(
                 off,
-                TxQueueConf::pico_of_snapshots(
+                TxQueueConf::pico_of_snapshot(
                     &SessionPolicy::defaults(),
                     &wz_session_core::limits::SessionLimits::BUILD
                 )
@@ -2287,7 +2287,7 @@ mod tests {
         assert_eq!(
             stance(
                 bound,
-                TxQueueConf::of_snapshots(
+                TxQueueConf::of_snapshot(
                     &SessionPolicy::defaults(),
                     &wz_session_core::limits::SessionLimits::BUILD
                 )
@@ -2300,7 +2300,7 @@ mod tests {
         assert_eq!(
             stance(
                 init,
-                TxQueueConf::of_snapshots(
+                TxQueueConf::of_snapshot(
                     &SessionPolicy::defaults(),
                     &wz_session_core::limits::SessionLimits::BUILD
                 )
@@ -2317,7 +2317,7 @@ mod tests {
             r#"{ transport: { link: { tx: { queue: { size: { data: 6, control: 2 } } } } } }"#;
         let sizes = stance(
             wide,
-            TxQueueConf::of_snapshots(
+            TxQueueConf::of_snapshot(
                 &SessionPolicy::defaults(),
                 &wz_session_core::limits::SessionLimits::BUILD,
             ),
@@ -2327,7 +2327,7 @@ mod tests {
         assert_eq!(
             sizes,
             {
-                let mut expected = TxQueueConf::of_snapshots(
+                let mut expected = TxQueueConf::of_snapshot(
                     &SessionPolicy::defaults(),
                     &wz_session_core::limits::SessionLimits::BUILD,
                 )
@@ -2345,12 +2345,12 @@ mod tests {
         assert_eq!(
             stance(
                 on,
-                TxQueueConf::pico_of_snapshots(
+                TxQueueConf::pico_of_snapshot(
                     &SessionPolicy::defaults(),
                     &wz_session_core::limits::SessionLimits::BUILD
                 )
             ),
-            TxQueueConf::pico_of_snapshots(
+            TxQueueConf::pico_of_snapshot(
                 &SessionPolicy::defaults(),
                 &wz_session_core::limits::SessionLimits::BUILD
             )
@@ -2358,12 +2358,12 @@ mod tests {
         assert_eq!(
             stance(
                 "{}",
-                TxQueueConf::of_snapshots(
+                TxQueueConf::of_snapshot(
                     &SessionPolicy::defaults(),
                     &wz_session_core::limits::SessionLimits::BUILD
                 )
             ),
-            TxQueueConf::of_snapshots(
+            TxQueueConf::of_snapshot(
                 &SessionPolicy::defaults(),
                 &wz_session_core::limits::SessionLimits::BUILD
             )
@@ -2452,7 +2452,7 @@ mod tests {
         assert_eq!(plan.session_policy, handed);
         let stance = plan
             .into_arguments(AbiChoices {
-                tx_queue: TxQueueConf::of_snapshots(
+                tx_queue: TxQueueConf::of_snapshot(
                     &handed,
                     &wz_session_core::limits::SessionLimits::BUILD,
                 ),
@@ -2598,7 +2598,7 @@ mod tests {
             "the plan says what the document says: the key defaults on"
         );
         let abi = |groups_report_shm| AbiChoices {
-            tx_queue: TxQueueConf::of_snapshots(
+            tx_queue: TxQueueConf::of_snapshot(
                 &SessionPolicy::defaults(),
                 &wz_session_core::limits::SessionLimits::BUILD,
             ),
@@ -3047,7 +3047,7 @@ mod tests {
 
         let expected = plan.session.clone();
         let arguments = plan.into_arguments(AbiChoices {
-            tx_queue: TxQueueConf::of_snapshots(
+            tx_queue: TxQueueConf::of_snapshot(
                 &SessionPolicy::defaults(),
                 &wz_session_core::limits::SessionLimits::BUILD,
             ),
@@ -3178,7 +3178,7 @@ mod tests {
                 .expect("key expressions");
         assert_eq!(plan.session.aggregation, expected);
         let arguments = plan.into_arguments(AbiChoices {
-            tx_queue: TxQueueConf::of_snapshots(
+            tx_queue: TxQueueConf::of_snapshot(
                 &SessionPolicy::defaults(),
                 &wz_session_core::limits::SessionLimits::BUILD,
             ),
@@ -3216,7 +3216,7 @@ mod tests {
             plan_of(WhatAmI::Router, &[], &["tcp/127.0.0.1:0"], document)
                 .expect("opens")
                 .into_arguments(AbiChoices {
-                    tx_queue: TxQueueConf::of_snapshots(
+                    tx_queue: TxQueueConf::of_snapshot(
                         &SessionPolicy::defaults(),
                         &wz_session_core::limits::SessionLimits::BUILD,
                     ),
@@ -3294,7 +3294,7 @@ mod tests {
             plan_of(WhatAmI::Router, &[], &["tcp/127.0.0.1:0"], document)
                 .expect("opens")
                 .into_arguments(AbiChoices {
-                    tx_queue: TxQueueConf::of_snapshots(
+                    tx_queue: TxQueueConf::of_snapshot(
                         &SessionPolicy::defaults(),
                         &wz_session_core::limits::SessionLimits::BUILD,
                     ),
@@ -3355,7 +3355,7 @@ mod tests {
         )
         .expect("opens")
         .into_arguments(AbiChoices {
-            tx_queue: TxQueueConf::of_snapshots(
+            tx_queue: TxQueueConf::of_snapshot(
                 &SessionPolicy::defaults(),
                 &wz_session_core::limits::SessionLimits::BUILD,
             ),

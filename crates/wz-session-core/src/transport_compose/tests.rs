@@ -19,7 +19,7 @@ fn params(zid: &[u8], batch_size: u16, lease_ms: u64) -> SessionInitParams {
         keep_alive: crate::session_init_params::KeepAliveConf::default(),
         initial_sn: 0x1234,
         cookie: crate::session_init_params::cookie_bytes(&[0xC0, 0xC1, 0xC2]),
-        tx_queue: TxQueueConf::of_snapshots(
+        tx_queue: TxQueueConf::of_snapshot(
             &crate::policy::SessionPolicy::defaults(),
             &crate::limits::SessionLimits::BUILD,
         ),

@@ -4257,8 +4257,8 @@ pub struct OpenStance {
     /// The transmit model of the ABI calling this. The two ABIs this core serves
     /// transmit differently: a zenoh-c session puts onto zenoh's bounded queue
     /// and drops a droppable message after `wait_before_drop`
-    /// ([`TxQueueConf::of_snapshots`]), while pico writes on the caller's thread and
-    /// never drops for a full socket ([`TxQueueConf::pico_of_snapshots`]); either is
+    /// ([`TxQueueConf::of_snapshot`]), while pico writes on the caller's thread and
+    /// never drops for a full socket ([`TxQueueConf::pico_of_snapshot`]); either is
     /// built under [`Self::session_policy`].
     pub tx_queue: TxQueueConf,
     /// The batch size the session advertises at its handshake, dialled and accepted alike; see
@@ -4989,7 +4989,7 @@ mod tests {
     fn the_parameters_a_session_is_given_carry_both_halves_of_its_link() {
         let stated = LinkConf {
             tx: LinkTx {
-                queue: TxQueueConf::pico_of_snapshots(
+                queue: TxQueueConf::pico_of_snapshot(
                     &SessionPolicy::defaults(),
                     &wz_session_core::limits::SessionLimits::BUILD,
                 ),
@@ -5036,7 +5036,7 @@ mod tests {
         }
         let link_conf = LinkConf {
             tx: LinkTx {
-                queue: TxQueueConf::of_snapshots(
+                queue: TxQueueConf::of_snapshot(
                     &handed,
                     &wz_session_core::limits::SessionLimits::BUILD,
                 ),
@@ -5072,7 +5072,7 @@ mod tests {
         }
         let link_conf = LinkConf {
             tx: LinkTx {
-                queue: TxQueueConf::of_snapshots(
+                queue: TxQueueConf::of_snapshot(
                     &SessionPolicy::defaults(),
                     &wz_session_core::limits::SessionLimits::BUILD,
                 ),
@@ -5377,7 +5377,7 @@ mod tests {
                     [0xC1; 4].into(),
                     LinkConf {
                         tx: LinkTx {
-                            queue: TxQueueConf::of_snapshots(
+                            queue: TxQueueConf::of_snapshot(
                                 &SessionPolicy::defaults(),
                                 &wz_session_core::limits::SessionLimits::BUILD,
                             ),
@@ -5520,7 +5520,7 @@ mod tests {
                     [0xC1; 4].into(),
                     LinkConf {
                         tx: LinkTx {
-                            queue: TxQueueConf::of_snapshots(
+                            queue: TxQueueConf::of_snapshot(
                                 &SessionPolicy::defaults(),
                                 &wz_session_core::limits::SessionLimits::BUILD,
                             ),
@@ -5606,7 +5606,7 @@ mod tests {
                     [0xC1; 4].into(),
                     LinkConf {
                         tx: LinkTx {
-                            queue: TxQueueConf::of_snapshots(
+                            queue: TxQueueConf::of_snapshot(
                                 &SessionPolicy::defaults(),
                                 &wz_session_core::limits::SessionLimits::BUILD,
                             ),
@@ -6185,7 +6185,7 @@ mod tests {
     #[cfg(feature = "peer")]
     fn peer_stance() -> OpenStance {
         OpenStance {
-            tx_queue: TxQueueConf::pico_of_snapshots(
+            tx_queue: TxQueueConf::pico_of_snapshot(
                 &SessionPolicy::defaults(),
                 &wz_session_core::limits::SessionLimits::BUILD,
             ),
@@ -6709,7 +6709,7 @@ mod multicast_face_tests {
                 &join,
                 wz_session_core::multicast_params::zid_vec(&[0x0A]),
                 WhatAmI::Peer,
-                TxQueueConf::of_snapshots(&policy, &wz_session_core::limits::SessionLimits::BUILD),
+                TxQueueConf::of_snapshot(&policy, &wz_session_core::limits::SessionLimits::BUILD),
                 LinkRxConf::default(),
                 &policy,
             )
@@ -6765,7 +6765,7 @@ mod multicast_face_tests {
             batch_size: 2_048,
             is_qos: false,
             compression: false,
-            tx_queue: super::TxQueueConf::of_snapshots(
+            tx_queue: super::TxQueueConf::of_snapshot(
                 &super::SessionPolicy::defaults(),
                 &wz_session_core::limits::SessionLimits::BUILD,
             ),

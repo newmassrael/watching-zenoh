@@ -5552,7 +5552,7 @@ mod link_congestion_tests {
             super::TxQueueConf {
                 wait_before_drop_us: 42,
                 wait_before_close_us: 4_242,
-                ..super::TxQueueConf::of_snapshots(
+                ..super::TxQueueConf::of_snapshot(
                     &wz_session_core::policy::SessionPolicy::defaults(),
                     &wz_session_core::limits::SessionLimits::BUILD,
                 )
@@ -5601,7 +5601,7 @@ mod link_congestion_tests {
             link.block_first_asked(),
             [(
                 Priority::InteractiveHigh,
-                super::TxQueueConf::of_snapshots(
+                super::TxQueueConf::of_snapshot(
                     &wz_session_core::policy::SessionPolicy::defaults(),
                     &wz_session_core::limits::SessionLimits::BUILD
                 )
@@ -5668,7 +5668,7 @@ mod link_congestion_tests {
     fn session(link: Arc<CongestibleLink>) -> Arc<super::SessionLinkActions> {
         session_with_queue(
             link,
-            super::TxQueueConf::of_snapshots(
+            super::TxQueueConf::of_snapshot(
                 &wz_session_core::policy::SessionPolicy::defaults(),
                 &wz_session_core::limits::SessionLimits::BUILD,
             ),
@@ -5826,7 +5826,7 @@ mod link_congestion_tests {
             super::TxQueueConf {
                 wait_before_drop_us: 42,
                 wait_before_close_us: 4_242,
-                ..super::TxQueueConf::of_snapshots(
+                ..super::TxQueueConf::of_snapshot(
                     &wz_session_core::policy::SessionPolicy::defaults(),
                     &wz_session_core::limits::SessionLimits::BUILD,
                 )
@@ -5857,7 +5857,7 @@ mod link_congestion_tests {
         params.batch_size = 1_024;
         params.tx_queue = super::TxQueueConf {
             sizes,
-            ..super::TxQueueConf::of_snapshots(
+            ..super::TxQueueConf::of_snapshot(
                 &wz_session_core::policy::SessionPolicy::defaults(),
                 &wz_session_core::limits::SessionLimits::BUILD,
             )
@@ -5908,7 +5908,7 @@ mod link_congestion_tests {
         }
         assert_eq!(
             *link.shapes.lock().expect("shapes"),
-            [super::TxQueueConf::of_snapshots(
+            [super::TxQueueConf::of_snapshot(
                 &wz_session_core::policy::SessionPolicy::defaults(),
                 &wz_session_core::limits::SessionLimits::BUILD
             )
@@ -6141,7 +6141,7 @@ mod link_congestion_tests {
     /// dropped (`SendWireError::HeldConduit`), as pico's put fails.
     #[test]
     fn under_the_pico_profile_a_droppable_message_behind_a_held_conduit_asks_nothing() {
-        let queue = super::TxQueueConf::pico_of_snapshots(
+        let queue = super::TxQueueConf::pico_of_snapshot(
             &wz_session_core::policy::SessionPolicy::defaults(),
             &wz_session_core::limits::SessionLimits::BUILD,
         );
@@ -6228,7 +6228,7 @@ mod link_congestion_tests {
             link.clone(),
             super::TxQueueConf {
                 expiry_keeps_session: true,
-                ..super::TxQueueConf::of_snapshots(
+                ..super::TxQueueConf::of_snapshot(
                     &wz_session_core::policy::SessionPolicy::defaults(),
                     &wz_session_core::limits::SessionLimits::BUILD,
                 )
@@ -6262,7 +6262,7 @@ mod link_congestion_tests {
         params.initial_sn = 7;
         params.tx_queue = super::TxQueueConf {
             expiry_keeps_session: true,
-            ..super::TxQueueConf::of_snapshots(
+            ..super::TxQueueConf::of_snapshot(
                 &wz_session_core::policy::SessionPolicy::defaults(),
                 &wz_session_core::limits::SessionLimits::BUILD,
             )
@@ -6284,7 +6284,7 @@ mod link_congestion_tests {
             link.clone(),
             super::TxQueueConf {
                 expiry_keeps_session: true,
-                ..super::TxQueueConf::of_snapshots(
+                ..super::TxQueueConf::of_snapshot(
                     &wz_session_core::policy::SessionPolicy::defaults(),
                     &wz_session_core::limits::SessionLimits::BUILD,
                 )
@@ -6435,7 +6435,7 @@ mod link_congestion_tests {
             link.clone(),
             super::TxQueueConf {
                 expiry_keeps_session: true,
-                ..super::TxQueueConf::of_snapshots(
+                ..super::TxQueueConf::of_snapshot(
                     &wz_session_core::policy::SessionPolicy::defaults(),
                     &wz_session_core::limits::SessionLimits::BUILD,
                 )

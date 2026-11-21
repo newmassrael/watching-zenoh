@@ -2322,7 +2322,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             faces: vec![Face {
                 id: DIAL_FACE,
                 link: Link::Waiting { at_us: u64::MAX },
-                replay: Replay::with_pacing(ReplayPacing::of_snapshots(
+                replay: Replay::with_pacing(ReplayPacing::of_snapshot(
                     &policy,
                     &resolve_limits(&config),
                 )),
@@ -2532,7 +2532,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 
     /// State how the declarations of a link go out, for a caller that wants a pace regardless of
     /// the session's policies (a test, or a program whose image is built for another policy); the
-    /// snapshots the session opened under state it otherwise (`ReplayPacing::of_snapshots`). `Some`
+    /// snapshots the session opened under state it otherwise (`ReplayPacing::of_snapshot`). `Some`
     /// sends a burst of declarations a step and waits at least the interval before the next burst;
     /// `None` sends them all in one.
     pub fn set_replay_pacing(&self, pacing: Option<ReplayPacing>) {
