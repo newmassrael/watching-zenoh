@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  The key of the table of reset generations (docs/session-lifecycle-intent.md, decision D6): a
+  peer's zid read as the unsigned 128-bit number zenoh compares, held as its low and high halves.
+  Two spellings of one zid on the wire differ only in high zero bytes, so both read to one key.
+  No machine sends it as an event; the event-schema kind is how SCE declares a record
+  (SCE_FORGE.md, "Records").
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       version="1.0"
+       sce:kind="event-schema"
+       name="reset_peer_schema"
+       sce:event-name="reset.peer">
+  <datamodel>
+    <data id="low" sce:type="uint64" sce:direction="in"/>
+    <data id="high" sce:type="uint64" sce:direction="in"/>
+  </datamodel>
+</scxml>

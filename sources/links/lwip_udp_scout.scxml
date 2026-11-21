@@ -26,6 +26,11 @@
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
        sce:kind="link" name="lwip_udp_scout" version="1.0">
+  <!-- The framer and the outbound event's codec are read from their
+       documents: a link's event decode and encode are generated from
+       the codecs it imports under the names its framer and encode give. -->
+  <sce:import as="frame" kind="codec" src="../codecs/frame.scxml"/>
+  <sce:import as="scout" kind="codec" src="../codecs/scout.scxml"/>
 
   <sce:link-class>udp</sce:link-class>
 

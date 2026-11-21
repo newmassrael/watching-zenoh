@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  What take_generation.scxml answers: taken and no_room carry nothing, duplicate carries the last
+  generation the table holds for the peer.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       version="1.0"
+       sce:kind="union"
+       name="take_generation_result">
+  <sce:import kind="enum" src="take_generation_kind.scxml" as="TakeKind"/>
+  <sce:import kind="event-schema" src="take_generation_duplicate.scxml" as="Duplicate"/>
+  <datamodel>
+    <data id="kind" sce:type="enum:TakeKind">
+      <sce:case variant="taken"/>
+      <sce:case variant="duplicate" record="Duplicate"/>
+      <sce:case variant="no_room"/>
+    </data>
+  </datamodel>
+</scxml>

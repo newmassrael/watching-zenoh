@@ -595,12 +595,17 @@ async fn run_group(
     };
     // One bind for the first join and every re-join, so a re-join installs
     // exactly the membership the first one did. Each join's session binds it
-    // when it asks for its link.
+    // when it asks for its link. The link is upstream's shape: the group is read
+    // on a joined socket and the session sends from a socket of its own, on an
+    // ephemeral port (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @
+    // `// Establish a unicast UDP socket`). The group keys a member by the
+    // address its datagrams come from, so two members on one host sending from
+    // the group's port would be read as one.
     // The node's snapshot: the two link policies of the group's sockets, and what the group's
     // parameters carry to its loop and its session.
     let snapshot = crate::args::resolve_policy();
     let bind = || {
-        UdpDriver::bind_multicast(
+        UdpDriver::bind_multicast_link(
             group,
             port,
             McastSocketConfig {

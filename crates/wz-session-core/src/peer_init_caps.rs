@@ -40,6 +40,28 @@
 /// both need it and only this module is in every build.
 pub const DEFAULT_MULTICAST_BATCH_SIZE: u16 = 8192;
 
+/// What an opening session does with an InitAck whose batch size is larger
+/// than the one its InitSyn advertised: the second rule wz's presets differ by
+/// on a link's batch. An acceptor of either original answers with no larger a
+/// batch than it was offered, so only a peer that does not follow its own
+/// original sends one.
+///
+/// The resolutions are not part of this choice: both originals refuse an
+/// InitAck that enlarges the sequence-number or request-id resolution, with
+/// the close reason INVALID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WiderInitAckBatch {
+    /// zenoh's: keep the session and use the smaller batch of the two, as for
+    /// any InitAck
+    /// (`io/zenoh-transport/src/unicast/establishment/open.rs` @
+    /// `state.transport.batch_size = state.transport.batch_size.min(init_ack.batch_size);`).
+    Adopt,
+    /// zenoh-pico's: refuse the session as it refuses an enlarged resolution
+    /// (`vendor/zenoh-pico/src/transport/unicast/transport.c` @
+    /// `if (iam._body._init._batch_size <= param->_batch_size) {`).
+    Refuse,
+}
+
 /// Peer-advertised resolution + batch-size capabilities decoded from an
 /// INIT body — the InitSyn and InitAck share the wire layout
 /// (`wz_codecs::init_body`), so the Accepting side decodes the peer's
@@ -82,10 +104,12 @@ fn decode_wire_caps(sn_res_byte: Option<u8>, batch_size: Option<u16>) -> (u8, u8
 /// **less than or equal to** the value the initiator advertised in its
 /// InitSyn ("Any of the size parameters in the InitAck must be less or
 /// equal than the one in the InitSyn"). A peer that ENLARGES
-/// `seq_num_res`, `req_id_res`, or `batch_size` returns `true` here and
-/// the dispatcher rejects the session instead of adopting the value —
-/// before this gate, `min()` negotiation kept our side self-consistent
-/// but silently tolerated a non-conforming acceptor (F-b carry).
+/// `seq_num_res` or `req_id_res` returns `true` here and the dispatcher
+/// rejects the session instead of adopting the value, as both originals do.
+/// An enlarged `batch_size` returns `true` only under
+/// [`WiderInitAckBatch::Refuse`], zenoh-pico's rule; under zenoh's
+/// [`WiderInitAckBatch::Adopt`] the session keeps it and the `min()`
+/// negotiation uses the smaller batch.
 ///
 /// Compares the RAW wire advertisement (S-bit-clear defaults applied via
 /// `decode_wire_caps`), not the projection `PeerInitCaps::
@@ -97,11 +121,13 @@ pub fn init_ack_exceeds_advertisement(
     own_seq_num_res: u8,
     own_req_id_res: u8,
     own_batch_size: u16,
+    wider_batch: WiderInitAckBatch,
     sn_res_byte: Option<u8>,
     batch_size: Option<u16>,
 ) -> bool {
     let (peer_seq, peer_req, peer_batch) = decode_wire_caps(sn_res_byte, batch_size);
-    peer_seq > own_seq_num_res || peer_req > own_req_id_res || peer_batch > own_batch_size
+    let batch_refused = wider_batch == WiderInitAckBatch::Refuse && peer_batch > own_batch_size;
+    peer_seq > own_seq_num_res || peer_req > own_req_id_res || batch_refused
 }
 
 impl PeerInitCaps {
@@ -199,6 +225,7 @@ mod init_ack_validation_tests {
             1,
             2,
             1024,
+            WiderInitAckBatch::Refuse,
             sn_res,
             Some(1024)
         ));
@@ -207,6 +234,7 @@ mod init_ack_validation_tests {
             1,
             2,
             1024,
+            WiderInitAckBatch::Refuse,
             Some(0x04),
             Some(512)
         ));
@@ -221,6 +249,7 @@ mod init_ack_validation_tests {
             1,
             2,
             1024,
+            WiderInitAckBatch::Refuse,
             Some(0x0A),
             Some(1024)
         ));
@@ -229,6 +258,7 @@ mod init_ack_validation_tests {
             1,
             2,
             1024,
+            WiderInitAckBatch::Refuse,
             Some(0x0D),
             Some(1024)
         ));
@@ -237,8 +267,47 @@ mod init_ack_validation_tests {
             1,
             2,
             1024,
+            WiderInitAckBatch::Refuse,
             Some(0x09),
             Some(2048)
+        ));
+    }
+
+    /// zenoh's rule keeps a session whose InitAck names the larger batch, and
+    /// still refuses an enlarged resolution: only the batch is the choice.
+    #[test]
+    fn init_ack_wider_batch_is_adopted_under_zenohs_rule() {
+        let adopt = WiderInitAckBatch::Adopt;
+        // batch_size enlarged: peer 2048 > own 1024, kept.
+        assert!(!init_ack_exceeds_advertisement(
+            1,
+            2,
+            1024,
+            adopt,
+            Some(0x09),
+            Some(2048)
+        ));
+        // S-clear: the default 65535 > own 1024, kept.
+        assert!(!init_ack_exceeds_advertisement(
+            2, 2, 1024, adopt, None, None
+        ));
+        // seq_num_res enlarged: peer seq 2 > own 1, refused under either rule.
+        assert!(init_ack_exceeds_advertisement(
+            1,
+            2,
+            1024,
+            adopt,
+            Some(0x0A),
+            Some(1024)
+        ));
+        // req_id_res enlarged: peer req 3 > own 2, refused under either rule.
+        assert!(init_ack_exceeds_advertisement(
+            1,
+            2,
+            1024,
+            adopt,
+            Some(0x0D),
+            Some(1024)
         ));
     }
 
@@ -249,12 +318,33 @@ mod init_ack_validation_tests {
     #[test]
     fn init_ack_s_clear_defaults_compared() {
         // own advertised the defaults: peer's S-clear reply conforms.
-        assert!(!init_ack_exceeds_advertisement(2, 2, 65535, None, None));
+        assert!(!init_ack_exceeds_advertisement(
+            2,
+            2,
+            65535,
+            WiderInitAckBatch::Refuse,
+            None,
+            None
+        ));
         // own advertised seq_num_res=1: an S-clear reply means the peer
         // adopted the DEFAULT 2 > 1 — non-conforming, reject.
-        assert!(init_ack_exceeds_advertisement(1, 2, 65535, None, None));
+        assert!(init_ack_exceeds_advertisement(
+            1,
+            2,
+            65535,
+            WiderInitAckBatch::Refuse,
+            None,
+            None
+        ));
         // own advertised batch 1024: S-clear default 65535 > 1024, reject.
-        assert!(init_ack_exceeds_advertisement(2, 2, 1024, None, None));
+        assert!(init_ack_exceeds_advertisement(
+            2,
+            2,
+            1024,
+            WiderInitAckBatch::Refuse,
+            None,
+            None
+        ));
     }
 }
 

@@ -478,6 +478,18 @@ The list above is the census as taken. This list records what changed since.
   (`TxFrame<&[u8]>`), where wz's links lend the transmit slot in place. Both are
   candidates for the catalogue of section 4, for the SCE session to judge.
 - **W3, open.** Not yet scoped beyond the census row.
+- **The reset-generation pilot (S2 row 30 and S5 row M5), half done.** The rule
+  is `sources/algorithms/take_generation.scxml`, an algorithm that takes the
+  table `inout` (SCE ADR 0108, a `map<record, uint64>` keyed by the zid as its
+  two halves) and answers taken, duplicate or no room.
+  `wz-session-core::reset_generations` holds it in a `ResetGenerations<N>`, and
+  the heap profile's `lifecycle_query` answers through it (row 30), its bound one
+  no node reaches and its seed the host's entropy. The fixed-memory profile's
+  connect manager (row M5) still holds its `FixedVec`: its table lives in a
+  `static` built by a `const fn` whose bytes are all zero, so the linker puts it in
+  `.bss`, and SCE's map at the pin is neither built by a `const fn` nor zero when
+  empty (its "no slot" marks are `u32::MAX`). That is a request to the SCE side,
+  not a wz edit.
 
 ### 7.2 What S7 to S10 found (2026-11-20)
 

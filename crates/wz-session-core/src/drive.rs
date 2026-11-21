@@ -704,7 +704,9 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
                 // R311kc — initiator InitAck params validation (zenoh-pico
                 // unicast/transport.c:123-140): an InitAck whose size
                 // parameters exceed our InitSyn advertisement REJECTS the
-                // session — `framing.error` drives Closing with
+                // session (the batch size only under the pico rule the ABI
+                // states, `WiderInitAckBatch::Refuse`; zenoh adopts the
+                // smaller batch) — `framing.error` drives Closing with
                 // `CloseReason::Invalid` (wire Close(INVALID)) and the
                 // typed outcome surfaces the reason to the open loop.
                 // Unlike the silent-drop admissions below, the reject must
@@ -758,8 +760,9 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
                         // R311y823 — the PATCH reject leaves through
                         // `establishment.ext_rejected`, not `framing.error`,
                         // because the reason byte differs on the wire. zenoh
-                        // reserves INVALID for the three BODY size parameters
-                        // checked immediately above (`open.rs:288,304`) and
+                        // reserves INVALID for the two BODY resolutions
+                        // checked immediately above (`open.rs:288,304`; it
+                        // adopts a larger batch rather than refusing it) and
                         // closes GENERIC for every EXTENSION handler failure
                         // (`open.rs:321-364`) -- and `link.close` puts that
                         // byte in a Close the peer reads

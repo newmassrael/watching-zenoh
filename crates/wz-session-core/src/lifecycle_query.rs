@@ -77,7 +77,6 @@
 //! way: its reply is about the peer its key names, and a pattern names none. The
 //! capability query has no target, so it answers any key that intersects it.
 
-use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
@@ -96,6 +95,8 @@ pub use crate::lifecycle_wire::{
 };
 use crate::lifecycle_wire::{CLOSE_VERB, OPEN_VERB, RESET_VERB, STATUS_VERB};
 use crate::query_sink::{QueryView, ReplyError, ReplyOut};
+pub use crate::reset_generations::MapSeed;
+use crate::reset_generations::{ResetGenerations, HEAP_RESET_PEERS};
 use crate::text_out::FixedText;
 use crate::zid_hex::same_zid;
 
@@ -263,9 +264,11 @@ pub struct LifecycleQueries<A, D, I = NoIntent, M = NoMachines, O = NoOpener> {
     intent: I,
     machines: M,
     opener: O,
-    /// The latest reset generation taken, by the peer's zid in its canonical
-    /// form. Volatile, as every runtime edit of D6 is.
-    resets: RefCell<BTreeMap<Vec<u8>, u64>>,
+    /// The latest reset generation taken for each peer, by the rule of
+    /// `sources/algorithms/take_generation.scxml`. A heap node states no bound a node reaches
+    /// ([`HEAP_RESET_PEERS`]), so it never refuses a peer for room. Volatile, as every runtime
+    /// edit of D6 is.
+    resets: RefCell<ResetGenerations<HEAP_RESET_PEERS>>,
 }
 
 /// What [`LifecycleQueries::answer`] did with a query.
@@ -290,8 +293,16 @@ impl<A: SessionLifecycleAuthority, D: SessionDirectory> LifecycleQueries<A, D> {
     /// The queries of the node `zid_hex` (zenoh's spelling) of role `whatami`,
     /// for a host that holds no peer by intent, by a machine or by an opener
     /// ([`Self::with_intent`], [`Self::with_machines`] and [`Self::with_opener`]
-    /// say it does).
-    pub fn new(zid_hex: &str, whatami: &str, authority: A, directory: D) -> Self {
+    /// say it does). `reset_seed` keys the table of reset generations
+    /// ([`ResetGenerations::with_seed`] says what a host hands): a seed drawn from the host's
+    /// entropy, so a peer cannot choose zids that crowd one chain of that table.
+    pub fn new(
+        zid_hex: &str,
+        whatami: &str,
+        authority: A,
+        directory: D,
+        reset_seed: MapSeed,
+    ) -> Self {
         Self {
             zid_hex: String::from(zid_hex),
             whatami: String::from(whatami),
@@ -300,7 +311,7 @@ impl<A: SessionLifecycleAuthority, D: SessionDirectory> LifecycleQueries<A, D> {
             intent: NoIntent,
             machines: NoMachines,
             opener: NoOpener,
-            resets: RefCell::new(BTreeMap::new()),
+            resets: RefCell::new(ResetGenerations::with_seed(reset_seed)),
         }
     }
 }
@@ -488,15 +499,7 @@ where
     }
 
     fn take_generation(&self, peer: &Zid, generation: u64) -> Generation {
-        let canonical = Vec::from(canonical_zid(peer));
-        let mut resets = self.queries.resets.borrow_mut();
-        if let Some(&last) = resets.get(&canonical) {
-            if generation <= last {
-                return Generation::Duplicate { last };
-            }
-        }
-        resets.insert(canonical, generation);
-        Generation::Taken
+        self.queries.resets.borrow_mut().take(peer, generation)
     }
 
     fn links(&self, peer: &Zid) -> SessionLinks {
@@ -766,8 +769,12 @@ mod tests {
                 asked: Cell::new(0),
             },
             Table(RefCell::new(sessions)),
+            TEST_SEED,
         )
     }
+
+    /// The seed of every table a test here builds: a fixed one, as a host with no entropy hands.
+    const TEST_SEED: MapSeed = MapSeed::from_halves(0x7a69_6420_7465_7374, 0x7265_7365_7473_2121);
 
     fn ask<I: PeerIntent, M: PeerMachines, O: PeerOpener>(
         node: &LifecycleQueries<Authority, Table, I, M, O>,
@@ -1627,7 +1634,7 @@ mod tests {
                         .collect(),
                 )),
             };
-            let queries = LifecycleQueries::new(ME, "peer", &world, &world)
+            let queries = LifecycleQueries::new(ME, "peer", &world, &world, TEST_SEED)
                 .with_intent(&world)
                 .with_machines(&world);
             let answers: Vec<Option<String>> = case

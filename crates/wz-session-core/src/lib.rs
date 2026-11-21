@@ -2087,6 +2087,11 @@ pub mod lifecycle_wire;
 #[cfg(feature = "storage-profile")]
 pub mod lifecycle_node;
 
+// The lifecycle reset's table of generations (decision D6): the rule is the SCE algorithm
+// `sources/algorithms/take_generation.scxml`, and each profile states the table's bound.
+#[cfg(feature = "storage-profile")]
+pub mod reset_generations;
+
 // The table every transport of the lifecycle contract is held to (decision D7), for a test of
 // this crate or an adapter in a sibling (`lifecycle-contract`, which the census leg turns on so
 // that the crate's own adapter runs). No production build names it.
