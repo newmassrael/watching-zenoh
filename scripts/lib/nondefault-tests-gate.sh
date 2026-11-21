@@ -1633,10 +1633,11 @@ wz-session-core/query-reply-err|"
     "wz-runtime-tokio|hook|transport-link-app,transport-multicast|app_link::"
     # A `TokioTime` over a time base the program supplies (`program-time`): the integration file
     # `tests/it/files/session_program_time.rs` (its readings, waits, timeouts and bounds on the
-    # program's time, a session's lease timed by it in the drive loop) and the session's own tests
-    # whose name says `program_time` (the wait for stable declarations). The filter is the name
-    # both share, so a test added to either is covered.
-    "wz-runtime-tokio|hook|program-time|program_time"
+    # program's time, a session's lease timed by it in the drive loop), whose target covers every
+    # test of the file, and the session's own test of the wait for stable declarations on that
+    # time, by its path. The two rows share one feature set, so they share one build.
+    "wz-runtime-tokio|hook|program-time|--test=session_program_time"
+    "wz-runtime-tokio|hook|program-time|session::tests::a_stable_declarations_wait_on_program_time_ends_only_when_that_time_passes"
     # The router's routing events (`router_forward::routing_spans`, built with `routing-router-hat`
     # and `tracing-spans`) and the span a spawned task runs in (`runtime_pool::span_tests`, whose
     # claim is the `tracing-instrument` arm). The wide leg names neither tracing feature, so the

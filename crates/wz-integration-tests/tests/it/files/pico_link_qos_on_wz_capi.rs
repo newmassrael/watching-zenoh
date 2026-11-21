@@ -1394,6 +1394,8 @@ fn congestion_control_run(probes: &Probes) {
 
 /// A client's `Drop` returns and is not delivered on a full link, and its `Block` waits and
 /// delivers: on the real zenoh-pico first, then on wz.
+// wz-proves: none -- both ends of the subject run wz's library; the real zenoh-pico runs only
+// as the control, against itself, so no exchange crosses implementations
 #[test]
 #[ignore = "runs real zenoh-pico and wz processes through a stalling relay; Layer S runs via \
             --ignored"]
@@ -1408,6 +1410,8 @@ fn link_qos_drop_and_block_on_a_full_stream_in_client_mode() {
 /// A peer's `Drop` returns and is not delivered on a full link, and its `Block` waits and
 /// delivers, on wz. The control is the client run of the real zenoh-pico, because a pico peer
 /// does not hold the definition on a full link; that run is printed as the reference.
+// wz-proves: none -- both ends of the subject run wz's library; the real zenoh-pico runs only
+// as the control, against itself, so no exchange crosses implementations
 #[test]
 #[ignore = "runs real zenoh-pico and wz processes through a stalling relay; Layer S runs via \
             --ignored"]
@@ -2081,6 +2085,8 @@ fn redial_findings(o: &Redial) -> Vec<String> {
 /// Reliable samples over a group whose relay loses, delays and reorders the publisher's frames
 /// arrive in order and are each received or reported missed, and best-effort ones arrive in
 /// order: on the real zenoh-pico first, then on wz, each repeated with the same relay seeds.
+// wz-proves: none -- both ends of the subject run wz's library; the real zenoh-pico runs only
+// as the control, against itself, so no exchange crosses implementations
 #[test]
 #[ignore = "runs real zenoh-pico and wz processes on two groups of the loopback interface \
             joined by an impairing relay; Layer S runs via --ignored"]
@@ -2124,6 +2130,8 @@ fn link_qos_reliable_samples_over_a_lossy_group_arrive_in_order_or_are_reported_
 /// A client's reliable samples across a stream that is cut and dialled again arrive in order and
 /// never twice, each lost one is reported missed, and nothing put once the link carries again is
 /// lost: on the real zenoh-pico first, then on wz, each repeated.
+// wz-proves: none -- both ends of the subject run wz's library; the real zenoh-pico runs only
+// as the control, against itself, so no exchange crosses implementations
 #[test]
 #[ignore = "runs real zenoh-pico and wz processes through a relay that cuts the stream; Layer S \
             runs via --ignored"]

@@ -51,10 +51,21 @@ interest_reaches_the_upstream_and_withholds_the_clients_final` asserts
   list: a builder joins a set by what its body does, so adding one classifies
   it automatically.
 * ROUTER-plane vs API-plane files -- a file is router-plane when its
-  production region speaks in `FaceId`. That is the type a module has only if
-  it forwards BETWEEN peers; the api-plane emitters (`session/publisher.rs`,
-  `session/querier.rs`, `session/mod.rs`, `session/liveliness.rs`) do not
-  mention it, and the seven that do are the routing modules.
+  production region speaks in the ROUTER's `FaceId`. That is the type a module
+  has only if it forwards BETWEEN peers; the api-plane emitters
+  (`session/publisher.rs`, `session/querier.rs`, `session/mod.rs`,
+  `session/liveliness.rs`) do not mention it, and the seven that do are the
+  routing modules. The name alone is not the type: a crate that declares a
+  `FaceId` of its own names something else by it. The cooperative engine's
+  session calls each of its own transports a face (`type FaceId = u64` in
+  `wz-capi-coop`), and its multicast group sends the session's OWN Interests,
+  the ones zenoh-pico encodes with no extension at all
+  (`vendor/zenoh-pico/src/protocol/codec/network.c` @
+  `z_result_t _z_n_interest_encode(_z_wbuf_t *wbf, const _z_n_msg_interest_t *interest) {`),
+  exactly as the tokio engine's group does through the same bare builder. So a
+  file of a crate that declares its own `FaceId` is api-plane, and the
+  router's definition (`ROUTER_FACE_ID_FILE`) is the one declared name that
+  says which `FaceId` is the router's; it is judged to exist.
 * The call sites -- every production `build_interest_<name>(` under `crates/`,
   outside the defining file.
 
@@ -111,6 +122,16 @@ BUILDER_CALL = re.compile(r"\b(build_interest_\w+)\s*\(")
 
 #: The type a module holds only if it forwards between peers.
 FACE_ID = re.compile(r"\bFaceId\b")
+
+#: Where the ROUTER's `FaceId` is declared: the one face id that names a face
+#: a router forwards between. Any other crate's `FaceId` is a name it gave a
+#: thing of its own.
+ROUTER_FACE_ID_FILE = "crates/wz-runtime-tokio/src/accept_loop.rs"
+
+#: A `FaceId` item declared by a crate: a struct, an enum or a type alias.
+FACE_ID_DEF = re.compile(
+    r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:struct|enum|type)\s+FaceId\b"
+)
 
 #: A direct envelope construction, which no builder mediates.
 DIRECT_BUILD = re.compile(r"\bInterestOwned\s*\{")
@@ -279,6 +300,41 @@ def is_router_plane(path: pathlib.Path, lines: list[str], in_test: set[int]) -> 
     return False
 
 
+def crate_of(rel: pathlib.Path) -> str:
+    """The crate directory a tracked path sits in (`crates/<name>`)."""
+    return "/".join(rel.parts[:2])
+
+
+def face_id_definitions(repo: pathlib.Path = REPO) -> tuple[bool, set[str]]:
+    """Whether the router's `FaceId` is declared where `ROUTER_FACE_ID_FILE`
+    says, and the crates that declare a `FaceId` of their own.
+
+    Production declarations only: a test fixture that names a local `FaceId`
+    makes nothing of its crate api-plane. The router's crate is never in the
+    second set, whatever else it declares.
+    """
+    router_defined = False
+    own: set[str] = set()
+    for rel in tracked_rust(repo):
+        try:
+            text = (repo / rel).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if "FaceId" not in text or declared_as_test_module(repo, rel):
+            continue
+        lines = text.splitlines()
+        in_test = test_lines(rel, lines)
+        for n, line in enumerate(lines, start=1):
+            if n in in_test or is_comment(line) or not FACE_ID_DEF.match(line):
+                continue
+            if rel.as_posix() == ROUTER_FACE_ID_FILE:
+                router_defined = True
+            else:
+                own.add(crate_of(rel))
+    own.discard(crate_of(pathlib.Path(ROUTER_FACE_ID_FILE)))
+    return router_defined, own
+
+
 def call_sites(
     repo: pathlib.Path = REPO,
 ) -> tuple[list[tuple[str, int, str, bool]], list[str]]:
@@ -292,6 +348,7 @@ def call_sites(
     """
     sites: list[tuple[str, int, str, bool]] = []
     direct: list[str] = []
+    _router_defined, own_face_crates = face_id_definitions(repo)
     for rel in tracked_rust(repo):
         key = rel.as_posix()
         if key == BUILDER_FILE:
@@ -307,7 +364,7 @@ def call_sites(
             continue
         lines = text.splitlines()
         in_test = test_lines(rel, lines)
-        router = is_router_plane(rel, lines, in_test)
+        router = is_router_plane(rel, lines, in_test) and crate_of(rel) not in own_face_crates
         for n, line in enumerate(lines, start=1):
             if n in in_test or is_comment(line):
                 continue
@@ -350,6 +407,15 @@ def findings(repo: pathlib.Path = REPO) -> tuple[list[str], dict[str, int]]:
             f"at DEFAULT on six of its seven api-level Interests "
             f"(`api/session.rs`), so a uniform wz is a wz that diverges -- the "
             f"stamp has been applied a layer too low."
+        )
+
+    router_defined, _own = face_id_definitions(repo)
+    if not router_defined:
+        out.append(
+            f"the router's `FaceId` is not declared in {ROUTER_FACE_ID_FILE}, so "
+            f"which `FaceId` makes a file router-plane is unknown, and a crate "
+            f"declaring its own would be read as the router's. Point "
+            f"ROUTER_FACE_ID_FILE at where it moved."
         )
 
     sites, direct = call_sites(repo)
@@ -660,6 +726,49 @@ def selftest() -> int:
                 "the undecorated `mod fwd_prod;`"
             )
 
+    # Which `FaceId` a file speaks in. The same bare call in four crates: the
+    # router's own crate and a crate that imports the router's `FaceId` are
+    # router-plane; a crate that declares a `FaceId` of its own (the
+    # cooperative engine's session faces) is not; and a `FaceId` declared only
+    # in a crate's TEST module makes nothing of that crate api-plane.
+    with tempfile.TemporaryDirectory() as td:
+        d = pathlib.Path(td)
+        subprocess.run(["git", "-C", str(d), "init", "-q"], check=True)
+        bare_call = "fn p(&self, f: FaceId) {\n    let _ = build_interest_bare();\n}\n"
+        for rel_name, body in (
+            (BUILDER_FILE, _STAMPING_BUILDER + "\n" + _BARE_BUILDER),
+            (ROUTER_FACE_ID_FILE, "pub struct FaceId(pub u64);\n"),
+            ("crates/wz-runtime-tokio/src/fwd.rs", bare_call),
+            ("crates/own/src/registry.rs", "pub(super) type FaceId = u64;\n"),
+            ("crates/own/src/group.rs", bare_call),
+            ("crates/imports/src/fwd.rs", "use r::accept_loop::FaceId;\n" + bare_call),
+            (
+                "crates/fixture/src/fwd.rs",
+                bare_call + "#[cfg(test)]\nmod tests {\n    type FaceId = u64;\n}\n",
+            ),
+        ):
+            p = d / rel_name
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(body, encoding="utf-8")
+            subprocess.run(["git", "-C", str(d), "add", rel_name], check=True)
+        router_defined, own = face_id_definitions(d)
+        if not router_defined or own != {"crates/own"}:
+            failures.append(
+                f"FaceId declarations: router declared {router_defined}, own-face "
+                f"crates {sorted(own)}, want True and ['crates/own']"
+            )
+        sites, _direct = call_sites(d)
+        flagged = sorted({s[0] for s in sites if s[2] == "build_interest_bare" and s[3]})
+        want = [
+            "crates/fixture/src/fwd.rs",
+            "crates/imports/src/fwd.rs",
+            "crates/wz-runtime-tokio/src/fwd.rs",
+        ]
+        if flagged != want:
+            failures.append(
+                f"a crate's own FaceId: router-plane bare sites {flagged}, want {want}"
+            )
+
     reported, branch_total = _findings_branches(failures)
 
     if failures:
@@ -667,7 +776,7 @@ def selftest() -> int:
             print(f"  router-interest-qos SELFTEST FAIL: {line}", file=sys.stderr)
         return 1
     print(
-        f"  router-interest-qos: selftest {len(CASES) + 4} predicate case(s) OK, "
+        f"  router-interest-qos: selftest {len(CASES) + 5} predicate case(s) OK, "
         f"plus every one of {branch_total} `findings()` failure branch(es) fired "
         f"from a fixture ({reported} message(s) collected). The branch population "
         "is DERIVED from this file's own syntax tree, not counted by hand"

@@ -45,7 +45,6 @@ wz-capi-c	wz-capi-c/src/shm.rs	1	error: public documentation for `zc_threadsafe_
 wz-capi-c	wz-capi-c/src/shm.rs	1	error: redundant explicit link target: explicit target is redundant
 wz-capi-c	wz-capi-c/src/string_array.rs	1	error: unresolved link to `crate::scout`: no item named `scout` in module `wz_capi_c`
 wz-capi-c	wz-capi-c/src/sub.rs	1	error: public documentation for `z_subscriber_id` links to private item `crate::entity::z_entity_global_id_t::for_entity`: this item is private
-wz-capi-coop	wz-capi-coop/src/engine.rs	1	error: unresolved link to `CoopEngine::listening`: the struct `CoopEngine` has no field or associated item named `listening`
 wz-capi-core	wz-capi-core/src/drive.rs	1	error: unresolved link to `Self::with_shm_clients`: the struct `OpenStance` has no field or associated item named `with_shm_clients`
 wz-capi-core	wz-capi-core/src/drive.rs	1	error: unresolved link to `SessionResources::gossip`: the struct `SessionResources` has no field or associated item named `gossip`
 wz-capi-core	wz-capi-core/src/drive.rs	1	error: unresolved link to `drive_bind_phase`: no item named `drive_bind_phase` in scope

@@ -9038,7 +9038,9 @@ layer_c1ak_cargo_test_transport_stats() {
     # 7 -> 8: `a_key_set_is_carried_by_a_payload_class_alone` (`stats/filters`). fe69f5b004 moved
     # this and four guards below; merge c4209646f0 put the old numbers back, and the pc5 run of the
     # 8e integration branch printed these.
-    _runci_guarded_test C1ak 8 cargo test -p wz-session-core --features transport-stats --lib stats:: --quiet \
+    # 8 -> 9 = what hosted run 44790303307 printed: `a_report_absorbs_another_counter_by_counter`,
+    # the report of a session on several links summed counter by counter.
+    _runci_guarded_test C1ak 9 cargo test -p wz-session-core --features transport-stats --lib stats:: --quiet \
         || return 1
     # R2930 — 8 -> 9: `a_multicast_congestion_drop_is_observed_and_not_counted_sent`.
     # 9 -> 12: the three `stats/filters` tests (the filter list, a classified payload
@@ -9085,7 +9087,9 @@ layer_c1ak_cargo_test_transport_stats() {
     # R2372 — 3 -> 6, the same R2371 arithmetic on the alloc-only arm.
     # R2843 — 6 -> 3: the three renderer tests were all this arm's `alloc` ones.
     # 3 -> 4: `a_key_set_is_carried_by_a_payload_class_alone`, ungated like the class it holds.
-    _runci_guarded_test C1ak 4 cargo test -p wz-session-core --no-default-features --features alloc --lib stats:: --quiet \
+    # 4 -> 5, counted from the source: `a_report_absorbs_another_counter_by_counter`, ungated like
+    # the report it sums.
+    _runci_guarded_test C1ak 5 cargo test -p wz-session-core --no-default-features --features alloc --lib stats:: --quiet \
         || return 1
     # R311y811 — the BARE arm: no `alloc`, no `transport-stats`. R311y810 un-gated
     # this module precisely so its report type could be named in EVERY feature
@@ -9105,7 +9109,9 @@ layer_c1ak_cargo_test_transport_stats() {
     # allocating arm's count, written to match the red tree. The feature
     # implies nothing now, and this arm reads its three again.
     # 3 -> 4: `a_key_set_is_carried_by_a_payload_class_alone`, which needs no allocator.
-    _runci_guarded_test C1ak 4 cargo test -p wz-session-core --no-default-features --lib stats --quiet \
+    # 4 -> 5, counted from the source: `a_report_absorbs_another_counter_by_counter`, which needs
+    # none either.
+    _runci_guarded_test C1ak 5 cargo test -p wz-session-core --no-default-features --lib stats --quiet \
         || return 1
     # R311y810 — adminspace-metrics AND transport-stats together: the combination
     # a deployment actually runs, which no lane composed before. The metrics leg's
@@ -14304,7 +14310,9 @@ layer_c1m_session_lwip() {
     # connection closed before it was taken, a port already listened on, a port freed for the next).
     # 17, counted from the source: an IPv6 connection and listener name their ends in their family,
     # and only a family the kernel lacks is `Unsupported`.
-    _runci_guarded_test "C1m posix tcp seam" 17 \
+    # 17 -> 19 = what hosted run 44790303307 printed: a stream the peer does not read stops being
+    # writable until it reads, and the wait for room handed out answers as the socket does.
+    _runci_guarded_test "C1m posix tcp seam" 19 \
         cargo test -p wz-runtime-posix --lib stream:: --quiet || return 1
     # The host's multicast seam (`wz_runtime_posix::group`): the receivers of one host share the group's
     # port, a group that is not one is not joined, a member sends from a port of its own with the hop

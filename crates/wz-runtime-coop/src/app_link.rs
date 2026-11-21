@@ -801,7 +801,7 @@ impl AppLinks {
         self
     }
 
-    /// Links whose opens wait for the program to report a link up for [`OPEN_WAIT_MS`] of the
+    /// Links whose opens wait for the program to report a link up for `OPEN_WAIT_MS` of the
     /// session's clock, which `bound` sleeps on, in place of the wall clock's: the clock of a
     /// session timed by a time base the program supplies.
     #[must_use]
