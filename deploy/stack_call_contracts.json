@@ -311,6 +311,12 @@
       "why": "the codec's sink appends a slice to the buffer it writes"
     },
     {
+      "id": "wireexpr-suffix-tail-append",
+      "where": {"function": "wireexpr::WireexprWire>::write_source$"},
+      "callees": "TxBuf>::append$",
+      "why": "the key expression's suffix is the writer's last act: TxSink::write_bytes (tx_buf.rs, self.buf.append(bytes), rule txbuf-append) inlined as a tail call through the buffer's vtable (ldr.w r3, [r8, #28], the slot of TxBuf::append after len, is_empty, as_slice and truncate), which the line table puts on the function's closing brace (wireexpr.rs:351, generated) and the reader names since it reads a tail call through a register (2026-11-21). Read off the admin node over the secure channel; the byte writes before it in the same function stay with txbuf-append-byte-sink and sink-vle-byte, which come first"
+    },
+    {
       "id": "txbuf-reserve",
       "where": {"file": "tx_buf.rs", "anchor": "self.buf.reserve(n)"},
       "callees": "TxBuf>::reserve$",
