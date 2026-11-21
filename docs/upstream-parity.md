@@ -28,8 +28,8 @@ cell without a same-condition measurement makes no claim.
   The cooperative engine the pico ABI runs on is a host engine (`docs/capi-pico-on-coop-engine.md` D3).
 - **Size, host.** `scripts/lib/capability_cost_gate.py` builds each C ABI case, holds it to
   a text budget, and builds zenoh-pico as the same build (`wz_config.pico_reference`) to
-  print the ratio. It prints the ratio and does not grade it. It has no zenoh-c reference
-  and does not build `--original-features` lines.
+  print the ratio. It prints the ratio and does not grade it (it grades it since 2026-11-21,
+  D9). It has no zenoh-c reference and does not build `--original-features` lines.
 - **Size, MCU.** `deploy/resource_budget.json` holds the fixed client's static chain and
   stack peak. `deploy/session_slot_bytes.json` holds the session slot. Neither has a
   reference.
@@ -389,6 +389,53 @@ derived from the declaration and never chosen by hand:
      to 143,720, the commits and the symbols in its `measured`). No boot of the matrix was run
      again: its boot cells (stack used, heap peak, turnaround) are those of run 20261031T063515,
      and the caveat of that run in `deploy/upstream_parity.json` says so.
+
+- **D9. The host libraries of the pico ABI are held under zenoh-pico in ratchet form (owner,
+  2026-11-21: wz is to be smaller and faster than zenoh-pico, held by gates as a ratchet and a
+  debt loop).** D8 holds the MCU kit's build cells at WIN only, and they read WIN. The host
+  libraries (the pico C ABI cdylib that ships as the Linux `.so` and the Windows DLL) read far
+  from it: Layer C1cs reads the cooperative pico client at about 2.5 times zenoh-pico built as the
+  same build, and the tokio cases higher. A WIN-only rule would hold every one of them red until
+  the debt is paid, and a red that stays red holds nothing. Until then each case is held where it
+  stands and may only move toward pico. The rule:
+  1. **The ratio, read in the same run.** `scripts/lib/capability_cost_gate.py` (Layer C1cs)
+     already builds, for every pico case, zenoh-pico from this tree's `vendor/zenoh-pico` with
+     the switches `wz_config.pico_reference` derives from the case's features, on the host that
+     builds wz. It now grades wz text over pico text. The ratio and not the bytes is held because
+     both libraries are built on one host in one run: what the host moves alike on both sides (the
+     linker, the libc, the section layout) cancels, and one tree's ratio is comparable across
+     hosts within the gate's tolerance, where its bytes are not (section 2 records one pico-client
+     build reading 1,794,606 to 1,833,173 bytes on three hosts in one day). The reference is
+     built with the host's C compiler, so each row records the toolchain it was read with, and a
+     failure on another toolchain names both.
+  2. **The committed table.** `deploy/pico_host_ceiling.json` has one row per pico case, and
+     every row is a pico case of the gate: a case added without a row, or a row left for a case
+     that is gone, fails, so the population cannot grow outside the ceiling. A row is locked,
+     `"verdict": "win"`, or a ratchet, `"ratio_at_most"` with the reading it was set from (date,
+     both texts, the pico pin, the toolchain) and the open-debt item the case is registered under.
+     `ratio_at_most` is that reading's ratio rounded up to four places, and the gate refuses any
+     other value, so a ratchet moves only with a stated reading.
+  3. **Locked is D1.** A locked case reads WIN (wz text smaller) or fails; a TIE fails as a LOSS
+     does. No budget or row move clears it: the bytes are taken back, or the owner decides here,
+     as in D8.
+  4. **The ratchet only moves down.** A reading over `ratio_at_most` by more than the tolerance
+     fails. The tolerance is 0.2 percent of the ratchet: two readings of one tree on one host are
+     equal, and the largest spread the gate's notes record between hosted CI and a build host on
+     one tree is 0.08 percent of wz's text, so 0.2 percent allows that on both sides of the ratio
+     with a margin. A host whose compiler spreads the ratio further shows as a failure naming
+     both toolchains; a row is filled from the host that grades it. A reading under the
+     ratchet by more than the tolerance passes and prints the tighter row, which the round commits:
+     every gain is kept. A ratchet case that reads WIN fails until its row is locked (the gate
+     prints the locked row), so a case that reaches WIN is held there from that commit on.
+  5. **The debt loop (D5).** Every case that is not locked is an open-debt item, paid largest
+     ratio first, each paid in its own round with the ratio read again in that round and the row
+     tightened by the reading. A row without a registered item fails. The loop ends when every row
+     is locked.
+  6. **The byte budget stays.** A case's text budget in the gate still holds its own size, with
+     its reason, as before. The ceiling adds the reference to it; it does not replace it.
+  7. **Unfilled rows do not land.** A row whose `ratio_at_most` is null fails `--check` with the
+     row this run reads. `--measure` prints the rows of every pico case it builds, to paste, and
+     so does `--check` after its findings.
 
 ## 5. Steps
 
