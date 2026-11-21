@@ -276,7 +276,8 @@ mod udp {
                 addr,
                 queue,
                 fault,
-                wz_session_core::policy::SessionPolicy::defaults(),
+                &wz_session_core::policy::SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD,
             )
         });
         let driver = UdpWriteDriver::new(tx, LinkSubject::UNKNOWN, None);

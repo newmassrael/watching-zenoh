@@ -1239,11 +1239,11 @@ impl Drop for MulticastTxPlane {
     }
 }
 
-/// The pacing of a group's transmit task: `P`'s, for the `datagram-fragment-pacing` value of the
-/// snapshot the group's parameters carry. [`OfBuild`](crate::datagram_pacing::OfBuild) is the
-/// writer's in production; a test names the pacing it observes.
+/// The pacing of a group's transmit task: `P`'s, for the `datagram-fragment-pacing` value and the
+/// burst and gap of the snapshots the group's parameters carry. [`OfBuild`](crate::datagram_pacing::OfBuild)
+/// is the writer's in production; a test names the pacing it observes.
 fn group_writer_pacing<P: crate::datagram_pacing::Pacing>(params: &MulticastParams) -> P {
-    P::of_policy(&params.policy)
+    P::of_snapshot(&params.policy, &params.limits)
 }
 
 #[cfg(test)]
@@ -1333,6 +1333,91 @@ mod writer_pacing_tests {
             let pacing: ByPolicy = group_writer_pacing(&params(policy));
             assert_eq!(pacing.is_paced(), paced, "{value:?}");
         }
+    }
+
+    /// The waits a group's transmit task under `params` asks before one fragment past `burst`,
+    /// written back to back.
+    fn group_waits(params: &MulticastParams, burst: usize) -> Vec<Option<std::time::Duration>> {
+        let mut pacing: crate::datagram_pacing::Paced = group_writer_pacing(params);
+        crate::datagram_pacing::fragment_waits(&mut pacing, burst + 1)
+    }
+
+    /// `params` of a group whose session states `limits`.
+    fn params_under(limits: wz_session_core::limits::SessionLimits) -> MulticastParams {
+        MulticastParams {
+            limits,
+            ..params(SessionPolicy::defaults())
+        }
+    }
+
+    /// `DATAGRAM_FRAGMENT_BURST` with nothing stated: a group's transmit task lets the build's
+    /// burst through back to back and holds the next fragment the gap.
+    #[tokio::test(start_paused = true)]
+    async fn datagram_fragment_burst_with_nothing_stated_paces_a_group_writer_by_the_build() {
+        let burst = wz_session_core::caps::DATAGRAM_FRAGMENT_BURST;
+        assert_eq!(
+            group_waits(&params(SessionPolicy::defaults()), burst),
+            crate::datagram_pacing::burst_then_gap(
+                burst,
+                wz_session_core::caps::DATAGRAM_FRAGMENT_GAP_US
+            )
+        );
+    }
+
+    /// `DATAGRAM_FRAGMENT_BURST` stated as two in the group's limits: its transmit task holds the
+    /// third fragment the gap.
+    #[tokio::test(start_paused = true)]
+    async fn datagram_fragment_burst_stated_is_the_burst_a_group_writer_uses() {
+        use wz_session_core::limit_binding::LimitSpec;
+        let mut limits = wz_session_core::limits::SessionLimits::BUILD;
+        let stated = limits.select_datagram_fragment_burst(2);
+        if wz_session_core::limits::DatagramFragmentBurst::DOMAIN.is_singleton() {
+            // A build that keeps the build's value alone refuses the statement itself.
+            assert!(stated.is_err());
+            return;
+        }
+        stated.expect("two is inside the domain");
+        assert_eq!(
+            group_waits(&params_under(limits), 2),
+            crate::datagram_pacing::burst_then_gap(
+                2,
+                wz_session_core::caps::DATAGRAM_FRAGMENT_GAP_US
+            )
+        );
+    }
+
+    /// `DATAGRAM_FRAGMENT_GAP_US` with nothing stated: the fragment past the burst of a group's
+    /// transmit task waits the build's gap.
+    #[tokio::test(start_paused = true)]
+    async fn datagram_fragment_gap_us_with_nothing_stated_paces_a_group_writer_by_the_build() {
+        let burst = wz_session_core::caps::DATAGRAM_FRAGMENT_BURST;
+        let waits = group_waits(&params(SessionPolicy::defaults()), burst);
+        assert_eq!(
+            waits.last().copied().flatten(),
+            Some(std::time::Duration::from_micros(
+                wz_session_core::caps::DATAGRAM_FRAGMENT_GAP_US as u64
+            ))
+        );
+    }
+
+    /// `DATAGRAM_FRAGMENT_GAP_US` stated as 500 in the group's limits: the fragment past the
+    /// burst of its transmit task waits 500 microseconds.
+    #[tokio::test(start_paused = true)]
+    async fn datagram_fragment_gap_us_stated_is_the_gap_a_group_writer_uses() {
+        use wz_session_core::limit_binding::LimitSpec;
+        let mut limits = wz_session_core::limits::SessionLimits::BUILD;
+        let stated = limits.select_datagram_fragment_gap_us(500);
+        if wz_session_core::limits::DatagramFragmentGapUs::DOMAIN.is_singleton() {
+            // A build that keeps the build's value alone refuses the statement itself.
+            assert!(stated.is_err());
+            return;
+        }
+        stated.expect("500 is inside the domain");
+        let burst = wz_session_core::caps::DATAGRAM_FRAGMENT_BURST;
+        assert_eq!(
+            group_waits(&params_under(limits), burst),
+            crate::datagram_pacing::burst_then_gap(burst, 500)
+        );
     }
 }
 

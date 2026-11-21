@@ -2919,7 +2919,7 @@ storage = "quota"
 scope = "link"
 binding_heap = "live"
 binding_fixed = "none"
-read = "build"
+read = "snapshot"
 wire = "timing"
 help = '''
 How many fragments of a message a UDP link's writer writes in a row when the
@@ -2941,7 +2941,7 @@ storage = "quota"
 scope = "link"
 binding_heap = "live"
 binding_fixed = "none"
-read = "build"
+read = "snapshot"
 wire = "timing"
 help = '''
 How long, in microseconds, must pass after the last fragment was written

@@ -145,6 +145,7 @@ async fn udp_dial_and_demux_faces_report_mirrored_endpoints() {
     // Both faces wire as a session of the build defaults would: the test is about the endpoints
     // a face reports, which no policy and no receive block changes.
     let policy = SessionPolicy::defaults();
+    let limits = wz_session_core::limits::SessionLimits::defaults();
 
     let mut bound = bind_endpoint("udp/127.0.0.1:0")
         .await
@@ -159,7 +160,7 @@ async fn udp_dial_and_demux_faces_report_mirrored_endpoints() {
         .await
         .expect("dial the udp listener");
     let (_dial_in, dial_out, _dial_h) =
-        wire_dialed_link_with_rx(dialed, LinkRxConf::default(), &policy);
+        wire_dialed_link_with_rx(dialed, LinkRxConf::default(), &policy, &limits);
 
     // UDP has no `accept()`: the demux pump learns a peer only from a datagram, so
     // the dialer must speak before the acceptor exists.
@@ -188,6 +189,7 @@ async fn udp_dial_and_demux_faces_report_mirrored_endpoints() {
             .expect("a udp demux face needs no post-accept handshake"),
         LinkRxConf::default(),
         &policy,
+        &limits,
     );
 
     let dial_pair = dial_out
