@@ -4687,7 +4687,7 @@ layer_c0mut_verdict_legs() {
 layer_cmut_code_mutation() {
     local want="${WZ_CMUT_PART:-}" jobs="${WZ_CMUT_JOBS:-1}"
     local pin have parts part work rc n=0 fail=0
-    local -a argv=() outcomes=() ran=()
+    local -a argv=() outcomes=() scopes_run=()
     if [[ "$ONLY_LAYER" != "Cmut" && "${WZ_RUN_LAYER_CMUT:-0}" != "1" ]]; then
         echo "Layer Cmut SKIP (opt-in mutation lane; --layer Cmut or WZ_RUN_LAYER_CMUT=1)"
         return 0
@@ -4736,7 +4736,7 @@ layer_cmut_code_mutation() {
         case "$rc" in
             0 | 2 | 3)
                 outcomes+=("$work/out/mutants.out/outcomes.json")
-                ran+=("$part")
+                scopes_run+=("$part")
                 ;;
             *)
                 echo "  Cmut $part FAIL — cargo-mutants exited $rc and measured nothing" >&2
@@ -4748,12 +4748,12 @@ layer_cmut_code_mutation() {
         echo "  Cmut FAIL — the table lists no scope to run" >&2
         return 1
     fi
-    if (( ${#ran[@]} > 0 )); then
+    if (( ${#scopes_run[@]} > 0 )); then
         python3 scripts/lib/mutation_ratchet_gate.py --check "${outcomes[@]}" \
             --expect "$(IFS=,; printf '%s' "${ran[*]}")" || fail=1
     fi
     (( fail == 0 )) || return 1
-    _runci_lane_did Cmut "${#ran[@]}" "scope(s) held to their mutation rows"
+    _runci_lane_did Cmut "${#scopes_run[@]}" "scope(s) held to their mutation rows"
 }
 
 # _cmut_surroundings <dir>

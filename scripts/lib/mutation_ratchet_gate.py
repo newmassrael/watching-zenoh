@@ -95,7 +95,8 @@ GENERATED = re.compile(r"_generated\.rs$")
 
 NULL_ROW = (
     "scope {name} has no row in {table}: it was never measured. Measure it with "
-    "`WZ_CMUT_PART={name} bash scripts/run-ci.sh --layer Cmut`, print its row with "
+    "`WZ_DECLINED_EXPECT= WZ_CMUT_PART={name} bash scripts/run-ci.sh --layer Cmut` (the nightly "
+    "job arms WZ_DECLINED_EXPECT empty the same way), print its row with "
     "`python3 scripts/lib/mutation_ratchet_gate.py --rows <its outcomes.json>` and commit that "
     "object as scopes.{name}.row. The row this run measured: {row}"
 )

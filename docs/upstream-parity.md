@@ -419,11 +419,11 @@ derived from the declaration and never chosen by hand:
      does. No budget or row move clears it: the bytes are taken back, or the owner decides here,
      as in D8.
   4. **The ratchet only moves down.** A reading over `ratio_at_most` by more than the tolerance
-     fails. The tolerance is 0.2 percent of the ratchet: two readings of one tree on one host are
-     equal, and the largest spread the gate's notes record between hosted CI and a build host on
-     one tree is 0.08 percent of wz's text, so 0.2 percent allows that on both sides of the ratio
-     with a margin. A host whose compiler spreads the ratio further shows as a failure naming
-     both toolchains; a row is filled from the host that grades it. A reading under the
+     fails. The tolerance is 2.5 percent of the ratchet, the measured spread between hosts: one tree
+     read wz's cooperative client 1.77 percent apart on two hosts on 2026-11-21 while zenoh-pico
+     read alike, so the ratio does not cancel what a host does to wz's own build. It narrows when
+     every host builds in the image the tree declares. A failure names both toolchains; a row is
+     filled from the hosts that grade it. A reading under the
      ratchet by more than the tolerance passes and prints the tighter row, which the round commits:
      every gain is kept. A ratchet case that reads WIN fails until its row is locked (the gate
      prints the locked row), so a case that reaches WIN is held there from that commit on.

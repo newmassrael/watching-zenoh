@@ -1340,6 +1340,10 @@ round_fed_gates=(
     # reads, so the commit that adds a tool sees whether a lane reaches it. A text read, no build.
     "script_exercise_census.py --selftest"
     "script_exercise_census.py --check"
+    "completeness_gate.py --selftest"
+    "completeness_gate.py --check"
+    "mutation_ratchet_gate.py --selftest"
+    "mutation_ratchet_gate.py --declared"
     # R2659 — the link BEFORE `unwired_lane_lint`'s. That one checks lane ->
     # ci.yml; this checks test -> lane, so the chain is test -> lane -> workflow
     # and this is its missing first link. Both exist for the same reason, stated

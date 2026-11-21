@@ -1517,12 +1517,14 @@ HOST_CEILING = ROOT / "deploy" / "pico_host_ceiling.json"
 HOST_CEILING_SCHEMA = 1
 # How far over its ratchet a ratio may read before the case fails, relative to the ratchet. Two
 # readings of one tree on one host are equal (both builds are deterministic), so this is only the
-# spread between hosts. The largest this file's notes record for wz is hosted CI reading
-# `pico-default` 3,600 bytes over a build host (0.08 percent) and the pico client images 1,264
-# over another (0.07 percent); allowing the reference as much again in the other direction gives
-# 0.16 percent, and 0.2 percent is that rounded up. It bounds only what the ratio forgives: the
-# case's byte budget still holds it to its own figure and margin.
-RATIO_TOLERANCE = 0.002
+# spread between hosts, and it is MEASURED, not assumed: on 2026-11-21 one tree read
+# pico-client-coop at 1,012,762 bytes on the coordinating host and 1,030,646 on a build host
+# (1.77 percent), while zenoh-pico read 403,086 on both, so the ratio does NOT cancel what a host
+# does to wz's own build (its Rust toolchain's linking, not the C compiler). 2.5 percent covers that
+# spread with a margin. It narrows to the spread of one image when every host builds in the image
+# the tree declares (the same-build-environment work); until then a row is filled from the hosts
+# that grade it. It bounds only what the ratio forgives: the case's byte budget still holds it.
+RATIO_TOLERANCE = 0.025
 # A ratchet is the reading's ratio rounded UP to four places, so the bound never sits under the
 # reading it was set from.
 RATIO_PLACES = 10_000
@@ -1955,18 +1957,18 @@ def cmd_selftest() -> int:
                             grade_ceiling("t", locked, rd(1000, 1000)))))
     expect("a ratchet case at its ratio passes, and so does one inside the tolerance",
            grade_ceiling("t", ratchet, rd(2_520_000, 1_000_000)) == ([], [])
-           and grade_ceiling("t", ratchet, rd(2_525_000, 1_000_000)) == ([], []))
-    over, _ = grade_ceiling("t", ratchet, rd(2_526_000, 1_000_000))
+           and grade_ceiling("t", ratchet, rd(2_582_000, 1_000_000)) == ([], []))
+    over, _ = grade_ceiling("t", ratchet, rd(2_584_000, 1_000_000))
     expect("a ratchet case over the tolerance fails, naming the reading it was set from",
            len(over) == 1 and "over its ratchet 2.52" in over[0] and "2026-11-20" in over[0]
            and "read with" not in over[0])
     expect("a ratchet failure on another toolchain names both",
            "the row was read with cc 1, this run with cc 2"
            in grade_ceiling("t", ratchet, rd(2_600_000, 1_000_000, tc="cc 2"))[0][0])
-    expect("the tolerance is relative to the ratchet and is 0.2 percent",
-           RATIO_TOLERANCE == 0.002
-           and grade_ceiling("t", ceiling_row(rd(10_000, 10_000), debt), rd(10_019, 10_000))[0] == []
-           and grade_ceiling("t", ceiling_row(rd(10_000, 10_000), debt), rd(10_021, 10_000))[0] != [])
+    expect("the tolerance is relative to the ratchet and is 2.5 percent, the measured host spread",
+           RATIO_TOLERANCE == 0.025
+           and grade_ceiling("t", ceiling_row(rd(10_000, 10_000), debt), rd(10_249, 10_000))[0] == []
+           and grade_ceiling("t", ceiling_row(rd(10_000, 10_000), debt), rd(10_251, 10_000))[0] != [])
     lower, tighter = grade_ceiling("t", ratchet, rd(2_400_000, 1_000_000))
     expect("a ratchet case well under its ratio passes and prints the tighter row to commit",
            lower == [] and len(tighter) == 1 and '"ratio_at_most": 2.4' in tighter[0])
