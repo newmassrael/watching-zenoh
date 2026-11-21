@@ -2073,10 +2073,23 @@ mod config_disposition_tests {
     /// honours; a path below the member that the open refuses is not.
     #[test]
     fn the_door_honours_the_paths_of_the_wz_member_the_open_reads() {
-        for path in ["wz", "wz/profile", "wz/policies", "wz/policies/key-set"] {
+        for path in [
+            "wz",
+            "wz/profile",
+            "wz/policies",
+            "wz/policies/key-set",
+            "wz/limits",
+            "wz/limits/PICO_TX_QUEUE_SIZE",
+            "wz/limits/SNAPSHOT_PERIOD_MS",
+        ] {
             assert_eq!(ask(path), (Z_OK, WZ_CAPI_C_CONFIG_HONOURED), "{path}");
         }
-        for path in ["wz/colour", "wz/limits", "wz/policies/no-such-policy"] {
+        for path in [
+            "wz/colour",
+            "wz/limits/max",
+            "wz/limits/MAX_TASKS",
+            "wz/policies/no-such-policy",
+        ] {
             assert_eq!(ask(path), (Z_OK, WZ_CAPI_C_CONFIG_UNKNOWN), "{path}");
         }
     }

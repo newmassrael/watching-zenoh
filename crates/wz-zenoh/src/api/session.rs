@@ -660,11 +660,11 @@ fn with_the_node<T>(open: impl FnOnce() -> T) -> T {
 #[cfg(feature = "engine-tokio")]
 impl Engine {
     /// Open a session on this engine, from the document the configuration is, and the id the
-    /// session stands on, under `policy`, the snapshot the open resolved
+    /// session stands on, under `snapshot`, the policies and the limits the open resolved
     /// (`Config::resolve_policies`).
     fn open(
         config: &Config,
-        policy: Policy,
+        snapshot: wz_session_core::policy_document::Resolved,
         #[cfg(feature = "shared-memory")] shm_clients: Option<
             Arc<zenoh_shm::api::client_storage::ShmClientStorage>,
         >,
@@ -684,8 +684,8 @@ impl Engine {
         let document = tokio_engine::document_of(&expanded, role, &zid)?;
         tokio_engine::refuse_repeated_ids(&document)?;
         // The document is zenoh's configuration alone: the `wz` member was resolved with the
-        // open's own layer before this, and the plan runs under that snapshot.
-        let plan = OpenPlan::resolve_under(role, stated, Some(&document.to_string()), |_| policy)
+        // open's own layer before this, and the plan runs under those snapshots.
+        let plan = OpenPlan::resolve_under(role, stated, Some(&document.to_string()), |_| snapshot)
             .map_err(tokio_engine::refusal_error)?;
         // Subregions of `gateway/south` are placed by a node alone: a shape that fits none is
         // refused by the key's name and not opened as the registry of faces, which has no south.
@@ -5441,7 +5441,7 @@ impl RuntimeCore {
         let (engine, zid) = Engine::open(
             config,
             #[cfg(feature = "engine-tokio")]
-            policies.policy,
+            policies,
             #[cfg(feature = "shared-memory")]
             shm_clients.clone(),
         )?;

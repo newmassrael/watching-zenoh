@@ -33,6 +33,7 @@
 use wz_runtime_tokio::accept_bounds::AcceptBounds;
 use wz_runtime_tokio::node_clock::TimestampingEnabled;
 use wz_runtime_tokio::policy::{SessionPolicy, SnResolution};
+use wz_runtime_tokio::policy_document::Resolved;
 use wz_runtime_tokio::retry_period::RetryPolicy;
 use wz_runtime_tokio::session::LocalDeliveryDrain;
 use wz_runtime_tokio::session_glue::{KeepAliveConf, LinkRxConf, TxQueueConf, WhatAmI};
@@ -390,11 +391,12 @@ pub enum OpenRefusal {
     /// counter to count a payload under a filter in.
     StatsNotInBuild,
     /// The document's `wz` member is refused
-    /// ([`ConfigIngestError::PoliciesRefused`], whose text names each refusal): a policy, a value
-    /// or a profile the build does not have, a value its domain leaves out, a member of `wz` it
-    /// does not read. Reported before every refusal that reads the rest of the document, as the
-    /// reader refuses the whole document: a session is never opened on part of the policies it
-    /// was given, nor on the build defaults in their place.
+    /// ([`ConfigIngestError::PoliciesRefused`], whose text names each refusal): a policy, a value,
+    /// a profile or a limit the build does not have, a value its domain leaves out, a limit only
+    /// the build decides, a member of `wz` it does not read. Reported before every refusal that
+    /// reads the rest of the document, as the reader refuses the whole document: a session is
+    /// never opened on part of the policies or the limits it was given, nor on the build defaults
+    /// in their place.
     Policies,
 }
 
@@ -423,7 +425,7 @@ impl OpenRefusal {
             Self::PluginHostNotInBuild => "plugins_loading/enabled",
             Self::Aggregation => "aggregation/subscribers, aggregation/publishers",
             Self::StatsNotInBuild => "stats/filters",
-            Self::Policies => "wz/profile, wz/policies",
+            Self::Policies => "wz/profile, wz/policies, wz/limits",
         }
     }
 }
@@ -928,23 +930,28 @@ pub struct OpenPlan {
     /// machine the open makes: the sessions of the registry or the node, their links and their
     /// faces. A machine reads a policy here and never from the build.
     pub session_policy: SessionPolicy,
-    /// The snapshot of the session limits the open resolved, handed to the same machines as
-    /// [`Self::session_policy`]: a table reads its bound here and never from the build. The
-    /// document states no limit yet, so it holds the build's.
+    /// The snapshot of the session limits the open resolved ([`resolve_snapshot`]), handed to
+    /// the same machines as [`Self::session_policy`]: a table reads its bound here and never from
+    /// the build.
     pub session_limits: SessionLimits,
 }
 
-/// The policies an open from `node` (the document the open read, or `None` when it read none)
-/// runs under: the one place the open of an [`OpenPlan`] decides them. The snapshot the
-/// document's `wz` member resolved to when the reader read it ([`ZenohNodeConfig::policies`]),
-/// which is the build defaults for a document with no such member; the build defaults when no
-/// document was read. A member the reader refused never reaches here: the open is refused with
-/// [`OpenRefusal::Policies`].
-pub fn resolve_policy(node: Option<&ZenohNodeConfig>) -> SessionPolicy {
+/// The policies and the limits an open from `node` (the document the open read, or `None` when
+/// it read none) runs under: the one place the open of an [`OpenPlan`] decides them. The
+/// snapshots the document's `wz` member resolved to when the reader read it
+/// ([`ZenohNodeConfig::policies`]), which are the build defaults for a document with no such
+/// member; the build defaults when no document was read. A member the reader refused never
+/// reaches here: the open is refused with [`OpenRefusal::Policies`].
+pub fn resolve_snapshot(node: Option<&ZenohNodeConfig>) -> Resolved {
     match node {
-        Some(node) => node.policies.policy,
-        None => SessionPolicy::defaults(),
+        Some(node) => node.policies,
+        None => Resolved::unchanged(SessionPolicy::defaults()),
     }
+}
+
+/// The policies of [`resolve_snapshot`] alone.
+pub fn resolve_policy(node: Option<&ZenohNodeConfig>) -> SessionPolicy {
+    resolve_snapshot(node).policy
 }
 
 impl OpenPlan {
@@ -1068,23 +1075,23 @@ impl OpenPlan {
     /// the caller could not render one; a document the reader refuses is the same as none, and is
     /// reported as [`OpenRefusal::DocumentUnreadable`] after every refusal that needs no document.
     ///
-    /// The policies the plan runs under are [`resolve_policy`]'s; a caller that has resolved its
-    /// own snapshot opens with [`Self::resolve_under`].
+    /// The policies and the limits the plan runs under are [`resolve_snapshot`]'s; a caller that
+    /// has resolved its own snapshots opens with [`Self::resolve_under`].
     pub fn resolve(
         role: WhatAmI,
         stated: StatedEndpoints,
         document: Option<&str>,
     ) -> Result<Self, OpenRefusal> {
-        Self::resolve_under(role, stated, document, resolve_policy)
+        Self::resolve_under(role, stated, document, resolve_snapshot)
     }
 
-    /// [`Self::resolve`], with the policies the plan runs under made by `policy_of` from the
-    /// document the reader parsed (`None` when it parsed none).
+    /// [`Self::resolve`], with the policies and the session limits the plan runs under taken from
+    /// what `snapshot_of` makes of the document the reader parsed (`None` when it parsed none).
     pub fn resolve_under(
         role: WhatAmI,
         stated: StatedEndpoints,
         document: Option<&str>,
-        policy_of: impl FnOnce(Option<&ZenohNodeConfig>) -> SessionPolicy,
+        snapshot_of: impl FnOnce(Option<&ZenohNodeConfig>) -> Resolved,
     ) -> Result<Self, OpenRefusal> {
         let ingest = match document.map(ZenohNodeConfig::from_json5) {
             Some(Ok(ingest)) => Some(ingest),
@@ -1119,7 +1126,8 @@ impl OpenPlan {
             ignored
         });
         let node = ingest.map(|ingest| ingest.config);
-        let session_policy = policy_of(node.as_ref());
+        let snapshot = snapshot_of(node.as_ref());
+        let session_policy = snapshot.policy;
         // The width of the sequence numbers the sessions offer, unicast and in a group's Join:
         // `transport/link/tx/sequence_number_resolution` when the document states a width other
         // than upstream's, the open's `sn-resolution` policy otherwise. A document rendered from
@@ -1410,7 +1418,7 @@ impl OpenPlan {
             ignored,
             session,
             session_policy,
-            session_limits: SessionLimits::defaults(),
+            session_limits: snapshot.limits.session,
         })
     }
 
@@ -1845,11 +1853,55 @@ mod tests {
                 WhatAmI::Client,
                 &[],
                 &[],
-                r#"{ scouting: { multicast: { enabled: false } }, wz: { limits: {} } }"#
+                r#"{ scouting: { multicast: { enabled: false } }, wz: { limits: { NO_SUCH_LIMIT: 1 } } }"#
             ),
             OpenRefusal::Policies
         );
-        assert_eq!(OpenRefusal::Policies.key(), "wz/profile, wz/policies");
+        assert_eq!(
+            OpenRefusal::Policies.key(),
+            "wz/profile, wz/policies, wz/limits"
+        );
+    }
+
+    /// The plan holds the session limits the document's `wz/limits` states, for each member of
+    /// the corpus every door is held to, as a node reads it; a member the reader refuses refuses
+    /// the open as a refused `wz` member.
+    #[test]
+    fn the_plan_holds_the_session_limits_the_document_states() {
+        use wz_session_core::limit_corpus::cases;
+
+        for case in cases() {
+            let planned = plan_of(
+                WhatAmI::Client,
+                &["tcp/127.0.0.1:7447"],
+                &[],
+                &case.document(),
+            );
+            match planned {
+                Ok(plan) => {
+                    assert!(case.node.is_selected(), "{}: opened", case.name);
+                    if let Err(why) = case.node.check_session(&plan.session_limits) {
+                        panic!("{}: {why}", case.name);
+                    }
+                    let node = node_of(&case.document());
+                    assert_eq!(
+                        resolve_snapshot(Some(&node)).limits.session,
+                        plan.session_limits,
+                        "{}",
+                        case.name
+                    );
+                }
+                Err(refusal) => {
+                    assert!(!case.node.is_selected(), "{}: {refusal:?}", case.name);
+                    assert_eq!(refusal, OpenRefusal::Policies, "{}", case.name);
+                }
+            }
+        }
+        // No document is the build's limits.
+        assert_eq!(
+            resolve_snapshot(None).limits.session,
+            SessionLimits::defaults()
+        );
     }
 
     /// A peer is a forwarding node when it accepts sessions and asks nothing the node does not
@@ -2327,7 +2379,7 @@ mod tests {
                 listen: Vec::new(),
             },
             Some("{}"),
-            |_| handed,
+            |_| Resolved::unchanged(handed),
         )
         .expect("a client with an endpoint opens");
         assert_eq!(plan.sn_resolution, other);

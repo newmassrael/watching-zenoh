@@ -2658,7 +2658,20 @@ def emit_rust_limit_snapshots(decl: dict) -> str:
         out += [""] + limit_spec_rust(lim)
     out += [""] + limit_snapshot_rust("SessionLimits", session, "a session holds")
     out += [""] + limit_snapshot_rust("RuntimeLimits", runtime, "a node or runtime holds")
+    out += [""] + capacity_limits_rust(decl)
     return "\n".join(out) + "\n"
+
+
+def capacity_limits_rust(decl: dict) -> list[str]:
+    """`CAPACITY_LIMITS`: the id of every limit that is a capacity alone (the limits `open_limits`
+    leaves out), so a reader that names a limit by its id tells a limit only the build sizes from
+    one the build does not have, and refuses each by its own reason."""
+    ids = [rust_word(lim["id"]) for lim in decl["limits"] if lim["storage"] == "capacity"]
+    return [
+        "/// Every limit that is a capacity alone, by its id: the build sizes storage by it and no later",
+        "/// stage decides it, so neither snapshot holds it and a document that states it is refused by",
+        "/// name.",
+    ] + rust_static_array(f"pub static CAPACITY_LIMITS: [&str; {len(ids)}] =", ids)
 
 
 def first_sentence(text: str) -> str:
@@ -5825,6 +5838,9 @@ def cmd_selftest() -> int:
            ["limits"]["properties"]
            and "pub struct MaxA;" not in emit_rust_limit_snapshots(cdecl))
     bsnap = emit_rust_limit_snapshots(bdecl)
+    expect("a capacity alone is named in CAPACITY_LIMITS, and a limit a later stage decides is not",
+           'pub static CAPACITY_LIMITS: [&str; 1] = ["MAX_A"];' in emit_rust_limit_snapshots(cdecl)
+           and "pub static CAPACITY_LIMITS: [&str; 0] = [];" in bsnap)
     expect("an advisory bound is sized only on the fixed profile and unbounded on the heap",
            "const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_A);" in bsnap
            and "const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);" in bsnap)

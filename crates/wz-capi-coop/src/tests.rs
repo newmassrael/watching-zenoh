@@ -626,6 +626,7 @@ fn client_config() -> CoopConfig {
         max_faces: crate::DEFAULT_MAX_FACES,
         groups: Vec::new(),
         clock_moves: None,
+        limits: wz_session_core::limits::SessionLimits::defaults(),
     }
 }
 
