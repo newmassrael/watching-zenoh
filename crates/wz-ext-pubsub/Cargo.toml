@@ -12,8 +12,9 @@
 # history merge. Nothing here reads a clock, spawns a task or holds a socket: time is an argument,
 # and each engine is a host that drives the rules (docs/advanced-pubsub-on-a-neutral-core.md).
 #
-# `std`, not `no_std`: the advanced plane is a host-profile capability (it is not in the MCU
-# profile), and the time-range grammar and the ring use `std::time` and `std::sync`.
+# `no_std` with `alloc` without its `std` feature: the advanced plane is a host-profile capability
+# (it is not in the MCU profile), and the pico C ABI's host library without `std` hosts it over the
+# host's own lock (`host-sync`) and a wall-clock instant of its own (`time_range::EpochTime`).
 #
 # `rlib` only: a Rust-internal seam, like `wz-capi-port` and `wz-host-net`.
 
@@ -33,7 +34,13 @@ path = "src/lib.rs"
 crate-type = ["rlib"]
 
 [features]
-default = []
+# `std`: the locks are `std`'s, a wall-clock instant is `std`'s `SystemTime`, and the node clock
+# and the engine port are their `std` forms. On by default, which every build has had.
+default = ["std"]
+std = ["wz-node-time?/std", "wz-capi-port?/std"]
+# The host's own lock (`wz-host-sync`), for a build without `std`, and the same host calls for the
+# node clock and the engine port.
+host-sync = ["dep:wz-host-sync", "wz-node-time?/host-sync", "wz-capi-port?/os-sys"]
 # The advanced publisher's composite (`advanced_publisher`): the four declarations, what a put
 # stamps and retains, the beacon. It stamps a source identity and a timestamp on every put, so it
 # turns on the session-core setters for them and the node's HLC; a build without it pulls in
@@ -95,9 +102,11 @@ ext-pubsub-sample-miss-detection = ["ext-pubsub-serde-codec"]
 wz-session-core = { path = "../wz-session-core", default-features = false, features = ["alloc"] }
 # The engine's port, which the hosted subscriber (`engine-host`) is written over. It names no
 # engine, no async runtime and no thread.
-wz-capi-port = { path = "../wz-capi-port", optional = true }
+wz-capi-port = { path = "../wz-capi-port", optional = true, default-features = false }
 # The node's time: the HLC an advanced publisher stamps from and the stamper it borrows it through.
-wz-node-time = { path = "../wz-node-time", optional = true }
+wz-node-time = { path = "../wz-node-time", optional = true, default-features = false }
+# The host's lock without `std` (`host-sync`).
+wz-host-sync = { path = "../wz-host-sync", optional = true }
 # A reply the cache could not stage is warned about and the answer goes on, as upstream's does.
 log = "0.4"
 

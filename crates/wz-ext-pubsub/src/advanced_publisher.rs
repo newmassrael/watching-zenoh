@@ -23,9 +23,9 @@
 //! runtime), a C session another (its entities on one shared key table), and the cooperative
 //! engine a third. Nothing here spawns a task, reads a clock or holds a socket.
 
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use alloc::sync::Arc;
+use core::sync::atomic::{AtomicU32, Ordering};
+use core::time::Duration;
 
 use wz_node_time::node_clock::{DataStamp, NodeHlc};
 use wz_node_time::timestamp_source::wall_clock_ntp64;
@@ -41,6 +41,7 @@ use wz_session_core::zid_hex::zid_to_zenoh_hex;
 use wz_session_core::serde_codec::z_serialize;
 
 use crate::advanced_cache::{CacheConfig, CacheStore, CachedSample, Retained};
+use crate::prelude::*;
 
 /// How an advanced publisher tags its samples for downstream detection /
 /// recovery. Mirror of zenoh-ext `Sequencing` (advanced_publisher.rs:55-59).
@@ -299,28 +300,28 @@ impl Default for AdvancedPublisherOptions {
 /// and the composite reports it unchanged, so the cause is readable and nothing about it is
 /// flattened to a string.
 #[derive(Debug)]
-pub struct PlaneError(Box<dyn std::error::Error + Send + Sync + 'static>);
+pub struct PlaneError(Box<dyn core::error::Error + Send + Sync + 'static>);
 
 impl PlaneError {
     /// Wrap a plane's own error.
-    pub fn new(error: impl std::error::Error + Send + Sync + 'static) -> Self {
+    pub fn new(error: impl core::error::Error + Send + Sync + 'static) -> Self {
         Self(Box::new(error))
     }
 
     /// The error the plane gave.
-    pub fn cause(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+    pub fn cause(&self) -> &(dyn core::error::Error + Send + Sync + 'static) {
         &*self.0
     }
 }
 
-impl std::fmt::Display for PlaneError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for PlaneError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         self.0.fmt(f)
     }
 }
 
-impl std::error::Error for PlaneError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl core::error::Error for PlaneError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         Some(&*self.0)
     }
 }
@@ -420,7 +421,7 @@ pub trait ShmChunk: Send + Sync + 'static {
     fn send_handle(self: Arc<Self>) -> wz_session_core::extshm::ShmSendHandle;
 
     /// The concrete value behind the trait object, for a plane that sends a descriptor.
-    fn into_any(self: Arc<Self>) -> Arc<dyn std::any::Any + Send + Sync>;
+    fn into_any(self: Arc<Self>) -> Arc<dyn core::any::Any + Send + Sync>;
 }
 
 /// WHERE an advanced publisher lives: what declares its entities and what

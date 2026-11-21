@@ -32,8 +32,8 @@
 //! This is the widest form (history, which implies recovery), the one a C ABI's option struct
 //! asks for. A build that wants less links the machine and the plans alone.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use alloc::sync::{Arc, Weak};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use wz_capi_port::cancellation::{register_fan, CancellationToken, Registration};
 use wz_capi_port::{
@@ -58,6 +58,8 @@ use super::plans::{
     recovery_query_timeout_ms, AdvPublisherSource,
 };
 use super::state::{Miss, MissHandlers, RecoveryRequest, SampleMissListener, State};
+use crate::prelude::*;
+use crate::sync::{lock_or_panic, Mutex, MutexGuard};
 
 /// One callback a subscription's sink mints: it reads each sample the subscription delivers.
 type SampleCallback = Box<dyn FnMut(&dyn SampleView) + Send>;
@@ -81,8 +83,8 @@ pub enum HostError {
     },
 }
 
-impl std::fmt::Display for HostError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for HostError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Refused(what) => write!(f, "the engine refused an advanced subscriber: {what}"),
             Self::IdsExhausted => {
@@ -93,7 +95,7 @@ impl std::fmt::Display for HostError {
     }
 }
 
-impl std::error::Error for HostError {}
+impl core::error::Error for HostError {}
 
 /// What every callback and job of one subscriber shares.
 struct Shared {
@@ -123,10 +125,8 @@ impl Shared {
         self.engine.upgrade().map_or(0, |engine| engine.now_ms())
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
-        self.state
-            .lock()
-            .expect("advanced subscriber state mutex poisoned")
+    fn lock(&self) -> MutexGuard<'_, State> {
+        lock_or_panic(&self.state, super::state::STATE_POISONED)
     }
 }
 

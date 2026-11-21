@@ -830,6 +830,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-capi-port"
+version = "0.1.0"
+dependencies = [
+ "critical-section",
+ "wz-session-core",
+]
+
+[[package]]
 name = "wz-codecs"
 version = "0.1.0"
 dependencies = [
@@ -857,6 +865,8 @@ name = "wz-ext-pubsub"
 version = "0.1.0"
 dependencies = [
  "log",
+ "wz-capi-port",
+ "wz-node-time",
  "wz-session-core",
 ]
 

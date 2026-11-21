@@ -15,6 +15,8 @@
 //! (the publisher without the subscriber, say) links only the ones it calls, and the grammar
 //! stays one text for every host.
 
+use crate::prelude::*;
+
 /// The `@adv` namespace prefix (zenoh `KE_ADV_PREFIX`, admin.rs:48).
 pub const KE_ADV_PREFIX: &str = "@adv";
 

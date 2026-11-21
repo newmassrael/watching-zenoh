@@ -46,15 +46,16 @@
 //! [`crate::time_range`]); a value zenoh's parser rejects is no range at all, so
 //! every sample replies, as upstream does.
 
-use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
+use alloc::collections::VecDeque;
+use alloc::sync::Arc;
 
 use wz_session_core::qos::{CongestionControl, Priority};
 use wz_session_core::query_sink::{QueryView, ReplyMeta, ReplyOut};
 use wz_session_core::sample::{EncodingHint, QosLevel, SampleKind, SourceInfo, TimestampHint};
 
-use crate::time_range::{self, contains_ntp64, ntp64_to_system_time, TimeRange};
+use crate::prelude::*;
+use crate::sync::{lock_or_panic, Mutex};
+use crate::time_range::{self, contains_ntp64, ntp64_to_system_time, TimeRange, WallTime};
 
 /// One sample retained in the cache ring for recovery / history replies.
 /// `source_info` carries the sample's `(zid, eid, sn)`; the `_sn` range
@@ -154,8 +155,8 @@ impl Retained {
     }
 }
 
-impl std::fmt::Debug for Retained {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for Retained {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("Retained")
     }
 }
@@ -297,6 +298,9 @@ impl Default for CacheConfig {
     }
 }
 
+/// What a ring's lock panics with when a panic of its holder poisoned it.
+const RING_POISONED: &str = "advanced cache ring mutex poisoned";
+
 /// The shared ring an advanced publisher feeds and the cache queryable answers from.
 type CacheRing = Arc<Mutex<VecDeque<CachedSample>>>;
 
@@ -347,7 +351,7 @@ impl CacheStore {
         let ring = Arc::clone(&self.ring);
         let replies_config = self.replies_config;
         move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
-            let guard = ring.lock().expect("advanced cache ring mutex poisoned");
+            let guard = lock_or_panic(&ring, RING_POISONED);
             answer_from_ring(&guard, view, out, now(), replies_config);
         }
     }
@@ -367,10 +371,7 @@ impl CacheStore {
     /// retraction does), and this mutex is not reentrant.
     pub fn cache_sample(&self, sample: CachedSample) {
         let evicted = {
-            let mut ring = self
-                .ring
-                .lock()
-                .expect("advanced cache ring mutex poisoned");
+            let mut ring = lock_or_panic(&self.ring, RING_POISONED);
             let evicted = if ring.len() >= self.max_samples {
                 ring.pop_front()
             } else {
@@ -384,10 +385,7 @@ impl CacheStore {
 
     /// Number of samples currently retained (test / introspection seam).
     pub fn len(&self) -> usize {
-        self.ring
-            .lock()
-            .expect("advanced cache ring mutex poisoned")
-            .len()
+        lock_or_panic(&self.ring, RING_POISONED).len()
     }
 
     /// True when the ring holds no samples.
@@ -538,7 +536,7 @@ fn sample_matches_sn(sample_sn: Option<u32>, range: Option<(Option<u32>, Option<
 
 /// Whether a sample's NTP64 timestamp satisfies the resolved `_time` range.
 /// No range (absent, or a value zenoh's parser rejects) matches every sample.
-fn sample_matches_time(sample_time: u64, range: Option<TimeRange<SystemTime>>) -> bool {
+fn sample_matches_time(sample_time: u64, range: Option<TimeRange<WallTime>>) -> bool {
     range.map_or(true, |r| contains_ntp64(&r, sample_time))
 }
 

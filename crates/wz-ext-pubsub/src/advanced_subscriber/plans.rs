@@ -10,11 +10,9 @@
 //! again.
 
 #[cfg(feature = "advanced-recovery")]
-use std::collections::HashSet;
+use alloc::collections::BTreeSet;
 #[cfg(feature = "advanced-recovery")]
-use std::sync::Mutex;
-#[cfg(feature = "advanced-recovery")]
-use std::time::Duration;
+use core::time::Duration;
 
 #[cfg(feature = "advanced-recovery")]
 use wz_session_core::reply_sink::{ReplyKind, ReplyView};
@@ -22,6 +20,11 @@ use wz_session_core::reply_sink::{ReplyKind, ReplyView};
 use wz_session_core::sample::{EncodingHint, Sample};
 #[cfg(feature = "advanced-recovery")]
 use wz_session_core::zid_hex::zenoh_hex_to_zid;
+
+#[cfg(feature = "advanced-recovery")]
+use crate::prelude::*;
+#[cfg(feature = "advanced-recovery")]
+use crate::sync::{lock_past_poison, Mutex, MutexGuard};
 
 /// R311y89 (review C3) — convert a `RecoveryConfig::query_timeout` `Duration`
 /// into the `QueryOptions::with_timeout_ms` `u32` ms value, clamped to
@@ -194,9 +197,9 @@ pub struct PendingGets {
 #[derive(Default)]
 struct InFlight {
     /// Issued, not yet terminal — the set a teardown must cancel.
-    live: HashSet<wz_session_core::wire_id::RequestId>,
+    live: BTreeSet<wz_session_core::wire_id::RequestId>,
     /// Terminal before `record` saw them (the synchronous-loopback ordering).
-    finished_early: HashSet<wz_session_core::wire_id::RequestId>,
+    finished_early: BTreeSet<wz_session_core::wire_id::RequestId>,
 }
 
 #[cfg(feature = "advanced-recovery")]
@@ -221,8 +224,8 @@ impl PendingGets {
     /// in `Drop` — where a second panic would abort the process. The data behind
     /// it is two sets of request ids with no cross-field invariant a panic can leave
     /// half-applied, so the poisoned guard is exactly as usable as a healthy one.
-    fn lock(&self) -> std::sync::MutexGuard<'_, Option<InFlight>> {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    fn lock(&self) -> MutexGuard<'_, Option<InFlight>> {
+        lock_past_poison(&self.inner)
     }
 
     /// Record a GET that has just been issued. `false` means the subscriber was

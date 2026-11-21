@@ -9,12 +9,14 @@
 //! the subscriber to live here: a host builds the options and hands them to whichever engine runs
 //! the subscriber.
 
-use std::sync::Arc;
+use alloc::sync::Arc;
 #[cfg(feature = "advanced-recovery")]
-use std::time::Duration;
+use core::time::Duration;
 
 use wz_session_core::declare_form::RetractionKey;
 use wz_session_core::locality::Locality;
+
+use crate::prelude::*;
 
 /// Retransmission (gap-recovery) configuration
 /// (`AdvancedSubscriberOptions::with_recovery`). Mirror of zenoh-ext
@@ -397,8 +399,8 @@ impl EntityForm {
     }
 }
 
-impl std::fmt::Debug for EntityForm {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for EntityForm {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("EntityForm")
             .field("mapping_id", &self.mapping_id)
             .field("suffix", &self.suffix)
@@ -471,8 +473,8 @@ impl FormsHandle {
     }
 }
 
-impl std::fmt::Debug for FormsHandle {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for FormsHandle {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("FormsHandle")
     }
 }
