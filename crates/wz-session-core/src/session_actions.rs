@@ -14574,30 +14574,38 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// Keep the key form of each query of `event` that arrived by an id of the dictionary, so a
-    /// reply on its key mirrors it (`try_send_response`). The heap profile's owned
-    /// frames: a record read where its frame lies has no allocator to keep it with.
+    /// reply on its key mirrors it (`try_send_response`): a Request of a frame's owned messages,
+    /// or one the in-place receive lends (`IterationEvent::InPlace`), read where its frame lies.
     #[cfg(all(feature = "shared-key-ids", feature = "codec-request"))]
     pub fn note_requests(&self, event: &crate::driver_loop::IterationEvent<'_, '_>) {
-        let crate::driver_loop::IterationEvent::Poll(
-            crate::driver_loop::DriverLoopOutcome::FramePayload { messages, .. },
-        ) = event
-        else {
-            return;
-        };
         let from_router = self.peer_whatami_wire() == Some(0);
-        R::with_mutex_mut(&self.link_keys, |keys| {
-            for message in messages {
-                if let crate::network_message::NetworkMessage::Request(request) = message {
-                    let body = &request.keyexpr.body;
-                    let (id, suffix) = crate::wireexpr_resolve::id_and_suffix(body);
-                    let sender_mapping = matches!(
-                        body,
-                        wz_codecs::wireexpr::WireexprOwnedVariant::WireexprLocal(_)
-                    );
-                    keys.note_request(request.rid, id, suffix, sender_mapping, from_router);
+        match event {
+            crate::driver_loop::IterationEvent::Poll(
+                crate::driver_loop::DriverLoopOutcome::FramePayload { messages, .. },
+            ) => R::with_mutex_mut(&self.link_keys, |keys| {
+                for message in messages {
+                    if let crate::network_message::NetworkMessage::Request(request) = message {
+                        let body = &request.keyexpr.body;
+                        let (id, suffix) = crate::wireexpr_resolve::id_and_suffix(body);
+                        let sender_mapping = matches!(
+                            body,
+                            wz_codecs::wireexpr::WireexprOwnedVariant::WireexprLocal(_)
+                        );
+                        keys.note_request(request.rid, id, suffix, sender_mapping, from_router);
+                    }
+                }
+            }),
+            crate::driver_loop::IterationEvent::InPlace(record) => {
+                if let Some(request) = record.request() {
+                    let (id, suffix, sender_mapping) =
+                        crate::wireexpr_resolve::id_suffix_and_space_viewed(&request.keyexpr.body);
+                    R::with_mutex_mut(&self.link_keys, |keys| {
+                        keys.note_request(request.rid, id, suffix, sender_mapping, from_router)
+                    });
                 }
             }
-        });
+            _ => {}
+        }
     }
 
     /// `response` with its key as the link's key ids say a reply names it: the request's id and

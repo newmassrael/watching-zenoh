@@ -704,6 +704,22 @@ pub fn resolve_wireexpr_view<'k, 'f: 'k, D: WireexprLentStorage>(
     resolve_parts(arm, id, suffix, spaces, out)
 }
 
+/// The `(id, suffix)` a wireexpr read as its view (`WireexprView`) carries, as
+/// [`id_and_suffix_view`] reads them, and whether its id names the sender's space (`M=1`, the
+/// codec's `WireexprLocal` arm): what a Request lent by the in-place receive is kept by.
+#[cfg(any(feature = "codec-request", feature = "codec-response"))]
+pub fn id_suffix_and_space_viewed<'f>(
+    body: &wz_codecs::wireexpr::WireexprViewVariant<'f>,
+) -> (crate::wire_id::ExprId, Option<&'f str>, bool) {
+    use wz_codecs::wireexpr::WireexprViewVariant as V;
+    let (body, sender) = match body {
+        V::WireexprLocal(arm) => (WireexprVariantIn::WireexprLocal(arm.clone()), true),
+        V::WireexprNonlocal(arm) => (WireexprVariantIn::WireexprNonlocal(arm.clone()), false),
+    };
+    let (id, suffix) = id_and_suffix_view(&body);
+    (id, suffix, sender)
+}
+
 /// [`resolve_wireexpr_view`] over a wireexpr read as its view
 /// (`WireexprView`): the same two arms, which the view holds as the codec's own arm types (a
 /// wireexpr has no list, so each arm is its own view). The arm is copied into the codec's variant

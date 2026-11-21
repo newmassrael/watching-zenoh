@@ -460,6 +460,57 @@ mod tests {
         assert_eq!(finals, cases.len() - 1, "every case but the unroutable one");
     }
 
+    /// A Request read where its frame lies names its key by the id, the suffix and the space the
+    /// owned decode of the same record names it by, in either space: what the in-place receive
+    /// keeps a query's key form by (`SessionLinkActions::note_requests`).
+    #[test]
+    fn a_lent_request_names_its_key_as_the_owned_decode_does() {
+        use crate::wire::parts::{WireexprLocalOwned, WireexprNonlocalOwned, WireexprOwnedVariant};
+
+        let mut senders = RequestQueryBuilder::new(23, 5, None)
+            .build()
+            .expect("build");
+        senders.keyexpr.body = WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
+            id: 5,
+            suffix_len: None,
+            suffix: None,
+        });
+        let mut receivers = RequestQueryBuilder::new(24, 5, None)
+            .build()
+            .expect("build");
+        receivers.keyexpr.body = WireexprOwnedVariant::WireexprNonlocal(WireexprNonlocalOwned {
+            id: 5,
+            suffix_len: None,
+            suffix: None,
+        });
+        let cases = [
+            RequestQueryBuilder::new(21, 0, Some("demo/a"))
+                .build()
+                .expect("build"),
+            RequestQueryBuilder::new(22, 5, Some("/more"))
+                .build()
+                .expect("build"),
+            senders,
+            receivers,
+        ];
+        for (i, request) in cases.iter().enumerate() {
+            let owned = &request.keyexpr.body;
+            let (id, suffix) = crate::wireexpr_resolve::id_and_suffix(owned);
+            let sender = matches!(owned, WireexprOwnedVariant::WireexprLocal(_));
+            let wire = request
+                .try_as_borrowed()
+                .expect("a borrowed view")
+                .encode_to_vec();
+            let decoded =
+                RequestView::decode(&mut SceCursor::new(&wire)).expect("the record decodes");
+            assert_eq!(
+                crate::wireexpr_resolve::id_suffix_and_space_viewed(&decoded.keyexpr.body),
+                (id, suffix, sender),
+                "case {i}"
+            );
+        }
+    }
+
     /// A query whose parameters are past the build's bound is refused alike on both receive
     /// paths: no queryable runs, nothing is staged, and its final is owed, as for a query that
     /// matched nobody. The build fixes the bound, so the build with none sees the query run.
