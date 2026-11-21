@@ -723,9 +723,9 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
     // in, and inlined into the session's `on_event` they are all there for the length of the
     // application layer's call.
     #[inline(never)]
-    pub fn dispatch_event<R: ReplySink, G: ReplySink, Q: Storage>(
+    pub fn dispatch_event<R: ReplySink, G: ReplySink, Q: Storage, T: Storage>(
         &mut self,
-        peers: &mut PeerTables,
+        peers: &mut PeerTables<T>,
         requesters: &mut Requesters<R, G, Q>,
         event: IterationEvent<'_, '_>,
     ) {
@@ -735,9 +735,15 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
     /// [`Self::dispatch_event`] for a session that holds other faces: `others` is what their
     /// peers declare, counted by the matching verdicts beside this face's own.
     #[inline(never)]
-    pub fn dispatch_event_among<R: ReplySink, G: ReplySink, Q: Storage, O: OtherPeers>(
+    pub fn dispatch_event_among<
+        R: ReplySink,
+        G: ReplySink,
+        Q: Storage,
+        O: OtherPeers,
+        T: Storage,
+    >(
         &mut self,
-        peers: &mut PeerTables,
+        peers: &mut PeerTables<T>,
         requesters: &mut Requesters<R, G, Q>,
         event: IterationEvent<'_, '_>,
         others: &O,
@@ -856,9 +862,9 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
     /// through its send path: the replies, the answers to its interests, the
     /// terminated-get prunes, and last the `Final`s, so every Reply for a request
     /// precedes the `Final` that ends it.
-    pub fn flush_pending<S, R: ReplySink, G: ReplySink, Q: Storage>(
+    pub fn flush_pending<S, R: ReplySink, G: ReplySink, Q: Storage, T: Storage>(
         &mut self,
-        peers: &mut PeerTables,
+        peers: &mut PeerTables<T>,
         requesters: &mut Requesters<R, G, Q>,
         actions: &S,
     ) where
@@ -882,9 +888,9 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
     /// `peers.finals` its quota, and sends each when the last of them has, so no `Final`
     /// overtakes a reply. The replies it drains are one burst, as
     /// `flush_pending`'s are.
-    pub fn flush_pending_replies<S, R: ReplySink, G: ReplySink, Q: Storage>(
+    pub fn flush_pending_replies<S, R: ReplySink, G: ReplySink, Q: Storage, T: Storage>(
         &mut self,
-        peers: &mut PeerTables,
+        peers: &mut PeerTables<T>,
         requesters: &mut Requesters<R, G, Q>,
         actions: &S,
     ) where
@@ -899,9 +905,9 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
 
     /// Fan and drain in one call: [`Self::dispatch_event`] then
     /// [`Self::flush_pending`], the shape a session's `on_event` takes.
-    pub fn dispatch<S, R: ReplySink, G: ReplySink, Q: Storage>(
+    pub fn dispatch<S, R: ReplySink, G: ReplySink, Q: Storage, T: Storage>(
         &mut self,
-        peers: &mut PeerTables,
+        peers: &mut PeerTables<T>,
         requesters: &mut Requesters<R, G, Q>,
         event: IterationEvent<'_, '_>,
         actions: &S,
@@ -915,9 +921,9 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
     /// Fan an event into the statechart switchboard against the session's alias
     /// table; see [`crate::observer::ApplicationLayerObserver::dispatch_switchboard`].
     #[cfg(feature = "switchboard")]
-    pub fn dispatch_switchboard(
+    pub fn dispatch_switchboard<T: Storage>(
         &self,
-        peers: &PeerTables,
+        peers: &PeerTables<T>,
         event: IterationEvent<'_, '_>,
         injector: &mut dyn EventInjector,
     ) -> usize {
@@ -931,7 +937,10 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
     /// The link of this session was lost: every token its peer had declared is
     /// flushed, delivering a `Delete` to each matching subscriber. Returns the
     /// count. A no-op without `liveliness-subscriber`.
-    pub fn flush_liveliness_on_link_loss(&mut self, peers: &mut PeerTables) -> usize {
+    pub fn flush_liveliness_on_link_loss<T: Storage>(
+        &mut self,
+        peers: &mut PeerTables<T>,
+    ) -> usize {
         #[cfg(feature = "liveliness-subscriber")]
         {
             self.liveliness_subscribers
@@ -947,16 +956,19 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
     /// The link of this session was lost: every subscriber and queryable its peer
     /// had declared is gone, and the matching watches are re-evaluated against what
     /// remains. Returns the number of declarations dropped.
-    pub fn flush_declarations_on_link_loss(&mut self, peers: &mut PeerTables) -> usize {
+    pub fn flush_declarations_on_link_loss<T: Storage>(
+        &mut self,
+        peers: &mut PeerTables<T>,
+    ) -> usize {
         self.flush_declarations_on_link_loss_among(peers, &NoOtherPeers)
     }
 
     /// [`Self::flush_declarations_on_link_loss`] for a session that holds other faces: what their
     /// peers declare is counted by the matching verdicts the flush re-evaluates, so a listener
     /// another face's peer still satisfies keeps matching.
-    pub fn flush_declarations_on_link_loss_among<O: OtherPeers>(
+    pub fn flush_declarations_on_link_loss_among<O: OtherPeers, T: Storage>(
         &mut self,
-        peers: &mut PeerTables,
+        peers: &mut PeerTables<T>,
         others: &O,
     ) -> usize {
         #[allow(unused_mut)]
@@ -1011,7 +1023,11 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
     /// builds the owned one it always did. A reply whose bounded field overflows cannot
     /// be wire-encoded and is skipped, as on the AP.
     #[inline(never)]
-    fn drain_query_replies<S: ResponseSink>(&mut self, peers: &mut PeerTables, sink: &S) {
+    fn drain_query_replies<S: ResponseSink, T: Storage>(
+        &mut self,
+        peers: &mut PeerTables<T>,
+        sink: &S,
+    ) {
         #[cfg(feature = "query-queryable")]
         peers
             .replies
@@ -1022,7 +1038,11 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
 
     /// The `Final`s owed, through `send_response_final`.
     #[inline(never)]
-    fn drain_query_finals<S: ResponseSink>(&mut self, peers: &mut PeerTables, sink: &S) {
+    fn drain_query_finals<S: ResponseSink, T: Storage>(
+        &mut self,
+        peers: &mut PeerTables<T>,
+        sink: &S,
+    ) {
         #[cfg(all(feature = "query-queryable", feature = "codec-response-final"))]
         for (rid, qos) in peers.finals.drain_owed() {
             sink.send_response_final(rid, qos);
@@ -1036,7 +1056,11 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
     /// The answers to the peer's interests: the subscriber interest chains first,
     /// then the liveliness ones, each batch's items before its terminating `Final`.
     #[inline(never)]
-    fn drain_declare_replies<S: DeclareReplySink>(&mut self, peers: &mut PeerTables, sink: &S) {
+    fn drain_declare_replies<S: DeclareReplySink, T: Storage>(
+        &mut self,
+        peers: &mut PeerTables<T>,
+        sink: &S,
+    ) {
         #[cfg(feature = "declare-subscriber")]
         for item in peers.subscribers.take_staged_sub_interest_replies() {
             match &item {
@@ -1336,6 +1360,18 @@ mod lent_tests {
             &SessionLimits::defaults(),
         )
         .expect("the arena has the rows")
+    }
+
+    /// The application's tables answer the tables of a peer of any storage policy: a lent observer
+    /// dispatches against a peer of the static policy, and a lost link drops what that peer
+    /// declared, which is nothing here.
+    #[test]
+    fn a_lent_observer_dispatches_against_a_peer_of_the_static_policy() {
+        let mut observer = lent_with(2);
+        let mut peers = PeerTables::<crate::bounded::Static>::new_static();
+        let mut requesters = Requesters::<BoxedReplySink, BoxedReplySink>::new();
+        observer.dispatch_event(&mut peers, &mut requesters, IterationEvent::AppWake);
+        assert_eq!(observer.flush_declarations_on_link_loss(&mut peers), 0);
     }
 
     /// Two subscriptions lent, under a quota that admits more: the third is refused as a full

@@ -115,6 +115,7 @@ use crate::reply_acceptance::ReplyKeyExpr;
 #[cfg(all(feature = "codec-request", feature = "storage-profile"))]
 use crate::reply_stage::{
     EncodingParts, FinalStage, PartsBody, PartsKind, ReplyParts, ReplyStage, ReplyStaging,
+    StagesReplies,
 };
 // The staging methods that take an owned hint (the timestamp) and the `Final` table's
 // trait are the heap profile's: a build with no allocator stages through `ReplyParts`.
@@ -1118,7 +1119,7 @@ pub struct QueryResponder<'a> {
     /// owned when a caller hands one in ([`Self::new`]). A staged reply owns its
     /// copy either way.
     keyexpr_literal: LiteralKey<'a>,
-    replies: &'a mut ReplyStage,
+    replies: &'a mut dyn StagesReplies,
     /// R121j-3c — optional responder identity attached to every
     /// subsequent send_reply / send_reply_del / send_err. `None`
     /// emits no envelope-level responder ext; `Some` stamps the
@@ -1229,7 +1230,7 @@ impl<'a> QueryResponder<'a> {
         keyexpr_literal: String,
         accept: ReplyKeyExpr,
         qos: QosLevel,
-        replies: &'a mut ReplyStage,
+        replies: &'a mut dyn StagesReplies,
     ) -> Self {
         Self {
             rid,
@@ -1253,7 +1254,7 @@ impl<'a> QueryResponder<'a> {
         keyexpr_facts: crate::keyexpr_match::KeyFacts,
         accept: ReplyKeyExpr,
         qos: QosLevel,
-        replies: &'a mut ReplyStage,
+        replies: &'a mut dyn StagesReplies,
     ) -> Self {
         Self {
             rid,
@@ -1311,7 +1312,7 @@ impl<'a> QueryResponder<'a> {
     /// counted, and nothing is staged. The growable backing refuses nothing.
     pub fn send_reply(&mut self, payload: &[u8]) -> Result<(), ReplyError> {
         let stamp = self.auto_stamp();
-        self.replies.stage_parts(ReplyParts {
+        self.replies.stage_reply(ReplyParts {
             rid: self.rid,
             keyexpr: key_str(&self.keyexpr_literal),
             responder: responder_parts(&self.responder),
@@ -1343,7 +1344,7 @@ impl<'a> QueryResponder<'a> {
     pub fn send_reply_keyed(&mut self, keyexpr: &str, payload: &[u8]) -> Result<(), ReplyError> {
         self.admit(keyexpr)?;
         let stamp = self.auto_stamp();
-        self.replies.stage_parts(ReplyParts {
+        self.replies.stage_reply(ReplyParts {
             rid: self.rid,
             keyexpr,
             responder: responder_parts(&self.responder),
@@ -1379,7 +1380,7 @@ impl<'a> QueryResponder<'a> {
         timestamp: &TimestampHint,
     ) -> Result<(), ReplyError> {
         self.admit(keyexpr)?;
-        self.replies.stage_parts(ReplyParts {
+        self.replies.stage_reply(ReplyParts {
             rid: self.rid,
             keyexpr,
             responder: responder_parts(&self.responder),
@@ -1418,7 +1419,7 @@ impl<'a> QueryResponder<'a> {
         source_info: Option<&SourceInfo>,
     ) -> Result<(), ReplyError> {
         self.admit(keyexpr)?;
-        self.replies.stage_parts(ReplyParts {
+        self.replies.stage_reply(ReplyParts {
             rid: self.rid,
             keyexpr,
             responder: responder_parts(&self.responder),
@@ -1459,7 +1460,7 @@ impl<'a> QueryResponder<'a> {
         attachment: &[u8],
     ) -> Result<(), ReplyError> {
         self.admit(keyexpr)?;
-        self.replies.stage_parts(ReplyParts {
+        self.replies.stage_reply(ReplyParts {
             rid: self.rid,
             keyexpr,
             responder: responder_parts(&self.responder),
@@ -1493,7 +1494,7 @@ impl<'a> QueryResponder<'a> {
         encoding: Option<&EncodingHint>,
     ) -> Result<(), ReplyError> {
         self.admit(keyexpr)?;
-        self.replies.stage_parts(ReplyParts {
+        self.replies.stage_reply(ReplyParts {
             rid: self.rid,
             keyexpr,
             responder: responder_parts(&self.responder),
@@ -1520,7 +1521,7 @@ impl<'a> QueryResponder<'a> {
         encoding: EncodingParts<'_>,
     ) -> Result<(), ReplyError> {
         self.admit(keyexpr)?;
-        self.replies.stage_parts(ReplyParts {
+        self.replies.stage_reply(ReplyParts {
             rid: self.rid,
             keyexpr,
             responder: responder_parts(&self.responder),
@@ -1543,7 +1544,7 @@ impl<'a> QueryResponder<'a> {
     /// timestamp). Fallible for the reason [`Self::send_reply`] is.
     pub fn send_reply_del(&mut self) -> Result<(), ReplyError> {
         let stamp = self.auto_stamp();
-        self.replies.stage_parts(ReplyParts {
+        self.replies.stage_reply(ReplyParts {
             rid: self.rid,
             keyexpr: key_str(&self.keyexpr_literal),
             responder: responder_parts(&self.responder),
@@ -1585,7 +1586,7 @@ impl<'a> QueryResponder<'a> {
     pub fn send_reply_keyed_del(&mut self, keyexpr: &str) -> Result<(), ReplyError> {
         self.admit(keyexpr)?;
         let stamp = self.auto_stamp();
-        self.replies.stage_parts(ReplyParts {
+        self.replies.stage_reply(ReplyParts {
             rid: self.rid,
             keyexpr,
             responder: responder_parts(&self.responder),
@@ -1620,7 +1621,7 @@ impl<'a> QueryResponder<'a> {
         &mut self,
         source_info: Option<&SourceInfo>,
     ) -> Result<(), ReplyError> {
-        self.replies.stage_parts(ReplyParts {
+        self.replies.stage_reply(ReplyParts {
             rid: self.rid,
             keyexpr: key_str(&self.keyexpr_literal),
             responder: responder_parts(&self.responder),
@@ -1662,7 +1663,7 @@ impl<'a> QueryResponder<'a> {
         source_info: Option<&SourceInfo>,
     ) -> Result<(), ReplyError> {
         self.admit(keyexpr)?;
-        self.replies.stage_parts(ReplyParts {
+        self.replies.stage_reply(ReplyParts {
             rid: self.rid,
             keyexpr,
             responder: responder_parts(&self.responder),
@@ -1710,7 +1711,7 @@ impl<'a> QueryResponder<'a> {
         };
         #[cfg(not(feature = "transport-shm"))]
         let body = PartsBody::Put(payload);
-        self.replies.stage_parts(ReplyParts {
+        self.replies.stage_reply(ReplyParts {
             rid: self.rid,
             keyexpr,
             responder: responder_parts(&self.responder),
@@ -1760,7 +1761,7 @@ impl<'a> QueryResponder<'a> {
         meta: ReplyMeta<'_>,
     ) -> Result<(), ReplyError> {
         self.admit(keyexpr)?;
-        self.replies.stage_parts(ReplyParts {
+        self.replies.stage_reply(ReplyParts {
             rid: self.rid,
             keyexpr,
             responder: responder_parts(&self.responder),
@@ -1797,7 +1798,7 @@ impl<'a> QueryResponder<'a> {
         schema: Option<&[u8]>,
         payload: &[u8],
     ) -> Result<(), ReplyError> {
-        self.replies.stage_parts(ReplyParts {
+        self.replies.stage_reply(ReplyParts {
             rid: self.rid,
             keyexpr: key_str(&self.keyexpr_literal),
             responder: responder_parts(&self.responder),
@@ -2902,11 +2903,11 @@ impl<C: ResponderSink, P: Storage> QueryableRegistry<C, P> {
     /// mirror of `SubscriberRegistry::dispatch_push`). Gate carried by
     /// the enclosing `#[cfg(all(codec-request, alloc))] impl`.
     #[cfg(feature = "alloc")]
-    pub fn dispatch_request<'a>(
+    pub fn dispatch_request<'a, S: Storage>(
         &mut self,
         request: &RequestOwned,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
-        replies: &mut ReplyStage,
+        replies: &mut ReplyStage<S>,
     ) -> DispatchOutcome {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         // Only the Query body arm triggers application-visible
@@ -3114,14 +3115,14 @@ impl<C: ResponderSink, P: Storage> QueryableRegistry<C, P> {
     /// R311dx — gate carried by the enclosing
     /// `#[cfg(all(codec-request, alloc))] impl` (the `&QueryOwned` param).
     #[cfg(feature = "alloc")]
-    pub fn local_query(
+    pub fn local_query<S: Storage>(
         &mut self,
         rid: crate::wire_id::RequestId,
         keyexpr: &str,
         query: &QueryOwned,
         target: Option<QueryTarget>,
         qos: QosLevel,
-        replies: &mut ReplyStage,
+        replies: &mut ReplyStage<S>,
     ) -> usize {
         // A loopback query is built in this process, so its value is never a list
         // of slices after a marker: there is nothing to un-swap.
@@ -3145,13 +3146,13 @@ impl<C: ResponderSink, P: Storage> QueryableRegistry<C, P> {
     /// own value ext would have carried, and `value.1` is the same bytes the body carries
     /// for a build that reads only the plain shape, so the two readings agree.
     #[cfg(feature = "alloc")]
-    pub fn local_query_with_value(
+    pub fn local_query_with_value<S: Storage>(
         &mut self,
         envelope: QueryEnvelope,
         keyexpr: &str,
         query: &QueryOwned,
         value: Option<(crate::sample::EncodingHint, crate::link::RxBytes)>,
-        replies: &mut ReplyStage,
+        replies: &mut ReplyStage<S>,
     ) -> usize {
         let projection = Self::project_owned_query(
             query,
@@ -3169,14 +3170,14 @@ impl<C: ResponderSink, P: Storage> QueryableRegistry<C, P> {
     /// session's own is the one of its loopback leg (the interceptions of the node that asked,
     /// and the one of the node that answers).
     #[cfg(all(feature = "alloc", feature = "pubsub-ts-stack"))]
-    pub fn local_query_with_stack(
+    pub fn local_query_with_stack<S: Storage>(
         &mut self,
         envelope: QueryEnvelope,
         keyexpr: &str,
         query: &QueryOwned,
         value: Option<(crate::sample::EncodingHint, crate::link::RxBytes)>,
         ts_stack: Option<&crate::ts_stack::TsStack>,
-        replies: &mut ReplyStage,
+        replies: &mut ReplyStage<S>,
     ) -> usize {
         let projection = Self::project_owned_query(query, value, ts_stack);
         self.fire_matching_queryables(
@@ -3202,12 +3203,12 @@ impl<C: ResponderSink, P: Storage> QueryableRegistry<C, P> {
     /// points; gate carried by the enclosing
     /// `#[cfg(all(codec-request, alloc))] impl` (the `&QueryOwned` param).
     #[cfg(feature = "alloc")]
-    fn fire_matching_queryables(
+    fn fire_matching_queryables<S: Storage>(
         &mut self,
         envelope: QueryEnvelope,
         keyexpr: &str,
         projection: QueryProjection<'_>,
-        replies: &mut ReplyStage,
+        replies: &mut ReplyStage<S>,
         is_remote: bool,
     ) -> usize {
         self.fire_projection(envelope, keyexpr, projection, replies, is_remote)
@@ -3290,12 +3291,12 @@ impl<C: ResponderSink, P: Storage> QueryableRegistry<C, P> {
     /// frame lies makes (`dispatch_request_in_place`) are fired through this
     /// one body, so the match, the responder and the view a handler gets cannot
     /// differ between the two.
-    fn fire_projection(
+    fn fire_projection<S: Storage>(
         &mut self,
         envelope: QueryEnvelope,
         keyexpr: &str,
         projection: QueryProjection<'_>,
-        replies: &mut ReplyStage,
+        replies: &mut ReplyStage<S>,
         is_remote: bool,
     ) -> usize {
         let QueryEnvelope { rid, target, qos } = envelope;
@@ -3478,12 +3479,12 @@ impl<C: ResponderSink, P: Storage> QueryableRegistry<C, P> {
     /// [`Self::dispatch_request`]; they do not enqueue a Final
     /// either.
     #[cfg(feature = "alloc")]
-    pub fn dispatch_messages<'a>(
+    pub fn dispatch_messages<'a, S: Storage>(
         &mut self,
         messages: &[NetworkMessage],
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
-        pending_replies: &mut ReplyStage,
-        pending_final_rids: &mut FinalStage,
+        pending_replies: &mut ReplyStage<S>,
+        pending_final_rids: &mut FinalStage<S>,
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         // R311dx — the whole registry impl is `codec-request`-gated, so
@@ -3555,12 +3556,12 @@ impl<C: ResponderSink, P: Storage> QueryableRegistry<C, P> {
     /// ([`IterationEvent::InPlace`]) is dispatched as a view over its frame.
     /// Other `IterationEvent` variants (`Lease`, non-FramePayload Poll
     /// outcomes) are no-ops.
-    pub fn dispatch_iteration_event<'a>(
+    pub fn dispatch_iteration_event<'a, S: Storage>(
         &mut self,
         event: IterationEvent<'_, '_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
-        pending_replies: &mut ReplyStage,
-        pending_final_rids: &mut FinalStage,
+        pending_replies: &mut ReplyStage<S>,
+        pending_final_rids: &mut FinalStage<S>,
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         match event {

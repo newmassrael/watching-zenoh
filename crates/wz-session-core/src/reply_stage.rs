@@ -695,6 +695,20 @@ impl<P: Storage> Default for ReplyStage<P> {
     }
 }
 
+/// The one thing a responder does with the stage it is lent: put a reply in it. A trait apart from
+/// [`ReplyStaging`] so a responder holds the stage of any storage policy behind one reference,
+/// whatever policy the session's tables of its peer are.
+pub trait StagesReplies {
+    /// [`ReplyStaging::stage_parts`].
+    fn stage_reply(&mut self, parts: ReplyParts<'_>) -> Result<(), ReplyError>;
+}
+
+impl<P: Storage> StagesReplies for ReplyStage<P> {
+    fn stage_reply(&mut self, parts: ReplyParts<'_>) -> Result<(), ReplyError> {
+        ReplyStaging::stage_parts(self, parts)
+    }
+}
+
 impl<P: Storage> ReplyStaging for ReplyStage<P> {
     fn stage_parts(&mut self, parts: ReplyParts<'_>) -> Result<(), ReplyError> {
         // The sizes the reply would put in the arena, and the two bounds a peer's

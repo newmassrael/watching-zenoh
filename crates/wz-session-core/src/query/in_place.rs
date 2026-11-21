@@ -148,12 +148,12 @@ impl<C: super::ResponderSink, P: crate::bounded::Storage> QueryableRegistry<C, P
     /// staging replies into `pending_replies` and the Final it owes into
     /// `pending_final_rids`, as [`Self::dispatch_messages`] does for an owned
     /// one. See the module docs for what it hands to the owned projection.
-    pub(super) fn dispatch_request_in_place(
+    pub(super) fn dispatch_request_in_place<S: crate::bounded::Storage>(
         &mut self,
         request: &RequestView<'_>,
         spaces: MappingSpaces<'_>,
-        pending_replies: &mut ReplyStage,
-        pending_final_rids: &mut FinalStage,
+        pending_replies: &mut ReplyStage<S>,
+        pending_final_rids: &mut FinalStage<S>,
     ) {
         // As the owned path: a Query that would owe a Final the table cannot
         // hold is refused before any queryable runs, and counted.
@@ -200,12 +200,12 @@ impl<C: super::ResponderSink, P: crate::bounded::Storage> QueryableRegistry<C, P
 
     /// The lent dispatch itself: [`Self::dispatch_request`]'s steps over the
     /// Request where it lies.
-    fn dispatch_lent(
+    fn dispatch_lent<S: crate::bounded::Storage>(
         &mut self,
         request: &RequestView<'_>,
         spaces: MappingSpaces<'_>,
         envelope: QueryEnvelope,
-        replies: &mut ReplyStage,
+        replies: &mut ReplyStage<S>,
     ) -> Result<DispatchOutcome, Fallback> {
         // Only the Query body arm reaches the table.
         let RequestViewVariant::CodecZenohQuery(query) = &request.body else {
@@ -242,12 +242,12 @@ impl<C: super::ResponderSink, P: crate::bounded::Storage> QueryableRegistry<C, P
     /// lent form cannot represent is dispatched, and owes its Final, exactly as
     /// it always did. Heap profile only.
     #[cfg(feature = "alloc")]
-    fn dispatch_owned_projection(
+    fn dispatch_owned_projection<S: crate::bounded::Storage>(
         &mut self,
         request: &RequestView<'_>,
         spaces: MappingSpaces<'_>,
-        pending_replies: &mut ReplyStage,
-        pending_final_rids: &mut FinalStage,
+        pending_replies: &mut ReplyStage<S>,
+        pending_final_rids: &mut FinalStage<S>,
     ) {
         // The wire profile is unbounded (`Heap`, or the AP's shared frame
         // ranges), so this projection cannot refuse a decoded Request. The

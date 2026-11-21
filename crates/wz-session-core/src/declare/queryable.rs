@@ -916,9 +916,9 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteQueryableTable<D, U, P> {
     /// `DeclQueryable` / `UndeclQueryable`, seeded with the current
     /// verdict (registration fires only when already matching).
     #[cfg(all(feature = "session-matching", feature = "alloc"))]
-    pub fn declare_matching_listener(
+    pub fn declare_matching_listener<Q: Storage>(
         &mut self,
-        peer: &RemoteQueryablePeer<P>,
+        peer: &RemoteQueryablePeer<Q>,
         keyexpr: &str,
         sink: BoxedMatchingSink,
     ) -> u64 {
@@ -943,9 +943,9 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteQueryableTable<D, U, P> {
     /// `true` and is then told `true` again by a spurious registration
     /// fire.
     #[cfg(all(feature = "session-matching", feature = "alloc"))]
-    pub fn declare_matching_listener_seeded(
+    pub fn declare_matching_listener_seeded<Q: Storage>(
         &mut self,
-        peer: &RemoteQueryablePeer<P>,
+        peer: &RemoteQueryablePeer<Q>,
         criterion: QuerierCriterion,
         local_matching: bool,
         sink: BoxedMatchingSink,
@@ -961,9 +961,9 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteQueryableTable<D, U, P> {
     /// the watch's whole criterion because the local answer depends on the
     /// querier's target too. Returns the number of watches that flipped.
     #[cfg(all(feature = "session-matching", feature = "alloc"))]
-    pub fn reevaluate_matching(
+    pub fn reevaluate_matching<Q: Storage>(
         &mut self,
-        peer: &RemoteQueryablePeer<P>,
+        peer: &RemoteQueryablePeer<Q>,
         local_matching: &dyn Fn(&QuerierCriterion) -> bool,
     ) -> usize {
         self.matching_watches
@@ -978,9 +978,9 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteQueryableTable<D, U, P> {
     /// connection-dropped sweep drops SUBSCRIBER and QUERYABLE targets
     /// alike, because both live in the same target list.
     #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
-    pub fn flush_declarations_on_link_loss(
+    pub fn flush_declarations_on_link_loss<Q: Storage>(
         &mut self,
-        peer: &mut RemoteQueryablePeer<P>,
+        peer: &mut RemoteQueryablePeer<Q>,
         local_matching: &dyn Fn(&QuerierCriterion) -> bool,
     ) -> usize {
         let _ = &local_matching;
@@ -1032,9 +1032,9 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteQueryableTable<D, U, P> {
     /// S9a — `peer` is the declaring peer's side (its `declared` table), passed in
     /// so one table serves many sessions.
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-    pub fn dispatch_declare<'a>(
+    pub fn dispatch_declare<'a, Q: Storage>(
         &mut self,
-        peer: &mut RemoteQueryablePeer<P>,
+        peer: &mut RemoteQueryablePeer<Q>,
         body: &DeclareOwnedVariant,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
@@ -1060,9 +1060,9 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteQueryableTable<D, U, P> {
     /// a bounded buffer, so the fixed backing absorbs a declaration without the
     /// heap.
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-    pub fn dispatch_declare_with_local<'a>(
+    pub fn dispatch_declare_with_local<'a, Q: Storage>(
         &mut self,
-        peer: &mut RemoteQueryablePeer<P>,
+        peer: &mut RemoteQueryablePeer<Q>,
         body: &DeclareOwnedVariant,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         local_matching: &dyn Fn(&QuerierCriterion) -> bool,
@@ -1115,9 +1115,9 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteQueryableTable<D, U, P> {
         feature = "storage-profile",
         feature = "session-slot"
     ))]
-    pub fn dispatch_declare_view_with_local<'a, 'f>(
+    pub fn dispatch_declare_view_with_local<'a, 'f, Q: Storage>(
         &mut self,
-        peer: &mut RemoteQueryablePeer<P>,
+        peer: &mut RemoteQueryablePeer<Q>,
         body: &DeclareVariant<'f>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         local_matching: &dyn Fn(&QuerierCriterion) -> bool,
@@ -1157,9 +1157,9 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteQueryableTable<D, U, P> {
     /// (refusing and counting past the table's room or a row's text), fan it to the
     /// observers through the no-heap SSOT, and flip-fire the matching watches.
     #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
-    fn apply_declared(
+    fn apply_declared<Q: Storage>(
         &mut self,
-        peer: &mut RemoteQueryablePeer<P>,
+        peer: &mut RemoteQueryablePeer<Q>,
         id: u64,
         resolved: &str,
         complete: bool,
@@ -1173,7 +1173,7 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteQueryableTable<D, U, P> {
         // subsequent declare with the same id overwrites
         // the prior entry (peer renamed the keyexpr), which
         // matches zenoh-pico's same-id-replaces behaviour.
-        let Ok(text) = key_text_within::<P>(resolved, peer.key_quota) else {
+        let Ok(text) = key_text_within::<Q>(resolved, peer.key_quota) else {
             peer.oversize = peer.oversize.saturating_add(1);
             return;
         };
@@ -1229,9 +1229,9 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteQueryableTable<D, U, P> {
     /// a missing id is silent), fan it to the observers, and flip-fire the
     /// matching watches.
     #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
-    fn apply_undeclared(
+    fn apply_undeclared<Q: Storage>(
         &mut self,
-        peer: &mut RemoteQueryablePeer<P>,
+        peer: &mut RemoteQueryablePeer<Q>,
         id: u64,
         local_matching: &dyn Fn(&QuerierCriterion) -> bool,
     ) {
@@ -1270,9 +1270,9 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteQueryableTable<D, U, P> {
     /// Drain a `Vec<NetworkMessage>` through [`Self::dispatch_declare`].
     /// Mirror of the sibling registries.
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-    pub fn dispatch_messages<'a>(
+    pub fn dispatch_messages<'a, Q: Storage>(
         &mut self,
-        peer: &mut RemoteQueryablePeer<P>,
+        peer: &mut RemoteQueryablePeer<Q>,
         messages: &[NetworkMessage],
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
@@ -1282,9 +1282,9 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteQueryableTable<D, U, P> {
     /// R311y797 — [`Self::dispatch_messages`] threading the session-local
     /// half through to [`Self::dispatch_declare_with_local`].
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-    pub fn dispatch_messages_with_local<'a>(
+    pub fn dispatch_messages_with_local<'a, Q: Storage>(
         &mut self,
-        peer: &mut RemoteQueryablePeer<P>,
+        peer: &mut RemoteQueryablePeer<Q>,
         messages: &[NetworkMessage],
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         local_matching: &dyn Fn(&QuerierCriterion) -> bool,
@@ -1304,9 +1304,9 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteQueryableTable<D, U, P> {
 
     /// `IterationEvent` adapter; mirror of the sibling registries.
     #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
-    pub fn dispatch_iteration_event<'a>(
+    pub fn dispatch_iteration_event<'a, Q: Storage>(
         &mut self,
-        peer: &mut RemoteQueryablePeer<P>,
+        peer: &mut RemoteQueryablePeer<Q>,
         event: IterationEvent<'_, '_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
@@ -1317,9 +1317,9 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteQueryableTable<D, U, P> {
     /// session-local half; the entry point the observer fan uses, so an
     /// inbound frame's declarations re-evaluate against BOTH halves.
     #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
-    pub fn dispatch_iteration_event_with_local<'a>(
+    pub fn dispatch_iteration_event_with_local<'a, Q: Storage>(
         &mut self,
-        peer: &mut RemoteQueryablePeer<P>,
+        peer: &mut RemoteQueryablePeer<Q>,
         event: IterationEvent<'_, '_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         local_matching: &dyn Fn(&QuerierCriterion) -> bool,

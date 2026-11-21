@@ -772,9 +772,9 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteSubscriberTable<D, U, P> {
     /// value). Returns the watch id for
     /// [`Self::undeclare_matching_listener`].
     #[cfg(all(feature = "session-matching", feature = "alloc"))]
-    pub fn declare_matching_listener(
+    pub fn declare_matching_listener<Q: Storage>(
         &mut self,
-        peer: &RemoteSubscriberPeer<P>,
+        peer: &RemoteSubscriberPeer<Q>,
         keyexpr: &str,
         sink: BoxedMatchingSink,
     ) -> u64 {
@@ -802,9 +802,9 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteSubscriberTable<D, U, P> {
     /// part of the verdict too and the watch has to keep applying it. See
     /// that type for the divergence this closed.
     #[cfg(all(feature = "session-matching", feature = "alloc"))]
-    pub fn declare_matching_listener_seeded(
+    pub fn declare_matching_listener_seeded<Q: Storage>(
         &mut self,
-        peer: &RemoteSubscriberPeer<P>,
+        peer: &RemoteSubscriberPeer<Q>,
         criterion: PublisherCriterion,
         local_matching: bool,
         sink: BoxedMatchingSink,
@@ -823,9 +823,9 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteSubscriberTable<D, U, P> {
     /// declaration already arrives through
     /// [`Self::dispatch_declare_with_local`], which re-evaluates.
     #[cfg(all(feature = "session-matching", feature = "alloc"))]
-    pub fn reevaluate_matching(
+    pub fn reevaluate_matching<Q: Storage>(
         &mut self,
-        peer: &RemoteSubscriberPeer<P>,
+        peer: &RemoteSubscriberPeer<Q>,
         local_matching: &dyn Fn(&PublisherCriterion) -> bool,
     ) -> usize {
         self.matching_watches
@@ -862,9 +862,9 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteSubscriberTable<D, U, P> {
     /// upstream's too — `_z_liveliness_subscription_undeclare_all` calls
     /// the subscriber callbacks where the write filter does not.
     #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
-    pub fn flush_declarations_on_link_loss(
+    pub fn flush_declarations_on_link_loss<Q: Storage>(
         &mut self,
-        peer: &mut RemoteSubscriberPeer<P>,
+        peer: &mut RemoteSubscriberPeer<Q>,
         local_matching: &dyn Fn(&PublisherCriterion) -> bool,
     ) -> usize {
         let _ = &local_matching;
@@ -928,9 +928,9 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteSubscriberTable<D, U, P> {
     /// S9a — `peer` is the declaring peer's side (its `declared` table), passed
     /// in so one table serves many sessions.
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-    pub fn dispatch_declare<'a>(
+    pub fn dispatch_declare<'a, Q: Storage>(
         &mut self,
-        peer: &mut RemoteSubscriberPeer<P>,
+        peer: &mut RemoteSubscriberPeer<Q>,
         body: &DeclareOwnedVariant,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
@@ -961,9 +961,9 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteSubscriberTable<D, U, P> {
     /// The keyexpr is resolved into a bounded buffer, so on the fixed backing the
     /// whole absorb allocates nothing.
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-    pub fn dispatch_declare_with_local<'a>(
+    pub fn dispatch_declare_with_local<'a, Q: Storage>(
         &mut self,
-        peer: &mut RemoteSubscriberPeer<P>,
+        peer: &mut RemoteSubscriberPeer<Q>,
         body: &DeclareOwnedVariant,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         local_matching: &dyn Fn(&PublisherCriterion) -> bool,
@@ -1006,9 +1006,9 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteSubscriberTable<D, U, P> {
         feature = "storage-profile",
         feature = "session-slot"
     ))]
-    pub fn dispatch_declare_view_with_local<'a, 'f>(
+    pub fn dispatch_declare_view_with_local<'a, 'f, Q: Storage>(
         &mut self,
-        peer: &mut RemoteSubscriberPeer<P>,
+        peer: &mut RemoteSubscriberPeer<Q>,
         body: &DeclareVariant<'f>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         local_matching: &dyn Fn(&PublisherCriterion) -> bool,
@@ -1044,9 +1044,9 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteSubscriberTable<D, U, P> {
     /// counting past the table's room or a row's text), fan it to the observers
     /// through the no-heap SSOT, and re-evaluate the matching watches.
     #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
-    fn apply_declared(
+    fn apply_declared<Q: Storage>(
         &mut self,
-        peer: &mut RemoteSubscriberPeer<P>,
+        peer: &mut RemoteSubscriberPeer<Q>,
         id: u64,
         resolved: &str,
         local_matching: &dyn Fn(&PublisherCriterion) -> bool,
@@ -1056,7 +1056,7 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteSubscriberTable<D, U, P> {
         // R290 — same membership-tracking pattern as the
         // Q-side registry: same-id-replaces semantic, no
         // explicit conflict surfacing.
-        let Ok(text) = key_text_within::<P>(resolved, peer.key_quota) else {
+        let Ok(text) = key_text_within::<Q>(resolved, peer.key_quota) else {
             peer.oversize = peer.oversize.saturating_add(1);
             return;
         };
@@ -1110,9 +1110,9 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteSubscriberTable<D, U, P> {
     /// fired from inside the `on_undecl` chain observes the post-undeclare state),
     /// fan it to the observers, and re-evaluate the matching watches.
     #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
-    fn apply_undeclared(
+    fn apply_undeclared<Q: Storage>(
         &mut self,
-        peer: &mut RemoteSubscriberPeer<P>,
+        peer: &mut RemoteSubscriberPeer<Q>,
         id: u64,
         local_matching: &dyn Fn(&PublisherCriterion) -> bool,
     ) {
@@ -1156,9 +1156,9 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteSubscriberTable<D, U, P> {
     /// sibling registries so the observer in production code can fan
     /// one event into every registry uniformly.
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-    pub fn dispatch_messages<'a>(
+    pub fn dispatch_messages<'a, Q: Storage>(
         &mut self,
-        peer: &mut RemoteSubscriberPeer<P>,
+        peer: &mut RemoteSubscriberPeer<Q>,
         messages: &[NetworkMessage],
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
@@ -1169,9 +1169,9 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteSubscriberTable<D, U, P> {
     /// half of the matching verdict; see
     /// [`Self::dispatch_declare_with_local`].
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-    pub fn dispatch_messages_with_local<'a>(
+    pub fn dispatch_messages_with_local<'a, Q: Storage>(
         &mut self,
-        peer: &mut RemoteSubscriberPeer<P>,
+        peer: &mut RemoteSubscriberPeer<Q>,
         messages: &[NetworkMessage],
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         local_matching: &dyn Fn(&PublisherCriterion) -> bool,
@@ -1202,9 +1202,9 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteSubscriberTable<D, U, P> {
     /// sibling registries. Other `IterationEvent` variants (`Lease`,
     /// non-FramePayload `Poll` outcomes) are no-ops.
     #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
-    pub fn dispatch_iteration_event<'a>(
+    pub fn dispatch_iteration_event<'a, Q: Storage>(
         &mut self,
-        peer: &mut RemoteSubscriberPeer<P>,
+        peer: &mut RemoteSubscriberPeer<Q>,
         event: IterationEvent<'_, '_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
@@ -1217,9 +1217,9 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteSubscriberTable<D, U, P> {
     /// production observer fan uses, so both runtime profiles get the
     /// local half without either of them mirroring the local table.
     #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
-    pub fn dispatch_iteration_event_with_local<'a>(
+    pub fn dispatch_iteration_event_with_local<'a, Q: Storage>(
         &mut self,
-        peer: &mut RemoteSubscriberPeer<P>,
+        peer: &mut RemoteSubscriberPeer<Q>,
         event: IterationEvent<'_, '_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         local_matching: &dyn Fn(&PublisherCriterion) -> bool,
