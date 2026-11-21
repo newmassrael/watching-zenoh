@@ -58,6 +58,8 @@ fn front(lane: &mut SampleLane) -> Option<(Vec<SubId>, LaneSample)> {
         LaneItem::Sample(sample) => Some((sample.subscribers().collect(), sample)),
         #[cfg(feature = "liveliness")]
         LaneItem::Liveliness(_) => panic!("a sample was offered, not a token"),
+        #[cfg(feature = "query")]
+        LaneItem::Reply(_) => panic!("a sample was offered, not a reply"),
     }
 }
 
@@ -695,4 +697,82 @@ fn a_rehearsal_says_whether_the_tokens_fit_and_queues_none() {
         LaneCounts::default(),
         "a rehearsal counts nothing"
     );
+}
+
+/// A reply a test hands the lane: an Err with an encoding, an attachment-free answer of a
+/// responder, stamped.
+#[cfg(feature = "query")]
+struct Answer;
+
+#[cfg(feature = "query")]
+impl wz_session_core::reply_sink::ReplyView for Answer {
+    fn rid(&self) -> wz_session_core::wire_id::RequestId {
+        9
+    }
+
+    fn keyexpr(&self) -> &str {
+        "demo/answer"
+    }
+
+    fn kind(&self) -> wz_session_core::reply_sink::ReplyKind {
+        wz_session_core::reply_sink::ReplyKind::Err
+    }
+
+    fn payload(&self) -> &[u8] {
+        b"refused"
+    }
+
+    fn err_encoding(&self) -> Option<(u32, Option<&[u8]>)> {
+        Some((3, Some(b"text")))
+    }
+
+    fn timestamp_parts(&self) -> Option<wz_session_core::reply_stage::TimestampParts<'_>> {
+        Some(wz_session_core::reply_stage::TimestampParts {
+            time: 42,
+            zid: &[1, 2],
+        })
+    }
+
+    fn responder(&self) -> Option<(&[u8], u32)> {
+        Some((&[7, 7, 7], 5))
+    }
+}
+
+/// A reply takes one event of the lane and is handed to its leg's callback with every part as it
+/// came, from the lane's area; the lane is idle once it is done, and not while it is held.
+#[cfg(feature = "query")]
+#[test]
+fn a_reply_is_handed_from_the_lane_as_it_came() {
+    use wz_session_core::reply_sink::{ReplyKind, ReplyView};
+
+    let Some(mut lane) = lane(256, 4) else {
+        return;
+    };
+    assert!(lane.is_idle());
+    lane.offer_reply(11, &Answer);
+    assert!(!lane.is_idle(), "a reply waits");
+    let Some(LaneItem::Reply(reply)) = lane.take_front() else {
+        panic!("the reply is at the head");
+    };
+    assert_eq!(reply.leg(), 11);
+    assert_eq!(
+        (reply.rid(), reply.keyexpr(), reply.kind(), reply.payload()),
+        (9, "demo/answer", ReplyKind::Err, &b"refused"[..])
+    );
+    assert_eq!(reply.err_encoding(), Some((3, Some(&b"text"[..]))));
+    assert_eq!(
+        reply.put_encoding(),
+        None,
+        "an Err's encoding is not a Put's"
+    );
+    assert_eq!(reply.attachment(), None);
+    assert_eq!(
+        reply.timestamp_parts().map(|stamp| (stamp.time, stamp.zid)),
+        Some((42, &[1u8, 2][..]))
+    );
+    assert_eq!(reply.responder(), Some((&[7u8, 7, 7][..], 5)));
+    assert!(!lane.is_idle(), "a delivery holds the head");
+    lane.complete();
+    assert!(lane.is_idle());
+    assert_eq!(lane.counts(), LaneCounts::default());
 }

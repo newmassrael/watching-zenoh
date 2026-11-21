@@ -58,6 +58,8 @@ use wz_session_core::limits::SessionLimits;
 use wz_session_core::link::{LostCause, RxFrame};
 use wz_session_core::qos::CongestionControl;
 use wz_session_core::reliability::Reliability;
+#[cfg(feature = "query")]
+use wz_session_core::reply_sink::{ReplyKind, ReplyView};
 use wz_session_core::sample::{QosLevel, SampleKind, SourceInfo};
 use wz_session_core::sink::SampleView;
 
@@ -173,10 +175,11 @@ pub(crate) fn read_room<
         .max_liveliness_subscriptions()
         .lent_under(Quota::at_most(LIVE))
         .unwrap_or(LIVE);
-    let callbacks = most_subscribers(subscribers, liveliness);
+    let most = most_subscribers(subscribers, liveliness);
     ReadRoom {
-        bytes: read_bytes(batch, frag, key, callbacks),
-        callbacks,
+        bytes: read_bytes(batch, frag, key, most),
+        // A reply owes its leg's callback, whatever the session's subscribers.
+        callbacks: most.max(1),
     }
 }
 
@@ -223,6 +226,9 @@ enum Event {
         token_id: u64,
         subscribers: usize,
     },
+    /// A reply, for the callback of the leg of a get it answers, which is its one subscriber.
+    #[cfg(feature = "query")]
+    Reply(ReplyRecord),
 }
 
 impl Event {
@@ -232,6 +238,8 @@ impl Event {
             Self::Sample { subscribers, .. } => *subscribers,
             #[cfg(feature = "liveliness")]
             Self::Liveliness { subscribers, .. } => *subscribers,
+            #[cfg(feature = "query")]
+            Self::Reply(_) => 1,
         }
     }
 
@@ -241,6 +249,9 @@ impl Event {
             Self::Sample { subscribers, .. } => *subscribers += 1,
             #[cfg(feature = "liveliness")]
             Self::Liveliness { subscribers, .. } => *subscribers += 1,
+            // A reply is never held open, so none joins it.
+            #[cfg(feature = "query")]
+            Self::Reply(_) => {}
         }
     }
 
@@ -251,7 +262,91 @@ impl Event {
             Self::Sample { record, .. } => record.holds_sender(),
             #[cfg(feature = "liveliness")]
             Self::Liveliness { .. } => true,
+            // A reply is the answer a get waits for; its loss is not the sender's to choose.
+            #[cfg(feature = "query")]
+            Self::Reply(_) => true,
         }
+    }
+}
+
+/// What a reply is, besides its bytes: its key, payload, attachment, encoding schema, timestamp
+/// id and responder id lie one after the other in the lane's area.
+#[cfg(feature = "query")]
+#[derive(Clone)]
+struct ReplyRecord {
+    leg: u64,
+    rid: wz_session_core::wire_id::RequestId,
+    kind: ReplyKind,
+    qos: Option<QosLevel>,
+    key: usize,
+    payload: usize,
+    attachment: Option<usize>,
+    /// The packed id of the Put's or the Err's encoding, and the bytes of its schema.
+    encoding: Option<(u32, Option<usize>)>,
+    /// The time word, and the bytes of the id prefix.
+    timestamp: Option<(u64, usize)>,
+    source_info: Option<SourceInfo>,
+    /// The bytes of the responder's zid, and its entity id.
+    responder: Option<(usize, u32)>,
+}
+
+#[cfg(feature = "query")]
+impl ReplyRecord {
+    /// What `view`, a reply to leg `leg`, is besides its bytes, and its parts in the order they
+    /// lie in the area.
+    fn of(leg: u64, view: &dyn ReplyView) -> (Self, [&[u8]; 6]) {
+        let key = view.keyexpr().as_bytes();
+        let payload = view.payload();
+        let attachment = view.attachment();
+        let encoding = view.put_encoding().or_else(|| view.err_encoding());
+        let timestamp = view
+            .timestamp_parts()
+            .map(|stamp| (stamp.time, stamp.zid))
+            .or_else(|| {
+                view.timestamp()
+                    .map(|hint| (hint.time, hint.zid.as_slice()))
+            });
+        let responder = view.responder();
+        let schema = encoding.and_then(|(_, schema)| schema).unwrap_or(&[]);
+        let zid = timestamp.map_or(&[][..], |(_, zid)| zid);
+        let record = Self {
+            leg,
+            rid: view.rid(),
+            kind: view.kind(),
+            qos: view.qos(),
+            key: key.len(),
+            payload: payload.len(),
+            attachment: attachment.map(<[u8]>::len),
+            encoding: encoding.map(|(id, schema)| (id, schema.map(<[u8]>::len))),
+            timestamp: timestamp.map(|(time, zid)| (time, zid.len())),
+            source_info: view.source_info().cloned(),
+            responder: responder.map(|(zid, eid)| (zid.len(), eid)),
+        };
+        let parts = [
+            key,
+            payload,
+            attachment.unwrap_or(&[]),
+            schema,
+            zid,
+            responder.map_or(&[][..], |(zid, _)| zid),
+        ];
+        (record, parts)
+    }
+
+    fn after_payload(&self) -> usize {
+        self.key + self.payload
+    }
+
+    fn after_attachment(&self) -> usize {
+        self.after_payload() + self.attachment.unwrap_or(0)
+    }
+
+    fn after_schema(&self) -> usize {
+        self.after_attachment() + self.encoding.and_then(|(_, s)| s).unwrap_or(0)
+    }
+
+    fn after_timestamp(&self) -> usize {
+        self.after_schema() + self.timestamp.map_or(0, |(_, zid)| zid)
     }
 }
 
@@ -662,6 +757,43 @@ impl SampleLane {
         self.open = Some(reservation);
     }
 
+    /// Queue `view`, a reply to leg `leg`, for the leg's callback, or count it when the lane has
+    /// no room for it: one event of the lane, published at once.
+    #[cfg(feature = "query")]
+    pub(crate) fn offer_reply(&mut self, leg: u64, view: &dyn ReplyView) {
+        self.seal();
+        let (record, parts) = ReplyRecord::of(leg, view);
+        let bytes = parts
+            .iter()
+            .try_fold(0usize, |sum, part| sum.checked_add(part.len()));
+        let reservation = match bytes {
+            Some(bytes) if self.lane.admits_callbacks(1) => self.lane.reserve(bytes).ok(),
+            _ => None,
+        };
+        let Some(reservation) = reservation else {
+            self.count_refused(true);
+            return;
+        };
+        let mut at = reservation.offset();
+        for part in parts {
+            self.put(at, part);
+            at += part.len();
+        }
+        let index = reservation.index();
+        self.records[index] = Some(Event::Reply(record));
+        if self.lane.publish(reservation, 1).is_err() {
+            self.records[index] = None;
+            self.count_refused(true);
+        }
+    }
+
+    /// Whether the lane holds nothing and no delivery holds its head: what a leg's end waits for,
+    /// so that it is told after every reply queued before it.
+    #[cfg(feature = "query")]
+    pub(crate) fn is_idle(&self) -> bool {
+        !self.handing && self.lane.stats().queued_events == 0
+    }
+
     /// Count a sample the lane had no room for, by its congestion control.
     fn refuse(&mut self, record: &Record) {
         self.count_refused(record.holds_sender());
@@ -784,6 +916,8 @@ impl SampleLane {
                     subscribers,
                     base,
                 }),
+                #[cfg(feature = "query")]
+                Event::Reply(record) => LaneItem::Reply(LaneReply { record, base }),
             });
         }
     }
@@ -829,6 +963,103 @@ pub(crate) enum LaneItem {
     /// A token's appearance or retraction, for a liveliness subscriber's callback.
     #[cfg(feature = "liveliness")]
     Liveliness(LaneLiveliness),
+    /// A reply, for the callback of the leg it answers.
+    #[cfg(feature = "query")]
+    Reply(LaneReply),
+}
+
+/// A reply at the head of the lane, where its bytes lie: what its leg's callback is handed. Valid
+/// until the delivery that took it completes it.
+#[cfg(feature = "query")]
+pub(crate) struct LaneReply {
+    record: ReplyRecord,
+    base: *const u8,
+}
+
+#[cfg(feature = "query")]
+impl LaneReply {
+    /// The leg of the get it answers.
+    pub(crate) fn leg(&self) -> u64 {
+        self.record.leg
+    }
+
+    /// The `len` bytes `skip` bytes into the reply.
+    fn part(&self, skip: usize, len: usize) -> &[u8] {
+        // SAFETY: the reply's parts were written one after the other from `base`
+        // (`SampleLane::offer_reply`), and the head's bytes are not written again until the
+        // delivery that holds it completes it, which is after this view is gone.
+        unsafe { core::slice::from_raw_parts(self.base.add(skip), len) }
+    }
+
+    /// The schema of its encoding, of the kind `kind` is.
+    fn encoding_of(&self, kind: ReplyKind) -> Option<(u32, Option<&[u8]>)> {
+        if self.record.kind != kind {
+            return None;
+        }
+        self.record.encoding.map(|(id, schema)| {
+            (
+                id,
+                schema.map(|len| self.part(self.record.after_attachment(), len)),
+            )
+        })
+    }
+}
+
+#[cfg(feature = "query")]
+impl ReplyView for LaneReply {
+    fn rid(&self) -> wz_session_core::wire_id::RequestId {
+        self.record.rid
+    }
+
+    fn keyexpr(&self) -> &str {
+        // SAFETY: the bytes were a `&str`'s (`ReplyView::keyexpr`), so they are UTF-8.
+        unsafe { core::str::from_utf8_unchecked(self.part(0, self.record.key)) }
+    }
+
+    fn kind(&self) -> ReplyKind {
+        self.record.kind
+    }
+
+    fn payload(&self) -> &[u8] {
+        self.part(self.record.key, self.record.payload)
+    }
+
+    fn err_encoding(&self) -> Option<(u32, Option<&[u8]>)> {
+        self.encoding_of(ReplyKind::Err)
+    }
+
+    fn put_encoding(&self) -> Option<(u32, Option<&[u8]>)> {
+        self.encoding_of(ReplyKind::Put)
+    }
+
+    fn attachment(&self) -> Option<&[u8]> {
+        self.record
+            .attachment
+            .map(|len| self.part(self.record.after_payload(), len))
+    }
+
+    fn source_info(&self) -> Option<&SourceInfo> {
+        self.record.source_info.as_ref()
+    }
+
+    fn timestamp_parts(&self) -> Option<wz_session_core::reply_stage::TimestampParts<'_>> {
+        self.record
+            .timestamp
+            .map(|(time, zid)| wz_session_core::reply_stage::TimestampParts {
+                time,
+                zid: self.part(self.record.after_schema(), zid),
+            })
+    }
+
+    fn responder(&self) -> Option<(&[u8], u32)> {
+        self.record
+            .responder
+            .map(|(zid, eid)| (self.part(self.record.after_timestamp(), zid), eid))
+    }
+
+    fn qos(&self) -> Option<QosLevel> {
+        self.record.qos
+    }
 }
 
 /// A token's appearance or retraction at the head of the lane, its key where it lies.

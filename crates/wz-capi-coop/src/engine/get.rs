@@ -10,10 +10,12 @@
 //! reply keys and the consolidation `QueryOptions` reads, as the tokio engine registers its own.
 //!
 //! What the observer hands the entry's sink happens under the session's lock, and a C callback
-//! never runs there (decision D8), so the sink only queues: an owned copy of each reply, and the
-//! leg's END when the entry is dropped (its Final, its deadline, its cancellation, the loss of its
-//! link), said by a guard the sink owns. The deliveries hand both out with no lock held, the end
-//! as the drop of the leg's callback, which is how a C program learns its get is over.
+//! never runs there (decision D8), so the sink only queues: each reply in the session's delivery
+//! lane, one event of the lane for it and its bytes where the lane lies, and the leg's END when the
+//! entry is dropped (its Final, its deadline, its cancellation, the loss of its link), said by a
+//! guard the sink owns. The deliveries hand both out with no lock held, the end once the lane has
+//! handed every reply queued before it, as the drop of the leg's callback, which is how a C
+//! program learns its get is over.
 //!
 //! The ends wait in a table the session's arena lent ([`EndedLegs`]), a row for each get the
 //! session's tables of pending gets can hold. A leg ends when its row in those tables goes, and the
@@ -21,14 +23,14 @@
 //! rows; a leg the session ends itself (cancelled, or never sent) drops its callback where it ends
 //! it and leaves no end waiting.
 
-use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 
 use wz_capi_port::os::Mutex;
 use wz_session_core::bounded::{BoundedVec, Lent};
 
-use wz_session_core::reply::InboundReply;
 use wz_session_core::reply_sink::{BoxedReplySink, ReplyView};
+
+use crate::lane::SampleLane;
 
 use super::lock;
 use super::registry::{FaceId, Registry};
@@ -73,17 +75,14 @@ impl EndedLegs {
 /// What the get plane shares between the session's state, the observer's reply sinks and the
 /// deliveries.
 pub(super) struct GetPlane {
-    /// The replies the legs' sinks queued, in the order they came.
-    pub(super) replies: Mutex<VecDeque<(u64, InboundReply)>>,
     /// The legs that ended, handed out after the replies queued before them.
     pub(super) ended: Mutex<EndedLegs>,
 }
 
 impl GetPlane {
-    /// A plane with nothing queued, its ends waiting in `ended`.
+    /// A plane with nothing ended, its ends waiting in `ended`.
     pub(super) fn new(ended: EndedLegs) -> Self {
         Self {
-            replies: Mutex::new(VecDeque::new()),
             ended: Mutex::new(ended),
         }
     }
@@ -139,18 +138,22 @@ impl Drop for LegEnd {
     }
 }
 
-/// The sink of leg `leg`'s pending entry: each reply is queued as an owned copy, and the entry's
-/// drop queues the leg's end. The Final itself says nothing more: the registry drops the entry
-/// once its Finals are in, which is the end.
-pub(super) fn reply_sink(leg: u64, plane: &Arc<GetPlane>) -> BoxedReplySink {
-    let replies = Arc::clone(plane);
+/// The sink of leg `leg`'s pending entry: each reply is queued in the session's delivery
+/// `lane`, and the entry's drop queues the leg's end. The Final itself says nothing more: the
+/// registry drops the entry once its Finals are in, which is the end.
+pub(super) fn reply_sink(
+    leg: u64,
+    plane: &Arc<GetPlane>,
+    lane: &Arc<Mutex<SampleLane>>,
+) -> BoxedReplySink {
+    let lane = Arc::clone(lane);
     let end = LegEnd {
         leg,
         plane: Arc::clone(plane),
     };
     BoxedReplySink::new(
         move |view: &dyn ReplyView| {
-            lock(&replies.replies).push_back((leg, InboundReply::from_view(view)));
+            lock(&lane).offer_reply(leg, view);
         },
         move |_rid| {
             // Owned by this closure so it is dropped with the sink.

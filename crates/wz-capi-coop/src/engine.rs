@@ -3191,6 +3191,22 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                         }
                     }
                 }
+                #[cfg(feature = "query")]
+                LaneItem::Reply(reply) => {
+                    let leg = reply.leg();
+                    let callback =
+                        lock(&self.targets)
+                            .iter()
+                            .find_map(|(t, target)| match target {
+                                Target::Reply(cb) if *t == TargetKey::Reply(leg) => {
+                                    Some(cb.clone())
+                                }
+                                _ => None,
+                            });
+                    if let Some(callback) = callback {
+                        (lock(&callback))(&reply);
+                    }
+                }
                 #[cfg(feature = "liveliness")]
                 LaneItem::Liveliness(sample) => {
                     for id in sample.subscribers() {
@@ -3265,27 +3281,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             // undeclared before its query was delivered lets go of the hold all the same.
             self.answer(generation, query.rid(), replies, true);
         }
-        #[cfg(feature = "query")]
-        loop {
-            let next = lock(&self.gets.replies).pop_front();
-            let Some((leg, reply)) = next else {
-                break;
-            };
-            let callback = lock(&self.targets)
-                .iter()
-                .find_map(|(t, target)| match target {
-                    Target::Reply(cb) if *t == TargetKey::Reply(leg) => Some(cb.clone()),
-                    _ => None,
-                });
-            if let Some(callback) = callback {
-                (lock(&callback))(&reply);
-            }
-        }
         // The legs that are over, after every reply queued before their ends: each callback is
         // dropped here, with no lock held, which is how the C program learns it (the reply
-        // closure's `drop(context)`).
+        // closure's `drop(context)`). A lane another delivery still hands out may hold a reply
+        // of one of them: that delivery tells the ends once it is through.
         #[cfg(feature = "query")]
-        loop {
+        while lock(&self.samples).is_idle() {
             let next = lock(&self.gets.ended).take();
             let Some(leg) = next else {
                 break;
@@ -4887,7 +4888,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 .then(|| core.clock.now_us().div_ceil(1000) + u64::from(timeout_ms));
             let sink = ConsolidatingSink::new(
                 opts.resolved_consolidation(),
-                get::reply_sink(leg_id, &self.gets),
+                get::reply_sink(leg_id, &self.gets, &self.samples),
             );
             // One Final: the face's peer's. Registered before the request goes out, so no answer
             // can arrive before its entry.
@@ -4979,7 +4980,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 .then(|| core.clock.now_us().div_ceil(1000) + u64::from(timeout_ms));
             let sink = ConsolidatingSink::new(
                 opts.resolved_consolidation(),
-                get::reply_sink(leg_id, &self.gets),
+                get::reply_sink(leg_id, &self.gets, &self.samples),
             );
             // Registered before the query is queued, as a link's leg is before it is sent.
             let registered = core.registry.borrow_mut().face_mut(face).map(|tables| {
@@ -5038,7 +5039,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 .then(|| core.clock.now_us().div_ceil(1000) + u64::from(timeout_ms));
             let sink = ConsolidatingSink::new(
                 opts.resolved_consolidation(),
-                get::reply_sink(leg_id, &self.gets),
+                get::reply_sink(leg_id, &self.gets, &self.samples),
             );
             let registered = core.registry.borrow_mut().local.replies.register_sink(
                 rid,
@@ -5127,7 +5128,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                     tables.gets.liveliness_gets.register(
                         interest_id,
                         deadline_ms,
-                        get::reply_sink(leg_id, &self.gets),
+                        get::reply_sink(leg_id, &self.gets, &self.samples),
                     )
                 })
                 .is_some_and(|registered| matches!(registered, Ok(true)));
@@ -5437,8 +5438,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         // lock held, as a sent leg is.
         let handed = core::mem::take(&mut *lock(&self.handed));
         drop(handed);
-        #[cfg(feature = "query")]
-        drop(core::mem::take(&mut *lock(&self.gets.replies)));
         #[cfg(feature = "query")]
         lock(&self.gets.ended).clear();
         // The queries no callback will now answer, and the callbacks' C contexts, are dropped
