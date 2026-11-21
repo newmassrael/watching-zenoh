@@ -1378,7 +1378,18 @@ LIMIT_ON_HEAP = ("advisory", "capacity", "quota")
 LIMIT_RANGE_MOST = 4294967295
 LIMIT_KEYS = {"id", "kconfig", "default", "help",
               "storage", "scope", "binding_heap", "binding_fixed", "wire",
-              "kind", "driven", "range", "most", "on_heap", "zero_unbounded"}
+              "kind", "driven", "range", "most", "on_heap", "zero_unbounded", "upstream"}
+# A limit's counterpart in upstream zenoh (`[limit.upstream]`): `zenoh`, the key of zenoh's
+# configuration that states the same number, or `none`; `cite`, the upstream code that reads the
+# key; `reason`, why no key does. The zenoh-pico counterpart is the value switch whose
+# `[[upstream_switch]]` row anchors to the limit (`limit_rows`), so it is not stated a second time.
+LIMIT_UPSTREAM_KEYS = {"zenoh", "cite", "reason"}
+LIMIT_UPSTREAM_NONE = "none"
+# A key of zenoh's configuration as a path of its members, `transport/link/tx/lease`.
+UPSTREAM_KEY_RE = re.compile(r"[a-z0-9_]+(?:/[a-z0-9_]+)*")
+# zenoh's example configuration, a byte copy of the pinned upstream's: every key it writes out,
+# which is every key a limit may name.
+UPSTREAM_DEFAULT_CONFIG = ROOT / "crates" / "wz-zenoh" / "DEFAULT_CONFIG.json5"
 
 
 def stated_one_of(out: list[str], where: str, row: dict, key: str,
@@ -1500,17 +1511,183 @@ def limit_kind_problems(lid: str, lim: dict) -> list[str]:
     return out
 
 
+# One token of a JSON5 text: white space, a comment, a string, a punctuation mark, or a bare word
+# (a name, a number, `true`, `false`, `null`).
+JSON5_TOKEN = re.compile(
+    r"""\s+|//[^\n]*|/\*.*?\*/|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|[{}\[\]:,]|[^\s{}\[\]:,"'/]+""",
+    re.DOTALL)
+JSON5_PUNCTUATION = frozenset("{}[]:,")
+
+
+def json5_tokens(text: str) -> list[str]:
+    """The tokens of a JSON5 text, without its white space and comments. Raises ValueError at a
+    character no token starts with."""
+    tokens: list[str] = []
+    pos = 0
+    while pos < len(text):
+        m = JSON5_TOKEN.match(text, pos)
+        if m is None:
+            raise ValueError(f"offset {pos}: no JSON5 token starts at {text[pos:pos + 20]!r}")
+        pos = m.end()
+        tok = m.group(0)
+        if not (tok[0].isspace() or tok.startswith(("//", "/*"))):
+            tokens.append(tok)
+    return tokens
+
+
+def json5_member_paths(text: str) -> frozenset[str]:
+    """The path of every member of a JSON5 document's objects, as zenoh's configuration names its
+    keys: `a/b` is the member `b` of the object that is the top-level member `a`. A member of an
+    object inside an array has no such path and is left out, as is anything inside a comment.
+    Raises ValueError on a text that is not one JSON5 object."""
+    paths: set[str] = set()
+    # Each open container: its kind, the path its members extend (None inside an array), what it
+    # expects next, and the key of the member being read.
+    stack: list[list] = []
+    closed = False
+    for tok in json5_tokens(text):
+        if closed:
+            raise ValueError(f"`{tok}` follows the document's object")
+        if not stack:
+            if tok != "{":
+                raise ValueError(f"the document opens with `{tok}`, not an object")
+            stack.append(["object", "", "key", None])
+            continue
+        top = stack[-1]
+        kind, prefix, state, key = top
+        if state == "colon":
+            if tok != ":":
+                raise ValueError(f"member `{key}` is followed by `{tok}`, not `:`")
+            top[2] = "value"
+            continue
+        if state == "next":
+            if tok == ",":
+                top[2] = "key" if kind == "object" else "value"
+            elif tok == ("}" if kind == "object" else "]"):
+                stack.pop()
+                closed = not stack
+            else:
+                raise ValueError(f"`{tok}` where a `,` or the end of the {kind} belongs")
+            continue
+        if state == "key":
+            if tok == "}":
+                stack.pop()
+                closed = not stack
+            elif tok in JSON5_PUNCTUATION:
+                raise ValueError(f"`{tok}` where the key of a member belongs")
+            else:
+                top[3] = tok[1:-1] if tok[0] in "\"'" else tok
+                top[2] = "colon"
+            continue
+        if kind == "array" and tok == "]":
+            stack.pop()
+            closed = not stack
+            continue
+        if tok in JSON5_PUNCTUATION and tok not in ("{", "["):
+            raise ValueError(f"`{tok}` where a value belongs")
+        path = None if prefix is None else f"{prefix}{key}"
+        if path is not None:
+            paths.add(path)
+        top[2] = "next"
+        if tok == "{":
+            stack.append(["object", None if path is None else f"{path}/", "key", None])
+        elif tok == "[":
+            stack.append(["array", None, "value", None])
+    if stack or not closed:
+        raise ValueError("the document's object is never closed")
+    return frozenset(paths)
+
+
+@functools.lru_cache(maxsize=None)
+def upstream_config_paths() -> frozenset[str]:
+    """The keys of zenoh's example configuration (`UPSTREAM_DEFAULT_CONFIG`). Raises ValueError
+    when the file cannot be read as one JSON5 object."""
+    where = UPSTREAM_DEFAULT_CONFIG.relative_to(ROOT)
+    try:
+        text = UPSTREAM_DEFAULT_CONFIG.read_text(encoding="utf-8")
+    except OSError as e:
+        raise ValueError(f"{where} cannot be read ({e})") from e
+    try:
+        return json5_member_paths(text)
+    except ValueError as e:
+        raise ValueError(f"{where}: {e}") from e
+
+
+def limit_upstream_problems(lid: str, lim: dict, config_paths: frozenset[str] | None) -> list[str]:
+    """A limit names its counterpart in upstream zenoh: the key of zenoh's configuration that
+    states the same number, with at least one citation of the upstream code that reads it, or
+    `none` with the reason no key does (and, if it helps, citations of what upstream holds
+    instead). A citation is the anchored form `upstream_citation_anchor_gate.py` resolves at the
+    pin, of zenoh only: the zenoh-pico side is the value switch whose row anchors to the limit.
+    `config_paths` are the keys of zenoh's example configuration; None leaves a key's presence
+    unjudged, where the file could not be read (`validate_limits` says so once)."""
+    import upstream_citation_anchor_gate as anchors
+
+    where = f"limit `{lid}`"
+    up = lim.get("upstream")
+    if not isinstance(up, dict):
+        return [f"{where}: it states no upstream counterpart (`[limit.upstream]`): the key of "
+                f"zenoh's configuration that states the same number, or '{LIMIT_UPSTREAM_NONE}' "
+                f"with the reason"]
+    out: list[str] = []
+    for key in sorted(set(up) - LIMIT_UPSTREAM_KEYS):
+        out.append(f"{where}: `upstream.{key}` is not a key an upstream counterpart has")
+        if key == "pico":
+            out.append(f"{where}: the zenoh-pico side is the value switch whose row anchors to "
+                       f"`{LIMIT_ANCHOR}{lid}`, stated there once")
+    cites = up.get("cite", [])
+    if not isinstance(cites, list) or not all(isinstance(c, str) for c in cites):
+        out.append(f"{where}: `upstream.cite` is an array of citations")
+        cites = []
+    for cite in cites:
+        if anchors.PICO_ANCHOR_CITE.search(cite):
+            out.append(f"{where}: `upstream.cite` cites zenoh-pico ({cite}); that side is the "
+                       f"value switch whose row anchors to `{LIMIT_ANCHOR}{lid}`, stated there once")
+        elif not anchors.ANCHOR_CITE.fullmatch(cite):
+            out.append(f"{where}: `upstream.cite` holds {cite!r}, which is not one citation of "
+                       f"upstream zenoh in the anchored form, a path then @ then a needle, each "
+                       f"in backquotes")
+    zenoh = up.get("zenoh")
+    reason = up.get("reason")
+    if not isinstance(zenoh, str) or not UPSTREAM_KEY_RE.fullmatch(zenoh):
+        out.append(f"{where}: `upstream.zenoh` is {zenoh!r}; it is the key of zenoh's "
+                   f"configuration as a path of its members (as transport/link/tx/lease), or "
+                   f"'{LIMIT_UPSTREAM_NONE}'")
+    elif zenoh == LIMIT_UPSTREAM_NONE:
+        if not isinstance(reason, str) or not reason.strip():
+            out.append(f"{where}: its upstream is '{LIMIT_UPSTREAM_NONE}' and it says no reason; a "
+                       f"limit upstream has no key for states why in `upstream.reason`")
+    else:
+        if "reason" in up:
+            out.append(f"{where}: only an upstream of '{LIMIT_UPSTREAM_NONE}' states a reason; a key "
+                       f"is shown by the code that reads it, in `upstream.cite`")
+        if not cites:
+            out.append(f"{where}: its upstream key `{zenoh}` is shown by no citation of the "
+                       f"upstream code that reads it")
+        if config_paths is not None and zenoh not in config_paths:
+            out.append(f"{where}: its upstream key `{zenoh}` is no key of zenoh's configuration "
+                       f"({UPSTREAM_DEFAULT_CONFIG.relative_to(ROOT)})")
+    return out
+
+
 def validate_limits(limits: list[dict]) -> list[str]:
     out: list[str] = []
     ids = [l.get("id") for l in limits]
     if len(ids) != len(set(ids)):
         out.append("a limit id is declared twice")
+    config_paths: frozenset[str] | None
+    try:
+        config_paths = upstream_config_paths()
+    except ValueError as e:
+        out.append(f"the upstream keys of the limits cannot be judged: {e}")
+        config_paths = None
     for lim in limits:
         lid = lim.get("id", "?")
         for key in sorted(set(lim) - LIMIT_KEYS):
             out.append(f"limit `{lid}`: `{key}` is not a key a limit has")
         out += limit_binding_problems(lid, lim)
         out += limit_kind_problems(lid, lim)
+        out += limit_upstream_problems(lid, lim, config_paths)
         if not re.fullmatch(r"[A-Z][A-Z0-9_]*", str(lid)):
             out.append(f"limit `{lid}`: an id is a Rust constant name, SCREAMING_SNAKE_CASE")
         if lim.get("kconfig") != f"WZ_LIMIT_{lid}":
@@ -4435,6 +4612,10 @@ wire = "none"
 help = '''
 A table.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "A sample table upstream has no key for."
 """
 
 
@@ -5562,6 +5743,63 @@ def cmd_selftest() -> int:
     expect("`zero_unbounded = false` is refused",
            limit_refused(quota_bound.replace("default = 4\n", "default = 4\nzero_unbounded = false\n"),
                          "`zero_unbounded` is stated as true or not at all"))
+    # What a limit is in upstream zenoh: a key of its configuration with the code that reads it, or
+    # none with the reason. The citations here are real ones: the citation gate resolves every
+    # anchored citation of this file at the pin.
+    none_block = '[limit.upstream]\nzenoh = "none"\nreason = "A sample table upstream has no key for."\n'
+    lease_cite = 'cite = ["`commons/zenoh-config/src/lib.rs` @ `lease: u64,`"]'
+    pico_cite = 'cite = ["`vendor/zenoh-pico/include/zenoh-pico/config.h.in` @ `Z_TRANSPORT_LEASE`"]'
+
+    def upstream_text(*lines: str) -> str:
+        return SAMPLE.replace(none_block, "".join(f"{line}\n" for line in ("[limit.upstream]",) + lines))
+
+    expect("a limit whose upstream is a key, shown by the code that reads it, validates",
+           validate_decl(read_decl_toml(upstream_text('zenoh = "transport/link/tx/lease"', lease_cite)))
+           == [])
+    expect("a limit upstream has no key for, citing what upstream holds instead, validates",
+           validate_decl(read_decl_toml(upstream_text('zenoh = "none"', 'reason = "None."', lease_cite)))
+           == [])
+    expect("a limit that names no upstream counterpart is refused",
+           limit_refused(SAMPLE.replace(none_block, ""), "limit `MAX_A`: it states no upstream counterpart"))
+    expect("an upstream key zenoh's configuration does not have is refused",
+           limit_refused(upstream_text('zenoh = "transport/link/tx/leases"', lease_cite),
+                         "its upstream key `transport/link/tx/leases` is no key of zenoh's configuration"))
+    expect("an upstream key that is not a path of members is refused",
+           limit_refused(upstream_text('zenoh = "transport.link.tx.lease"', lease_cite),
+                         "it is the key of zenoh's configuration as a path of its members"))
+    expect("an upstream key no citation shows is refused",
+           limit_refused(upstream_text('zenoh = "transport/link/tx/lease"'),
+                         "its upstream key `transport/link/tx/lease` is shown by no citation"))
+    expect("a citation not in the anchored form is refused",
+           limit_refused(upstream_text('zenoh = "transport/link/tx/lease"', 'cite = ["the lease of a link"]'),
+                         "which is not one citation of upstream zenoh in the anchored form"))
+    expect("a citation of zenoh-pico is refused: that side is the value switch's row",
+           limit_refused(upstream_text('zenoh = "none"', 'reason = "None."', pico_cite),
+                         "`upstream.cite` cites zenoh-pico"))
+    expect("a pico side stated in the limit is refused",
+           limit_refused(upstream_text('zenoh = "none"', 'reason = "None."', 'pico = "Z_TRANSPORT_LEASE"'),
+                         "`upstream.pico` is not a key an upstream counterpart has"))
+    expect("an upstream of none that gives no reason is refused",
+           limit_refused(upstream_text('zenoh = "none"'), "its upstream is 'none' and it says no reason"))
+    expect("a reason beside an upstream key is refused",
+           limit_refused(upstream_text('zenoh = "transport/link/tx/lease"', 'reason = "Why."', lease_cite),
+                         "only an upstream of 'none' states a reason"))
+    expect("the JSON5 reader names each member of an object by its path, and none in an array or a comment",
+           json5_member_paths('// a: 1\n{\n  a: { b: 1, "c": [ { d: 2 } ], },\n  /* e: 3 */ f: \'x\',\n}\n')
+           == {"a", "a/b", "a/c", "f"})
+
+    def json5_refused(text: str) -> bool:
+        try:
+            json5_member_paths(text)
+        except ValueError:
+            return True
+        return False
+
+    expect("a text that is not one JSON5 object is refused",
+           all(json5_refused(t) for t in ("", "{ a: 1", "{ a 1 }", "{ a: 1 } {", "[1]", "{ a: / }")))
+    expect("zenoh's example configuration has the keys the pico limits name",
+           {"transport/link/tx/lease", "transport/link/tx/batch_size", "routing/interests/timeout"}
+           <= upstream_config_paths())
     # What the generator makes of the kinds: Kconfig ranges, binding rows, the schema, snapshots.
     pdecl = decl_of(read_decl_toml(parameter))
     expect("a parameter's Kconfig states its range",
