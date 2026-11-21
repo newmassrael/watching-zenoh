@@ -3,6 +3,11 @@
   "schema": "wz-no-heap-ratchet/1",
   "tolerance": 0.05,
   "families": {
+    "idle": {
+      "allocs_per_round": null,
+      "locked": false,
+      "debt": "debt-TBD"
+    },
     "publisher-declare": {
       "allocs_per_round": 18.44,
       "locked": false,

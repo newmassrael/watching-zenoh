@@ -28,6 +28,13 @@
 //! every other thread's are the query's delivery, the queryable's reply and the reply's delivery.
 //! Every other family counts every thread.
 //!
+//! A family counted over every thread reads what the operation caused only if the sessions'
+//! own threads allocate nothing while no call is made: a read task that allocated on each of
+//! its turns would add to a round whatever turns the round happened to take, which the host's
+//! load and the threads' interleaving decide. The `idle` family holds that: its round is
+//! `IDLE_SLICE` with no call made, every thread counted, and it reads 0 when a turn of the
+//! sessions' loops allocates nothing.
+//!
 //! The allocator is installed as this executable's own (`#[global_allocator]`), which is why the
 //! file is an executable of its own. A build with the tokio engine runs its sessions there and is
 //! not the cooperative engine's, so it compiles none of this file.
@@ -71,6 +78,9 @@ const READING_VARIABLE: &str = "WZ_NO_HEAP_READING";
 /// A key a declaration under count names, and none of the pair's own entities matches. Synthetic.
 const DECLARED: &CStr = c"noheap/declared";
 
+/// One round of the `idle` family: this long with no call made.
+const IDLE_SLICE: Duration = Duration::from_millis(10);
+
 /// The room a put near the batch limit leaves for the frame and message headers around its
 /// payload, so that the payload with them fits one batch of the build.
 const BATCH_HEADROOM: usize = 64;
@@ -78,6 +88,7 @@ const BATCH_HEADROOM: usize = 64;
 /// What a family's rounds do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Round {
+    Idle,
     PublisherDeclare,
     PutSmall,
     PutBatch,
@@ -92,7 +103,8 @@ enum Round {
 
 impl Round {
     /// Every round, in the order they are counted.
-    const ALL: [Round; 10] = [
+    const ALL: [Round; 11] = [
+        Round::Idle,
         Round::PublisherDeclare,
         Round::PutSmall,
         Round::PutBatch,
@@ -113,7 +125,8 @@ impl Round {
             Round::E2e => cfg!(all(feature = "e2e-sender", feature = "e2e-receiver")),
             Round::Replay => cfg!(feature = "replay-cache"),
             Round::ConfigDocument => cfg!(feature = "config-document"),
-            Round::PublisherDeclare
+            Round::Idle
+            | Round::PublisherDeclare
             | Round::PutSmall
             | Round::PutBatch
             | Round::Get
@@ -134,7 +147,8 @@ enum Part {
 }
 
 /// The operation families the gate holds, each named as `deploy/no_heap_ratchet.json` names it.
-const FAMILIES: [(&str, Round, Part); 13] = [
+const FAMILIES: [(&str, Round, Part); 14] = [
+    ("idle", Round::Idle, Part::All),
     ("publisher-declare", Round::PublisherDeclare, Part::All),
     ("put-small", Round::PutSmall, Part::Calling),
     ("subscriber-receive-small", Round::PutSmall, Part::Others),
@@ -456,6 +470,7 @@ impl Bench {
     /// Run one round of `round`, waited for to its end where its end can be seen.
     unsafe fn run(&mut self, round: Round) {
         match round {
+            Round::Idle => std::thread::sleep(IDLE_SLICE),
             Round::PublisherDeclare => self.publisher_declare(),
             Round::PutSmall => {
                 let mut bytes = payload();
