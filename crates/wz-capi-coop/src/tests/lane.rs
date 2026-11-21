@@ -662,3 +662,37 @@ fn a_captured_offer_queues_nothing_and_a_sample_for_several_is_written_once() {
     assert_eq!(drain(&mut lane), [(vec![3, 1], 2)]);
     assert_eq!(lane.counts(), LaneCounts::default());
 }
+
+/// Tokens offered while the lane rehearses are placed on a copy of its bookkeeping and not queued:
+/// the rehearsal says whether every one would find room, and the lane is left as it was.
+#[cfg(feature = "liveliness")]
+#[test]
+fn a_rehearsal_says_whether_the_tokens_fit_and_queues_none() {
+    use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
+
+    let Some(mut lane) = lane(64, 4) else {
+        return;
+    };
+    let token = |token_id| LivelinessSample {
+        kind: LivelinessSampleKind::Put,
+        keyexpr: "demo/alive",
+        token_id,
+    };
+    lane.rehearse();
+    for token_id in 0..4 {
+        lane.offer_liveliness(1, &token(token_id));
+    }
+    assert!(lane.rehearsed(), "four tokens of 14 bytes in 64");
+    assert!(lane.take_front().is_none(), "the rehearsal queued nothing");
+    lane.rehearse();
+    for token_id in 0..5 {
+        lane.offer_liveliness(1, &token(token_id));
+    }
+    assert!(!lane.rehearsed(), "a fifth is past the lane's four events");
+    assert!(lane.take_front().is_none());
+    assert_eq!(
+        lane.counts(),
+        LaneCounts::default(),
+        "a rehearsal counts nothing"
+    );
+}

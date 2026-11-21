@@ -5295,17 +5295,35 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // With `history`, the registration hands the sink the tokens the session already knows,
         // before the peer answers with the rest, as zenoh-pico's does
         // (`vendor/zenoh-pico/src/net/liveliness.c` @ `_z_liveliness_subscription_trigger_history`).
+        // They are rehearsed first: the declaration is refused when the lane cannot hold every one
+        // of them until they are handed, at the end of this call or, declared from inside a
+        // callback, once that callback returns.
+        lock(&self.samples).rehearse();
         let registered = core.registry.borrow_mut().register_liveliness_subscriber(
             u64::from(id),
             &keyexpr,
             history,
             liveliness::sample_sink(id, &self.samples),
         );
-        // Refused by the observer, the declaration is refused, as a subscriber's is.
-        if registered.is_err() {
+        let held = lock(&self.samples).rehearsed();
+        if registered.is_ok() && !held {
+            core.registry
+                .borrow_mut()
+                .app
+                .liveliness_subscribers
+                .unregister(u64::from(id));
+        }
+        // Refused by the observer, or with no room for its history, the declaration is refused,
+        // as a subscriber's is.
+        if registered.is_err() || !held {
             drop(guard);
             drop(self.take_target(TargetKey::Liveliness(id)));
             return None;
+        }
+        if history {
+            core.registry
+                .borrow_mut()
+                .replay_liveliness_tokens(u64::from(id));
         }
         let entry = LiveSubEntry {
             id,

@@ -121,6 +121,11 @@ and each subscriber is handed the samples of the session's puts in the order the
 the session's delivery lane has no room to hold the sample until the callback returns, the put
 answers `_Z_ERR_SYSTEM_OUT_OF_MEMORY` and no subscriber of the session is handed it.
 
+A liveliness subscriber declared with history is handed the tokens the session already knows by
+the end of the declaration, as zenoh-pico's is; declared inside a callback, once that callback has
+returned. When the delivery lane has no room to hold them all until then, the declaration fails
+and the subscriber is not declared.
+
 ## wz's own doors in this build
 
 Every door is declared in `wz_ext.h` with its arguments, its results and its refusals; a door of a

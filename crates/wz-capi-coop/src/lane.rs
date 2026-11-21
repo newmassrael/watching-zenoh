@@ -327,6 +327,27 @@ impl Record {
     }
 }
 
+/// Tokens placed on a copy of a lane's bookkeeping ([`SampleLane::rehearse`]).
+#[cfg(feature = "liveliness")]
+struct Rehearsal {
+    lane: DeliveryLane<{ caps::DELIVERY_LANE_EVENTS }>,
+    /// Whether each found room.
+    fits: bool,
+}
+
+#[cfg(feature = "liveliness")]
+impl Rehearsal {
+    /// Place a token of `bytes` bytes, for one subscriber, as the lane would.
+    fn offer(&mut self, bytes: usize) {
+        let placed = self.lane.admits_callbacks(1)
+            && match self.lane.reserve(bytes) {
+                Ok(reservation) => self.lane.publish(reservation, 1).is_ok(),
+                Err(_) => false,
+            };
+        self.fits &= placed;
+    }
+}
+
 /// What the lane did not hand a subscriber, by why.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LaneCounts {
@@ -351,6 +372,10 @@ pub(crate) struct SampleLane {
     handing: bool,
     /// What is offered now is a record a link's gate let through ([`Self::offering_gated`]).
     gated: bool,
+    /// The tokens offered now are rehearsed on a copy of the bookkeeping and not queued
+    /// ([`Self::rehearse`]).
+    #[cfg(feature = "liveliness")]
+    rehearsal: Option<Rehearsal>,
     /// The subscribers the samples offered now are for, noted instead of queued
     /// ([`Self::capture`]).
     #[cfg(feature = "local-subscriber")]
@@ -382,6 +407,8 @@ impl SampleLane {
             open: None,
             handing: false,
             gated: false,
+            #[cfg(feature = "liveliness")]
+            rehearsal: None,
             #[cfg(feature = "local-subscriber")]
             capturing: None,
             counts: LaneCounts::default(),
@@ -601,6 +628,10 @@ impl SampleLane {
     #[cfg(feature = "liveliness")]
     pub(crate) fn offer_liveliness(&mut self, subscriber: SubId, sample: &LivelinessSample<'_>) {
         let key = sample.keyexpr.as_bytes();
+        if let Some(rehearsal) = &mut self.rehearsal {
+            rehearsal.offer(key.len() + SUBSCRIBER_ID_BYTES);
+            return;
+        }
         let same = |event: &Event| {
             matches!(
                 event,
@@ -651,6 +682,30 @@ impl SampleLane {
             &mut self.counts.dropped
         };
         *count = count.saturating_add(1);
+    }
+
+    /// Rehearse the tokens offered from here on, until [`Self::rehearsed`]: each is placed on a copy
+    /// of the lane's bookkeeping and nothing is written or queued. How the session learns, before
+    /// it hands a liveliness subscriber the tokens it already knows, that the lane holds them all.
+    #[cfg(feature = "liveliness")]
+    pub(crate) fn rehearse(&mut self) {
+        // The event held open is published before the tokens are queued, and its callbacks are
+        // then owed: the copy is made with them.
+        self.seal();
+        self.rehearsal = Some(Rehearsal {
+            lane: self.lane.clone(),
+            fits: true,
+        });
+    }
+
+    /// Whether every token offered since [`Self::rehearse`] found room; the lane queues what is
+    /// offered again.
+    #[cfg(feature = "liveliness")]
+    pub(crate) fn rehearsed(&mut self) -> bool {
+        match self.rehearsal.take() {
+            Some(rehearsal) => rehearsal.fits,
+            None => true,
+        }
     }
 
     /// Whether the lane has the room one record can take now ([`ReadRoom`]): what the session

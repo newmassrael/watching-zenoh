@@ -589,6 +589,17 @@ impl Registry {
         }
         Ok(registered)
     }
+
+    /// Hand liveliness subscriber `id` the tokens every face's peer holds now, as its
+    /// registration with `history` does.
+    #[cfg(feature = "liveliness")]
+    pub(super) fn replay_liveliness_tokens(&mut self, id: u64) {
+        let Self { app, faces, .. } = self;
+        for face in faces.iter() {
+            app.liveliness_subscribers
+                .replay_known_tokens(&face.peer.tokens, id);
+        }
+    }
 }
 
 #[cfg(test)]
