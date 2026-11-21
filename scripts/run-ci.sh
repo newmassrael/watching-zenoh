@@ -28931,7 +28931,7 @@ layer_qzk_client_images_build() {
         || { echo "  Qzk ceiling FAIL — the matrix gives no pair to hold (above)" >&2; return 1; }
     if [[ -n "$want" ]] && ! awk -v want="$want" '$1 == want { found = 1 } END { exit !found }' <<< "$parts"; then
         echo "  Qzk FAIL — WZ_QZK_PART=$want is none of the lane's parts:" >&2
-        sed 's/^/    /' <<< "$parts" >&2
+        while IFS= read -r part_line; do echo "    $part_line"; done <<< "$parts" >&2
         return 1
     fi
     lane_home="$(mktemp -d)"
