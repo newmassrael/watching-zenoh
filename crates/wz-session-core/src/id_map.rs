@@ -302,7 +302,8 @@ impl<V> IdMap<V> for GrowableIdMap<V> {
 pub type KeyText<P = Profile> = <P as Storage>::Text<{ caps::MAX_KEYEXPR_BYTES }>;
 
 /// A keyexpr the peer named is longer than [`caps::MAX_KEYEXPR_BYTES`], which a
-/// table of the static policy cannot hold. Never answered on the growable policy.
+/// table of the static policy cannot hold, or than the quota the session's creator
+/// stated ([`key_text_within`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeyexprTooLong;
 
@@ -313,6 +314,21 @@ pub fn key_text_as<P: Storage>(literal: &str) -> Result<KeyText<P>, KeyexprTooLo
     let mut text = <KeyText<P> as TextBacking>::empty();
     text.push_str(literal).map_err(|_| KeyexprTooLong)?;
     Ok(text)
+}
+
+/// [`key_text_as`] held to `quota`, the session's `MAX_KEYEXPR_BYTES`: a keyexpr
+/// longer than the quota admits is refused as one the table cannot hold, on every
+/// policy. Where the build fixes the bound to the rows' capacity the quota compares
+/// nothing and the rows refuse alone.
+#[inline]
+pub fn key_text_within<P: Storage>(
+    literal: &str,
+    quota: crate::limits::MaxKeyexprBytesHeld,
+) -> Result<KeyText<P>, KeyexprTooLong> {
+    if !quota.admits(literal.len()) {
+        return Err(KeyexprTooLong);
+    }
+    key_text_as::<P>(literal)
 }
 
 /// [`key_text_as`] in this build's storage profile.

@@ -388,6 +388,24 @@ impl ApplicationLayerObserver {
         observer
             .subscribers
             .limit_memo_to(limits.match_memo_slots());
+        // The longest key every table of the session stores: what it registers itself and what
+        // its peer declares.
+        let keys = limits.max_keyexpr_bytes_held();
+        observer.subscribers.limit_keys_to(keys);
+        observer.subscribers.limit_peer_keys_to(keys);
+        #[cfg(feature = "query-queryable")]
+        observer.queryables.limit_keys_to(keys);
+        #[cfg(feature = "liveliness-token")]
+        observer.local_tokens.limit_keys_to(keys);
+        #[cfg(feature = "liveliness-subscriber")]
+        observer.liveliness_subscribers.limit_keys_to(keys);
+        #[cfg(feature = "liveliness-subscriber")]
+        observer.liveliness_subscribers.limit_peer_keys_to(keys);
+        observer.replies.limit_keys_to(keys);
+        #[cfg(feature = "declare-subscriber")]
+        observer.remote_subscribers.limit_peer_keys_to(keys);
+        #[cfg(feature = "declare-queryable")]
+        observer.remote_queryables.limit_peer_keys_to(keys);
         #[cfg(feature = "query-queryable")]
         observer.queryables.limit_to(limits.max_queryables_held());
         #[cfg(feature = "declare-subscriber")]

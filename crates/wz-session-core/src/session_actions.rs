@@ -3683,6 +3683,17 @@ impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R
     // `ext_qos` reads as).
     #[cfg(all(feature = "liveliness-token", not(feature = "alloc")))]
     fn send_declare_token_reply(&self, token_id: u64, keyexpr: &str, interest_id: u64) {
+        // A keyexpr past the session's `MAX_KEYEXPR_BYTES` is not answered, as the subscriber
+        // reply skips one. A build that fixes the bound compares nothing here: the token
+        // table's rows refused such a key when it was registered.
+        if !self
+            .params
+            .limits
+            .max_keyexpr_bytes_held()
+            .admits(keyexpr.len())
+        {
+            return;
+        }
         let _ = self
             .dispatch_network_message_at(
                 DispatchStage::Fresh,
@@ -3697,8 +3708,17 @@ impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R
     }
     #[cfg(all(feature = "liveliness-token", feature = "alloc"))]
     fn send_declare_token_reply(&self, token_id: u64, keyexpr: &str, interest_id: u64) {
-        // A keyexpr past the protocol's bound is not answered, as the subscriber reply
-        // below skips one: the chain's `DeclFinal` still terminates the interest.
+        // A keyexpr past the session's `MAX_KEYEXPR_BYTES` or the protocol's bound is not
+        // answered, as the subscriber reply below skips one: the chain's `DeclFinal` still
+        // terminates the interest. A build that fixes the bound compares nothing here.
+        if !self
+            .params
+            .limits
+            .max_keyexpr_bytes_held()
+            .admits(keyexpr.len())
+        {
+            return;
+        }
         if let Ok(declare) = build_token_reply(token_id, keyexpr, interest_id).and_then(|reply| {
             reply.try_into_owned_in::<crate::transport_profile::TransportStorage>()
         }) {

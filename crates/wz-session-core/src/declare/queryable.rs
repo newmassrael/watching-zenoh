@@ -21,7 +21,7 @@
 use crate::bounded::EpochCounter;
 use crate::bounded::{Profile, Static, Storage};
 #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
-use crate::id_map::key_text_as;
+use crate::id_map::key_text_within;
 #[cfg(feature = "storage-profile")]
 use crate::id_map::{DeclaredQueryable, DeclaredQueryables, FixedIdMap, IdMap};
 #[cfg(feature = "alloc")]
@@ -361,6 +361,12 @@ pub struct RemoteQueryablePeer<P: Storage = Profile> {
     /// alone.
     #[cfg(feature = "storage-profile")]
     quota: crate::limits::MaxRemoteDeclsHeld,
+    /// The longest keyexpr a row holds (`MAX_KEYEXPR_BYTES`): what the creator of the session's
+    /// tables resolved ([`Self::limit_keys_to`]), the build's value until it does. A
+    /// `DeclQueryable` whose keyexpr is longer is refused and counted in `oversize`, as one a fixed
+    /// row cannot hold is.
+    #[cfg(feature = "storage-profile")]
+    key_quota: crate::limits::MaxKeyexprBytesHeld,
     /// `DeclQueryable`s refused because their keyexpr is longer than a row's
     /// text. Counted with the table's own refusals.
     #[cfg(feature = "storage-profile")]
@@ -390,6 +396,8 @@ impl<P: Storage> Default for RemoteQueryablePeer<P> {
             #[cfg(feature = "storage-profile")]
             quota: crate::limits::MaxRemoteDeclsHeld::build_default(),
             #[cfg(feature = "storage-profile")]
+            key_quota: crate::limits::MaxKeyexprBytesHeld::build_default(),
+            #[cfg(feature = "storage-profile")]
             oversize: 0,
             #[cfg(feature = "storage-profile")]
             epoch: <P::Epoch as Default>::default(),
@@ -407,6 +415,8 @@ impl RemoteQueryablePeer<Static> {
             declared: FixedIdMap::new(),
             #[cfg(feature = "storage-profile")]
             quota: crate::limits::MaxRemoteDeclsHeld::build_default(),
+            #[cfg(feature = "storage-profile")]
+            key_quota: crate::limits::MaxKeyexprBytesHeld::build_default(),
             #[cfg(feature = "storage-profile")]
             oversize: 0,
             #[cfg(feature = "storage-profile")]
@@ -496,6 +506,23 @@ impl<P: Storage> RemoteQueryablePeer<P> {
     #[cfg(feature = "storage-profile")]
     pub fn limit_to(&mut self, quota: crate::limits::MaxRemoteDeclsHeld) {
         self.quota = quota;
+    }
+
+    /// Hold the peer's table to the `MAX_KEYEXPR_BYTES` the creator of the session's tables
+    /// resolved: a `DeclQueryable` whose keyexpr is longer than `quota` admits is refused and
+    /// counted ([`Self::refusals`]), as one longer than a fixed row holds is, and the
+    /// declarations already held are kept.
+    #[cfg(feature = "storage-profile")]
+    pub fn limit_keys_to(&mut self, quota: crate::limits::MaxKeyexprBytesHeld) {
+        self.key_quota = quota;
+    }
+
+    /// The quota the peer's declared keyexprs are held to (`MAX_KEYEXPR_BYTES`): what the
+    /// creator of the session's tables stated ([`Self::limit_keys_to`]), the build's value until
+    /// it did.
+    #[cfg(feature = "storage-profile")]
+    pub fn key_quota(&self) -> crate::limits::MaxKeyexprBytesHeld {
+        self.key_quota
     }
 
     /// The quota the peer's table is held to (`MAX_REMOTE_DECLS`): what the creator of the
@@ -650,6 +677,12 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteQueryableRegistry<D, U, P> {
     #[cfg(feature = "storage-profile")]
     pub fn limit_peer_to(&mut self, quota: crate::limits::MaxRemoteDeclsHeld) {
         self.peer.limit_to(quota);
+    }
+
+    /// [`RemoteQueryablePeer::limit_keys_to`] for this registry's peer.
+    #[cfg(feature = "storage-profile")]
+    pub fn limit_peer_keys_to(&mut self, quota: crate::limits::MaxKeyexprBytesHeld) {
+        self.peer.limit_keys_to(quota);
     }
 
     /// R288 — count of currently-declared peer queryables; see
@@ -1140,7 +1173,7 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteQueryableTable<D, U, P> {
         // subsequent declare with the same id overwrites
         // the prior entry (peer renamed the keyexpr), which
         // matches zenoh-pico's same-id-replaces behaviour.
-        let Ok(text) = key_text_as::<P>(resolved) else {
+        let Ok(text) = key_text_within::<P>(resolved, peer.key_quota) else {
             peer.oversize = peer.oversize.saturating_add(1);
             return;
         };
