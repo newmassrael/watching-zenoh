@@ -1146,8 +1146,21 @@ declare -A BASELINE_MC_TEXT=(
     # `group_drive` 8. What main grew by over the old figures was not separated by symbol at
     # its reading; the ledger round that lands this records it as main's. data is 4 on both;
     # bss reads 270112 hosted by the same offset (270120 on the build host). Old: 74160/74216.
-    ["thumbv7m-none-eabi"]=78276
-    ["thumbv7em-none-eabihf"]=78260
+    #
+    # 2026-11-22 -- thumbv7m 78276 -> 84112, thumbv7em-hf 78260 -> 84300 (+5836 / +6040), read by
+    # hosted Layer Q on run 44895098050 (main's c72460b30) and failed the gate there and on every
+    # run since 0c7aa853b. BISECTED on one build host (thumbv7m, its own offset over hosted):
+    # 79076 at 589a8884c, 79172 at the SCE pin 99e9dbb81 (+96), 79076 at 68888eca7, and 85320 at
+    # 23da5b6a2, the landing of a multicast group's send stage (967dbc4e4 and the commits with
+    # it). By symbol across that merge the text grew 5606 B: GroupTxStage::push_held +2280 (new),
+    # StageQueue::wait_for_room +600 and ::enqueue +156 (new), the Frame envelope of push and
+    # interest +830, build_fragment_wire +288, multicast_tx_bytes +398, rt_main +788, the stage's
+    # VecDeque and Rc +684, against multicast_tx_emit -1190. Every new symbol is the stage the
+    # landing meant to add, and data and bss are flat, so this is ROM for a feature, not a leak.
+    # On build host hkl002 main's 7de14394c reads byte-equal to c72460b30 (84892 / 85048), so the
+    # figures here are the hosted readings themselves. Old: 78276/78260.
+    ["thumbv7m-none-eabi"]=84112
+    ["thumbv7em-none-eabihf"]=84300
 )
 # shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
                             # namerefs in the `case "$artifact"` dispatch below; shellcheck
