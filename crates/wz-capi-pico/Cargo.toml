@@ -619,6 +619,14 @@ required-features = ["app-transport", "peer", "query", "queryable", "liveliness"
 name = "allocation_faults"
 required-features = ["app-transport", "peer", "query", "queryable", "multi-thread"]
 
+# The no-heap measurement of Layer C1nh: the allocations each operation family makes after a
+# session opens, on the cooperative engine, held by `deploy/no_heap_ratchet.json`. An executable
+# of its own because its `#[global_allocator]` counts them; its test is `#[ignore]`d. A build
+# with the tokio engine compiles none of it (the file is `cfg(not(feature = "engine-tokio"))`).
+[[test]]
+name = "no_heap_after_open"
+required-features = ["engine-coop", "app-transport", "peer", "query", "queryable", "multi-thread"]
+
 # The node that `client_only_dials_a_listener` dials: a build that cannot listen needs one of
 # the full build to talk to. It asks queries and answers them, so the build has both ends of one.
 [[example]]
