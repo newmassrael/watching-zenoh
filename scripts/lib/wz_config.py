@@ -2715,7 +2715,9 @@ def schema_annotations(row: dict, keys: tuple[str, ...]) -> dict:
 def emit_config_schema(decl: dict) -> str:
     """The JSON Schema (draft 2020-12) of the run-time document: under `wz`, `policies` holds each
     policy a stage after the build decides (its `binding` is not `build`), as the enum of its
-    values, and `limits` each limit that is not a capacity alone (`open_limits`): a bound as an
+    values, and `limits` each limit that is not a capacity alone (`open_limits`) and that the
+    build's machines read from a statement (`read = "snapshot"`; one read from the build would be
+    refused by name at the open, so it is no member a document may state): a bound as an
     integer of at least 1 or `"unbounded"`, a parameter as an integer in its range with the
     declared default. Each carries its help's first sentence and where it is bound (`x-wz-*`). The build may narrow a policy's values further (its domain), which a
     document is checked against when it is applied, not here. `profile` is the enum of the
@@ -2733,6 +2735,8 @@ def emit_config_schema(decl: dict) -> str:
         }
     limits = {}
     for lim in open_limits(decl):
+        if lim.get("read") != LIMIT_READ_SNAPSHOT:
+            continue
         if lim["kind"] == "bound":
             # A stated bound admits at least one: `0` would refuse everything, and no bound is
             # stated as the word. A build with a capacity narrows it further (its domain).
@@ -2805,8 +2809,8 @@ def emit_config_schema(decl: dict) -> str:
                      "stale."),
         "title": "wz run-time configuration",
         "description": ("The policies and limits a document may state when a node opens or while "
-                        "it runs. A policy the build fixes, and a limit only the build sizes, are "
-                        "not here."),
+                        "it runs. A policy the build fixes, a limit only the build sizes, and a "
+                        "limit no machine of the build reads from a statement are not here."),
         "type": "object",
         "properties": {
             "wz": {
@@ -5481,6 +5485,10 @@ def cmd_selftest() -> int:
                   for stage in ("open", "none")]
     expect("a capacity alone is not in the schema, whatever stage sizes it",
            json.loads(emit_config_schema({"policies": [], "limits": built_only}))["properties"]["wz"]
+           ["properties"]["limits"]["properties"] == {})
+    expect("a limit no machine reads from a statement is not in the schema",
+           json.loads(emit_config_schema({"policies": [], "limits": [
+               dict(sdecl["limits"][0], read=LIMIT_READ_BUILD)]}))["properties"]["wz"]
            ["properties"]["limits"]["properties"] == {})
     expect("a description is the help's first sentence, a stop inside an address not ending it",
            first_sentence("A locator (for example udp/192.168.1.10:7447). A longer one\nis refused.")
