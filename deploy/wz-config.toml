@@ -2706,7 +2706,7 @@ storage = "both"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "build"
-read = "build"
+read = "snapshot"
 wire = "none"
 help = '''
 The replies a node holds for a multicast group before it sends them, with or

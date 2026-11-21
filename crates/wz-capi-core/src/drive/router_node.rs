@@ -645,7 +645,8 @@ pub(crate) fn open_router_blocking(
     // source is south (`zenoh/src/net/routing/hat/client/pubsub.rs` @ `fn compute_data_route`).
     // The node's machines read the snapshot the open resolved, as its links do.
     let forwarder =
-        RouterForwarder::for_node(role.whatami(), own_zid, timestamping, &session_policy);
+        RouterForwarder::for_node(role.whatami(), own_zid, timestamping, &session_policy)
+            .with_limits(&session_limits);
     // The forwarder built the node's clock: a stated bound it refused fails the open here, before
     // any listener is bound, as the registry's open does.
     refuse_a_refused_clock(&forwarder.node_hlc())?;

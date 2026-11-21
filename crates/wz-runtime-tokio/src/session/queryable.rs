@@ -455,6 +455,9 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         // The clock a reply is stamped with: this session's own, shared with every other
         // consumer of it (`Session::node_hlc`), and held only where the policy asks for it.
         let reply_clock = reply_clock_for(&self.policy, stamps, &self.node_hlc);
+        // The bounds a job stages its replies under: the session's, read without the observer's
+        // lock, since the job runs outside it.
+        let reply_bounds = self.reply_bounds;
         let sink = move |view: &dyn QueryView, _out: &mut dyn ReplyOut| {
             // The registry-provided responder (`_out`, bound to the
             // observer's pending_replies) is deliberately unused: the
@@ -489,7 +492,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                     Some(shared) => shared,
                     None => &borrowed,
                 };
-                let mut replies = wz_session_core::reply_stage::ReplyStage::new();
+                let mut replies = wz_session_core::reply_stage::ReplyStage::held_to(reply_bounds);
                 {
                     // R311y834 — the DEFERRED job runs the handler outside
                     // the observer lock, so it rebuilds the responder and

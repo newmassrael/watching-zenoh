@@ -3350,6 +3350,10 @@ pub struct RouterForwarder {
     /// sharing, its link admission, the rule for a second link to one node) read them here and
     /// never from the build.
     policy: wz_session_core::policy::SessionPolicy,
+    /// The snapshot of the session limits the node's creator resolved, the one its sessions are
+    /// handed ([`Self::with_limits`]); the build's until it is stated. The replies a hosted
+    /// queryable writes are staged under its reply bounds.
+    limits: wz_session_core::limits::SessionLimits,
     /// R311y450 — THIS router's §5.18 wall-clock HLC, the source of the
     /// forward-path timestamp [`route_push`](Self::route_push) applies. A distinct
     /// axis from `clock` above (that one is the opaque MONOTONIC clock for query
@@ -4623,7 +4627,7 @@ impl RouterForwarder {
         } else {
             &full
         };
-        let mut replies = wz_session_core::reply_stage::ReplyStage::new();
+        let mut replies = wz_session_core::reply_stage::ReplyStage::held_to(self.reply_bounds());
         {
             let mut responder = QueryResponder::new(
                 full.rid(),
@@ -4823,6 +4827,19 @@ impl RouterForwarder {
     /// The snapshot of this node's policies.
     pub fn policy(&self) -> &wz_session_core::policy::SessionPolicy {
         &self.policy
+    }
+
+    /// Hold the node's own machines to `limits`, the snapshot of session limits its creator
+    /// resolved, the one its sessions are handed (builder): the replies a hosted queryable writes
+    /// are staged under the bounds it states. A forwarder not handed one holds the build's.
+    pub fn with_limits(mut self, limits: &wz_session_core::limits::SessionLimits) -> Self {
+        self.limits = *limits;
+        self
+    }
+
+    /// The bounds a hosted queryable's replies are staged under ([`Self::with_limits`]).
+    fn reply_bounds(&self) -> wz_session_core::reply_stage::ReplyBounds {
+        wz_session_core::reply_stage::ReplyBounds::of(&self.limits)
     }
 
     /// R2626 — set zenoh's `timestamping.drop_future_timestamp` (builder).
@@ -5235,6 +5252,7 @@ impl RouterForwarder {
             trees_delay: Self::DEFAULT_TREES_DELAY,
             clock,
             policy: *policy,
+            limits: wz_session_core::limits::SessionLimits::BUILD,
         }
     }
 }
@@ -12326,7 +12344,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let Some(to) = self.pending.guard().peek(LOCAL_FACE, record.qid) else {
             return;
         };
-        let mut replies = wz_session_core::reply_stage::ReplyStage::new();
+        let mut replies =
+            wz_session_core::reply_stage::ReplyStage::held_to(self.fwd.reply_bounds());
         {
             let mut responder = QueryResponder::new(
                 to.rid,

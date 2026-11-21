@@ -85,3 +85,24 @@ fn a_forwarder_stamps_by_the_clock_quality_of_the_snapshot() {
     }
     assert!(built >= 1, "the build's domain holds at least its default");
 }
+
+/// A forwarder's hosted queryables stage their replies under the session limits its creator
+/// handed it ([`RouterForwarder::with_limits`]), and under the build's when it was handed none.
+#[test]
+fn a_forwarder_stages_hosted_replies_under_the_limits_it_was_handed() {
+    use wz_session_core::limit_binding::{LimitSpec, Quota};
+    use wz_session_core::limits::{MaxReplyPayloadBytes, SessionLimits};
+    use wz_session_core::reply_stage::ReplyBounds;
+
+    let policy = SessionPolicy::defaults();
+    assert_eq!(router(&[0x05], &policy).reply_bounds(), ReplyBounds::BUILD);
+    let mut limits = SessionLimits::defaults();
+    let stated = limits.select_max_reply_payload_bytes(Quota::at_most(2));
+    if MaxReplyPayloadBytes::DOMAIN.is_singleton() {
+        assert!(stated.is_err(), "a build of one value refuses two");
+        return;
+    }
+    stated.expect("two is inside the domain");
+    let fwd = router(&[0x05], &policy).with_limits(&limits);
+    assert_eq!(fwd.reply_bounds(), ReplyBounds::of(&limits));
+}

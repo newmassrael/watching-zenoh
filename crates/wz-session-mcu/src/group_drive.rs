@@ -240,7 +240,25 @@ use core::cell::RefCell;
         feature = "liveliness-token"
     )
 ))]
-use wz_session_core::caps::MAX_MULTICAST_REPLIES;
+use wz_session_core::limits::{MaxMulticastRepliesHeld, SessionLimits};
+
+/// The count `quota` admits at most, `usize::MAX` where it is no bound, the word an unbounded
+/// quota is held as.
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    )
+))]
+const fn quota_count(quota: wz_session_core::limit_binding::Quota) -> usize {
+    match quota.most() {
+        Some(most) => most,
+        None => usize::MAX,
+    }
+}
 #[cfg(all(
     feature = "alloc",
     any(
@@ -287,8 +305,9 @@ pub use stage::{GroupTxPace, GroupTxStage};
 /// channel. `Clone` shares the backing store (and the drop count) between the
 /// sink clone and the loop's `pop` end.
 ///
-/// It holds at most [`MAX_MULTICAST_REPLIES`] replies, the bound the fixed form
-/// below is sized by: a peer that asks faster than the loop answers would
+/// It holds at most `MAX_MULTICAST_REPLIES` replies, the bound the fixed form
+/// below is sized by, as the creator of the session states it
+/// ([`with_limits`](Self::with_limits)): a peer that asks faster than the loop answers would
 /// otherwise grow the heap for as long as it kept asking. A reply is what comes
 /// in through [`MulticastReplyEnqueue::enqueue`] (what the sink stages for a
 /// peer's interest or query, and what a group answers a member's ask with), and
@@ -326,6 +345,10 @@ pub use stage::{GroupTxPace, GroupTxStage};
 #[derive(Clone, Default)]
 pub struct MulticastReplyQueue {
     queue: Rc<RefCell<HeapReplies>>,
+    /// The most replies the queue holds (`MAX_MULTICAST_REPLIES`): what the creator of the
+    /// session resolved ([`Self::with_limits`]), the build's value for a queue made by
+    /// [`Self::new`]. Every clone holds the same.
+    quota: MaxMulticastRepliesHeld,
 }
 
 /// What the heap form's clones share: the queued replies and how many were
@@ -357,14 +380,24 @@ struct HeapReplies {
     )
 ))]
 impl MulticastReplyQueue {
-    /// A fresh empty reply queue.
+    /// A fresh empty reply queue, held to the build's `MAX_MULTICAST_REPLIES`.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// How many replies the queue holds at most: [`MAX_MULTICAST_REPLIES`].
+    /// A fresh empty reply queue, held to the `MAX_MULTICAST_REPLIES` of `limits`, the
+    /// snapshot the creator of the session resolved.
+    pub fn with_limits(limits: &SessionLimits) -> Self {
+        Self {
+            queue: Rc::default(),
+            quota: limits.max_multicast_replies_held(),
+        }
+    }
+
+    /// How many replies the queue holds at most: its `MAX_MULTICAST_REPLIES`, `usize::MAX`
+    /// where it holds no bound.
     pub const fn capacity(&self) -> usize {
-        MAX_MULTICAST_REPLIES
+        quota_count(self.quota.get())
     }
 
     /// How many replies are waiting.
@@ -391,7 +424,7 @@ impl MulticastReplyQueue {
     fn push(&self, item: MulticastTxItem) {
         let refused = {
             let mut queue = self.queue.borrow_mut();
-            if queue.items.len() < MAX_MULTICAST_REPLIES {
+            if self.quota.get().admits(queue.items.len() + 1) {
                 queue.items.push_back(item);
                 None
             } else {
@@ -428,9 +461,10 @@ impl MulticastReplyEnqueue for MulticastReplyQueue {
 }
 
 /// Fixed-memory step S9c -- the multicast reply backing of the `session-slot`
-/// profile: a queue of [`MAX_MULTICAST_REPLIES`] items in a `static`, which REFUSES
+/// profile: a queue of `MAX_MULTICAST_REPLIES` items in a `static`, which REFUSES
 /// the reply it has no room for and COUNTS it, as the heap form above does with
-/// the same bound.
+/// the same bound. The session that drains it may hold it to fewer
+/// ([`limit_to`](MulticastReplyQueue::limit_to)).
 ///
 /// Its size is the declared limit and nothing else (the deploy
 /// `session_pool.process.multicast_replies` key): an image does not choose a number
@@ -476,8 +510,13 @@ impl MulticastReplyEnqueue for MulticastReplyQueue {
     )
 ))]
 pub struct MulticastReplyQueue {
-    items: RefCell<heapless::Deque<MulticastTxItem, MAX_MULTICAST_REPLIES>>,
+    items:
+        RefCell<heapless::Deque<MulticastTxItem, { wz_session_core::caps::MAX_MULTICAST_REPLIES }>>,
     dropped: core::cell::Cell<u32>,
+    /// The most replies the queue holds (`MAX_MULTICAST_REPLIES`), never more than its storage:
+    /// what the creator of the session resolved ([`Self::limit_to`]), the build's value until it
+    /// does. Held in no byte where the build allows one value, which is then the storage's.
+    quota: core::cell::Cell<MaxMulticastRepliesHeld>,
 }
 
 // SAFETY: the profile's rule, stated on the type: every access to `items` and
@@ -506,17 +545,27 @@ unsafe impl Sync for MulticastReplyQueue {}
     )
 ))]
 impl MulticastReplyQueue {
-    /// An empty queue, for a `static`.
+    /// An empty queue, for a `static`, held to the build's `MAX_MULTICAST_REPLIES`.
     pub const fn new() -> Self {
         Self {
             items: RefCell::new(heapless::Deque::new()),
             dropped: core::cell::Cell::new(0),
+            quota: core::cell::Cell::new(SessionLimits::BUILD.max_multicast_replies_held()),
         }
     }
 
-    /// How many replies the queue holds at most: [`MAX_MULTICAST_REPLIES`].
-    pub const fn capacity(&self) -> usize {
-        MAX_MULTICAST_REPLIES
+    /// Hold the queue to the `MAX_MULTICAST_REPLIES` of `limits`, the snapshot the creator of
+    /// the session that drains it resolved: a reply past it is dropped and counted, and the
+    /// replies queued are kept. The image's `static` is made before any session, so the session
+    /// states its value here.
+    pub fn limit_to(&self, limits: &SessionLimits) {
+        let quota = limits.max_multicast_replies_held();
+        wz_runtime_coop::cs::with(|_| self.quota.set(quota));
+    }
+
+    /// How many replies the queue holds at most: its `MAX_MULTICAST_REPLIES`.
+    pub fn capacity(&self) -> usize {
+        quota_count(wz_runtime_coop::cs::with(|_| self.quota.get()).get())
     }
 
     /// How many replies are waiting.
@@ -542,11 +591,13 @@ impl MulticastReplyQueue {
 
     fn push(&self, item: MulticastTxItem) {
         let refused = wz_runtime_coop::cs::with(|_| {
-            self.items
-                .borrow_mut()
-                .push_back(item)
-                .err()
-                .inspect(|_| self.dropped.set(self.dropped.get().saturating_add(1)))
+            let mut items = self.items.borrow_mut();
+            let refused = if self.quota.get().admits(items.len() + 1) {
+                items.push_back(item).err()
+            } else {
+                Some(item)
+            };
+            refused.inspect(|_| self.dropped.set(self.dropped.get().saturating_add(1)))
         });
         // Dropped outside the critical section: freeing the item is the allocator's
         // business and has no place in an interrupt-off window.

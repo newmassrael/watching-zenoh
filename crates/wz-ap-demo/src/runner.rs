@@ -4672,6 +4672,7 @@ async fn run_peer_until(
         &params.policy,
     );
     let forwarder = forwarder
+        .with_limits(&params.limits)
         .with_drop_future_timestamp(opts.timestamping.drop_future_timestamp())
         // Item 751, step 7d — the south partition, before ANYTHING else is set on the hats: it
         // rebuilds them, so a mode chosen first would be lost, and the hats a face joins are the
@@ -6599,6 +6600,7 @@ async fn run_router_hat_until(
             node_timestamping,
             &params.policy,
         )
+        .with_limits(&params.limits)
         .with_drop_future_timestamp(opts.timestamping.drop_future_timestamp())
         .with_south_partition(opts.south_partition.clone()),
     );

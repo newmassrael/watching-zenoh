@@ -107,7 +107,7 @@ use {
     wz_capi_port::{QblId, QueryCallback, QueryableSink},
     wz_session_core::query::QueryableId,
     wz_session_core::query_sink::BoxedQuerySink,
-    wz_session_core::reply_stage::ReplyStage,
+    wz_session_core::reply_stage::{ReplyBounds, ReplyStage},
     wz_session_core::response_sink::ResponseSink,
 };
 
@@ -496,6 +496,11 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     rooms: Arc<LinkRooms>,
     wait_before_drop_us: u64,
     held_drop: HeldDrop,
+    /// The bounds the replies of the session's queryables are staged under, taken from the
+    /// limits its open resolved: a callback answers outside the session's lock, into a stage of
+    /// its own held as the session's tables are.
+    #[cfg(feature = "queryable")]
+    reply_bounds: ReplyBounds,
     /// The face a publish holding the session sends on now, [`NOT_SENDING`] while none does
     /// ([`SendingOn`]): the face pico's profile drops a droppable publish on, as against the
     /// session's other faces, which it is still sent to, and a session held by a read step, a
@@ -1809,6 +1814,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 transport,
                 params,
                 policy: self.policy,
+                limits: resolve_limits(&self.config),
                 // A message the session puts on the group waits for room by running the session's
                 // tasks, the group's among them, on the session's clock.
                 pace: Rc::new(group::SessionPace {
@@ -2381,6 +2387,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let wait_before_drop_us = core.config.tx_queue.wait_before_drop_us;
         let held_drop = core.config.tx_queue.held_drop;
         let handed_at_most = core.config.tx_queue.sizes;
+        #[cfg(feature = "queryable")]
+        let reply_bounds = ReplyBounds::of(&resolve_limits(&core.config));
         // The ports are bound and the groups joined before anything is dialled: a session that
         // cannot listen, or join a group, where it was told to does not open.
         core.listen_on_config()?;
@@ -2403,6 +2411,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             rooms,
             wait_before_drop_us,
             held_drop,
+            #[cfg(feature = "queryable")]
+            reply_bounds,
             sending_on: AtomicU64::new(NOT_SENDING),
             handed: Mutex::new(VecDeque::new()),
             handed_at_most,
@@ -2764,7 +2774,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                     Target::Queryable(cb) if *t == TargetKey::Queryable(id) => Some(cb.clone()),
                     _ => None,
                 });
-            let mut replies = ReplyStage::new();
+            let mut replies = ReplyStage::held_to(self.reply_bounds);
             if let Some(callback) = callback {
                 let _answering =
                     query::Answering::enter(self as *const Self as usize, generation, query.rid());
@@ -3327,7 +3337,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             qos,
         };
         let query = opts.loopback_query();
-        let mut staged = ReplyStage::new();
+        let mut staged = ReplyStage::held_to(self.reply_bounds);
         let mut registry = core.registry.borrow_mut();
         self.plane.asking_locally(|| {
             registry.app.queryables.local_query_with_value(

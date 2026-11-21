@@ -894,6 +894,13 @@ where
     /// ([`ApplicationLayerObserver::querier_max_pending_queries`]). Read from the observer once,
     /// when the session is made, so a querier is declared without the observer's lock.
     querier_max_pending_queries: wz_session_core::limit_binding::Quota,
+    /// The bounds the replies of this session's queryables are staged under, as the session's
+    /// creator stated them to the observer the session is made with
+    /// ([`ApplicationLayerObserver::reply_bounds`]). Read from the observer once, when the
+    /// session is made, so a handler job run outside the observer's lock, or a query held past
+    /// its handler, stages its replies under them without that lock.
+    #[cfg(all(feature = "transport-unicast", feature = "query-queryable"))]
+    reply_bounds: wz_session_core::reply_stage::ReplyBounds,
     /// R311kz — per-session deferred-fire queue (the F-6 fix): the
     /// matching-listener sinks installed in the registries stage their
     /// fires here (under the observer lock), and the drive-loop
@@ -1435,6 +1442,8 @@ where
             // The count of the very observer shared above.
             local_live: self.local_live.clone(),
             querier_max_pending_queries: self.querier_max_pending_queries,
+            #[cfg(all(feature = "transport-unicast", feature = "query-queryable"))]
+            reply_bounds: self.reply_bounds,
             fires: self.fires.clone(),
             clock: self.clock.clone(),
             // An Arc bump, deliberately: a fork must SHARE the node clock, not
@@ -3264,6 +3273,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
         let local_live = R::with_mutex_mut(&observer, |o| o.subscribers.local_live());
         let querier_max_pending_queries =
             R::with_mutex_mut(&observer, |o| o.querier_max_pending_queries());
+        #[cfg(all(feature = "transport-unicast", feature = "query-queryable"))]
+        let reply_bounds = R::with_mutex_mut(&observer, |o| o.reply_bounds());
         let declaration_order = Arc::new(R::new_mutex_held_across_waits(
             wz_session_core::owed_replies::OwedReplies::new(),
         ));
@@ -3368,6 +3379,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
             declaration_order,
             local_live,
             querier_max_pending_queries,
+            #[cfg(all(feature = "transport-unicast", feature = "query-queryable"))]
+            reply_bounds,
             fires: wz_session_core::deferred_fire::DeferredFireQueue::new(),
             clock,
             // The holds on the Finals this session's queryables owe: a group's queryable answers
@@ -4022,6 +4035,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         let local_live = R::with_mutex_mut(&observer, |o| o.subscribers.local_live());
         let querier_max_pending_queries =
             R::with_mutex_mut(&observer, |o| o.querier_max_pending_queries());
+        #[cfg(all(feature = "transport-unicast", feature = "query-queryable"))]
+        let reply_bounds = R::with_mutex_mut(&observer, |o| o.reply_bounds());
         let session = Self::from_inner(SessionInner {
             // R311y554 — the default is the pre-policy behaviour; a host that
             // needs the drive-task hand-off opts in with
@@ -4038,6 +4053,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             )),
             local_live,
             querier_max_pending_queries,
+            #[cfg(all(feature = "transport-unicast", feature = "query-queryable"))]
+            reply_bounds,
             // R311kz — fresh deferred-fire queue per logical session;
             // every deferred sink (matching, decl listeners, data
             // planes) clones a handle out of it at registration.
@@ -6189,7 +6206,9 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                         wz_session_core::link::RxBytes,
                     )> = None;
                     R::with_mutex_mut(&self.observer, |observer| {
-                        let mut replies = wz_session_core::reply_stage::ReplyStage::new();
+                        let mut replies = wz_session_core::reply_stage::ReplyStage::held_to(
+                            observer.reply_bounds(),
+                        );
                         // R311y94 (review V2) — carry the GET's selector params
                         // (`_sn` / `_max`) into the loopback Query so a SessionLocal
                         // queryable filters identically to the wire path.
