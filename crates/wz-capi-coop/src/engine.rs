@@ -93,6 +93,7 @@ use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::shared_key_ids::{KeyIdsAtOpen, KeyIdsRefused, LinkKeyForms, SharedKeyIds};
 use wz_session_core::signing_key::SigningKey;
 use wz_session_core::sink::{BoxedSink, SampleView};
+use wz_session_core::timestamp_visibility::{exposed_by, HiddenTimestamp};
 use wz_session_core::wire_id::{next_u32_id, u32_id_taken, EntityId, ExprId};
 use wz_session_core::wireexpr_resolve::{OwnMappingSpace, SharedOwnMappingSpace};
 #[cfg(feature = "listen")]
@@ -180,7 +181,8 @@ use {
     wz_capi_port::{cancellation::CancellableFan, ReplyCallback},
     wz_session_core::query_options::QueryOptions,
     wz_session_core::reply_acceptance::ReplyAcceptance,
-    wz_session_core::reply_sink::ConsolidatingSink,
+    wz_session_core::reply_sink::{ConsolidatingSink, ReplyView},
+    wz_session_core::timestamp_visibility::HiddenReplyTimestamp,
 };
 
 /// How a session is opened: what the ABI's config says, which the engine turns into the
@@ -771,9 +773,12 @@ impl Drop for Delivering<'_> {
     }
 }
 
+/// What a subscriber's sink mints: the callback a sample is handed to.
+type SubscriberCallbackFn = Box<dyn FnMut(&dyn SampleView) + Send + 'static>;
+
 /// A subscriber's callback, as the ABI's sink minted it. Locked while it runs, so a delivery
 /// from the read task and one from the program's own `zp_read` never overlap.
-type SubscriberCallback = Arc<Mutex<Box<dyn FnMut(&dyn SampleView) + Send + 'static>>>;
+type SubscriberCallback = Arc<Mutex<SubscriberCallbackFn>>;
 
 /// A queryable's callback, locked while it runs as a subscriber's is.
 #[cfg(feature = "queryable")]
@@ -1227,6 +1232,25 @@ fn dispatch_holding_finals<C: ClockSource + 'static>(
             }
         }
     }
+}
+
+/// A subscriber's `callback`, shown each sample's timestamp when `expose` and none otherwise
+/// (`entity-timestamp-opt-in`): the one place a sample is handed to a subscriber's callback.
+fn sample_shown(expose: bool, mut callback: SubscriberCallbackFn) -> SubscriberCallbackFn {
+    if expose {
+        return callback;
+    }
+    Box::new(move |sample: &dyn SampleView| callback(&HiddenTimestamp(sample)))
+}
+
+/// A get's leg `callback`, shown each reply's timestamp when `expose` and none otherwise
+/// (`entity-timestamp-opt-in`): the one place a reply is handed to a get's callback.
+#[cfg(feature = "query")]
+fn reply_shown(expose: bool, mut callback: ReplyCallback) -> ReplyCallback {
+    if expose {
+        return callback;
+    }
+    Box::new(move |reply: &dyn ReplyView| callback(&HiddenReplyTimestamp(reply)))
 }
 
 /// The `on_event` of a link whose session has no queryable: the registry's dispatch, with
@@ -3667,9 +3691,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let Ok(registration) = registration else {
             return Some(id);
         };
+        // The declaration states no choice about the timestamp, so it takes the session's
+        // `entity-timestamp-opt-in`, as the policy the session was opened under resolves it.
+        let callback = sample_shown(exposed_by(&core.policy), sink());
         lock(&self.targets).push((
             TargetKey::Subscriber(id),
-            Target::Subscriber(Arc::new(Mutex::new(sink()))),
+            Target::Subscriber(Arc::new(Mutex::new(callback))),
         ));
         let entry = SubEntry {
             id,
@@ -4242,16 +4269,21 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         if StatementNotHonoured::of_query(opts).is_err() {
             return Some(0);
         }
-        let faces = {
+        let (faces, expose) = {
             let Some(guard) = self.live() else {
                 return Some(0);
             };
-            if opts.allowed_destination.allows_remote() {
+            // `entity-timestamp-opt-in`: the query's choice, or the session's policy when it
+            // states none, applied to every leg's callback, after its replies are consolidated.
+            let expose = opts.expose_timestamp_by(&guard.0.policy);
+            let faces = if opts.allowed_destination.allows_remote() {
                 guard.0.up_faces()
             } else {
                 Vec::new()
-            }
+            };
+            (faces, expose)
         };
+        let mut leg = || reply_shown(expose, leg());
         let mut issued = 0;
         for face in faces {
             let leg_id = self.next_local_id();

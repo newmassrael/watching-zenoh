@@ -81,6 +81,8 @@ enum Command {
     DeclareQueryable(wz_session_core::wire_id::EntityId, &'static str, bool),
     UndeclareQueryable(u64),
     Push(&'static str, &'static [u8]),
+    /// [`Command::Push`] stamped with a time by the router.
+    PushStamped(&'static str, &'static [u8]),
     /// Push `.1` naming id `.0` in the RECEIVER's space, as a zenoh router does for a subscriber it
     /// routes to once the subscriber has declared a key expression to it: the id is one the
     /// session under test declared, and the key is what that declaration says.
@@ -112,6 +114,9 @@ enum Command {
     /// Hold a queryable on the key that answers each query with the payload, on the query's key.
     #[cfg(feature = "query")]
     Answer(&'static str, &'static [u8]),
+    /// [`Command::Answer`] with each reply stamped by the router's clock.
+    #[cfg(feature = "query")]
+    AnswerStamped(&'static str, &'static [u8]),
     /// Answer no query from now on, as a peer gone quiet: a frame that carries one is dropped.
     #[cfg(feature = "query")]
     Silence,
@@ -480,6 +485,13 @@ fn run_router(
             Ok(Command::Push(key, value)) => {
                 let _ = actions.send_push_literal(key, value, true);
             }
+            Ok(Command::PushStamped(key, value)) => {
+                let meta = wz_session_core::metadata::PushMetadata {
+                    timestamp: Some(router_stamp(zid)),
+                    ..Default::default()
+                };
+                let _ = actions.send_push_with_meta_literal(key, value, true, &meta);
+            }
             Ok(Command::PushReceiverAlias(id, value)) => {
                 // The aliased builder names the SENDER's space; this Push names the receiver's.
                 let mut push = wz_session_core::push_build::build_push_aliased(id, None, value)
@@ -534,6 +546,26 @@ fn run_router(
                         BoxedQuerySink::new(
                             move |query: &dyn QueryView, out: &mut dyn ReplyOut| {
                                 let _ = out.reply_keyed(query.keyexpr(), value);
+                            },
+                        ),
+                    )
+                    .expect("the router's queryable");
+                counted_queries.lock().unwrap().settled = true;
+            }
+            #[cfg(feature = "query")]
+            Ok(Command::AnswerStamped(key, value)) => {
+                let stamp = router_stamp(zid);
+                answering
+                    .borrow_mut()
+                    .queryables
+                    .register_sink(
+                        key,
+                        Locality::Any,
+                        false,
+                        BoxedQuerySink::new(
+                            move |query: &dyn QueryView, out: &mut dyn ReplyOut| {
+                                let _ =
+                                    out.reply_keyed_stamped(query.keyexpr(), value, None, &stamp);
                             },
                         ),
                     )
@@ -608,6 +640,14 @@ fn run_router(
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => return,
         }
+    }
+}
+
+/// The time the router stamps what it is told to stamp, under its own zid.
+fn router_stamp(zid: u8) -> wz_session_core::sample::TimestampHint {
+    wz_session_core::sample::TimestampHint {
+        time: 0x6000_0000_0000_0001,
+        zid: vec![zid; 4],
     }
 }
 
@@ -1384,3 +1424,4 @@ mod shared_key_ids;
 mod snapshot;
 #[cfg(feature = "ticker")]
 mod ticker;
+mod timestamps;
