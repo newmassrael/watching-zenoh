@@ -13056,10 +13056,11 @@ layer_c1co_pico_client_dials_a_listener() {
 #
 #   1. kconfig     the pinned Kconfig interpreter, which the next leg resolves the profile with
 #                  (idempotent, hash-pinned), as Layer C1st provisions it.
-#   2. pico-tokio  `wz-capi-pico` built from the profile the Windows package is built from
-#                  (`configs/profiles/host-peer-ext.conf`, resolved by `wz_config.py`), its unit
-#                  tests and every integration test target that build compiles: the doors, the
-#                  layouts and the sessions over the loopback of a 32-bit process.
+#   2. pico-profile  `wz-capi-pico` built from the profile the Windows package is built from
+#                  (`configs/profiles/host-peer-ext.conf`, resolved by `wz_config.py` on the
+#                  engine it chooses, the cooperative one), its unit tests and every integration
+#                  test target that build compiles: the doors, the layouts and the sessions over
+#                  the loopback of a 32-bit process.
 #   3. pico-coop   the cooperative engine's build of the same planes (it carries no tokio
 #                  engine): its unit tests, over `wz-runtime-posix`'s host at 32 bits.
 #   4. coop-mutual-dial  two cooperative sessions dialling each other over real sockets, the
@@ -13104,7 +13105,7 @@ layer_c1p32_pico_i686() {
     coop+=",advanced,unstable-api,connectivity,app-transport"
     _runci_legs_open C1p32 || return 1
     _runci_leg kconfig -- bash scripts/provision-kconfiglib.sh
-    _runci_leg pico-tokio --after kconfig -- _c1p32_pico_profile_tests "$target"
+    _runci_leg pico-profile --after kconfig -- _c1p32_pico_profile_tests "$target"
     _runci_leg pico-coop -- _runci_guarded_test "C1p32 pico cooperative engine" + \
         cargo test -p wz-capi-pico --target "$target" --no-default-features --features "$coop" --lib \
         --no-fail-fast
@@ -13132,7 +13133,7 @@ _c1p32_pico_profile_tests() {
         return 1
     fi
     read -r -a args <<<"$resolved"
-    _runci_guarded_test "C1p32 pico host-peer-ext (tokio engine)" + \
+    _runci_guarded_test "C1p32 pico host-peer-ext (the profile's engine)" + \
         cargo test -p wz-capi-pico --target "$target" "${args[@]}" --tests --no-fail-fast
 }
 

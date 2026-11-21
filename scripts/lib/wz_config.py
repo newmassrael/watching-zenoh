@@ -61,7 +61,8 @@ itself (their Kconfig symbol, default and help). This tool is everything that de
                                   that build's library writes
     --resolve-features ABI PRESET...
                                   merge presets onto the defaults (kconfiglib) and print the cargo
-                                  arguments of ABI
+                                  arguments of ABI, on the engine the presets choose
+                                  (CONFIG_WZ_ENGINE_COOP: the --engine coop list)
     --drop-in-features c HEADER   the cargo arguments of the wz-capi-c build a program compiled
                                   against an installed zenoh-c's zenoh_configure.h links
     --env pico CONFIG             the WZ_LIMIT_<NAME>=<n> environment of the wz-capi-pico build
@@ -2146,8 +2147,53 @@ def features_for(decl: dict, abi: str, on: set[str]) -> list[str]:
 
 
 def cargo_args(decl: dict, abi: str, on: set[str]) -> str:
-    feats = features_for(decl, abi, on)
+    return cargo_args_of(features_for(decl, abi, on))
+
+
+def cargo_args_of(feats: list[str]) -> str:
+    """The cargo arguments of a build of exactly `feats`."""
     return "--no-default-features" + (f" --features {','.join(feats)}" if feats else "")
+
+
+# The option of the global axis `engine` that runs a pico build's sessions on the cooperative engine
+# (docs/c-abi-engine-and-memory.md, E1). The axis chooses no capability: the choice changes the
+# build's feature list (`engine_features`).
+ENGINE_COOP_SYMBOL = "WZ_ENGINE_COOP"
+
+
+def engine_features(abi: str, base: list[str], feats: list[str], coop: bool,
+                    table: dict) -> list[str]:
+    """`feats`, `abi`'s list for the capabilities a configuration turns on over the ABI's
+    `base`, on the engine it chose: as it is for the tokio engine, and for the cooperative one the
+    pico crate's list with the base's tokio switches left out and `engine-coop` named
+    (`coop_features`, over the crate's feature table `table`).
+
+    Strict, as the resolution is (C9): a capability the configuration turned on that only the
+    tokio engine runs would be left out of the cooperative build without a word, so it is refused
+    by name, and so is the cooperative choice for an ABI that has one engine."""
+    if not coop:
+        return feats
+    if abi != "pico":
+        raise PresetError(f"{ENGINE_COOP_SYMBOL} chooses the cooperative engine, which the {abi} "
+                          "ABI does not have; only the pico ABI runs on it")
+    out = coop_features(feats, table)
+    lost = [f for f in feats if f not in out and f not in base]
+    if lost:
+        raise PresetError(f"{ENGINE_COOP_SYMBOL} chooses the cooperative engine, which does not "
+                          f"run {', '.join(lost)}: turn {'it' if len(lost) == 1 else 'them'} off "
+                          "or choose the tokio engine")
+    return out
+
+
+def resolved_features(decl: dict, abi: str, kconf) -> list[str]:
+    """The `--features` list of `abi` a resolved configuration gives: its capabilities on the
+    engine it chose. A tree generated before the engine axis was declared has no such symbol and
+    chooses the tokio engine, as every build did then."""
+    sym = kconf.syms.get(ENGINE_COOP_SYMBOL)
+    coop = sym is not None and sym.tri_value == 2
+    table = manifest_features(MANIFESTS["pico"]) if coop else {}
+    return engine_features(abi, decl["base"][abi],
+                           features_for(decl, abi, resolved_caps(decl, kconf)), coop, table)
 
 
 def coop_features(feats: list[str], table: dict) -> list[str]:
@@ -4301,7 +4347,7 @@ def statement_digest(body: dict) -> str:
 def resolved_statement(decl: dict, abi: str, kconf, derived_from: dict) -> dict:
     """The conformance statement of the `abi` build a resolved configuration gives."""
     return conformance_statement(
-        decl, abi, features_for(decl, abi, resolved_caps(decl, kconf)),
+        decl, abi, resolved_features(decl, abi, kconf),
         {lim["id"]: int(kconf.syms[lim["kconfig"]].str_value) for lim in decl["limits"]},
         {pol["id"]: resolved_policy(kconf, pol) for pol in decl["policies"]},
         derived_from)
@@ -4383,8 +4429,13 @@ def cmd_check_presets() -> int:
             bad += 1
             continue
         abi = BASE_ABI[preset_header(profile.read_text(encoding="utf-8"))["base"]]
-        print(f"  wz-config presets: {profile.name} -> {abi}: "
-              f"{cargo_args(decl, abi, resolved_caps(decl, kconf))}")
+        try:
+            args = cargo_args_of(resolved_features(decl, abi, kconf))
+        except PresetError as exc:
+            print(f"  wz-config presets FAIL: {profile.name}: {exc}", file=sys.stderr)
+            bad += 1
+            continue
+        print(f"  wz-config presets: {profile.name} -> {abi}: {args}")
     for original in BASE_ABI:
         try:
             kconf = resolve([], original=original)
@@ -5002,6 +5053,30 @@ def cmd_selftest() -> int:
     tokio_selecting["query"] = list(good["query"]) + ["engine-tokio"]
     expect("a capability that later selects the tokio engine leaves the list by itself",
            "query" not in coop_features(arm, tokio_selecting))
+    # The engine axis: the tokio choice is the list as it is, the cooperative one the cooperative
+    # list, and the cooperative choice for an ABI with one engine is refused by name.
+    base = decl["base"]["pico"]
+    shared = features_for(decl, "pico", {"peer", "query"})
+    expect("the tokio engine keeps the list as the capabilities make it",
+           engine_features("pico", base, arm, False, good) == arm)
+    expect("the cooperative engine is the cooperative list, the base's tokio switches out",
+           engine_features("pico", base, shared, True, good) == coop_features(shared, good)
+           and "rx-busy-poll" not in engine_features("pico", base, shared, True, good))
+
+    def refusal(abi: str, feats: list[str]) -> str:
+        try:
+            engine_features(abi, decl["base"][abi], feats, True, good)
+        except PresetError as exc:
+            return str(exc)
+        return ""
+
+    expect("a capability only the tokio engine runs is refused by name on the cooperative one",
+           "raweth-transport" in refusal("pico", arm))
+    expect("the cooperative engine is refused for the zenoh-c ABI",
+           ENGINE_COOP_SYMBOL in refusal("c", features_for(decl, "c", set())))
+    expect("the cargo arguments of a list are the list's",
+           cargo_args_of(["engine-coop", "std"]) == "--no-default-features --features engine-coop,std"
+           and cargo_args_of([]) == "--no-default-features")
     # The conformance statement (decision C15) states the build the feature list makes, every
     # capability of the ABI on or off, every limit and policy, and a digest of only those values.
     defaults = {lim["id"]: lim["default"] for lim in decl["limits"]}
@@ -6661,10 +6736,11 @@ def main(argv: list[str]) -> int:
         decl = load_decl()
         try:
             kconf = resolve([pathlib.Path(p) for p in argv[3:]])
+            feats = resolved_features(decl, argv[2], kconf)
         except PresetError as exc:
             print(f"  wz-config FAIL: {exc}", file=sys.stderr)
             return 1
-        print(cargo_args(decl, argv[2], resolved_caps(decl, kconf)))
+        print(cargo_args_of(feats))
         return 0
     if len(argv) == 4 and argv[1] == "--env" and argv[2] == "pico":
         # The numbers a pico `config.h` states for its value switches, as the environment of the

@@ -152,9 +152,10 @@ core = ["rx-busy-poll", "open-plan"]
 # allocator), which the crate's default names first. It is not a capability: no plane comes or
 # goes with it, every host engine selects it, and only a Zephyr image builds the layer without it
 # (`os-zephyr`), from a manifest of its own.
-# `engine-tokio`: the engine a pico build runs its sessions on (docs/capi-pico-on-coop-engine.md).
-# Every build this declaration configures is on the tokio engine; the cooperative engine is not
-# an axis here yet (that note's decision D5).
+# `engine-tokio`: the engine a pico build runs its sessions on (docs/capi-pico-on-coop-engine.md),
+# with the two switches of its drive. A configuration that chooses the cooperative engine on the
+# global axis `engine` (below) is resolved from the same list with every feature that selects the
+# tokio engine left out and `engine-coop` named (`wz_config.py` `engine_features`).
 pico = ["std", "engine-tokio", "serial-drive-own-thread", "rx-busy-poll"]
 c = []
 
@@ -4759,6 +4760,46 @@ help = '''
 Upstream's `mode = router`. It is a peer that also stamps the messages it relays: the
 capability `timestamping` is the node clock that role holds, which upstream's router has on
 by default.
+'''
+
+# The engine a pico ABI build runs its sessions on (docs/c-abi-engine-and-memory.md, E1 and P1). A
+# global axis, so that a profile states it as it states the role. It selects no capability: the
+# choice changes the cargo features the configuration resolves to (`wz_config.py`
+# `engine_features`), and only the pico ABI has a second engine, so the cooperative choice for
+# another ABI is refused when it is resolved. No original states it, so each original's defconfig
+# keeps the default.
+[[axis]]
+id = "engine"
+kconfig = "WZ_ENGINE"
+prompt = "The engine a pico ABI build runs its sessions on"
+default = "tokio"
+help = '''
+The tokio engine runs every capability of the pico ABI; the cooperative engine is the one
+sans-I/O engine the C ABI presets move to, and runs every capability but those of the tokio
+engine's own drive (its drive thread, its busy read) and the planes not yet ported to it.
+'''
+
+[[axis_option]]
+id = "tokio"
+axis = "engine"
+kconfig = "WZ_ENGINE_TOKIO"
+prompt = "The tokio engine: each session on a runtime of its own"
+help = '''
+`engine-tokio` with the two switches of its drive (`serial-drive-own-thread`, `rx-busy-poll`),
+as the base of the pico ABI names them.
+'''
+
+[[axis_option]]
+id = "coop"
+axis = "engine"
+kconfig = "WZ_ENGINE_COOP"
+prompt = "The cooperative engine: each session stepped by the program or its read task"
+help = '''
+`engine-coop`: a session is stepped by the program's own calls (zp_read, zp_spin_once) in
+zenoh-pico's single-threaded arm, and by the read task the program starts in its multi-threaded
+arm, as zenoh-pico's are. The base's tokio switches are left out of the build; a configuration
+that also turns on a capability only the tokio engine runs is refused when it is resolved, by the
+capability's name.
 '''
 
 [[image]]

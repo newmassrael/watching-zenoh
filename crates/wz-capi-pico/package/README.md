@@ -97,14 +97,21 @@ with).
 
 ## Threads and callbacks
 
-The library runs each session on threads of its own (the tokio engine, the only engine of the
-Windows library). It reads, keeps the lease and runs every callback on those threads, whether or
-not the program starts the read task. A program written for zenoh-pico's single-threaded arm,
-whose callbacks run only inside its own calls, must therefore lock what its callbacks share with
-its own thread, or read samples through a ring or fifo channel and pull them with the channel's
-`try_recv`. `zp_read`, `zp_send_keep_alive` and `zp_spin_once` answer for a live session and do no
-work. The order a program with its own scheduler calls the run API in is written in `wz_ext.h`,
-in the section "the periodic run API", and `examples\periodic.c` runs it.
+The library's engine is the cooperative one: a session moves only when it is stepped, as a
+zenoh-pico session does. zenoh-pico has two arms, and so does this library. In the single-threaded
+arm the program steps the session itself with `zp_read` and `zp_spin_once`, and every callback
+runs inside those calls. In the multi-threaded arm, which is this package's (its `config.h` defines
+`Z_FEATURE_MULTI_THREAD`), the session is stepped by its read task: a thread `z_open` starts
+unless the open's options set `auto_start_read_task` to false, and which `zp_start_read_task` and
+`zp_stop_read_task` start and stop. The read task reads, keeps the lease and runs every callback;
+while it is stopped the session reads nothing and sends no keep-alive, and a put still writes, on
+the caller's thread. A callback runs with no lock of the library held, so it may call into the
+session; what it shares with the program's own thread the program locks, or it reads samples
+through a ring or fifo channel and pulls them with the channel's `try_recv`. A program written for
+the single-threaded arm links a build of that arm, which this package is not: the two arms differ
+in the size of types a program allocates. The order a program with its own scheduler calls the
+run API in is written in `wz_ext.h`, in the section "the periodic run API", and
+`examples\periodic.c` runs it.
 
 ## wz's own doors in this build
 

@@ -34,9 +34,13 @@ through it.
 
 ## Known limits
 
-- Sessions run on the library's own threads (the tokio engine). zenoh-pico's single-threaded arm,
-  where the program drives the session from its own scheduler and callbacks run inside its calls,
-  is not part of this library: `README.md`, "Threads and callbacks".
+- Sessions run on the cooperative engine and are stepped by their read task, as in zenoh-pico's
+  multi-threaded arm. zenoh-pico's single-threaded arm, where the program steps the session with
+  `zp_read` and `zp_spin_once` and callbacks run inside its calls, is a build of its own and not
+  this package: `README.md`, "Threads and callbacks".
+- Gossip, which a session told of a node by a peer uses to dial it, is not in this build: the pico
+  C API never starts it, and zenoh-pico has no such plane. Its peers are found by scouting and the
+  endpoints the program configures.
 - The library and its import library are not code-signed.
 - The library is linked with `/Brepro`, so its image carries no build time. Whether two builds of
   one commit give the same bytes has not been measured.

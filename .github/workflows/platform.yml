@@ -1007,9 +1007,11 @@ jobs:
   # are, and exits 0 when it ran its exchange.
   #
   # A job of its own and not steps of `capi`: that job's budget is spent by what it gates,
-  # and Linux is not one of its hosts. Every example builds the library with ONE feature list
-  # (`WZ_EXAMPLE_FEATURES`, the union of what the examples' doors need), so the library is
-  # built once; the profile example's second run builds it again with the policy's build
+  # and Linux is not one of its hosts. The examples are the program set of the release package
+  # (`package-windows`), so every example builds the library the package ships: the profile
+  # `host-peer-ext` resolved by the pinned Kconfig interpreter, on the engine it chooses (the
+  # cooperative one, `WZ_PICO_ENGINE`), as ONE feature list (`WZ_EXAMPLE_FEATURES`), so the
+  # library is built once; the profile example's second run builds it again with the policy's build
   # default on, last, because that build replaces the first. Both runs also open sessions
   # from documents that name their profile, whose answers must not follow the build's default.
   #
@@ -1033,7 +1035,7 @@ jobs:
             host: windows
     env:
       WZ_HOST_SELECTED: ${{ (inputs.host == '' || inputs.host == 'both' || inputs.host == matrix.host) && 'true' || 'false' }}
-      WZ_EXAMPLE_FEATURES: app-transport,config-document,e2e-sender,e2e-receiver,e2e-supervision,instance-key,replay-cache
+      WZ_PICO_ENGINE: coop
     steps:
       - name: Checkout (with submodules)
         if: ${{ env.WZ_HOST_SELECTED == 'true' }}
@@ -1077,6 +1079,32 @@ jobs:
           else
             sudo apt-get update -q && sudo apt-get install -y --no-install-recommends libclang-dev
           fi
+
+      # The package's feature list is resolved from its profile with the pinned interpreter, which
+      # `wz_config.py` imports from the running python, where this puts it, by version and hash.
+      - name: The pinned Kconfig interpreter
+        if: ${{ env.WZ_HOST_SELECTED == 'true' }}
+        shell: bash
+        run: python -m pip install --quiet --no-deps --require-hashes -r scripts/requirements-kconfig.txt
+
+      # The profile's list without `engine-coop`, which scripts/pico-c-program.sh names itself for
+      # the cooperative engine. A profile that no longer resolves to that engine fails here, and
+      # not as an example that ran against another build.
+      - name: the package's feature list
+        if: ${{ env.WZ_HOST_SELECTED == 'true' }}
+        shell: bash
+        run: |
+          args="$(python scripts/lib/wz_config.py --resolve-features pico configs/profiles/host-peer-ext.conf)"
+          features=",${args#--no-default-features --features },"
+          case "$features" in
+            *,engine-coop,*) ;;
+            *) echo "host-peer-ext does not resolve to the cooperative engine: $args" >&2; exit 1 ;;
+          esac
+          features="${features//,engine-coop,/,}"
+          features="${features#,}"
+          features="${features%,}"
+          echo "the package's features: $features"
+          echo "WZ_EXAMPLE_FEATURES=$features" >> "$GITHUB_ENV"
 
       # The group of the transport example needs an interface the host carries multicast
       # on: the loopback on Linux; on Windows, whose loopback adapter carries no group, the
