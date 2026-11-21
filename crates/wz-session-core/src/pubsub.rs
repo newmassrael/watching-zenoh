@@ -98,7 +98,9 @@ use alloc::string::String;
 // a subset no lane built until Layer C1bj. Fully qualifying removes the
 // coupling rather than restating it in a longer cfg.
 
-use crate::bounded::{Arena, BoundedString, BoundedVec, LendRefused, Lent, Profile, Storage};
+use crate::bounded::{
+    Arena, BoundedString, BoundedVec, LendRefused, Lent, Profile, Static, Storage,
+};
 // Not every build reads a held chain here: the arms that do are gated on the body codecs.
 use crate::caps;
 #[cfg(feature = "storage-profile")]
@@ -497,7 +499,8 @@ struct PeerNaming<P: Storage = Profile> {
     ///
     /// Per SESSION: two sessions of one process may carry two zids, and an echo
     /// is a sample that names the zid of the session it came back on.
-    own_zid: Option<BoundedVec<u8, 16, P>>,
+    // Inline whatever the policy: sixteen bytes no table lends.
+    own_zid: Option<BoundedVec<u8, 16, Static>>,
 }
 
 /// What a session's peer asked to be told about our subscriptions, and what is
@@ -1725,9 +1728,9 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         interests: &mut InterestSide<Q>,
         new_id: SubscriptionId,
     ) {
-        // Of the interest table's own policy: it holds every row the table can, so the loop
-        // below stops only where the table itself would.
-        let mut hits: BoundedVec<(u64, bool), { caps::MAX_INBOUND_SUB_INTERESTS }, Q> =
+        // As many rows as the interest table can hold, in a buffer of its own: a policy whose rows
+        // are only lent makes none for itself (`Storage::Scratch`).
+        let mut hits: BoundedVec<(u64, bool), { caps::MAX_INBOUND_SUB_INTERESTS }, Q::Scratch> =
             BoundedVec::default();
         {
             // The new subscription's pattern is read back out of the table
@@ -1787,8 +1790,8 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     /// the red that keeps this line honest; the wire tests are not.
     #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
     fn stage_emptied_aggregate_retracts<Q: Storage>(&self, interests: &mut InterestSide<Q>) {
-        // Of the interest table's own policy, as in `stage_future_subscriber_pushes`.
-        let mut hits: BoundedVec<u64, { caps::MAX_INBOUND_SUB_INTERESTS }, Q> =
+        // A buffer of its own, as in `stage_future_subscriber_pushes`.
+        let mut hits: BoundedVec<u64, { caps::MAX_INBOUND_SUB_INTERESTS }, Q::Scratch> =
             BoundedVec::default();
         for row in interests.rows.iter() {
             if row.aggregate
@@ -3177,7 +3180,7 @@ impl<P: Storage> SubscriberPeer<P> {
         if !(1..=16).contains(&zid.len()) {
             return false;
         }
-        let mut own: BoundedVec<u8, 16, P> = BoundedVec::default();
+        let mut own: BoundedVec<u8, 16, Static> = BoundedVec::default();
         for byte in zid {
             // At most 16 were admitted above, so the fixed backing has room.
             if own.push(*byte).is_err() {

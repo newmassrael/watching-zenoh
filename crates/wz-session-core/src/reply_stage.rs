@@ -939,15 +939,23 @@ impl<P: Storage> FinalStage<P> {
     }
 
     /// Take every owed `Final` out, in the order they were owed, as a table of its own. This
-    /// table is left empty, with its count of refused requests and its quota: the count says
-    /// what was asked of this table, and the quota is the one its creator stated, which a
-    /// table built by `Default` in its place would not hold.
-    pub fn take_owed(&mut self) -> Self {
-        Self {
-            rows: core::mem::take(&mut self.rows),
+    /// table is left empty, with its count of refused requests, its quota and its rows: the
+    /// count says what was asked of this table, the quota is the one its creator stated, and
+    /// the rows are the ones its maker lent it, which a table moved out would take with it. The
+    /// table taken out is a buffer of its own (`Storage::Scratch`), as a policy whose rows are
+    /// only lent makes none for itself.
+    pub fn take_owed(&mut self) -> FinalStage<P::Scratch> {
+        let mut owed = FinalStage {
+            rows: BoundedVec::default(),
             refused_requests: 0,
             quota: self.quota,
+        };
+        for row in self.rows.iter() {
+            let taken = owed.rows.push(*row);
+            debug_assert!(taken.is_ok(), "a table of the same capacity");
         }
+        self.rows.clear();
+        owed
     }
 }
 

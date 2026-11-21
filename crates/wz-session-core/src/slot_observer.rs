@@ -1099,7 +1099,10 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
             }
         }
         #[cfg(feature = "liveliness-token")]
-        for item in core::mem::take(&mut peers.pending_declares) {
+        // Drained in place: the rows are the ones the peer's tables were made with, which a table
+        // moved out would take with it.
+        while !peers.pending_declares.is_empty() {
+            let item = peers.pending_declares.remove(0);
             match item {
                 DeclResponseItem::Token {
                     token_id,
@@ -1360,6 +1363,15 @@ mod lent_tests {
             &SessionLimits::defaults(),
         )
         .expect("the arena has the rows")
+    }
+
+    /// The own zid a peer's tables hold is inline whatever their policy: a side of the lent policy,
+    /// lent no rows at all, keeps it.
+    #[test]
+    fn a_lent_peer_side_keeps_its_own_zid() {
+        let mut side = crate::pubsub::SubscriberPeer::<Lent>::default();
+        assert!(side.set_own_zid_bytes(&[1, 2, 3]));
+        assert_eq!(side.own_zid(), Some(&[1u8, 2, 3][..]));
     }
 
     /// The application's tables answer the tables of a peer of any storage policy: a lent observer
