@@ -1241,13 +1241,25 @@ mod tests {
         }
     }
 
-    /// A payload past `MAX_REPLY_PAYLOAD_BYTES` is a refusal on the fixed policy and
-    /// leaves the stage as it was; the growable policy never had that bound.
+    /// Whether a stage of the policy `P` holding the snapshot's default bounds refuses a
+    /// payload one byte past the build's `MAX_REPLY_PAYLOAD_BYTES`: the fixed policy always
+    /// does, and any stage does where the snapshot's default bound is a number, as it is in a
+    /// build on the fixed profile; where the default is no bound a growable stage takes it.
+    fn refuses_past_the_build<P: Storage>() -> bool {
+        P::ENFORCES_CAPACITY
+            || !crate::limits::MaxReplyPayloadBytesHeld::default()
+                .get()
+                .admits(caps::MAX_REPLY_PAYLOAD_BYTES + 1)
+    }
+
+    /// A payload past `MAX_REPLY_PAYLOAD_BYTES` is a refusal where the stage's bound is that
+    /// value (the fixed policy, or the snapshot's default bound of a build on the fixed profile)
+    /// and leaves the stage as it was; a growable stage with no bound takes it.
     fn payload_past_the_bound<P: Storage>() {
         let big = [7u8; caps::MAX_REPLY_PAYLOAD_BYTES + 1];
         let mut stage: ReplyStage<P> = ReplyStage::default();
         let outcome = stage.stage_parts(put_reply(1, "a", &big));
-        if P::ENFORCES_CAPACITY {
+        if refuses_past_the_build::<P>() {
             assert_eq!(outcome, Err(ReplyError::PayloadTooLarge));
             assert_eq!(stage.staged(), 0);
             assert_eq!(stage.bytes_held(), 0, "a refusal writes nothing");
@@ -1478,15 +1490,16 @@ mod tests {
         assert_eq!(drained, 1);
     }
 
-    /// An attachment past the payload bound is refused on the fixed policy whether or not the
-    /// build holds attachments: a handler is told the same in every build.
+    /// An attachment past the payload bound is refused where the stage's bound is that value
+    /// (`refuses_past_the_build`) whether or not the build holds attachments: a handler is
+    /// told the same in every build.
     fn attachment_past_the_bound_is_refused_in_every_build<P: Storage>() {
         let big = [7u8; caps::MAX_REPLY_PAYLOAD_BYTES + 1];
         let info = some_source_info();
         let zid = [9u8; 4];
         let mut stage: ReplyStage<P> = ReplyStage::default();
         let outcome = stage.stage_parts(side_band_reply(&zid, &big, &info));
-        if P::ENFORCES_CAPACITY {
+        if refuses_past_the_build::<P>() {
             assert_eq!(outcome, Err(ReplyError::PayloadTooLarge));
             assert_eq!(stage.staged(), 0);
             assert_eq!(stage.refusals().payload_too_large, 1);
@@ -1594,6 +1607,15 @@ mod tests {
     #[test]
     fn the_growable_stage_addresses_past_64_kib() {
         use crate::bounded::Heap;
+        // A build on the fixed profile holds every stage, a growable one included, to the
+        // snapshot's default payload bound, which no reply of 40,000 bytes fits; the offsets
+        // past 64 KiB are reached only where that default is no bound.
+        if !crate::limits::MaxReplyPayloadBytesHeld::default()
+            .get()
+            .is_unbounded()
+        {
+            return;
+        }
         let first = alloc::vec![1u8; 40_000];
         let second = alloc::vec![2u8; 40_000];
         let mut stage: ReplyStage<Heap> = ReplyStage::default();
