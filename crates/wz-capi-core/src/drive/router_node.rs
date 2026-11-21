@@ -605,6 +605,7 @@ pub(crate) fn open_router_blocking(
         groups,
         session_defaults,
         session_policy,
+        session_limits,
         ..
     } = stance;
     // The prefix as the forwarder takes it. The plan validated the text, so one that does not
@@ -632,6 +633,7 @@ pub(crate) fn open_router_blocking(
         rx: link_rx,
         accept,
         policy: session_policy,
+        limits: session_limits,
     };
     let (_, wire_zid) = session_zids(zid).ok_or(OpenError::DriveFailed)?;
     // Built here and shared, so that the program holding the node can reach the forwarder's

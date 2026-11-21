@@ -24,6 +24,7 @@ fn params(zid: &[u8], batch_size: u16, lease_ms: u64) -> SessionInitParams {
         cookie_signing_key: crate::signing_key::SigningKey::new(vec![0xAB; 32])
             .expect("32-byte test key"),
         policy: crate::policy::SessionPolicy::defaults(),
+        limits: crate::limits::SessionLimits::BUILD,
     }
 }
 

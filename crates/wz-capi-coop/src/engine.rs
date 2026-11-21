@@ -1240,6 +1240,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             tx_queue: self.config.tx_queue,
             link_rx: self.config.link_rx,
             policy: self.policy,
+            // The snapshot the registry's tables were held to: the open decides it from the
+            // config alone.
+            limits: resolve_limits(&self.config),
             cookie_signing_key: SigningKey::from_entropy(&mut self.entropy)
                 .map_err(|_| OpenError::EntropyUnavailable)?,
         };

@@ -69,6 +69,7 @@ pub fn fixture_session_init_params() -> SessionInitParams {
         tx_queue: wz_runtime_tokio::session_glue::TxQueueConf::of_policy(&policy),
         link_rx: wz_runtime_tokio::session_glue::LinkRxConf::default(),
         policy,
+        limits: wz_runtime_tokio::limits::SessionLimits::BUILD,
         cookie_signing_key: SigningKey::new(vec![0xAB; 32])
             .expect("32-byte test key satisfies >= 32 invariant"),
     }
@@ -114,6 +115,7 @@ pub fn zenoh_interop_session_init_params(
         tx_queue: wz_runtime_tokio::session_glue::TxQueueConf::of_policy(&policy),
         link_rx: wz_runtime_tokio::session_glue::LinkRxConf::default(),
         policy,
+        limits: wz_runtime_tokio::limits::SessionLimits::BUILD,
         cookie_signing_key: SigningKey::new(vec![0xAB; 32])
             .expect("32-byte test key satisfies >= 32 invariant"),
     }

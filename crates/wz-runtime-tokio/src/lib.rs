@@ -599,6 +599,10 @@ use wz_session_core::policy::MulticastLoopback;
 /// Ungated, like `policy`.
 pub use wz_session_core::policy_document;
 
+/// The limits a stage after the build may decide, as snapshots, so a creator names the
+/// `limits::SessionLimits` it hands its sessions through the facade. Ungated, like `policy`.
+pub use wz_session_core::limits;
+
 /// session-extqos (R311y506) — the `init::ext::QoSLink` establishment codec:
 /// [`extqos::QosLinkState`] (the priority band + reliability a link declares),
 /// its z64 packing, and [`extqos::QosLinkError`], which

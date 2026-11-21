@@ -38,6 +38,7 @@ use wz_runtime_tokio::accept_loop::{
     accept_loop_offering_spawned, accept_loop_offering_spawned_local, DialIntentReceiver,
     DialIntentSender, FaceExecutor, SpawnedDrive,
 };
+use wz_runtime_tokio::limits::SessionLimits;
 use wz_runtime_tokio::node_clock::{NodeHlc, TimestampingEnabled};
 use wz_runtime_tokio::policy::{SessionPolicy, SnResolution};
 use wz_runtime_tokio::retry_period::RetryPolicy;
@@ -1422,6 +1423,9 @@ pub struct LinkConf {
     /// The policies of the session the links belong to: see [`OpenStance::session_policy`].
     /// Carried here because `init_params` is where every role hands them to a session.
     pub policy: SessionPolicy,
+    /// The session limits of the session the links belong to: see
+    /// [`OpenStance::session_limits`]. Carried here for the reason [`Self::policy`] is.
+    pub limits: SessionLimits,
 }
 
 /// The batch size a session advertises when its config states none: zenoh's own default
@@ -1459,6 +1463,7 @@ pub(crate) fn init_params(
         tx_queue: link_conf.tx.queue,
         link_rx: link_conf.rx,
         policy: link_conf.policy,
+        limits: link_conf.limits,
         cookie_signing_key: SigningKey::from_entropy(&mut OsEntropy)?,
     })
 }
@@ -4694,6 +4699,7 @@ pub fn open_blocking(
         rx: link_rx,
         accept,
         policy: session_policy,
+        limits: session_limits,
     };
     // The session's clock, which every face, its drive loop and its lease read: the program's time
     // base when the defaults name one, held by the session's state for as long as it runs, and the
@@ -4996,6 +5002,7 @@ mod tests {
             },
             accept: AcceptBounds::default(),
             policy: SessionPolicy::defaults(),
+            limits: SessionLimits::BUILD,
         };
         let params = init_params(WhatAmI::Client, [0xC1; 4].into(), stated).expect("entropy");
         assert_eq!(params.seq_num_res, SnResolution::Bits8.wire_code());
@@ -5035,11 +5042,47 @@ mod tests {
             rx: LinkRxConf::default(),
             accept: AcceptBounds::default(),
             policy: handed,
+            limits: SessionLimits::BUILD,
         };
         let params = init_params(WhatAmI::Peer, [0xC2; 4].into(), link_conf).expect("entropy");
         assert_eq!(params.policy, handed);
         assert_ne!(
             params.policy, build,
+            "the handed snapshot is not the build's"
+        );
+    }
+
+    /// The parameters every role mints carry the session limits its links were handed, not the
+    /// build's.
+    #[test]
+    fn the_parameters_a_session_is_given_carry_the_limits_of_its_links() {
+        use wz_session_core::limit_binding::{LimitSpec, Quota};
+        use wz_session_core::limits::MaxSubscriptions;
+        let mut handed = SessionLimits::BUILD;
+        if handed.select_max_subscriptions(Quota::at_most(2)).is_err() {
+            // The build allows one value: there is no other snapshot to hand.
+            assert!(MaxSubscriptions::DOMAIN.is_singleton());
+            return;
+        }
+        let link_conf = LinkConf {
+            tx: LinkTx {
+                queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
+                batch_size: DEFAULT_BATCH_SIZE,
+                lease_ms: DEFAULT_LEASE_MS,
+                keep_alive: KeepAliveConf::default(),
+                sn_resolution: SnResolution::default(),
+            },
+            rx: LinkRxConf::default(),
+            accept: AcceptBounds::default(),
+            policy: SessionPolicy::defaults(),
+            limits: handed,
+        };
+        let params = init_params(WhatAmI::Peer, [0xC3; 4].into(), link_conf).expect("entropy");
+        assert_eq!(params.limits, handed);
+        assert_eq!(params.limits.max_subscriptions(), Quota::at_most(2));
+        assert_ne!(
+            params.limits,
+            SessionLimits::BUILD,
             "the handed snapshot is not the build's"
         );
     }
@@ -5334,6 +5377,7 @@ mod tests {
                         rx: LinkRxConf::default(),
                         accept: AcceptBounds::default(),
                         policy: SessionPolicy::defaults(),
+                        limits: SessionLimits::BUILD,
                     },
                 )
                 .expect("entropy"),
@@ -5473,6 +5517,7 @@ mod tests {
                         rx: LinkRxConf::default(),
                         accept: AcceptBounds::default(),
                         policy: SessionPolicy::defaults(),
+                        limits: SessionLimits::BUILD,
                     },
                 )
                 .expect("entropy"),
@@ -5555,6 +5600,7 @@ mod tests {
                         rx: LinkRxConf::default(),
                         accept: AcceptBounds::default(),
                         policy: SessionPolicy::defaults(),
+                        limits: SessionLimits::BUILD,
                     },
                 )
                 .expect("entropy"),

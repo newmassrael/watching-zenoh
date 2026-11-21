@@ -96,6 +96,7 @@ fn unicast_params(zid: u8, policy: &SessionPolicy) -> Result<SessionInitParams, 
         tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(policy),
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         policy: *policy,
+        limits: wz_session_core::limits::SessionLimits::BUILD,
         cookie_signing_key,
     })
 }

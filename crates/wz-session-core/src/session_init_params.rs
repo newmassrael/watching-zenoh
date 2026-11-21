@@ -23,6 +23,7 @@ use alloc::vec::Vec;
 
 use wz_codecs::whatami::WhatAmI;
 
+use crate::limits::SessionLimits;
 use crate::policy::SessionPolicy;
 use crate::signing_key::SigningKey;
 
@@ -193,6 +194,12 @@ pub struct SessionInitParams {
     /// queue's own policy values ([`TxQueueConf::of_policy`]) are derived from the same snapshot
     /// by the creator.
     pub policy: SessionPolicy,
+    /// The value of every limit this session's tables are held to: the snapshot its creator
+    /// resolved for it, starting from [`SessionLimits::defaults`]. A table of the session reads its
+    /// bound here and never from the build. It rides here for the reason [`Self::tx_queue`] does.
+    /// Where the build allows each limit one value the snapshot holds no byte, and a field of no
+    /// size adds no padding to the bundle: its alignment is a `usize`'s, under the `u64` fields'.
+    pub limits: SessionLimits,
 }
 
 /// Upstream's default `transport/link/rx/max_message_size`, 1 GiB
