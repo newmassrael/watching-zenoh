@@ -216,3 +216,66 @@ fn in_a_netns_a_group_session_rejoins_a_reattached_interface_and_admits_a_new_me
         let _ = member.wait();
     }
 }
+
+/// Two members on one host are two members. The group keys a member by the address its
+/// datagrams come from, and a member sends from a socket of its own on an ephemeral port, as
+/// upstream's multicast link does (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @
+/// `// Establish a unicast UDP socket`). A session that sent from the joined socket, on the
+/// group's port, gave both members one address, and the subject admitted whichever Join came
+/// first and read the other's as that member's refresh, so the second never arrived. The leg
+/// above met it only when the member started after the re-join was the later of the two.
+// The subject and both members are wz, as in the leg above.
+#[test]
+#[ignore = "needs a network namespace and wz-ap-demo with transport-multicast + locator-iface; Layer M runs via --ignored after probing for one"]
+fn in_a_netns_two_group_members_on_one_address_are_both_admitted() {
+    let demo = wz_ap_demo_binary();
+    assert_demo_binary_newer_than_sources(&demo);
+    let ns = NetnsPair::up("grptwo", HOST_CIDR, PEER_CIDR);
+    let dir = tempfile::tempdir().expect("a directory for the documents");
+    let subject_doc = group_document(dir.path(), "subject.json5", "a1a1", HOST_ADDR);
+    let first_doc = group_document(dir.path(), "first.json5", "b2b2", PEER_ADDR);
+    let second_doc = group_document(dir.path(), "second.json5", "c3c3", PEER_ADDR);
+
+    let mut subject = ChildGuard::wrap(
+        "wz-ap-demo group session on the veth host end",
+        Command::new(&demo)
+            .arg("--sessions")
+            .arg(&subject_doc)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("the subject demo runs"),
+    );
+    let stderr = subject.child_mut().stderr.take().expect("stderr was piped");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                return;
+            }
+        }
+    });
+    let mut witness = Witness {
+        rx,
+        seen: Vec::new(),
+        member_logs: vec![
+            tempfile::tempfile().expect("first member log"),
+            tempfile::tempfile().expect("second member log"),
+        ],
+    };
+
+    let ready = witness.expect(0, "READY peer multicast joined");
+    let mut members = vec![
+        spawn_member(&ns, &demo, &first_doc, &witness.member_logs[0]),
+        spawn_member(&ns, &demo, &second_doc, &witness.member_logs[1]),
+    ];
+    // Either may be first; each must arrive.
+    witness.expect(ready + 1, "peer arrived b2b2");
+    witness.expect(ready + 1, "peer arrived c3c3");
+
+    graceful_terminate(subject.child_mut(), Duration::from_secs(5));
+    ns.kill_inside();
+    for member in &mut members {
+        let _ = member.wait();
+    }
+}
