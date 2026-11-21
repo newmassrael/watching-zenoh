@@ -178,7 +178,8 @@ const DEFAULT_SEED: u64 = 0x5EED_5EED_5EED;
 
 struct Run {
     seed: u64,
-    /// How long the storm of each chaos test lasts.
+    /// How long the storm of each chaos test lasts at least; past it the storm runs on, up to
+    /// `MIX_GRACE`, until it has made every call and injected every fault of its shape.
     seconds: u64,
     workers: usize,
     /// How many sessions the sequential test opens and closes.
@@ -756,8 +757,9 @@ impl Pipe {
         }
     }
 
-    /// Cut every pair, telling both ends, as a stack whose interface went down does.
-    fn cut_all(&self) {
+    /// Cut every pair, telling both ends, as a stack whose interface went down does. Returns the
+    /// ends cut, none when no link was up.
+    fn cut_all(&self) -> usize {
         let ends: Vec<(Side, u64)> = {
             let mut peers = self.peers.lock().unwrap();
             let ends = peers.keys().copied().collect();
@@ -766,11 +768,13 @@ impl Pipe {
         };
         self.sources.lock().unwrap().clear();
         self.waiting.lock().unwrap().clear();
+        let cut = ends.len();
         for (side, link) in ends {
             self.cuts.fetch_add(1, Ordering::SeqCst);
             let _ =
                 unsafe { wz_ext_transport_event(self.loan(side), link, WZ_EXT_LINK_EVENT_CLOSED) };
         }
+        cut
     }
 
     fn summary(&self) -> String {
@@ -1768,11 +1772,15 @@ fn worker(storm: &Storm, index: usize, seed: u64, beat: &Beat) {
 }
 
 /// The chaos thread: closes a session while the workers call on it, frees it, opens another, and
-/// every tenth time cuts every link of the pipe, until the storm stops.
+/// every `CUT_EVERY` rounds cuts every link of the pipe, until the storm stops. Rounds, not the
+/// clock, place the cuts: the first falls in a round the seed draws among the first
+/// `CUT_EVERY`, and a cut that finds no link up stays due the next round, since it injected
+/// nothing.
 fn chaos(storm: &Storm, seed: u64, beat: &Beat) {
-    const CUT_EVERY: u32 = 10;
+    const CUT_EVERY: u64 = 10;
     let mut rng = Rng::new(seed ^ 0xC4A0_5C4A);
-    let mut until_cut = CUT_EVERY;
+    // A stream of its own, so the rounds' sides and waits stay what the seed drew before.
+    let mut until_cut = 1 + Rng::new(seed ^ 0x0C07_0C07).below(CUT_EVERY);
     while !storm.stop.load(Ordering::SeqCst) {
         // The listening session goes one time in eight: every dialler then loses its link at
         // once and dials into nothing until the next listener is up.
@@ -1802,9 +1810,12 @@ fn chaos(storm: &Storm, seed: u64, beat: &Beat) {
         }
         until_cut -= 1;
         if until_cut == 0 {
-            until_cut = CUT_EVERY;
             beat.mark(Op::Cut);
-            storm.pipe.cut_all();
+            until_cut = if storm.pipe.cut_all() > 0 {
+                CUT_EVERY
+            } else {
+                1
+            };
         }
         let wait = Duration::from_millis(20 + rng.below(130)) * storm.scale;
         pause(beat, wait, Some(&storm.stop));
@@ -1812,9 +1823,45 @@ fn chaos(storm: &Storm, seed: u64, beat: &Beat) {
     beat.rest();
 }
 
-/// The storm over `shape`: workers and the chaos thread for the run's seconds, faults on; then,
-/// faults off, a put and a get across the sessions the storm left; then everything closed.
-/// Returns what was counted.
+/// How long past its seconds a storm may run to make its mix whole. A storm that needs it all has
+/// a cause: no link comes up again, or a thread makes no progress.
+const MIX_GRACE: Duration = Duration::from_secs(60);
+
+/// What the storm has yet to do of what it is named for, as the failure a run that ended without
+/// it reports: a call no worker has made, no dialling session the chaos thread opened, or a fault
+/// of its shape the pipe has not injected. `None` once the mix is whole; every count only grows.
+fn mix_missing(storm: &Storm) -> Option<String> {
+    for (op, name) in OP_NAMES.iter().enumerate() {
+        if storm.counts.calls(op) == 0 {
+            return Some(format!("no {name} was made: {}", storm.counts.summary()));
+        }
+    }
+    if storm.counts.opened[Side::Dialling as usize].load(Ordering::SeqCst) == 0 {
+        return Some(format!(
+            "the chaos thread opened no dialling session: {}",
+            storm.counts.summary()
+        ));
+    }
+    let pipe = &storm.pipe;
+    let shaped = match pipe.shape {
+        Shape::Stream => ("no send was split", &pipe.partials),
+        Shape::Datagram => ("no datagram was lost", &pipe.losses),
+    };
+    for (missing, counter) in [
+        ("no send was made to block", &pipe.blocks),
+        ("no link was cut", &pipe.cuts),
+        shaped,
+    ] {
+        if counter.load(Ordering::SeqCst) == 0 {
+            return Some(format!("{missing}: {}", pipe.summary()));
+        }
+    }
+    None
+}
+
+/// The storm over `shape`: workers and the chaos thread for the run's seconds and until its mix is
+/// whole, faults on; then, faults off, a put and a get across the sessions the storm left; then
+/// everything closed. Returns what was counted.
 fn storm(shape: Shape, run: &Run, watch: &Watch, main: &Beat, beats: &[Arc<Beat>]) -> String {
     let (pipe, teller) = Pipe::start(shape, run.seed);
     watch.watch_pipe(Some(Arc::clone(&pipe)));
@@ -1865,6 +1912,12 @@ fn storm(shape: Shape, run: &Run, watch: &Watch, main: &Beat, beats: &[Arc<Beat>
             .spawn_scoped(scope, move || chaos(storm_ref, seed, chaos_beat))
             .expect("the chaos thread starts");
         pause(main, Duration::from_secs(run.seconds), None);
+        // A loaded host makes fewer rounds and sends in the same seconds; the storm runs on until
+        // its mix is whole, so the run grades the library and not the host's speed.
+        let grace = Instant::now() + run.scaled(MIX_GRACE);
+        while mix_missing(&storm).is_some() && Instant::now() < grace {
+            pause(main, Duration::from_millis(20), None);
+        }
         storm.stop.store(true, Ordering::SeqCst);
         main.mark(Op::Join);
     });
@@ -1947,36 +2000,8 @@ fn storm(shape: Shape, run: &Run, watch: &Watch, main: &Beat, beats: &[Arc<Beat>
 
     // The run did what it is named for: every call was made, the sessions came and went, and the
     // pipe injected each fault of its shape.
-    for (op, name) in OP_NAMES.iter().enumerate() {
-        assert!(
-            storm.counts.calls(op) > 0,
-            "no {name} was made: {}",
-            storm.counts.summary()
-        );
-    }
-    assert!(
-        storm.counts.opened[Side::Dialling as usize].load(Ordering::SeqCst) > 0,
-        "the chaos thread opened no dialling session: {}",
-        storm.counts.summary()
-    );
-    let injected = |counter: &AtomicUsize| counter.load(Ordering::SeqCst) > 0;
-    assert!(
-        injected(&pipe.blocks),
-        "no send was made to block: {}",
-        pipe.summary()
-    );
-    assert!(injected(&pipe.cuts), "no link was cut: {}", pipe.summary());
-    match shape {
-        Shape::Stream => assert!(
-            injected(&pipe.partials),
-            "no send was split: {}",
-            pipe.summary()
-        ),
-        Shape::Datagram => assert!(
-            injected(&pipe.losses),
-            "no datagram was lost: {}",
-            pipe.summary()
-        ),
+    if let Some(missing) = mix_missing(&storm) {
+        panic!("{missing}");
     }
     format!(
         "{}\n  calls: {}\n  closures: {}",
