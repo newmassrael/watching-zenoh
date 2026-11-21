@@ -56,10 +56,13 @@
 //! writes one capacity-aware code path; the [`Heap`](crate::bounded::Heap) build's `Ok(())` arm
 //! is simply never taken on the failure side. `N` is the deploy-declared capacity.
 
+use core::cell::Cell;
 use core::fmt;
 use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 use core::ptr::NonNull;
+
+use crate::byte_cells::LentByteCells;
 
 #[cfg(feature = "alloc")]
 use alloc::string::String;
@@ -1188,6 +1191,79 @@ impl Arena {
         self.lent += span;
         Ok(BoundedVec { inner })
     }
+
+    /// The bytes a table of `count` buffers of `size` bytes takes in an arena
+    /// ([`Self::lend_byte_cells`]): a span of their flags and a span of their bytes. `None` past
+    /// the address space.
+    pub const fn byte_cells_bytes(size: usize, count: usize) -> Option<usize> {
+        match Self::byte_cells_spans(size, count) {
+            Some((flags, bytes)) => flags.checked_add(bytes),
+            None => None,
+        }
+    }
+
+    /// The two spans of a table of `count` buffers of `size` bytes: its flags', then its bytes'.
+    const fn byte_cells_spans(size: usize, count: usize) -> Option<(usize, usize)> {
+        let flags = match count.checked_mul(LentByteCells::FLAG_BYTES) {
+            Some(flags) => Self::span(flags),
+            None => None,
+        };
+        let bytes = match count.checked_mul(size) {
+            Some(bytes) => Self::span(bytes),
+            None => None,
+        };
+        match (flags, bytes) {
+            (Some(flags), Some(bytes)) => Some((flags, bytes)),
+            _ => None,
+        }
+    }
+
+    /// Lend a table of `count` buffers of `size` bytes, every one free and its bytes zero: the
+    /// next span holds the flags that say which are lent, and the one after it their bytes. A
+    /// buffer a link claims from it is a [`ByteBuf`](crate::byte_cells::ByteBuf), as one of a
+    /// table the image declares is. Refused, taking nothing, past what is left.
+    ///
+    /// The table's memory is this arena's: whoever owns the arena gives it back only once every
+    /// copy of the table and every buffer claimed from it is gone, as it does for a lent table.
+    pub fn lend_byte_cells(
+        &mut self,
+        size: usize,
+        count: usize,
+    ) -> Result<LentByteCells, LendRefused> {
+        let left = self.bytes - self.lent;
+        let (flags, bytes) = match Self::byte_cells_spans(size, count) {
+            Some((flags, bytes)) if flags.checked_add(bytes).is_some_and(|all| all <= left) => {
+                (flags, bytes)
+            }
+            spans => {
+                return Err(LendRefused::Exhausted {
+                    asked: spans.and_then(|(flags, bytes)| flags.checked_add(bytes)),
+                    left,
+                })
+            }
+        };
+        // SAFETY: both spans lie inside the arena past what it has lent, as `lent` only grows, so
+        // nothing else uses them. A flag is one byte with no alignment of its own and the bytes are
+        // bytes, so any address in the arena is aligned for them. Each flag is written `false`
+        // and each byte zero before the table is made, which is what `LentByteCells::over` asks.
+        let table = unsafe {
+            let at = self.base.as_ptr().add(self.lent);
+            let taken = at.cast::<Cell<bool>>();
+            for cell in 0..count {
+                taken.add(cell).write(Cell::new(false));
+            }
+            let data = at.add(flags);
+            core::ptr::write_bytes(data, 0, count * size);
+            LentByteCells::over(
+                NonNull::new_unchecked(taken),
+                NonNull::new_unchecked(data),
+                size,
+                count,
+            )
+        };
+        self.lent += flags + bytes;
+        Ok(table)
+    }
 }
 
 /// Capacity-generic owned UTF-8 string -- the string-shaped sibling of
@@ -1549,6 +1625,45 @@ mod tests {
                 .lend(N)
                 .expect("the arena is laid out for the table")
         }
+    }
+
+    /// A table of byte buffers takes a span of flags and a span of bytes, which is what
+    /// `Arena::byte_cells_bytes` says it takes; its buffers are zero and apart; and a table past
+    /// what is left, or past the address space, is refused and takes nothing.
+    #[test]
+    fn an_arena_lends_a_table_of_byte_buffers_and_refuses_one_past_what_is_left() {
+        let asked = Arena::byte_cells_bytes(10, 3).expect("within the address space");
+        assert_eq!(
+            Some(asked),
+            Arena::span(3 * LentByteCells::FLAG_BYTES)
+                .and_then(|flags| Arena::span(30).map(|bytes| flags + bytes))
+        );
+        let mut arena = arena_of(asked + ARENA_ALIGN);
+        let table = arena
+            .lend_byte_cells(10, 3)
+            .expect("the arena holds the table");
+        assert_eq!(arena.high_water(), asked);
+        assert_eq!((table.size(), table.capacity()), (10, 3));
+        let mut first = table.claim().expect("a buffer");
+        assert!(first.as_mut_slice().iter().all(|&b| b == 0), "lent zero");
+        let second = table.claim().expect("a second buffer");
+        let (a, b) = (first.raw().0 as usize, second.raw().0 as usize);
+        assert!(a.abs_diff(b) >= 10, "two buffers never overlap");
+        assert_eq!(
+            arena.lend_byte_cells(10, 3).err(),
+            Some(LendRefused::Exhausted {
+                asked: Some(asked),
+                left: ARENA_ALIGN,
+            })
+        );
+        assert_eq!(
+            arena.lend_byte_cells(1, usize::MAX).err(),
+            Some(LendRefused::Exhausted {
+                asked: None,
+                left: ARENA_ALIGN,
+            })
+        );
+        assert_eq!(arena.high_water(), asked, "a refused table takes nothing");
     }
 
     /// Fill to `N`, then one more: refused with the value handed back on a policy
