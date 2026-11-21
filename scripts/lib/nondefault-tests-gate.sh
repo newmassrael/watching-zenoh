@@ -447,6 +447,11 @@ transport-link-unixpipe,transport-link-ws|"
         multicast-transport\
         |app_transport"
     "wz-capi-pico|hook|shared-key-ids|--test=key_ids_tokio"
+    # A session's batch size stated by its config's document (`wz/limits`) through the document door:
+    # three pairs of sessions open at once in one process, each held on the wire to its own size, and a
+    # size past the build's ceiling refused by name (`batch_size_per_session`, behind `config-document`
+    # on top of the default `peer`). Two tests.
+    "wz-capi-pico|hook|config-document|--test=batch_size_per_session"
     # A time base the program supplies (`wz_ext_time_base_*`): the doors' refusals and ownership
     # and a listening session that runs on the program's time with its control on the system's
     # (`time_base::`), a silent inbound link held to the accept timeout of the program's time

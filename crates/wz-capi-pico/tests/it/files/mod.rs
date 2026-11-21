@@ -9,6 +9,7 @@ mod admin_space_roundtrip;
 mod advanced_subscriber_faces;
 mod advertised_pico_numbers;
 mod app_transport_doors;
+mod batch_size_per_session;
 mod blocking_callback_keeps_session;
 mod client_only_dials_a_listener;
 mod client_only_refuses_a_listener;
