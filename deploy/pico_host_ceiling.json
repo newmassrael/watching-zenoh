@@ -2,19 +2,19 @@
  "about": "The pico ceiling of the host libraries (docs/upstream-parity.md decision D9, scripts/lib/capability_cost_gate.py, Layer C1cs). One row per pico case of the gate: the pico C ABI cdylib (the Linux .so and the Windows DLL) against zenoh-pico built as the same build. What is held is the RATIO of the two texts, not a byte count: both libraries are built on the same host in the same run, so what a host moves alike on both sides (its linker, its libc, its section layout) cancels, and one tree's ratio reads the same on two hosts within the gate's tolerance, where its bytes do not. A row is either locked, {\"verdict\": \"win\"} (the case must read wz smaller than pico, decision D1; a TIE or a LOSS fails, and no row or budget move clears it), or a ratchet, {\"ratio_at_most\": r} with the reading r was set from (r is that reading's ratio rounded up to four places, and the gate refuses any other r) and the open-debt item the case is registered under (decision D5: every case that is no WIN is a debt, paid largest ratio first). A ratchet only moves down: a reading over r by more than the tolerance fails, a reading under it by more prints the tighter row to commit, and a ratchet case that reads WIN fails until its row is locked. A row whose ratio_at_most is null is unfilled and fails --check with the row to paste; `--measure` prints the rows of the cases it builds.",
  "schema": 1,
  "cases": {
-  "pico-client": {"ratio_at_most": null, "debt": "open-debt item TBD", "reading": null},
-  "pico-client-small": {"ratio_at_most": null, "debt": "open-debt item TBD", "reading": null},
-  "pico-client-udp": {"ratio_at_most": null, "debt": "open-debt item TBD", "reading": null},
-  "pico-client-coop": {"ratio_at_most": null, "debt": "open-debt item TBD", "reading": null},
-  "pico-client-coop-unstable": {"ratio_at_most": null, "debt": "open-debt item TBD", "reading": null},
-  "pico-client-coop-local": {"ratio_at_most": null, "debt": "open-debt item TBD", "reading": null},
-  "pico-client-coop-connectivity": {"ratio_at_most": null, "debt": "open-debt item TBD", "reading": null},
-  "pico-client-coop-admin-space": {"ratio_at_most": null, "debt": "open-debt item TBD", "reading": null},
-  "pico-client-coop-query": {"ratio_at_most": null, "debt": "open-debt item TBD", "reading": null},
-  "pico-client-coop-local-queryable": {"ratio_at_most": null, "debt": "open-debt item TBD", "reading": null},
-  "pico-client-coop-scout": {"ratio_at_most": null, "debt": "open-debt item TBD", "reading": null},
-  "pico-peer-coop": {"ratio_at_most": null, "debt": "open-debt item TBD", "reading": null},
-  "pico-peer": {"ratio_at_most": null, "debt": "open-debt item TBD", "reading": null},
-  "pico-default": {"ratio_at_most": null, "debt": "open-debt item TBD", "reading": null}
+  "pico-client": {"ratio_at_most": null, "debt": "debt-TBD", "reading": null},
+  "pico-client-small": {"ratio_at_most": null, "debt": "debt-TBD", "reading": null},
+  "pico-client-udp": {"ratio_at_most": null, "debt": "debt-TBD", "reading": null},
+  "pico-client-coop": {"ratio_at_most": null, "debt": "debt-TBD", "reading": null},
+  "pico-client-coop-unstable": {"ratio_at_most": null, "debt": "debt-TBD", "reading": null},
+  "pico-client-coop-local": {"ratio_at_most": null, "debt": "debt-TBD", "reading": null},
+  "pico-client-coop-connectivity": {"ratio_at_most": null, "debt": "debt-TBD", "reading": null},
+  "pico-client-coop-admin-space": {"ratio_at_most": null, "debt": "debt-TBD", "reading": null},
+  "pico-client-coop-query": {"ratio_at_most": null, "debt": "debt-TBD", "reading": null},
+  "pico-client-coop-local-queryable": {"ratio_at_most": null, "debt": "debt-TBD", "reading": null},
+  "pico-client-coop-scout": {"ratio_at_most": null, "debt": "debt-TBD", "reading": null},
+  "pico-peer-coop": {"ratio_at_most": null, "debt": "debt-TBD", "reading": null},
+  "pico-peer": {"ratio_at_most": null, "debt": "debt-TBD", "reading": null},
+  "pico-default": {"ratio_at_most": null, "debt": "debt-TBD", "reading": null}
  }
 }

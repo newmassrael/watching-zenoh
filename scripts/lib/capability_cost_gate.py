@@ -1526,8 +1526,10 @@ RATIO_TOLERANCE = 0.002
 # A ratchet is the reading's ratio rounded UP to four places, so the bound never sits under the
 # reading it was set from.
 RATIO_PLACES = 10_000
-DEBT_ID = re.compile(r"open-debt item [0-9]+")
-DEBT_PLACEHOLDER = "open-debt item TBD"
+# A debt is an entry of the store's inventory (`debt-<id>`, status active), as every new open
+# debt is since 2026-11-13; `cmd_check` also holds the id to the inventory.
+DEBT_ID = re.compile(r"debt-[a-z0-9][a-z0-9-]*")
+DEBT_PLACEHOLDER = "debt-TBD"
 READING_KEYS = ("date", "wz_text", "pico_text", "pico_pin", "toolchain")
 ROW_KEYS = frozenset(("verdict", "ratio_at_most", "debt", "reading"))
 CEILING_NO_BUDGET = ("no budget or row move clears it: take the bytes back, or the owner "
@@ -1613,7 +1615,7 @@ def row_findings(case_id: str, row: object) -> list[str]:
             out.append(f"{case_id}: the row is locked at WIN on a reading that is no WIN")
         if "debt" in row and not (isinstance(row["debt"], str) and DEBT_ID.fullmatch(row["debt"])):
             out.append(f"{case_id}: a locked row's debt, when stated, is the item its WIN closed "
-                       f"(`open-debt item <n>`)")
+                       f"(`debt-<id>`, an entry of the store's inventory)")
         return out
     if not isinstance(row.get("debt"), str):
         out.append(f"{case_id}: a ratchet row states the debt item it is registered under")
@@ -1682,7 +1684,7 @@ def grade_ceiling(case_id: str, row: dict, reading: dict) -> tuple[list[str], li
         return [f"{said}. Its row in {HOST_CEILING.relative_to(ROOT)} states no ratio_at_most, so "
                 f"the case is held to nothing. Fill it from the host that grades it: paste "
                 f"{format_row(case_id, ceiling_row(reading, debt))} over the row, with `debt` the "
-                f"open-debt item the case is registered under (D5); "
+                f"store inventory entry (`debt-<id>`) the case is registered under (D5); "
                 f"`python3 scripts/lib/capability_cost_gate.py --measure {case_id}` prints the "
                 f"same row"], []
     findings: list[str] = []
@@ -1690,7 +1692,7 @@ def grade_ceiling(case_id: str, row: dict, reading: dict) -> tuple[list[str], li
     if not (isinstance(debt, str) and DEBT_ID.fullmatch(debt)):
         findings.append(f"{case_id}: its row names no registered debt ({debt!r}): a case that is no "
                         f"WIN is an open-debt item, paid largest ratio first (D5), and its row "
-                        f"says which (`open-debt item <n>`)")
+                        f"says which (`debt-<id>`, an entry of the store's inventory)")
     if verdict == "WIN":
         findings.append(f"{said}. A case that reached WIN is locked at WIN from now on: replace its "
                         f"row with {format_row(case_id, ceiling_row(reading, debt))} and close "
@@ -1929,7 +1931,7 @@ def cmd_selftest() -> int:
     def rd(wz: int, pico: int, date: str = "2026-11-21", tc: str = "cc 1") -> dict:
         return ceiling_reading(wz, pico, "e1ab223a28aa", tc, date)
 
-    debt = "open-debt item 1"
+    debt = "debt-known"
     set_from = rd(2_520_000, 1_000_000, "2026-11-20")
     ratchet = ceiling_row(set_from, debt)
     expect("a reading that is no WIN sets a ratchet at its ratio, rounded up, under its debt",
