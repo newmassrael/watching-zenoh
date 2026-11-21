@@ -105,6 +105,10 @@ it behaves as pico behaves in both of pico's threading arms.
   table and the separation is what the engine needs.
 - **D6. The compile profile is orthogonal.** A `panic = "abort"` profile for the
   C ABI (`capi-small`) composes with either engine and is measured on its own.
+- **Superseded in part (owner, 2026-11-21).** `docs/c-abi-engine-and-memory.md` makes the
+  cooperative engine the only engine of the C ABIs, the zenoh-c ABI included, and takes the heap
+  out of them (pools: `docs/c-abi-no-heap-pools.md`). D3's heap profile and the last sentence of
+  D4 (the zenoh-c ABI keeps the tokio engine) give way to it.
 
 ## 4. Steps
 
