@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  What taking a reset generation did: the generation was taken, the table already held it or a
+  later one, or the table had no room for a new peer. The tag of take_generation_result.scxml.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       version="1.0"
+       sce:kind="enum"
+       name="take_generation_kind"
+       sce:underlying-type="uint8">
+  <datamodel>
+    <data id="variants">
+      <sce:variant name="taken" value="0"/>
+      <sce:variant name="duplicate" value="1"/>
+      <sce:variant name="no_room" value="2"/>
+    </data>
+  </datamodel>
+</scxml>

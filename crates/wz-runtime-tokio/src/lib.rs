@@ -678,6 +678,19 @@ pub use wz_session_core::query_sink;
 #[cfg(feature = "session-close-ingress")]
 pub use wz_session_core::lifecycle_query;
 
+/// The seed of a lifecycle node's table of reset generations
+/// ([`lifecycle_query::LifecycleQueries::new`]), drawn from OS-backed entropy: sixteen bytes from
+/// `getrandom`, the source this runtime draws its handshake nonces and signing keys from, so a
+/// peer cannot choose zids that crowd one chain of that table. A sandbox without entropy sees
+/// the typed error rather than a fixed seed.
+#[cfg(feature = "session-close-ingress")]
+pub fn lifecycle_reset_seed_from_os_entropy() -> Result<lifecycle_query::MapSeed, getrandom::Error>
+{
+    let mut bytes = [0u8; 16];
+    getrandom::getrandom(&mut bytes)?;
+    Ok(lifecycle_query::MapSeed::new(bytes))
+}
+
 /// R311gb-3c — reply-delivery seam (`ReplyKind` + `ReplyView` accessor
 /// contract + `ReplySink` DIP trait + the `alloc` `BoxedReplySink`
 /// closure adapter). Re-exported so AP consumers name
