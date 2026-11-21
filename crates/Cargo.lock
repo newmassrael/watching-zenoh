@@ -4437,6 +4437,7 @@ version = "0.1.0"
 dependencies = [
  "critical-section",
  "libc",
+ "log",
  "windows-sys 0.61.2",
  "wz-runtime-coop",
  "wz-session-core",

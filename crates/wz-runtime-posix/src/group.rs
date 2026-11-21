@@ -24,6 +24,8 @@
 
 use core::net::{IpAddr, SocketAddr};
 
+#[cfg(feature = "host-multicast")]
+use core::ffi::c_int;
 use wz_runtime_coop::group_transport::{GroupInterface, GroupTransport};
 use wz_runtime_coop::udp_link::{unspecified_like, DatagramSocket, SERVICE_WAIT_MS};
 
@@ -51,6 +53,50 @@ pub trait MulticastSocket: DatagramSocket {
     /// The error of an interface named in the other family than the group's, which is answered
     /// before any socket is opened.
     fn interface_family() -> Self::Error;
+
+    /// Make every call of the socket return at once: a send that finds no room fails, which
+    /// [`Self::found_no_room`] tells apart, where a blocking one would hold the session's step.
+    #[cfg(feature = "host-multicast")]
+    fn make_nonblocking(&self) -> Result<(), Self::Error>;
+
+    /// Whether this host's other members of a group observe what the socket sends, in the option
+    /// of its family (`IP_MULTICAST_LOOP`, `IPV6_MULTICAST_LOOP`).
+    #[cfg(feature = "host-multicast")]
+    fn set_multicast_loopback(&self, on: bool) -> Result<(), Self::Error>;
+
+    /// Mark what the socket sends with the traffic class `class`, given as written and not shifted
+    /// into the DSCP bits, in the option of its family (`IP_TOS`, `IPV6_TCLASS`): `Ok(false)`
+    /// where the platform has no such option for the socket's family, and nothing was set.
+    #[cfg(feature = "host-multicast")]
+    fn set_traffic_class(&self, class: u32) -> Result<bool, Self::Error>;
+
+    /// Whether `error`, from a send of a socket made non-blocking, says the socket had no room
+    /// for the datagram (or a signal cut the call short): nothing was sent, and the same datagram
+    /// may be offered again.
+    #[cfg(feature = "host-multicast")]
+    fn found_no_room(error: &Self::Error) -> bool;
+
+    /// Wait up to `timeout_us` microseconds for the socket to take another datagram: `true` once
+    /// it will, or once it has failed, which the send that follows reports; `false` when the time
+    /// is up first.
+    #[cfg(feature = "host-multicast")]
+    fn wait_writable(&self, timeout_us: u64) -> bool;
+
+    /// Wait up to `timeout_ms` milliseconds for any of `sockets` to have a datagram, returning at
+    /// once when one has; with none to wait on, the time passes. A failed wait returns early: the
+    /// read that follows finds what there is.
+    #[cfg(feature = "host-multicast")]
+    fn wait_readable_any(sockets: &[&Self], timeout_ms: c_int);
+
+    wz_runtime_coop::with_heap_link_seams! {
+        /// [`Self::wait_writable`] made by a thread other than the one that owns the socket, on a
+        /// handle of its own, so a wait made after the socket was closed asks one still open.
+        /// `None` when the platform cannot give one.
+        #[cfg(feature = "host-multicast")]
+        fn writability(
+            &self,
+        ) -> Option<alloc::boxed::Box<dyn wz_runtime_coop::session_drive::LinkWritability>>;
+    }
 }
 
 /// A multicast group session's I/O over two sockets `S` of the host.
@@ -206,6 +252,47 @@ impl MulticastSocket for PosixUdpSocket {
 
     fn interface_family() -> PosixNetError {
         PosixNetError::InterfaceFamily
+    }
+
+    #[cfg(feature = "host-multicast")]
+    fn make_nonblocking(&self) -> Result<(), PosixNetError> {
+        PosixUdpSocket::make_nonblocking(self)
+    }
+
+    #[cfg(feature = "host-multicast")]
+    fn set_multicast_loopback(&self, on: bool) -> Result<(), PosixNetError> {
+        PosixUdpSocket::set_multicast_loopback(self, on)
+    }
+
+    #[cfg(feature = "host-multicast")]
+    fn set_traffic_class(&self, class: u32) -> Result<bool, PosixNetError> {
+        PosixUdpSocket::set_traffic_class(self, class)
+    }
+
+    // `EWOULDBLOCK` is `EAGAIN` on every POSIX kernel this crate is built for.
+    #[cfg(feature = "host-multicast")]
+    fn found_no_room(error: &PosixNetError) -> bool {
+        matches!(error, PosixNetError::Send(sent, errno)
+            if *sent < 0 && matches!(*errno, libc::EAGAIN | libc::EINTR))
+    }
+
+    #[cfg(feature = "host-multicast")]
+    fn wait_writable(&self, timeout_us: u64) -> bool {
+        PosixUdpSocket::wait_writable(self, timeout_us)
+    }
+
+    #[cfg(feature = "host-multicast")]
+    fn wait_readable_any(sockets: &[&Self], timeout_ms: c_int) {
+        PosixUdpSocket::wait_readable_any(sockets, timeout_ms)
+    }
+
+    wz_runtime_coop::with_heap_link_seams! {
+        #[cfg(feature = "host-multicast")]
+        fn writability(
+            &self,
+        ) -> Option<alloc::boxed::Box<dyn wz_runtime_coop::session_drive::LinkWritability>> {
+            PosixUdpSocket::writability(self)
+        }
     }
 }
 

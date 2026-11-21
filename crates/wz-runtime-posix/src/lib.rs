@@ -16,7 +16,10 @@
 //!    session host is given over it. [`stream`] -- TCP over the same, ([`stream::PosixTcpSocket`]),
 //!    the socket the shared stream link (`wz_runtime_coop::stream_link`) is written against.
 //!    [`group`](mod@group) -- a multicast group's two sockets as the group transport the shared
-//!    group drive loop runs on, written once over either host's sockets.
+//!    group drive loop runs on, written once over either host's sockets. Under `host-multicast`,
+//!    what a node on a host opens beside them, over either host's sockets too: `interfaces`, the
+//!    host's interface table; `multicast`, a group's sockets made by the policy its locator states,
+//!    as the transport of a session's group face; and `scouting`, a scouting window's sockets.
 //! 5. [`file`](mod@file) -- a file read whole into the caller's buffer, and a secret read only when its
 //!    owner alone may read it: a document provisioned to the device apart from the program.
 //! 6. [`glue`] -- the console line and the sleep, and [`posix_image_no_heap!`], the image glue
@@ -55,7 +58,10 @@ extern crate std;
 
 // The heap profile's links hand their owner a boxed wait on their socket (`net::FdReadiness`,
 // `windows::SocketReadiness`).
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+#[cfg(any(
+    all(feature = "alloc", not(feature = "session-slot")),
+    feature = "host-multicast"
+))]
 extern crate alloc;
 
 #[cfg(unix)]
@@ -66,6 +72,12 @@ pub mod file;
 pub mod glue;
 // A multicast group's two sockets as the group transport, over either host's sockets.
 pub mod group;
+#[cfg(feature = "host-multicast")]
+pub mod interfaces;
+#[cfg(feature = "host-multicast")]
+pub mod multicast;
+#[cfg(feature = "host-multicast")]
+pub mod scouting;
 // Written over the runtime's heap link layer, so compiled where the runtime declares it.
 wz_runtime_coop::with_heap_link_seams! {
     #[cfg(all(unix, feature = "alloc"))]

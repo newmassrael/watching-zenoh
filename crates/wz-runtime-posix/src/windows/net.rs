@@ -186,6 +186,73 @@ impl WindowsUdpSocket {
             .map_err(WindowsNetError::MulticastOption)
     }
 
+    /// Make every call of this socket return at once (`ioctlsocket(FIONBIO)`): a send that finds
+    /// no room fails with `WSAEWOULDBLOCK` rather than wait for it.
+    #[cfg(feature = "host-multicast")]
+    pub(crate) fn make_nonblocking(&self) -> Result<(), WindowsNetError> {
+        super::set_nonblocking(self.socket, true).map_err(WindowsNetError::NonBlocking)
+    }
+
+    /// Whether this host's other members of a group observe what this socket sends:
+    /// `IP_MULTICAST_LOOP` or `IPV6_MULTICAST_LOOP`, each a `DWORD` on Windows.
+    #[cfg(feature = "host-multicast")]
+    pub(crate) fn set_multicast_loopback(&self, on: bool) -> Result<(), WindowsNetError> {
+        let (level, name) = match self.local {
+            SocketAddr::V4(_) => (ws::IPPROTO_IP, ws::IP_MULTICAST_LOOP),
+            SocketAddr::V6(_) => (ws::IPPROTO_IPV6, ws::IPV6_MULTICAST_LOOP),
+        };
+        set_option(self.socket, level, name, &u32::from(on))
+            .map_err(WindowsNetError::MulticastOption)
+    }
+
+    /// Mark what this IPv4 socket sends with the traffic class `class`, as written (`IP_TOS`, a
+    /// `DWORD`). An IPv6 socket is not marked here, as upstream leaves it unmarked on Windows:
+    /// `Ok(false)`, and nothing is set.
+    #[cfg(feature = "host-multicast")]
+    pub(crate) fn set_traffic_class(&self, class: u32) -> Result<bool, WindowsNetError> {
+        match self.local {
+            SocketAddr::V4(_) => set_option(self.socket, ws::IPPROTO_IP, ws::IP_TOS, &class)
+                .map(|()| true)
+                .map_err(WindowsNetError::MulticastOption),
+            SocketAddr::V6(_) => Ok(false),
+        }
+    }
+
+    /// Wait up to `timeout_us` microseconds for this socket to take another datagram.
+    #[cfg(feature = "host-multicast")]
+    pub(crate) fn wait_writable(&self, timeout_us: u64) -> bool {
+        super::poll_writable(
+            self.socket,
+            i32::try_from(timeout_us.div_ceil(1_000)).unwrap_or(i32::MAX),
+        )
+    }
+
+    /// Wait up to `timeout_ms` milliseconds for any of `sockets` to have a datagram: one
+    /// `WSAPoll` over them. `WSAPoll` refuses an empty set at once, so with none the thread sleeps
+    /// the time instead, as a POSIX `poll` of no descriptor does.
+    #[cfg(feature = "host-multicast")]
+    pub(crate) fn wait_readable_any(sockets: &[&Self], timeout_ms: c_int) {
+        if sockets.is_empty() {
+            // SAFETY: a plain system call with a value argument.
+            unsafe {
+                windows_sys::Win32::System::Threading::Sleep(u32::try_from(timeout_ms).unwrap_or(0))
+            };
+            return;
+        }
+        let mut fds: alloc::vec::Vec<ws::WSAPOLLFD> = sockets
+            .iter()
+            .map(|socket| ws::WSAPOLLFD {
+                fd: socket.socket,
+                events: ws::POLLRDNORM,
+                revents: 0,
+            })
+            .collect();
+        // SAFETY: `fds` is live for the call and its length is the count passed; every socket is
+        // one the caller holds open for the call, and the timeout bounds the wait. A failed wait
+        // returns early, and the read that follows reports the error.
+        unsafe { ws::WSAPoll(fds.as_mut_ptr(), fds.len() as u32, timeout_ms) };
+    }
+
     /// The port the system bound this socket to.
     fn chosen_port(&self) -> Result<u16, WindowsNetError> {
         match name_of(self.socket, ws::getsockname)
@@ -310,6 +377,19 @@ impl DatagramSocket for WindowsUdpSocket {
         #[cfg(feature = "alloc")]
         fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
             super::SocketReadiness::of(self.socket)
+        }
+    }
+}
+
+wz_runtime_coop::with_heap_link_seams! {
+    #[cfg(feature = "host-multicast")]
+    impl WindowsUdpSocket {
+        /// A wait for room on this socket made by a thread other than its owner's, on a duplicate
+        /// of the socket; `None` when it cannot be duplicated.
+        pub(crate) fn writability(
+            &self,
+        ) -> Option<alloc::boxed::Box<dyn wz_runtime_coop::session_drive::LinkWritability>> {
+            super::SocketReadiness::writable_of(self.socket)
         }
     }
 }

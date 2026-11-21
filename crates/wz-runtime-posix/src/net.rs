@@ -55,7 +55,7 @@ pub enum PosixNetError {
     ReceiveTimeout(c_int),
     /// `bind` failed with this `errno`.
     Bind(c_int),
-    /// `fcntl(F_SETFL, O_NONBLOCK)` on a listening socket failed with this `errno`.
+    /// `fcntl(F_SETFL, O_NONBLOCK)` on a listening or a multicast socket failed with this `errno`.
     NonBlocking(c_int),
     /// `setsockopt(SO_REUSEADDR)` failed with this `errno`.
     ReuseAddr(c_int),
@@ -67,8 +67,9 @@ pub enum PosixNetError {
     /// A multicast interface was named in the other family than the group's or the socket's (an
     /// IPv4 address for an IPv6 group, an index for an IPv4 one), so no kernel call was made.
     InterfaceFamily,
-    /// `setsockopt` of a multicast egress option (`IP_MULTICAST_IF`, `IP_MULTICAST_TTL`) failed
-    /// with this `errno`.
+    /// `setsockopt` of a multicast egress option (`IP_MULTICAST_IF`, `IP_MULTICAST_TTL`,
+    /// `IP_MULTICAST_LOOP`) or of the traffic class (`IP_TOS`, `IPV6_TCLASS`) failed with this
+    /// `errno`.
     MulticastOption(c_int),
     /// `listen` failed with this `errno`.
     Listen(c_int),
@@ -647,6 +648,65 @@ impl PosixUdpSocket {
         set_option(self.fd, level, name, &c_int::from(hops)).map_err(PosixNetError::MulticastOption)
     }
 
+    /// Make every call of this socket return at once: a send that finds no room fails with
+    /// `EAGAIN` rather than wait for it.
+    #[cfg(feature = "host-multicast")]
+    pub(crate) fn make_nonblocking(&self) -> Result<(), PosixNetError> {
+        set_nonblocking(self.fd, true).map_err(PosixNetError::NonBlocking)
+    }
+
+    /// Whether this host's other members of a group observe what this socket sends:
+    /// `IP_MULTICAST_LOOP` or `IPV6_MULTICAST_LOOP`, as the socket's family names it.
+    #[cfg(feature = "host-multicast")]
+    pub(crate) fn set_multicast_loopback(&self, on: bool) -> Result<(), PosixNetError> {
+        let (level, name) = match self.local {
+            SocketAddr::V4(_) => (libc::IPPROTO_IP, libc::IP_MULTICAST_LOOP),
+            SocketAddr::V6(_) => (libc::IPPROTO_IPV6, libc::IPV6_MULTICAST_LOOP),
+        };
+        set_option(self.fd, level, name, &c_int::from(on)).map_err(PosixNetError::MulticastOption)
+    }
+
+    /// Mark what this socket sends with the traffic class `class`, as written: `IP_TOS` on an
+    /// IPv4 socket, `IPV6_TCLASS` on an IPv6 one. `Ok(false)` where the kernel's IPv6 socket is
+    /// not marked here (Neutrino), and nothing is set.
+    #[cfg(feature = "host-multicast")]
+    pub(crate) fn set_traffic_class(&self, class: u32) -> Result<bool, PosixNetError> {
+        let (level, name) = match self.local {
+            SocketAddr::V4(_) => (libc::IPPROTO_IP, libc::IP_TOS),
+            #[cfg(not(target_os = "nto"))]
+            SocketAddr::V6(_) => (libc::IPPROTO_IPV6, libc::IPV6_TCLASS),
+            #[cfg(target_os = "nto")]
+            SocketAddr::V6(_) => return Ok(false),
+        };
+        set_option(self.fd, level, name, &(class as c_int))
+            .map(|()| true)
+            .map_err(PosixNetError::MulticastOption)
+    }
+
+    /// Wait up to `timeout_us` microseconds for this socket to take another datagram.
+    #[cfg(feature = "host-multicast")]
+    pub(crate) fn wait_writable(&self, timeout_us: u64) -> bool {
+        poll_writable(self.fd, timeout_us)
+    }
+
+    /// Wait up to `timeout_ms` milliseconds for any of `sockets` to have a datagram: one `poll`
+    /// over their descriptors, which with none passes the time.
+    #[cfg(feature = "host-multicast")]
+    pub(crate) fn wait_readable_any(sockets: &[&Self], timeout_ms: c_int) {
+        let mut fds: alloc::vec::Vec<libc::pollfd> = sockets
+            .iter()
+            .map(|socket| libc::pollfd {
+                fd: socket.fd,
+                events: libc::POLLIN,
+                revents: 0,
+            })
+            .collect();
+        // SAFETY: `fds` is live for the call and its length is the count passed; every descriptor
+        // is one of a socket the caller holds for the call, and the timeout bounds the wait. A
+        // failed or interrupted wait returns early, and the read that follows reports the error.
+        unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout_ms) };
+    }
+
     /// The port the kernel bound this socket to.
     fn chosen_port(&self) -> Result<u16, PosixNetError> {
         match name_of(self.fd, libc::getsockname)
@@ -758,6 +818,17 @@ impl DatagramSocket for PosixUdpSocket {
         #[cfg(feature = "alloc")]
         fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
             FdReadiness::of(self.fd)
+        }
+    }
+}
+
+wz_runtime_coop::with_heap_link_seams! {
+    #[cfg(feature = "host-multicast")]
+    impl PosixUdpSocket {
+        /// A wait for room on this socket made by a thread other than its owner's, on a duplicate
+        /// of its descriptor; `None` when the descriptor cannot be duplicated.
+        pub(crate) fn writability(&self) -> Option<alloc::boxed::Box<dyn LinkWritability>> {
+            FdReadiness::writable_of(self.fd)
         }
     }
 }

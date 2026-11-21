@@ -37,6 +37,10 @@ path = "src/lib.rs"
 wz-runtime-coop = { path = "../wz-runtime-coop", default-features = false, features = ["session-unicast"] }
 # The traits the seams implement (`EntropySource`, `EpochSource`).
 wz-session-core = { path = "../wz-session-core", default-features = false, features = ["no_std"] }
+# What a host's multicast sockets report that is not an error of a call (an `#iface=` the host
+# cannot resolve, a scouting membership the kernel refused), as the host crate of the tokio runtime
+# reports it (`host-multicast`). No `std` feature: the crate's own macros, and nothing allocates.
+log = { version = "0.4", optional = true }
 
 # The POSIX hosts' system calls (`clock_gettime`, `getrandom`, `socket`, `poll`, `recvfrom`,
 # `write`). No `std` feature: this crate is `#![no_std]`, and `libc` is the C library's own names.
@@ -52,6 +56,8 @@ libc = { version = "0.2", default-features = false }
 version = "0.61"
 features = [
     "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
     "Win32_Networking_WinSock",
     "Win32_Security_Cryptography",
     "Win32_System_IO",
@@ -82,6 +88,13 @@ alloc = ["wz-runtime-coop/alloc", "wz-session-core/alloc"]
 # also builds the stack the slot profile's session host is given: `slot::PosixStack` on a POSIX
 # host, `windows::slot::WindowsStack` on Windows.
 session-slot = ["wz-runtime-coop/session-slot"]
+# The host's own multicast sockets as a node on a host opens them: the interface table
+# (`interfaces`: `getifaddrs`, the Windows adapter table), the group's two sockets made by the
+# policy its locator states (`multicast`: `#iface=`, `#join=`, `#ttl=`, `#bind=`, `#dscp=`, the
+# loopback and the refusal of an unpinned link) as the transport the shared group drive loop runs
+# on, and a scouting window's sockets, one for each interface that can carry multicast
+# (`scouting`). The heap profile's: the table and the members are lists the host sizes.
+host-multicast = ["alloc", "dep:log"]
 
 [lints]
 workspace = true

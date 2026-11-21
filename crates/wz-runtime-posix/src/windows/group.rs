@@ -15,6 +15,8 @@
 
 use core::net::{IpAddr, SocketAddr};
 
+#[cfg(feature = "host-multicast")]
+use windows_sys::Win32::Networking::WinSock as ws;
 use wz_runtime_coop::group_transport::GroupInterface;
 
 use super::net::WindowsUdpSocket;
@@ -45,6 +47,46 @@ impl MulticastSocket for WindowsUdpSocket {
 
     fn interface_family() -> WindowsNetError {
         WindowsNetError::InterfaceFamily
+    }
+
+    #[cfg(feature = "host-multicast")]
+    fn make_nonblocking(&self) -> Result<(), WindowsNetError> {
+        WindowsUdpSocket::make_nonblocking(self)
+    }
+
+    #[cfg(feature = "host-multicast")]
+    fn set_multicast_loopback(&self, on: bool) -> Result<(), WindowsNetError> {
+        WindowsUdpSocket::set_multicast_loopback(self, on)
+    }
+
+    #[cfg(feature = "host-multicast")]
+    fn set_traffic_class(&self, class: u32) -> Result<bool, WindowsNetError> {
+        WindowsUdpSocket::set_traffic_class(self, class)
+    }
+
+    #[cfg(feature = "host-multicast")]
+    fn found_no_room(error: &WindowsNetError) -> bool {
+        matches!(error, WindowsNetError::Send(ws::SOCKET_ERROR, code)
+            if matches!(*code, ws::WSAEWOULDBLOCK | ws::WSAEINTR))
+    }
+
+    #[cfg(feature = "host-multicast")]
+    fn wait_writable(&self, timeout_us: u64) -> bool {
+        WindowsUdpSocket::wait_writable(self, timeout_us)
+    }
+
+    #[cfg(feature = "host-multicast")]
+    fn wait_readable_any(sockets: &[&Self], timeout_ms: core::ffi::c_int) {
+        WindowsUdpSocket::wait_readable_any(sockets, timeout_ms)
+    }
+
+    wz_runtime_coop::with_heap_link_seams! {
+        #[cfg(feature = "host-multicast")]
+        fn writability(
+            &self,
+        ) -> Option<alloc::boxed::Box<dyn wz_runtime_coop::session_drive::LinkWritability>> {
+            WindowsUdpSocket::writability(self)
+        }
     }
 }
 
