@@ -11,10 +11,9 @@
 //! registry implementation over two backings, so the logic is written once
 //! against [`crate::id_map::IdMap`] and only the storage swaps with the profile.
 //!
-//! - **growable** (`alloc` on, `bounded-heapless` off: the AP profile) is the
-//!   `hashbrown::HashMap` the registries always held.
-//!   [`bind`](crate::id_map::IdMap::bind) never refuses and the declared capacity
-//!   is advisory.
+//! - **growable** (`alloc` on, `bounded-heapless` off: the AP profile) is a
+//!   `GrowableIdMap`: the `hashbrown::HashMap` the registries
+//!   always held, whose room never refuses; the declared capacity is advisory.
 //! - **fixed** (`alloc` off, or `bounded-heapless` on: the MCU profiles) is a
 //!   [`crate::id_map::FixedIdMap`]: `N` rows in an inline array.
 //!   [`bind`](crate::id_map::IdMap::bind) of an id the table does not hold, with
@@ -23,6 +22,11 @@
 //!   ([`refusals`](crate::id_map::IdMap::refusals)) and allocates nothing.
 //!   Rebinding an id the table already holds replaces it in place and needs no
 //!   room, which is what a peer that re-declares an id expects.
+//!
+//! The bound a session's creator states for a table ([`crate::limits::SessionLimits`])
+//! is asked through [`bind_within`](crate::id_map::IdMap::bind_within) on both
+//! backings: a NEW id past it is refused the way a full fixed table refuses one,
+//! handed back and counted, so the two backings refuse the same declarations.
 //!
 //! A refusal is the PEER's to see, never a panic and never a thing another
 //! session pays for: the registries drop the declaration that did not fit and
@@ -58,6 +62,18 @@ pub trait IdMap<V> {
     /// already bound is replaced in place and never refused.
     fn bind(&mut self, id: u64, value: V) -> Result<Option<V>, CapacityFull<V>>;
 
+    /// [`Self::bind`] under a bound above the table's room: a NEW id is first
+    /// asked `admits(count)`, with the count binding it would leave, and one it
+    /// refuses is refused as a full table refuses it, handed back and counted. An
+    /// id already bound is replaced in place and `admits` is not asked, so a
+    /// lowered bound keeps what the table holds.
+    fn bind_within<F: FnOnce(usize) -> bool>(
+        &mut self,
+        id: u64,
+        value: V,
+        admits: F,
+    ) -> Result<Option<V>, CapacityFull<V>>;
+
     /// Drop the binding of `id`, returning what it held.
     fn unbind(&mut self, id: u64) -> Option<V>;
 
@@ -73,8 +89,9 @@ pub trait IdMap<V> {
     where
         V: 'a;
 
-    /// How many NEW ids were refused for want of room since the table was made.
-    /// Always zero on the growable backing, where nothing is refused.
+    /// How many NEW ids were refused since the table was made, for want of room
+    /// or past the bound [`Self::bind_within`] asked. Zero on the growable
+    /// backing while no bound refuses, as its room refuses nothing.
     fn refusals(&self) -> u32;
 
     /// Whether any id is bound.
@@ -138,8 +155,21 @@ impl<V, const N: usize> IdMap<V> for FixedIdMap<V, N> {
     }
 
     fn bind(&mut self, id: u64, value: V) -> Result<Option<V>, CapacityFull<V>> {
+        self.bind_within(id, value, |_| true)
+    }
+
+    fn bind_within<F: FnOnce(usize) -> bool>(
+        &mut self,
+        id: u64,
+        value: V,
+        admits: F,
+    ) -> Result<Option<V>, CapacityFull<V>> {
         if let Some((_, held)) = self.rows.iter_mut().find(|(k, _)| *k == id) {
             return Ok(Some(core::mem::replace(held, value)));
+        }
+        if !admits(self.rows.len() + 1) {
+            self.refused = self.refused.saturating_add(1);
+            return Err(CapacityFull(value));
         }
         match self.rows.push((id, value)) {
             Ok(()) => {
@@ -178,41 +208,91 @@ impl<V, const N: usize> IdMap<V> for FixedIdMap<V, N> {
     }
 }
 
+/// The growable backing of [`IdMap`]: the `hashbrown` map the registries always
+/// held, whose room refuses nothing, and the count of the NEW ids a bound refused
+/// ([`IdMap::bind_within`]). The count is the table's own for the reason
+/// [`FixedIdMap`]'s is: a refusal is counted where it is made, whichever refused.
 #[cfg(feature = "alloc")]
-impl<V> IdMap<V> for HashMap<u64, V> {
+pub struct GrowableIdMap<V> {
+    map: HashMap<u64, V>,
+    refused: u32,
+}
+
+#[cfg(feature = "alloc")]
+impl<V> GrowableIdMap<V> {
+    /// An empty table.
+    pub fn new() -> Self {
+        Self {
+            map: HashMap::new(),
+            refused: 0,
+        }
+    }
+
+    /// The bindings as the map holds them, for a reader that takes the map itself.
+    pub fn as_map(&self) -> &HashMap<u64, V> {
+        &self.map
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<V> Default for GrowableIdMap<V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<V> IdMap<V> for GrowableIdMap<V> {
     fn find(&self, id: u64) -> Option<&V> {
-        self.get(&id)
+        self.map.get(&id)
     }
 
     fn find_mut(&mut self, id: u64) -> Option<&mut V> {
-        self.get_mut(&id)
+        self.map.get_mut(&id)
     }
 
     fn bind(&mut self, id: u64, value: V) -> Result<Option<V>, CapacityFull<V>> {
-        Ok(self.insert(id, value))
+        Ok(self.map.insert(id, value))
+    }
+
+    fn bind_within<F: FnOnce(usize) -> bool>(
+        &mut self,
+        id: u64,
+        value: V,
+        admits: F,
+    ) -> Result<Option<V>, CapacityFull<V>> {
+        if let Some(held) = self.map.get_mut(&id) {
+            return Ok(Some(core::mem::replace(held, value)));
+        }
+        if !admits(self.map.len() + 1) {
+            self.refused = self.refused.saturating_add(1);
+            return Err(CapacityFull(value));
+        }
+        self.map.insert(id, value);
+        Ok(None)
     }
 
     fn unbind(&mut self, id: u64) -> Option<V> {
-        self.remove(&id)
+        self.map.remove(&id)
     }
 
     fn reset(&mut self) {
-        self.clear();
+        self.map.clear();
     }
 
     fn count(&self) -> usize {
-        self.len()
+        self.map.len()
     }
 
     fn entries<'a>(&'a self) -> impl Iterator<Item = (u64, &'a V)>
     where
         V: 'a,
     {
-        self.iter().map(|(k, v)| (*k, v))
+        self.map.iter().map(|(k, v)| (*k, v))
     }
 
     fn refusals(&self) -> u32 {
-        0
+        self.refused
     }
 }
 
@@ -222,7 +302,8 @@ impl<V> IdMap<V> for HashMap<u64, V> {
 pub type KeyText<P = Profile> = <P as Storage>::Text<{ caps::MAX_KEYEXPR_BYTES }>;
 
 /// A keyexpr the peer named is longer than [`caps::MAX_KEYEXPR_BYTES`], which a
-/// table of the static policy cannot hold. Never answered on the growable policy.
+/// table of the static policy cannot hold, or than the quota the session's creator
+/// stated ([`key_text_within`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeyexprTooLong;
 
@@ -233,6 +314,21 @@ pub fn key_text_as<P: Storage>(literal: &str) -> Result<KeyText<P>, KeyexprTooLo
     let mut text = <KeyText<P> as TextBacking>::empty();
     text.push_str(literal).map_err(|_| KeyexprTooLong)?;
     Ok(text)
+}
+
+/// [`key_text_as`] held to `quota`, the session's `MAX_KEYEXPR_BYTES`: a keyexpr
+/// longer than the quota admits is refused as one the table cannot hold, on every
+/// policy. Where the build fixes the bound to the rows' capacity the quota compares
+/// nothing and the rows refuse alone.
+#[inline]
+pub fn key_text_within<P: Storage>(
+    literal: &str,
+    quota: crate::limits::MaxKeyexprBytesHeld,
+) -> Result<KeyText<P>, KeyexprTooLong> {
+    if !quota.admits(literal.len()) {
+        return Err(KeyexprTooLong);
+    }
+    key_text_as::<P>(literal)
 }
 
 /// [`key_text_as`] in this build's storage profile.
@@ -411,11 +507,47 @@ mod tests {
 
     #[cfg(feature = "alloc")]
     #[test]
-    fn the_growable_backing_refuses_nothing() {
-        let mut table: HashMap<u64, u32> = HashMap::new();
+    fn the_growable_backing_refuses_nothing_by_its_room() {
+        let mut table: GrowableIdMap<u32> = GrowableIdMap::new();
         for id in 0..64u64 {
             assert!(table.bind(id, 0).is_ok());
         }
         assert_eq!((table.count(), table.refusals()), (64, 0));
+        assert_eq!(table.as_map().len(), 64);
+    }
+
+    /// Under a bound of two, below the room of either backing: the third NEW id is refused
+    /// as a full table refuses one, handed back and counted, and changes nothing held; a held
+    /// id is replaced without asking the bound, and a place let go is taken again.
+    fn a_bound_refuses_a_new_id_as_a_full_table_does<M: IdMap<u32> + Default>() {
+        let mut table = M::default();
+        let two = |count: usize| count <= 2;
+        assert!(table.bind_within(1, 10, two).is_ok());
+        assert!(table.bind_within(2, 20, two).is_ok());
+        let refused = table.bind_within(3, 30, two);
+        assert_eq!(
+            (refused.err().map(|c| c.0), table.count(), table.refusals()),
+            (Some(30), 2, 1),
+            "(value handed back, ids held, refusals counted)"
+        );
+        assert_eq!(table.find(3), None);
+        assert_eq!(table.bind_within(2, 200, two).ok(), Some(Some(20)));
+        assert_eq!((table.count(), table.refusals()), (2, 1));
+        assert_eq!(table.unbind(1), Some(10));
+        assert!(table.bind_within(3, 30, two).is_ok());
+        assert_eq!((table.count(), table.refusals()), (2, 1));
+        table.reset();
+        assert_eq!(table.refusals(), 1, "a reset keeps the count");
+    }
+
+    #[test]
+    fn a_bound_refuses_a_new_id_on_the_fixed_backing() {
+        a_bound_refuses_a_new_id_as_a_full_table_does::<FixedIdMap<u32, 4>>();
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_bound_refuses_a_new_id_on_the_growable_backing() {
+        a_bound_refuses_a_new_id_as_a_full_table_does::<GrowableIdMap<u32>>();
     }
 }

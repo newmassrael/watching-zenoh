@@ -10,17 +10,25 @@
 //! (`io/zenoh-transport/src/multicast/link.rs` @ `let tpc = TransmissionPipelineConf {`),
 //! so the two transports share one deadline rather than two copies of it.
 
+use crate::limit_binding::Quota;
 use crate::link::RoomWait;
 use crate::session_init_params::TxQueueConf;
 
 /// R2923 / R2926 — whether a message was pushed onto its conduit's link, or
-/// found no room within its deadline (a congestion drop).
+/// found no room within its deadline (a congestion drop), or was dropped behind
+/// a conduit another sender held.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PushOutcome {
     /// The message is on the link's queue.
     Pushed,
     /// No room was found within the message's deadline.
     Congested,
+    /// The message may be dropped and another sender held its conduit, so the queue profile
+    /// dropped it at once with nothing asked of the link
+    /// ([`HeldDrop::DropAtOnce`](crate::session_init_params::HeldDrop::DropAtOnce)): a
+    /// congestion drop the sender is told of, as pico's put fails when its held transmit lock
+    /// drops the message, where a [`Self::Congested`] one is answered as sent.
+    Held,
 }
 
 /// What a BLOCKING message that found no room in its deadline costs: the one decision the
@@ -69,15 +77,15 @@ impl ExpiryRun {
         self.run = 0;
     }
 
-    /// A blocking message expired. Whether this is the `close_after`-th in the run, which is
-    /// the one that closes the session; every expiry after it is too, so a close asked for twice
-    /// is the same close. `0` never closes.
-    pub fn expired(&mut self, close_after: u16) -> bool {
-        if close_after == 0 {
+    /// A blocking message expired. Whether the run it completes is as long as `close_after`
+    /// allows, which is the expiry that closes the session; every expiry after it is too, so a
+    /// close asked for twice is the same close. With no bound no run closes it.
+    pub fn expired(&mut self, close_after: Quota) -> bool {
+        if close_after.is_unbounded() {
             return false;
         }
         self.run = self.run.saturating_add(1);
-        self.run >= close_after
+        !close_after.admits(usize::from(self.run) + 1)
     }
 }
 
@@ -249,7 +257,10 @@ mod tests {
     /// neither the ordinary nor the probing deadline carries.
     #[test]
     fn a_covered_deadline_is_the_ordinary_one_marked() {
-        let conf = TxQueueConf::of_policy(&crate::policy::SessionPolicy::defaults());
+        let conf = TxQueueConf::of_snapshot(
+            &crate::policy::SessionPolicy::defaults(),
+            &crate::limits::SessionLimits::BUILD,
+        );
         for droppable in [true, false] {
             let covered = PushDeadline::covered(droppable, &conf);
             let ordinary = PushDeadline::new(droppable, &conf);
@@ -267,7 +278,7 @@ mod tests {
     fn a_run_of_expiries_never_closes_when_no_count_is_stated() {
         let mut run = ExpiryRun::default();
         for _ in 0..10_000 {
-            assert!(!run.expired(0));
+            assert!(!run.expired(Quota::UNBOUNDED));
         }
     }
 
@@ -275,31 +286,33 @@ mod tests {
     /// it are kept.
     #[test]
     fn the_expiry_that_completes_the_run_closes_the_session() {
+        let three = Quota::at_most(3);
         let mut run = ExpiryRun::default();
-        assert!(!run.expired(3));
-        assert!(!run.expired(3));
-        assert!(run.expired(3));
+        assert!(!run.expired(three));
+        assert!(!run.expired(three));
+        assert!(run.expired(three));
         // A close asked for again is the same close.
-        assert!(run.expired(3));
+        assert!(run.expired(three));
     }
 
     /// A count of one is upstream's own answer, the first expiry closes it.
     #[test]
     fn a_count_of_one_closes_at_the_first_expiry() {
-        assert!(ExpiryRun::default().expired(1));
+        assert!(ExpiryRun::default().expired(Quota::at_most(1)));
     }
 
     /// A message that finds room ends the run: the expiries on either side of it are two runs
     /// of two, not one of four, so a link that blocks now and then is never closed.
     #[test]
     fn a_push_between_expiries_starts_the_count_again() {
+        let three = Quota::at_most(3);
         let mut run = ExpiryRun::default();
-        assert!(!run.expired(3));
-        assert!(!run.expired(3));
+        assert!(!run.expired(three));
+        assert!(!run.expired(three));
         run.pushed();
-        assert!(!run.expired(3));
-        assert!(!run.expired(3));
-        assert!(run.expired(3));
+        assert!(!run.expired(three));
+        assert!(!run.expired(three));
+        assert!(run.expired(three));
     }
 
     /// A push with no run open changes nothing.
@@ -307,8 +320,8 @@ mod tests {
     fn a_push_with_no_run_open_leaves_the_count_at_zero() {
         let mut run = ExpiryRun::default();
         run.pushed();
-        assert!(!run.expired(2));
-        assert!(run.expired(2));
+        assert!(!run.expired(Quota::at_most(2)));
+        assert!(run.expired(Quota::at_most(2)));
     }
 
     /// Under pico's transmit model a droppable message asks for room as long
@@ -316,7 +329,10 @@ mod tests {
     /// drops only on a contended TX mutex, never for a full socket.
     #[test]
     fn a_pico_droppable_message_waits_as_long_as_a_blocking_one() {
-        let pico = TxQueueConf::pico_of_policy(&crate::policy::SessionPolicy::defaults());
+        let pico = TxQueueConf::pico_of_snapshot(
+            &crate::policy::SessionPolicy::defaults(),
+            &crate::limits::SessionLimits::BUILD,
+        );
         let mut drop = PushDeadline::new(true, &pico);
         let block = PushDeadline::new(false, &pico);
         assert_eq!(
@@ -346,7 +362,10 @@ mod tests {
         TxQueueConf {
             wait_before_close_us: 1_000,
             no_progress_us,
-            ..TxQueueConf::of_policy(&crate::policy::SessionPolicy::defaults())
+            ..TxQueueConf::of_snapshot(
+                &crate::policy::SessionPolicy::defaults(),
+                &crate::limits::SessionLimits::BUILD,
+            )
         }
     }
 
@@ -429,7 +448,10 @@ mod tests {
                 wait_before_drop_us: 100,
                 max_wait_before_drop_fragments_us: 1_000,
                 no_progress_us,
-                ..TxQueueConf::of_policy(&crate::policy::SessionPolicy::defaults())
+                ..TxQueueConf::of_snapshot(
+                    &crate::policy::SessionPolicy::defaults(),
+                    &crate::limits::SessionLimits::BUILD,
+                )
             };
             let mut drop = PushDeadline::new(true, &conf);
             let mut seen = [drop.ask(); 5];
@@ -455,8 +477,9 @@ mod tests {
     #[test]
     fn an_expired_blocking_message_closes_the_session_by_default() {
         assert_eq!(
-            TxExpiry::of(&TxQueueConf::of_policy(
-                &crate::policy::SessionPolicy::defaults()
+            TxExpiry::of(&TxQueueConf::of_snapshot(
+                &crate::policy::SessionPolicy::defaults(),
+                &crate::limits::SessionLimits::BUILD
             )),
             TxExpiry::Closing
         );
@@ -467,7 +490,10 @@ mod tests {
     fn with_the_policy_on_an_expired_blocking_message_keeps_the_session() {
         let conf = TxQueueConf {
             expiry_keeps_session: true,
-            ..TxQueueConf::of_policy(&crate::policy::SessionPolicy::defaults())
+            ..TxQueueConf::of_snapshot(
+                &crate::policy::SessionPolicy::defaults(),
+                &crate::limits::SessionLimits::BUILD,
+            )
         };
         assert_eq!(TxExpiry::of(&conf), TxExpiry::Kept);
     }
@@ -475,7 +501,10 @@ mod tests {
     /// The control: zenoh's default still drops after `wait_before_drop`.
     #[test]
     fn a_zenoh_droppable_message_still_waits_only_wait_before_drop() {
-        let zenoh = TxQueueConf::of_policy(&crate::policy::SessionPolicy::defaults());
+        let zenoh = TxQueueConf::of_snapshot(
+            &crate::policy::SessionPolicy::defaults(),
+            &crate::limits::SessionLimits::BUILD,
+        );
         let drop = PushDeadline::new(true, &zenoh);
         assert_eq!(
             drop.ask(),

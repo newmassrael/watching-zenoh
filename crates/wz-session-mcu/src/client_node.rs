@@ -29,6 +29,7 @@ use core::cell::RefCell;
 
 use wz_runtime_coop::session_drive::SessionLinks;
 use wz_runtime_coop::{ClockSource, CoopLocalSet};
+use wz_session_core::limits::SessionLimits;
 use wz_session_core::locality::Locality;
 use wz_session_core::observer::ApplicationLayerObserver;
 use wz_session_core::query_sink::BoxedQuerySink;
@@ -76,14 +77,25 @@ where
 {
     /// A node that holds a session with each endpoint of `endpoints`, over the network `links`.
     /// `dial_params` gives each dialled session its parameters.
+    ///
+    /// The node's observer is every session's, so it is held to one snapshot of the session
+    /// limits: the `limits` of the parameters `dial_params` gives, which it is asked for once
+    /// here, before any dial, unless the build allows each limit one value.
     pub fn new(
         local: &'a CoopLocalSet<C>,
         links: Rc<L>,
         endpoints: &'static dyn EndpointSource,
         timeouts: SessionTimeouts,
-        dial_params: P,
+        mut dial_params: P,
     ) -> Self {
-        let observer = Rc::new(RefCell::new(ApplicationLayerObserver::new()));
+        // A snapshot of no byte has one value, the build's: a build whose every limit is one value
+        // asks the parameters nothing.
+        let limits = if const { core::mem::size_of::<SessionLimits>() == 0 } {
+            SessionLimits::BUILD
+        } else {
+            dial_params().limits
+        };
+        let observer = Rc::new(RefCell::new(ApplicationLayerObserver::with_limits(&limits)));
         let dial_observer = observer.clone();
         let on_event: DialSink<C> = Box::new(move |actions| {
             Box::new(dispatch_to(dial_observer.clone(), actions.clone())) as EventSink
@@ -255,11 +267,13 @@ mod tests {
             keep_alive: wz_session_core::session_init_params::KeepAliveConf::PICO,
             initial_sn: 0,
             cookie: vec![],
-            tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(
+            tx_queue: wz_session_core::session_init_params::TxQueueConf::of_snapshot(
                 &wz_session_core::policy::SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD,
             ),
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
             policy: wz_session_core::policy::SessionPolicy::defaults(),
+            limits: wz_session_core::limits::SessionLimits::BUILD,
             cookie_signing_key: wz_session_core::signing_key::SigningKey::new(vec![7u8; 32])
                 .expect("key"),
         }
@@ -436,5 +450,66 @@ mod tests {
         settle(&mut node);
         std::assert_eq!(seen.responses.get(), 1, "the router received the reply");
         std::assert_eq!(seen.finals.get(), 1, "and the final that closes the query");
+    }
+
+    /// The node's observer is held to the session limits of the parameters it gives its
+    /// sessions: with `MAX_SUBSCRIPTIONS` stated as two, a third subscriber is refused as a full
+    /// table, and the refusal leaves the two subscribers and the two declarations. The CONTROL is
+    /// the same node under the build's limits, which takes the third.
+    #[test]
+    fn the_observer_is_held_to_the_limits_of_the_session_parameters() {
+        use wz_session_core::limit_binding::{LimitSpec, Quota};
+        use wz_session_core::limits::MaxSubscriptions;
+        static ENDPOINTS: StaticEndpoints = StaticEndpoints::new(&["udp/10.0.0.1:7447"]);
+
+        let mut stated = SessionLimits::BUILD;
+        if stated.select_max_subscriptions(Quota::at_most(2)).is_err() {
+            // A build of one value refuses two: it has no other snapshot to hand the node.
+            std::assert!(MaxSubscriptions::DOMAIN.is_singleton());
+            return;
+        }
+        let net = MemoryNetwork::new();
+        let runtime = CoopRuntime::new(FrozenClock);
+        let local = CoopLocalSet::new(&runtime);
+        let sink = || BoxedSink::new(|_sample: &dyn wz_session_core::sink::SampleView| {});
+
+        let mut node = ClientNode::new(
+            &local,
+            Rc::new(MemoryLinks::new(net.clone(), [10, 0, 0, 2])),
+            &ENDPOINTS,
+            SessionTimeouts::from_build(),
+            move || SessionInitParams {
+                limits: stated,
+                ..params(0xb1)
+            },
+        );
+        node.subscriber("test/a", sink()).expect("under the quota");
+        node.subscriber("test/b", sink()).expect("under the quota");
+        std::assert_eq!(
+            node.subscriber("test/c", sink()),
+            Err(RegisterError::TableFull)
+        );
+        std::assert_eq!(node.observer().borrow().subscribers.len(), 2);
+        std::assert_eq!(
+            node.declarations.len(),
+            2,
+            "the refused one is not declared"
+        );
+
+        // CONTROL: the build's limits take the subscriber the stated ones refused.
+        let mut control = ClientNode::new(
+            &local,
+            Rc::new(MemoryLinks::new(net.clone(), [10, 0, 0, 3])),
+            &ENDPOINTS,
+            SessionTimeouts::from_build(),
+            || params(0xb2),
+        );
+        for key in ["test/a", "test/b", "test/c"] {
+            control
+                .subscriber(key, sink())
+                .expect("the build's limits take it");
+        }
+        std::assert_eq!(control.observer().borrow().subscribers.len(), 3);
+        std::assert_eq!(control.declarations.len(), 3);
     }
 }

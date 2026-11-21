@@ -38,6 +38,7 @@ fn a_role_gated_off_node_holds_no_clock() {
         WhatAmI::Peer,
         TimestampingEnabled::default(),
         &SessionPolicy::defaults(),
+        &RuntimeLimits::BUILD,
     );
     assert!(!off.is_stamping());
     assert!(off.stamp().is_none());
@@ -53,6 +54,7 @@ fn a_stamping_node_mints_strictly_increasing_stamps_carrying_its_zid() {
         WhatAmI::Router,
         TimestampingEnabled::default(),
         &SessionPolicy::defaults(),
+        &RuntimeLimits::BUILD,
     );
     assert!(node.is_stamping());
     let mut prev = 0u64;
@@ -76,6 +78,7 @@ fn a_node_that_does_not_stamp_gives_a_reply_no_stamp() {
         WhatAmI::Peer,
         TimestampingEnabled::default(),
         &SessionPolicy::defaults(),
+        &RuntimeLimits::BUILD,
     );
     assert!(off.next_stamp().is_none());
     assert!(NodeHlc::disabled().next_stamp().is_none());
@@ -91,6 +94,7 @@ fn a_stamping_node_stamps_a_reply_with_its_own_identity_and_a_later_time_each_ti
         WhatAmI::Router,
         TimestampingEnabled::default(),
         &SessionPolicy::defaults(),
+        &RuntimeLimits::BUILD,
     );
     let first = node.next_stamp().expect("a router-role node stamps");
     let second = node.next_stamp().expect("and again");
@@ -115,6 +119,7 @@ fn a_node_whose_identity_is_longer_than_a_timestamp_carries_stamps_no_reply() {
         WhatAmI::Router,
         TimestampingEnabled::default(),
         &SessionPolicy::defaults(),
+        &RuntimeLimits::BUILD,
     );
     assert!(
         node.stamp().is_some(),
@@ -163,7 +168,8 @@ fn own_standing() -> StandingHome {
 /// The bound a node runs with when the environment states none: the build's.
 #[cfg(feature = "time-hlc")]
 fn build_bound() -> wz_session_core::ntp64::Ntp64 {
-    max_delta_from(Err(std::env::VarError::NotPresent)).expect("the build's own bound is honoured")
+    max_delta_from(Err(std::env::VarError::NotPresent), &RuntimeLimits::BUILD)
+        .expect("the build's own bound is honoured")
 }
 
 /// A stamping node whose physical clock is frozen.
@@ -257,6 +263,7 @@ fn a_node_stamps_by_the_snapshot_it_is_handed() {
             TimestampingEnabled::default(),
             FrozenEpoch,
             &policy,
+            &RuntimeLimits::BUILD,
         );
         assert_eq!(
             node.data_stamp() == DataStamp::Withheld,
@@ -315,6 +322,7 @@ fn a_node_reads_a_source_registered_after_it_was_built_and_none_it_stamps_nothin
         TimestampingEnabled::default(),
         registry,
         &SessionPolicy::defaults(),
+        &RuntimeLimits::BUILD,
     );
     assert!(
         node.stamp().is_some(),
@@ -367,6 +375,7 @@ fn nodes_over_one_registry_share_its_standing_and_the_host_reports_through_eithe
             TimestampingEnabled::default(),
             registry,
             &SessionPolicy::defaults(),
+            &RuntimeLimits::BUILD,
         )
         .with_trusted_only_stamping(true)
     };
@@ -438,14 +447,15 @@ fn the_bound_is_the_builds_unless_the_variable_states_one_the_build_allows() {
     use wz_session_core::limits::ClockMaxForwardStepMs;
     use wz_session_core::ntp64::Ntp64;
     let ms = |n: u64| Ntp64::from_duration(core::time::Duration::from_millis(n));
-    let stated = |text: &str| max_delta_from(Ok(String::from(text)));
+    let stated = |text: &str| max_delta_from(Ok(String::from(text)), &RuntimeLimits::BUILD);
+    let build = wz_session_core::caps::CLOCK_MAX_FORWARD_STEP_MS as u64;
     assert_eq!(
-        max_delta_from(Err(std::env::VarError::NotPresent)),
-        Ok(ms(DEFAULT_MAX_DELTA_MS))
+        max_delta_from(Err(std::env::VarError::NotPresent), &RuntimeLimits::BUILD),
+        Ok(ms(build))
     );
     assert_eq!(
-        stated(&DEFAULT_MAX_DELTA_MS.to_string()),
-        Ok(ms(DEFAULT_MAX_DELTA_MS)),
+        stated(&build.to_string()),
+        Ok(ms(build)),
         "the build's own value is allowed by every build"
     );
     let allows = |n: usize| ClockMaxForwardStepMs::DOMAIN.contains(LimitValue::Integer(n));
@@ -479,18 +489,21 @@ fn the_bound_is_the_builds_unless_the_variable_states_one_the_build_allows() {
 fn a_bound_that_is_not_a_whole_number_of_milliseconds_is_refused_and_not_defaulted() {
     for text in ["soon", "-5", " 3000 ", "", "1.5", "18446744073709551616"] {
         assert_eq!(
-            max_delta_from(Ok(String::from(text))),
+            max_delta_from(Ok(String::from(text)), &RuntimeLimits::BUILD),
             Err(MaxDeltaRefused::NotMilliseconds {
                 stated: String::from(text)
             }),
             "`{text}`"
         );
     }
-    let not_unicode = max_delta_from(Err(std::env::VarError::NotUnicode(
-        std::ffi::OsString::from("x"),
-    )));
+    let not_unicode = max_delta_from(
+        Err(std::env::VarError::NotUnicode(std::ffi::OsString::from(
+            "x",
+        ))),
+        &RuntimeLimits::BUILD,
+    );
     assert_eq!(not_unicode, Err(MaxDeltaRefused::NotUnicode));
-    let refusal = max_delta_from(Ok(String::from("soon"))).unwrap_err();
+    let refusal = max_delta_from(Ok(String::from("soon")), &RuntimeLimits::BUILD).unwrap_err();
     assert!(
         refusal.to_string().contains("UHLC_MAX_DELTA_MS") && refusal.to_string().contains("soon"),
         "the refusal names the variable and the value: {refusal}"
@@ -502,7 +515,7 @@ fn a_bound_that_is_not_a_whole_number_of_milliseconds_is_refused_and_not_default
 #[cfg(feature = "time-hlc")]
 #[test]
 fn a_node_whose_stated_bound_is_refused_holds_no_clock_and_says_why() {
-    let refused = max_delta_from(Ok(String::from("soon"))).unwrap_err();
+    let refused = max_delta_from(Ok(String::from("soon")), &RuntimeLimits::BUILD).unwrap_err();
     let stamping = SessionPolicy::defaults().clock_quality_stamping();
     let node = |whatami: WhatAmI, bound| {
         NodeHlc::over_source_bounded(
@@ -538,6 +551,86 @@ fn a_node_whose_stated_bound_is_refused_holds_no_clock_and_says_why() {
     assert_eq!(honoured.max_delta_word(), Some(build_bound().as_word()));
 }
 
+/// `CLOCK_MAX_FORWARD_STEP_MS` with nothing stated: a node whose creator hands it the build's
+/// runtime limits runs its clock with the build's bound.
+#[cfg(feature = "time-hlc")]
+#[test]
+fn clock_max_forward_step_ms_with_nothing_stated_holds_the_builds_bound() {
+    let build = wz_session_core::ntp64::Ntp64::from_duration(core::time::Duration::from_millis(
+        wz_session_core::caps::CLOCK_MAX_FORWARD_STEP_MS as u64,
+    ));
+    let limits = RuntimeLimits::defaults();
+    assert_eq!(
+        max_delta_from(Err(std::env::VarError::NotPresent), &limits),
+        Ok(build)
+    );
+    let node = NodeHlc::for_node_over_source_by(
+        &[0x01],
+        WhatAmI::Router,
+        TimestampingEnabled::default(),
+        FrozenEpoch,
+        &SessionPolicy::defaults(),
+        &limits,
+    );
+    // The creator's door reads the environment too, so the node holds what the two resolve to.
+    let resolved = max_delta_from(std::env::var(MAX_DELTA_VARIABLE), &limits);
+    assert_eq!(
+        node.max_delta_word(),
+        resolved.ok().map(|bound| bound.as_word())
+    );
+}
+
+/// `CLOCK_MAX_FORWARD_STEP_MS` stated in the runtime limits the creator hands: the clock runs with
+/// the stated bound, and `UHLC_MAX_DELTA_MS`, where the environment states it, is selected over
+/// it. A build that keeps the build's value alone refuses the statement itself.
+#[cfg(feature = "time-hlc")]
+#[test]
+fn clock_max_forward_step_ms_stated_is_the_bound_the_clock_runs_with() {
+    use wz_session_core::limit_binding::LimitSpec;
+    use wz_session_core::limits::ClockMaxForwardStepMs;
+    use wz_session_core::ntp64::Ntp64;
+    let ms = |n: usize| Ntp64::from_duration(core::time::Duration::from_millis(n as u64));
+    let build = wz_session_core::caps::CLOCK_MAX_FORWARD_STEP_MS;
+    let value = if build == 20 { 30 } else { 20 };
+    let mut limits = RuntimeLimits::defaults();
+    let selected = limits.select_clock_max_forward_step_ms(value);
+    if ClockMaxForwardStepMs::DOMAIN.is_singleton() {
+        assert!(selected.is_err(), "a build of one value refuses another");
+        return;
+    }
+    selected.expect("the value is inside the domain");
+    let stated = max_delta_from(Err(std::env::VarError::NotPresent), &limits);
+    assert_eq!(stated, Ok(ms(value)));
+    let node = NodeHlc::over_source_bounded(
+        &[0x01],
+        WhatAmI::Router,
+        TimestampingEnabled::default(),
+        FrozenEpoch,
+        own_standing(),
+        SessionPolicy::defaults().clock_quality_stamping(),
+        stated,
+    );
+    assert_eq!(node.max_delta_word(), Some(ms(value).as_word()));
+    let through_creator = NodeHlc::for_node_over_source_by(
+        &[0x01],
+        WhatAmI::Router,
+        TimestampingEnabled::default(),
+        FrozenEpoch,
+        &SessionPolicy::defaults(),
+        &limits,
+    );
+    let resolved = max_delta_from(std::env::var(MAX_DELTA_VARIABLE), &limits);
+    assert_eq!(
+        through_creator.max_delta_word(),
+        resolved.ok().map(|bound| bound.as_word())
+    );
+    assert_eq!(
+        max_delta_from(Ok(build.to_string()), &limits),
+        Ok(ms(build)),
+        "the variable moves the bound over what the creator stated"
+    );
+}
+
 /// A node of a build without the clock reads no bound, so it never refuses one.
 #[test]
 fn a_node_built_by_its_creator_reports_no_refusal_when_the_variable_is_unset_or_unread() {
@@ -546,6 +639,7 @@ fn a_node_built_by_its_creator_reports_no_refusal_when_the_variable_is_unset_or_
         WhatAmI::Router,
         TimestampingEnabled::default(),
         &SessionPolicy::defaults(),
+        &RuntimeLimits::BUILD,
     );
     if std::env::var_os(MAX_DELTA_VARIABLE).is_none() || cfg!(not(feature = "time-hlc")) {
         assert_eq!(node.clock_refused(), None);
@@ -654,6 +748,7 @@ mod forward_stamp {
             WhatAmI::Peer,
             TimestampingEnabled::default(),
             &SessionPolicy::defaults(),
+            &RuntimeLimits::BUILD,
         );
         let before = bare_put();
         let mut after = before.clone();
@@ -711,6 +806,7 @@ mod forward_stamp {
             WhatAmI::Router,
             TimestampingEnabled::default(),
             &SessionPolicy::defaults(),
+            &RuntimeLimits::BUILD,
         );
         let mut push = bare_put();
         assert!(
@@ -810,6 +906,7 @@ mod forward_stamp {
             WhatAmI::Router,
             TimestampingEnabled::default(),
             &SessionPolicy::defaults(),
+            &RuntimeLimits::BUILD,
         );
         let mut push = build_push_del_literal("demo/hlc").expect("build del");
         let given = wz_session_core::sample::TimestampHint {
@@ -838,6 +935,7 @@ mod forward_stamp {
             WhatAmI::Router,
             TimestampingEnabled::default(),
             &SessionPolicy::defaults(),
+            &RuntimeLimits::BUILD,
         );
         let publisher_zid = [0x0B, 0x0C];
         let inbound_time = crate::timestamp_source::wall_clock_ntp64();
@@ -869,6 +967,7 @@ mod forward_stamp {
             WhatAmI::Router,
             TimestampingEnabled::default(),
             &SessionPolicy::defaults(),
+            &RuntimeLimits::BUILD,
         );
         let ten_seconds = 10u64 << 32;
         let future_time = crate::timestamp_source::wall_clock_ntp64() + ten_seconds;
@@ -907,6 +1006,7 @@ mod forward_stamp {
             WhatAmI::Router,
             TimestampingEnabled::default(),
             &SessionPolicy::defaults(),
+            &RuntimeLimits::BUILD,
         );
         let mut relayed = stamped_put(future_time, &[0x0B, 0x0C]);
         assert_eq!(
@@ -926,6 +1026,7 @@ mod forward_stamp {
             WhatAmI::Router,
             TimestampingEnabled::default(),
             &SessionPolicy::defaults(),
+            &RuntimeLimits::BUILD,
         )
         .with_drop_future_timestamp(true);
         let mut dropped = stamped_put(future_time, &[0x0B, 0x0C]);
@@ -952,6 +1053,7 @@ mod forward_stamp {
             WhatAmI::Router,
             TimestampingEnabled::default(),
             &SessionPolicy::defaults(),
+            &RuntimeLimits::BUILD,
         )
         .with_drop_future_timestamp(true);
 
@@ -1103,6 +1205,7 @@ fn an_oversized_or_empty_zid_still_yields_a_usable_clock() {
         WhatAmI::Router,
         TimestampingEnabled::all(true),
         &SessionPolicy::defaults(),
+        &RuntimeLimits::BUILD,
     );
     assert!(long.stamp().is_some());
     let empty = NodeHlc::for_node_by(
@@ -1110,6 +1213,7 @@ fn an_oversized_or_empty_zid_still_yields_a_usable_clock() {
         WhatAmI::Router,
         TimestampingEnabled::all(true),
         &SessionPolicy::defaults(),
+        &RuntimeLimits::BUILD,
     );
     assert!(empty.stamp().is_some());
 }
@@ -1131,6 +1235,7 @@ fn an_interception_is_stamped_with_the_zid_of_the_node_and_strictly_increases() 
         WhatAmI::Router,
         TimestampingEnabled::default(),
         &SessionPolicy::defaults(),
+        &RuntimeLimits::BUILD,
     );
     let mut prev = 0;
     for _ in 0..100 {
@@ -1151,6 +1256,7 @@ fn a_node_whose_role_stamps_no_data_still_stamps_its_interceptions() {
         WhatAmI::Peer,
         TimestampingEnabled::default(),
         &SessionPolicy::defaults(),
+        &RuntimeLimits::BUILD,
     );
     assert!(peer.stamp().is_none(), "no data is stamped on a peer");
     let (_, id) = read_interception(&peer.interception_timestamp().expect("a stamp"));

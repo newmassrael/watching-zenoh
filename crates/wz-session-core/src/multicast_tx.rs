@@ -407,12 +407,12 @@ pub fn multicast_tx_emit(
     let reliable = multicast_tx_reliable(&item);
     let mut collect = UnboundedCollect(Vec::new());
     // Always room, so never `Congested` and the waits are never spent; the queue is the one the
-    // group's snapshot makes, as every queue a machine builds is.
+    // group's snapshots make, as every queue a machine builds is.
     let _ = multicast_tx_push(
         item,
         tx_sn,
         params,
-        &TxQueueConf::of_policy(&params.policy),
+        &TxQueueConf::of_snapshot(&params.policy, &params.limits),
         &mut collect,
     );
     MulticastTxFrames {
@@ -1824,11 +1824,15 @@ mod qos_emit_tests {
             batch_size: 2_048,
             is_qos,
             compression: false,
-            tx_queue: TxQueueConf::of_policy(&crate::policy::SessionPolicy::defaults()),
+            tx_queue: TxQueueConf::of_snapshot(
+                &crate::policy::SessionPolicy::defaults(),
+                &crate::limits::SessionLimits::BUILD,
+            ),
             link_rx: crate::session_init_params::LinkRxConf::default(),
             join_rule: crate::multicast_params::GroupJoinRule::Pico,
             max_sessions: None,
             policy: crate::policy::SessionPolicy::defaults(),
+            limits: crate::limits::SessionLimits::BUILD,
         }
     }
 
@@ -1921,11 +1925,15 @@ mod push_tests {
             batch_size,
             is_qos: false,
             compression: false,
-            tx_queue: TxQueueConf::of_policy(&crate::policy::SessionPolicy::defaults()),
+            tx_queue: TxQueueConf::of_snapshot(
+                &crate::policy::SessionPolicy::defaults(),
+                &crate::limits::SessionLimits::BUILD,
+            ),
             link_rx: crate::session_init_params::LinkRxConf::default(),
             join_rule: crate::multicast_params::GroupJoinRule::Pico,
             max_sessions: None,
             policy: crate::policy::SessionPolicy::defaults(),
+            limits: crate::limits::SessionLimits::BUILD,
         }
     }
 
@@ -2049,7 +2057,10 @@ mod push_tests {
     #[test]
     fn messages_in_a_window_leave_as_one_datagram_with_one_sequence_number() {
         let params = params(2_048);
-        let conf = TxQueueConf::of_policy(&crate::policy::SessionPolicy::defaults());
+        let conf = TxQueueConf::of_snapshot(
+            &crate::policy::SessionPolicy::defaults(),
+            &crate::limits::SessionLimits::BUILD,
+        );
         let mut tx = MulticastTxConduits::new(mask_from_res(params.seq_num_res));
         let mut queue = Scripted::default();
         let mut window = MulticastBatch::new();
@@ -2087,7 +2098,10 @@ mod push_tests {
     #[test]
     fn an_express_message_takes_the_open_frame_with_it() {
         let params = params(2_048);
-        let conf = TxQueueConf::of_policy(&crate::policy::SessionPolicy::defaults());
+        let conf = TxQueueConf::of_snapshot(
+            &crate::policy::SessionPolicy::defaults(),
+            &crate::limits::SessionLimits::BUILD,
+        );
         let mut tx = MulticastTxConduits::new(mask_from_res(params.seq_num_res));
         let mut queue = Scripted::default();
         let mut window = MulticastBatch::new();
@@ -2124,7 +2138,10 @@ mod push_tests {
     #[test]
     fn a_change_of_reliability_closes_the_open_frame() {
         let params = params(2_048);
-        let conf = TxQueueConf::of_policy(&crate::policy::SessionPolicy::defaults());
+        let conf = TxQueueConf::of_snapshot(
+            &crate::policy::SessionPolicy::defaults(),
+            &crate::limits::SessionLimits::BUILD,
+        );
         let mut tx = MulticastTxConduits::new(mask_from_res(params.seq_num_res));
         let mut queue = Scripted::default();
         let mut window = MulticastBatch::new();
@@ -2158,7 +2175,10 @@ mod push_tests {
     #[test]
     fn a_message_that_finds_no_room_spends_no_sequence_number() {
         let params = params(2_048);
-        let conf = TxQueueConf::of_policy(&crate::policy::SessionPolicy::defaults());
+        let conf = TxQueueConf::of_snapshot(
+            &crate::policy::SessionPolicy::defaults(),
+            &crate::limits::SessionLimits::BUILD,
+        );
         let mut tx = MulticastTxConduits::new(mask_from_res(params.seq_num_res));
         let mut queue = Scripted {
             answers: [LinkRoom::Congested].into(),
@@ -2203,7 +2223,10 @@ mod push_tests {
         let conf = TxQueueConf {
             wait_before_drop_us: 7,
             wait_before_close_us: 11,
-            ..TxQueueConf::of_policy(&crate::policy::SessionPolicy::defaults())
+            ..TxQueueConf::of_snapshot(
+                &crate::policy::SessionPolicy::defaults(),
+                &crate::limits::SessionLimits::BUILD,
+            )
         };
         let mut tx = MulticastTxConduits::new(mask_from_res(params.seq_num_res));
         let mut queue = Scripted::default();
@@ -2246,7 +2269,10 @@ mod push_tests {
             put(true, &payload),
             &mut tx,
             &params,
-            &TxQueueConf::of_policy(&crate::policy::SessionPolicy::defaults()),
+            &TxQueueConf::of_snapshot(
+                &crate::policy::SessionPolicy::defaults(),
+                &crate::limits::SessionLimits::BUILD,
+            ),
             &mut queue,
         );
         assert_eq!(outcome, PushOutcome::Pushed);
@@ -2309,7 +2335,10 @@ mod push_tests {
             compression: true,
             ..params(2_048)
         };
-        let conf = TxQueueConf::of_policy(&crate::policy::SessionPolicy::defaults());
+        let conf = TxQueueConf::of_snapshot(
+            &crate::policy::SessionPolicy::defaults(),
+            &crate::limits::SessionLimits::BUILD,
+        );
         for (payload, shrinks) in [(&[0x5a; 600][..], true), (&b"v"[..], false)] {
             let mut plain_tx = MulticastTxConduits::new(mask_from_res(plain.seq_num_res));
             let mut plain_queue = Scripted::default();
@@ -2358,7 +2387,10 @@ mod push_tests {
             compression: true,
             ..params(128)
         };
-        let conf = TxQueueConf::of_policy(&crate::policy::SessionPolicy::defaults());
+        let conf = TxQueueConf::of_snapshot(
+            &crate::policy::SessionPolicy::defaults(),
+            &crate::limits::SessionLimits::BUILD,
+        );
         // Bytes lz4 cannot shrink, so that a datagram is its header and its fragment.
         let noise = |len: usize| -> Vec<u8> {
             (0..len as u32)
@@ -2415,7 +2447,10 @@ mod push_tests {
     fn a_chain_that_runs_out_part_way_ends_with_a_drop_marker_on_the_next_sn() {
         use crate::inbound::{parse_inbound, InboundFrame};
         let params = params(128);
-        let conf = TxQueueConf::of_policy(&crate::policy::SessionPolicy::defaults());
+        let conf = TxQueueConf::of_snapshot(
+            &crate::policy::SessionPolicy::defaults(),
+            &crate::limits::SessionLimits::BUILD,
+        );
         let mut tx = MulticastTxConduits::new(mask_from_res(params.seq_num_res));
         let mut queue = Scripted {
             answers: [LinkRoom::Free, LinkRoom::Free, LinkRoom::Congested].into(),
@@ -2464,7 +2499,10 @@ mod push_tests {
     #[test]
     fn a_held_conduit_takes_the_push_on_its_own_ring() {
         let params = params(2_048);
-        let conf = TxQueueConf::of_policy(&crate::policy::SessionPolicy::defaults());
+        let conf = TxQueueConf::of_snapshot(
+            &crate::policy::SessionPolicy::defaults(),
+            &crate::limits::SessionLimits::BUILD,
+        );
         let item = MulticastTxItem::Push {
             push: Box::new(crate::push_build::build_push_literal("k", b"v").unwrap()),
             reliable: true,
@@ -2498,7 +2536,10 @@ mod push_tests {
             put(true, b"v"),
             &mut MulticastTxConduit::new(Priority::Background, &mut sn),
             &params,
-            &TxQueueConf::of_policy(&crate::policy::SessionPolicy::defaults()),
+            &TxQueueConf::of_snapshot(
+                &crate::policy::SessionPolicy::defaults(),
+                &crate::limits::SessionLimits::BUILD,
+            ),
             &mut Scripted::default(),
         );
     }
@@ -2526,11 +2567,15 @@ mod lend_tests {
             batch_size,
             is_qos,
             compression: false,
-            tx_queue: TxQueueConf::of_policy(&crate::policy::SessionPolicy::defaults()),
+            tx_queue: TxQueueConf::of_snapshot(
+                &crate::policy::SessionPolicy::defaults(),
+                &crate::limits::SessionLimits::BUILD,
+            ),
             link_rx: crate::session_init_params::LinkRxConf::default(),
             join_rule: crate::multicast_params::GroupJoinRule::Pico,
             max_sessions: None,
             policy: crate::policy::SessionPolicy::defaults(),
+            limits: crate::limits::SessionLimits::BUILD,
         }
     }
 
@@ -2618,7 +2663,10 @@ mod lend_tests {
                 put(b"payload", priority),
                 &mut tx,
                 &params,
-                &TxQueueConf::of_policy(&crate::policy::SessionPolicy::defaults()),
+                &TxQueueConf::of_snapshot(
+                    &crate::policy::SessionPolicy::defaults(),
+                    &crate::limits::SessionLimits::BUILD,
+                ),
                 &mut queue,
             );
             assert_eq!(outcome, PushOutcome::Pushed);
@@ -2647,7 +2695,10 @@ mod lend_tests {
             put(&payload, Priority::DEFAULT),
             &mut tx,
             &params,
-            &TxQueueConf::of_policy(&crate::policy::SessionPolicy::defaults()),
+            &TxQueueConf::of_snapshot(
+                &crate::policy::SessionPolicy::defaults(),
+                &crate::limits::SessionLimits::BUILD,
+            ),
             &mut queue,
         );
         assert_eq!((queue.offers, queue.refused), (2, 1));
@@ -2673,7 +2724,10 @@ mod lend_tests {
             put(&payload, Priority::DEFAULT),
             &mut tx,
             &params,
-            &TxQueueConf::of_policy(&crate::policy::SessionPolicy::defaults()),
+            &TxQueueConf::of_snapshot(
+                &crate::policy::SessionPolicy::defaults(),
+                &crate::limits::SessionLimits::BUILD,
+            ),
             &mut queue,
         );
         assert!(
@@ -2700,7 +2754,10 @@ mod lend_tests {
                 put(b"v", Priority::DEFAULT),
                 &mut tx,
                 &params,
-                &TxQueueConf::of_policy(&crate::policy::SessionPolicy::defaults()),
+                &TxQueueConf::of_snapshot(
+                    &crate::policy::SessionPolicy::defaults(),
+                    &crate::limits::SessionLimits::BUILD,
+                ),
                 &mut queue,
             );
         }
@@ -2735,11 +2792,15 @@ mod lent_emit_tests {
             batch_size,
             is_qos,
             compression: false,
-            tx_queue: TxQueueConf::of_policy(&crate::policy::SessionPolicy::defaults()),
+            tx_queue: TxQueueConf::of_snapshot(
+                &crate::policy::SessionPolicy::defaults(),
+                &crate::limits::SessionLimits::BUILD,
+            ),
             link_rx: crate::session_init_params::LinkRxConf::default(),
             join_rule: crate::multicast_params::GroupJoinRule::Pico,
             max_sessions: None,
             policy: crate::policy::SessionPolicy::defaults(),
+            limits: crate::limits::SessionLimits::BUILD,
         }
     }
 

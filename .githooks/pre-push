@@ -1098,6 +1098,11 @@ round_fed_gates=(
     # generated limits module. A text read, no build.
     "limit_read_gate.py --selftest"
     "limit_read_gate.py --check"
+    # A crate on the cooperative runtime enters a critical section only through the runtime's
+    # door, which a host build makes the runtime's own lock. Round-fed by the sources of every
+    # crate on the runtime and their manifests. A text read and one `cargo metadata`, no build.
+    "coop_critical_section_gate.py --selftest"
+    "coop_critical_section_gate.py --check"
     "sce_feature_model.py --check"
     # R3521 -- the package entry's selftest. Round-fed by deploy/wz-config.toml (it loads the
     # declaration and holds its artifact, role, platform and runtime-feature rows to the entry's own
@@ -1318,12 +1323,27 @@ round_fed_gates=(
     # A sharded job's matrix lists exactly the shards its count names; static, a yaml read.
     "shard_matrix_binding.py"
     "unwired_lane_lint.py"
+    # The soft-job declarations (deploy/soft_jobs.json) against every soft site
+    # of the workflows: a round that adds, renames or promotes a
+    # `continue-on-error` feeds it, and so does the date, since an entry lapses.
+    # A YAML read of the workflows, no build and no network.
+    "soft_job_gate.py --selftest"
+    "soft_job_gate.py --check"
     # R4268 — the planner of `[checks.ci]` (bx.toml): the dispatch table read as
     # the fleet's units. A round that edits the table feeds it, and a table it
     # cannot read is a gate the fleet can no longer run, so the push sees it.
     # MEASURED: well under a second each, a text read with no build.
     "runci_plan.py --selftest"
     "runci_plan.py --check"
+    # Every script under scripts/ is run by a lane, selftested by one, imported by a script that
+    # is, or declared with a reason. Round-fed by run-ci.sh, the workflows and the scripts it
+    # reads, so the commit that adds a tool sees whether a lane reaches it. A text read, no build.
+    "script_exercise_census.py --selftest"
+    "script_exercise_census.py --check"
+    "completeness_gate.py --selftest"
+    "completeness_gate.py --check"
+    "mutation_ratchet_gate.py --selftest"
+    "mutation_ratchet_gate.py --declared"
     # R2659 — the link BEFORE `unwired_lane_lint`'s. That one checks lane ->
     # ci.yml; this checks test -> lane, so the chain is test -> lane -> workflow
     # and this is its missing first link. Both exist for the same reason, stated

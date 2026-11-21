@@ -7652,6 +7652,7 @@ fn plain_reply_stamp_seen_by(options: QueryableOptions) -> (Option<Vec<u8>>, Vec
         wz_codecs::whatami::WhatAmI::Router,
         crate::node_clock::TimestampingEnabled::default(),
         &wz_session_core::policy::SessionPolicy::defaults(),
+        &wz_session_core::limits::RuntimeLimits::BUILD,
     );
     let session = session.with_node_clock(hlc);
     let _queryable = session.declare_queryable("home/temp", options, |_query, out| {
@@ -7907,13 +7908,101 @@ fn a_querier_with_the_default_bound_never_refuses() {
     let (session, _driver) = build_session();
     let querier = session.declare_querier("home/temp", awaiting_options());
     assert_eq!(
-        wz_session_core::caps::QUERIER_MAX_PENDING_QUERIES,
-        0,
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .querier_max_pending_queries(),
+        wz_session_core::limit_binding::Quota::UNBOUNDED,
         "the build under test states no bound"
     );
     for _ in 0..200 {
         querier.get(|_| {}, |_| {}).expect("no bound");
     }
+}
+
+/// A querier is held to the bound the session's creator stated to its observer, with nothing set
+/// on the querier itself: stated as two, the third query is refused and sends nothing.
+#[cfg(feature = "query-get")]
+#[test]
+fn a_querier_takes_the_bound_its_sessions_creator_stated() {
+    use wz_session_core::limit_binding::{LimitSpec, Quota};
+    use wz_session_core::limits::{QuerierMaxPendingQueries, SessionLimits};
+
+    let mut limits = SessionLimits::defaults();
+    let stated = limits.select_querier_max_pending_queries(Quota::at_most(2));
+    if QuerierMaxPendingQueries::DOMAIN.is_singleton() {
+        assert!(stated.is_err(), "a build of one value refuses two");
+        return;
+    }
+    stated.expect("two is inside the domain");
+    let (actions, driver) = recording_actions();
+    let observer = Arc::new(crate::sync::PlainMutex::new(
+        ApplicationLayerObserver::with_limits(&limits),
+    ));
+    let session = TokioSession::new(actions, observer, Arc::new(TokioTime::new()));
+    let querier = session.declare_querier("home/temp", awaiting_options());
+    querier.get(|_| {}, |_| {}).expect("first place");
+    querier.get(|_| {}, |_| {}).expect("second place");
+    let on_the_wire = driver.frame_count();
+    assert!(
+        matches!(
+            querier.get(|_| {}, |_| {}),
+            Err(QueryAliasError::QuotaExceeded { limit: 2 })
+        ),
+        "the third query is refused with the stated bound"
+    );
+    assert_eq!(driver.frame_count(), on_the_wire, "and sends no frame");
+    assert_eq!(querier.slots.pending(), 2, "and takes no place");
+}
+
+/// The replies a handler job or a held query stages apart from the observer are held to the
+/// bounds the session's creator stated to its observer, read when the session is made: a session
+/// over an observer held to a payload of two refuses a reply of three to the handler, and one
+/// over an observer made with no snapshot holds the build's bounds.
+#[cfg(all(feature = "transport-unicast", feature = "query-queryable"))]
+#[test]
+fn a_sessions_reply_bounds_are_the_ones_its_creator_stated() {
+    use wz_session_core::limit_binding::{LimitSpec, Quota};
+    use wz_session_core::limits::{MaxReplyPayloadBytes, SessionLimits};
+    use wz_session_core::query_sink::{ReplyError, ReplyOut};
+    use wz_session_core::reply_stage::{ReplyBounds, ReplyStage};
+
+    let (actions, _driver) = recording_actions();
+    let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
+    let plain = TokioSession::new(actions, observer, Arc::new(TokioTime::new()));
+    assert_eq!(plain.reply_bounds, ReplyBounds::BUILD);
+
+    let mut limits = SessionLimits::defaults();
+    let stated = limits.select_max_reply_payload_bytes(Quota::at_most(2));
+    if MaxReplyPayloadBytes::DOMAIN.is_singleton() {
+        assert!(stated.is_err(), "a build of one value refuses two");
+        return;
+    }
+    stated.expect("two is inside the domain");
+    let (actions, _driver) = recording_actions();
+    let observer = Arc::new(crate::sync::PlainMutex::new(
+        ApplicationLayerObserver::with_limits(&limits),
+    ));
+    let session = TokioSession::new(actions, observer, Arc::new(TokioTime::new()));
+    assert_eq!(session.reply_bounds, ReplyBounds::of(&limits));
+
+    let mut replies = ReplyStage::held_to(session.reply_bounds);
+    {
+        let mut responder = wz_session_core::query::QueryResponder::new(
+            1,
+            String::from("home/temp"),
+            wz_session_core::reply_acceptance::ReplyKeyExpr::from_parameter_bytes(None),
+            wz_session_core::sample::QosLevel::DEFAULT,
+            &mut replies,
+        );
+        assert_eq!(
+            responder.try_reply(b"abc"),
+            Err(ReplyError::PayloadTooLarge)
+        );
+        assert_eq!(responder.try_reply(b"ab"), Ok(()));
+    }
+    assert_eq!(replies.len(), 1, "the refused reply was not staged");
 }
 
 /// The aliased querier holds the same bound.
@@ -13912,13 +14001,15 @@ fn tapped_qos_group_session_under(
         batch_size: 2_048,
         is_qos: true,
         compression: false,
-        tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(
+        tx_queue: wz_session_core::session_init_params::TxQueueConf::of_snapshot(
             &wz_session_core::policy::SessionPolicy::defaults(),
+            &wz_session_core::limits::SessionLimits::BUILD,
         ),
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
         max_sessions: None,
         policy,
+        limits: wz_session_core::limits::SessionLimits::BUILD,
     };
     let (producer, tap) = crate::multicast_pipeline::MulticastTxTap::attach(&params);
     let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
@@ -17402,6 +17493,36 @@ async fn a_declaration_made_during_the_wait_restarts_it() {
     );
 }
 
+/// `DECLARATION_SYNC_INTERVAL_MS` stated in the session's snapshot is the step of the wait for
+/// stable declarations: a session that owes nothing is stable only once a whole stated interval
+/// has passed with nothing changed.
+#[tokio::test]
+async fn declaration_sync_interval_ms_stated_is_the_step_of_the_wait_for_stable_declarations() {
+    let mut params = fixture_session_init_params();
+    if params
+        .limits
+        .select_declaration_sync_interval_ms(300)
+        .is_err()
+    {
+        // A build of one value refuses another: there is no other snapshot to hand.
+        return;
+    }
+    let (actions, _driver) = recording_actions_with_params(params);
+    let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
+    let session = TokioSession::new(actions, observer, Arc::new(TokioTime::new()));
+    let started = std::time::Instant::now();
+    assert!(
+        session
+            .wait_declarations_stable(std::time::Duration::from_secs(5))
+            .await,
+        "nothing owed"
+    );
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(300),
+        "the wait stepped by the stated interval"
+    );
+}
+
 /// One inbound Push on `demo/data`, as the drive loop would dispatch it.
 #[cfg(all(
     feature = "declare-subscriber",
@@ -18061,7 +18182,10 @@ fn a_sessions_clock_stamps_by_the_clock_quality_of_its_snapshot() {
             "made: {}",
             value.id()
         );
-        let session = session.with_timestamping(TimestampingEnabled::all(true));
+        let session = session.with_timestamping(
+            TimestampingEnabled::all(true),
+            &wz_session_core::limits::RuntimeLimits::BUILD,
+        );
         assert_eq!(
             session.node_hlc().data_stamp() == DataStamp::Withheld,
             trusted_only,
@@ -18071,6 +18195,37 @@ fn a_sessions_clock_stamps_by_the_clock_quality_of_its_snapshot() {
         opened += 1;
     }
     assert!(opened >= 1, "the build's domain holds at least its default");
+}
+
+/// A session's clock rebuilt by a host runs with the `CLOCK_MAX_FORWARD_STEP_MS` of the runtime
+/// limits the host hands it: the build's bound with nothing stated, and the stated one otherwise.
+#[cfg(feature = "time-hlc")]
+#[test]
+fn a_sessions_clock_rebuilt_by_a_host_is_bounded_by_the_runtime_limits_it_is_handed() {
+    use crate::node_clock::TimestampingEnabled;
+    use wz_session_core::limits::RuntimeLimits;
+    if std::env::var_os("UHLC_MAX_DELTA_MS").is_some() {
+        // The variable is selected over the snapshot, which the node clock's own tests hold.
+        return;
+    }
+    let bound = |limits: &RuntimeLimits| {
+        let (session, _driver) = build_session();
+        let session = session.with_timestamping(TimestampingEnabled::all(true), limits);
+        session.node_hlc().max_delta_word()
+    };
+    let word = |ms: usize| {
+        wz_session_core::ntp64::Ntp64::from_duration(core::time::Duration::from_millis(ms as u64))
+            .as_word()
+    };
+    let build = wz_session_core::caps::CLOCK_MAX_FORWARD_STEP_MS;
+    assert_eq!(bound(&RuntimeLimits::defaults()), Some(word(build)));
+    let value = if build == 20 { 30 } else { 20 };
+    let mut limits = RuntimeLimits::defaults();
+    if limits.select_clock_max_forward_step_ms(value).is_err() {
+        // A build that keeps the build's value alone refuses the statement itself.
+        return;
+    }
+    assert_eq!(bound(&limits), Some(word(value)));
 }
 
 /// On a time base the program supplies, the wait for stable declarations runs on the program's

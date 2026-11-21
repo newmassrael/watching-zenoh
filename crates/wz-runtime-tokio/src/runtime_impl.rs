@@ -477,15 +477,59 @@ impl Default for TokioTime {
 /// borrows, which that one cannot take, so a bound a session keeps on its own clock reaches a
 /// wait that is not `'static`. The future is polled first, as tokio's timeout polls it: one that
 /// is ready when the time passes has finished in time.
-pub async fn timeout_on<C, F>(clock: &C, ms: u64, fut: F) -> Result<F::Output, TimeoutElapsed>
+///
+/// A named future ([`TimeoutOn`]) and not an `async fn`: an `async fn` keeps its argument and
+/// the future it moves into its race as two values of its state, so each bound an open passed
+/// through held the open twice, and the bounds nest.
+pub fn timeout_on<'c, C, F>(
+    clock: &'c C,
+    ms: u64,
+    fut: F,
+) -> TimeoutOn<F, impl Future<Output = ()> + 'c>
 where
     C: TimeSource,
     F: Future,
 {
-    tokio::select! {
-        biased;
-        out = fut => Ok(out),
-        () = clock.sleep(ms) => Err(TimeoutElapsed),
+    TimeoutOn::new(fut, clock.sleep(ms))
+}
+
+/// `fut` raced against `deadline`, `fut` polled first: the future [`timeout_on`] answers with.
+/// It holds each of the two once, where it is pinned.
+#[must_use = "futures do nothing unless polled"]
+pub struct TimeoutOn<F, S> {
+    fut: F,
+    deadline: S,
+}
+
+impl<F, S> TimeoutOn<F, S> {
+    /// `fut` raced against `deadline`.
+    pub fn new(fut: F, deadline: S) -> Self {
+        Self { fut, deadline }
+    }
+}
+
+impl<F, S> Future for TimeoutOn<F, S>
+where
+    F: Future,
+    S: Future<Output = ()>,
+{
+    type Output = Result<F::Output, TimeoutElapsed>;
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        // SAFETY: the two fields are pinned structurally: neither is moved out of a pinned
+        // `TimeoutOn`, which has no `Drop` of its own and is `Unpin` only where both are.
+        let this = unsafe { self.get_unchecked_mut() };
+        // SAFETY: as above, `fut` stays where it is for as long as `self` is pinned.
+        let fut = unsafe { std::pin::Pin::new_unchecked(&mut this.fut) };
+        if let std::task::Poll::Ready(out) = fut.poll(cx) {
+            return std::task::Poll::Ready(Ok(out));
+        }
+        // SAFETY: as above, for `deadline`.
+        let deadline = unsafe { std::pin::Pin::new_unchecked(&mut this.deadline) };
+        deadline.poll(cx).map(|()| Err(TimeoutElapsed))
     }
 }
 

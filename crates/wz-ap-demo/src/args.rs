@@ -6083,6 +6083,92 @@ mod stock_config_tests {
         assert!(refused.contains("`key-set` = `ajar`"), "{refused}");
     }
 
+    /// The file's `wz` member states the node's runtime limits too, and the tuning `main` reads
+    /// hands them to the machines the node makes for itself; a file that states none, and a node
+    /// no file describes, run under the build defaults.
+    #[test]
+    fn the_wz_member_of_the_file_states_the_node_runtime_limits_the_tuning_hands_on() {
+        use wz::runtime_tokio::limits::RuntimeLimits;
+        assert_eq!(
+            TransportTuning::default().runtime_limits,
+            RuntimeLimits::defaults()
+        );
+        let silent = expand(
+            &["--config", "z.json5"],
+            r#"{ connect: { endpoints: ["tcp/r:7447"] } }"#,
+        )
+        .unwrap();
+        assert_eq!(silent.policies.limits.runtime, RuntimeLimits::defaults());
+
+        let mut stated = RuntimeLimits::defaults();
+        let value = if stated.snapshot_period_ms() == 250 {
+            125
+        } else {
+            250
+        };
+        if stated.select_snapshot_period_ms(value).is_err() {
+            // A build that keeps the build's value alone refuses the statement; the reader's own
+            // tests hold it to that.
+            return;
+        }
+        let chosen = expand(
+            &["--config", "z.json5"],
+            &format!(
+                r#"{{ connect: {{ endpoints: ["tcp/r:7447"] }},
+                     wz: {{ limits: {{ SNAPSHOT_PERIOD_MS: {value} }} }} }}"#
+            ),
+        )
+        .unwrap();
+        assert_eq!(chosen.policies.limits.runtime, stated);
+        let tuning = TransportTuning::from_argv(&chosen.argv)
+            .expect("the expansion is parseable")
+            .with_runtime_limits(chosen.policies.limits.runtime);
+        assert_eq!(tuning.runtime_limits.snapshot_period_ms(), value);
+    }
+
+    /// The runtime limits a file's `wz/limits` states reach the node: the expansion carries them,
+    /// the tuning `main` reads under them holds them for every dial, and a connect list longer
+    /// than a stated `MAX_STATIC_CONNECT` is refused by the limit's name.
+    #[test]
+    fn the_runtime_limits_a_file_states_reach_the_tuning() {
+        use wz::runtime_tokio::limits::RuntimeLimits;
+        let stated = expand(
+            &["--config", "z.json5"],
+            r#"{ connect: { endpoints: ["tcp/r:7447"] },
+                 wz: { limits: { MAX_LOCATOR_LEN: 32, MAX_STATIC_CONNECT: 1 } } }"#,
+        );
+        let stated = match stated {
+            Ok(stated) => stated,
+            // A build that keeps each limit at the build's value refuses the statement itself.
+            Err(refused) => {
+                assert!(
+                    refused.starts_with("--config: z.json5: the `wz` member is refused: "),
+                    "{refused}"
+                );
+                return;
+            }
+        };
+        let runtime = stated.policies.limits.runtime;
+        assert_ne!(runtime, RuntimeLimits::defaults());
+        let tuning = TransportTuning::from_argv_under(
+            &stated.argv,
+            stated.policies.policy,
+            &stated.policies.limits.session,
+        )
+        .expect("the expansion's flags parse")
+        .with_runtime_limits(runtime);
+        assert_eq!(tuning.runtime_limits, runtime);
+
+        let refused = expand(
+            &["--config", "z.json5"],
+            r#"{ connect: { endpoints: ["tcp/r:7447", "tcp/s:7447"] },
+                 wz: { limits: { MAX_STATIC_CONNECT: 1 } } }"#,
+        )
+        .unwrap_err();
+        assert!(refused.starts_with("--config: z.json5: "), "{refused}");
+        assert!(refused.contains("MAX_STATIC_CONNECT (1)"), "{refused}");
+    }
+
     /// R311y843 — every key wz REPORTS as honoured, paired with whether the
     /// demo does anything at all with it.
     ///
@@ -6129,16 +6215,12 @@ mod stock_config_tests {
     /// them. Both directions are pinned here.
     #[test]
     fn the_scouting_socket_resolves_to_what_was_named_or_to_zenohs_own_default() {
-        const DEFAULT_GROUP: std::net::Ipv4Addr = std::net::Ipv4Addr::new(224, 0, 0, 224);
-        const DEFAULT_PORT: u16 = 7446;
+        let socket = |text: &str| text.parse::<std::net::SocketAddr>().expect("a socket");
 
         // Nothing named -> zenoh's default socket, untouched.
         let bare = parse_scout_socket(&argv(&["--scout"])).unwrap();
         assert_eq!(bare, ScoutSocketArgs::default());
-        assert_eq!(
-            bare.group_and_port(DEFAULT_GROUP, DEFAULT_PORT),
-            (DEFAULT_GROUP, DEFAULT_PORT)
-        );
+        assert_eq!(bare.socket(), socket("224.0.0.224:7446"));
 
         // Named -> BOTH halves move. A resolver that took the group and kept
         // the default port would pass a group-only assertion.
@@ -6152,18 +6234,27 @@ mod stock_config_tests {
             "4",
         ]))
         .unwrap();
-        assert_eq!(
-            moved.group_and_port(DEFAULT_GROUP, DEFAULT_PORT),
-            (std::net::Ipv4Addr::new(224, 0, 0, 99), 7999)
-        );
+        assert_eq!(moved.socket(), socket("224.0.0.99:7999"));
         assert_eq!(moved.interface.as_deref(), Some("eth0"));
         assert_eq!(moved.ttl, Some(4));
+
+        // A group of the other family is read as the config reader reads the key: upstream types
+        // it as a socket address of either family.
+        let v6 = parse_scout_socket(&argv(&["--scout", "--scout-addr", "[ff05::231]:7511"]))
+            .expect("an IPv6 scouting socket");
+        assert_eq!(v6.socket(), socket("[ff05::231]:7511"));
 
         // A malformed socket is REFUSED at the argv boundary, so the resolver
         // is never handed one — the same refusal the config reader makes, in
         // the same words, because the failure it prevents is the same node that
-        // starts and joins nothing.
-        for bad in ["224.0.0.99", "not-an-address"] {
+        // starts and joins nothing. A zenoh-pico group locator is another
+        // library's key, and an unbracketed IPv6 address is no socket.
+        for bad in [
+            "224.0.0.99",
+            "not-an-address",
+            "udp/224.0.0.99:7999",
+            "ff05::231:7511",
+        ] {
             let err = parse_scout_socket(&argv(&["--scout", "--scout-addr", bad])).unwrap_err();
             assert!(err.contains("--scout-addr"), "{err}");
         }
@@ -9041,8 +9132,9 @@ mod stock_config_tests {
                 batching: false,
                 batching_time_limit_us: 5_000,
                 allocation: wz::runtime_tokio::session_glue::QueueAllocation::Init,
-                ..wz::runtime_tokio::session_glue::TxQueueConf::of_policy(
-                    &wz::runtime_tokio::policy::SessionPolicy::defaults()
+                ..wz::runtime_tokio::session_glue::TxQueueConf::of_snapshot(
+                    &wz::runtime_tokio::policy::SessionPolicy::defaults(),
+                    &wz::runtime_tokio::limits::SessionLimits::BUILD
                 )
             },
             "the file's queue section reaches the session the node opens"
@@ -9065,8 +9157,9 @@ mod stock_config_tests {
         assert_eq!(bare.lease_ms, 10_000);
         assert_eq!(
             bare.tx_queue,
-            wz::runtime_tokio::session_glue::TxQueueConf::of_policy(
-                &wz::runtime_tokio::policy::SessionPolicy::defaults()
+            wz::runtime_tokio::session_glue::TxQueueConf::of_snapshot(
+                &wz::runtime_tokio::policy::SessionPolicy::defaults(),
+                &wz::runtime_tokio::limits::SessionLimits::BUILD
             )
         );
         assert_eq!(
@@ -9334,8 +9427,9 @@ mod stock_config_tests {
                 wait_before_drop_us: 2_500,
                 max_wait_before_drop_fragments_us: 40_000,
                 wait_before_close_us: 7_000_000,
-                ..wz::runtime_tokio::session_glue::TxQueueConf::of_policy(
-                    &wz::runtime_tokio::policy::SessionPolicy::defaults()
+                ..wz::runtime_tokio::session_glue::TxQueueConf::of_snapshot(
+                    &wz::runtime_tokio::policy::SessionPolicy::defaults(),
+                    &wz::runtime_tokio::limits::SessionLimits::BUILD
                 )
             }
         );
@@ -10402,8 +10496,9 @@ pub(crate) fn parse_phase_exit_on_failure(
 /// struct having to know what that group is.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct ScoutSocketArgs {
-    /// `--scout-addr <ip>:<port>`, already known to parse as a v4 socket.
-    pub(crate) address: Option<String>,
+    /// `--scout-addr <ip>:<port>` (or `[<ipv6>]:<port>`), as the one reader of
+    /// `scouting/multicast/address` read it.
+    pub(crate) address: Option<std::net::SocketAddr>,
     /// `--scout-iface <name-or-ip>`.
     pub(crate) interface: Option<String>,
     /// `--scout-ttl <n>`.
@@ -10411,8 +10506,8 @@ pub(crate) struct ScoutSocketArgs {
 }
 
 impl ScoutSocketArgs {
-    /// The group and port to join: what the operator named, or the caller's
-    /// defaults when they named nothing.
+    /// The group and port to join: what the operator named, or upstream's
+    /// default when they named nothing.
     ///
     /// Extracted from the scouting path rather than left inline so the FALLBACK
     /// is testable. That half is the one with no other witness: a resolver that
@@ -10420,14 +10515,12 @@ impl ScoutSocketArgs {
     /// discover peers on a default-configured network, so every test that does
     /// not pin the fallback passes in a world where the key does nothing.
     ///
-    /// `address` was validated as a v4 socket at the argv boundary (and at the
-    /// config boundary before it), so the parse below cannot fail on operator
-    /// input; keeping the fallible form and defaulting on `Err` means a future
-    /// caller that skips the check degrades to the default group rather than
-    /// panicking in a discovery path.
+    /// The asking and the answering directions both resolve here, so a network
+    /// that moved neither has wz asking and answering on the one group upstream
+    /// names (`UPSTREAM_SCOUT_MULTICAST_ADDRESS`).
     ///
-    /// Gated on the UNION of its two consumers — the `scouting-active` bind in
-    /// `runner.rs` and this file's own `zenoh-config` test — rather than
+    /// Gated on the UNION of its consumers — the `scouting-active` and
+    /// `scouting-responder` binds and this file's own `zenoh-config` test — rather than
     /// silenced with `allow(dead_code)`. R311y845 shipped it ungated and the
     /// pre-push changed-crate run (DEFAULT features, where neither consumer
     /// compiles) refused it as dead code, which is the gate working: every
@@ -10438,18 +10531,9 @@ impl ScoutSocketArgs {
         feature = "scouting-responder",
         all(test, feature = "zenoh-config")
     ))]
-    pub(crate) fn group_and_port(
-        &self,
-        default_group: std::net::Ipv4Addr,
-        default_port: u16,
-    ) -> (std::net::Ipv4Addr, u16) {
-        match self.address.as_deref().and_then(|a| a.parse().ok()) {
-            Some(sock) => {
-                let sock: std::net::SocketAddrV4 = sock;
-                (*sock.ip(), sock.port())
-            }
-            None => (default_group, default_port),
-        }
+    pub(crate) fn socket(&self) -> std::net::SocketAddr {
+        self.address
+            .unwrap_or(wz::runtime_tokio::config::UPSTREAM_SCOUT_MULTICAST_ADDRESS)
     }
 
     /// R2791 — this struct as the socket-facing config, so the scouting plane
@@ -10472,7 +10556,7 @@ impl ScoutSocketArgs {
     /// Gated on the UNION of its four consumers, derived from their own
     /// attributes (`scouting-active`, `scouting-responder`, and an
     /// `all(scouting-active, routing-peer)` that the first already covers)
-    /// rather than copied from `group_and_port` above: that one also carries an
+    /// rather than copied from `socket` above: that one also carries an
     /// `all(test, zenoh-config)` arm, for a test this method has no counterpart
     /// to, and matching it would leave this dead code in exactly that build.
     ///
@@ -10504,18 +10588,18 @@ impl ScoutSocketArgs {
 pub(crate) fn parse_scout_socket(args: &[String]) -> Result<ScoutSocketArgs, String> {
     let address = match parse_pair(args, "--scout-addr") {
         None => None,
-        Some(raw) => {
-            // The same check the config reader applies, and for the same
-            // reason: zenoh types this key as a `SocketAddr`, so an address
-            // without a port is a value neither implementation accepts.
-            if raw.parse::<std::net::SocketAddrV4>().is_err() {
+        // The config reader's own reading of the key, for the same reason it
+        // refuses: zenoh types this key as a `SocketAddr`, so an address
+        // without a port is a value neither implementation accepts.
+        Some(raw) => match wz::runtime_tokio::config::scout_multicast_socket(Some(raw.as_str())) {
+            Ok(socket) => Some(socket),
+            Err(_) => {
                 return Err(format!(
                     "--scout-addr: `{raw}` is not an <ip>:<port> socket \
                      (e.g. 224.0.0.224:7446)"
-                ));
+                ))
             }
-            Some(raw)
-        }
+        },
     };
     let interface = match parse_pair(args, "--scout-iface") {
         Some(v) if v.is_empty() => {
@@ -10867,6 +10951,11 @@ pub(crate) struct TransportTuning {
     /// The snapshot of the node's policies ([`resolve_policy`]): every session the node opens is
     /// handed it, and the defaults above that a policy decides are taken from it.
     pub(crate) policy: wz::runtime_tokio::policy::SessionPolicy,
+    /// The node's runtime limits: the build's ([`resolve_runtime_limits`]), or those a `--config`
+    /// file's `wz/limits` states (`StockConfigExpansion::policies`), which `main` hands the tuning
+    /// ([`Self::with_runtime_limits`]). The machines the node makes for itself, its clock and its
+    /// resource snapshot, and every dial config it makes are handed them.
+    pub(crate) runtime_limits: wz::runtime_tokio::limits::RuntimeLimits,
 }
 
 /// The snapshot of the policies of a demo node no `--config` file describes, and of the sessions
@@ -10876,6 +10965,14 @@ pub(crate) struct TransportTuning {
 /// ([`TransportTuning::from_argv_under`]) and its scouting sockets.
 pub(crate) fn resolve_policy() -> wz::runtime_tokio::policy::SessionPolicy {
     wz::runtime_tokio::policy::SessionPolicy::defaults()
+}
+
+/// The runtime limits of a demo node no `--config` file describes: the build defaults. A node a
+/// file describes runs under the limits the file's `wz` member resolved
+/// (`StockConfigExpansion::policies`), which `main` hands its tuning
+/// ([`TransportTuning::with_runtime_limits`]).
+pub(crate) fn resolve_runtime_limits() -> wz::runtime_tokio::limits::RuntimeLimits {
+    wz::runtime_tokio::limits::RuntimeLimits::defaults()
 }
 
 /// R2925 — the demo's flag for each priority's queue size, indexed by the
@@ -10894,25 +10991,44 @@ pub(crate) const TX_QUEUE_SIZE_FLAGS: [&str; 8] = [
 
 impl Default for TransportTuning {
     fn default() -> Self {
-        Self::of_policy(resolve_policy())
+        // A node no document describes resolves no limits: the build's are named.
+        Self::of_snapshot(
+            resolve_policy(),
+            &wz::runtime_tokio::limits::SessionLimits::BUILD,
+        )
     }
 }
 
 impl TransportTuning {
-    /// What a node that names no transport flag runs with, under `policy`, the snapshot of the
-    /// node: the width it offers and the two policies its queues carry are the snapshot's.
-    pub(crate) fn of_policy(policy: wz::runtime_tokio::policy::SessionPolicy) -> Self {
+    /// What a node that names no transport flag runs with, under `policy` and `limits`, the
+    /// snapshots of the node: the width it offers, the two policies its queues carry and the
+    /// window of one of them are the snapshots'.
+    pub(crate) fn of_snapshot(
+        policy: wz::runtime_tokio::policy::SessionPolicy,
+        limits: &wz::runtime_tokio::limits::SessionLimits,
+    ) -> Self {
         Self {
             batch_size: 65535,
             lease_ms: 10_000,
             sn_resolution: policy.sn_resolution(),
             link_defaults: Default::default(),
-            tx_queue: wz::runtime_tokio::session_glue::TxQueueConf::of_policy(&policy),
+            tx_queue: wz::runtime_tokio::session_glue::TxQueueConf::of_snapshot(&policy, limits),
             link_rx: Default::default(),
             open_timeout: wz::runtime_tokio::session_open::OPEN_TIMEOUT,
             stats_filters: Default::default(),
             policy,
+            runtime_limits: resolve_runtime_limits(),
         }
+    }
+
+    /// `self` whose node runs under `limits`, the runtime limits its creator resolved
+    /// (builder): what `main` hands the tuning of a node a `--config` file describes.
+    pub(crate) fn with_runtime_limits(
+        mut self,
+        limits: wz::runtime_tokio::limits::RuntimeLimits,
+    ) -> Self {
+        self.runtime_limits = limits;
+        self
     }
 
     /// Read `--batch-size <n>` / `--lease-ms <n>` off the command line.
@@ -10932,17 +11048,22 @@ impl TransportTuning {
     /// the tests read the tuning this way.
     #[cfg(test)]
     pub(crate) fn from_argv(rest: &[String]) -> Result<Self, String> {
-        Self::from_argv_under(rest, resolve_policy())
+        Self::from_argv_under(
+            rest,
+            resolve_policy(),
+            &wz::runtime_tokio::limits::SessionLimits::BUILD,
+        )
     }
 
-    /// `from_argv` under `policy`, the node's snapshot: the tuning starts from
-    /// [`Self::of_policy`], so the defaults a policy decides and [`Self::policy`] are the
+    /// `from_argv` under `policy` and `limits`, the node's snapshots: the tuning starts from
+    /// [`Self::of_snapshot`], so the defaults a policy decides and [`Self::policy`] are the
     /// snapshot's, and every session the node opens is handed it.
     pub(crate) fn from_argv_under(
         rest: &[String],
         policy: wz::runtime_tokio::policy::SessionPolicy,
+        limits: &wz::runtime_tokio::limits::SessionLimits,
     ) -> Result<Self, String> {
-        let mut out = Self::of_policy(policy);
+        let mut out = Self::of_snapshot(policy, limits);
         if let Some(v) = parse_pair(rest, "--batch-size") {
             out.batch_size = v
                 .parse::<u16>()
@@ -11334,6 +11455,7 @@ pub(crate) fn session_init_params_for(
         // was therefore a literal in a public repository.
         // The node's snapshot, which the queue and the width above were made from.
         policy: tuning.policy,
+        limits: wz::runtime_tokio::limits::SessionLimits::BUILD,
         cookie_signing_key: SigningKey::from_entropy(&mut OsEntropy).map_err(|e| {
             std::io::Error::other(format!(
                 "no OS entropy for the cookie signing key ({e}); refusing to open a \
@@ -12805,15 +12927,18 @@ mod transport_tuning_policy_tests {
     #[test]
     fn the_tuning_carries_the_snapshot_it_is_read_under() {
         let chosen = a_chosen_snapshot();
-        let tuning = TransportTuning::from_argv_under(&argv(&["--lease-ms", "2000"]), chosen)
-            .expect("the flags read");
+        let build = wz::runtime_tokio::limits::SessionLimits::BUILD;
+        let tuning =
+            TransportTuning::from_argv_under(&argv(&["--lease-ms", "2000"]), chosen, &build)
+                .expect("the flags read");
         assert_eq!(tuning.policy, chosen);
         // The width a node offers when no flag states one is the snapshot's.
         assert_eq!(tuning.sn_resolution, chosen.sn_resolution());
         assert_eq!(tuning.lease_ms, 2000);
         // A flag still states over the snapshot's default.
-        let stated = TransportTuning::from_argv_under(&argv(&["--sn-resolution", "16bit"]), chosen)
-            .expect("the flags read");
+        let stated =
+            TransportTuning::from_argv_under(&argv(&["--sn-resolution", "16bit"]), chosen, &build)
+                .expect("the flags read");
         assert_eq!(
             stated.sn_resolution,
             wz::runtime_tokio::policy::SnResolution::Bits16
@@ -12835,7 +12960,8 @@ mod transport_tuning_policy_tests {
         {
             return;
         }
-        let window = TransportTuning::of_policy(on)
+        let build = wz::runtime_tokio::limits::SessionLimits::BUILD;
+        let window = TransportTuning::of_snapshot(on, &build)
             .tx_queue
             .no_progress_us
             .expect("the policy on gives the queue its window");
@@ -12844,6 +12970,7 @@ mod transport_tuning_policy_tests {
             TransportTuning::from_argv_under(
                 &argv(&["--wait-before-close-us", total_us.as_str()]),
                 on,
+                &build,
             )
         };
         let err = at(window - 1).expect_err("a total wait shorter than the window");
@@ -12855,5 +12982,37 @@ mod transport_tuning_policy_tests {
                 .wait_before_close_us,
             window
         );
+    }
+
+    /// `TX_NO_PROGRESS_WINDOW_US` stated in the node's limits is the window the total wait the
+    /// flags state is held against: a total a microsecond shorter than the stated window is
+    /// refused, one as long is read, whatever the build's window is.
+    #[test]
+    fn tx_no_progress_window_us_stated_is_the_window_the_flags_are_held_to() {
+        use wz::runtime_tokio::policy::TxNoProgressDeadline;
+        let mut on = SessionPolicy::defaults();
+        if on
+            .select_tx_no_progress_deadline(TxNoProgressDeadline::On)
+            .is_err()
+        {
+            return;
+        }
+        let mut limits = wz::runtime_tokio::limits::SessionLimits::BUILD;
+        if limits.select_tx_no_progress_window_us(2_000).is_err() {
+            // A build of one value refuses another: there is no other snapshot to hand.
+            return;
+        }
+        let at = |total_us: u64| {
+            let total_us = total_us.to_string();
+            TransportTuning::from_argv_under(
+                &argv(&["--wait-before-close-us", total_us.as_str()]),
+                on,
+                &limits,
+            )
+        };
+        let err = at(1_999).expect_err("a total wait shorter than the stated window");
+        assert!(err.contains("2000 us"), "{err}");
+        let read = at(2_000).expect("a total wait as long as the stated window");
+        assert_eq!(read.tx_queue.no_progress_us, Some(2_000));
     }
 }

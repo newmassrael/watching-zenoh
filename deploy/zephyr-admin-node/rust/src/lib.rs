@@ -63,6 +63,7 @@ use wz::runtime_zephyr::ZephyrClock;
 use wz::runtime_zephyr::ZephyrEntropy;
 #[cfg(not(storage_fixed))]
 use wz_session_core::entropy::EntropySource;
+use wz_session_core::limits::SessionLimits;
 use wz_session_core::policy::SessionPolicy;
 #[cfg(all(role_client, not(storage_fixed)))]
 use wz_session_core::query_sink::BoxedQuerySink;
@@ -141,6 +142,14 @@ wz::runtime_zephyr::zephyr_image_no_heap!();
 /// `WZ_POLICY_*_ALLOWS_*`) is one value on this target, and takes no byte.
 pub fn resolve_policy() -> SessionPolicy {
     SessionPolicy::defaults()
+}
+
+/// The limits of every session this image opens, which the node's observer and the peer tables of
+/// each session's slot are held to. The image's start is the creator of its sessions, and this is
+/// where it resolves them: the build's values until the image reads a run-time document. A limit
+/// the image does not widen is one value on this target, and takes no byte.
+pub fn resolve_limits() -> SessionLimits {
+    SessionLimits::defaults()
 }
 
 /// How often the node reads its stack's high-water mark. The read walks the whole
@@ -275,13 +284,14 @@ pub trait NodeNet {
 }
 
 /// zenoh 1.x's handshake shape, with a batch the MCU's receive slot holds whole, for a session
-/// whose machines read `policy`.
+/// whose machines read `policy` and whose tables are held to `limits`.
 #[cfg(not(storage_fixed))]
 fn params(
     whatami: WhatAmI,
     zid: SessionZid,
     signing_key: &[u8],
     policy: &SessionPolicy,
+    limits: &SessionLimits,
 ) -> SessionInitParams {
     SessionInitParams {
         whatami,
@@ -293,9 +303,10 @@ fn params(
         keep_alive: wz_session_core::session_init_params::KeepAliveConf::PICO,
         initial_sn: 0,
         cookie: Vec::new(),
-        tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(policy),
+        tx_queue: wz_session_core::session_init_params::TxQueueConf::of_snapshot(policy, limits),
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         policy: *policy,
+        limits: *limits,
         cookie_signing_key: SigningKey::new(signing_key.to_vec()).expect("32-byte key"),
     }
 }
@@ -329,6 +340,7 @@ fn run<N: NodeNet>(mut net: N) -> i32 {
     let locators: Vec<String> = net.addresses().into_iter().map(locator).collect();
     let accept_runtime = runtime.clone();
     let policy = resolve_policy();
+    let limits = resolve_limits();
     let node = AdminNode::new(
         &local,
         net.links(),
@@ -342,11 +354,11 @@ fn run<N: NodeNet>(mut net: N) -> i32 {
         },
         LISTEN_PORT,
         SessionTimeouts::from_build(),
-        move || params(WhatAmI::Peer, zid, &key, &policy),
+        move || params(WhatAmI::Peer, zid, &key, &policy, &limits),
         move |sink| {
             new_session_actions(
                 sink,
-                params(WhatAmI::Peer, zid, &key, &policy),
+                params(WhatAmI::Peer, zid, &key, &policy, &limits),
                 CoopTime::new(&accept_runtime),
                 ZephyrEntropy,
             )
@@ -482,12 +494,13 @@ fn run_client<N: NodeNet>(mut net: N) -> i32 {
     };
     let zid_hex = zid_to_zenoh_hex(&zid);
     let policy = resolve_policy();
+    let limits = resolve_limits();
     let mut node = ClientNode::new(
         &local,
         net.links(),
         &ENDPOINTS,
         SessionTimeouts::from_build(),
-        move || params(WhatAmI::Client, zid, &key, &policy),
+        move || params(WhatAmI::Client, zid, &key, &policy, &limits),
     );
     if node.queryable(STATUS_KEY, answer(STATUS_BODY)).is_err()
         || node.queryable(CONFIG_KEY, answer(CONFIG_BODY)).is_err()

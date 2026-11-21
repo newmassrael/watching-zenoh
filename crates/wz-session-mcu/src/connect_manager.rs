@@ -44,7 +44,7 @@ use core::convert::Infallible;
 
 use heapless::Vec as FixedVec;
 use wz_session_core::bounded::BoundedVec;
-use wz_session_core::caps::{MAX_LOCATOR_LEN, MAX_PEER_NODES, MAX_STATIC_CONNECT};
+use wz_session_core::caps::{self, MAX_PEER_NODES};
 use wz_session_core::connect_endpoints::{group_len, ConnectEndpoints, ConnectEntry, EndpointText};
 use wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES;
 #[cfg(any(
@@ -90,13 +90,13 @@ impl StaticEndpoints {
     /// The endpoints the node holds sessions with, in the order it dials them.
     pub const fn new(list: &'static [&'static str]) -> Self {
         assert!(
-            list.len() <= MAX_STATIC_CONNECT,
+            list.len() <= caps::MAX_STATIC_CONNECT,
             "more endpoints than the node holds rows for"
         );
         let mut i = 0;
         while i < list.len() {
             assert!(
-                list[i].len() <= MAX_LOCATOR_LEN,
+                list[i].len() <= caps::MAX_LOCATOR_LEN,
                 "an endpoint longer than a locator row"
             );
             i += 1;
@@ -942,7 +942,7 @@ impl NodeKey for Infallible {
 }
 
 /// How many peers the machines hold: the endpoints the control names and the nodes asked for.
-const PEERS: usize = MAX_STATIC_CONNECT + MAX_PEER_NODES;
+const PEERS: usize = caps::MAX_STATIC_CONNECT + MAX_PEER_NODES;
 
 /// How many dials can be in flight for the peers, with the ones a peer stopped wanting while
 /// they ran: each of the peers dials once at a time.
@@ -1156,14 +1156,14 @@ impl Tables {
 /// node is driven by one cooperative loop, which is the only thing that reaches it, and the guard
 /// makes that a property the type has and not a rule a caller keeps.
 pub struct PeerStore {
-    tables: critical_section::Mutex<core::cell::RefCell<Tables>>,
+    tables: wz_runtime_coop::cs::Mutex<core::cell::RefCell<Tables>>,
 }
 
 impl PeerStore {
     /// An empty store: no peer held. `const`, so a `static` can be one.
     pub const fn new() -> Self {
         Self {
-            tables: critical_section::Mutex::new(core::cell::RefCell::new(Tables {
+            tables: wz_runtime_coop::cs::Mutex::new(core::cell::RefCell::new(Tables {
                 planner: Planner::new(),
                 directory: LocatorDirectory::new(),
                 now_ms: 0,
@@ -1178,7 +1178,7 @@ impl PeerStore {
 
     /// Run `f` on the tables.
     fn with<R>(&self, f: impl FnOnce(&mut Tables) -> R) -> R {
-        critical_section::with(|cs| f(&mut self.tables.borrow_ref_mut(cs)))
+        wz_runtime_coop::cs::with(|cs| f(&mut self.tables.borrow_ref_mut(cs)))
     }
 }
 
@@ -2253,7 +2253,7 @@ impl<D: Dialer> ConnectManager<D> {
         // Hang up what the list no longer names: stop the machine (a session it holds is
         // hung up by the close that asks for), then hang up what is still held (a session
         // still handshaking has no face the machine holds), and forget the endpoint.
-        let mut gone: FixedVec<Key, MAX_STATIC_CONNECT> = FixedVec::new();
+        let mut gone: FixedVec<Key, { caps::MAX_STATIC_CONNECT }> = FixedVec::new();
         for row in self.rows.iter() {
             if !named(row) {
                 // One row per endpoint, and the table has as many rows as this holds.

@@ -238,7 +238,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> HeldQuery<R, T,
     /// the in-dispatch one is (the query's keyexpr, acceptance policy and QoS),
     /// and they go out on the query's own route.
     pub fn reply(&self, answer: impl FnOnce(&mut dyn ReplyOut)) {
-        let mut replies = ReplyStage::new();
+        let mut replies = ReplyStage::held_to(self.session.reply_bounds);
         {
             let mut responder = QueryResponder::new(
                 self.key.rid,

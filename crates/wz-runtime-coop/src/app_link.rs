@@ -26,8 +26,9 @@
 //! the transport's table ([`AppLinkTable::hold_remainder`](wz_session_core::app_link_table::AppLinkTable::hold_remainder)),
 //! behind anything held before, and offered to the program again at the start of every send and
 //! every turn of the link's loop (each read and wait), so the stream's bytes leave in order once
-//! the program is writable. The remainder is bounded by the transport's queue bound; past it the
-//! send fails, as a socket whose peer stopped reading does. Only this engine copies a remainder:
+//! the program is writable. The remainder is bounded by the link's queue bound, the
+//! `APP_LINK_QUEUE_BYTES` of the session that opened it ([`SessionTransport`]); past it the send
+//! fails, as a socket whose peer stopped reading does. Only this engine copies a remainder:
 //! the tokio engine's writer keeps its own offset.
 //!
 //! # Waiting
@@ -49,7 +50,7 @@ use wz_session_core::app_link_table::{
     kind_for_locator, AcceptRead, AppLinkKind, DatagramRead, LinkHandle, OpenProgress, SendGate,
     SendStep, StreamRead,
 };
-use wz_session_core::app_transport::AppTransport;
+use wz_session_core::app_transport::{AppTransport, SessionTransport};
 
 use crate::group_transport::{GroupSend, GroupTransport};
 use crate::ip_stack::{HeapIpDriver, IpDriver};
@@ -194,15 +195,17 @@ fn socket_of(locator: &str) -> SocketAddr {
         .unwrap_or(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0))
 }
 
-/// Open a link of `kind` for `locator` and wait until the program says it is up: for
-/// [`OPEN_WAIT_MS`] of the wall clock, or of the session's clock when `bound` gives a sleep of it.
+/// Open a link of `kind` for `locator`, held to the session's queue bound, and wait until the
+/// program says it is up: for [`OPEN_WAIT_MS`] of the wall clock, or of the session's clock when
+/// `bound` gives a sleep of it.
 fn open_link(
-    transport: &Arc<AppTransport>,
+    session: &SessionTransport,
     kind: AppLinkKind,
     locator: &str,
     bound: Option<&OpenBound>,
 ) -> Result<LinkHandle, LinkOpenError> {
-    let handle = transport.begin_open(kind, locator);
+    let transport = &session.transport;
+    let handle = session.begin_open(kind, locator);
     let mut progress = OpenProgress::Opening;
     let opening = |waker: Option<&core::task::Waker>| {
         progress = transport.with(|table| table.poll_open(handle, waker));
@@ -441,7 +444,7 @@ impl StreamSocket for AppStreamSocket {
 /// How this engine opens streams over the program's transport: its [`StreamDial`].
 #[derive(Clone)]
 pub struct AppStreamDial {
-    transport: Arc<AppTransport>,
+    transport: SessionTransport,
     /// What an open waits on, when it is a clock of the session's ([`AppLinks::with_open_bound`]).
     open_bound: Option<OpenBound>,
 }
@@ -459,7 +462,7 @@ impl StreamDial for AppStreamDial {
         )?;
         Ok(AppStreamSocket {
             held: Held {
-                transport: Arc::clone(&self.transport),
+                transport: Arc::clone(&self.transport.transport),
                 handle,
             },
             local: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
@@ -480,7 +483,7 @@ impl StreamDial for AppStreamDial {
         )?;
         Ok(Box::new(AppStreamListener {
             held: Held {
-                transport: Arc::clone(&self.transport),
+                transport: Arc::clone(&self.transport.transport),
                 handle,
             },
             at,
@@ -533,15 +536,15 @@ pub struct AppDatagramSocket {
 }
 
 impl AppDatagramSocket {
-    /// Open a datagram link to `to` over `transport`.
-    pub fn dial(transport: &Arc<AppTransport>, to: SocketAddr) -> Result<Self, LinkOpenError> {
+    /// Open a datagram link to `to` over `transport`, held to the session's queue bound.
+    pub fn dial(transport: &SessionTransport, to: SocketAddr) -> Result<Self, LinkOpenError> {
         Self::dial_bounded(transport, to, None)
     }
 
     /// [`Self::dial`] whose open waits on `bound`, a sleep of the session's clock, when there is
     /// one ([`AppLinks::with_open_bound`]).
     pub fn dial_bounded(
-        transport: &Arc<AppTransport>,
+        transport: &SessionTransport,
         to: SocketAddr,
         bound: Option<&OpenBound>,
     ) -> Result<Self, LinkOpenError> {
@@ -549,7 +552,7 @@ impl AppDatagramSocket {
         let handle = open_link(transport, AppLinkKind::Datagram, &locator, bound)?;
         Ok(Self {
             held: Held {
-                transport: Arc::clone(transport),
+                transport: Arc::clone(&transport.transport),
                 handle,
             },
             peer: to,
@@ -639,22 +642,23 @@ pub struct AppGroupTransport {
 }
 
 impl AppGroupTransport {
-    /// Join the group `locator` names (a `udp/` locator with `#iface=`) over `transport`.
-    pub fn join(transport: &Arc<AppTransport>, locator: &str) -> Result<Self, LinkOpenError> {
+    /// Join the group `locator` names (a `udp/` locator with `#iface=`) over `transport`, the
+    /// group's link held to the session's queue bound.
+    pub fn join(transport: &SessionTransport, locator: &str) -> Result<Self, LinkOpenError> {
         Self::join_bounded(transport, locator, None)
     }
 
     /// [`Self::join`] whose open waits on `bound`, a sleep of the session's clock, when there is
     /// one ([`AppLinks::with_open_bound`]).
     pub fn join_bounded(
-        transport: &Arc<AppTransport>,
+        transport: &SessionTransport,
         locator: &str,
         bound: Option<&OpenBound>,
     ) -> Result<Self, LinkOpenError> {
         let handle = open_link(transport, AppLinkKind::Group, locator, bound)?;
         Ok(Self {
             held: Some(Held {
-                transport: Arc::clone(transport),
+                transport: Arc::clone(&transport.transport),
                 handle,
             }),
         })
@@ -771,20 +775,21 @@ impl GroupTransport for AppGroupTransport {
 /// The session shell's links over the program's transport: a `tcp/` dial and listen open
 /// streams through the program, a `udp/` dial a datagram link, a `udp/` listen a datagram
 /// listener and a `udp/` listen naming an interface a group the program joins, and nothing is a
-/// socket of the system's. A `tls/` locator is not carried.
+/// socket of the system's. A `tls/` locator is not carried. Each link is held to the queue bound
+/// of the session the links are made for.
 pub struct AppLinks {
-    transport: Arc<AppTransport>,
+    transport: SessionTransport,
     dial: AppStreamDial,
     datagram_rx: usize,
     open_bound: Option<OpenBound>,
 }
 
 impl AppLinks {
-    /// Links over `transport`.
-    pub fn new(transport: Arc<AppTransport>) -> Self {
+    /// Links over `transport`, as the session whose bound it carries opens them.
+    pub fn new(transport: SessionTransport) -> Self {
         Self {
             dial: AppStreamDial {
-                transport: Arc::clone(&transport),
+                transport: transport.clone(),
                 open_bound: None,
             },
             transport,
@@ -801,7 +806,7 @@ impl AppLinks {
         self
     }
 
-    /// Links whose opens wait for the program to report a link up for [`OPEN_WAIT_MS`] of the
+    /// Links whose opens wait for the program to report a link up for `OPEN_WAIT_MS` of the
     /// session's clock, which `bound` sleeps on, in place of the wall clock's: the clock of a
     /// session timed by a time base the program supplies.
     #[must_use]
@@ -865,7 +870,7 @@ impl SessionLinks for AppLinks {
                 )?;
                 Ok(Box::new(AppDatagramListener {
                     held: Held {
-                        transport: Arc::clone(&self.transport),
+                        transport: Arc::clone(&self.transport.transport),
                         handle,
                     },
                     at: at.at,
@@ -1019,22 +1024,30 @@ mod tests {
         }
     }
 
-    fn transport(bound: usize) -> (Arc<Script>, Arc<AppTransport>) {
+    fn transport() -> (Arc<Script>, Arc<AppTransport>) {
         let script = Arc::new(Script::default());
         let transport = Arc::new(AppTransport::new(
-            Box::new(HostLock(Mutex::new(AppLinkTable::with_queue_bound(bound)))),
+            Box::new(HostLock(Mutex::new(AppLinkTable::new()))),
             Box::new(Port(Arc::clone(&script))),
         ));
         (script, transport)
+    }
+
+    /// `transport` as a session whose links queue at most `bound` bytes opens links over it.
+    fn session(transport: &Arc<AppTransport>, bound: usize) -> SessionTransport {
+        SessionTransport {
+            transport: Arc::clone(transport),
+            queue: wz_session_core::limit_binding::Quota::at_most(bound),
+        }
     }
 
     const PEER: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9)), 7447);
 
     #[test]
     fn a_dial_opens_a_stream_through_the_program_named_by_its_locator() {
-        let (script, transport) = transport(64);
+        let (script, transport) = transport();
         let stream = AppStreamDial {
-            transport: Arc::clone(&transport),
+            transport: session(&transport, 64),
             open_bound: None,
         }
         .dial(PEER)
@@ -1058,10 +1071,10 @@ mod tests {
 
     #[test]
     fn what_the_program_does_not_take_is_held_and_leaves_in_order_once_writable() {
-        let (script, transport) = transport(64);
+        let (script, transport) = transport();
         *script.answers.lock().unwrap() = vec![ProgramSend::Wrote(2), ProgramSend::WouldBlock];
         let stream = AppStreamDial {
-            transport: Arc::clone(&transport),
+            transport: session(&transport, 64),
             open_bound: None,
         }
         .dial(PEER)
@@ -1090,10 +1103,10 @@ mod tests {
 
     #[test]
     fn a_remainder_past_the_bound_fails_the_send() {
-        let (script, transport) = transport(4);
+        let (script, transport) = transport();
         *script.answers.lock().unwrap() = vec![ProgramSend::WouldBlock];
         let stream = AppStreamDial {
-            transport: Arc::clone(&transport),
+            transport: session(&transport, 4),
             open_bound: None,
         }
         .dial(PEER)
@@ -1103,9 +1116,9 @@ mod tests {
 
     #[test]
     fn a_stream_reads_what_the_program_hands_in_and_ends_when_it_closes() {
-        let (_script, transport) = transport(64);
+        let (_script, transport) = transport();
         let stream = AppStreamDial {
-            transport: Arc::clone(&transport),
+            transport: session(&transport, 64),
             open_bound: None,
         }
         .dial(PEER)
@@ -1127,8 +1140,8 @@ mod tests {
 
     #[test]
     fn a_datagram_goes_whole_or_is_dropped() {
-        let (script, transport) = transport(64);
-        let socket = AppDatagramSocket::dial(&transport, PEER).unwrap();
+        let (script, transport) = transport();
+        let socket = AppDatagramSocket::dial(&session(&transport, 64), PEER).unwrap();
         socket.send_to(PEER, b"whole").unwrap();
         *script.answers.lock().unwrap() = vec![ProgramSend::WouldBlock, ProgramSend::Wrote(1)];
         assert_eq!(
@@ -1155,9 +1168,10 @@ mod tests {
 
     #[test]
     fn a_group_is_joined_read_by_member_and_left_on_close() {
-        let (script, transport) = transport(64);
+        let (script, transport) = transport();
         let mut group =
-            AppGroupTransport::join(&transport, "udp/239.7.7.7:7447#iface=lan7").expect("joined");
+            AppGroupTransport::join(&session(&transport, 64), "udp/239.7.7.7:7447#iface=lan7")
+                .expect("joined");
         assert!(group.open());
         assert!(group.carrier_up());
         let handle = group.held.as_ref().unwrap().handle;
@@ -1191,9 +1205,10 @@ mod tests {
     /// send and has room at once.
     #[test]
     fn a_group_datagram_the_program_cannot_take_is_full_until_it_is_writable() {
-        let (script, transport) = transport(64);
+        let (script, transport) = transport();
         let mut group =
-            AppGroupTransport::join(&transport, "udp/239.7.7.7:7447#iface=lan7").expect("joined");
+            AppGroupTransport::join(&session(&transport, 64), "udp/239.7.7.7:7447#iface=lan7")
+                .expect("joined");
         let handle = group.held.as_ref().unwrap().handle;
         let outside = group.writability().expect("a wait from outside the loop");
         assert_eq!(group.try_send_to_group(b"sent"), GroupSend::Sent);
@@ -1239,9 +1254,10 @@ mod tests {
     #[test]
     fn a_groups_wait_for_input_returns_when_the_program_hands_in_a_datagram() {
         use std::time::{Duration, Instant};
-        let (_script, transport) = transport(64);
+        let (_script, transport) = transport();
         let joined =
-            AppGroupTransport::join(&transport, "udp/239.7.7.7:7447#iface=lan7").expect("joined");
+            AppGroupTransport::join(&session(&transport, 64), "udp/239.7.7.7:7447#iface=lan7")
+                .expect("joined");
         let handle = joined.held.as_ref().unwrap().handle;
         let mut group: Box<dyn GroupTransport> = Box::new(joined);
         let ready = group.readiness().expect("a wait from outside the loop");
@@ -1288,8 +1304,8 @@ mod tests {
 
     #[test]
     fn the_links_open_a_stream_and_a_datagram_link_and_refuse_tls() {
-        let (_script, transport) = transport(64);
-        let links = AppLinks::new(Arc::clone(&transport));
+        let (_script, transport) = transport();
+        let links = AppLinks::new(session(&transport, 64));
         let tcp = links.open_initiator(Locator::tcp(PEER)).expect("a stream");
         assert!(wz_session_core::link::BoxedLinkDriver::batch_length_prefixed(&*tcp.sink));
         let udp = links
@@ -1308,8 +1324,8 @@ mod tests {
 
     #[test]
     fn a_listener_hands_out_the_streams_the_program_accepts() {
-        let (_script, transport) = transport(64);
-        let links = AppLinks::new(Arc::clone(&transport));
+        let (_script, transport) = transport();
+        let links = AppLinks::new(session(&transport, 64));
         let listener = links.open_listener(Locator::tcp(PEER)).expect("listening");
         assert!(matches!(listener.accept(), Ok(None)));
         let listening = transport.with(|table| {
@@ -1338,8 +1354,8 @@ mod tests {
 
     #[test]
     fn a_datagram_listener_hands_out_each_source_the_program_accepts_as_a_datagram_link() {
-        let (script, transport) = transport(64);
-        let links = AppLinks::new(Arc::clone(&transport));
+        let (script, transport) = transport();
+        let links = AppLinks::new(session(&transport, 64));
         let listener = links
             .open_listener(Locator::udp(PEER))
             .expect("a udp/ listen is carried");
@@ -1366,8 +1382,8 @@ mod tests {
 
     #[test]
     fn an_accepted_source_reads_every_datagram_as_its_own() {
-        let (script, transport) = transport(64);
-        let links = AppLinks::new(Arc::clone(&transport));
+        let (script, transport) = transport();
+        let links = AppLinks::new(session(&transport, 64));
         let _listener = links.open_listener(Locator::udp(PEER)).unwrap();
         let (listening, _) = datagram_listener_of(&script);
         transport
@@ -1390,7 +1406,7 @@ mod tests {
         assert_eq!(socket.try_recv(&mut buf), Ok(Some((3, source))));
         assert_eq!(socket.try_recv(&mut buf), Ok(None));
         // A dialled link reads the source the program names.
-        let dialled = AppDatagramSocket::dial(&transport, PEER).unwrap();
+        let dialled = AppDatagramSocket::dial(&session(&transport, 64), PEER).unwrap();
         transport
             .received(dialled.held.handle, b"in", Some("udp/203.0.113.7:9"))
             .unwrap();
@@ -1402,8 +1418,8 @@ mod tests {
 
     #[test]
     fn the_links_join_a_group_through_the_program_and_refuse_what_names_none() {
-        let (script, transport) = transport(64);
-        let links = AppLinks::new(Arc::clone(&transport));
+        let (script, transport) = transport();
+        let links = AppLinks::new(session(&transport, 64));
         // Neither a datagram listen nor another scheme names a group: refused, with nothing asked
         // of the program.
         for endpoint in ["udp/192.0.2.9:7447", "tcp/239.7.7.7:7447#iface=lan7"] {
@@ -1500,7 +1516,7 @@ mod tests {
     #[test]
     fn an_open_bounded_on_the_sessions_clock_is_given_up_when_that_clock_passes() {
         let transport = Arc::new(AppTransport::new(
-            Box::new(HostLock(Mutex::new(AppLinkTable::with_queue_bound(64)))),
+            Box::new(HostLock(Mutex::new(AppLinkTable::new()))),
             Box::new(Unanswered),
         ));
         let passed = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1516,7 +1532,8 @@ mod tests {
         };
         let opening = std::thread::spawn(move || {
             let started = std::time::Instant::now();
-            let opened = AppDatagramSocket::dial_bounded(&transport, PEER, Some(&bound));
+            let opened =
+                AppDatagramSocket::dial_bounded(&session(&transport, 64), PEER, Some(&bound));
             (opened.is_err(), started.elapsed())
         });
         std::thread::sleep(std::time::Duration::from_millis(200));
@@ -1544,7 +1561,7 @@ mod tests {
     fn a_group_join_and_a_datagram_listen_are_bounded_on_the_sessions_clock() {
         for listen in [false, true] {
             let transport = Arc::new(AppTransport::new(
-                Box::new(HostLock(Mutex::new(AppLinkTable::with_queue_bound(64)))),
+                Box::new(HostLock(Mutex::new(AppLinkTable::new()))),
                 Box::new(Unanswered),
             ));
             let passed = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1558,7 +1575,7 @@ mod tests {
                     }) as BoundSleep
                 })
             };
-            let links = AppLinks::new(transport).with_open_bound(bound);
+            let links = AppLinks::new(session(&transport, 64)).with_open_bound(bound);
             let opening = std::thread::spawn(move || {
                 let started = std::time::Instant::now();
                 let refused = if listen {

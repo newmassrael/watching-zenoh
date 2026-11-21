@@ -86,7 +86,13 @@ where
     H: Deref<Target = SessionLinkActions<CoopRuntime<C, D>, CoopTime<C>>> + 'static,
     O: Deref<Target = RefCell<ApplicationLayerObserver>> + 'static,
 {
-    move |event| observer.borrow_mut().dispatch(event, &*actions)
+    move |event| {
+        let mut observer = observer.borrow_mut();
+        // The observer may serve another session too: this one states its own answer to a query
+        // it cannot resolve before its event is dispatched, as the slot profile's dispatch does.
+        observer.set_unanswerable_final(actions.params.policy.query_unanswerable_final());
+        observer.dispatch(event, &*actions);
+    }
 }
 
 /// A reply sink for a session that asks nothing: a pending query of its own never
@@ -243,16 +249,27 @@ where
     D: BoxedLinkDriver + ?Sized + 'static,
 {
     /// The application layer of the session `handle` names, over `observer`.
+    ///
+    /// `requesters` are held to the limits the session was opened with (the `limits` of its
+    /// parameters), whatever quota they were made with: the session's creator resolved them, so a
+    /// layer that makes its requesters states no limit of its own.
     pub fn new(
         observer: &'static ObserverCell<K>,
         handle: SlotRef<CoopRuntime<C, D>, CoopTime<C>>,
-        requesters: Requesters<R, G>,
+        mut requesters: Requesters<R, G>,
     ) -> Self {
+        requesters.limit_to(&handle.params.limits);
         Self {
             observer,
             handle,
             requesters,
         }
+    }
+
+    /// The session's own pending tables, held to its limits: where a layer registers a request
+    /// this dispatch has no verb for (a liveliness get).
+    pub fn requesters_mut(&mut self) -> &mut Requesters<R, G> {
+        &mut self.requesters
     }
 
     /// Ask the drive loop to raise [`IterationEvent::AppWake`] at the top of its next step.
@@ -528,11 +545,13 @@ mod tests {
             keep_alive: wz_session_core::session_init_params::KeepAliveConf::PICO,
             initial_sn: 0,
             cookie: vec![0u8; 16],
-            tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(
+            tx_queue: wz_session_core::session_init_params::TxQueueConf::of_snapshot(
                 &wz_session_core::policy::SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD,
             ),
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
             policy: wz_session_core::policy::SessionPolicy::defaults(),
+            limits: wz_session_core::limits::SessionLimits::BUILD,
             cookie_signing_key: SigningKey::new(vec![7u8; 32]).expect(">=32-byte key"),
         }
     }
@@ -670,5 +689,51 @@ mod tests {
             "the staged reply was drained, not left behind"
         );
         std::assert!(peer_saw_pong(), "the reply left on the session's link");
+    }
+
+    /// The session states its own `query-unanswerable-final` to the observer before its event is
+    /// dispatched: a value another session left on the observer is not the one this session's
+    /// queries are answered by. Every value the build's domain holds is tried; one it leaves out
+    /// is held by no session of the build.
+    #[test]
+    fn the_dispatch_states_its_sessions_unanswerable_final_to_the_observer() {
+        use wz_session_core::policy::{QueryUnanswerableFinal, SessionPolicy};
+
+        for value in [
+            QueryUnanswerableFinal::None,
+            QueryUnanswerableFinal::EmptyFinal,
+        ] {
+            let mut policy = SessionPolicy::defaults();
+            if policy.select_query_unanswerable_final(value).is_err() {
+                continue;
+            }
+            let net = MemoryNetwork::new();
+            let node_at = SocketAddr::from(([10, 0, 0, 1], 7473));
+            let peer_at = SocketAddr::from(([10, 0, 0, 2], 7474));
+            let driver = net.bind(node_at, Some(peer_at)).expect("bind node end");
+            let runtime = CoopRuntime::new(FrozenClock);
+            let sink: Rc<dyn BoxedLinkDriver> = driver;
+            let actions =
+                SessionLinkActions::<CoopRuntime<FrozenClock>, CoopTime<FrozenClock>>::new_generic(
+                    sink,
+                    SessionInitParams { policy, ..params() },
+                    CoopTime::new(&runtime),
+                );
+
+            let observer = Rc::new(RefCell::new(ApplicationLayerObserver::new()));
+            let other = match value {
+                QueryUnanswerableFinal::None => QueryUnanswerableFinal::EmptyFinal,
+                QueryUnanswerableFinal::EmptyFinal => QueryUnanswerableFinal::None,
+            };
+            observer.borrow_mut().set_unanswerable_final(other);
+            let mut on_event = dispatch_to(observer.clone(), actions);
+            on_event(IterationEvent::Poll(&frame(Vec::new())));
+            std::assert_eq!(
+                observer.borrow().queryables.answers_unresolved_queries(),
+                value == QueryUnanswerableFinal::EmptyFinal,
+                "{}",
+                value.id()
+            );
+        }
     }
 }

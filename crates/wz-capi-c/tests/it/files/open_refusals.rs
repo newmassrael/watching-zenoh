@@ -185,11 +185,11 @@ fn a_config_the_open_cannot_carry_out_is_refused_with_its_code() {
         (
             // The member is refused before the endpoints are looked at: without it this row is
             // the first one, nothing to dial.
-            "a wz member stating limits, on a client with nothing to dial",
+            "a wz member stating a limit the build lacks, on a client with nothing to dial",
             &[
                 NO_SCOUTING,
                 ("mode", "\"client\""),
-                ("wz", "{ limits: {} }"),
+                ("wz", "{ limits: { NO_SUCH_LIMIT: 1 } }"),
             ],
             Z_EINVAL,
         ),

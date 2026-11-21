@@ -175,6 +175,16 @@ pub struct LocalTokenRegistry<P: Storage = Profile> {
     /// nothing by its storage, so this is what bounds it; where the build fixes the bound to the
     /// storage's capacity it is held in no byte and the storage refuses alone.
     quota: crate::limits::MaxLocalTokensHeld,
+    /// The most items the staging this registry answers interests into holds between two drains
+    /// (`MAX_PENDING_DECLARES`): what the creator of the registry resolved
+    /// ([`Self::limit_interest_replies_to`]), the build's value until it does. Held here because
+    /// this registry is the one writer of that staging, wherever the staging is placed.
+    reply_quota: crate::limits::MaxPendingDeclaresHeld,
+    /// The longest keyexpr a token row holds (`MAX_KEYEXPR_BYTES`): what the creator of the
+    /// registry resolved ([`Self::limit_keys_to`]), the build's value until it does. Where the
+    /// build fixes the bound to the rows' capacity it is held in no byte and the rows refuse
+    /// alone.
+    key_quota: crate::limits::MaxKeyexprBytesHeld,
 }
 
 impl<P: Storage> Default for LocalTokenRegistry<P> {
@@ -182,6 +192,8 @@ impl<P: Storage> Default for LocalTokenRegistry<P> {
         Self {
             tokens: BoundedVec::default(),
             quota: Default::default(),
+            reply_quota: Default::default(),
+            key_quota: Default::default(),
         }
     }
 }
@@ -208,6 +220,39 @@ impl<P: Storage> LocalTokenRegistry<P> {
         self.quota = quota;
     }
 
+    /// Hold the registry to the `MAX_KEYEXPR_BYTES` its creator resolved: a token whose keyexpr
+    /// is longer than `quota` admits is refused ([`RegisterError::KeyexprTooLong`]), as a fixed
+    /// row that cannot hold it refuses it, and the tokens already held are kept.
+    pub fn limit_keys_to(&mut self, quota: crate::limits::MaxKeyexprBytesHeld) {
+        self.key_quota = quota;
+    }
+
+    /// Hold the staging this registry answers interests into to the `MAX_PENDING_DECLARES` its
+    /// creator resolved: a chain that would leave more items staged between two drains than
+    /// `quota` admits is refused whole, as a full fixed buffer refuses it, and what is staged is
+    /// kept.
+    ///
+    /// A quota under the tokens a match-all interest is answered with, plus its `Final`, refuses
+    /// that interest's chain every time it is asked. The build holds its own capacities clear of
+    /// that (`caps.rs`); a stage that states a lower quota states that refusal.
+    pub fn limit_interest_replies_to(&mut self, quota: crate::limits::MaxPendingDeclaresHeld) {
+        self.reply_quota = quota;
+    }
+
+    /// Whether `pending` takes `count` more items: its storage has the slots, and the staging
+    /// quota admits the items they would leave staged. Inlined so that a build whose quota is
+    /// its storage's capacity, where `admits` compares nothing, compiles each caller to the
+    /// storage's check alone.
+    #[inline(always)]
+    fn has_room(
+        &self,
+        pending: &BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }, P>,
+        count: usize,
+    ) -> bool {
+        pending.free_slots() >= count
+            && self.reply_quota.admits(pending.len().saturating_add(count))
+    }
+
     /// Record a locally-declared token. Called by
     /// `Session::declare_token` after the proactive `Declare(DeclToken)`
     /// emit.
@@ -219,13 +264,17 @@ impl<P: Storage> LocalTokenRegistry<P> {
     /// `Err(TableFull)` = token table at [`caps::MAX_LOCAL_TOKENS`],
     /// `Err(KeyexprTooLong)` = keyexpr exceeds [`caps::MAX_KEYEXPR_BYTES`].
     /// On every backing a registration past the quota the creator stated
-    /// ([`Self::limit_to`]) is `Err(TableFull)`.
+    /// ([`Self::limit_to`]) is `Err(TableFull)`, and a keyexpr past the key bound
+    /// it stated ([`Self::limit_keys_to`]) is `Err(KeyexprTooLong)`.
     pub fn register(&mut self, token_id: u64, keyexpr: &str) -> Result<bool, RegisterError> {
         if self.tokens.iter().any(|t| t.token_id == token_id) {
             return Ok(false);
         }
         if !self.quota.admits(self.tokens.len() + 1) {
             return Err(RegisterError::TableFull);
+        }
+        if !self.key_quota.admits(keyexpr.len()) {
+            return Err(RegisterError::KeyexprTooLong);
         }
         let mut ke: BoundedString<{ caps::MAX_KEYEXPR_BYTES }, P> = BoundedString::default();
         ke.push_str(keyexpr)
@@ -284,8 +333,10 @@ impl<P: Storage> LocalTokenRegistry<P> {
     /// [`Self::dispatch_messages`] -- is `alloc`-gated. `bounded-heapless`
     /// ends that accident (a fixed backing WITH `alloc`, so the batching path
     /// meets the hard bound), which is why the chain is now sized before it is
-    /// staged rather than pushed best-effort. On the growable backing the room
-    /// is unbounded and this never refuses.
+    /// staged rather than pushed best-effort. On every backing the room is
+    /// also bounded by the quota the creator stated
+    /// ([`Self::limit_interest_replies_to`]); on the growable backing with no
+    /// quota stated it is unbounded and this never refuses.
     pub fn respond_to_interest_borrowed(
         &self,
         pattern: Option<&str>,
@@ -297,7 +348,7 @@ impl<P: Storage> LocalTokenRegistry<P> {
             .iter()
             .filter(|token| token_matches(token.keyexpr.as_str(), pattern))
             .count();
-        if pending.free_slots() < matching.saturating_add(1) {
+        if !self.has_room(pending, matching.saturating_add(1)) {
             return Err(CapacityFull(()));
         }
         const RESERVED: &str = "room for the whole chain was checked above";
@@ -421,7 +472,7 @@ impl<P: Storage> LocalTokenRegistry<P> {
                 // Unresolvable mapping id — drop silently.
                 Ok(None) => return Ok(()),
                 Err(crate::wireexpr_resolve::KeyexprPastBound) => {
-                    if pending.free_slots() < 1 {
+                    if !self.has_room(pending, 1) {
                         return Err(CapacityFull(()));
                     }
                     return pending

@@ -25,7 +25,7 @@
 //! A reply (what comes in through `MulticastReplyEnqueue::enqueue`: what the group's dispatch
 //! stages for a member's interest or query, and what the group answers a member's ask with) is
 //! put on its lane without waiting, since it is staged inside the pump it would wait for, and
-//! holds one of [`MAX_MULTICAST_REPLIES`] slots until the pump takes it, as every reply queue of
+//! holds one of `MAX_MULTICAST_REPLIES` slots until the pump takes it, as every reply queue of
 //! a group does (`MulticastReplyQueue`): the reply past them is dropped and counted apart from
 //! the lanes' drops, so a member that asks faster than the group's socket writes cannot grow the
 //! stage for as long as it keeps asking.
@@ -35,7 +35,7 @@ use alloc::rc::Rc;
 use core::cell::{Cell, RefCell};
 
 use wz_runtime_coop::group_transport::{GroupSend, GroupTransport};
-use wz_session_core::caps::MAX_MULTICAST_REPLIES;
+use wz_session_core::limits::{MaxMulticastRepliesHeld, SessionLimits};
 use wz_session_core::link::{LinkRoom, RoomAnswer, RoomWait};
 use wz_session_core::multicast_params::MulticastParams;
 use wz_session_core::multicast_reply_sink::MulticastReplyEnqueue;
@@ -68,7 +68,7 @@ pub trait GroupTxPace {
 /// A group's transmission stage: the sequence numbers its producers mint, the datagrams they put
 /// on its lanes, bounded as the tokio engine bounds its group's pipeline
 /// (`MulticastTxLanes::of_group`), and what each lane dropped for want of room; and the replies it
-/// holds, bounded by [`MAX_MULTICAST_REPLIES`], and how many it dropped for want of a slot. The
+/// holds, bounded by `MAX_MULTICAST_REPLIES`, and how many it dropped for want of a slot. The
 /// two drop counts are kept apart because they answer different questions: [`Self::drops`] is
 /// the lanes' (messages of the session that found their lane full within their wait, by
 /// priority, as the tokio group counts a congestion drop), and [`Self::dropped`] is the reply
@@ -77,6 +77,10 @@ pub trait GroupTxPace {
 #[derive(Clone)]
 pub struct GroupTxStage {
     inner: Rc<Inner>,
+    /// The most replies the stage holds (`MAX_MULTICAST_REPLIES`): what the creator of the
+    /// session resolved ([`Self::with_limits`]), the build's value for a stage made by
+    /// [`Self::new`]. Every clone holds the same.
+    quota: MaxMulticastRepliesHeld,
 }
 
 struct Inner {
@@ -109,8 +113,19 @@ struct Queued {
 
 impl GroupTxStage {
     /// An empty stage of the group `params` describes: its conduits from sequence number 0, and
-    /// its lanes its queue's sizes in batches of its batch size, one lane when it runs no QoS.
+    /// its lanes its queue's sizes in batches of its batch size, one lane when it runs no QoS. Its
+    /// replies are held to the build's `MAX_MULTICAST_REPLIES`.
     pub fn new(params: &MulticastParams) -> Self {
+        Self::held_to(params, MaxMulticastRepliesHeld::default())
+    }
+
+    /// [`Self::new`], its replies held to the `MAX_MULTICAST_REPLIES` of `limits`, the snapshot
+    /// the creator of the group's session resolved.
+    pub fn with_limits(params: &MulticastParams, limits: &SessionLimits) -> Self {
+        Self::held_to(params, limits.max_multicast_replies_held())
+    }
+
+    fn held_to(params: &MulticastParams, quota: MaxMulticastRepliesHeld) -> Self {
         Self {
             inner: Rc::new(Inner {
                 params: params.clone(),
@@ -125,6 +140,7 @@ impl GroupTxStage {
                 replies: Cell::new(0),
                 dropped: Cell::new(0),
             }),
+            quota,
         }
     }
 
@@ -145,7 +161,7 @@ impl GroupTxStage {
     /// takes a reply slot, or is dropped and counted ([`Self::dropped`]) when none is free.
     fn admit_reply(&self, item: MulticastTxItem) {
         let inner = &*self.inner;
-        if inner.replies.get() >= MAX_MULTICAST_REPLIES {
+        if !self.quota.get().admits(inner.replies.get() + 1) {
             inner.dropped.set(inner.dropped.get().saturating_add(1));
             // Freed here, with nothing of the stage borrowed.
             drop(item);
@@ -225,12 +241,13 @@ impl GroupTxStage {
 
     /// Whether a reply slot is free.
     pub(super) fn has_reply_slot(&self) -> bool {
-        self.inner.replies.get() < MAX_MULTICAST_REPLIES
+        self.quota.get().admits(self.inner.replies.get() + 1)
     }
 
-    /// How many replies the stage holds at most: [`MAX_MULTICAST_REPLIES`].
+    /// How many replies the stage holds at most: its `MAX_MULTICAST_REPLIES`, `usize::MAX` where
+    /// it holds no bound.
     pub const fn capacity(&self) -> usize {
-        MAX_MULTICAST_REPLIES
+        super::quota_count(self.quota.get())
     }
 
     /// How many replies were dropped for want of a reply slot since the stage was made. A message
@@ -546,11 +563,15 @@ mod tests {
             batch_size: 2_048,
             is_qos: false,
             compression: false,
-            tx_queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
+            tx_queue: TxQueueConf::of_snapshot(
+                &SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD,
+            ),
             link_rx: LinkRxConf::default(),
             join_rule: GroupJoinRule::Pico,
             max_sessions: None,
             policy: SessionPolicy::defaults(),
+            limits: wz_session_core::limits::SessionLimits::BUILD,
         }
     }
 
@@ -936,6 +957,71 @@ mod tests {
         let host = FullHost::new(&nothing);
         assert_eq!(full.push(put("second"), &host), PushOutcome::Congested);
         assert_eq!((full.drops(Priority::DEFAULT), full.dropped()), (1, 0));
+    }
+
+    /// `MAX_MULTICAST_REPLIES` with nothing stated: a stage held to the session's snapshot holds
+    /// the build's number of replies and drops the next, as a stage made with none does.
+    #[test]
+    fn max_multicast_replies_with_nothing_stated_admits_what_the_build_admitted() {
+        use wz_session_core::caps::MAX_MULTICAST_REPLIES;
+        use wz_session_core::limits::SessionLimits;
+
+        let stage = GroupTxStage::with_limits(&one_batch_lanes(), &SessionLimits::defaults());
+        assert_eq!(stage.capacity(), MAX_MULTICAST_REPLIES);
+        for _ in 0..MAX_MULTICAST_REPLIES {
+            stage.enqueue(fill());
+        }
+        assert_eq!(stage.dropped(), 0);
+        stage.enqueue(put("second"));
+        assert_eq!(
+            stage.dropped(),
+            1,
+            "the reply past the build's value is dropped"
+        );
+    }
+
+    /// `MAX_MULTICAST_REPLIES` stated as two: the third reply is dropped and counted, takes
+    /// nothing of its lane and is no congestion drop, and a reply the pump takes frees its slot.
+    /// A heap reply queue held to the same snapshot drops the third the same.
+    #[test]
+    fn max_multicast_replies_stated_refuses_the_next() {
+        use wz_session_core::limit_binding::{LimitSpec, Quota};
+        use wz_session_core::limits::{MaxMulticastReplies, SessionLimits};
+
+        let mut limits = SessionLimits::defaults();
+        let stated = limits.select_max_multicast_replies(Quota::at_most(2));
+        if MaxMulticastReplies::DOMAIN.is_singleton() {
+            assert!(stated.is_err(), "a build of one value refuses two");
+            return;
+        }
+        stated.expect("two is inside the domain");
+
+        let stage = GroupTxStage::with_limits(&one_batch_lanes(), &limits);
+        assert_eq!(stage.capacity(), 2);
+        stage.enqueue(put("first"));
+        stage.enqueue(put("first"));
+        stage.enqueue(put("second"));
+        assert_eq!(stage.dropped(), 1, "the third reply is dropped and counted");
+        assert_eq!(
+            stage.drops(Priority::DEFAULT),
+            0,
+            "and is no congestion drop"
+        );
+        assert!(stage.take().is_some());
+        stage.enqueue(put("third"));
+        assert_eq!(stage.dropped(), 1, "a reply taken frees its slot");
+        let mut queued = 0;
+        while stage.take().is_some() {
+            queued += 1;
+        }
+        assert_eq!(queued, 2, "the dropped reply took nothing");
+
+        let queue = crate::group_drive::MulticastReplyQueue::with_limits(&limits);
+        assert_eq!(queue.capacity(), 2);
+        for _ in 0..3 {
+            queue.enqueue(put("first"));
+        }
+        assert_eq!((queue.len(), queue.dropped()), (2, 1));
     }
 
     /// The pump pulls an offer of its pull seam onto the stage only while the stage has a reply

@@ -489,11 +489,11 @@ pub fn new_session_actions<T: TimeSource>(
     #[cfg(feature = "transport-batching")]
     if batching {
         let staged = Arc::downgrade(&actions);
-        let flush: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-            if let Some(actions) = staged.upgrade() {
-                actions.flush_staged();
-            }
-        });
+        let flush: Arc<dyn Fn() -> wz_session_core::link::IdleFlush + Send + Sync> =
+            Arc::new(move || match staged.upgrade() {
+                Some(actions) => actions.flush_staged(),
+                None => wz_session_core::link::IdleFlush::Drained,
+            });
         if flushing_driver.set_idle_flush(flush) {
             actions.set_auto_batching(true);
         }
@@ -5068,7 +5068,9 @@ mod batch_tx_tests {
     /// installs, and runs it when the test says the writer fell idle.
     struct IdleFlushLink {
         frames: std::sync::Mutex<Vec<Vec<u8>>>,
-        flush: std::sync::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
+        flush: std::sync::Mutex<
+            Option<std::sync::Arc<dyn Fn() -> wz_session_core::link::IdleFlush + Send + Sync>>,
+        >,
     }
 
     impl super::BoxedLinkDriver for IdleFlushLink {
@@ -5082,7 +5084,10 @@ mod batch_tx_tests {
         }
         fn open_blocking(&self) {}
         fn close_blocking(&self) {}
-        fn set_idle_flush(&self, hook: std::sync::Arc<dyn Fn() + Send + Sync>) -> bool {
+        fn set_idle_flush(
+            &self,
+            hook: std::sync::Arc<dyn Fn() -> wz_session_core::link::IdleFlush + Send + Sync>,
+        ) -> bool {
             *self.flush.lock().expect("flush") = Some(hook);
             true
         }
@@ -5105,7 +5110,7 @@ mod batch_tx_tests {
         let flush = link.flush.lock().expect("flush").clone();
         if let Some(flush) = &flush {
             // The writer fell idle: what the session staged is owed a write now.
-            flush();
+            let _ = flush();
         }
         let frames = link.frames.lock().expect("frames").clone();
         let per_frame = frames
@@ -5552,7 +5557,10 @@ mod link_congestion_tests {
             super::TxQueueConf {
                 wait_before_drop_us: 42,
                 wait_before_close_us: 4_242,
-                ..super::TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults())
+                ..super::TxQueueConf::of_snapshot(
+                    &wz_session_core::policy::SessionPolicy::defaults(),
+                    &wz_session_core::limits::SessionLimits::BUILD,
+                )
             },
         );
         let meta = super::PushMetadata {
@@ -5598,8 +5606,11 @@ mod link_congestion_tests {
             link.block_first_asked(),
             [(
                 Priority::InteractiveHigh,
-                super::TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults())
-                    .wait_before_drop_us
+                super::TxQueueConf::of_snapshot(
+                    &wz_session_core::policy::SessionPolicy::defaults(),
+                    &wz_session_core::limits::SessionLimits::BUILD
+                )
+                .wait_before_drop_us
             )],
             "keyed by the reply's own priority"
         );
@@ -5662,7 +5673,10 @@ mod link_congestion_tests {
     fn session(link: Arc<CongestibleLink>) -> Arc<super::SessionLinkActions> {
         session_with_queue(
             link,
-            super::TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults()),
+            super::TxQueueConf::of_snapshot(
+                &wz_session_core::policy::SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD,
+            ),
         )
     }
 
@@ -5817,7 +5831,10 @@ mod link_congestion_tests {
             super::TxQueueConf {
                 wait_before_drop_us: 42,
                 wait_before_close_us: 4_242,
-                ..super::TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults())
+                ..super::TxQueueConf::of_snapshot(
+                    &wz_session_core::policy::SessionPolicy::defaults(),
+                    &wz_session_core::limits::SessionLimits::BUILD,
+                )
             },
         );
         actions
@@ -5845,7 +5862,10 @@ mod link_congestion_tests {
         params.batch_size = 1_024;
         params.tx_queue = super::TxQueueConf {
             sizes,
-            ..super::TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults())
+            ..super::TxQueueConf::of_snapshot(
+                &wz_session_core::policy::SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD,
+            )
         };
         let actions =
             super::new_session_actions(link.clone(), params, crate::runtime_impl::TokioTime::new());
@@ -5893,10 +5913,11 @@ mod link_congestion_tests {
         }
         assert_eq!(
             *link.shapes.lock().expect("shapes"),
-            [
-                super::TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults())
-                    .shape(true, 65_535, 65_535)
-            ]
+            [super::TxQueueConf::of_snapshot(
+                &wz_session_core::policy::SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD
+            )
+            .shape(true, 65_535, 65_535)]
         );
     }
 
@@ -6125,8 +6146,10 @@ mod link_congestion_tests {
     /// dropped (`SendWireError::HeldConduit`), as pico's put fails.
     #[test]
     fn under_the_pico_profile_a_droppable_message_behind_a_held_conduit_asks_nothing() {
-        let queue =
-            super::TxQueueConf::pico_of_policy(&wz_session_core::policy::SessionPolicy::defaults());
+        let queue = super::TxQueueConf::pico_of_snapshot(
+            &wz_session_core::policy::SessionPolicy::defaults(),
+            &wz_session_core::limits::SessionLimits::BUILD,
+        );
         let seen = drop_behind_a_blocking_sender(queue);
         assert_eq!(
             seen.sent,
@@ -6210,7 +6233,10 @@ mod link_congestion_tests {
             link.clone(),
             super::TxQueueConf {
                 expiry_keeps_session: true,
-                ..super::TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults())
+                ..super::TxQueueConf::of_snapshot(
+                    &wz_session_core::policy::SessionPolicy::defaults(),
+                    &wz_session_core::limits::SessionLimits::BUILD,
+                )
             },
         );
         link.set_room(LinkRoom::Congested);
@@ -6226,6 +6252,103 @@ mod link_congestion_tests {
         );
     }
 
+    /// `check` run on a session over `link` under the `tx-expiry-keeps-session` policy whose
+    /// snapshot states `close_after` for `TX_EXPIRY_CLOSE_AFTER`. A build whose domain of the
+    /// limit is one value refuses any other, so no creator could hand it, and that refusal is what
+    /// such a build is checked for.
+    fn kept_session(
+        link: Arc<CongestibleLink>,
+        close_after: wz_session_core::limit_binding::Quota,
+        check: impl FnOnce(Arc<super::SessionLinkActions>),
+    ) {
+        let mut params = wz_runtime_tokio_test_support::fixture_session_init_params();
+        if let Err(refused) = params.limits.select_tx_expiry_close_after(close_after) {
+            assert!(
+                refused.domain.is_singleton(),
+                "{} refused {}",
+                refused.limit,
+                refused.value
+            );
+            return;
+        }
+        params.initial_sn = 7;
+        params.tx_queue = super::TxQueueConf {
+            expiry_keeps_session: true,
+            ..super::TxQueueConf::of_snapshot(
+                &wz_session_core::policy::SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD,
+            )
+        };
+        check(super::new_session_actions(
+            link,
+            params,
+            crate::runtime_impl::TokioTime::new(),
+        ));
+    }
+
+    /// `TX_EXPIRY_CLOSE_AFTER` with nothing stated: the session keeps itself through as many
+    /// expiries in a row as the build's value allows, every one of them while the build states
+    /// none, and closes at the build's count where it states one.
+    #[test]
+    fn tx_expiry_close_after_with_nothing_stated_admits_what_the_build_admitted() {
+        let link = CongestibleLink::new();
+        let actions = session_with_queue(
+            link.clone(),
+            super::TxQueueConf {
+                expiry_keeps_session: true,
+                ..super::TxQueueConf::of_snapshot(
+                    &wz_session_core::policy::SessionPolicy::defaults(),
+                    &wz_session_core::limits::SessionLimits::BUILD,
+                )
+            },
+        );
+        link.set_room(LinkRoom::Congested);
+        let build = wz_session_core::caps::TX_EXPIRY_CLOSE_AFTER;
+        let kept = if build == 0 { 50 } else { build - 1 };
+        for _ in 0..kept {
+            assert!(blocking_push(&actions).is_ok(), "refused, not sent");
+            assert!(
+                !actions.take_congestion_close(),
+                "kept, under the build's count"
+            );
+        }
+        if build != 0 {
+            assert!(blocking_push(&actions).is_ok());
+            assert!(
+                actions.take_congestion_close(),
+                "the build's count closes the session"
+            );
+        }
+    }
+
+    /// `TX_EXPIRY_CLOSE_AFTER` stated as two: the first expiry is kept and the second closes
+    /// the session, and the message that completes the run is still refused to its sender and
+    /// never reaches the link.
+    #[test]
+    fn tx_expiry_close_after_stated_as_two_refuses_the_next() {
+        use wz_session_core::send_wire_error::SendWireError;
+        let link = CongestibleLink::new();
+        kept_session(
+            link.clone(),
+            wz_session_core::limit_binding::Quota::at_most(2),
+            |actions| {
+                link.set_room(LinkRoom::Congested);
+                assert_eq!(
+                    blocking_push(&actions),
+                    Ok(SendWireError::TransportUnavailable)
+                );
+                assert!(!actions.take_congestion_close(), "the first is kept");
+                assert_eq!(
+                    blocking_push(&actions),
+                    Ok(SendWireError::TransportUnavailable),
+                    "the second is refused to its sender all the same"
+                );
+                assert!(link.frames().is_empty(), "nothing reached the link");
+                assert!(actions.take_congestion_close(), "the second closes it");
+            },
+        );
+    }
+
     /// `TX_EXPIRY_CLOSE_AFTER`: a link that stays blocked is kept for the first expiries and
     /// closed at the count-th, and the message that completes the run is still refused to its
     /// sender, since it was dropped.
@@ -6233,30 +6356,28 @@ mod link_congestion_tests {
     fn a_link_that_stays_blocked_is_closed_at_the_count_the_limit_states() {
         use wz_session_core::send_wire_error::SendWireError;
         let link = CongestibleLink::new();
-        let actions = session_with_queue(
+        kept_session(
             link.clone(),
-            super::TxQueueConf {
-                expiry_keeps_session: true,
-                expiry_close_after: 3,
-                ..super::TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults())
+            wz_session_core::limit_binding::Quota::at_most(3),
+            |actions| {
+                link.set_room(LinkRoom::Congested);
+                for _ in 0..2 {
+                    assert_eq!(
+                        blocking_push(&actions),
+                        Ok(SendWireError::TransportUnavailable)
+                    );
+                    assert!(!actions.take_congestion_close(), "kept, the run is short");
+                }
+                assert_eq!(
+                    blocking_push(&actions),
+                    Ok(SendWireError::TransportUnavailable),
+                    "the message that completes the run was dropped, and its sender is told"
+                );
+                assert!(
+                    actions.take_congestion_close(),
+                    "the third in a row closes the session"
+                );
             },
-        );
-        link.set_room(LinkRoom::Congested);
-        for _ in 0..2 {
-            assert_eq!(
-                blocking_push(&actions),
-                Ok(SendWireError::TransportUnavailable)
-            );
-            assert!(!actions.take_congestion_close(), "kept, the run is short");
-        }
-        assert_eq!(
-            blocking_push(&actions),
-            Ok(SendWireError::TransportUnavailable),
-            "the message that completes the run was dropped, and its sender is told"
-        );
-        assert!(
-            actions.take_congestion_close(),
-            "the third in a row closes the session"
         );
     }
 
@@ -6264,45 +6385,41 @@ mod link_congestion_tests {
     #[test]
     fn a_push_that_finds_room_ends_the_run_of_expiries() {
         let link = CongestibleLink::new();
-        let actions = session_with_queue(
+        kept_session(
             link.clone(),
-            super::TxQueueConf {
-                expiry_keeps_session: true,
-                expiry_close_after: 2,
-                ..super::TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults())
+            wz_session_core::limit_binding::Quota::at_most(2),
+            |actions| {
+                for _ in 0..4 {
+                    link.set_room(LinkRoom::Congested);
+                    assert!(blocking_push(&actions).is_ok(), "refused, not sent");
+                    link.set_room(LinkRoom::Free);
+                    actions
+                        .send_push_literal_qos("home/a", b"A", true, Priority::DEFAULT)
+                        .expect("room again");
+                }
+                assert!(
+                    !actions.take_congestion_close(),
+                    "four single expiries, each ended by a push, are four runs of one"
+                );
             },
-        );
-        for _ in 0..4 {
-            link.set_room(LinkRoom::Congested);
-            assert!(blocking_push(&actions).is_ok(), "refused, not sent");
-            link.set_room(LinkRoom::Free);
-            actions
-                .send_push_literal_qos("home/a", b"A", true, Priority::DEFAULT)
-                .expect("room again");
-        }
-        assert!(
-            !actions.take_congestion_close(),
-            "four single expiries, each ended by a push, are four runs of one"
         );
     }
 
-    /// With the limit at its default the policy is as it was: no count of expiries closes it.
+    /// With no bound the policy is as it was before the limit: no count of expiries closes it.
     #[test]
     fn with_no_count_stated_no_run_of_expiries_closes_the_session() {
         let link = CongestibleLink::new();
-        let actions = session_with_queue(
+        kept_session(
             link.clone(),
-            super::TxQueueConf {
-                expiry_keeps_session: true,
-                expiry_close_after: 0,
-                ..super::TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults())
+            wz_session_core::limit_binding::Quota::UNBOUNDED,
+            |actions| {
+                link.set_room(LinkRoom::Congested);
+                for _ in 0..50 {
+                    assert!(blocking_push(&actions).is_ok());
+                }
+                assert!(!actions.take_congestion_close());
             },
         );
-        link.set_room(LinkRoom::Congested);
-        for _ in 0..50 {
-            assert!(blocking_push(&actions).is_ok());
-        }
-        assert!(!actions.take_congestion_close());
     }
 
     /// The control: upstream's behaviour, the policy off. The put succeeds from the caller's
@@ -6329,7 +6446,10 @@ mod link_congestion_tests {
             link.clone(),
             super::TxQueueConf {
                 expiry_keeps_session: true,
-                ..super::TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults())
+                ..super::TxQueueConf::of_snapshot(
+                    &wz_session_core::policy::SessionPolicy::defaults(),
+                    &wz_session_core::limits::SessionLimits::BUILD,
+                )
             },
         );
         link.set_room(LinkRoom::Congested);
@@ -6890,6 +7010,61 @@ mod reconnect_tx_tests {
         assert!(
             actions.declarations_synced_at(u64::MAX / 2),
             "waited the whole timeout"
+        );
+    }
+
+    /// A session over the recorder whose snapshot is `limits`, with one interest sent that asks
+    /// for what exists, and the session's clock read before and after the send: the interest was
+    /// sent between the two.
+    fn waiting_on_one_interest(
+        limits: wz_session_core::limits::SessionLimits,
+    ) -> (Arc<super::SessionLinkActions>, u64, u64) {
+        use wz_runtime_core::TimeSource;
+        let mut params = wz_runtime_tokio_test_support::fixture_session_init_params();
+        params.limits = limits;
+        let (actions, _driver) = crate::test_fixtures::recording_actions_with_params(params);
+        let before = actions.clock.now_monotonic_ms();
+        actions
+            .send_interest_liveliness_get(14, 0, Some("home/get"))
+            .expect("liveliness get interest");
+        let after = actions.clock.now_monotonic_ms();
+        (actions, before, after)
+    }
+
+    /// `DECLARATION_SYNC_FINAL_TIMEOUT_MS` with nothing stated: an unanswered interest is waited
+    /// for until the build's timeout has passed, and given up on from then.
+    #[test]
+    fn declaration_sync_final_timeout_ms_with_nothing_stated_is_the_builds_timeout() {
+        let (actions, before, after) =
+            waiting_on_one_interest(wz_session_core::limits::SessionLimits::defaults());
+        let timeout = wz_session_core::caps::DECLARATION_SYNC_FINAL_TIMEOUT_MS as u64;
+        assert!(
+            !actions.declarations_synced_at(before + timeout - 1),
+            "waited less than the build's timeout"
+        );
+        assert!(
+            actions.declarations_synced_at(after + timeout),
+            "waited the build's timeout"
+        );
+    }
+
+    /// `DECLARATION_SYNC_FINAL_TIMEOUT_MS` stated as two milliseconds: the session gives the
+    /// interest up once two have passed, whatever the build's own timeout is.
+    #[test]
+    fn declaration_sync_final_timeout_ms_stated_is_the_timeout_the_session_waits() {
+        let mut limits = wz_session_core::limits::SessionLimits::defaults();
+        if limits.select_declaration_sync_final_timeout_ms(2).is_err() {
+            // A build of one value refuses another: there is no other snapshot to hand.
+            return;
+        }
+        let (actions, before, after) = waiting_on_one_interest(limits);
+        assert!(
+            !actions.declarations_synced_at(before + 1),
+            "waited less than the stated timeout"
+        );
+        assert!(
+            actions.declarations_synced_at(after + 2),
+            "waited the stated timeout"
         );
     }
 

@@ -23,11 +23,18 @@ caching, the disk-headroom report -- none of which is a defect.
 A deliberate absence is expressible: delete the lane's `run_layer` line. A
 lane nobody runs anywhere is a different (and louder) statement than a lane
 the hosted gate silently never reaches.
+
+R4581 -- the hosted workflows are `runci_plan.HOSTED_WORKFLOWS`, one list for
+this lint and for the fleet's planner: `ci.yml` on every push, and the nightly
+`mutation.yml`, whose lane (Cmut) takes hours a scope and no push can wait on.
+A lane that only the nightly workflow runs is hosted, not local-only.
 """
 
 import pathlib
 import re
 import sys
+
+from runci_plan import HOSTED_WORKFLOWS
 
 RUN_LAYER = re.compile(r"(?m)^run_layer ([A-Za-z0-9]+) ")
 CI_LAYER = re.compile(r"--layer ([A-Za-z0-9]+)")
@@ -35,8 +42,8 @@ CI_LAYER = re.compile(r"--layer ([A-Za-z0-9]+)")
 
 def main() -> int:
     runci_path = pathlib.Path("scripts/run-ci.sh")
-    ciyml_path = pathlib.Path(".github/workflows/ci.yml")
-    for path in (runci_path, ciyml_path):
+    workflows = [pathlib.Path(p) for p in HOSTED_WORKFLOWS]
+    for path in (runci_path, *workflows):
         if not path.is_file():
             # A gate that cannot read its input must not report green.
             print(f"unwired-lane lint FAIL: {path} not found (wrong cwd?)", file=sys.stderr)
@@ -44,7 +51,7 @@ def main() -> int:
 
     registered_ids = RUN_LAYER.findall(runci_path.read_text())
     registered = set(registered_ids)
-    wired = set(CI_LAYER.findall(ciyml_path.read_text()))
+    wired = {lane for path in workflows for lane in CI_LAYER.findall(path.read_text())}
 
     if not registered:
         print(
@@ -71,7 +78,11 @@ def main() -> int:
 
     missing = sorted(registered - wired)
     if missing:
-        print("Layer C0 FAIL: lane(s) registered in run-ci.sh but NOT in ci.yml:", file=sys.stderr)
+        print(
+            f"Layer C0 FAIL: lane(s) registered in run-ci.sh but in NO hosted workflow "
+            f"({', '.join(p.name for p in workflows)}):",
+            file=sys.stderr,
+        )
         for lane in missing:
             print(f"    - {lane}", file=sys.stderr)
         print("", file=sys.stderr)
@@ -80,7 +91,10 @@ def main() -> int:
         print("  or -- if the absence is deliberate -- remove its run_layer line.", file=sys.stderr)
         return 1
 
-    print(f"  unwired-lane gate: {len(registered)} registered lane(s), 0 absent from ci.yml")
+    print(
+        f"  unwired-lane gate: {len(registered)} registered lane(s), 0 absent from "
+        f"{' and '.join(p.name for p in workflows)}"
+    )
     return 0
 
 

@@ -41,6 +41,7 @@ use wz_session_core::driver_loop::IterationEvent;
 use wz_session_core::entropy::EntropySource;
 use wz_session_core::lifecycle_node::{lifecycle_verdict, Command, Commander, Verdict};
 use wz_session_core::lifecycle_wire::{RefusedReason, StatusVerdict};
+use wz_session_core::limits::SessionLimits;
 use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::locator_directory::DirectoryZid;
 use wz_session_core::policy::SessionPolicy;
@@ -304,6 +305,8 @@ struct ServerFactory {
     observer: &'static ObserverCell<Sinks>,
     /// The snapshot every session is made with.
     policy: SessionPolicy,
+    /// The limits every session is made with, which the peer tables of its slot are held to.
+    limits: SessionLimits,
 }
 
 /// The snapshot of every session this image opens, the admin node's and the client's. The image's
@@ -312,6 +315,14 @@ struct ServerFactory {
 /// one value on this target, and takes no byte.
 pub fn resolve_policy() -> SessionPolicy {
     SessionPolicy::defaults()
+}
+
+/// The limits of every session this image opens, which the node's observer and the peer tables of
+/// each session's slot are held to. The image's start is the creator of its sessions, and this is
+/// where it resolves them: the build's values until the image reads a run-time document. A limit
+/// the image does not widen is one value on this target, and takes no byte.
+pub fn resolve_limits() -> SessionLimits {
+    SessionLimits::defaults()
 }
 
 impl SessionFactory<Clock, Driver> for ServerFactory {
@@ -335,9 +346,10 @@ impl SessionFactory<Clock, Driver> for ServerFactory {
             keep_alive: wz_session_core::session_init_params::KeepAliveConf::PICO,
             initial_sn: 0,
             cookie: cookie_bytes(&[]),
-            tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(&self.policy),
+            tx_queue: wz_session_core::session_init_params::TxQueueConf::of_snapshot(&self.policy, &self.limits),
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
             policy: self.policy,
+            limits: self.limits,
             cookie_signing_key: SigningKey::from_slice(&self.key).expect("32-byte key"),
         }
     }
@@ -690,12 +702,14 @@ fn install_observer(
     zid_hex: &str,
     locators: &[&str],
     open: &'static Verbs<StoreNode<Commanders>>,
+    limits: SessionLimits,
 ) -> Result<&'static ObserverCell<Sinks>, &'static core::ffi::CStr> {
     let identity = FixedNodeIdentity::new(zid_hex, "peer", "wz-zephyr-admin-loopback", locators)
         .map_err(|_| c"wz: FAIL - the node's identity does not fit its fixed fields")?;
     static APP: wz_session_mcu::app_layer::SlotApp<Sinks> =
         wz_session_mcu::app_layer::SlotApp::new();
     let installed = APP.install_with(|observer| {
+        observer.limit_to(&limits);
         if host_connect_writes_fixed(&mut observer.subscribers, zid_hex, "peer", &CONTROL.control)
             .is_err()
         {
@@ -747,7 +761,8 @@ fn start_server(
 
     let mut zid_text: FixedText<33> = FixedText::new();
     let _ = write_zenoh_hex(&zid, &mut zid_text);
-    let observer = install_observer(zid_text.prefix(), &[], open)?;
+    let limits = resolve_limits();
+    let observer = install_observer(zid_text.prefix(), &[], open, limits)?;
 
     let Some(runtime) = SERVER.runtime.start::<Driver>(Clock::default()) else {
         return Err(c"wz: FAIL - the admin node's runtime was started twice");
@@ -794,6 +809,7 @@ fn start_server(
                 key,
                 observer,
                 policy,
+                limits,
             })
         })
         .ok_or(c"wz: FAIL - the admin node's arena is too small")?;
@@ -911,6 +927,7 @@ pub extern "C" fn wz_app_main() -> i32 {
         identity,
         batch_size: BATCH,
         policy: resolve_policy(),
+        limits: resolve_limits(),
         entropy: || ZephyrEntropy,
         endpoints: &ENDPOINTS,
         peers: &[],

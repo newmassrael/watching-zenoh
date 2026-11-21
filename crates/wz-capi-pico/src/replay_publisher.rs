@@ -58,6 +58,7 @@ use crate::query::{
     z_owned_closure_query_t, z_owned_queryable_t, z_query_keyexpr, z_query_reply, z_queryable_move,
     z_undeclare_queryable,
 };
+use crate::replay_subscriber::quota_of_count;
 use crate::result::{
     ZResult, WZ_EXT_ERR_UNSUPPORTED, Z_EINVAL, Z_ERR_CONFIG_INVALID_VALUE, Z_ERR_INVALID,
     Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK,
@@ -96,7 +97,7 @@ pub const WZ_EXT_REPLAY_NO_CACHE: u8 = 255;
 pub struct wz_ext_replay_shape_t {
     /// The longest frame the cache keeps, in bytes, at least 1.
     pub frame_max: usize,
-    /// How many frames each instance's ring keeps, 1 to `REPLAY_DEPTH_MAX`.
+    /// How many frames each instance's ring keeps, 1 to the session's `REPLAY_DEPTH_MAX`.
     pub depth: u32,
     /// How many instances the message has, at least 1.
     pub instances: u32,
@@ -220,7 +221,7 @@ fn shape_of(shape: &wz_ext_replay_shape_t) -> Shape {
 /// The text of a refusal to make a cache.
 fn create_text(refusal: CreateRefused) -> &'static str {
     match refusal {
-        CreateRefused::DepthOutOfRange => "depth: 1 to the build's REPLAY_DEPTH_MAX",
+        CreateRefused::DepthOutOfRange => "depth: 1 to the session's REPLAY_DEPTH_MAX",
         CreateRefused::NoInstance => "instances: at least 1",
         CreateRefused::FrameMaxOutOfRange => "frame_max: at least 1 and below 2^32 - 1",
         CreateRefused::TooLarge => "the shape's storage does not fit the address space",
@@ -411,18 +412,19 @@ pub unsafe extern "C" fn wz_ext_replay_publisher_storage_size(
     })
 }
 
-/// A replay cache of `shape` over the program's `storage`, made on `session` (whose policies it
-/// reads, once) and putting the message on `publisher`. It records and answers nothing until the
-/// program records a frame and serves.
+/// A replay cache of `shape` over the program's `storage`, made on `session` (whose policies and
+/// `REPLAY_DEPTH_MAX` it reads, once) and putting the message on `publisher`. It records and
+/// answers nothing until the program records a frame and serves.
 ///
 /// `this_` holds the gravestone on every error. `refusal` may be null; when it is not, it holds the
 /// gravestone on success and the reason on `_Z_ERR_CONFIG_INVALID_VALUE`.
 ///
 /// Returns `Z_ERR_NULL` for a null `this_`, session, publisher, shape or storage;
 /// `Z_ERR_SESSION_CLOSED` for a closed session; `_Z_ERR_CONFIG_INVALID_VALUE` for a shape out of
-/// range or storage shorter than `wz_ext_replay_publisher_storage_size`; `WZ_EXT_ERR_UNSUPPORTED`
-/// for a session whose replay policy has a value this door does not know (a core of a later
-/// extension interface); `Z_OK` otherwise.
+/// range (a depth past the session's `REPLAY_DEPTH_MAX` among them) or storage shorter than
+/// `wz_ext_replay_publisher_storage_size`; `WZ_EXT_ERR_UNSUPPORTED` for a session whose replay
+/// policy has a value this door does not know (a core of a later extension interface); `Z_OK`
+/// otherwise.
 ///
 /// # Safety
 /// `this_` is writable; `session` and `publisher` are null or loans of this library, kept until
@@ -459,7 +461,8 @@ pub unsafe extern "C" fn wz_ext_replay_publisher_new(
         };
         let shape = shape_of(&*shape);
         let area: &'static mut [u8] = core::slice::from_raw_parts_mut(storage, storage_len);
-        let cache = match ReplayPublisher::new(area, shape, policy.serve_holds_sends) {
+        let depth_max = quota_of_count(facts.replay_depth_max);
+        let cache = match ReplayPublisher::new(area, shape, depth_max, policy.serve_holds_sends) {
             Ok(cache) => cache,
             Err(why) => {
                 write_refusal(refusal, create_text(why));

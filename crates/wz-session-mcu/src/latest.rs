@@ -34,9 +34,13 @@
 
 use core::cell::{Cell, UnsafeCell};
 
-use wz_session_core::caps::MAX_KEYEXPR_BYTES;
+use wz_session_core::caps;
 use wz_session_core::sample_kind::SampleKind;
 use wz_session_core::sink::{SampleSink, SampleView};
+
+/// The bytes a cell keeps a key in, `MAX_KEYEXPR_BYTES` of them as the build sizes it. A key is
+/// refused by what this storage holds: the cell is the node's, not a table of a session.
+type KeyBytes = [u8; caps::MAX_KEYEXPR_BYTES];
 
 /// What a cell holds, as a reader sees it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,7 +81,7 @@ pub trait LatestSlots: Sync {
 /// One cell: the last sample and the count of them.
 pub struct LatestCell<const N: usize> {
     payload: UnsafeCell<[u8; N]>,
-    key: UnsafeCell<[u8; MAX_KEYEXPR_BYTES]>,
+    key: UnsafeCell<KeyBytes>,
     stored: Cell<usize>,
     key_len: Cell<usize>,
     received: Cell<usize>,
@@ -90,7 +94,7 @@ impl<const N: usize> LatestCell<N> {
     pub const fn new() -> Self {
         Self {
             payload: UnsafeCell::new([0; N]),
-            key: UnsafeCell::new([0; MAX_KEYEXPR_BYTES]),
+            key: UnsafeCell::new([0; caps::MAX_KEYEXPR_BYTES]),
             stored: Cell::new(0),
             key_len: Cell::new(0),
             received: Cell::new(0),
@@ -109,7 +113,7 @@ impl<const N: usize> LatestCell<N> {
         kind: SampleKind,
     ) -> Result<(), KeyTooLong> {
         let key_len = key.len();
-        if key_len > MAX_KEYEXPR_BYTES {
+        if key_len > core::mem::size_of::<KeyBytes>() {
             return Err(KeyTooLong);
         }
         let keep = payload.len().min(capacity).min(N);
@@ -321,6 +325,7 @@ mod tests {
     use alloc::string::String;
     use alloc::vec::Vec;
     use alloc::{format, vec};
+    use wz_session_core::caps::MAX_KEYEXPR_BYTES;
     use wz_session_core::reliability::Reliability;
     use wz_session_core::sink::BorrowedSample;
 

@@ -233,6 +233,10 @@ adminspace-fixed = [
 [dependencies]
 # The cooperative runtime: CoopRuntime<C> + CoopTime<C>, the local task set the
 # sessions are spawned on, and the `SessionLinks` / `SessionDatagramLink` seams.
+# Also the critical sections (`wz_runtime_coop::cs`): a host build takes the runtime's
+# host lock there and an image its own implementation. This crate names
+# `critical-section` only for its tests, so a section that bypasses the door does not
+# compile.
 wz-runtime-coop = { path = "../wz-runtime-coop", default-features = false, features = ["session-unicast"] }
 # Runtime-agnostic session SSOT: the action bundle, the engine-free FSM, the
 # admin answerers. no_std selects the heapless engine; alloc the bundle.
@@ -242,10 +246,6 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
 # since the server-layer split. Optional, pulled by `adminspace-fixed` and `adminspace-write`; a
 # session's admin row is read off the unicast session this crate always has.
 wz-admin = { path = "../wz-admin", default-features = false, features = ["session-unicast"], optional = true }
-# R2828 — `admin_host::ConnectControl` locks with the same IRQ-disabling Mutex
-# the cooperative runtime uses. No impl feature here: the firmware (or the std
-# impl in dev-dependencies, for host tests) supplies it at link time.
-critical-section = "1"
 # The group loop reads its clock through `TimeSource`, as the unicast loop does.
 wz-runtime-core = { path = "../wz-runtime-core", default-features = false }
 # The slot profile's reply queue: a fixed-capacity deque in a `static`, the same
@@ -256,8 +256,9 @@ heapless = { version = "0.8", default-features = false }
 wz-workload = { path = "../wz-workload", default-features = false }
 
 [dev-dependencies]
-# critical-section's std impl backs CoopRuntime's critical_section::Mutex and the
-# portable-atomic polyfill on the host test path.
+# critical-section's std impl backs CoopRuntime's critical_section::Mutex, this
+# crate's own sections (`cs::with` without `host-lock`) and the portable-atomic
+# polyfill on the host test path.
 critical-section = { version = "1", features = ["std"] }
 # Builds the Push / Request records the shell's tests feed the observer.
 # Dev-only: the library names no wz_codecs type.

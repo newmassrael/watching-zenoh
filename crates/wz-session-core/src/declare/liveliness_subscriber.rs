@@ -94,7 +94,7 @@ use crate::driver_loop::DriverLoopOutcome;
 #[cfg(feature = "storage-profile")]
 use crate::driver_loop::IterationEvent;
 #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
-use crate::id_map::key_text_as;
+use crate::id_map::key_text_within;
 #[cfg(feature = "storage-profile")]
 use crate::id_map::{DeclaredKeys, FixedIdMap, IdMap};
 // Both fan paths ask INTERSECTION and never import `keyexpr_matches`: a token
@@ -195,6 +195,10 @@ pub struct LivelinessSubscriberTable<C: LivelinessSampleSink, P: Storage = Profi
     /// build fixes the bound to the storage's capacity it is held in no byte and the storage
     /// refuses alone.
     quota: crate::limits::MaxLivelinessSubscriptionsHeld,
+    /// The longest pattern a slot holds (`MAX_KEYEXPR_BYTES`): what the creator of the table
+    /// resolved ([`Self::limit_keys_to`]), the build's value until it does. Where the build fixes
+    /// the bound to the slots' capacity it is held in no byte and the slots refuse alone.
+    key_quota: crate::limits::MaxKeyexprBytesHeld,
 }
 
 /// The tokens ONE peer has declared to this session: the table a peer writes.
@@ -224,6 +228,17 @@ pub struct PeerTokens<P: Storage = Profile> {
     /// would hand one peer's tokens to a subscriber of the other.
     #[cfg(feature = "storage-profile")]
     table: DeclaredKeys<P>,
+    /// The most tokens `table` holds (`MAX_REMOTE_DECLS`): what the creator of the session's
+    /// tables resolved ([`Self::limit_to`]), the build's value until it does. A growable table
+    /// refuses nothing by its room, so this is what bounds it; where the build fixes the bound
+    /// to the table's capacity it is held in no byte and the table refuses alone.
+    #[cfg(feature = "storage-profile")]
+    quota: crate::limits::MaxRemoteDeclsHeld,
+    /// The longest keyexpr a row holds (`MAX_KEYEXPR_BYTES`): what the creator of the session's
+    /// tables resolved ([`Self::limit_keys_to`]), the build's value until it does. A token whose
+    /// keyexpr is longer is refused and counted in `oversize`, as one a fixed row cannot hold is.
+    #[cfg(feature = "storage-profile")]
+    key_quota: crate::limits::MaxKeyexprBytesHeld,
     /// `DeclToken`s refused because their keyexpr is longer than a row's text.
     /// Counted with the table's own refusals ([`Self::refusals`]).
     #[cfg(feature = "storage-profile")]
@@ -255,6 +270,10 @@ impl<P: Storage> Default for PeerTokens<P> {
             #[cfg(feature = "storage-profile")]
             table: DeclaredKeys::<P>::default(),
             #[cfg(feature = "storage-profile")]
+            quota: crate::limits::MaxRemoteDeclsHeld::build_default(),
+            #[cfg(feature = "storage-profile")]
+            key_quota: crate::limits::MaxKeyexprBytesHeld::build_default(),
+            #[cfg(feature = "storage-profile")]
             oversize: 0,
             #[cfg(all(feature = "storage-profile", feature = "alloc"))]
             sourced: alloc::collections::BTreeMap::new(),
@@ -270,6 +289,10 @@ impl PeerTokens<Static> {
         Self {
             #[cfg(feature = "storage-profile")]
             table: FixedIdMap::new(),
+            #[cfg(feature = "storage-profile")]
+            quota: crate::limits::MaxRemoteDeclsHeld::build_default(),
+            #[cfg(feature = "storage-profile")]
+            key_quota: crate::limits::MaxKeyexprBytesHeld::build_default(),
             #[cfg(feature = "storage-profile")]
             oversize: 0,
             #[cfg(all(feature = "storage-profile", feature = "alloc"))]
@@ -305,9 +328,42 @@ impl<P: Storage> PeerTokens<P> {
         self.table.count()
     }
 
+    /// Hold the peer's table to the `MAX_REMOTE_DECLS` the creator of the session's tables
+    /// resolved: a `DeclToken` for a NEW id that would leave more tokens than `quota` admits
+    /// is refused and counted as a full table refuses it ([`Self::refusals`]), and the tokens
+    /// already held are kept, as a lowered soft limit keeps what it holds.
+    #[cfg(feature = "storage-profile")]
+    pub fn limit_to(&mut self, quota: crate::limits::MaxRemoteDeclsHeld) {
+        self.quota = quota;
+    }
+
+    /// Hold the peer's table to the `MAX_KEYEXPR_BYTES` the creator of the session's tables
+    /// resolved: a `DeclToken` whose keyexpr is longer than `quota` admits is refused and
+    /// counted ([`Self::refusals`]), as one longer than a fixed row holds is, and the tokens
+    /// already held are kept.
+    #[cfg(feature = "storage-profile")]
+    pub fn limit_keys_to(&mut self, quota: crate::limits::MaxKeyexprBytesHeld) {
+        self.key_quota = quota;
+    }
+
+    /// The quota the peer's token keyexprs are held to (`MAX_KEYEXPR_BYTES`): what the creator
+    /// of the session's tables stated ([`Self::limit_keys_to`]), the build's value until it did.
+    #[cfg(feature = "storage-profile")]
+    pub fn key_quota(&self) -> crate::limits::MaxKeyexprBytesHeld {
+        self.key_quota
+    }
+
+    /// The quota the peer's table is held to (`MAX_REMOTE_DECLS`): what the creator of the
+    /// session's tables stated ([`Self::limit_to`]), the build's value until it did.
+    #[cfg(feature = "storage-profile")]
+    pub fn quota(&self) -> crate::limits::MaxRemoteDeclsHeld {
+        self.quota
+    }
+
     /// How many `DeclToken`s this table refused: for a NEW id because it was
-    /// full ([`caps::MAX_REMOTE_DECLS`]), or for a keyexpr longer than a row's
-    /// text. Always zero on the growable backing, where nothing is refused.
+    /// full ([`caps::MAX_REMOTE_DECLS`]) or held the quota its creator stated
+    /// ([`Self::limit_to`]), or for a keyexpr longer than a row's text. Zero on
+    /// the growable backing while no quota is stated, as its room refuses nothing.
     #[cfg(feature = "storage-profile")]
     pub fn refusals(&self) -> u32 {
         self.table.refusals().saturating_add(self.oversize)
@@ -358,6 +414,7 @@ impl<C: LivelinessSampleSink, P: Storage> Default for LivelinessSubscriberTable<
         Self {
             slots: BoundedVec::default(),
             quota: Default::default(),
+            key_quota: Default::default(),
         }
     }
 }
@@ -397,6 +454,18 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberRegistry<C, P> {
     /// counters by name.
     pub fn peer(&self) -> &PeerTokens<P> {
         &self.peer
+    }
+
+    /// [`PeerTokens::limit_to`] for this registry's peer.
+    #[cfg(feature = "storage-profile")]
+    pub fn limit_peer_to(&mut self, quota: crate::limits::MaxRemoteDeclsHeld) {
+        self.peer.limit_to(quota);
+    }
+
+    /// [`PeerTokens::limit_keys_to`] for this registry's peer.
+    #[cfg(feature = "storage-profile")]
+    pub fn limit_peer_keys_to(&mut self, quota: crate::limits::MaxKeyexprBytesHeld) {
+        self.peer.limit_keys_to(quota);
     }
 
     /// [`LivelinessSubscriberTable::register`] against this registry's peer.
@@ -548,6 +617,13 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
         self.quota = quota;
     }
 
+    /// Hold the table to the `MAX_KEYEXPR_BYTES` its creator resolved: a subscriber whose
+    /// pattern is longer than `quota` admits is refused ([`RegisterError::KeyexprTooLong`]), as
+    /// a fixed slot that cannot hold it refuses it, and the subscribers already in are kept.
+    pub fn limit_keys_to(&mut self, quota: crate::limits::MaxKeyexprBytesHeld) {
+        self.key_quota = quota;
+    }
+
     /// Register a subscriber slot keyed by `interest_id`. Returns
     /// `false` if `interest_id` is already registered — callers
     /// allocate fresh ids through
@@ -575,7 +651,8 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
     /// `interest_id` (no-op), `Err(TableFull)` = slot table at capacity,
     /// `Err(KeyexprTooLong)` = keyexpr exceeds [`caps::MAX_KEYEXPR_BYTES`].
     /// On every backing a registration past the quota the creator stated
-    /// ([`Self::limit_to`]) is `Err(TableFull)`.
+    /// ([`Self::limit_to`]) is `Err(TableFull)`, and a keyexpr past the key bound
+    /// it stated ([`Self::limit_keys_to`]) is `Err(KeyexprTooLong)`.
     ///
     /// S9a — `peer` is the registering session's peer side: a history subscriber
     /// is replayed the tokens THAT peer holds.
@@ -595,6 +672,9 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
         }
         if !self.quota.admits(self.slots.len() + 1) {
             return Err(RegisterError::TableFull);
+        }
+        if !self.key_quota.admits(keyexpr.len()) {
+            return Err(RegisterError::KeyexprTooLong);
         }
         let mut pattern: BoundedString<{ caps::MAX_KEYEXPR_BYTES }, P> = BoundedString::default();
         pattern
@@ -899,15 +979,21 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
         if peer.table.find(id).is_some() {
             return;
         }
-        // S9a — a token the table has no room for (or whose keyexpr is
-        // longer than a row's text) is REFUSED and counted, and is not
-        // announced to the subscribers: what they are told is what the
-        // table holds, so a later `UndeclToken` can name it.
-        let Ok(text) = key_text_as::<P>(resolved) else {
+        // S9a — a token the table has no room for, or none under the quota
+        // its creator stated (or whose keyexpr is longer than a row's text),
+        // is REFUSED and counted, and is not announced to the subscribers:
+        // what they are told is what the table holds, so a later
+        // `UndeclToken` can name it.
+        let Ok(text) = key_text_within::<P>(resolved, peer.key_quota) else {
             peer.oversize = peer.oversize.saturating_add(1);
             return;
         };
-        if peer.table.bind(id, text).is_err() {
+        let quota = peer.quota;
+        if peer
+            .table
+            .bind_within(id, text, |count| quota.admits(count))
+            .is_err()
+        {
             return;
         }
         #[cfg(feature = "alloc")]

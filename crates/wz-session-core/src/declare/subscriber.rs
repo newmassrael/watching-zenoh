@@ -23,7 +23,7 @@
 use crate::bounded::EpochCounter;
 use crate::bounded::{Profile, Static, Storage};
 #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
-use crate::id_map::key_text_as;
+use crate::id_map::key_text_within;
 #[cfg(feature = "storage-profile")]
 use crate::id_map::{DeclaredKeys, FixedIdMap, IdMap};
 #[cfg(feature = "alloc")]
@@ -208,6 +208,19 @@ pub struct RemoteSubscriberPeer<P: Storage = Profile> {
     /// state refuses a NEW id, counts it, and announces nothing for it.
     #[cfg(feature = "storage-profile")]
     declared: DeclaredKeys<P>,
+    /// The most declarations `declared` holds (`MAX_REMOTE_DECLS`): what the creator of the
+    /// session's tables resolved ([`Self::limit_to`]), the build's value until it does. A
+    /// growable table refuses nothing by its room, so this is what bounds it; where the build
+    /// fixes the bound to the table's capacity it is held in no byte and the table refuses
+    /// alone.
+    #[cfg(feature = "storage-profile")]
+    quota: crate::limits::MaxRemoteDeclsHeld,
+    /// The longest keyexpr a row holds (`MAX_KEYEXPR_BYTES`): what the creator of the session's
+    /// tables resolved ([`Self::limit_keys_to`]), the build's value until it does. A
+    /// `DeclSubscriber` whose keyexpr is longer is refused and counted in `oversize`, as one a
+    /// fixed row cannot hold is.
+    #[cfg(feature = "storage-profile")]
+    key_quota: crate::limits::MaxKeyexprBytesHeld,
     /// `DeclSubscriber`s refused because their keyexpr is longer than the table's
     /// text (a [`DeclaredKeys`] row holds [`crate::caps::MAX_KEYEXPR_BYTES`] bytes
     /// on the fixed backing). Counted with the table's own refusals.
@@ -244,6 +257,10 @@ impl<P: Storage> Default for RemoteSubscriberPeer<P> {
             #[cfg(feature = "storage-profile")]
             declared: DeclaredKeys::<P>::default(),
             #[cfg(feature = "storage-profile")]
+            quota: crate::limits::MaxRemoteDeclsHeld::build_default(),
+            #[cfg(feature = "storage-profile")]
+            key_quota: crate::limits::MaxKeyexprBytesHeld::build_default(),
+            #[cfg(feature = "storage-profile")]
             oversize: 0,
             #[cfg(feature = "storage-profile")]
             initial_final: false,
@@ -263,6 +280,10 @@ impl RemoteSubscriberPeer<Static> {
         Self {
             #[cfg(feature = "storage-profile")]
             declared: FixedIdMap::new(),
+            #[cfg(feature = "storage-profile")]
+            quota: crate::limits::MaxRemoteDeclsHeld::build_default(),
+            #[cfg(feature = "storage-profile")]
+            key_quota: crate::limits::MaxKeyexprBytesHeld::build_default(),
             #[cfg(feature = "storage-profile")]
             oversize: 0,
             #[cfg(feature = "storage-profile")]
@@ -347,10 +368,43 @@ impl<P: Storage> RemoteSubscriberPeer<P> {
         self.declared.entries().map(|(id, ke)| (id, ke.as_ref()))
     }
 
+    /// Hold the peer's table to the `MAX_REMOTE_DECLS` the creator of the session's tables
+    /// resolved: a `DeclSubscriber` for a NEW id that would leave more declarations than
+    /// `quota` admits is refused and counted as a full table refuses it ([`Self::refusals`]),
+    /// and the declarations already held are kept, as a lowered soft limit keeps what it holds.
+    #[cfg(feature = "storage-profile")]
+    pub fn limit_to(&mut self, quota: crate::limits::MaxRemoteDeclsHeld) {
+        self.quota = quota;
+    }
+
+    /// Hold the peer's table to the `MAX_KEYEXPR_BYTES` the creator of the session's tables
+    /// resolved: a `DeclSubscriber` whose keyexpr is longer than `quota` admits is refused and
+    /// counted ([`Self::refusals`]), as one longer than a fixed row holds is, and the
+    /// declarations already held are kept.
+    #[cfg(feature = "storage-profile")]
+    pub fn limit_keys_to(&mut self, quota: crate::limits::MaxKeyexprBytesHeld) {
+        self.key_quota = quota;
+    }
+
+    /// The quota the peer's declared keyexprs are held to (`MAX_KEYEXPR_BYTES`): what the
+    /// creator of the session's tables stated ([`Self::limit_keys_to`]), the build's value until
+    /// it did.
+    #[cfg(feature = "storage-profile")]
+    pub fn key_quota(&self) -> crate::limits::MaxKeyexprBytesHeld {
+        self.key_quota
+    }
+
+    /// The quota the peer's table is held to (`MAX_REMOTE_DECLS`): what the creator of the
+    /// session's tables stated ([`Self::limit_to`]), the build's value until it did.
+    #[cfg(feature = "storage-profile")]
+    pub fn quota(&self) -> crate::limits::MaxRemoteDeclsHeld {
+        self.quota
+    }
+
     /// How many `DeclSubscriber` this peer's table refused: for a NEW id because
-    /// it was full ([`crate::caps::MAX_REMOTE_DECLS`]), or for a keyexpr longer
-    /// than a row's text. Always zero on the growable backing, where nothing is
-    /// refused.
+    /// it was full ([`crate::caps::MAX_REMOTE_DECLS`]) or held the quota its creator
+    /// stated ([`Self::limit_to`]), or for a keyexpr longer than a row's text. Zero on
+    /// the growable backing while no quota is stated, as its room refuses nothing.
     #[cfg(feature = "storage-profile")]
     pub fn refusals(&self) -> u32 {
         self.declared.refusals().saturating_add(self.oversize)
@@ -473,6 +527,18 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteSubscriberRegistry<D, U, P> {
     /// counters by name.
     pub fn peer(&self) -> &RemoteSubscriberPeer<P> {
         &self.peer
+    }
+
+    /// [`RemoteSubscriberPeer::limit_to`] for this registry's peer.
+    #[cfg(feature = "storage-profile")]
+    pub fn limit_peer_to(&mut self, quota: crate::limits::MaxRemoteDeclsHeld) {
+        self.peer.limit_to(quota);
+    }
+
+    /// [`RemoteSubscriberPeer::limit_keys_to`] for this registry's peer.
+    #[cfg(feature = "storage-profile")]
+    pub fn limit_peer_keys_to(&mut self, quota: crate::limits::MaxKeyexprBytesHeld) {
+        self.peer.limit_keys_to(quota);
     }
 
     /// R290 — count of currently-declared peer subscribers; see
@@ -990,13 +1056,20 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteSubscriberTable<D, U, P> {
         // R290 — same membership-tracking pattern as the
         // Q-side registry: same-id-replaces semantic, no
         // explicit conflict surfacing.
-        let Ok(text) = key_text_as::<P>(resolved) else {
+        let Ok(text) = key_text_within::<P>(resolved, peer.key_quota) else {
             peer.oversize = peer.oversize.saturating_add(1);
             return;
         };
         #[cfg(feature = "alloc")]
         let told_as = peer.told_as(resolved);
-        if peer.declared.bind(id, text).is_err() {
+        // Past the room or the quota: refused and counted by the table, and announced to no
+        // observer, so what they are told is what the table holds.
+        let quota = peer.quota;
+        if peer
+            .declared
+            .bind_within(id, text, |count| quota.admits(count))
+            .is_err()
+        {
             return;
         }
         peer.changed();

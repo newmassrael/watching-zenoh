@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$comment": "GENERATED from deploy/wz-config.toml by scripts/lib/wz_config.py --emit config-schema. Do not edit: `wz_config.py --check` fails when this file is stale.",
   "title": "wz run-time configuration",
-  "description": "The policies and limits a document may state when a node opens or while it runs. A policy the build fixes, and a limit only the build sizes, are not here.",
+  "description": "The policies and limits a document may state when a node opens or while it runs. A policy the build fixes, a limit only the build sizes, and a limit no machine of the build reads from a statement are not here.",
   "type": "object",
   "properties": {
     "wz": {
@@ -1001,54 +1001,6 @@
               "x-wz-binding-fixed": "none",
               "x-wz-wire": "timing"
             },
-            "SNAPSHOT_HISTOGRAM_BUCKETS": {
-              "description": "How many buckets the snapshot's message-interval histogram has, each 8 bytes.",
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 32,
-              "default": 24,
-              "x-wz-kind": "parameter",
-              "x-wz-storage": "both",
-              "x-wz-scope": [
-                "runtime",
-                "session"
-              ],
-              "x-wz-binding-heap": "open",
-              "x-wz-binding-fixed": "build",
-              "x-wz-wire": "visible"
-            },
-            "SUPERVISION_CHECKPOINTS": {
-              "description": "How many checkpoints the node's supervisor watches.",
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 64,
-              "default": 4,
-              "x-wz-kind": "parameter",
-              "x-wz-storage": "both",
-              "x-wz-scope": "runtime",
-              "x-wz-binding-heap": "open",
-              "x-wz-binding-fixed": "build",
-              "x-wz-wire": "none"
-            },
-            "E2E_SUPERVISED_STREAMS": {
-              "description": "How many periodic streams one reception supervisor holds.",
-              "oneOf": [
-                {
-                  "type": "integer",
-                  "minimum": 1
-                },
-                {
-                  "const": "unbounded"
-                }
-              ],
-              "x-wz-kind": "bound",
-              "x-wz-driven": "local",
-              "x-wz-storage": "quota",
-              "x-wz-scope": "runtime",
-              "x-wz-binding-heap": "open",
-              "x-wz-binding-fixed": "open",
-              "x-wz-wire": "none"
-            },
             "APP_LINK_QUEUE_BYTES": {
               "description": "The most bytes one link of a transport the program supplies queues in either direction: what the program handed in and the session has not read, and what a session that cannot wait handed over and the program has not taken.",
               "oneOf": [
@@ -1068,116 +1020,8 @@
               "x-wz-binding-fixed": "none",
               "x-wz-wire": "timing"
             },
-            "EVENT_RING_SLOTS": {
-              "description": "How many event records the node's event ring holds.",
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 1073741823,
-              "default": 64,
-              "x-wz-kind": "parameter",
-              "x-wz-storage": "both",
-              "x-wz-scope": "runtime",
-              "x-wz-binding-heap": "open",
-              "x-wz-binding-fixed": "build",
-              "x-wz-wire": "none"
-            },
-            "CLOCK_SOURCES": {
-              "description": "How many clock sources an application can register with the node at once, when the clock-source capability is on.",
-              "oneOf": [
-                {
-                  "type": "integer",
-                  "minimum": 1
-                },
-                {
-                  "const": "unbounded"
-                }
-              ],
-              "x-wz-kind": "bound",
-              "x-wz-driven": "local",
-              "x-wz-storage": "quota",
-              "x-wz-scope": "runtime",
-              "x-wz-binding-heap": "open",
-              "x-wz-binding-fixed": "none",
-              "x-wz-wire": "none"
-            },
-            "E2E_SENDER_SLOTS": {
-              "description": "How many senders one receiving judge of end-to-end protected frames keeps a counter for, when the e2e-sender-demux capability is on.",
-              "oneOf": [
-                {
-                  "type": "integer",
-                  "minimum": 1
-                },
-                {
-                  "const": "unbounded"
-                }
-              ],
-              "x-wz-kind": "bound",
-              "x-wz-driven": "remote",
-              "x-wz-storage": "both",
-              "x-wz-scope": "entity",
-              "x-wz-binding-heap": "open",
-              "x-wz-binding-fixed": "build",
-              "x-wz-wire": "none"
-            },
             "REPLAY_DEPTH_MAX": {
               "description": "The deepest replay a message may keep: how many of the frames it last sent, as they were sent, a publisher holds for a subscriber that arrives later and asks for them.",
-              "oneOf": [
-                {
-                  "type": "integer",
-                  "minimum": 1
-                },
-                {
-                  "const": "unbounded"
-                }
-              ],
-              "x-wz-kind": "bound",
-              "x-wz-driven": "local",
-              "x-wz-storage": "both",
-              "x-wz-scope": "entity",
-              "x-wz-binding-heap": "open",
-              "x-wz-binding-fixed": "build",
-              "x-wz-wire": "none"
-            },
-            "MESSAGE_CATALOG_ENTRIES": {
-              "description": "How many messages one message catalog declares, when the message-catalog capability is on.",
-              "oneOf": [
-                {
-                  "type": "integer",
-                  "minimum": 1
-                },
-                {
-                  "const": "unbounded"
-                }
-              ],
-              "x-wz-kind": "bound",
-              "x-wz-driven": "local",
-              "x-wz-storage": "both",
-              "x-wz-scope": "runtime",
-              "x-wz-binding-heap": "open",
-              "x-wz-binding-fixed": "build",
-              "x-wz-wire": "none"
-            },
-            "INSTANCE_KEY_FIELDS": {
-              "description": "How many fields of a payload one message's instance key names, when the instance-key capability is on.",
-              "oneOf": [
-                {
-                  "type": "integer",
-                  "minimum": 1
-                },
-                {
-                  "const": "unbounded"
-                }
-              ],
-              "x-wz-kind": "bound",
-              "x-wz-driven": "local",
-              "x-wz-storage": "both",
-              "x-wz-scope": "entity",
-              "x-wz-binding-heap": "open",
-              "x-wz-binding-fixed": "build",
-              "x-wz-wire": "none"
-            },
-            "INSTANCES_PER_MESSAGE": {
-              "description": "How many instances one message's instance key may tell apart, when the instance-key capability is on: the product of the lengths of the lists of values its key fields may take.",
               "oneOf": [
                 {
                   "type": "integer",

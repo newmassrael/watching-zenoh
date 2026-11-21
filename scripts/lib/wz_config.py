@@ -1377,8 +1377,25 @@ LIMIT_ON_HEAP = ("advisory", "capacity", "quota")
 # with the narrowest word wz builds for.
 LIMIT_RANGE_MOST = 4294967295
 LIMIT_KEYS = {"id", "kconfig", "default", "help",
-              "storage", "scope", "binding_heap", "binding_fixed", "wire",
-              "kind", "driven", "range", "most", "on_heap", "zero_unbounded"}
+              "storage", "scope", "binding_heap", "binding_fixed", "read", "wire",
+              "kind", "driven", "range", "most", "on_heap", "zero_unbounded", "upstream"}
+# Where the machines of a limit's scope read it (deploy/wz-config.toml, "Limits"): from the
+# snapshot their creator hands them, or still from the build's value. A statement of a limit read
+# from the build would be taken and never read, so a reader of a document refuses it by name.
+LIMIT_READS = ("snapshot", "build")
+LIMIT_READ_SNAPSHOT = "snapshot"
+LIMIT_READ_BUILD = "build"
+# A limit's counterpart in upstream zenoh (`[limit.upstream]`): `zenoh`, the key of zenoh's
+# configuration that states the same number, or `none`; `cite`, the upstream code that reads the
+# key; `reason`, why no key does. The zenoh-pico counterpart is the value switch whose
+# `[[upstream_switch]]` row anchors to the limit (`limit_rows`), so it is not stated a second time.
+LIMIT_UPSTREAM_KEYS = {"zenoh", "cite", "reason"}
+LIMIT_UPSTREAM_NONE = "none"
+# A key of zenoh's configuration as a path of its members, `transport/link/tx/lease`.
+UPSTREAM_KEY_RE = re.compile(r"[a-z0-9_]+(?:/[a-z0-9_]+)*")
+# zenoh's example configuration, a byte copy of the pinned upstream's: every key it writes out,
+# which is every key a limit may name.
+UPSTREAM_DEFAULT_CONFIG = ROOT / "crates" / "wz-zenoh" / "DEFAULT_CONFIG.json5"
 
 
 def stated_one_of(out: list[str], where: str, row: dict, key: str,
@@ -1445,6 +1462,21 @@ def limit_binding_problems(lid: str, lim: dict) -> list[str]:
     return out
 
 
+def limit_read_problems(lid: str, lim: dict) -> list[str]:
+    """Where the machines of a limit's scope read it. Every limit a stage after the build may
+    decide states it; a capacity alone states none, since only the build sizes it and no snapshot
+    holds it."""
+    where = f"limit `{lid}`"
+    out: list[str] = []
+    if lim.get("storage") == "capacity":
+        if "read" in lim:
+            out.append(f"{where}: a capacity alone is read from the build only, so it states no "
+                       "`read`")
+        return out
+    stated_one_of(out, where, lim, "read", LIMIT_READS)
+    return out
+
+
 def limit_kind_problems(lid: str, lim: dict) -> list[str]:
     """What a limit's value is to the code. A bound names who makes its table grow (`driven`); a
     parameter names the range its code runs with (`range`, holding the default). A limit that is
@@ -1500,17 +1532,184 @@ def limit_kind_problems(lid: str, lim: dict) -> list[str]:
     return out
 
 
+# One token of a JSON5 text: white space, a comment, a string, a punctuation mark, or a bare word
+# (a name, a number, `true`, `false`, `null`).
+JSON5_TOKEN = re.compile(
+    r"""\s+|//[^\n]*|/\*.*?\*/|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|[{}\[\]:,]|[^\s{}\[\]:,"'/]+""",
+    re.DOTALL)
+JSON5_PUNCTUATION = frozenset("{}[]:,")
+
+
+def json5_tokens(text: str) -> list[str]:
+    """The tokens of a JSON5 text, without its white space and comments. Raises ValueError at a
+    character no token starts with."""
+    tokens: list[str] = []
+    pos = 0
+    while pos < len(text):
+        m = JSON5_TOKEN.match(text, pos)
+        if m is None:
+            raise ValueError(f"offset {pos}: no JSON5 token starts at {text[pos:pos + 20]!r}")
+        pos = m.end()
+        tok = m.group(0)
+        if not (tok[0].isspace() or tok.startswith(("//", "/*"))):
+            tokens.append(tok)
+    return tokens
+
+
+def json5_member_paths(text: str) -> frozenset[str]:
+    """The path of every member of a JSON5 document's objects, as zenoh's configuration names its
+    keys: `a/b` is the member `b` of the object that is the top-level member `a`. A member of an
+    object inside an array has no such path and is left out, as is anything inside a comment.
+    Raises ValueError on a text that is not one JSON5 object."""
+    paths: set[str] = set()
+    # Each open container: its kind, the path its members extend (None inside an array), what it
+    # expects next, and the key of the member being read.
+    stack: list[list] = []
+    closed = False
+    for tok in json5_tokens(text):
+        if closed:
+            raise ValueError(f"`{tok}` follows the document's object")
+        if not stack:
+            if tok != "{":
+                raise ValueError(f"the document opens with `{tok}`, not an object")
+            stack.append(["object", "", "key", None])
+            continue
+        top = stack[-1]
+        kind, prefix, state, key = top
+        if state == "colon":
+            if tok != ":":
+                raise ValueError(f"member `{key}` is followed by `{tok}`, not `:`")
+            top[2] = "value"
+            continue
+        if state == "next":
+            if tok == ",":
+                top[2] = "key" if kind == "object" else "value"
+            elif tok == ("}" if kind == "object" else "]"):
+                stack.pop()
+                closed = not stack
+            else:
+                raise ValueError(f"`{tok}` where a `,` or the end of the {kind} belongs")
+            continue
+        if state == "key":
+            if tok == "}":
+                stack.pop()
+                closed = not stack
+            elif tok in JSON5_PUNCTUATION:
+                raise ValueError(f"`{tok}` where the key of a member belongs")
+            else:
+                top[3] = tok[1:-1] if tok[0] in "\"'" else tok
+                top[2] = "colon"
+            continue
+        if kind == "array" and tok == "]":
+            stack.pop()
+            closed = not stack
+            continue
+        if tok in JSON5_PUNCTUATION and tok not in ("{", "["):
+            raise ValueError(f"`{tok}` where a value belongs")
+        path = None if prefix is None else f"{prefix}{key}"
+        if path is not None:
+            paths.add(path)
+        top[2] = "next"
+        if tok == "{":
+            stack.append(["object", None if path is None else f"{path}/", "key", None])
+        elif tok == "[":
+            stack.append(["array", None, "value", None])
+    if stack or not closed:
+        raise ValueError("the document's object is never closed")
+    return frozenset(paths)
+
+
+@functools.lru_cache(maxsize=None)
+def upstream_config_paths() -> frozenset[str]:
+    """The keys of zenoh's example configuration (`UPSTREAM_DEFAULT_CONFIG`). Raises ValueError
+    when the file cannot be read as one JSON5 object."""
+    where = UPSTREAM_DEFAULT_CONFIG.relative_to(ROOT)
+    try:
+        text = UPSTREAM_DEFAULT_CONFIG.read_text(encoding="utf-8")
+    except OSError as e:
+        raise ValueError(f"{where} cannot be read ({e})") from e
+    try:
+        return json5_member_paths(text)
+    except ValueError as e:
+        raise ValueError(f"{where}: {e}") from e
+
+
+def limit_upstream_problems(lid: str, lim: dict, config_paths: frozenset[str] | None) -> list[str]:
+    """A limit names its counterpart in upstream zenoh: the key of zenoh's configuration that
+    states the same number, with at least one citation of the upstream code that reads it, or
+    `none` with the reason no key does (and, if it helps, citations of what upstream holds
+    instead). A citation is the anchored form `upstream_citation_anchor_gate.py` resolves at the
+    pin, of zenoh only: the zenoh-pico side is the value switch whose row anchors to the limit.
+    `config_paths` are the keys of zenoh's example configuration; None leaves a key's presence
+    unjudged, where the file could not be read (`validate_limits` says so once)."""
+    import upstream_citation_anchor_gate as anchors
+
+    where = f"limit `{lid}`"
+    up = lim.get("upstream")
+    if not isinstance(up, dict):
+        return [f"{where}: it states no upstream counterpart (`[limit.upstream]`): the key of "
+                f"zenoh's configuration that states the same number, or '{LIMIT_UPSTREAM_NONE}' "
+                f"with the reason"]
+    out: list[str] = []
+    for key in sorted(set(up) - LIMIT_UPSTREAM_KEYS):
+        out.append(f"{where}: `upstream.{key}` is not a key an upstream counterpart has")
+        if key == "pico":
+            out.append(f"{where}: the zenoh-pico side is the value switch whose row anchors to "
+                       f"`{LIMIT_ANCHOR}{lid}`, stated there once")
+    cites = up.get("cite", [])
+    if not isinstance(cites, list) or not all(isinstance(c, str) for c in cites):
+        out.append(f"{where}: `upstream.cite` is an array of citations")
+        cites = []
+    for cite in cites:
+        if anchors.PICO_ANCHOR_CITE.search(cite):
+            out.append(f"{where}: `upstream.cite` cites zenoh-pico ({cite}); that side is the "
+                       f"value switch whose row anchors to `{LIMIT_ANCHOR}{lid}`, stated there once")
+        elif not anchors.ANCHOR_CITE.fullmatch(cite):
+            out.append(f"{where}: `upstream.cite` holds {cite!r}, which is not one citation of "
+                       f"upstream zenoh in the anchored form, a path then @ then a needle, each "
+                       f"in backquotes")
+    zenoh = up.get("zenoh")
+    reason = up.get("reason")
+    if not isinstance(zenoh, str) or not UPSTREAM_KEY_RE.fullmatch(zenoh):
+        out.append(f"{where}: `upstream.zenoh` is {zenoh!r}; it is the key of zenoh's "
+                   f"configuration as a path of its members (as transport/link/tx/lease), or "
+                   f"'{LIMIT_UPSTREAM_NONE}'")
+    elif zenoh == LIMIT_UPSTREAM_NONE:
+        if not isinstance(reason, str) or not reason.strip():
+            out.append(f"{where}: its upstream is '{LIMIT_UPSTREAM_NONE}' and it says no reason; a "
+                       f"limit upstream has no key for states why in `upstream.reason`")
+    else:
+        if "reason" in up:
+            out.append(f"{where}: only an upstream of '{LIMIT_UPSTREAM_NONE}' states a reason; a key "
+                       f"is shown by the code that reads it, in `upstream.cite`")
+        if not cites:
+            out.append(f"{where}: its upstream key `{zenoh}` is shown by no citation of the "
+                       f"upstream code that reads it")
+        if config_paths is not None and zenoh not in config_paths:
+            out.append(f"{where}: its upstream key `{zenoh}` is no key of zenoh's configuration "
+                       f"({UPSTREAM_DEFAULT_CONFIG.relative_to(ROOT)})")
+    return out
+
+
 def validate_limits(limits: list[dict]) -> list[str]:
     out: list[str] = []
     ids = [l.get("id") for l in limits]
     if len(ids) != len(set(ids)):
         out.append("a limit id is declared twice")
+    config_paths: frozenset[str] | None
+    try:
+        config_paths = upstream_config_paths()
+    except ValueError as e:
+        out.append(f"the upstream keys of the limits cannot be judged: {e}")
+        config_paths = None
     for lim in limits:
         lid = lim.get("id", "?")
         for key in sorted(set(lim) - LIMIT_KEYS):
             out.append(f"limit `{lid}`: `{key}` is not a key a limit has")
         out += limit_binding_problems(lid, lim)
+        out += limit_read_problems(lid, lim)
         out += limit_kind_problems(lid, lim)
+        out += limit_upstream_problems(lid, lim, config_paths)
         if not re.fullmatch(r"[A-Z][A-Z0-9_]*", str(lid)):
             out.append(f"limit `{lid}`: an id is a Rust constant name, SCREAMING_SNAKE_CASE")
         if lim.get("kconfig") != f"WZ_LIMIT_{lid}":
@@ -2316,11 +2515,13 @@ def limit_spec_rust(lim: dict) -> list[str]:
     bound = lim["kind"] == "bound"
     ty = "Quota" if bound else "usize"
     driven = f"Some(Driven::{camel(lim['driven'])})" if bound else "None"
+    read = "true" if lim["read"] == LIMIT_READ_SNAPSHOT else "false"
     out = rust_doc(f"`{lid}`: {first_sentence(lim['help'])}", "")
     out += ["#[derive(Clone, Copy, Debug, PartialEq, Eq)]", f"pub struct {name};", "",
             f"impl LimitSpec for {name} {{", f"    type Value = {ty};",
             f"    const LIMIT: &'static str = {rust_word(lid)};",
-            f"    const DRIVEN: Option<Driven> = {driven};"]
+            f"    const DRIVEN: Option<Driven> = {driven};",
+            f"    const READ_FROM_SNAPSHOT: bool = {read};"]
     out += rust_assoc_const("CAPACITY", "Option<usize>", limit_capacity_rust(lim))
     if bound and "most" in lim:
         domain = (f"LimitDomain::of_bound_within(Self::CAPACITY, {lim['most']}, Self::DEFAULT, "
@@ -2396,12 +2597,19 @@ def limit_snapshot_rust(snapshot: str, lims: list[dict], what: str) -> list[str]
         ty = "Quota" if lim["kind"] == "bound" else "usize"
         out += ["", f"    /// `{lim['id']}` as this snapshot holds it.",
                 f"    pub const fn {field}(&self) -> {ty} {{", f"        self.{field}.get()", "    }"]
+        name = camel_limit(lim["id"])
         if lim["kind"] == "bound":
-            name = camel_limit(lim["id"])
             out += ["", f"    /// `{lim['id']}` as the snapshot keeps it, for the table the bound limits to keep",
-                    "    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.",
-                    f"    pub const fn {field}_held(&self) -> {name}Held {{",
-                    f"        self.{field}", "    }"]
+                    "    /// and ask ([`Limited::admits`]): in no byte where the build allows one value."]
+        else:
+            out += ["", f"    /// `{lim['id']}` as the snapshot keeps it, for a machine that keeps the value beside",
+                    "    /// its own state: in no byte where the build allows one value."]
+        held = f"    pub const fn {field}_held(&self) -> {name}Held {{"
+        if len(held) <= RUST_MAX_WIDTH:
+            out.append(held)
+        else:
+            out += [f"    pub const fn {field}_held(", "        &self,", f"    ) -> {name}Held {{"]
+        out += [f"        self.{field}", "    }"]
         out += ["", f"    /// Selects `{lim['id']}`, when the build's domain holds `value`."]
         one = f"    pub fn select_{field}(&mut self, value: {ty}) -> Result<(), OutsideLimitDomain> {{"
         if len(one) <= RUST_MAX_WIDTH:
@@ -2438,8 +2646,9 @@ def emit_rust_limit_snapshots(decl: dict) -> str:
     (`open_limits`), implementing `LimitSpec` (its kind, who makes it grow, its capacity in this
     build, its domain and the build's value), and the two snapshots that hold one value of each:
     `RuntimeLimits` for a limit whose widest scope is the runtime, `SessionLimits` for the rest.
-    No machine reads them yet; each limit's reader still reads `caps`, so nothing a build does
-    changes."""
+    Each type states whether the machines of its scope read it from the snapshot
+    (`READ_FROM_SNAPSHOT`, the limit's `read`); the build defaults are what the build runs
+    with, so nothing a build does changes."""
     lims = open_limits(decl)
     runtime = [lim for lim in lims if is_runtime_limit(lim)]
     session = [lim for lim in lims if not is_runtime_limit(lim)]
@@ -2481,7 +2690,20 @@ def emit_rust_limit_snapshots(decl: dict) -> str:
         out += [""] + limit_spec_rust(lim)
     out += [""] + limit_snapshot_rust("SessionLimits", session, "a session holds")
     out += [""] + limit_snapshot_rust("RuntimeLimits", runtime, "a node or runtime holds")
+    out += [""] + capacity_limits_rust(decl)
     return "\n".join(out) + "\n"
+
+
+def capacity_limits_rust(decl: dict) -> list[str]:
+    """`CAPACITY_LIMITS`: the id of every limit that is a capacity alone (the limits `open_limits`
+    leaves out), so a reader that names a limit by its id tells a limit only the build sizes from
+    one the build does not have, and refuses each by its own reason."""
+    ids = [rust_word(lim["id"]) for lim in decl["limits"] if lim["storage"] == "capacity"]
+    return [
+        "/// Every limit that is a capacity alone, by its id: the build sizes storage by it and no later",
+        "/// stage decides it, so neither snapshot holds it and a document that states it is refused by",
+        "/// name.",
+    ] + rust_static_array(f"pub static CAPACITY_LIMITS: [&str; {len(ids)}] =", ids)
 
 
 def first_sentence(text: str) -> str:
@@ -2500,7 +2722,9 @@ def schema_annotations(row: dict, keys: tuple[str, ...]) -> dict:
 def emit_config_schema(decl: dict) -> str:
     """The JSON Schema (draft 2020-12) of the run-time document: under `wz`, `policies` holds each
     policy a stage after the build decides (its `binding` is not `build`), as the enum of its
-    values, and `limits` each limit that is not a capacity alone (`open_limits`): a bound as an
+    values, and `limits` each limit that is not a capacity alone (`open_limits`) and that the
+    build's machines read from a statement (`read = "snapshot"`; one read from the build would be
+    refused by name at the open, so it is no member a document may state): a bound as an
     integer of at least 1 or `"unbounded"`, a parameter as an integer in its range with the
     declared default. Each carries its help's first sentence and where it is bound (`x-wz-*`). The build may narrow a policy's values further (its domain), which a
     document is checked against when it is applied, not here. `profile` is the enum of the
@@ -2518,6 +2742,8 @@ def emit_config_schema(decl: dict) -> str:
         }
     limits = {}
     for lim in open_limits(decl):
+        if lim.get("read") != LIMIT_READ_SNAPSHOT:
+            continue
         if lim["kind"] == "bound":
             # A stated bound admits at least one: `0` would refuse everything, and no bound is
             # stated as the word. A build with a capacity narrows it further (its domain).
@@ -2545,8 +2771,9 @@ def emit_config_schema(decl: dict) -> str:
     members["policies"] = {"type": "object", "properties": policies, "additionalProperties": False}
     members["limits"] = {"type": "object", "properties": limits, "additionalProperties": False}
     # `wz/key-ids`, read by a build with the `shared-key-ids` capability: its forms are the values
-    # of `key-wire-form`, and how many entries a dictionary may have is the build's
-    # MAX_SHARED_KEY_IDS, which a build sizes, so the schema states no bound of its own.
+    # of `key-wire-form`, and how many entries a dictionary may have is the session's
+    # MAX_SHARED_KEY_IDS, which the document's own `limits` may state, so the schema states no
+    # bound of its own.
     forms = next((policy_values(pol) for pol in decl["policies"] if pol["id"] == "key-wire-form"),
                  None)
     if forms is not None:
@@ -2590,8 +2817,8 @@ def emit_config_schema(decl: dict) -> str:
                      "stale."),
         "title": "wz run-time configuration",
         "description": ("The policies and limits a document may state when a node opens or while "
-                        "it runs. A policy the build fixes, and a limit only the build sizes, are "
-                        "not here."),
+                        "it runs. A policy the build fixes, a limit only the build sizes, and a "
+                        "limit no machine of the build reads from a statement are not here."),
         "type": "object",
         "properties": {
             "wz": {
@@ -4431,10 +4658,15 @@ storage = "both"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "build"
+read = "snapshot"
 wire = "none"
 help = '''
 A table.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "A sample table upstream has no key for."
 """
 
 
@@ -5262,6 +5494,10 @@ def cmd_selftest() -> int:
     expect("a capacity alone is not in the schema, whatever stage sizes it",
            json.loads(emit_config_schema({"policies": [], "limits": built_only}))["properties"]["wz"]
            ["properties"]["limits"]["properties"] == {})
+    expect("a limit no machine reads from a statement is not in the schema",
+           json.loads(emit_config_schema({"policies": [], "limits": [
+               dict(sdecl["limits"][0], read=LIMIT_READ_BUILD)]}))["properties"]["wz"]
+           ["properties"]["limits"]["properties"] == {})
     expect("a description is the help's first sentence, a stop inside an address not ending it",
            first_sentence("A locator (for example udp/192.168.1.10:7447). A longer one\nis refused.")
            == "A locator (for example udp/192.168.1.10:7447)."
@@ -5439,6 +5675,8 @@ def cmd_selftest() -> int:
             text = re.sub(rf"(?m)^{key} = .*$", f"{key} = {value}", text)
         if stated.get("storage", '"both"') != '"both"':
             text = text.replace('on_heap = "advisory"\n', "")
+        if stated.get("storage") == '"capacity"':
+            text = text.replace('read = "snapshot"\n', "")
         return text
 
     def limit_refused(text: str, words: str) -> bool:
@@ -5479,6 +5717,14 @@ def cmd_selftest() -> int:
     expect("a limit neither storage profile reads is refused",
            limit_refused(limit_text(storage='"quota"', binding_heap='"none"', binding_fixed='"none"'),
                          "neither storage profile reads it"))
+    expect("a limit a later stage decides that states no `read` is refused",
+           limit_refused(SAMPLE.replace('read = "snapshot"\n', ""), "limit `MAX_A`: it states no `read`"))
+    expect("a `read` outside its set is refused",
+           limit_refused(limit_text(read='"cache"'), "`read` is 'cache', one of snapshot, build"))
+    expect("a capacity alone that states `read` is refused",
+           limit_refused(SAMPLE.replace('storage = "both"', 'storage = "capacity"')
+                         .replace('on_heap = "advisory"\n', ""),
+                         "a capacity alone is read from the build only, so it states no `read`"))
     expect("a limit held at two scopes validates",
            validate_decl(read_decl_toml(limit_text(scope='["runtime", "link"]'))) == [])
     expect("a scope array out of order is refused",
@@ -5562,6 +5808,63 @@ def cmd_selftest() -> int:
     expect("`zero_unbounded = false` is refused",
            limit_refused(quota_bound.replace("default = 4\n", "default = 4\nzero_unbounded = false\n"),
                          "`zero_unbounded` is stated as true or not at all"))
+    # What a limit is in upstream zenoh: a key of its configuration with the code that reads it, or
+    # none with the reason. The citations here are real ones: the citation gate resolves every
+    # anchored citation of this file at the pin.
+    none_block = '[limit.upstream]\nzenoh = "none"\nreason = "A sample table upstream has no key for."\n'
+    lease_cite = 'cite = ["`commons/zenoh-config/src/lib.rs` @ `lease: u64,`"]'
+    pico_cite = 'cite = ["`vendor/zenoh-pico/include/zenoh-pico/config.h.in` @ `Z_TRANSPORT_LEASE`"]'
+
+    def upstream_text(*lines: str) -> str:
+        return SAMPLE.replace(none_block, "".join(f"{line}\n" for line in ("[limit.upstream]",) + lines))
+
+    expect("a limit whose upstream is a key, shown by the code that reads it, validates",
+           validate_decl(read_decl_toml(upstream_text('zenoh = "transport/link/tx/lease"', lease_cite)))
+           == [])
+    expect("a limit upstream has no key for, citing what upstream holds instead, validates",
+           validate_decl(read_decl_toml(upstream_text('zenoh = "none"', 'reason = "None."', lease_cite)))
+           == [])
+    expect("a limit that names no upstream counterpart is refused",
+           limit_refused(SAMPLE.replace(none_block, ""), "limit `MAX_A`: it states no upstream counterpart"))
+    expect("an upstream key zenoh's configuration does not have is refused",
+           limit_refused(upstream_text('zenoh = "transport/link/tx/leases"', lease_cite),
+                         "its upstream key `transport/link/tx/leases` is no key of zenoh's configuration"))
+    expect("an upstream key that is not a path of members is refused",
+           limit_refused(upstream_text('zenoh = "transport.link.tx.lease"', lease_cite),
+                         "it is the key of zenoh's configuration as a path of its members"))
+    expect("an upstream key no citation shows is refused",
+           limit_refused(upstream_text('zenoh = "transport/link/tx/lease"'),
+                         "its upstream key `transport/link/tx/lease` is shown by no citation"))
+    expect("a citation not in the anchored form is refused",
+           limit_refused(upstream_text('zenoh = "transport/link/tx/lease"', 'cite = ["the lease of a link"]'),
+                         "which is not one citation of upstream zenoh in the anchored form"))
+    expect("a citation of zenoh-pico is refused: that side is the value switch's row",
+           limit_refused(upstream_text('zenoh = "none"', 'reason = "None."', pico_cite),
+                         "`upstream.cite` cites zenoh-pico"))
+    expect("a pico side stated in the limit is refused",
+           limit_refused(upstream_text('zenoh = "none"', 'reason = "None."', 'pico = "Z_TRANSPORT_LEASE"'),
+                         "`upstream.pico` is not a key an upstream counterpart has"))
+    expect("an upstream of none that gives no reason is refused",
+           limit_refused(upstream_text('zenoh = "none"'), "its upstream is 'none' and it says no reason"))
+    expect("a reason beside an upstream key is refused",
+           limit_refused(upstream_text('zenoh = "transport/link/tx/lease"', 'reason = "Why."', lease_cite),
+                         "only an upstream of 'none' states a reason"))
+    expect("the JSON5 reader names each member of an object by its path, and none in an array or a comment",
+           json5_member_paths('// a: 1\n{\n  a: { b: 1, "c": [ { d: 2 } ], },\n  /* e: 3 */ f: \'x\',\n}\n')
+           == {"a", "a/b", "a/c", "f"})
+
+    def json5_refused(text: str) -> bool:
+        try:
+            json5_member_paths(text)
+        except ValueError:
+            return True
+        return False
+
+    expect("a text that is not one JSON5 object is refused",
+           all(json5_refused(t) for t in ("", "{ a: 1", "{ a 1 }", "{ a: 1 } {", "[1]", "{ a: / }")))
+    expect("zenoh's example configuration has the keys the pico limits name",
+           {"transport/link/tx/lease", "transport/link/tx/batch_size", "routing/interests/timeout"}
+           <= upstream_config_paths())
     # What the generator makes of the kinds: Kconfig ranges, binding rows, the schema, snapshots.
     pdecl = decl_of(read_decl_toml(parameter))
     expect("a parameter's Kconfig states its range",
@@ -5587,6 +5890,13 @@ def cmd_selftest() -> int:
            ["limits"]["properties"]
            and "pub struct MaxA;" not in emit_rust_limit_snapshots(cdecl))
     bsnap = emit_rust_limit_snapshots(bdecl)
+    expect("a capacity alone is named in CAPACITY_LIMITS, and a limit a later stage decides is not",
+           'pub static CAPACITY_LIMITS: [&str; 1] = ["MAX_A"];' in emit_rust_limit_snapshots(cdecl)
+           and "pub static CAPACITY_LIMITS: [&str; 0] = [];" in bsnap)
+    expect("a limit read from the snapshot says so in its LimitSpec, and one read from the build",
+           "    const READ_FROM_SNAPSHOT: bool = true;\n" in bsnap
+           and "    const READ_FROM_SNAPSHOT: bool = false;\n"
+           in emit_rust_limit_snapshots(decl_of(read_decl_toml(limit_text(read='"build"')))))
     expect("an advisory bound is sized only on the fixed profile and unbounded on the heap",
            "const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_A);" in bsnap
            and "const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);" in bsnap)

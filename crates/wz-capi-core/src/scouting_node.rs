@@ -39,6 +39,7 @@ use std::time::Duration;
 use wz_codecs::whatami::{WhatAmI, WhatAmIMatcher};
 use wz_routing_graph::{AutoConnect, AutoConnectStrategies, Zid};
 use wz_runtime_tokio::accept_loop::DialIntentSender;
+use wz_runtime_tokio::config::scout_multicast_socket;
 use wz_runtime_tokio::policy::SessionPolicy;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::scouting_autoconnect::{autoconnect_verdict, AutoconnectVerdict};
@@ -49,7 +50,7 @@ use wz_runtime_tokio::scouting_glue::{
     drive_scouting_until_resolved, new_scouting_engine, ScoutOutcome, ScoutParams, ScoutedHello,
     ScoutingActions,
 };
-use wz_runtime_tokio::zenoh_config::{scout_multicast_socket, ZenohNodeConfig};
+use wz_runtime_tokio::zenoh_config::ZenohNodeConfig;
 use wz_runtime_tokio::{McastSocketConfig, UdpDriver};
 use wz_session_core::session_zid::SessionZid;
 
@@ -111,7 +112,7 @@ pub struct ScoutingPlan {
 
 /// The group and port `scouting/multicast/address` names, zenoh's default for an unstated one, or
 /// the refusal of one that is not a socket address: the one reading of the key, which `z_scout`
-/// reads it by too (`wz_runtime_tokio::zenoh_config::scout_multicast_socket`).
+/// reads it by too (`wz_runtime_tokio::config::scout_multicast_socket`).
 fn group_of(node: &ZenohNodeConfig) -> Result<(IpAddr, u16), ScoutingConfigError> {
     scout_multicast_socket(node.scout_multicast_address.as_deref())
         .map(|socket| (socket.ip(), socket.port()))

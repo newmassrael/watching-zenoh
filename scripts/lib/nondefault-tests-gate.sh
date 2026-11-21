@@ -412,6 +412,14 @@ transport-link-unixpipe,transport-link-ws|"
     # behind the feature). The round, the ring and the admission have model tests of their own in
     # `wz-session-core` and `wz-app-frame`, each a leg below.
     "wz-capi-pico|hook|replay-cache|"
+    # The doors' library's view of the core (`wz-capi-pico-ext/src/core_view.rs`) held to the core's
+    # declarations (`additional_view_tests`, behind any door capability): the replay cache's leg
+    # above runs its replay half; these run the event log's constants the instance keys report with
+    # (`event-ring`), the local queryable's field of the get options the replay subscriber sets
+    # (`local-queryable`), and the door that asks the interface's version (`additional`).
+    "wz-capi-pico|hook|instance-key,event-ring|additional_view_tests::"
+    "wz-capi-pico|hook|replay-cache,local-queryable|additional_view_tests::"
+    "wz-capi-pico|hook|message-catalog|additional::tests::"
     # The library's own unit tests of three wz doors, each behind its feature: the program's
     # transport (`app_transport`, `app-transport`), the config's document door (`config_policy`,
     # the tests behind `config-document`) and the key ids a config states (`key_ids`, its tests
@@ -468,6 +476,15 @@ transport-link-unixpipe,transport-link-ws|"
     # whose module is behind the feature). The payload's own tests are `wz-app-frame`'s, a leg
     # below.
     "wz-capi-pico|hook|message-payload|--test=message_payload_doors"
+    # The object pools (`wz_ext_object_pool_*`): the unit tests of the pools' plan and layout and
+    # of the place an object is taken from, and the file that reserves, exhausts, reuses and
+    # releases the pools through the doors, a process of its own (`object_pool_doors`, which
+    # `Cargo.toml` requires the feature for); with the region door, the same file lays the pools
+    # over the program's memory too.
+    "wz-capi-pico|hook|object-pool|object_pool::"
+    "wz-capi-pico|hook|object-pool|object_slot::"
+    "wz-capi-pico|hook|object-pool|--test=object_pool_doors"
+    "wz-capi-pico|hook|object-pool-region|--test=object_pool_doors"
     # Instance keys (`wz_app_frame::instance_key`): the model tests of the keyer, its last values
     # and its two stream doors, with the tests of the schema reader's tokenizer and parser, which
     # moved to this crate with the reader and compile only with `proto` (which this implies).
@@ -1639,10 +1656,11 @@ wz-session-core/query-reply-err|"
     "wz-runtime-tokio|hook|transport-link-app,transport-multicast|app_link::"
     # A `TokioTime` over a time base the program supplies (`program-time`): the integration file
     # `tests/it/files/session_program_time.rs` (its readings, waits, timeouts and bounds on the
-    # program's time, a session's lease timed by it in the drive loop) and the session's own tests
-    # whose name says `program_time` (the wait for stable declarations). The filter is the name
-    # both share, so a test added to either is covered.
-    "wz-runtime-tokio|hook|program-time|program_time"
+    # program's time, a session's lease timed by it in the drive loop), whose target covers every
+    # test of the file, and the session's own test of the wait for stable declarations on that
+    # time, by its path. The two rows share one feature set, so they share one build.
+    "wz-runtime-tokio|hook|program-time|--test=session_program_time"
+    "wz-runtime-tokio|hook|program-time|session::tests::a_stable_declarations_wait_on_program_time_ends_only_when_that_time_passes"
     # The router's routing events (`router_forward::routing_spans`, built with `routing-router-hat`
     # and `tracing-spans`) and the span a spawned task runs in (`runtime_pool::span_tests`, whose
     # claim is the `tracing-instrument` arm). The wide leg names neither tracing feature, so the
@@ -1768,6 +1786,26 @@ a stress run of seconds, run by Layer S with --ignored (3 passed guarded); this 
 a stress run of seconds, run by Layer S with --ignored (3 passed guarded); this table never passes --ignored"
     "wz-capi-pico|sessions_opened_and_closed_in_sequence_leave_no_allocation_behind|\
 a stress run of seconds, run by Layer S with --ignored (3 passed guarded); this table never passes --ignored"
+    # The pico ABI's memory legs (`tests/allocation_faults.rs`, needs `app-transport`): `#[ignore]`
+    # because each sweep starts a process for every point of its call, and the traffic counts read
+    # the process's allocations, so a leg of this table would run none of them. Layer S runs the
+    # eight with --ignored on each engine, 8 passed guarded each time.
+    "wz-capi-pico|z_open_meets_a_failed_allocation_at_every_point_of_its_call|\
+a memory leg of Layer S, run by it with --ignored on each engine (8 passed guarded); this table never passes --ignored"
+    "wz-capi-pico|z_declare_subscriber_meets_a_failed_allocation_at_every_point_of_its_call|\
+a memory leg of Layer S, run by it with --ignored on each engine (8 passed guarded); this table never passes --ignored"
+    "wz-capi-pico|z_declare_queryable_meets_a_failed_allocation_at_every_point_of_its_call|\
+a memory leg of Layer S, run by it with --ignored on each engine (8 passed guarded); this table never passes --ignored"
+    "wz-capi-pico|z_declare_publisher_meets_a_failed_allocation_at_every_point_of_its_call|\
+a memory leg of Layer S, run by it with --ignored on each engine (8 passed guarded); this table never passes --ignored"
+    "wz-capi-pico|z_put_meets_a_failed_allocation_at_every_point_of_its_call|\
+a memory leg of Layer S, run by it with --ignored on each engine (8 passed guarded); this table never passes --ignored"
+    "wz-capi-pico|z_get_meets_a_failed_allocation_at_every_point_of_its_call|\
+a memory leg of Layer S, run by it with --ignored on each engine (8 passed guarded); this table never passes --ignored"
+    "wz-capi-pico|puts_between_open_sessions_are_counted_for_their_allocations|\
+a memory leg of Layer S, run by it with --ignored on each engine (8 passed guarded); this table never passes --ignored"
+    "wz-capi-pico|gets_between_open_sessions_are_counted_for_their_allocations|\
+a memory leg of Layer S, run by it with --ignored on each engine (8 passed guarded); this table never passes --ignored"
 )
 
 if [[ ${#LEGS[@]} -eq 0 ]]; then

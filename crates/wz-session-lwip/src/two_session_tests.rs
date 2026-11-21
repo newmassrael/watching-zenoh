@@ -110,11 +110,13 @@ fn unicast_params(zid: u8) -> SessionInitParams {
         keep_alive: wz_session_core::session_init_params::KeepAliveConf::PICO,
         initial_sn: 0,
         cookie: vec![],
-        tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(
+        tx_queue: wz_session_core::session_init_params::TxQueueConf::of_snapshot(
             &wz_session_core::policy::SessionPolicy::defaults(),
+            &wz_session_core::limits::SessionLimits::BUILD,
         ),
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         policy: wz_session_core::policy::SessionPolicy::defaults(),
+        limits: wz_session_core::limits::SessionLimits::BUILD,
         cookie_signing_key: wz_session_core::signing_key::SigningKey::new(vec![7u8; 32])
             .expect("key"),
     }
@@ -132,13 +134,15 @@ fn group_params(zid: &[u8], lease_ms: u64) -> MulticastParams {
         batch_size: 2_048,
         is_qos: false,
         compression: false,
-        tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(
+        tx_queue: wz_session_core::session_init_params::TxQueueConf::of_snapshot(
             &wz_session_core::policy::SessionPolicy::defaults(),
+            &wz_session_core::limits::SessionLimits::BUILD,
         ),
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
         max_sessions: None,
         policy: wz_session_core::policy::SessionPolicy::defaults(),
+        limits: wz_session_core::limits::SessionLimits::BUILD,
     }
 }
 

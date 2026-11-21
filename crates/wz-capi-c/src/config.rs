@@ -97,8 +97,8 @@ pub(crate) const SESSION_ZID_KEY: &str = "id";
 /// refuses a policy or a member stated twice in it; a map of leaves keeps the later one and the
 /// refusal is gone, so the same text would open here and be refused by every other reader of it.
 /// The member is therefore kept as the values it was stated with, one per top-level `wz` member
-/// in the order stated, and a key below it (`wz/profile`, `wz/policies/<id>`) is a path into
-/// that tree ([`Self::insert`]).
+/// in the order stated, and a key below it (`wz/profile`, `wz/policies/<id>`, `wz/limits/<id>`)
+/// is a path into that tree ([`Self::insert`]).
 #[derive(Debug, Default)]
 pub(crate) struct ConfigState {
     entries: BTreeMap<String, Json5Value>,

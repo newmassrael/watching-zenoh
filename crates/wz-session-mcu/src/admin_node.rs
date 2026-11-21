@@ -51,6 +51,7 @@ use wz_runtime_coop::session_drive::{
 };
 use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopTime};
 use wz_session_core::driver_loop::DriverOutcome;
+use wz_session_core::limits::SessionLimits;
 use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::observer::ApplicationLayerObserver;
 use wz_session_core::registry_error::RegisterError;
@@ -126,12 +127,18 @@ where
     /// is given; an acceptor mints cookies, so this is where a board installs
     /// its entropy source (`wz_runtime_coop::session_runtime::new_session_actions`).
     ///
+    /// The node's observer is every session's, dialled and accepted, so it is held to one
+    /// snapshot of the session limits: the `limits` of the parameters `dial_params` gives, which
+    /// it is asked for once here, before any dial, unless the build allows each limit one value.
+    /// `accept` builds its sessions under the same limits.
+    ///
     /// `Err` when the node's own observer refuses its config subscriber or its
     /// admin queryable (see [`host_connect_writes`] and
     /// [`host_admin_queryable`]): a node that cannot host its admin space is
-    /// not started, rather than started deaf. On the growable backing this
-    /// never fails; on the fixed one it fails only for a key past
-    /// `caps::MAX_KEYEXPR_BYTES`, since the observer is fresh.
+    /// not started, rather than started deaf. The observer is fresh, so it
+    /// fails only for a key past `caps::MAX_KEYEXPR_BYTES` on the fixed
+    /// backing, or for limits that hold its subscriptions or its queryables
+    /// to none.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         local: &'a CoopLocalSet<C>,
@@ -141,14 +148,21 @@ where
         identity: NodeIdentity,
         listen_port: u16,
         timeouts: SessionTimeouts,
-        dial_params: P,
+        mut dial_params: P,
         accept: A,
     ) -> Result<Self, RegisterError> {
         let admin_key = admin_queryable_key(&identity.zid_hex, identity.whatami);
         let mut config_key = String::new();
         // Writing into a `String` cannot fail.
         let _ = write_config_space_pattern(&mut config_key, &identity.zid_hex, identity.whatami);
-        let observer = Rc::new(RefCell::new(ApplicationLayerObserver::new()));
+        // A snapshot of no byte has one value, the build's: a build whose every limit is one value
+        // asks the parameters nothing.
+        let limits = if const { core::mem::size_of::<SessionLimits>() == 0 } {
+            SessionLimits::BUILD
+        } else {
+            dial_params().limits
+        };
+        let observer = Rc::new(RefCell::new(ApplicationLayerObserver::with_limits(&limits)));
         {
             let mut o = observer.borrow_mut();
             host_connect_writes(&mut o, &identity.zid_hex, identity.whatami, control)?;
@@ -333,11 +347,13 @@ mod tests {
             keep_alive: wz_session_core::session_init_params::KeepAliveConf::PICO,
             initial_sn: 0,
             cookie: vec![],
-            tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(
+            tx_queue: wz_session_core::session_init_params::TxQueueConf::of_snapshot(
                 &wz_session_core::policy::SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD,
             ),
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
             policy: wz_session_core::policy::SessionPolicy::defaults(),
+            limits: wz_session_core::limits::SessionLimits::BUILD,
             cookie_signing_key: wz_session_core::signing_key::SigningKey::new(vec![7u8; 32])
                 .expect("key"),
         }
@@ -697,5 +713,98 @@ mod tests {
             node.declared.is_empty(),
             "what was declared on the ended session is forgotten with it"
         );
+    }
+
+    /// The node's observer is held to the session limits of the parameters it gives its
+    /// sessions: with `MAX_SUBSCRIPTIONS` stated as two, the node's own config subscriber and
+    /// one more are held, and the next is refused as a full table and leaves the two. The
+    /// CONTROL is the same node under the build's limits, which takes the next.
+    #[test]
+    fn the_observer_is_held_to_the_limits_of_the_session_parameters() {
+        use wz_session_core::limit_binding::{LimitSpec, Quota};
+        use wz_session_core::limits::MaxSubscriptions;
+        static CONTROL: ConnectControl = ConnectControl::new(true);
+        static STATUS: NodeStatus = NodeStatus::new(true);
+
+        let mut stated = SessionLimits::BUILD;
+        if stated.select_max_subscriptions(Quota::at_most(2)).is_err() {
+            // A build of one value refuses two: it has no other snapshot to hand the node.
+            std::assert!(MaxSubscriptions::DOMAIN.is_singleton());
+            return;
+        }
+        let net = MemoryNetwork::new();
+        let runtime = CoopRuntime::new(FrozenClock);
+        let local = CoopLocalSet::new(&runtime);
+        let identity = || NodeIdentity {
+            zid_hex: String::from("b4b4b4b4"),
+            whatami: "peer",
+            version: String::from("wz-test"),
+            locators: vec![String::from("udp/10.0.0.2:7551")],
+        };
+
+        let accept_runtime = runtime.clone();
+        let node = AdminNode::new(
+            &local,
+            Rc::new(MemoryLinks::new(net.clone(), [10, 0, 0, 2])),
+            &CONTROL,
+            &STATUS,
+            identity(),
+            7551,
+            SessionTimeouts::from_build(),
+            move || SessionInitParams {
+                limits: stated,
+                ..params(0xb4)
+            },
+            move |sink| {
+                new_session_actions(
+                    sink,
+                    params(0xb4),
+                    CoopTime::new(&accept_runtime),
+                    Counting(1),
+                )
+            },
+        )
+        .expect("two places take the config subscriber");
+        let mut observer = node.observer().borrow_mut();
+        std::assert_eq!(observer.subscribers.len(), 1, "the config subscriber");
+        observer
+            .subscribers
+            .register("test/a", |_| {})
+            .expect("under the quota");
+        std::assert_eq!(
+            observer.subscribers.register("test/b", |_| {}).err(),
+            Some(RegisterError::TableFull)
+        );
+        std::assert_eq!(observer.subscribers.len(), 2);
+
+        // CONTROL: the build's limits take the subscriber the stated ones refused.
+        let control_runtime = runtime.clone();
+        let control = AdminNode::new(
+            &local,
+            Rc::new(MemoryLinks::new(net.clone(), [10, 0, 0, 3])),
+            &CONTROL,
+            &STATUS,
+            identity(),
+            7552,
+            SessionTimeouts::from_build(),
+            || params(0xb5),
+            move |sink| {
+                new_session_actions(
+                    sink,
+                    params(0xb5),
+                    CoopTime::new(&control_runtime),
+                    Counting(1),
+                )
+            },
+        )
+        .expect("a fresh node takes its admin keys");
+        let mut observer = control.observer().borrow_mut();
+        for key in ["test/a", "test/b"] {
+            observer
+                .subscribers
+                .register(key, |_| {})
+                .expect("the build's limits take it");
+        }
+        std::assert_eq!(observer.subscribers.len(), 3);
     }
 }

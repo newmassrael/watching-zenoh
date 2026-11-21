@@ -18,7 +18,7 @@ use wz_runtime_posix::{PosixClock, PosixEntropy};
 use wz_session_core::app_link_table::{
     AppLinkKind, AppLinkTable, LinkHandle, ProgramEvent, ProgramOpen, ProgramSend,
 };
-use wz_session_core::app_transport::{AppPort, AppTransport, TableLock};
+use wz_session_core::app_transport::{AppPort, AppTransport, SessionTransport, TableLock};
 use wz_session_core::locality::Locality;
 use wz_session_core::multicast_params::GroupJoinRule;
 use wz_session_core::publish_options::PublishOptions;
@@ -221,7 +221,8 @@ fn open_member(
         }),
     ));
     *own.lock().unwrap() = Arc::downgrade(&transport);
-    Engine::open(AppLinks::new(transport), PosixClock, PosixEntropy, config)
+    let links = AppLinks::new(SessionTransport::new(transport, &config.limits));
+    Engine::open(links, PosixClock, PosixEntropy, config)
 }
 
 /// Wait, for at most five seconds, until `done`: each session is stepped by its read task.
@@ -931,7 +932,10 @@ mod congested {
             ..member_config(1, GROUP)
         };
         let engine = Engine::open(
-            AppLinks::new(Arc::clone(&transport)),
+            AppLinks::new(SessionTransport::new(
+                Arc::clone(&transport),
+                &config.limits,
+            )),
             PosixClock,
             PosixEntropy,
             config,
@@ -1016,6 +1020,43 @@ mod congested {
         SessionDrive::close(&*member);
     }
 
+    /// The replies a group's dispatch stages past the reply limit are dropped and charged to the
+    /// transport's drops, beside the session's own messages its lanes had no room for, as the tokio
+    /// engine's group charges every message it drops. No read runs, so nothing staged leaves.
+    #[cfg(feature = "transport-stats")]
+    #[test]
+    fn replies_past_the_reply_limit_are_the_transports_drops() {
+        use wz_session_core::caps::MAX_MULTICAST_REPLIES;
+        use wz_session_core::multicast_tx::MulticastTxItem;
+        let (member, _stack, _transport) = open_filling();
+        let reply = || {
+            let push = wz_session_core::push_build::build_push_literal_with_meta(
+                "demo/group/reply",
+                b"r",
+                &wz_session_core::metadata::PushMetadata::default(),
+            )
+            .expect("a push of a short key");
+            MulticastTxItem::Push {
+                push: Box::new(push),
+                reliable: true,
+                priority: Priority::DEFAULT,
+            }
+        };
+        member.stage_group_replies(MAX_MULTICAST_REPLIES, reply);
+        assert_eq!(
+            member.transport_stats().tx.n_dropped,
+            0,
+            "CONTROL: the reply limit holds this many"
+        );
+        member.stage_group_replies(2, reply);
+        assert_eq!(
+            member.transport_stats().tx.n_dropped,
+            2,
+            "the replies past the limit are the transport's drops"
+        );
+        SessionDrive::close(&*member);
+    }
+
     /// A droppable put that finds the session held asks the group's socket for room as it asks a
     /// link's: the session's waits for room hold the group's, which answers congestion while the
     /// socket is full and room once it takes datagrams again.
@@ -1033,7 +1074,10 @@ mod congested {
         for _ in 0..3 {
             put_with(&member, CongestionControl::Drop);
         }
-        assert_eq!(member.rooms().within(1_000), Room::Congested);
+        assert!(
+            matches!(member.rooms().within(1_000), Room::Congested(faces) if faces.len() == 1),
+            "the group's socket is the congestion, and the session's only face"
+        );
         writable(&stack, &transport);
         assert_eq!(member.rooms().within(1_000), Room::Free);
         SessionDrive::close(&*member);
@@ -1208,7 +1252,10 @@ mod cut {
                 ..member_config(member, GROUP)
             };
             let engine = Engine::open(
-                AppLinks::new(Arc::clone(&transport)),
+                AppLinks::new(SessionTransport::new(
+                    Arc::clone(&transport),
+                    &config.limits,
+                )),
                 PosixClock,
                 PosixEntropy,
                 config,
@@ -1418,7 +1465,10 @@ mod woken {
             Box::new(AlonePort(Arc::clone(&stack))),
         ));
         let engine = CoopEngine::open(
-            AppLinks::new(Arc::clone(&transport)),
+            AppLinks::new(SessionTransport::new(
+                Arc::clone(&transport),
+                &config.limits,
+            )),
             clock,
             PosixEntropy,
             config,

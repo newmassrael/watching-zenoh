@@ -66,7 +66,8 @@ const FULL: u32 = 1;
 /// How a cache is laid out: its depth, its instances and the longest frame it keeps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Shape {
-    /// How many frames each instance's ring keeps, 1 to `REPLAY_DEPTH_MAX`.
+    /// How many frames each instance's ring keeps, 1 to the `REPLAY_DEPTH_MAX` the cache is made
+    /// under.
     pub depth: usize,
     /// How many instances the message has, at least 1.
     pub instances: usize,
@@ -116,7 +117,7 @@ impl Shape {
 /// Why a cache could not be made.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CreateRefused {
-    /// A depth of 0, or past the build's `REPLAY_DEPTH_MAX`.
+    /// A depth of 0, or past the `REPLAY_DEPTH_MAX` the cache is made under.
     DepthOutOfRange,
     /// No instance.
     NoInstance,
@@ -237,14 +238,16 @@ pub struct ReplayPublisher<'a> {
 }
 
 impl<'a> ReplayPublisher<'a> {
-    /// A cache of `shape` over `storage`, empty. `holds_sends` is the `replay-serve-holds-sends`
-    /// policy of the snapshot the cache is made under.
+    /// A cache of `shape` over `storage`, empty. `depth_max` is the `REPLAY_DEPTH_MAX` of the
+    /// session limits the cache is made under, and `holds_sends` the `replay-serve-holds-sends`
+    /// policy of that session's snapshot. A refusal writes none of `storage`.
     pub fn new(
         storage: &'a mut [u8],
         shape: Shape,
+        depth_max: crate::limit_binding::Quota,
         holds_sends: bool,
     ) -> Result<Self, CreateRefused> {
-        if shape.depth == 0 || shape.depth > crate::caps::REPLAY_DEPTH_MAX {
+        if shape.depth == 0 || !depth_max.admits(shape.depth) {
             return Err(CreateRefused::DepthOutOfRange);
         }
         if shape.instances == 0 {
@@ -611,6 +614,10 @@ mod tests {
     use std::vec;
     use std::vec::Vec;
 
+    /// The `REPLAY_DEPTH_MAX` a session made with nothing stated holds.
+    const DEPTH_MAX: crate::limit_binding::Quota =
+        crate::limits::SessionLimits::BUILD.replay_depth_max();
+
     fn shape(depth: usize, instances: usize, frame_max: usize) -> Shape {
         Shape {
             depth,
@@ -662,30 +669,31 @@ mod tests {
     fn a_cache_is_refused_by_name_for_each_bad_shape() {
         let mut bytes = vec![0u8; 4096];
         assert_eq!(
-            ReplayPublisher::new(&mut bytes, shape(0, 1, 4), false).err(),
+            ReplayPublisher::new(&mut bytes, shape(0, 1, 4), DEPTH_MAX, false).err(),
             Some(CreateRefused::DepthOutOfRange)
         );
         assert_eq!(
             ReplayPublisher::new(
                 &mut bytes,
                 shape(crate::caps::REPLAY_DEPTH_MAX + 1, 1, 4),
+                DEPTH_MAX,
                 false
             )
             .err(),
             Some(CreateRefused::DepthOutOfRange)
         );
         assert_eq!(
-            ReplayPublisher::new(&mut bytes, shape(1, 0, 4), false).err(),
+            ReplayPublisher::new(&mut bytes, shape(1, 0, 4), DEPTH_MAX, false).err(),
             Some(CreateRefused::NoInstance)
         );
         assert_eq!(
-            ReplayPublisher::new(&mut bytes, shape(1, 1, 0), false).err(),
+            ReplayPublisher::new(&mut bytes, shape(1, 1, 0), DEPTH_MAX, false).err(),
             Some(CreateRefused::FrameMaxOutOfRange)
         );
         let s = shape(1, 2, 8);
         let mut short = vec![0u8; s.storage_bytes().unwrap() - 1];
         assert_eq!(
-            ReplayPublisher::new(&mut short, s, false).err(),
+            ReplayPublisher::new(&mut short, s, DEPTH_MAX, false).err(),
             Some(CreateRefused::StorageShort)
         );
     }
@@ -694,7 +702,7 @@ mod tests {
     fn an_empty_cache_answers_no_frame() {
         let s = shape(2, 2, 4);
         let mut bytes = storage(s);
-        let mut cache = ReplayPublisher::new(&mut bytes, s, false).unwrap();
+        let mut cache = ReplayPublisher::new(&mut bytes, s, DEPTH_MAX, false).unwrap();
         assert!(cache.is_empty());
         assert!(answer(&mut cache).is_empty());
         assert_eq!(cache.phase(), Phase::Releasing, "the answer is over");
@@ -709,7 +717,7 @@ mod tests {
     fn an_answer_lists_every_instance_in_time_instance_sequence_order() {
         let s = shape(3, 2, 4);
         let mut bytes = storage(s);
-        let mut cache = ReplayPublisher::new(&mut bytes, s, false).unwrap();
+        let mut cache = ReplayPublisher::new(&mut bytes, s, DEPTH_MAX, false).unwrap();
         cache.record(0, 30, b"a30").unwrap();
         cache.record(1, 10, b"b10").unwrap();
         cache.record(0, 20, b"a20").unwrap();
@@ -731,7 +739,7 @@ mod tests {
     fn a_full_ring_gives_up_its_oldest_frame_and_only_its_own() {
         let s = shape(2, 2, 4);
         let mut bytes = storage(s);
-        let mut cache = ReplayPublisher::new(&mut bytes, s, false).unwrap();
+        let mut cache = ReplayPublisher::new(&mut bytes, s, DEPTH_MAX, false).unwrap();
         cache.record(1, 1, b"keep").unwrap();
         cache.record(0, 2, b"old").unwrap();
         cache.record(0, 3, b"mid").unwrap();
@@ -758,7 +766,7 @@ mod tests {
     fn an_answer_is_the_snapshot_taken_when_it_began() {
         let s = shape(4, 1, 4);
         let mut bytes = storage(s);
-        let mut cache = ReplayPublisher::new(&mut bytes, s, false).unwrap();
+        let mut cache = ReplayPublisher::new(&mut bytes, s, DEPTH_MAX, false).unwrap();
         cache.record(0, 1, b"one").unwrap();
         cache.record(0, 2, b"two").unwrap();
         let mut order = vec![0; s.ring_cells()];
@@ -778,7 +786,7 @@ mod tests {
     fn a_short_order_lists_the_first_frames_of_the_order() {
         let s = shape(3, 2, 4);
         let mut bytes = storage(s);
-        let mut cache = ReplayPublisher::new(&mut bytes, s, false).unwrap();
+        let mut cache = ReplayPublisher::new(&mut bytes, s, DEPTH_MAX, false).unwrap();
         cache.record(1, 5, b"b5").unwrap();
         cache.record(0, 9, b"a9").unwrap();
         cache.record(0, 1, b"a1").unwrap();
@@ -797,7 +805,7 @@ mod tests {
     fn with_the_policy_off_no_send_is_held_even_while_an_answer_is_in_progress() {
         let s = shape(2, 1, 4);
         let mut bytes = storage(s);
-        let mut cache = ReplayPublisher::new(&mut bytes, s, false).unwrap();
+        let mut cache = ReplayPublisher::new(&mut bytes, s, DEPTH_MAX, false).unwrap();
         let mut order = vec![0; s.ring_cells()];
         cache.begin_answer(&mut order);
         assert_eq!(cache.phase(), Phase::Serving);
@@ -818,7 +826,7 @@ mod tests {
     fn with_the_policy_on_the_sends_wait_for_the_answer_and_go_out_oldest_first() {
         let s = shape(4, 2, 4);
         let mut bytes = storage(s);
-        let mut cache = ReplayPublisher::new(&mut bytes, s, true).unwrap();
+        let mut cache = ReplayPublisher::new(&mut bytes, s, DEPTH_MAX, true).unwrap();
         assert_eq!(cache.send(0, 1, b"now", SendKind::Event), Ok(Dispatch::Now));
         let mut order = vec![0; s.ring_cells()];
         cache.begin_answer(&mut order);
@@ -876,7 +884,7 @@ mod tests {
     fn a_send_during_the_release_waits_behind_what_is_held() {
         let s = shape(6, 1, 4);
         let mut bytes = storage(s);
-        let mut cache = ReplayPublisher::new(&mut bytes, s, true).unwrap();
+        let mut cache = ReplayPublisher::new(&mut bytes, s, DEPTH_MAX, true).unwrap();
         let mut order = vec![0; s.ring_cells()];
         cache.begin_answer(&mut order);
         cache.send(0, 1, b"e1", SendKind::Event).unwrap();
@@ -897,7 +905,7 @@ mod tests {
     fn a_new_answer_during_the_release_holds_the_rest_again() {
         let s = shape(2, 1, 4);
         let mut bytes = storage(s);
-        let mut cache = ReplayPublisher::new(&mut bytes, s, true).unwrap();
+        let mut cache = ReplayPublisher::new(&mut bytes, s, DEPTH_MAX, true).unwrap();
         let mut order = vec![0; s.ring_cells()];
         cache.begin_answer(&mut order);
         cache.send(0, 1, b"e1", SendKind::Event).unwrap();
@@ -917,7 +925,7 @@ mod tests {
     fn a_held_frame_too_long_for_the_buffer_is_given_up_and_the_release_still_ends() {
         let s = shape(2, 1, 4);
         let mut bytes = storage(s);
-        let mut cache = ReplayPublisher::new(&mut bytes, s, true).unwrap();
+        let mut cache = ReplayPublisher::new(&mut bytes, s, DEPTH_MAX, true).unwrap();
         let mut order = vec![0; s.ring_cells()];
         cache.begin_answer(&mut order);
         cache.send(0, 1, b"long", SendKind::Event).unwrap();
@@ -932,7 +940,7 @@ mod tests {
     fn an_end_with_no_answer_changes_nothing() {
         let s = shape(1, 1, 1);
         let mut bytes = storage(s);
-        let mut cache = ReplayPublisher::new(&mut bytes, s, true).unwrap();
+        let mut cache = ReplayPublisher::new(&mut bytes, s, DEPTH_MAX, true).unwrap();
         cache.end_answer();
         assert_eq!(cache.phase(), Phase::Idle);
         assert_eq!(cache.send(0, 0, b"x", SendKind::Event), Ok(Dispatch::Now));

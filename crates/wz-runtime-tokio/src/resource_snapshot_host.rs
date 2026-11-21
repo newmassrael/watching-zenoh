@@ -29,6 +29,7 @@ use std::time::Duration;
 // task read the same time, and a test that pauses the runtime's time pauses both.
 use tokio::time::Instant;
 
+use wz_session_core::limits::RuntimeLimits;
 use wz_session_core::resource_snapshot::{
     BuildMessageReading, BuildSampler, ResourceReading, ResourceSource,
 };
@@ -129,7 +130,8 @@ fn build_features() -> u64 {
 /// The sampler of a hosted node and what serves its latest snapshot.
 ///
 /// A node starts one ([`Self::spawn`]) and gives it the message reading of its receive paths; the
-/// admin space asks it for the latest snapshot as JSON ([`Self::latest_json`]).
+/// admin space asks it for the latest snapshot as JSON ([`Self::latest_json`]). The node hands it
+/// its runtime limits, whose `SNAPSHOT_PERIOD_MS` is the period it samples on.
 pub struct SnapshotService {
     sampler: Mutex<BuildSampler>,
     origin: Instant,
@@ -141,21 +143,26 @@ pub struct SnapshotService {
 }
 
 impl SnapshotService {
-    /// A service that has taken no snapshot, stating the loss of the process's event log.
-    pub fn new() -> Arc<Self> {
+    /// A service that has taken no snapshot, stating the loss of the process's event log and
+    /// sampling on the period of `limits`, the runtime limits the node's creator resolved.
+    pub fn new(limits: &RuntimeLimits) -> Arc<Self> {
         Arc::new(Self {
-            sampler: Mutex::new(BuildSampler::for_build(build_features())),
+            sampler: Mutex::new(BuildSampler::of_limits(limits, build_features())),
             origin: Instant::now(),
             #[cfg(feature = "event-ring")]
             events: wz_node_time::event_log::global(),
         })
     }
 
-    /// A service that states the loss of `events`, a log of the node's own.
+    /// A service that states the loss of `events`, a log of the node's own, and samples on the
+    /// period of `limits`.
     #[cfg(feature = "event-ring")]
-    pub fn with_event_log(events: &'static wz_node_time::event_log::EventLog) -> Arc<Self> {
+    pub fn with_event_log(
+        events: &'static wz_node_time::event_log::EventLog,
+        limits: &RuntimeLimits,
+    ) -> Arc<Self> {
         Arc::new(Self {
-            sampler: Mutex::new(BuildSampler::for_build(build_features())),
+            sampler: Mutex::new(BuildSampler::of_limits(limits, build_features())),
             origin: Instant::now(),
             events,
         })
@@ -386,7 +393,7 @@ mod tests {
 
         let mut source = Fixed(ResourceReading::default());
         for (log, dropped) in [(full, 3), (quiet, 0)] {
-            let service = SnapshotService::with_event_log(log);
+            let service = SnapshotService::with_event_log(log, &RuntimeLimits::BUILD);
             assert!(service.poll(&mut source, NodeMessageReading::empty));
             let json = service.latest_json().expect("a snapshot was taken");
             assert!(
@@ -398,7 +405,7 @@ mod tests {
 
     #[test]
     fn the_service_takes_one_snapshot_per_period_and_serves_it_as_json() {
-        let service = SnapshotService::new();
+        let service = SnapshotService::new(&RuntimeLimits::BUILD);
         assert_eq!(service.latest_json(), None, "nothing before the first poll");
         let mut source = Fixed(ResourceReading {
             cpu_permille: Some(123),
@@ -431,7 +438,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn the_task_takes_a_snapshot_at_once_and_serves_what_the_node_counted() {
-        let service = SnapshotService::new();
+        let service = SnapshotService::new(&RuntimeLimits::BUILD);
         // On this test's runtime, whose clock is the paused one the test advances.
         let handle = service.spawn_on(&tokio::runtime::Handle::current(), || {
             let mut reading = NodeMessageReading::empty();
@@ -472,5 +479,35 @@ mod tests {
             );
         }
         handle.abort();
+    }
+
+    /// `SNAPSHOT_PERIOD_MS` as the node's creator hands it: with nothing stated a service samples
+    /// on the build's period, and one handed a stated period samples on that one, the next
+    /// snapshot due that long after the last. A build that keeps the build's value alone refuses
+    /// the statement itself.
+    #[tokio::test(start_paused = true)]
+    async fn the_service_samples_on_the_period_of_the_runtime_limits_it_is_handed() {
+        use wz_session_core::limit_binding::LimitSpec;
+        use wz_session_core::limits::SnapshotPeriodMs;
+
+        let mut source = Fixed(ResourceReading::default());
+        let build = SnapshotService::new(&RuntimeLimits::defaults());
+        assert!(build.poll(&mut source, NodeMessageReading::empty));
+        assert_eq!(
+            build.due_in(),
+            Duration::from_millis(SNAPSHOT_PERIOD_MS as u64)
+        );
+
+        let value = if SNAPSHOT_PERIOD_MS == 250 { 125 } else { 250 };
+        let mut limits = RuntimeLimits::defaults();
+        let stated = limits.select_snapshot_period_ms(value);
+        if SnapshotPeriodMs::DOMAIN.is_singleton() {
+            assert!(stated.is_err(), "a build of one value refuses another");
+            return;
+        }
+        stated.expect("the period is inside the domain");
+        let service = SnapshotService::new(&limits);
+        assert!(service.poll(&mut source, NodeMessageReading::empty));
+        assert_eq!(service.due_in(), Duration::from_millis(value as u64));
     }
 }

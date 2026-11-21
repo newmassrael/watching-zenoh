@@ -34,6 +34,7 @@ use tokio::net::{TcpListener, TcpStream};
 use wz_runtime_core::TimeSource;
 #[cfg(feature = "routing-namespace")]
 use wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr;
+use wz_session_core::limits::RuntimeLimits;
 // R311y473 — the single dialable-locator scheme table `advertised_locator`
 // delegates to (and the adminspace per-link emitter shares).
 use wz_session_core::link::LinkKind;
@@ -142,7 +143,7 @@ use wz_session_core::serial_link::SerialRole;
 #[cfg(feature = "transport-link-app")]
 use crate::app_link::{wire_app_stream, AppListener, AppReadDriver, AppStream};
 #[cfg(feature = "transport-link-app")]
-use wz_session_core::app_transport::AppTransport;
+use wz_session_core::app_transport::SessionTransport;
 
 // R311oa — the TLS arm, like serial, rides this tcp+unicast-gated module as
 // an additive transport (transport-link-tls forwards transport-link-tcp, so
@@ -324,10 +325,16 @@ pub struct DialConfig {
     /// its handshake on one clock ([`open_within`]). [`OPEN_TIMEOUT`] unless the node states
     /// another.
     pub open_timeout: std::time::Duration,
-    /// The transport the program supplies, which carries every dial of this config in place of
-    /// the system's sockets. `None` (the default) dials the sockets the locator names.
+    /// The transport the program supplies, as the session that dials opens its links over it,
+    /// which carries every dial of this config in place of the system's sockets. `None` (the
+    /// default) dials the sockets the locator names.
     #[cfg(feature = "transport-link-app")]
-    pub app: Option<Arc<AppTransport>>,
+    pub app: Option<SessionTransport>,
+    /// The runtime limits of the node that dials with this config, as its creator resolved them:
+    /// the loop that dials from a directory of hints holds the directory to them. The build's
+    /// ([`RuntimeLimits::BUILD`]) unless the node states its own
+    /// ([`Self::with_runtime_limits`]).
+    pub runtime_limits: RuntimeLimits,
 }
 
 impl Default for DialConfig {
@@ -341,6 +348,7 @@ impl Default for DialConfig {
             open_timeout: OPEN_TIMEOUT,
             #[cfg(feature = "transport-link-app")]
             app: None,
+            runtime_limits: RuntimeLimits::BUILD,
         }
     }
 }
@@ -357,30 +365,74 @@ pub const OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(O
 /// `tokio::time::timeout(self.config.unicast.open_timeout, async {`), and has no shorter
 /// window for a step of the handshake; the handshake inside is held to the same bound
 /// ([`DialConfig::handshake_timeouts`]), so this is the clock that ends it.
-pub async fn open_within<T, F>(open_timeout: std::time::Duration, open: F) -> Result<T, OpenError>
+///
+/// The wall clock's wait, as a session with no clock of its own is timed. A named future
+/// ([`OpenWithin`]), as [`crate::runtime_impl::timeout_on`] is, so the open is held once.
+pub fn open_within<T, F>(
+    open_timeout: std::time::Duration,
+    open: F,
+) -> OpenWithin<F, tokio::time::Sleep>
 where
     F: core::future::Future<Output = Result<T, OpenError>>,
 {
-    open_within_on(&TokioTime::new(), open_timeout, open).await
+    let wait = std::time::Duration::from_millis(crate::runtime_impl::whole_ms(open_timeout));
+    OpenWithin {
+        timed: crate::runtime_impl::TimeoutOn::new(open, tokio::time::sleep(wait)),
+        open_timeout,
+    }
 }
 
 /// [`open_within`] on `clock`, the clock of the session the open is for: a session timed by a
 /// time base the program supplies holds its open to the program's time, as it holds the
 /// handshake inside it.
-pub async fn open_within_on<C, T, F>(
-    clock: &C,
+pub fn open_within_on<'c, C, T, F>(
+    clock: &'c C,
     open_timeout: std::time::Duration,
     open: F,
-) -> Result<T, OpenError>
+) -> OpenWithin<F, impl core::future::Future<Output = ()> + 'c>
 where
     C: TimeSource,
     F: core::future::Future<Output = Result<T, OpenError>>,
 {
-    match crate::runtime_impl::timeout_on(clock, crate::runtime_impl::whole_ms(open_timeout), open)
-        .await
-    {
-        Ok(opened) => opened,
-        Err(_) => Err(OpenError::OpenTimeout(open_timeout)),
+    OpenWithin {
+        timed: crate::runtime_impl::timeout_on(
+            clock,
+            crate::runtime_impl::whole_ms(open_timeout),
+            open,
+        ),
+        open_timeout,
+    }
+}
+
+/// An open raced against its bound: the open's own answer when it ends first, and
+/// [`OpenError::OpenTimeout`] when the bound passes first ([`open_within`], [`open_within_on`]).
+#[must_use = "futures do nothing unless polled"]
+pub struct OpenWithin<F, S> {
+    timed: crate::runtime_impl::TimeoutOn<F, S>,
+    open_timeout: std::time::Duration,
+}
+
+impl<T, F, S> core::future::Future for OpenWithin<F, S>
+where
+    F: core::future::Future<Output = Result<T, OpenError>>,
+    S: core::future::Future<Output = ()>,
+{
+    type Output = Result<T, OpenError>;
+
+    fn poll(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Self::Output> {
+        // SAFETY: `timed` is pinned structurally: it is never moved out of a pinned
+        // `OpenWithin`, which has no `Drop` of its own; `open_timeout` is `Copy` and only read.
+        let this = unsafe { self.get_unchecked_mut() };
+        let open_timeout = this.open_timeout;
+        // SAFETY: as above.
+        let timed = unsafe { core::pin::Pin::new_unchecked(&mut this.timed) };
+        timed.poll(cx).map(|timed| match timed {
+            Ok(opened) => opened,
+            Err(_) => Err(OpenError::OpenTimeout(open_timeout)),
+        })
     }
 }
 
@@ -398,6 +450,14 @@ impl DialConfig {
     pub fn handshake_timeouts(&self) -> SessionTimeouts {
         SessionTimeouts::from_build().with_open_timeout(self.open_timeout)
     }
+
+    /// The runtime limits of the node that dials with this config, resolved by its creator from
+    /// the node's document; a machine of the node reads a limit of the node here.
+    pub fn with_runtime_limits(mut self, runtime_limits: RuntimeLimits) -> Self {
+        self.runtime_limits = runtime_limits;
+        self
+    }
+
     /// R2592 — supply the per-link-kind socket configuration every dial layers
     /// its locator's options over. Ungated, like the layer itself.
     pub fn with_link_defaults(mut self, link_defaults: LinkDefaults) -> Self {
@@ -448,9 +508,10 @@ impl DialConfig {
         self
     }
 
-    /// Dial over the transport the program supplies rather than the system's sockets.
+    /// Dial over the transport the program supplies rather than the system's sockets, each link
+    /// held to the bound `app` carries for its session.
     #[cfg(feature = "transport-link-app")]
-    pub fn with_app_transport(mut self, app: Arc<AppTransport>) -> Self {
+    pub fn with_app_transport(mut self, app: SessionTransport) -> Self {
         self.app = Some(app);
         self
     }
@@ -624,13 +685,14 @@ pub struct AcceptConfig {
     /// The transport the program supplies, which carries every listen of this config in place of
     /// the system's sockets, the accept mirror of [`DialConfig::app`].
     #[cfg(feature = "transport-link-app")]
-    pub app: Option<Arc<AppTransport>>,
+    pub app: Option<SessionTransport>,
 }
 
 impl AcceptConfig {
-    /// Listen over the transport the program supplies rather than the system's sockets.
+    /// Listen over the transport the program supplies rather than the system's sockets, each
+    /// link held to the bound `app` carries for its session.
     #[cfg(feature = "transport-link-app")]
-    pub fn with_app_transport(mut self, app: Arc<AppTransport>) -> Self {
+    pub fn with_app_transport(mut self, app: SessionTransport) -> Self {
         self.app = Some(app);
         self
     }
@@ -4079,15 +4141,15 @@ pub async fn bind_endpoint_with_config(
 /// which an open names as an unknown scheme: the program's transport carries every link of the
 /// config or none, and no locator falls through to the system's sockets.
 #[cfg(feature = "transport-link-app")]
-async fn dial_app(app: &Arc<AppTransport>, connect: &str) -> io::Result<DialedLink> {
+async fn dial_app(app: &SessionTransport, connect: &str) -> io::Result<DialedLink> {
     use wz_session_core::app_link_table::{kind_for_locator, AppLinkKind};
     match kind_for_locator(connect, false) {
         Some(AppLinkKind::StreamDial) => Ok(DialedLink::App(
-            crate::app_link::dial_stream(app, connect).await?,
+            crate::app_link::dial_stream(&app.transport, connect, app.queue).await?,
         )),
         #[cfg(feature = "transport-link-udp")]
         Some(AppLinkKind::Datagram) => Ok(DialedLink::AppDatagram(
-            crate::app_link::dial_datagram(app, connect).await?,
+            crate::app_link::dial_datagram(&app.transport, connect, app.queue).await?,
         )),
         _ => Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -4099,15 +4161,15 @@ async fn dial_app(app: &Arc<AppTransport>, connect: &str) -> io::Result<DialedLi
 /// Listen on `listen` over the transport the program supplies, refusing what [`dial_app`]
 /// refuses for the same reason.
 #[cfg(feature = "transport-link-app")]
-async fn bind_app(app: &Arc<AppTransport>, listen: &str) -> io::Result<BoundListener> {
+async fn bind_app(app: &SessionTransport, listen: &str) -> io::Result<BoundListener> {
     use wz_session_core::app_link_table::{kind_for_locator, AppLinkKind};
     match kind_for_locator(listen, true) {
         Some(AppLinkKind::StreamListen) => Ok(BoundListener::App(
-            crate::app_link::listen_stream(app, listen).await?,
+            crate::app_link::listen_stream(&app.transport, listen, app.queue).await?,
         )),
         #[cfg(feature = "transport-link-udp")]
         Some(AppLinkKind::DatagramListen) => Ok(BoundListener::AppDatagram(
-            crate::app_link::listen_datagram(app, listen).await?,
+            crate::app_link::listen_datagram(&app.transport, listen, app.queue).await?,
         )),
         _ => Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -4291,13 +4353,15 @@ impl LinkDriver for InboundLink {
 /// writer-task join handle. TCP splits the stream (`wire_tcp_stream`); UDP
 /// shares the socket ([`wire_udp_socket`]).
 ///
-/// `link_rx` and `policy` are the session's, the one the link belongs to:
-/// `link_rx.buffer_size` is the read storage a stream link pools, and `policy`
-/// holds the policies a link's writer reads, so a link never reads the build.
+/// `link_rx`, `policy` and `limits` are the session's, the one the link belongs
+/// to: `link_rx.buffer_size` is the read storage a stream link pools, and
+/// `policy` and `limits` hold the policies and limits a link's writer reads, so a
+/// link never reads the build.
 pub fn wire_dialed_link_with_rx(
     dialed: DialedLink,
     link_rx: LinkRxConf,
     policy: &wz_session_core::policy::SessionPolicy,
+    limits: &wz_session_core::limits::SessionLimits,
 ) -> (
     InboundLink,
     Arc<dyn BoxedLinkDriver + Send + Sync>,
@@ -4305,7 +4369,13 @@ pub fn wire_dialed_link_with_rx(
 ) {
     // Universal framing (u16 prefix). The lowlatency open helpers call
     // `wire_dialed_link_with_lowlatency` with a flag they flip at Established.
-    wire_dialed_link_with_lowlatency(dialed, Arc::new(AtomicBool::new(false)), link_rx, policy)
+    wire_dialed_link_with_lowlatency(
+        dialed,
+        Arc::new(AtomicBool::new(false)),
+        link_rx,
+        policy,
+        limits,
+    )
 }
 
 /// transport-lowlatency — [`wire_dialed_link_with_rx`] sharing a lowlatency-wire
@@ -4324,14 +4394,15 @@ pub fn wire_dialed_link_with_lowlatency(
     lowlatency: Arc<AtomicBool>,
     link_rx: LinkRxConf,
     policy: &wz_session_core::policy::SessionPolicy,
+    limits: &wz_session_core::limits::SessionLimits,
 ) -> (
     InboundLink,
     Arc<dyn BoxedLinkDriver + Send + Sync>,
     WriterHandle,
 ) {
-    // Only the udp writer reads a policy of the snapshot today.
+    // Only the udp writer reads the snapshots here today.
     #[cfg(not(feature = "transport-link-udp"))]
-    let _ = policy;
+    let _ = (policy, limits);
     match dialed {
         DialedLink::Tcp(stream) => {
             let (inbound, outbound, handle) =
@@ -4340,7 +4411,7 @@ pub fn wire_dialed_link_with_lowlatency(
         }
         #[cfg(feature = "transport-link-udp")]
         DialedLink::Udp { socket, peer } => {
-            let (inbound, outbound, handle) = wire_udp_socket(socket, peer, policy);
+            let (inbound, outbound, handle) = wire_udp_socket(socket, peer, policy, limits);
             (InboundLink::Udp(inbound), outbound, handle)
         }
         // R311y382 — an accepted demux face: RX is the pump's per-src channel,
@@ -4348,7 +4419,7 @@ pub fn wire_dialed_link_with_lowlatency(
         // `InboundLink::Udp` shape as the dial side.
         #[cfg(feature = "transport-link-udp")]
         DialedLink::UdpDemuxed { inputs, peer } => {
-            let (inbound, outbound, handle) = wire_udp_demuxed(inputs, peer, policy);
+            let (inbound, outbound, handle) = wire_udp_demuxed(inputs, peer, policy, limits);
             (InboundLink::Udp(inbound), outbound, handle)
         }
         #[cfg(feature = "transport-link-serial")]
@@ -5480,7 +5551,7 @@ where
     I: FnOnce(&Arc<SessionLinkActions>),
 {
     let (inbound, outbound, writer_handle) =
-        wire_dialed_link_with_rx(connected, params.link_rx, &params.policy);
+        wire_dialed_link_with_rx(connected, params.link_rx, &params.policy, &params.limits);
     let actions = new_session_actions(outbound, params, clock);
     install(&actions);
     initiator_open(
@@ -5875,13 +5946,14 @@ where
             lowlatency_wire.clone(),
             params.link_rx,
             &params.policy,
+            &params.limits,
         )
     } else {
-        wire_dialed_link_with_rx(connected, params.link_rx, &params.policy)
+        wire_dialed_link_with_rx(connected, params.link_rx, &params.policy, &params.limits)
     };
     #[cfg(not(feature = "transport-lowlatency"))]
     let (inbound, outbound, writer_handle) =
-        wire_dialed_link_with_rx(connected, params.link_rx, &params.policy);
+        wire_dialed_link_with_rx(connected, params.link_rx, &params.policy, &params.limits);
     let actions = new_session_actions(outbound, params, clock);
     // Staged BEFORE the handshake drives, and BEFORE any wire byte: an offer
     // this build cannot honour fails here rather than opening a session whose
@@ -6090,7 +6162,7 @@ pub async fn accept_and_open_session(
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
     let (inbound, outbound, writer_handle) =
-        wire_dialed_link_with_rx(accepted, params.link_rx, &params.policy);
+        wire_dialed_link_with_rx(accepted, params.link_rx, &params.policy, &params.limits);
     let (actions, mut engine) = wire_session_engine(outbound, params, clock);
 
     // Accepting activation -> AwaitingInitSyn, whose onentry arms
@@ -6132,7 +6204,7 @@ pub async fn accept_and_open_session_with_auth(
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
     let (inbound, outbound, writer_handle) =
-        wire_dialed_link_with_rx(accepted, params.link_rx, &params.policy);
+        wire_dialed_link_with_rx(accepted, params.link_rx, &params.policy, &params.limits);
     let (actions, mut engine) = wire_session_engine(outbound, params, clock);
     actions.install_auth_dispatch(auth);
 
@@ -6380,13 +6452,14 @@ where
             lowlatency_wire.clone(),
             params.link_rx,
             &params.policy,
+            &params.limits,
         )
     } else {
-        wire_dialed_link_with_rx(accepted, params.link_rx, &params.policy)
+        wire_dialed_link_with_rx(accepted, params.link_rx, &params.policy, &params.limits)
     };
     #[cfg(not(feature = "transport-lowlatency"))]
     let (inbound, outbound, writer_handle) =
-        wire_dialed_link_with_rx(accepted, params.link_rx, &params.policy);
+        wire_dialed_link_with_rx(accepted, params.link_rx, &params.policy, &params.limits);
     let (actions, mut engine) = wire_session_engine(outbound, params, clock);
     actions
         .apply_offer(&offer)
@@ -6478,7 +6551,7 @@ pub async fn accept_and_open_session_with_namespace(
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
     let (inbound, outbound, writer_handle) =
-        wire_dialed_link_with_rx(accepted, params.link_rx, &params.policy);
+        wire_dialed_link_with_rx(accepted, params.link_rx, &params.policy, &params.limits);
     let (actions, mut engine) = wire_session_engine(outbound, params, clock);
     actions.set_namespace(namespace);
 
@@ -6869,6 +6942,22 @@ pub async fn open_session_static_config(
 mod tests {
     use super::*;
 
+    /// A dial config holds the build's runtime limits until the node states its own, and then
+    /// the node's, which the loop that dials with it reads.
+    #[test]
+    fn a_dial_config_holds_the_runtime_limits_its_node_states() {
+        use wz_session_core::limit_binding::Quota;
+        assert_eq!(DialConfig::default().runtime_limits, RuntimeLimits::BUILD);
+        let mut stated = RuntimeLimits::BUILD;
+        if stated.select_max_locator_len(Quota::at_most(2)).is_err() {
+            // The build allows one value: there is no other snapshot to state.
+            return;
+        }
+        let config = DialConfig::default().with_runtime_limits(stated);
+        assert_eq!(config.runtime_limits, stated);
+        assert_eq!(config.runtime_limits.max_locator_len(), Quota::at_most(2));
+    }
+
     /// R2944 — a dial's offer carries the QoS metadata of the ENDPOINT that
     /// names the link, and only that: read under a QoS offer (upstream's
     /// `is_qos` arm), refused when it does not parse, not looked at on any
@@ -7185,8 +7274,9 @@ mod tests {
         // What the session hands the link's write half at Established, with the
         // batch the handshake negotiated.
         let established = |outbound: &Arc<dyn BoxedLinkDriver + Send + Sync>, batch: usize| {
-            let shape = wz_session_core::session_init_params::TxQueueConf::of_policy(
+            let shape = wz_session_core::session_init_params::TxQueueConf::of_snapshot(
                 &wz_session_core::policy::SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD,
             )
             .shape(true, batch, batch);
             BoxedLinkDriver::shape_tx_queue(&**outbound, shape);
@@ -7194,13 +7284,15 @@ mod tests {
         let endpoint = format!("tcp/127.0.0.1:{port}");
         let cfg = DialConfig::default();
         let policy = wz_session_core::policy::SessionPolicy::defaults();
+        let limits = wz_session_core::limits::SessionLimits::defaults();
 
         let three = LinkRxConf {
             buffer_size: 3 * WIDEST,
             ..LinkRxConf::default()
         };
         let dialed = dial_endpoint(&endpoint, &cfg).await.expect("dials");
-        let (inbound, outbound, _writer) = wire_dialed_link_with_rx(dialed, three, &policy);
+        let (inbound, outbound, _writer) =
+            wire_dialed_link_with_rx(dialed, three, &policy, &limits);
         assert_eq!(pooled(&inbound), 0, "nothing is pooled before the batch");
         established(&outbound, WIDEST);
         assert_eq!(pooled(&inbound), 3);
@@ -7210,13 +7302,13 @@ mod tests {
             ..LinkRxConf::default()
         };
         let dialed = dial_endpoint(&endpoint, &cfg).await.expect("dials");
-        let (inbound, outbound, _writer) = wire_dialed_link_with_rx(dialed, two, &policy);
+        let (inbound, outbound, _writer) = wire_dialed_link_with_rx(dialed, two, &policy, &limits);
         established(&outbound, 16_000);
         assert_eq!(pooled(&inbound), 8, "the divisor is the link's batch");
 
         let dialed = dial_endpoint(&endpoint, &cfg).await.expect("dials");
         let (inbound, outbound, _writer) =
-            wire_dialed_link_with_rx(dialed, LinkRxConf::default(), &policy);
+            wire_dialed_link_with_rx(dialed, LinkRxConf::default(), &policy, &limits);
         established(&outbound, WIDEST);
         assert_eq!(pooled(&inbound), 1);
         drop(listener);

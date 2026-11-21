@@ -137,6 +137,14 @@ git config core.hooksPath .githooks
   waiting for a hosted run; read its result when it arrives. Never skip a
   failing gate and never bypass the hooks.
 
+**How complete the tests are.** Two lanes measure the suite rather than the code: a
+change is made to the code and a test has to fail. Layer C0mut does it to every leg of
+the analyzer's verdict on every push (`scripts/lib/verdict_leg_mutation.py`). Layer Cmut
+does it to the scopes of `deploy/mutation_ratchet.json` with cargo-mutants, nightly
+(`.github/workflows/mutation.yml`), and holds each scope's kill rate and missed count to
+its committed row; every missed mutant it prints is a test to write
+(`docs/mutation-testing.md`).
+
 **A lane's legs (open-debt item 938).** A lane of `scripts/run-ci.sh` either
 stops at its first red (`|| return 1`, the right shape when each step reads the
 previous one's build) or declares its legs in a leg ledger:
@@ -150,6 +158,32 @@ ledger lane therefore shows the lane's other reds on the same run. A gate's
 grade leans on its own `.selftest` leg. `scripts/lib/runci_leg_ledger_gate.py`
 (Layer C0) holds these rules and refuses a lane whose stop-at-first legs run two
 or more independent gates, except the lanes in its shrinking `BASELINE`.
+
+**Soft jobs and steps.** A `continue-on-error` job or step, or a step whose
+command ends `|| echo "::warning::..."`, concludes `success` whatever it did,
+so gate 2c never reads it; for a soft STEP the jobs API says `success` too and
+only the job log holds the verdict. Every such site has an entry in
+`deploy/soft_jobs.json`: why it is soft, the condition that makes it a gate,
+`promote_after_green`, `allowed_consecutive_red`, and an expiry at most 90
+days after its date, moved only by a renewal that says why. `python3
+scripts/lib/soft_job_gate.py --check` (Layer C0, and gate 2z of the extended
+sweep) refuses a site with no entry, an entry with no site, a lapsed entry and
+a malformed one. The hosted half belongs to the first move of a round, beside
+the previous run's jobs, and to the preflight before a landing:
+
+```
+python3 scripts/lib/soft_job_gate.py --hosted-last      # the last main runs of each workflow
+python3 scripts/lib/soft_job_gate.py --hosted <run-id>  # the runs named
+```
+
+It prints each soft site's reading per matrix row, newest run first, and exits
+1 when a site has been red on more consecutive main runs than its allowance
+(and while it recovers from that, until it has the greens that would promote
+it); it prints `promote:` with the edit when a site has earned its gate, and
+exits 3 (NOT-MEASURED, never a pass) when gh, the network or a log cannot be
+read. It is not part of gate 2c, which refuses a push: a soft site that breaks
+its promise is a debt to pay as its own round, not a reason the fix for some
+other red cannot land.
 
 `pre-commit` and `pre-push` require `mnemosyne-cli` on `PATH`
 (install via

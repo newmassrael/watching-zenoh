@@ -60,6 +60,14 @@ features = [
     "Win32_System_Threading",
 ]
 
+# A test build of this crate links the runtime with neither `host-lock` nor a program's image
+# glue (`posix_image_no_heap!`), so the runtime's critical sections need an implementation in the
+# test binary: critical-section's std one, as the runtime's own tests take. A Linux linker drops
+# the unreached sections and links without it; the Windows linker refuses an unresolved name in
+# any object it takes, reached or not.
+[dev-dependencies]
+critical-section = { version = "1", features = ["std"] }
+
 [features]
 # `wz-runtime-coop`'s session tier needs a form of its task pool, and the two forms are mutually
 # exclusive selectors. The default is the heap form, as `wz-runtime-zephyr`'s is, so that a
@@ -71,7 +79,8 @@ alloc = ["wz-runtime-coop/alloc", "wz-session-core/alloc"]
 # The per-session slot profile of the cooperative runtime, with no allocator: what a PROGRAM turns
 # on, with the defaults off (`--no-default-features --features session-slot`). Names
 # `wz-runtime-coop`'s selector, which is the instance the session code the program links uses; it
-# also builds `net::PosixStack`, the stack the slot profile's session host is given.
+# also builds the stack the slot profile's session host is given: `slot::PosixStack` on a POSIX
+# host, `windows::slot::WindowsStack` on Windows.
 session-slot = ["wz-runtime-coop/session-slot"]
 
 [lints]

@@ -16,6 +16,7 @@ use wz_runtime_posix::links::PosixLinks;
 use wz_runtime_posix::stream::PosixTcpDial;
 use wz_runtime_posix::{PosixClock, PosixEntropy};
 use wz_session_core::declare_form::InterestForm;
+use wz_session_core::limit_binding::Quota;
 use wz_session_core::locality::Locality;
 use wz_session_core::policy::{KeyWireForm, SessionPolicy};
 use wz_session_core::publish_options::PublishOptions;
@@ -526,6 +527,36 @@ fn a_shared_form_without_a_dictionary_is_refused_before_anything_is_dialled() {
             Some(OpenError::NoEndpoint)
         );
     }
+}
+
+/// The dictionary is held to the session's `MAX_SHARED_KEY_IDS` the config states: one entry past
+/// it refuses the open before anything is dialled, and at it the open goes on (and fails for the
+/// endpoint the config does not name).
+#[test]
+fn a_dictionary_over_the_configs_limit_is_refused_at_the_open() {
+    let stated = |most: usize| {
+        let mut config = client_config();
+        config
+            .limits
+            .select_max_shared_key_ids(Quota::at_most(most))
+            .map(|()| config)
+    };
+    let Ok(two) = stated(2) else {
+        // A build that keeps the build's value alone states no other.
+        return;
+    };
+    assert_eq!(
+        open_keyed(two, Some(dictionary()), policy_of(KeyWireForm::Declared)).err(),
+        Some(OpenError::KeyIdsOverLimit {
+            stated: 3,
+            limit: 2
+        })
+    );
+    let three = stated(3).expect("inside the domain");
+    assert_eq!(
+        open_keyed(three, Some(dictionary()), policy_of(KeyWireForm::Declared)).err(),
+        Some(OpenError::NoEndpoint)
+    );
 }
 
 /// The key every Interest below asks about: an entry of the dictionary of its own (id 41).

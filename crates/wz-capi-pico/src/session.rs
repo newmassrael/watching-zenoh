@@ -85,6 +85,7 @@ use crate::result::{
 use wz_capi_core::drive::{open_blocking, DialPhase, OpenError, OpenStance, SessionState};
 #[cfg(any(feature = "engine-tokio", feature = "tls-mbedtls"))]
 use wz_capi_port::tls_material::CapiTlsConfig;
+use wz_session_core::limits::SessionLimits;
 use wz_session_core::policy::{SessionPolicy, SnResolution};
 use wz_session_core::session_init_params::{KeepAliveConf, LinkRxConf, TxQueueConf};
 use wz_session_core::WhatAmI;
@@ -110,30 +111,29 @@ pub(crate) fn is_group_endpoint(endpoint: &str) -> bool {
 }
 
 /// The batch size a unicast session of this ABI advertises in its InitSyn, on either engine:
-/// pico's `BATCH_UNICAST_SIZE` as the build states it
-/// ([`wz_session_core::caps::PICO_UNICAST_BATCH_BYTES`]). A `const` item, so its range is
-/// checked when the build is made and never at an open.
-const PICO_UNICAST_BATCH: u16 = pico_batch(wz_session_core::caps::PICO_UNICAST_BATCH_BYTES);
+/// pico's `BATCH_UNICAST_SIZE` as the open's snapshot `limits` holds it
+/// (`PICO_UNICAST_BATCH_BYTES`).
+fn pico_unicast_batch(limits: &SessionLimits) -> u16 {
+    pico_batch(limits.pico_unicast_batch_bytes())
+}
 
-/// The batch size pico's Join advertises on a group: its `BATCH_MULTICAST_SIZE` as the build
-/// states it ([`wz_session_core::caps::PICO_MULTICAST_BATCH_BYTES`]), checked when the build is
-/// made as [`PICO_UNICAST_BATCH`] is.
+/// The batch size pico's Join advertises on a group: its `BATCH_MULTICAST_SIZE` as the open's
+/// snapshot `limits` holds it (`PICO_MULTICAST_BATCH_BYTES`).
 #[cfg(feature = "multicast-transport")]
-const PICO_MULTICAST_BATCH: u16 = pico_batch(wz_session_core::caps::PICO_MULTICAST_BATCH_BYTES);
+fn pico_multicast_batch(limits: &SessionLimits) -> u16 {
+    pico_batch(limits.pico_multicast_batch_bytes())
+}
 
-/// A batch size of this ABI as the wire carries it, in two bytes. Called only to make a `const`
-/// item, so a number outside `1..=65535` stops the build: a batch of 0 would size a session that
-/// sends nothing, and one past `u16::MAX` does not fit the field.
-const fn pico_batch(bytes: usize) -> u16 {
-    assert!(
-        bytes >= 1 && bytes <= u16::MAX as usize,
-        "a zenoh-pico batch size is 1 to 65535 bytes"
-    );
-    bytes as u16
+/// A batch size of this ABI as the wire carries it, in two bytes. The domain of both batch limits
+/// is `1..=65535`, so a snapshot holds no size the field cannot carry: a batch of 0 would size a
+/// session that sends nothing, and one past `u16::MAX` does not fit the field.
+fn pico_batch(bytes: usize) -> u16 {
+    u16::try_from(bytes).unwrap_or(u16::MAX)
 }
 
 /// What a session of this ABI rejoins from fragments, unicast and in a group, on either engine:
-/// pico's `FRAG_MAX_SIZE` as the build states it, whose rule is upstream's
+/// pico's `FRAG_MAX_SIZE` as the open's snapshot `limits` holds it (`PICO_FRAG_MAX_BYTES`; a
+/// snapshot that states no bound leaves the reassembly slot the only one), whose rule is upstream's
 /// `transport/link/rx/max_message_size` (a chain a fragment would take past it is dropped,
 /// `vendor/zenoh-pico/src/transport/unicast/rx.c` @
 /// `if ((_z_wbuf_len(dbuf) + msg->_payload.len) > Z_FRAG_MAX_SIZE) {`).
@@ -146,23 +146,27 @@ const fn pico_batch(bytes: usize) -> u16 {
 /// ([`TcpLinkMtu::Widest`](wz_session_core::session_init_params::TcpLinkMtu::Widest)), and an
 /// opening session refuses an InitAck that names a larger batch than it offered, as pico does
 /// ([`WiderInitAckBatch::Refuse`](wz_session_core::session_init_params::WiderInitAckBatch::Refuse)).
-const PICO_LINK_RX: LinkRxConf = LinkRxConf {
-    buffer_size: wz_session_core::session_init_params::RX_BUFFER_SIZE,
-    max_message_size: wz_session_core::caps::PICO_FRAG_MAX_BYTES,
-    tcp_mtu: wz_session_core::session_init_params::TcpLinkMtu::Widest,
-    wider_init_ack_batch: wz_session_core::session_init_params::WiderInitAckBatch::Refuse,
-};
+fn pico_link_rx(limits: &SessionLimits) -> LinkRxConf {
+    LinkRxConf {
+        buffer_size: wz_session_core::session_init_params::RX_BUFFER_SIZE,
+        max_message_size: limits.pico_frag_max_bytes().most().unwrap_or(usize::MAX),
+        tcp_mtu: wz_session_core::session_init_params::TcpLinkMtu::Widest,
+        wider_init_ack_batch: wz_session_core::session_init_params::WiderInitAckBatch::Refuse,
+    }
+}
 
 /// How long a listening session of this ABI gives an inbound link, pico's
-/// `Z_TRANSPORT_ACCEPT_TIMEOUT` as the build states it. pico bounds no count of pending accepts
-/// (it accepts one link at a time on its read task), so the count is upstream's rather than
-/// none: a bound pico never refused on is no worse than zenoh's.
+/// `Z_TRANSPORT_ACCEPT_TIMEOUT` as the open's snapshot `limits` holds it
+/// (`PICO_ACCEPT_TIMEOUT_MS`). pico bounds no count of pending accepts (it accepts one link at a
+/// time on its read task), so the count is upstream's rather than none: a bound pico never
+/// refused on is no worse than zenoh's.
 #[cfg(feature = "engine-tokio")]
-const PICO_ACCEPT: wz_capi_core::runtime::accept_bounds::AcceptBounds =
+fn pico_accept(limits: &SessionLimits) -> wz_capi_core::runtime::accept_bounds::AcceptBounds {
     wz_capi_core::runtime::accept_bounds::AcceptBounds {
-        timeout_ms: wz_session_core::caps::PICO_ACCEPT_TIMEOUT_MS as u64,
+        timeout_ms: limits.pico_accept_timeout_ms() as u64,
         pending: wz_capi_core::runtime::config::ACCEPT_PENDING,
-    };
+    }
+}
 
 /// How the tokio engine's open of this ABI dials. One attempt, as pico's `z_open` makes; a lost
 /// client session is opened again every 1000 ms, as pico re-opens it by default
@@ -170,12 +174,12 @@ const PICO_ACCEPT: wz_capi_core::runtime::accept_bounds::AcceptBounds =
 /// `return _z_fut_fn_result_wake_up_after(1000);`).
 ///
 /// Each open of an endpoint, its dial and its handshake, is held to pico's
-/// `Z_TRANSPORT_CONNECT_TIMEOUT` as the build states it
-/// ([`wz_session_core::caps::PICO_CONNECT_TIMEOUT_MS`]), and the session machine holds the
+/// `Z_TRANSPORT_CONNECT_TIMEOUT` as the open's snapshot `limits` holds it
+/// (`PICO_CONNECT_TIMEOUT_MS`), and the session machine holds the
 /// handshake to the same bound, as the cooperative engine's open does: pico gives both receives of
 /// its handshake one deadline that long (`vendor/zenoh-pico/src/transport/unicast/transport.c` @
 /// `z_clock_advance_ms(&recv_deadline, Z_TRANSPORT_CONNECT_TIMEOUT);`), where zenoh's
-/// `transport/unicast/open_timeout` would hold it to zenoh's ten seconds whatever the build
+/// `transport/unicast/open_timeout` would hold it to zenoh's ten seconds whatever the snapshot
 /// states.
 ///
 /// pico's `Z_CONFIG_SOCKET_TIMEOUT` has nothing to bound on this engine, so it is not read here.
@@ -185,50 +189,56 @@ const PICO_ACCEPT: wz_capi_core::runtime::accept_bounds::AcceptBounds =
 /// deadline. This engine's read task is woken by its link's input and never polls, and its
 /// `zp_read` processes nothing, so no wait of it corresponds.
 #[cfg(feature = "engine-tokio")]
-fn pico_dial_phase() -> DialPhase {
+fn pico_dial_phase(limits: &SessionLimits) -> DialPhase {
     DialPhase {
         redial: Some(wz_capi_core::runtime::retry_period::RetryPolicy::constant(
             1000,
         )),
-        open_timeout: core::time::Duration::from_millis(
-            wz_session_core::caps::PICO_CONNECT_TIMEOUT_MS as u64,
-        ),
+        open_timeout: core::time::Duration::from_millis(limits.pico_connect_timeout_ms() as u64),
         ..DialPhase::ONCE
     }
 }
 
-/// How often a session of this ABI sends a keepalive on an idle link, on either engine: pico's
-/// `Z_TRANSPORT_LEASE_EXPIRE_FACTOR` as the build states it, dividing the adopted lease. Refused
-/// when the build is made if the build states none (a division by zero in pico's own task).
-const PICO_KEEP_ALIVE: KeepAliveConf = KeepAliveConf::pico(pico_keepalives_per_lease(
-    wz_session_core::caps::PICO_KEEPALIVES_PER_LEASE,
-));
+/// The lease a session of this ABI advertises, unicast in its InitSyn and in a group's Join, on
+/// either engine: pico's `Z_TRANSPORT_LEASE` as the open's snapshot `limits` holds it
+/// (`PICO_LEASE_MS`).
+fn pico_lease_ms(limits: &SessionLimits) -> u64 {
+    limits.pico_lease_ms() as u64
+}
 
-/// The factor as a `u32`, at least 1.
-const fn pico_keepalives_per_lease(factor: usize) -> u32 {
-    assert!(
-        factor >= 1 && factor <= u32::MAX as usize,
-        "zenoh-pico divides its lease by a factor of at least 1"
-    );
-    factor as u32
+/// How often a session of this ABI sends a keepalive on an idle link, on either engine: pico's
+/// `Z_TRANSPORT_LEASE_EXPIRE_FACTOR` as the open's snapshot `limits` holds it
+/// (`PICO_KEEPALIVES_PER_LEASE`), dividing the adopted lease. The limit's domain starts at 1, so
+/// no snapshot holds the factor of 0 that would divide by zero in pico's own task, and ends at
+/// `u32::MAX`, so the factor always fits.
+fn pico_keep_alive(limits: &SessionLimits) -> KeepAliveConf {
+    KeepAliveConf::pico(u32::try_from(limits.pico_keepalives_per_lease()).unwrap_or(u32::MAX))
 }
 
 /// How long one read step of the cooperative engine waits on its links, in milliseconds: pico's
-/// `Z_CONFIG_SOCKET_TIMEOUT` as the build states it
-/// ([`wz_session_core::caps::PICO_SOCKET_TIMEOUT_MS`]). A `const` item, so its range is checked
-/// when the build is made and never at an open.
+/// `Z_CONFIG_SOCKET_TIMEOUT` as the open's snapshot `limits` holds it
+/// (`PICO_SOCKET_TIMEOUT_MS`), whose domain ends at `u32::MAX`, what the wait holds.
 #[cfg(not(feature = "engine-tokio"))]
-const PICO_SOCKET_TIMEOUT: u32 = pico_socket_timeout(wz_session_core::caps::PICO_SOCKET_TIMEOUT_MS);
+fn pico_socket_timeout(limits: &SessionLimits) -> u32 {
+    u32::try_from(limits.pico_socket_timeout_ms()).unwrap_or(u32::MAX)
+}
 
-/// The cooperative engine's read wait as the engine holds it. Called only to make a `const` item,
-/// so a number past what the wait holds stops the build.
+/// How long the cooperative engine's session machine gives a handshake, as the open's snapshot
+/// `limits` holds the two bounds: an inbound link's whole handshake is pico's
+/// `Z_TRANSPORT_ACCEPT_TIMEOUT` (`PICO_ACCEPT_TIMEOUT_MS`), as the tokio engine's
+/// `pico_accept` reads it, and a dialled one's its `Z_TRANSPORT_CONNECT_TIMEOUT`
+/// (`PICO_CONNECT_TIMEOUT_MS`), one deadline over both of its receives, so the session machine
+/// holds the handshake to the bound the open holds the endpoint to and to no shorter one. The
+/// other windows are the machine's own.
 #[cfg(not(feature = "engine-tokio"))]
-const fn pico_socket_timeout(ms: usize) -> u32 {
-    assert!(
-        ms <= u32::MAX as usize,
-        "a zenoh-pico socket timeout is at most u32::MAX ms"
-    );
-    ms as u32
+fn pico_session_timeouts(
+    limits: &SessionLimits,
+) -> wz_session_core::session_timeouts::SessionTimeouts {
+    wz_session_core::session_timeouts::SessionTimeouts {
+        accepting_inactivity_ms: limits.pico_accept_timeout_ms() as u64,
+        opening_ms: limits.pico_connect_timeout_ms() as u64,
+        ..wz_session_core::session_timeouts::SessionTimeouts::from_build()
+    }
 }
 
 /// What pico's JOIN advertises on a group (`vendor/zenoh-pico/src/protocol/definitions/transport.c`
@@ -236,22 +246,25 @@ const fn pico_socket_timeout(ms: usize) -> u32 {
 /// `Z_JOIN_INTERVAL` (2500 ms), its `Z_SN_RESOLUTION` and `Z_REQ_RESOLUTION` (0x02 each), its
 /// `Z_BATCH_MULTICAST_SIZE`, and no per-priority conduits. The lease and the batch size are build
 /// switches of pico's (`BATCH_MULTICAST_SIZE`, `Z_TRANSPORT_LEASE` in its CMakeLists), so they are
-/// the numbers this build states for them ([`wz_session_core::caps::PICO_LEASE_MS`],
-/// [`wz_session_core::caps::PICO_MULTICAST_BATCH_BYTES`]), pico's own by default: pico refuses a
+/// the numbers the open's snapshot `limits` holds for them (`PICO_LEASE_MS`,
+/// `PICO_MULTICAST_BATCH_BYTES`), pico's own by default: pico refuses a
 /// member whose Join states another batch size. The join interval and the two resolutions are
 /// fixed in pico's config template, not switches; the open's `sn-resolution` policy
 /// ([`wz_session_core::policy::SnResolution`]) states another width of the sequence number for a
 /// group whose members are built with one, as pico refuses a Join that states another than its own.
 #[cfg(feature = "multicast-transport")]
-const fn pico_group(sn_resolution: SnResolution) -> wz_capi_port::group::GroupProfile {
+fn pico_group(
+    sn_resolution: SnResolution,
+    limits: &SessionLimits,
+) -> wz_capi_port::group::GroupProfile {
     wz_capi_port::group::GroupProfile {
-        lease_ms: wz_session_core::caps::PICO_LEASE_MS as u64,
+        lease_ms: pico_lease_ms(limits),
         join_interval_ms: 2_500,
         // pico has no cap on a group's members: its list grows while its allocator gives.
         max_sessions: None,
         seq_num_res: sn_resolution.wire_code(),
         req_id_res: 0x02,
-        batch_size: PICO_MULTICAST_BATCH,
+        batch_size: pico_multicast_batch(limits),
         is_qos: false,
         compression: false,
         join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
@@ -271,9 +284,12 @@ pub(crate) fn resolve_policy(
 }
 
 /// pico's transmit model and the width of the sequence numbers its handshake advertises, under
-/// `policy`, the snapshot of the open: what both engines' opens are given.
-fn pico_link_policy(policy: &SessionPolicy) -> (TxQueueConf, SnResolution) {
-    (TxQueueConf::pico_of_policy(policy), policy.sn_resolution())
+/// `policy` and `limits`, the two snapshots of the open: what both engines' opens are given.
+fn pico_link_policy(policy: &SessionPolicy, limits: &SessionLimits) -> (TxQueueConf, SnResolution) {
+    (
+        TxQueueConf::pico_of_snapshot(policy, limits),
+        policy.sn_resolution(),
+    )
 }
 
 /// Resolve one certificate value from its PATH key or its `*_BASE64` inline key.
@@ -466,29 +482,26 @@ impl z_owned_session_t {
     }
 }
 
-/// The session limits a session of this ABI opens under: the build's, since pico's config states no
-/// session limit this ABI reads. The cooperative engine opens its session under the same, which it
-/// resolves itself.
-#[cfg(any(feature = "engine-tokio", feature = "session-memory"))]
-fn pico_session_limits() -> wz_session_core::limits::SessionLimits {
-    wz_session_core::limits::SessionLimits::defaults()
-}
-
-/// What a session's report of its memory is computed from (`crate::session_memory`): the limits
-/// it opens under, how many links it may hold by what it listens on, and the numbers its links are
-/// opened with, `tx_queue` and the read storage the engine is handed.
+/// What a session's report of its memory is computed from (`crate::session_memory`): `limits`,
+/// the snapshot the open resolved from the config and hands the engine, how many links the session
+/// may hold by what it listens on, and the numbers its links are opened with from that snapshot,
+/// `tx_queue` and what `pico_link_rx` and `pico_unicast_batch` read. The report is of the
+/// session the program holds, so it is never read from the build's values.
 #[cfg(feature = "session-memory")]
 fn memory_basis(
     listen: Option<&str>,
     tx_queue: &TxQueueConf,
+    limits: &SessionLimits,
 ) -> crate::session_memory::MemoryBasis {
+    let rx = pico_link_rx(limits);
     crate::session_memory::MemoryBasis {
-        limits: pico_session_limits(),
+        limits: *limits,
         links: crate::session_memory::links_of(listen),
         queue_batches: tx_queue.sizes.iter().sum(),
-        batch_bytes: usize::from(PICO_UNICAST_BATCH),
-        rx_bytes: PICO_LINK_RX.buffer_size,
-        message_bytes: PICO_LINK_RX.max_message_size,
+        batch_bytes: usize::from(pico_unicast_batch(limits)),
+        rx_bytes: rx.buffer_size,
+        // `pico_link_rx` hands the engine `usize::MAX` where the snapshot states no bound.
+        message_bytes: limits.pico_frag_max_bytes().most(),
     }
 }
 
@@ -561,7 +574,7 @@ impl PicoSessionHandle {
 ///
 /// # Safety
 /// `zs` must be null, or a valid `z_loaned_session_t` whose `_val` slot is a live
-/// `Box::into_raw::<PicoSessionHandle>` pointer (what [`z_open`] installs).
+/// `PicoSessionHandle` handle (what [`z_open`] installs).
 pub(crate) unsafe fn session_handle<'a>(
     zs: *const z_loaned_session_t,
 ) -> Option<&'a PicoSessionHandle> {
@@ -717,16 +730,16 @@ pub unsafe extern "C" fn z_open(
         // lost its link dials the locators found here again. pico re-runs the whole open,
         // scouting included (`_z_client_reopen_task_fn` calls `_z_open`), so a router that
         // comes back on another locator is found there and not here. The scout runs under the
-        // snapshot of the open it finds a node for, and a config whose policies the build refuses
-        // opens nothing and scouts for nothing.
-        let policy = match resolve_policy(&cfg.policies) {
-            Ok(resolved) => resolved.policy,
+        // snapshot of the open it finds a node for, and a config whose policies or limits the
+        // build refuses opens nothing and scouts for nothing.
+        let (policy, limits) = match resolve_policy(&cfg.policies) {
+            Ok(resolved) => (resolved.policy, resolved.limits.session),
             Err(code) => return code,
         };
         // The key-wire form, judged for the engine the session opens on, and the key ids every
         // node shares that the config states (`crate::key_ids`).
         #[cfg(feature = "shared-key-ids")]
-        let key_ids = match crate::key_ids::admit_at_open(&cfg, &policy) {
+        let key_ids = match crate::key_ids::admit_at_open(&cfg, &policy, &limits) {
             Ok(key_ids) => key_ids,
             Err(code) => return code,
         };
@@ -743,7 +756,7 @@ pub unsafe extern "C" fn z_open(
             (Some(connect), _) => vec![connect],
             (None, Some(_)) => Vec::new(),
             #[cfg(any(feature = "scout", feature = "scout-mcu"))]
-            (None, None) => match crate::scout::locators_by_scout(&cfg, &policy) {
+            (None, None) => match crate::scout::locators_by_scout(&cfg, &policy, &limits) {
                 Ok(locators) => locators,
                 Err(code) => return code,
             },
@@ -770,7 +783,13 @@ pub unsafe extern "C" fn z_open(
         // The core runs it (a listener bound before the dial, an accept loop beside the dial
         // face), so it is not refused. Until R3090 it was, with `Z_ERR_INVALID`, and the comment
         // called it a follow-up. Its role is a peer's: `open_config` reads a listen config so.
+        // The handle's place is taken before anything opens, so a full pool refuses the open and
+        // the open leaves nothing behind.
+        let Some(slot) = crate::object_slot::Slot::take(crate::object_slot::Kind::Session) else {
+            return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
+        };
         let request = OpenRequest {
+            slot,
             connect,
             listen,
             dial_whatami,
@@ -781,6 +800,7 @@ pub unsafe extern "C" fn z_open(
             #[cfg(any(feature = "engine-tokio", feature = "tls-mbedtls"))]
             tls,
             policy,
+            limits,
             #[cfg(feature = "app-transport")]
             app_transport,
             #[cfg(any(not(feature = "engine-tokio"), feature = "shared-key-ids"))]
@@ -1008,6 +1028,8 @@ mod open_config_tests {
 
 /// What `z_open` read off the C config and its options, for the engine that opens it.
 struct OpenRequest {
+    /// The place the session's handle is installed in, taken before anything is opened.
+    slot: crate::object_slot::Slot<PicoSessionHandle>,
     connect: Vec<String>,
     listen: Option<String>,
     dial_whatami: WhatAmI,
@@ -1029,6 +1051,10 @@ struct OpenRequest {
     /// The policies the session runs under ([`resolve_policy`]), handed to the engine and kept
     /// with the session's handle.
     policy: SessionPolicy,
+    /// The session limits the session runs under, resolved with [`Self::policy`]: the engine's
+    /// tables are held to them, whichever engine the session opens on, and the session's handle
+    /// keeps them.
+    limits: wz_session_core::limits::SessionLimits,
     /// The transport the program supplies, when the config carries one: every link goes over it.
     #[cfg(feature = "app-transport")]
     app_transport: Option<alloc::sync::Arc<wz_session_core::app_transport::AppTransport>>,
@@ -1051,6 +1077,7 @@ struct OpenRequest {
 #[cfg(feature = "engine-tokio")]
 unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZResult {
     let OpenRequest {
+        slot,
         connect,
         listen,
         dial_whatami,
@@ -1060,6 +1087,7 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
         start_admin_space,
         tls,
         policy,
+        limits,
         #[cfg(feature = "app-transport")]
         app_transport,
         #[cfg(feature = "shared-key-ids")]
@@ -1067,15 +1095,15 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
         #[cfg(feature = "time-base")]
         time_base,
     } = request;
-    let (tx_queue, sn_resolution) = pico_link_policy(&policy);
+    let (tx_queue, sn_resolution) = pico_link_policy(&policy, &limits);
     #[cfg(feature = "session-memory")]
-    let memory = memory_basis(listen.as_deref(), &tx_queue);
+    let memory = memory_basis(listen.as_deref(), &tx_queue, &limits);
     // This ABI stays on one attempt: the retry the zenoh-c open gained reads
     // zenoh's `connect/retry` and `connect/timeout_ms`, which are zenoh-c
     // config keys, and this shim resolves pico's numeric keys instead.
     // pico's transmit model, not zenoh's: a pico put writes on the
     // caller's thread and a full socket slows it rather than dropping it
-    // (see `TxQueueConf::pico_of_policy`). zenoh's 1 ms drop wait here discarded the
+    // (see `TxQueueConf::pico_of_snapshot`). zenoh's 1 ms drop wait here discarded the
     // tail of a burst that `teardown_drain` puts before `z_close`.
     let session_mode = if listen.is_some() {
         WhatAmI::Peer
@@ -1105,7 +1133,7 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             Vec::new(),
             vec![wz_capi_port::group::GroupJoin {
                 endpoint,
-                profile: pico_group(sn_resolution),
+                profile: pico_group(sn_resolution, &limits),
                 is_shm: false,
                 // pico declares its entities over whatever transport it holds, a group too
                 // (MEASURED off the group's wire: `decl_subscriber(1, ..)`), and with
@@ -1129,20 +1157,20 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
         dial_whatami,
         // R2948 — pico re-opens a lost client session by default; its handshake bound is
         // pico's (`pico_dial_phase`).
-        pico_dial_phase(),
+        pico_dial_phase(&limits),
         OpenStance {
             tx_queue,
             // pico's batch size and lease are build switches of its, not config keys
             // (`BATCH_UNICAST_SIZE`, `Z_TRANSPORT_LEASE`): its InitSyn carries
             // `Z_BATCH_UNICAST_SIZE` (`vendor/zenoh-pico/src/protocol/definitions/transport.c` @
             // `msg._body._init._batch_size = Z_BATCH_UNICAST_SIZE;`), 2048 by default and not
-            // zenoh's 65535, so this advertises the numbers the build states for them.
-            batch_size: PICO_UNICAST_BATCH,
-            lease_ms: wz_session_core::caps::PICO_LEASE_MS as u64,
-            keep_alive: PICO_KEEP_ALIVE,
+            // zenoh's 65535, so this advertises the numbers the open's snapshot holds for them.
+            batch_size: pico_unicast_batch(&limits),
+            lease_ms: pico_lease_ms(&limits),
+            keep_alive: pico_keep_alive(&limits),
             sn_resolution,
-            link_rx: PICO_LINK_RX,
-            accept: PICO_ACCEPT,
+            link_rx: pico_link_rx(&limits),
+            accept: pico_accept(&limits),
             // pico negotiates no transport capability on unicast: its InitSyn
             // carries the patch ext and nothing else
             // (`vendor/zenoh-pico/src/protocol/codec/transport.c` @
@@ -1227,7 +1255,10 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             #[cfg(not(any(feature = "shared-key-ids", feature = "time-base")))]
             session_defaults: wz_capi_core::session_defaults::SessionDefaults::default(),
             session_policy: policy,
-            session_limits: pico_session_limits(),
+            session_limits: limits,
+            // pico's configuration states no limit of a node, so a node its open runs holds the
+            // build's.
+            runtime_limits: wz_session_core::limits::RuntimeLimits::defaults(),
             #[cfg(feature = "app-transport")]
             app_transport,
         },
@@ -1248,10 +1279,11 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
                 session_mode,
                 &zid,
                 policy,
+                limits,
                 &drive.engine(),
             );
             #[cfg(not(feature = "connectivity"))]
-            let ext = crate::session_ext::PicoSessionExt::new(session_mode, &zid, policy);
+            let ext = crate::session_ext::PicoSessionExt::new(session_mode, &zid, policy, limits);
             // The session's own clock, which pico always gives, was refused: the bound
             // `UHLC_MAX_DELTA_MS` states is one it does not honour. The open fails as it does for
             // a stated value the build refuses, after the engine's session is closed.
@@ -1267,7 +1299,7 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             #[cfg(feature = "session-memory")]
             let handle = handle.with_memory(memory);
             *zs = z_owned_session_t {
-                _val: Box::into_raw(Box::new(handle)) as *mut c_void,
+                _val: slot.fill(handle) as *mut c_void,
                 _cnt: core::ptr::null_mut(),
             };
             #[cfg(feature = "admin-space")]
@@ -1333,8 +1365,8 @@ fn app_links_on<C>(
 /// without it refuses that endpoint.
 ///
 /// What zenoh-pico's client advertises, as the tokio engine's open does: pico's batch size
-/// ([`PICO_UNICAST_BATCH`], `BATCH_UNICAST_SIZE`), pico's lease (`Z_TRANSPORT_LEASE`) and pico's
-/// transmit model ([`TxQueueConf::pico_of_policy`]).
+/// (`BATCH_UNICAST_SIZE`), pico's lease (`Z_TRANSPORT_LEASE`) and pico's transmit model
+/// ([`TxQueueConf::pico_of_snapshot`]), as the request's snapshot of limits holds them.
 /// The zid is the one `Z_CONFIG_SESSION_ZID_KEY` names, and otherwise minted, as this ABI's tokio
 /// open does.
 ///
@@ -1361,9 +1393,10 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     }
     let dial_whatami = request.dial_whatami;
     let policy = request.policy;
-    let (tx_queue, sn_resolution) = pico_link_policy(&policy);
+    let limits = request.limits;
+    let (tx_queue, sn_resolution) = pico_link_policy(&policy, &limits);
     #[cfg(feature = "session-memory")]
-    let memory = memory_basis(request.listen.as_deref(), &tx_queue);
+    let memory = memory_basis(request.listen.as_deref(), &tx_queue, &limits);
     // The engine takes the id as the config states it, up to sixteen bytes: the form an INIT
     // carries.
     let zid = request.zid;
@@ -1385,7 +1418,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
             Vec::new(),
             vec![wz_capi_port::group::GroupJoin {
                 endpoint,
-                profile: pico_group(sn_resolution),
+                profile: pico_group(sn_resolution, &limits),
                 is_shm: false,
                 // pico declares its entities over whatever transport it holds, a group too, and
                 // with `Z_FEATURE_MULTICAST_DECLARATIONS` its keyexprs and write filters as
@@ -1411,17 +1444,23 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     // A datagram link reads into a buffer of the batch the session advertises, as pico's UDP link
     // reads into one of its `BATCH_UNICAST_SIZE`: no peer's batch is larger once the two have
     // negotiated, and a node pays its batch for each link and not the largest datagram.
-    let links =
-        crate::coop_host::links().with_rx_capacity(wz_session_core::caps::PICO_UNICAST_BATCH_BYTES);
+    let links = crate::coop_host::links().with_rx_capacity(limits.pico_unicast_batch_bytes());
+    // The clock every timer of the session reads: the time base the config names, or the host's.
+    #[cfg(feature = "time-base")]
+    let clock = crate::time_base::session_clock(request.time_base);
+    #[cfg(not(feature = "time-base"))]
+    let clock = crate::coop_host::clock();
     // The `tls/` link: the secure channel over the host's streams, for the dial and the listen,
     // made from the material the config's keys named. A config whose material cannot make a
     // channel (half a listener, a key that is not its chain's) fails the open, as a malformed
     // value does at the keys, and never degrades to a session without the protection asked for.
+    // An inbound handshake is timed on the session's clock, as the session's own handshake is.
     #[cfg(feature = "tls-mbedtls")]
     let links = match wz_capi_coop::tls::HostTls::from_config(
         crate::coop_host::tcp_dial(),
         &request.tls,
-        wz_session_core::caps::PICO_ACCEPT_TIMEOUT_MS as u64,
+        limits.pico_accept_timeout_ms() as u64,
+        &clock,
     ) {
         Ok(tls) => links.with_tls(tls),
         Err(_) => return crate::result::Z_ERR_INVALID,
@@ -1430,47 +1469,32 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     // tokio engine's group sockets are.
     #[cfg(feature = "multicast-transport")]
     let links = links.with_groups(wz_capi_coop::host_group::HostGroups::of_policy(&policy));
-    // The clock every timer of the session reads: the time base the config names, or the host's.
-    #[cfg(feature = "time-base")]
-    let clock = crate::time_base::session_clock(request.time_base);
-    #[cfg(not(feature = "time-base"))]
-    let clock = crate::coop_host::clock();
     let config = wz_capi_coop::CoopConfig {
         endpoints: connect,
         whatami: dial_whatami,
         zid,
-        // The numbers of pico's value build switches, as this build states them: the
+        // The numbers of pico's value build switches, as the open's snapshot holds them: the
         // batch size and lease its InitSyn carries (`BATCH_UNICAST_SIZE`,
         // `Z_TRANSPORT_LEASE`), the largest message it rejoins (`FRAG_MAX_SIZE`), how often
         // its keepalive speaks (`Z_TRANSPORT_LEASE_EXPIRE_FACTOR`) and its handshake's
         // receive deadline (`Z_TRANSPORT_CONNECT_TIMEOUT`).
-        batch_size: PICO_UNICAST_BATCH,
-        lease_ms: wz_session_core::caps::PICO_LEASE_MS as u64,
-        keep_alive: PICO_KEEP_ALIVE,
+        batch_size: pico_unicast_batch(&limits),
+        lease_ms: pico_lease_ms(&limits),
+        keep_alive: pico_keep_alive(&limits),
         sn_resolution,
-        link_rx: PICO_LINK_RX,
+        link_rx: pico_link_rx(&limits),
         tx_queue,
-        // How long an inbound link may take to complete its handshake is pico's
-        // `Z_TRANSPORT_ACCEPT_TIMEOUT` as the build states it, as the tokio engine's
-        // `PICO_ACCEPT` says; how long a dialled one may take is its
-        // `Z_TRANSPORT_CONNECT_TIMEOUT`, one deadline over both of its receives, so the
-        // session machine holds the handshake to the bound `open_timeout_ms` holds the
-        // endpoint to and to no shorter one.
-        timeouts: wz_session_core::session_timeouts::SessionTimeouts {
-            accepting_inactivity_ms: wz_session_core::caps::PICO_ACCEPT_TIMEOUT_MS as u64,
-            opening_ms: wz_session_core::caps::PICO_CONNECT_TIMEOUT_MS as u64,
-            ..wz_session_core::session_timeouts::SessionTimeouts::from_build()
-        },
-        open_timeout_ms: wz_session_core::caps::PICO_CONNECT_TIMEOUT_MS as u64,
+        timeouts: pico_session_timeouts(&limits),
+        open_timeout_ms: limits.pico_connect_timeout_ms() as u64,
         // pico tries again every 1000 ms while the reopen fails
         // (`vendor/zenoh-pico/src/net/session.c` @
         // `return _z_fut_fn_result_wake_up_after(1000);`).
         redial_ms: Some(1000),
         // A read waits on the link as long as pico's socket receive times out, its
-        // `Z_CONFIG_SOCKET_TIMEOUT` as this build states it.
-        idle_wait_ms: PICO_SOCKET_TIMEOUT,
+        // `Z_CONFIG_SOCKET_TIMEOUT` as the open's snapshot holds it.
+        idle_wait_ms: pico_socket_timeout(&limits),
         // The bounds of an accept are upstream's, as the tokio engine's are
-        // (`PICO_ACCEPT`): pico bounds no count of pending accepts or of sessions.
+        // (`pico_accept`): pico bounds no count of pending accepts or of sessions.
         listen,
         accept_pending: wz_capi_coop::DEFAULT_ACCEPT_PENDING,
         max_faces: wz_capi_coop::DEFAULT_MAX_FACES,
@@ -1482,6 +1506,8 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         clock_moves: crate::time_base::clock_moves(&clock),
         #[cfg(not(feature = "time-base"))]
         clock_moves: None,
+        // The session limits the config states, which the engine's tables are held to.
+        limits,
     };
     // A config that carries the program's transport opens the engine over its links, and over no
     // socket of the host's; `z_open` has refused a locator the transport does not carry. Either
@@ -1490,8 +1516,10 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     let opened = match request.app_transport {
         Some(transport) => wz_capi_coop::CoopEngine::open_with_key_ids(
             app_links_on(
-                wz_capi_coop::app_link::AppLinks::new(transport)
-                    .with_rx_capacity(wz_session_core::caps::PICO_UNICAST_BATCH_BYTES),
+                wz_capi_coop::app_link::AppLinks::new(
+                    wz_session_core::app_transport::SessionTransport::new(transport, &limits),
+                )
+                .with_rx_capacity(limits.pico_unicast_batch_bytes()),
                 &clock,
             ),
             clock,
@@ -1531,9 +1559,15 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     };
     let zid = drive.zid();
     #[cfg(feature = "connectivity")]
-    let ext = crate::session_ext::PicoSessionExt::new(dial_whatami, &zid, policy, &drive.engine());
+    let ext = crate::session_ext::PicoSessionExt::new(
+        dial_whatami,
+        &zid,
+        policy,
+        limits,
+        &drive.engine(),
+    );
     #[cfg(not(feature = "connectivity"))]
-    let ext = crate::session_ext::PicoSessionExt::new(dial_whatami, &zid, policy);
+    let ext = crate::session_ext::PicoSessionExt::new(dial_whatami, &zid, policy, limits);
     // A refused session clock fails the open as the tokio engine's does, the engine's session
     // closed first.
     #[cfg(any(feature = "advanced", feature = "clock-source"))]
@@ -1553,7 +1587,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         let _ = handle.drive.start_read_task();
     }
     *zs = z_owned_session_t {
-        _val: Box::into_raw(Box::new(handle)) as *mut c_void,
+        _val: request.slot.fill(handle) as *mut c_void,
         _cnt: core::ptr::null_mut(),
     };
     #[cfg(feature = "admin-space")]
@@ -1647,7 +1681,7 @@ pub unsafe extern "C" fn z_session_drop(obj: *mut z_moved_session_t) {
         if !val.is_null() {
             // The engine's session closes as it drops (idempotent), through the
             // drop glue its own crate holds: the drive is the engine's trait object.
-            drop(Box::from_raw(val as *mut PicoSessionHandle));
+            crate::object_slot::release(val as *mut PicoSessionHandle);
             (*obj)._this = z_owned_session_t::null_value();
         }
         Z_OK
@@ -2507,48 +2541,293 @@ pub extern "C" fn z_reliability_default() -> core::ffi::c_int {
 #[cfg(test)]
 mod build_numbers {
     use super::*;
+    use wz_session_core::caps;
+    use wz_session_core::limit_binding::{OutsideLimitDomain, Quota};
 
-    /// The batch sizes the opens advertise and the cooperative engine's read wait are the
-    /// numbers the build states, held in `const` items: each is named here in a `const`
-    /// context, which compiles only for a constant, so its range check is evaluated when the
-    /// build is made and an open cannot reach it.
-    #[test]
-    fn the_numbers_an_open_reads_are_the_builds_and_checked_when_it_is_made() {
-        const UNICAST: u16 = PICO_UNICAST_BATCH;
-        assert_eq!(
-            usize::from(UNICAST),
-            wz_session_core::caps::PICO_UNICAST_BATCH_BYTES
-        );
-        #[cfg(feature = "multicast-transport")]
-        {
-            const GROUP: u16 = PICO_MULTICAST_BATCH;
-            assert_eq!(
-                usize::from(GROUP),
-                wz_session_core::caps::PICO_MULTICAST_BATCH_BYTES
-            );
-            assert_eq!(pico_group(SnResolution::Bits32).batch_size, GROUP);
-        }
-        #[cfg(not(feature = "engine-tokio"))]
-        {
-            const WAIT: u32 = PICO_SOCKET_TIMEOUT;
-            assert_eq!(WAIT as usize, wz_session_core::caps::PICO_SOCKET_TIMEOUT_MS);
+    /// A value other than `build`, inside the range every limit of these tests declares.
+    fn another(build: usize) -> usize {
+        if build > 1 {
+            build - 1
+        } else {
+            build + 1
         }
     }
 
+    /// `check` run on the build's snapshot with one limit stated through `select`. A build that
+    /// keeps the build's value alone refuses the statement itself and leaves the snapshot as it
+    /// was, and that refusal is what such a build is checked for.
+    fn stated(
+        select: impl FnOnce(&mut SessionLimits) -> Result<(), OutsideLimitDomain>,
+        check: impl FnOnce(SessionLimits),
+    ) {
+        let mut limits = SessionLimits::defaults();
+        match select(&mut limits) {
+            Ok(()) => check(limits),
+            Err(refused) => {
+                assert!(
+                    refused.domain.is_singleton(),
+                    "{} refused {}",
+                    refused.limit,
+                    refused.value
+                );
+                assert_eq!(limits, SessionLimits::defaults());
+            }
+        }
+    }
+
+    /// `PICO_UNICAST_BATCH_BYTES` with nothing stated: an open advertises the build's batch size
+    /// in its InitSyn, as it did while it read the build's constant.
+    #[test]
+    fn pico_unicast_batch_bytes_with_nothing_stated_holds_the_builds_value() {
+        assert_eq!(
+            usize::from(pico_unicast_batch(&SessionLimits::defaults())),
+            caps::PICO_UNICAST_BATCH_BYTES
+        );
+    }
+
+    /// `PICO_UNICAST_BATCH_BYTES` stated: the batch size an open advertises is the stated one.
+    #[test]
+    fn pico_unicast_batch_bytes_stated_is_the_batch_an_open_advertises() {
+        let value = another(caps::PICO_UNICAST_BATCH_BYTES);
+        stated(
+            |limits| limits.select_pico_unicast_batch_bytes(value),
+            |limits| {
+                assert_eq!(usize::from(pico_unicast_batch(&limits)), value);
+            },
+        );
+    }
+
+    /// `PICO_MULTICAST_BATCH_BYTES` with nothing stated: a group's Join states the build's batch
+    /// size.
+    #[cfg(feature = "multicast-transport")]
+    #[test]
+    fn pico_multicast_batch_bytes_with_nothing_stated_holds_the_builds_value() {
+        let profile = pico_group(SnResolution::Bits32, &SessionLimits::defaults());
+        assert_eq!(
+            usize::from(profile.batch_size),
+            caps::PICO_MULTICAST_BATCH_BYTES
+        );
+    }
+
+    /// `PICO_MULTICAST_BATCH_BYTES` stated: a group's Join states the stated batch size, and the
+    /// unicast batch keeps the build's.
+    #[cfg(feature = "multicast-transport")]
+    #[test]
+    fn pico_multicast_batch_bytes_stated_is_the_batch_the_join_states() {
+        let value = another(caps::PICO_MULTICAST_BATCH_BYTES);
+        stated(
+            |limits| limits.select_pico_multicast_batch_bytes(value),
+            |limits| {
+                assert_eq!(
+                    usize::from(pico_group(SnResolution::Bits32, &limits).batch_size),
+                    value
+                );
+                assert_eq!(
+                    usize::from(pico_unicast_batch(&limits)),
+                    caps::PICO_UNICAST_BATCH_BYTES
+                );
+            },
+        );
+    }
+
+    /// `PICO_LEASE_MS` with nothing stated: an open advertises the build's lease, and so does a
+    /// group's Join.
+    #[test]
+    fn pico_lease_ms_with_nothing_stated_holds_the_builds_value() {
+        let limits = SessionLimits::defaults();
+        assert_eq!(pico_lease_ms(&limits), caps::PICO_LEASE_MS as u64);
+        #[cfg(feature = "multicast-transport")]
+        assert_eq!(
+            pico_group(SnResolution::Bits32, &limits).lease_ms,
+            caps::PICO_LEASE_MS as u64
+        );
+    }
+
+    /// `PICO_LEASE_MS` stated: the lease an open advertises, and a group's Join states, is the
+    /// stated one.
+    #[test]
+    fn pico_lease_ms_stated_is_the_lease_an_open_advertises() {
+        let value = another(caps::PICO_LEASE_MS);
+        stated(
+            |limits| limits.select_pico_lease_ms(value),
+            |limits| {
+                assert_eq!(pico_lease_ms(&limits), value as u64);
+                #[cfg(feature = "multicast-transport")]
+                assert_eq!(
+                    pico_group(SnResolution::Bits32, &limits).lease_ms,
+                    value as u64
+                );
+            },
+        );
+    }
+
+    /// `PICO_SOCKET_TIMEOUT_MS` with nothing stated: a read step of the cooperative engine waits
+    /// the build's time on its links.
+    #[cfg(not(feature = "engine-tokio"))]
+    #[test]
+    fn pico_socket_timeout_ms_with_nothing_stated_holds_the_builds_value() {
+        assert_eq!(
+            pico_socket_timeout(&SessionLimits::defaults()) as usize,
+            caps::PICO_SOCKET_TIMEOUT_MS
+        );
+    }
+
+    /// `PICO_SOCKET_TIMEOUT_MS` stated: a read step of the cooperative engine waits the stated
+    /// time.
+    #[cfg(not(feature = "engine-tokio"))]
+    #[test]
+    fn pico_socket_timeout_ms_stated_is_the_wait_of_a_read_step() {
+        let value = another(caps::PICO_SOCKET_TIMEOUT_MS);
+        stated(
+            |limits| limits.select_pico_socket_timeout_ms(value),
+            |limits| {
+                assert_eq!(pico_socket_timeout(&limits) as usize, value);
+            },
+        );
+    }
+
+    /// `PICO_CONNECT_TIMEOUT_MS` with nothing stated: each open of an endpoint, and the
+    /// handshake the session machine holds, is bounded by the build's time.
+    #[test]
+    fn pico_connect_timeout_ms_with_nothing_stated_holds_the_builds_value() {
+        let limits = SessionLimits::defaults();
+        let build = caps::PICO_CONNECT_TIMEOUT_MS as u64;
+        #[cfg(feature = "engine-tokio")]
+        assert_eq!(
+            pico_dial_phase(&limits).open_timeout,
+            core::time::Duration::from_millis(build)
+        );
+        #[cfg(not(feature = "engine-tokio"))]
+        assert_eq!(pico_session_timeouts(&limits).opening_ms, build);
+    }
+
+    /// `PICO_CONNECT_TIMEOUT_MS` stated: each open of an endpoint, and its handshake, is bounded
+    /// by the stated time.
+    #[test]
+    fn pico_connect_timeout_ms_stated_is_the_bound_of_an_open() {
+        let value = another(caps::PICO_CONNECT_TIMEOUT_MS);
+        stated(
+            |limits| limits.select_pico_connect_timeout_ms(value),
+            |limits| {
+                #[cfg(feature = "engine-tokio")]
+                assert_eq!(
+                    pico_dial_phase(&limits).open_timeout,
+                    core::time::Duration::from_millis(value as u64)
+                );
+                #[cfg(not(feature = "engine-tokio"))]
+                assert_eq!(pico_session_timeouts(&limits).opening_ms, value as u64);
+            },
+        );
+    }
+
+    /// `PICO_ACCEPT_TIMEOUT_MS` with nothing stated: a listening session gives an inbound link the
+    /// build's time to complete its handshake.
+    #[test]
+    fn pico_accept_timeout_ms_with_nothing_stated_holds_the_builds_value() {
+        let limits = SessionLimits::defaults();
+        let build = caps::PICO_ACCEPT_TIMEOUT_MS as u64;
+        #[cfg(feature = "engine-tokio")]
+        assert_eq!(pico_accept(&limits).timeout_ms, build);
+        #[cfg(not(feature = "engine-tokio"))]
+        assert_eq!(
+            pico_session_timeouts(&limits).accepting_inactivity_ms,
+            build
+        );
+    }
+
+    /// `PICO_ACCEPT_TIMEOUT_MS` stated: a listening session gives an inbound link the stated time,
+    /// and the count of pending accepts stays upstream's.
+    #[test]
+    fn pico_accept_timeout_ms_stated_is_the_time_an_inbound_link_is_given() {
+        let value = another(caps::PICO_ACCEPT_TIMEOUT_MS);
+        stated(
+            |limits| limits.select_pico_accept_timeout_ms(value),
+            |limits| {
+                #[cfg(feature = "engine-tokio")]
+                {
+                    let accept = pico_accept(&limits);
+                    assert_eq!(accept.timeout_ms, value as u64);
+                    assert_eq!(
+                        accept.pending,
+                        wz_capi_core::runtime::config::ACCEPT_PENDING
+                    );
+                }
+                #[cfg(not(feature = "engine-tokio"))]
+                assert_eq!(
+                    pico_session_timeouts(&limits).accepting_inactivity_ms,
+                    value as u64
+                );
+            },
+        );
+    }
+
+    /// `PICO_KEEPALIVES_PER_LEASE` with nothing stated: the keepalive divides the adopted lease
+    /// by the build's factor.
+    #[test]
+    fn pico_keepalives_per_lease_with_nothing_stated_holds_the_builds_value() {
+        let keep_alive = pico_keep_alive(&SessionLimits::defaults());
+        assert_eq!(
+            keep_alive.per_lease as usize,
+            caps::PICO_KEEPALIVES_PER_LEASE
+        );
+    }
+
+    /// `PICO_KEEPALIVES_PER_LEASE` stated: the keepalive divides the adopted lease by the stated
+    /// factor.
+    #[test]
+    fn pico_keepalives_per_lease_stated_is_the_factor_the_keepalive_divides_by() {
+        let value = another(caps::PICO_KEEPALIVES_PER_LEASE);
+        stated(
+            |limits| limits.select_pico_keepalives_per_lease(value),
+            |limits| {
+                let (own, adopted) = (10_000u64, 6_000u64);
+                assert_eq!(
+                    pico_keep_alive(&limits).interval_ms(own, adopted),
+                    adopted / value as u64
+                );
+            },
+        );
+    }
+
+    /// `PICO_FRAG_MAX_BYTES` with nothing stated: an open's links rejoin a chain up to the build's
+    /// size, as they did while they read the build's constant.
+    #[test]
+    fn pico_frag_max_bytes_with_nothing_stated_admits_what_the_build_admitted() {
+        assert_eq!(
+            pico_link_rx(&SessionLimits::defaults()).max_message_size,
+            caps::PICO_FRAG_MAX_BYTES
+        );
+    }
+
+    /// `PICO_FRAG_MAX_BYTES` stated as two: an open's links rejoin a chain of two bytes and end
+    /// one of three, which the session's reassembly holds to the bound it is handed; the rest of
+    /// what the links are told is unchanged.
+    #[test]
+    fn pico_frag_max_bytes_stated_as_two_refuses_the_next() {
+        stated(
+            |limits| limits.select_pico_frag_max_bytes(Quota::at_most(2)),
+            |limits| {
+                let link_rx = pico_link_rx(&limits);
+                assert_eq!(link_rx.max_message_size, 2);
+                assert_eq!(
+                    LinkRxConf {
+                        max_message_size: caps::PICO_FRAG_MAX_BYTES,
+                        ..link_rx
+                    },
+                    pico_link_rx(&SessionLimits::defaults())
+                );
+            },
+        );
+    }
+
     /// The tokio engine's open holds each open of an endpoint, and its handshake, to the bound the
-    /// build states for pico's `Z_TRANSPORT_CONNECT_TIMEOUT`, as the cooperative engine's open
+    /// snapshot states for pico's `Z_TRANSPORT_CONNECT_TIMEOUT`, as the cooperative engine's open
     /// does, and not to zenoh's `transport/unicast/open_timeout`; it re-opens a lost session every
     /// second, and is otherwise the one attempt every open here makes.
     #[cfg(feature = "engine-tokio")]
     #[test]
-    fn the_tokio_open_is_held_to_the_connect_timeout_the_build_states() {
-        let phase = pico_dial_phase();
-        assert_eq!(
-            phase.open_timeout,
-            core::time::Duration::from_millis(
-                wz_session_core::caps::PICO_CONNECT_TIMEOUT_MS as u64
-            )
-        );
+    fn the_tokio_open_is_held_to_the_connect_timeout_the_snapshot_states() {
+        let phase = pico_dial_phase(&SessionLimits::defaults());
         assert_eq!(
             phase.redial,
             Some(wz_capi_core::runtime::retry_period::RetryPolicy::constant(
@@ -2565,23 +2844,24 @@ mod build_numbers {
         );
     }
 
-    /// The keepalive of this ABI divides the ADOPTED lease by the factor the build states for
+    /// The keepalive of this ABI divides the ADOPTED lease by the factor the snapshot states for
     /// pico's `Z_TRANSPORT_LEASE_EXPIRE_FACTOR`, as pico's task does, and not the session's own
     /// lease as zenoh does.
     #[test]
-    fn the_keepalive_divides_the_adopted_lease_by_the_builds_factor() {
-        let factor = wz_session_core::caps::PICO_KEEPALIVES_PER_LEASE as u64;
+    fn the_keepalive_divides_the_adopted_lease_by_the_snapshots_factor() {
+        let keep_alive = pico_keep_alive(&SessionLimits::defaults());
+        let factor = u64::from(keep_alive.per_lease);
         let (own, adopted) = (10_000u64, 6_000u64);
         assert_eq!(
-            PICO_KEEP_ALIVE.interval_ms(own, adopted),
+            keep_alive.interval_ms(own, adopted),
             adopted / factor,
             "pico divides the lease it adopted at the handshake"
         );
         // Control: the zenoh interface divides the other lease, so the number above is the
         // basis this ABI states and not one every interface shares.
         assert_ne!(
-            KeepAliveConf::zenoh(factor as u32).interval_ms(own, adopted),
-            PICO_KEEP_ALIVE.interval_ms(own, adopted)
+            KeepAliveConf::zenoh(keep_alive.per_lease).interval_ms(own, adopted),
+            keep_alive.interval_ms(own, adopted)
         );
     }
 
@@ -2600,13 +2880,15 @@ mod build_numbers {
             // The build allows one width: there is no other snapshot to hand.
             return;
         }
-        let (queue, width) = pico_link_policy(&handed);
+        let limits = SessionLimits::defaults();
+        let (queue, width) = pico_link_policy(&handed, &limits);
         assert_eq!(width, other);
-        assert_eq!(queue, TxQueueConf::pico_of_policy(&handed));
+        assert_eq!(queue, TxQueueConf::pico_of_snapshot(&handed, &limits));
         // Control: the open that resolves its own snapshot is given the build's width.
         let config = ConfigState::default();
+        let resolved = resolve_policy(&config.policies).unwrap();
         assert_eq!(
-            pico_link_policy(&resolve_policy(&config.policies).unwrap().policy).1,
+            pico_link_policy(&resolved.policy, &resolved.limits.session).1,
             build.sn_resolution()
         );
     }
@@ -2618,14 +2900,15 @@ mod build_numbers {
     #[test]
     fn the_join_states_the_width_the_sn_resolution_policy_states() {
         use wz_session_core::policy::SnResolution;
-        let default = pico_group(SnResolution::Bits32);
+        let limits = SessionLimits::defaults();
+        let default = pico_group(SnResolution::Bits32, &limits);
         for (width, code) in [
             (SnResolution::Bits32, 0x02),
             (SnResolution::Bits8, 0x00),
             (SnResolution::Bits16, 0x01),
             (SnResolution::Bits64, 0x03),
         ] {
-            let profile = pico_group(width);
+            let profile = pico_group(width, &limits);
             assert_eq!(profile.seq_num_res, code, "{}", width.id());
             assert_eq!(profile.req_id_res, default.req_id_res);
             assert_eq!(profile.batch_size, default.batch_size);
@@ -2640,12 +2923,18 @@ mod build_numbers {
     #[test]
     fn the_pico_group_states_no_member_cap() {
         use wz_session_core::policy::SnResolution;
+        let limits = SessionLimits::defaults();
         assert_eq!(
-            pico_group(SessionPolicy::defaults().sn_resolution()).max_sessions,
+            pico_group(SessionPolicy::defaults().sn_resolution(), &limits).max_sessions,
             None
         );
         for width in [SnResolution::Bits8, SnResolution::Bits64] {
-            assert_eq!(pico_group(width).max_sessions, None, "{}", width.id());
+            assert_eq!(
+                pico_group(width, &limits).max_sessions,
+                None,
+                "{}",
+                width.id()
+            );
         }
     }
 }

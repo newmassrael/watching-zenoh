@@ -356,6 +356,14 @@ const _: () = assert!(
 // in the session's declare stage whole or refused. A match-all interest matches every row of the
 // table it asks about, so where capacity is enforced a stage shorter than the longest chain that
 // table can make refuses that interest every time it is asked.
+//
+// The assertions hold the build's capacities, and so the build's own quotas, which are those
+// capacities. A later stage may state a `MAX_PENDING_DECLARES` quota under them (or any quota on
+// a growable build, where nothing is asserted). It is neither refused nor raised: a snapshot holds
+// each limit to its own domain, and raising one would replace a value a stage stated. What the
+// stated quota does is the refusal it states: a chain longer than the quota is refused whole and
+// counted, never cut short, as a full fixed stage refuses it (`SubInterestRefusals::chains`, the
+// observers' `token_interest_chains_refused`).
 #[cfg(feature = "declare-subscriber")]
 const _: () = assert!(
     !crate::bounded::ENFORCES_CAPACITY || MAX_PENDING_DECLARES > MAX_SUBSCRIPTIONS,
@@ -472,7 +480,7 @@ pub const TX_EXPIRY_CLOSE_AFTER: usize = generated::TX_EXPIRY_CLOSE_AFTER;
 pub const HANDSHAKE_COOKIE_BYTES: usize = generated::HANDSHAKE_COOKIE_BYTES;
 
 /// How many batches each priority's outbound queue holds for the pico C ABI
-/// ([`crate::session_init_params::TxQueueConf::pico_of_policy`]), in upstream's `1..=16` for a
+/// ([`crate::session_init_params::TxQueueConf::pico_of_snapshot`]), in upstream's `1..=16` for a
 /// queue size (a value outside it counts as the nearest end). zenoh-pico has no bounded queue, a
 /// put writes on the calling thread; the queue of the tokio runtime is written by a second
 /// thread, and a lane of two batches holds four frames of 1 KiB, so sender and writer wait for

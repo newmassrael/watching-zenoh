@@ -82,13 +82,15 @@ fn init_params(whatami: WhatAmI, zid: &[u8], lease_ms: u64) -> SessionInitParams
         keep_alive: crate::session_init_params::KeepAliveConf::default(),
         initial_sn: 0x1234,
         cookie: cookie_bytes(&[0x01, 0x02, 0x03]),
-        tx_queue: crate::session_init_params::TxQueueConf::of_policy(
+        tx_queue: crate::session_init_params::TxQueueConf::of_snapshot(
             &crate::policy::SessionPolicy::defaults(),
+            &crate::limits::SessionLimits::BUILD,
         ),
         link_rx: crate::session_init_params::LinkRxConf::default(),
         cookie_signing_key: crate::signing_key::SigningKey::new(vec![0xAB; 32])
             .expect("32-byte test key"),
         policy: crate::policy::SessionPolicy::defaults(),
+        limits: crate::limits::SessionLimits::BUILD,
     }
 }
 

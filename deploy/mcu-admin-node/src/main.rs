@@ -62,6 +62,7 @@ use wz::session_lwip::LwipLinks;
 use wz_eth_mac_lan9118::{Lan9118, MPS2_BASE};
 use wz_mcu_clock::SystickClock;
 use wz_session_core::entropy::{EntropySource, EntropyUnavailable};
+use wz_session_core::limits::SessionLimits;
 use wz_session_core::policy::SessionPolicy;
 #[cfg(not(feature = "fixed-memory"))]
 use wz_session_core::session_init_params::SessionInitParams;
@@ -154,10 +155,18 @@ fn resolve_policy() -> SessionPolicy {
     SessionPolicy::defaults()
 }
 
+/// The limits of every session this image opens, which the node's observer and the peer tables
+/// of each session's slot are held to. Resolved where the policy is, from the build's values
+/// until the image reads a run-time document; a limit the image does not widen takes no byte.
+fn resolve_limits() -> SessionLimits {
+    SessionLimits::defaults()
+}
+
 /// zenoh 1.x's handshake shape, with a batch the MCU's 1536-byte receive
-/// slot holds whole, for a session whose machines read `policy`.
+/// slot holds whole, for a session whose machines read `policy` and whose tables are held
+/// to `limits`.
 #[cfg(not(feature = "fixed-memory"))]
-fn params(signing_key: &[u8], policy: &SessionPolicy) -> SessionInitParams {
+fn params(signing_key: &[u8], policy: &SessionPolicy, limits: &SessionLimits) -> SessionInitParams {
     SessionInitParams {
         whatami: WhatAmI::Peer,
         zid: ZID.into(),
@@ -168,9 +177,10 @@ fn params(signing_key: &[u8], policy: &SessionPolicy) -> SessionInitParams {
         keep_alive: wz_session_core::session_init_params::KeepAliveConf::PICO,
         initial_sn: 0,
         cookie: Vec::new(),
-        tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(policy),
+        tx_queue: wz_session_core::session_init_params::TxQueueConf::of_snapshot(policy, limits),
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         policy: *policy,
+        limits: *limits,
         cookie_signing_key: SigningKey::new(signing_key.to_vec()).expect("32-byte key"),
     }
 }
@@ -240,6 +250,7 @@ fn run_heap() -> ! {
     let _ = ClockSeededXorshift::seeded().try_fill_bytes(&mut key);
 
     let policy = resolve_policy();
+    let limits = resolve_limits();
     let runtime = CoopRuntime::new(SystickClockRef);
     let local = CoopLocalSet::new(&runtime);
     let zid_hex = zid_to_zenoh_hex(&ZID);
@@ -257,11 +268,11 @@ fn run_heap() -> ! {
         },
         LISTEN_PORT,
         SessionTimeouts::from_build(),
-        move || params(&key, &policy),
+        move || params(&key, &policy, &limits),
         move |sink| {
             new_session_actions(
                 sink,
-                params(&key, &policy),
+                params(&key, &policy, &limits),
                 CoopTime::new(&accept_runtime),
                 ClockSeededXorshift::seeded(),
             )

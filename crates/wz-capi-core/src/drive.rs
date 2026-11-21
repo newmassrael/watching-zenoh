@@ -38,6 +38,7 @@ use wz_runtime_tokio::accept_loop::{
     accept_loop_offering_spawned, accept_loop_offering_spawned_local, DialIntentReceiver,
     DialIntentSender, FaceExecutor, SpawnedDrive,
 };
+use wz_runtime_tokio::limits::SessionLimits;
 use wz_runtime_tokio::node_clock::{NodeHlc, TimestampingEnabled};
 use wz_runtime_tokio::policy::{SessionPolicy, SnResolution};
 use wz_runtime_tokio::retry_period::RetryPolicy;
@@ -79,7 +80,7 @@ use crate::scouting_responder::{bind_responder, Advertised, LateLocators, Respon
 /// for the role the session dials as.
 ///
 /// The two halves are the runtime's own types and the loop that runs
-/// them is [`drive_connect_phase`], the runtime's transcription of upstream's
+/// them is [`drive_connect_phase_on`], the runtime's transcription of upstream's
 /// `connect_peers` fork (`zenoh/src/net/runtime/orchestrator.rs` @
 /// `async fn connect_peers_single_link(&self, peers: &[EndPoints]) -> ZResult<()> {`).
 /// Nothing here re-derives the arithmetic, so a C open cannot drift from the
@@ -144,7 +145,8 @@ impl DialPhase {
 /// schedule that paces it ([`RetryPolicy`]), already resolved for the role the session plays.
 ///
 /// R3089 -- the bind twin of [`DialPhase`], and run by the runtime's own transcription of
-/// upstream's `bind_listeners` ([`drive_bind_phase`]), so a C open cannot drift from the node's.
+/// upstream's `bind_listeners`
+/// ([`drive_bind_phase`](wz_runtime_tokio::startup_phase::drive_bind_phase)), so a C open cannot drift from the node's.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ListenPhase {
     /// `listen/timeout_ms` + `listen/exit_on_failure`.
@@ -1422,6 +1424,9 @@ pub struct LinkConf {
     /// The policies of the session the links belong to: see [`OpenStance::session_policy`].
     /// Carried here because `init_params` is where every role hands them to a session.
     pub policy: SessionPolicy,
+    /// The session limits of the session the links belong to: see
+    /// [`OpenStance::session_limits`]. Carried here for the reason [`Self::policy`] is.
+    pub limits: SessionLimits,
 }
 
 /// The batch size a session advertises when its config states none: zenoh's own default
@@ -1459,6 +1464,7 @@ pub(crate) fn init_params(
         tx_queue: link_conf.tx.queue,
         link_rx: link_conf.rx,
         policy: link_conf.policy,
+        limits: link_conf.limits,
         cookie_signing_key: SigningKey::from_entropy(&mut OsEntropy)?,
     })
 }
@@ -3846,6 +3852,9 @@ struct GroupSetup {
     /// The session's snapshot, which each group's parameters carry to its drive loop and its
     /// sockets are opened under, as the unicast links are.
     policy: SessionPolicy,
+    /// The session's snapshot of its limits, which each group's parameters carry beside
+    /// [`Self::policy`].
+    limits: SessionLimits,
     /// Where a group that cannot be joined reports the open as failed, before the role
     /// reports anything.
     opened: OpenReport,
@@ -3880,9 +3889,9 @@ enum GroupLinkSpec {
     #[cfg(all(feature = "raweth-transport", target_os = "linux"))]
     RawEth(wz_runtime_tokio::raweth_link::RethLocator),
     /// A group the program's transport joins, named by its endpoint: the program's stack holds
-    /// the socket.
+    /// the socket, and the group's link is held to the session's queue bound.
     #[cfg(feature = "app-transport")]
-    App(Arc<wz_runtime_tokio::app_link::AppTransport>),
+    App(wz_runtime_tokio::app_link::SessionTransport),
 }
 
 #[cfg(feature = "multicast-transport")]
@@ -3893,7 +3902,8 @@ impl ResolvedGroup {
     /// which fails the open.
     ///
     /// `policy` is the session's snapshot: the group's parameters carry it, and its sockets are
-    /// opened under its link policies.
+    /// opened under its link policies. `limits` is the session's snapshot of its limits, which
+    /// the parameters carry beside it.
     fn resolve(
         join: &GroupJoin,
         zid: SessionZid,
@@ -3901,6 +3911,7 @@ impl ResolvedGroup {
         tx_queue: TxQueueConf,
         link_rx: LinkRxConf,
         policy: &SessionPolicy,
+        limits: &SessionLimits,
     ) -> Option<Self> {
         let link = Self::link_of(&join.endpoint, policy)?;
         Some(Self {
@@ -3911,7 +3922,7 @@ impl ResolvedGroup {
             // The port's conversion, which the cooperative engine's groups take too.
             params: join
                 .profile
-                .params(whatami, zid, tx_queue, link_rx, *policy),
+                .params(whatami, zid, tx_queue, link_rx, *policy, *limits),
         })
     }
 
@@ -3967,6 +3978,7 @@ async fn serve_beside_groups(setup: GroupSetup, role: impl Future<Output = ()>) 
         tx_queue,
         link_rx,
         policy,
+        limits,
         opened,
         app,
     } = setup;
@@ -3976,7 +3988,7 @@ async fn serve_beside_groups(setup: GroupSetup, role: impl Future<Output = ()>) 
     }
     let Some(groups) = joins
         .iter()
-        .map(|join| ResolvedGroup::resolve(join, zid, whatami, tx_queue, link_rx, &policy))
+        .map(|join| ResolvedGroup::resolve(join, zid, whatami, tx_queue, link_rx, &policy, &limits))
         .collect::<Option<Vec<_>>>()
     else {
         // An endpoint that names no group this build can join: pico's listen of it finds no
@@ -3991,7 +4003,7 @@ async fn serve_beside_groups(setup: GroupSetup, role: impl Future<Output = ()>) 
         Some(transport) => groups
             .into_iter()
             .map(|group| ResolvedGroup {
-                link: GroupLinkSpec::App(Arc::clone(transport)),
+                link: GroupLinkSpec::App(transport.clone()),
                 ..group
             })
             .collect(),
@@ -4075,7 +4087,9 @@ async fn serve_beside_groups(setup: GroupSetup, role: impl Future<Output = ()>) 
                                             (transport.clone(), locator.clone());
                                         async move {
                                             wz_runtime_tokio::app_link::join_group(
-                                                &transport, &locator,
+                                                &transport.transport,
+                                                &locator,
+                                                transport.queue,
                                             )
                                             .await
                                         }
@@ -4252,8 +4266,8 @@ pub struct OpenStance {
     /// The transmit model of the ABI calling this. The two ABIs this core serves
     /// transmit differently: a zenoh-c session puts onto zenoh's bounded queue
     /// and drops a droppable message after `wait_before_drop`
-    /// ([`TxQueueConf::of_policy`]), while pico writes on the caller's thread and
-    /// never drops for a full socket ([`TxQueueConf::pico_of_policy`]); either is
+    /// ([`TxQueueConf::of_snapshot`]), while pico writes on the caller's thread and
+    /// never drops for a full socket ([`TxQueueConf::pico_of_snapshot`]); either is
     /// built under [`Self::session_policy`].
     pub tx_queue: TxQueueConf,
     /// The batch size the session advertises at its handshake, dialled and accepted alike; see
@@ -4391,12 +4405,16 @@ pub struct OpenStance {
     /// default, which applies nothing.
     pub session_defaults: crate::session_defaults::SessionDefaults,
     /// The snapshot of the policies the session runs under, resolved once by the open that
-    /// created it (`open_plan::resolve_policy` for a plan, the ABI's own open otherwise). Every
+    /// created it (`open_plan::resolve_snapshot` for a plan, the ABI's own open otherwise). Every
     /// session, link and face the open makes is handed it; none reads the build.
     pub session_policy: SessionPolicy,
     /// The snapshot of the session limits, resolved by the same open and handed to the same
     /// sessions as [`Self::session_policy`]: their tables read their bounds here.
     pub session_limits: wz_session_core::limits::SessionLimits,
+    /// The snapshot of the node's runtime limits, resolved by the same open: the node a router
+    /// or forwarding peer open runs reads its limits here, the directory of the locators it dials
+    /// from among them.
+    pub runtime_limits: wz_session_core::limits::RuntimeLimits,
     /// The transport the program supplies, which carries every link the session dials or listens
     /// on in place of the system's sockets; `None` opens on the sockets the locators name. A
     /// locator the transport does not carry fails the open as a scheme this build does not know.
@@ -4405,10 +4423,11 @@ pub struct OpenStance {
 }
 
 /// The transport the program supplies, as the dial and listen roles carry it: the stance's
-/// [`OpenStance::app_transport`] in a build with the `app-transport` feature, and nothing in one
-/// without, so a session of that build holds no field for it.
+/// [`OpenStance::app_transport`] as the session opens its links over it, held to the session's
+/// limits, in a build with the `app-transport` feature, and nothing in one without, so a session
+/// of that build holds no field for it.
 #[cfg(feature = "app-transport")]
-type AppSlot = Option<Arc<wz_runtime_tokio::app_link::AppTransport>>;
+type AppSlot = Option<wz_runtime_tokio::app_link::SessionTransport>;
 /// See the alias of the same name: a build without the feature carries no transport.
 #[cfg(not(feature = "app-transport"))]
 #[derive(Clone, Debug)]
@@ -4434,7 +4453,7 @@ const NO_APP: AppSlot = AppSlot;
 #[cfg(feature = "app-transport")]
 fn dial_over(cfg: DialConfig, app: &AppSlot) -> DialConfig {
     match app {
-        Some(app) => cfg.with_app_transport(Arc::clone(app)),
+        Some(app) => cfg.with_app_transport(app.clone()),
         None => cfg,
     }
 }
@@ -4449,7 +4468,7 @@ fn dial_over(cfg: DialConfig, _app: &AppSlot) -> DialConfig {
 #[cfg(all(feature = "peer", feature = "app-transport"))]
 fn accept_over(cfg: AcceptConfig, app: &AppSlot) -> AcceptConfig {
     match app {
-        Some(app) => cfg.with_app_transport(Arc::clone(app)),
+        Some(app) => cfg.with_app_transport(app.clone()),
         None => cfg,
     }
 }
@@ -4628,12 +4647,15 @@ pub fn open_blocking(
         session_defaults,
         session_policy,
         session_limits,
+        runtime_limits,
         #[cfg(feature = "app-transport")]
         app_transport,
         ..
     } = stance;
     #[cfg(feature = "app-transport")]
-    let app: AppSlot = app_transport;
+    let app: AppSlot = app_transport.map(|transport| {
+        wz_runtime_tokio::app_link::SessionTransport::new(transport, &session_limits)
+    });
     #[cfg(not(feature = "app-transport"))]
     let app = AppSlot;
     // The prefix as the decorator takes it. The plan validated the text, so a text that does not
@@ -4694,6 +4716,7 @@ pub fn open_blocking(
         rx: link_rx,
         accept,
         policy: session_policy,
+        limits: session_limits,
     };
     // The session's clock, which every face, its drive loop and its lease read: the program's time
     // base when the defaults name one, held by the session's state for as long as it runs, and the
@@ -4730,19 +4753,28 @@ pub fn open_blocking(
     // session plays, and handed to the registry, which installs a clone on its plane and on every
     // face session it makes. `None` inside when the config does not enable timestamping for this
     // role, which is zenoh's own answer (`enabled().get(whatami)`) and the shipped one for a peer
-    // or client. Its `clock-quality-stamping` policy is the snapshot the open resolved.
-    let node_hlc = NodeHlc::for_node_by(&wire_zid, dial_whatami, timestamping, &session_policy);
+    // or client. Its `clock-quality-stamping` policy is the snapshot the open resolved, and its bound
+    // is the node's runtime limits the same open resolved.
+    let node_hlc = NodeHlc::for_node_by(
+        &wire_zid,
+        dial_whatami,
+        timestamping,
+        &session_policy,
+        &runtime_limits,
+    );
     // A bound `UHLC_MAX_DELTA_MS` states that the clock does not honour leaves the node without
     // the clock it was to have; the open fails with the reason rather than run a session that
     // stamps nothing, as upstream's node does not start on such a value.
     refuse_a_refused_clock(&node_hlc)?;
     // The key ids every node shares and the form of each face, from the endpoints in the order
     // the faces are numbered by. A form the session cannot honour (`shared` with no dictionary,
-    // an endpoint stated twice) fails the open before any thread or socket exists.
+    // an endpoint stated twice), or a dictionary past the session's limit, fails the open before
+    // any thread or socket exists.
     #[cfg(feature = "shared-key-ids")]
     let key_ids = match crate::faces::KeyIdPlan::new(
         &session_defaults.key_ids,
         session_policy.key_wire_form(),
+        &session_limits,
         &connect,
         &listen,
     ) {
@@ -4867,6 +4899,7 @@ pub fn open_blocking(
                 tx_queue: link_conf.tx.queue,
                 link_rx: link_conf.rx,
                 policy: link_conf.policy,
+                limits: link_conf.limits,
                 opened: tx.clone(),
                 app: app.clone(),
             };
@@ -4983,7 +5016,10 @@ mod tests {
     fn the_parameters_a_session_is_given_carry_both_halves_of_its_link() {
         let stated = LinkConf {
             tx: LinkTx {
-                queue: TxQueueConf::pico_of_policy(&SessionPolicy::defaults()),
+                queue: TxQueueConf::pico_of_snapshot(
+                    &SessionPolicy::defaults(),
+                    &wz_session_core::limits::SessionLimits::BUILD,
+                ),
                 batch_size: 2048,
                 lease_ms: 4000,
                 keep_alive: KeepAliveConf::ZENOH,
@@ -4996,6 +5032,7 @@ mod tests {
             },
             accept: AcceptBounds::default(),
             policy: SessionPolicy::defaults(),
+            limits: SessionLimits::BUILD,
         };
         let params = init_params(WhatAmI::Client, [0xC1; 4].into(), stated).expect("entropy");
         assert_eq!(params.seq_num_res, SnResolution::Bits8.wire_code());
@@ -5026,7 +5063,10 @@ mod tests {
         }
         let link_conf = LinkConf {
             tx: LinkTx {
-                queue: TxQueueConf::of_policy(&handed),
+                queue: TxQueueConf::of_snapshot(
+                    &handed,
+                    &wz_session_core::limits::SessionLimits::BUILD,
+                ),
                 batch_size: DEFAULT_BATCH_SIZE,
                 lease_ms: DEFAULT_LEASE_MS,
                 keep_alive: KeepAliveConf::default(),
@@ -5035,11 +5075,50 @@ mod tests {
             rx: LinkRxConf::default(),
             accept: AcceptBounds::default(),
             policy: handed,
+            limits: SessionLimits::BUILD,
         };
         let params = init_params(WhatAmI::Peer, [0xC2; 4].into(), link_conf).expect("entropy");
         assert_eq!(params.policy, handed);
         assert_ne!(
             params.policy, build,
+            "the handed snapshot is not the build's"
+        );
+    }
+
+    /// The parameters every role mints carry the session limits its links were handed, not the
+    /// build's.
+    #[test]
+    fn the_parameters_a_session_is_given_carry_the_limits_of_its_links() {
+        use wz_session_core::limit_binding::{LimitSpec, Quota};
+        use wz_session_core::limits::MaxSubscriptions;
+        let mut handed = SessionLimits::BUILD;
+        if handed.select_max_subscriptions(Quota::at_most(2)).is_err() {
+            // The build allows one value: there is no other snapshot to hand.
+            assert!(MaxSubscriptions::DOMAIN.is_singleton());
+            return;
+        }
+        let link_conf = LinkConf {
+            tx: LinkTx {
+                queue: TxQueueConf::of_snapshot(
+                    &SessionPolicy::defaults(),
+                    &wz_session_core::limits::SessionLimits::BUILD,
+                ),
+                batch_size: DEFAULT_BATCH_SIZE,
+                lease_ms: DEFAULT_LEASE_MS,
+                keep_alive: KeepAliveConf::default(),
+                sn_resolution: SnResolution::default(),
+            },
+            rx: LinkRxConf::default(),
+            accept: AcceptBounds::default(),
+            policy: SessionPolicy::defaults(),
+            limits: handed,
+        };
+        let params = init_params(WhatAmI::Peer, [0xC3; 4].into(), link_conf).expect("entropy");
+        assert_eq!(params.limits, handed);
+        assert_eq!(params.limits.max_subscriptions(), Quota::at_most(2));
+        assert_ne!(
+            params.limits,
+            SessionLimits::BUILD,
             "the handed snapshot is not the build's"
         );
     }
@@ -5325,7 +5404,10 @@ mod tests {
                     [0xC1; 4].into(),
                     LinkConf {
                         tx: LinkTx {
-                            queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
+                            queue: TxQueueConf::of_snapshot(
+                                &SessionPolicy::defaults(),
+                                &wz_session_core::limits::SessionLimits::BUILD,
+                            ),
                             batch_size: 1024,
                             lease_ms: DEFAULT_LEASE_MS,
                             keep_alive: KeepAliveConf::default(),
@@ -5334,6 +5416,7 @@ mod tests {
                         rx: LinkRxConf::default(),
                         accept: AcceptBounds::default(),
                         policy: SessionPolicy::defaults(),
+                        limits: SessionLimits::BUILD,
                     },
                 )
                 .expect("entropy"),
@@ -5464,7 +5547,10 @@ mod tests {
                     [0xC1; 4].into(),
                     LinkConf {
                         tx: LinkTx {
-                            queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
+                            queue: TxQueueConf::of_snapshot(
+                                &SessionPolicy::defaults(),
+                                &wz_session_core::limits::SessionLimits::BUILD,
+                            ),
                             batch_size: 1024,
                             lease_ms: DEFAULT_LEASE_MS,
                             keep_alive: KeepAliveConf::default(),
@@ -5473,6 +5559,7 @@ mod tests {
                         rx: LinkRxConf::default(),
                         accept: AcceptBounds::default(),
                         policy: SessionPolicy::defaults(),
+                        limits: SessionLimits::BUILD,
                     },
                 )
                 .expect("entropy"),
@@ -5546,7 +5633,10 @@ mod tests {
                     [0xC1; 4].into(),
                     LinkConf {
                         tx: LinkTx {
-                            queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
+                            queue: TxQueueConf::of_snapshot(
+                                &SessionPolicy::defaults(),
+                                &wz_session_core::limits::SessionLimits::BUILD,
+                            ),
                             batch_size: 1024,
                             lease_ms: DEFAULT_LEASE_MS,
                             keep_alive: KeepAliveConf::default(),
@@ -5555,6 +5645,7 @@ mod tests {
                         rx: LinkRxConf::default(),
                         accept: AcceptBounds::default(),
                         policy: SessionPolicy::defaults(),
+                        limits: SessionLimits::BUILD,
                     },
                 )
                 .expect("entropy"),
@@ -6121,7 +6212,10 @@ mod tests {
     #[cfg(feature = "peer")]
     fn peer_stance() -> OpenStance {
         OpenStance {
-            tx_queue: TxQueueConf::pico_of_policy(&SessionPolicy::defaults()),
+            tx_queue: TxQueueConf::pico_of_snapshot(
+                &SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD,
+            ),
             batch_size: DEFAULT_BATCH_SIZE,
             lease_ms: DEFAULT_LEASE_MS,
             keep_alive: KeepAliveConf::PICO,
@@ -6148,6 +6242,7 @@ mod tests {
             session_defaults: Default::default(),
             session_policy: SessionPolicy::defaults(),
             session_limits: wz_session_core::limits::SessionLimits::defaults(),
+            runtime_limits: wz_session_core::limits::RuntimeLimits::defaults(),
             #[cfg(feature = "app-transport")]
             app_transport: None,
         }
@@ -6642,9 +6737,10 @@ mod multicast_face_tests {
                 &join,
                 wz_session_core::multicast_params::zid_vec(&[0x0A]),
                 WhatAmI::Peer,
-                TxQueueConf::of_policy(&policy),
+                TxQueueConf::of_snapshot(&policy, &wz_session_core::limits::SessionLimits::BUILD),
                 LinkRxConf::default(),
                 &policy,
+                &wz_session_core::limits::SessionLimits::BUILD,
             )
             .expect("a udp multicast endpoint names a group");
             assert_eq!(group.params.policy, policy, "{value:?}");
@@ -6657,6 +6753,60 @@ mod multicast_face_tests {
             assert_eq!(opts.loopback, value);
             assert_eq!(opts.link_requires_iface, requires);
         }
+    }
+
+    /// `TX_NO_PROGRESS_WINDOW_US` stated in the session's limits reaches its group: the group's
+    /// parameters carry the snapshot of limits the open resolved, its queue holds the stated
+    /// window, and a machine of the group that makes its queue from the parameters, as the emit
+    /// of a group does, makes the same one.
+    #[test]
+    fn a_group_is_resolved_under_the_sessions_stated_window() {
+        use wz_runtime_tokio::policy::TxNoProgressDeadline;
+        let mut policy = SessionPolicy::defaults();
+        if policy
+            .select_tx_no_progress_deadline(TxNoProgressDeadline::On)
+            .is_err()
+        {
+            // The build keeps the policy off: no queue holds a window.
+            return;
+        }
+        let mut limits = wz_session_core::limits::SessionLimits::defaults();
+        if limits.select_tx_no_progress_window_us(2_000).is_err() {
+            // A build of one value refuses another: there is no other snapshot to hand.
+            return;
+        }
+        let join = GroupJoin {
+            endpoint: ENDPOINT.to_owned(),
+            profile: GroupProfile {
+                lease_ms: 10_000,
+                join_interval_ms: 100,
+                max_sessions: None,
+                seq_num_res: 0x02,
+                req_id_res: 0x02,
+                batch_size: 2_048,
+                is_qos: false,
+                compression: false,
+                join_rule: wz_runtime_tokio::multicast_glue::GroupJoinRule::Zenoh,
+            },
+            is_shm: false,
+            declarations: GroupDeclarations::None,
+        };
+        let group = ResolvedGroup::resolve(
+            &join,
+            wz_session_core::multicast_params::zid_vec(&[0x0A]),
+            WhatAmI::Peer,
+            TxQueueConf::of_snapshot(&policy, &limits),
+            LinkRxConf::default(),
+            &policy,
+            &limits,
+        )
+        .expect("a udp multicast endpoint names a group");
+        assert_eq!(group.params.limits, limits);
+        assert_eq!(group.params.tx_queue.no_progress_us, Some(2_000));
+        assert_eq!(
+            TxQueueConf::of_snapshot(&group.params.policy, &group.params.limits),
+            group.params.tx_queue
+        );
     }
 
     /// A group's session is made with the node's snapshot and not the build's: each value of
@@ -6698,11 +6848,15 @@ mod multicast_face_tests {
             batch_size: 2_048,
             is_qos: false,
             compression: false,
-            tx_queue: super::TxQueueConf::of_policy(&super::SessionPolicy::defaults()),
+            tx_queue: super::TxQueueConf::of_snapshot(
+                &super::SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD,
+            ),
             link_rx: Default::default(),
             join_rule: wz_runtime_tokio::multicast_glue::GroupJoinRule::Zenoh,
             max_sessions: None,
             policy: wz_runtime_tokio::policy::SessionPolicy::defaults(),
+            limits: wz_session_core::limits::SessionLimits::BUILD,
         }
     }
 

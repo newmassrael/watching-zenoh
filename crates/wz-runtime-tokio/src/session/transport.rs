@@ -678,8 +678,10 @@ impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Multicast {
                     // `wait_before_close`, a droppable one within its
                     // `wait_before_drop`, and one that finds none is a
                     // congestion drop the group counts. Upstream's multicast
-                    // put answers `Ok` for both, and for a group with no link.
-                    let _ = payload.tx.push(MulticastTxItem::Push {
+                    // put answers `Ok` for both, and for a group with no link;
+                    // what the queue profile dropped behind a held conduit is
+                    // told (`group_sent`).
+                    group_sent(payload.tx.push(MulticastTxItem::Push {
                         push,
                         reliable,
                         // R311y232 (ACTIVATION) — the app's chosen QoS band, staged onto
@@ -692,31 +694,27 @@ impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Multicast {
                         // WHOLE-SESSION finding: a direct `Session::publish_qos` over a
                         // QoS multicast group previously egressed at DEFAULT).
                         priority,
-                    });
-                    Ok(())
+                    }))
                 }
                 // A query to the group: each peer answers it with its replies and one
                 // `ResponseFinal`. Pushed on the caller's thread as a Push is; its band rides in
                 // its own `ext_qos`, so `priority` is not read.
                 #[cfg(feature = "codec-request")]
                 NetworkMessage::Request(request) => {
-                    let _ = payload.tx.push(MulticastTxItem::Request { request });
-                    Ok(())
+                    group_sent(payload.tx.push(MulticastTxItem::Request { request }))
                 }
                 // Open-debt item 913 — a declaration the session announces on the group (a
                 // subscriber, as zenoh announces one on each group it holds).
                 #[cfg(feature = "codec-declare")]
                 NetworkMessage::Declare(declare) => {
-                    let _ = payload.tx.push(MulticastTxItem::Declare { declare });
-                    Ok(())
+                    group_sent(payload.tx.push(MulticastTxItem::Declare { declare }))
                 }
                 // Open-debt item 913 — an interest the session asks the group (zenoh-pico asks
                 // one at open and one per write filter when its multicast declarations are on).
                 NetworkMessage::Interest(interest) => {
-                    let _ = payload.tx.push(MulticastTxItem::Interest {
+                    group_sent(payload.tx.push(MulticastTxItem::Interest {
                         interest: Box::new(interest),
-                    });
-                    Ok(())
+                    }))
                 }
                 _ => {
                     let _ = priority;
@@ -736,5 +734,47 @@ impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Multicast {
             let _ = (payload, msg, reliable, priority);
             Err(SendWireError::FeatureDisabled)
         }
+    }
+}
+
+/// What a message of the session put on its group answers its sender, from what the group's
+/// producer did with it (`MulticastTxProducer::push`): a message queued is sent, and so are a
+/// congestion drop and a message put while the group has no link or past its namespace, as
+/// upstream's multicast send answers `Ok` for each. A droppable message the queue profile dropped
+/// behind a conduit another sender held is told, as on a link (`SendWireError::HeldConduit`), so
+/// the pico profile's put on a group fails as its put on a link does.
+#[cfg(all(feature = "transport-multicast", feature = "codec-push"))]
+fn group_sent(
+    pushed: Result<
+        wz_session_core::tx_deadline::PushOutcome,
+        crate::multicast_pipeline::MulticastTxRefused,
+    >,
+) -> Result<(), SendWireError> {
+    use wz_session_core::tx_deadline::PushOutcome;
+    match pushed {
+        Ok(PushOutcome::Held) => Err(SendWireError::HeldConduit),
+        Ok(PushOutcome::Pushed | PushOutcome::Congested) | Err(_) => Ok(()),
+    }
+}
+
+#[cfg(all(test, feature = "transport-multicast", feature = "codec-push"))]
+mod group_sent_tests {
+    use super::group_sent;
+    use crate::multicast_pipeline::MulticastTxRefused;
+    use wz_session_core::send_wire_error::SendWireError;
+    use wz_session_core::tx_deadline::PushOutcome;
+
+    /// A message the queue profile dropped behind a held conduit is told to its sender, as on a
+    /// link; one queued, one dropped for want of room and one put while the group has no link are
+    /// answered as sent, as upstream's multicast send answers each.
+    #[test]
+    fn only_a_message_dropped_behind_a_held_conduit_is_told() {
+        assert_eq!(
+            group_sent(Ok(PushOutcome::Held)),
+            Err(SendWireError::HeldConduit)
+        );
+        assert_eq!(group_sent(Ok(PushOutcome::Pushed)), Ok(()));
+        assert_eq!(group_sent(Ok(PushOutcome::Congested)), Ok(()));
+        assert_eq!(group_sent(Err(MulticastTxRefused::Unlinked)), Ok(()));
     }
 }

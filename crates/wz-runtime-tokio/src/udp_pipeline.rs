@@ -762,14 +762,16 @@ async fn udp_demux_task(socket: Arc<UdpSocket>, new_face_tx: mpsc::UnboundedSend
 /// concurrent send/recv on clones is sound). `peer` is the unicast target
 /// every outbound datagram is addressed to. The handle is awaited during
 /// teardown so a tail frame the FSM enqueued during its final transition
-/// still reaches the peer before the socket drops. `policy` is the snapshot of
-/// the session the link is wired for, read by the writer task.
+/// still reaches the peer before the socket drops. `policy` and `limits` are the
+/// snapshots of the session the link is wired for, which the writer's pacing is
+/// made of.
 pub fn wire_udp_socket(
     socket: UdpSocket,
     peer: SocketAddr,
     policy: &wz_session_core::policy::SessionPolicy,
+    limits: &wz_session_core::limits::SessionLimits,
 ) -> (UdpReadDriver, Arc<UdpWriteDriver>, WriterHandle) {
-    let policy = *policy;
+    let pacing = unicast_writer_pacing::<crate::datagram_pacing::OfBuild>(policy, limits);
     let socket = Arc::new(socket);
     // R311y453 — the §5.16 subject, off the socket this face owns.
     let subject = ip_link_subject(LinkKind::Udp, socket.local_addr().ok());
@@ -784,11 +786,11 @@ pub fn wire_udp_socket(
     let inbound = UdpReadDriver::from_socket(socket.clone(), watch);
     let (tx, rx) = crate::writer_queue::datagram_outbound_channel();
     #[cfg(unix)]
-    if let Some(sink) = udp_inline_write(&socket, peer, &policy) {
+    if let Some(sink) = udp_inline_write(&socket, peer, &pacing) {
         tx.set_inline_write(sink);
     }
     let writer_handle = WriterHandle::spawn(rx, |queue| {
-        udp_writer_task(socket, peer, queue, fault, policy)
+        udp_writer_task_paced(socket, peer, queue, fault, pacing)
     });
     let outbound = Arc::new(UdpWriteDriver::new(tx, subject, endpoints));
     (inbound, outbound, writer_handle)
@@ -807,8 +809,9 @@ pub fn wire_udp_demuxed(
     inputs: UdpAcceptedInputs,
     peer: SocketAddr,
     policy: &wz_session_core::policy::SessionPolicy,
+    limits: &wz_session_core::limits::SessionLimits,
 ) -> (UdpReadDriver, Arc<UdpWriteDriver>, WriterHandle) {
-    let policy = *policy;
+    let pacing = unicast_writer_pacing::<crate::datagram_pacing::OfBuild>(policy, limits);
     let UdpAcceptedInputs {
         inbound_rx,
         send_socket,
@@ -827,11 +830,11 @@ pub fn wire_udp_demuxed(
     let inbound = UdpReadDriver::from_demux(inbound_rx, peer, pump, watch);
     let (tx, rx) = crate::writer_queue::datagram_outbound_channel();
     #[cfg(unix)]
-    if let Some(sink) = udp_inline_write(&send_socket, peer, &policy) {
+    if let Some(sink) = udp_inline_write(&send_socket, peer, &pacing) {
         tx.set_inline_write(sink);
     }
     let writer_handle = WriterHandle::spawn(rx, |queue| {
-        udp_writer_task(send_socket, peer, queue, fault, policy)
+        udp_writer_task_paced(send_socket, peer, queue, fault, pacing)
     });
     let outbound = Arc::new(UdpWriteDriver::new(tx, subject, endpoints));
     (inbound, outbound, writer_handle)
@@ -1361,17 +1364,31 @@ impl BoxedLinkDriver for UdpWriteDriver {
 /// read driver reports it as the link's loss ([`DatagramWriteFault`]), where the
 /// task's own exit used to be heard by nobody.
 ///
-/// `policy` is the snapshot of the session the link is wired for: its
-/// `datagram-fragment-pacing` decides whether the writer paces its fragments.
-pub async fn udp_writer_task(
+/// `policy` and `limits` are the snapshots of the session the link is wired for:
+/// its `datagram-fragment-pacing` decides whether the writer paces its fragments,
+/// and its `DATAGRAM_FRAGMENT_BURST` and `DATAGRAM_FRAGMENT_GAP_US` how. The
+/// pacing is made before the task is, so the task holds neither snapshot.
+pub fn udp_writer_task(
     socket: Arc<UdpSocket>,
     peer: SocketAddr,
     queue: OutboundQueue,
     fault: DatagramWriteFault,
-    policy: wz_session_core::policy::SessionPolicy,
-) {
-    use crate::datagram_pacing::{OfBuild, Pacing};
-    udp_writer_task_paced(socket, peer, queue, fault, OfBuild::of_policy(&policy)).await;
+    policy: &wz_session_core::policy::SessionPolicy,
+    limits: &wz_session_core::limits::SessionLimits,
+) -> impl core::future::Future<Output = ()> + Send + 'static {
+    let pacing = unicast_writer_pacing::<crate::datagram_pacing::OfBuild>(policy, limits);
+    udp_writer_task_paced(socket, peer, queue, fault, pacing)
+}
+
+/// The pacing of a unicast UDP link's writer: `P`'s, for the `datagram-fragment-pacing` value of
+/// `policy` and the burst and gap of `limits`, the snapshots of the session the link is wired
+/// for. [`OfBuild`](crate::datagram_pacing::OfBuild) is the writer's in production; a test names
+/// the pacing it observes.
+fn unicast_writer_pacing<P: crate::datagram_pacing::Pacing>(
+    policy: &wz_session_core::policy::SessionPolicy,
+    limits: &wz_session_core::limits::SessionLimits,
+) -> P {
+    P::of_snapshot(policy, limits)
 }
 
 /// A duplicate of a UDP link's socket that a sender writes its own datagram through, from its
@@ -1409,10 +1426,9 @@ impl crate::writer_queue::InlineWrite for UdpInlineSocket {
 fn udp_inline_write(
     socket: &UdpSocket,
     peer: SocketAddr,
-    policy: &wz_session_core::policy::SessionPolicy,
+    pacing: &impl crate::datagram_pacing::Pacing,
 ) -> Option<Arc<dyn crate::writer_queue::InlineWrite>> {
-    use crate::datagram_pacing::{OfBuild, Pacing};
-    if OfBuild::of_policy(policy).paces() {
+    if pacing.paces() {
         return None;
     }
     udp_inline_socket(socket, peer)
@@ -1502,6 +1518,90 @@ mod tests {
     /// The snapshot the links of these tests are wired for.
     const POLICY: wz_session_core::policy::SessionPolicy =
         wz_session_core::policy::SessionPolicy::defaults();
+
+    /// The limits the links of these tests are wired for.
+    const LIMITS: wz_session_core::limits::SessionLimits =
+        wz_session_core::limits::SessionLimits::BUILD;
+
+    /// The waits a unicast writer made for a session under `limits` asks before one fragment past
+    /// `burst`, written back to back.
+    fn unicast_waits(
+        limits: &wz_session_core::limits::SessionLimits,
+        burst: usize,
+    ) -> Vec<Option<std::time::Duration>> {
+        let mut pacing: crate::datagram_pacing::Paced = unicast_writer_pacing(&POLICY, limits);
+        crate::datagram_pacing::fragment_waits(&mut pacing, burst + 1)
+    }
+
+    /// `DATAGRAM_FRAGMENT_BURST` with nothing stated: a unicast writer lets the build's burst
+    /// through back to back and holds the next fragment the gap.
+    #[tokio::test(start_paused = true)]
+    async fn datagram_fragment_burst_with_nothing_stated_paces_a_unicast_writer_by_the_build() {
+        let burst = wz_session_core::caps::DATAGRAM_FRAGMENT_BURST;
+        assert_eq!(
+            unicast_waits(&LIMITS, burst),
+            crate::datagram_pacing::burst_then_gap(
+                burst,
+                wz_session_core::caps::DATAGRAM_FRAGMENT_GAP_US
+            )
+        );
+    }
+
+    /// `DATAGRAM_FRAGMENT_BURST` stated as two: a unicast writer of that session holds the third
+    /// fragment the gap.
+    #[tokio::test(start_paused = true)]
+    async fn datagram_fragment_burst_stated_is_the_burst_a_unicast_writer_uses() {
+        use wz_session_core::limit_binding::LimitSpec;
+        let mut limits = LIMITS;
+        let stated = limits.select_datagram_fragment_burst(2);
+        if wz_session_core::limits::DatagramFragmentBurst::DOMAIN.is_singleton() {
+            // A build that keeps the build's value alone refuses the statement itself.
+            assert!(stated.is_err());
+            return;
+        }
+        stated.expect("two is inside the domain");
+        assert_eq!(
+            unicast_waits(&limits, 2),
+            crate::datagram_pacing::burst_then_gap(
+                2,
+                wz_session_core::caps::DATAGRAM_FRAGMENT_GAP_US
+            )
+        );
+    }
+
+    /// `DATAGRAM_FRAGMENT_GAP_US` with nothing stated: the fragment past the burst of a unicast
+    /// writer waits the build's gap.
+    #[tokio::test(start_paused = true)]
+    async fn datagram_fragment_gap_us_with_nothing_stated_paces_a_unicast_writer_by_the_build() {
+        let burst = wz_session_core::caps::DATAGRAM_FRAGMENT_BURST;
+        let waits = unicast_waits(&LIMITS, burst);
+        assert_eq!(
+            waits.last().copied().flatten(),
+            Some(std::time::Duration::from_micros(
+                wz_session_core::caps::DATAGRAM_FRAGMENT_GAP_US as u64
+            ))
+        );
+    }
+
+    /// `DATAGRAM_FRAGMENT_GAP_US` stated as 500: the fragment past the burst of a unicast writer
+    /// of that session waits 500 microseconds.
+    #[tokio::test(start_paused = true)]
+    async fn datagram_fragment_gap_us_stated_is_the_gap_a_unicast_writer_uses() {
+        use wz_session_core::limit_binding::LimitSpec;
+        let mut limits = LIMITS;
+        let stated = limits.select_datagram_fragment_gap_us(500);
+        if wz_session_core::limits::DatagramFragmentGapUs::DOMAIN.is_singleton() {
+            // A build that keeps the build's value alone refuses the statement itself.
+            assert!(stated.is_err());
+            return;
+        }
+        stated.expect("500 is inside the domain");
+        let burst = wz_session_core::caps::DATAGRAM_FRAGMENT_BURST;
+        assert_eq!(
+            unicast_waits(&limits, burst),
+            crate::datagram_pacing::burst_then_gap(burst, 500)
+        );
+    }
 
     /// A fragment's datagram, by its header.
     const FRAGMENT: [u8; 2] = [0x46, 0];
@@ -1709,8 +1809,8 @@ mod tests {
         let a_addr = a.local_addr().expect("a addr");
         let b_addr = b.local_addr().expect("b addr");
 
-        let (_a_in, a_out, a_writer) = wire_udp_socket(a, b_addr, &POLICY);
-        let (mut b_in, _b_out, _b_writer) = wire_udp_socket(b, a_addr, &POLICY);
+        let (_a_in, a_out, a_writer) = wire_udp_socket(a, b_addr, &POLICY, &LIMITS);
+        let (mut b_in, _b_out, _b_writer) = wire_udp_socket(b, a_addr, &POLICY, &LIMITS);
 
         assert_eq!(
             a_out.send_blocking(b"hello-datagram", Reliability::BestEffort),
@@ -2006,7 +2106,7 @@ mod tests {
         let peer = UdpSocket::bind("127.0.0.1:0").await.expect("bind peer");
         let peer_addr = peer.local_addr().expect("peer addr");
         let socket = dial_udp(peer_addr, &LinkSocket::NONE).await.expect("dial");
-        let (mut read, write, _writer) = wire_udp_socket(socket, peer_addr, &POLICY);
+        let (mut read, write, _writer) = wire_udp_socket(socket, peer_addr, &POLICY, &LIMITS);
 
         an_unwritable_datagram(&write);
 
@@ -2077,7 +2177,7 @@ mod tests {
         let socket = dial_udp(closed_addr, &LinkSocket::NONE)
             .await
             .expect("dial");
-        let (mut read, write, _writer) = wire_udp_socket(socket, closed_addr, &POLICY);
+        let (mut read, write, _writer) = wire_udp_socket(socket, closed_addr, &POLICY, &LIMITS);
 
         assert_eq!(
             write.send_blocking(b"first", Reliability::BestEffort),
@@ -2115,7 +2215,7 @@ mod tests {
         let peer = UdpSocket::bind("127.0.0.1:0").await.expect("bind peer");
         let peer_addr = peer.local_addr().expect("peer addr");
         let socket = dial_udp(peer_addr, &LinkSocket::NONE).await.expect("dial");
-        let (mut read, write, writer) = wire_udp_socket(socket, peer_addr, &POLICY);
+        let (mut read, write, writer) = wire_udp_socket(socket, peer_addr, &POLICY, &LIMITS);
 
         an_unwritable_datagram(&write);
         // The writer takes the refusal and returns; nobody is receiving yet.
@@ -2151,8 +2251,12 @@ mod tests {
         let src = UdpSocket::bind("127.0.0.1:0").await.expect("bind src");
         src.send_to(b"hello", addr).await.expect("first datagram");
         let face = demux.recv_new_face().await.expect("face");
-        let (mut read, write, _writer) =
-            wire_udp_demuxed(demux.wire_inputs(face.inbound_rx), face.peer, &POLICY);
+        let (mut read, write, _writer) = wire_udp_demuxed(
+            demux.wire_inputs(face.inbound_rx),
+            face.peer,
+            &POLICY,
+            &LIMITS,
+        );
         // The datagram that opened the face is queued for it; take it so the
         // next event is the link's own.
         assert!(matches!(read.poll_event().await, LinkEvent::Rx(_)));
@@ -2188,10 +2292,18 @@ mod tests {
         let face1 = demux.recv_new_face().await.expect("face1");
         s2.send_to(b"two", addr).await.expect("s2 opens its face");
         let face2 = demux.recv_new_face().await.expect("face2");
-        let (mut read1, write1, _w1) =
-            wire_udp_demuxed(demux.wire_inputs(face1.inbound_rx), face1.peer, &POLICY);
-        let (mut read2, _write2, _w2) =
-            wire_udp_demuxed(demux.wire_inputs(face2.inbound_rx), face2.peer, &POLICY);
+        let (mut read1, write1, _w1) = wire_udp_demuxed(
+            demux.wire_inputs(face1.inbound_rx),
+            face1.peer,
+            &POLICY,
+            &LIMITS,
+        );
+        let (mut read2, _write2, _w2) = wire_udp_demuxed(
+            demux.wire_inputs(face2.inbound_rx),
+            face2.peer,
+            &POLICY,
+            &LIMITS,
+        );
         assert!(matches!(read1.poll_event().await, LinkEvent::Rx(_)));
         assert!(matches!(read2.poll_event().await, LinkEvent::Rx(_)));
 
@@ -2249,7 +2361,12 @@ mod ring_selection {
         let socket = dial_udp(peer_addr, &LinkSocket::NONE).await.expect("dial");
         let local = socket.local_addr().expect("local address");
         let policy = wz_session_core::policy::SessionPolicy::defaults();
-        let (read, _write, _writer) = wire_udp_socket(socket, peer_addr, &policy);
+        let (read, _write, _writer) = wire_udp_socket(
+            socket,
+            peer_addr,
+            &policy,
+            &wz_session_core::limits::SessionLimits::BUILD,
+        );
         let mut read = read.on_reactor(Arc::clone(&reactor));
 
         let first = [0x02u8, 0x00, b'x', b'y', b'z'];
@@ -2280,7 +2397,12 @@ mod ring_selection {
         let a_addr = a.local_addr().expect("a address");
         let b_addr = b.local_addr().expect("b address");
         let policy = wz_session_core::policy::SessionPolicy::defaults();
-        let (read, _write, _writer) = wire_udp_socket(a, b_addr, &policy);
+        let (read, _write, _writer) = wire_udp_socket(
+            a,
+            b_addr,
+            &policy,
+            &wz_session_core::limits::SessionLimits::BUILD,
+        );
         let mut read = read.on_reactor(reactor);
 
         b.send_to(b"hi", a_addr).await.expect("send");

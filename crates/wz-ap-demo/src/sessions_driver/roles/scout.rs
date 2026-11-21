@@ -18,14 +18,17 @@
 //!   interface: "eth0", ttl: 1, timeout_ms: 3000 }
 //! ```
 //!
-//! Lines: `started what=<list> group=<ip>:<port>`, then one
-//! `hello zid=<hex> whatami=<role> locators=<a;b>` per Hello (`none` when the
-//! node advertised no locator) and `done hellos=<n>` once the window ends.
+//! Lines: `started what=<list> group=<ip>:<port>` (`[<ipv6>]:<port>` for an IPv6
+//! group), then one `hello zid=<hex> whatami=<role> locators=<a;b>` per Hello
+//! (`none` when the node advertised no locator) and `done hellos=<n>` once the
+//! window ends.
 
 #[cfg(feature = "scouting-active")]
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::SocketAddr;
 #[cfg(feature = "scouting-active")]
 use std::time::Duration;
+
+use wz::runtime_tokio::config::scout_multicast_socket;
 
 #[cfg(feature = "scouting-active")]
 use wz::runtime_tokio::runtime_impl::TokioTime;
@@ -54,13 +57,6 @@ pub(crate) const DEFAULT_TIMEOUT_MS: u64 = 3_000;
 /// looks for (zenoh's `scouting/multicast/autoconnect.client`).
 #[cfg(feature = "scouting-active")]
 const DEFAULT_WHAT: &str = "router,peer";
-
-/// The group a Scout goes to when the document names no `address`: zenoh's own
-/// default, the one the one-shot `--scout` and the responder join.
-#[cfg(feature = "scouting-active")]
-const DEFAULT_GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 224);
-#[cfg(feature = "scouting-active")]
-const DEFAULT_PORT: u16 = 7446;
 
 /// How often the window's new Hellos are looked for while it runs. It also paces
 /// the window's own deadline check, so it bounds how late `done` can be.
@@ -127,7 +123,7 @@ fn check(args: &Args) -> Vec<(&'static str, String)> {
         }
     }
     if let Some(address) = args.text("address") {
-        if address.parse::<std::net::SocketAddrV4>().is_err() {
+        if scout_multicast_socket(Some(address)).is_err() {
             out.push((
                 "address",
                 "must be an <ip>:<port> socket, e.g. 224.0.0.224:7446".to_string(),
@@ -167,12 +163,8 @@ fn play(_ctx: Ctx) -> Play {
 /// binds the group port too) would hand the Hello to whichever socket the kernel
 /// picks. The group socket only listens.
 #[cfg(feature = "scouting-active")]
-async fn bind_window(
-    group: Ipv4Addr,
-    port: u16,
-    socket: &ScoutSocketArgs,
-) -> Result<ScoutFanOut, String> {
-    let group_ip = IpAddr::V4(group);
+async fn bind_window(group: SocketAddr, socket: &ScoutSocketArgs) -> Result<ScoutFanOut, String> {
+    let (group_ip, port) = (group.ip(), group.port());
     let locals = if socket.interface.is_some() {
         Vec::new()
     } else {
@@ -233,17 +225,32 @@ async fn run(ctx: Ctx) {
             return;
         }
     };
+    // The address was read by the same reader when the document was checked (`check`), so a
+    // refusal here is a document that was not checked, and it is said rather than scouted past.
+    let address = match ctx
+        .args()
+        .text("address")
+        .map(|a| scout_multicast_socket(Some(a)))
+    {
+        None => None,
+        Some(Ok(group)) => Some(group),
+        Some(Err(text)) => {
+            ctx.say.line(&format!(
+                "refused address={text}: not an <ip>:<port> socket"
+            ));
+            return;
+        }
+    };
     let socket = ScoutSocketArgs {
-        address: ctx.args().text("address").map(str::to_string),
+        address,
         interface: ctx.args().text("interface").map(str::to_string),
         ttl: ctx.int("ttl").and_then(|n| u32::try_from(n).ok()),
     };
-    let (group, port) = socket.group_and_port(DEFAULT_GROUP, DEFAULT_PORT);
-    let mut driver = match bind_window(group, port, &socket).await {
+    let group = socket.socket();
+    let mut driver = match bind_window(group, &socket).await {
         Ok(driver) => driver,
         Err(why) => {
-            ctx.say
-                .line(&format!("refused group={group}:{port}: {why}"));
+            ctx.say.line(&format!("refused group={group}: {why}"));
             return;
         }
     };
@@ -256,10 +263,8 @@ async fn run(ctx: Ctx) {
     });
     let mut engine = new_scouting_engine(&actions);
     let clock = TokioTime::new();
-    ctx.say.line(&format!(
-        "started what={} group={group}:{port}",
-        what_list(mask)
-    ));
+    ctx.say
+        .line(&format!("started what={} group={group}", what_list(mask)));
     let window =
         drive_scouting_until_resolved(&mut driver, &actions, &mut engine, &clock, None, TICK_MS);
     tokio::pin!(window);
@@ -395,6 +400,32 @@ mod tests {
             refused(r#"{ role: "get", key: "d/q", what: "peer" }"#),
             vec!["sessions[0].driver[0].what: not a key of the `get` role"]
         );
+    }
+
+    /// The `address` key is read by the config reader's own reading of
+    /// `scouting/multicast/address`: a socket of either family is taken, and a zenoh-pico group
+    /// locator or an unbracketed IPv6 address is refused by key, as `--scout-addr` and a
+    /// session's `scouting` block refuse them.
+    #[test]
+    fn the_address_is_read_as_the_config_reader_reads_the_key() {
+        assert_eq!(
+            args_of(r#"{ role: "scout", address: "[ff05::231]:7511" }"#),
+            Args::of(&[
+                ("address", Value::Text("[ff05::231]:7511".into())),
+                ("timeout_ms", Value::Int(DEFAULT_TIMEOUT_MS)),
+            ])
+        );
+        for bad in ["udp/224.0.0.99:7000", "ff05::231:7511"] {
+            assert_eq!(
+                refused(&format!(r#"{{ role: "scout", address: "{bad}" }}"#)),
+                vec![
+                    "sessions[0].driver[0].address: must be an <ip>:<port> socket, e.g. \
+                      224.0.0.224:7446"
+                        .to_string()
+                ],
+                "{bad}"
+            );
+        }
     }
 
     /// The role is played exactly when the build has `scouting-active`; a build

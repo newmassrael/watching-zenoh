@@ -471,6 +471,7 @@ mod tests {
             WhatAmI::Peer,
             TimestampingEnabled::all(true),
             &wz_session_core::policy::SessionPolicy::defaults(),
+            &wz_session_core::limits::RuntimeLimits::BUILD,
         );
         Arc::new(
             SharedSession::new_with_node_clock(

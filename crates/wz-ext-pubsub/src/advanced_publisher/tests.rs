@@ -490,6 +490,7 @@ fn node_clock(trusted_only: bool) -> NodeHlc {
         wz_node_time::node_clock::TimestampingEnabled::all(true),
         wz_node_time::timestamp_source::SystemEpoch,
         &wz_session_core::policy::SessionPolicy::defaults(),
+        &wz_session_core::limits::RuntimeLimits::BUILD,
     )
     .with_trusted_only_stamping(trusted_only)
 }

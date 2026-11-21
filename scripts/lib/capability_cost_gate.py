@@ -50,23 +50,49 @@ A pico case is also measured against zenoh-pico built as the SAME build: the pin
 Release and shared, with every switch `deploy/wz-config.toml` answers set from that answer for
 the case's features (`wz_config.pico_reference`). The gate builds it on the host it builds wz on,
 reads back the header pico generated to find any switch pico built otherwise than asked, and
-prints the ratio. The ratio is printed, not graded: the text budget already holds wz's size, and
-what this adds is that a size claim against pico is a number this gate printed, with its
-toolchain beside it, and never one copied from elsewhere. Rounds 3393 to 3395 divided by a
+prints the ratio, so a size claim against pico is a number this gate printed, with its toolchain
+beside it, and never one copied from elsewhere. Rounds 3393 to 3395 divided by a
 libzenohpico of unrecorded build; round 3472 corrected them with a reference whose switches were
 chosen by hand, and three of them (interest, matching, the receive cache) were set otherwise
 than the declaration says wz has them.
 
+## The ceiling (docs/upstream-parity.md D9)
+
+The text budget holds a case to its OWN figure, and a budget moves with the growth it records, so
+a case can fall behind zenoh-pico a budget move at a time with no finding: the MCU kit's build
+cells did exactly that (D8). Each pico case is therefore also held to the ratio of its text to
+the reference's, by its row in `deploy/pico_host_ceiling.json`:
+
+- WHY A RATIO. Both libraries are built on the same host in the same run, so what a host moves
+  alike on both sides (its linker, its libc, its section layout) cancels, and the ratio of one
+  tree is comparable across hosts within `RATIO_TOLERANCE`, where its bytes are not (the notes
+  of `CASES` record hosted CI reading a tree thousands of bytes off a build host). The reference
+  is built with the host's C compiler, so a failing row names the toolchain it was read with
+  beside this run's.
+- WHY A RATCHET. A case that is no WIN is an open-debt item (D5), paid largest ratio first, and
+  meanwhile may not get worse than its committed reading: `ratio_at_most` is that reading's ratio
+  rounded up, and a reading over it by more than the tolerance fails. A reading under it by more
+  than the tolerance passes and prints the tighter row to commit, so the bound follows every
+  gain down. A case that reads WIN fails until its row is locked (the gate prints the row), and a
+  locked case reads WIN or fails (D1): no budget or row move clears a LOSS once won.
+- POPULATION. Every pico case has exactly one row and every row a pico case, so a case cannot
+  join outside the ceiling. A row with `ratio_at_most` null is unfilled: it fails `--check`
+  with the row this run reads, and `--measure` prints the rows of every case it builds.
+
 Usage:
     capability_cost_gate.py --check [ID...]    build every case (or the named ones), grade it
-    capability_cost_gate.py --measure [ID...]  build the same and print what was measured
+    capability_cost_gate.py --measure [ID...]  build the same and print what was measured,
+                                               with each pico case's ceiling row to commit
     capability_cost_gate.py --selftest     grade the grader on synthetic input
 """
 
 from __future__ import annotations
 
+import datetime
 import hashlib
 import io
+import json
+import math
 import os
 import pathlib
 import re
@@ -74,10 +100,12 @@ import subprocess
 import sys
 import tarfile
 from dataclasses import dataclass, field
+from fractions import Fraction
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import wz_config  # noqa: E402  (the one declaration, and its resolver)
 from artifact_root import artifact  # noqa: E402  (a sibling: where products are)
+from kit_compare import verdict_size  # noqa: E402  (decision D1's size verdict, one copy)
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 CRATES = ROOT / "crates"
@@ -382,7 +410,36 @@ CASES: tuple[Case, ...] = (
     # reading, the growth from `cd240d4b4` to `e924c1792` measured on that build host (+6,356
     # here, +26,144 on pico-default), and 3,500, to the hundred; the other thirteen cases sit
     # under theirs.
-    Case("pico-client","wz-capi-pico", "libwz_capi_pico.so", PICO_BASE, 1_995_500,
+    # 2026-11-21 -- step 4b rounds 2 to 4, landed together: the six peer-filled bounds, the
+    # semaphore's bound as the limit's value, the session's limits in its parameters, the
+    # document's `wz/limits` read with named refusals, and the three doors that open under it.
+    # +12,802 here, both trees (`b58b71c19` and the round's head) built on one machine. The
+    # symbol diff of pico-client-small (+6,580 of text symbols; .text +6,864, .data.rel.ro
+    # +4,904, .rodata +1,920, .eh_frame +1,512): the reader of `wz/limits` (`compose_limits`
+    # +1,453, `FoundLimit::find` +1,382) and the limit tables it finds a limit in (read-only
+    # data), the quotas asked on the observer's paths (`dispatch_event` +824) and the open that
+    # resolves the document's limits (`resolve_policy` +552, `open_blocking` +155, `z_open`
+    # +151). A limit read from the build has no selector in its entry, so its selection (about
+    # 180 bytes each, which the round's first build linked for all 59) is not linked. Chosen
+    # growth; each budget moves by its growth on that machine, to the hundred.
+    # 2026-11-22 -- the step 4b carry (the limits read from the session's snapshot by their
+    # readers, the runtime limits handed to the node clocks and the opens, the tokio node's connect
+    # list refused past its limit, the slot build's peer tables and a task's reply stage held to
+    # the session's limits), with the hosted reds of run 44895098050 (main `c72460b30`), which
+    # read pico-client-coop-admin-space 92 over its budget and capic-router-node 656 over. Both
+    # trees (main `abb1552d1` and the carry's head) built on one machine: pico +7,732 to +10,324,
+    # pico-peer +2,124, capic +3,561 to +20,566. The symbol diff of pico-client-small (+4,854 of
+    # text symbols; .text +5,088, .eh_frame +1,880, .rela.dyn +720) and of capic-router-node
+    # (+16,238; .text +16,512): the face drive loop's closures (`face_drive_loop_core`,
+    # `drive_face_shared`, the face set's poll), the UDP writer paced by the session's policy
+    # (`udp_writer_task_paced` +5,858 against `udp_writer_task` -6,400) and the tables built
+    # with the session's limits (`SubscriberTable`'s default +831, the liveliness table +861);
+    # the open's timeout is a named future (`timeout_on` -1,000 or so per caller). Chosen
+    # growth. Each budget that moves is the hosted reading of run 44895098050, that growth, and
+    # 3,500, to the hundred; the five capic cases that stay sit under theirs with the growth.
+    Case("pico-client","wz-capi-pico", "libwz_capi_pico.so", PICO_BASE, 2_020_500,
+         # 2026-11-22 -- the step 4b carry and run 44895098050's reading:
+         # 2,007,557 hosted, +9,344 on one machine.
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
                  CONNECTIVITY, MULTICAST, COOP_ENGINE),
          require=(SINGLE_THREADED, TOKIO_ENGINE),
@@ -406,7 +463,11 @@ CASES: tuple[Case, ...] = (
     # 2026-11-20 -- step 4b round 2b, as pico-client's note of this day says: +48 on pc2.
     # 2026-11-20 -- the hosted reading again, as pico-client's note of this day says: 1,623,992
     # at `cd240d4b4` and +5,072 since.
-    Case("pico-client-small", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE, 1_632_600,
+    # 2026-11-21 -- step 4b rounds 2 to 4, as pico-client's note of this day says: +14,846 on
+    # one machine.
+    Case("pico-client-small", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE, 1_655_600,
+         # 2026-11-22 -- the step 4b carry and run 44895098050's reading:
+         # 1,644,062 hosted, +8,004 on one machine.
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
                  CONNECTIVITY, MULTICAST),
          require=(SINGLE_THREADED,), profile="capi-small",
@@ -432,7 +493,11 @@ CASES: tuple[Case, ...] = (
     # 2026-11-20 -- step 4b round 2b, as pico-client's note of this day says: +48 on pc2.
     # 2026-11-20 -- the hosted reading again, as pico-client's note of this day says: 2,049,727
     # at `cd240d4b4` and +7,600 since.
-    Case("pico-client-udp", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",link-udp", 2_063_900,
+    # 2026-11-21 -- step 4b rounds 2 to 4, as pico-client's note of this day says: +12,976 on
+    # one machine.
+    Case("pico-client-udp", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",link-udp", 2_087_300,
+         # 2026-11-22 -- the step 4b carry and run 44895098050's reading:
+         # 2,075,981 hosted, +7,732 on one machine.
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST),
          require=(UDP, SINGLE_THREADED),
@@ -541,8 +606,17 @@ CASES: tuple[Case, ...] = (
     # 2026-11-20 -- step 4b round 2b, as pico-client's note of this day says: +32 on pc2, the
     # engine registry's quota words; the query cases add the refusal a get and a queryable
     # return. Each coop case below moves by its own reading.
+    # 2026-11-21 -- step 4b rounds 2 to 4, as pico-client's note of this day says: +15,600 on
+    # one machine.
     Case("pico-client-coop", "wz-capi-pico", "libwz_capi_pico.so", "engine-coop,link-udp",
-         1_024_800,
+         # 2026-11-21 -- the fifth PoC set: +8,732 on one host against main b58b71c19, by symbol:
+         # a droppable publish behind a held session is dropped per face and owed to the other faces
+         # (`fan_out` 1,667, `publish` +1,558, `send_handed` 735, `for_held` +507, the owed leg's
+         # clone 761), the ABI object pools' slot release and registry (about 800); the owed queue is
+         # taken whole rather than drained, which kept 3,700 of a drain's code out.
+         # 2026-11-22 -- the step 4b carry and run 44895098050's reading:
+         # 1,047,506 hosted, +9,488 on one machine.
+         1_060_500,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
@@ -603,10 +677,15 @@ CASES: tuple[Case, ...] = (
     # The cooperative client with the unstable API, which the reference pico of the test lanes is
     # built with (`-DZ_FEATURE_UNSTABLE_API`): entity global ids, source info, cancellation
     # tokens. Nothing of it is the engine's, so it costs the ABI's own code and no engine's.
+    # 2026-11-21 -- step 4b rounds 2 to 4, as pico-client's note of this day says: +15,672 on
+    # one machine.
     Case("pico-client-coop-unstable", "wz-capi-pico", "libwz_capi_pico.so",
          # 2026-11-20 -- step 4b round 2a, as pico-client-coop's note says: +512 on pc2.
          # 2026-11-20 -- step 4b round 2b, as pico-client-coop's note says: +32 on pc2.
-         "engine-coop,link-udp,unstable-api", 1_135_900,
+         # 2026-11-21 -- the fifth PoC set, as pico-client-coop's note says: +8,680 on one host.
+         # 2026-11-22 -- the step 4b carry and run 44895098050's reading:
+         # 1,159,413 hosted, +9,488 on one machine.
+         "engine-coop,link-udp,unstable-api", 1_172_500,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
@@ -620,10 +699,15 @@ CASES: tuple[Case, ...] = (
     # The cooperative client that delivers a put to its own subscribers
     # (`Z_FEATURE_LOCAL_SUBSCRIBER`), which the reference pico of the test lanes is not built with
     # but a program that publishes and subscribes on one session needs.
+    # 2026-11-21 -- step 4b rounds 2 to 4, as pico-client's note of this day says: +15,508 on
+    # one machine.
     Case("pico-client-coop-local", "wz-capi-pico", "libwz_capi_pico.so",
          # 2026-11-20 -- step 4b round 2a, as pico-client-coop's note says: +496 on pc2.
          # 2026-11-20 -- step 4b round 2b, as pico-client-coop's note says: +32 on pc2.
-         "engine-coop,link-udp,local-subscriber", 1_031_400,
+         # 2026-11-21 -- the fifth PoC set, as pico-client-coop's note says: +8,524 on one host.
+         # 2026-11-22 -- the step 4b carry and run 44895098050's reading:
+         # 1,054,174 hosted, +9,592 on one machine.
+         "engine-coop,link-udp,local-subscriber", 1_067_300,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
@@ -636,10 +720,15 @@ CASES: tuple[Case, ...] = (
     # The cooperative client with the connectivity plane (`Z_FEATURE_CONNECTIVITY`): the listing
     # of its transports and links and the listeners that hear them come and go. The engine reports
     # its faces whatever the build, so the plane's own cost is the ABI's.
+    # 2026-11-21 -- step 4b rounds 2 to 4, as pico-client's note of this day says: +15,580 on
+    # one machine.
     Case("pico-client-coop-connectivity", "wz-capi-pico", "libwz_capi_pico.so",
          # 2026-11-20 -- step 4b round 2a, as pico-client-coop's note says: +644 on pc2.
          # 2026-11-20 -- step 4b round 2b, as pico-client-coop's note says: +32 on pc2.
-         "engine-coop,link-udp,unstable-api,connectivity", 1_205_900,
+         # 2026-11-21 -- the fifth PoC set, as pico-client-coop's note says: +8,572 on one host.
+         # 2026-11-22 -- the step 4b carry and run 44895098050's reading:
+         # 1,229,265 hosted, +9,580 on one machine.
+         "engine-coop,link-udp,unstable-api,connectivity", 1_242_400,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, MULTICAST,
                  TOKIO_ENGINE, COOP_LISTEN),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE, CONNECTIVITY),
@@ -653,10 +742,15 @@ CASES: tuple[Case, ...] = (
     # The cooperative client with pico's admin space (`Z_FEATURE_ADMIN_SPACE`): the queryable that
     # answers `@/<zid>/pico/**`, which needs the answering end and, for the peers it lists, the
     # engine's faces. It lists no connectivity listener, so that plane's exports stay out.
+    # 2026-11-21 -- step 4b rounds 2 to 4, as pico-client's note of this day says: +15,921 on
+    # one machine.
     Case("pico-client-coop-admin-space", "wz-capi-pico", "libwz_capi_pico.so",
          # 2026-11-20 -- step 4b round 2a, as pico-client-coop's note says: +460 on pc2.
          # 2026-11-20 -- step 4b round 2b, as pico-client-coop's note says: +128 on pc2.
-         "engine-coop,link-udp,admin-space", 1_395_600,
+         # 2026-11-21 -- the fifth PoC set, as pico-client-coop's note says: +8,429 on one host.
+         # 2026-11-22 -- the step 4b carry and run 44895098050's reading:
+         # 1,420,192 hosted, +10,054 on one machine.
+         "engine-coop,link-udp,admin-space", 1_433_800,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
@@ -686,10 +780,15 @@ CASES: tuple[Case, ...] = (
     # 2026-11-19 -- step 3b (pico-client's note of this day): the targeted get folds on the
     # domain, so it is linked; +2,732 on pc2, by symbol `issue_get` +1,454 and
     # `wz_ext_get_to_peer` +314, the leg reply moved out of `fan_get` (+2,934 / -2,917).
+    # 2026-11-21 -- step 4b rounds 2 to 4, as pico-client's note of this day says: +16,320 on
+    # one machine.
     Case("pico-client-coop-query", "wz-capi-pico", "libwz_capi_pico.so",
          # 2026-11-20 -- step 4b round 2a, as pico-client-coop's note says: +492 on pc2.
          # 2026-11-20 -- step 4b round 2b, as pico-client-coop's note says: +136 on pc2.
-         "engine-coop,link-udp,query,queryable", 1_349_400,
+         # 2026-11-21 -- the fifth PoC set, as pico-client-coop's note says: +8,868 on one host.
+         # 2026-11-22 -- the step 4b carry and run 44895098050's reading:
+         # 1,373,248 hosted, +10,300 on one machine.
+         "engine-coop,link-udp,query,queryable", 1_387_100,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
@@ -709,10 +808,15 @@ CASES: tuple[Case, ...] = (
     # The same, with a get delivered to the session's own queryables
     # (`Z_FEATURE_LOCAL_QUERYABLE`), which a program that asks its own queryable needs.
     # 2026-11-19 -- step 3b, the targeted get of the previous case's note: +2,764 on pc2.
+    # 2026-11-21 -- step 4b rounds 2 to 4, as pico-client's note of this day says: +16,284 on
+    # one machine.
     Case("pico-client-coop-local-queryable", "wz-capi-pico", "libwz_capi_pico.so",
          # 2026-11-20 -- step 4b round 2a, as pico-client-coop's note says: +492 on pc2.
          # 2026-11-20 -- step 4b round 2b, as pico-client-coop's note says: +76 on pc2.
-         "engine-coop,link-udp,query,queryable,local-queryable", 1_366_100,
+         # 2026-11-21 -- the fifth PoC set, as pico-client-coop's note says: +8,304 on one host.
+         # 2026-11-22 -- the step 4b carry and run 44895098050's reading:
+         # 1,389,476 hosted, +10,324 on one machine.
+         "engine-coop,link-udp,query,queryable,local-queryable", 1_403_300,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
@@ -729,10 +833,15 @@ CASES: tuple[Case, ...] = (
               "8,724 over pc2's 1,230,040; the budget follows the hosted reading and 3,500"),
     # The cooperative client that scouts (`Z_FEATURE_SCOUTING`): `z_scout`, and the lookup `z_open`
     # runs when its config names no locator, over the engine's own window and no tokio engine.
+    # 2026-11-21 -- step 4b rounds 2 to 4, as pico-client's note of this day says: +15,560 on
+    # one machine.
     Case("pico-client-coop-scout", "wz-capi-pico", "libwz_capi_pico.so",
          # 2026-11-20 -- step 4b round 2a, as pico-client-coop's note says: +512 on pc2.
          # 2026-11-20 -- step 4b round 2b, as pico-client-coop's note says: +32 on pc2.
-         "engine-coop,link-udp,scout", 1_108_700,
+         # 2026-11-21 -- the fifth PoC set, as pico-client-coop's note says: +8,660 on one host.
+         # 2026-11-22 -- the step 4b carry and run 44895098050's reading:
+         # 1,131,749 hosted, +9,444 on one machine.
+         "engine-coop,link-udp,scout", 1_144_700,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE, COOP_SCOUT),
@@ -751,10 +860,15 @@ CASES: tuple[Case, ...] = (
     # The cooperative peer (`peer` with no tokio engine): the client of pico-client-coop that also
     # listens on a `tcp/` endpoint and takes each inbound link as a face of its session
     # (`docs/capi-pico-on-coop-engine.md`, step L4).
+    # 2026-11-21 -- step 4b rounds 2 to 4, as pico-client's note of this day says: +15,340 on
+    # one machine.
     Case("pico-peer-coop", "wz-capi-pico", "libwz_capi_pico.so",
          # 2026-11-20 -- step 4b round 2a, as pico-client-coop's note says: +508 on pc2.
          # 2026-11-20 -- step 4b round 2b, as pico-client-coop's note says: +48 on pc2.
-         "engine-coop,link-udp,peer", 1_172_000,
+         # 2026-11-21 -- the fifth PoC set, as pico-client-coop's note says: +8,788 on one host.
+         # 2026-11-22 -- the step 4b carry and run 44895098050's reading:
+         # 1,195,275 hosted, +9,544 on one machine.
+         "engine-coop,link-udp,peer", 1_208_400,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE, COOP_SCOUT, COOP_LISTEN),
@@ -794,7 +908,11 @@ CASES: tuple[Case, ...] = (
     # 2026-11-20 -- step 4b round 2b, as pico-client's note of this day says: +48 on pc2.
     # 2026-11-20 -- the hosted reading again, as pico-client's note of this day says: 3,206,730
     # at `cd240d4b4` and +9,128 since.
-    Case("pico-peer", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",peer", 3_228_300,
+    # 2026-11-21 -- step 4b rounds 2 to 4, as pico-client's note of this day says: +13,680 on
+    # one machine.
+    Case("pico-peer", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",peer", 3_247_200,
+         # 2026-11-22 -- the step 4b carry and run 44895098050's reading:
+         # 3,241,530 hosted, +2,124 on one machine.
          forbid=(GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY, MULTICAST),
          require=(ACCEPT, RESPONDER, SCOUTING, UDP, SINGLE_THREADED),
          note="peer implies scout and with it the UDP group"),
@@ -828,7 +946,11 @@ CASES: tuple[Case, ...] = (
     # 2026-11-20 -- step 4b round 2b, as pico-client's note of this day says: +1,948 on pc2.
     # 2026-11-20 -- the hosted reading again, as pico-client's note of this day says: 4,685,692
     # at `cd240d4b4` and +26,144 since.
-    Case("pico-default", "wz-capi-pico", "libwz_capi_pico.so", None, 4_723_600,
+    # 2026-11-21 -- step 4b rounds 2 to 4, as pico-client's note of this day says: +17,224 on
+    # one machine.
+    Case("pico-default", "wz-capi-pico", "libwz_capi_pico.so", None, 4_751_800,
+         # 2026-11-22 -- the step 4b carry and run 44895098050's reading:
+         # 4,740,260 hosted, +8,024 on one machine.
          forbid=(SINGLE_THREADED,),
          require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
                   CONNECTIVITY, MULTICAST),
@@ -855,12 +977,16 @@ CASES: tuple[Case, ...] = (
               "4,343,962 on a build machine on the tree of round 3939: the local readings run "
               "under the hosted ones (capic-default's note), so the budget is the build "
               "machine's reading and 3,500, to the hundred"),
-    Case("capic-client","wz-capi-c", "libwz_capi_c.so", "", 3_000_000,
+    # 2026-11-21 -- step 4b rounds 2 to 4, as pico-client's note of this day says: +18,362 on
+    # one machine.
+    Case("capic-client","wz-capi-c", "libwz_capi_c.so", "", 3_018_400,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST,
                  ROUTER_NODE, ACCEPT_HANDSHAKE, CONFIG_VERDICT)),
     # 2026-11-03, the SCE pins -- 1,974,779 on hosted run 41589047498 (1,973,891 on hkl001 at the
     # head), the growth pico-client-coop's note of this day attributes; that and 3,500.
-    Case("capic-client-small", "wz-capi-c", "libwz_capi_c.so", "", 1_986_800,
+    # 2026-11-21 -- step 4b rounds 2 to 4, as pico-client's note of this day says: +19,522 on
+    # one machine.
+    Case("capic-client-small", "wz-capi-c", "libwz_capi_c.so", "", 2_006_400,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST,
                  ROUTER_NODE, ACCEPT_HANDSHAKE, CONFIG_VERDICT),
          profile="capi-small",
@@ -906,10 +1032,14 @@ CASES: tuple[Case, ...] = (
               "reads through, is in every build that holds a session, and is the likely "
               "growth; it was not bisected, and a symbol diff would be needed to say so. The "
               "budget is that reading and 3,500, rounded up to the hundred."),
-    Case("capic-scout", "wz-capi-c", "libwz_capi_c.so", "scout", 3_275_000,
+    # 2026-11-21 -- step 4b rounds 2 to 4, as pico-client's note of this day says: +20,209 on
+    # one machine.
+    Case("capic-scout", "wz-capi-c", "libwz_capi_c.so", "scout", 3_295_300,
          forbid=(ACCEPT, RESPONDER, GOSSIP, CLOCK, ADVANCED, MULTICAST, ROUTER_NODE),
          require=(SCOUTING, UDP)),
-    Case("capic-peer", "wz-capi-c", "libwz_capi_c.so", "peer", 4_065_000,
+    # 2026-11-21 -- step 4b rounds 2 to 4, as pico-client's note of this day says: +20,448 on
+    # one machine.
+    Case("capic-peer", "wz-capi-c", "libwz_capi_c.so", "peer", 4_085_500,
          forbid=(GOSSIP, CLOCK, ADVANCED, MULTICAST, ROUTER_NODE),
          require=(ACCEPT, RESPONDER, SCOUTING, UDP)),
     # The C ABI as a node (`router-node`, which implies `peer` and the query and liveliness
@@ -999,7 +1129,11 @@ CASES: tuple[Case, ...] = (
     # (+1,471 of text symbols on one machine, pico-default's parts and the local face's).
     # 2026-11-20 -- the hosted reading again, as pico-client's note of this day says: 6,331,248
     # at `cd240d4b4` and +30,148 since.
-    Case("capic-router-node", "wz-capi-c", "libwz_capi_c.so", "router-node", 6_386_800,
+    # 2026-11-21 -- step 4b rounds 2 to 4, as pico-client's note of this day says: +20,420 on
+    # one machine.
+    Case("capic-router-node", "wz-capi-c", "libwz_capi_c.so", "router-node", 6_432_100,
+         # 2026-11-22 -- the step 4b carry and run 44895098050's reading:
+         # 6,407,956 hosted, +20,566 on one machine.
          # What the declaration says the capability implies (`deploy/wz-config.toml`): the peer
          # role and the scouting and UDP link under it, and the multicast transport.
          require=(ROUTER_NODE, ACCEPT, RESPONDER, SCOUTING, UDP, MULTICAST),
@@ -1112,7 +1246,9 @@ CASES: tuple[Case, ...] = (
     # (+2,042 of text symbols on one machine, capic-router-node's parts).
     # 2026-11-20 -- the hosted reading again, as pico-client's note of this day says:
     # 11,398,161 at `cd240d4b4` and +32,660 since.
-    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 11_466_600,
+    # 2026-11-21 -- step 4b rounds 2 to 4, as pico-client's note of this day says: +21,424 on
+    # one machine.
+    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 11_488_100,
          require=(ROUTER_NODE, ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED,
                   MULTICAST, ACCEPT_HANDSHAKE, CONFIG_VERDICT),
          exports=837,
@@ -1182,6 +1318,8 @@ CASES: tuple[Case, ...] = (
     # 2026-11-19 -- step 3b, as `capic-router-node`'s note of this day says: +29,164 on pc2.
     # 2026-11-20 -- Rounds 4541 to this one, as `capic-default`'s note of this day takes apart:
     # 9,531,881 -> 9,566,045 on pc2 (+34,164). Chosen; that reading and 3,500, to the hundred.
+    # 2026-11-21 -- step 4b rounds 2 to 4, as pico-client's note of this day says: +21,732 on
+    # one machine.
     Case("capic-default-lean", "wz-capi-c", "libwz_capi_c.so",
          "link-udp,timestamping,peer,scout,query,queryable,liveliness,liveliness-get,advanced,"
          "group,gossip,transport_tls,transport_quic,transport_quic_datagram,transport_ws,"
@@ -1194,7 +1332,12 @@ CASES: tuple[Case, ...] = (
          # 2026-11-20 -- step 4b round 2b, as pico-client's note of this day says: +1,796 on pc2.
          # 2026-11-20 -- the hosted reading again, as pico-client's note of this day says:
          # 9,618,897 at `cd240d4b4` and +30,560 since.
-         9_667_300,
+         # 2026-11-21 -- the gates' batch over main 8d9b0e530: +1,372 on one host, every moved symbol a
+         # renamed monomorph of equal size but +497 (std's thread packet drop); the build host reads this
+         # case about 1 percent over that host, which put main at its budget and this batch 3,469 over.
+         # 2026-11-22 -- the step 4b carry and run 44895098050's reading:
+         # 9,691,657 hosted, +3,561 on one machine.
+         9_698_800,
          forbid=(ROUTER_NODE,),
          require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST),
          note="the default of the C ABI without the router node"),
@@ -1410,15 +1553,24 @@ def refused_switches(asked: dict[str, int], header: str) -> list[str]:
     return sorted(s for s, v in asked.items() if (s in on) != bool(v))
 
 
-def pico_reference_build(asked: dict[str, int]) -> Reference:
+def reference_key(pin: str, toolchain: str, flags: list[str]) -> str:
+    """The directory name of the reference build of `flags` at `pin` with `toolchain`: one per
+    triple, so a run that asks for the same build again reads it instead of building it, and a
+    switch, the pin or the compiler that moves gets a build of its own."""
+    return hashlib.sha256("\n".join([pin, toolchain, *flags]).encode()).hexdigest()[:16]
+
+
+def pico_reference_tree(asked: dict[str, int]) -> tuple[pathlib.Path, str, str]:
     """Build zenoh-pico with `asked` set, from an export of the pinned submodule (pico's CMake
-    writes a header into its source tree, which must not dirty the submodule), and measure it."""
+    writes a header into its source tree, which must not dirty the submodule), unless that build
+    is there already. Returns its directory (`src` the export, `build` the CMake tree), the full
+    pin and the toolchain. The host performance matrix (`scripts/host-bench/perf_matrix.py`)
+    links this same build, so the library it times is the one whose size this gate prints."""
     pin = subprocess.run(["git", "-C", str(PICO_SOURCE), "rev-parse", "HEAD"], capture_output=True,
                          text=True, check=True).stdout.strip()
     toolchain = f"{first_line(['cc', '--version'])}; {first_line(['cmake', '--version'])}"
     flags = [f"-D{s}={v}" for s, v in sorted(asked.items())]
-    key = hashlib.sha256("\n".join([pin, toolchain, *flags]).encode()).hexdigest()[:16]
-    work = PICO_BUILDS / key
+    work = PICO_BUILDS / reference_key(pin, toolchain, flags)
     lib = work / "build" / "lib" / "libzenohpico.so"
     if not lib.exists():
         archive = subprocess.run(["git", "-C", str(PICO_SOURCE), "archive", "--format=tar", "HEAD"],
@@ -1429,20 +1581,27 @@ def pico_reference_build(asked: dict[str, int]) -> Reference:
                    "-DCMAKE_BUILD_TYPE=Release", "-DBUILD_SHARED_LIBS=ON",
                    "-DBUILD_EXAMPLES=OFF", "-DBUILD_TESTING=OFF", *flags])
         run_quiet(["cmake", "--build", str(work / "build"), "--parallel", str(os.cpu_count() or 1)])
+    return work, pin, toolchain
+
+
+def pico_reference_build(asked: dict[str, int]) -> Reference:
+    """zenoh-pico built with `asked` set ([`pico_reference_tree`]), measured."""
+    work, pin, toolchain = pico_reference_tree(asked)
+    lib = work / "build" / "lib" / "libzenohpico.so"
     header = (work / "build" / "include" / "zenoh-pico" / "config.h").read_text()
     size_out = subprocess.run(["size", str(lib)], capture_output=True, text=True, check=True).stdout
     return Reference(text=int(size_out.splitlines()[1].split()[0]), pin=pin[:12],
                      toolchain=toolchain, refused=tuple(refused_switches(asked, header)))
 
 
-def report_reference(case: Case, got: Measured) -> None:
-    """Print the case's size against zenoh-pico built as the same build. Only the pico ABI's
-    cases have one here: zenoh-c's original is a Rust build of its own the lanes that install the
-    oracle provision, and this lane does not."""
+def report_reference(case: Case, got: Measured) -> Reference | None:
+    """Print the case's size against zenoh-pico built as the same build, and return that build.
+    Only the pico ABI's cases have one here: zenoh-c's original is a Rust build of its own the
+    lanes that install the oracle provision, and this lane does not."""
     if case.package != "wz-capi-pico":
         print(f"  capability-cost: {case.id}: no same-build reference in this lane (zenoh-c's is "
               f"provisioned only where the oracle is installed)")
-        return
+        return None
     asked = wz_config.pico_reference(wz_config.load_decl(), case_features(case))
     ref = pico_reference_build(asked)
     print(f"  capability-cost: {case.id}: zenoh-pico {ref.pin} as the same build: text "
@@ -1450,6 +1609,211 @@ def report_reference(case: Case, got: Measured) -> None:
     if ref.refused:
         print(f"  capability-cost: {case.id}: pico built {', '.join(ref.refused)} otherwise than "
               f"asked, so the two builds differ there")
+    return ref
+
+
+# ── the pico ceiling of the host libraries (docs/upstream-parity.md D9) ────────────────────────
+
+# The committed table: per pico case, the ratio it may not exceed, or its lock at WIN.
+HOST_CEILING = ROOT / "deploy" / "pico_host_ceiling.json"
+HOST_CEILING_SCHEMA = 1
+# How far over its ratchet a ratio may read before the case fails, relative to the ratchet. Two
+# readings of one tree on one host are equal (both builds are deterministic), so this is only the
+# spread between hosts, and it is MEASURED, not assumed: on 2026-11-21 one tree read
+# pico-client-coop at 1,012,762 bytes on the coordinating host and 1,030,646 on a build host
+# (1.77 percent), while zenoh-pico read 403,086 on both, so the ratio does NOT cancel what a host
+# does to wz's own build (its Rust toolchain's linking, not the C compiler). 2.5 percent covers that
+# spread with a margin. It narrows to the spread of one image when every host builds in the image
+# the tree declares (the same-build-environment work); until then a row is filled from the hosts
+# that grade it. It bounds only what the ratio forgives: the case's byte budget still holds it.
+RATIO_TOLERANCE = 0.025
+# A ratchet is the reading's ratio rounded UP to four places, so the bound never sits under the
+# reading it was set from.
+RATIO_PLACES = 10_000
+# A debt is an entry of the store's inventory (`debt-<id>`, status active), as every new open
+# debt is since 2026-11-13; `cmd_check` also holds the id to the inventory.
+DEBT_ID = re.compile(r"debt-[a-z0-9][a-z0-9-]*")
+DEBT_PLACEHOLDER = "debt-TBD"
+READING_KEYS = ("date", "wz_text", "pico_text", "pico_pin", "toolchain")
+ROW_KEYS = frozenset(("verdict", "ratio_at_most", "debt", "reading"))
+CEILING_NO_BUDGET = ("no budget or row move clears it: take the bytes back, or the owner "
+                     "decides (docs/upstream-parity.md D9)")
+
+
+def ceiling_cases() -> list[str]:
+    """The cases the ceiling holds: every pico case, the ones `report_reference` builds a
+    reference for."""
+    return [c.id for c in CASES if c.package == "wz-capi-pico"]
+
+
+def load_ceiling(path: pathlib.Path = HOST_CEILING) -> dict | None:
+    if not path.is_file():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def ceiling_rows(table: dict | None) -> dict:
+    rows = table.get("cases") if isinstance(table, dict) else None
+    return rows if isinstance(rows, dict) else {}
+
+
+def ceil_ratio(wz_text: int, pico_text: int) -> float:
+    """wz text over pico text, rounded up to four places in exact arithmetic."""
+    return math.ceil(Fraction(wz_text * RATIO_PLACES, pico_text)) / RATIO_PLACES
+
+
+def ceiling_reading(wz_text: int, pico_text: int, pin: str, toolchain: str, date: str) -> dict:
+    return {"date": date, "wz_text": wz_text, "pico_text": pico_text, "pico_pin": pin,
+            "toolchain": toolchain}
+
+
+def ceiling_row(reading: dict, debt: str | None) -> dict:
+    """The row a reading sets: locked when it is a WIN (D1), a ratchet at its ratio otherwise,
+    under the debt item the case is registered with (a placeholder while it has none)."""
+    row: dict = {}
+    if verdict_size(reading["wz_text"], reading["pico_text"]) == "WIN":
+        row["verdict"] = "win"
+        if debt and DEBT_ID.fullmatch(debt):
+            row["debt"] = debt
+    else:
+        row["ratio_at_most"] = ceil_ratio(reading["wz_text"], reading["pico_text"])
+        row["debt"] = debt if debt and DEBT_ID.fullmatch(debt) else DEBT_PLACEHOLDER
+    row["reading"] = reading
+    return row
+
+
+def format_row(case_id: str, row: dict) -> str:
+    return f"{json.dumps(case_id)}: {json.dumps(row)}"
+
+
+def reading_findings(case_id: str, reading: object) -> list[str]:
+    if not isinstance(reading, dict) or set(reading) != set(READING_KEYS):
+        return [f"{case_id}: its reading must state exactly {', '.join(READING_KEYS)}"]
+    out: list[str] = []
+    for key in ("wz_text", "pico_text"):
+        if type(reading[key]) is not int or reading[key] <= 0:
+            out.append(f"{case_id}: its reading's {key} is not a positive byte count")
+    for key in ("date", "pico_pin", "toolchain"):
+        if not isinstance(reading[key], str) or not reading[key]:
+            out.append(f"{case_id}: its reading's {key} is empty")
+    return out
+
+
+def row_findings(case_id: str, row: object) -> list[str]:
+    """What makes a row of the table no row of the ceiling. A row whose `ratio_at_most` is null
+    is well formed here (the unfilled form) and refused by `grade_ceiling`."""
+    if not isinstance(row, dict):
+        return [f"{case_id}: its row is not an object"]
+    out = [f"{case_id}: its row has the unknown key {key!r}" for key in sorted(set(row) - ROW_KEYS)]
+    locked = "verdict" in row
+    if locked == ("ratio_at_most" in row):
+        return out + [f"{case_id}: its row must state either `verdict` (locked) or "
+                      f"`ratio_at_most` (ratchet), and states {'both' if locked else 'neither'}"]
+    if locked:
+        if row["verdict"] != "win":
+            out.append(f"{case_id}: a locked row's verdict is \"win\" and nothing else (D1: only "
+                       f"WIN counts), not {row['verdict']!r}")
+        found = reading_findings(case_id, row.get("reading"))
+        out += found
+        if not found and verdict_size(row["reading"]["wz_text"], row["reading"]["pico_text"]) != "WIN":
+            out.append(f"{case_id}: the row is locked at WIN on a reading that is no WIN")
+        if "debt" in row and not (isinstance(row["debt"], str) and DEBT_ID.fullmatch(row["debt"])):
+            out.append(f"{case_id}: a locked row's debt, when stated, is the item its WIN closed "
+                       f"(`debt-<id>`, an entry of the store's inventory)")
+        return out
+    if not isinstance(row.get("debt"), str):
+        out.append(f"{case_id}: a ratchet row states the debt item it is registered under")
+    at_most = row["ratio_at_most"]
+    if at_most is None:
+        if row.get("reading") is not None:
+            out.append(f"{case_id}: an unfilled row (`ratio_at_most` null) states no reading")
+        return out
+    if isinstance(at_most, bool) or not isinstance(at_most, (int, float)) or at_most <= 0:
+        return out + [f"{case_id}: its ratio_at_most is not a positive number"]
+    found = reading_findings(case_id, row.get("reading"))
+    if found:
+        return out + found
+    reading = row["reading"]
+    if at_most != ceil_ratio(reading["wz_text"], reading["pico_text"]):
+        out.append(f"{case_id}: its ratio_at_most {at_most} is not its reading's ratio rounded up "
+                   f"to four places ({ceil_ratio(reading['wz_text'], reading['pico_text'])}): the "
+                   f"ratchet is set from a stated reading and from nothing else")
+    if verdict_size(reading["wz_text"], reading["pico_text"]) == "WIN":
+        out.append(f"{case_id}: a ratchet row set from a WIN; lock it: "
+                   f"{format_row(case_id, ceiling_row(reading, row.get('debt')))}")
+    return out
+
+
+def table_findings(table: dict | None, case_ids: list[str]) -> list[str]:
+    """What keeps the table from holding each of `case_ids` with one well-formed row. Static: it
+    needs no build, so a run of some cases still grades the whole table."""
+    where = HOST_CEILING.relative_to(ROOT)
+    if table is None:
+        return [f"{where} is missing: every pico case is held under zenoh-pico by its row there"]
+    if not isinstance(table, dict) or table.get("schema") != HOST_CEILING_SCHEMA:
+        return [f"{where} is not schema {HOST_CEILING_SCHEMA}"]
+    rows = table.get("cases")
+    if not isinstance(rows, dict):
+        return [f"{where} has no `cases` object"]
+    out: list[str] = []
+    for case_id in case_ids:
+        if case_id not in rows:
+            out.append(f"{case_id}: no row in {where}: a pico case is held under zenoh-pico from "
+                       f"the commit that adds it, so the population cannot grow past the ceiling; "
+                       f"`--measure {case_id}` prints its row")
+    for case_id, row in rows.items():
+        if case_id not in case_ids:
+            out.append(f"{case_id}: a row in {where} for no pico case of CASES")
+        else:
+            out += row_findings(case_id, row)
+    return out
+
+
+def grade_ceiling(case_id: str, row: dict, reading: dict) -> tuple[list[str], list[str]]:
+    """The findings and the notes for one case's reading against its well-formed row. Pure, so
+    the selftest can drive it."""
+    wz_text, pico_text = reading["wz_text"], reading["pico_text"]
+    ratio = wz_text / pico_text
+    verdict = verdict_size(wz_text, pico_text)
+    said = (f"{case_id}: wz text {wz_text} against zenoh-pico {pico_text} as the same build, "
+            f"ratio {ratio:.4f}, {verdict}")
+    if "verdict" in row:
+        if verdict != "WIN":
+            return [f"{said}. The case is locked at WIN (since {row['reading']['date']}); "
+                    f"{CEILING_NO_BUDGET}"], []
+        return [], []
+    debt = row.get("debt")
+    at_most = row["ratio_at_most"]
+    if at_most is None:
+        return [f"{said}. Its row in {HOST_CEILING.relative_to(ROOT)} states no ratio_at_most, so "
+                f"the case is held to nothing. Fill it from the host that grades it: paste "
+                f"{format_row(case_id, ceiling_row(reading, debt))} over the row, with `debt` the "
+                f"store inventory entry (`debt-<id>`) the case is registered under (D5); "
+                f"`python3 scripts/lib/capability_cost_gate.py --measure {case_id}` prints the "
+                f"same row"], []
+    findings: list[str] = []
+    notes: list[str] = []
+    if not (isinstance(debt, str) and DEBT_ID.fullmatch(debt)):
+        findings.append(f"{case_id}: its row names no registered debt ({debt!r}): a case that is no "
+                        f"WIN is an open-debt item, paid largest ratio first (D5), and its row "
+                        f"says which (`debt-<id>`, an entry of the store's inventory)")
+    if verdict == "WIN":
+        findings.append(f"{said}. A case that reached WIN is locked at WIN from now on: replace its "
+                        f"row with {format_row(case_id, ceiling_row(reading, debt))} and close "
+                        f"{debt}")
+        return findings, notes
+    limit = at_most * (1 + RATIO_TOLERANCE)
+    if ratio > limit:
+        then = row["reading"]
+        host = ("" if then["toolchain"] == reading["toolchain"] else
+                f"; the row was read with {then['toolchain']}, this run with {reading['toolchain']}")
+        findings.append(f"{said}, over its ratchet {at_most} (with the {RATIO_TOLERANCE:.1%} "
+                        f"tolerance, {limit:.4f}; set {then['date']} from {then['wz_text']} against "
+                        f"{then['pico_text']}){host}. A ratchet only moves down: {CEILING_NO_BUDGET}")
+    elif ratio * (1 + RATIO_TOLERANCE) < at_most:
+        notes.append(f"{case_id}: ratio {ratio:.4f} is under its ratchet {at_most} by more than the "
+                     f"tolerance; commit the tighter row: {format_row(case_id, ceiling_row(reading, debt))}")
+    return findings, notes
 
 
 def cmd_check(measure_only: bool, only: list[str]) -> int:
@@ -1458,6 +1822,15 @@ def cmd_check(measure_only: bool, only: list[str]) -> int:
         print(f"  capability-cost: no such case: {unknown}", file=sys.stderr)
         return 2
     rc = 0
+    table = load_ceiling()
+    rows = ceiling_rows(table)
+    if not measure_only:
+        for finding in table_findings(table, ceiling_cases()):
+            print(f"  capability-cost FAIL: {finding}", file=sys.stderr)
+            rc = 1
+    today = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+    measured_rows: dict[str, dict] = {}
+    ceilinged = 0
     for case in CASES:
         if only and case.id not in only:
             continue
@@ -1466,10 +1839,31 @@ def cmd_check(measure_only: bool, only: list[str]) -> int:
         print(f"  capability-cost: {case.id}: text {got.text} of {case.max_text} "
               f"({100 * got.text // case.max_text}%), {got.exports} exports, conformance digest "
               f"{', '.join(got.digests) or 'none'} (statement {stated})")
-        report_reference(case, got)
+        ref = report_reference(case, got)
+        reading = None
+        row = rows.get(case.id)
+        if ref is not None:
+            reading = ceiling_reading(got.text, ref.text, ref.pin, ref.toolchain, today)
+            debt = row.get("debt") if isinstance(row, dict) else None
+            measured_rows[case.id] = ceiling_row(reading, debt if isinstance(debt, str) else None)
         if measure_only:
             continue
         for finding in grade(case, got, stated):
+            print(f"  capability-cost FAIL: {finding}", file=sys.stderr)
+            rc = 1
+        if reading is None:
+            continue
+        if row is None:
+            print(f"  capability-cost: {case.id}: the row to add: "
+                  f"{format_row(case.id, measured_rows[case.id])}")
+            continue
+        if row_findings(case.id, row):
+            continue  # named by table_findings above
+        ceilinged += 1
+        findings, notes = grade_ceiling(case.id, row, reading)
+        for note in notes:
+            print(f"  capability-cost: {note}")
+        for finding in findings:
             print(f"  capability-cost FAIL: {finding}", file=sys.stderr)
             rc = 1
     statements = 0
@@ -1490,10 +1884,17 @@ def cmd_check(measure_only: bool, only: list[str]) -> int:
             print(f"  capability-cost FAIL: {finding}", file=sys.stderr)
             rc = 1
     sized = sum(1 for c in CASES if not only or c.id in only)
+    if measured_rows:
+        print(f"  capability-cost: the rows this run reads for {HOST_CEILING.relative_to(ROOT)} "
+              f"`cases` (each replaces the row of its case; a ratchet's `debt` is the open-debt "
+              f"item the case is registered under):")
+        for n, (case_id, row) in enumerate(measured_rows.items(), 1):
+            print(f"    {format_row(case_id, row)}{',' if n < len(measured_rows) else ''}")
     if rc == 0 and not measure_only:
         print(f"  capability-cost: {sized} case(s) within budget, absent where absent, present "
-              f"where present, each carrying its statement's digest; {statements} build(s) with "
-              f"stated limits, policies or arm carrying theirs")
+              f"where present, each carrying its statement's digest; {ceilinged} pico case(s) "
+              f"under their zenoh-pico ceiling; {statements} build(s) with stated limits, "
+              f"policies or arm carrying theirs")
     return rc
 
 
@@ -1559,6 +1960,15 @@ def cmd_selftest() -> int:
            refused_switches(asked, "#define Z_FEATURE_MATCHING 0\n#define Z_FEATURE_INTEREST 0\n"
                                    "#define Z_FEATURE_QUERY 1\n")
            == ["Z_FEATURE_MATCHING", "Z_FEATURE_QUERY"])
+    # A reference build is found again by its key, and a key that ignored one of its three inputs
+    # would hand a run the build of another switch set, pin or compiler.
+    flags = ["-DZ_FEATURE_MATCHING=1", "-DZ_FEATURE_QUERY=0"]
+    expect("the same build is the same key, and a switch, the pin or the toolchain moves it",
+           reference_key("pin", "cc", flags) == reference_key("pin", "cc", list(flags))
+           and len({reference_key("pin", "cc", flags),
+                    reference_key("pin", "cc", ["-DZ_FEATURE_MATCHING=0", "-DZ_FEATURE_QUERY=0"]),
+                    reference_key("other", "cc", flags),
+                    reference_key("pin", "other", flags)}) == 4)
     expect("a case's features are its package's as cargo resolves them",
            {"serial-drive-own-thread", "rx-busy-poll"}
            <= case_features(next(c for c in CASES if c.id == "pico-client"))
@@ -1621,6 +2031,83 @@ def cmd_selftest() -> int:
     expect("every case's profile is one crates/Cargo.toml defines",
            {c.profile for c in CASES} <= {"release"} | set(
                re.findall(r"^\[profile\.([\w-]+)\]", (CRATES / "Cargo.toml").read_text(), re.M)))
+    # THE PICO CEILING (D9): synthetic readings against each kind of row, and the committed table.
+    def rd(wz: int, pico: int, date: str = "2026-11-21", tc: str = "cc 1") -> dict:
+        return ceiling_reading(wz, pico, "e1ab223a28aa", tc, date)
+
+    debt = "debt-known"
+    set_from = rd(2_520_000, 1_000_000, "2026-11-20")
+    ratchet = ceiling_row(set_from, debt)
+    expect("a reading that is no WIN sets a ratchet at its ratio, rounded up, under its debt",
+           ratchet == {"ratio_at_most": 2.52, "debt": debt, "reading": set_from}
+           and ceiling_row(rd(1_016_594, 403_086), debt)["ratio_at_most"] == 2.5221
+           and ceil_ratio(3, 1) == 3.0 and ceil_ratio(1, 3) == 0.3334)
+    expect("a reading with no registered debt sets the placeholder, which a grade refuses",
+           ceiling_row(set_from, None)["debt"] == DEBT_PLACEHOLDER
+           and ceiling_row(set_from, DEBT_PLACEHOLDER)["debt"] == DEBT_PLACEHOLDER
+           and any("registered debt" in f
+                   for f in grade_ceiling("t", ceiling_row(set_from, None), set_from)[0]))
+    win = rd(990, 1000)
+    locked = ceiling_row(win, debt)
+    expect("a WIN reading sets a locked row",
+           locked == {"verdict": "win", "debt": debt, "reading": win}
+           and ceiling_row(win, DEBT_PLACEHOLDER) == {"verdict": "win", "reading": win})
+    expect("a locked case that reads WIN passes", grade_ceiling("t", locked, rd(999, 1000)) == ([], []))
+    expect("a locked case that reads LOSS or TIE fails, and no budget clears it",
+           all(len(f) == 1 and "locked at WIN" in f[0] and n == []
+               for f, n in (grade_ceiling("t", locked, rd(1001, 1000)),
+                            grade_ceiling("t", locked, rd(1000, 1000)))))
+    expect("a ratchet case at its ratio passes, and so does one inside the tolerance",
+           grade_ceiling("t", ratchet, rd(2_520_000, 1_000_000)) == ([], [])
+           and grade_ceiling("t", ratchet, rd(2_582_000, 1_000_000)) == ([], []))
+    over, _ = grade_ceiling("t", ratchet, rd(2_584_000, 1_000_000))
+    expect("a ratchet case over the tolerance fails, naming the reading it was set from",
+           len(over) == 1 and "over its ratchet 2.52" in over[0] and "2026-11-20" in over[0]
+           and "read with" not in over[0])
+    expect("a ratchet failure on another toolchain names both",
+           "the row was read with cc 1, this run with cc 2"
+           in grade_ceiling("t", ratchet, rd(2_600_000, 1_000_000, tc="cc 2"))[0][0])
+    expect("the tolerance is relative to the ratchet and is 2.5 percent, the measured host spread",
+           RATIO_TOLERANCE == 0.025
+           and grade_ceiling("t", ceiling_row(rd(10_000, 10_000), debt), rd(10_249, 10_000))[0] == []
+           and grade_ceiling("t", ceiling_row(rd(10_000, 10_000), debt), rd(10_251, 10_000))[0] != [])
+    lower, tighter = grade_ceiling("t", ratchet, rd(2_400_000, 1_000_000))
+    expect("a ratchet case well under its ratio passes and prints the tighter row to commit",
+           lower == [] and len(tighter) == 1 and '"ratio_at_most": 2.4' in tighter[0])
+    won, _ = grade_ceiling("t", ratchet, rd(999_999, 1_000_000))
+    expect("a ratchet case that reads WIN fails and prints the locked row to commit",
+           len(won) == 1 and '"verdict": "win"' in won[0] and "close " + debt in won[0])
+    unfilled = {"ratio_at_most": None, "debt": DEBT_PLACEHOLDER, "reading": None}
+    blank, _ = grade_ceiling("t", unfilled, set_from)
+    expect("an unfilled row fails, saying how to fill it with this run's row",
+           len(blank) == 1 and "--measure t" in blank[0] and '"ratio_at_most": 2.52' in blank[0])
+    # The table's shape, static: the population, the two row forms and their readings.
+    good = {"schema": HOST_CEILING_SCHEMA, "cases": {"a": ratchet, "b": locked, "c": unfilled}}
+    expect("a table with one well-formed row per case passes",
+           table_findings(good, ["a", "b", "c"]) == [])
+    expect("a case with no row, and a row for no case, are findings",
+           len(table_findings(good, ["a", "b", "c", "d"])) == 1
+           and len(table_findings(good, ["a", "b"])) == 1
+           and len(table_findings(None, ["a"])) == 1
+           and len(table_findings({"schema": 0, "cases": {}}, [])) == 1)
+    bad_rows = (
+        {**ratchet, "verdict": "win"},  # both forms
+        {"debt": debt, "reading": set_from},  # neither
+        {**ratchet, "ratio_at_mots": 2.52},  # an unknown key
+        {**ratchet, "ratio_at_most": 2.6},  # a bound no reading set
+        {**locked, "verdict": "tie"},  # a lock on anything but WIN
+        {**locked, "reading": set_from},  # a lock on a reading that is no WIN
+        {**ratchet, "reading": {**set_from, "wz_text": "2520000"}},  # a reading that is no count
+        {**unfilled, "reading": set_from},  # an unfilled row that states a reading
+        {"ratio_at_most": 1.0, "debt": debt, "reading": rd(999_999, 1_000_000)},  # a WIN ratchet
+    )
+    expect("each malformed row is a finding",
+           all(row_findings("t", r) for r in bad_rows))
+    committed = load_ceiling()
+    expect("the committed table holds every pico case of CASES, one well-formed row each",
+           table_findings(committed, ceiling_cases()) == []
+           and set(ceiling_rows(committed)) == {c.id for c in CASES if c.package == "wz-capi-pico"}
+           and len(ceiling_cases()) >= 1)
     print(f"  capability-cost selftest: {ok}/{ok + bad} arm(s) pass")
     return 0 if bad == 0 else 1
 

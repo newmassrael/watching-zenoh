@@ -959,7 +959,7 @@ jobs:
           if compgen -G "/usr/lib/llvm-*/lib/libclang*.so*" > /dev/null; then
             echo "libclang: $(compgen -G '/usr/lib/llvm-*/lib/libclang*.so*' | head -n 1)"
           else
-            sudo apt-get update -q && sudo apt-get install -y --no-install-recommends libclang-dev
+            bash scripts/lib/apt-install.sh libclang-dev
           fi
 
       - name: the cooperative engine's host and library on this host (observed)
@@ -1071,7 +1071,7 @@ jobs:
           if compgen -G "/usr/lib/llvm-*/lib/libclang*.so*" > /dev/null; then
             echo "libclang: $(compgen -G '/usr/lib/llvm-*/lib/libclang*.so*' | head -n 1)"
           else
-            sudo apt-get update -q && sudo apt-get install -y --no-install-recommends libclang-dev
+            bash scripts/lib/apt-install.sh libclang-dev
           fi
 
       # The group of the transport example needs an interface the host carries multicast
@@ -1198,13 +1198,19 @@ jobs:
   # target) and run, for both builds. The upload follows only a passing test, so a package this
   # job publishes is one that passed it.
   #
+  # Each width is packaged in both forms of the library, a row of the matrix each: `single`, the one
+  # DLL, and `split`, the core and the additional library built apart from the same feature list
+  # (docs/capi-pico-additional-library.md), whose programs link both import libraries. The examples
+  # and the check program are the same for both, so each form passing them is the two forms doing
+  # what one program asks of them alike.
+  #
   # Observed, not yet gated, as every new program of this workflow has started: the job is
   # `continue-on-error`, so a red here does not fail the run, and the test's verdict lines in the
   # job summary are the reading. It becomes a gate once two consecutive hosted runs read it green.
   # No Rust cache: the package is built with full debug information in both profiles, which no
   # entry of the cached workspace was built with.
   package-windows:
-    name: pico library package ${{ matrix.arch }} (windows-latest)
+    name: pico library package ${{ matrix.arch }} ${{ matrix.form }} (windows-latest)
     runs-on: windows-latest
     timeout-minutes: 120
     continue-on-error: true
@@ -1213,6 +1219,7 @@ jobs:
       fail-fast: false
       matrix:
         arch: [x64, x86]
+        form: [single, split]
     steps:
       - name: Checkout (with submodules)
         uses: actions/checkout@v4
@@ -1246,16 +1253,16 @@ jobs:
       - name: build the package
         timeout-minutes: 90
         shell: bash
-        run: python scripts/lib/pico_windows_package.py --build "$RUNNER_TEMP/pico-package-${{ matrix.arch }}" --profile host-peer-ext --arch ${{ matrix.arch }}
+        run: python scripts/lib/pico_windows_package.py --build "$RUNNER_TEMP/pico-package-${{ matrix.arch }}-${{ matrix.form }}" --profile host-peer-ext --arch ${{ matrix.arch }} --form ${{ matrix.form }}
 
       - name: the package's regression test (its zip, extracted, verified, compiled against and run)
         timeout-minutes: 25
         shell: bash
         run: |
-          out="$(cygpath -u "$RUNNER_TEMP")/pico-package-${{ matrix.arch }}"
+          out="$(cygpath -u "$RUNNER_TEMP")/pico-package-${{ matrix.arch }}-${{ matrix.form }}"
           set -- "$out"/*-windows-${{ matrix.arch }}-*.zip
           if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
-            echo "pico-package-test on Windows ${{ matrix.arch }}: the build left no single zip in $out: FAIL" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "pico-package-test on Windows ${{ matrix.arch }} ${{ matrix.form }}: the build left no single zip in $out: FAIL" | tee -a "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
           python scripts/lib/pico_windows_package.py --test "$(cygpath -w "$1")"
@@ -1263,10 +1270,10 @@ jobs:
       - name: Upload the package
         uses: actions/upload-artifact@v4
         with:
-          name: pico-windows-package-${{ matrix.arch }}
+          name: pico-windows-package-${{ matrix.arch }}-${{ matrix.form }}
           path: |
-            ${{ runner.temp }}/pico-package-${{ matrix.arch }}/*.zip
-            ${{ runner.temp }}/pico-package-${{ matrix.arch }}/*.zip.sha256
+            ${{ runner.temp }}/pico-package-${{ matrix.arch }}-${{ matrix.form }}/*.zip
+            ${{ runner.temp }}/pico-package-${{ matrix.arch }}-${{ matrix.form }}/*.zip.sha256
           if-no-files-found: error
           retention-days: 7
 

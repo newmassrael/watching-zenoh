@@ -2166,6 +2166,11 @@ pub struct QueryableRegistry<C, P: Storage = Profile> {
     /// refuses nothing by its storage, so this is what bounds it; where the build fixes the
     /// bound to the storage's capacity it is held in no byte and the storage refuses alone.
     quota: crate::limits::MaxQueryablesHeld,
+    /// The longest pattern the registry stores (`MAX_KEYEXPR_BYTES`): what the creator of the
+    /// registry resolved ([`Self::limit_keys_to`]), the build's value until it does. Where the
+    /// build fixes the bound to the rows' capacity it is held in no byte and the rows refuse
+    /// alone.
+    key_quota: crate::limits::MaxKeyexprBytesHeld,
     /// The declaration id the next queryable takes, from 1. A `u64` only so
     /// that it can stand one past `u32::MAX`, which is how the registry knows
     /// every id has been handed out.
@@ -2174,16 +2179,22 @@ pub struct QueryableRegistry<C, P: Storage = Profile> {
     /// (decision D12): handed to every matched queryable as [`QueryView::requester`]. Set by the
     /// session before it dispatches, since the registry is the session's and so is the link.
     requester: Option<[u8; 16]>,
+    /// The most bytes of selector parameters (`QUERY_PARAMETERS_MAX_BYTES`) a query from a peer
+    /// may carry for a queryable to run it: what the creator of the registry resolved
+    /// ([`Self::limit_query_sizes_to`]), the build's value until it does.
+    max_parameters: crate::limits::QueryParametersMaxBytesHeld,
+    /// The most bytes of attachment (`QUERY_ATTACHMENT_MAX_BYTES`) a query from a peer may
+    /// carry for a queryable to run it, held as `max_parameters` is.
+    max_attachment: crate::limits::QueryAttachmentMaxBytesHeld,
     /// How many queries from a peer were not run because their parameters or their attachment
-    /// were longer than the build's bound ([`caps::QUERY_PARAMETERS_MAX_BYTES`],
-    /// [`caps::QUERY_ATTACHMENT_MAX_BYTES`]). Saturating: a counter that wrapped would hide the
-    /// refusals it exists to show.
+    /// were longer than the bound the registry is held to ([`Self::query_size_bounds`]).
+    /// Saturating: a counter that wrapped would hide the refusals it exists to show.
     oversize_refused: u32,
-    /// Whether a query whose key does not resolve is owed a Final: the session's
-    /// `query-unanswerable-final` value, which the session states before every dispatch
-    /// ([`Self::set_unanswerable_final`]). A registry no session stated one to answers as
-    /// upstream does, with nothing.
-    answers_unresolved: bool,
+    /// The session's `query-unanswerable-final` value, which the session states before every
+    /// dispatch ([`Self::set_unanswerable_final`]): with `empty-final` a query whose key does not
+    /// resolve is owed a Final. Held in no byte where the build's domain is one value, which is
+    /// then the value; a registry no session stated one to answers by the build's default.
+    unanswerable_final: UnanswerableFinalHeld,
     /// transport-shm -- the receive side of shared memory for the VALUE of a
     /// query: the same state a push and a reply have (the negotiated capability,
     /// the resolver, the means of acknowledging the peer's slices, the drop
@@ -2199,15 +2210,25 @@ impl<C, P: Storage> Default for QueryableRegistry<C, P> {
         Self {
             queryables: BoundedVec::default(),
             quota: Default::default(),
+            key_quota: Default::default(),
             next_id: 1,
             requester: None,
+            max_parameters: Default::default(),
+            max_attachment: Default::default(),
             oversize_refused: 0,
-            answers_unresolved: false,
+            unanswerable_final: UnanswerableFinalHeld::default(),
             #[cfg(feature = "transport-shm")]
             shm: crate::extshm::ShmReceiveState::default(),
         }
     }
 }
+
+/// How a [`QueryableRegistry`] holds the `query-unanswerable-final` value of the session it
+/// dispatches for: as a snapshot holds it, in no byte where the build allows one value.
+type UnanswerableFinalHeld = crate::policy_binding::Bound<
+    crate::policy::QueryUnanswerableFinal,
+    { <crate::policy::QueryUnanswerableFinal as crate::policy_binding::PolicyValue>::HELD },
+>;
 
 impl<C, P: Storage> QueryableRegistry<C, P> {
     /// The bytes one queryable takes in the table's storage: its pattern's text with it where the
@@ -2219,6 +2240,36 @@ impl<C, P: Storage> QueryableRegistry<C, P> {
     /// the queryables already in are kept, as a lowered soft limit keeps what it holds.
     pub fn limit_to(&mut self, quota: crate::limits::MaxQueryablesHeld) {
         self.quota = quota;
+    }
+
+    /// Hold the queries from a peer to the sizes the registry's creator resolved: a query whose
+    /// selector parameters are longer than `parameters` admits (`QUERY_PARAMETERS_MAX_BYTES`),
+    /// or whose attachment is longer than `attachment` admits (`QUERY_ATTACHMENT_MAX_BYTES`),
+    /// reaches no queryable, is counted ([`Self::oversize_refusals`]) and is still owed its
+    /// final. A query of the registry's own session is not held to them.
+    pub fn limit_query_sizes_to(
+        &mut self,
+        parameters: crate::limits::QueryParametersMaxBytesHeld,
+        attachment: crate::limits::QueryAttachmentMaxBytesHeld,
+    ) {
+        self.max_parameters = parameters;
+        self.max_attachment = attachment;
+    }
+
+    /// The most bytes of selector parameters and of attachment a query from a peer may carry
+    /// for a queryable of this registry to run it ([`Self::limit_query_sizes_to`]), in that
+    /// order.
+    pub const fn query_size_bounds(
+        &self,
+    ) -> (crate::limit_binding::Quota, crate::limit_binding::Quota) {
+        (self.max_parameters.get(), self.max_attachment.get())
+    }
+
+    /// Hold the registry to the `MAX_KEYEXPR_BYTES` its creator resolved: a queryable whose
+    /// pattern is longer than `quota` admits is refused ([`RegisterError::KeyexprTooLong`]), as
+    /// a fixed row that cannot hold it refuses it, and the queryables already in are kept.
+    pub fn limit_keys_to(&mut self, quota: crate::limits::MaxKeyexprBytesHeld) {
+        self.key_quota = quota;
     }
 
     /// How many queries from a peer were refused for their size: not run by any queryable, and
@@ -2236,15 +2287,23 @@ impl<C, P: Storage> QueryableRegistry<C, P> {
     /// State the `query-unanswerable-final` value of the session about to be dispatched, from
     /// the snapshot the session was handed: with `empty-final`, a query from a peer whose key
     /// does not resolve is owed an empty Final, as one that matched nobody is.
+    ///
+    /// A snapshot holds only values its build's domain allows, so a value stated from one is
+    /// always taken. A value outside the domain is one no session of this build runs by, and the
+    /// registry keeps the value it holds; where the domain is one value there is nothing to state.
     pub fn set_unanswerable_final(&mut self, value: crate::policy::QueryUnanswerableFinal) {
-        self.answers_unresolved =
-            matches!(value, crate::policy::QueryUnanswerableFinal::EmptyFinal);
+        if let Ok(held) = UnanswerableFinalHeld::select(value) {
+            self.unanswerable_final = held;
+        }
     }
 
     /// Whether a query whose key does not resolve is owed a Final
-    /// ([`Self::set_unanswerable_final`]).
+    /// ([`Self::set_unanswerable_final`]): a constant of the build where its domain is one value.
     pub fn answers_unresolved_queries(&self) -> bool {
-        self.answers_unresolved
+        matches!(
+            self.unanswerable_final.get(),
+            crate::policy::QueryUnanswerableFinal::EmptyFinal
+        )
     }
 }
 
@@ -2400,6 +2459,10 @@ impl<C, P: Storage> QueryableRegistry<C, P> {
                     raw
                 }
             };
+        // A pattern past the session's key bound is refused as one the row cannot hold.
+        if !self.key_quota.admits(pattern.len()) {
+            return Err(RegisterError::KeyexprTooLong);
+        }
         // The quota before an id is taken: a refused registration changes nothing.
         if !self.quota.admits(self.queryables.len() + 1) {
             return Err(RegisterError::TableFull);
@@ -2703,19 +2766,19 @@ struct QueryProjection<'q> {
     ts_stack: Option<&'q crate::ts_stack::TsStack>,
 }
 
-/// Whether a query's parameters or its attachment are longer than the bound for each, `0`
-/// meaning none. Taking the bounds as arguments keeps the rule testable at every value, where
-/// the build fixes only one.
+/// Whether a query's parameters or its attachment are longer than the bound for each admits.
+/// Taking the bounds as arguments keeps the rule testable at every value, where a build or a
+/// snapshot fixes only one.
 #[cfg(all(feature = "codec-request", feature = "storage-profile"))]
 const fn request_past_bounds(
     parameters: Option<&[u8]>,
     attachment: Option<&[u8]>,
-    max_parameters: usize,
-    max_attachment: usize,
+    max_parameters: crate::limit_binding::Quota,
+    max_attachment: crate::limit_binding::Quota,
 ) -> bool {
-    const fn past(field: Option<&[u8]>, bound: usize) -> bool {
+    const fn past(field: Option<&[u8]>, bound: crate::limit_binding::Quota) -> bool {
         match field {
-            Some(bytes) => bound != 0 && bytes.len() > bound,
+            Some(bytes) => !bound.admits(bytes.len()),
             None => false,
         }
     }
@@ -3249,16 +3312,17 @@ impl<C: ResponderSink, P: Storage> QueryableRegistry<C, P> {
             let _ = plain_value;
             None
         };
-        // A query from a peer that is longer than the build allows runs nowhere. It is still a
+        // A query from a peer that is longer than the session allows runs nowhere. It is still a
         // query that was routed (the caller owes its final, as for one that matched nobody), so
         // the asker's query ends with no reply and does not wait out its timeout. The one body
         // both receive paths fire through is the one place the bound is read.
+        let (max_parameters, max_attachment) = self.query_size_bounds();
         if is_remote
             && request_past_bounds(
                 parameters_view,
                 attachment_view,
-                caps::QUERY_PARAMETERS_MAX_BYTES,
-                caps::QUERY_ATTACHMENT_MAX_BYTES,
+                max_parameters,
+                max_attachment,
             )
         {
             self.oversize_refused = self.oversize_refused.saturating_add(1);
@@ -3460,7 +3524,7 @@ impl<C: ResponderSink, P: Storage> QueryableRegistry<C, P> {
                     continue;
                 }
                 let outcome = self.dispatch_request(req, peer_keyexpr_table, pending_replies);
-                if outcome.owes_final(self.answers_unresolved) {
+                if outcome.owes_final(self.answers_unresolved_queries()) {
                     // R2595 — the terminator carries the QUERY's QoS, as every
                     // reply before it does: upstream stamps it on the final from
                     // the same `QueryInner::qos` the replies came from.
@@ -4193,27 +4257,34 @@ mod tests {
         );
     }
 
-    /// The rule at every value of the two bounds, which the build fixes only one of: `0` is no
-    /// bound, a bound is a length that may be filled and not passed, and each field has its own.
+    /// The rule at every value of the two bounds, which a build or a snapshot fixes only one of:
+    /// no bound admits any length, a bound is a length that may be filled and not passed, and
+    /// each field has its own.
     #[test]
     fn a_query_is_past_a_bound_only_when_a_field_is_longer_than_its_own() {
+        use crate::limit_binding::Quota;
         let (p, a) = (Some(&b"12345678"[..]), Some(&b"abc"[..]));
+        let none = Quota::UNBOUNDED;
+        let at = Quota::at_most;
         // No bound for either: whatever the length.
-        assert!(!request_past_bounds(p, a, 0, 0));
+        assert!(!request_past_bounds(p, a, none, none));
         // A bound that the field fills exactly is not passed; one byte past it is.
-        assert!(!request_past_bounds(p, None, 8, 0));
-        assert!(request_past_bounds(p, None, 7, 0));
-        assert!(!request_past_bounds(None, a, 0, 3));
-        assert!(request_past_bounds(None, a, 0, 2));
+        assert!(!request_past_bounds(p, None, at(8), none));
+        assert!(request_past_bounds(p, None, at(7), none));
+        assert!(!request_past_bounds(None, a, none, at(3)));
+        assert!(request_past_bounds(None, a, none, at(2)));
         // The bounds are separate: one field under its own does not excuse the other.
-        assert!(request_past_bounds(p, a, 8, 2));
-        assert!(request_past_bounds(p, a, 7, 3));
-        assert!(!request_past_bounds(p, a, 8, 3));
+        assert!(request_past_bounds(p, a, at(8), at(2)));
+        assert!(request_past_bounds(p, a, at(7), at(3)));
+        assert!(!request_past_bounds(p, a, at(8), at(3)));
         // A field that is absent is never past a bound.
-        assert!(!request_past_bounds(None, None, 1, 1));
+        assert!(!request_past_bounds(None, None, at(1), at(1)));
         // A bound of one field does not read the other.
-        assert!(!request_past_bounds(p, a, 0, 3));
-        assert!(!request_past_bounds(p, a, 8, 0));
+        assert!(!request_past_bounds(p, a, none, at(3)));
+        assert!(!request_past_bounds(p, a, at(8), none));
+        // A bound of zero admits an empty field and nothing longer.
+        assert!(!request_past_bounds(Some(&b""[..]), None, at(0), none));
+        assert!(request_past_bounds(Some(&b"x"[..]), None, at(0), none));
     }
 
     /// A node of this build refuses, or does not, a query of a peer past the build's bound, and
@@ -5857,42 +5928,69 @@ mod tests {
 
     /// `query-unanswerable-final = empty-final`: the same query whose mapping id the peer never
     /// declared is answered with an empty Final, and still runs no queryable. Stating `none`
-    /// again returns the registry to upstream's silence, and a non-Query body owes nothing under
-    /// either value, since it is not a query.
+    /// again returns the registry to upstream's silence. A value the build's domain leaves out is
+    /// one no snapshot of the build holds, and stating it leaves the registry as it was, so each
+    /// answer below is the domain's, whichever `WZ_POLICY_*_ALLOWS_*` the test build states.
     #[test]
     fn an_unresolvable_query_is_owed_an_empty_final_only_when_the_session_answers_it() {
         use crate::policy::QueryUnanswerableFinal;
+        use crate::policy_binding::PolicyValue;
         let mut reg = QueryableRegistry::new();
         reg.register("sensors/temp", |_q, responder| {
             responder.reply(b"21.0");
         })
         .expect("no quota is stated on this table");
-        assert!(
-            !reg.answers_unresolved_queries(),
-            "a registry no session stated a value to answers as upstream does"
+        assert_eq!(
+            reg.answers_unresolved_queries(),
+            QueryUnanswerableFinal::DEFAULT == QueryUnanswerableFinal::EmptyFinal,
+            "a registry no session stated a value to answers by the build's default"
         );
         let messages = vec![NetworkMessage::Request(Box::new(request_query(
             77, 99, None,
         )))];
 
-        reg.set_unanswerable_final(QueryUnanswerableFinal::EmptyFinal);
-        let mut replies = ReplyStage::new();
-        let mut finals = FinalStage::new();
-        reg.dispatch_messages(&messages, &HashMap::new(), &mut replies, &mut finals);
-        assert!(
-            replies.is_empty(),
-            "no queryable runs on a key it cannot read"
-        );
-        assert_eq!(
-            &finals[..],
-            &[(77, QosLevel::DEFAULT)][..],
-            "empty-final: the asker is told at once that nothing will come"
-        );
+        for value in [
+            QueryUnanswerableFinal::EmptyFinal,
+            QueryUnanswerableFinal::None,
+            QueryUnanswerableFinal::EmptyFinal,
+        ] {
+            let before = reg.answers_unresolved_queries();
+            reg.set_unanswerable_final(value);
+            let answers = if QueryUnanswerableFinal::DOMAIN.contains(value) {
+                value == QueryUnanswerableFinal::EmptyFinal
+            } else {
+                before
+            };
+            assert_eq!(reg.answers_unresolved_queries(), answers, "{}", value.id());
+            let mut replies = ReplyStage::new();
+            let mut finals = FinalStage::new();
+            reg.dispatch_messages(&messages, &HashMap::new(), &mut replies, &mut finals);
+            assert!(
+                replies.is_empty(),
+                "no queryable runs on a key it cannot read"
+            );
+            if answers {
+                assert_eq!(
+                    &finals[..],
+                    &[(77, QosLevel::DEFAULT)][..],
+                    "empty-final: the asker is told at once that nothing will come"
+                );
+            } else {
+                assert!(finals.is_empty(), "none: upstream's silence");
+            }
+        }
+    }
 
-        reg.set_unanswerable_final(QueryUnanswerableFinal::None);
-        let mut finals = FinalStage::new();
-        reg.dispatch_messages(&messages, &HashMap::new(), &mut replies, &mut finals);
-        assert!(finals.is_empty(), "none: upstream's silence again");
+    /// The registry holds the session's `query-unanswerable-final` value as a snapshot holds it:
+    /// in no byte where the build allows one value, and in one where it allows both.
+    #[test]
+    fn the_unanswerable_final_value_takes_a_byte_only_where_the_build_allows_a_choice() {
+        use crate::policy::QueryUnanswerableFinal;
+        use crate::policy_binding::PolicyValue;
+        assert_eq!(
+            core::mem::size_of::<UnanswerableFinalHeld>(),
+            usize::from(!QueryUnanswerableFinal::DOMAIN.is_singleton()),
+        );
     }
 
     /// The outcome's own rule, for every pair: a routed query always owes its Final, an
@@ -8138,19 +8236,18 @@ mod storage_policy_tests {
         assert_eq!(reg.len(), caps::MAX_QUERYABLES);
     }
 
-    /// A pattern past `MAX_KEYEXPR_BYTES` is refused, never truncated, where the
-    /// capacity is hard; the growable policy never had that bound.
+    /// A pattern past `MAX_KEYEXPR_BYTES` is refused, never truncated, on every policy: by the
+    /// row where the capacity is hard, and by the quota the registry holds where it grows.
     fn pattern_past_the_bound<P: Storage>() {
         let long = "k".repeat(caps::MAX_KEYEXPR_BYTES + 1);
         let mut reg: QueryableRegistry<Noop, P> = QueryableRegistry::default();
         let outcome = reg.register_sink(&long, Locality::Any, false, Noop);
-        if P::ENFORCES_CAPACITY {
-            assert_eq!(outcome.err(), Some(RegisterError::KeyexprTooLong));
-            assert_eq!(reg.len(), 0, "a refused pattern leaves the table empty");
-        } else {
-            assert!(outcome.is_ok());
-            assert_eq!(reg.len(), 1);
-        }
+        assert_eq!(outcome.err(), Some(RegisterError::KeyexprTooLong));
+        assert_eq!(reg.len(), 0, "a refused pattern leaves the table empty");
+        let at_bound = "k".repeat(caps::MAX_KEYEXPR_BYTES);
+        assert!(reg
+            .register_sink(&at_bound, Locality::Any, false, Noop)
+            .is_ok());
     }
 
     /// The canonizer's output is held by the policy asked for, and says the same

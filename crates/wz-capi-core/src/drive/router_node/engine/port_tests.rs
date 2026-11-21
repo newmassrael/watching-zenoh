@@ -63,7 +63,10 @@ fn abi_choices() -> AbiChoices {
 /// [`abi_choices`], with the handshake offering shared memory when `offer_shm` says so.
 fn abi_choices_offering(offer_shm: bool) -> AbiChoices {
     AbiChoices {
-        tx_queue: TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults()),
+        tx_queue: TxQueueConf::of_snapshot(
+            &wz_session_core::policy::SessionPolicy::defaults(),
+            &wz_session_core::limits::SessionLimits::BUILD,
+        ),
         start_read_task: true,
         local_delivery: LocalDeliveryDrain::Caller,
         liveliness_to_self: true,
@@ -195,7 +198,7 @@ fn a_node_holds_the_snapshot_its_open_hands_it() {
             )],
         },
         Some(r#"{ mode: "router", scouting: { multicast: { enabled: false } } }"#),
-        |_| handed,
+        |_| wz_session_core::policy_document::Resolved::unchanged(handed),
     )
     .expect("a document a router opens on");
     let node = plan

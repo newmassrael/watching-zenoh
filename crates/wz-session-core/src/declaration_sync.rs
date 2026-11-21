@@ -32,13 +32,6 @@
 
 use alloc::vec::Vec;
 
-// A timeout of zero gives up on an interest the instant it is sent: the node would be synced
-// before the peer could answer, which is a wait that waits for nothing.
-const _: () = assert!(
-    crate::caps::DECLARATION_SYNC_FINAL_TIMEOUT_MS >= 1,
-    "DECLARATION_SYNC_FINAL_TIMEOUT_MS must be at least 1"
-);
-
 /// One interest sent whose final has not arrived.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PendingFinal {

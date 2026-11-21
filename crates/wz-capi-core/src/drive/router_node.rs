@@ -93,6 +93,9 @@ pub struct RouterState {
     /// The policies the node runs under, as the open resolved them
     /// ([`OpenStance::session_policy`]).
     session_policy: SessionPolicy,
+    /// The limits the node's own session runs under, as the open resolved them
+    /// ([`OpenStance::session_limits`]).
+    session_limits: wz_session_core::limits::SessionLimits,
 }
 
 impl RouterState {
@@ -107,6 +110,13 @@ impl RouterState {
     /// [`SharedSession::session_policy`](crate::faces::SharedSession::session_policy).
     pub fn session_policy(&self) -> &SessionPolicy {
         &self.session_policy
+    }
+
+    /// The limits the node's own session runs under, which an entity the program declares on the
+    /// node takes its own limits from, as it does on a registry by
+    /// [`SharedSession::session_limits`](crate::faces::SharedSession::session_limits).
+    pub fn session_limits(&self) -> &wz_session_core::limits::SessionLimits {
+        &self.session_limits
     }
 
     /// Attach this ABI's per-node state. Once: a second call is refused and returns the value it
@@ -506,6 +516,7 @@ async fn join_group(
         link_conf.tx.queue,
         link_conf.rx,
         &link_conf.policy,
+        &link_conf.limits,
     )
     else {
         log_open_failure(
@@ -549,6 +560,7 @@ async fn join_group(
             join_rule: join.profile.join_rule,
             max_sessions: join.profile.max_sessions,
             policy: link_conf.policy,
+            limits: link_conf.limits,
         },
         opts,
         None,
@@ -605,6 +617,8 @@ pub(crate) fn open_router_blocking(
         groups,
         session_defaults,
         session_policy,
+        session_limits,
+        runtime_limits,
         ..
     } = stance;
     // The prefix as the forwarder takes it. The plan validated the text, so one that does not
@@ -632,6 +646,7 @@ pub(crate) fn open_router_blocking(
         rx: link_rx,
         accept,
         policy: session_policy,
+        limits: session_limits,
     };
     let (_, wire_zid) = session_zids(zid).ok_or(OpenError::DriveFailed)?;
     // Built here and shared, so that the program holding the node can reach the forwarder's
@@ -641,9 +656,16 @@ pub(crate) fn open_router_blocking(
     // is the router it dialled, which tells a client only what the client asked for, so the hat
     // sends that face every interest and every declaration of its south and every message whose
     // source is south (`zenoh/src/net/routing/hat/client/pubsub.rs` @ `fn compute_data_route`).
-    // The node's machines read the snapshot the open resolved, as its links do.
-    let forwarder =
-        RouterForwarder::for_node(role.whatami(), own_zid, timestamping, &session_policy);
+    // The node's machines read the snapshots the open resolved, as its links do: the clock the
+    // forwarder builds is bound by the node's runtime limits.
+    let forwarder = RouterForwarder::for_node(
+        role.whatami(),
+        own_zid,
+        timestamping,
+        &session_policy,
+        &runtime_limits,
+    )
+    .with_limits(&session_limits);
     // The forwarder built the node's clock: a stated bound it refused fails the open here, before
     // any listener is bound, as the registry's open does.
     refuse_a_refused_clock(&forwarder.node_hlc())?;
@@ -782,6 +804,7 @@ pub(crate) fn open_router_blocking(
                 scout_intents,
                 #[cfg(feature = "scout")]
                 scouting,
+                runtime_limits,
                 node_shutdown,
                 node_stop,
                 tx,
@@ -854,6 +877,7 @@ pub(crate) fn open_router_blocking(
                 abi_extension: std::sync::OnceLock::new(),
                 session_defaults,
                 session_policy,
+                session_limits,
             })
         }
         Ok(Err(cause)) => {
@@ -885,6 +909,7 @@ async fn run_router(
     dial_intents: Option<wz_runtime_tokio::accept_loop::DialIntentReceiver>,
     scout_intents: Option<wz_runtime_tokio::accept_loop::DialIntentSender>,
     #[cfg(feature = "scout")] scouting: Option<ScoutingPlan>,
+    runtime_limits: wz_session_core::limits::RuntimeLimits,
     shutdown: Arc<Notify>,
     stop: Arc<AtomicBool>,
     tx: Reporter<Result<Vec<String>, OpenError>>,
@@ -1011,6 +1036,8 @@ async fn run_router(
             return;
         }
     };
+    // The node's runtime limits, which the face loop holds its directory of locators to.
+    let dial_config = dial_config.with_runtime_limits(runtime_limits);
     let params = match init_params(role.whatami(), zid, link_conf) {
         Ok(params) => params,
         Err(error) => {

@@ -268,7 +268,7 @@ fn abi_reads_anyke(parameters: &[u8]) -> bool {
 /// Owns copies of the query's keyexpr / parameters / value payload so they
 /// outlive the wz [`QueryView`] borrow, caches the loaned views the accessors
 /// hand back, and accumulates the replies the callback asks for.
-struct QueryMarshal {
+pub(crate) struct QueryMarshal {
     keyexpr: String,
     parameters: Vec<u8>,
     /// pico's `_anyke`: whether this query accepts replies under ANY key rather
@@ -676,18 +676,18 @@ pub(crate) fn make_queryable_callback(
 /// `ResponseFinal` — pico's `_z_query_clear` contract.
 ///
 /// # Safety
-/// `handle` must be a live `Box::into_raw::<QueryMarshal>` pointer.
+/// `handle` must be a live `QueryMarshal` handle.
 unsafe fn free_query_marshal(handle: *mut c_void) {
-    drop(Box::from_raw(handle.cast::<QueryMarshal>()));
+    crate::object_slot::release(handle.cast::<QueryMarshal>());
 }
 
 /// Escape a borrowed query into an owned one bound to a deferred responder.
 ///
 /// # Safety
 /// `src` must be null or a pointer this crate handed to a query callback.
-unsafe fn clone_query_marshal(src: *const z_loaned_query_t) -> *mut c_void {
+unsafe fn clone_query_marshal(src: *const z_loaned_query_t) -> Result<*mut c_void, ZResult> {
     let Some(marshal) = query_marshal(src) else {
-        return core::ptr::null_mut();
+        return Err(crate::result::Z_ERR_GENERIC);
     };
     // Only a marshal the DISPATCH built can be escaped: the session it must
     // reply through comes from there. A marshal with no holder is one this
@@ -696,18 +696,23 @@ unsafe fn clone_query_marshal(src: *const z_loaned_query_t) -> *mut c_void {
     // failure rather than silently handed back. An escaped copy is the end of
     // the chain and is not escaped again.
     if marshal.deferred.is_some() {
-        return core::ptr::null_mut();
+        return Err(crate::result::Z_ERR_GENERIC);
     }
     let Some(holder) = marshal.holder.as_ref() else {
-        return core::ptr::null_mut();
+        return Err(crate::result::Z_ERR_GENERIC);
+    };
+    // The place is taken before the hold, so a full pool refuses the escape and holds nothing
+    // open.
+    let Some(slot) = crate::object_slot::Slot::take(crate::object_slot::Kind::Query) else {
+        return Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY);
     };
     // R2953 — the hold is taken HERE, inside the C callback: the handler job
     // every terminator job of its drain batch runs after, which is what makes
     // the hold visible to the job it must suppress. One hold per escape.
     let held = holder.hold_query(marshal);
-    let mut boxed = Box::new(marshal.deep_copy_deferred(held));
-    boxed.bind();
-    Box::into_raw(boxed).cast::<c_void>()
+    let owned = slot.fill(marshal.deep_copy_deferred(held));
+    (*owned).bind();
+    Ok(owned.cast::<c_void>())
 }
 
 crate::abi::impl_boxed_element!(
@@ -1039,7 +1044,7 @@ pub unsafe extern "C" fn z_query_reply_err_options_default(
 /// SSOT (so no future face replays it) and dropping every live face's wz
 /// queryable, which emits each wire undeclare and releases the last closure
 /// reference (→ the C `drop(context)`).
-struct QueryableState {
+pub(crate) struct QueryableState {
     engine: Arc<Engine>,
     id: QblId,
     /// R2959 — the queryable's key with the non-wild-prefix declaration pico
@@ -1092,9 +1097,9 @@ impl z_owned_queryable_t {
 }
 
 /// # Safety
-/// `h` must be a live `Box::into_raw::<QueryableState>` pointer.
+/// `h` must be a live `QueryableState` handle.
 unsafe fn free_queryable(h: *mut c_void) {
-    drop(Box::from_raw(h as *mut QueryableState));
+    crate::object_slot::release(h as *mut QueryableState);
 }
 
 impl_handle_ownership7!(
@@ -1289,19 +1294,25 @@ pub unsafe extern "C" fn z_declare_queryable(
         if queryable.is_null() {
             return Z_ERR_NULL;
         }
+        // The queryable's place is taken before it is declared, so a full pool refuses the
+        // declaration and declares nothing; the closure is consumed as on every refusal.
+        let Some(slot) = crate::object_slot::Slot::take(crate::object_slot::Kind::Queryable) else {
+            z_closure_query_drop(callback);
+            return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
+        };
         match declare_queryable_inner(zs, keyexpr, callback, options) {
             Ok((engine, id, key, released)) => {
-                let mut boxed = Box::new(QueryableState {
+                let state = slot.fill(QueryableState {
                     engine,
                     id,
                     key,
                     loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
                     released,
                 });
-                // Point the cached view at the boxed keyexpr's final address.
-                boxed.loaned_keyexpr = boxed.key.loaned();
+                // Point the cached view at the placed keyexpr's final address.
+                (*state).loaned_keyexpr = (*state).key.loaned();
                 *queryable = z_owned_queryable_t {
-                    handle: Box::into_raw(boxed) as *mut c_void,
+                    handle: state as *mut c_void,
                     _pad: [core::ptr::null_mut(); 3],
                 };
                 Z_OK
@@ -1350,7 +1361,7 @@ pub unsafe extern "C" fn z_undeclare_queryable(queryable: *mut z_moved_queryable
         }
         let handle = (*queryable)._this.handle;
         if !handle.is_null() {
-            drop(Box::from_raw(handle as *mut QueryableState));
+            crate::object_slot::release(handle as *mut QueryableState);
             (*queryable)._this = z_owned_queryable_t::null_value();
         }
         Z_OK
@@ -1750,12 +1761,13 @@ pub unsafe extern "C" fn z_query_clone(
         if this_.is_null() {
             return Z_ERR_NULL;
         }
-        let handle = clone_query_marshal(this_);
-        if handle.is_null() {
-            return crate::result::Z_ERR_GENERIC;
+        match clone_query_marshal(this_) {
+            Ok(handle) => {
+                (*dst).handle = handle;
+                Z_OK
+            }
+            Err(code) => code,
         }
-        (*dst).handle = handle;
-        Z_OK
     })
 }
 

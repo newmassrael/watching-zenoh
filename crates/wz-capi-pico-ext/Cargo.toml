@@ -1,0 +1,85 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-capi-pico-ext -- the doors of the additional features of the pico C ABI (end-to-end
+# protection, stream supervision, instance keys, the replay cache, the message catalog) as a
+# library of their own, beside the core library (wz-capi-pico built with
+# `--cfg wz_additional_apart`). Its sources are the core crate's door files, compiled again over
+# `src/core_view.rs`, the core's C ABI as the doors name it, which this library imports from the
+# core library through C (docs/capi-pico-additional-library.md).
+#
+# The default build of wz-capi-pico links the same doors into one library; this crate is the
+# second form of that build, never a second implementation.
+
+[package]
+name = "wz-capi-pico-ext"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "The additional-feature doors of the pico C ABI as a library of their own, over the core library's C ABI."
+
+[lib]
+name = "wz_capi_pico_ext"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+# The doors' tests are the core crate's: they run there, over the same sources, and the core's
+# tests hold `src/core_view.rs` to the core (crates/wz-capi-pico/src/additional_view_tests.rs). A
+# test executable of this crate would have no core library to link.
+test = false
+doctest = false
+# The doors' documentation is the core crate's, of the same files.
+doc = false
+
+# build.rs gives the library its SONAME and links it to the core library the build names.
+[build-dependencies]
+wz-cdylib-build = { path = "../wz-cdylib-build" }
+
+[features]
+# The arm of wz-capi-pico's default build that the doors' sources and the core view read: a build
+# of this crate with its defaults runs over a core built with its own.
+default = ["std", "unstable-api", "multi-thread", "query"]
+# The host's standard library, which every door is written over.
+std = []
+# What the core library this one runs over is built with, as far as the doors read it: the layout
+# of the C types the doors allocate (`unstable-api`, `local-queryable` in `z_get_options_t`), the
+# interface functions a core has (`query`: `wz_ext_interface_session_facts`), the event log the
+# instance keys report to (`event-ring`) and the threads a supervisor may run on
+# (`multi-thread`). Each is the wz-capi-pico feature of that name, and the two libraries are built
+# from one feature list (scripts/pico-additional-forms.sh, scripts/lib/pico_windows_package.py).
+unstable-api = ["std"]
+local-queryable = []
+query = []
+event-ring = []
+multi-thread = []
+# The doors, each the wz-capi-pico feature of that name, with what the doors' own rules need of
+# the libraries they link (`wz-app-frame`, the models of `wz-session-core`).
+e2e-sender = ["std", "unstable-api", "dep:wz-app-frame"]
+e2e-receiver = ["std", "unstable-api", "dep:wz-app-frame"]
+e2e-sender-demux = ["e2e-receiver"]
+e2e-supervision = ["std", "unstable-api", "wz-session-core/e2e-supervision"]
+instance-key = ["std", "unstable-api", "dep:wz-app-frame", "wz-app-frame/instance-key"]
+message-catalog = ["std", "unstable-api", "dep:wz-app-frame"]
+message-payload = ["message-catalog", "dep:wz-app-frame", "wz-app-frame/message-payload"]
+replay-cache = [
+    "std",
+    "unstable-api",
+    "query",
+    "e2e-receiver",
+    "wz-app-frame/replay",
+    "wz-session-core/replay-cache",
+]
+
+[dependencies]
+# The rules of the additional features (frames, judges, the catalog, instance keys), linked by
+# this library for itself as the core links them: they hold no state of a session.
+wz-app-frame = { path = "../wz-app-frame", optional = true }
+# The session core's stateless modules the doors name (policies, quotas, the replay and supervision
+# models, the build limits of the additional features): linked by this library for itself.
+wz-session-core = { path = "../wz-session-core", default-features = false, features = ["alloc"] }
+
+[lints]
+workspace = true

@@ -3683,6 +3683,17 @@ impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R
     // `ext_qos` reads as).
     #[cfg(all(feature = "liveliness-token", not(feature = "alloc")))]
     fn send_declare_token_reply(&self, token_id: u64, keyexpr: &str, interest_id: u64) {
+        // A keyexpr past the session's `MAX_KEYEXPR_BYTES` is not answered, as the subscriber
+        // reply skips one. A build that fixes the bound compares nothing here: the token
+        // table's rows refused such a key when it was registered.
+        if !self
+            .params
+            .limits
+            .max_keyexpr_bytes_held()
+            .admits(keyexpr.len())
+        {
+            return;
+        }
         let _ = self
             .dispatch_network_message_at(
                 DispatchStage::Fresh,
@@ -3697,8 +3708,17 @@ impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R
     }
     #[cfg(all(feature = "liveliness-token", feature = "alloc"))]
     fn send_declare_token_reply(&self, token_id: u64, keyexpr: &str, interest_id: u64) {
-        // A keyexpr past the protocol's bound is not answered, as the subscriber reply
-        // below skips one: the chain's `DeclFinal` still terminates the interest.
+        // A keyexpr past the session's `MAX_KEYEXPR_BYTES` or the protocol's bound is not
+        // answered, as the subscriber reply below skips one: the chain's `DeclFinal` still
+        // terminates the interest. A build that fixes the bound compares nothing here.
+        if !self
+            .params
+            .limits
+            .max_keyexpr_bytes_held()
+            .admits(keyexpr.len())
+        {
+            return;
+        }
         if let Ok(declare) = build_token_reply(token_id, keyexpr, interest_id).and_then(|reply| {
             reply.try_into_owned_in::<crate::transport_profile::TransportStorage>()
         }) {
@@ -3725,11 +3745,12 @@ impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R
         self.send_declare(crate::declare_build::build_declare_final_reply(interest_id));
     }
     // With no allocator the reply is written from the caller's own text through the
-    // borrowed writer of `lent_control`; a keyexpr longer than the session holds text for
-    // is skipped, as the heap form skips one the bounded codec field cannot hold.
+    // borrowed writer of `lent_control`; a keyexpr longer than the session's
+    // `MAX_KEYEXPR_BYTES` is skipped, as the heap form skips one. Nothing here is sized by
+    // the bound, so the value is compared even where the build fixes it.
     #[cfg(all(feature = "declare-subscriber", not(feature = "alloc")))]
     fn send_declare_subscriber_reply(&self, subscriber_id: u64, keyexpr: &str, interest_id: u64) {
-        if keyexpr.len() > crate::caps::MAX_KEYEXPR_BYTES {
+        if !self.params.limits.max_keyexpr_bytes().admits(keyexpr.len()) {
             return;
         }
         let _ = self.dispatch_declare_lent(&LentDeclaration::SubscriberReply {
@@ -3740,10 +3761,20 @@ impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R
     }
     #[cfg(all(feature = "declare-subscriber", feature = "alloc"))]
     fn send_declare_subscriber_reply(&self, subscriber_id: u64, keyexpr: &str, interest_id: u64) {
-        // A reply keyexpr longer than the bounded codec field cannot be encoded;
-        // the chain's `DeclFinal` still terminates the peer's CURRENT interest,
-        // so a skipped reply degrades to "no matching subscriber" rather than
-        // leaving the peer's query unresolved.
+        // A reply keyexpr past the session's `MAX_KEYEXPR_BYTES`, or longer than the
+        // bounded codec field, is not answered; the chain's `DeclFinal` still terminates
+        // the peer's CURRENT interest, so a skipped reply degrades to "no matching
+        // subscriber" rather than leaving the peer's query unresolved. A build that fixes
+        // the bound compares nothing here, as before it could be stated: its codec field
+        // refuses what it cannot hold.
+        if !self
+            .params
+            .limits
+            .max_keyexpr_bytes_held()
+            .admits(keyexpr.len())
+        {
+            return;
+        }
         if let Ok(declare) = crate::declare_build::build_declare_subscriber_reply_with_id(
             interest_id,
             subscriber_id,
@@ -4043,6 +4074,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // value via its reliable-channel window tracking
         // (zenoh-pico unicast/transport.c:182-194).
         let initial_frame_sn = params.initial_sn;
+        // Read before `params` moves into the core: the queries a link remembers the key form of.
+        #[cfg(feature = "shared-key-ids")]
+        let noted_requests = params.limits.link_noted_requests();
         #[cfg(feature = "transport-stats")]
         let stats_metrics = seed.metrics;
         #[cfg(not(feature = "transport-stats"))]
@@ -4154,6 +4188,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 link_keys: R::new_mutex(crate::shared_key_ids::LinkKeys::new(
                     None,
                     crate::policy::KeyWireForm::Declared,
+                    noted_requests,
                 )),
                 #[cfg(all(
                     feature = "alloc",
@@ -10024,12 +10059,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let outcome = TxExpiry::of(&self.params.tx_queue);
         match outcome {
             TxExpiry::Closing => self.request_congestion_close(),
-            // The link has stayed blocked for `TX_EXPIRY_CLOSE_AFTER` messages in a row: the
-            // session is not kept any more. The message that completes the run is still
-            // dropped and still reported, because it was: the sender is told the transport was
-            // not available, and the close is the drive loop's, as upstream's is.
+            // The link has stayed blocked for `TX_EXPIRY_CLOSE_AFTER` messages in a row, as the
+            // session's snapshot holds it: the session is not kept any more. The message that
+            // completes the run is still dropped and still reported, because it was: the sender
+            // is told the transport was not available, and the close is the drive loop's, as
+            // upstream's is.
             TxExpiry::Kept => {
-                let close_after = self.params.tx_queue.expiry_close_after;
+                let close_after = self.params.limits.tx_expiry_close_after();
                 if self
                     .core
                     .out_of_band
@@ -10590,8 +10626,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let wire_reliability = Reliability::from_reliable_bool(reliable);
         let count_pushed = || {
             // A message with room ends a run of expiries (`TX_EXPIRY_CLOSE_AFTER`); with no
-            // count stated there is no run to end.
-            if self.params.tx_queue.expiry_close_after != 0 {
+            // bound there is no run to end.
+            if !self.params.limits.tx_expiry_close_after().is_unbounded() {
                 self.core.out_of_band.take(|s| s.expiry_run.pushed());
             }
             #[cfg(feature = "transport-stats")]
@@ -11223,7 +11259,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 self.tx_conduits.leave_control_open();
             }
             // Whatever the outcome, not only a message staged: the writer's flush skips a
-            // conduit whose lock a sender holds ([`Self::flush_open_batch_nowait`]), and
+            // conduit whose lock a sender holds ([`Self::try_flush_open_batch`]), and
             // this sender, done with its conduit, is who tells it to come back. A send that
             // was dropped for congestion, or refused, has staged nothing, but may have
             // been holding the lock of a conduit with a frame still open.
@@ -11808,7 +11844,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// [`Self::flush_open_batch`] for the link's writer, which must never WAIT for a conduit's
-    /// lock: a conduit whose lock is held is skipped, and left open.
+    /// lock: a conduit whose lock is held is skipped, and left open. Answers whether every
+    /// conduit was taken and drained: `false` when a sender held one.
     ///
     /// A sender holds its conduit's lock across its wait for room on the link
     /// ([`PushDeadline`]: the wait is part of the congestion decision that precedes the
@@ -11819,17 +11856,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// because a sender that finds the writer owed a flush asks for one again when it is done
     /// with the conduit, whatever the outcome ([`Self::dispatch_network_message_at`]'s last
     /// step), and the writer then runs this again and finds the lock free.
-    #[cfg(feature = "transport-batching")]
-    fn flush_open_batch_nowait(&self) {
-        let _ = self.try_flush_open_batch();
-    }
-
-    /// [`Self::flush_open_batch_nowait`], answering whether every conduit was taken and drained.
-    /// `false` when a conduit's lock was held by a sender, which left that conduit as it was.
     ///
-    /// A probe needs the answer: a control message is a barrier for the data staged before it, so
-    /// a probe that could not drain every conduit may not go ahead, and is told to come back
-    /// (see [`DispatchStage::Probe`]).
+    /// Two callers need the answer. The writer's flush ([`Self::flush_staged`]) hands it on:
+    /// a sender holding a conduit is a producer still adding, which is when the writer backs
+    /// off. And a probe: a control message is a barrier for the data staged before it, so a
+    /// probe that could not drain every conduit may not go ahead, and is told to come back (see
+    /// [`DispatchStage::Probe`]).
     #[cfg(feature = "transport-batching")]
     fn try_flush_open_batch(&self) -> bool {
         self.drain_conduits(|_| true, false)
@@ -11861,7 +11893,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// Send the frame open in one conduit, under that conduit's lock (`batch`): the body of
-    /// the walks of [`Self::flush_open_batch`] and [`Self::flush_open_batch_nowait`].
+    /// the walks of [`Self::flush_open_batch`] and [`Self::try_flush_open_batch`].
     #[cfg(feature = "transport-batching")]
     fn flush_conduit(&self, idx: usize, priority: Priority, batch: &mut BatchTx) {
         // Lowered before the frame is taken, under the lock that keeps a control message from
@@ -11993,13 +12025,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// leaves when it overflows, when an express message or a keepalive goes out, or when the
     /// caller flushes or stops it. Draining it here sent each message as soon as the writer
     /// fell idle, so a caller's batch never held more than one burst.
-    pub fn flush_staged(&self) {
+    ///
+    /// Answers [`crate::link::IdleFlush::SenderHeld`] when a sender held a conduit's lock, which
+    /// left that conduit's frame open: the writer backs off for the batching time limit then,
+    /// as upstream's does when it cannot take its batch's lock.
+    pub fn flush_staged(&self) -> crate::link::IdleFlush {
         // The writer calls this, and a writer must not wait for a conduit's lock: see
-        // [`Self::flush_open_batch_nowait`].
+        // [`Self::try_flush_open_batch`].
         #[cfg(feature = "transport-batching")]
-        if !self.tx_conduits.caller_window_open() {
-            self.flush_open_batch_nowait();
+        if !self.tx_conduits.caller_window_open() && !self.try_flush_open_batch() {
+            return crate::link::IdleFlush::SenderHeld;
         }
+        crate::link::IdleFlush::Drained
     }
 
     /// R311jq — typed chokepoint entries: each hands its per-type body
@@ -16521,17 +16558,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// When the no-progress watch of the peer's initial declarations ends this session's link
     /// ([`crate::declaration_sync::stall_deadline`]), on the clock of the lease: a
-    /// `DECLARATION_SYNC_RX_NO_PROGRESS_MS` stretch after the later of the establishment and the
-    /// peer's last declaration, while `reliable-gap-reconnect` reacts and the peer's final has not
-    /// arrived. `None` before the establishment, while no engine notes the session's events, and
-    /// whenever the watch is off.
+    /// `DECLARATION_SYNC_RX_NO_PROGRESS_MS` stretch, as the session's snapshot holds it, after the
+    /// later of the establishment and the peer's last declaration, while `reliable-gap-reconnect`
+    /// reacts and the peer's final has not arrived. `None` before the establishment, while no
+    /// engine notes the session's events, and whenever the watch is off.
     #[cfg(feature = "alloc")]
     pub fn declaration_watch_deadline(&self) -> Option<u64> {
-        self.declaration_watch_deadline_for(crate::caps::DECLARATION_SYNC_RX_NO_PROGRESS_MS as u64)
+        self.declaration_watch_deadline_for(
+            self.params.limits.declaration_sync_rx_no_progress_ms() as u64
+        )
     }
 
     /// [`Self::declaration_watch_deadline`] for a window of `window_ms`, the form a test names
-    /// a window to where the build fixes one.
+    /// a window to where the snapshot holds another.
     #[cfg(feature = "alloc")]
     pub fn declaration_watch_deadline_for(&self, window_ms: u64) -> Option<u64> {
         let progress = self
@@ -16639,8 +16678,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// Whether this session's declarations are SYNCED with its peer: no paced replay owes the peer
     /// a declaration, and every interest the node sent that asks for what exists now has been
-    /// answered with a final, or has waited `DECLARATION_SYNC_FINAL_TIMEOUT_MS` and is given up on.
-    /// A session that sent no interest and runs no replay is synced.
+    /// answered with a final, or has waited `DECLARATION_SYNC_FINAL_TIMEOUT_MS`, as the session's
+    /// snapshot holds it, and is given up on. A session that sent no interest and runs no replay is
+    /// synced.
     ///
     /// The peer's own initial final is not required: a router sends none to a client.
     /// R311g1 — signature-stability: always `true` without `session-reconnect`, which has no
@@ -16656,12 +16696,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         {
             // The two locks are taken one after the other, never together.
             let replaying = R::with_mutex_mut(&self.declaration_cache, |cache| cache.replaying());
+            let timeout_ms = self.params.limits.declaration_sync_final_timeout_ms() as u64;
             !replaying
                 && R::with_mutex_mut(&self.declaration_sync, |sync| {
-                    sync.is_synced(
-                        now_ms,
-                        crate::caps::DECLARATION_SYNC_FINAL_TIMEOUT_MS as u64,
-                    )
+                    sync.is_synced(now_ms, timeout_ms)
                 })
         }
         #[cfg(not(feature = "session-reconnect"))]

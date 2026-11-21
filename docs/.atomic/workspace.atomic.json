@@ -2170,7 +2170,13 @@
         "Round 4502: this tree reads 79012/78964 on a build host, -4052/-4284 under main; nothing grew.",
         "Round 4502 symbols: hashbrown+foldhash -1754 (fixed peer table), multicast_dispatch -792.",
         "Round 4502 symbols: mcu_multicast_e2e -594, multicast_peer_rows -410, memset/memmove -232.",
-        "Round 4502 carry: main's growth over 74160/74216 was not split by symbol when it landed."
+        "Round 4502 carry: main's growth over 74160/74216 was not split by symbol when it landed.",
+        "2026-11-22 text thumbv7m=84112 thumbv7em-hf=84300 (data=4, bss 270112): hosted run 44895098050.",
+        "2026-11-22 cause: 23da5b6a2, a group send stage; one build host read 79076 before it, 85320 after.",
+        "2026-11-22: the SCE pin 99e9dbb81 in the same window is +96 on that host, not the growth.",
+        "2026-11-22 symbols: GroupTxStage::push_held +2280 NEW, StageQueue +756 NEW, rt_main +788.",
+        "2026-11-22 symbols: Frame envelope +830, multicast_tx_bytes +398, multicast_tx_emit -1190.",
+        "2026-11-22: data and bss flat; every new symbol is the stage that landing meant to add."
       ],
       "impact_scope": [
         "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
@@ -6241,6 +6247,199 @@
         "Which frame took 384 bytes off the client chains was not attributed; the size tool can now say it.",
         "Whether the parts lower the lane's peak was measured on the fleet (0.8 to 1.5 GB per part) but the fleet's learned figure for the whole lane is a prior, not a reading, until the fleet's own fix lands."
       ]
+    },
+    "Round 4581": {
+      "decision_summary": "The fifth set of the PoC's generic, default-off work lands with the reds it found. The pico C ABI holds its objects in fixed pools with an exhaustion error and memory-area doors, its cooperative engine has a slot profile on the program's own stack, a Windows host carries the group transport and the slot stack, and an allocation that fails at any Nth call is refused cleanly by every door, with no allocation once a session operates. The additional features build as one library or as a core and an additional library from one source, the additional library reaching the core only through its exported functions; a differential wire test holds the two forms to the same bytes, and running it on a build host for the first time found that the additional library's view of the core declared the session and publisher loans with no size, so the replay doors kept empty copies and the core read door memory as a handle; the view now gives both their core size and the layer direction gate refuses a door that holds a view type of no size by value. A droppable publish that finds the session held is dropped per face and owed to the other faces, as zenoh-pico's profile does; the owed queue is taken whole, which kept 3,700 bytes of a drain's code out of every cooperative build. A group's test replies are staged on its transmit stage, the secure channel counts the accepts of its listener, and one protobuf writer serves the capture and the application frames. Two tools no lane exercised are repaired: the performance matrix had lost its reference builder in a merge and measured nothing, and the Windows package was never built because its script read cargo's UTF-8 output with the runner's code page; each now has a selftest in Layer C0. The app-plane oracle lane binds the party's key-wire form and dictionary to its lane file and refuses a mismatch instead of timing out.",
+      "changes_bullets": [
+        "`wz-capi-pico`: object pools and slots with exhaustion errors and memory doors; the slot profile of the cooperative engine; allocation-fault injection tests; the core view of the additional library sized for the two loans its doors copy.",
+        "`wz-capi-pico-ext` (new): the additional library over the core's exported functions; `scripts/pico-additional-forms.sh`; the differential wire test armed in Layer Epico (`WZ_PICO_FORMS_REQUIRE`).",
+        "`wz-capi-coop`: per-face drop of a held publish with an owed queue taken whole; group test replies on the transmit stage.",
+        "`wz-runtime-posix`: the Windows group transport and slot stack; `wz-tls-mbedtls`: a counted listener; `wz-app-frame`: one protobuf writer.",
+        "Gates: capability budgets of nine cooperative cases moved by the measured cost; layer direction rule 8; feature census rows; logic census rows for the pools; armed-oracle row; lane-feature membership of the pico stability lane; the perf matrix and the Windows packager selftests in C0; the packager reads tool output as UTF-8; the oracle lane binds the party's key wire."
+      ],
+      "verification_bullets": [
+        "On one build host, the integration tree: crate tests of wz-session-core, -mcu, wz-runtime-posix, wz-capi-coop, wz-capi-pico (default and the view-test feature sets), -c, the allocation-fault tests, the TLS crate, clippy of six crates and of the additional library, the non-default test census, Layers Qzk (every kit image built under its gates and both clients held under zenoh-pico), S (stability) and Epico (the two library forms put the same bytes on the wire).",
+        "Capability cost: the nine cooperative cases measured against main on one host, +8.3K to +8.9K after the owed queue change took 3,700 off each; each budget moved by its own measured delta.",
+        "The app-plane oracle lane against the deployment's party, literal and shared key wires, with and without the party echoing the cookie: 3 checks and 14 aspects PASS each time the party is built in the lane file's form.",
+        "Every round-fed gate of the pre-push hook and gate 2f, run locally after the last change; the selftests of the perf matrix, the packager, the oracle lane, the cost gate and the armed-oracle census."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "Hosted Windows package jobs read as soft until two green runs; the soft-job meta gate on its own branch will hold that promise.",
+        "The worst-case memory report (branch poc-q4-worst-memory) waits for the runtime-config session's limits landing before it is rebased and verified.",
+        "Layer G's one-lane split (V1) was measured on two different hosts and is not comparable; it is to be measured again on one host."
+      ]
+    },
+    "Round 4582": {
+      "decision_summary": "The limits a stage after the build may decide now reach the machines that run under them: round 2 of the limits plane ends, the document layer reads them (round 3) and the three C ABI doors open sessions under them (round 4), landed together so that no door accepts a stated limit it does not apply. Six peer-filled bounds leave the build: MAX_REMOTE_DECLS and MAX_PEER_KEYEXPR_ALIASES (each peer table holds its quota and asks it before a new id, refusing past it the way a full fixed table already refuses, into the same counter; the heap backing counts its own refusals now), MAX_INBOUND_SUB_INTERESTS and MAX_PENDING_DECLARES (the subscriber registry and the token registry hold them; a chain past the quota is refused whole and counted, never cut), MAX_PENDING_REPLIES and MAX_PENDING_FINALS (the reply and final stages hold them; taking the owed finals keeps the quota and the refusal count with the table). The counting semaphore holds its bound as the limit's value Quota, so no bound has one spelling, and QUERIER_MAX_PENDING_QUERIES is read from the session's observer. A session's parameters carry its limits (SessionInitParams.limits, filled from the open's snapshot where one is in reach), and an MCU admin or client node holds its observer to them. The document's wz/limits member is read into the snapshots with named refusals (unknown limit, a capacity alone, a runtime limit at a door that holds only a session's, a value outside the domain, not a limit value, stated twice) and a statement of a limit whose machines still read the build is refused by name (LimitNotRead): which limits are read from the snapshot is declared once per [[limit]] (read = \"snapshot\" | \"build\"), generated into the tables, and held against the code both ways by limit_read_gate, which no longer keeps its own list. An entry of an unread limit links no selector, so a C ABI library carries the selection of read limits alone. Each [[limit]] declares its upstream zenoh counterpart (a config key with anchored citations, or none with a reason); the pico side is derived from the switch rows. The tokio node, zenoh-c and pico doors and the Rust API resolve the document and open with its session snapshot, asserted against one shared corpus of documents.",
+      "changes_bullets": [
+        "`crates/wz-session-core`: `id_map.rs` `bind_within` and the heap backing's own refusal count; the alias, remote declaration, interest, staged answer, reply and final tables hold `<Name>Held` quotas set by `limit_to`; `ApplicationLayerObserver::with_limits` and `PeerTables::limit_to` hand them; `quota.rs` holds its bound as `limit_binding::Quota`; `session_init_params.rs` gains `limits`.",
+        "Document layer: `policy_document.rs` reads `wz/limits` (`compose_limits`, `ResolvedLimits`, `Base`, `Overrides.limits`, seven named refusals, `LimitsNotRead` removed); `limit_binding.rs` entries carry `read_from_snapshot` and no selector for an unread limit; `limit_corpus.rs` is the one corpus every door asserts.",
+        "Doors: tokio `zenoh_config.rs` (node snapshot, honoured paths, export), `wz-capi-core` `open_plan.rs` and `drive.rs` (`LinkConf.limits`), zenoh-c and the Rust API through them, pico `config_policy.rs`/`session.rs`/`session_ext.rs` and the coop engine; MCU `admin_node.rs`/`client_node.rs` observers read `params.limits`.",
+        "Declaration and gates: `deploy/wz-config.toml` `[[limit]]` gains `read` and `[limit.upstream]`; `wz_config.py`, `upstream_switch_map.py`, `limit_read_gate.py` (declared pending set), the schema without unread limits; `capability_cost_gate.py` budgets, `feature_gate_diagnostic.py`, `files.md`, four MCU count guards, three reason pins, two census rows of S10 and S12."
+      ],
+      "verification_bullets": [
+        "One machine, final merged tree: workspace check of all targets; wz-session-core tests default 1,151, alloc 1,151, bounded-heapless 1,149, declare planes 1,429, query planes 1,329, all features 3,301; wz-session-mcu, capi-core 230, capi-coop 35, tokio querier 49 and wz/limits member 14, capi-pico replay-cache 221 and config-document 13, capi-c 220, the Rust API 195, session-lwip; every step 0 failed. Clippy -D warnings of each touched crate (session-core three feature sets, pico two).",
+        "The new tests ran: 28 enforcement tests (14 new), corpus 6, policy document 46, an MCU client node held to its parameters' limits, the capi-core link conf, the tokio querier's stated bound.",
+        "C1cs on one machine against `b58b71c19`: +12,802 to +21,732 per case (symbol diff in the note); the unread selectors' removal is in it; the gate passes with the moved budgets on the merged tree.",
+        "Static bundle 156 of 156, upstream citation, reason pins, limit-read, policy-read, wz-config 440 arms and check, switch map, census and coverage gates, count guard 16 of 16, leg ledger."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-7-declare-flow",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Runtime-scope limits: no machine reads a node's RuntimeLimits; all ten are declared read from the build and refused by name. The node clock still builds its own from the environment.",
+        "Slot builds: the MCU slot session's peer tables and the slot node's observer keep the build's values (no snapshot reaches them before the slot opens); a builder field and the deploy images move them.",
+        "Per-task reply stages in tokio, coop, router forward and the held query keep the build's quota.",
+        "45 limits remain read from the build; each moves by its round, its `read` turning to snapshot."
+      ]
+    },
+    "Round 4583": {
+      "decision_summary": "wz is held to being smaller, faster and more complete than zenoh-pico by gates, and the gates are held to being complete. The owner chose a ratchet with a debt loop: a figure may not get worse, each figure short of the goal is a registered debt paid largest first, and a figure that reaches its goal is locked there. D9 holds every pico ABI host library under zenoh-pico built as the same build in the same run, by the ratio of their text, at a tolerance of 2.5 percent, the spread measured between two hosts for one tree, until every host builds in the declared image. D10 makes the pico performance matrix judge itself cell by cell against a committed table, with a third arm for an external library given by path whose table stays outside the repository. D11 keeps a scoreboard of four completeness criteria: upstream test pass rate, a feature catalogue accepted as default-off switches (read from outside the repository), upstream debt, and structural contracts each enforced by a live gate. Three meta gates hold the gates themselves: every soft workflow site carries a declared promise and expiry and its hosted record is read, every script under scripts/ is exercised by a lane or declared, and code mutation testing measures the test suite's kill rate per scope nightly under a ratchet. Building them found two hidden reds: the Windows cooperative engine never linked (the MCU shell entered critical sections around the runtime's door, which Linux's linker discarded), now through the runtime's door with a gate that refuses any other entry, and the Qzk part listing that Layer 0's pinned shellcheck refused.",
+      "changes_bullets": [
+        "D9: `capability_cost_gate.py` judges wz/pico text per pico case against `deploy/pico_host_ceiling.json` (14 rows, debt `debt-pico-host-size-ceiling`); capic-default-lean budget read again.",
+        "D10: `perf_matrix.py --gate`, `--check-table`, arm X by `WZ_PERF_EXTERNAL_*`; `deploy/pico_perf_ceiling.json` (84 rows to fill from a run); `pico-compare.sh perf` exits with the gate.",
+        "D11: `completeness_gate.py` and `deploy/completeness_ratchet.json`, docs/completeness-scoreboard.md; `logic_census_coverage_gate.coverage()`.",
+        "Meta: `soft_job_gate.py` + `deploy/soft_jobs.json` (25 sites); `script_exercise_census.py` (327 scripts) and nine C0 selftest legs; Layer Cmut, `mutation_ratchet_gate.py`, `deploy/mutation_ratchet.json` (cargo-mutants 27.1.0), `.github/workflows/mutation.yml`, `scripts/install-cargo-mutants.sh`.",
+        "Windows: `wz-session-mcu` enters critical sections through `wz_runtime_coop::cs`; `coop_critical_section_gate.py`; `wz-runtime-posix` dev-dependency.",
+        "Store: three debt entries (host size ceiling, pico API shortfall, partial atoms)."
+      ],
+      "verification_bullets": [
+        "On the integration tree after main 8d9b0e530: Layer C1cs as fleet units (every pico case inside its ceiling row, every budget held), Layer 0 (pinned shellcheck and actionlint), Layer C0 (every static gate incl. the new ones), every round-fed gate of the pre-push hook and gate 2f.",
+        "The new gates' selftests: capability cost 42 arms, perf matrix 86, completeness, soft jobs 50, script census 67, mutation ratchet 35, coop critical section 9 fixtures; the completeness scoreboard reads pico API 15 of the original's 17, zenoh-c 24 of 24, 2 PARTIAL atoms, contracts all enforced.",
+        "The Windows link fix on Linux: wz-session-mcu tests and clippy, wz-runtime-posix unit tests, the two cooperative pico builds, Layer G, wz-capi-coop tests; Windows itself is judged by the hosted capi-coop job, which the soft-job gate now reads.",
+        "The D9 tolerance was set from a measurement, not assumed: one tree read pico-client-coop 1,012,762 and 1,030,646 bytes on two hosts while zenoh-pico read 403,086 on both."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "The perf table's 84 rows are unfilled until a matrix run on a quiet host; the matrix run of this day stalled.",
+        "Layer Cmut has no measured row: cargo-mutants is not provisioned on any build host (installing it needs the owner's leave), so the nightly job and the first rows wait.",
+        "D9's tolerance narrows when every host builds in the declared image (the same-build-environment work).",
+        "The soft-job gate's hosted reading is red today by design: the Windows package rows wait for two green runs of the packager fix, and the Windows cooperative rows for this landing's fix."
+      ]
+    },
+    "Round 4584": {
+      "decision_summary": "Layer B judged every source on six backends, so it failed `take_generation` (Round 4578) where SCE refuses it by name: SCE lowers a map in an algorithm on Rust and C11 only (`ALGORITHM_MAP_BACKENDS`, docs/adr/0108 D10), and cpp, kotlin, go and python exit 7 with that sentence. `scripts/verify-codegen.sh` now reads a table of the backends each stem is known to be refused on and the words of the refusal (`UNLOWERED_ON`, `UNLOWERED_BECAUSE`). A listed backend passes only when refused in exactly those words; one that emits fails and names the entry to drop, and any other failure stays a failure. The C1m guards had drifted where hosted runs never reached them, each leg failing on the one before: they take what main `c72460b30` printed (peer nodes 29, from hosted run 44895098050; lifecycle verbs 37, coop ip stack links 11 and slot declaration replay 14, from a build host). The SCE pin moves to e5289177652, whose map is built by a `const fn` and is all zero bytes when empty without an allocator; `ResetGenerations::with_seed` is `const` and gains `reseed` and `UNDRAWN_SEED`. The fixed-memory node does not take the table yet: under feature unification a graph with `alloc` on grows every SCE map on the heap, so the node's reset query allocated twice in `admin_open_query`. The SCE session accepted the diagnosis and is making a map's storage a type (`Inline` and `Heap`, the default chosen by the feature).",
+      "changes_bullets": [
+        "`scripts/verify-codegen.sh`: `UNLOWERED_ON` and `UNLOWERED_BECAUSE` (take_generation: cpp kotlin go python), status `unlowered` or `EMITS`, `unlowered=N` in the summary. `scripts/run-ci.sh`: C1m guards `mcu peer nodes` 27 to 29, `mcu lifecycle verbs` 35 to 37, `coop ip stack links` 10 to 11, `mcu slot declaration replay` 13 to 14, each with where it was printed. `vendor/sce` 8525a3e265b to e5289177652. `crates/wz-session-core/src/reset_generations.rs`: `with_seed` is a `const fn`, `reseed`, `UNDRAWN_SEED`, one more unit test."
+      ],
+      "verification_bullets": [
+        "`scripts/build-sce.sh` at e5289177652, then `bash scripts/regen-codegen.sh` stage 1 and stage 2: no file under `out/` changes. `verify-codegen.sh` over all 108 stems of `sources/codecs` and `sources/algorithms`: 108 pass; take_generation prints rust and c11 ok and the four others unlowered. `run-ci.sh --layer C1m` through bx on a build host: pass (262 s). `cargo test -p wz-session-core --lib reset_generations`: 7 passed. Clippy `-D warnings` of `wz-session-core` clean. The hook's round-fed gates: 166 ran, 0 failed. The other reds of hosted run 44895098050 are taken by the session watching-zenoh-5e, split by message."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.a-new-kind-algorithm",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.l-new-kind-bounded-collection",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "When SCE lands the map storage as a type, move the pin and put the connect manager's table on `Inline` storage (the branch `take-generation-mcu-wip` holds the change and its test, with the slot nodes drawing the seed from the session factory's entropy), then run `admin_open_query` (nothing allocated), C1m, the kit images one at a time and C1cs. Then the census rows whose only gap is U1, the U3 re-read and W9 to W11."
+      ]
+    },
+    "Round 4585": {
+      "decision_summary": "Two hosted reds of run 44895098050 (c72460b30) are paid, both read to the gate's own sentence and attributed before a fix. Layer Q's multicast-e2e footprint grew +5836 / +6040 bytes with the group send stage (23da5b6a2, bisected on one build host: 79076 before, 85320 after; the SCE pin 99e9dbb81 in the same window is +96), every new symbol the stage that landing meant to add and data and bss flat, so the baseline moves to the hosted reading 84112 / 84300 and section 6.9 records the attribution. Layer Q's session-slot-bytes record moves to 36128 / 36120, the cut the kit recovery round (b58b71c19) made and did not record; its owner agreed. Layer Z's tls expiry test failed in its adjudicator: stock zenohd kept a tls link after the certificate expired, because a client redials at once (`zenoh/src/net/runtime/orchestrator.rs` @ `fn closed_session`), the certificate check reads whole seconds and accepts a dial in the second the certificate ends on, and the new link's expiry task, spawned inside Arc::new_cyclic with its time already past (`io/zenoh-links/zenoh-link-tls/src/unicast.rs` @ `Arc::<LinkUnicastTls>::new_cyclic`), can run before the link is built and end without closing it (`io/zenoh-link-commons/src/tls.rs` @ `if let Some(link) = link.upgrade() {`). The rule the test holds is about the link the certificate was valid for, so the listener's verdict now names that link by its dialer's end, and a redial from another port is no longer read as the old link kept.",
+      "changes_bullets": [
+        "crates/wz-integration-tests/tests/it/files/wz_tls_close_on_expiry_zenohd_interop.rs: the verdict reads the dialer's ends of the tls links the listener lists and asks whether the end listed before the expiry is listed after it; the module doc states upstream's same-second redial and the expiry task that can miss it.",
+        "scripts/check-footprint.sh: BASELINE_MC_TEXT 84112 / 84300 with the bisect and the symbol diff; deploy/session_slot_bytes.json: 36128 / 36120.",
+        "Section 6.9 (preset-mcu-multicast-pub): six caveats with the figures, the cause, the pin's share and the symbols.",
+        "docs/hosted-red-acks.md: a row for run 44895098050 naming what this push pays, what Round 4584 paid, what watching-zenoh-5e holds, and the C1cc batching leg left unpaid."
+      ],
+      "verification_bullets": [
+        "The tls expiry test 3 of 3 on a build host (zenohd built from the pinned 1.10.2 tag, the demo with Layer Z's features): control and key, on zenohd and on wz, each run.",
+        "multicast-e2e built on one build host at 589a8884c (79076), 99e9dbb81 (79172), 68888eca7 (79076), 23da5b6a2 (85320) and 0c7aa853b (84856); nm symbol diff across 23da5b6a2 adds 5606 B; on hkl002 main's 7de14394c and c72460b30 read byte-equal (84892 / 85048), so the hosted reading of c72460b30 is the baseline.",
+        "session_slot_bytes.py --check on a build host: 36128 and 36120, equal to the record.",
+        "upstream_citation_anchor_gate.py --check --resolve passes; the pre-push hook's round-fed gates 166 of 166; validate-workspace T1 orphan delta 0, T3 warn 4 unchanged, entries and sections unchanged."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-9-preset-mcu-multicast-pub",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "C1cc a_longer_batching_time_limit_writes_a_contended_burst_in_fewer_batches_on_wz_and_libzenohc: wz writes about 4,500 batches under 0 ms and 100 ms alike while libzenohc goes 825 to 58; taken by watching-zenoh-43 next.",
+        "Layer Q's multicast-e2e figure is a hosted reading; the build hosts read it 780 B higher, so a local Layer Q is not its verdict."
+      ]
+    },
+    "Round 4586": {
+      "decision_summary": "A tokio link's writer now backs off for the batching time limit only when its idle flush found a sender holding an open frame, which is upstream's rule: its writer pulls the open batch when it can take the batch's lock and backs off when a producer holds it (`io/zenoh-transport/src/common/pipeline.rs` @ `if let Ok(mut g) = self.current.try_lock() {`), and while backing off it pulls once no new bytes were written since its last look or once the threshold has passed since the batch's first write (`io/zenoh-transport/src/common/pipeline.rs` @ `if diff >= self.backoff.threshold {`). wz's writer read whether producers were still adding from the staged count over a few microseconds of spinning, and a producer that lost its CPU makes no progress in that window and read as one that had stopped, so on a runner with few cores the writer flushed at once whatever the limit: C1cc's time limit leg failed on every hosted run that reached it (wz about 4,500 batches at 0 and at 100 ms, libzenohc 825 against 58), passed on a build host with every core, and failed there with two or four cores. The session's idle flush already skipped a conduit whose lock a sender held; it now answers that (`IdleFlush::SenderHeld`), the writer enters the backoff on it, waits for what is left of the limit or for a whole frame, and past the limit leaves a held frame to the sender's own wake, so a writer never spins on a lock.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/link.rs: `IdleFlush` (`Drained`, `SenderHeld`), the hook of `set_idle_flush` answers it.",
+        "crates/wz-session-core/src/session_actions.rs: `flush_staged` answers `SenderHeld` when `try_flush_open_batch` left a conduit a sender held; `flush_open_batch_nowait` folded into it.",
+        "crates/wz-runtime-tokio/src/writer_queue.rs: `Backoff` and `hold_back` replace the microsecond probes; `first_staged_ns` is the open frames' first write; a whole frame ends a backoff; three tests (backs off for the bound and no longer, a zero bound never backs off, a drained flush leaves at once under a long bound) replace the probe test.",
+        "session_glue.rs, stream_link.rs, quic_pipeline.rs: the hook's type; S4 row 90 names the backoff; reason pins of session-close-ingress moved after re-reading its claims; an acknowledgement row for run 44895098050."
+      ],
+      "verification_bullets": [
+        "C1cc's time limit leg on one build host with `taskset` to two and four cores and with every core: wz decides H1 in 8 steps on all three, libzenohc in 8, 12 and 8; on main before the change wz failed with two (Unordered) and four (undecided after 40 steps).",
+        "wz-runtime-tokio tests 1080 passed (writer_queue 73 of 73), wz-session-core lib 1152 passed, clippy -D warnings of both crates with all targets, cargo check of wz-session-core without default features and of wz-session-mcu.",
+        "Layer C1cc on a build host reached 69 of 76 legs and failed at the batching switch leg, which fails the same way on main before the change (two runs each): not this change's, and carried.",
+        "upstream_citation_anchor_gate.py --check --resolve, the pre-push hook's round-fed gates (reason pins and self-report lint after their fixes)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "C1cc a_session_without_batching_writes_each_put_in_a_batch_of_its_own_on_wz_and_libzenohc: with batching on wz writes 4003 batches of one put where libzenohc writes 93 to 306, on main as well; no hosted run has reached the leg; taken by watching-zenoh-43 next.",
+        "The writer's backoff changes how a stream link coalesces under contention; hosted throughput and latency lanes are the first wide reading of it."
+      ]
+    },
+    "Round 4587": {
+      "decision_summary": "Round 4586's writer backoff compared the staged count across a yield at its second look: after the idle flush answered that a sender held a frame, the writer yielded and looked again, and a producer that lost its CPU for that moment had staged nothing, read as one that had stopped, and the writer flushed inside the bound. That is the very reading Round 4586 removed from the first look; watching-zenoh-5e saw it once on a loaded build host, and on one CPU main fails the backoff test 30 times in 30. The writer now enters the backoff with a wait for what is left of the limit or for a whole frame, so every look compares the count across a wait. Upstream's first look after a failed lock also comes after only a yield (`io/zenoh-transport/src/common/pipeline.rs` @ `tokio::task::yield_now().await;`), but with a producer that made progress it then waits the rest of its threshold, which is what this writer now does in every case.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/writer_queue.rs: `Backoff::look` answers flush now or how long to wait, `Backoff::wait` waits after a yield; the backoff is entered with a wait; the remaining time is a checked subtraction (an eager one overflowed past the limit in a debug build).",
+        "docs/hosted-red-acks.md: a row for run 44895098050 that pays nothing and says so."
+      ],
+      "verification_bullets": [
+        "On one CPU (`taskset`) on one build host: the backoff test failed 30 of 30 on main (7032b581d) with the message watching-zenoh-5e reported, and passes 30 of 30 here; the writer_queue tests starting `a_` pass 15 times each on one and on two CPUs.",
+        "C1cc's time limit leg with two, four and every core: wz decides H1 (12, 8 and 8 steps); wz-runtime-tokio tests 1080 passed and clippy -D warnings with all targets; the pre-push hook's round-fed gates 166 of 166."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "C1cc a_session_without_batching_writes_each_put_in_a_batch_of_its_own_on_wz_and_libzenohc stays unpaid: the stream link's inline flush writes each put of a burst whose puts are more than 8 us apart; the fix trades request and reply latency and waits for the owner's direction."
+      ]
+    },
+    "Round 4588": {
+      "decision_summary": "The runtime-config step 4b carry lands with the repayment of hosted run 44895098050 (main c72460b30). The carry moves 45 limits that a run could not set to be read from the snapshot their session, node or runtime is handed: read = \"snapshot\" goes from 14 to 50 limits and read = \"build\" from 45 to 9. The nine stay build values for a stated reason each: an array length or a const generic (SNAPSHOT_HISTOGRAM_BUCKETS, EVENT_RING_SLOTS, CLOCK_SOURCES), a runtime-scope limit whose machine the pico and C doors build with no RuntimeLimits in hand (MESSAGE_CATALOG_ENTRIES, SUPERVISION_CHECKPOINTS, E2E_SUPERVISED_STREAMS), or a judge or keyer that is made before any session and takes none (E2E_SENDER_SLOTS, INSTANCE_KEY_FIELDS, INSTANCES_PER_MESSAGE). MAX_KEYEXPR_BYTES is a capacity, so every heap key table refuses a key over the snapshot's quota (a behaviour change on the heap profile, 256 bytes by default); MAX_STATIC_CONNECT is advisory on the heap and the tokio node refuses a connect list past it (ConnectPastLimit). A group session carries its limits (MulticastParams.limits) and its queue is made of both snapshots (TxQueueConf::of_snapshot, which replaces of_policy). The open's runtime limits reach the node clocks of the registry and the router. The facts interface of wz_ext moves MINOR 0 to 1 for replay_depth_max. Two stack overflows of the tokio tests with all features were removed at their cause: an async fn that takes a future holds it twice (argument and select), so timeout_on and open_within are named futures (the static open's future 52,032 to 12,176 bytes), and an eviction test boxed the four futures it joins. The repayment, read from each job's log: the module doc links written as paths where a module also has an outer doc (rustdoc resolves the combined docs in the parent's scope); wz-capture turns wz-app-frame message-payload on through a feature of its own, because a dev-dependency feature changed Layer C1's resolution (C1cap); the libclang install of platform.yml goes through apt-install.sh (C0g); 23 count guards move to what their command printed, found by guarded_count_gate.py over the range, since each layer stops at its first wrong count; the C1cs budgets are the hosted reading, the carry's growth on one machine and 3,500; the Zephyr stack records follow what the images read. The deploy images still called TxQueueConf::of_policy, which the carry removed and the workspace build does not compile, and Layer Qzb's build found it; they now make their queue of their snapshots. The host-net carrier cross-check compared sysfs from another network namespace on a build host; it now skips a device this namespace's kernel does not know by name.",
+      "changes_bullets": [
+        "crates (step 4b carry, merged from ten branches): the limit readers read the session, node or runtime snapshot; limit_read_gate reads read = \"snapshot\" for 50 limits; MulticastParams.limits; TxQueueConf::of_snapshot and pico_of_snapshot; DialConfig and OpenStance carry runtime_limits; ConnectPastLimit; timeout_on and open_within as named futures (TimeoutOn, OpenWithin); silent skips made closed helpers.",
+        "deploy/*: the MCU and Zephyr images make their tx queue of their policy and limits snapshots; the FreeRTOS demo's group gets its limits.",
+        "crates/wz-session-core retry_period, reply_stage, peer_tables and crates/wz-capi-core drive: inner-doc links written as paths.",
+        "crates/wz-capture: feature message-payload for the one-writer test; scripts/run-ci.sh: a C1cap leg runs it; scripts/lib/feature_gate_diagnostic.py records it as gating no public path.",
+        ".github/workflows/platform.yml: libclang through scripts/lib/apt-install.sh.",
+        "scripts/run-ci.sh: 23 count guards moved to the printed counts, each with its reason.",
+        "scripts/lib/capability_cost_gate.py: 16 budgets moved, with the symbol diff of the growth.",
+        "deploy/resource_budget.json, deploy/stack_call_contracts.json, scripts/lib/stack_frame_gate.py: the zephyr-fixed and fixed-tcp chains, four client stack bounds and two call pins.",
+        "crates/wz-host-net link_interfaces tests: the carrier cross-check skips a device another namespace's sysfs shows.",
+        "docs/reason-review-pins.md: seven session-close-ingress rows re-read and moved; docs/hosted-red-acks.md: a row for run 44895098050."
+      ],
+      "verification_bullets": [
+        "Workspace tests 11,656 passed, 0 failed on the merged tree (local), after a remote run had shown the host-net cross-check fail on hkl001 and a local run had shown wz-capi-c opens refused for a moment (the same tests pass on hkl001 on this tree and on main).",
+        "wz-runtime-tokio --all-features, wz-session-core --all-features (3,351) and its query set (1,380), wz-capi-core, wz-capi-pico (three feature sets), wz-ap-demo, host-slot-node control, wz-capture with message-payload (1,341): passed, 0 failed; clippy -D warnings on session-core (default and all features), tokio (both), capi-core, capi-c, capi-pico (three sets), zenoh, ap-demo, session-mcu, wz-capture (both), wz-host-net; cargo fmt --check.",
+        "run-ci layers on build hosts: C1cap, C0g, C1k, C1v, C1bb, C1ay, C1ah, C1y, C1d, C1g, C1p, C1m, C1ns, G, Q, Qa, Qz, Qza, Qzb, Qzk all exit 0; C1bzr for wz-session-core and wz-capi-core exits 0 and their rustdoc with all features reports no error.",
+        "guarded_count_gate.py over 0c7aa853b..HEAD measured 125 reached guards on a build host; 22 were wrong and moved, and C1m's multicast slot (3 to 4) was printed by its layer.",
+        "capability_cost_gate.py --measure on main abb1552d1 and on this tree on one machine for the growth, and --check passes here; resource_budget_gate --check and stack_bound_gate --contract pass.",
+        "The pre-push hook's round-fed gate list with reason_review_pin_gate, silent_skip_gate, the count lattice, count_guard_lint and upstream_citation_anchor_gate: 169 of 169; validate-workspace rc 0, no new T1 orphan."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "TimeSource::timeout's two implementations (runtime_impl.rs) still take their future as an async fn argument; the same named-future repair as TimeoutOn applies.",
+        "face_drive_loop_core's poll frame is about 388 KB in a debug build.",
+        "No CI lane runs wz-runtime-tokio's tests with all features, which is where the two stack overflows lived.",
+        "Nine limits stay build values for the reasons the decision names; the runtime-scope three wait for a door that hands RuntimeLimits to the pico and C machines.",
+        "No image calls the slot build's MulticastReplyQueue::limit_to yet; the C ABI's StatedTxQueue has no witness against upstream's wait_before_close.",
+        "C1bzr was run for the two crates whose links moved, not settled over every shard; hosted settles it."
+      ]
     }
   },
   "inventory_entries": {
@@ -6886,6 +7085,16 @@
       "source": "open-debt register",
       "reason": "OPEN (M): domain-transport omits 5 atoms; not established whether the omissions are intentional."
     },
+    "debt-completeness-partial-atoms": {
+      "status": "active",
+      "source": "open-debt register",
+      "reason": "OPEN 2026-11-21 (docs/upstream-parity.md D11, deploy/completeness_ratchet.json c.partial-atoms = 2). The feature inventory grades two atoms PARTIAL: api-compat-rust and session-close-ingress, each with the residue its own reason states. Closed when both grade COMPLETE and the row is locked at 0."
+    },
+    "debt-completeness-pico-api-shortfall": {
+      "status": "active",
+      "source": "open-debt register",
+      "reason": "OPEN 2026-11-21 (docs/upstream-parity.md D11, deploy/completeness_ratchet.json a.pico-api.shortfall = 2). Two of zenoh-pico's own API tests pass against the original and not against wz: z_api_source_info_test and z_api_admin_space_test, which call internal `_z_*` functions wz does not export. Closed when both pass on wz (the export or the equivalent public path) and the row is locked at 0."
+    },
     "debt-d-m5": {
       "status": "active",
       "source": "open-debt register",
@@ -6957,6 +7166,11 @@
       "status": "active",
       "source": "open-debt register",
       "reason": "OPEN (M): no e2e format. The AUTOSAR profile CRC polynomial is not in this machine's sources (grep for 0x1021 / crc16 finds nothing). Inventing one is forbidden; open as a seam only."
+    },
+    "debt-pico-host-size-ceiling": {
+      "status": "active",
+      "source": "open-debt register",
+      "reason": "OPEN 2026-11-21 (owner: wz smaller than zenoh-pico, ratchet + debt loop, docs/upstream-parity.md D9). The pico C ABI host libraries read 2.49 (cooperative client) to 7.7 (peer, default) times the text of zenoh-pico built as the same build in the same run (Layer C1cs, deploy/pico_host_ceiling.json). Each case is a ratchet row that may only move toward pico; paid largest ratio first, one case or one cause per round, the row tightened by the round's reading. Closed when every row of deploy/pico_host_ceiling.json is locked at WIN."
     },
     "debt-reliable-gap-reconnect-without-a-door": {
       "status": "deprecated",

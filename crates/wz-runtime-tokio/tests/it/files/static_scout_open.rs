@@ -194,7 +194,8 @@ async fn drive_udp_acceptor_to_established(socket: UdpSocket) -> (u32, WriterHan
         .expect("peek first datagram");
     let mut params = fixture_session_init_params();
     params.zid = [0x02; 4].into(); // distinct zid from the initiator
-    let (mut inbound, outbound, writer_handle) = wire_udp_socket(socket, src, &params.policy);
+    let (mut inbound, outbound, writer_handle) =
+        wire_udp_socket(socket, src, &params.policy, &params.limits);
 
     let actions = new_session_actions(outbound, params, TokioTime::new());
     let mut engine = new_session_engine(&actions);

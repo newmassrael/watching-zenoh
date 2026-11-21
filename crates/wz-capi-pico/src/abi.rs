@@ -531,7 +531,7 @@ pub(crate) const fn element_bytes(lp64: usize) -> usize {
 ///
 /// The owned struct is a `$size`-byte block (pico stack-allocates it, so the
 /// size is fixed by upstream's header and is pinned by the caller's
-/// `const _` assertion) carrying this crate's `Box` handle in slot 0. That
+/// `const _` assertion) carrying this crate's handle in slot 0. That
 /// layout is `memcpy`-relocatable, which pico's channel machinery requires:
 /// `_z_<handler>_elem_move` copies `sizeof(z_owned_*_t)` bytes out of a heap
 /// cell and frees the original.
@@ -659,12 +659,13 @@ macro_rules! impl_boxed_element {
                 if src.is_null() {
                     return $crate::result::Z_ERR_NULL;
                 }
-                let handle = $deep_copy(src as *const $Loaned);
-                if handle.is_null() {
-                    return $crate::result::Z_ERR_GENERIC;
+                match $deep_copy(src as *const $Loaned) {
+                    Ok(handle) => {
+                        (*dst).handle = handle;
+                        $crate::result::Z_OK
+                    }
+                    Err(code) => code,
                 }
-                (*dst).handle = handle;
-                $crate::result::Z_OK
             })
         }
     };

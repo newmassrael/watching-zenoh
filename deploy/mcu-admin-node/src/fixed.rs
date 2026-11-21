@@ -40,6 +40,7 @@ use wz::session_lwip::slot_node::{EventsOf, SessionFactory, SlotAdminNode};
 use wz::session_lwip::{LwipLinks, LwipSessionLink};
 use wz_eth_mac_lan9118::{Lan9118, MPS2_BASE};
 use wz_session_core::entropy::EntropySource;
+use wz_session_core::limits::SessionLimits;
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::session_init_params::{cookie_bytes, zid_bytes, SessionInitParams};
 use wz_session_core::session_slot::SessionSlots;
@@ -51,8 +52,8 @@ use wz_session_core::zid_hex::write_zenoh_hex;
 use wz_session_core::WhatAmI;
 
 use crate::{
-    fail, resolve_policy, ClockSeededXorshift, SystickClockRef, ADDRESS, GLOBAL_CLOCK, LISTEN_PORT,
-    ZID,
+    fail, resolve_limits, resolve_policy, ClockSeededXorshift, SystickClockRef, ADDRESS,
+    GLOBAL_CLOCK, LISTEN_PORT, ZID,
 };
 
 /// Sessions the node holds at most, dialled and accepted together: the process's
@@ -199,6 +200,8 @@ struct Factory {
     observer: &'static ObserverCell<Sinks>,
     /// The snapshot every session is made with.
     policy: SessionPolicy,
+    /// The limits every session is made with, which the peer tables of its slot are held to.
+    limits: SessionLimits,
 }
 
 impl SessionFactory<SystickClockRef, LwipUdpDriver> for Factory {
@@ -222,9 +225,10 @@ impl SessionFactory<SystickClockRef, LwipUdpDriver> for Factory {
             keep_alive: wz_session_core::session_init_params::KeepAliveConf::PICO,
             initial_sn: 0,
             cookie: cookie_bytes(&[]),
-            tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(&self.policy),
+            tx_queue: wz_session_core::session_init_params::TxQueueConf::of_snapshot(&self.policy, &self.limits),
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
             policy: self.policy,
+            limits: self.limits,
             cookie_signing_key: SigningKey::from_slice(&self.key).expect("32-byte key"),
         }
     }
@@ -285,7 +289,9 @@ pub fn run() -> ! {
         Ok(identity) => identity,
         Err(_) => fail("the node's identity does not fit"),
     };
+    let limits = resolve_limits();
     let installed = NODE.app.install_with(|observer| {
+        observer.limit_to(&limits);
         if host_connect_writes_fixed(&mut observer.subscribers, zid_hex, "peer", &NODE.control)
             .is_err()
         {
@@ -320,6 +326,7 @@ pub fn run() -> ! {
         key,
         observer,
         policy: resolve_policy(),
+        limits,
     });
     let node = Node::new(
         &host,

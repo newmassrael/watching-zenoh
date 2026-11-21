@@ -65,9 +65,13 @@ pub(crate) fn params(whatami: WhatAmI, zid: u8) -> SessionInitParams {
         keep_alive: KeepAliveConf::PICO,
         initial_sn: 0,
         cookie: vec![],
-        tx_queue: TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults()),
+        tx_queue: TxQueueConf::of_snapshot(
+            &wz_session_core::policy::SessionPolicy::defaults(),
+            &wz_session_core::limits::SessionLimits::BUILD,
+        ),
         link_rx: LinkRxConf::default(),
         policy: wz_session_core::policy::SessionPolicy::defaults(),
+        limits: wz_session_core::limits::SessionLimits::BUILD,
         cookie_signing_key: SigningKey::new(vec![7u8; 32]).expect("key"),
     }
 }
@@ -615,7 +619,10 @@ fn client_config() -> CoopConfig {
         keep_alive: KeepAliveConf::PICO,
         sn_resolution: wz_session_core::policy::SnResolution::default(),
         link_rx: LinkRxConf::default(),
-        tx_queue: TxQueueConf::pico_of_policy(&wz_session_core::policy::SessionPolicy::defaults()),
+        tx_queue: TxQueueConf::pico_of_snapshot(
+            &wz_session_core::policy::SessionPolicy::defaults(),
+            &wz_session_core::limits::SessionLimits::defaults(),
+        ),
         timeouts: SessionTimeouts::spec_defaults(),
         open_timeout_ms: 5_000,
         redial_ms: None,
@@ -625,6 +632,7 @@ fn client_config() -> CoopConfig {
         max_faces: crate::DEFAULT_MAX_FACES,
         groups: Vec::new(),
         clock_moves: None,
+        limits: wz_session_core::limits::SessionLimits::defaults(),
     }
 }
 

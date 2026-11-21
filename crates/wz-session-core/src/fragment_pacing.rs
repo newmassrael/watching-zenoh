@@ -31,16 +31,6 @@ const T_MID_FRAGMENT: u8 = 0x06;
 /// The mask of a header's message id.
 const MID_MASK: u8 = 0x1f;
 
-const _: () = assert!(
-    crate::caps::DATAGRAM_FRAGMENT_BURST >= 1,
-    "DATAGRAM_FRAGMENT_BURST is at least 1"
-);
-const _: () = assert!(
-    crate::caps::DATAGRAM_FRAGMENT_GAP_US >= 1
-        && crate::caps::DATAGRAM_FRAGMENT_GAP_US <= 1_000_000,
-    "DATAGRAM_FRAGMENT_GAP_US is between 1 and 1000000"
-);
-
 /// Whether `datagram` is a transport `Fragment`.
 pub const fn is_fragment(datagram: &[u8]) -> bool {
     match datagram {
@@ -72,14 +62,17 @@ impl FragmentPacer {
         }
     }
 
-    /// The pacer of this build's burst and gap. Whether a writer holds one at all is the
-    /// `datagram-fragment-pacing` policy's, which an engine reads as a type (a writer with the
-    /// policy off, upstream's behaviour, holds none and writes as it always did): this is the
-    /// pacer such a writer holds when it is on.
-    pub const fn of_build() -> Self {
+    /// The pacer of the burst and gap `limits` holds (`DATAGRAM_FRAGMENT_BURST`,
+    /// `DATAGRAM_FRAGMENT_GAP_US`), the snapshot of the session whose link the writer writes.
+    /// Whether a writer holds one at all is the `datagram-fragment-pacing` policy's, which an
+    /// engine reads as a type (a writer with the policy off, upstream's behaviour, holds none and
+    /// writes as it always did): this is the pacer such a writer holds when it is on. The
+    /// declaration's ranges hold the burst to `1..=u32::MAX` and the gap to `1..=1000000`, so
+    /// both convert without loss.
+    pub const fn of_limits(limits: &crate::limits::SessionLimits) -> Self {
         Self::new(
-            crate::caps::DATAGRAM_FRAGMENT_BURST as u32,
-            crate::caps::DATAGRAM_FRAGMENT_GAP_US as u64,
+            limits.datagram_fragment_burst() as u32,
+            limits.datagram_fragment_gap_us() as u64,
         )
     }
 
@@ -190,11 +183,11 @@ mod tests {
     }
 
     #[test]
-    fn the_pacer_of_a_build_holds_its_two_limits() {
+    fn the_pacer_of_the_build_defaults_holds_the_two_limits() {
         // Whether a writer holds the pacer is the policy's, read by the engine as a type; the
-        // pacer itself is the build's two limits, and behaves by them: the first fragment past
-        // the burst waits the gap.
-        let mut pacer = FragmentPacer::of_build();
+        // pacer itself is the snapshot's two limits, and behaves by them: the first fragment
+        // past the burst waits the gap.
+        let mut pacer = FragmentPacer::of_limits(&crate::limits::SessionLimits::defaults());
         assert_eq!(
             pacer,
             FragmentPacer::new(

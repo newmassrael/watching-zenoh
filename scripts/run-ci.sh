@@ -337,6 +337,12 @@
 #              the real zenoh-pico first as the control.
 #              Opt-in via `--layer S` or `WZ_RUN_LAYER_S=1`; the build
 #              host runs it long (docs/pico-stability-lane.md).
+#   Layer Cmut — the tests notice a change to the code they test: each
+#              scope of deploy/mutation_ratchet.json mutated by cargo-mutants
+#              in a copy of the workspace, its crate's tests run against each
+#              mutant, and its counts held to the committed row. Opt-in via
+#              `--layer Cmut` or `WZ_RUN_LAYER_CMUT=1`; hosted nightly
+#              (docs/mutation-testing.md).
 #
 # Exit codes:
 #   0  every required layer passed
@@ -2386,6 +2392,13 @@ layer_c0_test_discipline() {
     # deleting one row of the real table.
     _runci_leg logic_census_coverage_gate.selftest -- python3 scripts/lib/logic_census_coverage_gate.py --selftest
     _runci_leg logic_census_coverage_gate --after logic_census_coverage_gate.selftest -- python3 scripts/lib/logic_census_coverage_gate.py --check
+    # The completeness scoreboard (docs/completeness-scoreboard.md): four criteria by which wz is
+    # held to be more complete than zenoh-pico, each a figure read from the gate or the lane that
+    # computes it and held to its row of deploy/completeness_ratchet.json. A figure worse than its
+    # row fails; a better one prints the row to commit. It reads lanes' count guards and wiring
+    # here, never their runs.
+    _runci_leg completeness_gate.selftest -- python3 scripts/lib/completeness_gate.py --selftest
+    _runci_leg completeness_gate --after completeness_gate.selftest -- python3 scripts/lib/completeness_gate.py --check
     # R311y621 (§7.14) — the SOLO-PLANE-PAGE gate. R311y618 severed one leg of
     # `CaptureReport::is_complete` and all 229 tests stayed green: the pages
     # that should have caught it attached TWO planes, and the other plane
@@ -2553,6 +2566,12 @@ layer_c0_test_discipline() {
     # The ceiling of the kit images under zenoh-pico's (docs/upstream-parity.md D8): the pairs read off
     # the matrix, the stack reader and the rule, over synthetic outputs. The ELF half is Layer Qzk's.
     _runci_leg pico_ceiling_gate.selftest -- python3 scripts/lib/pico_ceiling_gate.py --selftest
+    # The gate of the pico ABI performance matrix (docs/pico-perf-matrix.md section 5, upstream-parity D10):
+    # its reading and its rules over synthetic runs, and the committed table of W over P held to the rows of
+    # the default matrix, so a cell cannot join or leave it unseen. The runs it judges are a quiet host's
+    # (`scripts/pico-compare.sh perf` judges each of its own); no hosted runner pins two sides of four CPUs.
+    _runci_leg perf_matrix.selftest -- python3 scripts/host-bench/perf_matrix.py --selftest
+    _runci_leg perf_matrix.table --after perf_matrix.selftest -- python3 scripts/host-bench/perf_matrix.py --check-table deploy/pico_perf_ceiling.json
     # R3449 -- the resource budget (a committed figure per image): each image whose worst chain
     # the stack gate commits has a row of figures the kit measured, the row copies that chain, and a
     # measured peak lies under it. No hardware here; `--measure` is the kit lane's.
@@ -2697,16 +2716,49 @@ layer_c0_test_discipline() {
     # one of them created by the round that closed the sibling debt. See the
     # script's docstring for why this is a gate and not a fourth comment.
     _runci_leg unwired_lane_lint -- python3 scripts/lib/unwired_lane_lint.py
+    # R4583 (no register item) — the SOFT-JOB gate, the lint above one axis over:
+    # that one asks whether a lane reaches hosted CI, this one whether a hosted
+    # verdict reaches anyone. A `continue-on-error` job or step concludes success
+    # whatever it did; the Windows package jobs of platform.yml were red on every
+    # hosted run from the day they landed, under runs that all read green. Every
+    # soft site now has an entry in deploy/soft_jobs.json (why it is soft, when it
+    # becomes a gate, the red streak it may show, an expiry), and `--check` holds
+    # sites and entries to each other and each entry to its date, so this leg can
+    # turn red on the calendar alone. The hosted half reads the runs
+    # (`--hosted-last`, docs/agent-reference.md).
+    _runci_leg soft_job_gate.selftest -- python3 scripts/lib/soft_job_gate.py --selftest
+    _runci_leg soft_job_gate --after soft_job_gate.selftest -- python3 scripts/lib/soft_job_gate.py --check
     # R4268 — the planner of bx.toml's `[checks.ci]`, which hands this table to
     # the fleet as one unit per lane (docs/verdicts-in-the-fleet.md).
     _runci_leg runci_plan.selftest -- python3 scripts/lib/runci_plan.py --selftest
     _runci_leg runci_plan --after runci_plan.selftest -- python3 scripts/lib/runci_plan.py --check
+    # Layer Cmut's table (docs/mutation-testing.md): the gate's own fixtures, then its scopes and
+    # rows. The mutants themselves run nightly; this is what a push can afford of them.
+    _runci_leg mutation_ratchet_gate.selftest -- python3 scripts/lib/mutation_ratchet_gate.py --selftest
+    _runci_leg mutation_ratchet_gate --after mutation_ratchet_gate.selftest -- python3 scripts/lib/mutation_ratchet_gate.py --declared
     # Open-debt item 938 — the leg ledger's rules held on the text, and the
     # census of lanes whose independent gates still stop at the first red; and
     # the ledger's runtime, driven through fixture legs.
     _runci_leg runci_legs_runtime -- _runci_legs_selftest
     _runci_leg runci_leg_ledger_gate.selftest -- python3 scripts/lib/runci_leg_ledger_gate.py --selftest
     _runci_leg runci_leg_ledger_gate --after runci_leg_ledger_gate.selftest -- python3 scripts/lib/runci_leg_ledger_gate.py --check
+    # Every script under scripts/ is run by a lane, selftested by one, imported by a script that
+    # is, or declared with the reason no lane runs it and the owner action that does
+    # (scripts/lib/script_exercise_census.py). A tool no lane ran rotted for a day unseen.
+    _runci_leg script_exercise_census.selftest -- python3 scripts/lib/script_exercise_census.py --selftest
+    _runci_leg script_exercise_census --after script_exercise_census.selftest -- python3 scripts/lib/script_exercise_census.py --check
+    # The selftests of the tools that census found run by hand, by a hook or by another tool and
+    # by no lane: each drives its rules on synthetic input, a text read with no build. The
+    # message catalog's selftest ends by checking the fixture's tables are current.
+    _runci_leg app_plane_oracle.selftest -- bash scripts/app-plane-oracle.sh --selftest
+    _runci_leg loop_milestone.selftest -- python3 scripts/lib/loop_milestone.py --selftest
+    _runci_leg zephyr_cargo_lines.selftest -- python3 scripts/lib/zephyr_cargo_lines.py --selftest
+    _runci_leg capture_anonymise.selftest -- python3 scripts/lib/capture_anonymise.py --selftest
+    _runci_leg capture_provenance_gate.selftest -- bash scripts/lib/capture_provenance_gate.sh --selftest
+    _runci_leg changed_crate_packages.selftest -- python3 scripts/lib/changed_crate_packages.py --selftest
+    _runci_leg merge_tests.selftest -- python3 scripts/lib/merge_tests.py --selftest
+    _runci_leg message_catalog.selftest -- python3 scripts/lib/message_catalog.py --selftest
+    _runci_leg message_catalog_map.selftest -- python3 scripts/lib/message_catalog_map.py --selftest
     # R311y922 — the GATE TEST-PIN lint, item 232's own round. Several lanes
     # pin a SET of test names that must be PRESENT in a feature build, and
     # that pin goes stale when the test is renamed or moved. It has cost two
@@ -3501,6 +3553,7 @@ layer_c0_test_discipline() {
     # The reader of scripts/kit-size-delta.sh, which builds a kit image in a base tree and this one
     # in one run: the ceiling gate's cells and the symbol diff, held here by its selftest.
     _runci_leg kit_size_delta.selftest -- python3 scripts/lib/kit_size_delta.py --selftest
+    _runci_leg pico_windows_package.selftest -- python3 scripts/lib/pico_windows_package.py --selftest
     # R311y879 — WHICH READER each narrow zint field gets, pinned against the
     # codec UPSTREAM reads it with. The three censuses above ask whether the
     # decode covers the wire and whether a consumer reaches it; this asks
@@ -3857,6 +3910,11 @@ layer_c0_test_discipline() {
     # yet) and the allowed sites are held to the code both ways.
     _runci_leg limit_read_gate.selftest -- python3 scripts/lib/limit_read_gate.py --selftest
     _runci_leg limit_read_gate --after limit_read_gate.selftest -- python3 scripts/lib/limit_read_gate.py --check
+    # A crate on the cooperative runtime enters a critical section only through the runtime's
+    # door (`wz_runtime_coop::cs::with`), which a host build makes the runtime's own lock: a
+    # section past it leaves a name no host library defines, which only the Windows linker refuses.
+    _runci_leg coop_critical_section_gate.selftest -- python3 scripts/lib/coop_critical_section_gate.py --selftest
+    _runci_leg coop_critical_section_gate --after coop_critical_section_gate.selftest -- python3 scripts/lib/coop_critical_section_gate.py --check
     # R3733 -- the feature model a crate's state machines are gated by (sources/features/, SCE's
     # element gate) is generated from the crate's own cargo features, and is held to them: a model
     # that drifted from the manifest lets a machine gate on a feature the crate does not have.
@@ -4594,6 +4652,126 @@ layer_c0mut_verdict_legs() {
     python3 scripts/lib/verdict_leg_mutation.py --selftest || return 1
     python3 scripts/lib/verdict_leg_mutation.py || return 1
     return 0
+}
+
+# ─── Layer Cmut — the tests notice a change to the code they test ───
+#
+# Layer C0mut mutates the analyzer's verdict legs; this lane mutates general code. Each scope of
+# deploy/mutation_ratchet.json (a crate and files of it) is handed to cargo-mutants, which changes
+# the files one mutant at a time in a copy of the cargo workspace and runs the crate's own tests
+# against each change. scripts/lib/mutation_ratchet_gate.py then holds the scope's counts to its
+# committed row: a kill rate that falls or a missed count that rises fails, a better one prints the
+# row to commit, and every missed mutant is printed as the test it asks for
+# (docs/mutation-testing.md).
+#
+# Opt-in, as Layer S is: a scope takes hours, so a full sweep skips the lane unless it is asked for
+# (`--layer Cmut` or `WZ_RUN_LAYER_CMUT=1`). `WZ_CMUT_PART=<scope>` runs one scope, which is a
+# fleet unit (scripts/lib/runci_plan.py); unset, every scope runs in turn and the gate reads them
+# together. `WZ_CMUT_JOBS` is how many mutants cargo-mutants builds at once, each in a copy of its
+# own (1). Hosted, the lane runs nightly, a scope a job (.github/workflows/mutation.yml).
+#
+# THE COPY'S SURROUNDINGS. cargo-mutants builds a copy of the workspace (`crates/`), never the
+# checkout: no `--in-place`. The workspace reaches files outside itself by relative path (wz-codecs
+# includes `../../out/wz-codecs/*.rs`, path dependencies go into `vendor/sce`), so the copy is made
+# in a directory that holds a link to every other top-level entry of the checkout: from the copy,
+# `..` holds `out`, `vendor`, `deploy`, `rust-toolchain.toml` and `.cargo` as `crates/..` does.
+# cargo-mutants makes its copy in the system temporary directory, which the lane points at that
+# directory. The checkout is only read.
+#
+# cargo-mutants is run as itself and not as a cargo subcommand, and without a target directory a
+# caller chose: under an artifact root the cargo shim would give the outer command the checkout's
+# mirrored target directory, every copy would inherit it, and the mutated builds would share one
+# target with each other and with every other lane. Each copy builds in its own; the shim passes a
+# workspace outside the checkout through as it is. A cargo a caller named (`CARGO`) is cleared too,
+# so the copies build with the toolchain rust-toolchain.toml pins, which the surroundings hold.
+layer_cmut_code_mutation() {
+    local want="${WZ_CMUT_PART:-}" jobs="${WZ_CMUT_JOBS:-1}"
+    local pin have parts part work rc n=0 fail=0
+    local -a argv=() outcomes=() scopes_run=()
+    if [[ "$ONLY_LAYER" != "Cmut" && "${WZ_RUN_LAYER_CMUT:-0}" != "1" ]]; then
+        echo "Layer Cmut SKIP (opt-in mutation lane; --layer Cmut or WZ_RUN_LAYER_CMUT=1)"
+        return 0
+    fi
+    if [[ ! "$jobs" =~ ^[1-9][0-9]*$ ]]; then
+        echo "  Cmut FAIL: WZ_CMUT_JOBS=$jobs is not a count of at least 1" >&2
+        return 1
+    fi
+    python3 scripts/lib/mutation_ratchet_gate.py --selftest || return 1
+    python3 scripts/lib/mutation_ratchet_gate.py --declared || return 1
+    pin="$(python3 scripts/lib/mutation_ratchet_gate.py --tool-version)" || return 1
+    have="$(cargo-mutants mutants --version 2>/dev/null)" || have=""
+    if [[ "$have" != "cargo-mutants $pin" ]]; then
+        echo "  Cmut FAIL: the table pins cargo-mutants $pin and this machine runs '${have:-none}';" \
+            "bash scripts/install-cargo-mutants.sh installs the pin" >&2
+        return 1
+    fi
+    parts="$(python3 scripts/lib/mutation_ratchet_gate.py --parts)" || return 1
+    if [[ -n "$want" ]] && ! awk -v want="$want" '$1 == want { found = 1 } END { exit !found }' <<< "$parts"; then
+        echo "  Cmut FAIL — WZ_CMUT_PART=$want is none of the table's scopes:" >&2
+        awk '{ print "    " $1 }' <<< "$parts" >&2
+        return 1
+    fi
+    # Read through descriptor 3: the builds and tests inside inherit stdin, and one that read it
+    # would take the scopes still to come.
+    while read -r part _ <&3; do
+        [[ -z "$want" || "$part" == "$want" ]] || continue
+        n=$((n + 1))
+        work="$WZ_ARTIFACTS/target/cmut/$part"
+        rm -rf "$work"
+        if ! _cmut_surroundings "$work/mirror"; then
+            echo "  Cmut $part FAIL — the copy's surroundings could not be laid out in $work/mirror" >&2
+            fail=1
+            continue
+        fi
+        python3 scripts/lib/mutation_ratchet_gate.py --argv "$part" --output "$work/out" \
+            --jobs "$jobs" >"$work/argv" || { fail=1; continue; }
+        mapfile -d '' -t argv <"$work/argv"
+        echo "  Cmut $part: cargo-mutants ${argv[*]}"
+        (cd crates && env -u CARGO -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR \
+            TMPDIR="$work/mirror" cargo-mutants "${argv[@]}")
+        rc=$?
+        rm -rf "$work/mirror"
+        # 2 is a missed mutant and 3 a timeout: outcomes the gate reads. Anything else measured
+        # nothing (4: the unmutated tests failed in the copy; 1: the arguments were refused).
+        case "$rc" in
+            0 | 2 | 3)
+                outcomes+=("$work/out/mutants.out/outcomes.json")
+                scopes_run+=("$part")
+                ;;
+            *)
+                echo "  Cmut $part FAIL — cargo-mutants exited $rc and measured nothing" >&2
+                fail=1
+                ;;
+        esac
+    done 3<<< "$parts"
+    if (( n == 0 )); then
+        echo "  Cmut FAIL — the table lists no scope to run" >&2
+        return 1
+    fi
+    if (( ${#scopes_run[@]} > 0 )); then
+        python3 scripts/lib/mutation_ratchet_gate.py --check "${outcomes[@]}" \
+            --expect "$(IFS=,; printf '%s' "${ran[*]}")" || fail=1
+    fi
+    (( fail == 0 )) || return 1
+    _runci_lane_did Cmut "${#scopes_run[@]}" "scope(s) held to their mutation rows"
+}
+
+# _cmut_surroundings <dir>
+#
+# The directory a scope's copy of `crates/` is made in: a link to every top-level entry of the
+# checkout but `crates` (the copy stands for it), `target` (each copy builds its own) and `.git`
+# (no build reads the checkout's history, and a copy must not write it).
+_cmut_surroundings() {
+    local dir="$1" entry name
+    mkdir -p "$dir" || return 1
+    for entry in "$repo_root"/* "$repo_root"/.[!.]*; do
+        [[ -e "$entry" ]] || continue
+        name="${entry##*/}"
+        case "$name" in
+            crates | target | .git) continue ;;
+        esac
+        ln -s "$entry" "$dir/$name" || return 1
+    done
 }
 
 # ─── Layer U — how many releases behind each pinned upstream is ─────
@@ -6266,10 +6444,20 @@ layer_c1cap_capture_shard() {
         echo "  C1cap: $n wz-capture test(s) passed at Layer C1's features"
     }
 
+    # The one test behind wz-capture's `message-payload`, which Layer C1's selection does not
+    # turn on: a dev-dependency feature in its place made the partition leg red (wz-app-frame
+    # resolved with `message-payload` only when wz-capture was in the selection).
+    _c1cap_message_payload() {
+        _runci_guarded_test "C1cap message-payload 1" 1 \
+            cargo test -p wz-capture --features "$feats,message-payload" --lib --quiet -- \
+            proto_encode_tests::the_json_writer_and_a_programs_payload_write_one_message_alike
+    }
+
     _runci_legs_open C1cap || return 1
     _runci_leg features -- _c1cap_features
     _runci_leg partition -- _c1cap_partition
     _runci_leg tests --after features -- _c1cap_tests
+    _runci_leg message_payload --after features -- _c1cap_message_payload
     _runci_legs_close
 }
 
@@ -6698,7 +6886,8 @@ layer_c1v_cargo_test_ws() {
     # 19 -> 20: the init flood under a fixed cookie held to the pending bound (fc58d7c76,
     # `under_a_fixed_cookie_a_flood_of_init_syns_is_bounded_by_the_pending_bound`); ungated, so
     # C1y moves by +1 too. Hosted run 44740160167 printed 20 at 581714684.
-    _runci_guarded_test C1v 20 cargo test -p wz-runtime-tokio --features routing-accept,transport-link-ws --lib accept_loop --quiet \
+    # 20 -> 21 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
+    _runci_guarded_test C1v 21 cargo test -p wz-runtime-tokio --features routing-accept,transport-link-ws --lib accept_loop --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-ws --quiet -- -D warnings \
@@ -7115,7 +7304,8 @@ layer_c1bb_cargo_test_qos() {
     # 11 -> 12, counted from the source: the express drain test
     # (`an_express_message_drains_through_its_own_band_and_no_further`), `cfg(transport-qos)`
     # inside `batch_tx_tests` like the three R311y835 cases.
-    _runci_guarded_test C1bb 12 cargo test -p wz-runtime-tokio --features transport-qos,transport-batching,codec-push,codec-close,transport-unicast --lib batch_tx_tests:: --quiet \
+    # 12 -> 15 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
+    _runci_guarded_test C1bb 15 cargo test -p wz-runtime-tokio --features transport-qos,transport-batching,codec-push,codec-close,transport-unicast --lib batch_tx_tests:: --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-qos,session-extqos,transport-multilink,transport-batching,codec-push,codec-close,transport-unicast --quiet -- -D warnings) \
@@ -7761,12 +7951,14 @@ layer_c1ay_cargo_test_router_hat() {
     # queryable plane and one for tokens.
     # Every C1AY router_forward guard +2 with step 3c of the staged policy binding (the forwarder
     # clock snapshot test among them), the number each command printed on a build host.
-    _runci_guarded_test "C1AY router_forward 340" 340 \
+    # 340 -> 341 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
+    _runci_guarded_test "C1AY router_forward 341" 341 \
         cargo test -p wz-runtime-tokio --features routing-router-hat --lib router_forward --quiet || return 1
     # The c2 integration: 315 -> 329. MEASURED on pc2 on this exact command.
     # 2026-11-18 -- 329 -> 335, printed on pc2 (the six of the first guard's note).
     # 335 -> 343: the five and the three of the first guard's note.
-    _runci_guarded_test "C1AY router_forward qos 345" 345 \
+    # 345 -> 346 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
+    _runci_guarded_test "C1AY router_forward qos 346" 346 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,transport-qos --lib router_forward --quiet || return 1
     # The router's counts (`counter`): four UNGATED witnesses of the atomic count (it rises by one,
     # by n and to a peak; many threads lose none; a peak taken from many threads is the greatest
@@ -7806,7 +7998,8 @@ layer_c1ay_cargo_test_router_hat() {
     # The c2 integration: 338 -> 353. MEASURED on pc2 on this exact command.
     # 2026-11-18 -- 353 -> 359, printed on a build host (the six of `router_forward 330`).
     # 359 -> 367: the five and the three of the first guard's note.
-    _runci_guarded_test "C1AY router_forward mcast-faces 369" 369 \
+    # 369 -> 370 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
+    _runci_guarded_test "C1AY router_forward mcast-faces 370" 370 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,router-multicast-faces --lib router_forward --quiet || return 1
     # R2346 — 140 -> 141, and ONLY this arm moves: the added test is
     # `#[cfg(feature = "access-acl")]`, so the five sibling resolutions that do
@@ -7834,7 +8027,8 @@ layer_c1ay_cargo_test_router_hat() {
     # The c2 integration: 318 -> 332. MEASURED on pc2 on this exact command.
     # 2026-11-18 -- 332 -> 338, printed on pc2 (the six of `router_forward 330`).
     # 338 -> 346: the five and the three of the first guard's note.
-    _runci_guarded_test "C1AY router_forward 348" 348 \
+    # 348 -> 349 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
+    _runci_guarded_test "C1AY router_forward 349" 349 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,access-acl --lib router_forward --quiet || return 1
     # R2348 — a NEW arm, and it exists because without it this round's central
     # tests would have been compiled out while the lane stayed green. The router
@@ -7857,7 +8051,8 @@ layer_c1ay_cargo_test_router_hat() {
     # The c2 integration: 321 -> 335. MEASURED on pc2 on this exact command.
     # 2026-11-18 -- 335 -> 341, printed on pc2 (the six of `router_forward 330`).
     # 341 -> 349: the five and the three of the first guard's note.
-    _runci_guarded_test "C1AY router_forward hotreload 351" 351 \
+    # 351 -> 352 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
+    _runci_guarded_test "C1AY router_forward hotreload 352" 352 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-interceptor-hotreload,access-acl --lib router_forward --quiet || return 1
     # R311y464 — 171 -> 173: y463 added token_current_future_interest_replies_with_a
     # _client_token and token_current_future_interest_matches_a_wildcard_target, both
@@ -7882,7 +8077,8 @@ layer_c1ay_cargo_test_router_hat() {
     # 389 -> 390, counted from the source: a router's peer told a later token for its interest.
     # 390 -> 399: the five, the one and the three (token tables) of the first guard's note.
     # 401 -> 402, printed on the build host: a peer node's liveliness subscriber asks its routers.
-    _runci_guarded_test "C1AY router_forward 402" 402 \
+    # 402 -> 403 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
+    _runci_guarded_test "C1AY router_forward 403" 403 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables --lib router_forward --quiet || return 1
     # R2415 — 146 -> 140. NOT this round's tests: `d7cd078f` re-gated the mcast
     # egress plane from `transport-multicast` onto `router-multicast-faces`, so six
@@ -7892,7 +8088,8 @@ layer_c1ay_cargo_test_router_hat() {
     # The c2 integration: 310 -> 324. MEASURED on pc2 on this exact command.
     # 2026-11-18 -- 324 -> 330, printed on pc2 (the six of `router_forward 330`).
     # 330 -> 338: the five and the three of the first guard's note.
-    _runci_guarded_test "C1AY router_forward multicast 340" 340 \
+    # 340 -> 341 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
+    _runci_guarded_test "C1AY router_forward multicast 341" 341 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,transport-multicast --lib router_forward --quiet || return 1
     # R2636 — 143 -> 144, and ONLY this arm of the seven moves. The added test
     # renders the router's `sessions[]` table and is `#[cfg(feature =
@@ -7911,7 +8108,8 @@ layer_c1ay_cargo_test_router_hat() {
     # 334 -> 335, counted from the source: the `adminspace-core`-gated test of the region a
     # partitioning node reports for each face, which only this arm's features reach.
     # 335 -> 343: the five and the three of the first guard's note.
-    _runci_guarded_test "C1AY router_forward linkstate 345" 345 \
+    # 345 -> 346 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
+    _runci_guarded_test "C1AY router_forward linkstate 346" 346 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,adminspace-router-linkstate --lib router_forward --quiet || return 1
     # Item 751 step 7c — the peer node's FROZEN scenes (`router_forward/peer_scenes/*.txt`,
     # `peer_differential_tests::frozen`). A transcript names the lines of every plane the
@@ -7936,7 +8134,8 @@ layer_c1ay_cargo_test_router_hat() {
     # The c2 integration: 323 -> 338. MEASURED on pc2 on this exact command.
     # 2026-11-18 -- 338 -> 344, printed on pc2 (the six of `router_forward 330`).
     # 344 -> 352: the five and the three of the first guard's note.
-    _runci_guarded_test "C1AY router_forward interest broker 354" 354 \
+    # 354 -> 355 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
+    _runci_guarded_test "C1AY router_forward interest broker 355" 355 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-interest-pending-gc --lib router_forward --quiet || return 1
     _runci_guarded_test "C1AY peer scenes frozen 2" 2 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables,pubsub-delete,adminspace-introspection-handlers,adminspace-router-linkstate --lib router_forward::peer_differential_tests::frozen --quiet || return 1
@@ -7965,7 +8164,8 @@ layer_c1ay_cargo_test_router_hat() {
     # (`a_retry_period_that_is_not_a_number_is_refused`) and would read 9.
     # 8 -> 10 (2026-10-31): the wait grows in integer arithmetic since `b21ec5f5cc`, which added
     # two tests to the module and did not move this count.
-    _runci_guarded_test "C1AY retry_period 10" 10 \
+    # 10 -> 16 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
+    _runci_guarded_test "C1AY retry_period 16" 16 \
         cargo test -p wz-session-core --lib retry_period:: --quiet || return 1
     _runci_guarded_test "C1AY redial_schedule 5" 5 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,router-connect-reconcile --lib --quiet -- \
@@ -8107,7 +8307,8 @@ layer_c1ay_cargo_test_router_hat() {
     # at its first guard since, so this one was never read.
     # 57 -> 59 with step 4a of the staged policy binding (a `--config` file's `wz` member among
     # them), printed by `guarded_count_gate.py` on a build host.
-    _runci_guarded_test "C1AY stock_config_tests 59" 59 \
+    # 59 -> 61 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
+    _runci_guarded_test "C1AY stock_config_tests 61" 61 \
         cargo test -p wz-ap-demo --features zenoh-config stock_config_tests --quiet || return 1
     # R2139 (unregistered open-debt item 227) — THE SAME MODULE WITH THE SINKS
     # PRESENT, and it is not a duplicate of the leg above.
@@ -8167,7 +8368,8 @@ layer_c1ay_cargo_test_router_hat() {
     # passed.
     # 2026-11-18 -- 48 -> 63, printed on a build host: the fifteen of the guard above.
     # 63 -> 65, the same two of the guard above.
-    _runci_guarded_test "C1AY stock_config_tests role-parity 65" 65 \
+    # 65 -> 67 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
+    _runci_guarded_test "C1AY stock_config_tests role-parity 67" 67 \
         cargo test -p wz-ap-demo \
         --features zenoh-config,scouting-responder,routing-peer,router-hat-router,scouting-active \
         stock_config_tests --quiet || return 1
@@ -8862,7 +9064,8 @@ layer_c1ah_cargo_test_time_hlc() {
     # Put is refused to every route, a settled push routes as it is. The pc5 run printed 35.
     # 35 -> 36, step 3c's node clock snapshot test, printed on a build host. 36 -> 39, a clock
     # bound the build does not allow or that is no number is refused by name (three tests).
-    _runci_guarded_test "C1ah node_clock" 39 \
+    # 39 -> 41 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
+    _runci_guarded_test "C1ah node_clock" 41 \
         cargo test -p wz-node-time --features time-hlc,codec-push,pubsub-timestamp \
         --lib node_clock:: --quiet || return 1
     # R311y818 — the PUBLISH-side auto-stamp (zenoh `resolve_put`'s head,
@@ -9047,7 +9250,9 @@ layer_c1ak_cargo_test_transport_stats() {
     # 7 -> 8: `a_key_set_is_carried_by_a_payload_class_alone` (`stats/filters`). fe69f5b004 moved
     # this and four guards below; merge c4209646f0 put the old numbers back, and the pc5 run of the
     # 8e integration branch printed these.
-    _runci_guarded_test C1ak 8 cargo test -p wz-session-core --features transport-stats --lib stats:: --quiet \
+    # 8 -> 9 = what hosted run 44790303307 printed: `a_report_absorbs_another_counter_by_counter`,
+    # the report of a session on several links summed counter by counter.
+    _runci_guarded_test C1ak 9 cargo test -p wz-session-core --features transport-stats --lib stats:: --quiet \
         || return 1
     # R2930 — 8 -> 9: `a_multicast_congestion_drop_is_observed_and_not_counted_sent`.
     # 9 -> 12: the three `stats/filters` tests (the filter list, a classified payload
@@ -9094,7 +9299,9 @@ layer_c1ak_cargo_test_transport_stats() {
     # R2372 — 3 -> 6, the same R2371 arithmetic on the alloc-only arm.
     # R2843 — 6 -> 3: the three renderer tests were all this arm's `alloc` ones.
     # 3 -> 4: `a_key_set_is_carried_by_a_payload_class_alone`, ungated like the class it holds.
-    _runci_guarded_test C1ak 4 cargo test -p wz-session-core --no-default-features --features alloc --lib stats:: --quiet \
+    # 4 -> 5, counted from the source: `a_report_absorbs_another_counter_by_counter`, ungated like
+    # the report it sums.
+    _runci_guarded_test C1ak 5 cargo test -p wz-session-core --no-default-features --features alloc --lib stats:: --quiet \
         || return 1
     # R311y811 — the BARE arm: no `alloc`, no `transport-stats`. R311y810 un-gated
     # this module precisely so its report type could be named in EVERY feature
@@ -9114,7 +9321,9 @@ layer_c1ak_cargo_test_transport_stats() {
     # allocating arm's count, written to match the red tree. The feature
     # implies nothing now, and this arm reads its three again.
     # 3 -> 4: `a_key_set_is_carried_by_a_payload_class_alone`, which needs no allocator.
-    _runci_guarded_test C1ak 4 cargo test -p wz-session-core --no-default-features --lib stats --quiet \
+    # 4 -> 5, counted from the source: `a_report_absorbs_another_counter_by_counter`, which needs
+    # none either.
+    _runci_guarded_test C1ak 5 cargo test -p wz-session-core --no-default-features --lib stats --quiet \
         || return 1
     # R311y810 — adminspace-metrics AND transport-stats together: the combination
     # a deployment actually runs, which no lane composed before. The metrics leg's
@@ -10805,7 +11014,8 @@ layer_c1y_cargo_test_routing_peer() {
     # 44201914197 printed 27 at 4050dd889, 44412368690 printed 34 at 458774b1f; the build host
     # printed 34 at 5f5342ae1. 34 -> 35, the locator a node cannot store (as C1v). 35 -> 36, the
     # init flood under a fixed cookie (as C1v); hosted run 44740160167 printed 36 at 581714684.
-    _runci_guarded_test "C1y accept_loop" 36 \
+    # 36 -> 37 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
+    _runci_guarded_test "C1y accept_loop" 37 \
         cargo test -p wz-runtime-tokio --features routing-peer --lib accept_loop --quiet || return 1
     # The loop-level witness of the link admission (two `peer_loop`s that dial each other with
     # one link each, and no face of either goes up on a link that is then closed). It needs
@@ -11507,7 +11717,8 @@ layer_c1d_cargo_test_pubsub() {
     # and every time without; a frame of repeated keys is delivered as the owned path delivers
     # it), and the second states both builds' scan count, so only this arm sees the other half.
     # 3 -> 4: a key whose positions pass 16 bits is scanned each time, which the filter reaches.
-    _runci_guarded_test "C1d match cache out" 4 \
+    # 4 -> 7 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
+    _runci_guarded_test "C1d match cache out" 7 \
         env WZ_LIMIT_MATCH_MEMO_SLOTS=0 \
         cargo test -p wz-session-core --features codec-push,codec-declare,codec-response-final,pubsub-put,pubsub-delete,pubsub-attachment,pubsub-timestamp \
         --lib --quiet -- match_mem repeated_key || return 1
@@ -11989,7 +12200,8 @@ layer_c1g_cargo_test_observer() {
     # heap counted over each writer and its encode into an array, zero, against the
     # owned builder's, nonzero, as the instrument's control (1 = what that PRINTED).
     # Default features, the three the writers need.
-    _runci_guarded_test C1g 10 \
+    # 10 -> 12 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
+    _runci_guarded_test C1g 12 \
         cargo test -p wz-session-core --lib --features codec-declare,declare-final,codec-response-final --quiet -- lent_control:: || return 1
     wz_test_args wz-session-core lent_control_alloc
     _runci_guarded_test C1g 1 \
@@ -12640,9 +12852,10 @@ layer_c1cf_reduced_features() {
 #
 # `capability_cost_gate.py` builds each case in its table with exactly its features and grades
 # size, the absence of the planes it leaves out, the presence of the planes it has, and the
-# pinned export count of the default build. Eight release builds and two `capi-small` builds
-# (panics abort) of two cdylibs, run as ONE lane because each case replaces the previous one's
-# artifact in the target directory of its profile. Each library must also carry the conformance
+# pinned export count of the default build, and holds each pico case's ratio to zenoh-pico
+# under its row of `deploy/pico_host_ceiling.json` (docs/upstream-parity.md D9). Eight release
+# builds and two `capi-small` builds (panics abort) of two cdylibs, run as ONE lane because
+# each case replaces the previous one's artifact in the target directory of its profile. Each library must also carry the conformance
 # digest of its statement. Two more dev builds in a target directory of their own (the statement
 # cases) state a limit and a policy and turn the zenoh-c shared-memory arm on, which no size case
 # does, and are graded on that digest alone.
@@ -13407,7 +13620,8 @@ layer_c1p_multicast() {
     # 2026-11-18 -- 49 -> 65, printed on a build host: the group's max_sessions (d5413a2231),
     # compressed batches (b56c4fc48f), the address index (824cd35015) and the Join and chain cases
     # beside them; C1p was not reached on hosted since.
-    _runci_guarded_test C1p 65 cargo test -p wz-session-core --features session-multicast --lib multicast --quiet \
+    # 65 -> 67 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
+    _runci_guarded_test C1p 67 cargo test -p wz-session-core --features session-multicast --lib multicast --quiet \
         || return 1
     # R2928 — 63 -> 64, the printed number: of the four `multicast_tx::push_tests`
     # only the no-room case compiles here; the rest need `codec-response-final`
@@ -13437,7 +13651,8 @@ layer_c1p_multicast() {
     # `a_join_naming_a_zero_zid_is_refused_where_it_is_read` (hosted run 44201914197
     # printed 101 at 4050dd889, 44412368690 printed 102 at 458774b1f; the build host
     # printed 102 at 5f5342ae1).
-    _runci_guarded_test C1p 102 cargo test -p wz-session-core --features session-multicast,reassembly,codec-push,codec-join --lib multicast --quiet \
+    # 102 -> 109 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
+    _runci_guarded_test C1p 109 cargo test -p wz-session-core --features session-multicast,reassembly,codec-push,codec-join --lib multicast --quiet \
         || return 1
     # R311y633 (§17.6 / §11.2) — the arm that BUILDS `multicast_rx` and RUNS it.
     # The two arms above omit `codec-close`, and `pub mod multicast_rx` is gated
@@ -13709,7 +13924,9 @@ layer_c1m_session_lwip() {
     # 3148fdfc84 printed 22 here; the other numbers are counted from the source.
     _runci_guarded_test "C1m mcu default" 22 \
         cargo test -p wz-session-mcu --quiet || return 1
-    _runci_guarded_test "C1m mcu unicast app layer" 23 \
+    # 23 -> 24, printed: the merge of main at `0e24b2486` (Round 4581) into the limits rounds
+    # prints one more here, which neither tree printed before it.
+    _runci_guarded_test "C1m mcu unicast app layer" 24 \
         cargo test -p wz-session-mcu \
         --features query-queryable,codec-response,codec-response-final,pubsub-put \
         --quiet || return 1
@@ -13724,9 +13941,13 @@ layer_c1m_session_lwip() {
     # and its end is a lost session to a machine a dialling open moved on (decision D10).
     # 55 -> 57, counted from the source: the in-memory network's IPv6 test (as in the default leg)
     # and the dial reader's bracketed IPv6 address (`dial::parse_tests`, which `dial` compiles).
-    _runci_guarded_test "C1m mcu adminspace-write" 57 \
+    # 57 -> 61, printed: main at `b58b71c19` already printed 61 on one machine, so the source
+    # counts above missed four; the limits rounds add none to this leg.
+    _runci_guarded_test "C1m mcu adminspace-write" 61 \
         cargo test -p wz-session-mcu --features adminspace-write --quiet || return 1
-    _runci_guarded_test "C1m mcu peer nodes" 27 \
+    # 27 -> 29, printed: hosted run 44895098050 on `c72460b30` printed 29 (the +2 above was counted
+    # from the source and missed two).
+    _runci_guarded_test "C1m mcu peer nodes" 29 \
         env WZ_LIMIT_MAX_PEER_NODES=2 \
         cargo test -p wz-session-mcu --features adminspace-write --lib connect_manager \
         --quiet || return 1
@@ -13735,7 +13956,9 @@ layer_c1m_session_lwip() {
     # 31 -> 32: the text a build states a list in reads as the bytes a link's key proves.
     # 32 -> 35, counted from the source: the two passive tests of the legs above, and the verbs
     # reaching the session a passive node opened (its link, a reset and a close through the shell).
-    _runci_guarded_test "C1m mcu lifecycle verbs" 35 \
+    # 35 -> 37, printed: main at `c72460b30` printed 37 on a build host; no hosted run reached this
+    # leg, the one above failing first.
+    _runci_guarded_test "C1m mcu lifecycle verbs" 37 \
         env WZ_LIMIT_MAX_PEER_NODES=2 \
         cargo test -p wz-session-mcu \
         --features adminspace-write,lifecycle-close,lifecycle-reset,lifecycle-status --lib \
@@ -13748,7 +13971,10 @@ layer_c1m_session_lwip() {
     # 59 -> 62: the same three as the adminspace-write leg (decision D10).
     # 63 -> 65, counted from the source: the same two as the adminspace-write leg.
     # 65 -> 67, counted from the source: the same two IPv6 tests as the adminspace-write leg.
-    _runci_guarded_test "C1m mcu adminspace read+write" 67 \
+    # 67 -> 72, printed: main at `b58b71c19` printed 71 on one machine (four the source counts
+    # missed), and the limits rounds add one, an admin node's observer held to its session's limits.
+    # 72 -> 73, printed: one more with main at `0e24b2486` (Round 4581) merged in.
+    _runci_guarded_test "C1m mcu adminspace read+write" 73 \
         cargo test -p wz-session-mcu --features adminspace-core,adminspace-write --quiet || return 1
     # The fixed-memory client node's shared mechanism (`slot_node`, compiled only on the slot profile
     # with the client core): no leg above selects both, so its tests ran in none until this one. 28 =
@@ -13763,18 +13989,22 @@ layer_c1m_session_lwip() {
     # and read as the list the node holds, and its refusals.
     # 31 -> 32: Round 4521's `the_sessions_the_node_makes_carry_the_snapshot_it_is_handed`;
     # hosted run 44434030103 printed 32, and so did a build host.
-    _runci_guarded_test "C1m mcu slot node" 32 \
+    # 32 -> 34: the limits the node is handed, carried by its sessions' parameters and held by its
+    # observer (two tests); counted from the source, not yet printed.
+    _runci_guarded_test "C1m mcu slot node" 34 \
         cargo test -p wz-session-mcu --features client-slot --lib slot_node --quiet || return 1
     # The same tests of a node built with `declare-token`: the number is the same, and what two of
     # them assert is the other half (a token is declared, and is not refused). 31 -> 32: Round
-    # 4521's snapshot test, as the first arm; hosted run 44572424670 printed 32.
-    _runci_guarded_test "C1m mcu slot node with tokens" 32 \
+    # 4521's snapshot test, as the first arm; hosted run 44572424670 printed 32. 32 -> 34: the two
+    # limits tests of the first arm; counted from the source, not yet printed.
+    _runci_guarded_test "C1m mcu slot node with tokens" 34 \
         cargo test -p wz-session-mcu --features client-slot,declare-token --lib slot_node --quiet || return 1
     # The same tests of a node that binds the lifecycle verbs in band (`client-verbs`, what a
     # declaration that names a commander builds), and one more: the verbs are declared under the
     # node's own key once named, and refused unnamed. 32 -> 33: Round 4521's snapshot test, which
-    # moved the two legs above and not this one; hosted run 44646497313 printed 33.
-    _runci_guarded_test "C1m mcu slot node with verbs" 33 \
+    # moved the two legs above and not this one; hosted run 44646497313 printed 33. 33 -> 35: the
+    # two limits tests of the first arm; counted from the source, not yet printed.
+    _runci_guarded_test "C1m mcu slot node with verbs" 35 \
         cargo test -p wz-session-mcu --features client-verbs,lifecycle-close,lifecycle-reset,lifecycle-status \
         --lib slot_node --quiet || return 1
     # The client that answers queries and subscribes to nothing (`client-slot-queryable`, what
@@ -14173,9 +14403,11 @@ layer_c1m_session_lwip() {
     # S9a -- the tables a peer writes live in the session slot: two sessions have
     # two sets, a flood through one is refused and counted there and not in the
     # other, a slot comes back empty, and the tables count in the slot's size. 3 =
-    # what that command PRINTED.
+    # what that command PRINTED. 3 -> 5: a session opened in a slot holds its tables, and its
+    # dispatch its requesters, to the limits it was opened with; counted from the source, not yet
+    # printed.
     wz_test_args wz-session-lwip session_peer_tables
-    _runci_guarded_test "C1m session peer tables" 3 \
+    _runci_guarded_test "C1m session peer tables" 5 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,declare-subscriber,session-slot \
         "${WZ_TEST_ARGS[@]}" --quiet || return 1
@@ -14304,7 +14536,9 @@ layer_c1m_session_lwip() {
     # 9 = what that command PRINTED, five of them the accepting side. 10, counted from the source:
     # a dial to an IPv6 locator opens a socket of that family (the heap form of the same test is
     # `alloc` without `session-slot`, so not here).
-    _runci_guarded_test "C1m coop ip stack links" 10 \
+    # 10 -> 11, printed: main at `c72460b30` printed 11 on a build host; no hosted run reached this
+    # leg, an earlier one failing first.
+    _runci_guarded_test "C1m coop ip stack links" 11 \
         cargo test -p wz-runtime-coop --features session-slot \
         --lib ip_stack:: --quiet || return 1
     # The host's TCP seam (`wz_runtime_posix::stream`): the connection a dial makes and the port a
@@ -14313,7 +14547,9 @@ layer_c1m_session_lwip() {
     # connection closed before it was taken, a port already listened on, a port freed for the next).
     # 17, counted from the source: an IPv6 connection and listener name their ends in their family,
     # and only a family the kernel lacks is `Unsupported`.
-    _runci_guarded_test "C1m posix tcp seam" 17 \
+    # 17 -> 19 = what hosted run 44790303307 printed: a stream the peer does not read stops being
+    # writable until it reads, and the wait for room handed out answers as the socket does.
+    _runci_guarded_test "C1m posix tcp seam" 19 \
         cargo test -p wz-runtime-posix --lib stream:: --quiet || return 1
     # The host's multicast seam (`wz_runtime_posix::group`): the receivers of one host share the group's
     # port, a group that is not one is not joined, a member sends from a port of its own with the hop
@@ -14348,8 +14584,9 @@ layer_c1m_session_lwip() {
     # made for each put is refused on the group and the round goes on; and the members follow the
     # arrivals and departures and never go below none: 4 = what that command PRINTED.
     # 4 -> 5: the group session is made with the snapshot it is handed (cd6f74c9a added
-    # the test and left this count).
-    _runci_guarded_test "C1m mcu slot group" 5 \
+    # the test and left this count). 5 -> 6: a join holds the group's tables to the limits the
+    # node hands its plane; counted from the source, not yet printed.
+    _runci_guarded_test "C1m mcu slot group" 6 \
         cargo test -p wz-session-mcu --features group --lib slot_group:: --quiet || return 1
     # The replay of a node's declarations on a session (`slot_client`, the slot profile with
     # `client-slot`): each entry is offered once in order, a refused send resumes at the entry it failed
@@ -14362,7 +14599,10 @@ layer_c1m_session_lwip() {
     # the session, a retry wait until the no-progress bound, and what a turn reports).
     # 10 -> 13, counted from the source: a refusal is told apart as a stage with no room or a
     # failed send, and a failed send ends the session paced or not, as upstream's reopen does.
-    _runci_guarded_test "C1m mcu slot declaration replay" 13 \
+    # 13 -> 14, printed: main at `c72460b30` printed 14 on a build host; no hosted run
+    # reached this leg, an earlier one failing first.
+    # 14 -> 15 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
+    _runci_guarded_test "C1m mcu slot declaration replay" 15 \
         cargo test -p wz-session-mcu --features client-slot --lib slot_client::tests:: --quiet || return 1
     # Fixed-memory step S6, the exhaustion cases of the N-session pool (R1, R2, R6):
     # a node holds at most the generated MAX_SESSIONS sessions, and every table a
@@ -14410,7 +14650,8 @@ layer_c1m_session_lwip() {
     # a full table refused, counted, its group socket given back) and run as a task of
     # a static runtime: 3 = what that command PRINTED.
     wz_test_args wz-session-lwip multicast_slot
-    _runci_guarded_test "C1m multicast slot" 3 \
+    # 3 -> 4 (2026-11-22, printed by the command on a build host): the runtime-config 4b slot work added a case to tests/multicast_slot.rs.
+    _runci_guarded_test "C1m multicast slot" 4 \
         cargo test -p wz-session-lwip \
         --features transport-multicast,codec-push,codec-response-final,session-slot,static-link-storage \
         "${WZ_TEST_ARGS[@]}" --quiet || return 1
@@ -14753,7 +14994,8 @@ layer_c1ns_nostd_members_isolated() {
     for member in $nostd; do
         (cd crates && cargo test -p "$member" --quiet) || return 1
     done
-    _runci_guarded_test "C1ns zephyr lib" 37 \
+    # 37 -> 38 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
+    _runci_guarded_test "C1ns zephyr lib" 38 \
         cargo test -p wz-runtime-zephyr --lib --quiet || return 1
 }
 
@@ -18667,6 +18909,22 @@ _pico_cli_unavailable() {
 # lane — the register recorded that as §11.9 and it stayed true. A proof that
 # only ever runs when someone remembers is a proof the tree cannot depend on.
 layer_epico_library_oracles() {
+    # The two forms of wz's own pico library (docs/capi-pico-additional-library.md): the one
+    # library, and the core with the doors' library beside it, built from one feature list by
+    # scripts/pico-additional-forms.sh, and one C scenario compiled against each form and held to
+    # the same messages on the wire
+    # (`crates/wz-integration-tests/tests/it/files/pico_additional_split_wire.rs`). It is a leg of
+    # the pico library's lane and needs no foreign library, so it runs before the oracle check
+    # below. This lane builds the forms, so for the length of the leg their absence is a failure
+    # (`WZ_PICO_FORMS_REQUIRE=1`) and not the skip the test takes in a sweep that built none. One
+    # test, so the count is exact.
+    bash scripts/pico-additional-forms.sh || return 1
+    wz_test_args wz-integration-tests pico_additional_split_wire
+    _runci_guarded_test "Epico the two forms of the pico library on the wire" 1 \
+        env WZ_PICO_FORMS_REQUIRE=1 cargo test -p wz-integration-tests \
+        "${WZ_TEST_ARGS[@]}" -- --quiet \
+        || return 1
+    echo "  Epico: the one library and the core with the doors' library put the same messages on the wire"
     if [[ ! -f "$WZ_ARTIFACTS"/target/zenoh-pico-build/lib/libzenohpico.so ]]; then
         _pico_cli_unavailable "Layer Epico" || return 1
         return 0
@@ -20880,7 +21138,7 @@ layer_p_throughput_differential() {
 # What it covers and how to read a red: docs/pico-stability-lane.md.
 #
 # Two legs over the stress executable of wz-capi-pico (`tests/stability.rs`, whose three tests are
-# `#[ignore]`d so that no default sweep runs them):
+# `#[ignore]`d so that no default sweep runs them), the memory legs and the link legs:
 #
 #   1. The three tests in a debug build. Worker threads put, get and declare while a chaos thread
 #      closes and reopens the sessions under them, over a transport the program supplies that
@@ -20914,6 +21172,25 @@ layer_s_pico_stability() {
     echo "Layer S: seed ${WZ_STABILITY_SEED} (WZ_STABILITY_SEED=${WZ_STABILITY_SEED} runs this mix again)"
     wz_test_args wz-capi-pico stability
     _runci_guarded_test S 3 cargo test -p wz-capi-pico --features "$features" \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --nocapture --test-threads=1 || return 1
+
+    # The memory legs (`tests/allocation_faults.rs`, an executable of its own for its allocator),
+    # on each engine: for z_open, the three declarations, z_put and z_get, a run with no failure
+    # counts the allocations of the call, and then every point of it fails in a run of its own (a
+    # process started from the test, `WZ_ALLOC_FAULT_JOBS` at once); and the allocations of puts
+    # and gets between open sessions are counted. A heap build is held to what every build owes
+    # (no run ends but by returning or in the allocation-failure handler, no panic, nothing left
+    # behind by a call that returned) and prints its counts; a build that takes its memory at open
+    # is held to a named error at every point and to traffic that allocates nothing. One test at a
+    # time: each sweep runs its own processes in parallel. Count-guarded: every test is `#[ignore]`.
+    wz_test_args wz-capi-pico allocation_faults
+    _runci_guarded_test "S allocation faults, tokio engine" 8 \
+        cargo test -p wz-capi-pico --features "$features" \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --nocapture --test-threads=1 || return 1
+    wz_test_args wz-capi-pico allocation_faults
+    _runci_guarded_test "S allocation faults, cooperative engine" 8 \
+        cargo test -p wz-capi-pico --no-default-features \
+        --features engine-coop,app-transport,peer,query,queryable,multi-thread \
         "${WZ_TEST_ARGS[@]}" -- --ignored --nocapture --test-threads=1 || return 1
 
     # The link legs (`crates/wz-integration-tests/tests/it/files/pico_link_qos_on_wz_capi.rs`): one
@@ -28709,7 +28986,7 @@ layer_qzk_client_images_build() {
         || { echo "  Qzk ceiling FAIL — the matrix gives no pair to hold (above)" >&2; return 1; }
     if [[ -n "$want" ]] && ! awk -v want="$want" '$1 == want { found = 1 } END { exit !found }' <<< "$parts"; then
         echo "  Qzk FAIL — WZ_QZK_PART=$want is none of the lane's parts:" >&2
-        sed 's/^/    /' <<< "$parts" >&2
+        while IFS= read -r part_line; do echo "    $part_line"; done <<< "$parts" >&2
         return 1
     fi
     lane_home="$(mktemp -d)"
@@ -28871,6 +29148,7 @@ run_layer B layer_b_verify_codegen || overall=1
 run_layer B2 layer_b2_regen_diff || overall=1
 run_layer C0 layer_c0_test_discipline || overall=1
 run_layer C0mut layer_c0mut_verdict_legs || overall=1
+run_layer Cmut layer_cmut_code_mutation || overall=1
 run_layer C0i layer_c0i_impact_ref_gate || overall=1
 run_layer U layer_u_upstream_release_distance || overall=1
 run_layer C0b layer_c0b_job_budget_margin || overall=1

@@ -4006,6 +4006,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-capi-pico-ext"
+version = "0.1.0"
+dependencies = [
+ "wz-app-frame",
+ "wz-cdylib-build",
+ "wz-session-core",
+]
+
+[[package]]
 name = "wz-capi-port"
 version = "0.1.0"
 dependencies = [
@@ -4412,6 +4421,7 @@ dependencies = [
 name = "wz-runtime-posix"
 version = "0.1.0"
 dependencies = [
+ "critical-section",
  "libc",
  "windows-sys 0.61.2",
  "wz-runtime-coop",

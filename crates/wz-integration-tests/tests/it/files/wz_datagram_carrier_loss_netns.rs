@@ -131,6 +131,7 @@ async fn in_a_netns_a_dial_link_whose_route_is_removed_is_lost_at_its_next_write
         socket,
         peer,
         &wz_runtime_tokio::policy::SessionPolicy::defaults(),
+        &wz_runtime_tokio::limits::SessionLimits::BUILD,
     );
 
     // Nothing has been sent, so nothing has been refused: the link is quiet.

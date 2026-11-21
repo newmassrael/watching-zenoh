@@ -186,6 +186,14 @@ PROBES: dict[str, dict[str, list[tuple[str, str, frozenset[str]]]]] = {
 # table would otherwise be.
 NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
     "wz-capture": {
+        # The step 4b carry's round: `message-payload` turns `wz-app-frame`'s feature of that
+        # name on for one test, which a dev-dependency feature could not do without changing
+        # Layer C1's resolution of `wz-app-frame` (the C1cap partition). It gates that test and
+        # nothing public.
+        "message-payload": (
+            "no `#[cfg]` in this package attaches this feature to a publicly visible item; "
+            "it gates one test (`proto_encode_tests`), which Layer C1cap runs with it on"
+        ),
         # R2972 — `compression` gated `passive::compression_active`, a public
         # accessor, until that accessor was removed (`compression_active` had no
         # reader once the session-wide answer went). What is left is one
@@ -684,6 +692,12 @@ DEFERRED: dict[str, dict[str, str]] = {
                 # `adminspace-write` gone, `pub mod connect_endpoints` is behind the bare
                 # feature, a simple site the root probe reads.
                 "attachment-bytes",
+                # `bounded-heapless` joins from the methods list below: its two accessors of
+                # `ApplicationLayerObserver` (`reply_refusals`, `request_refusals`) carry no
+                # cfg since the reply and final stages hold the session's quota on every backing,
+                # and what it still gates is the choice of the storage policy, under compound
+                # attributes alone (`all(alloc, not(..))` and `any(not(alloc), ..)`).
+                "bounded-heapless",
                 # R3291 -- `bounded-heapless` LEFT this list by the R2686 route.
                 # It was here because every public item it gated sat behind
                 # `any(test, doc, not(feature = ..))` (the closure-taking
@@ -782,13 +796,6 @@ DEFERRED: dict[str, dict[str, str]] = {
                 "adjudicates"
             )
             for f in (
-                # `bounded-heapless` joins. It was probed through public items under a bare
-                # `#[cfg(feature = "bounded-heapless")]` in `reply_stage` (R3291, above); the
-                # storage-policy step made the staging tables generic over the policy, so
-                # those items carry no cfg any more. What the feature still gates in a
-                # public module is two accessors of `ApplicationLayerObserver`
-                # (`reply_refusals`, `request_refusals`), which are METHODS.
-                "bounded-heapless",
                 # `clock-source` gates `ClockStanding::holdover_expired`, the event of the
                 # host's holdover bound passing, a METHOD under a simple cfg; the rest of what
                 # it changes in this package is a match arm and the body of a method.

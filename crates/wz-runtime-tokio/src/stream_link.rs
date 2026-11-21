@@ -1032,7 +1032,10 @@ impl BoxedLinkDriver for StreamWriteDriver {
     // The writer task is the consumer of this queue, and it is the one that runs the
     // hook: when it has nothing to write it flushes what the session staged, which is
     // the pull zenoh's transmission pipeline has (R3367).
-    fn set_idle_flush(&self, hook: Arc<dyn Fn() + Send + Sync>) -> bool {
+    fn set_idle_flush(
+        &self,
+        hook: Arc<dyn Fn() -> wz_session_core::link::IdleFlush + Send + Sync>,
+    ) -> bool {
         self.tx.set_idle_hook(hook);
         true
     }

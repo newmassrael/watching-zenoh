@@ -639,6 +639,8 @@ fn group_params(
     lease_ms: u64,
     policy: &wz::runtime_tokio::policy::SessionPolicy,
 ) -> wz::runtime_tokio::multicast_glue::MulticastParams {
+    // A sessions document states no limits: the build's are the group's, named here.
+    let limits = wz::runtime_tokio::limits::SessionLimits::BUILD;
     wz::runtime_tokio::multicast_glue::MulticastParams {
         whatami: WhatAmI::Peer,
         zid,
@@ -649,7 +651,7 @@ fn group_params(
         batch_size: 2_048,
         is_qos: false,
         compression: false,
-        tx_queue: wz::runtime_tokio::session_glue::TxQueueConf::of_policy(policy),
+        tx_queue: wz::runtime_tokio::session_glue::TxQueueConf::of_snapshot(policy, &limits),
         link_rx: Default::default(),
         // The demo's group is zenoh-pico's, as its batch is.
         join_rule: wz::runtime_tokio::multicast_glue::GroupJoinRule::Pico,
@@ -657,6 +659,7 @@ fn group_params(
         // rows are the bound.
         max_sessions: None,
         policy: *policy,
+        limits,
     }
 }
 

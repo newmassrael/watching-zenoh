@@ -1,0 +1,90 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# Nightly mutation testing (Layer Cmut, docs/mutation-testing.md): each scope of
+# deploy/mutation_ratchet.json in a job of its own, its files mutated one change at a time by
+# cargo-mutants in a copy of the workspace, its crate's own tests run against each change, and the
+# scope's counts held to its committed row. Not on a push: a scope takes hours, which no push can
+# wait on; Layer C0 holds the table itself on every push.
+#
+# The scopes are read from the table by the first job, so a scope added there is run here the next
+# night with no edit of this file. A red night is a debt item of its own (a missed mutant is a test
+# to write, a lower kill rate a test that stopped noticing), not a red of the push it ran after.
+#
+# No cargo cache: cargo-mutants builds each scope in a copy of the workspace with its own target
+# directory, which no cache entry of this repository holds, and the cache budget has no room for
+# another class (.github/cache-classes.json).
+
+name: Mutation
+
+on:
+  schedule:
+    - cron: "41 4 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: mutation
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  WZ_DECLINED_EXPECT: ""
+
+jobs:
+  scopes:
+    name: the scopes of the mutation table
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    outputs:
+      scopes: ${{ steps.read.outputs.scopes }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read the scopes
+        id: read
+        run: |
+          scopes="$(python3 scripts/lib/mutation_ratchet_gate.py --parts-json)"
+          echo "scopes=$scopes" >> "$GITHUB_OUTPUT"
+
+  mutants:
+    name: mutants ${{ matrix.scope }}
+    needs: scopes
+    runs-on: ubuntu-22.04
+    # A scope is cut so that it ends well inside this; its first measured night says how long
+    # it takes, and a scope that comes near it is split in the table.
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        scope: ${{ fromJSON(needs.scopes.outputs.scopes) }}
+    env:
+      WZ_CMUT_PART: ${{ matrix.scope }}
+    steps:
+      - name: Checkout (with submodules)
+        # The workspace reaches vendor/sce by path, and the copy cargo-mutants builds reaches it
+        # through the same relative path.
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        run: bash scripts/lib/rust-toolchain-pinned.sh
+
+      - name: Install cargo-mutants at the table's pin
+        run: bash scripts/install-cargo-mutants.sh
+
+      - name: Layer Cmut — mutate ${{ matrix.scope }} and hold it to its row
+        run: bash scripts/run-ci.sh --layer Cmut
+
+      # Every night and not only a red one: the missed list and each mutant's log are what a
+      # person writes the next test from.
+      - name: Upload the outcomes of ${{ matrix.scope }}
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-${{ matrix.scope }}
+          path: target/cmut/${{ matrix.scope }}/out/
+          if-no-files-found: ignore

@@ -45,6 +45,7 @@ use wz_runtime_coop::session_drive::LinkOpenError;
 use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTime};
 use wz_runtime_core::TimeSource;
 use wz_session_core::driver_loop::IterationEvent;
+use wz_session_core::limits::SessionLimits;
 use wz_session_core::multicast_dispatch::{MulticastConfig, MulticastDispatcher};
 use wz_session_core::multicast_params::{zid_vec, MulticastOutcome, MulticastParams};
 use wz_session_core::multicast_tx::{multicast_tx_offer_put_literal, MulticastTxOffer};
@@ -174,6 +175,9 @@ impl GroupTiming {
 /// `policy`, the node's snapshot: the parameters carry it to the group's drive loop, and the
 /// queue its session is made with is made from it.
 fn group_params(zid: &[u8], timing: &GroupTiming, policy: &SessionPolicy) -> MulticastParams {
+    // The node's image resolves no limits snapshot of its own: the build's limits are the ones
+    // its group runs with, named here, and its queue and machines read them from the parameters.
+    let limits = wz_session_core::limits::SessionLimits::BUILD;
     MulticastParams {
         whatami: WhatAmI::Peer,
         zid: zid_vec(zid),
@@ -184,7 +188,7 @@ fn group_params(zid: &[u8], timing: &GroupTiming, policy: &SessionPolicy) -> Mul
         batch_size: GROUP_BATCH_BYTES,
         is_qos: false,
         compression: false,
-        tx_queue: TxQueueConf::of_policy(policy),
+        tx_queue: TxQueueConf::of_snapshot(policy, &limits),
         link_rx: LinkRxConf::default(),
         // The MCU session is zenoh-pico's.
         join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
@@ -192,6 +196,7 @@ fn group_params(zid: &[u8], timing: &GroupTiming, policy: &SessionPolicy) -> Mul
         // (`MEMBERS`) is the bound.
         max_sessions: None,
         policy: *policy,
+        limits,
     }
 }
 
@@ -256,11 +261,14 @@ impl<const P: usize> GroupPublisher<P> {
 }
 
 /// What the group's task is made of besides its pump: the state it shares with the loop, the
-/// observer its events are dispatched to, the clock its offers read, and what it publishes and
-/// counts. Plain values the task's two callbacks are built from ([`group_task`]).
+/// observer its events are dispatched to and the snapshots it states to that observer and holds
+/// its requesters to, the clock its offers read, and what it publishes and counts. Plain values
+/// the task's two callbacks are built from ([`group_task`]).
 struct GroupTaskParts<C: ClockSource + 'static, const P: usize> {
     state: &'static GroupState,
     observer: &'static ObserverCell<DocumentSinks>,
+    policy: SessionPolicy,
+    limits: SessionLimits,
     clock: CoopTime<C>,
     publications: [Publication; P],
     counts: &'static PublishCounts<P>,
@@ -284,11 +292,13 @@ where
     let GroupTaskParts {
         state,
         observer,
+        policy,
+        limits,
         clock,
         publications,
         counts,
     } = parts;
-    let mut requesters = Requesters::<NoReplies, NoReplies>::new();
+    let mut requesters = Requesters::<NoReplies, NoReplies>::with_limits(&limits);
     let on_event = move |event: IterationEvent<'_, '_>| {
         match event {
             IterationEvent::MulticastPeerArrived(_) => state.member_arrived(),
@@ -296,9 +306,11 @@ where
             _ => {}
         }
         let mut peers = state.peers.borrow_mut();
-        observer
-            .borrow_mut()
-            .dispatch_event(&mut peers, &mut requesters, event);
+        let mut observer = observer.borrow_mut();
+        // The observer is the node's and serves its sessions too: the group states its own
+        // answer to a query it cannot resolve, as each session does before its dispatch.
+        observer.set_unanswerable_final(policy.query_unanswerable_final());
+        observer.dispatch_event(&mut peers, &mut requesters, event);
     };
     let mut publisher = GroupPublisher::<P>::new();
     let next_tx = move || publisher.offer(clock.now_monotonic_ms(), &publications, counts);
@@ -354,6 +366,8 @@ where
     zid_len: usize,
     /// The node's snapshot, which each session the group joins with is made from.
     policy: SessionPolicy,
+    /// The node's limits, which the group's peer tables are held to at each join.
+    limits: SessionLimits,
     task: Option<CoopLocalJoinHandle<MulticastOutcome>>,
     join_at_ms: u64,
 }
@@ -377,6 +391,7 @@ where
             zid,
             zid_len,
             policy: *context.policy,
+            limits: context.limits,
             task: None,
             // The first tick joins.
             join_at_ms: 0,
@@ -396,6 +411,14 @@ where
     #[inline(never)]
     fn join(&mut self) -> bool {
         let state = self.plane.state;
+        // The group's peer tables outlive each of its sessions: every join holds them to the node's
+        // limits before a member can write a row, and before the socket is asked for, so a join
+        // that is refused still leaves them held. A snapshot of no byte has one value, the build's,
+        // which the tables hold from their making, so a build whose every limit is one value hands
+        // nothing and borrows nothing here.
+        if const { core::mem::size_of::<SessionLimits>() != 0 } {
+            state.peers.borrow_mut().limit_to(&self.limits);
+        }
         let Ok(transport) = self.plane.bind.bind() else {
             return false;
         };
@@ -414,6 +437,8 @@ where
         let parts = GroupTaskParts {
             state,
             observer: self.observer,
+            policy: self.policy,
+            limits: self.limits,
             clock: CoopTime::new(&self.runtime),
             publications: self.plane.publications,
             counts: self.plane.counts,
@@ -505,7 +530,10 @@ mod tests {
             }
             let params = group_params(&[0x01, 0x02], &GroupTiming::ZENOH, &policy);
             assert_eq!(params.tx_queue.no_progress_us.is_some(), on, "{on}");
-            assert_eq!(params.tx_queue, TxQueueConf::of_policy(&policy));
+            assert_eq!(
+                params.tx_queue,
+                TxQueueConf::of_snapshot(&policy, &wz_session_core::limits::SessionLimits::BUILD)
+            );
             assert_eq!(params.lease_ms, GroupTiming::ZENOH.lease_ms);
             built += 1;
         }
@@ -581,6 +609,135 @@ mod tests {
         );
         assert_eq!((counts.refused(0), counts.sent(0)), (1, 0));
         assert_eq!((counts.refused(1), counts.sent(1)), (0, 1));
+    }
+
+    /// A transport that cannot be made: the bind below refuses before one would be.
+    enum NoGroup {}
+
+    impl GroupTransport for NoGroup {
+        fn open(&mut self) -> bool {
+            match *self {}
+        }
+
+        fn close(&mut self) {
+            match *self {}
+        }
+
+        fn service(&self) {
+            match *self {}
+        }
+
+        fn carrier_up(&self) -> bool {
+            match *self {}
+        }
+
+        fn send_to_group(&mut self, _datagram: &[u8]) {
+            match *self {}
+        }
+
+        fn recv_with(&mut self, _f: &mut dyn FnMut(&[u8], core::net::SocketAddr)) -> bool {
+            match *self {}
+        }
+    }
+
+    /// A stack with no socket for the group: every join is refused at the bind.
+    struct NoSocket;
+
+    impl GroupBind<NoGroup> for NoSocket {
+        fn bind(&mut self) -> Result<NoGroup, LinkOpenError> {
+            Err(LinkOpenError::Exhausted)
+        }
+    }
+
+    /// A clock that never moves.
+    #[derive(Clone, Copy, Default)]
+    struct Frozen;
+
+    impl ClockSource for Frozen {
+        fn now_us(&self) -> u64 {
+            0
+        }
+    }
+
+    /// The state of a group plane started under `limits` and ticked once: its first join, which
+    /// the stack refuses at the bind.
+    fn joined_once_under(limits: SessionLimits) -> &'static GroupState {
+        use alloc::boxed::Box;
+        let state: &'static GroupState = Box::leak(Box::new(GroupState::new()));
+        let slots: &'static MulticastSlots<Frozen, NoGroup, 1, 1> =
+            Box::leak(Box::new(MulticastSlots::new()));
+        let cell: &'static wz_runtime_coop::RuntimeCell<Frozen, 1, 64, 1> =
+            Box::leak(Box::new(wz_runtime_coop::RuntimeCell::new()));
+        let runtime: CoopRuntime<Frozen> = cell.start(Frozen).expect("the runtime is started once");
+        let observer: &'static ObserverCell<DocumentSinks> =
+            Box::leak(Box::new(ObserverCell::new()));
+        let counts: &'static PublishCounts<0> = Box::leak(Box::new(PublishCounts::new()));
+        let plane = SlotGroup {
+            slots,
+            state,
+            bind: NoSocket,
+            publications: [],
+            counts,
+            timing: GroupTiming::ZENOH,
+        };
+        let mut running = plane.start(PlaneContext {
+            runtime,
+            observer,
+            zid: &[0x01, 0x02],
+            policy: &SessionPolicy::defaults(),
+            limits,
+        });
+        running.tick(0);
+        assert_eq!(
+            (state.joins(), state.join_refused()),
+            (0, 1),
+            "the join was refused at the bind"
+        );
+        state
+    }
+
+    /// The group's peer tables are held to the limits the node hands its plane at each join: with
+    /// `MAX_PENDING_FINALS` stated as two, the third request a member makes finds no room and is
+    /// refused and counted, and the refusal leaves the two `Final`s owed. The CONTROL is a plane
+    /// started under the build's limits, whose tables owe the third.
+    #[test]
+    fn a_stated_quota_of_two_finals_refuses_the_third_in_a_group_joined_through_the_plane() {
+        use wz_session_core::limit_binding::{LimitSpec, Quota};
+        use wz_session_core::limits::MaxPendingFinals;
+        use wz_session_core::reply_stage::FinalStaging;
+        use wz_session_core::sample::QosLevel;
+        // A build whose finals table holds fewer than three cannot compile the control.
+        const { assert!(wz_session_core::caps::MAX_PENDING_FINALS >= 3) };
+        let mut stated = SessionLimits::BUILD;
+        if stated.select_max_pending_finals(Quota::at_most(2)).is_err() {
+            // A build of one value refuses two: it has no other snapshot to hand the plane.
+            assert!(MaxPendingFinals::DOMAIN.is_singleton());
+            return;
+        }
+
+        let held = joined_once_under(stated);
+        {
+            let mut peers = held.peers.borrow_mut();
+            for rid in 0..2 {
+                assert!(peers.finals.has_room(), "under the stated quota");
+                peers.finals.owe(rid, QosLevel::DEFAULT);
+            }
+            assert!(
+                !peers.finals.has_room(),
+                "the third request finds no room under the stated quota"
+            );
+            peers.finals.refuse_request();
+            assert_eq!((peers.finals.len(), peers.finals.refusals()), (2, 1));
+        }
+
+        // CONTROL: the build's limits owe the third.
+        let built = joined_once_under(SessionLimits::BUILD);
+        let mut peers = built.peers.borrow_mut();
+        for rid in 0..3 {
+            assert!(peers.finals.has_room(), "under the build's limits");
+            peers.finals.owe(rid, QosLevel::DEFAULT);
+        }
+        assert_eq!(peers.finals.len(), 3);
     }
 
     #[test]

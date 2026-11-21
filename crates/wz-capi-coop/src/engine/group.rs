@@ -36,6 +36,7 @@ use wz_session_core::declare_build::{
 use wz_session_core::declare_form::{GroupDeclaration, GroupKey, RetractionKey};
 use wz_session_core::driver_loop::IterationEvent;
 use wz_session_core::interest_build::{build_interest_exact, build_interest_final, InterestKinds};
+use wz_session_core::limits::SessionLimits;
 use wz_session_core::locality::Locality;
 use wz_session_core::metadata::PushMetadata;
 use wz_session_core::multicast_dispatch::MulticastConfig;
@@ -233,6 +234,8 @@ pub(super) struct GroupJoining {
     pub(super) transport: alloc::boxed::Box<dyn GroupTransport>,
     pub(super) params: MulticastParams,
     pub(super) policy: SessionPolicy,
+    /// The session limits the session's open resolved: the group's replies are held to them.
+    pub(super) limits: SessionLimits,
     pub(super) pace: Rc<dyn Pace>,
     /// The generation a member's query is held and answered under (`queryable`).
     #[cfg(feature = "queryable")]
@@ -309,6 +312,7 @@ impl GroupFace {
             transport,
             params,
             policy,
+            limits,
             pace,
             #[cfg(feature = "queryable")]
             generation,
@@ -321,8 +325,9 @@ impl GroupFace {
             label: GroupLabel::of(&join),
         });
         // Bounded as the tokio engine bounds its group's pipeline: the queue's sizes, in batches
-        // of the group's batch, one lane when it runs no QoS.
-        let tx = GroupTxStage::new(&params);
+        // of the group's batch, one lane when it runs no QoS. The replies it holds are bounded by
+        // the session's limits.
+        let tx = GroupTxStage::with_limits(&params, &limits);
         let room = transport.writability().map(Arc::from);
         let input = transport.readiness().map(Arc::from);
         let due = GroupDue::default();
@@ -425,13 +430,22 @@ impl GroupFace {
         self.tx.drops(priority)
     }
 
-    /// How many messages the session put on the group were dropped for want of room, of every
-    /// priority (`transport-stats`).
+    /// How many messages the group dropped before they reached its socket (`transport-stats`):
+    /// the session's own, of every priority, that found no room on their lane, and the replies its
+    /// dispatch staged past the reply limit (`GroupTxStage::dropped`), as the tokio engine's
+    /// group counts every message it drops, a reply among them, as the transport's.
     #[cfg(feature = "transport-stats")]
-    pub(super) fn congestion_drops_total(&self) -> u32 {
+    pub(super) fn drops_total(&self) -> u32 {
         (0..Priority::NUM)
             .map(|at| self.tx.drops(Priority::from_wire(at as u8)))
-            .fold(0u32, u32::saturating_add)
+            .fold(self.tx.dropped(), u32::saturating_add)
+    }
+
+    /// The group's stage, as its dispatch stages a reply on it. Read only by
+    /// `CoopEngine::stage_group_replies`, and compiled where it is.
+    #[cfg(all(test, feature = "app-transport", feature = "transport-stats"))]
+    pub(super) fn reply_stage(&self) -> &GroupTxStage {
+        &self.tx
     }
 
     /// Ask the group's session for its JOIN at its next step, between two beacons, as the tokio

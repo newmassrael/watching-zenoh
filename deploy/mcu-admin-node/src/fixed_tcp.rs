@@ -39,6 +39,7 @@ use wz_runtime_coop::udp_link::NoDatagram;
 use wz_runtime_coop::{CoopLocalSet, CoopRuntime, CoopTime, RuntimeCell};
 use wz_session_core::byte_cells::ByteCells;
 use wz_session_core::entropy::EntropySource;
+use wz_session_core::limits::SessionLimits;
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::session_init_params::{cookie_bytes, zid_bytes, SessionInitParams};
 use wz_session_core::session_slot::SessionSlots;
@@ -61,8 +62,8 @@ use wz_session_mcu::slot_dial::{EventsOf, SessionFactory};
 use wz_session_mcu::slot_host::SessionHost;
 
 use crate::{
-    fail, resolve_policy, ClockSeededXorshift, SystickClockRef, ADDRESS, GLOBAL_CLOCK, LISTEN_PORT,
-    ZID,
+    fail, resolve_limits, resolve_policy, ClockSeededXorshift, SystickClockRef, ADDRESS,
+    GLOBAL_CLOCK, LISTEN_PORT, ZID,
 };
 
 /// Sessions the node holds at most, accepted and dialled together.
@@ -269,6 +270,8 @@ struct Factory {
     observer: &'static ObserverCell<Sinks>,
     /// The snapshot every session is made with.
     policy: SessionPolicy,
+    /// The limits every session is made with, which the peer tables of its slot are held to.
+    limits: SessionLimits,
 }
 
 impl SessionFactory<Clock, Driver> for Factory {
@@ -291,9 +294,10 @@ impl SessionFactory<Clock, Driver> for Factory {
             keep_alive: wz_session_core::session_init_params::KeepAliveConf::PICO,
             initial_sn: 0,
             cookie: cookie_bytes(&[]),
-            tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(&self.policy),
+            tx_queue: wz_session_core::session_init_params::TxQueueConf::of_snapshot(&self.policy, &self.limits),
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
             policy: self.policy,
+            limits: self.limits,
             cookie_signing_key: SigningKey::from_slice(&self.key).expect("32-byte key"),
         }
     }
@@ -312,10 +316,12 @@ impl SessionFactory<Clock, Driver> for Factory {
 fn install_observer(
     zid_hex: &str,
     locators: &[&str],
+    limits: SessionLimits,
 ) -> Result<&'static ObserverCell<Sinks>, &'static str> {
     let identity = FixedNodeIdentity::new(zid_hex, "peer", VERSION, locators)
         .map_err(|_| "the node's identity does not fit its fixed fields")?;
     let installed = STORAGE.app.install_with(|observer| {
+        observer.limit_to(&limits);
         if host_connect_writes_fixed(&mut observer.subscribers, zid_hex, "peer", &CONTROL.control)
             .is_err()
         {
@@ -393,7 +399,8 @@ fn start() -> Running {
     let _ = write_zenoh_hex(&ZID, &mut zid_text);
     let zid_hex = zid_text.prefix();
 
-    let observer = match install_observer(zid_hex, &[LOCATOR]) {
+    let limits = resolve_limits();
+    let observer = match install_observer(zid_hex, &[LOCATOR], limits) {
         Ok(observer) => observer,
         Err(why) => fail(why),
     };
@@ -432,6 +439,7 @@ fn start() -> Running {
             key,
             observer,
             policy,
+            limits,
         })
     }) else {
         fail("the node's arena was used before");

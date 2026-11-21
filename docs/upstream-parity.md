@@ -28,8 +28,8 @@ cell without a same-condition measurement makes no claim.
   The cooperative engine the pico ABI runs on is a host engine (`docs/capi-pico-on-coop-engine.md` D3).
 - **Size, host.** `scripts/lib/capability_cost_gate.py` builds each C ABI case, holds it to
   a text budget, and builds zenoh-pico as the same build (`wz_config.pico_reference`) to
-  print the ratio. It prints the ratio and does not grade it. It has no zenoh-c reference
-  and does not build `--original-features` lines.
+  print the ratio. It prints the ratio and does not grade it (it grades it since 2026-11-21,
+  D9). It has no zenoh-c reference and does not build `--original-features` lines.
 - **Size, MCU.** `deploy/resource_budget.json` holds the fixed client's static chain and
   stack peak. `deploy/session_slot_bytes.json` holds the session slot. Neither has a
   reference.
@@ -38,7 +38,7 @@ cell without a same-condition measurement makes no claim.
   throughput, by hand. Its `perf` mode runs one probe program against `libwz_capi_pico`
   and against zenoh-pico built as the same build, per transport (tcp, udp, multicast, a
   transport the program supplies) and with batching off and on, and writes the result as
-  a file (`docs/pico-perf-matrix.md`). On the MCU, `scripts/kit-lane.sh` runs wz images on the T2G kit and
+  a file (`docs/pico-perf-matrix.md`), which the gate of D9 judges. On the MCU, `scripts/kit-lane.sh` runs wz images on the T2G kit and
   holds each to its own row. The pico image (`deploy/zephyr-pico-compare`) is not in the
   lane. The alternating-boot and wire-turnaround method of the 2026-10-21 to 10-23
   comparisons on the T2G kit was run with scripts that live on the bench host and not in
@@ -389,6 +389,97 @@ derived from the declaration and never chosen by hand:
      to 143,720, the commits and the symbols in its `measured`). No boot of the matrix was run
      again: its boot cells (stack used, heap peak, turnaround) are those of run 20261031T063515,
      and the caveat of that run in `deploy/upstream_parity.json` says so.
+
+- **D9. The host libraries of the pico ABI are held under zenoh-pico in ratchet form (owner,
+  2026-11-21: wz is to be smaller and faster than zenoh-pico, held by gates as a ratchet and a
+  debt loop).** D8 holds the MCU kit's build cells at WIN only, and they read WIN. The host
+  libraries (the pico C ABI cdylib that ships as the Linux `.so` and the Windows DLL) read far
+  from it: Layer C1cs reads the cooperative pico client at about 2.5 times zenoh-pico built as the
+  same build, and the tokio cases higher. A WIN-only rule would hold every one of them red until
+  the debt is paid, and a red that stays red holds nothing. Until then each case is held where it
+  stands and may only move toward pico. The rule:
+  1. **The ratio, read in the same run.** `scripts/lib/capability_cost_gate.py` (Layer C1cs)
+     already builds, for every pico case, zenoh-pico from this tree's `vendor/zenoh-pico` with
+     the switches `wz_config.pico_reference` derives from the case's features, on the host that
+     builds wz. It now grades wz text over pico text. The ratio and not the bytes is held because
+     both libraries are built on one host in one run: what the host moves alike on both sides (the
+     linker, the libc, the section layout) cancels, and one tree's ratio is comparable across
+     hosts within the gate's tolerance, where its bytes are not (section 2 records one pico-client
+     build reading 1,794,606 to 1,833,173 bytes on three hosts in one day). The reference is
+     built with the host's C compiler, so each row records the toolchain it was read with, and a
+     failure on another toolchain names both.
+  2. **The committed table.** `deploy/pico_host_ceiling.json` has one row per pico case, and
+     every row is a pico case of the gate: a case added without a row, or a row left for a case
+     that is gone, fails, so the population cannot grow outside the ceiling. A row is locked,
+     `"verdict": "win"`, or a ratchet, `"ratio_at_most"` with the reading it was set from (date,
+     both texts, the pico pin, the toolchain) and the open-debt item the case is registered under.
+     `ratio_at_most` is that reading's ratio rounded up to four places, and the gate refuses any
+     other value, so a ratchet moves only with a stated reading.
+  3. **Locked is D1.** A locked case reads WIN (wz text smaller) or fails; a TIE fails as a LOSS
+     does. No budget or row move clears it: the bytes are taken back, or the owner decides here,
+     as in D8.
+  4. **The ratchet only moves down.** A reading over `ratio_at_most` by more than the tolerance
+     fails. The tolerance is 2.5 percent of the ratchet, the measured spread between hosts: one tree
+     read wz's cooperative client 1.77 percent apart on two hosts on 2026-11-21 while zenoh-pico
+     read alike, so the ratio does not cancel what a host does to wz's own build. It narrows when
+     every host builds in the image the tree declares. A failure names both toolchains; a row is
+     filled from the hosts that grade it. A reading under the
+     ratchet by more than the tolerance passes and prints the tighter row, which the round commits:
+     every gain is kept. A ratchet case that reads WIN fails until its row is locked (the gate
+     prints the locked row), so a case that reaches WIN is held there from that commit on.
+  5. **The debt loop (D5).** Every case that is not locked is an open-debt item, paid largest
+     ratio first, each paid in its own round with the ratio read again in that round and the row
+     tightened by the reading. A row without a registered item fails. The loop ends when every row
+     is locked.
+  6. **The byte budget stays.** A case's text budget in the gate still holds its own size, with
+     its reason, as before. The ceiling adds the reference to it; it does not replace it.
+  7. **Unfilled rows do not land.** A row whose `ratio_at_most` is null fails `--check` with the
+     row this run reads. `--measure` prints the rows of every pico case it builds, to paste, and
+     so does `--check` after its findings.
+- **D10. The host performance matrix of the pico ABI is a ratchet and a debt loop (owner,
+  2026-11-21).** wz is to be faster than zenoh-pico and than a deployment's own build of a
+  library of the pico API, and gates hold it, not a reading taken now and then. The matrix is
+  `scripts/pico-compare.sh perf` (`docs/pico-perf-matrix.md`); the gate is
+  `scripts/host-bench/perf_matrix.py --gate`, run at the end of every run of it.
+  1. **A row is one figure of one cell, read by D1.** The cost ratio (wz's figure over the
+     reference's when lower is better, the reference's over wz's when higher is better, so
+     below 1 is wz ahead in every row), with its bootstrap 95% interval over the run's
+     repetitions, three at the least of each arm.
+  2. **The ratchet.** A row that is not WIN holds the upper end of the interval it was written
+     from (`ratio_at_most`); a later run fails when its upper end exceeds that by more than
+     the table's stated tolerance. A reading under it is written as the new value, so the row
+     only tightens.
+  3. **The lock.** A row that reads WIN is locked (`locked`), and a locked row fails anything
+     but WIN, with no tolerance.
+  4. **The debt loop.** Every row that is not WIN is a debt in the sense of D5, paid largest
+     ratio first; the gate prints them in that order after every run. A repetition wz lost on
+     its own fails its rows; a cell the reference lost every repetition of is a row that says
+     so, and fails once the reference measures it again.
+  5. **The population.** A cell with no row fails, and a null row fails with the row the run
+     writes, so no cell joins the matrix unjudged. The committed table's rows are exactly the
+     default matrix's, held in Layer C0 with the gate's selftest.
+  6. **Two pairs, one mechanism.** W over P is committed (`deploy/pico_perf_ceiling.json`). W
+     over X, the external library, is measured when the environment names that library, and
+     judged against a table the environment names outside the repository, because its figures
+     are the deployment's: the repository holds the mechanism and no name, path or figure of
+     the deployment. A run without it is NOT-MEASURED for W over X, never a pass of it.
+  7. **Where it runs.** On a quiet host, by the run itself. It is not a hosted lane: a hosted
+     runner cannot pin the matrix's two sides on cores of their own, and a ratchet read on a
+     noisy runner would fail on its neighbours rather than on wz.
+- **D11. Completeness is a scoreboard of four criteria, each held by a ratchet (owner,
+  2026-11-21).** wz's architecture is to be more complete than zenoh-pico's and than a
+  deployment's own pico-compatible build. The criteria: (a) upstream's own tests (zenoh-pico's
+  API tests in Layer Z, zenoh-c's tests in Layer C1cc) pass on wz at least as many programs as on
+  the original library; (b) a deployment's feature catalogue, a document kept outside this
+  repository, is accepted whole as switches of `deploy/wz-config.toml` that are off by
+  default; (c) the inventory's PARTIAL atoms and the logic census's unplaced crates and files are
+  zero; (d) the structural contracts (layer direction, the hourglass C ABI, no allocation in
+  operation, lock order) each have a gate a lane runs. `scripts/lib/completeness_gate.py`
+  reads every figure from the gate or the lane that computes it, in Layer C0, and holds it to its
+  row of `deploy/completeness_ratchet.json`: a figure may not get worse, a shortfall names its
+  debt, and a criterion met is locked. Criterion (b) is measured only where the catalogue is
+  given (`WZ_FEATURE_CATALOGUE`), and its figure stays with the document. What each figure is and
+  how it is read: `docs/completeness-scoreboard.md`.
 
 ## 5. Steps
 

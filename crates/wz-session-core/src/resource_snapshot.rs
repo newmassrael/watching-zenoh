@@ -718,7 +718,8 @@ impl<const B: usize> Sampler<B> {
 }
 
 // The limits of a build, checked where they are read so that a value the layout cannot hold stops
-// the build and does not become a node that samples at the wrong period.
+// the build and does not become a node that samples at the wrong period. The period is checked
+// over every value its domain allows a snapshot to hold, so no selected period fails the sampler.
 const _: () = {
     assert!(
         crate::caps::SNAPSHOT_HISTOGRAM_BUCKETS >= 1
@@ -726,8 +727,12 @@ const _: () = {
         "SNAPSHOT_HISTOGRAM_BUCKETS is from 1 to 32"
     );
     assert!(
-        crate::caps::SNAPSHOT_PERIOD_MS >= 1
-            && crate::caps::SNAPSHOT_PERIOD_MS <= (MAX_TIMEOUT_TICKS / 1000) as usize,
+        match <crate::limits::SnapshotPeriodMs as crate::limit_binding::LimitSpec>::DOMAIN
+            .integers()
+        {
+            Some((least, most)) => least >= 1 && most <= (MAX_TIMEOUT_TICKS / 1000) as usize,
+            None => false,
+        },
         "SNAPSHOT_PERIOD_MS is from 1 to 2147483"
     );
 };
@@ -736,11 +741,13 @@ const _: () = {
 pub type BuildSampler = Sampler<{ crate::caps::SNAPSHOT_HISTOGRAM_BUCKETS }>;
 
 impl BuildSampler {
-    /// A sampler of the build's period, `SNAPSHOT_PERIOD_MS`, for an image whose capabilities are
-    /// the bits of `features`.
-    pub fn for_build(features: u64) -> Self {
-        // The period was checked against the range above, where the limit is read.
-        match Self::new(crate::caps::SNAPSHOT_PERIOD_MS as u32 * 1000, features) {
+    /// A sampler of the period `limits` holds, `SNAPSHOT_PERIOD_MS`, for an image whose
+    /// capabilities are the bits of `features`. `limits` is the snapshot of the runtime limits the
+    /// node's creator resolved; a creator that holds none of its own hands
+    /// [`RuntimeLimits::BUILD`](crate::limits::RuntimeLimits::BUILD).
+    pub fn of_limits(limits: &crate::limits::RuntimeLimits, features: u64) -> Self {
+        // Every period the limit's domain allows was checked against the range above.
+        match Self::new(limits.snapshot_period_ms() as u32 * 1000, features) {
             Ok(sampler) => sampler,
             Err(PeriodOutOfRange) => unreachable!("checked at compile time"),
         }
@@ -1422,7 +1429,7 @@ mod tests {
 
     #[test]
     fn the_build_sampler_has_the_builds_buckets_and_period() {
-        let mut sampler = BuildSampler::for_build(0);
+        let mut sampler = BuildSampler::of_limits(&crate::limits::RuntimeLimits::BUILD, 0);
         let mut source = Counting { reads: 0 };
         assert!(sampler.poll(0, &mut source, no_messages));
         let period_us = crate::caps::SNAPSHOT_PERIOD_MS as u32 * 1000;

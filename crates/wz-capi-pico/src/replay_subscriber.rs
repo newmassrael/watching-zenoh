@@ -58,8 +58,8 @@ use std::time::Instant;
 use wz_app_frame::e2e_receiver::Receiver;
 use wz_app_frame::replay_admission::{admit, Admission};
 use wz_app_frame::replay_pieces::{Joined, PieceJoiner};
+use wz_session_core::limit_binding::Quota;
 use wz_session_core::policy::ReplayReplyShape;
-use wz_session_core::quota::Quota;
 use wz_session_core::replay_subscriber::{
     CreateRefused, Deadlines, LiveFate, Phase, PublisherSlot, ReplaySubscriber, ReplyFate,
 };
@@ -711,6 +711,15 @@ unsafe extern "C" fn on_declaration(context: *mut c_void, event: *const wz_ext_d
     });
 }
 
+/// A count of the C interface as a quota: `0` is no bound, any other number the most admitted.
+pub(crate) fn quota_of_count(count: usize) -> Quota {
+    if count == 0 {
+        Quota::UNBOUNDED
+    } else {
+        Quota::at_most(count)
+    }
+}
+
 /// The C form of a phase.
 fn phase_code(phase: Phase) -> u8 {
     match phase {
@@ -888,9 +897,10 @@ pub unsafe extern "C" fn wz_ext_replay_subscriber_new(
                 core::slice::from_raw_parts_mut(options.held, options.held_len)
             }
         };
-        // Both are quotas, `0` for no bound: the core's is `0` on a host and a number on an
-        // image, so the two are combined as quotas, not by a `min` that `0` would turn into none.
-        let quota = Quota::tighter(options.max_in_flight, facts.querier_max_pending_queries);
+        // Both are counts of the C interface, `0` for no bound, read as quotas here and nowhere
+        // else; the subscriber is bound by the tighter of the two.
+        let quota = quota_of_count(options.max_in_flight)
+            .tighter(quota_of_count(facts.querier_max_pending_queries));
         let clock = Clock {
             read: options.clock,
             context: SendPtr(options.clock_context),
@@ -1168,6 +1178,31 @@ mod tests {
         assert_eq!(offset_of!(wz_ext_replay_sample_t, from_replay), 96);
         assert_eq!(offset_of!(wz_ext_replay_sample_t, zid), 100);
         assert_eq!(size_of::<wz_ext_replay_publisher_slot_t>(), 32);
+    }
+
+    /// A count of the C interface is read once as a quota, `0` as no bound, and the subscriber is
+    /// bound by the tighter of the program's count and the querier's.
+    #[test]
+    fn a_count_of_zero_is_no_bound_and_the_tighter_count_bounds() {
+        assert_eq!(quota_of_count(0), Quota::UNBOUNDED);
+        assert_eq!(quota_of_count(3), Quota::at_most(3));
+        assert_eq!(
+            quota_of_count(0).tighter(quota_of_count(0)),
+            Quota::UNBOUNDED,
+            "neither bounds"
+        );
+        assert_eq!(
+            quota_of_count(0).tighter(quota_of_count(4)),
+            Quota::at_most(4)
+        );
+        assert_eq!(
+            quota_of_count(2).tighter(quota_of_count(0)),
+            Quota::at_most(2)
+        );
+        assert_eq!(
+            quota_of_count(5).tighter(quota_of_count(4)),
+            Quota::at_most(4)
+        );
     }
 
     #[test]

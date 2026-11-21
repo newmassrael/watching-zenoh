@@ -1,0 +1,65 @@
+{
+  "about": "The completeness ratchet (docs/completeness-scoreboard.md). Each figure is read by scripts/lib/completeness_gate.py; a row moves only in the commit that moves its figure, and --check prints the row to write when a figure gets better.",
+  "figures": {
+    "a.pico-api.shortfall": {
+      "state": "ratchet",
+      "better": "lower",
+      "value": 2,
+      "target": 0,
+      "read": "2026-11-21",
+      "debt": "debt-completeness-pico-api-shortfall"
+    },
+    "a.pico-api.wz-passes": {
+      "state": "ratchet",
+      "better": "higher",
+      "value": 15,
+      "target": null,
+      "read": "2026-11-21",
+      "debt": null
+    },
+    "a.zenoh-c.shortfall": {
+      "state": "locked",
+      "better": "lower",
+      "value": 0,
+      "target": 0,
+      "read": "2026-11-21",
+      "debt": null
+    },
+    "a.zenoh-c.wz-passes": {
+      "state": "ratchet",
+      "better": "higher",
+      "value": 24,
+      "target": null,
+      "read": "2026-11-21",
+      "debt": null
+    },
+    "b.feature-catalogue": {
+      "state": "local",
+      "note": "read from the document WZ_FEATURE_CATALOGUE names; its figure and its ratchet stay in that document"
+    },
+    "c.partial-atoms": {
+      "state": "ratchet",
+      "better": "lower",
+      "value": 2,
+      "target": 0,
+      "read": "2026-11-21",
+      "debt": "debt-completeness-partial-atoms"
+    },
+    "c.logic-census-unplaced": {
+      "state": "locked",
+      "better": "lower",
+      "value": 0,
+      "target": 0,
+      "read": "2026-11-21",
+      "debt": null
+    },
+    "d.contracts-unenforced": {
+      "state": "locked",
+      "better": "lower",
+      "value": 0,
+      "target": 0,
+      "read": "2026-11-21",
+      "debt": null
+    }
+  }
+}

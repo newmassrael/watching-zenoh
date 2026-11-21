@@ -6,18 +6,21 @@
 //!
 //! # The rows
 //!
-//! The session's tables are the session core's rows (`wz_session_core::session_memory`), for the
-//! limits the open resolved. This ABI adds what it holds itself and what each link of the session
-//! holds, each from the value the open handed the engine:
+//! Every row is read from the session's own snapshot of its limits: the one its open resolved from
+//! the config, a document's `wz/limits` included, and handed the engine. The session's tables are
+//! the session core's rows (`wz_session_core::session_memory`) for that snapshot. This ABI adds
+//! what it holds itself and what each link of the session holds, each from the value the open
+//! handed the engine:
 //!
 //! - the session's handle, once;
-//! - each link's transmit queue: as many batches as the queue sizes the open states, one size for
-//!   each priority (`PICO_TX_QUEUE_SIZE`), each batch at most the batch the session advertises
+//! - each link's transmit queue: as many batches as the queue sizes the snapshot states, one size
+//!   for each priority (`PICO_TX_QUEUE_SIZE`), each batch at most the batch the session advertises
 //!   (`PICO_UNICAST_BATCH_BYTES`): no batch the two sides of a link agree on is larger;
 //! - each link's receive buffer, the read storage the open states (upstream's default, one buffer
 //!   of the widest batch, `RX_BUFFER_SIZE`), which no batch of the session's outgrows;
 //! - each link's reassembly: a message of at most `PICO_FRAG_MAX_BYTES` for each of the two
-//!   reliabilities a link rejoins apart, as upstream keeps one buffer for each.
+//!   reliabilities a link rejoins apart, as upstream keeps one buffer for each; a snapshot that
+//!   states no bound leaves the row without a count.
 //!
 //! A session that only dials holds one link. A listening session on the tokio engine accepts links
 //! to no bound, and a session on a group rejoins the messages of every member, so their link rows
@@ -29,8 +32,8 @@
 //! The rows are what the limits size. A closure an engine boxes into a table is counted at the
 //! box's own layers, as capturing nothing: what it captures is the engine's type. An engine's own
 //! state, its runtime, its threads and its tasks, is sized by no limit and is outside the rows, and
-//! so are the objects behind the handles a program holds. A build of the growable storage policy
-//! holds no key to its length, so its report is not enforced (`wz_ext_session_memory_t::enforced`).
+//! so are the objects behind the handles a program holds. Whether the build refuses past every
+//! row is `wz_ext_session_memory_t::enforced`.
 
 use core::ffi::c_char;
 
@@ -92,8 +95,8 @@ pub(crate) struct MemoryBasis {
     pub(crate) batch_bytes: usize,
     /// The bytes of one link's receive buffer.
     pub(crate) rx_bytes: usize,
-    /// The longest message one link rejoins from fragments.
-    pub(crate) message_bytes: usize,
+    /// The longest message one link rejoins from fragments; `None` where the limits state no bound.
+    pub(crate) message_bytes: Option<usize>,
 }
 
 impl Default for MemoryBasis {
@@ -106,7 +109,7 @@ impl Default for MemoryBasis {
             queue_batches: 0,
             batch_bytes: 0,
             rx_bytes: 0,
-            message_bytes: 0,
+            message_bytes: None,
         }
     }
 }
@@ -177,9 +180,9 @@ impl MemoryBasis {
             MemoryRow {
                 part: c"link reassembly",
                 basis: c"PICO_FRAG_MAX_BYTES",
-                count: per_link(2),
-                entry_bytes: self.message_bytes,
-                enforced: self.links.is_some(),
+                count: self.message_bytes.and(per_link(2)),
+                entry_bytes: self.message_bytes.unwrap_or(0),
+                enforced: self.links.is_some() && self.message_bytes.is_some(),
             },
         ];
         for row in rows {
@@ -359,7 +362,7 @@ mod tests {
             queue_batches: 16,
             batch_bytes: 2048,
             rx_bytes: 65535,
-            message_bytes: 4096,
+            message_bytes: Some(4096),
             ..MemoryBasis::default()
         };
         let memory = basis.report();
@@ -373,5 +376,40 @@ mod tests {
         assert_eq!(link(c"link transmit queues").total(), Some(3 * 16 * 2048));
         assert_eq!(link(c"link receive buffers").total(), Some(3 * 65535));
         assert_eq!(link(c"link reassembly").total(), Some(3 * 2 * 4096));
+    }
+
+    /// A reassembly the limits hold to no bound has no count and is not enforced, so the report
+    /// has no total; the rows that have one still sum to the bounded bytes, the reassembly's
+    /// bytes left out.
+    #[test]
+    fn a_reassembly_with_no_bound_leaves_the_report_without_a_total() {
+        let bounded = MemoryBasis {
+            links: Some(1),
+            queue_batches: 16,
+            batch_bytes: 2048,
+            rx_bytes: 65535,
+            message_bytes: Some(4096),
+            ..MemoryBasis::default()
+        };
+        let unbounded = MemoryBasis {
+            message_bytes: None,
+            ..bounded
+        };
+        let memory = unbounded.report();
+        let reassembly = *memory
+            .rows()
+            .iter()
+            .find(|row| row.part == c"link reassembly")
+            .expect("the report has the part");
+        assert_eq!(
+            (reassembly.count, reassembly.total(), reassembly.enforced),
+            (None, None, false)
+        );
+        assert_eq!(memory.total(), None);
+        assert!(!memory.is_enforced());
+        assert_eq!(
+            memory.bounded_bytes(),
+            bounded.report().bounded_bytes() - 2 * 4096
+        );
     }
 }

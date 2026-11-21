@@ -33,19 +33,20 @@
 use wz_runtime_tokio::accept_bounds::AcceptBounds;
 use wz_runtime_tokio::node_clock::TimestampingEnabled;
 use wz_runtime_tokio::policy::{SessionPolicy, SnResolution};
+use wz_runtime_tokio::policy_document::Resolved;
 use wz_runtime_tokio::retry_period::RetryPolicy;
 use wz_runtime_tokio::session::LocalDeliveryDrain;
 use wz_runtime_tokio::session_glue::{KeepAliveConf, LinkRxConf, TxQueueConf, WhatAmI};
 use wz_runtime_tokio::session_open::{SessionOffer, TransportMode};
 use wz_runtime_tokio::startup_phase::PhasePolicy;
 use wz_runtime_tokio::zenoh_config::{
-    config_key_in_build, default_listen_endpoint, honours_config_key, ConfigIngestError,
-    ShmInitMode, ZenohConfigIngest, ZenohNodeConfig, UNHONOURED_READER_GAP,
+    admit_connect_list, config_key_in_build, default_listen_endpoint, honours_config_key,
+    ConfigIngestError, ShmInitMode, ZenohConfigIngest, ZenohNodeConfig, UNHONOURED_READER_GAP,
     UNHONOURED_UPSTREAM_CONFIG_KEYS, UPSTREAM_INERT_CONFIG_KEYS, WZ_EXTENSION_CONFIG_KEYS,
 };
 #[cfg(feature = "routing-namespace")]
 use wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr;
-use wz_session_core::limits::SessionLimits;
+use wz_session_core::limits::{RuntimeLimits, SessionLimits};
 use wz_session_core::region_partition::SouthPartition;
 
 use crate::drive::{
@@ -390,12 +391,17 @@ pub enum OpenRefusal {
     /// counter to count a payload under a filter in.
     StatsNotInBuild,
     /// The document's `wz` member is refused
-    /// ([`ConfigIngestError::PoliciesRefused`], whose text names each refusal): a policy, a value
-    /// or a profile the build does not have, a value its domain leaves out, a member of `wz` it
-    /// does not read. Reported before every refusal that reads the rest of the document, as the
-    /// reader refuses the whole document: a session is never opened on part of the policies it
-    /// was given, nor on the build defaults in their place.
+    /// ([`ConfigIngestError::PoliciesRefused`], whose text names each refusal): a policy, a value,
+    /// a profile or a limit the build does not have, a value its domain leaves out, a limit only
+    /// the build decides, a member of `wz` it does not read. Reported before every refusal that
+    /// reads the rest of the document, as the reader refuses the whole document: a session is
+    /// never opened on part of the policies or the limits it was given, nor on the build defaults
+    /// in their place.
     Policies,
+    /// The endpoints to dial are more than the node's runtime limits admit (`MAX_STATIC_CONNECT`
+    /// as `wz/limits` states it, [`ConfigIngestError::ConnectPastLimit`]). A node bounded to
+    /// fewer peers does not open on a part of the list.
+    ConnectPastLimit,
 }
 
 impl OpenRefusal {
@@ -423,7 +429,8 @@ impl OpenRefusal {
             Self::PluginHostNotInBuild => "plugins_loading/enabled",
             Self::Aggregation => "aggregation/subscribers, aggregation/publishers",
             Self::StatsNotInBuild => "stats/filters",
-            Self::Policies => "wz/profile, wz/policies",
+            Self::Policies => "wz/profile, wz/policies, wz/limits",
+            Self::ConnectPastLimit => "connect/endpoints, wz/limits/MAX_STATIC_CONNECT",
         }
     }
 }
@@ -928,23 +935,32 @@ pub struct OpenPlan {
     /// machine the open makes: the sessions of the registry or the node, their links and their
     /// faces. A machine reads a policy here and never from the build.
     pub session_policy: SessionPolicy,
-    /// The snapshot of the session limits the open resolved, handed to the same machines as
-    /// [`Self::session_policy`]: a table reads its bound here and never from the build. The
-    /// document states no limit yet, so it holds the build's.
+    /// The snapshot of the session limits the open resolved ([`resolve_snapshot`]), handed to
+    /// the same machines as [`Self::session_policy`]: a table reads its bound here and never from
+    /// the build.
     pub session_limits: SessionLimits,
+    /// The snapshot of the node's runtime limits the open resolved ([`resolve_snapshot`]),
+    /// handed to the machines of the node the open runs: the directory of the locators it dials
+    /// from reads its bound here and never from the build.
+    pub runtime_limits: RuntimeLimits,
 }
 
-/// The policies an open from `node` (the document the open read, or `None` when it read none)
-/// runs under: the one place the open of an [`OpenPlan`] decides them. The snapshot the
-/// document's `wz` member resolved to when the reader read it ([`ZenohNodeConfig::policies`]),
-/// which is the build defaults for a document with no such member; the build defaults when no
-/// document was read. A member the reader refused never reaches here: the open is refused with
-/// [`OpenRefusal::Policies`].
-pub fn resolve_policy(node: Option<&ZenohNodeConfig>) -> SessionPolicy {
+/// The policies and the limits an open from `node` (the document the open read, or `None` when
+/// it read none) runs under: the one place the open of an [`OpenPlan`] decides them. The
+/// snapshots the document's `wz` member resolved to when the reader read it
+/// ([`ZenohNodeConfig::policies`]), which are the build defaults for a document with no such
+/// member; the build defaults when no document was read. A member the reader refused never
+/// reaches here: the open is refused with [`OpenRefusal::Policies`].
+pub fn resolve_snapshot(node: Option<&ZenohNodeConfig>) -> Resolved {
     match node {
-        Some(node) => node.policies.policy,
-        None => SessionPolicy::defaults(),
+        Some(node) => node.policies,
+        None => Resolved::unchanged(SessionPolicy::defaults()),
     }
+}
+
+/// The policies of [`resolve_snapshot`] alone.
+pub fn resolve_policy(node: Option<&ZenohNodeConfig>) -> SessionPolicy {
+    resolve_snapshot(node).policy
 }
 
 impl OpenPlan {
@@ -1068,23 +1084,23 @@ impl OpenPlan {
     /// the caller could not render one; a document the reader refuses is the same as none, and is
     /// reported as [`OpenRefusal::DocumentUnreadable`] after every refusal that needs no document.
     ///
-    /// The policies the plan runs under are [`resolve_policy`]'s; a caller that has resolved its
-    /// own snapshot opens with [`Self::resolve_under`].
+    /// The policies and the limits the plan runs under are [`resolve_snapshot`]'s; a caller that
+    /// has resolved its own snapshots opens with [`Self::resolve_under`].
     pub fn resolve(
         role: WhatAmI,
         stated: StatedEndpoints,
         document: Option<&str>,
     ) -> Result<Self, OpenRefusal> {
-        Self::resolve_under(role, stated, document, resolve_policy)
+        Self::resolve_under(role, stated, document, resolve_snapshot)
     }
 
-    /// [`Self::resolve`], with the policies the plan runs under made by `policy_of` from the
-    /// document the reader parsed (`None` when it parsed none).
+    /// [`Self::resolve`], with the policies and the session limits the plan runs under taken from
+    /// what `snapshot_of` makes of the document the reader parsed (`None` when it parsed none).
     pub fn resolve_under(
         role: WhatAmI,
         stated: StatedEndpoints,
         document: Option<&str>,
-        policy_of: impl FnOnce(Option<&ZenohNodeConfig>) -> SessionPolicy,
+        snapshot_of: impl FnOnce(Option<&ZenohNodeConfig>) -> Resolved,
     ) -> Result<Self, OpenRefusal> {
         let ingest = match document.map(ZenohNodeConfig::from_json5) {
             Some(Ok(ingest)) => Some(ingest),
@@ -1097,6 +1113,10 @@ impl OpenPlan {
             // run under is not known, so nothing else about the open is decided.
             Some(Err(ConfigIngestError::PoliciesRefused { .. })) => {
                 return Err(OpenRefusal::Policies)
+            }
+            // The document's own connect list, longer than the limits it states admit.
+            Some(Err(ConfigIngestError::ConnectPastLimit { .. })) => {
+                return Err(OpenRefusal::ConnectPastLimit)
             }
             Some(Err(_)) | None => None,
         };
@@ -1119,7 +1139,8 @@ impl OpenPlan {
             ignored
         });
         let node = ingest.map(|ingest| ingest.config);
-        let session_policy = policy_of(node.as_ref());
+        let snapshot = snapshot_of(node.as_ref());
+        let session_policy = snapshot.policy;
         // The width of the sequence numbers the sessions offer, unicast and in a group's Join:
         // `transport/link/tx/sequence_number_resolution` when the document states a width other
         // than upstream's, the open's `sn-resolution` policy otherwise. A document rendered from
@@ -1324,6 +1345,10 @@ impl OpenPlan {
         } else {
             connect
         };
+        // The list to dial, whoever stated it, is held to the node's runtime limits.
+        if admit_connect_list(connect.len(), &snapshot.limits.runtime).is_err() {
+            return Err(OpenRefusal::ConnectPastLimit);
+        }
         // `transport/link/protocols`, when the document states it, is the whitelist of the
         // unicast links the node makes: an endpoint to listen on or dial whose protocol it leaves
         // out is refused, as upstream refuses it when it makes the link manager. A group is a
@@ -1410,7 +1435,8 @@ impl OpenPlan {
             ignored,
             session,
             session_policy,
-            session_limits: SessionLimits::defaults(),
+            session_limits: snapshot.limits.session,
+            runtime_limits: snapshot.limits.runtime,
         })
     }
 
@@ -1533,6 +1559,7 @@ impl OpenPlan {
                 session_defaults: self.session,
                 session_policy: self.session_policy,
                 session_limits: self.session_limits,
+                runtime_limits: self.runtime_limits,
                 // A plan reads a zenoh configuration document, which names no transport of the
                 // program's.
                 #[cfg(feature = "app-transport")]
@@ -1554,8 +1581,8 @@ const fn held(present: bool) -> &'static str {
 /// The decisions that belong to the calling ABI and not to the document. They join the plan at
 /// [`OpenPlan::into_arguments`], so the plan is one value for every ABI.
 pub struct AbiChoices {
-    /// The transmit model: zenoh's bounded queue ([`TxQueueConf::of_policy`]) or pico's
-    /// caller-thread write ([`TxQueueConf::pico_of_policy`]), each under the plan's
+    /// The transmit model: zenoh's bounded queue ([`TxQueueConf::of_snapshot`]) or pico's
+    /// caller-thread write ([`TxQueueConf::pico_of_snapshot`]), each under the plan's
     /// [`OpenPlan::session_policy`].
     pub tx_queue: TxQueueConf,
     /// Whether the session's read task runs from the start.
@@ -1845,11 +1872,166 @@ mod tests {
                 WhatAmI::Client,
                 &[],
                 &[],
-                r#"{ scouting: { multicast: { enabled: false } }, wz: { limits: {} } }"#
+                r#"{ scouting: { multicast: { enabled: false } }, wz: { limits: { NO_SUCH_LIMIT: 1 } } }"#
             ),
             OpenRefusal::Policies
         );
-        assert_eq!(OpenRefusal::Policies.key(), "wz/profile, wz/policies");
+        assert_eq!(
+            OpenRefusal::Policies.key(),
+            "wz/profile, wz/policies, wz/limits"
+        );
+    }
+
+    /// The plan holds the session limits the document's `wz/limits` states, for each member of
+    /// the corpus every door is held to, as a node reads it; a member the reader refuses refuses
+    /// the open as a refused `wz` member.
+    #[test]
+    fn the_plan_holds_the_session_limits_the_document_states() {
+        use wz_session_core::limit_corpus::cases;
+
+        for case in cases() {
+            let planned = plan_of(
+                WhatAmI::Client,
+                &["tcp/127.0.0.1:7447"],
+                &[],
+                &case.document(),
+            );
+            match planned {
+                Ok(plan) => {
+                    assert!(case.node.is_selected(), "{}: opened", case.name);
+                    if let Err(why) = case.node.check_session(&plan.session_limits) {
+                        panic!("{}: {why}", case.name);
+                    }
+                    let node = node_of(&case.document());
+                    assert_eq!(
+                        resolve_snapshot(Some(&node)).limits.session,
+                        plan.session_limits,
+                        "{}",
+                        case.name
+                    );
+                }
+                Err(refusal) => {
+                    assert!(!case.node.is_selected(), "{}: {refusal:?}", case.name);
+                    assert_eq!(refusal, OpenRefusal::Policies, "{}", case.name);
+                }
+            }
+        }
+        // No document is the build's limits.
+        assert_eq!(
+            resolve_snapshot(None).limits.session,
+            SessionLimits::defaults()
+        );
+    }
+
+    /// The plan holds the runtime limits the document's `wz/limits` states for the node, for
+    /// each member of the corpus the plan takes, and the build's with no document.
+    #[test]
+    fn the_plan_holds_the_runtime_limits_the_document_states() {
+        use wz_session_core::limit_corpus::cases;
+
+        for case in cases() {
+            let Ok(plan) = plan_of(
+                WhatAmI::Client,
+                &["tcp/127.0.0.1:7447"],
+                &[],
+                &case.document(),
+            ) else {
+                assert!(!case.node.is_selected(), "{}: refused", case.name);
+                continue;
+            };
+            if let Err(why) = case.node.check_runtime(&plan.runtime_limits) {
+                panic!("{}: {why}", case.name);
+            }
+            let node = node_of(&case.document());
+            assert_eq!(
+                resolve_snapshot(Some(&node)).limits.runtime,
+                plan.runtime_limits,
+                "{}",
+                case.name
+            );
+        }
+        assert_eq!(
+            resolve_snapshot(None).limits.runtime,
+            RuntimeLimits::defaults()
+        );
+    }
+
+    /// `count` endpoints to dial, each its own port.
+    fn endpoints_to_dial(count: u16) -> Vec<String> {
+        (0..count)
+            .map(|port| format!("tcp/127.0.0.1:{}", 7447 + port))
+            .collect()
+    }
+
+    /// `MAX_STATIC_CONNECT` with nothing stated: the heap holds no bound, so a node dials nine
+    /// endpoints, more than a fixed image's rows, as it did before the limit was read.
+    #[test]
+    fn max_static_connect_with_nothing_stated_admits_nine() {
+        use wz_session_core::limit_binding::Quota;
+        assert_eq!(
+            RuntimeLimits::defaults().max_static_connect(),
+            Quota::UNBOUNDED
+        );
+        let nine = endpoints_to_dial(9);
+        let texts: Vec<&str> = nine.iter().map(String::as_str).collect();
+        let plan = plan_of(WhatAmI::Client, &texts, &[], "{}").expect("no bound is stated");
+        assert_eq!(plan.connect, nine);
+        let document = format!(
+            r#"{{ connect: {{ endpoints: [{}] }} }}"#,
+            nine.iter()
+                .map(|endpoint| format!("{endpoint:?}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        assert!(ZenohNodeConfig::from_json5(&document).is_ok());
+    }
+
+    /// `MAX_STATIC_CONNECT` stated as two: a list of three, stated by the caller or by the
+    /// document, refuses the open by the limit's name, and a list of two opens.
+    #[test]
+    fn max_static_connect_stated_as_two_refuses_three_by_name() {
+        use wz_session_core::limit_binding::LimitSpec;
+        use wz_session_core::limits::MaxStaticConnect;
+        let limits = r#"wz: { limits: { MAX_STATIC_CONNECT: 2 } }"#;
+        let stated = format!("{{ {limits} }}");
+        let three = endpoints_to_dial(3);
+        let texts: Vec<&str> = three.iter().map(String::as_str).collect();
+        if MaxStaticConnect::DOMAIN.is_singleton() {
+            // A build that keeps the build's value alone refuses the statement itself.
+            assert_eq!(
+                refusal_of(WhatAmI::Client, &texts, &[], &stated),
+                OpenRefusal::Policies
+            );
+            return;
+        }
+        assert_eq!(
+            refusal_of(WhatAmI::Client, &texts, &[], &stated),
+            OpenRefusal::ConnectPastLimit
+        );
+        assert!(OpenRefusal::ConnectPastLimit
+            .key()
+            .contains("MAX_STATIC_CONNECT"));
+        let in_document = format!(
+            r#"{{ {limits}, connect: {{ endpoints: [{}] }} }}"#,
+            three
+                .iter()
+                .map(|endpoint| format!("{endpoint:?}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        assert_eq!(
+            ZenohNodeConfig::from_json5(&in_document).map(|_| ()),
+            Err(ConfigIngestError::ConnectPastLimit {
+                endpoints: 3,
+                limit: wz_session_core::limit_binding::Quota::at_most(2),
+            })
+        );
+        assert_eq!(
+            refusal_of(WhatAmI::Client, &[], &[], &in_document),
+            OpenRefusal::ConnectPastLimit
+        );
+        let plan = plan_of(WhatAmI::Client, &texts[..2], &[], &stated).expect("two are admitted");
+        assert_eq!(plan.connect.len(), 2);
     }
 
     /// A peer is a forwarding node when it accepts sessions and asks nothing the node does not
@@ -2115,7 +2297,10 @@ mod tests {
             .expect("a client with an endpoint opens")
         };
         let abi = |offer_shm| AbiChoices {
-            tx_queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
+            tx_queue: TxQueueConf::of_snapshot(
+                &SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD,
+            ),
             start_read_task: true,
             local_delivery: LocalDeliveryDrain::Caller,
             liveliness_to_self: true,
@@ -2145,7 +2330,10 @@ mod tests {
             plan_of(WhatAmI::Client, &["tcp/127.0.0.1:7447"], &[], document)
                 .expect("a client with an endpoint opens")
                 .into_arguments(AbiChoices {
-                    tx_queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
+                    tx_queue: TxQueueConf::of_snapshot(
+                        &SessionPolicy::defaults(),
+                        &wz_session_core::limits::SessionLimits::BUILD,
+                    ),
                     start_read_task: true,
                     local_delivery: LocalDeliveryDrain::Caller,
                     liveliness_to_self: true,
@@ -2204,19 +2392,50 @@ mod tests {
                 .tx_queue
         };
         let off = r#"{ transport: { link: { tx: { queue: { batching: { enabled: false } } } } } }"#;
-        assert!(!stance(off, TxQueueConf::of_policy(&SessionPolicy::defaults())).batching);
-        assert!(!stance(off, TxQueueConf::pico_of_policy(&SessionPolicy::defaults())).batching);
+        assert!(
+            !stance(
+                off,
+                TxQueueConf::of_snapshot(
+                    &SessionPolicy::defaults(),
+                    &wz_session_core::limits::SessionLimits::BUILD
+                )
+            )
+            .batching
+        );
+        assert!(
+            !stance(
+                off,
+                TxQueueConf::pico_of_snapshot(
+                    &SessionPolicy::defaults(),
+                    &wz_session_core::limits::SessionLimits::BUILD
+                )
+            )
+            .batching
+        );
         let bound =
             r#"{ transport: { link: { tx: { queue: { batching: { time_limit: 4 } } } } } }"#;
         assert_eq!(
-            stance(bound, TxQueueConf::of_policy(&SessionPolicy::defaults()))
-                .batching_time_limit_us,
+            stance(
+                bound,
+                TxQueueConf::of_snapshot(
+                    &SessionPolicy::defaults(),
+                    &wz_session_core::limits::SessionLimits::BUILD
+                )
+            )
+            .batching_time_limit_us,
             4_000
         );
         let init =
             r#"{ transport: { link: { tx: { queue: { allocation: { mode: "init" } } } } } }"#;
         assert_eq!(
-            stance(init, TxQueueConf::of_policy(&SessionPolicy::defaults())).allocation,
+            stance(
+                init,
+                TxQueueConf::of_snapshot(
+                    &SessionPolicy::defaults(),
+                    &wz_session_core::limits::SessionLimits::BUILD
+                )
+            )
+            .allocation,
             wz_session_core::link::QueueAllocation::Init
         );
         // A queue's size is laid over the model too: an `init` queue makes its batches by it,
@@ -2226,12 +2445,23 @@ mod tests {
         let data = wz_session_core::qos::Priority::DEFAULT.wire_byte() as usize;
         let wide =
             r#"{ transport: { link: { tx: { queue: { size: { data: 6, control: 2 } } } } } }"#;
-        let sizes = stance(wide, TxQueueConf::of_policy(&SessionPolicy::defaults())).sizes;
+        let sizes = stance(
+            wide,
+            TxQueueConf::of_snapshot(
+                &SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD,
+            ),
+        )
+        .sizes;
         assert_eq!(sizes[data], 6);
         assert_eq!(
             sizes,
             {
-                let mut expected = TxQueueConf::of_policy(&SessionPolicy::defaults()).sizes;
+                let mut expected = TxQueueConf::of_snapshot(
+                    &SessionPolicy::defaults(),
+                    &wz_session_core::limits::SessionLimits::BUILD,
+                )
+                .sizes;
                 expected[data] = 6;
                 expected
             },
@@ -2243,12 +2473,30 @@ mod tests {
                                                                       time_limit: 1 },
                                                           allocation: { mode: "lazy" } } } } } }"#;
         assert_eq!(
-            stance(on, TxQueueConf::pico_of_policy(&SessionPolicy::defaults())),
-            TxQueueConf::pico_of_policy(&SessionPolicy::defaults())
+            stance(
+                on,
+                TxQueueConf::pico_of_snapshot(
+                    &SessionPolicy::defaults(),
+                    &wz_session_core::limits::SessionLimits::BUILD
+                )
+            ),
+            TxQueueConf::pico_of_snapshot(
+                &SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD
+            )
         );
         assert_eq!(
-            stance("{}", TxQueueConf::of_policy(&SessionPolicy::defaults())),
-            TxQueueConf::of_policy(&SessionPolicy::defaults())
+            stance(
+                "{}",
+                TxQueueConf::of_snapshot(
+                    &SessionPolicy::defaults(),
+                    &wz_session_core::limits::SessionLimits::BUILD
+                )
+            ),
+            TxQueueConf::of_snapshot(
+                &SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD
+            )
         );
     }
 
@@ -2327,14 +2575,17 @@ mod tests {
                 listen: Vec::new(),
             },
             Some("{}"),
-            |_| handed,
+            |_| Resolved::unchanged(handed),
         )
         .expect("a client with an endpoint opens");
         assert_eq!(plan.sn_resolution, other);
         assert_eq!(plan.session_policy, handed);
         let stance = plan
             .into_arguments(AbiChoices {
-                tx_queue: TxQueueConf::of_policy(&handed),
+                tx_queue: TxQueueConf::of_snapshot(
+                    &handed,
+                    &wz_session_core::limits::SessionLimits::BUILD,
+                ),
                 start_read_task: true,
                 local_delivery: LocalDeliveryDrain::Caller,
                 liveliness_to_self: true,
@@ -2477,7 +2728,10 @@ mod tests {
             "the plan says what the document says: the key defaults on"
         );
         let abi = |groups_report_shm| AbiChoices {
-            tx_queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
+            tx_queue: TxQueueConf::of_snapshot(
+                &SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD,
+            ),
             start_read_task: true,
             local_delivery: LocalDeliveryDrain::Caller,
             liveliness_to_self: true,
@@ -2923,7 +3177,10 @@ mod tests {
 
         let expected = plan.session.clone();
         let arguments = plan.into_arguments(AbiChoices {
-            tx_queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
+            tx_queue: TxQueueConf::of_snapshot(
+                &SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD,
+            ),
             start_read_task: true,
             local_delivery: LocalDeliveryDrain::Caller,
             liveliness_to_self: true,
@@ -3051,7 +3308,10 @@ mod tests {
                 .expect("key expressions");
         assert_eq!(plan.session.aggregation, expected);
         let arguments = plan.into_arguments(AbiChoices {
-            tx_queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
+            tx_queue: TxQueueConf::of_snapshot(
+                &SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD,
+            ),
             start_read_task: true,
             local_delivery: LocalDeliveryDrain::Caller,
             liveliness_to_self: true,
@@ -3086,7 +3346,10 @@ mod tests {
             plan_of(WhatAmI::Router, &[], &["tcp/127.0.0.1:0"], document)
                 .expect("opens")
                 .into_arguments(AbiChoices {
-                    tx_queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
+                    tx_queue: TxQueueConf::of_snapshot(
+                        &SessionPolicy::defaults(),
+                        &wz_session_core::limits::SessionLimits::BUILD,
+                    ),
                     start_read_task: true,
                     local_delivery: LocalDeliveryDrain::Caller,
                     liveliness_to_self: true,
@@ -3161,7 +3424,10 @@ mod tests {
             plan_of(WhatAmI::Router, &[], &["tcp/127.0.0.1:0"], document)
                 .expect("opens")
                 .into_arguments(AbiChoices {
-                    tx_queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
+                    tx_queue: TxQueueConf::of_snapshot(
+                        &SessionPolicy::defaults(),
+                        &wz_session_core::limits::SessionLimits::BUILD,
+                    ),
                     start_read_task: true,
                     local_delivery: LocalDeliveryDrain::Caller,
                     liveliness_to_self: true,
@@ -3219,7 +3485,10 @@ mod tests {
         )
         .expect("opens")
         .into_arguments(AbiChoices {
-            tx_queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
+            tx_queue: TxQueueConf::of_snapshot(
+                &SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD,
+            ),
             start_read_task: true,
             local_delivery: LocalDeliveryDrain::Caller,
             liveliness_to_self: true,

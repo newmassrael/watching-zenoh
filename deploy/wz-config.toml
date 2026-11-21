@@ -79,6 +79,24 @@
 # `binding_fixed` are its binding (below) under each storage profile, `none` where that profile
 # does not read it. A capacity is decided by the open at the latest, a quota at the open or later.
 #
+# `read` says where the machines of the limit's scope read it. `snapshot`: from the snapshot of
+# the limits their creator resolved and hands them, so a value a document states reaches them.
+# `build`: still from the build's value, so a statement would be taken and never read, and a reader
+# of a document refuses it by name. Every limit a stage after the build may decide states it; a
+# capacity alone states none. A limit of a runtime is read from the snapshot only where the node
+# hands its machines the runtime's snapshot it resolved. `scripts/lib/limit_read_gate.py` holds
+# this to the code both ways, so a limit moves to `snapshot` in the change that moves its readers.
+#
+# `[limit.upstream]` names what the limit is in upstream zenoh. `zenoh` is the key of zenoh's
+# configuration that states the same number, as a path in its DEFAULT_CONFIG.json5, which
+# `wz_config.py` finds in wz-zenoh's byte copy of that file; `cite` is the upstream code that
+# reads it, each citation in the anchored form `upstream_citation_anchor_gate.py` resolves at the
+# pin. Where no key states it, `zenoh` is `none` and `reason` says why; `cite` may then show
+# what upstream holds instead. The zenoh-pico counterpart is not stated here: it is the value switch
+# whose `[[upstream_switch]]` row anchors to the limit (`limit:<ID>`), written there once. A
+# counterpart is a comparison, not a second way to set the limit: a document sets a limit only under
+# `wz/limits`, and an upstream key keeps its own meaning.
+#
 # ## Where a value is bound
 #
 # Every policy and every limit states where its value is held, when it is decided and what a peer
@@ -1474,6 +1492,33 @@ implies = ["unstable-api"]
 help = "A time base the program supplies in place of the system's clock: the timers of a session opened from a config that names it (lease, keep-alive, handshake and the other deadlines) run on the program's time, which the program reads to the library and says when it has moved on (wz_ext_time_base_* and wz_ext_config_time_base, wz_capi_c_time_base_* and wz_capi_c_config_time_base, wz-own doors)."
 
 [[capability]]
+id = "object-pool"
+kconfig = "WZ_CAP_OBJECT_POOL"
+# Off by default: zenoh-pico allocates the objects behind its owned handles from the heap as it
+# makes them, and so does a build made as it is. A program that must make no allocation while it
+# runs turns it on and reserves the pools once, before it makes the objects; each count it states
+# is held to the bound of the session limit that bounds the object. The pico ABI's doors are
+# wz_ext_* and part of its unstable surface.
+default = "off"
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = ["unstable-api"]
+help = "Fixed pools, one per kind of object, that the objects behind the owned handles (sessions, publishers, subscribers, queryables, liveliness tokens and subscribers, owned samples, replies, queries and payloads) are taken from in place of the heap once the program reserves them; a full pool refuses the object with _Z_ERR_SYSTEM_OUT_OF_MEMORY (wz_ext_object_pool_*, wz-own doors)."
+
+[[capability]]
+id = "object-pool-region"
+kconfig = "WZ_CAP_OBJECT_POOL_REGION"
+# Off by default, as the pools it places are: a program that states where its memory lies hands
+# the library a region to lay the pools over instead of reserving them from the heap.
+default = "off"
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = ["object-pool"]
+help = "The object pools laid over memory the program hands over in place of one heap allocation (wz_ext_object_pool_place, a wz-own door)."
+
+[[capability]]
 id = "shared-key-ids"
 kconfig = "WZ_CAP_SHARED_KEY_IDS"
 # Off by default: a node that names a key by an id it never declared cannot be read by a stock
@@ -2058,6 +2103,7 @@ storage = "both"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "build"
+read = "snapshot"
 # `wire` is none: within the limit no byte a peer sees changes; past it, what does not fit is
 # left out.
 wire = "none"
@@ -2066,6 +2112,10 @@ The longest key expression, in bytes, a session stores: a subscription's
 pattern, or a key a peer declared. A longer one is refused, never cut short.
 Every table that stores keys sizes its rows by this.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the length of a key expression; wz bounds it to size the rows of the tables that store keys."
 
 [[limit]]
 id = "MAX_SUBSCRIPTIONS"
@@ -2078,11 +2128,17 @@ storage = "both"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "build"
+read = "snapshot"
 wire = "none"
 help = '''
 The subscribers a session holds at once. Declaring one more is refused
 while the table is full.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds it: a zenoh session holds its subscribers in a map that grows with each declaration."
+cite = ["`zenoh/src/api/session.rs` @ `pub(crate) subscribers: HashMap<Id, Arc<SubscriberState>>,`"]
 
 [[limit]]
 id = "MATCH_MEMO_SLOTS"
@@ -2094,6 +2150,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "none"
+read = "snapshot"
 wire = "none"
 help = '''
 How many distinct keys the receive match cache remembers at once: the keys
@@ -2106,6 +2163,10 @@ Z_FEATURE_RX_CACHE is off (its default). A build whose tables are fixed in
 size reads MATCH_MEMO_FIXED_SLOTS instead: its cache is paid for in RAM
 whether used or not, a heap's only as it fills.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: the receive match cache is wz's own, and zenoh-pico's counterpart is a build switch, not a number."
 
 [[limit]]
 id = "MATCH_MEMO_FIXED_SLOTS"
@@ -2129,6 +2190,10 @@ reaches the same subscribers in the same order. A closed key set needs no
 cache for the keys of its table.
 '''
 
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: it sizes the receive match cache of a wz build whose tables are fixed in size."
+
 [[limit]]
 id = "MATCH_MEMO_KEY_BYTES"
 kconfig = "WZ_LIMIT_MATCH_MEMO_KEY_BYTES"
@@ -2146,6 +2211,10 @@ remembers. A longer key is matched every time it arrives, never cut short.
 Read only where MATCH_MEMO_FIXED_SLOTS is above 0.
 '''
 
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: it sizes the keys the receive match cache of a fixed-size wz build remembers."
+
 [[limit]]
 id = "DELIVERY_LANE_EVENTS"
 kconfig = "WZ_LIMIT_DELIVERY_LANE_EVENTS"
@@ -2157,12 +2226,17 @@ storage = "both"
 scope = "entity"
 binding_heap = "open"
 binding_fixed = "build"
+read = "snapshot"
 wire = "none"
 help = '''
 How many samples the delivery lane of an offloaded subscriber holds at once:
 the samples the receive path has copied in and its callback has not yet run
 on. A sample past this is refused and counted. It must be at least 1.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: the delivery lane of an offloaded subscriber is wz's own."
 
 [[limit]]
 id = "DELIVERY_LANE_BYTES"
@@ -2174,6 +2248,7 @@ storage = "quota"
 scope = "entity"
 binding_heap = "open"
 binding_fixed = "none"
+read = "snapshot"
 wire = "none"
 help = '''
 How many bytes of copied samples a delivery lane holds at once: the key, the
@@ -2181,6 +2256,10 @@ payload, the attachment and the encoding schema of each waiting sample, and
 the end of the byte area a sample skipped to stay in one piece. A sample that
 does not fit is refused and counted. It must be at least 1.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: the delivery lane of an offloaded subscriber is wz's own."
 
 [[limit]]
 id = "DELIVERY_LANE_CALLBACKS"
@@ -2192,6 +2271,7 @@ storage = "quota"
 scope = "entity"
 binding_heap = "live"
 binding_fixed = "none"
+read = "snapshot"
 wire = "none"
 help = '''
 How many callback invocations a delivery lane owes at once. A host that admits
@@ -2200,6 +2280,10 @@ this binds only past the event limit and is left larger than it; a host that
 admits a sample once for all its subscriptions owes several. It must be at
 least 1.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: the delivery lane of an offloaded subscriber is wz's own."
 
 [[limit]]
 id = "MAX_QUERYABLES"
@@ -2212,11 +2296,17 @@ storage = "both"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "build"
+read = "snapshot"
 wire = "none"
 help = '''
 The queryables a session holds at once. Declaring one more is refused
 while the table is full.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds it: a zenoh session holds its queryables in a map that grows with each declaration."
+cite = ["`zenoh/src/api/session.rs` @ `pub(crate) queryables: HashMap<Id, Arc<QueryableState>>,`"]
 
 [[limit]]
 id = "MAX_PENDING_QUERIES"
@@ -2229,11 +2319,17 @@ storage = "both"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "build"
+read = "snapshot"
 wire = "none"
 help = '''
 The queries (gets) a session has waiting for their replies at once.
 Issuing one more is refused while the table is full.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds it: a zenoh session holds the queries it waits on in a map that grows with each get."
+cite = ["`zenoh/src/api/session.rs` @ `pub(crate) queries: HashMap<RequestId, QueryState>,`"]
 
 [[limit]]
 id = "LINK_NOTED_REQUESTS"
@@ -2245,6 +2341,7 @@ storage = "quota"
 scope = "link"
 binding_heap = "open"
 binding_fixed = "open"
+read = "snapshot"
 # `wire` is none: a reply whose request's key form was let go names its key in the link's own form,
 # which the peer reads as it reads any reply.
 wire = "none"
@@ -2255,6 +2352,10 @@ keys by the shared key ids. A query never ended gives way to the newest, so a
 peer cannot grow the table. It sizes a memory, not a bound: a query past it is
 still answered.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: it sizes wz's memory of the key form of the queries a peer sent over a link that names keys by the shared key ids."
 
 [[limit]]
 id = "MAX_DECL_OBSERVERS"
@@ -2267,6 +2368,7 @@ storage = "both"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "build"
+read = "snapshot"
 wire = "none"
 help = '''
 The observers an application installs on the declarations of its peers
@@ -2274,6 +2376,10 @@ The observers an application installs on the declarations of its peers
 kind and per direction. They are installed once at start, so few are
 needed; one more is refused.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds it: the observers of the declarations of peers are a door of wz."
 
 [[limit]]
 id = "MAX_LIVELINESS_SUBSCRIPTIONS"
@@ -2286,11 +2392,17 @@ storage = "both"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "build"
+read = "snapshot"
 wire = "none"
 help = '''
 The liveliness subscribers a session holds at once. Declaring one more
 is refused while the table is full.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds it: a zenoh session holds its liveliness subscribers in a map that grows with each declaration."
+cite = ["`zenoh/src/api/session.rs` @ `pub(crate) liveliness_subscribers: HashMap<Id, Arc<SubscriberState>>,`"]
 
 [[limit]]
 id = "MAX_LOCAL_TOKENS"
@@ -2303,6 +2415,7 @@ storage = "both"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "build"
+read = "snapshot"
 # `wire` is none: within the limit no byte a peer sees changes; past it, what does not fit is
 # left out.
 wire = "none"
@@ -2310,6 +2423,10 @@ help = '''
 The liveliness tokens a session itself declares and holds at once.
 Declaring one more is refused while the table is full.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the liveliness tokens a session declares."
 
 [[limit]]
 id = "MAX_PENDING_LIVELINESS_GETS"
@@ -2322,12 +2439,18 @@ storage = "both"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "build"
+read = "snapshot"
 wire = "none"
 help = '''
 The liveliness gets (snapshots of the tokens alive) a session has waiting
 for their answer at once. A get ends as soon as its answer is complete, so
 few are waiting together; one more is refused while the table is full.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds it: a zenoh session holds its liveliness gets in a map that grows with each one."
+cite = ["`zenoh/src/api/session.rs` @ `pub(crate) liveliness_queries: HashMap<InterestId, LivelinessQueryState>,`"]
 
 [[limit]]
 id = "MAX_PENDING_DECLARES"
@@ -2340,6 +2463,7 @@ storage = "both"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "build"
+read = "snapshot"
 # `wire` is none: within the limit no byte a peer sees changes; past it, what does not fit is
 # refused.
 wire = "none"
@@ -2349,6 +2473,10 @@ interests between two sends: each answer is the session's matching
 declarations and a final. An answer that does not fit whole is refused and
 counted, never sent in part.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds it: wz holds the answer to an interest of a peer whole before it sends it."
 
 [[limit]]
 id = "MAX_INBOUND_SUB_INTERESTS"
@@ -2361,6 +2489,7 @@ storage = "both"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "build"
+read = "snapshot"
 # `wire` is none: within the limit no byte a peer sees changes; past it, what does not fit is
 # left out.
 wire = "none"
@@ -2370,6 +2499,10 @@ remembers, so that a subscriber declared later is announced to them: one
 per publisher a peer holds with a write filter. Past it a peer still gets
 the subscribers of the moment, not the later ones.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the interests of its peers a session remembers."
 
 [[limit]]
 id = "MAX_PEER_KEYEXPR_ALIASES"
@@ -2382,6 +2515,7 @@ storage = "both"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "build"
+read = "snapshot"
 # `wire` is none: within the limit no byte a peer sees changes; past it, what does not fit is
 # dropped.
 wire = "none"
@@ -2390,6 +2524,11 @@ The key expressions one peer may have declared to this session at a time,
 to name them by a short id. One more is refused and counted, and a message
 that names it is dropped, as one naming an undeclared id is.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds it: zenoh holds the key ids a peer declared in a map of its face that grows with each declaration."
+cite = ["`zenoh/src/net/routing/dispatcher/face.rs` @ `pub(crate) remote_mappings: IntHashMap<ExprId, Arc<Resource>>,`"]
 
 [[limit]]
 id = "MAX_SHARED_KEY_IDS"
@@ -2403,6 +2542,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "none"
+read = "snapshot"
 # `wire` is none: the limit refuses a dictionary at the open, before any byte is sent.
 wire = "none"
 help = '''
@@ -2410,6 +2550,10 @@ The entries of the key-id dictionary every node of a deployment shares
 (shared-key-ids) that one session may be given. A dictionary of more is
 refused when it is handed over, and no session holds it.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: the key-id dictionary every node of a deployment shares is wz's own."
 
 [[limit]]
 id = "MAX_REMOTE_DECLS"
@@ -2422,12 +2566,18 @@ storage = "both"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "build"
+read = "snapshot"
 wire = "none"
 help = '''
 The declarations of one kind (subscribers, queryables, liveliness tokens)
 one peer may hold open to this session at a time. One more is refused and
 counted, and the application is not told of it.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds it: a zenoh session holds the declarations of its peers in maps that grow with each one."
+cite = ["`zenoh/src/api/session.rs` @ `pub(crate) remote_subscribers: HashMap<SubscriberId, KeyExpr<'static>>,`", "`zenoh/src/api/session.rs` @ `pub(crate) remote_queryables: HashMap<Id, (KeyExpr<'static>, bool)>,`"]
 
 [[limit]]
 id = "MAX_PENDING_REPLIES"
@@ -2440,12 +2590,17 @@ storage = "both"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "build"
+read = "snapshot"
 wire = "none"
 help = '''
 The replies a session's queryables may have ready to send between two
 sends. One more is refused and counted, and the handler that made it is
 told.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds it: wz holds the replies of its queryables between two sends in a table of its own."
 
 [[limit]]
 id = "MAX_PENDING_FINALS"
@@ -2458,6 +2613,7 @@ storage = "both"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "build"
+read = "snapshot"
 # `wire` is none: within the limit no byte a peer sees changes; past it, what does not fit is
 # refused.
 wire = "none"
@@ -2467,6 +2623,10 @@ query that would need one more is refused, and counted, before its
 queryables run: an answer that could not be ended would leave the asker
 waiting until its own timeout.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds it: wz holds the ends of answers it owes between two sends in a table of its own."
 
 [[limit]]
 id = "MAX_REPLY_PAYLOAD_BYTES"
@@ -2479,11 +2639,16 @@ storage = "both"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "build"
+read = "snapshot"
 wire = "none"
 help = '''
 The largest payload of one reply, in bytes, and the largest attachment
 beside it. A larger reply is refused, never cut short.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the payload of every reply; wz bounds it to size the reply buffers of a fixed-memory build."
 
 [[limit]]
 id = "MAX_ADMIN_REPLY_BYTES"
@@ -2502,6 +2667,10 @@ and answered to the asker as an error, never cut short. It cannot exceed
 the largest reply payload (WZ_LIMIT_MAX_REPLY_PAYLOAD_BYTES).
 '''
 
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: it sizes the admin space reply of a wz build."
+
 [[limit]]
 id = "MAX_ADMIN_LOCATORS"
 kconfig = "WZ_LIMIT_MAX_ADMIN_LOCATORS"
@@ -2517,6 +2686,10 @@ help = '''
 The listening locators a node without an allocator reports in its admin
 space. One more is refused when the node starts, never dropped.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: it sizes the locators a wz node without an allocator reports in its admin space."
 
 [[limit]]
 id = "MAX_ADMIN_SESSION_LINKS"
@@ -2534,6 +2707,10 @@ The links one session's row lists in the admin space. A unicast session
 has one; a row with more is refused and counted, not listed in part.
 '''
 
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: it sizes the links a session's row of the wz admin space lists."
+
 [[limit]]
 id = "MAX_MULTICAST_REPLIES"
 kconfig = "WZ_LIMIT_MAX_MULTICAST_REPLIES"
@@ -2545,12 +2722,17 @@ storage = "both"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "build"
+read = "snapshot"
 wire = "none"
 help = '''
 The replies a node holds for a multicast group before it sends them, with or
 without an allocator. One more is dropped and counted: a group is best
 effort, and an asker whose reply was dropped asks again.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds it: wz holds the replies for a multicast group in a table of its own before it sends them."
 
 [[limit]]
 id = "MAX_TASKS"
@@ -2569,6 +2751,10 @@ the task table the image declares, which the image is checked against when
 it compiles.
 '''
 
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: it is a ceiling on the task table of a fixed-memory wz image."
+
 [[limit]]
 id = "MAX_TIMERS"
 kconfig = "WZ_LIMIT_MAX_TIMERS"
@@ -2585,6 +2771,10 @@ The most timers the runtime of a fixed-memory image may hold: a ceiling on
 the timer table the image declares, checked as the task ceiling is.
 '''
 
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: it is a ceiling on the timer table of a fixed-memory wz image."
+
 [[limit]]
 id = "MAX_LOCATOR_LEN"
 kconfig = "WZ_LIMIT_MAX_LOCATOR_LEN"
@@ -2596,6 +2786,7 @@ storage = "both"
 scope = ["runtime", "link"]
 binding_heap = "open"
 binding_fixed = "build"
+read = "snapshot"
 wire = "none"
 help = '''
 The longest locator, in bytes, a node stores: one it is told to connect
@@ -2604,22 +2795,32 @@ is skipped, never cut short. The default fits an IPv6 locator with its
 scheme and port.
 '''
 
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the length of a locator; wz bounds it to size the locator rows of a node."
+
 [[limit]]
 id = "MAX_STATIC_CONNECT"
 kconfig = "WZ_LIMIT_MAX_STATIC_CONNECT"
 kind = "bound"
 driven = "local"
-on_heap = "capacity"
+on_heap = "advisory"
 default = 8
 storage = "both"
 scope = "runtime"
 binding_heap = "open"
 binding_fixed = "build"
+read = "snapshot"
 wire = "none"
 help = '''
-The locators a node is told to connect to. A list longer than this stops
-at the limit; a fixed deployment names a few peers.
+The locators a node is told to connect to. A fixed image holds this many
+rows and names a few peers; on the heap the list grows with no bound unless
+one is stated, and an open whose list is longer is refused by name.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds how many locators connect/endpoints lists; wz bounds it to size the locator table of a node."
 
 [[limit]]
 id = "MAX_PEER_NODES"
@@ -2642,6 +2843,10 @@ by its zid declares none of that, and refuses the open. One more than this
 is refused.
 '''
 
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: it sizes the connection machines a fixed-memory wz image holds for the peers it opens by their zid."
+
 [[limit]]
 id = "QUERIER_MAX_PENDING_QUERIES"
 kconfig = "WZ_LIMIT_QUERIER_MAX_PENDING_QUERIES"
@@ -2653,6 +2858,7 @@ storage = "quota"
 scope = "entity"
 binding_heap = "live"
 binding_fixed = "none"
+read = "snapshot"
 wire = "none"
 help = '''
 The queries one declared querier may have in flight at once; one more is
@@ -2664,6 +2870,10 @@ table: it only refuses the one more. It binds the queriers of the Rust session
 API and the replay subscriber of the zenoh-pico interface.
 '''
 
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds it: a zenoh querier refuses no query for the number in flight, which a value of 0 keeps."
+
 [[limit]]
 id = "TX_NO_PROGRESS_WINDOW_US"
 kconfig = "WZ_LIMIT_TX_NO_PROGRESS_WINDOW_US"
@@ -2674,6 +2884,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "live"
 binding_fixed = "open"
+read = "snapshot"
 wire = "timing"
 help = '''
 How long, in microseconds, a blocking message may wait with no progress
@@ -2681,6 +2892,11 @@ when the tx-no-progress-deadline policy is on: no fragment of it going out.
 It is read only when that policy is on, and must be at least 1 and no more
 than the total wait before the session is closed, which is set as before.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: zenoh bounds only the whole wait of a blocking message (transport/link/tx/queue/congestion_control/block/wait_before_close), not a stretch with no fragment sent."
+cite = ["`commons/zenoh-config/src/lib.rs` @ `/// The maximum time in microseconds to wait for an available batch before closing the transport session`"]
 
 [[limit]]
 id = "TX_EXPIRY_CLOSE_AFTER"
@@ -2695,6 +2911,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "live"
 binding_fixed = "open"
+read = "snapshot"
 wire = "timing"
 help = '''
 How many blocking messages in a row may find no room within their deadline
@@ -2704,6 +2921,10 @@ closes the session, which is the policy as it was before this limit. At most
 65535, the count a session holds: a build that states more does not compile.
 It is read only when that policy is on.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: the count serves the tx-expiry-keeps-session policy, which is wz's own."
 
 [[limit]]
 id = "DATAGRAM_FRAGMENT_BURST"
@@ -2715,12 +2936,17 @@ storage = "quota"
 scope = "link"
 binding_heap = "live"
 binding_fixed = "none"
+read = "snapshot"
 wire = "timing"
 help = '''
 How many fragments of a message a UDP link's writer writes in a row when the
 datagram-fragment-pacing policy is on, before the next one waits for
 DATAGRAM_FRAGMENT_GAP_US. At least 1. It is read only when that policy is on.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: the datagram-fragment-pacing policy is wz's own."
 
 [[limit]]
 id = "DATAGRAM_FRAGMENT_GAP_US"
@@ -2732,6 +2958,7 @@ storage = "quota"
 scope = "link"
 binding_heap = "live"
 binding_fixed = "none"
+read = "snapshot"
 wire = "timing"
 help = '''
 How long, in microseconds, must pass after the last fragment was written
@@ -2741,6 +2968,10 @@ second): a longer wait would hold a message's fragments past the time a peer
 keeps a partly received message. The tokio engine rounds it up to its timer's
 millisecond. It is read only when that policy is on.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: the datagram-fragment-pacing policy is wz's own."
 
 [[limit]]
 id = "QUERY_PARAMETERS_MAX_BYTES"
@@ -2753,6 +2984,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "live"
 binding_fixed = "live"
+read = "snapshot"
 wire = "none"
 help = '''
 The most bytes of selector parameters a query from a peer may carry for this
@@ -2762,6 +2994,10 @@ query ends with no reply and does not wait out its timeout. 0 sets no bound,
 which is how a node behaved before this limit. A query of the node's own
 session is not bounded: the caller already holds what it passed.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the parameters of a query a node runs."
 
 [[limit]]
 id = "QUERY_ATTACHMENT_MAX_BYTES"
@@ -2774,6 +3010,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "live"
 binding_fixed = "live"
+read = "snapshot"
 wire = "none"
 help = '''
 The most bytes of attachment a query from a peer may carry for this node to
@@ -2782,6 +3019,10 @@ reaches no queryable, is counted as refused for its size, and the query is
 still owed its final. 0 sets no bound, which is how a node behaved before this
 limit.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the attachment of every query a node runs."
 
 [[limit]]
 id = "HANDSHAKE_COOKIE_BYTES"
@@ -2808,6 +3049,10 @@ so the value is memory. The growable profile keeps a cookie of any length and
 does not read it.
 '''
 
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: it sizes the cookie buffers of a fixed-memory wz session."
+
 [[limit]]
 id = "PICO_TX_QUEUE_SIZE"
 kconfig = "WZ_LIMIT_PICO_TX_QUEUE_SIZE"
@@ -2818,6 +3063,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "none"
+read = "snapshot"
 wire = "timing"
 help = '''
 How many batches each priority's outbound queue holds for the pico C ABI, in
@@ -2832,6 +3078,10 @@ allocation: a frame takes heap only while it is queued, so a larger value
 costs memory only under a peer that does not drain.
 '''
 
+[limit.upstream]
+zenoh = "transport/link/tx/queue/size"
+cite = ["`commons/zenoh-config/src/lib.rs` @ `/// The size of each priority queue indicates the number of batches a given queue can contain.`", "`commons/zenoh-config/src/defaults.rs` @ `pub const MAX: usize = 16;`", "`io/zenoh-transport/src/manager.rs` @ `self = self.queue_size(link.tx().queue().size().clone());`"]
+
 [[limit]]
 id = "SNAPSHOT_PERIOD_MS"
 kconfig = "WZ_LIMIT_SNAPSHOT_PERIOD_MS"
@@ -2842,6 +3092,7 @@ storage = "quota"
 scope = "runtime"
 binding_heap = "live"
 binding_fixed = "none"
+read = "snapshot"
 wire = "timing"
 help = '''
 How often, in milliseconds, the node takes a snapshot of itself: what it spends
@@ -2849,6 +3100,10 @@ and how its messages are spaced. The node holds no timer for it: the program
 asks for a sample on its own cadence, and one is taken when this much time has
 passed since the last. At least 1 and at most 2147483 (about 35 minutes).
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: the snapshot of a node is a wz capability."
 
 [[limit]]
 id = "SNAPSHOT_HISTOGRAM_BUCKETS"
@@ -2861,6 +3116,7 @@ storage = "both"
 scope = ["runtime", "session"]
 binding_heap = "open"
 binding_fixed = "build"
+read = "build"
 # `wire` is visible: the bucket count is part of the snapshot's format.
 wire = "visible"
 help = '''
@@ -2871,6 +3127,10 @@ buckets tell intervals up to about 8 seconds apart and 32 cover the whole range.
 More buckets spread the tail of the distribution further out and make the
 snapshot longer. At least 1 and at most 32.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: the snapshot of a node is a wz capability."
 
 [[limit]]
 id = "SUPERVISION_CHECKPOINTS"
@@ -2883,12 +3143,20 @@ storage = "both"
 scope = "runtime"
 binding_heap = "open"
 binding_fixed = "build"
+# Read from the build: no RuntimeLimits exists where the supervisor is made. Only the tokio node
+# holds one, and it makes no supervisor; the one supervisor of the process is made by the first
+# call of a supervision door of the pico or C ABI, and those doors hold no RuntimeLimits.
+read = "build"
 wire = "none"
 help = '''
 How many checkpoints the node's supervisor watches. Each is a deadline an
 application feeds, and the node is healthy only while every checkpoint that is
 supervised has been fed in time. At least 1 and at most 64.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: the supervisor of a node is a wz capability."
 
 [[limit]]
 id = "E2E_SUPERVISED_STREAMS"
@@ -2900,6 +3168,10 @@ storage = "quota"
 scope = "runtime"
 binding_heap = "open"
 binding_fixed = "open"
+# Read from the build: no RuntimeLimits exists where a reception supervisor is made. Only the
+# tokio node holds one, and it makes no reception supervisor; `wz_ext_stream_supervisor_new`
+# makes it, and the pico and C doors hold no RuntimeLimits.
+read = "build"
 wire = "none"
 help = '''
 How many periodic streams one reception supervisor holds. The table of streams
@@ -2907,6 +3179,10 @@ is storage the application gives the supervisor when it makes it, one fixed row
 per stream, so this bounds how many rows of it are used and sizes nothing; a
 stream added past it is refused. At least 1.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: end-to-end reception supervision is a wz capability."
 
 [[limit]]
 id = "APP_LINK_QUEUE_BYTES"
@@ -2918,6 +3194,7 @@ storage = "quota"
 scope = "link"
 binding_heap = "open"
 binding_fixed = "none"
+read = "snapshot"
 # `wire` is timing: past the bound the program's bytes are refused and handed in again once the
 # session has read the queue down, so a peer receives the same bytes later.
 wire = "timing"
@@ -2930,6 +3207,10 @@ session has read the queue down to half. Read only by a build with the
 app-transport capability.
 '''
 
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: a transport the program supplies is a wz capability."
+
 [[limit]]
 id = "EVENT_RING_SLOTS"
 kconfig = "WZ_LIMIT_EVENT_RING_SLOTS"
@@ -2941,6 +3222,7 @@ storage = "both"
 scope = "runtime"
 binding_heap = "open"
 binding_fixed = "build"
+read = "build"
 wire = "none"
 help = '''
 How many event records the node's event ring holds. When the ring is full,
@@ -2948,6 +3230,10 @@ the event-ring-full policy decides which record is lost: the oldest or the
 newest. Each record is a few words, a fixed size, so the ring's memory is this
 number times that size. At least 1.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: the event ring is a wz capability."
 
 [[limit]]
 id = "EVENT_RECORD_ARGS"
@@ -2967,6 +3253,10 @@ and the arguments fill it. An event with more arguments than this keeps the
 first of them. At most 255.
 '''
 
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: the event ring is a wz capability."
+
 [[limit]]
 id = "CLOCK_SOURCES"
 kconfig = "WZ_LIMIT_CLOCK_SOURCES"
@@ -2977,6 +3267,7 @@ storage = "quota"
 scope = "runtime"
 binding_heap = "open"
 binding_fixed = "none"
+read = "build"
 wire = "none"
 help = '''
 How many clock sources an application can register with the node at once, when
@@ -2985,6 +3276,10 @@ sources in the order they were registered, and the first that can say what time
 it is answers; with none registered it reads the system clock. 0 registers
 none, which leaves the system clock as the only source.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: registered clock sources are a wz capability."
 
 [[limit]]
 id = "E2E_SENDER_SLOTS"
@@ -2999,6 +3294,10 @@ storage = "both"
 scope = "entity"
 binding_heap = "open"
 binding_fixed = "build"
+# Read from the build: the judge is no entity of a session. `wz_ext_e2e_receiver_new` and the
+# catalog's receiver door make it from a profile with no session, a program makes it before it
+# opens one, and the replay subscriber takes one made apart; no SessionLimits is in reach.
+read = "build"
 wire = "none"
 help = '''
 How many senders one receiving judge of end-to-end protected frames keeps a
@@ -3007,6 +3306,10 @@ sender, bound by a list or taken by the first intact frame of a sender in
 arrival order; a frame of a sender no slot holds is not judged and is counted.
 At least 1.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: end-to-end protection is a wz capability."
 
 [[limit]]
 id = "REPLAY_DEPTH_MAX"
@@ -3022,6 +3325,7 @@ storage = "both"
 scope = "entity"
 binding_heap = "open"
 binding_fixed = "build"
+read = "snapshot"
 wire = "none"
 help = '''
 The deepest replay a message may keep: how many of the frames it last sent, as
@@ -3029,6 +3333,10 @@ they were sent, a publisher holds for a subscriber that arrives later and asks
 for them. Each message states its own depth, from 1 to this; a depth above it
 is refused when the message is declared. At least 1.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: a replay depth is stated by each message of a wz message catalog."
 
 [[limit]]
 id = "MESSAGE_CATALOG_ENTRIES"
@@ -3043,12 +3351,20 @@ storage = "both"
 scope = "runtime"
 binding_heap = "open"
 binding_fixed = "build"
+# Read from the build: no RuntimeLimits exists where a catalog is made. Only the tokio node holds
+# one, and it makes no catalog; `wz_ext_message_catalog_new` makes it, and the pico and C doors
+# hold no RuntimeLimits.
+read = "build"
 wire = "none"
 help = '''
 How many messages one message catalog declares, when the message-catalog
 capability is on. A catalog that declares more is refused when it is read, and
 the generator of a fixed-memory image refuses to write its tables. At least 1.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: the message catalog is a wz capability."
 
 [[limit]]
 id = "INSTANCE_KEY_FIELDS"
@@ -3063,6 +3379,10 @@ storage = "both"
 scope = "entity"
 binding_heap = "open"
 binding_fixed = "build"
+# Read from the build: the keyer is no entity of a session. `wz_ext_instance_keyer_new` and the
+# catalog read a description with no session, and a program makes a keyer before it opens one; no
+# SessionLimits is in reach.
+read = "build"
 wire = "none"
 help = '''
 How many fields of a payload one message's instance key names, when the
@@ -3071,6 +3391,10 @@ field read through the message's schema; the instance is the position of their
 values in the product of the lists of values each may take. A description that
 names more fields is refused. At least 1.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: the instance key is a wz capability."
 
 [[limit]]
 id = "INSTANCES_PER_MESSAGE"
@@ -3085,6 +3409,10 @@ storage = "both"
 scope = "entity"
 binding_heap = "open"
 binding_fixed = "build"
+# Read from the build: the keyer is no entity of a session. `wz_ext_instance_keyer_new` and the
+# catalog read a description with no session, and a program makes a keyer before it opens one; no
+# SessionLimits is in reach.
+read = "build"
 wire = "none"
 help = '''
 How many instances one message's instance key may tell apart, when the
@@ -3093,6 +3421,10 @@ values its key fields may take. Each instance is a stream of the end-to-end
 doors and a last value, so this bounds the state kept per message. A
 description whose lists make more is refused. At least 1.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: the instance key is a wz capability."
 
 [[limit]]
 id = "CLOCK_MAX_FORWARD_STEP_MS"
@@ -3104,6 +3436,7 @@ storage = "quota"
 scope = "runtime"
 binding_heap = "live"
 binding_fixed = "none"
+read = "snapshot"
 wire = "none"
 help = '''
 How far ahead of the node's clock, in milliseconds, a timestamp from another
@@ -3117,6 +3450,10 @@ refused by name: the open fails with that reason, where zenoh panics. 0
 refuses any timestamp ahead of the clock.
 '''
 
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: zenoh takes the bound from the environment variable UHLC_MAX_DELTA_MS, read by its clock crate, which wz reads as well."
+
 [[limit]]
 id = "DECLARATION_SYNC_BURST_MESSAGES"
 kconfig = "WZ_LIMIT_DECLARATION_SYNC_BURST_MESSAGES"
@@ -3127,12 +3464,17 @@ storage = "quota"
 scope = "session"
 binding_heap = "live"
 binding_fixed = "open"
+read = "snapshot"
 wire = "timing"
 help = '''
 How many declarations one turn of a paced declaration replay sends, when the
 declaration-sync-pacing policy is on. It is read only when that policy is on.
 It must be at least 1: a turn that sends nothing would never finish.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: the declaration-sync-pacing policy is wz's own."
 
 [[limit]]
 id = "DECLARATION_SYNC_FINAL_TIMEOUT_MS"
@@ -3144,6 +3486,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "live"
 binding_fixed = "live"
+read = "snapshot"
 wire = "none"
 help = '''
 How long, in milliseconds, a node waits for the peer's answer to an interest it
@@ -3152,6 +3495,10 @@ wait of declarations_synced and wait_declarations_stable: a peer that never
 answers an interest does not hold a node unsynced for ever. It is read whether
 or not the declaration-sync-pacing policy is on, and must be at least 1.
 '''
+
+[limit.upstream]
+zenoh = "routing/interests/timeout"
+cite = ["`commons/zenoh-config/src/lib.rs` @ `/// The timeout to wait for incoming interests declarations.`", "`zenoh/src/net/routing/dispatcher/tables.rs` @ `Duration::from_millis(unwrap_or_default!(config.routing().interests().timeout()));`", "`zenoh/src/net/routing/dispatcher/interests.rs` @ `_ = tokio::time::sleep(cleanup.interests_timeout) => { cleanup.run().await }`"]
 
 [[limit]]
 id = "DECLARATION_SYNC_INTERVAL_MS"
@@ -3163,6 +3510,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "live"
 binding_fixed = "open"
+read = "snapshot"
 wire = "timing"
 help = '''
 How long, in milliseconds, a paced declaration replay waits between two of its
@@ -3170,6 +3518,10 @@ turns, when the declaration-sync-pacing policy is on. The session keeps being
 served during the wait. Waiting for the declarations to be stable steps by it
 whether or not that policy is on. Must be at least 1.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: the declaration-sync-pacing policy is wz's own."
 
 [[limit]]
 id = "DECLARATION_SYNC_RX_NO_PROGRESS_MS"
@@ -3181,6 +3533,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "none"
+read = "snapshot"
 wire = "none"
 help = '''
 How long, in milliseconds, a session waits for the next of its peer's initial
@@ -3194,6 +3547,10 @@ upstream keeps none. Only the tokio engine reads it, since only it notes the
 end of the peer's declarations.
 '''
 
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: zenoh keeps no watch on the initial declarations of a peer, as a value of 0 keeps none."
+
 [[limit]]
 id = "DECLARATION_SYNC_RETRY_INTERVAL_MS"
 kconfig = "WZ_LIMIT_DECLARATION_SYNC_RETRY_INTERVAL_MS"
@@ -3204,6 +3561,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "open"
+read = "snapshot"
 wire = "timing"
 help = '''
 How long, in milliseconds, a paced declaration replay waits before it tries
@@ -3216,6 +3574,10 @@ limit. The tokio engine, the cooperative engine and the fixed-memory slot
 client read it alike.
 '''
 
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: the declaration-sync-pacing policy is wz's own."
+
 [[limit]]
 id = "DECLARATION_SYNC_TX_NO_PROGRESS_MS"
 kconfig = "WZ_LIMIT_DECLARATION_SYNC_TX_NO_PROGRESS_MS"
@@ -3226,6 +3588,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "open"
+read = "snapshot"
 wire = "none"
 help = '''
 How long, in milliseconds, a paced declaration replay that retries refused
@@ -3235,6 +3598,10 @@ retries. Each declaration sent starts the stretch again. 0 gives up only when
 the link itself ends. The tokio engine, the cooperative engine and the
 fixed-memory slot client read it alike.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: the declaration-sync-pacing policy is wz's own."
 
 # The numbers of zenoh-pico's value switches (the `maps` rows above that anchor to a limit), as the
 # pico ABI states them. Each defaults to pico's own default, so the drop-in's default build states
@@ -3250,6 +3617,7 @@ storage = "quota"
 scope = "link"
 binding_heap = "open"
 binding_fixed = "none"
+read = "snapshot"
 wire = "negotiated"
 help = '''
 The batch size, in bytes, a session of the zenoh-pico interface advertises when
@@ -3257,6 +3625,10 @@ it opens a unicast session, as zenoh-pico's BATCH_UNICAST_SIZE. The two sides
 send frames no larger than the smaller of the two sizes. At least 1 and at most
 65535: a batch of no byte carries no frame.
 '''
+
+[limit.upstream]
+zenoh = "transport/link/tx/batch_size"
+cite = ["`commons/zenoh-config/src/lib.rs` @ `/// Zenoh's MTU equivalent (default: 2^16-1) (max: 2^16-1)`", "`io/zenoh-transport/src/manager.rs` @ `self = self.batch_size(*link.tx().batch_size());`", "`io/zenoh-transport/src/unicast/establishment/open.rs` @ `state.transport.batch_size = state.transport.batch_size.min(init_ack.batch_size);`"]
 
 [[limit]]
 id = "PICO_MULTICAST_BATCH_BYTES"
@@ -3268,6 +3640,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "none"
+read = "snapshot"
 # `wire` is visible: the Join states it, and a member that states another size is refused.
 wire = "visible"
 help = '''
@@ -3276,6 +3649,10 @@ the Join of a multicast group, as zenoh-pico's BATCH_MULTICAST_SIZE. zenoh-pico
 refuses a member whose Join states another size, so every member of a group
 states the same. At least 1 and at most 65535.
 '''
+
+[limit.upstream]
+zenoh = "transport/link/tx/batch_size"
+cite = ["`io/zenoh-transport/src/manager.rs` @ `self = self.batch_size(*link.tx().batch_size());`", "`io/zenoh-transport/src/multicast/transport.rs` @ `.min(batch_size::MULTICAST);`", "`io/zenoh-transport/src/multicast/rx.rs` @ `if join.batch_size != batch_size {`"]
 
 [[limit]]
 id = "PICO_LEASE_MS"
@@ -3287,12 +3664,17 @@ storage = "quota"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "none"
+read = "snapshot"
 wire = "negotiated"
 help = '''
 The lease, in milliseconds, a session of the zenoh-pico interface advertises,
 unicast and in a multicast group's Join, as zenoh-pico's Z_TRANSPORT_LEASE. A
 peer that hears nothing from the session for this long closes it.
 '''
+
+[limit.upstream]
+zenoh = "transport/link/tx/lease"
+cite = ["`commons/zenoh-config/src/lib.rs` @ `/// Link lease duration in milliseconds (default: 10000)`", "`io/zenoh-transport/src/unicast/manager.rs` @ `*config.transport().link().tx().lease(),`", "`io/zenoh-transport/src/multicast/manager.rs` @ `*config.transport().link().tx().lease(),`"]
 
 [[limit]]
 id = "PICO_SOCKET_TIMEOUT_MS"
@@ -3304,6 +3686,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "none"
+read = "snapshot"
 wire = "timing"
 help = '''
 How long, in milliseconds, one read step of the cooperative zenoh-pico session
@@ -3311,6 +3694,10 @@ waits on its link before it returns with nothing, as zenoh-pico's
 Z_CONFIG_SOCKET_TIMEOUT. The tokio engine has no such wait: its read is woken
 by what arrives.
 '''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: it bounds one read step of the cooperative engine, which zenoh-pico has and zenoh does not."
 
 [[limit]]
 id = "PICO_CONNECT_TIMEOUT_MS"
@@ -3322,12 +3709,17 @@ storage = "quota"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "none"
+read = "snapshot"
 wire = "timing"
 help = '''
 How long, in milliseconds, each open of an endpoint by a zenoh-pico session
 waits for the dial and the handshake before it fails, on either engine, as
 zenoh-pico's Z_TRANSPORT_CONNECT_TIMEOUT.
 '''
+
+[limit.upstream]
+zenoh = "transport/unicast/open_timeout"
+cite = ["`commons/zenoh-config/src/lib.rs` @ `/// Timeout in milliseconds when opening a link (default: 10000).`", "`io/zenoh-transport/src/unicast/manager.rs` @ `tokio::time::timeout(self.config.unicast.open_timeout, async {`"]
 
 [[limit]]
 id = "PICO_FRAG_MAX_BYTES"
@@ -3339,6 +3731,7 @@ storage = "quota"
 scope = "link"
 binding_heap = "open"
 binding_fixed = "none"
+read = "snapshot"
 wire = "none"
 help = '''
 The largest message, in bytes, a session of the zenoh-pico interface rejoins
@@ -3347,6 +3740,10 @@ FRAG_MAX_SIZE. A fragment that would take its message past it ends the chain
 and the message is dropped; a message that arrives in one frame is never
 measured against it.
 '''
+
+[limit.upstream]
+zenoh = "transport/link/rx/max_message_size"
+cite = ["`commons/zenoh-config/src/lib.rs` @ `/// Maximum size of the defragmentation buffer at receiver end (default: 1GiB).`", "`commons/zenoh-config/src/lib.rs` @ `/// Fragmented messages that are larger than the configured size will be dropped.`", "`io/zenoh-transport/src/manager.rs` @ `self = self.defrag_buff_size(*link.rx().max_message_size());`"]
 
 [[limit]]
 id = "PICO_ACCEPT_TIMEOUT_MS"
@@ -3358,6 +3755,7 @@ storage = "quota"
 scope = "link"
 binding_heap = "open"
 binding_fixed = "none"
+read = "snapshot"
 wire = "timing"
 help = '''
 How long, in milliseconds, a listening session of the zenoh-pico interface gives
@@ -3366,6 +3764,10 @@ before it drops the link without a word, as zenoh-pico's
 Z_TRANSPORT_ACCEPT_TIMEOUT. zenoh's own bound is ten seconds; the zenoh-c
 interface reads it from transport/unicast/accept_timeout.
 '''
+
+[limit.upstream]
+zenoh = "transport/unicast/accept_timeout"
+cite = ["`commons/zenoh-config/src/lib.rs` @ `/// Timeout in milliseconds when accepting a link (default: 10000).`", "`io/zenoh-transport/src/unicast/manager.rs` @ `c_manager.config.unicast.accept_timeout,`"]
 
 [[limit]]
 id = "PICO_KEEPALIVES_PER_LEASE"
@@ -3377,6 +3779,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "none"
+read = "snapshot"
 wire = "timing"
 help = '''
 How many keepalives a session of the zenoh-pico interface sends in one lease,
@@ -3384,6 +3787,10 @@ as zenoh-pico's Z_TRANSPORT_LEASE_EXPIRE_FACTOR: whenever the line has been
 idle for the adopted lease divided by this, the session sends one. At least 1.
 The lease is the smaller of the two the peers advertised.
 '''
+
+[limit.upstream]
+zenoh = "transport/link/tx/keep_alive"
+cite = ["`commons/zenoh-config/src/lib.rs` @ `/// Number of keep-alive messages in a link lease duration (default: 4)`", "`io/zenoh-transport/src/unicast/manager.rs` @ `self = self.keep_alive(*config.transport().link().tx().keep_alive());`"]
 
 # A policy is behaviour upstream does not have; it is declared with what upstream does and
 # defaults to that, so a build that states nothing is the original's (a policy is never on in an

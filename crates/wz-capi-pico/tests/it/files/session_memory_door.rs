@@ -38,6 +38,10 @@ unsafe fn open_role(port: u16, key: u8) -> z_owned_session_t {
         zp_config_insert(z_config_loan_mut(&mut cfg), key, endpoint.as_ptr()),
         Z_OK
     );
+    open_config(cfg)
+}
+
+unsafe fn open_config(mut cfg: z_owned_config_t) -> z_owned_session_t {
     let mut session: z_owned_session_t = std::mem::zeroed();
     assert_eq!(
         z_open(&mut session, z_config_move(&mut cfg), std::ptr::null()),
@@ -75,6 +79,15 @@ fn row<'a>(rows: &'a [Row], part: &str) -> &'a Row {
     rows.iter()
         .find(|row| row.part == part)
         .unwrap_or_else(|| panic!("the report has no {part:?}"))
+}
+
+/// The batches one link's transmit queue holds, every priority's together, for a session that
+/// opens under `limits` and the build's policies.
+fn queued_batches(limits: &SessionLimits) -> usize {
+    TxQueueConf::pico_of_snapshot(&SessionPolicy::defaults(), limits)
+        .sizes
+        .iter()
+        .sum()
 }
 
 /// Opens a listener and a session that dials it, runs `check` on both, and lets them go.
@@ -142,20 +155,28 @@ fn a_dialling_session_holds_one_link_and_a_listener_its_engines_bound() {
         assert_eq!((handle.door.bounded, handle.door.count), (1, 1));
         assert!(handle.basis.is_empty());
 
+        // A config that states no limit opens under the build's snapshot.
+        let limits = SessionLimits::defaults();
         let queue = row(&dialled, "link transmit queues");
-        let batches: usize = TxQueueConf::pico_of_policy(&SessionPolicy::defaults())
-            .sizes
-            .iter()
-            .sum();
         assert_eq!(queue.basis, "PICO_TX_QUEUE_SIZE");
         assert_eq!(
             (queue.door.bounded, queue.door.count, queue.door.entry_bytes),
-            (1, batches, wz_session_core::caps::PICO_UNICAST_BATCH_BYTES)
+            (
+                1,
+                queued_batches(&limits),
+                limits.pico_unicast_batch_bytes()
+            )
         );
         let reassembly = row(&dialled, "link reassembly");
         assert_eq!(
             (reassembly.door.count, reassembly.door.entry_bytes),
-            (2, wz_session_core::caps::PICO_FRAG_MAX_BYTES)
+            (
+                2,
+                limits
+                    .pico_frag_max_bytes()
+                    .most()
+                    .expect("the build bounds a rejoined message")
+            )
         );
         let buffer = row(&dialled, "link receive buffers");
         assert_eq!(

@@ -889,6 +889,18 @@ where
     /// A publish asks whether anything here wants it once per message; with no subscriber
     /// the answer is a load. Shared on `clone()`, as the observer is.
     local_live: Arc<core::sync::atomic::AtomicUsize>,
+    /// The bound of each querier declared on this session, `QUERIER_MAX_PENDING_QUERIES` as the
+    /// session's creator stated it to the observer the session is made with
+    /// ([`ApplicationLayerObserver::querier_max_pending_queries`]). Read from the observer once,
+    /// when the session is made, so a querier is declared without the observer's lock.
+    querier_max_pending_queries: wz_session_core::limit_binding::Quota,
+    /// The bounds the replies of this session's queryables are staged under, as the session's
+    /// creator stated them to the observer the session is made with
+    /// ([`ApplicationLayerObserver::reply_bounds`]). Read from the observer once, when the
+    /// session is made, so a handler job run outside the observer's lock, or a query held past
+    /// its handler, stages its replies under them without that lock.
+    #[cfg(all(feature = "transport-unicast", feature = "query-queryable"))]
+    reply_bounds: wz_session_core::reply_stage::ReplyBounds,
     /// R311kz — per-session deferred-fire queue (the F-6 fix): the
     /// matching-listener sinks installed in the registries stage their
     /// fires here (under the observer lock), and the drive-loop
@@ -1429,6 +1441,9 @@ where
             declaration_order: self.declaration_order.clone(),
             // The count of the very observer shared above.
             local_live: self.local_live.clone(),
+            querier_max_pending_queries: self.querier_max_pending_queries,
+            #[cfg(all(feature = "transport-unicast", feature = "query-queryable"))]
+            reply_bounds: self.reply_bounds,
             fires: self.fires.clone(),
             clock: self.clock.clone(),
             // An Arc bump, deliberately: a fork must SHARE the node clock, not
@@ -3256,6 +3271,10 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
         #[cfg(feature = "codec-push")] tx: crate::multicast_pipeline::MulticastTxProducer,
     ) -> Self {
         let local_live = R::with_mutex_mut(&observer, |o| o.subscribers.local_live());
+        let querier_max_pending_queries =
+            R::with_mutex_mut(&observer, |o| o.querier_max_pending_queries());
+        #[cfg(all(feature = "transport-unicast", feature = "query-queryable"))]
+        let reply_bounds = R::with_mutex_mut(&observer, |o| o.reply_bounds());
         let declaration_order = Arc::new(R::new_mutex_held_across_waits(
             wz_session_core::owed_replies::OwedReplies::new(),
         ));
@@ -3359,6 +3378,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
             observer,
             declaration_order,
             local_live,
+            querier_max_pending_queries,
+            #[cfg(all(feature = "transport-unicast", feature = "query-queryable"))]
+            reply_bounds,
             fires: wz_session_core::deferred_fire::DeferredFireQueue::new(),
             clock,
             // The holds on the Finals this session's queryables owe: a group's queryable answers
@@ -3799,6 +3821,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
         // ([`SessionInner::declaration_order`]).
         R::with_mutex_mut(&self.declaration_order, |owed| {
             R::with_mutex_mut(&self.observer, |obs| {
+                // The group's own answer to a query it cannot resolve, as the unicast dispatch
+                // states its session's: the observer may serve more than this session.
+                obs.set_unanswerable_final(self.policy.query_unanswerable_final());
                 obs.dispatch_event(event);
                 #[cfg(all(
                     feature = "query-queryable",
@@ -4001,13 +4026,21 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         // (`enabled().get(whatami).then(|| ..)`, runtime/mod.rs:147), so a
         // peer / client session gets the non-stamping handle and only a
         // router-role one gets a clock. Its `clock-quality-stamping` policy is the snapshot's.
+        // A session holds a session's limits alone, so its clock runs under the build's runtime
+        // limits; a host that holds the node's builds the clock with them
+        // ([`Self::with_timestamping`], [`Self::with_node_clock`]).
         let node_hlc = crate::node_clock::NodeHlc::for_node_by(
             &zid,
             actions.params.whatami,
             crate::node_clock::TimestampingEnabled::default(),
             &policy,
+            &wz_session_core::limits::RuntimeLimits::BUILD,
         );
         let local_live = R::with_mutex_mut(&observer, |o| o.subscribers.local_live());
+        let querier_max_pending_queries =
+            R::with_mutex_mut(&observer, |o| o.querier_max_pending_queries());
+        #[cfg(all(feature = "transport-unicast", feature = "query-queryable"))]
+        let reply_bounds = R::with_mutex_mut(&observer, |o| o.reply_bounds());
         let session = Self::from_inner(SessionInner {
             // R311y554 — the default is the pre-policy behaviour; a host that
             // needs the drive-task hand-off opts in with
@@ -4023,6 +4056,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 wz_session_core::owed_replies::OwedReplies::new(),
             )),
             local_live,
+            querier_max_pending_queries,
+            #[cfg(all(feature = "transport-unicast", feature = "query-queryable"))]
+            reply_bounds,
             // R311kz — fresh deferred-fire queue per logical session;
             // every deferred sink (matching, decl listeners, data
             // planes) clones a handle out of it at registration.
@@ -4109,7 +4145,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     }
 
     /// Rebuild this session's node clock against the `timestamping.enabled` map
-    /// a HOST read out of its config document.
+    /// a HOST read out of its config document, bounded by `limits`, the runtime limits the
+    /// host resolved for the node (`CLOCK_MAX_FORWARD_STEP_MS`).
     ///
     /// R2112 (open-debt item 102) — [`Self::new`] derives the clock from
     /// zenoh's shipped map LITERALLY, and that was the only reachable spelling:
@@ -4129,9 +4166,13 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     ///
     /// ```text
     /// let session = TokioSession::new(actions, observer, clock)
-    ///     .with_timestamping(TimestampingEnabled::default().with_role(role, on));
+    ///     .with_timestamping(TimestampingEnabled::default().with_role(role, on), &limits);
     /// ```
-    pub fn with_timestamping(self, enabled: crate::node_clock::TimestampingEnabled) -> Self
+    pub fn with_timestamping(
+        self,
+        enabled: crate::node_clock::TimestampingEnabled,
+        limits: &wz_session_core::limits::RuntimeLimits,
+    ) -> Self
     where
         <Unicast as TransportState<R, T>>::Payload: Clone,
     {
@@ -4142,6 +4183,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             self.transport.params.whatami,
             enabled,
             self.policy(),
+            limits,
         );
         self.with_node_clock(hlc)
     }
@@ -4805,9 +4847,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // The observer may serve more than this session, so the session states its own
             // `query-unanswerable-final` value, from the snapshot it was handed, before each
             // dispatch, as it states its negotiated SHM capability above.
-            #[cfg(feature = "query-queryable")]
-            obs.queryables
-                .set_unanswerable_final(self.actions().params.policy.query_unanswerable_final());
+            obs.set_unanswerable_final(self.actions().params.policy.query_unanswerable_final());
             // `declarations-synced-event` — the peer's `DeclareFinal` of the initial interest
             // turns the subscriber plane's flag on; read before and after, the dispatch that
             // turns it on is the one that tells the listeners, and one that finds it on already
@@ -4913,10 +4953,11 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     ///
     /// A declaration made, or withdrawn, while the wait runs restarts the check: the set the peer
     /// must hold has changed, and a sync that was true of the old set says nothing of the new one.
-    /// The interval is `DECLARATION_SYNC_INTERVAL_MS`, the pace a paced replay is driven at. Both
-    /// the interval and `timeout` are of the session's clock, as the sync it reads is.
+    /// The interval is `DECLARATION_SYNC_INTERVAL_MS` of the session's snapshot, the pace a paced
+    /// replay is driven at. Both the interval and `timeout` are of the session's clock, as the
+    /// sync it reads is.
     pub async fn wait_declarations_stable(&self, timeout: std::time::Duration) -> bool {
-        let step = wz_session_core::caps::DECLARATION_SYNC_INTERVAL_MS as u64;
+        let step = self.actions().params.limits.declaration_sync_interval_ms() as u64;
         let deadline = self
             .clock
             .now_monotonic_ms()
@@ -6176,7 +6217,9 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                         wz_session_core::link::RxBytes,
                     )> = None;
                     R::with_mutex_mut(&self.observer, |observer| {
-                        let mut replies = wz_session_core::reply_stage::ReplyStage::new();
+                        let mut replies = wz_session_core::reply_stage::ReplyStage::held_to(
+                            observer.reply_bounds(),
+                        );
                         // R311y94 (review V2) — carry the GET's selector params
                         // (`_sn` / `_max`) into the loopback Query so a SessionLocal
                         // queryable filters identically to the wire path.
@@ -6670,7 +6713,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             session: self.clone(),
             keyexpr,
             options,
-            slots: querier::QuerierSlots::new(),
+            slots: querier::QuerierSlots::with_limit(self.querier_max_pending_queries),
         }
     }
 
@@ -6701,7 +6744,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             mapping_id,
             inline_suffix: inline_suffix.map(str::to_string),
             options,
-            slots: querier::QuerierSlots::new(),
+            slots: querier::QuerierSlots::with_limit(self.querier_max_pending_queries),
         }
     }
 

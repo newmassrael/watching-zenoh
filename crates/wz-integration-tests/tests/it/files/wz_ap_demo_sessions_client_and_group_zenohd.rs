@@ -142,13 +142,15 @@ fn group_member(zid_byte: u8) -> (impl std::future::Future<Output = ()>, Multica
             batch_size: 2_048,
             is_qos: false,
             compression: false,
-            tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(
+            tx_queue: wz_session_core::session_init_params::TxQueueConf::of_snapshot(
                 &wz_session_core::policy::SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD,
             ),
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
             join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
             max_sessions: None,
             policy: wz_session_core::policy::SessionPolicy::defaults(),
+            limits: wz_session_core::limits::SessionLimits::BUILD,
         };
         let clock = TokioTime::new();
         let outcome = drive_multicast_session(

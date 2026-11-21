@@ -31,6 +31,7 @@
 //! is taken out before the shared rules run (see
 //! [`crate::sessions_driver::without_local_keys`]) and judged here.
 
+use wz::runtime_tokio::config::scout_multicast_socket;
 use wz::runtime_tokio::json5::Json5Value;
 
 use crate::args::ScoutSocketArgs;
@@ -102,7 +103,7 @@ fn block_refusals(path: &str, block: Option<&Json5Value>, out: &mut Vec<Refusal>
     }
     if has(multicast, "address") {
         match field(multicast, "address").and_then(as_str) {
-            Some(a) if a.parse::<std::net::SocketAddrV4>().is_ok() => {}
+            Some(a) if scout_multicast_socket(Some(a)).is_ok() => {}
             _ => out.push(Refusal::new(
                 format!("{path}.address"),
                 "must be an <ip>:<port> socket, e.g. 224.0.0.224:7446",
@@ -147,7 +148,7 @@ pub(crate) fn scouting_of(session: &[(String, Json5Value)]) -> Option<ScoutSocke
     Some(ScoutSocketArgs {
         address: field(multicast, "address")
             .and_then(as_str)
-            .map(str::to_string),
+            .and_then(|a| scout_multicast_socket(Some(a)).ok()),
         interface: field(multicast, "interface")
             .and_then(as_str)
             .map(str::to_string),
@@ -189,7 +190,7 @@ mod tests {
         assert_eq!(
             plan.sessions[0].scouting,
             Some(ScoutSocketArgs {
-                address: Some("224.0.0.99:7000".into()),
+                address: Some("224.0.0.99:7000".parse().expect("a socket")),
                 interface: Some("lo".into()),
                 ttl: Some(2),
             })
@@ -235,6 +236,29 @@ mod tests {
         assert_eq!(
             refused(&with_scouting(r#"{ multicast: true }"#)),
             vec!["sessions[0].scouting.multicast: must be a mapping"]
+        );
+    }
+
+    /// The block's `address` is read by the config reader's own reading of the key: a socket of
+    /// either family, and not a zenoh-pico group locator, which is another library's key.
+    #[test]
+    fn the_address_is_read_as_the_config_reader_reads_the_key() {
+        let plan = read_sessions_document(&with_scouting(
+            r#"{ multicast: { listen: true, address: "[ff05::231]:7511" } }"#,
+        ))
+        .expect("passes");
+        assert_eq!(
+            plan.sessions[0].scouting.as_ref().and_then(|s| s.address),
+            Some("[ff05::231]:7511".parse().expect("a socket"))
+        );
+        assert_eq!(
+            refused(&with_scouting(
+                r#"{ multicast: { listen: true, address: "udp/224.0.0.99:7000" } }"#,
+            )),
+            vec![
+                "sessions[0].scouting.multicast.address: must be an <ip>:<port> socket, \
+                 e.g. 224.0.0.224:7446"
+            ]
         );
     }
 

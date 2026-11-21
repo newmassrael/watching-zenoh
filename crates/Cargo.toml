@@ -47,6 +47,10 @@ members = [
     # wrapping the wz AP tokio Session. Reverse of the *-sys crates
     # (which BIND to C); this crate EXPORTS a C ABI. AP/std-only.
     "wz-capi-pico",
+    # The doors of wz-capi-pico's additional features as a library of their own, built from the
+    # same sources over the core library's C ABI: the second form of the pico library
+    # (docs/capi-pico-additional-library.md).
+    "wz-capi-pico-ext",
     # R311y498 (§5.27 api-compat-c) — the zenoh-c-compatible C ABI, the sibling of
     # wz-capi-pico over the SAME session model. It ships NO header: zenoh-c's is
     # cbindgen output, so it IS the ABI, and the claim under test is that a program

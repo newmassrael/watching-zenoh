@@ -72,13 +72,15 @@ fn params(zid: &[u8]) -> MulticastParams {
         batch_size: 2_048,
         is_qos: false,
         compression: false,
-        tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(
+        tx_queue: wz_session_core::session_init_params::TxQueueConf::of_snapshot(
             &wz_session_core::policy::SessionPolicy::defaults(),
+            &wz_session_core::limits::SessionLimits::BUILD,
         ),
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
         max_sessions: None,
         policy: wz_session_core::policy::SessionPolicy::defaults(),
+        limits: wz_session_core::limits::SessionLimits::BUILD,
     }
 }
 
@@ -158,6 +160,42 @@ fn the_reply_queue_refuses_the_reply_it_has_no_room_for_and_counts_it() {
     sink.enqueue(items.next().expect("an item"));
     assert_eq!((REPLIES.len(), REPLIES.dropped()), (1, 2));
     assert_eq!(id_of(REPLIES.pop().expect("the reply")), last);
+}
+
+/// A queue its session holds to two replies drops the third and counts it, keeps the two it
+/// holds in their order, and costs the heap nothing for it: the quota the session states bounds
+/// the queue below the storage the build sized.
+#[test]
+fn a_reply_queue_held_to_two_by_its_session_drops_the_third() {
+    use wz_session_core::limit_binding::{LimitSpec, Quota};
+    use wz_session_core::limits::{MaxMulticastReplies, SessionLimits};
+    use wz_session_core::multicast_reply_sink::MulticastReplyEnqueue;
+
+    static REPLIES: MulticastReplyQueue = MulticastReplyQueue::new();
+    let sink: &'static MulticastReplyQueue = &REPLIES;
+    let mut limits = SessionLimits::defaults();
+    let stated = limits.select_max_multicast_replies(Quota::at_most(2));
+    if MaxMulticastReplies::DOMAIN.is_singleton() {
+        assert!(stated.is_err(), "a build of one value refuses two");
+        return;
+    }
+    stated.expect("two is inside the domain");
+    REPLIES.limit_to(&limits);
+    assert_eq!(REPLIES.capacity(), 2);
+
+    let items: Vec<MulticastTxItem> = (1..=3).map(final_for).collect();
+    let mut items = items.into_iter();
+    let m = Measurement::new();
+    let ((), n) = m.count("past the stated quota", || {
+        for _ in 0..3 {
+            sink.enqueue(items.next().expect("an item"));
+        }
+    });
+    assert_eq!(n, 0, "a reply refused by the quota costs the heap nothing");
+    assert_eq!((REPLIES.len(), REPLIES.dropped()), (2, 1));
+    assert_eq!(REPLIES.pop().map(id_of), Some(1));
+    assert_eq!(REPLIES.pop().map(id_of), Some(2));
+    assert!(REPLIES.pop().is_none(), "the third was dropped");
 }
 
 type Groups = MulticastSlots<Frozen, 4, 1>;

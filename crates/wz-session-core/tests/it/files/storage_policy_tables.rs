@@ -67,20 +67,15 @@ fn subscriber_table_fills_to_n_and_refuses_at_n_plus_one<P: Storage>() {
     }
 }
 
-/// A pattern past `MAX_KEYEXPR_BYTES` is refused, never truncated, where the capacity
-/// is hard; the growable policy never had that bound.
+/// A pattern past `MAX_KEYEXPR_BYTES` is refused, never truncated, on every policy: by the
+/// row where the capacity is hard, and by the quota the table holds where it grows.
 fn subscriber_pattern_past_the_bound<P: Storage>() {
     use wz_session_core::pubsub::SubscriberRegistry;
     let mut reg: SubscriberRegistry<NoopSampleSink, P> = SubscriberRegistry::default();
     let long = "k".repeat(caps::MAX_KEYEXPR_BYTES + 1);
     let outcome = reg.register_sink(&long, Locality::Any, NoopSampleSink);
-    if P::ENFORCES_CAPACITY {
-        assert_eq!(outcome.err(), Some(RegisterError::KeyexprTooLong));
-        assert_eq!(reg.len(), 0, "a refused pattern leaves the table empty");
-    } else {
-        assert!(outcome.is_ok());
-        assert_eq!(reg.len(), 1);
-    }
+    assert_eq!(outcome.err(), Some(RegisterError::KeyexprTooLong));
+    assert_eq!(reg.len(), 0, "a refused pattern leaves the table empty");
 }
 
 /// An unregistered slot is taken again, and a refused registration leaves no gap in
@@ -155,21 +150,16 @@ fn pending_queries_fill_to_n_and_refuse_at_n_plus_one<P: Storage>() {
 }
 
 /// The keyexpr a pending query is gated on is refused, never truncated, past
-/// `MAX_KEYEXPR_BYTES` where the capacity is hard: a truncated gate would withhold
-/// replies the caller is owed.
+/// `MAX_KEYEXPR_BYTES` on every policy: a truncated gate would withhold replies the
+/// caller is owed.
 fn pending_query_keyexpr_past_the_bound<P: Storage>() {
     use wz_session_core::reply::ReplyRegistry;
     use wz_session_core::reply_acceptance::ReplyAcceptance;
     let long = "k".repeat(caps::MAX_KEYEXPR_BYTES + 1);
     let mut reg: ReplyRegistry<NoopReplySink, P> = ReplyRegistry::default();
     let outcome = reg.register_sink(1, 1, None, ReplyAcceptance::Matching(&long), NoopReplySink);
-    if P::ENFORCES_CAPACITY {
-        assert_eq!(outcome.err(), Some(RegisterError::KeyexprTooLong));
-        assert_eq!(reg.len(), 0);
-    } else {
-        assert!(outcome.is_ok());
-        assert_eq!(reg.len(), 1);
-    }
+    assert_eq!(outcome.err(), Some(RegisterError::KeyexprTooLong));
+    assert_eq!(reg.len(), 0);
 }
 
 /// The liveliness get table: a duplicate interest id is a no-op, and the table is
@@ -239,6 +229,20 @@ mod declarations {
             .collect()
     }
 
+    /// Whether a declaration table of policy `P` refuses the id past `MAX_REMOTE_DECLS`:
+    /// where its capacity is hard, or where the build's quota is that capacity, which a
+    /// fixed build states for a table on the growable policy too.
+    #[cfg(any(
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "liveliness-subscriber"
+    ))]
+    fn held_to_n<P: Storage>() -> bool {
+        P::ENFORCES_CAPACITY
+            || !wz_session_core::limits::MaxRemoteDeclsHeld::default()
+                .admits(caps::MAX_REMOTE_DECLS + 1)
+    }
+
     #[cfg(feature = "declare-subscriber")]
     pub(crate) mod subscribers {
         use super::*;
@@ -249,7 +253,8 @@ mod declarations {
         }
 
         /// The id past `MAX_REMOTE_DECLS` is refused and counted where the capacity is
-        /// hard, taken where it is not; the ids that fit are all there either way.
+        /// hard or the build's quota is the capacity, taken where neither refuses; the ids
+        /// that fit are all there either way.
         pub(crate) fn fills_to_n_and_refuses_at_n_plus_one<P: Storage>() {
             let mut table: RemoteSubscriberTable<NoopDeclSink, NoopUndeclSink, P> =
                 RemoteSubscriberTable::default();
@@ -262,7 +267,7 @@ mod declarations {
                     MappingSpaces::for_aliases::<P>(&aliases, None),
                 );
             }
-            if P::ENFORCES_CAPACITY {
+            if held_to_n::<P>() {
                 assert_eq!(
                     (peer.declared_count(), peer.refusals()),
                     (caps::MAX_REMOTE_DECLS, 1)
@@ -326,7 +331,7 @@ mod declarations {
                     MappingSpaces::for_aliases::<P>(&aliases, None),
                 );
             }
-            if P::ENFORCES_CAPACITY {
+            if held_to_n::<P>() {
                 assert_eq!(
                     (peer.declared_count(), peer.refusals()),
                     (caps::MAX_REMOTE_DECLS, 1)
@@ -392,7 +397,7 @@ mod declarations {
                     MappingSpaces::for_aliases::<P>(&aliases, None),
                 );
             }
-            if P::ENFORCES_CAPACITY {
+            if held_to_n::<P>() {
                 assert_eq!((peer.count(), peer.refusals()), (caps::MAX_REMOTE_DECLS, 1));
             } else {
                 assert_eq!(

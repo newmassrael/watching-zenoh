@@ -21,14 +21,19 @@
 //! and when a place comes back) lives here once, and every engine that creates the resource
 //! asks it.
 //!
-//! # `0` is no bound
+//! # The bound
 //!
-//! A limit of `0` means unlimited. That is upstream's behaviour, which has no such bound, so it
-//! is the default of every quota-limited resource (as a policy defaults to upstream's behaviour,
-//! always), and it is why a limit that is a quota is not read like the
-//! capacity limits of `caps`, where `0` would mean a table of no rows.
+//! The bound is the value of a limit, a [`crate::limit_binding::Quota`], so a quota here means
+//! what a limit's quota means everywhere: [`crate::limit_binding::Quota::UNBOUNDED`] is no bound
+//! and a number is the most it admits, `0` admitting nothing. No bound is upstream's behaviour,
+//! which has no such bound, so it is the default of every quota-limited resource. An interface
+//! that writes no bound as `0` (a field of a C struct) converts the number at that interface,
+//! once, and never hands the `0` on.
 
-/// The bound is reached: the holder asked for one more place than the quota allows.
+use crate::limit_binding;
+
+/// The bound is reached: the holder asked for one more place than the quota allows. Only a quota
+/// with a number refuses, so the bound reached is always that number.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QuotaExceeded {
     /// The bound that was reached.
@@ -38,35 +43,23 @@ pub struct QuotaExceeded {
 /// A bound on live holders, and how many there are.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Quota {
-    limit: usize,
+    limit: limit_binding::Quota,
     live: usize,
 }
 
 impl Quota {
-    /// A quota of `limit` live holders; `0` is no bound.
-    pub const fn new(limit: usize) -> Self {
+    /// A quota of `limit` live holders.
+    pub const fn new(limit: limit_binding::Quota) -> Self {
         Self { limit, live: 0 }
     }
 
     /// No bound: every acquire is granted.
     pub const fn unlimited() -> Self {
-        Self::new(0)
+        Self::new(limit_binding::Quota::UNBOUNDED)
     }
 
-    /// The tighter of two limits, each `0` for no bound: a holder bound by both is bound by
-    /// this one. A build's limit is a constant, and `0` on a host, so a caller that narrows it
-    /// by a value of its own asks here rather than taking a `min` that `0` would turn into no
-    /// place at all.
-    pub const fn tighter(a: usize, b: usize) -> usize {
-        match (a, b) {
-            (0, limit) | (limit, 0) => limit,
-            (a, b) if a < b => a,
-            (_, b) => b,
-        }
-    }
-
-    /// The bound; `0` is none.
-    pub const fn limit(&self) -> usize {
+    /// The bound.
+    pub const fn limit(&self) -> limit_binding::Quota {
         self.limit
     }
 
@@ -75,20 +68,24 @@ impl Quota {
         self.live
     }
 
-    /// Change the bound; `0` is none. Places already taken stay taken: a bound lowered under
-    /// the live count refuses every acquire until enough places are released, and takes none
-    /// back from the holders.
-    pub fn set_limit(&mut self, limit: usize) {
+    /// Change the bound. Places already taken stay taken: a bound lowered under the live count
+    /// refuses every acquire until enough places are released, and takes none back from the
+    /// holders.
+    pub fn set_limit(&mut self, limit: limit_binding::Quota) {
         self.limit = limit;
     }
 
     /// Take one place, or say the bound is reached. A refusal changes nothing.
     pub fn try_acquire(&mut self) -> Result<(), QuotaExceeded> {
-        if self.limit != 0 && self.live >= self.limit {
-            return Err(QuotaExceeded { limit: self.limit });
+        match self.limit.most() {
+            Some(most) if !self.limit.admits(self.live.saturating_add(1)) => {
+                Err(QuotaExceeded { limit: most })
+            }
+            _ => {
+                self.live += 1;
+                Ok(())
+            }
         }
-        self.live += 1;
-        Ok(())
     }
 
     /// Give one place back. Giving back a place that was never taken is a defect of the
@@ -107,9 +104,13 @@ impl Quota {
 mod tests {
     use super::*;
 
+    fn at_most(most: usize) -> Quota {
+        Quota::new(limit_binding::Quota::at_most(most))
+    }
+
     #[test]
     fn a_quota_grants_up_to_its_limit_and_refuses_the_next() {
-        let mut quota = Quota::new(3);
+        let mut quota = at_most(3);
         for taken in 1..=3 {
             assert_eq!(quota.try_acquire(), Ok(()));
             assert_eq!(quota.live(), taken);
@@ -119,17 +120,8 @@ mod tests {
     }
 
     #[test]
-    fn the_tighter_of_two_limits_reads_zero_as_no_bound() {
-        assert_eq!(Quota::tighter(0, 0), 0, "neither bounds");
-        assert_eq!(Quota::tighter(0, 4), 4);
-        assert_eq!(Quota::tighter(4, 0), 4);
-        assert_eq!(Quota::tighter(3, 4), 3);
-        assert_eq!(Quota::tighter(4, 3), 3);
-    }
-
-    #[test]
     fn a_released_place_can_be_taken_again() {
-        let mut quota = Quota::new(1);
+        let mut quota = at_most(1);
         assert_eq!(quota.try_acquire(), Ok(()));
         assert!(quota.try_acquire().is_err());
         quota.release();
@@ -139,11 +131,11 @@ mod tests {
 
     #[test]
     fn a_bound_lowered_under_the_live_count_takes_no_place_back() {
-        let mut quota = Quota::new(3);
+        let mut quota = at_most(3);
         for _ in 0..3 {
             assert_eq!(quota.try_acquire(), Ok(()));
         }
-        quota.set_limit(1);
+        quota.set_limit(limit_binding::Quota::at_most(1));
         assert_eq!(quota.live(), 3, "the holders keep their places");
         assert_eq!(quota.try_acquire(), Err(QuotaExceeded { limit: 1 }));
         quota.release();
@@ -158,20 +150,37 @@ mod tests {
     }
 
     #[test]
-    fn a_limit_of_zero_is_no_bound() {
+    fn an_unbounded_quota_grants_every_acquire() {
         let mut quota = Quota::unlimited();
-        assert_eq!(quota, Quota::new(0));
+        assert_eq!(quota, Quota::new(limit_binding::Quota::UNBOUNDED));
         for _ in 0..10_000 {
             assert_eq!(quota.try_acquire(), Ok(()));
         }
         assert_eq!(quota.live(), 10_000);
-        assert_eq!(quota.limit(), 0);
+        assert_eq!(quota.limit(), limit_binding::Quota::UNBOUNDED);
+    }
+
+    #[test]
+    fn a_quota_of_zero_admits_nothing() {
+        let mut quota = at_most(0);
+        assert_eq!(quota.try_acquire(), Err(QuotaExceeded { limit: 0 }));
+        assert_eq!(quota.live(), 0, "a refusal takes no place");
+    }
+
+    #[test]
+    fn a_bound_raised_to_none_grants_what_the_number_refused() {
+        let mut quota = at_most(1);
+        assert_eq!(quota.try_acquire(), Ok(()));
+        assert!(quota.try_acquire().is_err());
+        quota.set_limit(limit_binding::Quota::UNBOUNDED);
+        assert_eq!(quota.try_acquire(), Ok(()));
+        assert_eq!(quota.live(), 2);
     }
 
     #[test]
     fn the_places_of_one_quota_are_not_another_quotas() {
-        let mut first = Quota::new(1);
-        let mut second = Quota::new(1);
+        let mut first = at_most(1);
+        let mut second = at_most(1);
         assert_eq!(first.try_acquire(), Ok(()));
         assert_eq!(second.try_acquire(), Ok(()));
     }
@@ -180,6 +189,6 @@ mod tests {
     #[should_panic(expected = "released that was never taken")]
     #[cfg(debug_assertions)]
     fn releasing_a_place_that_was_never_taken_stops_a_debug_build() {
-        Quota::new(2).release();
+        at_most(2).release();
     }
 }

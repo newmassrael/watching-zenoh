@@ -96,11 +96,13 @@ fn fixture_params() -> SessionInitParams {
         keep_alive: wz_runtime_tokio::session_glue::KeepAliveConf::default(),
         initial_sn: 0x42,
         cookie: vec![0xDE, 0xAD, 0xBE, 0xEF, 0x77],
-        tx_queue: wz_runtime_tokio::session_glue::TxQueueConf::of_policy(
+        tx_queue: wz_runtime_tokio::session_glue::TxQueueConf::of_snapshot(
             &wz_session_core::policy::SessionPolicy::defaults(),
+            &wz_session_core::limits::SessionLimits::BUILD,
         ),
         link_rx: wz_runtime_tokio::session_glue::LinkRxConf::default(),
         policy: wz_session_core::policy::SessionPolicy::defaults(),
+        limits: wz_session_core::limits::SessionLimits::BUILD,
         cookie_signing_key: SigningKey::new(vec![0xAB; 32]).expect("32-byte test key valid"),
     }
 }

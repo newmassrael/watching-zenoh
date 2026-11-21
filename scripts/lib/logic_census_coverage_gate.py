@@ -249,37 +249,55 @@ def file_findings(file_rows: list[tuple[str, str, str]], files: list[str],
     return out
 
 
-def check() -> int:
-    table = REPO_ROOT / TABLE
+class LostSubject(Exception):
+    """A table missing or read as empty, or a tree with no crate: the gate has nothing to judge,
+    which is never a pass."""
+
+
+def coverage(root: Path = REPO_ROOT) -> tuple[list[str], dict[str, int]]:
+    """Every finding of both levels, and the counts of what is placed. Raises `LostSubject` when
+    the crate table is missing or a population reads as empty. `completeness_gate.py` reads the
+    findings as the census's unplaced count."""
+    table = root / TABLE
     if not table.is_file():
-        print(f"logic-census-coverage: FAIL -- {TABLE} is missing", file=sys.stderr)
-        return 1
+        raise LostSubject(f"{TABLE} is missing")
     rows, bad = parse_table(table.read_text(encoding="utf-8"))
-    crates = tracked_crates(REPO_ROOT)
+    crates = tracked_crates(root)
     if not rows or not crates:
-        print("logic-census-coverage: FAIL -- read "
-              f"{len(rows)} row(s) and {len(crates)} tracked crate(s); the gate lost its "
-              "subject and must not pass over an empty population", file=sys.stderr)
-        return 1
+        raise LostSubject(f"read {len(rows)} row(s) and {len(crates)} tracked crate(s); the gate "
+                          "lost its subject and must not pass over an empty population")
     slice_text = {p.stem: p.read_text(encoding="utf-8")
-                  for p in (REPO_ROOT / CENSUS_DIR).glob("S*.md")}
+                  for p in (root / CENSUS_DIR).glob("S*.md")}
     found = bad + findings(rows, crates, slice_text)
-    file_table = REPO_ROOT / FILE_TABLE
+    file_table = root / FILE_TABLE
+    file_rows: list[tuple[str, str, str]] = []
+    files: list[str] = []
     if not file_table.is_file():
         found.append(f"{FILE_TABLE} is missing")
-        file_rows: list[tuple[str, str, str]] = []
-        files: list[str] = []
     else:
         file_rows, file_bad = parse_table(file_table.read_text(encoding="utf-8"))
-        files = tracked_files(REPO_ROOT, rows)
+        files = tracked_files(root, rows)
         if not file_rows or not files:
-            print("logic-census-coverage: FAIL -- read "
-                  f"{len(file_rows)} file row(s) and {len(files)} tracked file(s); the gate "
-                  "lost its subject and must not pass over an empty population",
-                  file=sys.stderr)
-            return 1
+            raise LostSubject(f"read {len(file_rows)} file row(s) and {len(files)} tracked "
+                              "file(s); the gate lost its subject and must not pass over an "
+                              "empty population")
         found += file_bad + file_findings(file_rows, files, rows, slice_rows(slice_text),
                                           slice_text)
+    counts = {
+        "crates": len(crates),
+        "crates_excluded": sum(1 for _, w, _ in rows if w.startswith("excluded:")),
+        "files": len(files),
+        "files_excluded": sum(1 for _, w, _ in file_rows if w.startswith("excluded:")),
+    }
+    return found, counts
+
+
+def check() -> int:
+    try:
+        found, counts = coverage()
+    except LostSubject as exc:
+        print(f"logic-census-coverage: FAIL -- {exc}", file=sys.stderr)
+        return 1
     if found:
         print("logic-census-coverage: FAIL -- a crate or a file is outside the logic census "
               "unseen:", file=sys.stderr)
@@ -290,11 +308,11 @@ def check() -> int:
               f"row in {FILE_TABLE}; the header of each table says what a row holds.",
               file=sys.stderr)
         return 1
-    excluded = sum(1 for _, w, _ in rows if w.startswith("excluded:"))
-    files_excluded = sum(1 for _, w, _ in file_rows if w.startswith("excluded:"))
-    print(f"logic-census-coverage: ok -- {len(crates)} crate(s): {len(crates) - excluded} "
-          f"read by a slice, {excluded} excluded with a reason; {len(files)} file(s) of "
-          f"those crates: {len(files) - files_excluded} cited by a slice's rows, "
+    crates, excluded = counts["crates"], counts["crates_excluded"]
+    files, files_excluded = counts["files"], counts["files_excluded"]
+    print(f"logic-census-coverage: ok -- {crates} crate(s): {crates - excluded} "
+          f"read by a slice, {excluded} excluded with a reason; {files} file(s) of "
+          f"those crates: {files - files_excluded} cited by a slice's rows, "
           f"{files_excluded} excluded with a reason")
     return 0
 

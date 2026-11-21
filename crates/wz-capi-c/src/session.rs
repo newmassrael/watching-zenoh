@@ -119,6 +119,17 @@ impl SessionHandle {
         }
     }
 
+    /// The limits the session runs under, as its open resolved them: the registry's or the
+    /// node's. An entity declared on the session takes its own limits from here.
+    #[cfg(feature = "rx-callback-offload")]
+    pub(crate) fn session_limits(&self) -> &wz_session_core::limits::SessionLimits {
+        match self {
+            Self::Registry(state) => state.shared.session_limits(),
+            #[cfg(feature = "router-node")]
+            Self::Node(node) => node.session_limits(),
+        }
+    }
+
     /// What the session applies itself above its links, as its open compiled it from the
     /// configuration: the registry's or the node's, read the same way.
     pub(crate) fn session_defaults(&self) -> &wz_capi_core::session_defaults::SessionDefaults {
@@ -340,7 +351,8 @@ fn refusal_code(refusal: OpenRefusal) -> ZResult {
         | OpenRefusal::PluginHostNotInBuild
         | OpenRefusal::Aggregation
         | OpenRefusal::StatsNotInBuild
-        | OpenRefusal::Policies => Z_EINVAL,
+        | OpenRefusal::Policies
+        | OpenRefusal::ConnectPastLimit => Z_EINVAL,
         OpenRefusal::QosWithLowlatency
         | OpenRefusal::GossipTarget
         | OpenRefusal::NothingToDial
@@ -353,10 +365,15 @@ fn refusal_code(refusal: OpenRefusal) -> ZResult {
 /// What this ABI decides about an open, beyond what the config says.
 ///
 /// zenoh's own bounded queue and waits: this ABI stands for zenoh-c. The queue carries two
-/// policies, taken from `policy`, the plan's snapshot.
-fn abi_choices(shm_clients: OpenShmClients, policy: &SessionPolicy) -> AbiChoices {
+/// policies, taken from `policy`, and the window of one of them, taken from `limits`: the plan's
+/// snapshots.
+fn abi_choices(
+    shm_clients: OpenShmClients,
+    policy: &SessionPolicy,
+    limits: &wz_session_core::limits::SessionLimits,
+) -> AbiChoices {
     AbiChoices {
-        tx_queue: TxQueueConf::of_policy(policy),
+        tx_queue: TxQueueConf::of_snapshot(policy, limits),
         // zenoh-c has no switch for a session's read task: its runtime drives the session from
         // the open.
         start_read_task: true,
@@ -535,7 +552,7 @@ pub(crate) unsafe fn open_session(
     // without `router-node`.
     #[cfg(feature = "router-node")]
     let node = plan.node_role(plan.role);
-    let choices = abi_choices(shm_clients, &plan.session_policy);
+    let choices = abi_choices(shm_clients, &plan.session_policy, &plan.session_limits);
     // Mutable only where a shared-memory client set or a time base re-takes the stance below.
     #[allow(unused_mut)]
     let mut arguments = plan.into_arguments(choices);
@@ -1145,9 +1162,89 @@ mod policy_document_tests {
         }
     }
 
+    /// The session limits of the registry of faces `handle` is: what the open handed its tables.
+    fn limits_of(handle: &SessionHandle) -> wz_session_core::limits::SessionLimits {
+        match handle {
+            SessionHandle::Registry(state) => *state.shared.session_limits(),
+            #[cfg(feature = "router-node")]
+            SessionHandle::Node(_) => {
+                panic!("a peer that listens and keeps no south apart opens as the registry")
+            }
+        }
+    }
+
+    /// Open a peer as [`open_inserting`] does, with `inserts`, and compare what the session runs
+    /// under with what `expected` states: a member a node takes reaches the session's limits, and
+    /// one it refuses fails the open as a refused configuration and opens nothing.
+    ///
+    /// # Safety
+    /// As [`open_inserting`].
+    unsafe fn open_held_to(
+        name: &str,
+        inserts: &[(&str, &str)],
+        expected: &wz_session_core::limit_corpus::Expected,
+    ) {
+        let (code, mut session) = open_inserting(inserts);
+        if !expected.is_selected() {
+            assert_eq!(code, Z_EINVAL, "{name}");
+            assert!(
+                session_handle(z_session_loan(&session)).is_none(),
+                "{name}: a refused open leaves the gravestone"
+            );
+            return;
+        }
+        assert_eq!(code, Z_OK, "{name}");
+        let handle = session_handle(z_session_loan(&session)).expect("the open made a session");
+        let held = expected.check_session(&limits_of(handle));
+        let _ = z_close(z_session_loan_mut(&mut session), std::ptr::null_mut());
+        z_session_drop((&mut session as *mut z_owned_session_t).cast::<z_moved_session_t>());
+        if let Err(why) = held {
+            panic!("{name}: {why}");
+        }
+    }
+
+    /// The limits stated by inserting `wz/limits`, or each `wz/limits/<id>` on its own, reach the
+    /// session the open makes, for each member of the corpus every door is held to, as a node
+    /// reads it: a limit the build does not have, a value that is no whole number, a value its
+    /// domain leaves out and a limit only the build decides fail the open.
+    #[test]
+    fn a_session_runs_under_the_limits_its_inserts_state() {
+        use wz_session_core::limit_corpus::cases;
+
+        for case in cases() {
+            // SAFETY: as above; the session a taken member opens is closed by the helper.
+            unsafe {
+                open_held_to(
+                    case.name,
+                    &[("wz/limits", case.limits.as_str())],
+                    &case.node,
+                );
+            }
+            let by_key: Vec<(String, String)> = case
+                .node
+                .selected()
+                .iter()
+                .map(|(limit, value)| {
+                    let value = wz_session_core::limit_corpus::json5_value(*value);
+                    (format!("wz/limits/{limit}"), value)
+                })
+                .collect();
+            if by_key.is_empty() {
+                continue;
+            }
+            let inserts: Vec<(&str, &str)> = by_key
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str()))
+                .collect();
+            // SAFETY: as above.
+            unsafe { open_held_to(case.name, &inserts, &case.node) };
+        }
+    }
+
     /// An insert the member stores and the resolution refuses fails the open with the code of a
     /// configuration refused for what it states: a value the policy does not have, a policy the
-    /// build does not have, a profile it does not have, and a member that is no object.
+    /// build does not have, a profile it does not have, a member that is no object, and a limit
+    /// the build does not have.
     #[test]
     fn a_refused_insert_fails_the_open_as_a_refused_configuration() {
         for refused in [
@@ -1155,7 +1252,7 @@ mod policy_document_tests {
             ("wz/policies/no-such-policy", r#""on""#),
             ("wz/profile", r#""no-such-profile""#),
             ("wz", r#""upstream""#),
-            ("wz/limits", "{}"),
+            ("wz/limits", "{ NO_SUCH_LIMIT: 1 }"),
         ] {
             // SAFETY: as above; the open makes no session, so there is none to close.
             unsafe {

@@ -14,6 +14,7 @@ fn stamping_node(zid: &[u8]) -> NodeHlc {
         WhatAmI::Router,
         TimestampingEnabled::default(),
         &SessionPolicy::defaults(),
+        &wz_session_core::limits::RuntimeLimits::BUILD,
     )
 }
 
@@ -95,6 +96,7 @@ fn a_non_stamping_node_falls_the_stamper_back_to_the_wall_clock() {
         WhatAmI::Peer,
         TimestampingEnabled::default(),
         &SessionPolicy::defaults(),
+        &wz_session_core::limits::RuntimeLimits::BUILD,
     );
     assert!(!off.is_stamping(), "the zenoh default gates a peer off");
     let stamper = FallbackStamp::new(zid.clone(), off);

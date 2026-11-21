@@ -25,6 +25,14 @@
 //! field changes meaning or goes; the minor when one is added, a field always at the end of its
 //! struct. A library written against major M and minor N runs over a core of major M and minor N
 //! or later.
+//!
+//! The major version is also the name of a function the core exports, `wz_ext_interface_major_1`
+//! for major 1. The doors of the additional features call it, so a library of them built apart
+//! from the core (`docs/capi-pico-additional-library.md`) names it among its imports, and the
+//! system's loader refuses to load that library over a core of another major version before any
+//! door runs. A minor version adds functions, which that library imports by name too, so a core
+//! older than its minor version is refused the same way. `wz_ext_additional_interface` asks both
+//! at run time.
 
 use core::ffi::c_void;
 use core::mem::size_of;
@@ -35,11 +43,13 @@ use crate::ffi::{guarded, InCallback};
 use crate::result::{ZResult, Z_EINVAL, Z_ERR_NULL, Z_OK};
 #[cfg(feature = "query")]
 use crate::session::{session_handle, z_loaned_session_t};
+#[cfg(feature = "query")]
+use wz_session_core::limit_binding::Quota;
 
 /// The major version of this interface.
 pub const WZ_EXT_INTERFACE_MAJOR: u16 = 1;
 /// The minor version of this interface.
-pub const WZ_EXT_INTERFACE_MINOR: u16 = 0;
+pub const WZ_EXT_INTERFACE_MINOR: u16 = 1;
 
 /// `replay_reply_shape` of the session facts: one reply per frame, as it was sent.
 pub const WZ_EXT_REPLAY_SHAPE_FRAME_PER_SAMPLE: u8 = 0;
@@ -60,8 +70,8 @@ pub struct wz_ext_interface_version_t {
     pub minor: u16,
 }
 
-/// What the core says of a session that a door of the additional features reads. 24 bytes on a
-/// 64-bit target, 20 on a 32-bit one.
+/// What the core says of a session that a door of the additional features reads. 32 bytes on a
+/// 64-bit target, 24 on a 32-bit one.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct wz_ext_session_facts_t {
@@ -81,6 +91,18 @@ pub struct wz_ext_session_facts_t {
     pub reserved: [u8; 7],
     /// How many queries one querier of the session may have in flight at once, 0 for no bound.
     pub querier_max_pending_queries: usize,
+    /// How many frames one instance's ring of a replay cache made on the session may keep
+    /// (`REPLAY_DEPTH_MAX`), 0 for no bound. Added in minor version 1.
+    pub replay_depth_max: usize,
+}
+
+/// `quota` as a count of this interface, whose fields write no bound as `0`: the number, or `0`
+/// for none. A quota of `0`, which admits nothing, has no count of its own here; no open of this
+/// ABI holds a session to it, for a document that states a bound as `0` is refused and the build
+/// reads its `0` as no bound.
+#[cfg(feature = "query")]
+fn count_of_quota(quota: Quota) -> usize {
+    quota.most().unwrap_or(0)
 }
 
 /// Whether a caller's struct of `stated` bytes holds every field this version writes into `T`.
@@ -117,6 +139,13 @@ pub unsafe extern "C" fn wz_ext_interface_version(out: *mut wz_ext_interface_ver
         };
         Z_OK
     })
+}
+
+/// The major version of this interface, exported under a name that carries it: a library that calls
+/// it cannot be loaded over a core of another major version, whose function has another name.
+#[no_mangle]
+pub extern "C" fn wz_ext_interface_major_1() -> u16 {
+    WZ_EXT_INTERFACE_MAJOR
 }
 
 /// Write what the core says of `session` into `out`, whose `struct_size` the caller has set. A
@@ -163,7 +192,10 @@ pub unsafe extern "C" fn wz_ext_interface_session_facts(
             },
             targeted_query: u8::from(crate::get_to_peer::targeted_by(policy)),
             reserved: [0; 7],
-            querier_max_pending_queries: wz_session_core::caps::QUERIER_MAX_PENDING_QUERIES,
+            querier_max_pending_queries: count_of_quota(
+                handle.ext.limits.querier_max_pending_queries(),
+            ),
+            replay_depth_max: count_of_quota(handle.ext.limits.replay_depth_max()),
         };
         Z_OK
     })
@@ -239,7 +271,23 @@ mod tests {
             core::mem::offset_of!(wz_ext_session_facts_t, querier_max_pending_queries),
             16
         );
-        assert_eq!(size_of::<wz_ext_session_facts_t>(), 16 + size_of::<usize>());
+        assert_eq!(
+            core::mem::offset_of!(wz_ext_session_facts_t, replay_depth_max),
+            16 + size_of::<usize>()
+        );
+        assert_eq!(
+            size_of::<wz_ext_session_facts_t>(),
+            16 + 2 * size_of::<usize>()
+        );
+    }
+
+    #[test]
+    fn the_function_named_by_the_major_version_answers_it() {
+        assert_eq!(wz_ext_interface_major_1(), WZ_EXT_INTERFACE_MAJOR);
+        assert_eq!(
+            WZ_EXT_INTERFACE_MAJOR, 1,
+            "a new major version renames wz_ext_interface_major_1 with its number"
+        );
     }
 
     #[test]
@@ -317,6 +365,7 @@ mod tests {
             targeted_query: 7,
             reserved: [7; 7],
             querier_max_pending_queries: 7,
+            replay_depth_max: 7,
         };
         let mut facts = blank;
         // SAFETY: a local the doors may write, a null session and a gravestone's loan.
@@ -352,6 +401,14 @@ mod tests {
                 ..blank
             }
         );
+    }
+
+    #[cfg(feature = "query")]
+    #[test]
+    fn a_quota_is_written_as_a_count_whose_zero_is_no_bound() {
+        assert_eq!(count_of_quota(Quota::UNBOUNDED), 0);
+        assert_eq!(count_of_quota(Quota::at_most(7)), 7);
+        assert_eq!(count_of_quota(Quota::at_most(1)), 1);
     }
 
     #[test]

@@ -293,6 +293,7 @@ mod tests {
             TimestampingEnabled::all(true),
             SystemEpoch,
             &wz_runtime_tokio::policy::SessionPolicy::defaults(),
+            &wz_runtime_tokio::limits::RuntimeLimits::BUILD,
         )
         .with_trusted_only_stamping(true);
         assert!(

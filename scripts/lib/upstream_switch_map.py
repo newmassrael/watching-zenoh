@@ -68,6 +68,14 @@ against zenoh-c's `default` features. A capability neither reaches (the query pl
 zenoh-c, which has no switch for it) is judged in the declaration alone, and the run
 names the zenoh-pico ones.
 
+## The limits' upstream counterparts
+
+A limit's zenoh counterpart is the key of zenoh's configuration its `[limit.upstream]` names
+(`wz_config.py` holds the key to upstream's configuration and the citations to their anchored
+form). Its zenoh-pico counterpart is not stated in the limit: it is the value switch whose `maps`
+row anchors to it (`limit:<ID>`), derived here from the rows (`limit_upstreams`). A limit is the
+value of at most one pico switch, which `limit_arm` holds.
+
 ## What this does NOT claim
 
 That a `maps` or `always` capability is as DEEP as upstream's: that is the depth axis
@@ -354,6 +362,34 @@ def value_arm(decl: dict, rows: tuple[tuple[str, str, str | None, str], ...],
     return failures
 
 
+def limit_upstreams(decl: dict) -> dict[str, dict]:
+    """Each limit's counterparts upstream: `zenoh`, the key of zenoh's configuration its
+    `[limit.upstream]` names (None where it names none), and `pico`, the zenoh-pico value switches
+    whose `maps` row anchors to it, in row order. The pico side is read from the rows, where it is
+    written once."""
+    pico: dict[str, list[str]] = {}
+    for switch, lid in wz_config.limit_rows(decl):
+        pico.setdefault(lid, []).append(switch)
+    out: dict[str, dict] = {}
+    for lim in decl["limits"]:
+        zenoh = lim.get("upstream", {}).get("zenoh")
+        out[lim["id"]] = {"zenoh": None if zenoh == wz_config.LIMIT_UPSTREAM_NONE else zenoh,
+                          "pico": pico.get(lim["id"], [])}
+    return out
+
+
+def limit_arm(decl: dict) -> list[str]:
+    """Is each limit the value of at most one zenoh-pico switch? A pico `config.h` that stated two
+    would give the limit two numbers, of which the header's reader (`wz_config.pico_limit_values`)
+    keeps the last."""
+    failures: list[str] = []
+    for lid, sides in sorted(limit_upstreams(decl).items()):
+        if len(sides["pico"]) > 1:
+            failures.append(f"zenoh-pico: limit {lid} is the value of {len(sides['pico'])} switches "
+                            f"({', '.join(sides['pico'])}); a pico config.h states one number for it")
+    return failures
+
+
 def pico_switches(source: Path) -> tuple[str, set[str]]:
     """(version, switches) of a zenoh-pico source tree: its `Z_FEATURE_*` switches. Its value
     switches are `pico_value_defaults`'s, and the population is the two together."""
@@ -535,6 +571,15 @@ def report(table: str, rows: tuple[tuple[str, str, str | None, str], ...]) -> No
         print(f"    -- NEVER by name: {', '.join(never)}")
 
 
+def report_limits(decl: dict) -> None:
+    sides = limit_upstreams(decl).values()
+    zenoh = sum(1 for s in sides if s["zenoh"])
+    pico = sum(1 for s in sides if s["pico"])
+    own = sum(1 for s in sides if not s["zenoh"] and not s["pico"])
+    print(f"  upstream-switch-map: limits: {len(sides)} -- {zenoh} with a zenoh key, {pico} with a "
+          f"zenoh-pico switch, {own} with neither")
+
+
 # ── selftest ────────────────────────────────────────────────────────────────
 
 
@@ -705,6 +750,23 @@ def selftest() -> int:
         if got_ok != want_ok:
             print(f"  selftest FAIL [{label}]: expected {'pass' if want_ok else 'FAIL'}", file=sys.stderr)
             return 1
+    # A limit's two sides: the zenoh key its declaration names, and the pico switches whose rows
+    # anchor to it.
+    ldecl = {"limits": [{"id": "MCAST", "upstream": {"zenoh": "transport/link/tx/batch_size"}},
+                        {"id": "OWN", "upstream": {"zenoh": "none", "reason": "x"}}],
+             "switches": as_switches((("BATCH_MULTICAST_SIZE", "maps", "limit:MCAST", "x"),
+                                      ("Z_FEATURE_QUERY", "maps", "wz-capi-pico/query", "x")))}
+    want_sides = {"MCAST": {"zenoh": "transport/link/tx/batch_size", "pico": ["BATCH_MULTICAST_SIZE"]},
+                  "OWN": {"zenoh": None, "pico": []}}
+    if limit_upstreams(ldecl) != want_sides or limit_arm(ldecl) != []:
+        print(f"  selftest FAIL [a limit's sides, the pico one read from the rows]: "
+              f"{limit_upstreams(ldecl)} {limit_arm(ldecl)}", file=sys.stderr)
+        return 1
+    two_switches = {**ldecl, "switches": ldecl["switches"] + as_switches(
+        (("BATCH_UNICAST_SIZE", "maps", "limit:MCAST", "x"),))}
+    if limit_arm(two_switches) == []:
+        print("  selftest FAIL [a limit two pico switches anchor to]: ACCEPTED", file=sys.stderr)
+        return 1
     limit_row = (("BATCH_MULTICAST_SIZE", "maps", "limit:MCAST", "a number"),)
     if shape_arm("t", limit_row, features, frozenset({"MCAST"})) != [] \
             or shape_arm("t", limit_row, features, frozenset()) == []:
@@ -802,7 +864,7 @@ def selftest() -> int:
     print(
         f"  upstream-switch-map: selftest {len(shape_cases)} shape + {len(decl_cases)} declaration "
         f"+ {len(default_cases) + 2} default + {len(up_cases)} upstream + {len(value_cases) + 1} value "
-        f"case(s) and the readers pass"
+        f"+ 2 limit case(s) and the readers pass"
     )
     return 0
 
@@ -833,6 +895,8 @@ def main() -> int:
         report(table, rows)
         failures += shape_arm(table, rows, features, frozenset(lim["id"] for lim in decl["limits"]))
     failures += declaration_arm(decl)
+    failures += limit_arm(decl)
+    report_limits(decl)
 
     try:
         if args.zenoh_c:

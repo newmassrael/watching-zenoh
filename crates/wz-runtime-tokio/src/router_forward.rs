@@ -3350,6 +3350,10 @@ pub struct RouterForwarder {
     /// sharing, its link admission, the rule for a second link to one node) read them here and
     /// never from the build.
     policy: wz_session_core::policy::SessionPolicy,
+    /// The snapshot of the session limits the node's creator resolved, the one its sessions are
+    /// handed ([`Self::with_limits`]); the build's until it is stated. The replies a hosted
+    /// queryable writes are staged under its reply bounds.
+    limits: wz_session_core::limits::SessionLimits,
     /// R311y450 — THIS router's §5.18 wall-clock HLC, the source of the
     /// forward-path timestamp [`route_push`](Self::route_push) applies. A distinct
     /// axis from `clock` above (that one is the opaque MONOTONIC clock for query
@@ -4623,7 +4627,7 @@ impl RouterForwarder {
         } else {
             &full
         };
-        let mut replies = wz_session_core::reply_stage::ReplyStage::new();
+        let mut replies = wz_session_core::reply_stage::ReplyStage::held_to(self.reply_bounds());
         {
             let mut responder = QueryResponder::new(
                 full.rid(),
@@ -4771,7 +4775,8 @@ impl RouterForwarder {
     }
 
     /// The forwarder of a node of role `node_mode`, whose machines read `policy`, the snapshot
-    /// the node's creator resolved from its configuration.
+    /// the node's creator resolved from its configuration, and whose clock is bounded by the
+    /// `CLOCK_MAX_FORWARD_STEP_MS` of `limits`, the runtime limits the creator resolved.
     ///
     /// The role decides the hats the node runs:
     ///
@@ -4803,6 +4808,7 @@ impl RouterForwarder {
         self_zid: Zid,
         timestamping: crate::node_clock::TimestampingEnabled,
         policy: &wz_session_core::policy::SessionPolicy,
+        limits: &wz_session_core::limits::RuntimeLimits,
     ) -> Self {
         Self::build(
             node_mode,
@@ -4810,12 +4816,14 @@ impl RouterForwarder {
             Box::new(Instant::now),
             timestamping,
             policy,
+            limits,
         )
     }
 
     /// The snapshot a forwarder made by [`new`](Self::new) or [`with_clock`](Self::with_clock),
     /// which are handed none, resolves: the build defaults, until a run-time document is read
-    /// here. A node whose creator holds its own snapshot is made by [`Self::for_node`].
+    /// here. Such a forwarder runs under the build's runtime limits as well. A node whose creator
+    /// holds its own snapshots is made by [`Self::for_node`].
     fn resolve_policy() -> wz_session_core::policy::SessionPolicy {
         wz_session_core::policy::SessionPolicy::defaults()
     }
@@ -4823,6 +4831,19 @@ impl RouterForwarder {
     /// The snapshot of this node's policies.
     pub fn policy(&self) -> &wz_session_core::policy::SessionPolicy {
         &self.policy
+    }
+
+    /// Hold the node's own machines to `limits`, the snapshot of session limits its creator
+    /// resolved, the one its sessions are handed (builder): the replies a hosted queryable writes
+    /// are staged under the bounds it states. A forwarder not handed one holds the build's.
+    pub fn with_limits(mut self, limits: &wz_session_core::limits::SessionLimits) -> Self {
+        self.limits = *limits;
+        self
+    }
+
+    /// The bounds a hosted queryable's replies are staged under ([`Self::with_limits`]).
+    fn reply_bounds(&self) -> wz_session_core::reply_stage::ReplyBounds {
+        wz_session_core::reply_stage::ReplyBounds::of(&self.limits)
     }
 
     /// R2626 — set zenoh's `timestamping.drop_future_timestamp` (builder).
@@ -5063,6 +5084,7 @@ impl RouterForwarder {
             clock,
             crate::node_clock::TimestampingEnabled::default(),
             &Self::resolve_policy(),
+            &wz_session_core::limits::RuntimeLimits::BUILD,
         )
     }
 
@@ -5072,7 +5094,7 @@ impl RouterForwarder {
     }
 
     /// The forwarder of a client node ([`for_node`](Self::for_node) at Client) with the shipped
-    /// `timestamping.enabled` map and the build's snapshot.
+    /// `timestamping.enabled` map and the build's snapshots.
     #[cfg(test)]
     fn client(self_zid: Zid) -> Self {
         Self::for_node(
@@ -5080,6 +5102,7 @@ impl RouterForwarder {
             self_zid,
             crate::node_clock::TimestampingEnabled::default(),
             &wz_session_core::policy::SessionPolicy::defaults(),
+            &wz_session_core::limits::RuntimeLimits::BUILD,
         )
     }
 
@@ -5093,18 +5116,20 @@ impl RouterForwarder {
             clock,
             crate::node_clock::TimestampingEnabled::default(),
             &Self::resolve_policy(),
+            &wz_session_core::limits::RuntimeLimits::BUILD,
         )
     }
 
     /// The inner constructor every public constructor funnels through, so the
     /// field initialiser lives ONCE (only the monotonic clock, the
-    /// `timestamping.enabled` map and the node's snapshot vary).
+    /// `timestamping.enabled` map and the node's snapshots vary).
     fn build(
         node_mode: WhatAmI,
         self_zid: Zid,
         clock: Box<dyn Fn() -> Instant + Send + Sync>,
         timestamping: crate::node_clock::TimestampingEnabled,
         policy: &wz_session_core::policy::SessionPolicy,
+        limits: &wz_session_core::limits::RuntimeLimits,
     ) -> Self {
         Self {
             // Shared as the snapshot's `routing-table-sharing` value says; a test names the other
@@ -5143,12 +5168,14 @@ impl RouterForwarder {
             // enables, which is why the stamp is live on a router by default.
             // R2112 (open-debt item 102) — and the map is now the HOST's, so a
             // config document that says otherwise reaches the gate instead of
-            // stopping at the reader. Its `clock-quality-stamping` policy is the node's snapshot's.
+            // stopping at the reader. Its `clock-quality-stamping` policy is the node's snapshot's,
+            // and its bound the node's runtime limits'.
             node_hlc: crate::node_clock::NodeHlc::for_node_by(
                 self_zid.as_slice(),
                 node_mode,
                 timestamping,
                 policy,
+                limits,
             ),
             #[cfg(feature = "pubsub-ts-stack")]
             interception_source: std::sync::OnceLock::new(),
@@ -5235,6 +5262,7 @@ impl RouterForwarder {
             trees_delay: Self::DEFAULT_TREES_DELAY,
             clock,
             policy: *policy,
+            limits: wz_session_core::limits::SessionLimits::BUILD,
         }
     }
 }
@@ -12326,7 +12354,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let Some(to) = self.pending.guard().peek(LOCAL_FACE, record.qid) else {
             return;
         };
-        let mut replies = wz_session_core::reply_stage::ReplyStage::new();
+        let mut replies =
+            wz_session_core::reply_stage::ReplyStage::held_to(self.fwd.reply_bounds());
         {
             let mut responder = QueryResponder::new(
                 to.rid,
@@ -24660,6 +24689,7 @@ mod tests {
             zid(0x01),
             map,
             &wz_session_core::policy::SessionPolicy::defaults(),
+            &wz_session_core::limits::RuntimeLimits::BUILD,
         );
         let (client, _sc) = face(zid(0xAA), WIRE_CLIENT);
         let (peer_sub, sink_peer) = face(zid(0xBB), WIRE_PEER);
@@ -24747,6 +24777,7 @@ mod tests {
             zid(0x01),
             crate::node_clock::TimestampingEnabled::default(),
             &wz_session_core::policy::SessionPolicy::defaults(),
+            &wz_session_core::limits::RuntimeLimits::BUILD,
         );
         let (client, _sc) = face(zid(0xAA), WIRE_CLIENT); // publishing client
         let (peer_sub, sink_peer) = face(zid(0xCC), WIRE_PEER); // peers_net subscriber
@@ -24816,6 +24847,7 @@ mod tests {
             crate::node_clock::TimestampingEnabled::default(),
             FrozenEpoch,
             &wz_session_core::policy::SessionPolicy::defaults(),
+            &wz_session_core::limits::RuntimeLimits::BUILD,
         )
         // The policy that stamps whatever the build states: under `trusted-only` an
         // unreferenced clock judges nothing, and neither arm would absorb.
@@ -30720,13 +30752,15 @@ mod tests {
                 batch_size: 2_048,
                 is_qos: false,
                 compression: false,
-                tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(
+                tx_queue: wz_session_core::session_init_params::TxQueueConf::of_snapshot(
                     &wz_session_core::policy::SessionPolicy::defaults(),
+                    &wz_session_core::limits::SessionLimits::BUILD,
                 ),
                 link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
                 join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
                 max_sessions: None,
                 policy: wz_session_core::policy::SessionPolicy::defaults(),
+                limits: wz_session_core::limits::SessionLimits::BUILD,
             },
         )
     }

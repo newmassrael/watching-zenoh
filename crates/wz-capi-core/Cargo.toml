@@ -265,6 +265,11 @@ message-catalog = []
 # (`wz-capi-pico/message-payload`), so this feature only carries the capability's name, as
 # `e2e-sender`'s does.
 message-payload = []
+# The object pools. The model has nothing behind them: the pools are the pico ABI's own
+# (`wz-capi-pico/object-pool`, `wz-capi-pico/object-pool-region`), so these features only carry
+# the capabilities' names, as `e2e-sender`'s does.
+object-pool = []
+object-pool-region = ["object-pool"]
 # A transport the program supplies: every link a session opens goes over the program's own network
 # stack, through the calls of its port, and over no socket of the system's. The model threads the
 # transport from the stance to each dial and listen config (`OpenStance::app_transport`); the

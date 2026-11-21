@@ -457,8 +457,11 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "the two gate together is `channel::HOST_KEY_SLOTS`, the number of keys the host build's "
         "key store holds (`host-lock` selects the host configuration, `vendored` builds it), "
         "which this crate's own tests hold to the library's store (`tests.rs` and "
-        "`tests/key_store_exhaustion.rs`)",
-        frozenset({"host-lock", "vendored"}),
+        "`tests/key_store_exhaustion.rs`). `session-slot` (with `alloc`) selects the slot form of "
+        "the cooperative engine's task, and what it gates off, `CountedTlsListener` and "
+        "`TlsDial::listen_counted`, is the heap form's accept counting that the cooperative "
+        "engine's listener calls, run by its `stream` tests",
+        frozenset({"host-lock", "vendored", "session-slot"}),
     ),
     "wz-capi-port": (
         "the port between a wz C ABI and its engine: a workspace-internal rlib with no path a C "
@@ -616,11 +619,17 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # default, as upstream has no such doors. It and `instance-key` each gate
         # `pub mod proto_file` (either one is enough), whose one public item is the
         # `wz_ext_proto_file_t` struct both take, declared in `wz_ext.h`.
+        # `object-pool` gates `pub mod object_pool`, whose public items are wz's own doors
+        # `wz_ext_object_pool_bytes`, `_reserve`, `_class` and `_release`, the
+        # `WZ_EXT_OBJECT_POOL_CLASSES` constant and the two structs they take, declared in
+        # `wz_ext.h`; `object-pool-region` gates its `wz_ext_object_pool_place` door inside it. Off
+        # by default, as upstream has no such doors.
         # Each of `e2e-sender`, `e2e-receiver`, `e2e-supervision`, `instance-key`,
         # `message-catalog` and `replay-cache` also gates `pub mod ext_interface`, the versioned
         # interface the doors of those capabilities reach the core through, whose public items are
         # wz's own doors `wz_ext_interface_version`, `_session_facts`, `_bytes_view` and
-        # `_run_in_callback`, and the types and constants they take, declared in `wz_ext.h`.
+        # `_run_in_callback`, and the types and constants they take, declared in `wz_ext.h`; and
+        # `pub mod additional`, whose public item is wz's own door `wz_ext_additional_interface`.
         # `session-memory` gates `pub mod session_memory`, whose public items are wz's own doors
         # `wz_ext_session_memory` and `wz_ext_session_memory_row` and the two structs they write,
         # declared in `wz_ext.h`; off by default, as upstream has no such doors.
@@ -639,6 +648,8 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "instance-key",
                 "message-catalog",
                 "message-payload",
+                "object-pool",
+                "object-pool-region",
                 "remote-declaration-watch",
                 "replay-cache",
                 "resource-snapshot",
@@ -648,6 +659,33 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "shared-key-ids",
                 "supervision",
                 "time-base",
+            }
+        ),
+    ),
+    # The second form of the pico C ABI (docs/capi-pico-additional-library.md): the doors of the
+    # additional capabilities compiled again, by `#[path]`, from `wz-capi-pico`'s own door files
+    # into a library of their own over the core library. Each feature here is `wz-capi-pico`'s of
+    # that name: `e2e-sender`, `e2e-receiver`, `e2e-supervision`, `instance-key`,
+    # `message-catalog`, `message-payload` and `replay-cache` gate the `pub mod` of their door
+    # files, and each of them but `message-payload` gates `pub mod additional` too; `event-ring`
+    # and `replay-cache` gate the modules of `src/core_view.rs`, the core's C ABI as the doors
+    # import it, and their re-exports at the crate root, where the door files name them. A `#[path]` module, an inline module and a re-export are
+    # shapes `ABI_CONTRACT` refuses, so the row is held to `PROSE_ONLY` below.
+    "wz-capi-pico-ext": (
+        "a C ABI library built as a `cdylib` alone, so no Rust consumer can take a dependency on "
+        "it and name a path; its exports are the doors of `wz-capi-pico`'s own files, which that "
+        "package's row holds to `ABI_CONTRACT`, and `additional_view_tests` in that crate holds "
+        "what it imports of the core to the core's declarations",
+        frozenset(
+            {
+                "e2e-receiver",
+                "e2e-sender",
+                "e2e-supervision",
+                "event-ring",
+                "instance-key",
+                "message-catalog",
+                "message-payload",
+                "replay-cache",
             }
         ),
     ),
@@ -1636,10 +1674,17 @@ FAMILY_DIFFERENTIAL_MANIFEST = ROOT / "conformance" / "differential" / "Cargo.to
 #
 # `wz-tls-mbedtls` as well: who consumes the crate (the cooperative engine and the deploy images)
 # is a claim no predicate above holds a row to.
+#
+# `wz-capi-pico-ext` too: its row's reason is that the crate is a `cdylib` alone whose exports are
+# `wz-capi-pico`'s door files compiled again. `ABI_CONTRACT` reads a gated `pub mod` in the file
+# beside the crate root and refuses a re-export, and this crate's door modules are `#[path]` files
+# of the other crate and its view of the core an inline module re-exported at the root, so no
+# predicate above holds the row; the doors themselves are held under `wz-capi-pico`.
 PROSE_ONLY: frozenset[str] = frozenset(
     {
         "wz-capi-core",
         "wz-capi-coop",
+        "wz-capi-pico-ext",
         "wz-capi-port",
         "wz-host-net",
         "wz-ext-pubsub",

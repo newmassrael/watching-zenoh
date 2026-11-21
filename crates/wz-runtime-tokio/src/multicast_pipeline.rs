@@ -456,7 +456,6 @@ impl Link {
             multicast_tx_conduit, multicast_tx_droppable, multicast_tx_push,
             multicast_tx_push_batched, MulticastTxConduit, MulticastTxTally,
         };
-        use wz_session_core::tx_deadline::PushOutcome;
         #[cfg_attr(not(feature = "routing-namespace"), allow(unused_mut))]
         let mut item = item;
         // §5.21 routing-namespace — the one egress chokepoint every producer's
@@ -483,17 +482,18 @@ impl Link {
                 self.lanes.link_room(band, wait)
             })
         } else {
-            Some(
-                self.stages[band as usize]
-                    .lock()
-                    .expect("multicast stage poisoned"),
-            )
+            Ok(self.stages[band as usize]
+                .lock()
+                .expect("multicast stage poisoned"))
         };
-        let Some(mut stage) = stage else {
-            if let Some(pushed) = self.pushed.as_ref() {
-                let _ = pushed.send((tally, PushOutcome::Congested));
+        let mut stage = match stage {
+            Ok(stage) => stage,
+            Err(dropped) => {
+                if let Some(pushed) = self.pushed.as_ref() {
+                    let _ = pushed.send((tally, dropped));
+                }
+                return Ok(dropped);
             }
-            return Ok(PushOutcome::Congested);
         };
         let inside = SenderInside::mark(sender);
         let Stage { sn, window, queued } = &mut *stage;
@@ -587,11 +587,12 @@ impl Drop for SenderInside<'_> {
 /// The stage of a droppable push: taken when it is free. While another holds it, what the push
 /// does is the queue profile's (`TxQueueConf::held_drop`): zenoh's asks the lane for room itself
 /// with `ask`, without the stage and out of its `wait_before_drop`, and is a congestion drop
-/// (`None`) when there is none within it, while room means the holder is about to let go and the
-/// stage is tried again; pico's is dropped at once, asking nothing, when the holder is another
-/// push (`sender`), as pico's try-lock fails only on a lock another send holds, and waits for a
-/// holder that is not one. What the waits spent comes off `conf`'s `wait_before_drop_us`, so the
-/// push spends one deadline in all.
+/// (`PushOutcome::Congested`) when there is none within it, while room means the holder is about
+/// to let go and the stage is tried again; pico's is dropped at once, asking nothing, when the
+/// holder is another push (`sender`), as pico's try-lock fails only on a lock another send holds
+/// (`PushOutcome::Held`, which its sender is told of), and waits for a holder that is not one.
+/// What the waits spent comes off `conf`'s `wait_before_drop_us`, so the push spends one deadline
+/// in all.
 #[cfg(any(
     feature = "codec-push",
     feature = "codec-response",
@@ -603,19 +604,20 @@ fn droppable_stage<'a>(
     sender: &std::sync::atomic::AtomicBool,
     conf: &mut wz_session_core::session_init_params::TxQueueConf,
     mut ask: impl FnMut(wz_session_core::link::RoomWait) -> wz_session_core::link::RoomAnswer,
-) -> Option<std::sync::MutexGuard<'a, Stage>> {
+) -> Result<std::sync::MutexGuard<'a, Stage>, wz_session_core::tx_deadline::PushOutcome> {
     use wz_session_core::link::{LinkRoom, RoomWait};
     use wz_session_core::session_init_params::HeldDrop;
+    use wz_session_core::tx_deadline::PushOutcome;
     loop {
         match stage.try_lock() {
-            Ok(stage) => return Some(stage),
+            Ok(stage) => return Ok(stage),
             Err(std::sync::TryLockError::Poisoned(_)) => panic!("multicast stage poisoned"),
             Err(std::sync::TryLockError::WouldBlock) => {}
         }
         if conf.held_drop == HeldDrop::DropAtOnce {
             // Only behind another push (`sender`); a holder that is not one lets go once done.
             if sender.load(std::sync::atomic::Ordering::SeqCst) {
-                return None;
+                return Err(PushOutcome::Held);
             }
             std::hint::spin_loop();
             continue;
@@ -625,7 +627,7 @@ fn droppable_stage<'a>(
         });
         conf.wait_before_drop_us = conf.wait_before_drop_us.saturating_sub(answer.waited_us);
         if answer.room == LinkRoom::Congested {
-            return None;
+            return Err(PushOutcome::Congested);
         }
         std::hint::spin_loop();
     }
@@ -1035,7 +1037,10 @@ impl MulticastTxPlane {
                 wz_session_core::tx_deadline::PushOutcome::Pushed => {
                     stats.network_message_sent(&tally)
                 }
-                wz_session_core::tx_deadline::PushOutcome::Congested => {
+                // A push dropped behind a held stage is a congestion drop as well, which the
+                // pico profile tells its sender of.
+                wz_session_core::tx_deadline::PushOutcome::Congested
+                | wz_session_core::tx_deadline::PushOutcome::Held => {
                     stats.network_message_dropped(&tally)
                 }
             }
@@ -1234,11 +1239,11 @@ impl Drop for MulticastTxPlane {
     }
 }
 
-/// The pacing of a group's transmit task: `P`'s, for the `datagram-fragment-pacing` value of the
-/// snapshot the group's parameters carry. [`OfBuild`](crate::datagram_pacing::OfBuild) is the
-/// writer's in production; a test names the pacing it observes.
+/// The pacing of a group's transmit task: `P`'s, for the `datagram-fragment-pacing` value and the
+/// burst and gap of the snapshots the group's parameters carry. [`OfBuild`](crate::datagram_pacing::OfBuild)
+/// is the writer's in production; a test names the pacing it observes.
 fn group_writer_pacing<P: crate::datagram_pacing::Pacing>(params: &MulticastParams) -> P {
-    P::of_policy(&params.policy)
+    P::of_snapshot(&params.policy, &params.limits)
 }
 
 #[cfg(test)]
@@ -1300,11 +1305,15 @@ mod writer_pacing_tests {
             batch_size: 2_048,
             is_qos: false,
             compression: false,
-            tx_queue: TxQueueConf::of_policy(&policy),
+            tx_queue: TxQueueConf::of_snapshot(
+                &policy,
+                &wz_session_core::limits::SessionLimits::BUILD,
+            ),
             link_rx: LinkRxConf::default(),
             join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
             max_sessions: None,
             policy,
+            limits: wz_session_core::limits::SessionLimits::BUILD,
         }
     }
 
@@ -1324,6 +1333,91 @@ mod writer_pacing_tests {
             let pacing: ByPolicy = group_writer_pacing(&params(policy));
             assert_eq!(pacing.is_paced(), paced, "{value:?}");
         }
+    }
+
+    /// The waits a group's transmit task under `params` asks before one fragment past `burst`,
+    /// written back to back.
+    fn group_waits(params: &MulticastParams, burst: usize) -> Vec<Option<std::time::Duration>> {
+        let mut pacing: crate::datagram_pacing::Paced = group_writer_pacing(params);
+        crate::datagram_pacing::fragment_waits(&mut pacing, burst + 1)
+    }
+
+    /// `params` of a group whose session states `limits`.
+    fn params_under(limits: wz_session_core::limits::SessionLimits) -> MulticastParams {
+        MulticastParams {
+            limits,
+            ..params(SessionPolicy::defaults())
+        }
+    }
+
+    /// `DATAGRAM_FRAGMENT_BURST` with nothing stated: a group's transmit task lets the build's
+    /// burst through back to back and holds the next fragment the gap.
+    #[tokio::test(start_paused = true)]
+    async fn datagram_fragment_burst_with_nothing_stated_paces_a_group_writer_by_the_build() {
+        let burst = wz_session_core::caps::DATAGRAM_FRAGMENT_BURST;
+        assert_eq!(
+            group_waits(&params(SessionPolicy::defaults()), burst),
+            crate::datagram_pacing::burst_then_gap(
+                burst,
+                wz_session_core::caps::DATAGRAM_FRAGMENT_GAP_US
+            )
+        );
+    }
+
+    /// `DATAGRAM_FRAGMENT_BURST` stated as two in the group's limits: its transmit task holds the
+    /// third fragment the gap.
+    #[tokio::test(start_paused = true)]
+    async fn datagram_fragment_burst_stated_is_the_burst_a_group_writer_uses() {
+        use wz_session_core::limit_binding::LimitSpec;
+        let mut limits = wz_session_core::limits::SessionLimits::BUILD;
+        let stated = limits.select_datagram_fragment_burst(2);
+        if wz_session_core::limits::DatagramFragmentBurst::DOMAIN.is_singleton() {
+            // A build that keeps the build's value alone refuses the statement itself.
+            assert!(stated.is_err());
+            return;
+        }
+        stated.expect("two is inside the domain");
+        assert_eq!(
+            group_waits(&params_under(limits), 2),
+            crate::datagram_pacing::burst_then_gap(
+                2,
+                wz_session_core::caps::DATAGRAM_FRAGMENT_GAP_US
+            )
+        );
+    }
+
+    /// `DATAGRAM_FRAGMENT_GAP_US` with nothing stated: the fragment past the burst of a group's
+    /// transmit task waits the build's gap.
+    #[tokio::test(start_paused = true)]
+    async fn datagram_fragment_gap_us_with_nothing_stated_paces_a_group_writer_by_the_build() {
+        let burst = wz_session_core::caps::DATAGRAM_FRAGMENT_BURST;
+        let waits = group_waits(&params(SessionPolicy::defaults()), burst);
+        assert_eq!(
+            waits.last().copied().flatten(),
+            Some(std::time::Duration::from_micros(
+                wz_session_core::caps::DATAGRAM_FRAGMENT_GAP_US as u64
+            ))
+        );
+    }
+
+    /// `DATAGRAM_FRAGMENT_GAP_US` stated as 500 in the group's limits: the fragment past the
+    /// burst of its transmit task waits 500 microseconds.
+    #[tokio::test(start_paused = true)]
+    async fn datagram_fragment_gap_us_stated_is_the_gap_a_group_writer_uses() {
+        use wz_session_core::limit_binding::LimitSpec;
+        let mut limits = wz_session_core::limits::SessionLimits::BUILD;
+        let stated = limits.select_datagram_fragment_gap_us(500);
+        if wz_session_core::limits::DatagramFragmentGapUs::DOMAIN.is_singleton() {
+            // A build that keeps the build's value alone refuses the statement itself.
+            assert!(stated.is_err());
+            return;
+        }
+        stated.expect("500 is inside the domain");
+        let burst = wz_session_core::caps::DATAGRAM_FRAGMENT_BURST;
+        assert_eq!(
+            group_waits(&params_under(limits), burst),
+            crate::datagram_pacing::burst_then_gap(burst, 500)
+        );
     }
 }
 
@@ -1358,12 +1452,16 @@ mod tests {
                 sizes: [1; Priority::NUM],
                 wait_before_drop_us: 1_000,
                 wait_before_close_us: CLOSE_WAIT.as_micros() as u64,
-                ..TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults())
+                ..TxQueueConf::of_snapshot(
+                    &wz_session_core::policy::SessionPolicy::defaults(),
+                    &wz_session_core::limits::SessionLimits::BUILD,
+                )
             },
             link_rx: LinkRxConf::default(),
             join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
             max_sessions: None,
             policy: wz_session_core::policy::SessionPolicy::defaults(),
+            limits: wz_session_core::limits::SessionLimits::BUILD,
         }
     }
 
@@ -1544,20 +1642,26 @@ mod tests {
         let mut asked = Vec::new();
 
         // Answered as congested, so a push that asked would end here too and show in `asked`.
-        let mut pico = TxQueueConf::pico_of_policy(&SessionPolicy::defaults());
+        let mut pico = TxQueueConf::pico_of_snapshot(
+            &SessionPolicy::defaults(),
+            &wz_session_core::limits::SessionLimits::BUILD,
+        );
         let taken = droppable_stage(&stage, &sender, &mut pico, |wait| {
             asked.push(wait);
             RoomAnswer::at_once(LinkRoom::Congested)
         });
         assert!(
-            taken.is_none(),
-            "a stage another push holds drops the push at once"
+            matches!(taken, Err(PushOutcome::Held)),
+            "a stage another push holds drops the push at once, and its sender is told"
         );
         assert!(asked.is_empty(), "the lane was asked {asked:?}");
 
         let mut zenoh = TxQueueConf {
             wait_before_drop_us: 1_000,
-            ..TxQueueConf::of_policy(&SessionPolicy::defaults())
+            ..TxQueueConf::of_snapshot(
+                &SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD,
+            )
         };
         let taken = droppable_stage(&stage, &sender, &mut zenoh, |wait| {
             asked.push(wait);
@@ -1566,7 +1670,10 @@ mod tests {
                 waited_us: 1_000,
             }
         });
-        assert!(taken.is_none(), "no room within the wait");
+        assert!(
+            matches!(taken, Err(PushOutcome::Congested)),
+            "no room within the wait is a congestion drop, answered as sent"
+        );
         assert_eq!(
             asked,
             [RoomWait::Drop { wait_us: 1_000 }],
@@ -1601,13 +1708,16 @@ mod tests {
         });
         let started = Instant::now();
         let mut asked = 0usize;
-        let mut pico = TxQueueConf::pico_of_policy(&SessionPolicy::defaults());
+        let mut pico = TxQueueConf::pico_of_snapshot(
+            &SessionPolicy::defaults(),
+            &wz_session_core::limits::SessionLimits::BUILD,
+        );
         let taken = droppable_stage(&stage, &not_a_push, &mut pico, |_| {
             asked += 1;
             RoomAnswer::at_once(LinkRoom::Congested)
         });
         assert!(
-            taken.is_some(),
+            taken.is_ok(),
             "the push waited for the holder and took the stage"
         );
         assert!(
@@ -1618,6 +1728,50 @@ mod tests {
         assert_eq!(asked, 0, "the lane was asked for room");
         releaser.join().expect("the releaser");
         holder.join().expect("the holder");
+    }
+
+    /// Under the pico profile a droppable push whose stage a blocking push holds, waiting for room
+    /// on the full lane, is answered `Held`, which its sender is told of, where a congestion drop
+    /// is answered `Congested`, which a multicast put answers as sent; the blocking push still
+    /// waits out its own deadline.
+    #[test]
+    fn under_the_pico_profile_a_push_behind_another_push_is_answered_held() {
+        use wz_session_core::policy::SessionPolicy;
+        let mut pico = params(false);
+        pico.tx_queue = TxQueueConf {
+            sizes: [1; Priority::NUM],
+            // `fill` pushes droppable messages until one finds no room, each within this wait.
+            wait_before_drop_us: 1_000,
+            wait_before_close_us: CLOSE_WAIT.as_micros() as u64,
+            ..TxQueueConf::pico_of_snapshot(
+                &SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD,
+            )
+        };
+        let (producer, tap) = MulticastTxTap::attach(&pico);
+        fill(&producer, Priority::DEFAULT);
+        let waiting = producer.clone();
+        let blocked = std::thread::spawn(move || {
+            waiting.push(terminal(Priority::DEFAULT, CongestionControl::Block))
+        });
+        until_held(&tap, Priority::DEFAULT);
+
+        let started = Instant::now();
+        let outcome = producer.push(terminal(Priority::DEFAULT, CongestionControl::Drop));
+        let took = started.elapsed();
+        assert_eq!(outcome, Ok(PushOutcome::Held));
+        assert!(
+            took < CLOSE_WAIT / 3,
+            "a push behind another push waited {took:?}"
+        );
+        assert!(
+            !blocked.is_finished(),
+            "CONTROL: the blocking push still held the stage"
+        );
+        assert_eq!(
+            blocked.join().expect("blocked pusher"),
+            Ok(PushOutcome::Congested)
+        );
     }
 
     /// A held stage alone is not congestion: while its lane has room, a droppable push waits for

@@ -39,7 +39,8 @@ use wz_session_core::app_link_table::{
 };
 #[cfg(any(feature = "transport-link-udp", feature = "transport-multicast"))]
 use wz_session_core::app_link_table::{DatagramRead, Received};
-pub use wz_session_core::app_transport::{AppPort, AppTransport, TableLock};
+pub use wz_session_core::app_transport::{AppPort, AppTransport, SessionTransport, TableLock};
+use wz_session_core::limit_binding::Quota;
 use wz_session_core::link::LinkKind;
 
 use crate::link_interfaces::{addressless_link_endpoints, addressless_link_subject};
@@ -66,8 +67,8 @@ impl TableLock for HostTableLock {
     }
 }
 
-/// A transport over `port`, under the host's lock, whose links queue at most the build's
-/// `APP_LINK_QUEUE_BYTES`.
+/// A transport over `port`, under the host's lock. Each link queues at most the
+/// `APP_LINK_QUEUE_BYTES` of the session that opens it ([`SessionTransport`]).
 pub fn host_transport(port: Box<dyn AppPort>) -> Arc<AppTransport> {
     Arc::new(AppTransport::new(
         Box::new(HostTableLock::new(AppLinkTable::new())),
@@ -94,15 +95,16 @@ fn locator_socket(locator: &str) -> Option<SocketAddr> {
     locator_address(locator).parse().ok()
 }
 
-/// Open a link of `kind` for `locator` and wait until the program says it is up. The link is
-/// released (and closed on the program) when the returned guard drops, or when this future is
-/// dropped before it completes.
+/// Open a link of `kind` for `locator`, which queues at most `queue` bytes in each direction, and
+/// wait until the program says it is up. The link is released (and closed on the program) when
+/// the returned guard drops, or when this future is dropped before it completes.
 async fn open_link(
     transport: &Arc<AppTransport>,
     kind: AppLinkKind,
     locator: &str,
+    queue: Quota,
 ) -> io::Result<Arc<AppLinkGuard>> {
-    let handle = transport.begin_open(kind, locator);
+    let handle = transport.begin_open(kind, locator, queue);
     let guard = Arc::new(AppLinkGuard::new(Arc::clone(transport), handle));
     poll_fn(|cx| {
         let progress = transport.with(|table| table.poll_open(handle, Some(cx.waker())));
@@ -119,9 +121,14 @@ async fn open_link(
     Ok(guard)
 }
 
-/// Dial a stream for `locator` (a `tcp/` locator) over the program's stack.
-pub async fn dial_stream(transport: &Arc<AppTransport>, locator: &str) -> io::Result<AppStream> {
-    let guard = open_link(transport, AppLinkKind::StreamDial, locator).await?;
+/// Dial a stream for `locator` (a `tcp/` locator) over the program's stack, which queues at most
+/// `queue` bytes in each direction (the session's `APP_LINK_QUEUE_BYTES`).
+pub async fn dial_stream(
+    transport: &Arc<AppTransport>,
+    locator: &str,
+    queue: Quota,
+) -> io::Result<AppStream> {
+    let guard = open_link(transport, AppLinkKind::StreamDial, locator, queue).await?;
     Ok(AppStream {
         guard,
         local: None,
@@ -129,12 +136,14 @@ pub async fn dial_stream(transport: &Arc<AppTransport>, locator: &str) -> io::Re
     })
 }
 
-/// Listen for streams on `locator` (a `tcp/` locator) over the program's stack.
+/// Listen for streams on `locator` (a `tcp/` locator) over the program's stack; each stream the
+/// program accepts on it queues at most `queue` bytes in each direction.
 pub async fn listen_stream(
     transport: &Arc<AppTransport>,
     locator: &str,
+    queue: Quota,
 ) -> io::Result<AppListener> {
-    let guard = open_link(transport, AppLinkKind::StreamListen, locator).await?;
+    let guard = open_link(transport, AppLinkKind::StreamListen, locator, queue).await?;
     Ok(AppListener {
         guard,
         address: locator_address(locator).to_owned(),
@@ -428,13 +437,15 @@ impl AppListener {
 }
 
 /// Listen for datagrams on `locator` (a `udp/` locator naming no interface) over the program's
-/// stack: the program accepts each source that sends to it as a link of its own.
+/// stack: the program accepts each source that sends to it as a link of its own, which queues at
+/// most `queue` bytes in each direction.
 #[cfg(feature = "transport-link-udp")]
 pub async fn listen_datagram(
     transport: &Arc<AppTransport>,
     locator: &str,
+    queue: Quota,
 ) -> io::Result<AppListener> {
-    let guard = open_link(transport, AppLinkKind::DatagramListen, locator).await?;
+    let guard = open_link(transport, AppLinkKind::DatagramListen, locator, queue).await?;
     Ok(AppListener {
         guard,
         address: locator_address(locator).to_owned(),
@@ -481,13 +492,15 @@ pub struct AppDatagram {
     locator: String,
 }
 
-/// Open a datagram link to `locator` (a `udp/` locator) over the program's stack.
+/// Open a datagram link to `locator` (a `udp/` locator) over the program's stack, which queues at
+/// most `queue` bytes in each direction.
 #[cfg(feature = "transport-link-udp")]
 pub async fn dial_datagram(
     transport: &Arc<AppTransport>,
     locator: &str,
+    queue: Quota,
 ) -> io::Result<AppDatagram> {
-    let guard = open_link(transport, AppLinkKind::Datagram, locator).await?;
+    let guard = open_link(transport, AppLinkKind::Datagram, locator, queue).await?;
     Ok(AppDatagram {
         guard,
         locator: locator.to_owned(),
@@ -608,13 +621,15 @@ pub struct AppGroupDriver {
     group: String,
 }
 
-/// Join the group `locator` names over the program's stack.
+/// Join the group `locator` names over the program's stack; the group's link queues at most
+/// `queue` bytes in each direction.
 #[cfg(feature = "transport-multicast")]
 pub async fn join_group(
     transport: &Arc<AppTransport>,
     locator: &str,
+    queue: Quota,
 ) -> io::Result<AppGroupDriver> {
-    let guard = open_link(transport, AppLinkKind::Group, locator).await?;
+    let guard = open_link(transport, AppLinkKind::Group, locator, queue).await?;
     Ok(AppGroupDriver {
         guard,
         group: format!("udp/{}", locator_address(locator)),
@@ -758,17 +773,16 @@ mod tests {
         }
     }
 
-    fn transport_bounded(bound: usize) -> (Arc<Script>, Arc<AppTransport>) {
+    /// The queue bound of a link whose test does not reach it.
+    const QUEUE: Quota = Quota::at_most(1 << 16);
+
+    fn transport() -> (Arc<Script>, Arc<AppTransport>) {
         let script = Arc::new(Script::default());
         let transport = Arc::new(AppTransport::new(
-            Box::new(HostTableLock::new(AppLinkTable::with_queue_bound(bound))),
+            Box::new(HostTableLock::new(AppLinkTable::new())),
             Box::new(ScriptPort(Arc::clone(&script))),
         ));
         (script, transport)
-    }
-
-    fn transport() -> (Arc<Script>, Arc<AppTransport>) {
-        transport_bounded(1 << 16)
     }
 
     #[test]
@@ -797,7 +811,7 @@ mod tests {
     #[tokio::test]
     async fn a_dialled_stream_writes_through_the_port_and_reads_what_the_program_hands_in() {
         let (script, transport) = transport();
-        let stream = dial_stream(&transport, "tcp/192.0.2.5:7447")
+        let stream = dial_stream(&transport, "tcp/192.0.2.5:7447", QUEUE)
             .await
             .expect("the port answers up");
         let handle = stream.handle();
@@ -822,7 +836,9 @@ mod tests {
     async fn a_partial_send_and_a_would_block_still_deliver_every_byte_in_order() {
         let (script, transport) = transport();
         *script.send_answers.lock().unwrap() = vec![ProgramSend::Wrote(2), ProgramSend::WouldBlock];
-        let stream = dial_stream(&transport, "tcp/192.0.2.5:7447").await.unwrap();
+        let stream = dial_stream(&transport, "tcp/192.0.2.5:7447", QUEUE)
+            .await
+            .unwrap();
         let handle = stream.handle();
         let (_read, mut write) = stream.into_split();
         let writer = tokio::spawn(async move { write.write_all(b"abcdef").await });
@@ -846,7 +862,7 @@ mod tests {
     async fn a_refused_open_is_an_error_and_leaves_no_link() {
         let (script, transport) = transport();
         *script.open_answer.lock().unwrap() = Some(ProgramOpen::Refused);
-        let error = dial_stream(&transport, "tcp/192.0.2.5:7447")
+        let error = dial_stream(&transport, "tcp/192.0.2.5:7447", QUEUE)
             .await
             .err()
             .expect("refused");
@@ -861,7 +877,9 @@ mod tests {
     #[tokio::test]
     async fn dropping_both_halves_closes_the_link_on_the_program() {
         let (script, transport) = transport();
-        let stream = dial_stream(&transport, "tcp/192.0.2.5:7447").await.unwrap();
+        let stream = dial_stream(&transport, "tcp/192.0.2.5:7447", QUEUE)
+            .await
+            .unwrap();
         let handle = stream.handle();
         let (read, write) = stream.into_split();
         drop(read);
@@ -881,7 +899,9 @@ mod tests {
     #[tokio::test]
     async fn a_program_close_ends_the_read_and_fails_the_write() {
         let (_script, transport) = transport();
-        let stream = dial_stream(&transport, "tcp/192.0.2.5:7447").await.unwrap();
+        let stream = dial_stream(&transport, "tcp/192.0.2.5:7447", QUEUE)
+            .await
+            .unwrap();
         let handle = stream.handle();
         let (mut read, mut write) = stream.into_split();
         transport.received(handle, b"x", None).unwrap();
@@ -896,7 +916,7 @@ mod tests {
     #[tokio::test]
     async fn a_listener_hands_out_the_streams_the_program_accepts() {
         let (_script, transport) = transport();
-        let listener = listen_stream(&transport, "tcp/192.0.2.5:7447")
+        let listener = listen_stream(&transport, "tcp/192.0.2.5:7447", QUEUE)
             .await
             .expect("listening");
         assert_eq!(listener.address(), "192.0.2.5:7447");
@@ -917,7 +937,7 @@ mod tests {
         *script.open_answer.lock().unwrap() = Some(ProgramOpen::Pending);
         let dial = {
             let transport = Arc::clone(&transport);
-            tokio::spawn(async move { dial_stream(&transport, "tcp/192.0.2.5:7447").await })
+            tokio::spawn(async move { dial_stream(&transport, "tcp/192.0.2.5:7447", QUEUE).await })
         };
         let handle = loop {
             if let Some((handle, ..)) = script.opens.lock().unwrap().first().cloned() {
@@ -932,8 +952,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_full_stream_tells_the_program_when_the_session_has_read_it_down() {
-        let (script, transport) = transport_bounded(4);
-        let stream = dial_stream(&transport, "tcp/192.0.2.5:7447").await.unwrap();
+        let (script, transport) = transport();
+        let stream = dial_stream(&transport, "tcp/192.0.2.5:7447", Quota::at_most(4))
+            .await
+            .unwrap();
         let handle = stream.handle();
         let (mut read, _write) = stream.into_split();
         transport.received(handle, b"abcd", None).unwrap();
@@ -954,7 +976,7 @@ mod tests {
     async fn a_datagram_link_sends_each_batch_whole_and_reads_each_datagram_with_its_peer() {
         use crate::LinkDriver as _;
         let (script, transport) = transport();
-        let link = dial_datagram(&transport, "udp/192.0.2.6:7447")
+        let link = dial_datagram(&transport, "udp/192.0.2.6:7447", QUEUE)
             .await
             .unwrap();
         let handle = link.guard.handle();
@@ -985,7 +1007,7 @@ mod tests {
     async fn a_datagram_the_program_cuts_fails_the_send() {
         let (script, transport) = transport();
         *script.send_answers.lock().unwrap() = vec![ProgramSend::Wrote(3)];
-        let link = dial_datagram(&transport, "udp/192.0.2.6:7447")
+        let link = dial_datagram(&transport, "udp/192.0.2.6:7447", QUEUE)
             .await
             .unwrap();
         let error = send_datagram(&link.guard, b"abcdef")
@@ -1000,7 +1022,7 @@ mod tests {
         use crate::multicast_glue::MulticastLinkDriver as _;
         use crate::LinkDriver as _;
         let (script, transport) = transport();
-        let mut group = join_group(&transport, "udp/239.7.7.7:7447#iface=lan7")
+        let mut group = join_group(&transport, "udp/239.7.7.7:7447#iface=lan7", QUEUE)
             .await
             .unwrap();
         let handle = group.guard.handle();
