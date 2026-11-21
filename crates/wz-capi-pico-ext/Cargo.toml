@@ -80,6 +80,10 @@ wz-app-frame = { path = "../wz-app-frame", optional = true }
 # The session core's stateless modules the doors name (policies, quotas, the replay and supervision
 # models, the build limits of the additional features): linked by this library for itself.
 wz-session-core = { path = "../wz-session-core", default-features = false, features = ["alloc"] }
+# The host's lock, condition variable, threads and monotonic clock, which the doors take in place of
+# `std`'s in a build without it (`scripts/lib/layer_direction_gate.py`'s `LIBRARY_CRATES`): named
+# here so that the doors' files name the same crate in both libraries that compile them.
+wz-host-sync = { path = "../wz-host-sync" }
 
 [lints]
 workspace = true

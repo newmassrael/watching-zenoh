@@ -285,8 +285,12 @@ BOUNDARY_TOOLKIT: dict[str, frozenset[str]] = {
 # Re-exports of `alloc` for a build without `std`.
 TOOLKIT_MODULES = frozenset({"prelude"})
 
-# The crates of the stack a door may name whole: the additional features' own rules.
-LIBRARY_CRATES = frozenset({"wz_app_frame"})
+# The crates of the stack a door may name whole: the additional features' own rules, and the host's
+# lock, condition variable, threads and monotonic clock (`wz_host_sync`), which a door built
+# without `std` takes in place of `std`'s. That one is a leaf over the system's own calls, with no
+# knowledge of an engine or a session: it is not the engine port, which a door may not name (rule
+# 5), and both libraries that compile the doors link it for themselves.
+LIBRARY_CRATES = frozenset({"wz_app_frame", "wz_host_sync"})
 SESSION_CORE_IDENT = "wz_session_core"
 # The modules of the session core that are libraries a door links for itself: the features'
 # sans-I/O models and pure values, with no session or engine behind them.

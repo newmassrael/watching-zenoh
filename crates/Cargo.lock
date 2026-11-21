@@ -3996,6 +3996,7 @@ dependencies = [
  "wz-codecs",
  "wz-conformance-build",
  "wz-ext-pubsub",
+ "wz-host-sync",
  "wz-node-time",
  "wz-runtime-posix",
  "wz-runtime-tokio",
@@ -4011,6 +4012,7 @@ version = "0.1.0"
 dependencies = [
  "wz-app-frame",
  "wz-cdylib-build",
+ "wz-host-sync",
  "wz-session-core",
 ]
 

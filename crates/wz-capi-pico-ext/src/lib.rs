@@ -28,6 +28,10 @@
 // Every export has the pico C ABI's one safety contract, as the core's crate root states.
 #![allow(clippy::missing_safety_doc)]
 
+// The doors name the heap's types where they live (`alloc`), which a library built without `std`
+// has as one built with it does.
+extern crate alloc;
+
 // The core's result codes: its file, constants only, so both libraries answer the same numbers.
 #[path = "../../wz-capi-pico/src/result.rs"]
 pub mod result;

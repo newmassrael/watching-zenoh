@@ -23,11 +23,16 @@
 #![no_std]
 #![cfg(any(unix, windows))]
 
+// `spawn_fn` carries a closure to its thread on the heap; nothing else here allocates.
+extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+use core::cell::UnsafeCell;
 use core::ffi::c_void;
+use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::time::Duration;
 
 #[cfg(unix)]
 mod unix;
@@ -235,6 +240,180 @@ impl Default for RawCondvar {
     }
 }
 
+/// [`RawCondvar::wait`], and no later than when the monotonic clock reads `deadline_ns`: whether
+/// a notification came (false: the deadline came first).
+///
+/// # Safety
+/// The calling thread holds `lock`.
+unsafe fn raw_wait_until(cv: &RawCondvar, lock: &RawLock, deadline_ns: u64) -> bool {
+    let seen = cv.epoch.load(Ordering::SeqCst);
+    lock.unlock();
+    let notified = park_until(
+        || cv.epoch.load(Ordering::SeqCst) == seen,
+        Some(deadline_ns),
+    );
+    lock.lock();
+    notified
+}
+
+/// A value behind a [`RawLock`], reached through a guard: the shape of `std::sync::Mutex` with
+/// no poisoning (nothing here unwinds), made in a `const` context.
+pub struct Mutex<T> {
+    raw: RawLock,
+    value: UnsafeCell<T>,
+}
+
+// SAFETY: the value is reached only through a guard, and the lock lets one thread hold a guard at
+// a time.
+unsafe impl<T: Send> Sync for Mutex<T> {}
+
+impl<T> Mutex<T> {
+    /// `value`, behind a lock no thread holds.
+    pub const fn new(value: T) -> Self {
+        Self {
+            raw: RawLock::new(),
+            value: UnsafeCell::new(value),
+        }
+    }
+
+    /// Wait until the lock is the calling thread's.
+    pub fn lock(&self) -> MutexGuard<'_, T> {
+        self.raw.lock();
+        MutexGuard { mutex: self }
+    }
+
+    /// The lock, when no thread holds it: `None` without waiting when one does.
+    pub fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
+        if self.raw.try_lock() {
+            Some(MutexGuard { mutex: self })
+        } else {
+            None
+        }
+    }
+
+    /// The value, through the only reference there is.
+    pub fn get_mut(&mut self) -> &mut T {
+        self.value.get_mut()
+    }
+
+    /// The value, the lock gone.
+    pub fn into_inner(self) -> T {
+        self.value.into_inner()
+    }
+}
+
+impl<T: Default> Default for Mutex<T> {
+    fn default() -> Self {
+        Self::new(T::default())
+    }
+}
+
+/// What [`Mutex::lock`] hands back; the lock is let go when it is dropped.
+pub struct MutexGuard<'a, T> {
+    mutex: &'a Mutex<T>,
+}
+
+impl<T> Deref for MutexGuard<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        // SAFETY: the guard holds the lock, so no other reference to the value is live.
+        unsafe { &*self.mutex.value.get() }
+    }
+}
+
+impl<T> DerefMut for MutexGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        // SAFETY: as for `deref`, and `&mut self` makes this the only one.
+        unsafe { &mut *self.mutex.value.get() }
+    }
+}
+
+impl<T> Drop for MutexGuard<'_, T> {
+    fn drop(&mut self) {
+        // SAFETY: this guard holds the lock it lets go.
+        unsafe { self.mutex.raw.unlock() }
+    }
+}
+
+/// A condition variable waited on with a [`Mutex`]'s guard: the shape of `std::sync::Condvar`.
+pub struct Condvar {
+    raw: RawCondvar,
+}
+
+impl Condvar {
+    /// A condition variable no thread waits on.
+    pub const fn new() -> Self {
+        Self {
+            raw: RawCondvar::new(),
+        }
+    }
+
+    /// Let the guard's lock go, wait until notified, and take it again. A wake may come without
+    /// a notification, so the caller waits in a loop on its own condition.
+    pub fn wait<'a, T>(&self, guard: MutexGuard<'a, T>) -> MutexGuard<'a, T> {
+        // SAFETY: the guard holds its lock, which the wait lets go and takes again.
+        unsafe { self.raw.wait(&guard.mutex.raw) };
+        guard
+    }
+
+    /// Wait while `condition` holds of the value, for at most `timeout`: the guard, and whether
+    /// the time ran out with the condition still holding.
+    pub fn wait_timeout_while<'a, T>(
+        &self,
+        mut guard: MutexGuard<'a, T>,
+        timeout: Duration,
+        mut condition: impl FnMut(&mut T) -> bool,
+    ) -> (MutexGuard<'a, T>, bool) {
+        let timeout_ns = u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX);
+        let deadline = monotonic_ns().saturating_add(timeout_ns);
+        while condition(&mut guard) {
+            if monotonic_ns() >= deadline {
+                return (guard, true);
+            }
+            // SAFETY: as in `wait`.
+            unsafe { raw_wait_until(&self.raw, &guard.mutex.raw, deadline) };
+        }
+        (guard, false)
+    }
+
+    /// Wake a waiting thread (every waiter, which their loops allow).
+    pub fn notify_one(&self) {
+        self.raw.notify_one();
+    }
+
+    /// Wake every waiting thread.
+    pub fn notify_all(&self) {
+        self.raw.notify_all();
+    }
+}
+
+impl Default for Condvar {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// A reading of the monotonic clock ([`monotonic_ns`]): the shape of `std::time::Instant`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Instant(u64);
+
+impl Instant {
+    /// The clock now.
+    pub fn now() -> Self {
+        Self(monotonic_ns())
+    }
+
+    /// The time since this reading; zero for a reading not yet passed.
+    pub fn elapsed(&self) -> Duration {
+        Self::now().duration_since(*self)
+    }
+
+    /// The time from `earlier` to this reading; zero when `earlier` is later.
+    pub fn duration_since(&self, earlier: Self) -> Duration {
+        Duration::from_nanos(self.0.saturating_sub(earlier.0))
+    }
+}
+
 /// What a thread [`spawn`] starts runs: the first field of the starter's own record, which the new
 /// thread is handed, so the record is reached from it.
 #[repr(C)]
@@ -295,6 +474,42 @@ pub unsafe fn spawn(start: *mut ThreadStart) -> Option<Thread> {
     sys::spawn(start).map(|(handle, id)| Thread { handle, id })
 }
 
+/// Run `body` on a thread of the system: the thread, or `None` when the system gave none.
+pub fn spawn_fn(body: impl FnOnce() + Send + 'static) -> Option<Thread> {
+    use alloc::boxed::Box;
+
+    type Body = Box<dyn FnOnce() + Send + 'static>;
+
+    /// The record the thread is handed: the start first, so the thread reaches the rest from it.
+    #[repr(C)]
+    struct Boxed {
+        head: ThreadStart,
+        body: Body,
+    }
+
+    /// # Safety
+    /// `head` is the first field of the `Boxed` this function leaked for the thread.
+    unsafe fn run(head: *mut ThreadStart) {
+        let Boxed { body, .. } = *Box::from_raw(head.cast::<Boxed>());
+        body();
+    }
+
+    let record = Box::into_raw(Box::new(Boxed {
+        head: ThreadStart { run },
+        body: Box::new(body),
+    }));
+    // SAFETY: `run` takes the record back once, on the new thread; when no thread runs it is
+    // taken back here.
+    match unsafe { spawn(record.cast::<ThreadStart>()) } {
+        Some(thread) => Some(thread),
+        None => {
+            // SAFETY: as above: no thread took it.
+            drop(unsafe { Box::from_raw(record) });
+            None
+        }
+    }
+}
+
 /// The calling thread's number, by which [`Thread::id`] names a thread a spawn started; never 0.
 pub fn current_thread() -> usize {
     sys::current_thread()
@@ -309,7 +524,6 @@ pub fn sleep_ms(ms: u64) {
 mod tests {
     use super::*;
 
-    use core::cell::UnsafeCell;
     use std::boxed::Box;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
@@ -532,6 +746,67 @@ mod tests {
         }
         sleep_ms(5);
         assert!(monotonic_ns() >= first + 4_000_000);
+    }
+
+    /// A wait that nothing ends waits its timeout and says so; a notification after the value
+    /// changed ends one early, and the condition is read under the lock.
+    #[test]
+    fn a_timed_condvar_wait_waits_its_timeout_and_a_notification_ends_it() {
+        let shared = Arc::new((Mutex::new(false), Condvar::new()));
+        let started = Instant::now();
+        let (guard, timed_out) =
+            shared
+                .1
+                .wait_timeout_while(shared.0.lock(), Duration::from_millis(30), |set| !*set);
+        assert!(timed_out && !*guard);
+        drop(guard);
+        assert!(started.elapsed() >= Duration::from_millis(30));
+        let setter = {
+            let shared = shared.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(20));
+                *shared.0.lock() = true;
+                shared.1.notify_all();
+            })
+        };
+        let (guard, timed_out) =
+            shared
+                .1
+                .wait_timeout_while(shared.0.lock(), Duration::from_secs(5), |set| !*set);
+        assert!(!timed_out && *guard, "the notification ended the wait");
+        drop(guard);
+        setter.join().expect("the setter ran");
+    }
+
+    /// The typed lock excludes and hands its value out, and the monotonic reading moves.
+    #[test]
+    fn the_typed_mutex_and_instant_answer_as_std_s_do() {
+        let mut mutex = Mutex::new(3);
+        *mutex.lock() += 1;
+        assert!(mutex.try_lock().is_some());
+        let held = mutex.lock();
+        assert!(mutex.try_lock().is_none(), "held");
+        drop(held);
+        *mutex.get_mut() += 1;
+        assert_eq!(mutex.into_inner(), 5);
+        let from = super::Instant::now();
+        sleep_ms(5);
+        assert!(from.elapsed() >= Duration::from_millis(4));
+        assert_eq!(from.duration_since(super::Instant::now()), Duration::ZERO);
+    }
+
+    #[test]
+    fn a_closure_runs_on_a_thread_of_its_own() {
+        let seen = Arc::new(AtomicUsize::new(0));
+        let thread = {
+            let seen = seen.clone();
+            spawn_fn(move || seen.store(current_thread(), Ordering::SeqCst))
+                .expect("a host gives a thread")
+        };
+        let id = thread.id();
+        thread.join();
+        assert_eq!(seen.load(Ordering::SeqCst), id);
+        assert_ne!(id, current_thread());
     }
 
     #[test]

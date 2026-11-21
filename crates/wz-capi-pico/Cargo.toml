@@ -137,6 +137,7 @@ os-zephyr = ["dep:wz-capi-coop", "dep:wz-runtime-zephyr", "wz-session-core/no_st
 # selects `std` is refused (`src/lib.rs`), and a build that also names a host engine keeps `std`.
 os-posix = [
     "dep:wz-capi-coop",
+    "dep:wz-host-sync",
     "dep:wz-runtime-posix",
     "wz-capi-coop/host-sys",
     "wz-capi-port/os-sys",
@@ -701,6 +702,9 @@ wz-capi-coop = { path = "../wz-capi-coop", default-features = false, optional = 
 # the one both engines take it from.
 wz-tls-pem = { path = "../wz-tls-pem", optional = true }
 wz-runtime-posix = { path = "../wz-runtime-posix", optional = true }
+# The host's lock, condition variable, threads and monotonic clock without `std` (`os-posix`): what
+# the doors of the additional features hold and wait on there, in place of `std::sync`.
+wz-host-sync = { path = "../wz-host-sync", optional = true }
 # The cooperative engine's host in a Zephyr image (`os-zephyr`): Zephyr's datagram and stream
 # sockets as the session's links on the heap profile, the kernel's tick as its clock, and the
 # board's random source and wall clock. The heap profile (`alloc`), as the engine allocates.
