@@ -584,7 +584,9 @@ where
 /// a session sends to ([`UdpPort`]), which yields a link for each source whose `InitSyn` it takes,
 /// shaped as the stack's links are and run as an acceptor's. The link's socket is the peer's share
 /// of the port, so the session reads that peer's datagrams alone and its replies leave by the port
-/// the peer sent to.
+/// the peer sent to. Each link's buffers are claimed as a dialled link's are, from the session's
+/// tables when it lent the stack some; the port's own read buffer and the datagrams it sorts for
+/// each peer are the heap's either way.
 #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
 struct IpUdpListener<U: DatagramSocket, S, T> {
     port: Rc<UdpPort<U>>,
