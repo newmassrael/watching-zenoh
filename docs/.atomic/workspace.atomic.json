@@ -6241,6 +6241,30 @@
         "Which frame took 384 bytes off the client chains was not attributed; the size tool can now say it.",
         "Whether the parts lower the lane's peak was measured on the fleet (0.8 to 1.5 GB per part) but the fleet's learned figure for the whole lane is a prior, not a reading, until the fleet's own fix lands."
       ]
+    },
+    "Round 4581": {
+      "decision_summary": "The fifth set of the PoC's generic, default-off work lands with the reds it found. The pico C ABI holds its objects in fixed pools with an exhaustion error and memory-area doors, its cooperative engine has a slot profile on the program's own stack, a Windows host carries the group transport and the slot stack, and an allocation that fails at any Nth call is refused cleanly by every door, with no allocation once a session operates. The additional features build as one library or as a core and an additional library from one source, the additional library reaching the core only through its exported functions; a differential wire test holds the two forms to the same bytes, and running it on a build host for the first time found that the additional library's view of the core declared the session and publisher loans with no size, so the replay doors kept empty copies and the core read door memory as a handle; the view now gives both their core size and the layer direction gate refuses a door that holds a view type of no size by value. A droppable publish that finds the session held is dropped per face and owed to the other faces, as zenoh-pico's profile does; the owed queue is taken whole, which kept 3,700 bytes of a drain's code out of every cooperative build. A group's test replies are staged on its transmit stage, the secure channel counts the accepts of its listener, and one protobuf writer serves the capture and the application frames. Two tools no lane exercised are repaired: the performance matrix had lost its reference builder in a merge and measured nothing, and the Windows package was never built because its script read cargo's UTF-8 output with the runner's code page; each now has a selftest in Layer C0. The app-plane oracle lane binds the party's key-wire form and dictionary to its lane file and refuses a mismatch instead of timing out.",
+      "changes_bullets": [
+        "`wz-capi-pico`: object pools and slots with exhaustion errors and memory doors; the slot profile of the cooperative engine; allocation-fault injection tests; the core view of the additional library sized for the two loans its doors copy.",
+        "`wz-capi-pico-ext` (new): the additional library over the core's exported functions; `scripts/pico-additional-forms.sh`; the differential wire test armed in Layer Epico (`WZ_PICO_FORMS_REQUIRE`).",
+        "`wz-capi-coop`: per-face drop of a held publish with an owed queue taken whole; group test replies on the transmit stage.",
+        "`wz-runtime-posix`: the Windows group transport and slot stack; `wz-tls-mbedtls`: a counted listener; `wz-app-frame`: one protobuf writer.",
+        "Gates: capability budgets of nine cooperative cases moved by the measured cost; layer direction rule 8; feature census rows; logic census rows for the pools; armed-oracle row; lane-feature membership of the pico stability lane; the perf matrix and the Windows packager selftests in C0; the packager reads tool output as UTF-8; the oracle lane binds the party's key wire."
+      ],
+      "verification_bullets": [
+        "On one build host, the integration tree: crate tests of wz-session-core, -mcu, wz-runtime-posix, wz-capi-coop, wz-capi-pico (default and the view-test feature sets), -c, the allocation-fault tests, the TLS crate, clippy of six crates and of the additional library, the non-default test census, Layers Qzk (every kit image built under its gates and both clients held under zenoh-pico), S (stability) and Epico (the two library forms put the same bytes on the wire).",
+        "Capability cost: the nine cooperative cases measured against main on one host, +8.3K to +8.9K after the owed queue change took 3,700 off each; each budget moved by its own measured delta.",
+        "The app-plane oracle lane against the deployment's party, literal and shared key wires, with and without the party echoing the cookie: 3 checks and 14 aspects PASS each time the party is built in the lane file's form.",
+        "Every round-fed gate of the pre-push hook and gate 2f, run locally after the last change; the selftests of the perf matrix, the packager, the oracle lane, the cost gate and the armed-oracle census."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "Hosted Windows package jobs read as soft until two green runs; the soft-job meta gate on its own branch will hold that promise.",
+        "The worst-case memory report (branch poc-q4-worst-memory) waits for the runtime-config session's limits landing before it is rebased and verified.",
+        "Layer G's one-lane split (V1) was measured on two different hosts and is not comparable; it is to be measured again on one host."
+      ]
     }
   },
   "inventory_entries": {
