@@ -6292,6 +6292,32 @@
         "Per-task reply stages in tokio, coop, router forward and the held query keep the build's quota.",
         "45 limits remain read from the build; each moves by its round, its `read` turning to snapshot."
       ]
+    },
+    "Round 4583": {
+      "decision_summary": "wz is held to being smaller, faster and more complete than zenoh-pico by gates, and the gates are held to being complete. The owner chose a ratchet with a debt loop: a figure may not get worse, each figure short of the goal is a registered debt paid largest first, and a figure that reaches its goal is locked there. D9 holds every pico ABI host library under zenoh-pico built as the same build in the same run, by the ratio of their text, at a tolerance of 2.5 percent, the spread measured between two hosts for one tree, until every host builds in the declared image. D10 makes the pico performance matrix judge itself cell by cell against a committed table, with a third arm for an external library given by path whose table stays outside the repository. D11 keeps a scoreboard of four completeness criteria: upstream test pass rate, a feature catalogue accepted as default-off switches (read from outside the repository), upstream debt, and structural contracts each enforced by a live gate. Three meta gates hold the gates themselves: every soft workflow site carries a declared promise and expiry and its hosted record is read, every script under scripts/ is exercised by a lane or declared, and code mutation testing measures the test suite's kill rate per scope nightly under a ratchet. Building them found two hidden reds: the Windows cooperative engine never linked (the MCU shell entered critical sections around the runtime's door, which Linux's linker discarded), now through the runtime's door with a gate that refuses any other entry, and the Qzk part listing that Layer 0's pinned shellcheck refused.",
+      "changes_bullets": [
+        "D9: `capability_cost_gate.py` judges wz/pico text per pico case against `deploy/pico_host_ceiling.json` (14 rows, debt `debt-pico-host-size-ceiling`); capic-default-lean budget read again.",
+        "D10: `perf_matrix.py --gate`, `--check-table`, arm X by `WZ_PERF_EXTERNAL_*`; `deploy/pico_perf_ceiling.json` (84 rows to fill from a run); `pico-compare.sh perf` exits with the gate.",
+        "D11: `completeness_gate.py` and `deploy/completeness_ratchet.json`, docs/completeness-scoreboard.md; `logic_census_coverage_gate.coverage()`.",
+        "Meta: `soft_job_gate.py` + `deploy/soft_jobs.json` (25 sites); `script_exercise_census.py` (327 scripts) and nine C0 selftest legs; Layer Cmut, `mutation_ratchet_gate.py`, `deploy/mutation_ratchet.json` (cargo-mutants 27.1.0), `.github/workflows/mutation.yml`, `scripts/install-cargo-mutants.sh`.",
+        "Windows: `wz-session-mcu` enters critical sections through `wz_runtime_coop::cs`; `coop_critical_section_gate.py`; `wz-runtime-posix` dev-dependency.",
+        "Store: three debt entries (host size ceiling, pico API shortfall, partial atoms)."
+      ],
+      "verification_bullets": [
+        "On the integration tree after main 8d9b0e530: Layer C1cs as fleet units (every pico case inside its ceiling row, every budget held), Layer 0 (pinned shellcheck and actionlint), Layer C0 (every static gate incl. the new ones), every round-fed gate of the pre-push hook and gate 2f.",
+        "The new gates' selftests: capability cost 42 arms, perf matrix 86, completeness, soft jobs 50, script census 67, mutation ratchet 35, coop critical section 9 fixtures; the completeness scoreboard reads pico API 15 of the original's 17, zenoh-c 24 of 24, 2 PARTIAL atoms, contracts all enforced.",
+        "The Windows link fix on Linux: wz-session-mcu tests and clippy, wz-runtime-posix unit tests, the two cooperative pico builds, Layer G, wz-capi-coop tests; Windows itself is judged by the hosted capi-coop job, which the soft-job gate now reads.",
+        "The D9 tolerance was set from a measurement, not assumed: one tree read pico-client-coop 1,012,762 and 1,030,646 bytes on two hosts while zenoh-pico read 403,086 on both."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "The perf table's 84 rows are unfilled until a matrix run on a quiet host; the matrix run of this day stalled.",
+        "Layer Cmut has no measured row: cargo-mutants is not provisioned on any build host (installing it needs the owner's leave), so the nightly job and the first rows wait.",
+        "D9's tolerance narrows when every host builds in the declared image (the same-build-environment work).",
+        "The soft-job gate's hosted reading is red today by design: the Windows package rows wait for two green runs of the packager fix, and the Windows cooperative rows for this landing's fix."
+      ]
     }
   },
   "inventory_entries": {
