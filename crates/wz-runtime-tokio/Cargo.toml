@@ -2164,7 +2164,15 @@ wz-session-core = { path = "../wz-session-core", features = ["alloc", "deferred-
 # `adminspace-core`, which every admin feature here composes.
 wz-admin = { path = "../wz-admin", default-features = false, optional = true }
 sce-forge-runtime = { path = "../../vendor/sce/backends/rust/forge-runtime" }
-sce-rust-runtime = { path = "../../vendor/sce/backends/rust/runtime" }
+# The statechart runtime without its BasicHTTP event processor (`http-send`, one of the runtime's
+# defaults): no machine of this tree sends over HTTP and nothing here registers the processor's
+# transport, so the processor would be a callback slot in every engine and code no send reaches.
+# The truncated-macrostep report is the runtime's other default and stays, named beside `std` as
+# the runtime asks of a crate that leaves `http-send` out.
+sce-rust-runtime = { path = "../../vendor/sce/backends/rust/runtime", default-features = false, features = [
+    "std",
+    "macrostep-diagnostics",
+] }
 # R311il — sce-rust-lua dropped: the session FSM (the last Lua-bound
 # statechart) is now engine-free (`<sce:action>` native host-trait
 # dispatch, codegen'd in wz-session-core), so no `IScriptEngine` /
