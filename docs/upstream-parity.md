@@ -359,7 +359,13 @@ derived from the declaration and never chosen by hand:
      kernel heap pool its storage block (stated by the build as `wz_storage_block_bytes`) under
      the reference's heap peak in the matrix's run. A committed figure of the reference is not
      used for a cell a build decides: a toolchain, a Zephyr tree or a path that differs moves the
-     reference too, and a cell is a comparison only when both sides moved alike.
+     reference too, and a cell is a comparison only when both sides moved alike. The lane can be
+     run one ceiling group at a time (`WZ_QZK_PART`, `scripts/kit-lane.sh parts`): a group is a
+     reference with every image the matrix pairs with it, so a reference is never built apart
+     from an image it holds, and an image with no pair is a part of its own. The lane refuses a
+     cut that leaves an image out or puts one in two parts, runs every part when no part is
+     named (hosted CI runs it so), and the fleet's planner gives each part a unit of its own
+     (`scripts/lib/runci_plan.py`), so that no one machine is held for the whole lane.
   2. **Only WIN passes (D1).** A TIE or a LOSS fails the layer and names the cell, both figures
      and the difference. The gate has no exception and no allow list.
   3. **An image's own budget moves only under the ceiling.** `deploy/text_budget.json` and
