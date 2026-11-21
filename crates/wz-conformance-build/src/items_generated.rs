@@ -119,6 +119,18 @@ pub const LIMITS: &[(&str, &str, u64)] = &[
         8,
     ),
     ("MAX_LOCAL_TOKENS", "WZ_LIMIT_MAX_LOCAL_TOKENS", 8),
+    ("MAX_PUBLISHERS", "WZ_LIMIT_MAX_PUBLISHERS", 16),
+    ("MAX_QUERIERS", "WZ_LIMIT_MAX_QUERIERS", 16),
+    (
+        "MAX_MATCHING_LISTENERS",
+        "WZ_LIMIT_MAX_MATCHING_LISTENERS",
+        16,
+    ),
+    (
+        "MAX_DECLARED_KEYEXPRS",
+        "WZ_LIMIT_MAX_DECLARED_KEYEXPRS",
+        80,
+    ),
     (
         "MAX_PENDING_LIVELINESS_GETS",
         "WZ_LIMIT_MAX_PENDING_LIVELINESS_GETS",

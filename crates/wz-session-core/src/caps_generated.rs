@@ -32,6 +32,12 @@ pub(super) const MAX_DECL_OBSERVERS: usize = limit(option_env!("WZ_LIMIT_MAX_DEC
 pub(super) const MAX_LIVELINESS_SUBSCRIPTIONS: usize =
     limit(option_env!("WZ_LIMIT_MAX_LIVELINESS_SUBSCRIPTIONS"), 8);
 pub(super) const MAX_LOCAL_TOKENS: usize = limit(option_env!("WZ_LIMIT_MAX_LOCAL_TOKENS"), 8);
+pub(super) const MAX_PUBLISHERS: usize = limit(option_env!("WZ_LIMIT_MAX_PUBLISHERS"), 16);
+pub(super) const MAX_QUERIERS: usize = limit(option_env!("WZ_LIMIT_MAX_QUERIERS"), 16);
+pub(super) const MAX_MATCHING_LISTENERS: usize =
+    limit(option_env!("WZ_LIMIT_MAX_MATCHING_LISTENERS"), 16);
+pub(super) const MAX_DECLARED_KEYEXPRS: usize =
+    limit(option_env!("WZ_LIMIT_MAX_DECLARED_KEYEXPRS"), 80);
 pub(super) const MAX_PENDING_LIVELINESS_GETS: usize =
     limit(option_env!("WZ_LIMIT_MAX_PENDING_LIVELINESS_GETS"), 8);
 pub(super) const MAX_PENDING_DECLARES: usize =

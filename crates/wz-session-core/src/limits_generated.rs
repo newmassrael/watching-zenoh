@@ -289,6 +289,90 @@ const _: LimitDomain = MaxLocalTokens::DOMAIN;
 /// A table the bound limits keeps it so, and asks it [`Limited::admits`].
 pub type MaxLocalTokensHeld = Limited<MaxLocalTokens, { MaxLocalTokens::HELD }>;
 
+/// `MAX_PUBLISHERS`: The publishers a session holds at once, each with the write filter
+/// that asks whether anything subscribes to its key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MaxPublishers;
+
+impl LimitSpec for MaxPublishers {
+    type Value = Quota;
+    const LIMIT: &'static str = "MAX_PUBLISHERS";
+    const DRIVEN: Option<Driven> = Some(Driven::Local);
+    const READ_FROM_SNAPSHOT: bool = true;
+    const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_PUBLISHERS);
+    const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
+}
+
+const _: LimitDomain = MaxPublishers::DOMAIN;
+
+/// How `MAX_PUBLISHERS` is held: in no byte when its domain is one value.
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type MaxPublishersHeld = Limited<MaxPublishers, { MaxPublishers::HELD }>;
+
+/// `MAX_QUERIERS`: The queriers a session holds at once, each with the write filter that
+/// asks whether anything answers on its key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MaxQueriers;
+
+impl LimitSpec for MaxQueriers {
+    type Value = Quota;
+    const LIMIT: &'static str = "MAX_QUERIERS";
+    const DRIVEN: Option<Driven> = Some(Driven::Local);
+    const READ_FROM_SNAPSHOT: bool = true;
+    const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_QUERIERS);
+    const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
+}
+
+const _: LimitDomain = MaxQueriers::DOMAIN;
+
+/// How `MAX_QUERIERS` is held: in no byte when its domain is one value.
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type MaxQueriersHeld = Limited<MaxQueriers, { MaxQueriers::HELD }>;
+
+/// `MAX_MATCHING_LISTENERS`: The matching listeners a session holds at once, over all its
+/// publishers and queriers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MaxMatchingListeners;
+
+impl LimitSpec for MaxMatchingListeners {
+    type Value = Quota;
+    const LIMIT: &'static str = "MAX_MATCHING_LISTENERS";
+    const DRIVEN: Option<Driven> = Some(Driven::Local);
+    const READ_FROM_SNAPSHOT: bool = true;
+    const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_MATCHING_LISTENERS);
+    const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
+}
+
+const _: LimitDomain = MaxMatchingListeners::DOMAIN;
+
+/// How `MAX_MATCHING_LISTENERS` is held: in no byte when its domain is one value.
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type MaxMatchingListenersHeld = Limited<MaxMatchingListeners, { MaxMatchingListeners::HELD }>;
+
+/// `MAX_DECLARED_KEYEXPRS`: The key expressions a session declares to its peers at once,
+/// each held by the entities that name it and by the program's declarations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MaxDeclaredKeyexprs;
+
+impl LimitSpec for MaxDeclaredKeyexprs {
+    type Value = Quota;
+    const LIMIT: &'static str = "MAX_DECLARED_KEYEXPRS";
+    const DRIVEN: Option<Driven> = Some(Driven::Local);
+    const READ_FROM_SNAPSHOT: bool = true;
+    const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_DECLARED_KEYEXPRS);
+    const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
+}
+
+const _: LimitDomain = MaxDeclaredKeyexprs::DOMAIN;
+
+/// How `MAX_DECLARED_KEYEXPRS` is held: in no byte when its domain is one value.
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type MaxDeclaredKeyexprsHeld = Limited<MaxDeclaredKeyexprs, { MaxDeclaredKeyexprs::HELD }>;
+
 /// `MAX_PENDING_LIVELINESS_GETS`: The liveliness gets (snapshots of the tokens alive) a
 /// session has waiting for their answer at once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1349,6 +1433,14 @@ pub struct SessionLimits {
     max_liveliness_subscriptions: MaxLivelinessSubscriptionsHeld,
     /// `MAX_LOCAL_TOKENS`.
     max_local_tokens: MaxLocalTokensHeld,
+    /// `MAX_PUBLISHERS`.
+    max_publishers: MaxPublishersHeld,
+    /// `MAX_QUERIERS`.
+    max_queriers: MaxQueriersHeld,
+    /// `MAX_MATCHING_LISTENERS`.
+    max_matching_listeners: MaxMatchingListenersHeld,
+    /// `MAX_DECLARED_KEYEXPRS`.
+    max_declared_keyexprs: MaxDeclaredKeyexprsHeld,
     /// `MAX_PENDING_LIVELINESS_GETS`.
     max_pending_liveliness_gets: MaxPendingLivelinessGetsHeld,
     /// `MAX_PENDING_DECLARES`.
@@ -1441,6 +1533,10 @@ impl SessionLimits {
             max_decl_observers: Limited::build_default(),
             max_liveliness_subscriptions: Limited::build_default(),
             max_local_tokens: Limited::build_default(),
+            max_publishers: Limited::build_default(),
+            max_queriers: Limited::build_default(),
+            max_matching_listeners: Limited::build_default(),
+            max_declared_keyexprs: Limited::build_default(),
             max_pending_liveliness_gets: Limited::build_default(),
             max_pending_declares: Limited::build_default(),
             max_inbound_sub_interests: Limited::build_default(),
@@ -1698,6 +1794,77 @@ impl SessionLimits {
     /// Selects `MAX_LOCAL_TOKENS`, when the build's domain holds `value`.
     pub fn select_max_local_tokens(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
         self.max_local_tokens = Limited::select(value)?;
+        Ok(())
+    }
+
+    /// `MAX_PUBLISHERS` as this snapshot holds it.
+    pub const fn max_publishers(&self) -> Quota {
+        self.max_publishers.get()
+    }
+
+    /// `MAX_PUBLISHERS` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn max_publishers_held(&self) -> MaxPublishersHeld {
+        self.max_publishers
+    }
+
+    /// Selects `MAX_PUBLISHERS`, when the build's domain holds `value`.
+    pub fn select_max_publishers(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
+        self.max_publishers = Limited::select(value)?;
+        Ok(())
+    }
+
+    /// `MAX_QUERIERS` as this snapshot holds it.
+    pub const fn max_queriers(&self) -> Quota {
+        self.max_queriers.get()
+    }
+
+    /// `MAX_QUERIERS` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn max_queriers_held(&self) -> MaxQueriersHeld {
+        self.max_queriers
+    }
+
+    /// Selects `MAX_QUERIERS`, when the build's domain holds `value`.
+    pub fn select_max_queriers(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
+        self.max_queriers = Limited::select(value)?;
+        Ok(())
+    }
+
+    /// `MAX_MATCHING_LISTENERS` as this snapshot holds it.
+    pub const fn max_matching_listeners(&self) -> Quota {
+        self.max_matching_listeners.get()
+    }
+
+    /// `MAX_MATCHING_LISTENERS` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn max_matching_listeners_held(&self) -> MaxMatchingListenersHeld {
+        self.max_matching_listeners
+    }
+
+    /// Selects `MAX_MATCHING_LISTENERS`, when the build's domain holds `value`.
+    pub fn select_max_matching_listeners(
+        &mut self,
+        value: Quota,
+    ) -> Result<(), OutsideLimitDomain> {
+        self.max_matching_listeners = Limited::select(value)?;
+        Ok(())
+    }
+
+    /// `MAX_DECLARED_KEYEXPRS` as this snapshot holds it.
+    pub const fn max_declared_keyexprs(&self) -> Quota {
+        self.max_declared_keyexprs.get()
+    }
+
+    /// `MAX_DECLARED_KEYEXPRS` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn max_declared_keyexprs_held(&self) -> MaxDeclaredKeyexprsHeld {
+        self.max_declared_keyexprs
+    }
+
+    /// Selects `MAX_DECLARED_KEYEXPRS`, when the build's domain holds `value`.
+    pub fn select_max_declared_keyexprs(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
+        self.max_declared_keyexprs = Limited::select(value)?;
         Ok(())
     }
 
@@ -2531,6 +2698,46 @@ impl LimitField<SessionLimits> for MaxLocalTokens {
     }
 }
 
+impl LimitField<SessionLimits> for MaxPublishers {
+    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
+        snapshot.select_max_publishers(value)
+    }
+
+    fn held_in(snapshot: &SessionLimits) -> Quota {
+        snapshot.max_publishers()
+    }
+}
+
+impl LimitField<SessionLimits> for MaxQueriers {
+    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
+        snapshot.select_max_queriers(value)
+    }
+
+    fn held_in(snapshot: &SessionLimits) -> Quota {
+        snapshot.max_queriers()
+    }
+}
+
+impl LimitField<SessionLimits> for MaxMatchingListeners {
+    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
+        snapshot.select_max_matching_listeners(value)
+    }
+
+    fn held_in(snapshot: &SessionLimits) -> Quota {
+        snapshot.max_matching_listeners()
+    }
+}
+
+impl LimitField<SessionLimits> for MaxDeclaredKeyexprs {
+    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
+        snapshot.select_max_declared_keyexprs(value)
+    }
+
+    fn held_in(snapshot: &SessionLimits) -> Quota {
+        snapshot.max_declared_keyexprs()
+    }
+}
+
 impl LimitField<SessionLimits> for MaxPendingLivelinessGets {
     fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
         snapshot.select_max_pending_liveliness_gets(value)
@@ -2902,7 +3109,7 @@ impl LimitField<SessionLimits> for PicoKeepalivesPerLease {
 }
 
 /// How many limits [`SessionLimits`] holds: the length of [`SESSION_LIMITS`].
-pub const SESSION_LIMIT_COUNT: usize = 49;
+pub const SESSION_LIMIT_COUNT: usize = 53;
 
 /// Every limit of [`SessionLimits`] as a reader that names it by its id sees it, in the order of
 /// its fields.
@@ -2919,6 +3126,10 @@ pub static SESSION_LIMITS: [LimitEntry<SessionLimits>; SESSION_LIMIT_COUNT] = [
     LimitEntry::of::<MaxDeclObservers>(),
     LimitEntry::of::<MaxLivelinessSubscriptions>(),
     LimitEntry::of::<MaxLocalTokens>(),
+    LimitEntry::of::<MaxPublishers>(),
+    LimitEntry::of::<MaxQueriers>(),
+    LimitEntry::of::<MaxMatchingListeners>(),
+    LimitEntry::of::<MaxDeclaredKeyexprs>(),
     LimitEntry::of::<MaxPendingLivelinessGets>(),
     LimitEntry::of::<MaxPendingDeclares>(),
     LimitEntry::of::<MaxInboundSubInterests>(),

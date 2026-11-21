@@ -628,6 +628,82 @@
               "x-wz-binding-fixed": "open",
               "x-wz-wire": "none"
             },
+            "MAX_PUBLISHERS": {
+              "description": "The publishers a session holds at once, each with the write filter that asks whether anything subscribes to its key.",
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "const": "unbounded"
+                }
+              ],
+              "x-wz-kind": "bound",
+              "x-wz-driven": "local",
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "open",
+              "x-wz-wire": "none"
+            },
+            "MAX_QUERIERS": {
+              "description": "The queriers a session holds at once, each with the write filter that asks whether anything answers on its key.",
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "const": "unbounded"
+                }
+              ],
+              "x-wz-kind": "bound",
+              "x-wz-driven": "local",
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "open",
+              "x-wz-wire": "none"
+            },
+            "MAX_MATCHING_LISTENERS": {
+              "description": "The matching listeners a session holds at once, over all its publishers and queriers.",
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "const": "unbounded"
+                }
+              ],
+              "x-wz-kind": "bound",
+              "x-wz-driven": "local",
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "open",
+              "x-wz-wire": "none"
+            },
+            "MAX_DECLARED_KEYEXPRS": {
+              "description": "The key expressions a session declares to its peers at once, each held by the entities that name it and by the program's declarations.",
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "const": "unbounded"
+                }
+              ],
+              "x-wz-kind": "bound",
+              "x-wz-driven": "local",
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "open",
+              "x-wz-wire": "none"
+            },
             "MAX_PENDING_LIVELINESS_GETS": {
               "description": "The liveliness gets (snapshots of the tokens alive) a session has waiting for their answer at once.",
               "oneOf": [

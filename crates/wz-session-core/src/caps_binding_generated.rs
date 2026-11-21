@@ -178,6 +178,54 @@ pub const MAX_LOCAL_TOKENS: LimitBinding = LimitBinding {
     wire: Wire::None,
 };
 
+/// Where [`super::MAX_PUBLISHERS`] is bound.
+pub const MAX_PUBLISHERS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
+    storage: Storage::Both,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Open),
+    wire: Wire::None,
+};
+
+/// Where [`super::MAX_QUERIERS`] is bound.
+pub const MAX_QUERIERS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
+    storage: Storage::Both,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Open),
+    wire: Wire::None,
+};
+
+/// Where [`super::MAX_MATCHING_LISTENERS`] is bound.
+pub const MAX_MATCHING_LISTENERS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
+    storage: Storage::Both,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Open),
+    wire: Wire::None,
+};
+
+/// Where [`super::MAX_DECLARED_KEYEXPRS`] is bound.
+pub const MAX_DECLARED_KEYEXPRS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
+    storage: Storage::Both,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Open),
+    wire: Wire::None,
+};
+
 /// Where [`super::MAX_PENDING_LIVELINESS_GETS`] is bound.
 pub const MAX_PENDING_LIVELINESS_GETS: LimitBinding = LimitBinding {
     kind: LimitKind::Bound,
