@@ -201,9 +201,10 @@ link-udp = ["wz-capi-core?/link-udp"]
 # locator. Both engines scout (a scout needs no session), so it selects neither: it turns the
 # window on in the one the build has, which is how a cooperative client finds a router. The
 # session's own scouting vocabulary is named because the plane reads the locator grammar and the
-# defaults from it. The group's sockets are the host's (`wz-host-net`), so it selects `std`.
+# defaults from it. The window's sockets are the host's, one for each interface that can carry
+# multicast (`wz-capi-coop`'s `scout` over `wz-runtime-posix`), which need no `std`, so a host
+# library without it scouts as one with it does; a Zephyr image names `scout-mcu` instead.
 scout = [
-    "std",
     "link-udp",
     "wz-session-core/scouting-active",
     "wz-session-core/codec-scout",

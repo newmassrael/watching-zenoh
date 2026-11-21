@@ -176,6 +176,24 @@ compile_error!(
      library without it"
 );
 
+// `scout` asks each interface of a host by a socket of its own, and `multicast-transport` joins a
+// group on a host's sockets (`wz-runtime-posix`), which a Zephyr image has none of; `peer` and
+// `multicast-transport` bring `scout`. Beside `os-zephyr` alone it is refused by name, rather than
+// by the host's paths the image lacks.
+#[cfg(all(
+    feature = "os-zephyr",
+    feature = "scout",
+    not(any(
+        feature = "engine-tokio",
+        feature = "engine-coop",
+        feature = "os-posix"
+    ))
+))]
+compile_error!(
+    "wz-capi-pico: `scout`, which `peer` and `multicast-transport` bring, opens a host's \
+     multicast sockets, and a Zephyr image has none: an image scouts with `scout-mcu`"
+);
+
 // `scout-mcu` is the cooperative engine's window over one datagram socket; the tokio engine scouts
 // on the host's sockets, which is `scout`.
 #[cfg(all(
