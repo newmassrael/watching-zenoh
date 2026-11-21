@@ -8,6 +8,7 @@ use core::cell::UnsafeCell;
 use core::ffi::c_void;
 
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+use windows_sys::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows_sys::Win32::System::Threading::{
     AcquireSRWLockExclusive, CreateThread, GetCurrentThreadId, ReleaseSRWLockExclusive, Sleep,
     SleepConditionVariableSRW, WaitForSingleObject, WakeAllConditionVariable, CONDITION_VARIABLE,
@@ -57,10 +58,39 @@ impl ParkCond {
         SleepConditionVariableSRW(self.0.get(), lock.0.get(), INFINITE, 0);
     }
 
-    pub(crate) fn notify_all(&self) {
-        // SAFETY: an initialised condition variable that never moves.
-        unsafe { WakeAllConditionVariable(self.0.get()) };
+    /// Wait until notified or until the performance counter reads `deadline_ns`: the wait takes
+    /// the milliseconds left, rounded up so that it does not end before the deadline.
+    ///
+    /// # Safety
+    /// The calling thread holds `lock` exclusively.
+    pub(crate) unsafe fn wait_until(&self, lock: &ParkLock, deadline_ns: u64) {
+        let left_ms = deadline_ns
+            .saturating_sub(monotonic_ns())
+            .div_ceil(1_000_000)
+            .min(u64::from(INFINITE - 1));
+        SleepConditionVariableSRW(self.0.get(), lock.0.get(), left_ms as u32, 0);
     }
+
+    /// # Safety
+    /// The calling thread holds the parking place's lock.
+    pub(crate) unsafe fn notify_all(&self) {
+        WakeAllConditionVariable(self.0.get());
+    }
+}
+
+/// The performance counter in nanoseconds.
+pub(crate) fn monotonic_ns() -> u64 {
+    let mut ticks = 0_i64;
+    let mut per_second = 0_i64;
+    // SAFETY: live locals the calls write.
+    unsafe {
+        QueryPerformanceCounter(&mut ticks);
+        QueryPerformanceFrequency(&mut per_second);
+    }
+    if per_second <= 0 || ticks < 0 {
+        return 0;
+    }
+    (u128::from(ticks as u64) * 1_000_000_000 / u128::from(per_second as u64)) as u64
 }
 
 /// A thread of the system, by its handle.

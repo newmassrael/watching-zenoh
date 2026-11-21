@@ -16,7 +16,9 @@
 //! that finds its lock still held parks again.
 //!
 //! [`spawn`] starts a thread of the system, and [`current_thread`] names the calling thread by the
-//! number [`Thread::id`] gives the thread a spawn started.
+//! number [`Thread::id`] gives the thread a spawn started. [`Parker`] is what one thread waits on
+//! until another wakes it, with or without a timeout on [`monotonic_ns`], the host's monotonic
+//! clock; a timed wait is on that clock, so a date set on the host moves no deadline.
 
 #![no_std]
 #![cfg(any(unix, windows))]
@@ -53,24 +55,89 @@ static PARKED: AtomicUsize = AtomicUsize::new(0);
 /// this thread counted and wakes it (under `PARK_LOCK`, which this thread holds until its wait has
 /// begun), or this thread sees the write and does not wait: no wake is lost.
 fn park_while(blocked: impl Fn() -> bool) {
+    park_until(blocked, None);
+}
+
+/// [`park_while`], and no later than when the monotonic clock ([`monotonic_ns`]) reads
+/// `deadline_ns`, if one is given: whether `blocked` cleared (false: the deadline came first).
+fn park_until(blocked: impl Fn() -> bool, deadline_ns: Option<u64>) -> bool {
     PARK_LOCK.lock();
     PARKED.fetch_add(1, Ordering::SeqCst);
+    let mut cleared = true;
     while blocked() {
-        // SAFETY: this thread holds `PARK_LOCK`, which the wait releases and takes back.
-        unsafe { PARK_COND.wait(&PARK_LOCK) };
+        match deadline_ns {
+            // SAFETY: this thread holds `PARK_LOCK`, which the wait releases and takes back.
+            None => unsafe { PARK_COND.wait(&PARK_LOCK) },
+            Some(deadline) => {
+                if monotonic_ns() >= deadline {
+                    cleared = false;
+                    break;
+                }
+                // SAFETY: as above.
+                unsafe { PARK_COND.wait_until(&PARK_LOCK, deadline) };
+            }
+        }
     }
     PARKED.fetch_sub(1, Ordering::SeqCst);
     // SAFETY: this thread took it above.
     unsafe { PARK_LOCK.unlock() };
+    cleared
 }
 
 /// Wake every parked thread, if one is.
 fn unpark_all() {
     if PARKED.load(Ordering::SeqCst) != 0 {
         PARK_LOCK.lock();
-        PARK_COND.notify_all();
-        // SAFETY: this thread took it above.
-        unsafe { PARK_LOCK.unlock() };
+        // SAFETY: this thread holds `PARK_LOCK`; it lets it go below.
+        unsafe {
+            PARK_COND.notify_all();
+            PARK_LOCK.unlock();
+        }
+    }
+}
+
+/// The host's monotonic clock in nanoseconds: `CLOCK_MONOTONIC` on a POSIX host, the performance
+/// counter on Windows. It never steps back, and a date set on the host moves it not at all.
+pub fn monotonic_ns() -> u64 {
+    sys::monotonic_ns()
+}
+
+/// What a thread waits on until another wakes it: one word, made in a `const` context. A wake
+/// that comes before the wait is kept, so the wait that follows returns at once, as
+/// `std::thread::park` keeps an `unpark`.
+pub struct Parker {
+    woken: AtomicBool,
+}
+
+impl Parker {
+    /// A parker no wake has reached.
+    pub const fn new() -> Self {
+        Self {
+            woken: AtomicBool::new(false),
+        }
+    }
+
+    /// Wait until woken, and take the wake.
+    pub fn park(&self) {
+        park_while(|| !self.woken.swap(false, Ordering::SeqCst));
+    }
+
+    /// [`Self::park`] for at most `timeout_ns`: whether a wake came (false: the time ran out).
+    pub fn park_timeout_ns(&self, timeout_ns: u64) -> bool {
+        let deadline = monotonic_ns().saturating_add(timeout_ns);
+        park_until(|| !self.woken.swap(false, Ordering::SeqCst), Some(deadline))
+    }
+
+    /// Wake the thread that waits, or the next wait.
+    pub fn unpark(&self) {
+        self.woken.store(true, Ordering::SeqCst);
+        unpark_all();
+    }
+}
+
+impl Default for Parker {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -408,6 +475,63 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    /// A timed wait waits at least its timeout when nothing wakes it, and its clock is the one
+    /// `monotonic_ns` reads: a condition variable timed on another clock (the wall clock a
+    /// statically made pthread one has) would read the deadline against the wrong epoch and end
+    /// at once or wait for the skew.
+    #[test]
+    fn a_timed_park_waits_at_least_its_timeout() {
+        let parker = Parker::new();
+        let started = Instant::now();
+        let from = monotonic_ns();
+        assert!(!parker.park_timeout_ns(30_000_000), "nothing woke it");
+        assert!(
+            started.elapsed() >= Duration::from_millis(30),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(monotonic_ns() - from >= 30_000_000);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the wait ended near its deadline"
+        );
+    }
+
+    /// A wake ends a wait, a wake that comes first is kept for the next wait, and it is taken by
+    /// it: the wait after that waits again.
+    #[test]
+    fn a_wake_ends_a_wait_and_one_that_comes_first_is_kept() {
+        let parker = Arc::new(Parker::new());
+        let waker = {
+            let parker = parker.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(20));
+                parker.unpark();
+            })
+        };
+        parker.park();
+        waker.join().expect("the waker ran");
+        parker.unpark();
+        assert!(
+            parker.park_timeout_ns(5_000_000_000),
+            "the earlier wake was kept"
+        );
+        assert!(!parker.park_timeout_ns(10_000_000), "and taken");
+    }
+
+    #[test]
+    fn the_monotonic_clock_moves_and_does_not_step_back() {
+        let first = monotonic_ns();
+        let mut last = first;
+        for _ in 0..1000 {
+            let now = monotonic_ns();
+            assert!(now >= last);
+            last = now;
+        }
+        sleep_ms(5);
+        assert!(monotonic_ns() >= first + 4_000_000);
     }
 
     #[test]
