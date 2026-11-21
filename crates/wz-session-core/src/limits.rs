@@ -395,6 +395,67 @@ mod enforcement {
             },
         );
     }
+
+    /// The places of one querier, made as the runtime that declares the querier makes them: held
+    /// to the bound the session's observer was handed.
+    fn querier_places(limits: &SessionLimits) -> crate::quota::Quota {
+        let observer = ApplicationLayerObserver::with_limits(limits);
+        crate::quota::Quota::new(observer.querier_max_pending_queries())
+    }
+
+    /// `QUERIER_MAX_PENDING_QUERIES` with nothing stated: the build's value, whose `0` is no bound,
+    /// so a querier takes every place it asks for, or the build's number of places and no more.
+    #[test]
+    fn querier_max_pending_queries_with_nothing_stated_admits_what_the_build_admitted() {
+        let mut places = querier_places(&SessionLimits::defaults());
+        assert_eq!(
+            places.limit(),
+            Quota::from_build(caps::QUERIER_MAX_PENDING_QUERIES, true)
+        );
+        match caps::QUERIER_MAX_PENDING_QUERIES {
+            0 => {
+                for _ in 0..1_000 {
+                    places.try_acquire().expect("the build states no bound");
+                }
+                assert_eq!(places.live(), 1_000);
+            }
+            build => {
+                for _ in 0..build {
+                    places.try_acquire().expect("under the build's bound");
+                }
+                assert_eq!(
+                    places.try_acquire(),
+                    Err(crate::quota::QuotaExceeded { limit: build })
+                );
+                assert_eq!(places.live(), build);
+            }
+        }
+    }
+
+    /// `QUERIER_MAX_PENDING_QUERIES` stated as two: the third query is refused with the bound it
+    /// reached and takes no place, and a place given back is taken again.
+    #[test]
+    fn querier_max_pending_queries_stated_refuses_the_next() {
+        held_to_two(
+            SessionLimits::select_querier_max_pending_queries,
+            QuerierMaxPendingQueries::DOMAIN.is_singleton(),
+            |limits| {
+                let mut places = querier_places(limits);
+                places.try_acquire().expect("under the quota");
+                places.try_acquire().expect("under the quota");
+                assert_eq!(
+                    places.try_acquire(),
+                    Err(crate::quota::QuotaExceeded { limit: 2 })
+                );
+                assert_eq!(places.live(), 2, "a refusal takes no place");
+                places.release();
+                places
+                    .try_acquire()
+                    .expect("a place is free under the quota");
+                assert_eq!(places.live(), 2);
+            },
+        );
+    }
 }
 
 #[cfg(test)]

@@ -307,6 +307,11 @@ pub struct ApplicationLayerObserver {
     /// directly — see `Session::query` in `wz-runtime-tokio`.
     pub replies:
         ReplyRegistry<crate::reply_sink::ConsolidatingSink<crate::reply_sink::BoxedReplySink>>,
+    /// `QUERIER_MAX_PENDING_QUERIES` as the session's creator stated it: how many queries one
+    /// querier declared on the session has in flight at once. The runtime that declares a querier
+    /// reads it here ([`Self::querier_max_pending_queries`]) and holds the querier's places to it
+    /// in a [`crate::quota::Quota`]; the pending entries themselves are rows of `replies`.
+    querier_max_pending_queries: crate::limits::QuerierMaxPendingQueriesHeld,
     /// R311r — staging buffers are unconditional so the observer
     /// struct shape is stable across consumer-feature subsets. The
     /// drain side in [`Self::flush_pending`] stays cfg-gated on
@@ -405,7 +410,15 @@ impl ApplicationLayerObserver {
             .liveliness_gets
             .limit_to(limits.max_pending_liveliness_gets_held());
         observer.replies.limit_to(limits.max_pending_queries_held());
+        observer.querier_max_pending_queries = limits.querier_max_pending_queries_held();
         observer
+    }
+
+    /// The bound of each querier declared on the session: `QUERIER_MAX_PENDING_QUERIES` as the
+    /// session's creator stated it ([`Self::with_limits`]), the build's value for an observer made
+    /// by [`Self::new`].
+    pub const fn querier_max_pending_queries(&self) -> crate::limit_binding::Quota {
+        self.querier_max_pending_queries.get()
     }
 
     /// New observer with empty registries, held to the build's limits. Callers register
@@ -458,6 +471,7 @@ impl ApplicationLayerObserver {
             // surface can register pending entries even though
             // feature-OFF never reaches the registration path.
             replies: ReplyRegistry::new(),
+            querier_max_pending_queries: crate::limit_binding::Limited::build_default(),
             // R311r — staging buffers always allocated; drain path in
             // flush_pending stays cfg-gated on query-queryable.
             pending_replies: ReplyStage::new(),

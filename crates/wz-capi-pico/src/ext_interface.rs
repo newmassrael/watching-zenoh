@@ -35,6 +35,8 @@ use crate::ffi::{guarded, InCallback};
 use crate::result::{ZResult, Z_EINVAL, Z_ERR_NULL, Z_OK};
 #[cfg(feature = "query")]
 use crate::session::{session_handle, z_loaned_session_t};
+#[cfg(feature = "query")]
+use wz_session_core::limit_binding::Quota;
 
 /// The major version of this interface.
 pub const WZ_EXT_INTERFACE_MAJOR: u16 = 1;
@@ -81,6 +83,15 @@ pub struct wz_ext_session_facts_t {
     pub reserved: [u8; 7],
     /// How many queries one querier of the session may have in flight at once, 0 for no bound.
     pub querier_max_pending_queries: usize,
+}
+
+/// `quota` as a count of this interface, whose fields write no bound as `0`: the number, or `0`
+/// for none. A quota of `0`, which admits nothing, has no count of its own here; no open of this
+/// ABI holds a session to it, for a session's limits are the build's and the build reads its `0`
+/// as no bound.
+#[cfg(feature = "query")]
+fn count_of_quota(quota: Quota) -> usize {
+    quota.most().unwrap_or(0)
 }
 
 /// Whether a caller's struct of `stated` bytes holds every field this version writes into `T`.
@@ -163,7 +174,9 @@ pub unsafe extern "C" fn wz_ext_interface_session_facts(
             },
             targeted_query: u8::from(crate::get_to_peer::targeted_by(policy)),
             reserved: [0; 7],
-            querier_max_pending_queries: wz_session_core::caps::QUERIER_MAX_PENDING_QUERIES,
+            querier_max_pending_queries: count_of_quota(
+                handle.ext.limits.querier_max_pending_queries(),
+            ),
         };
         Z_OK
     })
@@ -352,6 +365,14 @@ mod tests {
                 ..blank
             }
         );
+    }
+
+    #[cfg(feature = "query")]
+    #[test]
+    fn a_quota_is_written_as_a_count_whose_zero_is_no_bound() {
+        assert_eq!(count_of_quota(Quota::UNBOUNDED), 0);
+        assert_eq!(count_of_quota(Quota::at_most(7)), 7);
+        assert_eq!(count_of_quota(Quota::at_most(1)), 1);
     }
 
     #[test]

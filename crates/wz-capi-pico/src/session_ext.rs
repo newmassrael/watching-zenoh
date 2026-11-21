@@ -30,6 +30,7 @@ use alloc::sync::Arc;
 use wz_capi_port::SessionEngine;
 #[cfg(any(feature = "advanced", feature = "clock-source"))]
 use wz_node_time::node_clock::{NodeHlc, TimestampingEnabled};
+use wz_session_core::limits::SessionLimits;
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::WhatAmI;
 
@@ -61,11 +62,16 @@ pub(crate) struct PicoSessionExt {
     /// statement a policy governs admits it by (`wz_ext_get_to_peer`, the one such door today).
     #[cfg(feature = "query")]
     pub(crate) policy: SessionPolicy,
+    /// The session limits the session runs under, as its open resolved them: what the door that
+    /// reports the session's facts reads the bound of a querier from.
+    #[cfg(feature = "query")]
+    pub(crate) limits: SessionLimits,
 }
 
 impl PicoSessionExt {
-    /// A session of role `mode` and identity `zid`, under `policy`, the snapshot its open
-    /// resolved; with the connectivity plane, over the faces of `engine`, the engine that runs it.
+    /// A session of role `mode` and identity `zid`, under `policy` and `limits`, the snapshots its
+    /// open resolved; with the connectivity plane, over the faces of `engine`, the engine that runs
+    /// it.
     ///
     /// The clock STAMPS whatever the role, which is pico's: its timestamps come
     /// from the session's own clock and zid unconditionally
@@ -87,12 +93,16 @@ impl PicoSessionExt {
         mode: WhatAmI,
         zid: &[u8],
         policy: SessionPolicy,
+        limits: SessionLimits,
         #[cfg(feature = "connectivity")] engine: &Arc<dyn SessionEngine>,
     ) -> Self {
         // The snapshot is read by the clock and by a door a policy governs: a build with neither
         // a clock nor `query` reads none of it.
         #[cfg(not(any(feature = "query", feature = "advanced", feature = "clock-source")))]
         let _ = policy;
+        // The limits are read by the door that reports the session's facts alone.
+        #[cfg(not(feature = "query"))]
+        let _ = limits;
         #[cfg(feature = "connectivity")]
         let connectivity = Connectivity::new();
         #[cfg(feature = "connectivity")]
@@ -125,6 +135,8 @@ impl PicoSessionExt {
             admin_space: crate::admin_space::AdminSpaceSlot::new(None),
             #[cfg(feature = "query")]
             policy,
+            #[cfg(feature = "query")]
+            limits,
         }
     }
 
@@ -189,11 +201,17 @@ mod tests {
                 SharedSession::new(TokioTime::new(), ZID.into(), policy)
                     .expect("test host entropy"),
             );
-            PicoSessionExt::new(WhatAmI::Peer, &ZID, policy, &shared.as_engine())
+            PicoSessionExt::new(
+                WhatAmI::Peer,
+                &ZID,
+                policy,
+                SessionLimits::defaults(),
+                &shared.as_engine(),
+            )
         }
         #[cfg(not(feature = "connectivity"))]
         {
-            PicoSessionExt::new(WhatAmI::Peer, &ZID, policy)
+            PicoSessionExt::new(WhatAmI::Peer, &ZID, policy, SessionLimits::defaults())
         }
     }
 

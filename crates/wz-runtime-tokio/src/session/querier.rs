@@ -392,14 +392,9 @@ pub(crate) struct QuerierSlots {
 }
 
 impl QuerierSlots {
-    /// The places of a querier declared now: the build's bound.
-    pub(crate) fn new() -> Self {
-        Self::with_limit(wz_session_core::limit_binding::Quota::from_build(
-            wz_session_core::caps::QUERIER_MAX_PENDING_QUERIES,
-            true,
-        ))
-    }
-
+    /// The places of a querier declared now, held to `limit`: the session's
+    /// `QUERIER_MAX_PENDING_QUERIES`, as its creator stated it to the observer the session was
+    /// made with (`ApplicationLayerObserver::querier_max_pending_queries`).
     pub(crate) fn with_limit(limit: wz_session_core::limit_binding::Quota) -> Self {
         Self {
             quota: Arc::new(std::sync::Mutex::new(wz_session_core::quota::Quota::new(
