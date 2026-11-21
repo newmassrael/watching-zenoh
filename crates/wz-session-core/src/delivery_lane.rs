@@ -427,15 +427,7 @@ impl<const EVENTS: usize> DeliveryLane<EVENTS> {
             self.entries[at].phase = Phase::Void;
             return Ok(());
         }
-        let budget = self.callback_budget;
-        let pending = self.pending_callbacks;
-        let oversized = budget > 0 && callbacks > budget;
-        let fits = if oversized {
-            self.len == 1
-        } else {
-            pending <= budget && callbacks <= budget - pending
-        };
-        if !fits {
+        if !self.admits_callbacks(callbacks) {
             self.entries[at].phase = Phase::Void;
             return Err(self.count(Refusal::CallbacksFull));
         }
@@ -443,6 +435,52 @@ impl<const EVENTS: usize> DeliveryLane<EVENTS> {
         self.entries[at].callbacks = callbacks;
         self.entries[at].phase = Phase::Ready;
         Ok(())
+    }
+
+    /// Whether [`Self::publish`] would charge a sample `callbacks` callbacks now, WITHOUT counting
+    /// a refusal: what a producer that finds a sample's callbacks one at a time asks before it adds
+    /// each, so that the sample it publishes is not refused for them. The samples reserved and not
+    /// yet published, the producer's own among them, count as the lane's.
+    pub const fn admits_callbacks(&self, callbacks: usize) -> bool {
+        let budget = self.callback_budget;
+        let pending = self.pending_callbacks;
+        if budget > 0 && callbacks > budget {
+            self.len == 1
+        } else {
+            pending <= budget && callbacks <= budget - pending
+        }
+    }
+
+    /// Lengthen `reservation` by `bytes` bytes right after the ones it holds, or answer `false`
+    /// and change nothing: what a producer asks whose sample grows as it is written (a list it adds
+    /// to as it finds each item). Only the newest reservation grows, and only into room that
+    /// follows it in the area: a sample is never split, so bytes that would go past the end of the
+    /// area, or onto the oldest sample's, are not taken.
+    pub fn extend(&mut self, reservation: &mut Reservation, bytes: usize) -> bool {
+        let at = reservation.index;
+        let newest = self.len > 0 && at == advance(self.head, self.len - 1, EVENTS);
+        if !newest || self.entries[at].phase != Phase::Reserved {
+            return false;
+        }
+        let cap = self.byte_capacity;
+        let end = reservation.offset + reservation.bytes;
+        // The newest sample's bytes end where the free room starts; it runs to the oldest
+        // sample's bytes when those lie after it, and to the end of the area when they do not.
+        let after = if self.byte_head > end {
+            self.byte_head - end
+        } else {
+            cap - end
+        };
+        if bytes > after || bytes > cap - self.byte_used {
+            return false;
+        }
+        let entry = &mut self.entries[at];
+        entry.bytes += bytes;
+        entry.charge += bytes;
+        self.byte_tail = advance(entry.offset, entry.bytes, cap);
+        self.byte_used += bytes;
+        reservation.bytes += bytes;
+        true
     }
 
     /// The producer could not write the sample after all (its own failure, not the lane's): the
@@ -678,6 +716,71 @@ mod tests {
         let empty = admit(&mut lane, 0, 1).expect("an empty payload needs no room");
         assert_eq!(empty.bytes, 0);
         assert_eq!(lane.stats().pending_bytes, 4);
+    }
+
+    /// A reserved sample grows into the room after it and is published whole, and the next sample
+    /// is placed after what it grew to.
+    #[test]
+    fn a_reserved_sample_grows_into_the_room_after_it() {
+        let mut lane = lane::<4>(10, 10);
+        let mut grown = lane.reserve(4).unwrap();
+        assert!(lane.extend(&mut grown, 3));
+        assert_eq!((grown.offset(), grown.bytes()), (0, 7));
+        assert_eq!(lane.stats().pending_bytes, 7);
+        lane.publish(grown, 1).unwrap();
+        assert!(matches!(lane.front(), Next::Ready(d) if d.bytes == 7));
+        let next = admit(&mut lane, 3, 1).unwrap();
+        assert_eq!(next.offset, 7, "placed after what the first grew to");
+        assert_eq!(lane.stats().refused.total, 0, "growing refuses nothing");
+    }
+
+    /// A sample does not grow past the end of the area, nor onto the oldest sample's bytes; what
+    /// is refused leaves the lane as it was.
+    #[test]
+    fn a_sample_does_not_grow_past_the_end_or_onto_the_oldest() {
+        let mut lane = lane::<4>(10, 10);
+        admit(&mut lane, 4, 1).unwrap();
+        admit(&mut lane, 4, 1).unwrap();
+        assert!(lane.complete(), "the first four bytes are free");
+        let mut at_the_end = lane.reserve(2).unwrap();
+        assert_eq!(at_the_end.offset(), 8);
+        assert!(!lane.extend(&mut at_the_end, 1), "past the end of the area");
+        assert_eq!(at_the_end.bytes(), 2);
+        lane.publish(at_the_end, 1).unwrap();
+        let mut wrapped = lane.reserve(2).unwrap();
+        assert_eq!(wrapped.offset(), 0);
+        assert!(lane.extend(&mut wrapped, 2), "the room before the oldest");
+        assert!(
+            !lane.extend(&mut wrapped, 1),
+            "onto the oldest sample's bytes"
+        );
+        assert_eq!(wrapped.bytes(), 4);
+        assert_eq!(lane.stats().pending_bytes, 4 + 2 + 4);
+        lane.publish(wrapped, 1).unwrap();
+    }
+
+    /// Only the newest reservation grows: one behind it would run onto its bytes.
+    #[test]
+    fn only_the_newest_reservation_grows() {
+        let mut lane = lane::<4>(10, 10);
+        let mut older = lane.reserve(2).unwrap();
+        let mut newer = lane.reserve(2).unwrap();
+        assert!(!lane.extend(&mut older, 1));
+        assert!(lane.extend(&mut newer, 1));
+        assert_eq!((older.bytes(), newer.bytes()), (2, 3));
+        lane.cancel(older);
+        lane.cancel(newer);
+    }
+
+    /// Asking whether callbacks fit counts no refusal, and answers as `publish` does.
+    #[test]
+    fn asking_whether_callbacks_fit_counts_nothing() {
+        let mut lane = lane::<4>(100, 4);
+        admit(&mut lane, 1, 3).unwrap();
+        assert!(lane.admits_callbacks(1));
+        assert!(!lane.admits_callbacks(2));
+        assert_eq!(lane.stats().refused.total, 0);
+        assert_eq!(admit(&mut lane, 1, 2).unwrap_err(), Refusal::CallbacksFull);
     }
 
     #[test]

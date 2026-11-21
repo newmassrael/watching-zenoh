@@ -331,11 +331,13 @@ fn resolve_policy(_config: &CoopConfig) -> SessionPolicy {
 /// The session limits a session [`CoopEngine::open`] opens from `config` holds its tables to: the
 /// one place that open decides them. The snapshot the ABI resolved and states in the config
 /// ([`CoopConfig::limits`]), its delivery lane long enough for the sample of the largest message
-/// the session rejoins (`lane::holding_a_message`).
+/// the session rejoins, for each of its subscribers (`lane::holding_a_message`).
 fn resolve_limits(config: &CoopConfig) -> SessionLimits {
-    crate::lane::holding_a_message::<{ caps::PICO_FRAG_MAX_BYTES }, { caps::MAX_KEYEXPR_BYTES }>(
-        config.limits,
-    )
+    crate::lane::holding_a_message::<
+        { caps::PICO_FRAG_MAX_BYTES },
+        { caps::MAX_KEYEXPR_BYTES },
+        { caps::MAX_SUBSCRIPTIONS },
+    >(config.limits)
 }
 
 /// Why no session was opened.
@@ -3090,28 +3092,33 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // through the body and a callback that steps the session again would wait on it.
         loop {
             let next = lock(&self.samples).take_front();
-            let Some((id, item)) = next else {
+            let Some(item) = next else {
                 break;
             };
-            // The head goes back to the lane when the callback returns, or unwinds.
+            // The head goes back to the lane when the last callback returns, or one unwinds.
             let _handed = Handed(&self.samples);
             match item {
                 LaneItem::Sample(sample) => {
-                    let callback =
-                        lock(&self.targets)
-                            .iter()
-                            .find_map(|(t, target)| match target {
-                                Target::Subscriber(cb) if *t == TargetKey::Subscriber(id) => {
-                                    Some(cb.clone())
-                                }
-                                _ => None,
-                            });
-                    if let Some(callback) = callback {
-                        (lock(&callback))(&sample);
+                    // A subscriber undeclared since the sample was queued has no callback left,
+                    // and is passed over.
+                    for id in sample.subscribers() {
+                        let callback =
+                            lock(&self.targets)
+                                .iter()
+                                .find_map(|(t, target)| match target {
+                                    Target::Subscriber(cb) if *t == TargetKey::Subscriber(id) => {
+                                        Some(cb.clone())
+                                    }
+                                    _ => None,
+                                });
+                        if let Some(callback) = callback {
+                            (lock(&callback))(&sample);
+                        }
                     }
                 }
                 #[cfg(feature = "liveliness")]
                 LaneItem::Liveliness(sample) => {
+                    let id = sample.subscriber();
                     let callback =
                         lock(&self.targets)
                             .iter()

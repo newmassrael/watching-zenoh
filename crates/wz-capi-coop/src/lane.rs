@@ -12,10 +12,13 @@
 //! `DELIVERY_LANE_EVENTS`, a byte area of `DELIVERY_LANE_BYTES`, a callback budget of
 //! `DELIVERY_LANE_CALLBACKS`, all read from the limits the session opened under. The byte area is a
 //! span of the session's arena; a sample's key, payload, attachment, encoding schema and timestamp
-//! id lie one after the other in it, and what is not bytes (the subscriber, the kind, the
-//! reliability, the QoS, the source) is a [`Record`] at the sample's event slot. A callback is
-//! handed a view of the sample where it lies ([`LaneSample`]); the slot and its bytes are given
-//! back when the callback returns.
+//! id lie one after the other in it, followed by the ids of the subscribers it is for, and what is
+//! not bytes (the kind, the reliability, the QoS, the source) is a [`Record`] at the sample's event
+//! slot. A sample is written once for all the subscribers it reaches: the session hands it to each
+//! subscriber in turn, and the lane holds the sample it wrote last open until something else
+//! reaches it, so the same sample offered for another subscriber adds only that subscriber's id.
+//! Each callback is handed a view of the sample where it lies ([`LaneSample`]); the slot and its
+//! bytes are given back when the last of them returns.
 //!
 //! A liveliness subscriber's samples, a token appearing or retracted, take the same lane in the
 //! order they happen among the subscribers' samples: the token's key is the slot's bytes, and its
@@ -30,7 +33,7 @@
 //! Any other sample that finds no room is dropped and counted ([`LaneCounts::dropped`]). The gate
 //! is asked before a batch is read, so a batch only overflows the room it found when its samples
 //! take more than its own length: a key a peer named by its declaration, resolved longer than it
-//! travelled, or a sample many subscribers take. A sample that holds its sender and still finds no
+//! travelled, and the ids of the subscribers each sample is for. A sample that holds its sender and still finds no
 //! room is refused and counted apart ([`LaneCounts::held_over`]), as the session core's lane
 //! answers such a sample with a local resource limit (`delivery_lane::Overload`) and not with a
 //! silent loss.
@@ -45,7 +48,7 @@ use wz_session_core::bounded::{BoundedVec, Static};
 use wz_session_core::caps;
 #[cfg(feature = "liveliness")]
 use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
-use wz_session_core::delivery_lane::{DeliveryLane, Next};
+use wz_session_core::delivery_lane::{DeliveryLane, Next, Reservation};
 use wz_session_core::limit_binding::Quota;
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::link::{LostCause, RxFrame};
@@ -59,53 +62,67 @@ use crate::prelude::*;
 /// The longest id of the clock that stamped a sample's timestamp the wire carries.
 const TIMESTAMP_ID_BYTES: usize = 16;
 
+/// The bytes of a subscriber's id in the list that follows a sample's parts.
+const SUBSCRIBER_ID_BYTES: usize = core::mem::size_of::<SubId>();
+
 /// The most bytes one sample takes in the lane beyond the message it arrived in, for a session
-/// whose longest key is `key_bytes`: its key as the session resolved it, which a peer may have
-/// named by an alias of a few bytes, and the id of its timestamp's clock. Its payload, its
-/// attachment and its encoding's schema are bytes of the message.
-pub(crate) const fn sample_overhead(key_bytes: usize) -> usize {
-    key_bytes.saturating_add(TIMESTAMP_ID_BYTES)
+/// whose longest key is `key_bytes` and that holds `subscribers` subscribers at most: its key as
+/// the session resolved it, which a peer may have named by an alias of a few bytes, the id of its
+/// timestamp's clock, and the id of each subscriber it is for. Its payload, its attachment and its
+/// encoding's schema are bytes of the message.
+pub(crate) const fn sample_overhead(key_bytes: usize, subscribers: usize) -> usize {
+    key_bytes
+        .saturating_add(TIMESTAMP_ID_BYTES)
+        .saturating_add(subscribers.saturating_mul(SUBSCRIBER_ID_BYTES))
 }
 
 /// Whether a lane of `LANE` bytes holds the sample of a whole message of `FRAG` bytes on a key of
-/// `KEY` bytes.
-pub(crate) const fn holds_a_message<const LANE: usize, const FRAG: usize, const KEY: usize>() -> bool
-{
-    match FRAG.checked_add(sample_overhead(KEY)) {
+/// `KEY` bytes, for each of `SUBS` subscribers.
+pub(crate) const fn holds_a_message<
+    const LANE: usize,
+    const FRAG: usize,
+    const KEY: usize,
+    const SUBS: usize,
+>() -> bool {
+    match FRAG.checked_add(sample_overhead(KEY, SUBS)) {
         Some(sample) => sample <= LANE,
         None => false,
     }
 }
 
-// The build's lane holds the sample of the largest message the build lets a session rejoin, so a
-// session's lane, sized from the session's message under that bound, never needs more than the
-// build gives it: a build that raises `PICO_FRAG_MAX_BYTES` raises `DELIVERY_LANE_BYTES` with it.
+// The build's lane holds the sample of the largest message the build lets a session rejoin, for
+// every subscriber the build admits, so a session's lane, sized from the session's message under
+// that bound, never needs more than the build gives it: a build that raises `PICO_FRAG_MAX_BYTES`
+// raises `DELIVERY_LANE_BYTES` with it.
 const _: () = assert!(
     holds_a_message::<
         { caps::DELIVERY_LANE_BYTES },
         { caps::PICO_FRAG_MAX_BYTES },
         { caps::MAX_KEYEXPR_BYTES },
+        { caps::MAX_SUBSCRIPTIONS },
     >(),
     "the build's delivery lane holds a sample of the build's largest rejoined message"
 );
 
 /// `limits` with the delivery lane long enough for the sample of the largest message the session
-/// rejoins (`PICO_FRAG_MAX_BYTES`) on its longest key (`MAX_KEYEXPR_BYTES`): a lane stated shorter
-/// is lengthened to it, as a sample longer than the whole lane could never be handed on. `FRAG`
-/// and `KEY` are the build's values, under which the session's lie.
-pub(crate) fn holding_a_message<const FRAG: usize, const KEY: usize>(
+/// rejoins (`PICO_FRAG_MAX_BYTES`) on its longest key (`MAX_KEYEXPR_BYTES`), for every subscriber
+/// it holds (`MAX_SUBSCRIPTIONS`): a lane stated shorter is lengthened to it, as a sample longer
+/// than the whole lane could never be handed on. `FRAG`, `KEY` and `SUBS` are the build's values,
+/// under which the session's lie.
+pub(crate) fn holding_a_message<const FRAG: usize, const KEY: usize, const SUBS: usize>(
     mut limits: SessionLimits,
 ) -> SessionLimits {
-    let (Ok(frag), Ok(key)) = (
+    let (Ok(frag), Ok(key), Ok(subscribers)) = (
         limits
             .pico_frag_max_bytes()
             .lent_under(Quota::at_most(FRAG)),
         limits.max_keyexpr_bytes().lent_under(Quota::at_most(KEY)),
+        limits.max_subscriptions().lent_under(Quota::at_most(SUBS)),
     ) else {
         // A value over the build's refuses the session's open when its arena is laid out.
         return limits;
     };
-    let sample = frag.saturating_add(sample_overhead(key));
+    let sample = frag.saturating_add(sample_overhead(key, subscribers));
     if sample > limits.delivery_lane_bytes() {
         // Refused only by a domain of one value, which is the build's lane, and the build's lane
         // holds the sample (the assertion above).
@@ -117,8 +134,8 @@ pub(crate) fn holding_a_message<const FRAG: usize, const KEY: usize>(
 /// What waits at an event slot of the lane, besides its bytes.
 #[derive(Clone)]
 enum Event {
-    /// A sample, for the callback of the subscriber it names.
-    Sample(SubId, Record),
+    /// A sample, for the callbacks of the `subscribers` subscribers whose ids follow its parts.
+    Sample { record: Record, subscribers: usize },
     /// A token's appearance or retraction, for the callback of the liveliness subscriber it
     /// names; the token's key is the slot's bytes.
     #[cfg(feature = "liveliness")]
@@ -130,8 +147,9 @@ enum Event {
     },
 }
 
-/// What a sample is, besides its bytes.
-#[derive(Clone)]
+/// What a sample is, besides its bytes. Two samples of equal records and equal bytes are one
+/// sample to every callback, which is what lets one written copy serve each subscriber of it.
+#[derive(Clone, PartialEq)]
 struct Record {
     kind: SampleKind,
     reliability: Reliability,
@@ -145,6 +163,60 @@ struct Record {
     /// The time word, and the bytes of the id prefix.
     timestamp: Option<(u64, usize)>,
     source_info: Option<SourceInfo>,
+}
+
+impl Record {
+    /// What `sample` is besides its bytes, and its parts in the order they lie in the area.
+    fn of(sample: &dyn SampleView) -> (Self, [&[u8]; 5]) {
+        let key = sample.keyexpr().as_bytes();
+        let payload = sample.payload();
+        let attachment = sample.attachment();
+        let encoding = encoding_of(sample);
+        let timestamp = timestamp_of(sample);
+        let schema = encoding.and_then(|(_, schema)| schema).unwrap_or(&[]);
+        let zid = timestamp.map_or(&[][..], |(_, zid)| zid);
+        let record = Self {
+            kind: sample.kind(),
+            reliability: sample.reliability(),
+            qos: sample.qos(),
+            key: key.len(),
+            payload: payload.len(),
+            attachment: attachment.map(<[u8]>::len),
+            encoding: encoding.map(|(id, schema)| (id, schema.map(<[u8]>::len))),
+            timestamp: timestamp.map(|(time, zid)| (time, zid.len())),
+            source_info: sample.source_info().cloned(),
+        };
+        (
+            record,
+            [key, payload, attachment.unwrap_or(&[]), schema, zid],
+        )
+    }
+
+    fn after_payload(&self) -> usize {
+        self.key + self.payload
+    }
+
+    fn after_attachment(&self) -> usize {
+        self.after_payload() + self.attachment.unwrap_or(0)
+    }
+
+    fn after_schema(&self) -> usize {
+        self.after_attachment() + self.encoding.and_then(|(_, s)| s).unwrap_or(0)
+    }
+
+    /// Where the ids of the subscribers start: after the last part.
+    fn after_parts(&self) -> usize {
+        self.after_schema() + self.timestamp.map_or(0, |(_, zid)| zid)
+    }
+
+    /// Whether the sample's congestion control holds its sender: sent reliably, with `block` or
+    /// `block-first`. A sample that states no QoS has zenoh's default, `drop`.
+    fn holds_sender(&self) -> bool {
+        self.reliability == Reliability::Reliable
+            && self
+                .qos
+                .is_some_and(|qos| qos.congestion() != CongestionControl::Drop)
+    }
 }
 
 /// What the lane did not hand a subscriber, by why.
@@ -164,6 +236,9 @@ pub(crate) struct SampleLane {
     lane: DeliveryLane<{ caps::DELIVERY_LANE_EVENTS }>,
     records: [Option<Event>; caps::DELIVERY_LANE_EVENTS],
     area: NonNull<u8>,
+    /// The sample written last, its reservation held so that the other subscribers it reaches join
+    /// it: published, and so handed out, once anything else reaches the lane.
+    open: Option<Reservation>,
     /// A delivery holds the head: another thread that delivers finds nothing until it completes.
     handing: bool,
     counts: LaneCounts,
@@ -190,66 +265,143 @@ impl SampleLane {
             lane: DeliveryLane::with_limits(limits),
             records: [const { None }; caps::DELIVERY_LANE_EVENTS],
             area,
+            open: None,
             handing: false,
             counts: LaneCounts::default(),
         }
     }
 
     /// Queue `sample` for the callback of `subscriber`, or count it when the lane has no room
-    /// for it.
+    /// for it. The sample the lane holds open, offered again for a subscriber it is not for yet,
+    /// is not written again: the subscriber's id joins the ones that follow it.
     pub(crate) fn offer(&mut self, subscriber: SubId, sample: &dyn SampleView) {
-        let key = sample.keyexpr().as_bytes();
-        let payload = sample.payload();
-        let attachment = sample.attachment();
-        let encoding = encoding_of(sample);
-        let timestamp = timestamp_of(sample);
-        let schema = encoding.and_then(|(_, schema)| schema).unwrap_or(&[]);
-        let zid = timestamp.map_or(&[][..], |(_, zid)| zid);
-        let parts: [&[u8]; 5] = [key, payload, attachment.unwrap_or(&[]), schema, zid];
+        let (record, parts) = Record::of(sample);
+        if let Some(mut open) = self.open.take() {
+            let joined = self.join(&mut open, subscriber, &record, &parts);
+            self.open = Some(open);
+            if joined {
+                return;
+            }
+        }
+        self.seal();
         let Some(bytes) = parts
             .iter()
-            .try_fold(0usize, |sum, part| sum.checked_add(part.len()))
+            .try_fold(SUBSCRIBER_ID_BYTES, |sum, part| sum.checked_add(part.len()))
         else {
-            self.refuse(sample);
+            self.refuse(&record);
             return;
         };
+        if !self.lane.admits_callbacks(1) {
+            self.refuse(&record);
+            return;
+        }
         let Ok(reservation) = self.lane.reserve(bytes) else {
-            self.refuse(sample);
+            self.refuse(&record);
             return;
         };
         let mut at = reservation.offset();
         for part in parts {
-            // SAFETY: the lane placed the sample's `bytes` contiguously at `reservation.offset()`,
-            // inside the area (`DeliveryLane::reserve`), and no other sample's bytes lie there
-            // until this one is completed; `part` is the sample's and not the area's.
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    part.as_ptr(),
-                    self.area.as_ptr().add(at),
-                    part.len(),
-                )
-            };
+            self.put(at, part);
             at += part.len();
         }
-        let index = reservation.index();
-        self.records[index] = Some(Event::Sample(
-            subscriber,
-            Record {
-                kind: sample.kind(),
-                reliability: sample.reliability(),
-                qos: sample.qos(),
-                key: key.len(),
-                payload: payload.len(),
-                attachment: attachment.map(<[u8]>::len),
-                encoding: encoding.map(|(id, schema)| (id, schema.map(<[u8]>::len))),
-                timestamp: timestamp.map(|(time, zid)| (time, zid.len())),
-                source_info: sample.source_info().cloned(),
-            },
-        ));
-        if self.lane.publish(reservation, 1).is_err() {
-            self.records[index] = None;
-            self.refuse(sample);
+        self.put(at, &subscriber.to_ne_bytes());
+        self.records[reservation.index()] = Some(Event::Sample {
+            record,
+            subscribers: 1,
+        });
+        self.open = Some(reservation);
+    }
+
+    /// Add `subscriber` to the sample held `open` when `record` and `parts` are that sample's
+    /// and it is not for `subscriber` already: `true` when the offer is answered so, the id written
+    /// after the others, or counted when the callbacks owed are full. `false` leaves the offer to
+    /// a sample of its own: another sample, a subscriber the open one is for already (a second
+    /// sample of the same bytes), or no room for one more id after it.
+    fn join(
+        &mut self,
+        open: &mut Reservation,
+        subscriber: SubId,
+        record: &Record,
+        parts: &[&[u8]; 5],
+    ) -> bool {
+        let index = open.index();
+        let subscribers = match &self.records[index] {
+            Some(Event::Sample {
+                record: held,
+                subscribers,
+            }) if held == record => *subscribers,
+            _ => return false,
+        };
+        // SAFETY: the open sample's bytes lie at its reservation, written by `Self::offer` and
+        // `Self::join`, and nothing else writes there while it is held open.
+        let written = unsafe {
+            core::slice::from_raw_parts(self.area.as_ptr().add(open.offset()), open.bytes())
+        };
+        let (mut held, ids) = written.split_at(record.after_parts());
+        for part in parts {
+            let (bytes, rest) = held.split_at(part.len());
+            if bytes != *part {
+                return false;
+            }
+            held = rest;
         }
+        let id = subscriber.to_ne_bytes();
+        if ids
+            .chunks_exact(SUBSCRIBER_ID_BYTES)
+            .any(|other| *other == id[..])
+        {
+            return false;
+        }
+        if !self.lane.admits_callbacks(subscribers + 1) {
+            self.refuse(record);
+            return true;
+        }
+        let at = open.offset() + open.bytes();
+        if !self.lane.extend(open, SUBSCRIBER_ID_BYTES) {
+            return false;
+        }
+        self.put(at, &id);
+        if let Some(Event::Sample { subscribers, .. }) = &mut self.records[index] {
+            *subscribers += 1;
+        }
+        true
+    }
+
+    /// Publish the sample held open, so a delivery hands it out: no subscriber joins it after.
+    fn seal(&mut self) {
+        let Some(open) = self.open.take() else {
+            return;
+        };
+        let index = open.index();
+        let (subscribers, holds_sender) = match &self.records[index] {
+            Some(Event::Sample {
+                record,
+                subscribers,
+            }) => (*subscribers, record.holds_sender()),
+            _ => (0, false),
+        };
+        // Its callbacks were admitted one by one as it was written, so only a lane that stops
+        // refuses it, and then every subscriber it was for goes without.
+        if self.lane.publish(open, subscribers).is_err() {
+            self.records[index] = None;
+            for _ in 0..subscribers {
+                self.count_refused(holds_sender);
+            }
+        }
+    }
+
+    /// Copy `bytes` into the area from `at`, inside the reservation of the sample being written:
+    /// no other sample's bytes lie there until that one is completed.
+    fn put(&mut self, at: usize, bytes: &[u8]) {
+        let inside = at
+            .checked_add(bytes.len())
+            .is_some_and(|end| self.lane.can_ever_fit(end));
+        assert!(inside, "a sample's bytes lie inside the lane's area");
+        // SAFETY: inside the area (asserted above), which is this lane's alone (`Self::over`);
+        // `bytes` are the sample's and not the area's.
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), self.area.as_ptr().add(at), bytes.len())
+        };
     }
 
     /// Queue a token's appearance or retraction, `sample`, for the callback of liveliness
@@ -258,21 +410,13 @@ impl SampleLane {
     /// with the samples that do ([`LaneCounts::held_over`]).
     #[cfg(feature = "liveliness")]
     pub(crate) fn offer_liveliness(&mut self, subscriber: SubId, sample: &LivelinessSample<'_>) {
+        self.seal();
         let key = sample.keyexpr.as_bytes();
         let Ok(reservation) = self.lane.reserve(key.len()) else {
-            self.counts.held_over = self.counts.held_over.saturating_add(1);
+            self.count_refused(true);
             return;
         };
-        // SAFETY: the lane placed the key's bytes contiguously at `reservation.offset()`, inside
-        // the area (`DeliveryLane::reserve`), where no other event's bytes lie until this one is
-        // completed; `key` is the sample's and not the area's.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                key.as_ptr(),
-                self.area.as_ptr().add(reservation.offset()),
-                key.len(),
-            )
-        };
+        self.put(reservation.offset(), key);
         let index = reservation.index();
         self.records[index] = Some(Event::Liveliness {
             subscriber,
@@ -282,13 +426,18 @@ impl SampleLane {
         });
         if self.lane.publish(reservation, 1).is_err() {
             self.records[index] = None;
-            self.counts.held_over = self.counts.held_over.saturating_add(1);
+            self.count_refused(true);
         }
     }
 
     /// Count a sample the lane had no room for, by its congestion control.
-    fn refuse(&mut self, sample: &dyn SampleView) {
-        let count = if holds_sender(sample) {
+    fn refuse(&mut self, record: &Record) {
+        self.count_refused(record.holds_sender());
+    }
+
+    /// Count one subscriber's sample the lane had no room for: apart when it holds its sender.
+    fn count_refused(&mut self, holds_sender: bool) {
+        let count = if holds_sender {
             &mut self.counts.held_over
         } else {
             &mut self.counts.dropped
@@ -307,9 +456,10 @@ impl SampleLane {
         }
     }
 
-    /// What is at the head of the lane, and whose callback it is for: held by this delivery until
-    /// [`Self::complete`]. `None` when the lane is empty or another delivery holds the head.
-    pub(crate) fn take_front(&mut self) -> Option<(SubId, LaneItem)> {
+    /// What is at the head of the lane, with the subscribers it is for: held by this delivery
+    /// until [`Self::complete`]. `None` when the lane is empty or another delivery holds the head.
+    pub(crate) fn take_front(&mut self) -> Option<LaneItem> {
+        self.seal();
         if self.handing {
             return None;
         }
@@ -326,29 +476,32 @@ impl SampleLane {
             // SAFETY: the head's bytes are inside the area (`DeliveryLane::front`).
             let base = unsafe { self.area.as_ptr().add(delivery.offset) };
             return Some(match event {
-                Event::Sample(subscriber, record) => {
-                    (subscriber, LaneItem::Sample(LaneSample { record, base }))
-                }
+                Event::Sample {
+                    record,
+                    subscribers,
+                } => LaneItem::Sample(LaneSample {
+                    record,
+                    subscribers,
+                    base,
+                }),
                 #[cfg(feature = "liveliness")]
                 Event::Liveliness {
                     subscriber,
                     kind,
                     key,
                     token_id,
-                } => (
+                } => LaneItem::Liveliness(LaneLiveliness {
                     subscriber,
-                    LaneItem::Liveliness(LaneLiveliness {
-                        kind,
-                        key,
-                        token_id,
-                        base,
-                    }),
-                ),
+                    kind,
+                    key,
+                    token_id,
+                    base,
+                }),
             });
         }
     }
 
-    /// The callback of the head sample returned: its slot and its bytes come back.
+    /// The callbacks of the head returned, each of them: its slot and its bytes come back.
     pub(crate) fn complete(&mut self) {
         if let Next::Ready(delivery) = self.lane.front() {
             self.records[delivery.index] = None;
@@ -381,19 +534,10 @@ fn timestamp_of(sample: &dyn SampleView) -> Option<(u64, &[u8])> {
     })
 }
 
-/// Whether `sample`'s congestion control holds its sender: sent reliably, with `block` or
-/// `block-first`. A sample that states no QoS has zenoh's default, `drop`.
-fn holds_sender(sample: &dyn SampleView) -> bool {
-    sample.reliability() == Reliability::Reliable
-        && sample
-            .qos()
-            .is_some_and(|qos| qos.congestion() != CongestionControl::Drop)
-}
-
 /// What a delivery takes from the head of the lane, where its bytes lie. Valid until the delivery
 /// that took it completes it.
 pub(crate) enum LaneItem {
-    /// A sample, for a subscriber's callback.
+    /// A sample, for the callbacks of its subscribers.
     Sample(LaneSample),
     /// A token's appearance or retraction, for a liveliness subscriber's callback.
     #[cfg(feature = "liveliness")]
@@ -403,6 +547,7 @@ pub(crate) enum LaneItem {
 /// A token's appearance or retraction at the head of the lane, its key where it lies.
 #[cfg(feature = "liveliness")]
 pub(crate) struct LaneLiveliness {
+    subscriber: SubId,
     kind: LivelinessSampleKind,
     key: usize,
     token_id: u64,
@@ -411,6 +556,11 @@ pub(crate) struct LaneLiveliness {
 
 #[cfg(feature = "liveliness")]
 impl LaneLiveliness {
+    /// The liveliness subscriber whose callback it is for.
+    pub(crate) fn subscriber(&self) -> SubId {
+        self.subscriber
+    }
+
     /// The sample, for the liveliness subscriber's callback.
     pub(crate) fn as_sample(&self) -> LivelinessSample<'_> {
         // SAFETY: the key's bytes were a `&str`'s, written at `base` (`SampleLane::offer_liveliness`),
@@ -427,32 +577,36 @@ impl LaneLiveliness {
     }
 }
 
-/// A sample at the head of the lane, where its bytes lie: what a subscriber's callback is handed.
-/// Valid until the delivery that took it completes it.
+/// A sample at the head of the lane, where its bytes lie: what each of its subscribers' callbacks
+/// is handed. Valid until the delivery that took it completes it.
 pub(crate) struct LaneSample {
     record: Record,
+    subscribers: usize,
     base: *const u8,
 }
 
 impl LaneSample {
     /// The `len` bytes `skip` bytes into the sample.
     fn part(&self, skip: usize, len: usize) -> &[u8] {
-        // SAFETY: the sample's parts were written one after the other from `base` (`SampleLane::offer`),
-        // and the head's bytes are not written again until the delivery that holds it completes it,
-        // which is after this view is gone.
+        // SAFETY: the sample's parts and its subscribers' ids were written one after the other
+        // from `base` (`SampleLane::offer`, `SampleLane::join`), and the head's bytes are not
+        // written again until the delivery that holds it completes it, which is after this view
+        // is gone.
         unsafe { core::slice::from_raw_parts(self.base.add(skip), len) }
     }
 
-    fn after_payload(&self) -> usize {
-        self.record.key + self.record.payload
-    }
-
-    fn after_attachment(&self) -> usize {
-        self.after_payload() + self.record.attachment.unwrap_or(0)
-    }
-
-    fn after_schema(&self) -> usize {
-        self.after_attachment() + self.record.encoding.and_then(|(_, s)| s).unwrap_or(0)
+    /// The subscribers whose callbacks it is for, in the order the session offered it to them.
+    pub(crate) fn subscribers(&self) -> impl Iterator<Item = SubId> + '_ {
+        self.part(
+            self.record.after_parts(),
+            self.subscribers * SUBSCRIBER_ID_BYTES,
+        )
+        .chunks_exact(SUBSCRIBER_ID_BYTES)
+        .map(|held| {
+            let mut id = [0u8; SUBSCRIBER_ID_BYTES];
+            id.copy_from_slice(held);
+            SubId::from_ne_bytes(id)
+        })
     }
 }
 
@@ -481,7 +635,7 @@ impl SampleView for LaneSample {
     fn attachment(&self) -> Option<&[u8]> {
         self.record
             .attachment
-            .map(|len| self.part(self.after_payload(), len))
+            .map(|len| self.part(self.record.after_payload(), len))
     }
 
     fn source_info(&self) -> Option<&SourceInfo> {
@@ -491,14 +645,14 @@ impl SampleView for LaneSample {
     fn timestamp_parts(&self) -> Option<(u64, &[u8])> {
         self.record
             .timestamp
-            .map(|(time, zid)| (time, self.part(self.after_schema(), zid)))
+            .map(|(time, zid)| (time, self.part(self.record.after_schema(), zid)))
     }
 
     fn encoding_parts(&self) -> Option<(u32, Option<&[u8]>)> {
         self.record.encoding.map(|(id, schema)| {
             (
                 id,
-                schema.map(|len| self.part(self.after_attachment(), len)),
+                schema.map(|len| self.part(self.record.after_attachment(), len)),
             )
         })
     }

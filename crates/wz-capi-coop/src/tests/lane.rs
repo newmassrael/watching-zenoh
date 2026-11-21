@@ -36,13 +36,45 @@ fn lane(bytes: usize, events: usize) -> Option<SampleLane> {
     Some(unsafe { SampleLane::over(NonNull::from(area).cast::<u8>(), bytes, &limits) })
 }
 
-/// The sample at the head of `lane`, and whose it is, held by the caller until it completes it.
-fn front(lane: &mut SampleLane) -> Option<(SubId, LaneSample)> {
+/// [`lane`] whose callbacks owed at once are `callbacks` at most.
+fn lane_owing(bytes: usize, events: usize, callbacks: usize) -> Option<SampleLane> {
+    let mut limits = SessionLimits::defaults();
+    limits.select_delivery_lane_bytes(bytes).ok()?;
+    limits
+        .select_delivery_lane_events(Quota::at_most(events))
+        .ok()?;
+    limits
+        .select_delivery_lane_callbacks(Quota::at_most(callbacks))
+        .ok()?;
+    let area: &'static mut [u8] = vec![0u8; bytes].leak();
+    // SAFETY: the area is leaked, so it outlives the lane, and nothing else uses it.
+    Some(unsafe { SampleLane::over(NonNull::from(area).cast::<u8>(), bytes, &limits) })
+}
+
+/// The sample at the head of `lane`, and the subscribers it is for, held by the caller until it
+/// completes it.
+fn front(lane: &mut SampleLane) -> Option<(Vec<SubId>, LaneSample)> {
     match lane.take_front()? {
-        (id, LaneItem::Sample(sample)) => Some((id, sample)),
+        LaneItem::Sample(sample) => Some((sample.subscribers().collect(), sample)),
         #[cfg(feature = "liveliness")]
-        (_, LaneItem::Liveliness(_)) => panic!("a sample was offered, not a token"),
+        LaneItem::Liveliness(_) => panic!("a sample was offered, not a token"),
     }
+}
+
+/// The subscribers each sample in `lane` is for, in order, and its payload's first byte, each
+/// sample completed as it is read.
+fn drain(lane: &mut SampleLane) -> Vec<(Vec<SubId>, u8)> {
+    let mut handed = Vec::new();
+    while let Some((ids, sample)) = front(lane) {
+        handed.push((ids, sample.payload().first().copied().unwrap_or(0)));
+        lane.complete();
+    }
+    handed
+}
+
+/// A best-effort put of `len` bytes of `byte` on `demo/lane`.
+fn filled(len: usize, byte: u8) -> Sample {
+    Sample::new_put("demo/lane", vec![byte; len]).with_reliability(Reliability::BestEffort)
 }
 
 /// A best-effort put of `payload` on `demo/lane`.
@@ -73,8 +105,8 @@ fn a_sample_is_handed_as_it_was_offered() {
         .with_reliability(Reliability::BestEffort);
     lane.offer(7, &sample);
     {
-        let (id, view) = front(&mut lane).expect("the sample is at the head");
-        assert_eq!(id, 7);
+        let (ids, view) = front(&mut lane).expect("the sample is at the head");
+        assert_eq!(ids, [7]);
         assert_eq!(view.keyexpr(), "demo/a");
         assert_eq!(view.payload(), b"payload");
         assert_eq!(view.kind(), SampleKind::Put);
@@ -116,14 +148,14 @@ fn a_second_delivery_finds_the_head_held() {
     let Some(mut lane) = lane(256, 4) else {
         return;
     };
-    lane.offer(1, &best_effort(8));
-    lane.offer(2, &best_effort(8));
+    lane.offer(1, &filled(8, 1));
+    lane.offer(2, &filled(8, 2));
     let (first, _) = front(&mut lane).expect("the first sample");
-    assert_eq!(first, 1);
+    assert_eq!(first, [1]);
     assert!(lane.take_front().is_none(), "the head is held");
     lane.complete();
     let (second, _view) = front(&mut lane).expect("the second sample");
-    assert_eq!(second, 2);
+    assert_eq!(second, [2]);
 }
 
 /// A lane that admits one sample drops a second that may be dropped and counts it; one whose
@@ -247,10 +279,15 @@ fn the_builds_lane_holds_the_builds_largest_message() {
         { caps::DELIVERY_LANE_BYTES },
         { caps::PICO_FRAG_MAX_BYTES },
         { caps::MAX_KEYEXPR_BYTES },
+        { caps::MAX_SUBSCRIPTIONS },
     >());
-    assert_eq!(sample_overhead(8), 24, "a key of 8 and a clock id of 16");
-    assert!(holds_a_message::<{ 100 + 24 }, 100, 8>());
-    assert!(!holds_a_message::<{ 100 + 23 }, 100, 8>());
+    assert_eq!(
+        sample_overhead(8, 2),
+        32,
+        "a key of 8, a clock id of 16 and two subscribers' ids of 4"
+    );
+    assert!(holds_a_message::<{ 100 + 32 }, 100, 8, 2>());
+    assert!(!holds_a_message::<{ 100 + 31 }, 100, 8, 2>());
 }
 
 /// A lane stated shorter than the sample of the session's largest message is lengthened to hold
@@ -271,16 +308,22 @@ fn a_lane_is_sized_from_the_sessions_message() {
         // A build that keeps either limit to its own value has no other.
         return;
     }
-    let held =
-        holding_a_message::<{ caps::PICO_FRAG_MAX_BYTES }, { caps::MAX_KEYEXPR_BYTES }>(short);
+    let held = holding_a_message::<
+        { caps::PICO_FRAG_MAX_BYTES },
+        { caps::MAX_KEYEXPR_BYTES },
+        { caps::MAX_SUBSCRIPTIONS },
+    >(short);
     assert_eq!(
         held.delivery_lane_bytes(),
-        frag + sample_overhead(caps::MAX_KEYEXPR_BYTES)
+        frag + sample_overhead(caps::MAX_KEYEXPR_BYTES, caps::MAX_SUBSCRIPTIONS)
     );
 
     let long = SessionLimits::defaults();
-    let kept =
-        holding_a_message::<{ caps::PICO_FRAG_MAX_BYTES }, { caps::MAX_KEYEXPR_BYTES }>(long);
+    let kept = holding_a_message::<
+        { caps::PICO_FRAG_MAX_BYTES },
+        { caps::MAX_KEYEXPR_BYTES },
+        { caps::MAX_SUBSCRIPTIONS },
+    >(long);
     assert_eq!(kept.delivery_lane_bytes(), long.delivery_lane_bytes());
 }
 
@@ -305,12 +348,12 @@ fn a_token_takes_the_lane_in_order_with_the_samples() {
         },
     );
     let (first, _) = front(&mut lane).expect("the sample first");
-    assert_eq!(first, 1);
+    assert_eq!(first, [1]);
     lane.complete();
-    let Some((id, LaneItem::Liveliness(token))) = lane.take_front() else {
+    let Some(LaneItem::Liveliness(token)) = lane.take_front() else {
         panic!("the token next");
     };
-    assert_eq!(id, 2);
+    assert_eq!(token.subscriber(), 2);
     let sample = token.as_sample();
     assert_eq!(
         (sample.kind, sample.keyexpr, sample.token_id),
@@ -358,8 +401,106 @@ fn the_gate_holds_back_what_was_read_while_the_lane_is_full() {
     let gate = LaneGate::new(Quiet, lane.clone(), 32);
     assert!(gate.takes_input(), "an empty lane takes a batch");
     lane.lock().offer(1, &best_effort(40));
-    assert!(!gate.takes_input(), "fifteen bytes left: no batch of 32");
+    assert!(!gate.takes_input(), "no room left for a batch of 32");
     assert!(front(&mut lane.lock()).is_some());
     lane.lock().complete();
     assert!(gate.takes_input(), "emptied, the lane takes a batch again");
+}
+
+/// A sample offered for several subscribers is written once and handed to each of them, in the
+/// order it was offered to them: it takes the room of one copy and the ids, and one event slot.
+#[test]
+fn a_sample_for_several_subscribers_is_written_once_and_handed_to_each() {
+    let Some(mut lane) = lane(256, 4) else {
+        return;
+    };
+    let sample = filled(40, 7);
+    lane.offer(3, &sample);
+    lane.offer(1, &sample);
+    lane.offer(2, &sample);
+    // One copy: the key's 9 bytes, the payload's 40 and three ids of 4; three copies would leave
+    // fewer than 100 bytes of the 256.
+    assert!(lane.takes_a_batch(256 - (9 + 40 + 3 * 4)));
+    assert_eq!(drain(&mut lane), [(vec![3, 1, 2], 7)]);
+    assert_eq!(lane.counts(), LaneCounts::default());
+}
+
+/// A second sample of the same bytes is a sample of its own, and a sample offered after another
+/// one is written again: neither is folded into a sample its subscriber already has, nor moved
+/// ahead of the sample between them.
+#[test]
+fn a_sample_is_shared_only_by_the_subscribers_offered_it_together() {
+    let Some(mut lane) = lane(512, 8) else {
+        return;
+    };
+    let same = filled(8, 1);
+    lane.offer(1, &same);
+    lane.offer(2, &same);
+    lane.offer(1, &same);
+    lane.offer(2, &same);
+    lane.offer(1, &filled(8, 2));
+    lane.offer(2, &same);
+    assert_eq!(
+        drain(&mut lane),
+        [(vec![1, 2], 1), (vec![1, 2], 1), (vec![1], 2), (vec![2], 1)]
+    );
+}
+
+/// The head a delivery holds keeps its bytes and its subscribers until the delivery completes
+/// it: a sample that would need its room is refused meanwhile, and the room comes back after.
+#[test]
+fn a_held_sample_keeps_its_room_until_its_last_subscriber_is_done() {
+    let Some(mut lane) = lane(128, 4) else {
+        return;
+    };
+    let shared = filled(40, 5);
+    lane.offer(1, &shared);
+    lane.offer(2, &shared);
+    lane.offer(3, &shared);
+    let (ids, held) = front(&mut lane).expect("the shared sample");
+    assert_eq!(ids, [1, 2, 3]);
+    // 61 bytes held; 63 more fit, and nothing after them.
+    lane.offer(4, &filled(50, 6));
+    lane.offer(4, &filled(10, 8));
+    assert_eq!(lane.counts().dropped, 1, "no room while the head is held");
+    assert_eq!(held.payload(), [5u8; 40]);
+    assert_eq!(held.subscribers().collect::<Vec<_>>(), [1, 2, 3]);
+    lane.complete();
+    lane.offer(4, &filled(10, 8));
+    assert_eq!(lane.counts().dropped, 1, "the room came back");
+    assert_eq!(drain(&mut lane), [(vec![4], 6), (vec![4], 8)]);
+}
+
+/// Each subscriber of a shared sample owes a callback: those past the callbacks the lane owes at
+/// once are counted and handed nothing, and the ones before them are handed the sample.
+#[test]
+fn subscribers_past_the_callbacks_owed_are_counted() {
+    let Some(mut lane) = lane_owing(256, 4, 3) else {
+        return;
+    };
+    // A sample queued ahead owes one of the three, so the shared one is not alone in the lane,
+    // where it would be let owe more than all of them.
+    lane.offer(9, &filled(8, 9));
+    let shared = filled(8, 3);
+    lane.offer(1, &shared);
+    lane.offer(2, &shared);
+    lane.offer(3, &shared);
+    assert_eq!(lane.counts().dropped, 1);
+    assert_eq!(drain(&mut lane), [(vec![9], 9), (vec![1, 2], 3)]);
+}
+
+/// A subscriber whose id finds no room after the shared sample is offered a copy of its own,
+/// which is refused and counted when there is no room for that either.
+#[test]
+fn a_subscriber_with_no_room_for_its_id_is_counted() {
+    let Some(mut lane) = lane(64, 4) else {
+        return;
+    };
+    // The key's 9 bytes, the payload's 47 and two ids fill the 64.
+    let shared = filled(47, 4);
+    lane.offer(1, &shared);
+    lane.offer(2, &shared);
+    lane.offer(3, &shared);
+    assert_eq!(lane.counts().dropped, 1);
+    assert_eq!(drain(&mut lane), [(vec![1, 2], 4)]);
 }

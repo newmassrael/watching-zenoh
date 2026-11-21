@@ -219,3 +219,65 @@ fn a_filter_and_a_listener_count_the_sessions_own_subscribers_when_asked() {
     assert_eq!(heard(&counting), [true, false]);
     assert!(engine.write_filter_active(counting_filter));
 }
+
+/// A put reaches each of the session's own subscribers once, the sample written once for all of
+/// them; a put one of their callbacks makes from inside itself reaches each of them once too,
+/// after the sample whose callback made it and not inside that callback.
+#[test]
+fn a_put_made_inside_a_callback_reaches_each_subscriber_once_after_it() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let handed = Arc::new(Mutex::new(Vec::<(usize, Vec<u8>)>::new()));
+    let session = Arc::downgrade(&engine);
+    for subscriber in 0..3usize {
+        let handed = handed.clone();
+        let session = session.clone();
+        engine
+            .declare_subscriber_on_wire(
+                "demo/l/fan".to_owned(),
+                WireKey::literal(),
+                Locality::SessionLocal,
+                None,
+                Arc::new(move || {
+                    let handed = handed.clone();
+                    let session = session.clone();
+                    Box::new(move |sample: &dyn SampleView| {
+                        handed
+                            .lock()
+                            .unwrap()
+                            .push((subscriber, sample.payload().to_vec()));
+                        if subscriber == 0 && sample.payload() == b"outer" {
+                            if let Some(engine) = session.upgrade() {
+                                put_own(&engine, b"inner");
+                            }
+                        }
+                    })
+                }),
+            )
+            .expect("a session with ids left declares");
+    }
+
+    put_own(&engine, b"outer");
+    let outer = b"outer".to_vec();
+    let inner = b"inner".to_vec();
+    assert_eq!(
+        *handed.lock().unwrap(),
+        [
+            (0, outer.clone()),
+            (1, outer.clone()),
+            (2, outer),
+            (0, inner.clone()),
+            (1, inner.clone()),
+            (2, inner)
+        ],
+        "each subscriber once for each put, the inner put after the outer"
+    );
+}
+
+/// A put of `payload` on `demo/l/fan` for the session's own subscribers alone.
+fn put_own(engine: &Engine, payload: &[u8]) {
+    let opts = PublishOptions::put().with_locality(Locality::SessionLocal);
+    engine
+        .publish_on_wire_all("demo/l/fan", &WireKey::literal(), payload, &opts)
+        .expect("the publish is accepted");
+}
