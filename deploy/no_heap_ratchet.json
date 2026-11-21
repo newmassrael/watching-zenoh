@@ -1,0 +1,72 @@
+{
+  "about": "The allocations the pico C ABI on the cooperative engine makes after a session opens, one row per operation family (docs/upstream-parity.md D12, owner decision 2026-11-21: every byte a session needs is reserved at open from the configured limits, and none is taken after). Layer C1nh runs crates/wz-capi-pico/tests/no_heap_after_open.rs and `scripts/lib/no_heap_ratchet_gate.py --check` judges its reading against these rows. A row holds the allocations of one round of the family, `allocs_per_round` (the reading's allocations over its rounds, rounded up to three places), to that figure times one plus `tolerance`: a reading above it fails, a reading below it passes and prints the tighter row to commit, and a reading of 0 prints the row locked. `locked` is true once a family reads 0, and a locked row fails on any allocation. A null `allocs_per_round` is not measured yet and reads NOT-MEASURED, never a pass; `--fill <reading>` prints the rows a reading writes. A row above 0 names the store inventory entry it is registered under (`debt-<id>`); `debt-TBD` stands only on a row not measured yet. A row is written from the gate's own output for a reading, never by hand.",
+  "schema": "wz-no-heap-ratchet/1",
+  "tolerance": 0.05,
+  "families": {
+    "publisher-declare": {
+      "allocs_per_round": 18.44,
+      "locked": false,
+      "debt": "debt-c-abi-heap-after-open"
+    },
+    "put-small": {
+      "allocs_per_round": 7.89,
+      "locked": false,
+      "debt": "debt-c-abi-heap-after-open"
+    },
+    "subscriber-receive-small": {
+      "allocs_per_round": 13.33,
+      "locked": false,
+      "debt": "debt-c-abi-heap-after-open"
+    },
+    "put-batch": {
+      "allocs_per_round": 7.88,
+      "locked": false,
+      "debt": "debt-c-abi-heap-after-open"
+    },
+    "subscriber-receive-batch": {
+      "allocs_per_round": 13.2,
+      "locked": false,
+      "debt": "debt-c-abi-heap-after-open"
+    },
+    "get": {
+      "allocs_per_round": 20.99,
+      "locked": false,
+      "debt": "debt-c-abi-heap-after-open"
+    },
+    "queryable-reply": {
+      "allocs_per_round": 64.43,
+      "locked": false,
+      "debt": "debt-c-abi-heap-after-open"
+    },
+    "keyexpr-declare": {
+      "allocs_per_round": 41.59,
+      "locked": false,
+      "debt": "debt-c-abi-heap-after-open"
+    },
+    "liveliness-token": {
+      "allocs_per_round": 83.08,
+      "locked": false,
+      "debt": "debt-c-abi-heap-after-open"
+    },
+    "liveliness-get": {
+      "allocs_per_round": 51.37,
+      "locked": false,
+      "debt": "debt-c-abi-heap-after-open"
+    },
+    "e2e": {
+      "allocs_per_round": 24.01,
+      "locked": false,
+      "debt": "debt-c-abi-heap-after-open"
+    },
+    "replay": {
+      "allocs_per_round": 23.94,
+      "locked": false,
+      "debt": "debt-c-abi-heap-after-open"
+    },
+    "config-document": {
+      "allocs_per_round": 4,
+      "locked": false,
+      "debt": "debt-c-abi-heap-after-open"
+    }
+  }
+}

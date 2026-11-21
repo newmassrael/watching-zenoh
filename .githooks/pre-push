@@ -1344,6 +1344,10 @@ round_fed_gates=(
     "completeness_gate.py --check"
     "mutation_ratchet_gate.py --selftest"
     "mutation_ratchet_gate.py --declared"
+    # The no-heap ratchet's table against the families its test declares (Layer C1nh reads the
+    # measurement); a JSON and a text read, no build.
+    "no_heap_ratchet_gate.py --selftest"
+    "no_heap_ratchet_gate.py --declared"
     # R2659 — the link BEFORE `unwired_lane_lint`'s. That one checks lane ->
     # ci.yml; this checks test -> lane, so the chain is test -> lane -> workflow
     # and this is its missing first link. Both exist for the same reason, stated

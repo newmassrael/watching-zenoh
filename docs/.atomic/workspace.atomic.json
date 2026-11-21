@@ -6704,6 +6704,11 @@
       "status": "deprecated",
       "reason": "CLOSED R311y889 by scripts/lib/build_evidence_lint.py (Layer C0). Do not quote a count from here -- RUN the gate. The item: hosted run 32314626012 went red on Layer Qz with one line, 'Qz build deploy/zephyr-app (west) FAIL', in zero seconds, because the west build behind it was written >/dev/null 2>&1. The log held the verdict and none of the evidence, so telling a missing toolchain from a broken CMakeLists from a compile error meant provisioning Zephyr by hand and running it again -- a whole round spent reproducing what the failing run already knew. Measured across run-ci.sh, THREE builds discarded their output: the Zephyr one, the sce-codegen rebuild in Layer B (four words on failure), and the xtask build in Layer B2, that last the worst of its kind because it SKIPS rather than fails and prints 'libxml2/sce-build toolchain absent?' as a diagnosis when it is a guess -- a real break in the xtask read exactly like a box without libxml2. R311y756 had already repaired a fourth site in the same file for the same reason, which is what made this a rule needing a gate rather than a habit. The rule is deliberately NARROW: a BUILD command (west build, cargo build/test/run, scripts/build-*.sh, cmake --build, make) may not send both streams to /dev/null. The other ~55 discards in that file are command -v probes and the gates' own selftests, which run a script with deliberately bad input and legitimately care only about the exit status; a rule flagging those would need an exemption table longer than its findings."
     },
+    "debt-c-abi-heap-after-open": {
+      "status": "active",
+      "source": "open-debt register",
+      "reason": "The pico C ABI on the cooperative engine allocates after a session opens in every operation family (Layer C1nh, deploy/no_heap_ratchet.json, first reading 2026-11-21: 4 to 83 allocations per round). The owner decided the C ABI presets reserve all memory at open and allocate nothing after (docs/c-abi-engine-and-memory.md); docs/c-abi-no-heap-pools.md orders the conversion in units U0 to U16. Each family row falls to 0 and locks."
+    },
     "debt-c-g4": {
       "status": "active",
       "source": "open-debt register",
