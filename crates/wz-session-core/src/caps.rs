@@ -210,6 +210,22 @@ pub const MAX_LIVELINESS_SUBSCRIPTIONS: usize = generated::MAX_LIVELINESS_SUBSCR
 /// `HashMap` on the prior alloc-only backing.
 pub const MAX_LOCAL_TOKENS: usize = generated::MAX_LOCAL_TOKENS;
 
+/// The publishers a session holds at once, each with the write filter that asks whether anything
+/// subscribes to its key. A declaration past it is refused, having sent nothing.
+pub const MAX_PUBLISHERS: usize = generated::MAX_PUBLISHERS;
+
+/// The queriers a session holds at once, each with the write filter that asks whether anything
+/// answers on its key. A declaration past it is refused, having sent nothing.
+pub const MAX_QUERIERS: usize = generated::MAX_QUERIERS;
+
+/// The matching listeners a session holds at once, over all its publishers and queriers. A
+/// declaration past it is refused, having sent nothing.
+pub const MAX_MATCHING_LISTENERS: usize = generated::MAX_MATCHING_LISTENERS;
+
+/// The distinct key expressions a session declares to its peers at once (each held by every
+/// entity that names it). A declaration of one more distinct key is refused, having sent nothing.
+pub const MAX_DECLARED_KEYEXPRS: usize = generated::MAX_DECLARED_KEYEXPRS;
+
 /// Maximum number of concurrently-outstanding pending liveliness GET
 /// (snapshot) queries in a
 /// [`crate::declare::liveliness_get::LivelinessGetRegistry`]. Bounds the

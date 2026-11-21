@@ -2434,6 +2434,97 @@ zenoh = "none"
 reason = "No key of upstream's configuration bounds the liveliness tokens a session declares."
 
 [[limit]]
+id = "MAX_PUBLISHERS"
+kconfig = "WZ_LIMIT_MAX_PUBLISHERS"
+kind = "bound"
+driven = "local"
+on_heap = "advisory"
+default = 16
+storage = "both"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "open"
+read = "snapshot"
+wire = "none"
+help = '''
+The publishers a session holds at once, each with the write filter that
+asks whether anything subscribes to its key. Declaring one more is
+refused while the table is full.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the publishers a session declares, and zenoh-pico has no constant for them; the default is MAX_SUBSCRIPTIONS's, the other side of the same traffic."
+
+[[limit]]
+id = "MAX_QUERIERS"
+kconfig = "WZ_LIMIT_MAX_QUERIERS"
+kind = "bound"
+driven = "local"
+on_heap = "advisory"
+default = 16
+storage = "both"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "open"
+read = "snapshot"
+wire = "none"
+help = '''
+The queriers a session holds at once, each with the write filter that
+asks whether anything answers on its key. Declaring one more is refused
+while the table is full.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the queriers a session declares, and zenoh-pico has no constant for them; the default is MAX_QUERYABLES's, the other side of the same traffic."
+
+[[limit]]
+id = "MAX_MATCHING_LISTENERS"
+kconfig = "WZ_LIMIT_MAX_MATCHING_LISTENERS"
+kind = "bound"
+driven = "local"
+on_heap = "advisory"
+default = 16
+storage = "both"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "open"
+read = "snapshot"
+wire = "none"
+help = '''
+The matching listeners a session holds at once, over all its publishers
+and queriers. Declaring one more is refused while the table is full.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the matching listeners a session declares, and zenoh-pico has no constant for them; the default lets each publisher of the default MAX_PUBLISHERS hold one."
+
+[[limit]]
+id = "MAX_DECLARED_KEYEXPRS"
+kconfig = "WZ_LIMIT_MAX_DECLARED_KEYEXPRS"
+kind = "bound"
+driven = "local"
+on_heap = "advisory"
+default = 80
+storage = "both"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "open"
+read = "snapshot"
+wire = "none"
+help = '''
+The key expressions a session declares to its peers at once, each held by
+the entities that name it and by the program's declarations. Declaring
+one more distinct key is refused while the table is full.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the key expressions a session declares, and zenoh-pico has no constant for them; the default is one key for each entity the other defaults admit (16 subscribers, 16 queryables, 8 tokens, 8 liveliness subscribers, 16 publishers, 16 queriers)."
+
+[[limit]]
 id = "MAX_PENDING_LIVELINESS_GETS"
 kconfig = "WZ_LIMIT_MAX_PENDING_LIVELINESS_GETS"
 kind = "bound"
