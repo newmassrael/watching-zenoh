@@ -812,7 +812,7 @@ pub fn wire_tcp_stream(stream: TcpStream) -> (TcpReadDriver, Arc<StreamWriteDriv
 ///
 /// `link_rx` is the session's `transport/link/rx` section: `buffer_size` is the
 /// read storage the link pools, and `tcp_mtu` the rule the connection's MTU is
-/// sized by ([`tcp_link_mtu`]).
+/// sized by ([`TcpLinkMtu`]).
 pub fn wire_tcp_stream_with_lowlatency(
     stream: TcpStream,
     lowlatency: Arc<AtomicBool>,
@@ -1139,8 +1139,12 @@ mod tests {
                     .tcp_mss()
                     .expect("a connected socket reads its MSS"),
             );
+            // zenoh reads no MSS off a socket here, so the stream tells the rule nothing.
             #[cfg(not(unix))]
-            let mss = TcpMss::Unread;
+            let mss = {
+                let _ = stream;
+                TcpMss::Unread
+            };
             TcpLinkMtu::HalfMssMultiple.mtu(false, mss)
         }
 
