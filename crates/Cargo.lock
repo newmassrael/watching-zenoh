@@ -4332,6 +4332,7 @@ version = "0.1.0"
 dependencies = [
  "uhlc",
  "wz-codecs",
+ "wz-host-sync",
  "wz-session-core",
 ]
 

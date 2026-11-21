@@ -30,7 +30,15 @@ path = "src/lib.rs"
 crate-type = ["rlib"]
 
 [features]
-default = []
+# `std`: the wall clock is `std`'s `SystemTime`, the clock's standing is under `std`'s lock and its
+# bound reads the environment (`UHLC_MAX_DELTA_MS`). On by default, which every host build has had.
+# Without it the crate is `no_std` with `alloc`, for the pico C ABI's host library without `std`:
+# the wall clock and the lock are the host's own (`host-sync`), and the bound is the build's
+# `CLOCK_MAX_FORWARD_STEP_MS`, the same default, since a library has no environment of its own.
+default = ["std"]
+std = []
+# The host's wall clock and lock over its own calls (`wz-host-sync`), for a build without `std`.
+host-sync = ["dep:wz-host-sync"]
 # The node clock is a Hybrid Logical Clock (zenoh's `Option<Arc<HLC>>` on the Runtime). Off, a node
 # holds none: `NodeHlc` is zero-sized, nothing stamps, and every consumer falls back to the wall
 # clock, which is zenoh's own `None` arm. The tokio runtime's feature of the same name forwards here.
@@ -42,10 +50,10 @@ time-hlc = ["wz-session-core/clock-quality"]
 # The node's event log (the observation plane's ring of fixed-size records): one event ring the
 # node writes events into, stamped with the node clock, sized by `EVENT_RING_SLOTS` and
 # `EVENT_RECORD_ARGS`.
-event-ring = []
+event-ring = ["std"]
 # A clock the application registered, which can be held over and can run free once the host's bound
 # on holdover has passed (the two states `clock-source` adds to the standing).
-clock-source = ["time-hlc", "wz-session-core/clock-source"]
+clock-source = ["std", "time-hlc", "wz-session-core/clock-source"]
 # The clock the interceptions of a timestamp stack are recorded with (`NodeHlc::interception_timestamp`),
 # which a node has whether or not its role stamps data. Off, nothing is held for it.
 pubsub-ts-stack = ["time-hlc", "wz-session-core/pubsub-ts-stack"]
@@ -57,7 +65,7 @@ pubsub-timestamp = ["wz-session-core/pubsub-timestamp"]
 # The time base a program supplies (`time_base`): the clock a session's timers read and wait on in
 # place of the system's monotonic clock, for a program that runs the session on a time of its own
 # (a simulation, paused or faster or slower than the wall clock). Off, the module is not built.
-time-base = []
+time-base = ["std"]
 
 [dependencies]
 # The timestamp type, the NTP64 word, the epoch port and (with `codec-push`) the Push the forward
@@ -65,6 +73,8 @@ time-base = []
 wz-session-core = { path = "../wz-session-core", default-features = false, features = ["alloc"] }
 # The node's role, which the per-role switch reads.
 wz-codecs = { path = "../wz-codecs", default-features = false }
+# The host's wall clock and lock without `std` (`host-sync`).
+wz-host-sync = { path = "../wz-host-sync", optional = true }
 [dev-dependencies]
 # zenoh's own Hybrid Logical Clock crate, at the pin zenoh uses. The node clock is no longer built
 # on it (`wz_session_core::hlc` is), and this is the reference that clock is held to: the

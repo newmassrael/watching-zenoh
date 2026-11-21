@@ -9,7 +9,10 @@
 //! whether the clock is trusted, so the stamping path reads a single load and never the lock.
 
 use core::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, PoisonError};
+#[cfg(feature = "std")]
+use std::sync::{Mutex, MutexGuard, PoisonError};
+#[cfg(not(feature = "std"))]
+use wz_host_sync::{Mutex, MutexGuard};
 
 use wz_session_core::clock_quality::ClockQualityState;
 use wz_session_core::clock_standing::ClockStanding;
@@ -52,8 +55,20 @@ impl StandingCell {
         self.report(ClockStanding::holdover_expired)
     }
 
+    /// The standing, under its lock (`std`'s, past a poison, or the host's own without `std`).
+    fn locked(&self) -> MutexGuard<'_, ClockStanding> {
+        #[cfg(feature = "std")]
+        {
+            self.standing.lock().unwrap_or_else(PoisonError::into_inner)
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            self.standing.lock()
+        }
+    }
+
     fn report(&self, event: impl FnOnce(&mut ClockStanding) -> bool) -> bool {
-        let mut standing = self.standing.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut standing = self.locked();
         let changed = event(&mut standing);
         self.trusted.store(standing.is_trusted(), Ordering::Release);
         changed
@@ -61,10 +76,7 @@ impl StandingCell {
 
     /// The standing now.
     pub fn state(&self) -> ClockQualityState {
-        self.standing
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .state()
+        self.locked().state()
     }
 
     /// Whether the clock is trusted, as of the last report.
@@ -74,9 +86,6 @@ impl StandingCell {
 
     /// How many times the standing has changed.
     pub fn changes(&self) -> u32 {
-        self.standing
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .changes()
+        self.locked().changes()
     }
 }

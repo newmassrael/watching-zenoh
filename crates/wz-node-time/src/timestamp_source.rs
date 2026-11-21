@@ -117,13 +117,24 @@ impl wz_session_core::epoch::EpochSource for SystemEpoch {
     fn try_since_epoch(
         &self,
     ) -> Result<wz_session_core::epoch::SinceEpoch, wz_session_core::epoch::EpochUnavailable> {
+        let (secs, nanos) = system_since_epoch().ok_or(wz_session_core::epoch::EpochUnavailable)?;
+        Ok(wz_session_core::epoch::SinceEpoch { secs, nanos })
+    }
+}
+
+/// The system's wall clock since the Unix epoch, `None` before it: `std`'s `SystemTime`, or in a
+/// library without `std` the host's own clock (`host-sync`, `wz-host-sync`).
+fn system_since_epoch() -> Option<(u64, u32)> {
+    #[cfg(feature = "std")]
+    {
         let since = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| wz_session_core::epoch::EpochUnavailable)?;
-        Ok(wz_session_core::epoch::SinceEpoch {
-            secs: since.as_secs(),
-            nanos: since.subsec_nanos(),
-        })
+            .ok()?;
+        Some((since.as_secs(), since.subsec_nanos()))
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        wz_host_sync::wall_clock()
     }
 }
 
@@ -142,10 +153,10 @@ impl wz_session_core::epoch::EpochSource for SystemEpoch {
 /// NTP64 would route an exact millisecond count through a fraction conversion
 /// that only exists to match uhlc.
 pub fn wall_clock_unix_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
+    system_since_epoch().map_or(0, |(secs, nanos)| {
+        secs.saturating_mul(1_000)
+            .saturating_add(u64::from(nanos / 1_000_000))
+    })
 }
 
 /// The fallback timestamp source for an un-timestamped sample: the seam that
@@ -166,7 +177,7 @@ pub struct FallbackStamp {
     /// The consumer's identity, attached to every fallback stamp as the `zid`
     /// tie-breaker — identical across both source variants, so the source
     /// choice only upgrades the TIME word, never the identity.
-    zid: Vec<u8>,
+    zid: alloc::vec::Vec<u8>,
     /// The BORROWED node clock (R311y450). Not owned and not constructed here:
     /// one clock per node, `Arc`-shared with every other consumer, so two
     /// consumers on one node cannot mint colliding `(time, zid)` pairs. `None`
@@ -185,7 +196,7 @@ impl FallbackStamp {
     /// took only `zid` and built an HLC from it, so every call site silently
     /// minted another clock with the same `uhlc::ID`. Pass a clone of the ONE
     /// [`NodeHlc`](crate::node_clock::NodeHlc) the node built.
-    pub fn new(zid: Vec<u8>, node_hlc: crate::node_clock::NodeHlc) -> Self {
+    pub fn new(zid: alloc::vec::Vec<u8>, node_hlc: crate::node_clock::NodeHlc) -> Self {
         Self { zid, node_hlc }
     }
 

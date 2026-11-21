@@ -190,7 +190,7 @@ pub struct NodeHlc {
     /// resolve to the plain wall clock — zenoh's `Session::new_timestamp()`
     /// `None` arm.
     #[cfg(feature = "time-hlc")]
-    clock: Option<std::sync::Arc<NodeClock>>,
+    clock: Option<alloc::sync::Arc<NodeClock>>,
     /// R2626 — zenoh's `timestamping.drop_future_timestamp`: DROP a Put whose
     /// inbound timestamp uhlc rejects, instead of re-stamping it.
     ///
@@ -221,7 +221,7 @@ pub struct NodeHlc {
     /// `None` for a node built with no identity ([`Self::disabled`]) and for one whose clock was
     /// refused (`clock_refused`).
     #[cfg(feature = "pubsub-ts-stack")]
-    interception_clock: Option<std::sync::Arc<NodeClock>>,
+    interception_clock: Option<alloc::sync::Arc<NodeClock>>,
     /// Why the node holds no clock although it was to have one, for its creator to read
     /// ([`Self::clock_refused`]): the bound `UHLC_MAX_DELTA_MS` states is one the node does not
     /// honour. `None` for every node whose clock was built, and for one that was to have none.
@@ -272,7 +272,7 @@ pub enum DataStamp {
 struct NodeClock {
     hlc: wz_session_core::hlc::Hlc<NodeEpoch>,
     /// This node's zid, as `TimestampHint::zid` carries it on every stamp.
-    zid: Vec<u8>,
+    zid: alloc::vec::Vec<u8>,
     /// How far the clock is to be trusted, as the host last reported it.
     standing: StandingHome,
     /// Data this node passed on unstamped because of the `trusted-only` policy.
@@ -286,7 +286,7 @@ struct NodeClock {
 enum StandingHome {
     /// Built outside a `clock-source` build, and by the tests of one.
     #[cfg_attr(feature = "clock-source", allow(dead_code))]
-    Own(Box<crate::standing_cell::StandingCell>),
+    Own(alloc::boxed::Box<crate::standing_cell::StandingCell>),
     #[cfg(feature = "clock-source")]
     Shared(&'static crate::clock_registry::ClockRegistry),
 }
@@ -306,7 +306,7 @@ impl StandingHome {
 /// than the system clock (the application's own clock, or a frozen one in a test) without the
 /// type of the clock changing.
 #[cfg(feature = "time-hlc")]
-struct NodeEpoch(Box<dyn wz_session_core::epoch::EpochSource + Send + Sync>);
+struct NodeEpoch(alloc::boxed::Box<dyn wz_session_core::epoch::EpochSource + Send + Sync>);
 
 #[cfg(feature = "time-hlc")]
 impl wz_session_core::epoch::EpochSource for NodeEpoch {
@@ -336,7 +336,7 @@ pub enum MaxDeltaRefused {
     /// reads it: no sign but an optional `+`, and no space around the digits.
     NotMilliseconds {
         /// The text, as the environment holds it.
-        stated: String,
+        stated: alloc::string::String,
     },
     /// A whole number of milliseconds the build does not allow for `CLOCK_MAX_FORWARD_STEP_MS`:
     /// outside the limit's domain, or another value than the build's where the build keeps its own
@@ -372,7 +372,7 @@ impl core::fmt::Display for MaxDeltaRefused {
     }
 }
 
-impl std::error::Error for MaxDeltaRefused {}
+impl core::error::Error for MaxDeltaRefused {}
 
 /// The bound the clock runs with: the `CLOCK_MAX_FORWARD_STEP_MS` of `limits`, the runtime limits
 /// the node's creator handed it, unless the environment states another for `UHLC_MAX_DELTA_MS`
@@ -381,16 +381,59 @@ impl std::error::Error for MaxDeltaRefused {}
 /// creator resolved, so an operator's setting means the same on both. Stated, it is read as `uhlc`
 /// reads it (`s.parse()` into a `u64`) and selected over `limits`, so a value the build does not
 /// allow is refused as any selection of that limit is.
-#[cfg(feature = "time-hlc")]
+#[cfg(all(feature = "time-hlc", feature = "std"))]
 fn max_delta_from(
-    stated: Result<String, std::env::VarError>,
+    stated: Result<alloc::string::String, std::env::VarError>,
+    limits: &RuntimeLimits,
+) -> Result<wz_session_core::ntp64::Ntp64, MaxDeltaRefused> {
+    max_delta_of(
+        match stated {
+            Err(std::env::VarError::NotPresent) => Stated::Absent,
+            Err(std::env::VarError::NotUnicode(_)) => Stated::NotUnicode,
+            Ok(text) => Stated::Text(text),
+        },
+        limits,
+    )
+}
+
+/// What a node's setting states for the bound: nothing, bytes that are not Unicode, or a text.
+#[cfg(feature = "time-hlc")]
+enum Stated {
+    Absent,
+    #[cfg_attr(not(feature = "std"), allow(dead_code))]
+    NotUnicode,
+    #[cfg_attr(not(feature = "std"), allow(dead_code))]
+    Text(alloc::string::String),
+}
+
+/// The bound a node opens with under `limits`. With `std` the environment's `UHLC_MAX_DELTA_MS`
+/// may move it, as above. A library without `std` has no environment of its own to read: its
+/// bound is the `CLOCK_MAX_FORWARD_STEP_MS` of `limits`, which a deployment states with that limit.
+#[cfg(feature = "time-hlc")]
+fn max_delta_at_open(
+    limits: &RuntimeLimits,
+) -> Result<wz_session_core::ntp64::Ntp64, MaxDeltaRefused> {
+    #[cfg(feature = "std")]
+    {
+        max_delta_from(std::env::var(MAX_DELTA_VARIABLE), limits)
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        max_delta_of(Stated::Absent, limits)
+    }
+}
+
+/// The rule `max_delta_from` states, over what was stated wherever it was read.
+#[cfg(feature = "time-hlc")]
+fn max_delta_of(
+    stated: Stated,
     limits: &RuntimeLimits,
 ) -> Result<wz_session_core::ntp64::Ntp64, MaxDeltaRefused> {
     let mut limits = *limits;
     match stated {
-        Err(std::env::VarError::NotPresent) => {}
-        Err(std::env::VarError::NotUnicode(_)) => return Err(MaxDeltaRefused::NotUnicode),
-        Ok(text) => {
+        Stated::Absent => {}
+        Stated::NotUnicode => return Err(MaxDeltaRefused::NotUnicode),
+        Stated::Text(text) => {
             let ms = match text.parse::<u64>() {
                 Ok(ms) => ms,
                 Err(_) => return Err(MaxDeltaRefused::NotMilliseconds { stated: text }),
@@ -459,7 +502,7 @@ impl NodeHlc {
                 whatami,
                 enabled,
                 crate::timestamp_source::SystemEpoch,
-                StandingHome::Own(Box::default()),
+                StandingHome::Own(alloc::boxed::Box::default()),
                 policy.clock_quality_stamping(),
                 limits,
             )
@@ -510,7 +553,7 @@ impl NodeHlc {
             whatami,
             enabled,
             source,
-            StandingHome::Own(Box::default()),
+            StandingHome::Own(alloc::boxed::Box::default()),
             policy.clock_quality_stamping(),
             limits,
         )
@@ -536,7 +579,7 @@ impl NodeHlc {
             source,
             standing,
             stamping,
-            max_delta_from(std::env::var(MAX_DELTA_VARIABLE), limits),
+            max_delta_at_open(limits),
         )
     }
 
@@ -876,7 +919,7 @@ impl NodeHlc {
     /// node has none, so a node that does not stamp its data still stamps its stack. Nor does the
     /// `trusted-only` policy refuse it; the policy is about the data a node passes on as its own.
     #[cfg(feature = "pubsub-ts-stack")]
-    pub fn interception_timestamp(&self) -> Option<Vec<u8>> {
+    pub fn interception_timestamp(&self) -> Option<alloc::vec::Vec<u8>> {
         let clock = self.interception_clock.as_deref()?;
         let time = clock.hlc.new_timestamp().ok()?.as_word();
         Some(wz_session_core::ts_stack::timestamp_bytes(time, &clock.zid))
@@ -1015,14 +1058,14 @@ impl NodeHlc {
     pub fn stamp_own_publication<'a>(
         &self,
         push: &'a wz_session_core::wire::PushOwned,
-    ) -> Option<std::borrow::Cow<'a, wz_session_core::wire::PushOwned>> {
+    ) -> Option<alloc::borrow::Cow<'a, wz_session_core::wire::PushOwned>> {
         if !self.is_stamping() {
-            return Some(std::borrow::Cow::Borrowed(push));
+            return Some(alloc::borrow::Cow::Borrowed(push));
         }
         let mut carrier = push.clone();
         match self.treat_own_timestamp(&mut carrier) {
             TimestampVerdict::Drop => None,
-            TimestampVerdict::Relay => Some(std::borrow::Cow::Owned(carrier)),
+            TimestampVerdict::Relay => Some(alloc::borrow::Cow::Owned(carrier)),
         }
     }
 
@@ -1035,14 +1078,14 @@ impl NodeHlc {
     fn stamp_for_every_destination<'a>(
         &self,
         push: &'a wz_session_core::wire::PushOwned,
-    ) -> Option<std::borrow::Cow<'a, wz_session_core::wire::PushOwned>> {
+    ) -> Option<alloc::borrow::Cow<'a, wz_session_core::wire::PushOwned>> {
         if !self.is_stamping() {
-            return Some(std::borrow::Cow::Borrowed(push));
+            return Some(alloc::borrow::Cow::Borrowed(push));
         }
         let mut carrier = push.clone();
         match self.treat_timestamp(&mut carrier) {
             TimestampVerdict::Drop => None,
-            TimestampVerdict::Relay => Some(std::borrow::Cow::Owned(carrier)),
+            TimestampVerdict::Relay => Some(alloc::borrow::Cow::Owned(carrier)),
         }
     }
 }
@@ -1065,7 +1108,7 @@ pub struct ForwardStamp<'a> {
     /// The clock that stamps, `None` for a Push whose stamp is settled already.
     node: Option<&'a NodeHlc>,
     received: &'a wz_session_core::wire::PushOwned,
-    taken: core::cell::OnceCell<Option<std::borrow::Cow<'a, wz_session_core::wire::PushOwned>>>,
+    taken: core::cell::OnceCell<Option<alloc::borrow::Cow<'a, wz_session_core::wire::PushOwned>>>,
 }
 
 #[cfg(feature = "codec-push")]
@@ -1086,7 +1129,7 @@ impl<'a> ForwardStamp<'a> {
         Self {
             node: None,
             received: push,
-            taken: core::cell::OnceCell::from(Some(std::borrow::Cow::Borrowed(push))),
+            taken: core::cell::OnceCell::from(Some(alloc::borrow::Cow::Borrowed(push))),
         }
     }
 
@@ -1111,7 +1154,7 @@ impl<'a> ForwardStamp<'a> {
         self.taken
             .get_or_init(|| match self.node {
                 Some(node) => node.stamp_for_every_destination(self.received),
-                None => Some(std::borrow::Cow::Borrowed(self.received)),
+                None => Some(alloc::borrow::Cow::Borrowed(self.received)),
             })
             .as_deref()
     }
@@ -1167,9 +1210,9 @@ fn build_clock(
     source: impl wz_session_core::epoch::EpochSource + Send + Sync + 'static,
     standing: StandingHome,
     max_delta: wz_session_core::ntp64::Ntp64,
-) -> std::sync::Arc<NodeClock> {
-    std::sync::Arc::new(NodeClock {
-        hlc: wz_session_core::hlc::Hlc::new(NodeEpoch(Box::new(source)), max_delta),
+) -> alloc::sync::Arc<NodeClock> {
+    alloc::sync::Arc::new(NodeClock {
+        hlc: wz_session_core::hlc::Hlc::new(NodeEpoch(alloc::boxed::Box::new(source)), max_delta),
         zid: zid.to_vec(),
         standing,
         unstamped: core::sync::atomic::AtomicU32::new(0),

@@ -16,6 +16,18 @@
 //! The tokio runtime re-exports both modules at the paths it has always had, and the cooperative
 //! engine hosts the same ones (`docs/advanced-pubsub-on-a-neutral-core.md`).
 
+#![cfg_attr(not(feature = "std"), no_std)]
+
+extern crate alloc;
+
+// Without `std` the node's wall clock and the lock its clock's standing is under are the host's own
+// (`wz-host-sync`); a build with neither has no clock to read.
+#[cfg(not(any(feature = "std", feature = "host-sync")))]
+compile_error!(
+    "wz-node-time: a build without `std` reads the wall clock and takes its lock through the host's \
+     own calls: name `host-sync`"
+);
+
 #[cfg(feature = "clock-source")]
 pub mod clock_registry;
 #[cfg(feature = "event-ring")]
