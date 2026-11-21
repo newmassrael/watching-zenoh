@@ -422,6 +422,17 @@ opt-level = 3
 inherits = "release"
 panic = "abort"
 
+# The pico C ABI's host library without `std` (`wz-capi-pico`'s `os-posix`), selected with
+# `cargo build --profile capi-nostd`. A library without `std` has no unwinder, so a panic aborts
+# the process. It is linked as one program (`fat`): what none of its exports reaches is not carried,
+# and no landing pad of the prebuilt `core` is kept to name the personality routine `std` would
+# define. Its unwind tables are dropped by the configuration beside it (`.cargo/capi-nostd.toml`),
+# since a profile cannot carry a code generation flag on a stable toolchain.
+[profile.capi-nostd]
+inherits = "release"
+panic = "abort"
+lto = "fat"
+
 # socket2 0.6.3 and tokio 1.52.3 do not compile for QNX on the io-sock network stack: `libc` has
 # no `TCP_KEEPALIVE`, `unpcbid` or `LOCAL_PEEREID` there. ring 0.17.14 compiles for QNX but has no
 # entropy source for it (`SystemRandom` implements nothing), and quinn-udp 0.5.14 asks for an IP

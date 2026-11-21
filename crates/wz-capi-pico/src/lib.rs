@@ -61,6 +61,10 @@
 //! the calling thread's identity) is the engine port's `os`, whose host half is `std`'s; what the
 //! platform exports hand to the system is the host layer of this build (`os`). A capability whose
 //! module still names the host's library selects `std` in the manifest.
+//!
+//! A host library is built without `std` too (`os-posix`): the MCU build over the host's own
+//! calls, the port's `os` and the runtime's locks made of them, and the C library's heap and
+//! `abort` in place of `std`'s allocator and panic (`docs/c-abi-engine-and-memory.md`, E4).
 
 #![cfg_attr(not(feature = "std"), no_std)]
 // pico's C type names are snake_case (`z_owned_session_t`,
@@ -98,12 +102,13 @@ mod prelude {
 #[cfg(not(any(
     feature = "engine-tokio",
     feature = "engine-coop",
+    feature = "os-posix",
     feature = "os-zephyr"
 )))]
 compile_error!(
     "wz-capi-pico: a build needs an engine to run its sessions: `engine-tokio` for the session \
-     on its own thread and runtime, `engine-coop` for the one the program steps, `os-zephyr` for \
-     that one in a Zephyr image"
+     on its own thread and runtime, `engine-coop` for the one the program steps, `os-posix` for \
+     that one in a host library without `std`, `os-zephyr` for that one in a Zephyr image"
 );
 
 // `os-zephyr` is the image's engine and host, and an image has no standard library: a capability
@@ -120,6 +125,27 @@ compile_error!(
     "wz-capi-pico: `os-zephyr` builds without `std`, and a feature of this build selects it; \
      the capabilities a Zephyr image carries are those whose features do not select `std` \
      (see Cargo.toml)"
+);
+
+// `os-posix` is a host library without `std`: a capability that still selects `std` is refused
+// beside it by name, as beside `os-zephyr`, rather than built into a library that has `std` after
+// all. A build that names a host engine as well keeps `std` (features add, and the host wins).
+#[cfg(all(
+    feature = "os-posix",
+    feature = "std",
+    not(any(feature = "engine-tokio", feature = "engine-coop"))
+))]
+compile_error!(
+    "wz-capi-pico: `os-posix` builds without `std`, and a feature of this build selects it; \
+     the capabilities a host library without `std` carries are those whose features do not \
+     select `std` (see Cargo.toml)"
+);
+
+// A library is for one system: `os-posix` a host's, `os-zephyr` a Zephyr image's.
+#[cfg(all(feature = "os-posix", feature = "os-zephyr", not(feature = "std")))]
+compile_error!(
+    "wz-capi-pico: `os-posix` and `os-zephyr` each name the system the library is for; a build \
+     names one"
 );
 
 // `scout-mcu` is the cooperative engine's window over one datagram socket; the tokio engine scouts

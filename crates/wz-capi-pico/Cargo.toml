@@ -112,6 +112,23 @@ engine-coop = ["std", "dep:wz-capi-coop", "dep:wz-runtime-posix"]
 # links. The session core is asked for its `no_std` atomics, which a core without 64-bit atomics
 # (a Cortex-M7) needs. A capability that selects `std` is refused beside it (`src/lib.rs`).
 os-zephyr = ["dep:wz-capi-coop", "dep:wz-runtime-zephyr", "wz-session-core/no_std"]
+# `os-posix`: the library on a host without `std`, the MCU build plus an OS layer
+# (`docs/c-abi-engine-and-memory.md`, E4 and phase P4). The cooperative engine over the host's
+# sockets, clock and random source as `engine-coop` runs it (`wz-runtime-posix`: Linux, Android,
+# QNX Neutrino, and Winsock on Windows), the host layer of `src/os/unix.rs` or `src/os/windows.rs`
+# under the platform exports, the port's `os` and the runtime's critical sections made of the
+# host's own calls (`wz-capi-coop`'s `host-sys`), and what a library without `std` links in its
+# place (`src/os/no_std_host.rs`): the C library's heap as the global allocator, which is the one
+# `z_malloc` hands a program, and a panic that aborts the process. A library without `std` does
+# not unwind, so it is built with the `capi-nostd` profile, and for the host's own target with the
+# configuration beside it (`.cargo/capi-nostd.toml`). As beside `os-zephyr`, a capability that
+# selects `std` is refused (`src/lib.rs`), and a build that also names a host engine keeps `std`.
+os-posix = [
+    "dep:wz-capi-coop",
+    "dep:wz-runtime-posix",
+    "wz-capi-coop/host-sys",
+    "wz-capi-port/os-sys",
+]
 # The capabilities pico's own CMake switches name (`Z_FEATURE_QUERY`, `Z_FEATURE_QUERYABLE`,
 # `Z_FEATURE_LIVELINESS`, `Z_FEATURE_ADVANCED_PUBLICATION` / `_SUBSCRIPTION`), each one feature
 # of this crate: on in a default build, so the drop-in exports what the reference build does,

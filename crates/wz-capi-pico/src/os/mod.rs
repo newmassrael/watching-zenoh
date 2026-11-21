@@ -44,35 +44,47 @@ pub(crate) enum Unit {
 #[cfg(any(windows, test))]
 mod arith;
 
-// The Unix and Windows layers are a host's, and stand on its standard library.
-#[cfg(all(feature = "std", unix))]
+// The Unix and Windows layers are a host's, over its C library and its own calls, with `std` or
+// without it (`os-posix`).
+#[cfg(all(any(feature = "std", feature = "os-posix"), unix))]
 mod unix;
-#[cfg(all(feature = "std", unix))]
+#[cfg(all(any(feature = "std", feature = "os-posix"), unix))]
 pub(crate) use unix::*;
 
-#[cfg(all(feature = "std", windows))]
+#[cfg(all(any(feature = "std", feature = "os-posix"), windows))]
 mod windows;
-#[cfg(all(feature = "std", windows))]
+#[cfg(all(any(feature = "std", feature = "os-posix"), windows))]
 pub(crate) use windows::*;
+
+// What a host build without `std` links in its place: the C library's heap as the global
+// allocator, and a panic that aborts. Compiled where the tests run, which take blocks of it.
+#[cfg(any(
+    all(feature = "os-posix", not(feature = "std")),
+    all(test, any(unix, windows))
+))]
+mod no_std_host;
 
 // Zephyr is no target of the compiler's own (an image's Rust is built for the bare core), so the
 // image names it: `os-zephyr`. A host build that also names it (`--all-features`) keeps its host's
 // layer, as features add and the host's library wins.
-#[cfg(all(feature = "os-zephyr", not(feature = "std")))]
+#[cfg(all(feature = "os-zephyr", not(feature = "std"), not(feature = "os-posix")))]
 mod zephyr;
 // The Zephyr layer's clock arithmetic, compiled where the tests run as `arith` is.
-#[cfg(any(all(feature = "os-zephyr", not(feature = "std")), test))]
+#[cfg(any(
+    all(feature = "os-zephyr", not(feature = "std"), not(feature = "os-posix")),
+    test
+))]
 mod zephyr_arith;
-#[cfg(all(feature = "os-zephyr", not(feature = "std")))]
+#[cfg(all(feature = "os-zephyr", not(feature = "std"), not(feature = "os-posix")))]
 pub(crate) use zephyr::*;
 
 #[cfg(not(any(
-    all(feature = "std", any(unix, windows)),
-    all(feature = "os-zephyr", not(feature = "std"))
+    all(any(feature = "std", feature = "os-posix"), any(unix, windows)),
+    all(feature = "os-zephyr", not(feature = "std"), not(feature = "os-posix"))
 )))]
 compile_error!(
     "wz-capi-pico has no host layer for this build: a Unix or Windows host builds it with \
-     `std`, a Zephyr image with `os-zephyr` and without `std`, and any other system needs \
-     src/os/<host>.rs providing the names listed in src/os/mod.rs, modelled on zenoh-pico's \
-     system/<host>/system.c"
+     `std` or with `os-posix` in its place, a Zephyr image with `os-zephyr` and without `std`, \
+     and any other system needs src/os/<host>.rs providing the names listed in src/os/mod.rs, \
+     modelled on zenoh-pico's system/<host>/system.c"
 );

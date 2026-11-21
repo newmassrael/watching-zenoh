@@ -18,7 +18,7 @@
 //! (the condvar waits on an interval instead), a 32-bit `suseconds_t`, and Darwin's
 //! larger pthread layouts.
 
-use std::ffi::{c_char, c_ulong, c_void};
+use core::ffi::{c_char, c_ulong, c_void};
 
 use super::Unit;
 
@@ -58,15 +58,28 @@ pub unsafe fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
     libc::realloc(ptr, size)
 }
 
-/// Sleep at least `time` of `unit`, as pico's `usleep` and `sleep` do; the standard library
-/// sleeps on across an interruption where `usleep` would report it.
+/// Sleep at least `time` of `unit`, as pico's `usleep` and `sleep` do: `nanosleep`, slept again for
+/// what is left when a signal cuts it short, where `usleep` would report the interruption.
 pub fn sleep(unit: Unit, time: usize) {
     let time = time as u64;
-    std::thread::sleep(match unit {
-        Unit::Micro => std::time::Duration::from_micros(time),
-        Unit::Milli => std::time::Duration::from_millis(time),
-        Unit::Second => std::time::Duration::from_secs(time),
-    });
+    let (secs, nanos) = match unit {
+        Unit::Micro => (time / 1_000_000, (time % 1_000_000) * 1_000),
+        Unit::Milli => (time / 1_000, (time % 1_000) * 1_000_000),
+        Unit::Second => (time, 0),
+    };
+    let mut ask = libc::timespec {
+        tv_sec: libc::time_t::try_from(secs).unwrap_or(libc::time_t::MAX),
+        // Below a second, which a `long` of any width holds.
+        tv_nsec: nanos as libc::c_long,
+    };
+    let mut left = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: both are live locals the call reads and writes.
+    while unsafe { libc::nanosleep(&ask, &mut left) } != 0 {
+        ask = left;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -158,7 +171,7 @@ pub fn wall_now() -> WallTime {
         tv_usec: 0,
     };
     // SAFETY: `now` is a live local the call writes; a null timezone is allowed.
-    unsafe { libc::gettimeofday(&mut now, std::ptr::null_mut()) };
+    unsafe { libc::gettimeofday(&mut now, core::ptr::null_mut()) };
     now
 }
 
@@ -268,7 +281,7 @@ pub unsafe fn random_fill(buf: *mut c_void, len: usize) {
 pub unsafe fn random_fill(buf: *mut c_void, len: usize) {
     let fd = libc::open(c"/dev/urandom".as_ptr(), libc::O_RDONLY);
     if fd < 0 {
-        std::process::abort();
+        libc::abort();
     }
     let mut filled = 0usize;
     while filled < len {
@@ -279,11 +292,9 @@ pub unsafe fn random_fill(buf: *mut c_void, len: usize) {
         );
         if got > 0 {
             filled += got as usize;
-        } else if got == 0
-            || std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
-        {
+        } else if got == 0 || *libc::__get_errno_ptr() != libc::EINTR {
             libc::close(fd);
-            std::process::abort();
+            libc::abort();
         }
     }
     libc::close(fd);
@@ -306,7 +317,7 @@ pub unsafe fn random_fill(buf: *mut c_void, len: usize) {
 /// so does this crate, under `multi-thread`.
 #[cfg(feature = "multi-thread")]
 mod threads {
-    use std::ffi::{c_int, c_void};
+    use core::ffi::{c_int, c_void};
 
     #[cfg(target_os = "macos")]
     use super::clock_now;
@@ -369,11 +380,11 @@ mod threads {
     #[cfg(target_os = "nto")]
     const TASK_BYTES: usize = 4;
     #[cfg(not(target_os = "nto"))]
-    const TASK_BYTES: usize = std::mem::size_of::<*const c_void>();
+    const TASK_BYTES: usize = core::mem::size_of::<*const c_void>();
 
     const _: () = {
-        assert!(std::mem::size_of::<RawTask>() == TASK_BYTES);
-        assert!(std::mem::size_of::<TaskAttr>() == TASK_ATTR_BYTES);
+        assert!(core::mem::size_of::<RawTask>() == TASK_BYTES);
+        assert!(core::mem::size_of::<TaskAttr>() == TASK_ATTR_BYTES);
     };
 
     // The mutex and the condvar are pinned at build time where a size was measured on the SDK's
@@ -382,8 +393,8 @@ mod threads {
     // that stack-allocates a smaller object.
     #[cfg(target_os = "nto")]
     const _: () = {
-        assert!(std::mem::size_of::<RawMutex>() == 8);
-        assert!(std::mem::size_of::<RawCondvar>() == 8);
+        assert!(core::mem::size_of::<RawMutex>() == 8);
+        assert!(core::mem::size_of::<RawCondvar>() == 8);
     };
 
     /// pico's `_Z_CHECK_SYS_ERR`: 0 is `Z_OK`, anything else is the system-error code.
@@ -407,7 +418,7 @@ mod threads {
     /// # Safety
     /// `m` must point at storage for a `RawMutex`.
     pub unsafe fn mutex_init(m: *mut RawMutex) -> ZResult {
-        sys(libc::pthread_mutex_init(m, std::ptr::null()))
+        sys(libc::pthread_mutex_init(m, core::ptr::null()))
     }
 
     /// Destroy a mutex.
@@ -460,7 +471,7 @@ mod threads {
     /// # Safety
     /// `cv` must point at storage for a `RawCondvar`.
     pub unsafe fn condvar_init(cv: *mut RawCondvar) -> ZResult {
-        let mut attr: libc::pthread_condattr_t = std::mem::zeroed();
+        let mut attr: libc::pthread_condattr_t = core::mem::zeroed();
         let rc = libc::pthread_condattr_init(&mut attr);
         if rc != 0 {
             return sys(rc);
@@ -599,7 +610,7 @@ mod threads {
     /// # Safety
     /// `handle` must be a task `task_spawn` started and nothing has joined or detached.
     pub unsafe fn task_join(handle: RawTask) -> ZResult {
-        sys(libc::pthread_join(handle, std::ptr::null_mut()))
+        sys(libc::pthread_join(handle, core::ptr::null_mut()))
     }
 
     /// Release a started task WITHOUT waiting. The handle is not null.

@@ -15,12 +15,13 @@
 //! and tests; this file is the Win32 calls around them and cannot be compiled by
 //! anything but a Windows toolchain or a cross-check against one.
 
-use std::ffi::{c_char, c_ulong, c_void};
-use std::sync::atomic::{AtomicI64, Ordering};
+use core::ffi::{c_char, c_ulong, c_void};
+use core::sync::atomic::{AtomicI64, Ordering};
 
 use windows_sys::Win32::Foundation::{FILETIME, SYSTEMTIME};
 use windows_sys::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows_sys::Win32::System::SystemInformation::GetSystemTimeAsFileTime;
+use windows_sys::Win32::System::Threading::{Sleep, INFINITE};
 use windows_sys::Win32::System::Time::{
     FileTimeToSystemTime, GetTimeZoneInformation, SystemTimeToTzSpecificLocalTime,
     TIME_ZONE_ID_INVALID, TIME_ZONE_INFORMATION,
@@ -56,8 +57,8 @@ pub struct WallTime {
 }
 
 const _: () = {
-    assert!(std::mem::size_of::<Clock>() == 8);
-    assert!(std::mem::size_of::<WallTime>() == 16);
+    assert!(core::mem::size_of::<Clock>() == 8);
+    assert!(core::mem::size_of::<WallTime>() == 16);
 };
 
 // ---------------------------------------------------------------------------
@@ -79,14 +80,25 @@ pub unsafe fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
     libc::realloc(ptr, size)
 }
 
-/// Sleep at least `time` of `unit`, as pico's `Sleep` does.
+/// Sleep at least `time` of `unit`, as pico's `Sleep` does: whole milliseconds, a part of one
+/// rounded up, as pico's `z_sleep_us` rounds. `Sleep` takes a 32-bit count whose largest value is
+/// `INFINITE`, so a longer sleep is taken in parts.
 pub fn sleep(unit: Unit, time: usize) {
     let time = time as u64;
-    std::thread::sleep(match unit {
-        Unit::Micro => std::time::Duration::from_micros(time),
-        Unit::Milli => std::time::Duration::from_millis(time),
-        Unit::Second => std::time::Duration::from_secs(time),
-    });
+    let mut left = match unit {
+        Unit::Micro => time.div_ceil(1_000),
+        Unit::Milli => time,
+        Unit::Second => time.saturating_mul(1_000),
+    };
+    loop {
+        let part = left.min(u64::from(INFINITE - 1));
+        // SAFETY: any thread, any count below `INFINITE`.
+        unsafe { Sleep(part as u32) };
+        left -= part;
+        if left == 0 {
+            break;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -151,7 +163,7 @@ pub fn wall_now() -> WallTime {
     let (time, millitm) = arith::unix_time_of_filetime(ticks);
 
     // SAFETY: a zeroed `TIME_ZONE_INFORMATION` is plain data, and the call writes it.
-    let mut zone: TIME_ZONE_INFORMATION = unsafe { std::mem::zeroed() };
+    let mut zone: TIME_ZONE_INFORMATION = unsafe { core::mem::zeroed() };
     // SAFETY: a live local the call writes.
     let id = unsafe { GetTimeZoneInformation(&mut zone) };
     let (timezone, dstflag) = if id == TIME_ZONE_ID_INVALID {
@@ -208,12 +220,12 @@ pub unsafe fn wall_render_local(time: &WallTime, buf: *mut c_char, buflen: usize
         dwLowDateTime: ticks as u32,
         dwHighDateTime: (ticks >> 32) as u32,
     };
-    let mut utc: SYSTEMTIME = std::mem::zeroed();
+    let mut utc: SYSTEMTIME = core::mem::zeroed();
     if FileTimeToSystemTime(&filetime, &mut utc) == 0 {
         return false;
     }
-    let mut local: SYSTEMTIME = std::mem::zeroed();
-    if SystemTimeToTzSpecificLocalTime(std::ptr::null(), &utc, &mut local) == 0 {
+    let mut local: SYSTEMTIME = core::mem::zeroed();
+    if SystemTimeToTzSpecificLocalTime(core::ptr::null(), &utc, &mut local) == 0 {
         return false;
     }
     let Some(text) = arith::format_iso(
@@ -229,7 +241,7 @@ pub unsafe fn wall_render_local(time: &WallTime, buf: *mut c_char, buflen: usize
     if buflen < text.len() {
         return false;
     }
-    std::ptr::copy_nonoverlapping(text.as_ptr().cast::<c_char>(), buf, text.len());
+    core::ptr::copy_nonoverlapping(text.as_ptr().cast::<c_char>(), buf, text.len());
     true
 }
 
@@ -248,9 +260,10 @@ pub unsafe fn wall_render_local(time: &WallTime, buf: *mut c_char, buflen: usize
 /// # Safety
 /// `buf` must point at `len` writable bytes.
 pub unsafe fn random_fill(buf: *mut c_void, len: usize) {
-    let bytes = std::slice::from_raw_parts_mut(buf.cast::<u8>(), len);
+    let bytes = core::slice::from_raw_parts_mut(buf.cast::<u8>(), len);
     while getrandom::getrandom(bytes).is_err() {
-        std::thread::yield_now();
+        // The rest of this thread's time slice, as a yield.
+        Sleep(0);
     }
 }
 
@@ -260,7 +273,7 @@ pub unsafe fn random_fill(buf: *mut c_void, len: usize) {
 /// and so does this crate, under `multi-thread`.
 #[cfg(feature = "multi-thread")]
 mod threads {
-    use std::ffi::c_void;
+    use core::ffi::c_void;
 
     use windows_sys::Win32::Foundation::{
         CloseHandle, GetLastError, ERROR_TIMEOUT, HANDLE, WAIT_OBJECT_0,
@@ -272,6 +285,7 @@ mod threads {
     };
 
     use super::{arith, clock_now, frequency, Clock};
+    use crate::prelude::Box;
     use crate::result::{ZResult, Z_ERR_GENERIC, Z_OK};
     use crate::sync::Z_ETIMEDOUT;
 
@@ -291,13 +305,13 @@ mod threads {
     pub type TaskAttr = *mut c_void;
 
     /// The value of a task that was never started or has been joined or detached.
-    pub const TASK_NULL: RawTask = std::ptr::null_mut();
+    pub const TASK_NULL: RawTask = core::ptr::null_mut();
 
     const _: () = {
-        assert!(std::mem::size_of::<RawMutex>() == std::mem::size_of::<*mut c_void>());
-        assert!(std::mem::size_of::<RawCondvar>() == std::mem::size_of::<*mut c_void>());
-        assert!(std::mem::size_of::<RawTask>() == std::mem::size_of::<*mut c_void>());
-        assert!(std::mem::size_of::<TaskAttr>() == std::mem::size_of::<*mut c_void>());
+        assert!(core::mem::size_of::<RawMutex>() == core::mem::size_of::<*mut c_void>());
+        assert!(core::mem::size_of::<RawCondvar>() == core::mem::size_of::<*mut c_void>());
+        assert!(core::mem::size_of::<RawTask>() == core::mem::size_of::<*mut c_void>());
+        assert!(core::mem::size_of::<TaskAttr>() == core::mem::size_of::<*mut c_void>());
     };
 
     // ---------------------------------------------------------------------------
@@ -457,12 +471,12 @@ mod threads {
     ) -> ZResult {
         let start = Box::into_raw(Box::new(Start { fun, arg }));
         let handle = CreateThread(
-            std::ptr::null(),
+            core::ptr::null(),
             0,
             Some(thread_main),
             start.cast::<c_void>(),
             0,
-            std::ptr::null_mut(),
+            core::ptr::null_mut(),
         );
         if handle.is_null() {
             drop(Box::from_raw(start));
