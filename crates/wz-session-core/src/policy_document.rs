@@ -1084,13 +1084,16 @@ fn select_limit<'a, S: 'static>(
             why: Outside::Below { least: 1 },
         });
     }
-    entry
-        .select(snapshot, value)
-        .map_err(|refused| Reason::LimitOutsideDomain {
+    match entry.select(snapshot, value) {
+        Some(selected) => selected.map_err(|refused| Reason::LimitOutsideDomain {
             limit: refused.limit,
             value: refused.value,
             why: refused.why,
-        })
+        }),
+        // Refused before a value is selected (`apply_limit`); a caller that skips that order is
+        // refused the same way rather than accepted.
+        None => Err(Reason::LimitNotRead { limit: entry.id() }),
+    }
 }
 
 /// `base` with what a caller states and no document: the profile `overrides` names, then its
@@ -2144,43 +2147,49 @@ mod tests {
 
     /// A value the build's domain leaves out is refused with the domain's reason: outside the
     /// declared range, or, where the build keeps its own value alone, another value; and a
-    /// parameter is never `unbounded`. The selection is asked of the limit's entry, below the
-    /// refusal of a limit no machine reads, so a parameter whose machines still read the build
-    /// shows it too.
+    /// parameter is never `unbounded`. A parameter whose machines still read the build has no
+    /// selector in its entry, so the document's reader refuses it by name whatever the value, and
+    /// its domain is asked through the snapshot's own selector.
     #[test]
     fn a_limit_value_outside_the_domain_is_refused_with_the_domains_reason() {
         let entry = SESSION_LIMITS
             .iter()
             .find(|entry| entry.id() == "PICO_TX_QUEUE_SIZE")
             .expect("declared");
+        assert!(
+            !entry.read_from_snapshot(),
+            "the case is a parameter read from the build"
+        );
         let build = entry.value_in(&SessionLimits::defaults());
         let mut snapshot = SessionLimits::defaults();
+        for value in [LimitValue::Integer(17), LimitValue::Unbounded] {
+            assert_eq!(
+                select_limit(entry, &mut snapshot, value),
+                Err(Reason::LimitNotRead {
+                    limit: "PICO_TX_QUEUE_SIZE"
+                })
+            );
+        }
         let why = if entry.domain().is_singleton() {
             Outside::Pinned { only: build }
         } else {
             Outside::OutsideRange { least: 1, most: 16 }
         };
+        let refused = snapshot
+            .select_pico_tx_queue_size(17)
+            .expect_err("outside the domain");
         assert_eq!(
-            select_limit(entry, &mut snapshot, LimitValue::Integer(17)),
-            Err(Reason::LimitOutsideDomain {
-                limit: "PICO_TX_QUEUE_SIZE",
-                value: LimitValue::Integer(17),
-                why,
-            })
-        );
-        let unbounded = Reason::LimitOutsideDomain {
-            limit: "PICO_TX_QUEUE_SIZE",
-            value: LimitValue::Unbounded,
-            why: Outside::UnboundedParameter,
-        };
-        assert_eq!(
-            select_limit(entry, &mut snapshot, LimitValue::Unbounded),
-            Err(unbounded)
+            (refused.limit, refused.value, refused.why),
+            ("PICO_TX_QUEUE_SIZE", LimitValue::Integer(17), why)
         );
         assert_eq!(snapshot, SessionLimits::defaults());
         let refusal = Refusal {
             layer: Origin::Api,
-            reason: unbounded,
+            reason: Reason::LimitOutsideDomain {
+                limit: "PICO_TX_QUEUE_SIZE",
+                value: LimitValue::Unbounded,
+                why: Outside::UnboundedParameter,
+            },
         };
         assert_eq!(
             format!("{refusal}"),

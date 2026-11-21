@@ -1189,7 +1189,7 @@ mod enforcement {
 mod tests {
     use super::*;
     use crate::caps;
-    use crate::limit_binding::{LimitEntry, LimitSpec, LimitValue, Outside, Quota};
+    use crate::limit_binding::{LimitEntry, LimitSpec, Outside, Quota};
     use crate::policy_binding::{Driven, LimitKind, Storage};
 
     /// Every limit of `crate::caps` with its binding, by id.
@@ -1323,8 +1323,8 @@ mod tests {
             .expect("an open limit");
         assert_eq!(entry.driven(), Some(Driven::Remote));
         if !entry.domain().is_singleton() {
-            let refused = entry
-                .select(&mut limits, LimitValue::Unbounded)
+            let refused = limits
+                .select_max_keyexpr_bytes(Quota::UNBOUNDED)
                 .unwrap_err();
             assert_eq!(
                 refused.why,

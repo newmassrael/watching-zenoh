@@ -656,6 +656,9 @@ pub trait LimitField<S>: LimitSpec {
     fn held_in(snapshot: &S) -> Self::Value;
 }
 
+/// How an entry selects a value in its snapshot.
+type Selector<S> = fn(&mut S, LimitValue) -> Result<(), OutsideLimitDomain>;
+
 /// One limit as a reader that names it by its id sees it, in the snapshot `S` that holds it.
 pub struct LimitEntry<S: 'static> {
     id: &'static str,
@@ -664,7 +667,9 @@ pub struct LimitEntry<S: 'static> {
     read_from_snapshot: bool,
     capacity: Option<usize>,
     domain: LimitDomain,
-    select: fn(&mut S, LimitValue) -> Result<(), OutsideLimitDomain>,
+    /// `None` for a limit no machine reads from the snapshot: a statement of it is refused before
+    /// any value is selected, so the entry links no selector for it.
+    select: Option<Selector<S>>,
     held: fn(&S) -> LimitValue,
 }
 
@@ -700,7 +705,13 @@ impl<S> LimitEntry<S> {
             read_from_snapshot: L::READ_FROM_SNAPSHOT,
             capacity: L::CAPACITY,
             domain: L::DOMAIN,
-            select: select_at::<S, L>,
+            // Decided where the table is evaluated: a limit read from the build gets no selector,
+            // and a build links the selection of none of them.
+            select: if L::READ_FROM_SNAPSHOT {
+                Some(select_at::<S, L>)
+            } else {
+                None
+            },
             held: held_at::<S, L>,
         }
     }
@@ -736,9 +747,15 @@ impl<S> LimitEntry<S> {
         self.domain
     }
 
-    /// Selects `value` in `snapshot`. A refusal leaves `snapshot` as it was.
-    pub fn select(&self, snapshot: &mut S, value: LimitValue) -> Result<(), OutsideLimitDomain> {
-        (self.select)(snapshot, value)
+    /// Selects `value` in `snapshot`. A refusal leaves `snapshot` as it was. `None` for a limit no
+    /// machine reads from the snapshot ([`Self::read_from_snapshot`]), which has no selector: a
+    /// value selected in a field nothing reads would be accepted and never applied.
+    pub fn select(
+        &self,
+        snapshot: &mut S,
+        value: LimitValue,
+    ) -> Option<Result<(), OutsideLimitDomain>> {
+        self.select.map(|select| select(snapshot, value))
     }
 
     /// The value `snapshot` holds.
@@ -1051,11 +1068,15 @@ mod tests {
         assert_eq!(sized.capacity(), Some(8));
         assert_eq!(open.value_in(&snapshot), LimitValue::Unbounded);
         open.select(&mut snapshot, LimitValue::Integer(12))
+            .expect("a limit read from the snapshot has a selector")
             .expect("inside");
         assert_eq!(open.value_in(&snapshot), LimitValue::Integer(12));
-        let refused = sized
-            .select(&mut snapshot, LimitValue::Unbounded)
-            .unwrap_err();
+        // A limit read from the build has no selector in its entry.
+        assert!(sized
+            .select(&mut snapshot, LimitValue::Integer(4))
+            .is_none());
+        let refused =
+            select_at::<Snapshot, Sized8>(&mut snapshot, LimitValue::Unbounded).unwrap_err();
         assert_eq!(refused.why, Outside::UnboundedOverCapacity { capacity: 8 });
         // A refusal leaves the snapshot as it was.
         assert_eq!(sized.value_in(&snapshot), LimitValue::Integer(8));
