@@ -15,6 +15,7 @@
 //! no-heap: <family> not-built
 //! ```
 //!
+//! With `WZ_NO_HEAP_READING` set, the lines are written to the file it names as well.
 //! `scripts/lib/no_heap_ratchet_gate.py --check` holds those lines to `deploy/no_heap_ratchet.json`:
 //! the allocations of a round may only fall, and a family that reached 0 stays there. Layer C1nh
 //! builds and runs this file; its one test is `#[ignore]`d, so a default sweep does not count a
@@ -64,6 +65,8 @@ const ROUNDS: usize = 100;
 const SETTLE: Duration = Duration::from_millis(100);
 /// The prefix of every line the gate reads.
 const PREFIX: &str = "no-heap:";
+/// The variable that names a file the lines are written to as well, which the lane hands the gate.
+const READING_VARIABLE: &str = "WZ_NO_HEAP_READING";
 
 /// A key a declaration under count names, and none of the pair's own entities matches. Synthetic.
 const DECLARED: &CStr = c"noheap/declared";
@@ -720,13 +723,21 @@ fn allocations_after_open_are_counted_per_operation_family() {
     assert!(dropped, "both transports are let go");
     assert_eq!(PANICS.load(Ordering::SeqCst), 0, "a thread panicked");
 
+    let mut reading = String::new();
     for (name, round, part) in FAMILIES {
-        match seen.iter().find(|(of, _)| *of == round) {
+        let line = match seen.iter().find(|(of, _)| *of == round) {
             Some((_, window)) => {
                 let (allocs, bytes) = part_of(window, part);
-                println!("{PREFIX} {name} allocs={allocs} bytes={bytes} rounds={ROUNDS}");
+                format!("{PREFIX} {name} allocs={allocs} bytes={bytes} rounds={ROUNDS}")
             }
-            None => println!("{PREFIX} {name} not-built"),
-        }
+            None => format!("{PREFIX} {name} not-built"),
+        };
+        println!("{line}");
+        reading.push_str(&line);
+        reading.push('\n');
+    }
+    if let Some(path) = std::env::var_os(READING_VARIABLE) {
+        std::fs::write(&path, reading)
+            .unwrap_or_else(|error| panic!("the reading is written to {path:?}: {error}"));
     }
 }

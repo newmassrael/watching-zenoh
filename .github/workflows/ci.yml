@@ -2366,6 +2366,13 @@ jobs:
           WZ_STABILITY_SECONDS: "10"
         run: bash scripts/run-ci.sh --layer S
 
+      - name: Layer C1nh — what the pico C ABI allocates after a session opens
+        # The no-heap ratchet (docs/upstream-parity.md D12): the cooperative engine's build of the
+        # pico C ABI counts each operation family's allocations after open, and
+        # deploy/no_heap_ratchet.json holds them so that they only fall. A row not filled yet fails
+        # as NOT-MEASURED. Here beside Layer S, whose memory legs build the same engine's tests.
+        run: bash scripts/run-ci.sh --layer C1nh
+
   # Layer C1p32, in a job of its own: the pico C ABI library and every crate either of its engines
   # links, built and tested for `i686-unknown-linux-gnu`, which this 64-bit runner runs natively.
   # The library ships for 32-bit Windows too, and every other job builds it for 64 bits only, where

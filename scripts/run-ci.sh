@@ -343,6 +343,10 @@
 #              mutant, and its counts held to the committed row. Opt-in via
 #              `--layer Cmut` or `WZ_RUN_LAYER_CMUT=1`; hosted nightly
 #              (docs/mutation-testing.md).
+#   Layer C1nh — the pico C ABI on the cooperative engine and what it
+#              allocates after a session opens: each operation family's
+#              allocations a round, held by deploy/no_heap_ratchet.json so
+#              that they only fall, to 0 (docs/upstream-parity.md D12).
 #
 # Exit codes:
 #   0  every required layer passed
@@ -2736,6 +2740,10 @@ layer_c0_test_discipline() {
     # rows. The mutants themselves run nightly; this is what a push can afford of them.
     _runci_leg mutation_ratchet_gate.selftest -- python3 scripts/lib/mutation_ratchet_gate.py --selftest
     _runci_leg mutation_ratchet_gate --after mutation_ratchet_gate.selftest -- python3 scripts/lib/mutation_ratchet_gate.py --declared
+    # Layer C1nh's table (docs/upstream-parity.md D12): the gate's own fixtures, then the table's
+    # rows against the families the no-heap test declares. The reading itself is the lane's.
+    _runci_leg no_heap_ratchet_gate.selftest -- python3 scripts/lib/no_heap_ratchet_gate.py --selftest
+    _runci_leg no_heap_ratchet_gate --after no_heap_ratchet_gate.selftest -- python3 scripts/lib/no_heap_ratchet_gate.py --declared
     # Open-debt item 938 — the leg ledger's rules held on the text, and the
     # census of lanes whose independent gates still stop at the first red; and
     # the ledger's runtime, driven through fixture legs.
@@ -13134,6 +13142,41 @@ _c1p32_pico_profile_tests() {
     read -r -a args <<<"$resolved"
     _runci_guarded_test "C1p32 pico host-peer-ext (tokio engine)" + \
         cargo test -p wz-capi-pico --target "$target" "${args[@]}" --tests --no-fail-fast
+}
+
+# ─── Layer C1nh — what the pico C ABI allocates after a session opens ──────
+#
+# The owner's decision of 2026-11-21 (docs/upstream-parity.md D12): the pico C ABI runs on the
+# cooperative engine with no heap after a session opens, every byte it needs reserved at open from
+# the configured limits. This lane holds the way there. `tests/no_heap_after_open.rs` of
+# wz-capi-pico opens two sessions over the program's own transport and, after a warm-up, counts
+# what each operation family allocates in a fixed number of rounds; the test writes one line a
+# family to the file `WZ_NO_HEAP_READING` names, and scripts/lib/no_heap_ratchet_gate.py holds
+# each family's allocations a round to its row of deploy/no_heap_ratchet.json. A rise fails, a fall
+# prints the row to commit, a family at 0 is locked there, and a row not filled yet reads
+# NOT-MEASURED, which fails the lane as a rise does: a ratchet with no number holds nothing.
+#
+# The build is the cooperative engine's with every capability a family exercises. A family the
+# build lacks prints `not-built` and is not judged, so this feature list is the population: a
+# capability left out of it is a family the lane stops holding. One test, `#[ignore]`d so that no
+# default sweep counts a process it shares, guarded at exactly 1 passed. A leg ledger: the gate's
+# own fixtures do not wait on the build, and the reading is judged only after both passed.
+layer_c1nh_no_heap_after_open() {
+    local features="engine-coop,peer,multi-thread,link-udp,query,queryable,liveliness"
+    features+=",liveliness-get,unstable-api,app-transport,e2e-sender,e2e-receiver"
+    features+=",replay-cache,config-document"
+    local reading="$WZ_ARTIFACTS/target/no-heap/reading.txt"
+    mkdir -p "${reading%/*}" || return 1
+    rm -f "$reading"
+    local -x WZ_NO_HEAP_READING="$reading"
+    wz_test_args wz-capi-pico no_heap_after_open
+    _runci_legs_open C1nh || return 1
+    _runci_leg no_heap_ratchet_gate.selftest -- python3 scripts/lib/no_heap_ratchet_gate.py --selftest
+    _runci_leg measure -- _runci_guarded_test "C1nh no heap after open" 1 \
+        cargo test -p wz-capi-pico --no-default-features --features "$features" \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --nocapture --test-threads=1
+    _runci_leg no_heap_ratchet_gate --after no_heap_ratchet_gate.selftest,measure -- python3 scripts/lib/no_heap_ratchet_gate.py --check "$reading"
+    _runci_legs_close
 }
 
 # ─── Layer C1cn — every crate LINTS CLEAN behind its non-default ────
@@ -29186,6 +29229,7 @@ run_layer C1cs layer_c1cs_capability_cost || overall=1
 run_layer Z8 layer_z8_upstream_suite || overall=1
 run_layer C1co layer_c1co_pico_client_dials_a_listener || overall=1
 run_layer C1p32 layer_c1p32_pico_i686 || overall=1
+run_layer C1nh layer_c1nh_no_heap_after_open || overall=1
 run_layer C1cn layer_c1cn_nondefault_features || overall=1
 run_layer C1i layer_c1i_cargo_test_scouting || overall=1
 run_layer C1k layer_c1k_cargo_test_scouting_static || overall=1

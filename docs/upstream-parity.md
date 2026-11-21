@@ -480,6 +480,23 @@ derived from the declaration and never chosen by hand:
   debt, and a criterion met is locked. Criterion (b) is measured only where the catalogue is
   given (`WZ_FEATURE_CATALOGUE`), and its figure stays with the document. What each figure is and
   how it is read: `docs/completeness-scoreboard.md`.
+- **D12. No heap after open, held per operation family by a ratchet (owner, 2026-11-21).** The
+  pico C ABI runs on the cooperative engine with no heap after a session opens: every byte a
+  session needs is reserved at open from the configured limits, and nothing is allocated after.
+  The engine and its pools are the decision record `docs/c-abi-engine-and-memory.md`; this is how
+  the migration to it is held. Layer C1nh builds the cooperative engine with every capability a
+  family exercises and runs `crates/wz-capi-pico/tests/no_heap_after_open.rs`: two sessions open
+  over the program's own transport, and each operation family (a publisher declared and
+  undeclared, a small put and one near the batch limit, the subscriber's receiving of each, a get
+  and the queryable's reply, a key expression declared, a liveliness token and a liveliness get,
+  end-to-end protection and judging, the replay cache's put, a config handed a document) runs a
+  warm-up and then a fixed number of rounds with the allocator counting.
+  `scripts/lib/no_heap_ratchet_gate.py` holds each family's allocations a round to its row of
+  `deploy/no_heap_ratchet.json`: a rise above the row and its tolerance fails, a fall prints the
+  tighter row to commit, a family that reads 0 is locked and fails on any allocation after, a
+  family of the table the reading lacks or one the table lacks fails, and a row not filled yet is
+  NOT-MEASURED, which fails the lane too. A row above 0 is an open debt in the sense of D5 and
+  names its store entry. The target is every row locked at 0.
 
 ## 5. Steps
 
