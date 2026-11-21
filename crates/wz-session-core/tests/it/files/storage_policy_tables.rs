@@ -239,6 +239,20 @@ mod declarations {
             .collect()
     }
 
+    /// Whether a declaration table of policy `P` refuses the id past `MAX_REMOTE_DECLS`:
+    /// where its capacity is hard, or where the build's quota is that capacity, which a
+    /// fixed build states for a table on the growable policy too.
+    #[cfg(any(
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "liveliness-subscriber"
+    ))]
+    fn held_to_n<P: Storage>() -> bool {
+        P::ENFORCES_CAPACITY
+            || !wz_session_core::limits::MaxRemoteDeclsHeld::default()
+                .admits(caps::MAX_REMOTE_DECLS + 1)
+    }
+
     #[cfg(feature = "declare-subscriber")]
     pub(crate) mod subscribers {
         use super::*;
@@ -249,7 +263,8 @@ mod declarations {
         }
 
         /// The id past `MAX_REMOTE_DECLS` is refused and counted where the capacity is
-        /// hard, taken where it is not; the ids that fit are all there either way.
+        /// hard or the build's quota is the capacity, taken where neither refuses; the ids
+        /// that fit are all there either way.
         pub(crate) fn fills_to_n_and_refuses_at_n_plus_one<P: Storage>() {
             let mut table: RemoteSubscriberTable<NoopDeclSink, NoopUndeclSink, P> =
                 RemoteSubscriberTable::default();
@@ -262,7 +277,7 @@ mod declarations {
                     MappingSpaces::for_aliases::<P>(&aliases, None),
                 );
             }
-            if P::ENFORCES_CAPACITY {
+            if held_to_n::<P>() {
                 assert_eq!(
                     (peer.declared_count(), peer.refusals()),
                     (caps::MAX_REMOTE_DECLS, 1)
@@ -326,7 +341,7 @@ mod declarations {
                     MappingSpaces::for_aliases::<P>(&aliases, None),
                 );
             }
-            if P::ENFORCES_CAPACITY {
+            if held_to_n::<P>() {
                 assert_eq!(
                     (peer.declared_count(), peer.refusals()),
                     (caps::MAX_REMOTE_DECLS, 1)
@@ -392,7 +407,7 @@ mod declarations {
                     MappingSpaces::for_aliases::<P>(&aliases, None),
                 );
             }
-            if P::ENFORCES_CAPACITY {
+            if held_to_n::<P>() {
                 assert_eq!((peer.count(), peer.refusals()), (caps::MAX_REMOTE_DECLS, 1));
             } else {
                 assert_eq!(

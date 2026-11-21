@@ -224,6 +224,12 @@ pub struct PeerTokens<P: Storage = Profile> {
     /// would hand one peer's tokens to a subscriber of the other.
     #[cfg(feature = "storage-profile")]
     table: DeclaredKeys<P>,
+    /// The most tokens `table` holds (`MAX_REMOTE_DECLS`): what the creator of the session's
+    /// tables resolved ([`Self::limit_to`]), the build's value until it does. A growable table
+    /// refuses nothing by its room, so this is what bounds it; where the build fixes the bound
+    /// to the table's capacity it is held in no byte and the table refuses alone.
+    #[cfg(feature = "storage-profile")]
+    quota: crate::limits::MaxRemoteDeclsHeld,
     /// `DeclToken`s refused because their keyexpr is longer than a row's text.
     /// Counted with the table's own refusals ([`Self::refusals`]).
     #[cfg(feature = "storage-profile")]
@@ -255,6 +261,8 @@ impl<P: Storage> Default for PeerTokens<P> {
             #[cfg(feature = "storage-profile")]
             table: DeclaredKeys::<P>::default(),
             #[cfg(feature = "storage-profile")]
+            quota: crate::limits::MaxRemoteDeclsHeld::build_default(),
+            #[cfg(feature = "storage-profile")]
             oversize: 0,
             #[cfg(all(feature = "storage-profile", feature = "alloc"))]
             sourced: alloc::collections::BTreeMap::new(),
@@ -270,6 +278,8 @@ impl PeerTokens<Static> {
         Self {
             #[cfg(feature = "storage-profile")]
             table: FixedIdMap::new(),
+            #[cfg(feature = "storage-profile")]
+            quota: crate::limits::MaxRemoteDeclsHeld::build_default(),
             #[cfg(feature = "storage-profile")]
             oversize: 0,
             #[cfg(all(feature = "storage-profile", feature = "alloc"))]
@@ -305,9 +315,26 @@ impl<P: Storage> PeerTokens<P> {
         self.table.count()
     }
 
+    /// Hold the peer's table to the `MAX_REMOTE_DECLS` the creator of the session's tables
+    /// resolved: a `DeclToken` for a NEW id that would leave more tokens than `quota` admits
+    /// is refused and counted as a full table refuses it ([`Self::refusals`]), and the tokens
+    /// already held are kept, as a lowered soft limit keeps what it holds.
+    #[cfg(feature = "storage-profile")]
+    pub fn limit_to(&mut self, quota: crate::limits::MaxRemoteDeclsHeld) {
+        self.quota = quota;
+    }
+
+    /// The quota the peer's table is held to (`MAX_REMOTE_DECLS`): what the creator of the
+    /// session's tables stated ([`Self::limit_to`]), the build's value until it did.
+    #[cfg(feature = "storage-profile")]
+    pub fn quota(&self) -> crate::limits::MaxRemoteDeclsHeld {
+        self.quota
+    }
+
     /// How many `DeclToken`s this table refused: for a NEW id because it was
-    /// full ([`caps::MAX_REMOTE_DECLS`]), or for a keyexpr longer than a row's
-    /// text. Always zero on the growable backing, where nothing is refused.
+    /// full ([`caps::MAX_REMOTE_DECLS`]) or held the quota its creator stated
+    /// ([`Self::limit_to`]), or for a keyexpr longer than a row's text. Zero on
+    /// the growable backing while no quota is stated, as its room refuses nothing.
     #[cfg(feature = "storage-profile")]
     pub fn refusals(&self) -> u32 {
         self.table.refusals().saturating_add(self.oversize)
@@ -397,6 +424,12 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberRegistry<C, P> {
     /// counters by name.
     pub fn peer(&self) -> &PeerTokens<P> {
         &self.peer
+    }
+
+    /// [`PeerTokens::limit_to`] for this registry's peer.
+    #[cfg(feature = "storage-profile")]
+    pub fn limit_peer_to(&mut self, quota: crate::limits::MaxRemoteDeclsHeld) {
+        self.peer.limit_to(quota);
     }
 
     /// [`LivelinessSubscriberTable::register`] against this registry's peer.
@@ -895,15 +928,21 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
         if peer.table.find(id).is_some() {
             return;
         }
-        // S9a — a token the table has no room for (or whose keyexpr is
-        // longer than a row's text) is REFUSED and counted, and is not
-        // announced to the subscribers: what they are told is what the
-        // table holds, so a later `UndeclToken` can name it.
+        // S9a — a token the table has no room for, or none under the quota
+        // its creator stated (or whose keyexpr is longer than a row's text),
+        // is REFUSED and counted, and is not announced to the subscribers:
+        // what they are told is what the table holds, so a later
+        // `UndeclToken` can name it.
         let Ok(text) = key_text_as::<P>(resolved) else {
             peer.oversize = peer.oversize.saturating_add(1);
             return;
         };
-        if peer.table.bind(id, text).is_err() {
+        let quota = peer.quota;
+        if peer
+            .table
+            .bind_within(id, text, |count| quota.admits(count))
+            .is_err()
+        {
             return;
         }
         #[cfg(feature = "alloc")]

@@ -357,8 +357,10 @@ pub struct SubscriberTable<C: SampleSink, P: Storage = Profile> {
 /// is not part of [`SubscriberTable`]: the alias ids and interest ids a peer names
 /// mean nothing in another session, and what is staged is owed to THIS peer only.
 /// The fixed backing bounds each table ([`caps::MAX_PEER_KEYEXPR_ALIASES`],
-/// [`caps::MAX_INBOUND_SUB_INTERESTS`], [`caps::MAX_PENDING_DECLARES`]); a peer
-/// that fills one is refused and counted, and no other session's side changes.
+/// [`caps::MAX_INBOUND_SUB_INTERESTS`], [`caps::MAX_PENDING_DECLARES`]), and the alias
+/// table is held on both backings to the `MAX_PEER_KEYEXPR_ALIASES` the creator of the
+/// session's tables states (`limit_aliases_to`); a peer that fills one is refused
+/// and counted, and no other session's side changes.
 ///
 /// Two halves that are borrowed apart: `PeerNaming`, what the peer's ids name
 /// (read by every plane that resolves a keyexpr), and `InterestSide`, what it
@@ -409,6 +411,12 @@ struct PeerNaming<P: Storage = Profile> {
     /// and counts it.
     #[cfg(feature = "storage-profile")]
     aliases: PeerAliases<P>,
+    /// The most aliases `aliases` holds (`MAX_PEER_KEYEXPR_ALIASES`): what the creator of
+    /// the session's tables resolved ([`SubscriberPeer::limit_aliases_to`]), the build's value
+    /// until it does. A growable table refuses nothing by its room, so this is what bounds it;
+    /// where the build fixes the bound to the table's capacity it is held in no byte and the
+    /// table refuses alone.
+    alias_quota: crate::limits::MaxPeerKeyexprAliasesHeld,
     /// R311y739 — OUR id space, the other half of the pair the `M` bit picks
     /// between. Installed (not owned) so there is exactly ONE copy of the fact:
     /// the table itself lives on `SessionActions::outbound_mappings`, written by
@@ -2801,6 +2809,7 @@ impl<P: Storage> Default for SubscriberPeer<P> {
             #[cfg(feature = "storage-profile")]
             naming: PeerNaming {
                 aliases: PeerAliases::<P>::default(),
+                alias_quota: crate::limits::MaxPeerKeyexprAliasesHeld::build_default(),
                 #[cfg(feature = "alloc")]
                 own_mapping_space: None,
                 #[cfg(feature = "shared-key-ids")]
@@ -2823,6 +2832,7 @@ impl SubscriberPeer<crate::bounded::Static> {
             #[cfg(feature = "storage-profile")]
             naming: PeerNaming {
                 aliases: crate::id_map::FixedIdMap::new(),
+                alias_quota: crate::limits::MaxPeerKeyexprAliasesHeld::build_default(),
                 #[cfg(feature = "alloc")]
                 own_mapping_space: None,
                 #[cfg(feature = "shared-key-ids")]
@@ -2990,9 +3000,28 @@ impl<P: Storage> SubscriberPeer<P> {
         self.naming.aliases.count()
     }
 
+    /// Hold the peer's alias table to the `MAX_PEER_KEYEXPR_ALIASES` the creator of the
+    /// session's tables resolved: a `DeclKexpr` for a NEW id that would leave more aliases than
+    /// `quota` admits is refused and counted as a full table refuses it
+    /// ([`Self::alias_refusals`]), and the aliases already held are kept, as a lowered soft
+    /// limit keeps what it holds.
+    #[cfg(feature = "storage-profile")]
+    pub fn limit_aliases_to(&mut self, quota: crate::limits::MaxPeerKeyexprAliasesHeld) {
+        self.naming.alias_quota = quota;
+    }
+
+    /// The quota the peer's alias table is held to (`MAX_PEER_KEYEXPR_ALIASES`): what the
+    /// creator of the session's tables stated ([`Self::limit_aliases_to`]), the build's value
+    /// until it did.
+    #[cfg(feature = "storage-profile")]
+    pub fn alias_quota(&self) -> crate::limits::MaxPeerKeyexprAliasesHeld {
+        self.naming.alias_quota
+    }
+
     /// How many `DeclKexpr` for a NEW id this side refused because its alias
-    /// table was full ([`caps::MAX_PEER_KEYEXPR_ALIASES`]). Always zero on the
-    /// growable backing, where nothing is refused.
+    /// table was full ([`caps::MAX_PEER_KEYEXPR_ALIASES`]) or held the quota its
+    /// creator stated ([`Self::limit_aliases_to`]). Zero on the growable backing
+    /// while no quota is stated, as its room refuses nothing.
     #[cfg(feature = "storage-profile")]
     pub fn alias_refusals(&self) -> u32 {
         self.naming.aliases.refusals()
@@ -3066,7 +3095,8 @@ impl<P: Storage> SubscriberPeer<P> {
     /// `resolve_wireexpr`, so a `codec-declare`-without-`alloc` profile
     /// elides it (its sole caller `dispatch` is already `alloc`-gated).
     ///
-    /// S9a — a `DeclKexpr` for a NEW id with the alias table full is REFUSED and
+    /// S9a — a `DeclKexpr` for a NEW id with the alias table full, or at the quota
+    /// its creator stated ([`Self::limit_aliases_to`]), is REFUSED and
     /// counted ([`Self::alias_refusals`]), never grown for: the alias is not
     /// recorded, and a later message that names it resolves to nothing and is
     /// dropped, which is what any message naming an id the peer never declared
@@ -3111,12 +3141,15 @@ impl<P: Storage> SubscriberPeer<P> {
                 let Ok(text) = key_text_as::<P>(literal) else {
                     return;
                 };
-                // A refusal is counted by the table itself; the declaration that
-                // did not fit is dropped here, with the peer none the wiser.
-                let _ = self
-                    .naming
-                    .aliases
-                    .bind(crate::wire_id::declared_peer_key(d.id), text);
+                // A refusal, for want of room or past the quota, is counted by the
+                // table itself; the declaration that did not fit is dropped here, with
+                // the peer none the wiser.
+                let quota = self.naming.alias_quota;
+                let _ = self.naming.aliases.bind_within(
+                    crate::wire_id::declared_peer_key(d.id),
+                    text,
+                    |count| quota.admits(count),
+                );
             }
             DeclareOwnedVariant::CodecZenohUndeclKexpr(u) => {
                 self.naming
@@ -3186,10 +3219,12 @@ impl<P: Storage> SubscriberPeer<P> {
                     return;
                 };
                 // A refusal is counted by the table itself, as for the owned form.
-                let _ = self
-                    .naming
-                    .aliases
-                    .bind(crate::wire_id::declared_peer_key(d.id), text);
+                let quota = self.naming.alias_quota;
+                let _ = self.naming.aliases.bind_within(
+                    crate::wire_id::declared_peer_key(d.id),
+                    text,
+                    |count| quota.admits(count),
+                );
             }
             DeclareVariant::CodecZenohUndeclKexpr(u) => {
                 self.naming
@@ -3449,6 +3484,12 @@ impl<C: SampleSink, P: Storage> SubscriberRegistry<C, P> {
     /// its tables by name.
     pub fn peer(&self) -> &SubscriberPeer<P> {
         &self.peer
+    }
+
+    /// [`SubscriberPeer::limit_aliases_to`] for this registry's peer.
+    #[cfg(feature = "storage-profile")]
+    pub fn limit_peer_aliases_to(&mut self, quota: crate::limits::MaxPeerKeyexprAliasesHeld) {
+        self.peer.limit_aliases_to(quota);
     }
 
     /// [`SubscriberTable::register_sink`], and then what the registration owes
