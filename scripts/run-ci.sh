@@ -13717,7 +13717,9 @@ layer_c1m_session_lwip() {
     # 3148fdfc84 printed 22 here; the other numbers are counted from the source.
     _runci_guarded_test "C1m mcu default" 22 \
         cargo test -p wz-session-mcu --quiet || return 1
-    _runci_guarded_test "C1m mcu unicast app layer" 23 \
+    # 23 -> 24, printed: the merge of main at `0e24b2486` (Round 4581) into the limits rounds
+    # prints one more here, which neither tree printed before it.
+    _runci_guarded_test "C1m mcu unicast app layer" 24 \
         cargo test -p wz-session-mcu \
         --features query-queryable,codec-response,codec-response-final,pubsub-put \
         --quiet || return 1
@@ -13760,7 +13762,8 @@ layer_c1m_session_lwip() {
     # 65 -> 67, counted from the source: the same two IPv6 tests as the adminspace-write leg.
     # 67 -> 72, printed: main at `b58b71c19` printed 71 on one machine (four the source counts
     # missed), and the limits rounds add one, an admin node's observer held to its session's limits.
-    _runci_guarded_test "C1m mcu adminspace read+write" 72 \
+    # 72 -> 73, printed: one more with main at `0e24b2486` (Round 4581) merged in.
+    _runci_guarded_test "C1m mcu adminspace read+write" 73 \
         cargo test -p wz-session-mcu --features adminspace-core,adminspace-write --quiet || return 1
     # The fixed-memory client node's shared mechanism (`slot_node`, compiled only on the slot profile
     # with the client core): no leg above selects both, so its tests ran in none until this one. 28 =
