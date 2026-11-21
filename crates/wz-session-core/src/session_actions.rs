@@ -351,6 +351,10 @@ pub struct BatchTx {
     /// `lend` is.
     #[cfg(all(feature = "transport-fragmentation", feature = "transport-tx-lend"))]
     frag_lend: FragmentLendCounts,
+    /// Where this conduit's frames sent whole, outside a batch window, were
+    /// written, counted. Cumulative, as `lend` is.
+    #[cfg(feature = "transport-tx-lend")]
+    frame_lend: FrameLendCounts,
 }
 
 impl BatchTx {
@@ -449,6 +453,34 @@ impl FragmentLendCounts {
         self.slot_fragments = self.slot_fragments.wrapping_add(other.slot_fragments);
         self.heap_no_slot = self.heap_no_slot.wrapping_add(other.heap_no_slot);
         self.heap_short_slot = self.heap_short_slot.wrapping_add(other.heap_short_slot);
+    }
+}
+
+/// ARCHITECTURE section 9.1 -- where a session's frames sent whole were written,
+/// by count of frames (the answer of [`SessionLinkActions::frame_lend_counts`]).
+///
+/// A message that no batch window takes (the window is closed, or batching is
+/// off) leaves as a frame of its own, and with `transport-tx-lend` that frame is
+/// encoded straight into a slot the conduit's link lends. When the link lends no
+/// slot that holds it, the frame is built on the heap as without the feature,
+/// and that is counted here beside the frames that left as a slot, so a send
+/// path that never lends is visible as the batch and fragment paths are.
+#[cfg(feature = "transport-tx-lend")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FrameLendCounts {
+    /// Frames encoded into a lent slot and sent as that slot.
+    pub slot_frames: u32,
+    /// Frames built on the heap: the link lent no slot, every slot was out, the
+    /// slot was short, or (without fragmentation) the frame is past the budget.
+    /// Always zero under `tx-lend-only`, which refuses such a send instead.
+    pub heap_frames: u32,
+}
+
+#[cfg(feature = "transport-tx-lend")]
+impl FrameLendCounts {
+    fn add(&mut self, other: &Self) {
+        self.slot_frames = self.slot_frames.wrapping_add(other.slot_frames);
+        self.heap_frames = self.heap_frames.wrapping_add(other.heap_frames);
     }
 }
 
@@ -5294,6 +5326,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let mut sum = FragmentLendCounts::default();
         for conduit in &self.tx_conduits.conduits {
             R::with_mutex_mut(conduit, |batch| sum.add(&batch.frag_lend));
+        }
+        sum
+    }
+
+    /// ARCHITECTURE section 9.1 -- where this session's frames sent whole,
+    /// outside a batch window, were written, summed over its conduits: in a lent
+    /// slot, or on the heap.
+    #[cfg(feature = "transport-tx-lend")]
+    pub fn frame_lend_counts(&self) -> FrameLendCounts {
+        let mut sum = FrameLendCounts::default();
+        for conduit in &self.tx_conduits.conduits {
+            R::with_mutex_mut(conduit, |batch| sum.add(&batch.frame_lend));
         }
         sum
     }
@@ -11130,14 +11174,21 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // of their own (`Self::emit_fragments_encoded`, R3251).
             #[cfg(all(feature = "transport-tx-lend", not(feature = "tx-lend-only")))]
             match self.send_frame_lent(&frame_emit, worst_case_payload, &encode_body) {
-                FrameLend::Sent => return Ok(UnicastPush::Pushed),
+                FrameLend::Sent => {
+                    batch.frame_lend.slot_frames = batch.frame_lend.slot_frames.wrapping_add(1);
+                    return Ok(UnicastPush::Pushed);
+                }
                 #[cfg(feature = "transport-fragmentation")]
                 FrameLend::PastMtu => {
                     return self.emit_fragments_encoded(batch, &encode_body, frame_emit);
                 }
                 #[cfg(not(feature = "transport-fragmentation"))]
-                FrameLend::PastMtu => {}
-                FrameLend::Heap => {}
+                FrameLend::PastMtu => {
+                    batch.frame_lend.heap_frames = batch.frame_lend.heap_frames.wrapping_add(1);
+                }
+                FrameLend::Heap => {
+                    batch.frame_lend.heap_frames = batch.frame_lend.heap_frames.wrapping_add(1);
+                }
             }
             #[cfg(not(feature = "tx-lend-only"))]
             {
@@ -11157,7 +11208,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // minted above is spent, as it is for a refused fragment chain.
             #[cfg(feature = "tx-lend-only")]
             match self.send_frame_lent(&frame_emit, worst_case_payload, &encode_body) {
-                FrameLend::Sent => Ok(UnicastPush::Pushed),
+                FrameLend::Sent => {
+                    batch.frame_lend.slot_frames = batch.frame_lend.slot_frames.wrapping_add(1);
+                    Ok(UnicastPush::Pushed)
+                }
                 #[cfg(feature = "transport-fragmentation")]
                 FrameLend::PastMtu => self.emit_fragments_encoded(batch, &encode_body, frame_emit),
                 #[cfg(not(feature = "transport-fragmentation"))]

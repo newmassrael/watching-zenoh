@@ -23,6 +23,7 @@ use wz_session_core::limits::SessionLimits;
 use wz_session_core::locality::Locality;
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::publish_options::PublishOptions;
+use wz_session_core::session_actions::{BatchLendCounts, FrameLendCounts};
 
 use super::{
     client_config, config, open, open_with, until, CatchAll, Command, Engine, Router, LOOPBACK,
@@ -371,13 +372,18 @@ fn a_link_reads_into_the_buffer_its_sessions_arena_lent() {
     );
 }
 
-/// A put leaves in a slot its link took from the session's arena: the session stages its batch
-/// frame there and none on the heap.
+/// A put leaves in a slot its link took from the session's arena: whether the session stages it
+/// in a batch frame or sends it as a frame of its own, the frame is written into the slot and
+/// none is built on the heap. The counts are read before and after the put, so the slot frame is
+/// the put's.
 #[test]
 fn a_put_is_encoded_into_a_slot_the_arena_lent() {
     let router = Router::start(CatchAll::Held);
     let engine = open(&router);
     until(&engine, "the link to be up", || engine.faces_up() == 1);
+    let slots =
+        |(batch, whole): (BatchLendCounts, FrameLendCounts)| batch.slot_frames + whole.slot_frames;
+    let before = engine.lend_counts().expect("the link is up");
     engine
         .publish_on_wire_all(
             "demo/lent",
@@ -389,12 +395,13 @@ fn a_put_is_encoded_into_a_slot_the_arena_lent() {
     until(&engine, "the router to receive the put", || {
         router.seen(|s| s.samples.iter().any(|(k, _)| k == "demo/lent"))
     });
-    let counts = engine.batch_lend_counts().expect("the link is up");
-    assert!(counts.slot_frames >= 1, "{counts:?}");
+    let after = engine.lend_counts().expect("the link is up");
+    assert!(slots(after) > slots(before), "{before:?} then {after:?}");
+    let (batch, whole) = after;
     assert_eq!(
-        (counts.heap_no_slot, counts.heap_short_slot),
-        (0, 0),
-        "no frame was staged on the heap: {counts:?}"
+        (batch.heap_no_slot, batch.heap_short_slot, whole.heap_frames),
+        (0, 0, 0),
+        "no frame was built on the heap: {after:?}"
     );
 }
 

@@ -2726,17 +2726,21 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         })
     }
 
-    /// Where the batch frames of the session's first link that is up were staged: in a slot its
-    /// link lent, or on the heap and why. Compiled where its readers are (`tests::arena`).
+    /// Where the frames of the session's first link that is up were written, the batch frames and
+    /// the frames sent whole: in a slot its link lent, or on the heap. Compiled where its readers
+    /// are (`tests::arena`).
     #[cfg(all(test, feature = "std"))]
-    pub(crate) fn batch_lend_counts(
+    pub(crate) fn lend_counts(
         &self,
-    ) -> Option<wz_session_core::session_actions::BatchLendCounts> {
+    ) -> Option<(
+        wz_session_core::session_actions::BatchLendCounts,
+        wz_session_core::session_actions::FrameLendCounts,
+    )> {
         self.live().and_then(|core| {
             core.0
                 .ups()
                 .next()
-                .map(|actions| actions.batch_lend_counts())
+                .map(|actions| (actions.batch_lend_counts(), actions.frame_lend_counts()))
         })
     }
 
