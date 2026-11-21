@@ -2576,6 +2576,12 @@ layer_c0_test_discipline() {
     # (`scripts/pico-compare.sh perf` judges each of its own); no hosted runner pins two sides of four CPUs.
     _runci_leg perf_matrix.selftest -- python3 scripts/host-bench/perf_matrix.py --selftest
     _runci_leg perf_matrix.table --after perf_matrix.selftest -- python3 scripts/host-bench/perf_matrix.py --check-table deploy/pico_perf_ceiling.json
+    # The AP superiority matrix (docs/ap-superiority-matrix.md, upstream-parity D13): its rules over
+    # synthetic readings, and the committed table held to the matrix's rows with a debt on each row that
+    # is not locked; a filled completeness row is held to the figure the tree states. The measuring run
+    # is a quiet host's (`ap_matrix.py run` judges each of its own), never a hosted runner's.
+    _runci_leg ap_matrix.selftest -- python3 scripts/host-bench/ap_matrix.py --selftest
+    _runci_leg ap_matrix.table --after ap_matrix.selftest -- python3 scripts/host-bench/ap_matrix.py --check-table deploy/ap_superiority.json
     # R3449 -- the resource budget (a committed figure per image): each image whose worst chain
     # the stack gate commits has a row of figures the kit measured, the row copies that chain, and a
     # measured peak lies under it. No hardware here; `--measure` is the kit lane's.

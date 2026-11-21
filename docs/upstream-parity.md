@@ -501,6 +501,38 @@ derived from the declaration and never chosen by hand:
   family of the table the reading lacks or one the table lacks fails, and a row not filled yet is
   NOT-MEASURED, which fails the lane too. A row above 0 is an open debt in the sense of D5 and
   names its store entry. The target is every row locked at 0.
+- **D13. The AP presets are held against upstream zenoh in every aspect, as a ratchet and a debt loop
+  (owner, 2026-11-21).** After the C ABI presets move to one cooperative engine with no heap after open,
+  the application-processor presets are to beat upstream zenoh too: the router preset against zenohd,
+  and the Rust API preset (`wz-zenoh`) against upstream's Rust API, in performance, size and memory, and
+  completeness. "Every aspect" is a list of rows a gate judges, not a claim:
+  `scripts/host-bench/ap_matrix.py`, its table `deploy/ap_superiority.json` and its page
+  `docs/ap-superiority-matrix.md`.
+  1. **Two pairs, each on one host in one run.** The router pair: `wz-ap-demo --config` against
+     `zenohd -c` on one configuration document, with upstream's example programs built against upstream
+     zenoh around both. The API pair: upstream's example programs of the pinned tree built against
+     `wz-zenoh` and against upstream zenoh from one generated package, with zenohd as the router of both.
+     Each pair changes one side and holds the other at upstream's, so a difference has one owner. The
+     upstream tree is the one `upstream_root()` resolves at `UPSTREAM_VERSION`, and zenohd must answer
+     that version; a run without them is NOT-MEASURED.
+  2. **The cells.** Throughput at 8 B, 1 KiB and 64 KiB peer to peer and through one router; round-trip
+     p50 and p99 likewise; fan-out to 1, 16 and 128 subscribers; two routers in a row; the router on 1, 2,
+     4 and 8 cores; a thousand keys at mixed rates; query round trip and rate; liveliness churn; session
+     open; resident set idle and under load; heap peak; the stripped size of the router and of the
+     smallest client program; CPU per message. Completeness: upstream's tests and example scenarios on
+     `wz-zenoh` (the tables of Z8), zenohd's configuration keys the wz reader does not honour, and
+     zenohd's storage manager and REST plugin configurations.
+  3. **D10's reading and ratchet, imported.** A row of time, CPU or memory is D10's cost ratio with its
+     bootstrap interval over at least three repetitions, D1's verdict, and `perf_matrix.py`'s judge: a
+     null row is NOT-MEASURED until a run measures it and then fails with the row to write, a WIN locks, a
+     ratchet only tightens, a repetition wz lost fails. A size is exact. A completeness row is a shortfall
+     held toward 0, and its figure is read from the tree, so Layer C0 holds a filled one on every run.
+  4. **Every cell starts null, and every row that is not locked names its debt** (D5): an id of the
+     store's inventory, or `debt-TBD` until one is filed, which a filled row may not keep. A cell with no
+     harness yet (the thousand keys, queries, churn, the plugins) is NOT-MEASURED in every run and listed
+     as a debt; it is never a pass, so a full run exits 3 until each has its harness.
+  5. **Where it runs.** The measuring run on a quiet host chosen at that moment (`bx --explain-choice`),
+     never on a hosted runner, for D10's reason; the selftest and the table in Layer C0.
 
 ## 5. Steps
 
