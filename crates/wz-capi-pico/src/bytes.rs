@@ -420,12 +420,12 @@ impl StringState {
 }
 
 /// How many empty boxes a thread keeps for the next payload it makes.
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", not(feature = "object-pool")))]
 const BOX_CACHE: usize = 32;
 
 // Without `std` there is no thread-local storage to keep them in, and each payload is a box of
-// its own, as zenoh-pico's are.
-#[cfg(feature = "std")]
+// its own, as zenoh-pico's are. With the object pools the pool of payloads is what keeps them.
+#[cfg(all(feature = "std", not(feature = "object-pool")))]
 std::thread_local! {
     /// The allocations that held a payload this thread made and then consumed, kept empty. A
     /// publisher's loop clones a payload and puts it, over and over: the box the clone allocates
@@ -440,7 +440,7 @@ std::thread_local! {
 }
 
 /// An empty box this thread kept, if it has one.
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", not(feature = "object-pool")))]
 fn kept_box() -> Option<Box<core::mem::MaybeUninit<ByteBuf>>> {
     EMPTY_BOXES
         .try_with(|boxes| boxes.try_borrow_mut().ok().and_then(|mut b| b.pop()))
@@ -449,25 +449,43 @@ fn kept_box() -> Option<Box<core::mem::MaybeUninit<ByteBuf>>> {
 }
 
 /// None is kept without `std`.
-#[cfg(not(feature = "std"))]
+#[cfg(all(not(feature = "std"), not(feature = "object-pool")))]
 fn kept_box() -> Option<Box<core::mem::MaybeUninit<ByteBuf>>> {
     None
 }
 
-/// Box `buf`, in a kept allocation when this thread has one.
-fn box_bytes(buf: ByteBuf) -> *mut ByteBuf {
+/// Box `buf`, in a kept allocation when this thread has one; `None` never.
+#[cfg(not(feature = "object-pool"))]
+fn box_bytes(buf: ByteBuf) -> Option<*mut ByteBuf> {
     // `Box::new_uninit` is newer than this crate's minimum Rust; an uninitialised value boxed
     // is the same allocation, and the optimiser writes nothing into it.
     let mut slot = kept_box().unwrap_or_else(|| Box::new(core::mem::MaybeUninit::uninit()));
     slot.write(buf);
-    Box::into_raw(slot).cast::<ByteBuf>()
+    Some(Box::into_raw(slot).cast::<ByteBuf>())
+}
+
+/// Place `buf` in a slot of its own; `None` when the pool of payloads is full.
+#[cfg(feature = "object-pool")]
+fn box_bytes(buf: ByteBuf) -> Option<*mut ByteBuf> {
+    crate::object_slot::Slot::take(crate::object_slot::Kind::Bytes).map(|slot| slot.fill(buf))
+}
+
+/// Take the payload out of a place made by [`box_bytes`] (or by `Box::new`: the two have the same
+/// layout) and give the place back.
+///
+/// # Safety
+/// `h` must be a live `ByteBuf` handle, not used again.
+#[cfg(feature = "object-pool")]
+pub(crate) unsafe fn unbox_bytes(h: *mut ByteBuf) -> ByteBuf {
+    crate::object_slot::reclaim(h)
 }
 
 /// Take the payload out of a box made by [`box_bytes`] (or by `Box::new`: the two have the same
-/// layout) and keep the allocation, empty, for the next one; past [`BOX_CACHE`] it is freed.
+/// layout) and keep the allocation, empty, for the next one; past `BOX_CACHE` it is freed.
 ///
 /// # Safety
 /// `h` must be a live `Box::into_raw::<ByteBuf>` pointer, not used again.
+#[cfg(not(feature = "object-pool"))]
 pub(crate) unsafe fn unbox_bytes(h: *mut ByteBuf) -> ByteBuf {
     let slot = Box::from_raw(h.cast::<core::mem::MaybeUninit<ByteBuf>>());
     let buf = slot.assume_init_read();
@@ -614,11 +632,22 @@ pub unsafe extern "C" fn z_slice_take_from_loaned(
 
 // --- helpers to box a payload into an owned value -------------------------
 
-unsafe fn store_bytes(dst: *mut z_owned_bytes_t, buf: ByteBuf) {
-    *dst = z_owned_bytes_t {
-        handle: box_bytes(buf) as *mut c_void,
-        _pad: [core::ptr::null_mut(); 3],
-    };
+/// Put `buf` in `dst`. `Z_OK`; `_Z_ERR_SYSTEM_OUT_OF_MEMORY`, `dst` null and `buf` dropped,
+/// when the pool of payloads is full.
+unsafe fn store_bytes(dst: *mut z_owned_bytes_t, buf: ByteBuf) -> ZResult {
+    match box_bytes(buf) {
+        Some(handle) => {
+            *dst = z_owned_bytes_t {
+                handle: handle as *mut c_void,
+                _pad: [core::ptr::null_mut(); 3],
+            };
+            Z_OK
+        }
+        None => {
+            *dst = z_owned_bytes_t::null_value();
+            crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY
+        }
+    }
 }
 unsafe fn store_slice(dst: *mut z_owned_slice_t, buf: ByteBuf) {
     *dst = z_owned_slice_t {
@@ -636,7 +665,8 @@ pub unsafe extern "C" fn z_bytes_empty(bytes: *mut z_owned_bytes_t) {
     if bytes.is_null() {
         return;
     }
-    store_bytes(bytes, ByteBuf::new());
+    // A full pool leaves `bytes` null, the one answer a call with no result has.
+    let _ = store_bytes(bytes, ByteBuf::new());
 }
 
 /// Adopt a caller-allocated C string into an owned string (pico
@@ -675,8 +705,8 @@ pub unsafe extern "C" fn z_string_from_str(
     })
 }
 
-pub(crate) unsafe fn store_owned_bytes(dst: *mut z_owned_bytes_t, buf: ByteBuf) {
-    store_bytes(dst, buf);
+pub(crate) unsafe fn store_owned_bytes(dst: *mut z_owned_bytes_t, buf: ByteBuf) -> ZResult {
+    store_bytes(dst, buf)
 }
 
 pub(crate) unsafe fn store_owned_slice(dst: *mut z_owned_slice_t, buf: ByteBuf) {
@@ -717,8 +747,7 @@ pub unsafe extern "C" fn z_bytes_copy_from_buf(
         } else {
             core::slice::from_raw_parts(data, len).to_vec()
         };
-        store_bytes(bytes, ByteBuf::from(buf));
-        Z_OK
+        store_bytes(bytes, ByteBuf::from(buf))
     })
 }
 
@@ -733,8 +762,7 @@ pub unsafe extern "C" fn z_bytes_copy_from_str(
             return Z_ERR_NULL;
         }
         let buf = CStr::from_ptr(value).to_bytes().to_vec();
-        store_bytes(bytes, ByteBuf::from(buf));
-        Z_OK
+        store_bytes(bytes, ByteBuf::from(buf))
     })
 }
 
@@ -762,8 +790,7 @@ pub(crate) unsafe fn store_aliased_payload(
     } else {
         (data, len)
     };
-    store_bytes(bytes, ByteBuf::aliased(data, len, release));
-    Z_OK
+    store_bytes(bytes, ByteBuf::aliased(data, len, release))
 }
 
 /// Build a payload from a statically allocated C string (pico
@@ -1003,10 +1030,7 @@ pub unsafe extern "C" fn z_bytes_clone(
             return Z_ERR_NULL;
         }
         match bytes_ref(src) {
-            Some(buf) => {
-                store_bytes(dst, buf.clone());
-                Z_OK
-            }
+            Some(buf) => store_bytes(dst, buf.clone()),
             None => Z_ERR_NULL,
         }
     })
@@ -1264,8 +1288,7 @@ pub unsafe extern "C" fn z_bytes_from_slice(
                     // The payload takes over the slice's storage rather than
                     // copying it (pico moves the allocation), so its address is
                     // the slice's and an aliased slice's deleter waits for it.
-                    store_bytes(bytes, state.shared_payload());
-                    Z_OK
+                    store_bytes(bytes, state.shared_payload())
                 }
                 None => Z_ERR_NULL,
             }
@@ -1321,8 +1344,7 @@ pub unsafe extern "C" fn z_bytes_from_string(
                 Some(state) => {
                     // As `z_bytes_from_slice`: the string's own storage, minus
                     // its terminator.
-                    store_bytes(bytes, state.shared_payload());
-                    Z_OK
+                    store_bytes(bytes, state.shared_payload())
                 }
                 None => Z_ERR_NULL,
             }
@@ -1669,7 +1691,7 @@ pub unsafe extern "C" fn z_view_string_loan_mut(
     str_in as *mut z_loaned_string_t
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "object-pool")))]
 mod box_cache_tests {
     use super::*;
 
@@ -1683,14 +1705,14 @@ mod box_cache_tests {
     fn a_reused_box_holds_exactly_the_payload_put_in_it() {
         // SAFETY: every pointer below comes from `box_bytes` and is unboxed once.
         unsafe {
-            let first = box_bytes(ByteBuf::from(b"first".to_vec()));
+            let first = box_bytes(ByteBuf::from(b"first".to_vec())).expect("the heap's");
             let first_at = first as usize;
             let got = unbox_bytes(first);
             assert_eq!(got.to_vec(), b"first");
             let after_first = kept();
             assert!(after_first >= 1, "the emptied box is kept");
 
-            let second = box_bytes(ByteBuf::from(b"second payload".to_vec()));
+            let second = box_bytes(ByteBuf::from(b"second payload".to_vec())).expect("the heap's");
             assert_eq!(
                 second as usize, first_at,
                 "the kept allocation is the next one used"
@@ -1705,7 +1727,7 @@ mod box_cache_tests {
 
             // Many at once: the list holds at most BOX_CACHE and the rest are freed.
             let many: Vec<*mut ByteBuf> = (0..BOX_CACHE * 3)
-                .map(|i| box_bytes(ByteBuf::from(vec![i as u8; i % 7])))
+                .map(|i| box_bytes(ByteBuf::from(vec![i as u8; i % 7])).expect("the heap's"))
                 .collect();
             for (i, ptr) in many.into_iter().enumerate() {
                 assert_eq!(
@@ -1724,7 +1746,7 @@ mod box_cache_tests {
     fn a_box_unboxed_on_another_thread_is_intact() {
         // SAFETY: the pointer is handed to the other thread whole and unboxed once.
         unsafe {
-            let ptr = box_bytes(ByteBuf::from(b"across".to_vec())) as usize;
+            let ptr = box_bytes(ByteBuf::from(b"across".to_vec())).expect("the heap's") as usize;
             let seen = std::thread::spawn(move || {
                 let before = kept();
                 let buf = unbox_bytes(ptr as *mut ByteBuf);

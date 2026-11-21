@@ -445,6 +445,17 @@ time-base = [
     "wz-capi-core?/time-base",
     "wz-capi-coop?/time-base",
 ]
+# `object-pool`: fixed pools, one per kind of object, that the objects behind the owned handles (a
+# session, a publisher, a subscriber, a queryable, a liveliness token, an owned sample, reply or
+# query, a payload) are taken from in place of the heap once the program reserves them
+# (`wz_ext_object_pool_*`), each count held to the bound of the session limit that bounds the
+# object. A full pool refuses the object with `_Z_ERR_SYSTEM_OUT_OF_MEMORY`. wz's own, off as the
+# reference build is, and part of the unstable surface. The pools are this ABI's and serve either
+# engine, so it selects neither.
+object-pool = ["unstable-api", "wz-capi-core?/object-pool"]
+# `object-pool-region`: the same pools over memory the program hands over
+# (`wz_ext_object_pool_place`), for a program that states where its memory lies.
+object-pool-region = ["object-pool", "wz-capi-core?/object-pool-region"]
 # `remote-declaration-watch` and `declarations-synced-event`: the declaration watch, the doors that
 # tell a program what a peer declares and retracts (`wz_ext_decl_watch_declare`,
 # `wz_ext_decl_watch_drop`). wz's own, which zenoh-pico has not, so off as the reference build is.
@@ -586,6 +597,12 @@ required-features = ["resource-snapshot", "admin-space", "peer", "query"]
 [[test]]
 name = "clock_source_stamps"
 required-features = ["engine-tokio", "peer", "clock-source"]
+
+# The object pools driven through their doors: a process of its own, as the pools are the
+# process's.
+[[test]]
+name = "object_pool_doors"
+required-features = ["object-pool", "peer"]
 
 # The stress run of Layer S: threads calling while sessions close and open again, over a transport
 # the program supplies that injects faults. An executable of its own because it counts the

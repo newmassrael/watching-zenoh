@@ -1850,6 +1850,106 @@ void wz_ext_time_base_drop(wz_ext_moved_time_base_t *this_);
 void wz_ext_internal_time_base_null(wz_ext_owned_time_base_t *this_);
 bool wz_ext_internal_time_base_check(const wz_ext_owned_time_base_t *this_);
 
+/* ================================================ fixed pools for the library's objects
+ *
+ * The object behind each owned handle of a session, a publisher, a
+ * subscriber, a queryable, a liveliness token or subscriber, and behind an
+ * owned sample, reply, reply error, query or payload, taken from fixed pools
+ * the program reserves once, in place of the heap, so that the program makes
+ * no allocation for them while it runs. Part of the unstable surface, and
+ * present only in a build with the object-pool capability;
+ * wz_ext_object_pool_place also needs object-pool-region.
+ *
+ * THE POOLS. One per kind of object, of as many slots as its count, each
+ * slot the smallest of WZ_EXT_OBJECT_POOL_CLASSES sizes that holds the
+ * object (16 bytes, then each twice the one before). The pool of one kind
+ * never lends a slot to another, so each kind holds what was stated for it
+ * and no more. wz_ext_object_pool_class reports the pools by slot size, the
+ * kinds of one size together.
+ *
+ * THE COUNTS. The program states how many of each object it holds at once.
+ * The entity counts (publishers to liveliness_subscribers) are per session
+ * and are multiplied by sessions; the rest are for all sessions together. A
+ * session's subscribers, queryables, liveliness tokens and liveliness
+ * subscribers are bounded by the limits it opens under (MAX_SUBSCRIPTIONS,
+ * MAX_QUERYABLES, MAX_LOCAL_TOKENS, MAX_LIVELINESS_SUBSCRIPTIONS): a count of
+ * one of those left 0 takes its limit's bound, a count above the bound is
+ * held to it, and a count left 0 whose limit holds no bound is refused. The
+ * other counts are as stated, 0 being none. A count of an object the build
+ * has none of is not read.
+ *
+ * RUNNING. Before a reservation, and after a release, every object is the
+ * heap's, as in a build without the capability. While pools are reserved, a
+ * pool with no free slot refuses the object: the call that wanted it answers
+ * _Z_ERR_SYSTEM_OUT_OF_MEMORY having opened, declared or held nothing (z_open,
+ * z_declare_publisher, z_declare_subscriber, z_declare_queryable,
+ * z_liveliness_declare_token, z_liveliness_declare_subscriber, the clone and
+ * take_from_loaned of a sample, reply, reply error or query, and the
+ * constructors of a payload, which leave it null). An object let go frees
+ * its slot. The bytes a payload carries, configs, key expressions, strings,
+ * encodings, closures and the handles of the other wz_ext doors are the
+ * heap's in either build. */
+#define WZ_EXT_OBJECT_POOL_CLASSES 11
+
+typedef struct wz_ext_object_pool_counts_t {
+  size_t sessions;
+  size_t publishers;
+  size_t subscribers;
+  size_t queryables;
+  size_t liveliness_tokens;
+  size_t liveliness_subscribers;
+  size_t samples;
+  size_t replies;
+  size_t queries;
+  size_t bytes;
+} wz_ext_object_pool_counts_t;
+
+typedef struct wz_ext_object_pool_class_t {
+  size_t slot_bytes;
+  size_t slots;
+  size_t in_use;
+  size_t high_water;
+  size_t refused;
+} wz_ext_object_pool_class_t;
+
+/* The bytes the pools of counts take, in out_bytes (0 on every error): the
+ * memory wz_ext_object_pool_place needs. Z_OK; _Z_ERR_NULL for a NULL
+ * argument; _Z_ERR_CONFIG_INVALID_VALUE for counts that make no pool (a
+ * count left 0 whose limit holds no bound, or no slot at all);
+ * _Z_ERR_SYSTEM_OUT_OF_MEMORY for more than the address space holds. */
+z_result_t wz_ext_object_pool_bytes(const wz_ext_object_pool_counts_t *counts,
+                                    size_t *out_bytes);
+
+/* Reserve the pools of counts from the heap, in one allocation. Z_OK;
+ * _Z_ERR_NULL for a NULL counts; _Z_ERR_CONFIG_INVALID_VALUE for counts that
+ * make no pool; _Z_ERR_SYSTEM_OUT_OF_MEMORY when the heap has not the
+ * memory; Z_EINVAL when pools are reserved already. A refusal leaves the heap
+ * as it was. */
+z_result_t wz_ext_object_pool_reserve(const wz_ext_object_pool_counts_t *counts);
+
+/* Reserve the pools of counts over the len bytes at base, which the program
+ * hands over until wz_ext_object_pool_release and must not touch meanwhile.
+ * Z_OK; _Z_ERR_NULL for a NULL argument; _Z_ERR_CONFIG_INVALID_VALUE for
+ * counts that make no pool; Z_EINVAL for a base not aligned to 16 bytes, or
+ * when pools are reserved already; _Z_ERR_SYSTEM_OUT_OF_MEMORY for a len
+ * under what wz_ext_object_pool_bytes answers. A refused call writes nothing
+ * at base. */
+z_result_t wz_ext_object_pool_place(void *base, size_t len,
+                                    const wz_ext_object_pool_counts_t *counts);
+
+/* The pools of slot size class (0 to WZ_EXT_OBJECT_POOL_CLASSES - 1)
+ * together, in out: the slot size, and while pools are reserved their slots,
+ * those in use, the most in use at once and the objects they refused. Z_OK; _Z_ERR_NULL for a NULL out;
+ * Z_EINVAL for a class past the last. */
+z_result_t wz_ext_object_pool_class(size_t class_index,
+                                    wz_ext_object_pool_class_t *out);
+
+/* Give the pools up: the heap's memory is freed, the program's is the
+ * program's again, and objects are the heap's once more. Z_OK, also when
+ * none are reserved; Z_EINVAL while an object is held in them, which keeps
+ * them. */
+z_result_t wz_ext_object_pool_release(void);
+
 /* ================================================ the message catalog
  *
  * A deployment's messages, declared once as data: one JSON5 text names the

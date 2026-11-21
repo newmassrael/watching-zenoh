@@ -1458,6 +1458,33 @@ implies = ["unstable-api"]
 help = "A time base the program supplies in place of the system's clock: the timers of a session opened from a config that names it (lease, keep-alive, handshake and the other deadlines) run on the program's time, which the program reads to the library and says when it has moved on (wz_ext_time_base_* and wz_ext_config_time_base, wz_capi_c_time_base_* and wz_capi_c_config_time_base, wz-own doors)."
 
 [[capability]]
+id = "object-pool"
+kconfig = "WZ_CAP_OBJECT_POOL"
+# Off by default: zenoh-pico allocates the objects behind its owned handles from the heap as it
+# makes them, and so does a build made as it is. A program that must make no allocation while it
+# runs turns it on and reserves the pools once, before it makes the objects; each count it states
+# is held to the bound of the session limit that bounds the object. The pico ABI's doors are
+# wz_ext_* and part of its unstable surface.
+default = "off"
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = ["unstable-api"]
+help = "Fixed pools, one per kind of object, that the objects behind the owned handles (sessions, publishers, subscribers, queryables, liveliness tokens and subscribers, owned samples, replies, queries and payloads) are taken from in place of the heap once the program reserves them; a full pool refuses the object with _Z_ERR_SYSTEM_OUT_OF_MEMORY (wz_ext_object_pool_*, wz-own doors)."
+
+[[capability]]
+id = "object-pool-region"
+kconfig = "WZ_CAP_OBJECT_POOL_REGION"
+# Off by default, as the pools it places are: a program that states where its memory lies hands
+# the library a region to lay the pools over instead of reserving them from the heap.
+default = "off"
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = ["object-pool"]
+help = "The object pools laid over memory the program hands over in place of one heap allocation (wz_ext_object_pool_place, a wz-own door)."
+
+[[capability]]
 id = "shared-key-ids"
 kconfig = "WZ_CAP_SHARED_KEY_IDS"
 # Off by default: a node that names a key by an id it never declared cannot be read by a stock
