@@ -40,6 +40,7 @@ use wz_runtime_coop::session_drive::{LinkReadiness, LinkWritability, SessionData
 use wz_session_core::bounded::{BoundedVec, Static};
 use wz_session_core::caps;
 use wz_session_core::delivery_lane::{DeliveryLane, Next};
+use wz_session_core::limit_binding::Quota;
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::link::{LostCause, RxFrame};
 use wz_session_core::qos::CongestionControl;
@@ -48,6 +49,64 @@ use wz_session_core::sample::{QosLevel, SampleKind, SourceInfo};
 use wz_session_core::sink::SampleView;
 
 use crate::prelude::*;
+
+/// The longest id of the clock that stamped a sample's timestamp the wire carries.
+const TIMESTAMP_ID_BYTES: usize = 16;
+
+/// The most bytes one sample takes in the lane beyond the message it arrived in, for a session
+/// whose longest key is `key_bytes`: its key as the session resolved it, which a peer may have
+/// named by an alias of a few bytes, and the id of its timestamp's clock. Its payload, its
+/// attachment and its encoding's schema are bytes of the message.
+pub(crate) const fn sample_overhead(key_bytes: usize) -> usize {
+    key_bytes.saturating_add(TIMESTAMP_ID_BYTES)
+}
+
+/// Whether a lane of `LANE` bytes holds the sample of a whole message of `FRAG` bytes on a key of
+/// `KEY` bytes.
+pub(crate) const fn holds_a_message<const LANE: usize, const FRAG: usize, const KEY: usize>() -> bool
+{
+    match FRAG.checked_add(sample_overhead(KEY)) {
+        Some(sample) => sample <= LANE,
+        None => false,
+    }
+}
+
+// The build's lane holds the sample of the largest message the build lets a session rejoin, so a
+// session's lane, sized from the session's message under that bound, never needs more than the
+// build gives it: a build that raises `PICO_FRAG_MAX_BYTES` raises `DELIVERY_LANE_BYTES` with it.
+const _: () = assert!(
+    holds_a_message::<
+        { caps::DELIVERY_LANE_BYTES },
+        { caps::PICO_FRAG_MAX_BYTES },
+        { caps::MAX_KEYEXPR_BYTES },
+    >(),
+    "the build's delivery lane holds a sample of the build's largest rejoined message"
+);
+
+/// `limits` with the delivery lane long enough for the sample of the largest message the session
+/// rejoins (`PICO_FRAG_MAX_BYTES`) on its longest key (`MAX_KEYEXPR_BYTES`): a lane stated shorter
+/// is lengthened to it, as a sample longer than the whole lane could never be handed on. `FRAG`
+/// and `KEY` are the build's values, under which the session's lie.
+pub(crate) fn holding_a_message<const FRAG: usize, const KEY: usize>(
+    mut limits: SessionLimits,
+) -> SessionLimits {
+    let (Ok(frag), Ok(key)) = (
+        limits
+            .pico_frag_max_bytes()
+            .lent_under(Quota::at_most(FRAG)),
+        limits.max_keyexpr_bytes().lent_under(Quota::at_most(KEY)),
+    ) else {
+        // A value over the build's refuses the session's open when its arena is laid out.
+        return limits;
+    };
+    let sample = frag.saturating_add(sample_overhead(key));
+    if sample > limits.delivery_lane_bytes() {
+        // Refused only by a domain of one value, which is the build's lane, and the build's lane
+        // holds the sample (the assertion above).
+        let _ = limits.select_delivery_lane_bytes(sample);
+    }
+    limits
+}
 
 /// What a sample is, besides its bytes: kept at its event slot of the lane.
 #[derive(Clone)]

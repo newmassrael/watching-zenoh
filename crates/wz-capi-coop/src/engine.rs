@@ -330,9 +330,12 @@ fn resolve_policy(_config: &CoopConfig) -> SessionPolicy {
 
 /// The session limits a session [`CoopEngine::open`] opens from `config` holds its tables to: the
 /// one place that open decides them. The snapshot the ABI resolved and states in the config
-/// ([`CoopConfig::limits`]).
+/// ([`CoopConfig::limits`]), its delivery lane long enough for the sample of the largest message
+/// the session rejoins (`lane::holding_a_message`).
 fn resolve_limits(config: &CoopConfig) -> SessionLimits {
-    config.limits
+    crate::lane::holding_a_message::<{ caps::PICO_FRAG_MAX_BYTES }, { caps::MAX_KEYEXPR_BYTES }>(
+        config.limits,
+    )
 }
 
 /// Why no session was opened.

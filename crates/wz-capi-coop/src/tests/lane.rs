@@ -223,3 +223,52 @@ fn every_listener_the_build_admits_has_a_row() {
     }
     assert_eq!(flips.next(), None);
 }
+
+/// The build's lane holds the sample of the build's largest rejoined message on its longest key,
+/// which is what lets a session's lane be sized from its own message under the build's; a lane
+/// one byte short of a message's sample does not hold it.
+#[test]
+fn the_builds_lane_holds_the_builds_largest_message() {
+    use crate::lane::{holds_a_message, sample_overhead};
+    use wz_session_core::caps;
+
+    assert!(holds_a_message::<
+        { caps::DELIVERY_LANE_BYTES },
+        { caps::PICO_FRAG_MAX_BYTES },
+        { caps::MAX_KEYEXPR_BYTES },
+    >());
+    assert_eq!(sample_overhead(8), 24, "a key of 8 and a clock id of 16");
+    assert!(holds_a_message::<{ 100 + 24 }, 100, 8>());
+    assert!(!holds_a_message::<{ 100 + 23 }, 100, 8>());
+}
+
+/// A lane stated shorter than the sample of the session's largest message is lengthened to hold
+/// it, from the session's own (lowered) message length and not the build's; a lane stated longer
+/// is kept.
+#[test]
+fn a_lane_is_sized_from_the_sessions_message() {
+    use crate::lane::{holding_a_message, sample_overhead};
+    use wz_session_core::caps;
+
+    let frag = caps::PICO_FRAG_MAX_BYTES / 2;
+    let mut short = SessionLimits::defaults();
+    if short.select_delivery_lane_bytes(1).is_err()
+        || short
+            .select_pico_frag_max_bytes(Quota::at_most(frag))
+            .is_err()
+    {
+        // A build that keeps either limit to its own value has no other.
+        return;
+    }
+    let held =
+        holding_a_message::<{ caps::PICO_FRAG_MAX_BYTES }, { caps::MAX_KEYEXPR_BYTES }>(short);
+    assert_eq!(
+        held.delivery_lane_bytes(),
+        frag + sample_overhead(caps::MAX_KEYEXPR_BYTES)
+    );
+
+    let long = SessionLimits::defaults();
+    let kept =
+        holding_a_message::<{ caps::PICO_FRAG_MAX_BYTES }, { caps::MAX_KEYEXPR_BYTES }>(long);
+    assert_eq!(kept.delivery_lane_bytes(), long.delivery_lane_bytes());
+}
