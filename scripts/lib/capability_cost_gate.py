@@ -1287,7 +1287,10 @@ CASES: tuple[Case, ...] = (
          # 2026-11-20 -- step 4b round 2b, as pico-client's note of this day says: +1,796 on pc2.
          # 2026-11-20 -- the hosted reading again, as pico-client's note of this day says:
          # 9,618,897 at `cd240d4b4` and +30,560 since.
-         9_689_100,
+         # 2026-11-21 -- the gates' batch over main 8d9b0e530: +1,372 on one host, every moved symbol a
+         # renamed monomorph of equal size but +497 (std's thread packet drop); the build host reads this
+         # case about 1 percent over that host, which put main at its budget and this batch 3,469 over.
+         9_694_000,
          forbid=(ROUTER_NODE,),
          require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST),
          note="the default of the C ABI without the router node"),
