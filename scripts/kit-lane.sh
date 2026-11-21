@@ -492,8 +492,19 @@ build() {
     if [[ "${#extra[@]}" -gt 0 ]]; then
         extra=(-- "${extra[@]}")
     fi
+    # The image's text, which the gates below hold to committed figures, holds no path of this host:
+    # the Rust half and the C half are built under scripts/lib/build_normalization.py, the rule every
+    # lane that measures bytes builds under. The paths only: this build writes its own build time into
+    # the image as the board's clock at boot (wz_board_hooks.c), an input of the image rather than an
+    # accident of where it was built. The C flags reach CMake when it first configures a build directory.
+    local normalized
+    if ! normalized="$(python3 "$ROOT/scripts/lib/build_normalization.py" --env --paths-only)"; then
+        bad "$key" "the build normalisation refused this host's paths (its reason is above)"
+        return 1
+    fi
     if (
-        cd "$ROOT" && nice -n 10 west build -b "$BOARD" -d "$dir" "deploy/$APP" -p auto "${extra[@]}"
+        cd "$ROOT" && eval "$normalized" \
+            && nice -n 10 west build -b "$BOARD" -d "$dir" "deploy/$APP" -p auto "${extra[@]}"
     ) >"$out/build.log" 2>&1; then
         ok "$key" "west build ($out/build.log)"
     else
