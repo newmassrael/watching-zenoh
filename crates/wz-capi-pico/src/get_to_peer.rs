@@ -19,7 +19,7 @@
 //! refusal the callback's `drop(context)` runs before the door returns, which is the get reported
 //! over with no reply.
 
-use std::ffi::{c_char, CStr};
+use core::ffi::{c_char, CStr};
 
 use wz_session_core::peer_target::{self, PeerTargetError};
 use wz_session_core::policy::{SessionPolicy, TargetedQuery};
@@ -27,6 +27,7 @@ use wz_session_core::policy_binding::PolicyValue;
 
 use crate::abi::z_loaned_keyexpr_t;
 use crate::get::{get_inner, z_get_options_t, z_moved_closure_reply_t};
+use crate::prelude::Vec;
 use crate::result::{ZResult, WZ_EXT_ERR_POLICY_OFF, Z_ERR_INVALID, Z_ERR_NULL};
 use crate::session::z_loaned_session_t;
 use crate::zid::{z_id_t, Z_ID_SIZE};

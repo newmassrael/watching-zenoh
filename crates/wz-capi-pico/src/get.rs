@@ -126,8 +126,8 @@
 //! declares — observably different on the wire for anything watching matching
 //! status. That is a real seam, not a cost, and it is a follow-up round.
 
-use std::ffi::{c_int, c_void};
-use std::sync::Arc;
+use alloc::sync::Arc;
+use core::ffi::{c_int, c_void};
 
 use wz_capi_port::cancellation::{register_fan, CancellableFan, CancellationToken, Registration};
 use wz_capi_port::ReplyCallback;
@@ -139,6 +139,7 @@ use wz_session_core::reply_sink::{ReplyKind, ReplyView};
 use crate::abi::{z_loaned_bytes_t, z_loaned_keyexpr_t, z_moved_bytes_t};
 use crate::ffi::{guard_val, guarded, CClosure as FfiClosure};
 use crate::keyexpr::{keyexpr_str, wire_key_of};
+use crate::prelude::*;
 use crate::pubsub::{
     sample_kind_of, z_closure_drop_callback_t, z_loaned_sample_t, SampleMarshal, Z_SAMPLE_KIND_PUT,
 };
@@ -288,8 +289,8 @@ impl ReplyMarshal {
                 ),
             err_payload,
             loaned_err_payload: z_loaned_bytes_t {
-                handle: std::ptr::null_mut(),
-                _pad: [std::ptr::null_mut(); 3],
+                handle: core::ptr::null_mut(),
+                _pad: [core::ptr::null_mut(); 3],
             },
         }
     }
@@ -312,8 +313,8 @@ impl ReplyMarshal {
             sample: self.sample.deep_copy(),
             err_payload: self.err_payload.clone(),
             loaned_err_payload: z_loaned_bytes_t {
-                handle: std::ptr::null_mut(),
-                _pad: [std::ptr::null_mut(); 3],
+                handle: core::ptr::null_mut(),
+                _pad: [core::ptr::null_mut(); 3],
             },
         }
     }
@@ -427,7 +428,7 @@ impl z_owned_closure_reply_t {
     #[inline]
     fn null_value() -> Self {
         Self {
-            context: std::ptr::null_mut(),
+            context: core::ptr::null_mut(),
             call: None,
             drop: None,
         }
@@ -535,9 +536,9 @@ pub(crate) fn fire_reply(closure: &CReplyClosure, gate: &ReplyGate, view: &dyn R
     // tear down the drive thread, so it is caught here.
     let ctx = closure.context.0;
     let _in_callback = crate::ffi::InCallback::enter();
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+    let _ = crate::ffi::catch(|| unsafe {
         call(reply_ptr, ctx);
-    }));
+    });
 }
 
 // --- closure_reply exports -------------------------------------------------
@@ -719,7 +720,7 @@ pub struct z_get_options_t {
 }
 
 crate::option_fields::unstable_option_fields!(z_get_options_t {
-    source_info: *mut crate::pubsub::z_source_info_t = std::ptr::null_mut(),
+    source_info: *mut crate::pubsub::z_source_info_t = core::ptr::null_mut(),
 });
 
 crate::locality::locality_option_field!(z_get_options_t, allowed_destination, "local-queryable");
@@ -758,16 +759,16 @@ impl z_get_options_t {
 /// the header's fields takes them from the target.
 #[cfg(target_pointer_width = "64")]
 const _: () = {
-    assert!(std::mem::align_of::<z_get_options_t>() == 8);
+    assert!(core::mem::align_of::<z_get_options_t>() == 8);
     // Every field AFTER the feature-conditional region, by offset. These are
     // the assertions that would have caught the defect: the struct was 64 B
     // instead of 80 B, which reads as "two tail fields missing" — harmless —
     // when in fact the missing pair sits BEFORE `accept_replies` and displaced
     // it by 16 B. A size check cannot tell those two stories apart.
-    assert!(std::mem::offset_of!(z_get_options_t, attachment) == 48);
+    assert!(core::mem::offset_of!(z_get_options_t, attachment) == 48);
     // The local queryable's field takes the padding after `is_express`.
     assert!(
-        std::mem::offset_of!(z_get_options_t, target)
+        core::mem::offset_of!(z_get_options_t, target)
             == if cfg!(feature = "local-queryable") {
                 36
             } else {
@@ -778,16 +779,16 @@ const _: () = {
 
 #[cfg(all(feature = "unstable-api", target_pointer_width = "64"))]
 const _: () = {
-    assert!(std::mem::size_of::<z_get_options_t>() == 80);
-    assert!(std::mem::offset_of!(z_get_options_t, source_info) == 56);
-    assert!(std::mem::offset_of!(z_get_options_t, cancellation_token) == 64);
-    assert!(std::mem::offset_of!(z_get_options_t, accept_replies) == 72);
+    assert!(core::mem::size_of::<z_get_options_t>() == 80);
+    assert!(core::mem::offset_of!(z_get_options_t, source_info) == 56);
+    assert!(core::mem::offset_of!(z_get_options_t, cancellation_token) == 64);
+    assert!(core::mem::offset_of!(z_get_options_t, accept_replies) == 72);
 };
 
 #[cfg(all(not(feature = "unstable-api"), target_pointer_width = "64"))]
 const _: () = {
-    assert!(std::mem::size_of::<z_get_options_t>() == 64);
-    assert!(std::mem::offset_of!(z_get_options_t, accept_replies) == 56);
+    assert!(core::mem::size_of::<z_get_options_t>() == 64);
+    assert!(core::mem::offset_of!(z_get_options_t, accept_replies) == 56);
 };
 
 /// How to re-measure the numbers above, so the next round checks rather than
@@ -828,8 +829,8 @@ pub unsafe extern "C" fn z_get_options_default(options: *mut z_get_options_t) {
     if options.is_null() {
         return;
     }
-    (*options).payload = std::ptr::null_mut();
-    (*options).encoding = std::ptr::null_mut();
+    (*options).payload = core::ptr::null_mut();
+    (*options).encoding = core::ptr::null_mut();
     (*options).consolidation = z_query_consolidation_t {
         mode: Z_CONSOLIDATION_MODE_AUTO,
     };
@@ -844,11 +845,11 @@ pub unsafe extern "C" fn z_get_options_default(options: *mut z_get_options_t) {
     }
     (*options).target = Z_QUERY_TARGET_BEST_MATCHING;
     (*options).timeout_ms = 0;
-    (*options).attachment = std::ptr::null_mut();
+    (*options).attachment = core::ptr::null_mut();
     #[cfg(feature = "unstable-api")]
     {
-        (*options).source_info = std::ptr::null_mut();
-        (*options).cancellation_token = std::ptr::null_mut();
+        (*options).source_info = core::ptr::null_mut();
+        (*options).cancellation_token = core::ptr::null_mut();
     }
     (*options).accept_replies = crate::reply_keyexpr::Z_REPLY_KEYEXPR_MATCHING_QUERY;
 }
@@ -1123,7 +1124,7 @@ fn transmit_parameters(parameters: &[u8], accept_replies: z_reply_keyexpr_t) -> 
 pub(crate) unsafe fn get_inner(
     zs: *const z_loaned_session_t,
     keyexpr: *const z_loaned_keyexpr_t,
-    parameters: *const std::ffi::c_char,
+    parameters: *const core::ffi::c_char,
     parameters_len: usize,
     callback: *mut z_moved_closure_reply_t,
     options: *mut z_get_options_t,
@@ -1224,7 +1225,7 @@ pub(crate) unsafe fn get_inner(
     let params_in: &[u8] = if parameters.is_null() || parameters_len == 0 {
         &[]
     } else {
-        std::slice::from_raw_parts(parameters as *const u8, parameters_len)
+        core::slice::from_raw_parts(parameters as *const u8, parameters_len)
     };
     // R2959 — the query names the caller's key in its own wire form, as pico's
     // `_z_query` does (`_z_declared_keyexpr_alias_to_wire(keyexpr, ...)`).
@@ -1569,7 +1570,7 @@ impl LegReply {
 pub unsafe extern "C" fn z_get(
     zs: *const z_loaned_session_t,
     keyexpr: *const z_loaned_keyexpr_t,
-    parameters: *const std::ffi::c_char,
+    parameters: *const core::ffi::c_char,
     callback: *mut z_moved_closure_reply_t,
     options: *mut z_get_options_t,
 ) -> ZResult {
@@ -1577,7 +1578,7 @@ pub unsafe extern "C" fn z_get(
         let len = if parameters.is_null() {
             0
         } else {
-            std::ffi::CStr::from_ptr(parameters).to_bytes().len()
+            core::ffi::CStr::from_ptr(parameters).to_bytes().len()
         };
         get_inner(zs, keyexpr, parameters, len, callback, options, Ok(None))
     })
@@ -1590,7 +1591,7 @@ pub unsafe extern "C" fn z_get(
 pub unsafe extern "C" fn z_get_with_parameters_substr(
     zs: *const z_loaned_session_t,
     keyexpr: *const z_loaned_keyexpr_t,
-    parameters: *const std::ffi::c_char,
+    parameters: *const core::ffi::c_char,
     parameters_len: usize,
     callback: *mut z_moved_closure_reply_t,
     options: *mut z_get_options_t,
@@ -1629,9 +1630,9 @@ pub unsafe extern "C" fn z_reply_is_ok(reply: *const z_loaned_reply_t) -> bool {
 /// empty.
 #[no_mangle]
 pub unsafe extern "C" fn z_reply_ok(reply: *const z_loaned_reply_t) -> *const z_loaned_sample_t {
-    guard_val(std::ptr::null(), || match reply_marshal(reply) {
+    guard_val(core::ptr::null(), || match reply_marshal(reply) {
         Some(marshal) if marshal.is_ok => marshal.sample.as_loaned(),
-        _ => std::ptr::null(),
+        _ => core::ptr::null(),
     })
 }
 
@@ -1641,11 +1642,11 @@ pub unsafe extern "C" fn z_reply_ok(reply: *const z_loaned_reply_t) -> *const z_
 pub unsafe extern "C" fn z_reply_err(
     reply: *const z_loaned_reply_t,
 ) -> *const z_loaned_reply_err_t {
-    guard_val(std::ptr::null(), || match reply_marshal(reply) {
+    guard_val(core::ptr::null(), || match reply_marshal(reply) {
         Some(marshal) if !marshal.is_ok => {
             marshal as *const ReplyMarshal as *const z_loaned_reply_err_t
         }
-        _ => std::ptr::null(),
+        _ => core::ptr::null(),
     })
 }
 
@@ -1655,9 +1656,9 @@ pub unsafe extern "C" fn z_reply_err(
 pub unsafe extern "C" fn z_reply_err_payload(
     reply_err: *const z_loaned_reply_err_t,
 ) -> *const z_loaned_bytes_t {
-    guard_val(std::ptr::null(), || match reply_err_marshal(reply_err) {
+    guard_val(core::ptr::null(), || match reply_err_marshal(reply_err) {
         Some(marshal) => &marshal.loaned_err_payload as *const z_loaned_bytes_t,
-        None => std::ptr::null(),
+        None => core::ptr::null(),
     })
 }
 
@@ -1679,7 +1680,7 @@ const REPLY_ERR_BYTES: usize = crate::abi::element_bytes(72);
 #[repr(C)]
 pub struct z_owned_reply_err_t {
     handle: *mut c_void,
-    _pad: [u8; REPLY_ERR_BYTES - std::mem::size_of::<*mut c_void>()],
+    _pad: [u8; REPLY_ERR_BYTES - core::mem::size_of::<*mut c_void>()],
 }
 
 /// Moved reply error (pico `z_moved_reply_err_t`).
@@ -1689,14 +1690,14 @@ pub struct z_moved_reply_err_t {
 }
 
 const _: () = {
-    assert!(std::mem::size_of::<z_owned_reply_err_t>() == REPLY_ERR_BYTES);
+    assert!(core::mem::size_of::<z_owned_reply_err_t>() == REPLY_ERR_BYTES);
 };
 
 impl z_owned_reply_err_t {
     fn null_value() -> Self {
         Self {
-            handle: std::ptr::null_mut(),
-            _pad: [0u8; REPLY_ERR_BYTES - std::mem::size_of::<*mut c_void>()],
+            handle: core::ptr::null_mut(),
+            _pad: [0u8; REPLY_ERR_BYTES - core::mem::size_of::<*mut c_void>()],
         }
     }
 }
@@ -1715,9 +1716,9 @@ impl z_owned_reply_err_t {
 pub unsafe extern "C" fn z_reply_err_encoding(
     reply_err: *const z_loaned_reply_err_t,
 ) -> *const crate::encoding::z_loaned_encoding_t {
-    guard_val(std::ptr::null(), || match reply_err_marshal(reply_err) {
+    guard_val(core::ptr::null(), || match reply_err_marshal(reply_err) {
         Some(marshal) => crate::pubsub::z_sample_encoding(marshal.sample.as_loaned()),
-        None => std::ptr::null(),
+        None => core::ptr::null(),
     })
 }
 
@@ -1770,9 +1771,9 @@ pub unsafe extern "C" fn z_reply_err_clone(
 pub unsafe extern "C" fn z_reply_err_loan(
     err: *const z_owned_reply_err_t,
 ) -> *const z_loaned_reply_err_t {
-    guard_val(std::ptr::null(), || {
+    guard_val(core::ptr::null(), || {
         if err.is_null() {
-            return std::ptr::null();
+            return core::ptr::null();
         }
         (*err).handle as *const z_loaned_reply_err_t
     })
@@ -1786,9 +1787,9 @@ pub unsafe extern "C" fn z_reply_err_loan(
 pub unsafe extern "C" fn z_reply_err_loan_mut(
     err: *mut z_owned_reply_err_t,
 ) -> *mut z_loaned_reply_err_t {
-    guard_val(std::ptr::null_mut(), || {
+    guard_val(core::ptr::null_mut(), || {
         if err.is_null() {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         }
         (*err).handle as *mut z_loaned_reply_err_t
     })

@@ -53,22 +53,17 @@
 //!
 //! ## Where it builds
 //!
-//! The token BLOCKS: its cancel waits on a condition variable until every
-//! registration is dropped, which is the host's (`std`). The fan only takes a
-//! lock ([`crate::sync::Lock`]), so it builds wherever the port does, and an
-//! engine on an MCU takes the same `get_on_wire` with it. The token and what
-//! registers against it ([`Registration`], [`register_fan`]) come with `std`;
-//! an MCU's token waits on the kernel's condition variable, which arrives with
-//! the pico ABI's MCU host layer.
+//! Wherever the port does. The token BLOCKS: its cancel waits until every
+//! registration is dropped, on the port's condition variable ([`crate::os`]):
+//! `std`'s on a host, the host's own calls' in a host library without `std`,
+//! an MCU kernel's in an image. The fan only takes a lock ([`crate::sync::Lock`]).
 
 use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-#[cfg(feature = "std")]
-use std::collections::BTreeMap;
-#[cfg(feature = "std")]
-use std::sync::{Condvar, Mutex, MutexGuard};
 
+use crate::os::{Condvar, Mutex, MutexGuard};
 use crate::sync::Lock;
 
 /// A one-shot on-cancel action.
@@ -76,7 +71,6 @@ type OnCancel = Box<dyn FnOnce() + Send>;
 
 /// The token's state, under one lock so "cancel has started", "the handlers are
 /// gone" and "no registration can land" are one fact rather than three.
-#[cfg(feature = "std")]
 struct Inner {
     /// The handlers to run on cancel, keyed so a completed query can remove its
     /// own. `None` once cancel has started.
@@ -91,13 +85,11 @@ struct Inner {
 }
 
 /// A cancellation token shared by every handle a C program holds on it.
-#[cfg(feature = "std")]
 pub struct CancellationToken {
     inner: Mutex<Inner>,
     idle: Condvar,
 }
 
-#[cfg(feature = "std")]
 impl Default for CancellationToken {
     fn default() -> Self {
         Self {
@@ -112,17 +104,16 @@ impl Default for CancellationToken {
     }
 }
 
-#[cfg(feature = "std")]
 impl CancellationToken {
     /// A fresh, uncancelled token.
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
     }
 
-    /// Lock, treating a poisoned lock as usable: every critical section here
-    /// leaves `Inner` consistent before it can panic.
+    /// Lock. The port's lock treats a poisoned one as usable: every critical
+    /// section here leaves `Inner` consistent before it can panic.
     fn lock(&self) -> MutexGuard<'_, Inner> {
-        self.inner.lock().unwrap_or_else(|p| p.into_inner())
+        self.inner.lock()
     }
 
     /// Whether the handlers have run.
@@ -175,7 +166,7 @@ impl CancellationToken {
         }
         let mut inner = self.lock();
         while inner.active > 0 {
-            inner = self.idle.wait(inner).unwrap_or_else(|p| p.into_inner());
+            inner = self.idle.wait(inner);
         }
     }
 
@@ -201,13 +192,11 @@ impl CancellationToken {
 
 /// One query's membership of a token: its on-cancel handler and its notifier.
 /// Dropping it is how the query tells the token it is over.
-#[cfg(feature = "std")]
 pub struct Registration {
     token: Arc<CancellationToken>,
     id: u64,
 }
 
-#[cfg(feature = "std")]
 impl Drop for Registration {
     fn drop(&mut self) {
         self.token.release(self.id);
@@ -276,7 +265,6 @@ impl CancellableFan {
 /// Register a fan against a token: the token's on-cancel handler cancels the
 /// fan. `None` when the token has already started cancelling — the caller then
 /// fails the get without issuing it.
-#[cfg(feature = "std")]
 pub fn register_fan(token: &Arc<CancellationToken>) -> Option<(Arc<CancellableFan>, Registration)> {
     let fan = CancellableFan::new();
     let on_cancel = Arc::clone(&fan);

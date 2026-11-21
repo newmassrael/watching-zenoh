@@ -221,9 +221,9 @@ scout-mcu = [
 ]
 # `query`: `z_get` and the querier, the requesting end of a query. Both engines ask a get and
 # watch whether a queryable matches, so it selects neither. Every get and querier holds a
-# cancellation token, whose cancel waits on the host's condition variable (`wz-capi-port`'s
-# `cancellation`), so it selects `std`.
-query = ["std", "wz-capi-core?/query", "wz-capi-coop?/query"]
+# cancellation token, whose cancel waits on the port's condition variable (`wz-capi-port`'s
+# `cancellation` over its `os`), which every build has, so it selects no `std`.
+query = ["wz-capi-core?/query", "wz-capi-coop?/query"]
 # `queryable`: `z_declare_queryable` and the replies, the answering end of a query. Both engines
 # answer queries, so it selects neither: it turns the queryable on in the one the build has.
 queryable = ["wz-capi-core?/queryable", "wz-capi-coop?/queryable"]
@@ -233,9 +233,8 @@ liveliness = ["wz-capi-core?/liveliness", "wz-capi-coop?/liveliness"]
 # `liveliness-get`: the snapshot get of the liveliness plane. It is a query, so it needs the
 # requesting end of one; both engines ask it (the tokio engine's drive loop sweeps the get
 # deadlines, the cooperative engine's every step does), so it selects neither. It holds the
-# get's cancellation token, so it selects `std` as `query` does.
+# get's cancellation token, which needs no `std`, as `query`'s does not.
 liveliness-get = [
-    "std",
     "liveliness",
     "query",
     "wz-capi-core?/liveliness-get",

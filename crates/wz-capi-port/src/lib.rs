@@ -44,9 +44,10 @@
 //! `no_std` with `alloc`: an MCU image's pico ABI names the same port as the host's
 //! (`docs/upstream-parity.md` step M5; the C ABI is one definition, a driver trait the host
 //! runtime and the MCU slot host implement, and thin artefact crates binding the two). The `std`
-//! feature, on by default, gives the port's lock to the process ([`sync`]) and adds the
-//! cancellation token, whose cancel blocks; without it the lock is a critical section the image
-//! links, or in a host library built without `std` the host's own lock (`os-sys`).
+//! feature, on by default, gives the port's lock to the process ([`sync`]); without it the lock
+//! is a critical section the image links, or in a host library built without `std` the host's
+//! own lock (`os-sys`). The cancellation token waits on the port's condition variable ([`os`])
+//! in every build.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 

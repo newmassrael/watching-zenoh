@@ -39,8 +39,8 @@
 //! not the contents, because every field is reached through an exported
 //! accessor.
 
-use std::ffi::{c_char, c_int, c_void};
-use std::sync::Arc;
+use alloc::sync::Arc;
+use core::ffi::{c_char, c_int, c_void};
 
 use wz_capi_port::cancellation::CancellationToken;
 use wz_capi_port::FilterPlane;
@@ -57,6 +57,7 @@ use crate::matching::{
     declare_on_filter, z_matching_status_t, z_moved_closure_matching_status_t,
     z_owned_matching_listener_t,
 };
+use crate::prelude::*;
 use crate::qos::{Z_CONGESTION_CONTROL_BLOCK, Z_PRIORITY_DEFAULT};
 use crate::reply_keyexpr::{z_reply_keyexpr_t, Z_REPLY_KEYEXPR_MATCHING_QUERY};
 use crate::result::{
@@ -127,7 +128,7 @@ pub struct z_querier_get_options_t {
 }
 
 crate::option_fields::unstable_option_fields!(z_querier_get_options_t {
-    source_info: *mut crate::pubsub::z_source_info_t = std::ptr::null_mut(),
+    source_info: *mut crate::pubsub::z_source_info_t = core::ptr::null_mut(),
 });
 
 impl z_querier_get_options_t {
@@ -148,26 +149,26 @@ impl z_querier_get_options_t {
 
 /// One pointer of the host: every field of this struct is one, so its layout is a count of them on
 /// any host (24 and 40 B are the 64-bit host's).
-const WORD: usize = std::mem::size_of::<*mut c_void>();
+const WORD: usize = core::mem::size_of::<*mut c_void>();
 
 #[cfg(not(feature = "unstable-api"))]
-const _: () = assert!(std::mem::size_of::<z_querier_get_options_t>() == 3 * WORD);
+const _: () = assert!(core::mem::size_of::<z_querier_get_options_t>() == 3 * WORD);
 
 /// The reference build declares this at 40 B
 /// (`-DZENOH_LINUX -DZ_FEATURE_UNSTABLE_API`); pinned so the unstable tail
 /// cannot silently fall off, as it had on `z_get_options_t`.
 #[cfg(feature = "unstable-api")]
 const _: () = {
-    assert!(std::mem::size_of::<z_querier_get_options_t>() == 5 * WORD);
+    assert!(core::mem::size_of::<z_querier_get_options_t>() == 5 * WORD);
     // By OFFSET too: this struct's unstable tail is a PAIR, and a pair is where
     // an order mistake hides — `cancellation_token` before `source_info` here,
     // the other way round in `z_get_options_t`. Upstream really does declare
     // them in opposite orders in the two structs
     // (`api/types.h:290-297` vs `:479-497`), so "same two fields" is not the
     // same layout and only a measured offset says which.
-    assert!(std::mem::offset_of!(z_querier_get_options_t, attachment) == 2 * WORD);
-    assert!(std::mem::offset_of!(z_querier_get_options_t, cancellation_token) == 3 * WORD);
-    assert!(std::mem::offset_of!(z_querier_get_options_t, source_info) == 4 * WORD);
+    assert!(core::mem::offset_of!(z_querier_get_options_t, attachment) == 2 * WORD);
+    assert!(core::mem::offset_of!(z_querier_get_options_t, cancellation_token) == 3 * WORD);
+    assert!(core::mem::offset_of!(z_querier_get_options_t, source_info) == 4 * WORD);
 };
 
 /// Default querier options (pico `z_querier_options_default`,
@@ -180,7 +181,7 @@ pub unsafe extern "C" fn z_querier_options_default(options: *mut z_querier_optio
         return;
     }
     *options = z_querier_options_t {
-        encoding: std::ptr::null_mut(),
+        encoding: core::ptr::null_mut(),
         target: Z_QUERY_TARGET_BEST_MATCHING,
         consolidation: z_query_consolidation_t {
             mode: Z_CONSOLIDATION_MODE_AUTO,
@@ -204,13 +205,13 @@ pub unsafe extern "C" fn z_querier_get_options_default(options: *mut z_querier_g
         return;
     }
     *options = z_querier_get_options_t {
-        payload: std::ptr::null_mut(),
-        encoding: std::ptr::null_mut(),
-        attachment: std::ptr::null_mut(),
+        payload: core::ptr::null_mut(),
+        encoding: core::ptr::null_mut(),
+        attachment: core::ptr::null_mut(),
         #[cfg(feature = "unstable-api")]
-        cancellation_token: std::ptr::null_mut(),
+        cancellation_token: core::ptr::null_mut(),
         #[cfg(feature = "unstable-api")]
-        source_info: std::ptr::null_mut(),
+        source_info: core::ptr::null_mut(),
     };
 }
 
@@ -317,8 +318,8 @@ impl z_owned_querier_t {
     #[inline]
     pub(crate) fn null_value() -> Self {
         Self {
-            handle: std::ptr::null_mut(),
-            _pad: [std::ptr::null_mut(); 22],
+            handle: core::ptr::null_mut(),
+            _pad: [core::ptr::null_mut(); 22],
         }
     }
 }
@@ -444,7 +445,7 @@ pub unsafe extern "C" fn z_declare_querier(
             shared: engine,
             filter,
             key,
-            loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
+            loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
             target,
             consolidation,
             timeout_ms,
@@ -457,7 +458,7 @@ pub unsafe extern "C" fn z_declare_querier(
         boxed.bind();
         *querier = z_owned_querier_t {
             handle: Box::into_raw(boxed) as *mut c_void,
-            _pad: [std::ptr::null_mut(); 22],
+            _pad: [core::ptr::null_mut(); 22],
         };
         Z_OK
     })
@@ -491,7 +492,7 @@ pub unsafe extern "C" fn z_querier_get(
     let len = if parameters.is_null() {
         0
     } else {
-        std::ffi::CStr::from_ptr(parameters).to_bytes().len()
+        core::ffi::CStr::from_ptr(parameters).to_bytes().len()
     };
     z_querier_get_with_parameters_substr(querier, parameters, len, callback, options)
 }
@@ -563,7 +564,7 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
         let params_in: &[u8] = if parameters.is_null() || parameters_len == 0 {
             &[]
         } else {
-            std::slice::from_raw_parts(parameters as *const u8, parameters_len)
+            core::slice::from_raw_parts(parameters as *const u8, parameters_len)
         };
         // A get's own encoding wins; without one the value is sent with the
         // encoding the querier was declared with.
@@ -668,8 +669,8 @@ mod tests {
     /// header laid out by each 32-bit ABI's rules, which differ only in the alignment of the
     /// `uint64_t`: 4 on 32-bit x86 Linux (System V i386), 8 on 32-bit Windows and ARM.
     fn options_layout() -> [usize; 9] {
-        let word = std::mem::size_of::<*mut c_void>();
-        let u64_align = std::mem::align_of::<u64>();
+        let word = core::mem::size_of::<*mut c_void>();
+        let u64_align = core::mem::align_of::<u64>();
         match (word, u64_align, cfg!(feature = "local-queryable")) {
             (8, _, false) => [8, 12, 16, 20, 0, 24, 32, 40, 48],
             (8, _, true) => [8, 12, 16, 20, 24, 28, 32, 40, 48],
@@ -697,17 +698,17 @@ mod tests {
     /// The get options are all pointers: five words with the unstable tail, three without.
     #[test]
     fn querier_abi_sizes_match_pico() {
-        let word = std::mem::size_of::<*mut c_void>();
-        assert_eq!(std::mem::size_of::<z_owned_querier_t>(), 23 * word);
-        assert_eq!(std::mem::size_of::<z_loaned_querier_t>(), 23 * word);
-        assert_eq!(std::mem::size_of::<z_moved_querier_t>(), 23 * word);
+        let word = core::mem::size_of::<*mut c_void>();
+        assert_eq!(core::mem::size_of::<z_owned_querier_t>(), 23 * word);
+        assert_eq!(core::mem::size_of::<z_loaned_querier_t>(), 23 * word);
+        assert_eq!(core::mem::size_of::<z_moved_querier_t>(), 23 * word);
         assert_eq!(
-            std::mem::size_of::<z_querier_options_t>(),
+            core::mem::size_of::<z_querier_options_t>(),
             options_layout()[8]
         );
         // The token and source-info tail is the unstable API's.
         assert_eq!(
-            std::mem::size_of::<z_querier_get_options_t>(),
+            core::mem::size_of::<z_querier_get_options_t>(),
             if cfg!(feature = "unstable-api") {
                 5 * word
             } else {
@@ -725,7 +726,7 @@ mod tests {
         #[cfg(not(feature = "local-queryable"))]
         let _ = allowed;
         let o = z_querier_options_t {
-            encoding: std::ptr::null_mut(),
+            encoding: core::ptr::null_mut(),
             target: 0,
             consolidation: z_query_consolidation_t { mode: 0 },
             congestion_control: 0,
@@ -759,7 +760,7 @@ mod tests {
     #[test]
     fn querier_defaults_agree_with_get_defaults() {
         let mut q = z_querier_options_t {
-            encoding: std::ptr::null_mut(),
+            encoding: core::ptr::null_mut(),
             target: 99,
             consolidation: z_query_consolidation_t { mode: 99 },
             congestion_control: 99,
@@ -770,7 +771,7 @@ mod tests {
             timeout_ms: 99,
             accept_replies: 99,
         };
-        let mut g: crate::get::z_get_options_t = unsafe { std::mem::zeroed() };
+        let mut g: crate::get::z_get_options_t = unsafe { core::mem::zeroed() };
         unsafe {
             z_querier_options_default(&mut q);
             crate::get::z_get_options_default(&mut g);

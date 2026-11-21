@@ -7,9 +7,10 @@
 //! arm's host surface (mutex, condvar, task), which a build without `multi-thread` does not
 //! have. The token does not depend on the arm.
 
-use std::ffi::c_void;
-use std::sync::Arc;
+use alloc::sync::Arc;
+use core::ffi::c_void;
 
+use crate::prelude::Box;
 use crate::result::{ZResult, Z_ERR_NULL, Z_OK};
 
 /// The shared state behind a `z_owned_cancellation_token_t`.
@@ -89,16 +90,16 @@ pub struct z_moved_cancellation_token_t {
 
 const _: () = {
     assert!(
-        std::mem::size_of::<z_owned_cancellation_token_t>()
-            == 2 * std::mem::size_of::<*mut c_void>()
+        core::mem::size_of::<z_owned_cancellation_token_t>()
+            == 2 * core::mem::size_of::<*mut c_void>()
     );
 };
 
 impl z_owned_cancellation_token_t {
     fn null_value() -> Self {
         Self {
-            handle: std::ptr::null_mut(),
-            _cnt: std::ptr::null_mut(),
+            handle: core::ptr::null_mut(),
+            _cnt: core::ptr::null_mut(),
         }
     }
 }
@@ -131,7 +132,7 @@ pub unsafe extern "C" fn z_cancellation_token_new(
         let arc = CancellationToken::new();
         *token = z_owned_cancellation_token_t {
             handle: Box::into_raw(Box::new(arc)) as *mut c_void,
-            _cnt: std::ptr::null_mut(),
+            _cnt: core::ptr::null_mut(),
         };
         Z_OK
     })
@@ -205,7 +206,7 @@ pub unsafe extern "C" fn z_cancellation_token_clone(
             Some(arc) => {
                 *dst = z_owned_cancellation_token_t {
                     handle: Box::into_raw(Box::new(Arc::clone(arc))) as *mut c_void,
-                    _cnt: std::ptr::null_mut(),
+                    _cnt: core::ptr::null_mut(),
                 };
                 Z_OK
             }
