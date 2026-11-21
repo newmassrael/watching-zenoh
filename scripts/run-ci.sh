@@ -2386,6 +2386,13 @@ layer_c0_test_discipline() {
     # deleting one row of the real table.
     _runci_leg logic_census_coverage_gate.selftest -- python3 scripts/lib/logic_census_coverage_gate.py --selftest
     _runci_leg logic_census_coverage_gate --after logic_census_coverage_gate.selftest -- python3 scripts/lib/logic_census_coverage_gate.py --check
+    # The completeness scoreboard (docs/completeness-scoreboard.md): four criteria by which wz is
+    # held to be more complete than zenoh-pico, each a figure read from the gate or the lane that
+    # computes it and held to its row of deploy/completeness_ratchet.json. A figure worse than its
+    # row fails; a better one prints the row to commit. It reads lanes' count guards and wiring
+    # here, never their runs.
+    _runci_leg completeness_gate.selftest -- python3 scripts/lib/completeness_gate.py --selftest
+    _runci_leg completeness_gate --after completeness_gate.selftest -- python3 scripts/lib/completeness_gate.py --check
     # R311y621 (§7.14) — the SOLO-PLANE-PAGE gate. R311y618 severed one leg of
     # `CaptureReport::is_complete` and all 229 tests stayed green: the pages
     # that should have caught it attached TWO planes, and the other plane
