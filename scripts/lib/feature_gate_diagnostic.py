@@ -186,6 +186,14 @@ PROBES: dict[str, dict[str, list[tuple[str, str, frozenset[str]]]]] = {
 # table would otherwise be.
 NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
     "wz-capture": {
+        # The step 4b carry's round: `message-payload` turns `wz-app-frame`'s feature of that
+        # name on for one test, which a dev-dependency feature could not do without changing
+        # Layer C1's resolution of `wz-app-frame` (the C1cap partition). It gates that test and
+        # nothing public.
+        "message-payload": (
+            "no `#[cfg]` in this package attaches this feature to a publicly visible item; "
+            "it gates one test (`proto_encode_tests`), which Layer C1cap runs with it on"
+        ),
         # R2972 — `compression` gated `passive::compression_active`, a public
         # accessor, until that accessor was removed (`compression_active` had no
         # reader once the session-wide answer went). What is left is one
