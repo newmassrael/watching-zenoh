@@ -22,6 +22,8 @@
 //!   (`SessionArena::lend_links`). The batch is the config's, held to the session's
 //!   `PICO_UNICAST_BATCH_BYTES` under the build's; these are the rows lent when the session opens,
 //!   first;
+//! - the session's delivery lane (`DELIVERY_LANE_BYTES`, under the build's), the bytes of what
+//!   it hands its subscribers' callbacks after its lock (`crate::lane`), lent next;
 //! - the engine's own record of each declaration it announces and announces again over a new
 //!   link ([`EntityRows`]): its subscribers, queryables, tokens and liveliness subscribers under
 //!   the limits of the application's tables, the key expressions it declares
@@ -103,7 +105,7 @@ impl ArenaRow {
 }
 
 /// The most rows a plan holds: every row of the build with every feature.
-pub const ARENA_ROWS: usize = 17;
+pub const ARENA_ROWS: usize = 19;
 
 /// The slots each link is lent to encode its frames into: a batching session holds a batch open in
 /// one slot while it encodes the next message, which does not join it, into another.
@@ -202,6 +204,8 @@ pub struct ArenaPlan {
     links: usize,
     /// The length of a link's receive buffer and of each of its slots.
     link_bytes: usize,
+    /// The bytes of the session's delivery lane (`crate::lane`).
+    lane_bytes: usize,
     entities: EntityRows,
     gets: GetTables,
     held_queries: usize,
@@ -220,6 +224,10 @@ impl ArenaPlan {
             len: 0,
             links,
             link_bytes,
+            lane_bytes: lent::<{ caps::DELIVERY_LANE_BYTES }>(
+                "DELIVERY_LANE_BYTES",
+                Quota::at_most(limits.delivery_lane_bytes()),
+            )?,
             entities: EntityRows::default(),
             gets: GetTables::default(),
             held_queries: 0,
@@ -250,6 +258,14 @@ impl ArenaPlan {
             links,
             times(LINK_TX_SLOTS, link_bytes)?,
         );
+        // The delivery lane's area, lent next (`SessionArena::lend_lane`): one table of one buffer.
+        plan.put(
+            "delivery lane flag",
+            "DELIVERY_LANE_BYTES",
+            1,
+            LentByteCells::FLAG_BYTES,
+        );
+        plan.put("delivery lane", "DELIVERY_LANE_BYTES", 1, plan.lane_bytes);
         plan.put(
             "subscribers",
             "MAX_SUBSCRIPTIONS",
@@ -613,6 +629,29 @@ impl SessionArena {
             .lend_byte_cells(slots, plan.links)
             .map_err(ArenaRefused::Lend)?;
         Ok(LinkTables::new(rx, tx, plan.link_bytes))
+    }
+
+    /// Lend the delivery lane's area `plan` lays out, next after the links' buffers: one buffer of
+    /// `DELIVERY_LANE_BYTES`, held by the session's lane for the session's life. Refused only by
+    /// an arena reserved by another plan.
+    pub(crate) fn lend_lane(
+        &mut self,
+        plan: &ArenaPlan,
+    ) -> Result<(NonNull<u8>, usize), ArenaRefused> {
+        let cells = self
+            .arena
+            .lend_byte_cells(plan.lane_bytes, 1)
+            .map_err(ArenaRefused::Lend)?;
+        let refused = ArenaRefused::Lend(LendRefused::Exhausted {
+            asked: Some(plan.lane_bytes),
+            left: 0,
+        });
+        let buffer = cells.claim().ok_or(refused)?;
+        let (base, bytes) = buffer.raw();
+        // The claim is never given back: the lane holds the buffer until the session is let go, and
+        // a buffer dropped then would write its cell's flag into an arena given back before it.
+        core::mem::forget(buffer);
+        Ok((NonNull::new(base).ok_or(refused)?, bytes))
     }
 
     /// Lend a table of `rows` rows, at most `N`, from the arena: the next span of it. Refused,

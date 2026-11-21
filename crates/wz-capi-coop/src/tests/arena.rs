@@ -343,6 +343,40 @@ fn a_snapshot_batch_over_the_builds_refuses_the_plan() {
     );
 }
 
+/// The delivery lane's area is the `DELIVERY_LANE_BYTES` the session's limits state, one buffer
+/// and its flag: a lowered value lowers it, and one over the build's refuses the plan, naming the
+/// limit and both values.
+#[test]
+fn the_plan_lays_out_the_delivery_lane_the_limits_state() {
+    let built =
+        ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
+    assert_eq!(row(&built, "delivery lane").count, 1);
+    assert_eq!(
+        row(&built, "delivery lane").entry_bytes,
+        SessionLimits::defaults().delivery_lane_bytes()
+    );
+    assert_eq!(row(&built, "delivery lane flag").count, 1);
+    let mut lowered = SessionLimits::defaults();
+    if lowered.select_delivery_lane_bytes(1024).is_ok() {
+        let plan = ArenaPlan::of(&client_config(), &lowered).expect("lays an arena out");
+        assert_eq!(row(&plan, "delivery lane").entry_bytes, 1024);
+    }
+    let over = caps::DELIVERY_LANE_BYTES + 1;
+    let mut raised = SessionLimits::defaults();
+    if raised.select_delivery_lane_bytes(over).is_ok() {
+        assert_eq!(
+            ArenaPlan::of(&client_config(), &raised),
+            Err(ArenaRefused::Limit {
+                limit: "DELIVERY_LANE_BYTES",
+                why: UnlentRows::OverCeiling {
+                    value: over,
+                    ceiling: caps::DELIVERY_LANE_BYTES,
+                },
+            })
+        );
+    }
+}
+
 /// A listener lays out the gets and the link of a face for the dial role, each face it admits and
 /// each handshake it holds; the application's tables are the session's, once, however many faces
 /// it holds.

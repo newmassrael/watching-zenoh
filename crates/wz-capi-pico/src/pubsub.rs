@@ -242,8 +242,22 @@ impl SampleMarshal {
     /// installs.
     pub(crate) fn with_metadata(mut self, view: &dyn SampleView) -> Self {
         self.attachment = view.attachment().map(ByteBuf::from);
-        self.timestamp = view.timestamp().map(timestamp_of);
-        self.encoding = view.encoding().map(|hint| own_encoding(hint.clone()));
+        // Read where the view holds them first: a view of the session's delivery lane carries no
+        // hint, only the parts.
+        self.timestamp = view
+            .timestamp_parts()
+            .map(|(time, zid)| timestamp_from(time, zid))
+            .or_else(|| view.timestamp().map(timestamp_of));
+        self.encoding = view
+            .encoding_parts()
+            .map(
+                |(packed_id, schema)| wz_session_core::sample::EncodingHint {
+                    packed_id,
+                    schema: schema.map(<[u8]>::to_vec),
+                },
+            )
+            .or_else(|| view.encoding().cloned())
+            .map(own_encoding);
         // R311y559 — the three fields the census found unreachable from C. All
         // three were already on the seam; nothing decoded them into the ABI.
         self.qos = view.qos();
@@ -404,10 +418,15 @@ crate::abi::impl_boxed_element!(
 /// The pico timestamp for a wz [`TimestampHint`]. Shared by the sample and
 /// reply metadata paths so the two cannot render one differently.
 fn timestamp_of(hint: &wz_session_core::sample::TimestampHint) -> z_timestamp_t {
+    timestamp_from(hint.time, &hint.zid)
+}
+
+/// A timestamp of time word `time` and id prefix `zid`, as they lie on the wire.
+fn timestamp_from(time: u64, zid: &[u8]) -> z_timestamp_t {
     z_timestamp_t {
         valid: true,
-        id: crate::zid::z_id_t::from_wire(&hint.zid),
-        time: hint.time,
+        id: crate::zid::z_id_t::from_wire(zid),
+        time,
     }
 }
 

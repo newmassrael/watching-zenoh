@@ -45,6 +45,7 @@ use crate::prelude::*;
 use crate::arena::{
     AllocatorMemory, ArenaMemory, ArenaPlan, ArenaRefused, EntityRows, SessionArena,
 };
+use crate::lane::{LaneCounts, LaneGate, SampleLane};
 use wz_session_core::bounded::{BoundedString, BoundedVec, Lent};
 use wz_session_core::caps;
 use wz_session_core::slot_observer::ObserverRows;
@@ -90,7 +91,7 @@ use wz_session_core::publish_options::{PlainPutParams, PublishError, PublishOpti
 use wz_session_core::pubsub::SubscriptionId;
 use wz_session_core::push_build;
 use wz_session_core::qos::{CongestionControl, Priority};
-use wz_session_core::sample::{QosLevel, Sample, SampleKind};
+use wz_session_core::sample::{QosLevel, SampleKind};
 use wz_session_core::send_wire_error::SendWireError;
 use wz_session_core::session_init_params::{
     HeldDrop, KeepAliveConf, LinkRxConf, SessionInitParams, SessionZid, TxQueueConf, ZidError,
@@ -566,10 +567,10 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     #[cfg(feature = "transport-stats")]
     unsent_drops: AtomicU64,
     /// What the session delivered under the lock, handed out after it: the samples for its
-    /// subscribers, in the order they arrived, and the changes of its matching statuses. Two
-    /// queues and not one of an enum, so a sample is queued as it was built and a matching flip
-    /// does not take a sample's room.
-    samples: Arc<Mutex<VecDeque<(SubId, Sample)>>>,
+    /// subscribers, in the order they arrived, in the session's delivery lane (`crate::lane`),
+    /// and the changes of its matching statuses. Apart, so a matching flip does not take a
+    /// sample's room.
+    samples: Arc<Mutex<SampleLane>>,
     matching: Arc<Mutex<VecDeque<(MatchId, bool)>>>,
     /// The callbacks deliveries go to, by the id of the entity that owns them. Kept outside
     /// [`Core`] so a delivery takes no session state, and a callback that undeclares another
@@ -754,9 +755,10 @@ enum ToPublish<'a, L: SessionLinks + 'static, C: ClockSource + 'static> {
 
 // SAFETY: a `Confined` is reached only through the `Mutex` that holds it in `CoopEngine`, so one
 // thread at a time uses it. Its `Rc` handles and `RefCell` cells are all owned by the `Core`
-// inside it: no clone of any of them is ever handed out of the lock (deliveries leave as owned
-// `Sample`s and `bool`s, see `CoopEngine::samples`), so every handle of each `Rc` moves with the
-// `Core` when another thread takes the lock, and none is used by two threads at once.
+// inside it: no clone of any of them is ever handed out of the lock (deliveries leave as bytes
+// of the delivery lane and `bool`s, see `CoopEngine::samples`), so every handle of each `Rc`
+// moves with the `Core` when another thread takes the lock, and none is used by two threads at
+// once.
 unsafe impl<T> Send for Confined<T> {}
 
 /// The id space of one link: the key expressions this session declared to it, read through the
@@ -806,6 +808,16 @@ impl Drop for Delivering<'_> {
     fn drop(&mut self) {
         let thread = self.thread;
         self.set.with(|threads| threads.retain(|t| *t != thread));
+    }
+}
+
+/// A sample a delivery took from the head of the session's lane, given back when the delivery is
+/// done with it: when its callback returns, or unwinds.
+struct Handed<'a>(&'a Mutex<SampleLane>);
+
+impl Drop for Handed<'_> {
+    fn drop(&mut self) {
+        lock(self.0).complete();
     }
 }
 
@@ -1005,6 +1017,9 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// The periodic jobs the program started on the session ([`SessionEngine::start_ticker`]).
     #[cfg(feature = "ticker")]
     tickers: Tickers,
+    /// The session's delivery lane, which every link's gate asks before it reads a batch
+    /// (`crate::lane::LaneGate`).
+    lane: Arc<Mutex<SampleLane>>,
     /// The memory the open reserved for what the session's limits size (`crate::arena`). Last,
     /// so every table lent from it is dropped before it gives its memory back.
     arena: SessionArena,
@@ -1565,11 +1580,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // (`admit`), so a link that is refused has put nothing in the tables.
         #[cfg(feature = "listen")]
         let admitted = Admitted::default();
+        // A link is read only while the session's delivery lane can take a batch of it (decision
+        // Q4), and with `listen` only once the engine admitted it.
+        let batch = usize::from(self.config.batch_size);
         #[cfg(feature = "listen")]
-        let link: Rc<dyn SessionDatagramLink> =
-            Rc::new(AdmissionGate::new(pump, actions.clone(), admitted.clone()));
+        let link: Rc<dyn SessionDatagramLink> = Rc::new(LaneGate::new(
+            AdmissionGate::new(pump, actions.clone(), admitted.clone()),
+            self.lane.clone(),
+            batch,
+        ));
         #[cfg(not(feature = "listen"))]
-        let link = Rc::new(pump);
+        let link: Rc<dyn SessionDatagramLink> =
+            Rc::new(LaneGate::new(pump, self.lane.clone(), batch));
         #[cfg(feature = "queryable")]
         let generation = self.plane.generation.fetch_add(1, Ordering::AcqRel) + 1;
         #[cfg(feature = "queryable")]
@@ -2532,6 +2554,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let plan = ArenaPlan::of(&config, &resolve_limits(&config)).map_err(OpenError::Arena)?;
         let mut arena = SessionArena::reserve(&plan, memory).map_err(OpenError::Arena)?;
         links.lend_buffers(arena.lend_links(&plan).map_err(OpenError::Arena)?);
+        let (lane_area, lane_bytes) = arena.lend_lane(&plan).map_err(OpenError::Arena)?;
+        // SAFETY: the area is the arena's, lent to the lane alone, and the arena is the session's
+        // and given back only when the session is let go, after its last delivery.
+        let samples = Arc::new(Mutex::new(unsafe {
+            SampleLane::over(lane_area, lane_bytes, &resolve_limits(&config))
+        }));
         let mut entropy = SharedEntropy::new(entropy);
         let wire = match (&config.zid, policy.zid_derivation()) {
             (Some(zid), _) => wire_zid(zid)?,
@@ -2652,6 +2680,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             live_subs,
             #[cfg(feature = "ticker")]
             tickers: Tickers::default(),
+            lane: samples.clone(),
             arena,
         };
         #[cfg(feature = "queryable")]
@@ -2702,7 +2731,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             handed_at_most,
             #[cfg(feature = "transport-stats")]
             unsent_drops: AtomicU64::new(0),
-            samples: Arc::new(Mutex::new(VecDeque::new())),
+            samples,
             matching: Arc::new(Mutex::new(VecDeque::new())),
             targets: Mutex::new(Vec::new()),
             #[cfg(feature = "queryable")]
@@ -2734,6 +2763,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// ([`ArenaPlan::reserved_bytes`]).
     pub fn arena_bytes(&self) -> usize {
         self.arena_bytes
+    }
+
+    /// The samples the session's delivery lane did not hand a subscriber, by why
+    /// (`crate::lane`).
+    pub fn lane_counts(&self) -> LaneCounts {
+        lock(&self.samples).counts()
     }
 
     /// Dial `endpoint` as a face of its own, beside the dial role's, and return the id it is
@@ -3030,10 +3065,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // the pop is its own statement, since a guard in a `while let` condition would live
         // through the body and a callback that steps the session again would wait on it.
         loop {
-            let next = lock(&self.samples).pop_front();
+            let next = lock(&self.samples).take_front();
             let Some((id, sample)) = next else {
                 break;
             };
+            // The head goes back to the lane when the callback returns, or unwinds.
+            let _handed = Handed(&self.samples);
             let callback = lock(&self.targets)
                 .iter()
                 .find_map(|(t, target)| match target {
@@ -3994,13 +4031,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // So does a key longer than its row holds.
         let key = row_key(&keyexpr)?;
         let id = self.next_entity_id()?;
-        let queue = self.samples.clone();
+        let lane = self.samples.clone();
         let registration = core.registry.borrow_mut().app.subscribers.register_sink(
             &keyexpr,
             allowed_origin,
-            BoxedSink::new(move |sample: &dyn SampleView| {
-                lock(&queue).push_back((id, Sample::from_view(sample)));
-            }),
+            BoxedSink::new(move |sample: &dyn SampleView| lock(&lane).offer(id, sample)),
         );
         // A registration the observer refuses is a refused declaration, told as one: an id
         // answered for it would name a subscriber that hears nothing and was never announced.

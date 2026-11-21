@@ -1433,6 +1433,7 @@ mod group;
 mod host_group;
 #[cfg(feature = "rx-in-place")]
 mod in_place;
+mod lane;
 mod link_sets;
 #[cfg(all(feature = "listen", feature = "query", feature = "queryable"))]
 mod listen;

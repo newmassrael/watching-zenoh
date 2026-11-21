@@ -101,6 +101,8 @@ pub mod arena;
 mod engine;
 #[cfg(feature = "group-host")]
 pub mod host_group;
+// What the session hands its subscribers' callbacks after its lock, in a ring of its arena.
+pub mod lane;
 #[cfg(feature = "scout")]
 pub mod scout;
 #[cfg(feature = "scout-datagram")]
