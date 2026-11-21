@@ -3498,6 +3498,9 @@ layer_c0_test_discipline() {
     # growth that vanished callees explain as absorbed. An instrument run by
     # hand on two ELFs; its matcher is held here by the selftest.
     _runci_leg footprint_attribution.selftest -- python3 scripts/lib/footprint_attribution.py --selftest
+    # The reader of scripts/kit-size-delta.sh, which builds a kit image in a base tree and this one
+    # in one run: the ceiling gate's cells and the symbol diff, held here by its selftest.
+    _runci_leg kit_size_delta.selftest -- python3 scripts/lib/kit_size_delta.py --selftest
     # R311y879 — WHICH READER each narrow zint field gets, pinned against the
     # codec UPSTREAM reads it with. The three censuses above ask whether the
     # decode covers the wire and whether a consumer reaches it; this asks
