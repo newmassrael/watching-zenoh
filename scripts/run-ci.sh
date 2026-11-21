@@ -14369,10 +14369,11 @@ layer_c1m_session_lwip() {
     # S9a -- the tables a peer writes live in the session slot: two sessions have
     # two sets, a flood through one is refused and counted there and not in the
     # other, a slot comes back empty, and the tables count in the slot's size. 3 =
-    # what that command PRINTED. 3 -> 4: a session opened in a slot holds its tables to the
-    # limits it was opened with; counted from the source, not yet printed.
+    # what that command PRINTED. 3 -> 5: a session opened in a slot holds its tables, and its
+    # dispatch its requesters, to the limits it was opened with; counted from the source, not yet
+    # printed.
     wz_test_args wz-session-lwip session_peer_tables
-    _runci_guarded_test "C1m session peer tables" 4 \
+    _runci_guarded_test "C1m session peer tables" 5 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,declare-subscriber,session-slot \
         "${WZ_TEST_ARGS[@]}" --quiet || return 1
@@ -14547,8 +14548,9 @@ layer_c1m_session_lwip() {
     # made for each put is refused on the group and the round goes on; and the members follow the
     # arrivals and departures and never go below none: 4 = what that command PRINTED.
     # 4 -> 5: the group session is made with the snapshot it is handed (cd6f74c9a added
-    # the test and left this count).
-    _runci_guarded_test "C1m mcu slot group" 5 \
+    # the test and left this count). 5 -> 6: a join holds the group's tables to the limits the
+    # node hands its plane; counted from the source, not yet printed.
+    _runci_guarded_test "C1m mcu slot group" 6 \
         cargo test -p wz-session-mcu --features group --lib slot_group:: --quiet || return 1
     # The replay of a node's declarations on a session (`slot_client`, the slot profile with
     # `client-slot`): each entry is offered once in order, a refused send resumes at the entry it failed
