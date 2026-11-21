@@ -739,7 +739,7 @@
               "x-wz-storage": "both",
               "x-wz-scope": "session",
               "x-wz-binding-heap": "open",
-              "x-wz-binding-fixed": "build",
+              "x-wz-binding-fixed": "open",
               "x-wz-wire": "none"
             },
             "MAX_INBOUND_SUB_INTERESTS": {
@@ -758,7 +758,7 @@
               "x-wz-storage": "both",
               "x-wz-scope": "session",
               "x-wz-binding-heap": "open",
-              "x-wz-binding-fixed": "build",
+              "x-wz-binding-fixed": "open",
               "x-wz-wire": "none"
             },
             "MAX_PEER_KEYEXPR_ALIASES": {
@@ -834,7 +834,7 @@
               "x-wz-storage": "both",
               "x-wz-scope": "session",
               "x-wz-binding-heap": "open",
-              "x-wz-binding-fixed": "build",
+              "x-wz-binding-fixed": "open",
               "x-wz-wire": "none"
             },
             "MAX_PENDING_FINALS": {
@@ -853,7 +853,7 @@
               "x-wz-storage": "both",
               "x-wz-scope": "session",
               "x-wz-binding-heap": "open",
-              "x-wz-binding-fixed": "build",
+              "x-wz-binding-fixed": "open",
               "x-wz-wire": "none"
             },
             "MAX_REPLY_PAYLOAD_BYTES": {
@@ -872,7 +872,7 @@
               "x-wz-storage": "both",
               "x-wz-scope": "session",
               "x-wz-binding-heap": "open",
-              "x-wz-binding-fixed": "build",
+              "x-wz-binding-fixed": "open",
               "x-wz-wire": "none"
             },
             "MAX_MULTICAST_REPLIES": {

@@ -306,7 +306,7 @@ pub const MAX_PENDING_DECLARES: LimitBinding = LimitBinding {
     storage: Storage::Both,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
-    binding_fixed: Some(Binding::Build),
+    binding_fixed: Some(Binding::Open),
     wire: Wire::None,
 };
 
@@ -318,7 +318,7 @@ pub const MAX_INBOUND_SUB_INTERESTS: LimitBinding = LimitBinding {
     storage: Storage::Both,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
-    binding_fixed: Some(Binding::Build),
+    binding_fixed: Some(Binding::Open),
     wire: Wire::None,
 };
 
@@ -366,7 +366,7 @@ pub const MAX_PENDING_REPLIES: LimitBinding = LimitBinding {
     storage: Storage::Both,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
-    binding_fixed: Some(Binding::Build),
+    binding_fixed: Some(Binding::Open),
     wire: Wire::None,
 };
 
@@ -378,7 +378,7 @@ pub const MAX_PENDING_FINALS: LimitBinding = LimitBinding {
     storage: Storage::Both,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
-    binding_fixed: Some(Binding::Build),
+    binding_fixed: Some(Binding::Open),
     wire: Wire::None,
 };
 
@@ -390,7 +390,7 @@ pub const MAX_REPLY_PAYLOAD_BYTES: LimitBinding = LimitBinding {
     storage: Storage::Both,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
-    binding_fixed: Some(Binding::Build),
+    binding_fixed: Some(Binding::Open),
     wire: Wire::None,
 };
 
