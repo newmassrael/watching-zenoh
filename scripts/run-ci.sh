@@ -3502,6 +3502,7 @@ layer_c0_test_discipline() {
     # in one run: the ceiling gate's cells and the symbol diff, held here by its selftest.
     _runci_leg kit_size_delta.selftest -- python3 scripts/lib/kit_size_delta.py --selftest
     _runci_leg perf_matrix.selftest -- python3 scripts/host-bench/perf_matrix.py --selftest
+    _runci_leg pico_windows_package.selftest -- python3 scripts/lib/pico_windows_package.py --selftest
     # R311y879 — WHICH READER each narrow zint field gets, pinned against the
     # codec UPSTREAM reads it with. The three censuses above ask whether the
     # decode covers the wire and whether a consumer reaches it; this asks

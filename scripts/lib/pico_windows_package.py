@@ -526,7 +526,10 @@ def release_notes(template: str, facts: dict) -> str:
 
 def run(cmd: list[str], cwd: pathlib.Path, env: dict[str, str] | None = None) -> str:
     print("+ " + " ".join(cmd), flush=True)
-    proc = subprocess.run(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, text=True)
+    # The tools read here (cargo, git) write UTF-8; without `encoding` Python decodes a pipe with the
+    # host's code page (cp1252 on a hosted Windows runner) and a single byte of another script ends
+    # the build (2026-11-21: `cargo metadata`, byte 0x81).
+    proc = subprocess.run(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, encoding="utf-8")
     if proc.returncode != 0:
         raise Refusal(f"`{' '.join(cmd[:3])}` failed with exit status {proc.returncode}")
     return proc.stdout
@@ -590,7 +593,8 @@ def build_selection(options: list[str]) -> tuple[list[str], list[str]]:
 
 
 def git(*args: str) -> str:
-    return subprocess.run(["git", "-C", str(ROOT), *args], check=True, stdout=subprocess.PIPE, text=True).stdout.strip()
+    return subprocess.run(["git", "-C", str(ROOT), *args], check=True, stdout=subprocess.PIPE,
+                          encoding="utf-8").stdout.strip()
 
 
 def copy(src: pathlib.Path, dst: pathlib.Path) -> None:
@@ -802,8 +806,9 @@ def vs_root() -> pathlib.Path:
         "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
     if not vswhere.is_file():
         raise Refusal("no vswhere.exe: the MSVC toolchain is not installed")
-    found = subprocess.run([str(vswhere), "-latest", "-products", "*", "-property", "installationPath"],
-                           check=True, stdout=subprocess.PIPE, text=True).stdout.strip()
+    found = subprocess.run([str(vswhere), "-utf8", "-latest", "-products", "*", "-property",
+                            "installationPath"], check=True, stdout=subprocess.PIPE,
+                           encoding="utf-8").stdout.strip()
     if not found:
         raise Refusal("vswhere names no Visual Studio installation")
     return pathlib.Path(found)
@@ -1173,6 +1178,16 @@ def selftest() -> int:
            "The libraries of this package (`release/bin/wz_capi_pico.dll`" in two
            and "`release/bin/wz_capi_pico_ext.dll`" in two
            and f"`{CRATE}` and `{EXT_CRATE}` built with" in two)
+    # A pipe read as text without a stated encoding is decoded with the host's code page, which on a
+    # Windows runner is not the UTF-8 the tools write: every read of a tool here names its encoding.
+    import ast
+    tree = ast.parse(pathlib.Path(__file__).read_text(encoding="utf-8"))
+    undecoded = [node.lineno for node in ast.walk(tree)
+                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                 and node.func.attr in ("run", "check_output", "Popen")
+                 and any(k.arg in ("text", "universal_newlines") for k in node.keywords)
+                 and not any(k.arg == "encoding" for k in node.keywords)]
+    expect(f"every pipe this script reads as text states its encoding (lines {undecoded})", not undecoded)
 
     for failure in failures:
         print(f"  pico_windows_package selftest FAIL: {failure}", file=sys.stderr)
