@@ -242,6 +242,15 @@ ABSENT: dict[str, tuple[str, str | None, tuple[str, ...]]] = {
             "scripts/verify-codegen.sh",
         ),
     ),
+    # A constant of SCE's own source at the pinned submodule: the backends that lower a map in
+    # an algorithm, whose refusals the codegen sweep reads. The submodule is one gitlink to
+    # `git ls-files`, so this tree never spells the name outside prose; the file that cites it
+    # is the one that hands the submodule's root to the generator.
+    "ALGORITHM_MAP_BACKENDS": (
+        "foreign",
+        "vendor/sce",
+        ("scripts/verify-codegen.sh",),
+    ),
 }
 
 
