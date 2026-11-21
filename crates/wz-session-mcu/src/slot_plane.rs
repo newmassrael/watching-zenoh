@@ -13,13 +13,14 @@
 //! This module does not link `alloc`.
 
 use wz_runtime_coop::{ClockSource, CoopRuntime};
+use wz_session_core::limits::SessionLimits;
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::slot_observer::ObserverCell;
 
 use crate::slot_client::DocumentSinks;
 
 /// What the node hands a plane when the node starts: the runtime the plane's tasks run on, the
-/// observer the plane's events are fanned to, the zid the node advertises, and the snapshot the
+/// observer the plane's events are fanned to, the zid the node advertises, and the snapshots the
 /// node's sessions are made with.
 pub struct PlaneContext<'a, C: ClockSource + 'static> {
     /// The runtime of the node.
@@ -31,6 +32,10 @@ pub struct PlaneContext<'a, C: ClockSource + 'static> {
     /// The value of every policy the node's machines read: the snapshot the node's creator
     /// resolved, which a plane's sessions are made with as the node's own are.
     pub policy: &'a SessionPolicy,
+    /// The value of every limit the node's tables are held to: the snapshot the node's creator
+    /// resolved, which a plane's tables are held to as the node's sessions' are. Where the build
+    /// allows each limit one value it holds no byte.
+    pub limits: SessionLimits,
 }
 
 /// A plane as the image states it, before the node starts it.

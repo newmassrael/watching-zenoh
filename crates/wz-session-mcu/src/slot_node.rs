@@ -1275,6 +1275,7 @@ where
             observer,
             zid: &zid[..zid_len],
             policy: &policy,
+            limits,
         });
         ready(port, zid_text.prefix());
 

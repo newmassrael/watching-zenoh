@@ -249,16 +249,27 @@ where
     D: BoxedLinkDriver + ?Sized + 'static,
 {
     /// The application layer of the session `handle` names, over `observer`.
+    ///
+    /// `requesters` are held to the limits the session was opened with (the `limits` of its
+    /// parameters), whatever quota they were made with: the session's creator resolved them, so a
+    /// layer that makes its requesters states no limit of its own.
     pub fn new(
         observer: &'static ObserverCell<K>,
         handle: SlotRef<CoopRuntime<C, D>, CoopTime<C>>,
-        requesters: Requesters<R, G>,
+        mut requesters: Requesters<R, G>,
     ) -> Self {
+        requesters.limit_to(&handle.params.limits);
         Self {
             observer,
             handle,
             requesters,
         }
+    }
+
+    /// The session's own pending tables, held to its limits: where a layer registers a request
+    /// this dispatch has no verb for (a liveliness get).
+    pub fn requesters_mut(&mut self) -> &mut Requesters<R, G> {
+        &mut self.requesters
     }
 
     /// Ask the drive loop to raise [`IterationEvent::AppWake`] at the top of its next step.

@@ -399,6 +399,75 @@ mod enforcement {
         );
     }
 
+    /// The requesters a session on the slot profile holds beside its slot, held to `limits` as the
+    /// session's dispatch holds them to the limits the session was opened with.
+    #[cfg(feature = "storage-profile")]
+    fn slot_requesters(
+        limits: &SessionLimits,
+    ) -> crate::slot_observer::Requesters<
+        crate::reply_sink::BoxedReplySink,
+        crate::reply_sink::BoxedReplySink,
+    > {
+        let mut requesters = crate::slot_observer::Requesters::new();
+        requesters.limit_to(limits);
+        requesters
+    }
+
+    /// `MAX_PENDING_QUERIES` stated as two, on the requesters of a session on the slot profile:
+    /// the third pending query is refused as a full table and leaves the two pending.
+    #[cfg(feature = "storage-profile")]
+    #[test]
+    fn max_pending_queries_stated_refuses_the_next_on_a_slot_sessions_requesters() {
+        held_to_two(
+            SessionLimits::select_max_pending_queries,
+            MaxPendingQueries::DOMAIN.is_singleton(),
+            |limits| {
+                let mut requesters = slot_requesters(limits);
+                let mut pend = |rid: u32| {
+                    requesters
+                        .replies
+                        .register_sink(
+                            rid,
+                            1,
+                            None,
+                            crate::reply_acceptance::ReplyAcceptance::Any,
+                            crate::reply_sink::BoxedReplySink::new(|_| {}, |_| {}),
+                        )
+                        .map(|_| ())
+                };
+                pend(0).expect("under the quota");
+                pend(1).expect("under the quota");
+                assert_eq!(pend(2), Err(RegisterError::TableFull));
+                assert_eq!(requesters.replies.len(), 2);
+            },
+        );
+    }
+
+    /// `MAX_PENDING_LIVELINESS_GETS` stated as two, on the requesters of a session on the slot
+    /// profile: the third pending get is refused as a full table and leaves the two pending.
+    #[cfg(all(feature = "storage-profile", feature = "liveliness-get"))]
+    #[test]
+    fn max_pending_liveliness_gets_stated_refuses_the_next_on_a_slot_sessions_requesters() {
+        held_to_two(
+            SessionLimits::select_max_pending_liveliness_gets,
+            MaxPendingLivelinessGets::DOMAIN.is_singleton(),
+            |limits| {
+                let mut requesters = slot_requesters(limits);
+                let mut ask = |interest_id: u64| {
+                    requesters.liveliness_gets.register(
+                        interest_id,
+                        None,
+                        crate::reply_sink::BoxedReplySink::new(|_| {}, |_| {}),
+                    )
+                };
+                assert_eq!(ask(1), Ok(true), "under the quota");
+                assert_eq!(ask(2), Ok(true), "under the quota");
+                assert_eq!(ask(3), Err(RegisterError::TableFull));
+                assert_eq!(requesters.liveliness_gets.len(), 2);
+            },
+        );
+    }
+
     /// One FUTURE interest of the peer, the `index`th, answered through the subscriber registry
     /// the creator held to its limits. An interest the side cannot remember is counted, not
     /// returned as an error; the count moving is what reads here as a refusal.

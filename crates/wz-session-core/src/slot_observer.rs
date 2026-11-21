@@ -94,18 +94,21 @@ impl<R: ReplySink, G: ReplySink> Requesters<R, G> {
         }
     }
 
-    /// [`Self::new`], each registry held to the limits `limits` states: what the creator of the
-    /// session resolved for it.
+    /// [`Self::new`], each registry held to the limits `limits` states ([`Self::limit_to`]).
     pub fn with_limits(limits: &crate::limits::SessionLimits) -> Self {
         let mut requesters = Self::new();
+        requesters.limit_to(limits);
         requesters
-            .replies
-            .limit_to(limits.max_pending_queries_held());
+    }
+
+    /// Hold each registry to the limits `limits` states: what the creator of the session resolved
+    /// for it. What each registry holds is kept, and what it is asked for next is held to the new
+    /// quota.
+    pub fn limit_to(&mut self, limits: &crate::limits::SessionLimits) {
+        self.replies.limit_to(limits.max_pending_queries_held());
         #[cfg(feature = "liveliness-get")]
-        requesters
-            .liveliness_gets
+        self.liveliness_gets
             .limit_to(limits.max_pending_liveliness_gets_held());
-        requesters
     }
 }
 
