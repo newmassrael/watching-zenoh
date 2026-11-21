@@ -551,8 +551,12 @@ impl ReconnectingSession {
                     .map_err(OpenError::Dial)?;
                 // The snapshot the session was opened with, so every link a reconnect wires
                 // reads as the first did.
-                let (inbound, outbound, writer_handle) =
-                    wire_dialed_link_with_rx(dialed, self.link_rx, &self.actions.params.policy);
+                let (inbound, outbound, writer_handle) = wire_dialed_link_with_rx(
+                    dialed,
+                    self.link_rx,
+                    &self.actions.params.policy,
+                    &self.actions.params.limits,
+                );
                 let old = self.swappable.swap(outbound);
                 drop(old);
                 // R311ju — engine build + Initiator activation + open loop live
@@ -921,7 +925,7 @@ pub async fn open_session_with_reconnect(
             .await
             .map_err(OpenError::Dial)?;
         let (inbound, outbound, writer_handle) =
-            wire_dialed_link_with_rx(dialed, link_rx, &params.policy);
+            wire_dialed_link_with_rx(dialed, link_rx, &params.policy, &params.limits);
         let swappable = Arc::new(SwappableLink::<TokioRuntime>::new(outbound));
         let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = swappable.clone();
         let actions = new_session_actions(sink, params, clock);

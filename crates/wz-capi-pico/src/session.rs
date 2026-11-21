@@ -704,7 +704,7 @@ pub unsafe extern "C" fn z_open(
         // The key-wire form, judged for the engine the session opens on, and the key ids every
         // node shares that the config states (`crate::key_ids`).
         #[cfg(feature = "shared-key-ids")]
-        let key_ids = match crate::key_ids::admit_at_open(&cfg, &policy) {
+        let key_ids = match crate::key_ids::admit_at_open(&cfg, &policy, &limits) {
             Ok(key_ids) => key_ids,
             Err(code) => return code,
         };
@@ -1475,8 +1475,10 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     let opened = match request.app_transport {
         Some(transport) => wz_capi_coop::CoopEngine::open_with_key_ids(
             app_links_on(
-                wz_capi_coop::app_link::AppLinks::new(transport)
-                    .with_rx_capacity(limits.pico_unicast_batch_bytes()),
+                wz_capi_coop::app_link::AppLinks::new(
+                    wz_session_core::app_transport::SessionTransport::new(transport, &limits),
+                )
+                .with_rx_capacity(limits.pico_unicast_batch_bytes()),
                 &clock,
             ),
             clock,

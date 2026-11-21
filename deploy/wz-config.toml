@@ -2325,7 +2325,7 @@ storage = "quota"
 scope = "link"
 binding_heap = "open"
 binding_fixed = "open"
-read = "build"
+read = "snapshot"
 # `wire` is none: a reply whose request's key form was let go names its key in the link's own form,
 # which the peer reads as it reads any reply.
 wire = "none"
@@ -2526,7 +2526,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "none"
-read = "build"
+read = "snapshot"
 # `wire` is none: the limit refuses a dictionary at the open, before any byte is sent.
 wire = "none"
 help = '''
@@ -2920,7 +2920,7 @@ storage = "quota"
 scope = "link"
 binding_heap = "live"
 binding_fixed = "none"
-read = "build"
+read = "snapshot"
 wire = "timing"
 help = '''
 How many fragments of a message a UDP link's writer writes in a row when the
@@ -2942,7 +2942,7 @@ storage = "quota"
 scope = "link"
 binding_heap = "live"
 binding_fixed = "none"
-read = "build"
+read = "snapshot"
 wire = "timing"
 help = '''
 How long, in microseconds, must pass after the last fragment was written
@@ -3178,7 +3178,7 @@ storage = "quota"
 scope = "link"
 binding_heap = "open"
 binding_fixed = "none"
-read = "build"
+read = "snapshot"
 # `wire` is timing: past the bound the program's bytes are refused and handed in again once the
 # session has read the queue down, so a peer receives the same bytes later.
 wire = "timing"

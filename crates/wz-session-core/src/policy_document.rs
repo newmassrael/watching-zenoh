@@ -566,11 +566,12 @@ pub enum KeyIdsReason<'a> {
         /// Where and why the text stops being one.
         refusal: KeyexprRefusal,
     },
-    /// The dictionary has more entries than the build's `MAX_SHARED_KEY_IDS`.
+    /// The dictionary has more entries than the `MAX_SHARED_KEY_IDS` the document resolves to:
+    /// the one it states, or the build's.
     TooMany {
         /// How many it has.
         stated: usize,
-        /// How many the build allows.
+        /// How many the limit admits.
         limit: usize,
     },
     /// A link entry names an empty locator, which no endpoint is.
@@ -659,8 +660,8 @@ impl fmt::Display for KeyIdsReason<'_> {
             ),
             Self::TooMany { stated, limit } => write!(
                 f,
-                "states {stated} entries in `{DICTIONARY}`, and the build allows {limit} \
-                 (MAX_SHARED_KEY_IDS)"
+                "states {stated} entries in `{DICTIONARY}`, and the session's limit admits \
+                 {limit} (MAX_SHARED_KEY_IDS)"
             ),
             Self::EmptyLocator { at } => write!(
                 f,
@@ -1279,6 +1280,17 @@ mod from_json5 {
             ],
             &mut refusals,
         );
+        // The reader of `wz/key-ids` cannot count the dictionary against a limit the same
+        // document may state; the composed limits can.
+        #[cfg(feature = "shared-key-ids")]
+        if let Err(crate::shared_key_ids::KeyIdsRefused::TooMany { stated, limit }) =
+            read.key_ids.check_limits(&resolved.limits.session)
+        {
+            refusals.push(Refusal {
+                layer: Origin::Document,
+                reason: Reason::KeyIds(super::KeyIdsReason::TooMany { stated, limit }),
+            });
+        }
         if refusals.is_empty() {
             Ok(resolved)
         } else {

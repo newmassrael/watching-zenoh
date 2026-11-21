@@ -4074,6 +4074,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // value via its reliable-channel window tracking
         // (zenoh-pico unicast/transport.c:182-194).
         let initial_frame_sn = params.initial_sn;
+        // Read before `params` moves into the core: the queries a link remembers the key form of.
+        #[cfg(feature = "shared-key-ids")]
+        let noted_requests = params.limits.link_noted_requests();
         #[cfg(feature = "transport-stats")]
         let stats_metrics = seed.metrics;
         #[cfg(not(feature = "transport-stats"))]
@@ -4185,6 +4188,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 link_keys: R::new_mutex(crate::shared_key_ids::LinkKeys::new(
                     None,
                     crate::policy::KeyWireForm::Declared,
+                    noted_requests,
                 )),
                 #[cfg(all(
                     feature = "alloc",

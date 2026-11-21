@@ -143,7 +143,7 @@ use wz_session_core::serial_link::SerialRole;
 #[cfg(feature = "transport-link-app")]
 use crate::app_link::{wire_app_stream, AppListener, AppReadDriver, AppStream};
 #[cfg(feature = "transport-link-app")]
-use wz_session_core::app_transport::AppTransport;
+use wz_session_core::app_transport::SessionTransport;
 
 // R311oa — the TLS arm, like serial, rides this tcp+unicast-gated module as
 // an additive transport (transport-link-tls forwards transport-link-tcp, so
@@ -325,10 +325,11 @@ pub struct DialConfig {
     /// its handshake on one clock ([`open_within`]). [`OPEN_TIMEOUT`] unless the node states
     /// another.
     pub open_timeout: std::time::Duration,
-    /// The transport the program supplies, which carries every dial of this config in place of
-    /// the system's sockets. `None` (the default) dials the sockets the locator names.
+    /// The transport the program supplies, as the session that dials opens its links over it,
+    /// which carries every dial of this config in place of the system's sockets. `None` (the
+    /// default) dials the sockets the locator names.
     #[cfg(feature = "transport-link-app")]
-    pub app: Option<Arc<AppTransport>>,
+    pub app: Option<SessionTransport>,
     /// The runtime limits of the node that dials with this config, as its creator resolved them:
     /// the loop that dials from a directory of hints holds the directory to them. The build's
     /// ([`RuntimeLimits::BUILD`]) unless the node states its own
@@ -463,9 +464,10 @@ impl DialConfig {
         self
     }
 
-    /// Dial over the transport the program supplies rather than the system's sockets.
+    /// Dial over the transport the program supplies rather than the system's sockets, each link
+    /// held to the bound `app` carries for its session.
     #[cfg(feature = "transport-link-app")]
-    pub fn with_app_transport(mut self, app: Arc<AppTransport>) -> Self {
+    pub fn with_app_transport(mut self, app: SessionTransport) -> Self {
         self.app = Some(app);
         self
     }
@@ -639,13 +641,14 @@ pub struct AcceptConfig {
     /// The transport the program supplies, which carries every listen of this config in place of
     /// the system's sockets, the accept mirror of [`DialConfig::app`].
     #[cfg(feature = "transport-link-app")]
-    pub app: Option<Arc<AppTransport>>,
+    pub app: Option<SessionTransport>,
 }
 
 impl AcceptConfig {
-    /// Listen over the transport the program supplies rather than the system's sockets.
+    /// Listen over the transport the program supplies rather than the system's sockets, each
+    /// link held to the bound `app` carries for its session.
     #[cfg(feature = "transport-link-app")]
-    pub fn with_app_transport(mut self, app: Arc<AppTransport>) -> Self {
+    pub fn with_app_transport(mut self, app: SessionTransport) -> Self {
         self.app = Some(app);
         self
     }
@@ -4094,15 +4097,15 @@ pub async fn bind_endpoint_with_config(
 /// which an open names as an unknown scheme: the program's transport carries every link of the
 /// config or none, and no locator falls through to the system's sockets.
 #[cfg(feature = "transport-link-app")]
-async fn dial_app(app: &Arc<AppTransport>, connect: &str) -> io::Result<DialedLink> {
+async fn dial_app(app: &SessionTransport, connect: &str) -> io::Result<DialedLink> {
     use wz_session_core::app_link_table::{kind_for_locator, AppLinkKind};
     match kind_for_locator(connect, false) {
         Some(AppLinkKind::StreamDial) => Ok(DialedLink::App(
-            crate::app_link::dial_stream(app, connect).await?,
+            crate::app_link::dial_stream(&app.transport, connect, app.queue).await?,
         )),
         #[cfg(feature = "transport-link-udp")]
         Some(AppLinkKind::Datagram) => Ok(DialedLink::AppDatagram(
-            crate::app_link::dial_datagram(app, connect).await?,
+            crate::app_link::dial_datagram(&app.transport, connect, app.queue).await?,
         )),
         _ => Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -4114,15 +4117,15 @@ async fn dial_app(app: &Arc<AppTransport>, connect: &str) -> io::Result<DialedLi
 /// Listen on `listen` over the transport the program supplies, refusing what [`dial_app`]
 /// refuses for the same reason.
 #[cfg(feature = "transport-link-app")]
-async fn bind_app(app: &Arc<AppTransport>, listen: &str) -> io::Result<BoundListener> {
+async fn bind_app(app: &SessionTransport, listen: &str) -> io::Result<BoundListener> {
     use wz_session_core::app_link_table::{kind_for_locator, AppLinkKind};
     match kind_for_locator(listen, true) {
         Some(AppLinkKind::StreamListen) => Ok(BoundListener::App(
-            crate::app_link::listen_stream(app, listen).await?,
+            crate::app_link::listen_stream(&app.transport, listen, app.queue).await?,
         )),
         #[cfg(feature = "transport-link-udp")]
         Some(AppLinkKind::DatagramListen) => Ok(BoundListener::AppDatagram(
-            crate::app_link::listen_datagram(app, listen).await?,
+            crate::app_link::listen_datagram(&app.transport, listen, app.queue).await?,
         )),
         _ => Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -4306,13 +4309,15 @@ impl LinkDriver for InboundLink {
 /// writer-task join handle. TCP splits the stream (`wire_tcp_stream`); UDP
 /// shares the socket ([`wire_udp_socket`]).
 ///
-/// `link_rx` and `policy` are the session's, the one the link belongs to:
-/// `link_rx.buffer_size` is the read storage a stream link pools, and `policy`
-/// holds the policies a link's writer reads, so a link never reads the build.
+/// `link_rx`, `policy` and `limits` are the session's, the one the link belongs
+/// to: `link_rx.buffer_size` is the read storage a stream link pools, and
+/// `policy` and `limits` hold the policies and limits a link's writer reads, so a
+/// link never reads the build.
 pub fn wire_dialed_link_with_rx(
     dialed: DialedLink,
     link_rx: LinkRxConf,
     policy: &wz_session_core::policy::SessionPolicy,
+    limits: &wz_session_core::limits::SessionLimits,
 ) -> (
     InboundLink,
     Arc<dyn BoxedLinkDriver + Send + Sync>,
@@ -4320,7 +4325,13 @@ pub fn wire_dialed_link_with_rx(
 ) {
     // Universal framing (u16 prefix). The lowlatency open helpers call
     // `wire_dialed_link_with_lowlatency` with a flag they flip at Established.
-    wire_dialed_link_with_lowlatency(dialed, Arc::new(AtomicBool::new(false)), link_rx, policy)
+    wire_dialed_link_with_lowlatency(
+        dialed,
+        Arc::new(AtomicBool::new(false)),
+        link_rx,
+        policy,
+        limits,
+    )
 }
 
 /// transport-lowlatency — [`wire_dialed_link_with_rx`] sharing a lowlatency-wire
@@ -4339,14 +4350,15 @@ pub fn wire_dialed_link_with_lowlatency(
     lowlatency: Arc<AtomicBool>,
     link_rx: LinkRxConf,
     policy: &wz_session_core::policy::SessionPolicy,
+    limits: &wz_session_core::limits::SessionLimits,
 ) -> (
     InboundLink,
     Arc<dyn BoxedLinkDriver + Send + Sync>,
     WriterHandle,
 ) {
-    // Only the udp writer reads a policy of the snapshot today.
+    // Only the udp writer reads the snapshots here today.
     #[cfg(not(feature = "transport-link-udp"))]
-    let _ = policy;
+    let _ = (policy, limits);
     match dialed {
         DialedLink::Tcp(stream) => {
             let (inbound, outbound, handle) =
@@ -4355,7 +4367,7 @@ pub fn wire_dialed_link_with_lowlatency(
         }
         #[cfg(feature = "transport-link-udp")]
         DialedLink::Udp { socket, peer } => {
-            let (inbound, outbound, handle) = wire_udp_socket(socket, peer, policy);
+            let (inbound, outbound, handle) = wire_udp_socket(socket, peer, policy, limits);
             (InboundLink::Udp(inbound), outbound, handle)
         }
         // R311y382 — an accepted demux face: RX is the pump's per-src channel,
@@ -4363,7 +4375,7 @@ pub fn wire_dialed_link_with_lowlatency(
         // `InboundLink::Udp` shape as the dial side.
         #[cfg(feature = "transport-link-udp")]
         DialedLink::UdpDemuxed { inputs, peer } => {
-            let (inbound, outbound, handle) = wire_udp_demuxed(inputs, peer, policy);
+            let (inbound, outbound, handle) = wire_udp_demuxed(inputs, peer, policy, limits);
             (InboundLink::Udp(inbound), outbound, handle)
         }
         #[cfg(feature = "transport-link-serial")]
@@ -5495,7 +5507,7 @@ where
     I: FnOnce(&Arc<SessionLinkActions>),
 {
     let (inbound, outbound, writer_handle) =
-        wire_dialed_link_with_rx(connected, params.link_rx, &params.policy);
+        wire_dialed_link_with_rx(connected, params.link_rx, &params.policy, &params.limits);
     let actions = new_session_actions(outbound, params, clock);
     install(&actions);
     initiator_open(
@@ -5890,13 +5902,14 @@ where
             lowlatency_wire.clone(),
             params.link_rx,
             &params.policy,
+            &params.limits,
         )
     } else {
-        wire_dialed_link_with_rx(connected, params.link_rx, &params.policy)
+        wire_dialed_link_with_rx(connected, params.link_rx, &params.policy, &params.limits)
     };
     #[cfg(not(feature = "transport-lowlatency"))]
     let (inbound, outbound, writer_handle) =
-        wire_dialed_link_with_rx(connected, params.link_rx, &params.policy);
+        wire_dialed_link_with_rx(connected, params.link_rx, &params.policy, &params.limits);
     let actions = new_session_actions(outbound, params, clock);
     // Staged BEFORE the handshake drives, and BEFORE any wire byte: an offer
     // this build cannot honour fails here rather than opening a session whose
@@ -6105,7 +6118,7 @@ pub async fn accept_and_open_session(
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
     let (inbound, outbound, writer_handle) =
-        wire_dialed_link_with_rx(accepted, params.link_rx, &params.policy);
+        wire_dialed_link_with_rx(accepted, params.link_rx, &params.policy, &params.limits);
     let (actions, mut engine) = wire_session_engine(outbound, params, clock);
 
     // Accepting activation -> AwaitingInitSyn, whose onentry arms
@@ -6147,7 +6160,7 @@ pub async fn accept_and_open_session_with_auth(
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
     let (inbound, outbound, writer_handle) =
-        wire_dialed_link_with_rx(accepted, params.link_rx, &params.policy);
+        wire_dialed_link_with_rx(accepted, params.link_rx, &params.policy, &params.limits);
     let (actions, mut engine) = wire_session_engine(outbound, params, clock);
     actions.install_auth_dispatch(auth);
 
@@ -6395,13 +6408,14 @@ where
             lowlatency_wire.clone(),
             params.link_rx,
             &params.policy,
+            &params.limits,
         )
     } else {
-        wire_dialed_link_with_rx(accepted, params.link_rx, &params.policy)
+        wire_dialed_link_with_rx(accepted, params.link_rx, &params.policy, &params.limits)
     };
     #[cfg(not(feature = "transport-lowlatency"))]
     let (inbound, outbound, writer_handle) =
-        wire_dialed_link_with_rx(accepted, params.link_rx, &params.policy);
+        wire_dialed_link_with_rx(accepted, params.link_rx, &params.policy, &params.limits);
     let (actions, mut engine) = wire_session_engine(outbound, params, clock);
     actions
         .apply_offer(&offer)
@@ -6493,7 +6507,7 @@ pub async fn accept_and_open_session_with_namespace(
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
     let (inbound, outbound, writer_handle) =
-        wire_dialed_link_with_rx(accepted, params.link_rx, &params.policy);
+        wire_dialed_link_with_rx(accepted, params.link_rx, &params.policy, &params.limits);
     let (actions, mut engine) = wire_session_engine(outbound, params, clock);
     actions.set_namespace(namespace);
 
@@ -7226,13 +7240,15 @@ mod tests {
         let endpoint = format!("tcp/127.0.0.1:{port}");
         let cfg = DialConfig::default();
         let policy = wz_session_core::policy::SessionPolicy::defaults();
+        let limits = wz_session_core::limits::SessionLimits::defaults();
 
         let three = LinkRxConf {
             buffer_size: 3 * WIDEST,
             ..LinkRxConf::default()
         };
         let dialed = dial_endpoint(&endpoint, &cfg).await.expect("dials");
-        let (inbound, outbound, _writer) = wire_dialed_link_with_rx(dialed, three, &policy);
+        let (inbound, outbound, _writer) =
+            wire_dialed_link_with_rx(dialed, three, &policy, &limits);
         assert_eq!(pooled(&inbound), 0, "nothing is pooled before the batch");
         established(&outbound, WIDEST);
         assert_eq!(pooled(&inbound), 3);
@@ -7242,13 +7258,13 @@ mod tests {
             ..LinkRxConf::default()
         };
         let dialed = dial_endpoint(&endpoint, &cfg).await.expect("dials");
-        let (inbound, outbound, _writer) = wire_dialed_link_with_rx(dialed, two, &policy);
+        let (inbound, outbound, _writer) = wire_dialed_link_with_rx(dialed, two, &policy, &limits);
         established(&outbound, 16_000);
         assert_eq!(pooled(&inbound), 8, "the divisor is the link's batch");
 
         let dialed = dial_endpoint(&endpoint, &cfg).await.expect("dials");
         let (inbound, outbound, _writer) =
-            wire_dialed_link_with_rx(dialed, LinkRxConf::default(), &policy);
+            wire_dialed_link_with_rx(dialed, LinkRxConf::default(), &policy, &limits);
         established(&outbound, WIDEST);
         assert_eq!(pooled(&inbound), 1);
         drop(listener);

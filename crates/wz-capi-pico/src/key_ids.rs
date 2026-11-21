@@ -22,6 +22,8 @@
 #[cfg(feature = "shared-key-ids")]
 use core::ffi::{c_char, CStr};
 
+#[cfg(feature = "shared-key-ids")]
+use wz_session_core::limits::SessionLimits;
 #[cfg(not(feature = "shared-key-ids"))]
 use wz_session_core::policy::KeyWireForm;
 use wz_session_core::policy::SessionPolicy;
@@ -65,8 +67,9 @@ unsafe fn state_of<'c>(config: *mut z_loaned_config_t) -> Option<&'c mut ConfigS
 ///
 /// `Z_OK`; `Z_ERR_NULL` for a NULL config, a NULL array with entries, or a NULL key;
 /// `Z_ERR_INVALID` for a key that is not UTF-8 or not a canonical key expression, an id of 0, and
-/// an id or a key named twice; `Z_ERR_OVERFLOW` for more entries than the build's
-/// `MAX_SHARED_KEY_IDS`. A refused call leaves the config as it was.
+/// an id or a key named twice. A refused call leaves the config as it was. How many entries the
+/// session may hold is its `MAX_SHARED_KEY_IDS`, which the config's document may state, so
+/// `z_open` judges it (`admit_at_open`).
 ///
 /// # Safety
 /// `config` must be null or a live loaned config; with a `count` above 0, `ids` and `keys` must
@@ -107,7 +110,6 @@ pub unsafe extern "C" fn wz_ext_config_key_ids(
                 state.key_ids.ids = Some(alloc::sync::Arc::new(dictionary));
                 Z_OK
             }
-            Err(KeyIdsRefused::TooMany { .. }) => Z_ERR_OVERFLOW,
             Err(_) => Z_ERR_INVALID,
         }
     })
@@ -171,16 +173,21 @@ pub unsafe extern "C" fn wz_ext_config_key_wire_form_for(
 /// door states no dictionary, so the document's stands.
 ///
 /// `Z_ERR_INVALID` when the session's form, `policy`'s, or an endpoint's is `shared` and neither
-/// states a dictionary.
+/// states a dictionary; `Z_ERR_OVERFLOW` when the dictionary has more entries than the session's
+/// `MAX_SHARED_KEY_IDS` in `limits` admits.
 #[cfg(feature = "shared-key-ids")]
 pub(crate) fn admit_at_open(
     cfg: &ConfigState,
     policy: &SessionPolicy,
+    limits: &SessionLimits,
 ) -> Result<KeyIdsAtOpen, ZResult> {
     let at_open = cfg.key_ids.over(cfg.policies.document_key_ids()?);
     at_open
         .forms(policy.key_wire_form())
         .map_err(|_| Z_ERR_INVALID)?;
+    if let Err(KeyIdsRefused::TooMany { .. }) = at_open.check_limits(limits) {
+        return Err(Z_ERR_OVERFLOW);
+    }
     Ok(at_open)
 }
 
@@ -221,6 +228,7 @@ mod tests {
     use crate::prelude::*;
     #[cfg(feature = "config-document")]
     use crate::result::Z_ERR_CONFIG_INVALID_VALUE;
+    use wz_session_core::limit_binding::Quota;
     use wz_session_core::policy::KeyWireForm;
 
     /// `state` as the loaned config the doors are handed.
@@ -378,7 +386,7 @@ mod tests {
 
     /// Whether a session opens from `state` under `form`, or the code `z_open` answers.
     fn admits(state: &ConfigState, form: KeyWireForm) -> Result<(), ZResult> {
-        admit_at_open(state, &policy_of(form)).map(|_| ())
+        admit_at_open(state, &policy_of(form), &SessionLimits::defaults()).map(|_| ())
     }
 
     #[test]
@@ -402,9 +410,40 @@ mod tests {
         assert_eq!(admits(&state, KeyWireForm::Shared), Ok(()));
         assert_eq!(admits(&state, KeyWireForm::Declared), Ok(()));
         assert_eq!(
-            admit_at_open(&state, &policy_of(KeyWireForm::Declared)),
+            admit_at_open(
+                &state,
+                &policy_of(KeyWireForm::Declared),
+                &SessionLimits::defaults()
+            ),
             Ok(state.key_ids.clone()),
             "with no document the open holds what the doors stated"
+        );
+    }
+
+    /// The dictionary is held to the session's `MAX_SHARED_KEY_IDS`: one entry past it is
+    /// refused with the code `z_open` answers, and at it the open holds the dictionary.
+    #[test]
+    fn the_open_refuses_a_dictionary_past_the_sessions_limit_by_its_code() {
+        let mut state = ConfigState::default();
+        state.key_ids.ids = Some(alloc::sync::Arc::new(
+            KeyIds::new([(40, "lab/rig"), (41, "lab/rig/alpha"), (42, "lab/beta")]).expect("valid"),
+        ));
+        let declared = policy_of(KeyWireForm::Declared);
+        let mut limits = SessionLimits::defaults();
+        if limits.select_max_shared_key_ids(Quota::at_most(2)).is_err() {
+            // A build that keeps the build's value alone states no other.
+            return;
+        }
+        assert_eq!(
+            admit_at_open(&state, &declared, &limits),
+            Err(Z_ERR_OVERFLOW)
+        );
+        limits
+            .select_max_shared_key_ids(Quota::at_most(3))
+            .expect("inside the domain");
+        assert_eq!(
+            admit_at_open(&state, &declared, &limits),
+            Ok(state.key_ids.clone())
         );
     }
 
@@ -438,7 +477,11 @@ mod tests {
         let mut state = ConfigState::default();
         assert_eq!(hand_document(&mut state, DOCUMENT), Z_OK);
         assert_eq!(
-            admit_at_open(&state, &policy_of(KeyWireForm::Shared)),
+            admit_at_open(
+                &state,
+                &policy_of(KeyWireForm::Shared),
+                &SessionLimits::defaults()
+            ),
             Ok(document_key_ids()),
             "the document's dictionary makes the shared form admissible"
         );
@@ -460,8 +503,12 @@ mod tests {
             },
             Z_OK
         );
-        let at_open =
-            admit_at_open(&state, &policy_of(KeyWireForm::Shared)).expect("the document's ids");
+        let at_open = admit_at_open(
+            &state,
+            &policy_of(KeyWireForm::Shared),
+            &SessionLimits::defaults(),
+        )
+        .expect("the document's ids");
         assert_eq!(
             at_open.ids,
             document_key_ids().ids,
@@ -480,8 +527,12 @@ mod tests {
             unsafe { wz_ext_config_key_ids(&mut config, ids.as_ptr(), keys.as_ptr(), 1) },
             Z_OK
         );
-        let at_open =
-            admit_at_open(&state, &policy_of(KeyWireForm::Shared)).expect("the door's ids");
+        let at_open = admit_at_open(
+            &state,
+            &policy_of(KeyWireForm::Shared),
+            &SessionLimits::defaults(),
+        )
+        .expect("the door's ids");
         let held = at_open.ids.as_deref().expect("a dictionary");
         assert_eq!(held.key_of(7), Some("lab/other"));
         assert_eq!(
@@ -496,9 +547,13 @@ mod tests {
             Z_OK
         );
         assert_eq!(
-            admit_at_open(&state, &policy_of(KeyWireForm::Shared))
-                .expect("the document's ids")
-                .ids,
+            admit_at_open(
+                &state,
+                &policy_of(KeyWireForm::Shared),
+                &SessionLimits::defaults()
+            )
+            .expect("the document's ids")
+            .ids,
             document_key_ids().ids,
             "a dictionary taken back at the door leaves the document's"
         );
@@ -516,8 +571,12 @@ mod tests {
     fn one_document_gives_the_key_ids_the_zenoh_reader_gives() {
         let mut state = ConfigState::default();
         assert_eq!(hand_document(&mut state, DOCUMENT), Z_OK);
-        let through_door =
-            admit_at_open(&state, &policy_of(KeyWireForm::Declared)).expect("admitted");
+        let through_door = admit_at_open(
+            &state,
+            &policy_of(KeyWireForm::Declared),
+            &SessionLimits::defaults(),
+        )
+        .expect("admitted");
         let text = DOCUMENT.to_str().expect("UTF-8");
         let zenoh = wz_capi_core::runtime::zenoh_config::ZenohNodeConfig::from_json5(text)
             .expect("the zenoh reader takes the document");
@@ -544,7 +603,11 @@ mod tests {
             Z_ERR_CONFIG_INVALID_VALUE
         );
         assert_eq!(
-            admit_at_open(&state, &policy_of(KeyWireForm::Declared)),
+            admit_at_open(
+                &state,
+                &policy_of(KeyWireForm::Declared),
+                &SessionLimits::defaults()
+            ),
             Ok(KeyIdsAtOpen::default()),
             "a refused document leaves the config as it was"
         );

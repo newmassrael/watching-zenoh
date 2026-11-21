@@ -2771,8 +2771,9 @@ def emit_config_schema(decl: dict) -> str:
     members["policies"] = {"type": "object", "properties": policies, "additionalProperties": False}
     members["limits"] = {"type": "object", "properties": limits, "additionalProperties": False}
     # `wz/key-ids`, read by a build with the `shared-key-ids` capability: its forms are the values
-    # of `key-wire-form`, and how many entries a dictionary may have is the build's
-    # MAX_SHARED_KEY_IDS, which a build sizes, so the schema states no bound of its own.
+    # of `key-wire-form`, and how many entries a dictionary may have is the session's
+    # MAX_SHARED_KEY_IDS, which the document's own `limits` may state, so the schema states no
+    # bound of its own.
     forms = next((policy_values(pol) for pol in decl["policies"] if pol["id"] == "key-wire-form"),
                  None)
     if forms is not None:

@@ -8,7 +8,7 @@
 //! A writer waits before each datagram and notes the write after it:
 //!
 //! ```ignore
-//! let mut pacing = <OfBuild as Pacing>::of_policy(&session_policy);
+//! let mut pacing = <OfBuild as Pacing>::of_snapshot(&session_policy, &session_limits);
 //! while let Some(datagram) = queue.next_wire().await {
 //!     pacing.before(&datagram, |wait| queue.pause(wait)).await;
 //!     socket.send(&datagram).await?;
@@ -26,7 +26,9 @@
 //! upstream's behaviour, takes [`Unpaced`], whose wait is a future that is ready at once and never
 //! calls the writer's way to wait, so it links no pacer, no clock and no wait of a writer. A build
 //! that allows only on takes [`Paced`]. A build that allows both takes [`ByPolicy`], which holds a
-//! pacer when the snapshot of the writer's session says on. A test names the type it is about.
+//! pacer when the snapshot of the writer's session says on. A pacer's burst and gap are the
+//! session's limits (`DATAGRAM_FRAGMENT_BURST`, `DATAGRAM_FRAGMENT_GAP_US`). A test names the
+//! type it is about.
 
 use core::future::{Future, Ready};
 use core::pin::Pin;
@@ -34,6 +36,7 @@ use core::task::{Context, Poll};
 use std::time::Duration;
 use tokio::time::Instant;
 use wz_session_core::fragment_pacing::FragmentPacer;
+use wz_session_core::limits::SessionLimits;
 use wz_session_core::policy::{DatagramFragmentPacing, SessionPolicy};
 use wz_session_core::policy_binding::PolicyValue;
 
@@ -44,9 +47,10 @@ pub trait Pacing: Send + 'static {
     /// stated here whatever the lifetime its way to wait borrows.
     type Wait<F: Future<Output = ()> + Send>: Future<Output = ()> + Send;
 
-    /// The pacing of a writer whose session's snapshot is `policy`: [`Paced`] takes the build's
-    /// burst and gap, and [`ByPolicy`] paces only when `policy` says on.
-    fn of_policy(policy: &SessionPolicy) -> Self;
+    /// The pacing of a writer whose session's snapshots are `policy` and `limits`: [`Paced`]
+    /// takes the burst and gap `limits` holds, and [`ByPolicy`] paces only when `policy` says
+    /// on.
+    fn of_snapshot(policy: &SessionPolicy, limits: &SessionLimits) -> Self;
 
     /// Wait as long as `datagram` is due, by `wait`: the writer's own way to wait, which is
     /// called only when there is a wait (a unicast writer's ends on a seal, so teardown never
@@ -73,7 +77,7 @@ pub struct Unpaced;
 impl Pacing for Unpaced {
     type Wait<F: Future<Output = ()> + Send> = Ready<()>;
 
-    fn of_policy(_policy: &SessionPolicy) -> Self {
+    fn of_snapshot(_policy: &SessionPolicy, _limits: &SessionLimits) -> Self {
         Self
     }
 
@@ -126,8 +130,8 @@ impl Paced {
 impl Pacing for Paced {
     type Wait<F: Future<Output = ()> + Send> = PacedWait<F>;
 
-    fn of_policy(_policy: &SessionPolicy) -> Self {
-        Self::new(FragmentPacer::of_build())
+    fn of_snapshot(_policy: &SessionPolicy, limits: &SessionLimits) -> Self {
+        Self::new(FragmentPacer::of_limits(limits))
     }
 
     fn before<F: Future<Output = ()> + Send>(
@@ -182,11 +186,11 @@ impl ByPolicy {
 impl Pacing for ByPolicy {
     type Wait<F: Future<Output = ()> + Send> = PacedWait<F>;
 
-    fn of_policy(policy: &SessionPolicy) -> Self {
+    fn of_snapshot(policy: &SessionPolicy, limits: &SessionLimits) -> Self {
         Self(
             policy
                 .datagram_fragment_pacing()
-                .then(|| Paced::of_policy(policy)),
+                .then(|| Paced::of_snapshot(policy, limits)),
         )
     }
 
@@ -247,6 +251,29 @@ const ALLOWS_ON: bool =
 /// writers then hold as their session's snapshot says.
 pub type OfBuild = <Allowed<{ ALLOWS_OFF }, { ALLOWS_ON }> as Select>::Pacing;
 
+/// The wait a writer that holds `pacing` asks before each of `count` fragments it writes back to
+/// back, on a clock that stands still.
+#[cfg(test)]
+pub(crate) fn fragment_waits(pacing: &mut Paced, count: usize) -> Vec<Option<Duration>> {
+    const FRAGMENT: [u8; 2] = [0x46, 0];
+    (0..count)
+        .map(|_| {
+            let due = pacing.due(&FRAGMENT);
+            pacing.wrote();
+            due
+        })
+        .collect()
+}
+
+/// The waits a burst of `burst` fragments and a gap of `gap_us` microseconds make of one fragment
+/// past the burst on a clock that stands still: none for the burst, then the whole gap.
+#[cfg(test)]
+pub(crate) fn burst_then_gap(burst: usize, gap_us: usize) -> Vec<Option<Duration>> {
+    let mut waits = vec![None; burst];
+    waits.push(Some(Duration::from_micros(gap_us as u64)));
+    waits
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,7 +326,11 @@ mod tests {
             if policy.select_datagram_fragment_pacing(value).is_err() {
                 continue;
             }
-            assert_eq!(ByPolicy::of_policy(&policy).is_paced(), paced, "{value:?}");
+            assert_eq!(
+                ByPolicy::of_snapshot(&policy, &SessionLimits::defaults()).is_paced(),
+                paced,
+                "{value:?}"
+            );
         }
     }
 

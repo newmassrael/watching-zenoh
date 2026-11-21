@@ -3888,9 +3888,9 @@ enum GroupLinkSpec {
     #[cfg(all(feature = "raweth-transport", target_os = "linux"))]
     RawEth(wz_runtime_tokio::raweth_link::RethLocator),
     /// A group the program's transport joins, named by its endpoint: the program's stack holds
-    /// the socket.
+    /// the socket, and the group's link is held to the session's queue bound.
     #[cfg(feature = "app-transport")]
-    App(Arc<wz_runtime_tokio::app_link::AppTransport>),
+    App(wz_runtime_tokio::app_link::SessionTransport),
 }
 
 #[cfg(feature = "multicast-transport")]
@@ -4002,7 +4002,7 @@ async fn serve_beside_groups(setup: GroupSetup, role: impl Future<Output = ()>) 
         Some(transport) => groups
             .into_iter()
             .map(|group| ResolvedGroup {
-                link: GroupLinkSpec::App(Arc::clone(transport)),
+                link: GroupLinkSpec::App(transport.clone()),
                 ..group
             })
             .collect(),
@@ -4086,7 +4086,9 @@ async fn serve_beside_groups(setup: GroupSetup, role: impl Future<Output = ()>) 
                                             (transport.clone(), locator.clone());
                                         async move {
                                             wz_runtime_tokio::app_link::join_group(
-                                                &transport, &locator,
+                                                &transport.transport,
+                                                &locator,
+                                                transport.queue,
                                             )
                                             .await
                                         }
@@ -4420,10 +4422,11 @@ pub struct OpenStance {
 }
 
 /// The transport the program supplies, as the dial and listen roles carry it: the stance's
-/// [`OpenStance::app_transport`] in a build with the `app-transport` feature, and nothing in one
-/// without, so a session of that build holds no field for it.
+/// [`OpenStance::app_transport`] as the session opens its links over it, held to the session's
+/// limits, in a build with the `app-transport` feature, and nothing in one without, so a session
+/// of that build holds no field for it.
 #[cfg(feature = "app-transport")]
-type AppSlot = Option<Arc<wz_runtime_tokio::app_link::AppTransport>>;
+type AppSlot = Option<wz_runtime_tokio::app_link::SessionTransport>;
 /// See the alias of the same name: a build without the feature carries no transport.
 #[cfg(not(feature = "app-transport"))]
 #[derive(Clone, Debug)]
@@ -4449,7 +4452,7 @@ const NO_APP: AppSlot = AppSlot;
 #[cfg(feature = "app-transport")]
 fn dial_over(cfg: DialConfig, app: &AppSlot) -> DialConfig {
     match app {
-        Some(app) => cfg.with_app_transport(Arc::clone(app)),
+        Some(app) => cfg.with_app_transport(app.clone()),
         None => cfg,
     }
 }
@@ -4464,7 +4467,7 @@ fn dial_over(cfg: DialConfig, _app: &AppSlot) -> DialConfig {
 #[cfg(all(feature = "peer", feature = "app-transport"))]
 fn accept_over(cfg: AcceptConfig, app: &AppSlot) -> AcceptConfig {
     match app {
-        Some(app) => cfg.with_app_transport(Arc::clone(app)),
+        Some(app) => cfg.with_app_transport(app.clone()),
         None => cfg,
     }
 }
@@ -4648,7 +4651,9 @@ pub fn open_blocking(
         ..
     } = stance;
     #[cfg(feature = "app-transport")]
-    let app: AppSlot = app_transport;
+    let app: AppSlot = app_transport.map(|transport| {
+        wz_runtime_tokio::app_link::SessionTransport::new(transport, &session_limits)
+    });
     #[cfg(not(feature = "app-transport"))]
     let app = AppSlot;
     // The prefix as the decorator takes it. The plan validated the text, so a text that does not
@@ -4761,11 +4766,13 @@ pub fn open_blocking(
     refuse_a_refused_clock(&node_hlc)?;
     // The key ids every node shares and the form of each face, from the endpoints in the order
     // the faces are numbered by. A form the session cannot honour (`shared` with no dictionary,
-    // an endpoint stated twice) fails the open before any thread or socket exists.
+    // an endpoint stated twice), or a dictionary past the session's limit, fails the open before
+    // any thread or socket exists.
     #[cfg(feature = "shared-key-ids")]
     let key_ids = match crate::faces::KeyIdPlan::new(
         &session_defaults.key_ids,
         session_policy.key_wire_form(),
+        &session_limits,
         &connect,
         &listen,
     ) {

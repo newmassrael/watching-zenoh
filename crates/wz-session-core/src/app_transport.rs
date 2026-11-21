@@ -21,11 +21,17 @@
 //! host's mutex, or an image's critical section.
 
 use alloc::boxed::Box;
+// The links of a session share the transport, and `Arc` needs atomic pointers.
+#[cfg(target_has_atomic = "ptr")]
+use alloc::sync::Arc;
 
 use crate::app_link_table::{
     AppLinkKind, AppLinkTable, Effects, InboundRefusal, LinkHandle, ProgramEvent, ProgramOpen,
     ProgramSend,
 };
+use crate::limit_binding::Quota;
+#[cfg(target_has_atomic = "ptr")]
+use crate::limits::SessionLimits;
 
 /// The program's side of a transport: what the session calls. Each call is made with no lock of
 /// the transport held, from a thread of the session's.
@@ -139,10 +145,11 @@ impl AppTransport {
         Ok(link)
     }
 
-    /// Reserve a link of `kind` for `locator` and ask the program to open it, the lock let go
+    /// Reserve a link of `kind` for `locator`, which queues at most `queue` bytes in each
+    /// direction ([`AppLinkTable::reserve`]), and ask the program to open it, the lock let go
     /// while it does: the link's handle, whose standing [`AppLinkTable::poll_open`] reads.
-    pub fn begin_open(&self, kind: AppLinkKind, locator: &str) -> LinkHandle {
-        let handle = self.with(|table| table.reserve(kind));
+    pub fn begin_open(&self, kind: AppLinkKind, locator: &str, queue: Quota) -> LinkHandle {
+        let handle = self.with(|table| table.reserve(kind, queue));
         let answer = self.port.open(handle, kind, locator);
         let effects = self.with(|table| table.opened(handle, answer));
         self.perform(effects);
@@ -153,6 +160,34 @@ impl AppTransport {
     pub fn release(&self, link: LinkHandle) {
         let effects = self.with(|table| table.release(link));
         self.perform(effects);
+    }
+}
+
+/// A transport as one session opens its links over it: the transport, and the most bytes each
+/// link the session opens queues in either direction, the session's `APP_LINK_QUEUE_BYTES`. One
+/// transport may carry the links of several sessions, each link held to its own session's bound.
+#[cfg(target_has_atomic = "ptr")]
+#[derive(Clone)]
+pub struct SessionTransport {
+    /// The transport.
+    pub transport: Arc<AppTransport>,
+    /// The bound of each link the session opens over it.
+    pub queue: Quota,
+}
+
+#[cfg(target_has_atomic = "ptr")]
+impl SessionTransport {
+    /// `transport` as a session whose limits are `limits` opens its links over it.
+    pub fn new(transport: Arc<AppTransport>, limits: &SessionLimits) -> Self {
+        Self {
+            transport,
+            queue: limits.app_link_queue_bytes(),
+        }
+    }
+
+    /// [`AppTransport::begin_open`] of a link held to the session's bound.
+    pub fn begin_open(&self, kind: AppLinkKind, locator: &str) -> LinkHandle {
+        self.transport.begin_open(kind, locator, self.queue)
     }
 }
 
@@ -194,10 +229,10 @@ mod tests {
         }
     }
 
-    fn transport(bound: usize) -> (Arc<Calls>, AppTransport) {
+    fn transport() -> (Arc<Calls>, AppTransport) {
         let calls = Arc::new(Calls::default());
         let transport = AppTransport::new(
-            Box::new(HostLock(Mutex::new(AppLinkTable::with_queue_bound(bound)))),
+            Box::new(HostLock(Mutex::new(AppLinkTable::new()))),
             Box::new(Port(Arc::clone(&calls))),
         );
         (calls, transport)
@@ -205,8 +240,12 @@ mod tests {
 
     #[test]
     fn an_open_the_program_answers_up_is_open_and_its_release_closes_it_on_the_program() {
-        let (calls, transport) = transport(64);
-        let link = transport.begin_open(AppLinkKind::StreamDial, "tcp/192.0.2.1:7447");
+        let (calls, transport) = transport();
+        let link = transport.begin_open(
+            AppLinkKind::StreamDial,
+            "tcp/192.0.2.1:7447",
+            Quota::at_most(64),
+        );
         assert_eq!(
             transport.with(|table| table.state(link)),
             Some(crate::app_link::AppLinkState::Open)
@@ -218,8 +257,12 @@ mod tests {
 
     #[test]
     fn a_full_link_refuses_the_program_and_tells_it_once_read_down() {
-        let (calls, transport) = transport(4);
-        let link = transport.begin_open(AppLinkKind::StreamDial, "tcp/192.0.2.1:7447");
+        let (calls, transport) = transport();
+        let link = transport.begin_open(
+            AppLinkKind::StreamDial,
+            "tcp/192.0.2.1:7447",
+            Quota::at_most(4),
+        );
         transport.received(link, b"abcd", None).unwrap();
         assert_eq!(
             transport.received(link, b"e", None),

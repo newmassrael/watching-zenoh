@@ -46,8 +46,9 @@
 //! # Where it lives
 //!
 //! The dictionary is data an open is handed ([`KeyIdsAtOpen`]), held on the heap and shared by
-//! every link of the session ([`SharedKeyIds`]); [`crate::caps::MAX_SHARED_KEY_IDS`] bounds how
-//! many entries an open may hand it. An image with no allocator has no dictionary yet.
+//! every link of the session ([`SharedKeyIds`]); the session's `MAX_SHARED_KEY_IDS`
+//! ([`crate::limits::SessionLimits`]) bounds how many entries an open may hand it
+//! ([`KeyIdsAtOpen::check_limits`]). An image with no allocator has no dictionary yet.
 //!
 //! A configuration document states it as `wz/key-ids`, read with the rest of the document's `wz`
 //! member (`crate::policy_document`), whose refusals it shares ([`crate::policy_document::KeyIdsReason`]).
@@ -61,6 +62,8 @@ use core::fmt;
 use crate::json5::{number_as_u64, Json5Value};
 use crate::keyexpr_canon::{validate_keyexpr, KeyexprRefusal};
 use crate::keyexpr_match::is_wild;
+use crate::limit_binding::Quota;
+use crate::limits::SessionLimits;
 use crate::policy::KeyWireForm;
 use crate::policy_document::{KeyIdsReason, Origin, Reason, Refusal, Refusals};
 use crate::wire_id::ExprId;
@@ -77,11 +80,11 @@ pub type SharedKeyIds = alloc::sync::Arc<KeyIds>;
 /// Why a dictionary, or a form that needs one, was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyIdsRefused {
-    /// More entries than the limit the dictionary is built under.
+    /// More entries than the session's `MAX_SHARED_KEY_IDS` admits.
     TooMany {
         /// How many entries were given.
         stated: usize,
-        /// How many the limit allows.
+        /// How many the session's limit admits.
         limit: usize,
     },
     /// The entry at `at`, counted from 0 in the order given, names id 0, which is the literal's.
@@ -120,7 +123,7 @@ impl fmt::Display for KeyIdsRefused {
         match self {
             Self::TooMany { stated, limit } => write!(
                 f,
-                "the key-id dictionary has {stated} entries and the limit is {limit} \
+                "the key-id dictionary has {stated} entries and the session's limit is {limit} \
                  (MAX_SHARED_KEY_IDS)"
             ),
             Self::ZeroId { at } => write!(
@@ -153,14 +156,11 @@ impl fmt::Display for KeyIdsRefused {
 impl core::error::Error for KeyIdsRefused {}
 
 /// One fault of a dictionary's entries, borrowed from them: the rules of a dictionary stated once,
-/// for [`KeyIds::with_limit`], which refuses the first, and for the reader of a document's
-/// `wz/key-ids`, which reports each ([`read_document_member`]).
+/// for [`KeyIds::new`], which refuses the first, and for the reader of a document's
+/// `wz/key-ids`, which reports each ([`read_document_member`]). How many entries a session may
+/// hold is not a rule of the entries but of the session's limits ([`KeyIds::within`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Fault<'a> {
-    TooMany {
-        stated: usize,
-        limit: usize,
-    },
     ZeroId {
         at: usize,
     },
@@ -181,7 +181,6 @@ impl<'a> Fault<'a> {
     /// The fault as an open's door refuses it.
     fn refused(self) -> KeyIdsRefused {
         match self {
-            Self::TooMany { stated, limit } => KeyIdsRefused::TooMany { stated, limit },
             Self::ZeroId { at } => KeyIdsRefused::ZeroId { at },
             Self::NotAKeyExpr { at, refusal, .. } => KeyIdsRefused::NotAKeyExpr { at, refusal },
             Self::DuplicateId { id } => KeyIdsRefused::DuplicateId { id },
@@ -194,7 +193,6 @@ impl<'a> Fault<'a> {
     /// The fault as a document's reader reports it.
     fn reason(self) -> KeyIdsReason<'a> {
         match self {
-            Self::TooMany { stated, limit } => KeyIdsReason::TooMany { stated, limit },
             Self::ZeroId { at } => KeyIdsReason::ZeroId { at },
             Self::NotAKeyExpr { at, key, refusal } => {
                 KeyIdsReason::NotAKeyExpr { at, key, refusal }
@@ -205,20 +203,14 @@ impl<'a> Fault<'a> {
     }
 }
 
-/// Each fault of a dictionary of `stated` entries, of which `entries` are those read whole, each
-/// with its place among them, its id and its key, under `limit`: more entries than the limit,
-/// then each entry's own faults in their order (id 0, then a key that is not a canonical key
-/// expression), then each id and each key named more than once, ascending, once each. An id 0
-/// named twice is refused as id 0 and not again as a duplicate.
+/// Each fault of the entries of a dictionary, those read whole, each with its place among them,
+/// its id and its key: each entry's own faults in their order (id 0, then a key that is not a
+/// canonical key expression), then each id and each key named more than once, ascending, once
+/// each. An id 0 named twice is refused as id 0 and not again as a duplicate.
 pub(crate) fn dictionary_faults<'a>(
-    stated: usize,
     entries: &[(usize, ExprId, &'a str)],
-    limit: usize,
     mut report: impl FnMut(Fault<'a>),
 ) {
-    if stated > limit {
-        report(Fault::TooMany { stated, limit });
-    }
     for &(at, id, key) in entries {
         if id == 0 {
             report(Fault::ZeroId { at });
@@ -269,20 +261,12 @@ pub struct KeyIds {
 }
 
 impl KeyIds {
-    /// The dictionary of `entries`, each an id and the key it names, under the build's limit
-    /// ([`crate::caps::MAX_SHARED_KEY_IDS`]).
+    /// The dictionary of `entries`, each an id and the key it names. Refused when an id is 0 or
+    /// named twice, when a key is named twice, and when a key is not a canonical key expression;
+    /// the order the entries are given in does not matter. How many entries a session may be
+    /// handed is its limits', judged when the dictionary is handed over ([`Self::within`]).
     pub fn new<'a>(
         entries: impl IntoIterator<Item = (ExprId, &'a str)>,
-    ) -> Result<Self, KeyIdsRefused> {
-        Self::with_limit(entries, crate::caps::MAX_SHARED_KEY_IDS)
-    }
-
-    /// [`Self::new`] under `limit` entries. Refused when there are more, when an id is 0 or
-    /// named twice, when a key is named twice, and when a key is not a canonical key expression;
-    /// the order the entries are given in does not matter.
-    pub fn with_limit<'a>(
-        entries: impl IntoIterator<Item = (ExprId, &'a str)>,
-        limit: usize,
     ) -> Result<Self, KeyIdsRefused> {
         let given: Vec<(usize, ExprId, &str)> = entries
             .into_iter()
@@ -290,7 +274,7 @@ impl KeyIds {
             .map(|(at, (id, key))| (at, id, key))
             .collect();
         let mut first = None;
-        dictionary_faults(given.len(), &given, limit, |fault| {
+        dictionary_faults(&given, |fault| {
             first.get_or_insert(fault);
         });
         if let Some(fault) = first {
@@ -309,6 +293,19 @@ impl KeyIds {
         Ok(Self {
             entries: rows,
             by_key,
+        })
+    }
+
+    /// Whether a session whose `MAX_SHARED_KEY_IDS` is `quota` may hold the dictionary: refused
+    /// as [`KeyIdsRefused::TooMany`] when it has more entries than the quota admits.
+    pub fn within(&self, quota: Quota) -> Result<(), KeyIdsRefused> {
+        if quota.admits(self.len()) {
+            return Ok(());
+        }
+        Err(KeyIdsRefused::TooMany {
+            stated: self.len(),
+            // A quota that refuses a count has a bound.
+            limit: quota.most().unwrap_or(usize::MAX),
         })
     }
 
@@ -595,6 +592,16 @@ impl KeyIdsAtOpen {
         LinkKeyForms::new(session, self.links.clone(), self.ids.as_deref())
     }
 
+    /// Whether a session opened under `limits` may be handed the dictionary: refused as
+    /// [`KeyIds::within`] refuses it under the session's `MAX_SHARED_KEY_IDS`. No dictionary is
+    /// within every limit.
+    pub fn check_limits(&self, limits: &SessionLimits) -> Result<(), KeyIdsRefused> {
+        match self.ids.as_deref() {
+            Some(ids) => ids.within(limits.max_shared_key_ids()),
+            None => Ok(()),
+        }
+    }
+
     /// State `form` for the link to `locator`, in place of a form stated for it before.
     pub fn set_link(&mut self, locator: &str, form: KeyWireForm) {
         self.links.retain(|(stated, _)| stated != locator);
@@ -723,12 +730,9 @@ fn read_dictionary<'a>(value: &'a Json5Value, refusals: &mut Refusals<'a>) -> Op
             entries.push((at, id, key));
         }
     }
-    dictionary_faults(
-        items.len(),
-        &entries,
-        crate::caps::MAX_SHARED_KEY_IDS,
-        |fault| refuse(refusals, fault.reason()),
-    );
+    // How many entries the document may state is the limit it resolves to, which the resolution
+    // judges once the limits are composed (`crate::policy_document`).
+    dictionary_faults(&entries, |fault| refuse(refusals, fault.reason()));
     if refusals.found() != found_before || entries.is_empty() {
         return None;
     }
@@ -884,12 +888,6 @@ pub fn form_in_domain(form: KeyWireForm) -> bool {
     <KeyWireForm as crate::policy_binding::PolicyValue>::DOMAIN.contains(form)
 }
 
-/// How many queries of a link a node remembers the key form of at once, for the replies that
-/// mirror it: a query that is never ended gives way to the newest, so a peer cannot grow the
-/// table. The peer's queries, not this node's, so its own limit and not `MAX_PENDING_QUERIES`;
-/// at least 1, as the declaration's range holds it.
-const NOTED_REQUESTS: usize = crate::caps::LINK_NOTED_REQUESTS;
-
 /// The key form a request arrived under, kept until its `Final` for the replies that mirror it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NotedRequest {
@@ -906,15 +904,23 @@ pub struct LinkKeys {
     ids: Option<SharedKeyIds>,
     form: KeyWireForm,
     requests: Vec<(crate::wire_id::RequestId, NotedRequest)>,
+    /// How many queries the link remembers the key form of at once: a query that is never ended
+    /// gives way to the newest, so a peer cannot grow the table. The peer's queries, not this
+    /// node's, so a limit of its own and not `MAX_PENDING_QUERIES`.
+    noted_requests: usize,
 }
 
 impl LinkKeys {
-    /// A link that holds `ids` and names keys as `form` says.
-    pub fn new(ids: Option<SharedKeyIds>, form: KeyWireForm) -> Self {
+    /// A link that holds `ids`, names keys as `form` says, and remembers the key form of at most
+    /// `noted_requests` queries, the session's `LINK_NOTED_REQUESTS`
+    /// ([`crate::limits::SessionLimits::link_noted_requests`]). `0` is read as 1, the least the
+    /// declaration's range allows.
+    pub fn new(ids: Option<SharedKeyIds>, form: KeyWireForm, noted_requests: usize) -> Self {
         Self {
             ids,
             form,
             requests: Vec::new(),
+            noted_requests: noted_requests.max(1),
         }
     }
 
@@ -947,7 +953,7 @@ impl LinkKeys {
     /// Keep the key form of the request `rid` that arrived as `(id, suffix)` with the mapping bit
     /// `sender_mapping`, when a reply to it may mirror it: the link's form is `shared`, the peer
     /// is no router and the id is one of the dictionary's. The oldest kept gives way once the
-    /// link keeps `LINK_NOTED_REQUESTS` of them.
+    /// link keeps as many as it was made with ([`Self::new`]).
     pub fn note_request(
         &mut self,
         rid: crate::wire_id::RequestId,
@@ -963,7 +969,7 @@ impl LinkKeys {
             return;
         }
         self.requests.retain(|(noted, _)| *noted != rid);
-        if self.requests.len() >= NOTED_REQUESTS {
+        if self.requests.len() >= self.noted_requests {
             self.requests.remove(0);
         }
         self.requests.push((
@@ -1084,17 +1090,24 @@ mod tests {
             KeyIds::new([(5, "lab/**/*")]),
             Err(KeyIdsRefused::NotAKeyExpr { at: 0, .. }),
         ));
+    }
+
+    #[test]
+    fn a_dictionary_over_the_quota_a_session_holds_is_refused_and_one_at_it_is_not() {
+        let three = KeyIds::new([(1, "lab/a"), (2, "lab/b"), (3, "lab/c")]).expect("valid");
         assert_eq!(
-            KeyIds::with_limit([(1, "lab/a"), (2, "lab/b"), (3, "lab/c")], 2),
+            three.within(Quota::at_most(2)),
             Err(KeyIdsRefused::TooMany {
                 stated: 3,
                 limit: 2
             })
         );
-        assert!(
-            KeyIds::with_limit([(1, "lab/a"), (2, "lab/b")], 2).is_ok(),
-            "CONTROL: as many entries as the limit is not too many"
+        assert_eq!(
+            three.within(Quota::at_most(3)),
+            Ok(()),
+            "CONTROL: as many entries as the quota is not too many"
         );
+        assert_eq!(three.within(Quota::UNBOUNDED), Ok(()));
     }
 
     #[test]
@@ -1560,13 +1573,16 @@ mod link_keys_tests {
     use alloc::sync::Arc;
     use alloc::vec;
 
+    /// The queries a link of these tests remembers, more than any of them notes.
+    const NOTED: usize = 8;
+
     fn dictionary() -> SharedKeyIds {
         Arc::new(KeyIds::new([(40, "lab/rig"), (41, "lab/rig/alpha")]).expect("valid"))
     }
 
     #[test]
     fn a_link_names_a_key_by_its_own_form() {
-        let shared = LinkKeys::new(Some(dictionary()), KeyWireForm::Shared);
+        let shared = LinkKeys::new(Some(dictionary()), KeyWireForm::Shared, NOTED);
         assert_eq!(
             shared.key_wire("lab/rig/alpha", false),
             KeyWire::Shared {
@@ -1579,15 +1595,15 @@ mod link_keys_tests {
             KeyWire::Declared,
             "a router is told the declared form"
         );
-        let literal = LinkKeys::new(None, KeyWireForm::Literal);
+        let literal = LinkKeys::new(None, KeyWireForm::Literal, NOTED);
         assert_eq!(literal.key_wire("lab/rig/alpha", false), KeyWire::Literal);
-        let declared = LinkKeys::new(Some(dictionary()), KeyWireForm::Declared);
+        let declared = LinkKeys::new(Some(dictionary()), KeyWireForm::Declared, NOTED);
         assert_eq!(declared.key_wire("lab/rig/alpha", false), KeyWire::Declared);
     }
 
     #[test]
     fn a_kept_query_is_mirrored_on_its_own_key_until_it_ends() {
-        let mut keys = LinkKeys::new(Some(dictionary()), KeyWireForm::Shared);
+        let mut keys = LinkKeys::new(Some(dictionary()), KeyWireForm::Shared, NOTED);
         keys.note_request(7, 40, Some("/gamma"), true, false);
         assert_eq!(
             keys.reply_key(7, "lab/rig/gamma"),
@@ -1617,14 +1633,14 @@ mod link_keys_tests {
 
     #[test]
     fn only_a_query_by_a_dictionary_id_on_a_shared_link_from_no_router_is_kept() {
-        let mut keys = LinkKeys::new(Some(dictionary()), KeyWireForm::Shared);
+        let mut keys = LinkKeys::new(Some(dictionary()), KeyWireForm::Shared, NOTED);
         keys.note_request(1, 0, Some("lab/rig/alpha"), true, false);
         keys.note_request(2, 99, None, true, false);
         keys.note_request(3, 41, None, true, true);
         for rid in [1, 2, 3] {
             assert_eq!(keys.reply_key(rid, "lab/rig/alpha"), ReplyKey::Literal);
         }
-        let mut literal = LinkKeys::new(Some(dictionary()), KeyWireForm::Literal);
+        let mut literal = LinkKeys::new(Some(dictionary()), KeyWireForm::Literal, NOTED);
         literal.note_request(4, 41, None, true, false);
         assert_eq!(literal.reply_key(4, "lab/rig/alpha"), ReplyKey::Literal);
         keys.note_request(5, 41, None, false, false);
@@ -1641,16 +1657,24 @@ mod link_keys_tests {
 
     #[test]
     fn the_queries_kept_are_bounded_by_the_oldest_giving_way() {
-        let mut keys = LinkKeys::new(Some(dictionary()), KeyWireForm::Shared);
-        let bound = crate::caps::MAX_PENDING_QUERIES.max(1);
-        for rid in 0..=bound as u32 {
+        let mut keys = LinkKeys::new(Some(dictionary()), KeyWireForm::Shared, 3);
+        for rid in 0..=3 {
             keys.note_request(rid, 41, None, true, false);
         }
         assert_eq!(keys.reply_key(0, "lab/rig/alpha"), ReplyKey::Literal);
-        assert_ne!(
-            keys.reply_key(bound as u32, "lab/rig/alpha"),
-            ReplyKey::Literal
-        );
+        for rid in 1..=3 {
+            assert_ne!(keys.reply_key(rid, "lab/rig/alpha"), ReplyKey::Literal);
+        }
+    }
+
+    #[test]
+    fn a_link_made_to_remember_no_query_remembers_one() {
+        let mut keys = LinkKeys::new(Some(dictionary()), KeyWireForm::Shared, 0);
+        keys.note_request(1, 41, None, true, false);
+        assert_ne!(keys.reply_key(1, "lab/rig/alpha"), ReplyKey::Literal);
+        keys.note_request(2, 41, None, true, false);
+        assert_eq!(keys.reply_key(1, "lab/rig/alpha"), ReplyKey::Literal);
+        assert_ne!(keys.reply_key(2, "lab/rig/alpha"), ReplyKey::Literal);
     }
 
     #[test]
@@ -1798,6 +1822,7 @@ mod registry_tests {
 mod document_tests {
     use super::*;
     use crate::json5::parse;
+    use crate::limit_binding::LimitSpec;
     use crate::policy::SessionPolicy;
     use crate::policy_document::{resolve_document, statements_from_json5};
     use alloc::format;
@@ -1925,23 +1950,78 @@ mod document_tests {
         }
     }
 
+    /// The reasons `resolve_document` refuses `tree` for, in their order.
+    fn resolution_reasons(tree: &Json5Value) -> Vec<Reason<'_>> {
+        resolve_document(SessionPolicy::defaults(), tree)
+            .expect_err("the document is refused")
+            .iter()
+            .map(|refusal| refusal.reason)
+            .collect()
+    }
+
+    /// A `wz/key-ids` member whose dictionary names ids `1..=count`.
+    fn dictionary_member(count: usize) -> String {
+        let entries: Vec<String> = (1..=count)
+            .map(|id| format!(r#"{{ id: {id}, key: "lab/k{id}" }}"#))
+            .collect();
+        format!("{{ dictionary: [ {} ] }}", entries.join(", "))
+    }
+
+    /// With no limit stated the dictionary is held to the build's `MAX_SHARED_KEY_IDS`, by the
+    /// resolution, which knows the limit; the reader of the member alone does not count.
     #[test]
-    fn a_dictionary_over_the_limit_is_refused_by_name() {
+    fn a_dictionary_over_the_builds_limit_is_refused_by_name() {
         let limit = crate::caps::MAX_SHARED_KEY_IDS;
         if limit >= usize::from(ExprId::MAX) {
             // Every id a wireexpr has fits: no dictionary of distinct ids is over the limit.
             return;
         }
-        let entries: Vec<String> = (1..=limit + 1)
-            .map(|id| format!(r#"{{ id: {id}, key: "lab/k{id}" }}"#))
-            .collect();
-        let tree = document(&format!("{{ dictionary: [ {} ] }}", entries.join(", ")));
+        let tree = document(&dictionary_member(limit + 1));
+        assert!(statements_from_json5(&tree).is_ok());
         assert_eq!(
-            key_id_reasons(&tree),
-            [KeyIdsReason::TooMany {
+            resolution_reasons(&tree),
+            [Reason::KeyIds(KeyIdsReason::TooMany {
                 stated: limit + 1,
                 limit
-            }]
+            })]
+        );
+        let at = document(&dictionary_member(limit));
+        assert!(
+            resolve_document(SessionPolicy::defaults(), &at).is_ok(),
+            "CONTROL: as many entries as the limit"
+        );
+    }
+
+    /// A document that states `MAX_SHARED_KEY_IDS` holds its own dictionary to that value: past
+    /// it the document is refused by name, at it the dictionary is read.
+    #[test]
+    fn a_dictionary_over_the_limit_its_document_states_is_refused_by_name() {
+        let stated = |limit: usize, count: usize| {
+            parse(&format!(
+                r#"{{ wz: {{ limits: {{ MAX_SHARED_KEY_IDS: {limit} }}, "key-ids": {} }} }}"#,
+                dictionary_member(count)
+            ))
+            .expect("JSON5")
+        };
+        let over = stated(2, 3);
+        if crate::limits::MaxSharedKeyIds::DOMAIN.is_singleton() {
+            // A build that keeps the build's value alone refuses the statement itself.
+            assert!(resolve_document(SessionPolicy::defaults(), &over).is_err());
+            return;
+        }
+        assert_eq!(
+            resolution_reasons(&over),
+            [Reason::KeyIds(KeyIdsReason::TooMany {
+                stated: 3,
+                limit: 2
+            })]
+        );
+        let at = resolve_document(SessionPolicy::defaults(), &stated(3, 3))
+            .expect("as many entries as the limit the document states");
+        assert_eq!(
+            at.limits.session.max_shared_key_ids(),
+            Quota::at_most(3),
+            "the session the document opens holds the limit it states"
         );
     }
 
@@ -2158,14 +2238,10 @@ mod document_tests {
             (3, 5, "lab/c"),
         ];
         let mut found = Vec::new();
-        dictionary_faults(entries.len(), &entries, 2, |fault| found.push(fault));
+        dictionary_faults(&entries, |fault| found.push(fault));
         assert_eq!(
             found,
             [
-                Fault::TooMany {
-                    stated: 4,
-                    limit: 2
-                },
                 Fault::ZeroId { at: 0 },
                 Fault::NotAKeyExpr {
                     at: 0,
@@ -2178,11 +2254,8 @@ mod document_tests {
             "an id named three times is reported once"
         );
         assert_eq!(
-            KeyIds::with_limit(entries.iter().map(|&(_, id, key)| (id, key)), 2),
-            Err(KeyIdsRefused::TooMany {
-                stated: 4,
-                limit: 2
-            })
+            KeyIds::new(entries.iter().map(|&(_, id, key)| (id, key))),
+            Err(KeyIdsRefused::ZeroId { at: 0 })
         );
     }
 
