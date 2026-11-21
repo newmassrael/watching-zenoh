@@ -1,0 +1,56 @@
+# Census cost of each Layer C1cn member, in seconds on a hosted runner.
+# Read by census_shard_plan.py to deal the members to the census shards. The weights decide
+# balance only: a member with no row is planned at the median, and a row for a crate that is no
+# member is ignored. Both are named on the census job's stderr.
+#
+# Source: run 44778189472 (589a8884c9), both census shards complete: the time from one
+# `census:` line to the next. A member that printed no line then (no test only a feature build
+# reaches) is folded into the next printed member's interval, and that interval is split evenly
+# among the members it holds; those rows are marked "split". Today the census prints `(Ns)`
+# after every member, so a refresh reads each member's own figure.
+#
+# crate                        seconds
+lwip-sys                        9
+wz                              0   # excluded from all-features
+wz-admin                       19
+wz-ap-demo                     87
+wz-app-frame                   12
+wz-capi-c                     162
+wz-capi-coop                   86
+wz-capi-core                  230
+wz-capi-pico                  348
+wz-capi-port                   25
+wz-capture                     63
+wz-codecs-test-support          3   # split with wz-host-net
+wz-ext-pubsub                  10
+wz-host-net                     2   # split
+wz-link-lwip                    4
+wz-mcu-multicast-e2e           23
+wz-mcu-session-acceptor        12
+wz-node-time                   11
+wz-packet-socket               11
+wz-rest                        18
+wz-runtime-coop                20
+wz-runtime-core                 1
+wz-runtime-posix               10   # split with wz-runtime-tokio-test-support
+wz-runtime-tokio              569
+wz-runtime-tokio-test-support   9   # split
+wz-runtime-zephyr              61   # split with wz-session-lwip
+wz-session-core               174
+wz-session-lwip                60   # split
+wz-session-mcu                 40
+wz-storage                     12
+wz-tls-mbedtls                  0   # excluded from all-features
+wz-tls-record                   9   # split with the next four
+zenoh                         155
+zenoh-buffers                   8   # split
+zenoh-codec                     8   # split
+zenoh-collections              28   # split with zenoh-config
+zenoh-config                   27   # split
+zenoh-core                      8   # split
+zenoh-keyexpr                   5
+zenoh-protocol                  9   # split
+zenoh-runtime                   3   # split with zenoh-task
+zenoh-shm                      18   # split with zenoh-util
+zenoh-task                      2   # split
+zenoh-util                     18   # split

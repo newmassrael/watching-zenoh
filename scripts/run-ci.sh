@@ -3985,6 +3985,9 @@ layer_c0_test_discipline() {
     # and the crates uncompiled with their features.
     _runci_leg c1cn_part_binding.selftest -- python3 scripts/lib/c1cn_part_binding.py --selftest
     _runci_leg c1cn_part_binding --after c1cn_part_binding.selftest -- python3 scripts/lib/c1cn_part_binding.py
+    # The census shards' plan: a partition of the members dealt by measured cost.
+    # The selftest holds the partition property and reads the committed weights.
+    _runci_leg census_shard_plan.selftest -- python3 scripts/lib/census_shard_plan.py --selftest
     # A sharded job's matrix lists exactly the shards its count names: a shard dropped from the
     # list leaves every job green and its part of the work run by nobody.
     _runci_leg shard_matrix_binding.selftest -- python3 scripts/lib/shard_matrix_binding.py --selftest
@@ -12969,10 +12972,10 @@ _c1p32_pico_profile_tests() {
 # changed-crate filter cannot see a crate broken by a change elsewhere.
 layer_c1cn_nondefault_features() {
     # Hosted CI shards the census (WZ_CENSUS_SHARD of WZ_CENSUS_SHARDS, see the
-    # census in nondefault-tests-gate.sh); the two builds that are not the census
-    # run once, in the LAST shard (the one whose slice of the census is the
-    # lighter: shard 0 holds wz-runtime-tokio), and every shard runs its slice of
-    # the census. Unset means unsharded, which is shard 0 of 1 and so the last.
+    # census in nondefault-tests-gate.sh); with the layer unsplit, the two builds
+    # that are not the census run once, in the LAST shard, and every shard runs
+    # its slice of the census. Unset means unsharded, which is shard 0 of 1 and so
+    # the last.
     #
     # `WZ_C1CN_PART` splits the layer itself when hosted CI wants it split:
     # `census` runs the census slice and none of the builds, `builds` runs the
