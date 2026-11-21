@@ -2992,8 +2992,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// Send what was handed to the session ([`Self::hand_off`]), in the order it was handed, each
     /// leg to the faces it was not dropped on. The legs are given back to be let go of once the
     /// session is: a key a leg names may keep a declaration that is retracted as it drops.
-    fn send_handed(&self, core: &Core<L, C>) -> Vec<HandedLeg> {
-        let legs: Vec<HandedLeg> = lock(&self.handed).drain(..).collect();
+    /// The queue is taken whole, not drained into another collection: the legs leave in the order
+    /// they were handed either way, and a drain links the queue's drain and drop-guard code into
+    /// every cooperative build for nothing it needs (measured 2026-11-21).
+    fn send_handed(&self, core: &Core<L, C>) -> VecDeque<HandedLeg> {
+        let legs = core::mem::take(&mut *lock(&self.handed));
         for leg in &legs {
             let meta = leg.opts.push_metadata();
             // The caller was answered when the leg was handed.
@@ -4724,7 +4727,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
                 // so a program that only reads its session sends it.
                 (stepped, self.send_handed(&core.0))
             }
-            None => (false, Vec::new()),
+            None => (false, VecDeque::new()),
         };
         drop(handed);
         self.deliver();
