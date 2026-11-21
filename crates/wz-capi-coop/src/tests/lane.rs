@@ -18,7 +18,7 @@ use wz_session_core::sink::SampleView;
 
 use wz_capi_port::SubId;
 
-use crate::lane::{LaneCounts, LaneItem, LaneSample, MatchFlips, SampleLane};
+use crate::lane::{LaneCounts, LaneItem, LaneSample, MatchFlips, ReadRoom, SampleLane};
 
 /// The QoS byte of a sample sent at the data priority whose congestion control holds its sender.
 const BLOCK: u8 = 0x05 | 0x08;
@@ -70,6 +70,14 @@ fn drain(lane: &mut SampleLane) -> Vec<(Vec<SubId>, u8)> {
         lane.complete();
     }
     handed
+}
+
+/// The room of a record of `bytes` bytes for one subscriber.
+fn room(bytes: usize) -> ReadRoom {
+    ReadRoom {
+        bytes,
+        callbacks: 1,
+    }
 }
 
 /// A best-effort put of `len` bytes of `byte` on `demo/lane`.
@@ -214,14 +222,26 @@ fn the_gate_reads_a_link_only_while_the_lane_takes_a_batch() {
     let Some(mut lane) = lane(256, 4) else {
         return;
     };
-    assert!(lane.takes_a_batch(128));
-    assert!(lane.takes_a_batch(512), "an empty lane takes any batch");
+    assert!(lane.takes_a_read(room(128)));
+    assert!(
+        lane.takes_a_read(room(512)),
+        "an empty lane takes any batch"
+    );
     lane.offer(1, &best_effort(200));
-    assert!(!lane.takes_a_batch(128), "the lane has no room for a batch");
-    assert!(!lane.takes_a_batch(512), "nor for one longer than its area");
+    assert!(
+        !lane.takes_a_read(room(128)),
+        "the lane has no room for a batch"
+    );
+    assert!(
+        !lane.takes_a_read(room(512)),
+        "nor for one longer than its area"
+    );
     assert!(lane.take_front().is_some(), "the sample is at the head");
     lane.complete();
-    assert!(lane.takes_a_batch(128), "the delivery gave the room back");
+    assert!(
+        lane.takes_a_read(room(128)),
+        "the delivery gave the room back"
+    );
 }
 
 /// The changes of matching statuses are handed in the order they were found; a change and the
@@ -272,33 +292,45 @@ fn every_listener_the_build_admits_has_a_row() {
 /// one byte short of a message's sample does not hold it.
 #[test]
 fn the_builds_lane_holds_the_builds_largest_message() {
-    use crate::lane::{holds_a_message, sample_overhead};
+    use crate::lane::{holds_a_read, read_bytes, sample_overhead};
     use wz_session_core::caps;
 
-    assert!(holds_a_message::<
+    assert!(holds_a_read::<
         { caps::DELIVERY_LANE_BYTES },
+        { caps::PICO_UNICAST_BATCH_BYTES },
         { caps::PICO_FRAG_MAX_BYTES },
         { caps::MAX_KEYEXPR_BYTES },
         { caps::MAX_SUBSCRIPTIONS },
+        { caps::MAX_LIVELINESS_SUBSCRIPTIONS },
     >());
+    assert_eq!(
+        read_bytes(100, 50, 8, 2),
+        100 + 32,
+        "a batch longer than a message"
+    );
+    assert_eq!(
+        read_bytes(50, 100, 8, 2),
+        100 + 32,
+        "a message longer than a batch"
+    );
+    assert!(holds_a_read::<{ 100 + 32 }, 100, 50, 8, 2, 0>());
+    assert!(!holds_a_read::<{ 100 + 31 }, 100, 50, 8, 2, 0>());
     assert_eq!(
         sample_overhead(8, 2),
         32,
         "a key of 8, a clock id of 16 and two subscribers' ids of 4"
     );
-    assert!(holds_a_message::<{ 100 + 32 }, 100, 8, 2>());
-    assert!(!holds_a_message::<{ 100 + 31 }, 100, 8, 2>());
 }
 
-/// A lane stated shorter than the sample of the session's largest message is lengthened to hold
-/// it, from the session's own (lowered) message length and not the build's; a lane stated longer
-/// is kept.
+/// A lane stated shorter than what one record can hand it is lengthened to hold it, from the
+/// session's own (lowered) message length and batch and not the build's, the larger of the two;
+/// a lane stated longer is kept.
 #[test]
 fn a_lane_is_sized_from_the_sessions_message() {
-    use crate::lane::{holding_a_message, sample_overhead};
+    use crate::lane::{holding_a_read, sample_overhead};
     use wz_session_core::caps;
 
-    let frag = caps::PICO_FRAG_MAX_BYTES / 2;
+    let frag = caps::PICO_FRAG_MAX_BYTES / 4;
     let mut short = SessionLimits::defaults();
     if short.select_delivery_lane_bytes(1).is_err()
         || short
@@ -308,21 +340,31 @@ fn a_lane_is_sized_from_the_sessions_message() {
         // A build that keeps either limit to its own value has no other.
         return;
     }
-    let held = holding_a_message::<
+    let held = holding_a_read::<
+        { caps::PICO_UNICAST_BATCH_BYTES },
         { caps::PICO_FRAG_MAX_BYTES },
         { caps::MAX_KEYEXPR_BYTES },
         { caps::MAX_SUBSCRIPTIONS },
+        { caps::MAX_LIVELINESS_SUBSCRIPTIONS },
     >(short);
+    let subscribers = if cfg!(feature = "liveliness") {
+        caps::MAX_SUBSCRIPTIONS.max(caps::MAX_LIVELINESS_SUBSCRIPTIONS)
+    } else {
+        caps::MAX_SUBSCRIPTIONS
+    };
     assert_eq!(
         held.delivery_lane_bytes(),
-        frag + sample_overhead(caps::MAX_KEYEXPR_BYTES, caps::MAX_SUBSCRIPTIONS)
+        frag.max(short.pico_unicast_batch_bytes())
+            + sample_overhead(caps::MAX_KEYEXPR_BYTES, subscribers)
     );
 
     let long = SessionLimits::defaults();
-    let kept = holding_a_message::<
+    let kept = holding_a_read::<
+        { caps::PICO_UNICAST_BATCH_BYTES },
         { caps::PICO_FRAG_MAX_BYTES },
         { caps::MAX_KEYEXPR_BYTES },
         { caps::MAX_SUBSCRIPTIONS },
+        { caps::MAX_LIVELINESS_SUBSCRIPTIONS },
     >(long);
     assert_eq!(kept.delivery_lane_bytes(), long.delivery_lane_bytes());
 }
@@ -353,7 +395,7 @@ fn a_token_takes_the_lane_in_order_with_the_samples() {
     let Some(LaneItem::Liveliness(token)) = lane.take_front() else {
         panic!("the token next");
     };
-    assert_eq!(token.subscriber(), 2);
+    assert_eq!(token.subscribers().collect::<Vec<_>>(), [2]);
     let sample = token.as_sample();
     assert_eq!(
         (sample.kind, sample.keyexpr, sample.token_id),
@@ -398,7 +440,7 @@ fn the_gate_holds_back_what_was_read_while_the_lane_is_full() {
         return;
     };
     let lane = alloc::sync::Arc::new(Mutex::new(lane));
-    let gate = LaneGate::new(Quiet, lane.clone(), 32);
+    let gate = LaneGate::new(Quiet, lane.clone(), room(32));
     assert!(gate.takes_input(), "an empty lane takes a batch");
     lane.lock().offer(1, &best_effort(40));
     assert!(!gate.takes_input(), "no room left for a batch of 32");
@@ -420,7 +462,7 @@ fn a_sample_for_several_subscribers_is_written_once_and_handed_to_each() {
     lane.offer(2, &sample);
     // One copy: the key's 9 bytes, the payload's 40 and three ids of 4; three copies would leave
     // fewer than 100 bytes of the 256.
-    assert!(lane.takes_a_batch(256 - (9 + 40 + 3 * 4)));
+    assert!(lane.takes_a_read(room(256 - (9 + 40 + 3 * 4))));
     assert_eq!(drain(&mut lane), [(vec![3, 1, 2], 7)]);
     assert_eq!(lane.counts(), LaneCounts::default());
 }
@@ -503,4 +545,97 @@ fn a_subscriber_with_no_room_for_its_id_is_counted() {
     lane.offer(3, &shared);
     assert_eq!(lane.counts().dropped, 1);
     assert_eq!(drain(&mut lane), [(vec![1, 2], 4)]);
+}
+
+/// The gate asks for a record's callbacks too: those the event held open owes once it is
+/// published count, and callbacks past the whole budget are found only in an empty lane.
+#[test]
+fn the_gate_asks_for_the_callbacks_of_a_record() {
+    let Some(mut lane) = lane_owing(256, 4, 3) else {
+        return;
+    };
+    let two = ReadRoom {
+        bytes: 16,
+        callbacks: 2,
+    };
+    let past = ReadRoom {
+        bytes: 16,
+        callbacks: 4,
+    };
+    assert!(lane.takes_a_read(past), "an empty lane takes any record");
+    let shared = filled(8, 1);
+    lane.offer(1, &shared);
+    lane.offer(2, &shared);
+    assert!(
+        !lane.takes_a_read(two),
+        "two owed by the open sample, two more past three"
+    );
+    assert!(lane.takes_a_read(room(16)), "one more fits");
+    assert!(!lane.takes_a_read(past));
+    assert_eq!(drain(&mut lane), [(vec![1, 2], 1)]);
+    assert!(lane.takes_a_read(two));
+}
+
+/// A token offered for several liveliness subscribers is written once and handed to each, and a
+/// token of another kind for the same key is a token of its own.
+#[cfg(feature = "liveliness")]
+#[test]
+fn a_token_for_several_subscribers_is_written_once() {
+    use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
+
+    let Some(mut lane) = lane(256, 4) else {
+        return;
+    };
+    let token = |kind| LivelinessSample {
+        kind,
+        keyexpr: "demo/alive",
+        token_id: 9,
+    };
+    lane.offer_liveliness(1, &token(LivelinessSampleKind::Put));
+    lane.offer_liveliness(2, &token(LivelinessSampleKind::Put));
+    lane.offer_liveliness(1, &token(LivelinessSampleKind::Delete));
+    // One copy of the key's 10 bytes and two ids, then the second token's key and id.
+    assert!(lane.takes_a_read(room(256 - (10 + 2 * 4) - (10 + 4))));
+    let mut handed = Vec::new();
+    while let Some(LaneItem::Liveliness(token)) = lane.take_front() {
+        handed.push((
+            token.subscribers().collect::<Vec<_>>(),
+            token.as_sample().kind,
+        ));
+        lane.complete();
+    }
+    assert_eq!(
+        handed,
+        [
+            (vec![1, 2], LivelinessSampleKind::Put),
+            (vec![1], LivelinessSampleKind::Delete)
+        ]
+    );
+}
+
+/// A record the gate let through that holds its sender and finds no room is a defect: a debug
+/// build stops there, and a release build counts it apart.
+#[cfg(feature = "rx-in-place")]
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    should_panic(expected = "a record the gate let through found no room")
+)]
+fn a_gated_record_that_finds_no_room_is_a_defect() {
+    let Some(mut lane) = lane(1024, 1) else {
+        // A build that keeps the lane's limits to its own values has no such lane: its debug form
+        // ends as the test expects of it.
+        assert!(
+            !cfg!(debug_assertions),
+            "a record the gate let through found no room: no such lane in this build"
+        );
+        return;
+    };
+    lane.offer(1, &best_effort(8));
+    lane.offering_gated(true);
+    lane.offer(
+        2,
+        &Sample::new_put("demo/lane", b"x".to_vec()).with_qos(QosLevel::from_raw(BLOCK)),
+    );
+    assert_eq!(lane.counts().held_over, 1);
 }

@@ -330,13 +330,15 @@ fn resolve_policy(_config: &CoopConfig) -> SessionPolicy {
 
 /// The session limits a session [`CoopEngine::open`] opens from `config` holds its tables to: the
 /// one place that open decides them. The snapshot the ABI resolved and states in the config
-/// ([`CoopConfig::limits`]), its delivery lane long enough for the sample of the largest message
-/// the session rejoins, for each of its subscribers (`lane::holding_a_message`).
+/// ([`CoopConfig::limits`]), its delivery lane long enough for what one record the session is
+/// handed can put in it (`lane::holding_a_read`).
 fn resolve_limits(config: &CoopConfig) -> SessionLimits {
-    crate::lane::holding_a_message::<
+    crate::lane::holding_a_read::<
+        { caps::PICO_UNICAST_BATCH_BYTES },
         { caps::PICO_FRAG_MAX_BYTES },
         { caps::MAX_KEYEXPR_BYTES },
         { caps::MAX_SUBSCRIPTIONS },
+        { caps::MAX_LIVELINESS_SUBSCRIPTIONS },
     >(config.limits)
 }
 
@@ -1335,6 +1337,27 @@ fn leg(result: Result<(), SendWireError>) -> Result<usize, FanoutError> {
     }
 }
 
+/// The lane told, while a link's record is dispatched, that what is offered waited for room
+/// ([`SampleLane::offering_gated`]), and told otherwise again when the dispatch is done, or
+/// unwinds.
+#[cfg(feature = "rx-in-place")]
+struct Gated<'a>(&'a Mutex<SampleLane>);
+
+#[cfg(feature = "rx-in-place")]
+impl<'a> Gated<'a> {
+    fn over(lane: &'a Mutex<SampleLane>) -> Self {
+        lock(lane).offering_gated(true);
+        Self(lane)
+    }
+}
+
+#[cfg(feature = "rx-in-place")]
+impl Drop for Gated<'_> {
+    fn drop(&mut self) {
+        lock(self.0).offering_gated(false);
+    }
+}
+
 /// The `on_event` of a link whose session answers queries outside its lock: the registry's
 /// dispatch, with the `ResponseFinal`s it owes held back for the queries a callback is still to
 /// answer (`query`). Everything else the dispatch staged (the replies of a queryable that answers
@@ -1346,8 +1369,15 @@ fn dispatch_holding_finals<C: ClockSource + 'static>(
     actions: Rc<McuActions<C>>,
     plane: Arc<QueryPlane>,
     generation: u64,
+    lane: Arc<Mutex<SampleLane>>,
 ) -> impl FnMut(wz_session_core::driver_loop::IterationEvent<'_, '_>) + 'static {
     move |event| {
+        // The record waited for the room one record can take only where the link keeps its
+        // datagram and the session is handed it a record at a time (`rx-in-place`).
+        #[cfg(feature = "rx-in-place")]
+        let _gated = Gated::over(&lane);
+        #[cfg(not(feature = "rx-in-place"))]
+        let _ = &lane;
         let mut registry = registry.borrow_mut();
         // The queries this frame carries arrive on this face's link, whichever was dialled last.
         plane.arriving.store(generation, Ordering::Release);
@@ -1400,8 +1430,15 @@ fn dispatch_all<C: ClockSource + 'static>(
     registry: Rc<RefCell<Registry>>,
     face: FaceId,
     actions: Rc<McuActions<C>>,
+    lane: Arc<Mutex<SampleLane>>,
 ) -> impl FnMut(wz_session_core::driver_loop::IterationEvent<'_, '_>) + 'static {
     move |event| {
+        // The record waited for the room one record can take only where the link keeps its
+        // datagram and the session is handed it a record at a time (`rx-in-place`).
+        #[cfg(feature = "rx-in-place")]
+        let _gated = Gated::over(&lane);
+        #[cfg(not(feature = "rx-in-place"))]
+        let _ = &lane;
         let mut registry = registry.borrow_mut();
         // The application's tables serve every face: this face's session states its own answer
         // to a query it cannot resolve before its frame is dispatched, as one with queryables does.
@@ -1587,18 +1624,26 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // (`admit`), so a link that is refused has put nothing in the tables.
         #[cfg(feature = "listen")]
         let admitted = Admitted::default();
-        // A link is read only while the session's delivery lane can take a batch of it (decision
-        // Q4), and with `listen` only once the engine admitted it.
-        let batch = usize::from(self.config.batch_size);
+        // The session is handed a record of a link only while its delivery lane has the room one
+        // record can take (decision Q4), and with `listen` only once the engine admitted it.
+        let room = crate::lane::read_room::<
+            { caps::PICO_FRAG_MAX_BYTES },
+            { caps::MAX_KEYEXPR_BYTES },
+            { caps::MAX_SUBSCRIPTIONS },
+            { caps::MAX_LIVELINESS_SUBSCRIPTIONS },
+        >(
+            usize::from(self.config.batch_size),
+            &resolve_limits(&self.config),
+        );
         #[cfg(feature = "listen")]
         let link: Rc<dyn SessionDatagramLink> = Rc::new(LaneGate::new(
             AdmissionGate::new(pump, actions.clone(), admitted.clone()),
             self.lane.clone(),
-            batch,
+            room,
         ));
         #[cfg(not(feature = "listen"))]
         let link: Rc<dyn SessionDatagramLink> =
-            Rc::new(LaneGate::new(pump, self.lane.clone(), batch));
+            Rc::new(LaneGate::new(pump, self.lane.clone(), room));
         #[cfg(feature = "queryable")]
         let generation = self.plane.generation.fetch_add(1, Ordering::AcqRel) + 1;
         #[cfg(feature = "queryable")]
@@ -1608,9 +1653,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             actions.clone(),
             self.plane.clone(),
             generation,
+            self.lane.clone(),
         );
         #[cfg(not(feature = "queryable"))]
-        let dispatch = dispatch_all(self.registry.clone(), face, actions.clone());
+        let dispatch = dispatch_all(
+            self.registry.clone(),
+            face,
+            actions.clone(),
+            self.lane.clone(),
+        );
         // The link's fragmented messages are staged in buffers of the session's arena, as many
         // chains at once as the table has buffers free for it; a chain that finds none is refused
         // and counted, and the buffers go back when the session over the link ends.
@@ -3118,18 +3169,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 }
                 #[cfg(feature = "liveliness")]
                 LaneItem::Liveliness(sample) => {
-                    let id = sample.subscriber();
-                    let callback =
-                        lock(&self.targets)
-                            .iter()
-                            .find_map(|(t, target)| match target {
-                                Target::Liveliness(cb) if *t == TargetKey::Liveliness(id) => {
-                                    Some(cb.clone())
-                                }
-                                _ => None,
-                            });
-                    if let Some(callback) = callback {
-                        (lock(&callback))(sample.as_sample());
+                    for id in sample.subscribers() {
+                        let callback =
+                            lock(&self.targets)
+                                .iter()
+                                .find_map(|(t, target)| match target {
+                                    Target::Liveliness(cb) if *t == TargetKey::Liveliness(id) => {
+                                        Some(cb.clone())
+                                    }
+                                    _ => None,
+                                });
+                        if let Some(callback) = callback {
+                            (lock(&callback))(sample.as_sample());
+                        }
                     }
                 }
             }

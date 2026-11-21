@@ -28,15 +28,19 @@
 //!
 //! What a full lane does is what the sample's congestion control says. A sample sent reliably
 //! whose congestion control holds its sender (`block`, `block-first`) applies backpressure: the
-//! session stops reading the link while the lane cannot take a whole batch ([`LaneGate`]), so the
-//! transport's flow control carries the wait back to the sender and the samples wait in the link.
-//! Any other sample that finds no room is dropped and counted ([`LaneCounts::dropped`]). The gate
-//! is asked before a batch is read, so a batch only overflows the room it found when its samples
-//! take more than its own length: a key a peer named by its declaration, resolved longer than it
-//! travelled, and the ids of the subscribers each sample is for. A sample that holds its sender and still finds no
-//! room is refused and counted apart ([`LaneCounts::held_over`]), as the session core's lane
-//! answers such a sample with a local resource limit (`delivery_lane::Overload`) and not with a
-//! silent loss.
+//! session is handed no record of a link while the lane has not the room one record can take
+//! ([`ReadRoom`], [`LaneGate`]), so the transport's flow control carries the wait back to the
+//! sender and the samples wait in the link. The room is the larger of a batch and a rejoined
+//! message, with the most a sample adds to the record it came in: its key resolved from an alias,
+//! its timestamp's clock id and the ids of its subscribers; and an event slot, and a callback for
+//! each subscriber. A link keeps the datagram a session stopped in and lends it again, so the
+//! gate is asked before each record and not only before each datagram. Any other sample that
+//! finds no room is dropped and counted ([`LaneCounts::dropped`]). A sample that holds its sender
+//! and still finds no room is refused and counted apart ([`LaneCounts::held_over`]), as the
+//! session core's lane answers such a sample with a local resource limit
+//! (`delivery_lane::Overload`) and not with a silent loss: a defect for a record the gate let
+//! through, which a debug build stops at, and for the session's own puts, which wait for no room,
+//! a count.
 
 use alloc::sync::Arc;
 use core::ptr::NonNull;
@@ -76,75 +80,179 @@ pub(crate) const fn sample_overhead(key_bytes: usize, subscribers: usize) -> usi
         .saturating_add(subscribers.saturating_mul(SUBSCRIBER_ID_BYTES))
 }
 
-/// Whether a lane of `LANE` bytes holds the sample of a whole message of `FRAG` bytes on a key of
-/// `KEY` bytes, for each of `SUBS` subscribers.
-pub(crate) const fn holds_a_message<
-    const LANE: usize,
-    const FRAG: usize,
-    const KEY: usize,
-    const SUBS: usize,
->() -> bool {
-    match FRAG.checked_add(sample_overhead(KEY, SUBS)) {
-        Some(sample) => sample <= LANE,
-        None => false,
+/// The most subscribers one record of a session hands the lane for: a sample's, of the
+/// `subscribers` it holds, or a token's, of the `liveliness` subscribers it holds (none in a build
+/// without liveliness), whichever is more.
+const fn most_subscribers(subscribers: usize, liveliness: usize) -> usize {
+    let liveliness = if cfg!(feature = "liveliness") {
+        liveliness
+    } else {
+        0
+    };
+    if liveliness > subscribers {
+        liveliness
+    } else {
+        subscribers
     }
 }
 
-// The build's lane holds the sample of the largest message the build lets a session rejoin, for
-// every subscriber the build admits, so a session's lane, sized from the session's message under
-// that bound, never needs more than the build gives it: a build that raises `PICO_FRAG_MAX_BYTES`
-// raises `DELIVERY_LANE_BYTES` with it.
+/// The most bytes one record a session is handed can put in its lane, for a session whose batch
+/// is `batch` bytes, whose largest rejoined message is `frag` bytes, whose longest key is `key`
+/// bytes and whose records reach `subscribers` subscribers at most: a record is no longer than a
+/// batch or a rejoined message, and its sample adds to it at most [`sample_overhead`].
+pub(crate) const fn read_bytes(batch: usize, frag: usize, key: usize, subscribers: usize) -> usize {
+    let message = if batch > frag { batch } else { frag };
+    message.saturating_add(sample_overhead(key, subscribers))
+}
+
+/// What one record a session is handed can take of its lane at most: the room the lane is asked
+/// for before each record ([`LaneGate`]), so that what a record hands it always finds room.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ReadRoom {
+    /// Its bytes ([`read_bytes`]); and an event slot, which every record takes one of at most.
+    pub(crate) bytes: usize,
+    /// The callbacks it owes: one for each subscriber it reaches.
+    pub(crate) callbacks: usize,
+}
+
+/// Whether a lane of `LANE` bytes holds what one record can hand it in a build whose batch is
+/// `BATCH` bytes, whose largest rejoined message is `FRAG` bytes, whose longest key is `KEY`
+/// bytes and that holds `SUBS` subscribers and `LIVE` liveliness subscribers.
+pub(crate) const fn holds_a_read<
+    const LANE: usize,
+    const BATCH: usize,
+    const FRAG: usize,
+    const KEY: usize,
+    const SUBS: usize,
+    const LIVE: usize,
+>() -> bool {
+    read_bytes(BATCH, FRAG, KEY, most_subscribers(SUBS, LIVE)) <= LANE
+}
+
+// The build's lane holds what one record can hand it at the build's largest batch and rejoined
+// message, so a session's lane, sized from the session's values under the build's, never needs
+// more than the build gives it: a build that raises `PICO_UNICAST_BATCH_BYTES` or
+// `PICO_FRAG_MAX_BYTES` raises `DELIVERY_LANE_BYTES` with it.
 const _: () = assert!(
-    holds_a_message::<
+    holds_a_read::<
         { caps::DELIVERY_LANE_BYTES },
+        { caps::PICO_UNICAST_BATCH_BYTES },
         { caps::PICO_FRAG_MAX_BYTES },
         { caps::MAX_KEYEXPR_BYTES },
         { caps::MAX_SUBSCRIPTIONS },
+        { caps::MAX_LIVELINESS_SUBSCRIPTIONS },
     >(),
-    "the build's delivery lane holds a sample of the build's largest rejoined message"
+    "the build's delivery lane holds what one record of the build's largest batch hands it"
 );
 
-/// `limits` with the delivery lane long enough for the sample of the largest message the session
-/// rejoins (`PICO_FRAG_MAX_BYTES`) on its longest key (`MAX_KEYEXPR_BYTES`), for every subscriber
-/// it holds (`MAX_SUBSCRIPTIONS`): a lane stated shorter is lengthened to it, as a sample longer
-/// than the whole lane could never be handed on. `FRAG`, `KEY` and `SUBS` are the build's values,
-/// under which the session's lie.
-pub(crate) fn holding_a_message<const FRAG: usize, const KEY: usize, const SUBS: usize>(
+/// What one record of a session whose batch is `batch` bytes and whose limits are `limits` can
+/// take of its lane ([`ReadRoom`]), each limit lent under the build's value (`FRAG`, `KEY`,
+/// `SUBS`, `LIVE`). A value over the build's counts as the build's: the open refuses it.
+pub(crate) fn read_room<
+    const FRAG: usize,
+    const KEY: usize,
+    const SUBS: usize,
+    const LIVE: usize,
+>(
+    batch: usize,
+    limits: &SessionLimits,
+) -> ReadRoom {
+    let frag = limits
+        .pico_frag_max_bytes()
+        .lent_under(Quota::at_most(FRAG))
+        .unwrap_or(FRAG);
+    let key = limits
+        .max_keyexpr_bytes()
+        .lent_under(Quota::at_most(KEY))
+        .unwrap_or(KEY);
+    let subscribers = limits
+        .max_subscriptions()
+        .lent_under(Quota::at_most(SUBS))
+        .unwrap_or(SUBS);
+    let liveliness = limits
+        .max_liveliness_subscriptions()
+        .lent_under(Quota::at_most(LIVE))
+        .unwrap_or(LIVE);
+    let callbacks = most_subscribers(subscribers, liveliness);
+    ReadRoom {
+        bytes: read_bytes(batch, frag, key, callbacks),
+        callbacks,
+    }
+}
+
+/// `limits` with the delivery lane long enough for what one record can hand it
+/// ([`read_room`] of the session's `PICO_UNICAST_BATCH_BYTES`): a lane stated shorter is
+/// lengthened to it, as a record that found no room could never be handed on. `BATCH`, `FRAG`,
+/// `KEY`, `SUBS` and `LIVE` are the build's values, under which the session's lie.
+pub(crate) fn holding_a_read<
+    const BATCH: usize,
+    const FRAG: usize,
+    const KEY: usize,
+    const SUBS: usize,
+    const LIVE: usize,
+>(
     mut limits: SessionLimits,
 ) -> SessionLimits {
-    let (Ok(frag), Ok(key), Ok(subscribers)) = (
-        limits
-            .pico_frag_max_bytes()
-            .lent_under(Quota::at_most(FRAG)),
-        limits.max_keyexpr_bytes().lent_under(Quota::at_most(KEY)),
-        limits.max_subscriptions().lent_under(Quota::at_most(SUBS)),
-    ) else {
+    let Ok(batch) =
+        Quota::at_most(limits.pico_unicast_batch_bytes()).lent_under(Quota::at_most(BATCH))
+    else {
         // A value over the build's refuses the session's open when its arena is laid out.
         return limits;
     };
-    let sample = frag.saturating_add(sample_overhead(key, subscribers));
-    if sample > limits.delivery_lane_bytes() {
+    let read = read_room::<FRAG, KEY, SUBS, LIVE>(batch, &limits).bytes;
+    if read > limits.delivery_lane_bytes() {
         // Refused only by a domain of one value, which is the build's lane, and the build's lane
-        // holds the sample (the assertion above).
-        let _ = limits.select_delivery_lane_bytes(sample);
+        // holds the read (the assertion above).
+        let _ = limits.select_delivery_lane_bytes(read);
     }
     limits
 }
 
-/// What waits at an event slot of the lane, besides its bytes.
+/// What waits at an event slot of the lane, besides its bytes. Each is for the callbacks of its
+/// `subscribers` subscribers, whose ids follow its bytes.
 #[derive(Clone)]
 enum Event {
-    /// A sample, for the callbacks of the `subscribers` subscribers whose ids follow its parts.
+    /// A sample.
     Sample { record: Record, subscribers: usize },
-    /// A token's appearance or retraction, for the callback of the liveliness subscriber it
-    /// names; the token's key is the slot's bytes.
+    /// A token's appearance or retraction, for liveliness subscribers; the token's key is the
+    /// slot's bytes.
     #[cfg(feature = "liveliness")]
     Liveliness {
-        subscriber: SubId,
         kind: LivelinessSampleKind,
         key: usize,
         token_id: u64,
+        subscribers: usize,
     },
+}
+
+impl Event {
+    /// The subscribers it is for.
+    fn subscribers(&self) -> usize {
+        match self {
+            Self::Sample { subscribers, .. } => *subscribers,
+            #[cfg(feature = "liveliness")]
+            Self::Liveliness { subscribers, .. } => *subscribers,
+        }
+    }
+
+    /// One more subscriber is its.
+    fn joined(&mut self) {
+        match self {
+            Self::Sample { subscribers, .. } => *subscribers += 1,
+            #[cfg(feature = "liveliness")]
+            Self::Liveliness { subscribers, .. } => *subscribers += 1,
+        }
+    }
+
+    /// Whether what it carries holds its sender. A token is declared and retracted by a
+    /// declaration, which does.
+    fn holds_sender(&self) -> bool {
+        match self {
+            Self::Sample { record, .. } => record.holds_sender(),
+            #[cfg(feature = "liveliness")]
+            Self::Liveliness { .. } => true,
+        }
+    }
 }
 
 /// What a sample is, besides its bytes. Two samples of equal records and equal bytes are one
@@ -241,6 +349,8 @@ pub(crate) struct SampleLane {
     open: Option<Reservation>,
     /// A delivery holds the head: another thread that delivers finds nothing until it completes.
     handing: bool,
+    /// What is offered now is a record a link's gate let through ([`Self::offering_gated`]).
+    gated: bool,
     counts: LaneCounts,
 }
 
@@ -267,6 +377,7 @@ impl SampleLane {
             area,
             open: None,
             handing: false,
+            gated: false,
             counts: LaneCounts::default(),
         }
     }
@@ -276,12 +387,10 @@ impl SampleLane {
     /// is not written again: the subscriber's id joins the ones that follow it.
     pub(crate) fn offer(&mut self, subscriber: SubId, sample: &dyn SampleView) {
         let (record, parts) = Record::of(sample);
-        if let Some(mut open) = self.open.take() {
-            let joined = self.join(&mut open, subscriber, &record, &parts);
-            self.open = Some(open);
-            if joined {
-                return;
-            }
+        let same =
+            |event: &Event| matches!(event, Event::Sample { record: held, .. } if *held == record);
+        if self.join_open(subscriber, &parts, same, record.holds_sender()) {
+            return;
         }
         self.seal();
         let Some(bytes) = parts
@@ -312,32 +421,50 @@ impl SampleLane {
         self.open = Some(reservation);
     }
 
-    /// Add `subscriber` to the sample held `open` when `record` and `parts` are that sample's
-    /// and it is not for `subscriber` already: `true` when the offer is answered so, the id written
-    /// after the others, or counted when the callbacks owed are full. `false` leaves the offer to
-    /// a sample of its own: another sample, a subscriber the open one is for already (a second
-    /// sample of the same bytes), or no room for one more id after it.
+    /// Add `subscriber` to the event held open when `same` says it is the one offered, `parts`
+    /// its bytes, and it is not for `subscriber` already: `true` when the offer is answered so,
+    /// the id written after the others, or counted when the callbacks owed are full. `false`
+    /// leaves the offer to an event of its own: another one, a subscriber the open one is for
+    /// already (a second event of the same bytes), or no room for one more id after it.
+    fn join_open(
+        &mut self,
+        subscriber: SubId,
+        parts: &[&[u8]],
+        same: impl Fn(&Event) -> bool,
+        holds_sender: bool,
+    ) -> bool {
+        let Some(mut open) = self.open.take() else {
+            return false;
+        };
+        let joined = self.join(&mut open, subscriber, parts, same, holds_sender);
+        self.open = Some(open);
+        joined
+    }
+
+    /// [`Self::join_open`] for the event held `open`.
     fn join(
         &mut self,
         open: &mut Reservation,
         subscriber: SubId,
-        record: &Record,
-        parts: &[&[u8]; 5],
+        parts: &[&[u8]],
+        same: impl Fn(&Event) -> bool,
+        holds_sender: bool,
     ) -> bool {
         let index = open.index();
         let subscribers = match &self.records[index] {
-            Some(Event::Sample {
-                record: held,
-                subscribers,
-            }) if held == record => *subscribers,
+            Some(event) if same(event) => event.subscribers(),
             _ => return false,
         };
-        // SAFETY: the open sample's bytes lie at its reservation, written by `Self::offer` and
-        // `Self::join`, and nothing else writes there while it is held open.
+        let length = parts.iter().map(|part| part.len()).sum::<usize>();
+        // SAFETY: the open event's bytes lie at its reservation, written by the offer that opened
+        // it and by `Self::join`, and nothing else writes there while it is held open.
         let written = unsafe {
             core::slice::from_raw_parts(self.area.as_ptr().add(open.offset()), open.bytes())
         };
-        let (mut held, ids) = written.split_at(record.after_parts());
+        if written.len() < length {
+            return false;
+        }
+        let (mut held, ids) = written.split_at(length);
         for part in parts {
             let (bytes, rest) = held.split_at(part.len());
             if bytes != *part {
@@ -353,7 +480,7 @@ impl SampleLane {
             return false;
         }
         if !self.lane.admits_callbacks(subscribers + 1) {
-            self.refuse(record);
+            self.count_refused(holds_sender);
             return true;
         }
         let at = open.offset() + open.bytes();
@@ -361,8 +488,8 @@ impl SampleLane {
             return false;
         }
         self.put(at, &id);
-        if let Some(Event::Sample { subscribers, .. }) = &mut self.records[index] {
-            *subscribers += 1;
+        if let Some(event) = &mut self.records[index] {
+            event.joined();
         }
         true
     }
@@ -373,13 +500,10 @@ impl SampleLane {
             return;
         };
         let index = open.index();
-        let (subscribers, holds_sender) = match &self.records[index] {
-            Some(Event::Sample {
-                record,
-                subscribers,
-            }) => (*subscribers, record.holds_sender()),
-            _ => (0, false),
-        };
+        let (subscribers, holds_sender) =
+            self.records[index].as_ref().map_or((0, false), |event| {
+                (event.subscribers(), event.holds_sender())
+            });
         // Its callbacks were admitted one by one as it was written, so only a lane that stops
         // refuses it, and then every subscriber it was for goes without.
         if self.lane.publish(open, subscribers).is_err() {
@@ -405,29 +529,41 @@ impl SampleLane {
     }
 
     /// Queue a token's appearance or retraction, `sample`, for the callback of liveliness
-    /// subscriber `subscriber`, or count it when the lane has no room for its key. A token is
-    /// declared and retracted by a declaration, which holds its sender, so a refusal is counted
-    /// with the samples that do ([`LaneCounts::held_over`]).
+    /// subscriber `subscriber`, or count it when the lane has no room for its key. Written once
+    /// for all the liveliness subscribers it reaches, as a sample is ([`Self::offer`]). A token
+    /// is declared and retracted by a declaration, which holds its sender, so a refusal is
+    /// counted with the samples that do ([`LaneCounts::held_over`]).
     #[cfg(feature = "liveliness")]
     pub(crate) fn offer_liveliness(&mut self, subscriber: SubId, sample: &LivelinessSample<'_>) {
-        self.seal();
         let key = sample.keyexpr.as_bytes();
-        let Ok(reservation) = self.lane.reserve(key.len()) else {
+        let same = |event: &Event| {
+            matches!(
+                event,
+                Event::Liveliness { kind, key: length, token_id, .. }
+                    if *kind == sample.kind && *length == key.len() && *token_id == sample.token_id
+            )
+        };
+        if self.join_open(subscriber, &[key], same, true) {
+            return;
+        }
+        self.seal();
+        if !self.lane.admits_callbacks(1) {
+            self.count_refused(true);
+            return;
+        }
+        let Ok(reservation) = self.lane.reserve(key.len() + SUBSCRIBER_ID_BYTES) else {
             self.count_refused(true);
             return;
         };
         self.put(reservation.offset(), key);
-        let index = reservation.index();
-        self.records[index] = Some(Event::Liveliness {
-            subscriber,
+        self.put(reservation.offset() + key.len(), &subscriber.to_ne_bytes());
+        self.records[reservation.index()] = Some(Event::Liveliness {
             kind: sample.kind,
             key: key.len(),
             token_id: sample.token_id,
+            subscribers: 1,
         });
-        if self.lane.publish(reservation, 1).is_err() {
-            self.records[index] = None;
-            self.count_refused(true);
-        }
+        self.open = Some(reservation);
     }
 
     /// Count a sample the lane had no room for, by its congestion control.
@@ -436,7 +572,14 @@ impl SampleLane {
     }
 
     /// Count one subscriber's sample the lane had no room for: apart when it holds its sender.
+    /// A record a link's gate let through waited for the room one record can take ([`LaneGate`]),
+    /// so one that holds its sender and finds no room is a defect of that bound, and a debug build
+    /// stops there; what did not wait is counted.
     fn count_refused(&mut self, holds_sender: bool) {
+        debug_assert!(
+            !(holds_sender && self.gated),
+            "a record the gate let through found no room in the delivery lane"
+        );
         let count = if holds_sender {
             &mut self.counts.held_over
         } else {
@@ -445,15 +588,40 @@ impl SampleLane {
         *count = count.saturating_add(1);
     }
 
-    /// Whether the lane can take a whole batch of `batch` bytes now: what a link is read for. A
-    /// batch longer than the whole area is read only into an empty lane, so the link is never
-    /// stopped for good.
-    pub(crate) fn takes_a_batch(&self, batch: usize) -> bool {
-        if self.lane.can_ever_fit(batch) {
-            self.lane.fits(batch).is_ok()
+    /// Whether the lane has the room one record can take now ([`ReadRoom`]): what the session
+    /// is handed a record for. Room past the whole lane is found only in an empty lane, so the
+    /// link is never stopped for good; so is a record's callbacks past the whole budget, which
+    /// the lane admits alone ([`DeliveryLane::publish`]).
+    pub(crate) fn takes_a_read(&self, room: ReadRoom) -> bool {
+        let stats = self.lane.stats();
+        let empty = stats.queued_events == 0;
+        let bytes = if self.lane.can_ever_fit(room.bytes) {
+            self.lane.fits(room.bytes).is_ok()
         } else {
-            self.lane.stats().queued_events == 0
-        }
+            empty
+        };
+        // The event held open owes its callbacks once it is published, which is before the next
+        // record's are.
+        let open = self
+            .open
+            .as_ref()
+            .and_then(|open| self.records[open.index()].as_ref())
+            .map_or(0, Event::subscribers);
+        let owed = stats
+            .pending_callbacks
+            .saturating_add(open)
+            .saturating_add(room.callbacks);
+        bytes && (empty || owed <= stats.callback_budget)
+    }
+
+    /// Whether what is offered from here on is a record a link's gate let through (`true`), which
+    /// waited for the room one record can take ([`LaneGate`]), or anything else (`false`, the
+    /// lane's state when made): the session's own puts, the tokens a liveliness subscriber is
+    /// handed when it is declared, a group's records. Only the first is a defect when it holds
+    /// its sender and finds no room.
+    #[cfg(feature = "rx-in-place")]
+    pub(crate) fn offering_gated(&mut self, gated: bool) {
+        self.gated = gated;
     }
 
     /// What is at the head of the lane, with the subscribers it is for: held by this delivery
@@ -486,15 +654,15 @@ impl SampleLane {
                 }),
                 #[cfg(feature = "liveliness")]
                 Event::Liveliness {
-                    subscriber,
                     kind,
                     key,
                     token_id,
+                    subscribers,
                 } => LaneItem::Liveliness(LaneLiveliness {
-                    subscriber,
                     kind,
                     key,
                     token_id,
+                    subscribers,
                     base,
                 }),
             });
@@ -547,18 +715,28 @@ pub(crate) enum LaneItem {
 /// A token's appearance or retraction at the head of the lane, its key where it lies.
 #[cfg(feature = "liveliness")]
 pub(crate) struct LaneLiveliness {
-    subscriber: SubId,
     kind: LivelinessSampleKind,
     key: usize,
     token_id: u64,
+    subscribers: usize,
     base: *const u8,
 }
 
 #[cfg(feature = "liveliness")]
 impl LaneLiveliness {
-    /// The liveliness subscriber whose callback it is for.
-    pub(crate) fn subscriber(&self) -> SubId {
-        self.subscriber
+    /// The liveliness subscribers whose callbacks it is for, in the order the session offered it
+    /// to them.
+    pub(crate) fn subscribers(&self) -> impl Iterator<Item = SubId> + '_ {
+        // SAFETY: the key and the subscribers' ids were written one after the other from `base`
+        // (`SampleLane::offer_liveliness`, `SampleLane::join`), and are not written again until
+        // the delivery that holds the head completes it, which is after this view is gone.
+        let ids = unsafe {
+            core::slice::from_raw_parts(
+                self.base.add(self.key),
+                self.subscribers * SUBSCRIBER_ID_BYTES,
+            )
+        };
+        subscriber_ids(ids)
     }
 
     /// The sample, for the liveliness subscriber's callback.
@@ -597,17 +775,20 @@ impl LaneSample {
 
     /// The subscribers whose callbacks it is for, in the order the session offered it to them.
     pub(crate) fn subscribers(&self) -> impl Iterator<Item = SubId> + '_ {
-        self.part(
+        subscriber_ids(self.part(
             self.record.after_parts(),
             self.subscribers * SUBSCRIBER_ID_BYTES,
-        )
-        .chunks_exact(SUBSCRIBER_ID_BYTES)
-        .map(|held| {
-            let mut id = [0u8; SUBSCRIBER_ID_BYTES];
-            id.copy_from_slice(held);
-            SubId::from_ne_bytes(id)
-        })
+        ))
     }
+}
+
+/// The subscribers' ids written one after the other in `ids`.
+fn subscriber_ids(ids: &[u8]) -> impl Iterator<Item = SubId> + '_ {
+    ids.chunks_exact(SUBSCRIBER_ID_BYTES).map(|held| {
+        let mut id = [0u8; SUBSCRIBER_ID_BYTES];
+        id.copy_from_slice(held);
+        SubId::from_ne_bytes(id)
+    })
 }
 
 impl SampleView for LaneSample {
@@ -699,23 +880,24 @@ impl MatchFlips {
     }
 }
 
-/// `pump`, which gives the session nothing while the lane cannot take a whole batch of `batch`
-/// bytes (decision Q4): what the peer sends meanwhile waits in the link, and the transport's flow
-/// control carries the wait back to it.
+/// `pump`, which gives the session nothing while the lane has not the room one record can take
+/// (`room`, decision Q4): not the next datagram, and not the next record of one the link keeps.
+/// What the peer sends meanwhile waits in the link, and the transport's flow control carries the
+/// wait back to it.
 pub(crate) struct LaneGate<P> {
     pump: P,
     lane: Arc<Mutex<SampleLane>>,
-    batch: usize,
+    room: ReadRoom,
 }
 
 impl<P> LaneGate<P> {
-    pub(crate) fn new(pump: P, lane: Arc<Mutex<SampleLane>>, batch: usize) -> Self {
-        Self { pump, lane, batch }
+    pub(crate) fn new(pump: P, lane: Arc<Mutex<SampleLane>>, room: ReadRoom) -> Self {
+        Self { pump, lane, room }
     }
 
-    /// Whether the link's input is held back: the lane cannot take a batch.
+    /// Whether the link's input is held back: the lane has not the room of a record.
     fn shut(&self) -> bool {
-        !self.lane.lock().takes_a_batch(self.batch)
+        !self.lane.lock().takes_a_read(self.room)
     }
 }
 
