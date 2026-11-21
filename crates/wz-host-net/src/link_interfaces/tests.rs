@@ -326,6 +326,14 @@ fn the_carrier_verdict_agrees_with_sysfs_for_every_interface() {
             // A device can refuse the read (EINVAL while down); skip only that one.
             Err(_) => continue,
         };
+        // sysfs shows the devices of the network namespace that mounted it, and a sandbox that
+        // gives the process its own namespace can keep the host's sysfs: a build host's
+        // `docker0` read carrier 0 there while `getifaddrs` in the test's namespace had no
+        // node for it (NotFound). A device this namespace's kernel does not know by name is not
+        // the same device `getifaddrs` would answer for, so sysfs is no second source for it.
+        if interface_index_of_name(&name).is_err() {
+            continue;
+        }
         let verdict = unicast_addresses_of_interface(&name);
         checked += 1;
         match carrier.as_str() {
