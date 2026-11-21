@@ -82,7 +82,7 @@ default = [
 # capability whose code is still written against the host's library select it, so a host build
 # has it whatever its feature list; a capability comes to the MCU when its module no longer
 # needs it.
-std = ["wz-capi-port/std", "wz-capi-coop?/std"]
+std = ["wz-capi-port/std", "wz-capi-coop?/std", "wz-ext-pubsub?/std", "wz-node-time?/std"]
 # The ENGINE that runs a session (`docs/capi-pico-on-coop-engine.md`, decisions D1 and D4).
 #
 # `engine-tokio`: `wz-capi-core`, a session on its own OS thread and tokio runtime. It carries
@@ -142,6 +142,9 @@ os-posix = [
     "wz-capi-coop/host-sys",
     "wz-capi-port/os-sys",
     "wz-session-core/initial-sn-compact",
+    # The advanced plane's lock and the node clock's wall clock, where `advanced` builds them.
+    "wz-ext-pubsub?/host-sync",
+    "wz-node-time?/host-sync",
 ]
 # The capabilities pico's own CMake switches name (`Z_FEATURE_QUERY`, `Z_FEATURE_QUERYABLE`,
 # `Z_FEATURE_LIVELINESS`, `Z_FEATURE_ADVANCED_PUBLICATION` / `_SUBSCRIPTION`), each one feature
@@ -252,8 +255,11 @@ liveliness-get = [
 # so either engine runs it. The engine's own switch forwards where that engine is built in: the tokio engine's `advanced` turns
 # on the runtime's advanced features, the cooperative engine's `ticker` is the periodic job the
 # heartbeat and the sweeps are, and a build without either carries none.
+#
+# It selects no `std`: beside `os-posix` the cache's and the subscriber's locks and the node
+# clock's wall clock are the host's own calls (`wz-host-sync`). An image has neither, and a build
+# with neither is refused by name (`src/lib.rs`).
 advanced = [
-    "std",
     "liveliness",
     "queryable",
     "unstable-api",
@@ -721,8 +727,8 @@ wz-codecs = { path = "../wz-codecs", default-features = false }
 # which no engine owns: named where they live, so the plane runs on either engine
 # (`docs/advanced-pubsub-on-a-neutral-core.md`). Optional, and each feature the plane needs is
 # named by `advanced`.
-wz-ext-pubsub = { path = "../wz-ext-pubsub", optional = true }
-wz-node-time = { path = "../wz-node-time", optional = true }
+wz-ext-pubsub = { path = "../wz-ext-pubsub", optional = true, default-features = false }
+wz-node-time = { path = "../wz-node-time", optional = true, default-features = false }
 # The piece writer behind `segment-sender` (`src/segment_sender.rs`), and the frame writer and
 # receiving judge behind `e2e-sender` and `e2e-receiver` (`src/e2e.rs`), at its defaults (`alloc`),
 # which they are behind, and the keyer behind `instance-key`, which names its own feature of the

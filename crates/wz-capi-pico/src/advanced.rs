@@ -44,11 +44,12 @@
 //! callback at declare; wz's subscriber now has a registry of its own, and this
 //! ABI's fan-in is a set for the same reason.
 
-use std::ffi::c_void;
-use std::sync::Arc;
-use std::time::Duration;
+use alloc::sync::Arc;
+use core::ffi::c_void;
+use core::time::Duration;
 
 use wz_capi_port::listeners::ListenerSet;
+use wz_capi_port::os::Mutex;
 use wz_ext_pubsub::advanced_cache::{CacheConfig, RepliesConfig};
 use wz_ext_pubsub::advanced_publisher::{
     AdvancedPublisherError, AdvancedPublisherOn, AdvancedPublisherOptions, AdvancedPutOptions,
@@ -68,6 +69,7 @@ use crate::advanced_plane::PicoPlane;
 use crate::entity::z_entity_global_id_t;
 use crate::ffi::{guard_val, guarded, CClosure as FfiClosure};
 use crate::keyexpr::{declared_of, keyexpr_str, DeclaredKeyexpr};
+use crate::prelude::*;
 use crate::pubsub::{
     z_closure_drop_callback_t, z_moved_closure_sample_t, z_owned_closure_sample_t,
     z_owned_subscriber_t, CClosure, SubscriberState,
@@ -121,7 +123,7 @@ impl ze_owned_closure_miss_t {
     #[inline]
     pub(crate) fn null_value() -> Self {
         Self {
-            context: std::ptr::null_mut(),
+            context: core::ptr::null_mut(),
             call: None,
             drop: None,
         }
@@ -203,7 +205,7 @@ pub unsafe extern "C" fn ze_closure_miss_take(
     if dst.is_null() || src.is_null() {
         return;
     }
-    *dst = std::mem::replace(&mut (*src)._this, ze_owned_closure_miss_t::null_value());
+    *dst = core::mem::replace(&mut (*src)._this, ze_owned_closure_miss_t::null_value());
 }
 
 /// Drop a moved miss closure (pico `ze_closure_miss_drop`), running its C
@@ -245,7 +247,7 @@ pub unsafe extern "C" fn ze_closure_miss_call(
 // ---------------------------------------------------------------------------
 
 /// pico `ze_advanced_publisher_heartbeat_mode_t` — a plain C enum, so an `int`.
-pub type ze_advanced_publisher_heartbeat_mode_t = std::ffi::c_int;
+pub type ze_advanced_publisher_heartbeat_mode_t = core::ffi::c_int;
 /// `ZE_ADVANCED_PUBLISHER_HEARTBEAT_MODE_NONE` = 0, also the DEFAULT.
 pub const ZE_ADVANCED_PUBLISHER_HEARTBEAT_MODE_NONE: ze_advanced_publisher_heartbeat_mode_t = 0;
 /// `ZE_ADVANCED_PUBLISHER_HEARTBEAT_MODE_PERIODIC` = 1.
@@ -259,8 +261,8 @@ pub const ZE_ADVANCED_PUBLISHER_HEARTBEAT_MODE_SPORADIC: ze_advanced_publisher_h
 pub struct ze_advanced_publisher_cache_options_t {
     pub is_enabled: bool,
     pub max_samples: usize,
-    pub congestion_control: std::ffi::c_int,
-    pub priority: std::ffi::c_int,
+    pub congestion_control: core::ffi::c_int,
+    pub priority: core::ffi::c_int,
     pub is_express: bool,
     /// pico's own private field, carried for layout. Named `_liveliness`
     /// upstream and documented there as "not yet exposed in Zenoh".
@@ -376,7 +378,7 @@ pub unsafe extern "C" fn ze_advanced_publisher_options_default(
     );
     (*options).sample_miss_detection.is_enabled = false;
     (*options).publisher_detection = false;
-    (*options).publisher_detection_metadata = std::ptr::null();
+    (*options).publisher_detection_metadata = core::ptr::null();
 }
 
 /// Fill default advanced-publisher put options.
@@ -398,13 +400,13 @@ pub unsafe extern "C" fn ze_advanced_publisher_delete_options_default(
     if options.is_null() {
         return;
     }
-    (*options).timestamp = std::ptr::null_mut();
-    (*options).source_info = std::ptr::null_mut();
+    (*options).timestamp = core::ptr::null_mut();
+    (*options).source_info = core::ptr::null_mut();
 }
 
 /// The padding after the handle of an advanced publisher: to pico's 224 B on a 64-bit host, none
 /// on a 32-bit one (`crate::abi::element_bytes`).
-const PUBLISHER_PAD: usize = crate::abi::element_bytes(224) - std::mem::size_of::<*mut c_void>();
+const PUBLISHER_PAD: usize = crate::abi::element_bytes(224) - core::mem::size_of::<*mut c_void>();
 
 /// Owned advanced publisher (pico `ze_owned_advanced_publisher_t`, 224 B
 /// measured on a 64-bit host). Handle in slot 0, zero-padded to pico's size.
@@ -431,7 +433,7 @@ impl ze_owned_advanced_publisher_t {
     #[inline]
     pub(crate) fn null_value() -> Self {
         Self {
-            handle: std::ptr::null_mut(),
+            handle: core::ptr::null_mut(),
             _pad: [0u8; PUBLISHER_PAD],
         }
     }
@@ -573,7 +575,7 @@ pub unsafe extern "C" fn ze_declare_advanced_publisher(
         // publisher, and consumed at the point pico's `z_declare_publisher`
         // consumes them (after the validation above, before anything can fail).
         let declared = crate::pubsub::PublisherQos::declared_by(if options.is_null() {
-            std::ptr::null()
+            core::ptr::null()
         } else {
             &(*options).publisher_options
         });
@@ -602,7 +604,7 @@ pub unsafe extern "C" fn ze_declare_advanced_publisher(
         let mut boxed = Box::new(AdvPubState {
             engine,
             publisher,
-            loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
+            loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
         });
         boxed.bind();
         (*pub_).handle = Box::into_raw(boxed).cast::<c_void>();
@@ -851,12 +853,12 @@ pub unsafe extern "C" fn ze_advanced_subscriber_options_default(
     (*options).recovery.is_enabled = false;
     (*options).query_timeout_ms = 0;
     (*options).subscriber_detection = false;
-    (*options).subscriber_detection_metadata = std::ptr::null();
+    (*options).subscriber_detection_metadata = core::ptr::null();
 }
 
 /// The padding after the handle of an advanced subscriber: to pico's 152 B on a 64-bit host, none
 /// on a 32-bit one (`crate::abi::element_bytes`).
-const SUBSCRIBER_PAD: usize = crate::abi::element_bytes(152) - std::mem::size_of::<*mut c_void>();
+const SUBSCRIBER_PAD: usize = crate::abi::element_bytes(152) - core::mem::size_of::<*mut c_void>();
 
 /// Owned advanced subscriber (pico `ze_owned_advanced_subscriber_t`, 152 B
 /// measured on a 64-bit host).
@@ -883,7 +885,7 @@ impl ze_owned_advanced_subscriber_t {
     #[inline]
     pub(crate) fn null_value() -> Self {
         Self {
-            handle: std::ptr::null_mut(),
+            handle: core::ptr::null_mut(),
             _pad: [0u8; SUBSCRIBER_PAD],
         }
     }
@@ -920,26 +922,26 @@ pub(crate) struct AdvSubState {
 /// the set's lock, whoever else still holds the set.
 struct BackgroundMiss {
     set: MissSlot,
-    ids: std::sync::Mutex<Vec<u64>>,
+    ids: Mutex<Vec<u64>>,
 }
 
 impl BackgroundMiss {
     fn new(set: MissSlot) -> Self {
         Self {
             set,
-            ids: std::sync::Mutex::new(Vec::new()),
+            ids: Mutex::new(Vec::new()),
         }
     }
 
     fn insert(&self, listener: Arc<CMissClosure>) {
         let id = self.set.insert(listener);
-        self.ids.lock().unwrap_or_else(|e| e.into_inner()).push(id);
+        self.ids.lock().push(id);
     }
 }
 
 impl Drop for BackgroundMiss {
     fn drop(&mut self) {
-        let ids = std::mem::take(self.ids.get_mut().unwrap_or_else(|e| e.into_inner()));
+        let ids = core::mem::take(self.ids.get_mut());
         for id in ids {
             drop(self.set.remove(id));
         }
@@ -1098,7 +1100,7 @@ unsafe fn declare_subscriber_state(
         subscriber,
         // R311y559 — kept for `ze_advanced_subscriber_keyexpr`.
         keyexpr: ke,
-        loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
+        loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
         background_miss: BackgroundMiss::new(miss.clone()),
         miss,
         released: crate::ffi::AwaitRelease::new(released),
@@ -1133,9 +1135,9 @@ fn fire_miss(slot: &MissSlot, miss: &Miss) {
         let _in_callback = crate::ffi::InCallback::enter();
         // A panic unwinding out of the C callback across this `extern "C"`
         // boundary is UB and would tear down the drive thread.
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        let _ = crate::ffi::catch(|| unsafe {
             call(&value as *const ze_miss_t, ctx);
-        }));
+        });
     }
 }
 
@@ -1250,8 +1252,8 @@ impl ze_owned_sample_miss_listener_t {
     #[inline]
     pub(crate) fn null_value() -> Self {
         Self {
-            handle: std::ptr::null_mut(),
-            _pad: [std::ptr::null_mut(); 2],
+            handle: core::ptr::null_mut(),
+            _pad: [core::ptr::null_mut(); 2],
         }
     }
 }
@@ -1487,13 +1489,13 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers(
             shared: engine,
             id,
             key,
-            loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
+            loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
             released,
         });
         (*placed).bind();
         *liveliness_subscriber = z_owned_subscriber_t {
             handle: placed as *mut c_void,
-            _pad: [std::ptr::null_mut(); 3],
+            _pad: [core::ptr::null_mut(); 3],
         };
         Z_OK
     })
@@ -1721,7 +1723,7 @@ pub(crate) unsafe fn advanced_publisher_keyexpr(
 ) -> *const crate::abi::z_loaned_keyexpr_t {
     match crate::abi::handle_ref::<ze_loaned_advanced_publisher_t, AdvPubState>(pub_) {
         Some(state) => &state.loaned_keyexpr as *const crate::abi::z_loaned_keyexpr_t,
-        None => std::ptr::null(),
+        None => core::ptr::null(),
     }
 }
 
@@ -1746,7 +1748,7 @@ pub(crate) unsafe fn advanced_subscriber_keyexpr(
 ) -> *const crate::abi::z_loaned_keyexpr_t {
     match crate::abi::handle_ref::<ze_loaned_advanced_subscriber_t, AdvSubState>(sub) {
         Some(state) => &state.loaned_keyexpr as *const crate::abi::z_loaned_keyexpr_t,
-        None => std::ptr::null(),
+        None => core::ptr::null(),
     }
 }
 

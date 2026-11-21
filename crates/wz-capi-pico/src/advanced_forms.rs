@@ -35,12 +35,14 @@
 //! declaration stands for as long as some face still holds an entity on it and
 //! is retracted with the last — which is when pico lets go of a key it counted.
 
-use std::sync::{Arc, Mutex, PoisonError, Weak};
+use alloc::sync::{Arc, Weak};
 
+use wz_capi_port::os::Mutex;
 use wz_ext_pubsub::advanced_subscriber::{DeclarationForms, EntityForm};
 use wz_session_core::WhatAmI;
 
 use crate::keyexpr::DeclaredKeyexpr;
+use crate::prelude::*;
 use crate::session::Engine;
 use crate::write_filter::PicoSession;
 
@@ -97,7 +99,7 @@ impl PicoSubscriberForms {
     fn anchor(&self, shared: &Arc<Engine>, entity: Entity, keyexpr: &str) -> Option<Arc<Anchor>> {
         // Held across the declaration, so two faces asking at once cannot both
         // declare: the second finds the first's answer.
-        let mut answered = self.answered.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut answered = self.answered.lock();
         if let Some(held) = answered[entity as usize].upgrade() {
             return Some(held);
         }
@@ -175,10 +177,7 @@ impl DeclarationForms for PicoSubscriberForms {
     }
 
     fn retain(&self, anchor: Arc<dyn Send + Sync>) {
-        self.retained
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(anchor);
+        self.retained.lock().push(anchor);
     }
 }
 
@@ -293,7 +292,7 @@ mod tests {
         let second = forms.subscriber(BASE);
         assert_eq!(declared(&shared), vec!["demo/kd/asub"], "one declaration");
         assert_eq!(
-            forms.answered.lock().unwrap()[Entity::Subscriber as usize].strong_count(),
+            forms.answered.lock()[Entity::Subscriber as usize].strong_count(),
             2,
             "both faces hold the one declaration"
         );

@@ -168,6 +168,14 @@ compile_error!(
      `os-posix` for a host library without it"
 );
 
+// The advanced publisher and subscriber lock their cache and state and stamp from the wall clock:
+// a host's, with `std` or beside `os-posix`. An image has neither.
+#[cfg(all(feature = "advanced", not(feature = "std"), not(feature = "os-posix")))]
+compile_error!(
+    "wz-capi-pico: `advanced` needs a host's lock and wall clock: `std`, or `os-posix` for a host \
+     library without it"
+);
+
 // `scout-mcu` is the cooperative engine's window over one datagram socket; the tokio engine scouts
 // on the host's sockets, which is `scout`.
 #[cfg(all(
