@@ -35,8 +35,9 @@ use alloc::sync::Arc;
 use core::ptr::NonNull;
 
 use wz_capi_port::os::Mutex;
-use wz_capi_port::SubId;
+use wz_capi_port::{MatchId, SubId};
 use wz_runtime_coop::session_drive::{LinkReadiness, LinkWritability, SessionDatagramLink};
+use wz_session_core::bounded::{BoundedVec, Static};
 use wz_session_core::caps;
 use wz_session_core::delivery_lane::{DeliveryLane, Next};
 use wz_session_core::limits::SessionLimits;
@@ -330,6 +331,47 @@ impl SampleView for LaneSample {
                 schema.map(|len| self.part(self.after_attachment(), len)),
             )
         })
+    }
+}
+
+/// The changes of the session's matching statuses its lock found, handed to their listeners after
+/// it, in the order they were found. A listener holds one row at most: a change and the change
+/// back before the first was handed leave the listener where it stood, so the second takes the
+/// first's row away rather than a row of its own, and the table needs a row for each listener the
+/// build admits and no more.
+pub(crate) struct MatchFlips {
+    flips: BoundedVec<(MatchId, bool), { caps::MAX_MATCHING_LISTENERS }, Static>,
+}
+
+impl MatchFlips {
+    pub(crate) fn new() -> Self {
+        Self {
+            flips: BoundedVec::new_static(),
+        }
+    }
+
+    /// The status of `listener` changed to `matching`.
+    pub(crate) fn flip(&mut self, listener: MatchId, matching: bool) {
+        if let Some(at) = self.flips.iter().position(|(id, _)| *id == listener) {
+            self.flips.remove(at);
+            return;
+        }
+        let held = self.flips.push((listener, matching));
+        debug_assert!(held.is_ok(), "a row for each listener the build admits");
+    }
+
+    /// The change found first, to hand to its listener.
+    pub(crate) fn next(&mut self) -> Option<(MatchId, bool)> {
+        if self.flips.is_empty() {
+            None
+        } else {
+            Some(self.flips.remove(0))
+        }
+    }
+
+    /// `listener` is gone: nothing it was owed is handed.
+    pub(crate) fn forget(&mut self, listener: MatchId) {
+        self.flips.retain(|(id, _)| *id != listener);
     }
 }
 

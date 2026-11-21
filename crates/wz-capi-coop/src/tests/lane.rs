@@ -16,7 +16,7 @@ use wz_session_core::sample::{
 };
 use wz_session_core::sink::SampleView;
 
-use crate::lane::{LaneCounts, SampleLane};
+use crate::lane::{LaneCounts, MatchFlips, SampleLane};
 
 /// The QoS byte of a sample sent at the data priority whose congestion control holds its sender.
 const BLOCK: u8 = 0x05 | 0x08;
@@ -179,4 +179,47 @@ fn the_gate_reads_a_link_only_while_the_lane_takes_a_batch() {
     drop(view);
     lane.complete();
     assert!(lane.takes_a_batch(128), "the delivery gave the room back");
+}
+
+/// The changes of matching statuses are handed in the order they were found; a change and the
+/// change back before the first was handed leave the listener where it stood and are handed as
+/// nothing.
+#[test]
+fn a_change_and_its_change_back_are_handed_as_nothing() {
+    let mut flips = MatchFlips::new();
+    flips.flip(1, true);
+    flips.flip(2, true);
+    flips.flip(1, false);
+    assert_eq!(flips.next(), Some((2, true)));
+    assert_eq!(flips.next(), None, "listener 1 stands where it stood");
+    flips.flip(1, true);
+    assert_eq!(flips.next(), Some((1, true)));
+}
+
+/// A listener that is gone is handed nothing it was owed, and the others keep their order.
+#[test]
+fn a_listener_that_is_gone_is_handed_nothing() {
+    let mut flips = MatchFlips::new();
+    flips.flip(1, true);
+    flips.flip(2, true);
+    flips.flip(3, false);
+    flips.forget(2);
+    assert_eq!(flips.next(), Some((1, true)));
+    assert_eq!(flips.next(), Some((3, false)));
+    assert_eq!(flips.next(), None);
+}
+
+/// Every listener the build admits has a row: as many listeners as the build's value each owe a
+/// change, and each is handed.
+#[test]
+fn every_listener_the_build_admits_has_a_row() {
+    let mut flips = MatchFlips::new();
+    let listeners = wz_session_core::caps::MAX_MATCHING_LISTENERS as u64;
+    for id in 0..listeners {
+        flips.flip(id, true);
+    }
+    for id in 0..listeners {
+        assert_eq!(flips.next(), Some((id, true)));
+    }
+    assert_eq!(flips.next(), None);
 }

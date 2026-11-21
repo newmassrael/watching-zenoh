@@ -45,7 +45,7 @@ use crate::prelude::*;
 use crate::arena::{
     AllocatorMemory, ArenaMemory, ArenaPlan, ArenaRefused, EntityRows, SessionArena,
 };
-use crate::lane::{LaneCounts, LaneGate, SampleLane};
+use crate::lane::{LaneCounts, LaneGate, MatchFlips, SampleLane};
 use wz_session_core::bounded::{BoundedString, BoundedVec, Lent};
 use wz_session_core::caps;
 use wz_session_core::slot_observer::ObserverRows;
@@ -571,7 +571,7 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     /// and the changes of its matching statuses. Apart, so a matching flip does not take a
     /// sample's room.
     samples: Arc<Mutex<SampleLane>>,
-    matching: Arc<Mutex<VecDeque<(MatchId, bool)>>>,
+    matching: Arc<Mutex<MatchFlips>>,
     /// The callbacks deliveries go to, by the id of the entity that owns them. Kept outside
     /// [`Core`] so a delivery takes no session state, and a callback that undeclares another
     /// entity finds its target gone rather than the lock held.
@@ -2732,7 +2732,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             #[cfg(feature = "transport-stats")]
             unsent_drops: AtomicU64::new(0),
             samples,
-            matching: Arc::new(Mutex::new(VecDeque::new())),
+            matching: Arc::new(Mutex::new(MatchFlips::new())),
             targets: Mutex::new(Vec::new()),
             #[cfg(feature = "queryable")]
             plane,
@@ -3114,7 +3114,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             sink(told.event());
         }
         loop {
-            let next = lock(&self.matching).pop_front();
+            let next = lock(&self.matching).next();
             let Some((id, matching)) = next else {
                 break;
             };
@@ -4276,9 +4276,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let local = count_local && Self::local_matches(core, plane, &keyexpr);
         let now = Self::peer_matches(core, plane, &keyexpr) || local;
         let queue = self.matching.clone();
-        let report = BoxedMatchingSink::new(move |matching| {
-            lock(&queue).push_back((id, matching));
-        });
+        let report = BoxedMatchingSink::new(move |matching| lock(&queue).flip(id, matching));
         // The watch is in the registry of what `plane` counts, with the criterion its write
         // filter reads ([`Self::plane_matches`]), so the listener and the filter cannot differ.
         let watch = {
@@ -4300,7 +4298,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // An already-matching registration is told so at once, as zenoh-pico tells it
         // (`vendor/zenoh-pico/src/net/filtering.c` @ `_z_write_filter_ctx_add_callback`).
         if now {
-            lock(&self.matching).push_back((id, true));
+            lock(&self.matching).flip(id, true);
         }
         keep(
             &mut core.matches,
@@ -4337,6 +4335,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 Self::release_interest(core, entry.plane, &entry.keyexpr);
             }
         }
+        lock(&self.matching).forget(id);
         drop(self.take_target(TargetKey::Matching(id)));
     }
 
