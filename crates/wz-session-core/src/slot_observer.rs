@@ -94,21 +94,22 @@ impl<R: ReplySink, G: ReplySink> Requesters<R, G> {
         }
     }
 
-    /// [`Self::new`], each registry held to the limits `limits` states: what the creator of the
-    /// session resolved for it.
+    /// [`Self::new`], each registry held to the limits `limits` states ([`Self::limit_to`]).
     pub fn with_limits(limits: &crate::limits::SessionLimits) -> Self {
         let mut requesters = Self::new();
+        requesters.limit_to(limits);
         requesters
-            .replies
-            .limit_to(limits.max_pending_queries_held());
-        requesters
-            .replies
-            .limit_keys_to(limits.max_keyexpr_bytes_held());
+    }
+
+    /// Hold each registry to the limits `limits` states: what the creator of the session resolved
+    /// for it. What each registry holds is kept, and what it is asked for next is held to the new
+    /// quota.
+    pub fn limit_to(&mut self, limits: &crate::limits::SessionLimits) {
+        self.replies.limit_to(limits.max_pending_queries_held());
+        self.replies.limit_keys_to(limits.max_keyexpr_bytes_held());
         #[cfg(feature = "liveliness-get")]
-        requesters
-            .liveliness_gets
+        self.liveliness_gets
             .limit_to(limits.max_pending_liveliness_gets_held());
-        requesters
     }
 }
 
@@ -428,68 +429,62 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
         }
     }
 
-    /// [`Self::new`], each registry held to the limits `limits` states: what the creator of the
-    /// session resolved for it. A table reads its bound here and never from the build. The
-    /// tables of each peer, which this observer does not hold, are held to the same limits by
-    /// [`PeerTables::limit_to`].
+    /// [`Self::new`], each registry held to the limits `limits` states ([`Self::limit_to`]).
     pub fn with_limits(limits: &crate::limits::SessionLimits) -> Self {
         let mut observer = Self::new();
+        observer.limit_to(limits);
         observer
-            .subscribers
-            .limit_to(limits.max_subscriptions_held());
-        observer
-            .subscribers
-            .limit_memo_to(limits.match_memo_slots());
+    }
+
+    /// Hold each registry to the limits `limits` states: what the creator of the session resolved
+    /// for it. A table reads its bound here and never from the build. In place, as the observer of a
+    /// node is built where it stays ([`ObserverCell::init_with`]) and is never a value; what each
+    /// registry holds is kept, and what it is asked for next is held to the new quota, so a node
+    /// states its limits before it registers. The tables of each peer, which this observer does not
+    /// hold, are held to the same limits by [`PeerTables::limit_to`].
+    pub fn limit_to(&mut self, limits: &crate::limits::SessionLimits) {
+        self.subscribers.limit_to(limits.max_subscriptions_held());
+        #[cfg(feature = "query-queryable")]
+        self.queryables.limit_to(limits.max_queryables_held());
+        self.subscribers.limit_memo_to(limits.match_memo_slots());
         // The longest key every table the application registers in stores; the tables each
         // peer fills are held to it by `PeerTables::limit_to`.
         let keys = limits.max_keyexpr_bytes_held();
-        observer.subscribers.limit_keys_to(keys);
+        self.subscribers.limit_keys_to(keys);
         #[cfg(feature = "query-queryable")]
-        observer.queryables.limit_keys_to(keys);
+        self.queryables.limit_keys_to(keys);
         #[cfg(feature = "liveliness-token")]
-        observer.local_tokens.limit_keys_to(keys);
+        self.local_tokens.limit_keys_to(keys);
         #[cfg(feature = "liveliness-subscriber")]
-        observer.liveliness_subscribers.limit_keys_to(keys);
+        self.liveliness_subscribers.limit_keys_to(keys);
         #[cfg(feature = "query-queryable")]
-        observer.queryables.limit_to(limits.max_queryables_held());
-        #[cfg(feature = "query-queryable")]
-        observer.queryables.limit_query_sizes_to(
+        self.queryables.limit_query_sizes_to(
             limits.query_parameters_max_bytes_held(),
             limits.query_attachment_max_bytes_held(),
         );
         #[cfg(feature = "declare-subscriber")]
-        observer
-            .subscribers
+        self.subscribers
             .limit_interests_to(limits.max_inbound_sub_interests_held());
         #[cfg(feature = "declare-subscriber")]
-        observer
-            .subscribers
+        self.subscribers
             .limit_interest_replies_to(limits.max_pending_declares_held());
         #[cfg(feature = "declare-subscriber")]
-        observer
-            .remote_subscribers
+        self.remote_subscribers
             .limit_observers_to(limits.max_decl_observers_held());
         #[cfg(feature = "declare-queryable")]
-        observer
-            .remote_queryables
+        self.remote_queryables
             .limit_observers_to(limits.max_decl_observers_held());
         #[cfg(feature = "liveliness-token")]
-        observer
-            .liveliness
+        self.liveliness
             .limit_observers_to(limits.max_decl_observers_held());
         #[cfg(feature = "liveliness-token")]
-        observer
-            .local_tokens
-            .limit_to(limits.max_local_tokens_held());
+        self.local_tokens.limit_to(limits.max_local_tokens_held());
         #[cfg(feature = "liveliness-token")]
-        observer
-            .local_tokens
+        self.local_tokens
             .limit_interest_replies_to(limits.max_pending_declares_held());
         #[cfg(feature = "liveliness-subscriber")]
-        observer
-            .liveliness_subscribers
+        self.liveliness_subscribers
             .limit_to(limits.max_liveliness_subscriptions_held());
-        observer
     }
 
     /// Write an observer with nothing registered at `at`, one registry at a time, so the

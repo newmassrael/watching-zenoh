@@ -87,6 +87,7 @@ pub use wz_session_core::driver_loop::ReassemblyDropReason;
 
 use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
 use wz_session_core::inbound::{parse_inbound, InboundFrame};
+use wz_session_core::limits::SessionLimits;
 #[cfg(all(feature = "heap", not(feature = "fixed-memory")))]
 use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::policy::SessionPolicy;
@@ -706,7 +707,7 @@ where
     // nonce from the supplied `EntropySource`, the way the AP's
     // `new_session_actions` draws from `getrandom`.
     let mut entropy = entropy;
-    let params = acceptor_params(&mut entropy, &resolve_policy());
+    let params = acceptor_params(&mut entropy, &resolve_policy(), &resolve_limits());
     let actions = wz::runtime_coop::session_runtime::new_session_actions(
         topology.acceptor_sink(),
         params,
@@ -776,10 +777,12 @@ where
 /// a session with no signing key would admit nothing.
 ///
 /// `policy` is the snapshot the e2e resolved for its session ([`resolve_policy`]): the session's
-/// machines read it, and its queue is made from it.
+/// machines read it, and its queue is made from it. `limits` is the snapshot of its limits
+/// ([`resolve_limits`]), which the session's tables are held to.
 pub(crate) fn acceptor_params(
     entropy: &mut impl wz_session_core::entropy::EntropySource,
     policy: &SessionPolicy,
+    limits: &SessionLimits,
 ) -> SessionInitParams {
     SessionInitParams {
         whatami: WhatAmI::Peer,
@@ -803,7 +806,7 @@ pub(crate) fn acceptor_params(
         ),
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         policy: *policy,
-        limits: wz_session_core::limits::SessionLimits::BUILD,
+        limits: *limits,
         cookie_signing_key: SigningKey::from_entropy(entropy)
             .expect("the entropy source produced no signing key"),
     }
@@ -814,6 +817,12 @@ pub(crate) fn acceptor_params(
 /// snapshot: the build defaults until it reads a run-time document.
 pub(crate) fn resolve_policy() -> SessionPolicy {
     SessionPolicy::defaults()
+}
+
+/// The limits of the e2e's acceptor session, which its tables are held to. Resolved where the
+/// policy is, by the session's creator: the build's values until it reads a run-time document.
+pub(crate) fn resolve_limits() -> SessionLimits {
+    SessionLimits::defaults()
 }
 
 #[cfg(test)]
@@ -836,7 +845,7 @@ mod tests {
                 // The build's domain leaves this value out: no creator can hand it.
                 continue;
             }
-            let params = acceptor_params(&mut FixtureEntropy, &policy);
+            let params = acceptor_params(&mut FixtureEntropy, &policy, &resolve_limits());
             assert_eq!(params.policy, policy);
             assert_eq!(params.tx_queue.no_progress_us.is_some(), on, "{on}");
             built += 1;

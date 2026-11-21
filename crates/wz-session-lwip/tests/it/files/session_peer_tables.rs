@@ -250,6 +250,162 @@ fn a_slot_comes_back_with_empty_peer_tables() {
     );
 }
 
+/// A session opened in a slot holds the slot's peer tables to the limits of the parameters it was
+/// opened with: with `MAX_PENDING_FINALS` stated as two, the third request finds no room and is
+/// refused and counted, and the refusal leaves the two `Final`s owed. The CONTROL is the next
+/// session in the same slot, opened under the build's limits, which owes the third: the quota is
+/// each session's own and is not left behind by the one before.
+#[test]
+fn a_stated_quota_of_two_finals_refuses_the_third_in_a_slot_built_session() {
+    use wz_session_core::limit_binding::{LimitSpec, Quota};
+    use wz_session_core::limits::{MaxPendingFinals, SessionLimits};
+    let mut stated = SessionLimits::BUILD;
+    if stated.select_max_pending_finals(Quota::at_most(2)).is_err() {
+        // A build of one value refuses two: it has no other snapshot to hand the session.
+        assert!(MaxPendingFinals::DOMAIN.is_singleton());
+        return;
+    }
+    // A build whose finals table holds fewer than three cannot compile the control.
+    const { assert!(caps::MAX_PENDING_FINALS >= 3) };
+    static TABLE: Table = SessionSlots::new();
+    static RUNTIME: wz_runtime_coop::RuntimeCell<Frozen, 1, 64, 1> =
+        wz_runtime_coop::RuntimeCell::new();
+    let (_serial, link) = wz_link_lwip::lwip_test_link();
+    let link = Rc::new(link);
+    let runtime = RUNTIME
+        .start::<LwipUdpDriver>(Frozen)
+        .expect("the runtime is started once");
+
+    let claim = TABLE
+        .claim(driver_on(&link, 7745), Fill)
+        .ok()
+        .expect("slot");
+    let held = new_session_in_slot(
+        claim,
+        || SessionInitParams {
+            limits: stated,
+            ..params(0xd1)
+        },
+        CoopTime::new(&runtime),
+    );
+    {
+        let mut peers = held.peers().borrow_mut();
+        for rid in 0..2 {
+            assert!(peers.finals.has_room(), "under the stated quota");
+            peers.finals.owe(rid, QosLevel::DEFAULT);
+        }
+        assert!(
+            !peers.finals.has_room(),
+            "the third request finds no room under the stated quota"
+        );
+        peers.finals.refuse_request();
+        assert_eq!(
+            (peers.finals.len(), peers.finals.refusals()),
+            (2, 1),
+            "(finals owed, requests refused) after the refusal"
+        );
+    }
+    drop(held);
+    assert_eq!(TABLE.in_use(), 0, "the slot came back");
+
+    // CONTROL: the next session in the slot, under the build's limits, owes the third.
+    let claim = TABLE
+        .claim(driver_on(&link, 7746), Fill)
+        .ok()
+        .expect("slot");
+    let built = new_session_in_slot(claim, || params(0xd2), CoopTime::new(&runtime));
+    let mut peers = built.peers().borrow_mut();
+    for rid in 0..3 {
+        assert!(peers.finals.has_room(), "under the build's limits");
+        peers.finals.owe(rid, QosLevel::DEFAULT);
+    }
+    assert_eq!(peers.finals.len(), 3);
+}
+
+/// The dispatch of a session opened in a slot holds the requesters it is handed to the limits the
+/// session was opened with: with `MAX_PENDING_QUERIES` stated as two, the third pending query is
+/// refused as a full table and leaves the two pending. The CONTROL is the next session in the same
+/// slot, opened under the build's limits, whose dispatch takes the third.
+#[test]
+fn a_stated_quota_of_two_pending_queries_refuses_the_third_on_a_slot_sessions_dispatch() {
+    use wz_session_core::limit_binding::{LimitSpec, Quota};
+    use wz_session_core::limits::{MaxPendingQueries, SessionLimits};
+    use wz_session_core::registry_error::RegisterError;
+    use wz_session_core::reply_acceptance::ReplyAcceptance;
+    use wz_session_core::session_slot::SlotRef;
+    use wz_session_core::slot_observer::{DefaultSinks, ObserverCell, Requesters};
+    use wz_session_mcu::app_layer::{NoReplies, SlotDispatch};
+
+    /// Three pending queries asked on the requesters of a dispatch over `handle`, which the
+    /// dispatch is made with as a layer makes them, with no limit of its own.
+    fn three_pending_queries(
+        observer: &'static ObserverCell<DefaultSinks>,
+        handle: SlotRef<Rt, CoopTime<Frozen>>,
+    ) -> Vec<Result<(), RegisterError>> {
+        let mut dispatch: SlotDispatch<Frozen, NoReplies, NoReplies, DefaultSinks, LwipUdpDriver> =
+            SlotDispatch::new(observer, handle, Requesters::new());
+        (0..3)
+            .map(|rid| {
+                dispatch
+                    .requesters_mut()
+                    .replies
+                    .register_sink(rid, 1, None, ReplyAcceptance::Any, NoReplies)
+                    .map(|_| ())
+            })
+            .collect()
+    }
+
+    // A build whose pending-query table holds fewer than three cannot compile the control.
+    const { assert!(caps::MAX_PENDING_QUERIES >= 3) };
+    let mut stated = SessionLimits::BUILD;
+    if stated
+        .select_max_pending_queries(Quota::at_most(2))
+        .is_err()
+    {
+        // A build of one value refuses two: it has no other snapshot to hand the session.
+        assert!(MaxPendingQueries::DOMAIN.is_singleton());
+        return;
+    }
+    static TABLE: Table = SessionSlots::new();
+    static RUNTIME: wz_runtime_coop::RuntimeCell<Frozen, 1, 64, 1> =
+        wz_runtime_coop::RuntimeCell::new();
+    let (_serial, link) = wz_link_lwip::lwip_test_link();
+    let link = Rc::new(link);
+    let runtime = RUNTIME
+        .start::<LwipUdpDriver>(Frozen)
+        .expect("the runtime is started once");
+    let observer: &'static ObserverCell<DefaultSinks> = Box::leak(Box::new(ObserverCell::new()));
+
+    let claim = TABLE
+        .claim(driver_on(&link, 7747), Fill)
+        .ok()
+        .expect("slot");
+    let held = new_session_in_slot(
+        claim,
+        || SessionInitParams {
+            limits: stated,
+            ..params(0xe1)
+        },
+        CoopTime::new(&runtime),
+    );
+    assert_eq!(
+        three_pending_queries(observer, held),
+        [Ok(()), Ok(()), Err(RegisterError::TableFull)]
+    );
+    assert_eq!(TABLE.in_use(), 0, "the slot came back");
+
+    // CONTROL: the next session in the slot, under the build's limits, takes the third.
+    let claim = TABLE
+        .claim(driver_on(&link, 7748), Fill)
+        .ok()
+        .expect("slot");
+    let built = new_session_in_slot(claim, || params(0xe2), CoopTime::new(&runtime));
+    assert_eq!(
+        three_pending_queries(observer, built),
+        [Ok(()), Ok(()), Ok(())]
+    );
+}
+
 #[test]
 fn the_peer_tables_count_in_the_slot_size() {
     let slot = Table::slot_bytes();

@@ -13955,18 +13955,22 @@ layer_c1m_session_lwip() {
     # and read as the list the node holds, and its refusals.
     # 31 -> 32: Round 4521's `the_sessions_the_node_makes_carry_the_snapshot_it_is_handed`;
     # hosted run 44434030103 printed 32, and so did a build host.
-    _runci_guarded_test "C1m mcu slot node" 32 \
+    # 32 -> 34: the limits the node is handed, carried by its sessions' parameters and held by its
+    # observer (two tests); counted from the source, not yet printed.
+    _runci_guarded_test "C1m mcu slot node" 34 \
         cargo test -p wz-session-mcu --features client-slot --lib slot_node --quiet || return 1
     # The same tests of a node built with `declare-token`: the number is the same, and what two of
     # them assert is the other half (a token is declared, and is not refused). 31 -> 32: Round
-    # 4521's snapshot test, as the first arm; hosted run 44572424670 printed 32.
-    _runci_guarded_test "C1m mcu slot node with tokens" 32 \
+    # 4521's snapshot test, as the first arm; hosted run 44572424670 printed 32. 32 -> 34: the two
+    # limits tests of the first arm; counted from the source, not yet printed.
+    _runci_guarded_test "C1m mcu slot node with tokens" 34 \
         cargo test -p wz-session-mcu --features client-slot,declare-token --lib slot_node --quiet || return 1
     # The same tests of a node that binds the lifecycle verbs in band (`client-verbs`, what a
     # declaration that names a commander builds), and one more: the verbs are declared under the
     # node's own key once named, and refused unnamed. 32 -> 33: Round 4521's snapshot test, which
-    # moved the two legs above and not this one; hosted run 44646497313 printed 33.
-    _runci_guarded_test "C1m mcu slot node with verbs" 33 \
+    # moved the two legs above and not this one; hosted run 44646497313 printed 33. 33 -> 35: the
+    # two limits tests of the first arm; counted from the source, not yet printed.
+    _runci_guarded_test "C1m mcu slot node with verbs" 35 \
         cargo test -p wz-session-mcu --features client-verbs,lifecycle-close,lifecycle-reset,lifecycle-status \
         --lib slot_node --quiet || return 1
     # The client that answers queries and subscribes to nothing (`client-slot-queryable`, what
@@ -14365,9 +14369,11 @@ layer_c1m_session_lwip() {
     # S9a -- the tables a peer writes live in the session slot: two sessions have
     # two sets, a flood through one is refused and counted there and not in the
     # other, a slot comes back empty, and the tables count in the slot's size. 3 =
-    # what that command PRINTED.
+    # what that command PRINTED. 3 -> 5: a session opened in a slot holds its tables, and its
+    # dispatch its requesters, to the limits it was opened with; counted from the source, not yet
+    # printed.
     wz_test_args wz-session-lwip session_peer_tables
-    _runci_guarded_test "C1m session peer tables" 3 \
+    _runci_guarded_test "C1m session peer tables" 5 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,declare-subscriber,session-slot \
         "${WZ_TEST_ARGS[@]}" --quiet || return 1
@@ -14542,8 +14548,9 @@ layer_c1m_session_lwip() {
     # made for each put is refused on the group and the round goes on; and the members follow the
     # arrivals and departures and never go below none: 4 = what that command PRINTED.
     # 4 -> 5: the group session is made with the snapshot it is handed (cd6f74c9a added
-    # the test and left this count).
-    _runci_guarded_test "C1m mcu slot group" 5 \
+    # the test and left this count). 5 -> 6: a join holds the group's tables to the limits the
+    # node hands its plane; counted from the source, not yet printed.
+    _runci_guarded_test "C1m mcu slot group" 6 \
         cargo test -p wz-session-mcu --features group --lib slot_group:: --quiet || return 1
     # The replay of a node's declarations on a session (`slot_client`, the slot profile with
     # `client-slot`): each entry is offered once in order, a refused send resumes at the entry it failed
