@@ -156,6 +156,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-c/src/zenoh_ext.rs` | S8 | |
 | `crates/wz-capi-c/src/zid.rs` | S8 | |
 | `crates/wz-capi-coop/src/admission_gate.rs` | S7 | |
+| `crates/wz-capi-coop/src/arena.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/decl_watch.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/faces.rs` | S7 | |
@@ -167,19 +168,25 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-coop/src/engine/replay.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/ticker.rs` | S7 | |
 | `crates/wz-capi-coop/src/host_group.rs` | S7 | |
+| `crates/wz-capi-coop/src/lane.rs` | S7 | |
 | `crates/wz-capi-coop/src/lib.rs` | S7 | |
 | `crates/wz-capi-coop/src/scout.rs` | S7 | |
 | `crates/wz-capi-coop/src/scout/tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/scout_datagram.rs` | S7 | |
 | `crates/wz-capi-coop/src/tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/advanced.rs` | S7 | |
+| `crates/wz-capi-coop/src/tests/arena.rs` | excluded: test | Test-only file by its name. |
+| `crates/wz-capi-coop/src/tests/closure_drops.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/congestion.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/decl_watch.rs` | S7 | |
+| `crates/wz-capi-coop/src/tests/entity_tables.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/face_table.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/faces.rs` | S7 | |
 | `crates/wz-capi-coop/src/tests/get.rs` | S7 | |
 | `crates/wz-capi-coop/src/tests/group.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/host_group.rs` | excluded: test | Test-only file by its name. |
+| `crates/wz-capi-coop/src/tests/in_place.rs` | excluded: test | Test-only file by its name. |
+| `crates/wz-capi-coop/src/tests/lane.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/link_sets.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/listen.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/liveliness.rs` | S7 | |
