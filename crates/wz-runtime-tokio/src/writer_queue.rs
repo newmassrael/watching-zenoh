@@ -292,7 +292,7 @@ struct Lanes {
     /// Wakes the (single) writer when a frame lands or the last sender goes.
     ready: Notify,
     /// Wakes the writer ONLY for a frame that landed, which is what it waits for while it
-    /// backs off (see `OutboundRx::hold_back`): `ready` also carries the request to flush
+    /// backs off (see `Backoff::wait`): `ready` also carries the request to flush
     /// what is staged, which is the very thing that wait is for putting off.
     frame_ready: Notify,
     /// Wakes senders waiting for room when the writer frees some, or the
@@ -322,7 +322,7 @@ struct Lanes {
     /// which is what tells a stream from a lone message.
     staged_at_flush: AtomicU64,
     /// The longest the writer lets producers that are still staging keep adding before it
-    /// flushes, in microseconds (`OutboundRx::hold_back`): the session's
+    /// flushes, in microseconds (`Backoff::look`): the session's
     /// `transport/link/tx/queue/batching/time_limit`, handed over with the queue's shape at
     /// Established, and the writer's own bound before then. Written by a reshape, read by the
     /// writer, so it is an atomic beside the lanes and not a field behind their lock.
@@ -672,44 +672,45 @@ struct Backoff {
 }
 
 impl Backoff {
-    /// Whether the writer, backing off, holds the open frames back at this look: `true` after
-    /// it waited, for a frame to land or for the rest of the batching time limit, and then it
-    /// looks again; `false` when it is to flush them now.
+    /// The writer's look while it backs off: `None` to flush the open frames now, `Some(us)`
+    /// to wait that many microseconds, or for a frame to land, and look again.
     ///
     /// Upstream's backoff (`io/zenoh-transport/src/common/pipeline.rs` @ `fn try_pull_deep(`):
     /// a writer that is not backing off flushes at once; one that is flushes when no message
     /// was staged since its last look, or when the open frames' first message was staged the
     /// limit ago (`if diff >= self.backoff.threshold {`), and otherwise waits for what is left
-    /// of the limit or for a frame, whichever is first. While it waits a producer that stages
-    /// does not wake it: the request to flush stands, so a sender's wake finds it raised.
-    /// Upstream's wait is the same (`tokio::time::timeout(` on its batches' notifier), after a
-    /// yield, because the producer it backs off for may be waiting for the CPU this task holds.
+    /// of the limit. While it waits a producer that stages does not wake it: the request to
+    /// flush stands, so a sender's wake finds it raised.
     ///
     /// The backoff is entered only when the flush found a producer holding an open frame
-    /// ([`IdleFlush::SenderHeld`]), which is what upstream reads off its batch's lock. Whether
-    /// producers are still adding is never read off their progress over a few microseconds: a
-    /// producer that lost its CPU makes none, and reads as one that stopped.
-    async fn hold_back(&mut self, shared: &Lanes) -> bool {
+    /// ([`IdleFlush::SenderHeld`]), which is what upstream reads off its batch's lock, and it
+    /// is entered with a wait ([`Self::wait`]), so every look compares the staged count across
+    /// a wait and never across a yield: a producer that lost its CPU for a moment makes no
+    /// progress in a moment, and would read as one that stopped.
+    fn look(&mut self, shared: &Lanes) -> Option<u64> {
         let limit_us = shared.batching_time_limit_us.load(Ordering::Relaxed);
         if !self.active || limit_us == 0 {
-            return false;
+            return None;
         }
         let staged = shared.staged.load(Ordering::Relaxed);
         let moved = staged != self.seen;
         self.seen = staged;
         if !moved {
-            return false;
+            return None;
         }
         let open_us = shared.open_us();
-        if open_us >= limit_us {
-            return false;
-        }
+        limit_us.checked_sub(open_us).filter(|&left| left > 0)
+    }
+
+    /// Wait `us` microseconds, or until a frame lands, whichever is first. After a yield, as
+    /// upstream's writer yields before its wait (`tokio::task::yield_now().await;`): the
+    /// producer it backs off for may be waiting for the CPU this task holds.
+    async fn wait(shared: &Lanes, us: u64) {
         tokio::task::yield_now().await;
         tokio::select! {
             _ = shared.frame_ready.notified() => {}
-            _ = tokio::time::sleep(Duration::from_micros(limit_us - open_us)) => {}
+            _ = tokio::time::sleep(Duration::from_micros(us)) => {}
         }
-        true
     }
 }
 
@@ -3251,28 +3252,29 @@ impl OutboundRx {
                                 let _ = hook();
                                 continue;
                             }
-                            if self.backoff.hold_back(&self.shared).await {
-                                // Backing off, the producers still adding: a frame landed or
-                                // the wait ran out. Look again, the request standing.
+                            if let Some(us) = self.backoff.look(&self.shared) {
+                                // Backing off, the producers still adding: wait, then look
+                                // again, the request standing.
+                                Backoff::wait(&self.shared, us).await;
                                 idle_hook_ran = false;
                                 self.shared.flush_wanted.store(true, Ordering::SeqCst);
                                 continue;
                             }
                             let seen = self.note_flush();
-                            if hook() == IdleFlush::SenderHeld
-                                && self.shared.open_us()
-                                    < self.shared.batching_time_limit_us.load(Ordering::Relaxed)
-                            {
+                            let limit_us =
+                                self.shared.batching_time_limit_us.load(Ordering::Relaxed);
+                            let open_us = self.shared.open_us();
+                            if hook() == IdleFlush::SenderHeld && open_us < limit_us {
                                 // A producer is adding to a frame the flush had to leave open:
                                 // back off, as upstream's writer does when it cannot take its
-                                // batch's lock, and look again. Past the limit it does not: a
-                                // sender that still holds its frame then is the one to wake
-                                // the writer when it lets go (`tx_staged`), and a writer
-                                // that looked again and again would only spin.
+                                // batch's lock, waiting before it looks again. Past the limit
+                                // it does not: a sender that still holds its frame then is the
+                                // one to wake the writer when it lets go (`tx_staged`), and a
+                                // writer that looked again and again would only spin.
                                 self.backoff = Backoff { active: true, seen };
+                                Backoff::wait(&self.shared, limit_us - open_us).await;
                                 idle_hook_ran = false;
                                 self.shared.flush_wanted.store(true, Ordering::SeqCst);
-                                tokio::task::yield_now().await;
                                 continue;
                             }
                             self.backoff.active = false;
