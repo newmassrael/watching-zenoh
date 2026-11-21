@@ -735,9 +735,12 @@ impl Engine {
             listened,
             listen_deadline: plan.listen_phase.policy.budget.deadline().is_some(),
         };
-        // Upstream's bounded queue and waits, with the two policies the queue carries taken
-        // from the snapshot the plan resolved for the session.
-        let tx_queue = wz_runtime_tokio::session_glue::TxQueueConf::of_policy(&plan.session_policy);
+        // Upstream's bounded queue and waits, with the two policies the queue carries and the
+        // window of one of them taken from the snapshots the plan resolved for the session.
+        let tx_queue = wz_runtime_tokio::session_glue::TxQueueConf::of_snapshots(
+            &plan.session_policy,
+            &plan.session_limits,
+        );
         let arguments = plan.into_arguments(AbiChoices {
             tx_queue,
             start_read_task: true,

@@ -9046,8 +9046,9 @@ mod stock_config_tests {
                 batching: false,
                 batching_time_limit_us: 5_000,
                 allocation: wz::runtime_tokio::session_glue::QueueAllocation::Init,
-                ..wz::runtime_tokio::session_glue::TxQueueConf::of_policy(
-                    &wz::runtime_tokio::policy::SessionPolicy::defaults()
+                ..wz::runtime_tokio::session_glue::TxQueueConf::of_snapshots(
+                    &wz::runtime_tokio::policy::SessionPolicy::defaults(),
+                    &wz::runtime_tokio::limits::SessionLimits::BUILD
                 )
             },
             "the file's queue section reaches the session the node opens"
@@ -9070,8 +9071,9 @@ mod stock_config_tests {
         assert_eq!(bare.lease_ms, 10_000);
         assert_eq!(
             bare.tx_queue,
-            wz::runtime_tokio::session_glue::TxQueueConf::of_policy(
-                &wz::runtime_tokio::policy::SessionPolicy::defaults()
+            wz::runtime_tokio::session_glue::TxQueueConf::of_snapshots(
+                &wz::runtime_tokio::policy::SessionPolicy::defaults(),
+                &wz::runtime_tokio::limits::SessionLimits::BUILD
             )
         );
         assert_eq!(
@@ -9339,8 +9341,9 @@ mod stock_config_tests {
                 wait_before_drop_us: 2_500,
                 max_wait_before_drop_fragments_us: 40_000,
                 wait_before_close_us: 7_000_000,
-                ..wz::runtime_tokio::session_glue::TxQueueConf::of_policy(
-                    &wz::runtime_tokio::policy::SessionPolicy::defaults()
+                ..wz::runtime_tokio::session_glue::TxQueueConf::of_snapshots(
+                    &wz::runtime_tokio::policy::SessionPolicy::defaults(),
+                    &wz::runtime_tokio::limits::SessionLimits::BUILD
                 )
             }
         );
@@ -10889,20 +10892,28 @@ pub(crate) const TX_QUEUE_SIZE_FLAGS: [&str; 8] = [
 
 impl Default for TransportTuning {
     fn default() -> Self {
-        Self::of_policy(resolve_policy())
+        // A node no document describes resolves no limits: the build's are named.
+        Self::of_snapshots(
+            resolve_policy(),
+            &wz::runtime_tokio::limits::SessionLimits::BUILD,
+        )
     }
 }
 
 impl TransportTuning {
-    /// What a node that names no transport flag runs with, under `policy`, the snapshot of the
-    /// node: the width it offers and the two policies its queues carry are the snapshot's.
-    pub(crate) fn of_policy(policy: wz::runtime_tokio::policy::SessionPolicy) -> Self {
+    /// What a node that names no transport flag runs with, under `policy` and `limits`, the
+    /// snapshots of the node: the width it offers, the two policies its queues carry and the
+    /// window of one of them are the snapshots'.
+    pub(crate) fn of_snapshots(
+        policy: wz::runtime_tokio::policy::SessionPolicy,
+        limits: &wz::runtime_tokio::limits::SessionLimits,
+    ) -> Self {
         Self {
             batch_size: 65535,
             lease_ms: 10_000,
             sn_resolution: policy.sn_resolution(),
             link_defaults: Default::default(),
-            tx_queue: wz::runtime_tokio::session_glue::TxQueueConf::of_policy(&policy),
+            tx_queue: wz::runtime_tokio::session_glue::TxQueueConf::of_snapshots(&policy, limits),
             link_rx: Default::default(),
             open_timeout: wz::runtime_tokio::session_open::OPEN_TIMEOUT,
             stats_filters: Default::default(),
@@ -10927,17 +10938,22 @@ impl TransportTuning {
     /// the tests read the tuning this way.
     #[cfg(test)]
     pub(crate) fn from_argv(rest: &[String]) -> Result<Self, String> {
-        Self::from_argv_under(rest, resolve_policy())
+        Self::from_argv_under(
+            rest,
+            resolve_policy(),
+            &wz::runtime_tokio::limits::SessionLimits::BUILD,
+        )
     }
 
-    /// `from_argv` under `policy`, the node's snapshot: the tuning starts from
-    /// [`Self::of_policy`], so the defaults a policy decides and [`Self::policy`] are the
+    /// `from_argv` under `policy` and `limits`, the node's snapshots: the tuning starts from
+    /// [`Self::of_snapshots`], so the defaults a policy decides and [`Self::policy`] are the
     /// snapshot's, and every session the node opens is handed it.
     pub(crate) fn from_argv_under(
         rest: &[String],
         policy: wz::runtime_tokio::policy::SessionPolicy,
+        limits: &wz::runtime_tokio::limits::SessionLimits,
     ) -> Result<Self, String> {
-        let mut out = Self::of_policy(policy);
+        let mut out = Self::of_snapshots(policy, limits);
         if let Some(v) = parse_pair(rest, "--batch-size") {
             out.batch_size = v
                 .parse::<u16>()
@@ -12801,15 +12817,18 @@ mod transport_tuning_policy_tests {
     #[test]
     fn the_tuning_carries_the_snapshot_it_is_read_under() {
         let chosen = a_chosen_snapshot();
-        let tuning = TransportTuning::from_argv_under(&argv(&["--lease-ms", "2000"]), chosen)
-            .expect("the flags read");
+        let build = wz::runtime_tokio::limits::SessionLimits::BUILD;
+        let tuning =
+            TransportTuning::from_argv_under(&argv(&["--lease-ms", "2000"]), chosen, &build)
+                .expect("the flags read");
         assert_eq!(tuning.policy, chosen);
         // The width a node offers when no flag states one is the snapshot's.
         assert_eq!(tuning.sn_resolution, chosen.sn_resolution());
         assert_eq!(tuning.lease_ms, 2000);
         // A flag still states over the snapshot's default.
-        let stated = TransportTuning::from_argv_under(&argv(&["--sn-resolution", "16bit"]), chosen)
-            .expect("the flags read");
+        let stated =
+            TransportTuning::from_argv_under(&argv(&["--sn-resolution", "16bit"]), chosen, &build)
+                .expect("the flags read");
         assert_eq!(
             stated.sn_resolution,
             wz::runtime_tokio::policy::SnResolution::Bits16
@@ -12831,7 +12850,8 @@ mod transport_tuning_policy_tests {
         {
             return;
         }
-        let window = TransportTuning::of_policy(on)
+        let build = wz::runtime_tokio::limits::SessionLimits::BUILD;
+        let window = TransportTuning::of_snapshots(on, &build)
             .tx_queue
             .no_progress_us
             .expect("the policy on gives the queue its window");
@@ -12840,6 +12860,7 @@ mod transport_tuning_policy_tests {
             TransportTuning::from_argv_under(
                 &argv(&["--wait-before-close-us", total_us.as_str()]),
                 on,
+                &build,
             )
         };
         let err = at(window - 1).expect_err("a total wait shorter than the window");
@@ -12851,5 +12872,37 @@ mod transport_tuning_policy_tests {
                 .wait_before_close_us,
             window
         );
+    }
+
+    /// `TX_NO_PROGRESS_WINDOW_US` stated in the node's limits is the window the total wait the
+    /// flags state is held against: a total a microsecond shorter than the stated window is
+    /// refused, one as long is read, whatever the build's window is.
+    #[test]
+    fn tx_no_progress_window_us_stated_is_the_window_the_flags_are_held_to() {
+        use wz::runtime_tokio::policy::TxNoProgressDeadline;
+        let mut on = SessionPolicy::defaults();
+        if on
+            .select_tx_no_progress_deadline(TxNoProgressDeadline::On)
+            .is_err()
+        {
+            return;
+        }
+        let mut limits = wz::runtime_tokio::limits::SessionLimits::BUILD;
+        if limits.select_tx_no_progress_window_us(2_000).is_err() {
+            // A build of one value refuses another: there is no other snapshot to hand.
+            return;
+        }
+        let at = |total_us: u64| {
+            let total_us = total_us.to_string();
+            TransportTuning::from_argv_under(
+                &argv(&["--wait-before-close-us", total_us.as_str()]),
+                on,
+                &limits,
+            )
+        };
+        let err = at(1_999).expect_err("a total wait shorter than the stated window");
+        assert!(err.contains("2000 us"), "{err}");
+        let read = at(2_000).expect("a total wait as long as the stated window");
+        assert_eq!(read.tx_queue.no_progress_us, Some(2_000));
     }
 }

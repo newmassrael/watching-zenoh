@@ -271,9 +271,15 @@ pub(crate) fn resolve_policy(
 }
 
 /// pico's transmit model and the width of the sequence numbers its handshake advertises, under
-/// `policy`, the snapshot of the open: what both engines' opens are given.
-fn pico_link_policy(policy: &SessionPolicy) -> (TxQueueConf, SnResolution) {
-    (TxQueueConf::pico_of_policy(policy), policy.sn_resolution())
+/// `policy` and `limits`, the snapshots of the open: what both engines' opens are given.
+fn pico_link_policy(
+    policy: &SessionPolicy,
+    limits: &wz_session_core::limits::SessionLimits,
+) -> (TxQueueConf, SnResolution) {
+    (
+        TxQueueConf::pico_of_snapshots(policy, limits),
+        policy.sn_resolution(),
+    )
 }
 
 /// Resolve one certificate value from its PATH key or its `*_BASE64` inline key.
@@ -1044,13 +1050,13 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
         #[cfg(feature = "time-base")]
         time_base,
     } = request;
-    let (tx_queue, sn_resolution) = pico_link_policy(&policy);
+    let (tx_queue, sn_resolution) = pico_link_policy(&policy, &limits);
     // This ABI stays on one attempt: the retry the zenoh-c open gained reads
     // zenoh's `connect/retry` and `connect/timeout_ms`, which are zenoh-c
     // config keys, and this shim resolves pico's numeric keys instead.
     // pico's transmit model, not zenoh's: a pico put writes on the
     // caller's thread and a full socket slows it rather than dropping it
-    // (see `TxQueueConf::pico_of_policy`). zenoh's 1 ms drop wait here discarded the
+    // (see `TxQueueConf::pico_of_snapshots`). zenoh's 1 ms drop wait here discarded the
     // tail of a burst that `teardown_drain` puts before `z_close`.
     let session_mode = if listen.is_some() {
         WhatAmI::Peer
@@ -1308,7 +1314,7 @@ fn app_links_on<C>(
 ///
 /// What zenoh-pico's client advertises, as the tokio engine's open does: pico's batch size
 /// ([`PICO_UNICAST_BATCH`], `BATCH_UNICAST_SIZE`), pico's lease (`Z_TRANSPORT_LEASE`) and pico's
-/// transmit model ([`TxQueueConf::pico_of_policy`]).
+/// transmit model ([`TxQueueConf::pico_of_snapshots`]).
 /// The zid is the one `Z_CONFIG_SESSION_ZID_KEY` names, and otherwise minted, as this ABI's tokio
 /// open does.
 ///
@@ -1336,7 +1342,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     let dial_whatami = request.dial_whatami;
     let policy = request.policy;
     let limits = request.limits;
-    let (tx_queue, sn_resolution) = pico_link_policy(&policy);
+    let (tx_queue, sn_resolution) = pico_link_policy(&policy, &limits);
     // The engine takes the id as the config states it, up to sixteen bytes: the form an INIT
     // carries.
     let zid = request.zid;
@@ -2581,13 +2587,14 @@ mod build_numbers {
             // The build allows one width: there is no other snapshot to hand.
             return;
         }
-        let (queue, width) = pico_link_policy(&handed);
+        let limits = wz_session_core::limits::SessionLimits::BUILD;
+        let (queue, width) = pico_link_policy(&handed, &limits);
         assert_eq!(width, other);
-        assert_eq!(queue, TxQueueConf::pico_of_policy(&handed));
+        assert_eq!(queue, TxQueueConf::pico_of_snapshots(&handed, &limits));
         // Control: the open that resolves its own snapshot is given the build's width.
         let config = ConfigState::default();
         assert_eq!(
-            pico_link_policy(&resolve_policy(&config.policies).unwrap().policy).1,
+            pico_link_policy(&resolve_policy(&config.policies).unwrap().policy, &limits).1,
             build.sn_resolution()
         );
     }

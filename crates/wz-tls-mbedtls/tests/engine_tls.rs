@@ -63,7 +63,10 @@ fn base_config() -> CoopConfig {
         keep_alive: KeepAliveConf::PICO,
         sn_resolution: wz_session_core::policy::SnResolution::default(),
         link_rx: LinkRxConf::default(),
-        tx_queue: TxQueueConf::pico_of_policy(&wz_session_core::policy::SessionPolicy::defaults()),
+        tx_queue: TxQueueConf::pico_of_snapshots(
+            &wz_session_core::policy::SessionPolicy::defaults(),
+            &wz_session_core::limits::SessionLimits::defaults(),
+        ),
         timeouts: SessionTimeouts::spec_defaults(),
         open_timeout_ms: 5_000,
         redial_ms: None,

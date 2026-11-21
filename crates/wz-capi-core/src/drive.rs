@@ -4257,8 +4257,8 @@ pub struct OpenStance {
     /// The transmit model of the ABI calling this. The two ABIs this core serves
     /// transmit differently: a zenoh-c session puts onto zenoh's bounded queue
     /// and drops a droppable message after `wait_before_drop`
-    /// ([`TxQueueConf::of_policy`]), while pico writes on the caller's thread and
-    /// never drops for a full socket ([`TxQueueConf::pico_of_policy`]); either is
+    /// ([`TxQueueConf::of_snapshots`]), while pico writes on the caller's thread and
+    /// never drops for a full socket ([`TxQueueConf::pico_of_snapshots`]); either is
     /// built under [`Self::session_policy`].
     pub tx_queue: TxQueueConf,
     /// The batch size the session advertises at its handshake, dialled and accepted alike; see
@@ -4989,7 +4989,10 @@ mod tests {
     fn the_parameters_a_session_is_given_carry_both_halves_of_its_link() {
         let stated = LinkConf {
             tx: LinkTx {
-                queue: TxQueueConf::pico_of_policy(&SessionPolicy::defaults()),
+                queue: TxQueueConf::pico_of_snapshots(
+                    &SessionPolicy::defaults(),
+                    &wz_session_core::limits::SessionLimits::BUILD,
+                ),
                 batch_size: 2048,
                 lease_ms: 4000,
                 keep_alive: KeepAliveConf::ZENOH,
@@ -5033,7 +5036,10 @@ mod tests {
         }
         let link_conf = LinkConf {
             tx: LinkTx {
-                queue: TxQueueConf::of_policy(&handed),
+                queue: TxQueueConf::of_snapshots(
+                    &handed,
+                    &wz_session_core::limits::SessionLimits::BUILD,
+                ),
                 batch_size: DEFAULT_BATCH_SIZE,
                 lease_ms: DEFAULT_LEASE_MS,
                 keep_alive: KeepAliveConf::default(),
@@ -5066,7 +5072,10 @@ mod tests {
         }
         let link_conf = LinkConf {
             tx: LinkTx {
-                queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
+                queue: TxQueueConf::of_snapshots(
+                    &SessionPolicy::defaults(),
+                    &wz_session_core::limits::SessionLimits::BUILD,
+                ),
                 batch_size: DEFAULT_BATCH_SIZE,
                 lease_ms: DEFAULT_LEASE_MS,
                 keep_alive: KeepAliveConf::default(),
@@ -5368,7 +5377,10 @@ mod tests {
                     [0xC1; 4].into(),
                     LinkConf {
                         tx: LinkTx {
-                            queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
+                            queue: TxQueueConf::of_snapshots(
+                                &SessionPolicy::defaults(),
+                                &wz_session_core::limits::SessionLimits::BUILD,
+                            ),
                             batch_size: 1024,
                             lease_ms: DEFAULT_LEASE_MS,
                             keep_alive: KeepAliveConf::default(),
@@ -5508,7 +5520,10 @@ mod tests {
                     [0xC1; 4].into(),
                     LinkConf {
                         tx: LinkTx {
-                            queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
+                            queue: TxQueueConf::of_snapshots(
+                                &SessionPolicy::defaults(),
+                                &wz_session_core::limits::SessionLimits::BUILD,
+                            ),
                             batch_size: 1024,
                             lease_ms: DEFAULT_LEASE_MS,
                             keep_alive: KeepAliveConf::default(),
@@ -5591,7 +5606,10 @@ mod tests {
                     [0xC1; 4].into(),
                     LinkConf {
                         tx: LinkTx {
-                            queue: TxQueueConf::of_policy(&SessionPolicy::defaults()),
+                            queue: TxQueueConf::of_snapshots(
+                                &SessionPolicy::defaults(),
+                                &wz_session_core::limits::SessionLimits::BUILD,
+                            ),
                             batch_size: 1024,
                             lease_ms: DEFAULT_LEASE_MS,
                             keep_alive: KeepAliveConf::default(),
@@ -6167,7 +6185,10 @@ mod tests {
     #[cfg(feature = "peer")]
     fn peer_stance() -> OpenStance {
         OpenStance {
-            tx_queue: TxQueueConf::pico_of_policy(&SessionPolicy::defaults()),
+            tx_queue: TxQueueConf::pico_of_snapshots(
+                &SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD,
+            ),
             batch_size: DEFAULT_BATCH_SIZE,
             lease_ms: DEFAULT_LEASE_MS,
             keep_alive: KeepAliveConf::PICO,
@@ -6688,7 +6709,7 @@ mod multicast_face_tests {
                 &join,
                 wz_session_core::multicast_params::zid_vec(&[0x0A]),
                 WhatAmI::Peer,
-                TxQueueConf::of_policy(&policy),
+                TxQueueConf::of_snapshots(&policy, &wz_session_core::limits::SessionLimits::BUILD),
                 LinkRxConf::default(),
                 &policy,
             )
@@ -6744,7 +6765,10 @@ mod multicast_face_tests {
             batch_size: 2_048,
             is_qos: false,
             compression: false,
-            tx_queue: super::TxQueueConf::of_policy(&super::SessionPolicy::defaults()),
+            tx_queue: super::TxQueueConf::of_snapshots(
+                &super::SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD,
+            ),
             link_rx: Default::default(),
             join_rule: wz_runtime_tokio::multicast_glue::GroupJoinRule::Zenoh,
             max_sessions: None,

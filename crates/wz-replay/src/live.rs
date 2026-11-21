@@ -259,7 +259,10 @@ fn session_init_params(
         keep_alive: wz::runtime_tokio::session_glue::KeepAliveConf::default(),
         initial_sn: 0,
         cookie: Vec::new(),
-        tx_queue: wz::runtime_tokio::session_glue::TxQueueConf::of_policy(policy),
+        tx_queue: wz::runtime_tokio::session_glue::TxQueueConf::of_snapshots(
+            policy,
+            &wz_session_core::limits::SessionLimits::BUILD,
+        ),
         link_rx: wz::runtime_tokio::session_glue::LinkRxConf::default(),
         policy: *policy,
         limits: wz_session_core::limits::SessionLimits::BUILD,

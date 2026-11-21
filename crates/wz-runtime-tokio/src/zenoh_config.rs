@@ -2613,8 +2613,9 @@ fn validate_tx_queue(
                 .map_or("transport/link/tx/queue/size", |(path, _, _)| *path),
             value: size.size.to_string(),
         }),
-        // A document states no window (it is the `tx-no-progress-deadline` policy's, which a
-        // session takes from its snapshot), so the total wait it states is what is too short.
+        // The window is the node's snapshots' and no key of zenoh's (the `tx-no-progress-deadline`
+        // policy and `TX_NO_PROGRESS_WINDOW_US`), so the total wait the file states is what is too
+        // short.
         Err(TxQueueConfError::NoProgressWindow { total_us, .. }) => {
             Err(ConfigIngestError::OutOfRange {
                 path: "transport/link/tx/queue/congestion_control/block/wait_before_close",
@@ -8813,7 +8814,17 @@ impl ZenohNodeConfig {
             })?;
             named.push(ALLOCATION);
         }
-        validate_tx_queue(&out.tx_queue)?;
+        // Held as a session of this node holds it: the window of `tx-no-progress-deadline` is the
+        // node's snapshots' (`wz/policies` and `TX_NO_PROGRESS_WINDOW_US` of `wz/limits`), not a
+        // key of the file, so a total wait the file states shorter than it is refused here.
+        let windowed = wz_session_core::session_init_params::TxQueueConf::of_snapshots(
+            &out.policies.policy,
+            &out.policies.limits.session,
+        );
+        validate_tx_queue(&wz_session_core::session_init_params::TxQueueConf {
+            no_progress_us: windowed.no_progress_us,
+            ..out.tx_queue
+        })?;
         // The largest message a session rejoins from fragments. Any `usize` is
         // accepted, as upstream's `usize` field accepts it; the build's
         // reassembly slot bounds what a session applies.
@@ -15259,6 +15270,31 @@ mod wz_member_tests {
         let daemon = ZenohNodeConfig::from_json5_read_as(&document, ConfigReading::Daemon)
             .expect("the member resolves");
         assert_eq!(daemon.config.policies, policies);
+    }
+
+    /// The window a blocking message is held to is the node's snapshots' and not the build's:
+    /// with `tx-no-progress-deadline` on and `TX_NO_PROGRESS_WINDOW_US` stated in the member, a
+    /// total wait the file states shorter than the stated window is refused at the total wait's
+    /// key, and one as long is read. A build whose domains leave either out refuses the member.
+    #[test]
+    fn a_total_wait_shorter_than_the_window_the_member_states_is_refused() {
+        let at = |total_us: u64| {
+            ZenohNodeConfig::from_json5(&format!(
+                r#"{{ transport: {{ link: {{ tx: {{ queue: {{ congestion_control: {{ block: {{ wait_before_close: {total_us} }} }} }} }} }} }}, wz: {{ policies: {{ "tx-no-progress-deadline": "on" }}, limits: {{ TX_NO_PROGRESS_WINDOW_US: 2000 }} }} }}"#
+            ))
+        };
+        let read = match at(2_000) {
+            Err(ConfigIngestError::PoliciesRefused { .. }) => return,
+            other => other.expect("a total wait as long as the stated window"),
+        };
+        assert_eq!(read.config.tx_queue.wait_before_close_us, 2_000);
+        assert_eq!(
+            at(1_999).map(|_| ()),
+            Err(ConfigIngestError::OutOfRange {
+                path: "transport/link/tx/queue/congestion_control/block/wait_before_close",
+                value: String::from("1999"),
+            })
+        );
     }
 
     /// One refusal refuses the document, and the error names every refusal found: a member of

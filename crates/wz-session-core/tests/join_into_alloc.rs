@@ -82,7 +82,10 @@ fn params(batch_size: u16, is_qos: bool) -> MulticastParams {
         batch_size,
         is_qos,
         compression: false,
-        tx_queue: TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults()),
+        tx_queue: TxQueueConf::of_snapshots(
+            &wz_session_core::policy::SessionPolicy::defaults(),
+            &wz_session_core::limits::SessionLimits::BUILD,
+        ),
         link_rx: LinkRxConf::default(),
         join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
         max_sessions: None,

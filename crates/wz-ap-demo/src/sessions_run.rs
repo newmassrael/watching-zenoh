@@ -649,7 +649,10 @@ fn group_params(
         batch_size: 2_048,
         is_qos: false,
         compression: false,
-        tx_queue: wz::runtime_tokio::session_glue::TxQueueConf::of_policy(policy),
+        tx_queue: wz::runtime_tokio::session_glue::TxQueueConf::of_snapshots(
+            policy,
+            &wz::runtime_tokio::limits::SessionLimits::BUILD,
+        ),
         link_rx: Default::default(),
         // The demo's group is zenoh-pico's, as its batch is.
         join_rule: wz::runtime_tokio::multicast_glue::GroupJoinRule::Pico,

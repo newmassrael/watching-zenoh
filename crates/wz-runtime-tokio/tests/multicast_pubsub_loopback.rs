@@ -85,8 +85,9 @@ fn router_profile(zid: Vec<u8>) -> wz_runtime_tokio::multicast_glue::RouterGroup
         zid: wz_session_core::session_init_params::zid_bytes(&zid),
         qos: false,
         compression: false,
-        tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(
+        tx_queue: wz_session_core::session_init_params::TxQueueConf::of_snapshots(
             &wz_session_core::policy::SessionPolicy::defaults(),
+            &wz_session_core::limits::SessionLimits::BUILD,
         ),
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         // The beacon of the group members these witnesses run beside.
@@ -124,8 +125,9 @@ fn mc_params(zid_byte: u8) -> MulticastParams {
         batch_size: 2_048,
         is_qos: false,
         compression: false,
-        tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(
+        tx_queue: wz_session_core::session_init_params::TxQueueConf::of_snapshots(
             &wz_session_core::policy::SessionPolicy::defaults(),
+            &wz_session_core::limits::SessionLimits::BUILD,
         ),
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,

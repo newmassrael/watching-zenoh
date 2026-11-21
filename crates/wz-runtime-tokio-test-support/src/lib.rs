@@ -37,7 +37,7 @@ use wz_runtime_tokio::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, T
 
 /// The snapshot every fixture's session is handed: the build defaults. A test that is about
 /// another value selects it in the params a fixture returns, whose queue it then rebuilds with
-/// `TxQueueConf::of_policy` when the value is one the queue carries.
+/// `TxQueueConf::of_snapshots` when the value is one the queue carries.
 pub fn fixture_policy() -> wz_runtime_tokio::policy::SessionPolicy {
     wz_runtime_tokio::policy::SessionPolicy::defaults()
 }
@@ -66,7 +66,10 @@ pub fn fixture_session_init_params() -> SessionInitParams {
         cookie: Vec::new(),
         // Deterministic 32-byte test key. Production callers MUST
         // supply real per-process entropy via `SigningKey::new_random`.
-        tx_queue: wz_runtime_tokio::session_glue::TxQueueConf::of_policy(&policy),
+        tx_queue: wz_runtime_tokio::session_glue::TxQueueConf::of_snapshots(
+            &policy,
+            &wz_runtime_tokio::limits::SessionLimits::BUILD,
+        ),
         link_rx: wz_runtime_tokio::session_glue::LinkRxConf::default(),
         policy,
         limits: wz_runtime_tokio::limits::SessionLimits::BUILD,
@@ -112,7 +115,10 @@ pub fn zenoh_interop_session_init_params(
         initial_sn: 0,
         cookie: Vec::new(),
         // Deterministic 32-byte test key (same discipline as the fixture).
-        tx_queue: wz_runtime_tokio::session_glue::TxQueueConf::of_policy(&policy),
+        tx_queue: wz_runtime_tokio::session_glue::TxQueueConf::of_snapshots(
+            &policy,
+            &wz_runtime_tokio::limits::SessionLimits::BUILD,
+        ),
         link_rx: wz_runtime_tokio::session_glue::LinkRxConf::default(),
         policy,
         limits: wz_runtime_tokio::limits::SessionLimits::BUILD,

@@ -2863,8 +2863,9 @@ mod tests {
             batch_size: 2_048,
             is_qos: false,
             compression: false,
-            tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(
+            tx_queue: wz_session_core::session_init_params::TxQueueConf::of_snapshots(
                 &wz_session_core::policy::SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD,
             ),
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
             join_rule: GroupJoinRule::Pico,
@@ -3057,11 +3058,17 @@ mod tests {
             wait_before_drop_us: 7,
             max_wait_before_drop_fragments_us: 13,
             wait_before_close_us: 11,
-            ..TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults())
+            ..TxQueueConf::of_snapshots(
+                &wz_session_core::policy::SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD,
+            )
         };
         assert_ne!(
             operator,
-            TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults())
+            TxQueueConf::of_snapshots(
+                &wz_session_core::policy::SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD
+            )
         );
         let group = router_group_params(RouterGroupProfile {
             zid: [0x0A].into(),
@@ -3104,8 +3111,9 @@ mod tests {
             zid: [0x0B].into(),
             qos: false,
             compression: false,
-            tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(
+            tx_queue: wz_session_core::session_init_params::TxQueueConf::of_snapshots(
                 &wz_session_core::policy::SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD,
             ),
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
             beacon,
@@ -3144,7 +3152,10 @@ mod tests {
                 zid: [0x0C].into(),
                 qos: false,
                 compression: false,
-                tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(&policy),
+                tx_queue: wz_session_core::session_init_params::TxQueueConf::of_snapshots(
+                    &policy,
+                    &wz_session_core::limits::SessionLimits::BUILD,
+                ),
                 link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
                 beacon: GroupBeacon {
                     lease_ms: 5_000,

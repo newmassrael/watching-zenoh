@@ -1278,6 +1278,72 @@ mod enforcement {
         );
     }
 
+    /// A snapshot with `tx-no-progress-deadline` on, or `None` where the build keeps it off, so
+    /// no queue holds a window.
+    #[cfg(feature = "storage-profile")]
+    fn no_progress_deadline_on() -> Option<crate::policy::SessionPolicy> {
+        use crate::policy::{SessionPolicy, TxNoProgressDeadline};
+        let mut policy = SessionPolicy::defaults();
+        policy
+            .select_tx_no_progress_deadline(TxNoProgressDeadline::On)
+            .ok()?;
+        Some(policy)
+    }
+
+    /// `TX_NO_PROGRESS_WINDOW_US` with nothing stated: the queue a creator builds from the
+    /// snapshots holds the build's window, and a blocking message asks for room no longer than it.
+    #[cfg(feature = "storage-profile")]
+    #[test]
+    fn tx_no_progress_window_us_with_nothing_stated_is_the_builds_window() {
+        use crate::link::RoomWait;
+        use crate::session_init_params::TxQueueConf;
+        use crate::tx_deadline::PushDeadline;
+        let Some(on) = no_progress_deadline_on() else {
+            return;
+        };
+        let queue = TxQueueConf::of_snapshots(&on, &SessionLimits::defaults());
+        let window = caps::TX_NO_PROGRESS_WINDOW_US as u64;
+        assert_eq!(queue.no_progress_us, Some(window));
+        assert_eq!(
+            PushDeadline::new(false, &queue).ask(),
+            RoomWait::Block {
+                wait_us: window.min(queue.wait_before_close_us)
+            }
+        );
+    }
+
+    /// `TX_NO_PROGRESS_WINDOW_US` stated as 250: the queue of either transmit model holds a
+    /// window of 250 microseconds, and a blocking message asks for room no longer than that,
+    /// while its total wait is left as it was.
+    #[cfg(feature = "storage-profile")]
+    #[test]
+    fn tx_no_progress_window_us_stated_is_the_window_a_blocking_message_waits() {
+        use crate::link::RoomWait;
+        use crate::session_init_params::{TxQueueConf, WAIT_BEFORE_CLOSE_US};
+        use crate::tx_deadline::PushDeadline;
+        stated_as(
+            SessionLimits::select_tx_no_progress_window_us,
+            250,
+            TxNoProgressWindowUs::DOMAIN.is_singleton(),
+            |limits| {
+                let Some(on) = no_progress_deadline_on() else {
+                    return;
+                };
+                for queue in [
+                    TxQueueConf::of_snapshots(&on, limits),
+                    TxQueueConf::pico_of_snapshots(&on, limits),
+                ] {
+                    assert_eq!(queue.no_progress_us, Some(250));
+                    assert_eq!(queue.wait_before_close_us, WAIT_BEFORE_CLOSE_US);
+                    assert_eq!(
+                        PushDeadline::new(false, &queue).ask(),
+                        RoomWait::Block { wait_us: 250 }
+                    );
+                }
+            },
+        );
+    }
+
     /// The places of one querier, made as the runtime that declares the querier makes them: held
     /// to the bound the session's observer was handed.
     fn querier_places(limits: &SessionLimits) -> crate::quota::Quota {

@@ -184,7 +184,9 @@ fn group_params(zid: &[u8], timing: &GroupTiming, policy: &SessionPolicy) -> Mul
         batch_size: GROUP_BATCH_BYTES,
         is_qos: false,
         compression: false,
-        tx_queue: TxQueueConf::of_policy(policy),
+        // The node's image resolves no limits snapshot of its own: the build's window is the one
+        // its group runs with, named here.
+        tx_queue: TxQueueConf::of_snapshots(policy, &wz_session_core::limits::SessionLimits::BUILD),
         link_rx: LinkRxConf::default(),
         // The MCU session is zenoh-pico's.
         join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
@@ -511,7 +513,10 @@ mod tests {
             }
             let params = group_params(&[0x01, 0x02], &GroupTiming::ZENOH, &policy);
             assert_eq!(params.tx_queue.no_progress_us.is_some(), on, "{on}");
-            assert_eq!(params.tx_queue, TxQueueConf::of_policy(&policy));
+            assert_eq!(
+                params.tx_queue,
+                TxQueueConf::of_snapshots(&policy, &wz_session_core::limits::SessionLimits::BUILD)
+            );
             assert_eq!(params.lease_ms, GroupTiming::ZENOH.lease_ms);
             built += 1;
         }

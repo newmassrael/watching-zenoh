@@ -5552,7 +5552,10 @@ mod link_congestion_tests {
             super::TxQueueConf {
                 wait_before_drop_us: 42,
                 wait_before_close_us: 4_242,
-                ..super::TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults())
+                ..super::TxQueueConf::of_snapshots(
+                    &wz_session_core::policy::SessionPolicy::defaults(),
+                    &wz_session_core::limits::SessionLimits::BUILD,
+                )
             },
         );
         let meta = super::PushMetadata {
@@ -5598,8 +5601,11 @@ mod link_congestion_tests {
             link.block_first_asked(),
             [(
                 Priority::InteractiveHigh,
-                super::TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults())
-                    .wait_before_drop_us
+                super::TxQueueConf::of_snapshots(
+                    &wz_session_core::policy::SessionPolicy::defaults(),
+                    &wz_session_core::limits::SessionLimits::BUILD
+                )
+                .wait_before_drop_us
             )],
             "keyed by the reply's own priority"
         );
@@ -5662,7 +5668,10 @@ mod link_congestion_tests {
     fn session(link: Arc<CongestibleLink>) -> Arc<super::SessionLinkActions> {
         session_with_queue(
             link,
-            super::TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults()),
+            super::TxQueueConf::of_snapshots(
+                &wz_session_core::policy::SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD,
+            ),
         )
     }
 
@@ -5817,7 +5826,10 @@ mod link_congestion_tests {
             super::TxQueueConf {
                 wait_before_drop_us: 42,
                 wait_before_close_us: 4_242,
-                ..super::TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults())
+                ..super::TxQueueConf::of_snapshots(
+                    &wz_session_core::policy::SessionPolicy::defaults(),
+                    &wz_session_core::limits::SessionLimits::BUILD,
+                )
             },
         );
         actions
@@ -5845,7 +5857,10 @@ mod link_congestion_tests {
         params.batch_size = 1_024;
         params.tx_queue = super::TxQueueConf {
             sizes,
-            ..super::TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults())
+            ..super::TxQueueConf::of_snapshots(
+                &wz_session_core::policy::SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD,
+            )
         };
         let actions =
             super::new_session_actions(link.clone(), params, crate::runtime_impl::TokioTime::new());
@@ -5893,10 +5908,11 @@ mod link_congestion_tests {
         }
         assert_eq!(
             *link.shapes.lock().expect("shapes"),
-            [
-                super::TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults())
-                    .shape(true, 65_535, 65_535)
-            ]
+            [super::TxQueueConf::of_snapshots(
+                &wz_session_core::policy::SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD
+            )
+            .shape(true, 65_535, 65_535)]
         );
     }
 
@@ -6125,8 +6141,10 @@ mod link_congestion_tests {
     /// dropped (`SendWireError::HeldConduit`), as pico's put fails.
     #[test]
     fn under_the_pico_profile_a_droppable_message_behind_a_held_conduit_asks_nothing() {
-        let queue =
-            super::TxQueueConf::pico_of_policy(&wz_session_core::policy::SessionPolicy::defaults());
+        let queue = super::TxQueueConf::pico_of_snapshots(
+            &wz_session_core::policy::SessionPolicy::defaults(),
+            &wz_session_core::limits::SessionLimits::BUILD,
+        );
         let seen = drop_behind_a_blocking_sender(queue);
         assert_eq!(
             seen.sent,
@@ -6210,7 +6228,10 @@ mod link_congestion_tests {
             link.clone(),
             super::TxQueueConf {
                 expiry_keeps_session: true,
-                ..super::TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults())
+                ..super::TxQueueConf::of_snapshots(
+                    &wz_session_core::policy::SessionPolicy::defaults(),
+                    &wz_session_core::limits::SessionLimits::BUILD,
+                )
             },
         );
         link.set_room(LinkRoom::Congested);
@@ -6241,7 +6262,10 @@ mod link_congestion_tests {
         params.initial_sn = 7;
         params.tx_queue = super::TxQueueConf {
             expiry_keeps_session: true,
-            ..super::TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults())
+            ..super::TxQueueConf::of_snapshots(
+                &wz_session_core::policy::SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD,
+            )
         };
         Some(super::new_session_actions(
             link,
@@ -6260,7 +6284,10 @@ mod link_congestion_tests {
             link.clone(),
             super::TxQueueConf {
                 expiry_keeps_session: true,
-                ..super::TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults())
+                ..super::TxQueueConf::of_snapshots(
+                    &wz_session_core::policy::SessionPolicy::defaults(),
+                    &wz_session_core::limits::SessionLimits::BUILD,
+                )
             },
         );
         link.set_room(LinkRoom::Congested);
@@ -6408,7 +6435,10 @@ mod link_congestion_tests {
             link.clone(),
             super::TxQueueConf {
                 expiry_keeps_session: true,
-                ..super::TxQueueConf::of_policy(&wz_session_core::policy::SessionPolicy::defaults())
+                ..super::TxQueueConf::of_snapshots(
+                    &wz_session_core::policy::SessionPolicy::defaults(),
+                    &wz_session_core::limits::SessionLimits::BUILD,
+                )
             },
         );
         link.set_room(LinkRoom::Congested);
