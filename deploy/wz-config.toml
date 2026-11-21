@@ -2668,7 +2668,7 @@ default = 32
 storage = "both"
 scope = "session"
 binding_heap = "open"
-binding_fixed = "build"
+binding_fixed = "open"
 read = "snapshot"
 # `wire` is none: within the limit no byte a peer sees changes; past it, what does not fit is
 # refused.
@@ -2694,7 +2694,7 @@ default = 16
 storage = "both"
 scope = "session"
 binding_heap = "open"
-binding_fixed = "build"
+binding_fixed = "open"
 read = "snapshot"
 # `wire` is none: within the limit no byte a peer sees changes; past it, what does not fit is
 # left out.
@@ -2795,7 +2795,7 @@ default = 8
 storage = "both"
 scope = "session"
 binding_heap = "open"
-binding_fixed = "build"
+binding_fixed = "open"
 read = "snapshot"
 wire = "none"
 help = '''
@@ -2818,7 +2818,7 @@ default = 8
 storage = "both"
 scope = "session"
 binding_heap = "open"
-binding_fixed = "build"
+binding_fixed = "open"
 read = "snapshot"
 # `wire` is none: within the limit no byte a peer sees changes; past it, what does not fit is
 # refused.
@@ -2844,7 +2844,7 @@ default = 1024
 storage = "both"
 scope = "session"
 binding_heap = "open"
-binding_fixed = "build"
+binding_fixed = "open"
 read = "snapshot"
 wire = "none"
 help = '''

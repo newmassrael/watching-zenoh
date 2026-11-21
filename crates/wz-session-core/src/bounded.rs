@@ -1104,6 +1104,18 @@ impl<T> Drop for LentIntoIter<T> {
 /// spans, in whatever order they are lent.
 pub const ARENA_ALIGN: usize = 16;
 
+/// What an arena of no bytes points at ([`Arena::empty`]): an address aligned as every span of an
+/// arena starts.
+#[repr(align(16))]
+struct SpanStart;
+
+const _: () = assert!(
+    core::mem::align_of::<SpanStart>() == ARENA_ALIGN,
+    "an empty arena's spans start aligned as every arena's do"
+);
+
+static NO_BYTES: SpanStart = SpanStart;
+
 /// Memory reserved once for the tables of a session, lent to them in spans: each table of the
 /// [`Lent`] policy is one span (`docs/c-abi-no-heap-pools.md`, section 5).
 ///
@@ -1172,6 +1184,19 @@ impl Arena {
         Self {
             base,
             bytes,
+            lent: 0,
+        }
+    }
+
+    /// An arena of no bytes, which lends only tables of no rows: the storage of a table no memory
+    /// was given for. Such a table was lent, so it refuses every value as a full table does, and
+    /// is not the defect of a maker that lent it nothing (`LentSeq::refuse_unlent`).
+    pub fn empty() -> Self {
+        Self {
+            // No byte of it is read or written: every span it lends is of no bytes, and starts
+            // here, aligned for every row an arena lends.
+            base: NonNull::from(&NO_BYTES).cast::<u8>(),
+            bytes: 0,
             lent: 0,
         }
     }
@@ -1669,6 +1694,25 @@ mod tests {
                 .lend(N)
                 .expect("the arena is laid out for the table")
         }
+    }
+
+    /// An arena of no bytes lends a table of no rows, which refuses a value as a full table does,
+    /// and refuses a table of one row as exhausted, lending nothing.
+    #[test]
+    fn an_empty_arena_lends_only_tables_of_no_rows() {
+        let mut arena = Arena::empty();
+        let mut table: BoundedVec<u64, 4, Lent> = arena.lend(0).expect("no rows take no bytes");
+        assert!(matches!(table.push(7), Err(CapacityFull(7))));
+        assert!(table.is_empty());
+        assert_eq!(table.free_slots(), 0);
+        assert_eq!(
+            arena.lend::<u64, 4>(1).err(),
+            Some(LendRefused::Exhausted {
+                asked: Arena::table_bytes::<u64>(1),
+                left: 0,
+            })
+        );
+        assert_eq!(arena.high_water(), 0);
     }
 
     /// A table of byte buffers takes a span of flags and a span of bytes, which is what

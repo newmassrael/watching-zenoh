@@ -410,6 +410,16 @@ fn a_listener_lays_out_the_gets_of_each_face_it_admits() {
         row(&dial, "pending gets").entry_bytes,
         "every face's table is the same"
     );
+    // What a face's peer writes is held once for each face, as its gets are, and never for the
+    // session's own gets.
+    assert_eq!(row(&dial, "peer tables").count, 1);
+    assert_eq!(row(&listening, "peer tables").count, 1 + 3 + 2);
+    assert_eq!(listening.peers().tables, 1 + 3 + 2);
+    assert_eq!(
+        row(&listening, "peer tables").entry_bytes,
+        row(&dial, "peer tables").entry_bytes,
+        "every face's peer tables are the same"
+    );
     assert_eq!(row(&dial, "link receive buffers").count, 1);
     assert_eq!(row(&listening, "link receive buffers").count, 1 + 3 + 2);
     assert_eq!(dial.gets().rows.queries, caps::MAX_PENDING_QUERIES);
@@ -417,6 +427,45 @@ fn a_listener_lays_out_the_gets_of_each_face_it_admits() {
         row(&listening, "subscribers"),
         row(&dial, "subscribers"),
         "the application's tables are held once"
+    );
+}
+
+/// Each face's peer tables are lent the values of their limits the open resolved, the build's for a
+/// session that states none, the replies and `Final`s none in a build without `queryable`; a limit
+/// lowered at the open lowers the row.
+#[test]
+fn each_faces_peer_tables_take_the_values_the_open_resolved() {
+    let built =
+        ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
+    let rows = built.peers().rows;
+    assert_eq!(rows.sub_interests, caps::MAX_INBOUND_SUB_INTERESTS);
+    assert_eq!(rows.pending_declares, caps::MAX_PENDING_DECLARES);
+    let answers = cfg!(feature = "queryable");
+    assert_eq!(
+        (rows.replies, rows.reply_bytes, rows.finals),
+        if answers {
+            (
+                caps::MAX_PENDING_REPLIES,
+                caps::REPLY_STAGE_BYTES,
+                caps::MAX_PENDING_FINALS,
+            )
+        } else {
+            (0, 0, 0)
+        }
+    );
+    let mut lowered = SessionLimits::defaults();
+    if lowered
+        .select_max_pending_declares(Quota::at_most(1))
+        .is_err()
+    {
+        // A build that keeps the limit to its own value has no other.
+        return;
+    }
+    let at_one = ArenaPlan::of(&client_config(), &lowered).expect("lays an arena out");
+    assert_eq!(at_one.peers().rows.pending_declares, 1);
+    assert!(
+        row(&at_one, "peer tables").entry_bytes < row(&built, "peer tables").entry_bytes,
+        "the staging lent fewer rows"
     );
 }
 

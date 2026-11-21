@@ -31,17 +31,21 @@
     feature = "pubsub-put"
 ))]
 
+use std::ptr::NonNull;
 use std::sync::{Arc, Mutex};
 
 use wz_codecs_test_support::TestWire;
+use wz_session_core::bounded::{Arena, Lent, ARENA_ALIGN};
 use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
+use wz_session_core::limits::SessionLimits;
 use wz_session_core::locality::Locality;
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::observer::ApplicationLayerObserver;
-use wz_session_core::peer_tables::PeerTables;
+use wz_session_core::peer_tables::{PeerRows, PeerTables};
 use wz_session_core::push_build::build_push_aliased;
 use wz_session_core::query_sink::{BoxedQuerySink, QueryView, ReplyOut};
 use wz_session_core::reply_sink::BoxedReplySink;
+use wz_session_core::reply_stage::ReplyStage;
 use wz_session_core::request_build::build_request_query;
 use wz_session_core::response_sink::{DeclareReplySink, LivelinessGetPrune, ResponseSink};
 use wz_session_core::sink::{BoxedSink, SampleView};
@@ -115,7 +119,12 @@ impl DeclareReplySink for Sent {
     fn send_declare_token_reply(&self, _token_id: u64, _keyexpr: &str, _interest_id: u64) {}
 
     #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
-    fn send_declare_final_reply(&self, _interest_id: u64) {}
+    fn send_declare_final_reply(&self, interest_id: u64) {
+        self.0
+            .lock()
+            .expect("not poisoned")
+            .push(format!("declare final {interest_id}"));
+    }
 
     #[cfg(feature = "declare-subscriber")]
     fn send_declare_subscriber_reply(
@@ -373,4 +382,104 @@ fn for_one_session_the_slot_observer_does_what_the_application_observer_does() {
         "and the same deliveries"
     );
     assert_eq!(slot_seen.lock().expect("not poisoned").len(), 2);
+}
+
+/// One block of an arena's memory, aligned as an arena's spans start.
+#[derive(Clone, Copy)]
+#[repr(C, align(16))]
+struct Block([u8; ARENA_ALIGN]);
+
+/// A peer's tables lent `each` rows of every table, with room for each reply's key and payload
+/// of 64 bytes, from an arena the test process leaks, so it outlives them.
+fn lent_peers(each: usize) -> PeerTables<Lent> {
+    let rows = PeerRows {
+        sub_interests: each,
+        pending_declares: each,
+        replies: each,
+        reply_bytes: ReplyStage::<Lent>::area_bytes(each, 64, 64).expect("a small area"),
+        finals: each,
+    };
+    let bytes = PeerTables::<Lent>::arena_bytes(rows).expect("within the address space");
+    let blocks = bytes.div_ceil(ARENA_ALIGN).max(1);
+    let region: &'static mut [Block] = vec![Block([0; ARENA_ALIGN]); blocks].leak();
+    // SAFETY: the region is aligned to `ARENA_ALIGN`, as its blocks are, holds at least `bytes`
+    // bytes, and is leaked, so nothing else uses it and it outlives every lent table.
+    let mut arena = unsafe { Arena::over(NonNull::from(region).cast::<u8>(), bytes) };
+    PeerTables::<Lent>::lent(&mut arena, rows, &SessionLimits::defaults())
+        .expect("the arena is laid out for the tables")
+}
+
+/// A peer whose tables an arena lent is answered as one on the heap is: two replies and the Final
+/// after them, for one query and then for the next, which is staged in the rows the drain of the
+/// first left.
+#[test]
+fn a_peer_whose_tables_are_lent_is_answered_in_the_rows_it_was_lent() {
+    let (mut observer, _seen) = slot();
+    let mut peers = lent_peers(2);
+    let mut requesters = Req::new();
+    let sent = Sent::default();
+    for rid in [7, 8] {
+        let outcome = frame(vec![ask(rid, "demo/q/a")]);
+        observer.dispatch(
+            &mut peers,
+            &mut requesters,
+            IterationEvent::Poll(&outcome),
+            &sent,
+        );
+    }
+    let log = sent.log();
+    assert_eq!(log.len(), 6, "two replies and a Final each: {log:?}");
+    assert!(log[0].starts_with("reply") && log[1].starts_with("reply"));
+    assert_eq!(log[2], "final 7");
+    assert!(log[3].starts_with("reply") && log[4].starts_with("reply"));
+    assert_eq!(log[5], "final 8");
+}
+
+/// The answers staged to a lent peer's subscriber interests are drained and the staging keeps its
+/// rows: the next interest's chain is staged in them and drained in its turn.
+#[cfg(feature = "declare-subscriber")]
+#[test]
+fn a_lent_peers_interest_answers_drain_and_keep_their_rows() {
+    let (mut observer, _seen) = slot();
+    let mut peers = lent_peers(2);
+    let mut requesters = Req::new();
+    let sent = Sent::default();
+    for interest_id in [5u64, 6] {
+        observer
+            .subscribers
+            .respond_to_subscriber_interest_borrowed(
+                &mut peers.subscribers,
+                interest_id,
+                Some("demo/**"),
+                false,
+                true,
+                false,
+            );
+        observer.flush_pending(&mut peers, &mut requesters, &sent);
+    }
+    assert_eq!(sent.log(), vec!["declare final 5", "declare final 6"]);
+}
+
+/// The answers staged to a lent peer's liveliness interests are drained in place: the one row the
+/// staging was lent holds the next answer once the drain has sent the first.
+#[cfg(feature = "liveliness-token")]
+#[test]
+fn a_lent_peers_liveliness_answers_drain_in_place() {
+    use wz_session_core::declare::local_token::DeclResponseItem;
+
+    let (mut observer, _seen) = slot();
+    let mut peers = lent_peers(1);
+    let mut requesters = Req::new();
+    let sent = Sent::default();
+    for interest_id in [3u64, 4] {
+        assert!(
+            peers
+                .pending_declares
+                .push(DeclResponseItem::Final { interest_id })
+                .is_ok(),
+            "interest {interest_id}: the row is free"
+        );
+        observer.flush_pending(&mut peers, &mut requesters, &sent);
+    }
+    assert_eq!(sent.log(), vec!["declare final 3", "declare final 4"]);
 }

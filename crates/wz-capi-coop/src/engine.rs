@@ -2609,6 +2609,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 liveliness_subscribers: entities.liveliness_subscribers,
             },
             plan.gets(),
+            plan.peers(),
             memory,
         )
         .map_err(|lend| OpenError::Arena(ArenaRefused::Lend(lend)))?;

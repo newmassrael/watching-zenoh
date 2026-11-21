@@ -16,6 +16,14 @@
 //!   `MAX_PENDING_LIVELINESS_GETS`) for each face the session may hold at once, which a face
 //!   takes when it comes and gives back when it goes, and with `local-queryable` one of those
 //!   pending on the session's own queryables, which no face holds ([`GetTables`]);
+//! - one table of what a face's peer writes and is owed for each face the session may hold at once,
+//!   taken and given back as the face's gets are ([`FacePeers`]): its subscriber interests
+//!   (`MAX_INBOUND_SUB_INTERESTS`), the answers staged back to them and to its liveliness
+//!   interests (`MAX_PENDING_DECLARES`), the replies staged for its queries
+//!   (`MAX_PENDING_REPLIES`, each with a key and a payload of `MAX_KEYEXPR_BYTES` and
+//!   `MAX_REPLY_PAYLOAD_BYTES`) and the `Final`s owed after them (`MAX_PENDING_FINALS`), the
+//!   replies and `Final`s none in a build without `queryable`. What a peer declares by its own
+//!   ids is held inline in the table, at the build's capacities;
 //! - the buffers of each link the session may hold: a receive buffer of the batch the session
 //!   advertises, a streamed batch's length counted inside it, and [`LINK_TX_SLOTS`] slots of that
 //!   length to encode its frames into, each table with the flags that say which buffers are lent
@@ -40,9 +48,9 @@
 //! as `max_faces` admits, each a link it attaches or accepts; one that listens holds as many again
 //! in their handshake as `accept_pending` admits. A group's face is no link of the session's: it
 //! has a row of gets and no buffers. These are the tables whose limits bind at the open
-//! (`binding_fixed = "open"`). A link's reassembly, what a face's peer writes and what a group's
-//! members rejoin join the plan with the units that lend them from the arena and bound them by
-//! limits of their own (`docs/c-abi-no-heap-pools.md`, sections 4.5, 4.9 and 4.14): reserved
+//! (`binding_fixed = "open"`). A link's reassembly and what a group's members rejoin join the
+//! plan with the units that lend them from the arena and bound them by limits of their own
+//! (`docs/c-abi-no-heap-pools.md`, sections 4.9 and 4.14): reserved
 //! before then, they would be memory nothing uses, and a link's reassembly is sized by
 //! `max_message_size`, which upstream's default leaves at a gibibyte.
 //!
@@ -68,8 +76,10 @@ use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::caps;
 use wz_session_core::limit_binding::{Quota, UnlentRows};
 use wz_session_core::limits::SessionLimits;
+use wz_session_core::peer_tables::{PeerRows, PeerTables};
 use wz_session_core::pubsub::SubscriberTable;
 use wz_session_core::reply_sink::{BoxedReplySink, ConsolidatingSink};
+use wz_session_core::reply_stage::ReplyStage;
 use wz_session_core::sink::BoxedSink;
 use wz_session_core::slot_observer::{RequesterRows, Requesters};
 
@@ -105,7 +115,7 @@ impl ArenaRow {
 }
 
 /// The most rows a plan holds: every row of the build with every feature.
-pub const ARENA_ROWS: usize = 19;
+pub const ARENA_ROWS: usize = 20;
 
 /// The slots each link is lent to encode its frames into: a batching session holds a batch open in
 /// one slot while it encodes the next message, which does not join it, into another.
@@ -179,6 +189,17 @@ pub struct GetTables {
 /// One face's table of pending gets, as the arena lends it.
 type FaceGets = Requesters<ConsolidatingSink<BoxedReplySink>, BoxedReplySink, Lent>;
 
+/// The tables of what a face's peer writes and is owed that a session's arena lends: how many rows
+/// each table of one is lent, and how many there are, one for each face the session may hold at
+/// once.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FacePeers {
+    /// The rows of each table of one face's.
+    pub rows: PeerRows,
+    /// How many faces' tables.
+    pub tables: usize,
+}
+
 impl EntityRows {
     /// The rows of the write filters' one table: a publisher's and a querier's each.
     pub const fn filters(&self) -> Option<usize> {
@@ -208,6 +229,7 @@ pub struct ArenaPlan {
     lane_bytes: usize,
     entities: EntityRows,
     gets: GetTables,
+    peers: FacePeers,
     held_queries: usize,
 }
 
@@ -230,6 +252,7 @@ impl ArenaPlan {
             )?,
             entities: EntityRows::default(),
             gets: GetTables::default(),
+            peers: FacePeers::default(),
             held_queries: 0,
         };
         let faces = faces_of(config).ok_or(ArenaRefused::TooLarge)?;
@@ -329,6 +352,18 @@ impl ArenaPlan {
             plan.gets.tables,
             FaceGets::arena_bytes(plan.gets.rows).ok_or(ArenaRefused::TooLarge)?,
         );
+        // A row of tables, each what one face's peer writes and is owed: a face takes one whole.
+        plan.peers = FacePeers {
+            rows: peer_rows(limits)?,
+            tables: faces,
+        };
+        plan.put(
+            "peer tables",
+            "MAX_INBOUND_SUB_INTERESTS + MAX_PENDING_DECLARES + MAX_PENDING_REPLIES + \
+             MAX_PENDING_FINALS",
+            plan.peers.tables,
+            PeerTables::<Lent>::arena_bytes(plan.peers.rows).ok_or(ArenaRefused::TooLarge)?,
+        );
         plan.held_queries = if cfg!(feature = "queryable") {
             lent::<{ caps::MAX_PENDING_FINALS }>("MAX_PENDING_FINALS", limits.max_pending_finals())?
         } else {
@@ -406,6 +441,12 @@ impl ArenaPlan {
     /// The tables of pending gets the arena lends, and the rows of each.
     pub fn gets(&self) -> GetTables {
         self.gets
+    }
+
+    /// The tables of what each face's peer writes and is owed the arena lends, and the rows of
+    /// each.
+    pub fn peers(&self) -> FacePeers {
+        self.peers
     }
 
     /// How many queries the session holds for its queryables' callbacks at once
@@ -507,6 +548,47 @@ fn entity_rows(limits: &SessionLimits) -> Result<EntityRows, ArenaRefused> {
             "MAX_MATCHING_LISTENERS",
             limits.max_matching_listeners(),
         )?,
+    })
+}
+
+/// The rows of each table of what one face's peer writes and is owed, under `limits`. The replies'
+/// area holds as many replies as the stage has rows, each of the longest key and payload the
+/// session admits, as the build's stage holds them at the build's values.
+fn peer_rows(limits: &SessionLimits) -> Result<PeerRows, ArenaRefused> {
+    let replies = if cfg!(feature = "queryable") {
+        lent::<{ caps::MAX_PENDING_REPLIES }>("MAX_PENDING_REPLIES", limits.max_pending_replies())?
+    } else {
+        0
+    };
+    let reply_bytes = if replies == 0 {
+        0
+    } else {
+        ReplyStage::<Lent>::area_bytes(
+            replies,
+            lent::<{ caps::MAX_REPLY_PAYLOAD_BYTES }>(
+                "MAX_REPLY_PAYLOAD_BYTES",
+                limits.max_reply_payload_bytes(),
+            )?,
+            lent::<{ caps::MAX_KEYEXPR_BYTES }>("MAX_KEYEXPR_BYTES", limits.max_keyexpr_bytes())?,
+        )
+        .ok_or(ArenaRefused::TooLarge)?
+    };
+    Ok(PeerRows {
+        sub_interests: lent::<{ caps::MAX_INBOUND_SUB_INTERESTS }>(
+            "MAX_INBOUND_SUB_INTERESTS",
+            limits.max_inbound_sub_interests(),
+        )?,
+        pending_declares: lent::<{ caps::MAX_PENDING_DECLARES }>(
+            "MAX_PENDING_DECLARES",
+            limits.max_pending_declares(),
+        )?,
+        replies,
+        reply_bytes,
+        finals: if cfg!(feature = "queryable") {
+            lent::<{ caps::MAX_PENDING_FINALS }>("MAX_PENDING_FINALS", limits.max_pending_finals())?
+        } else {
+            0
+        },
     })
 }
 
