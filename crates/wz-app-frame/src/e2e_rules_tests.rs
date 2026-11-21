@@ -595,6 +595,52 @@ fn a_frame_that_fails_integrity_is_reported_moves_nothing_and_keeps_its_payload(
     );
 }
 
+/// An identifier word whose parts leave bits 12 to 15 and bit 7 to none, under a CRC that does not
+/// cover the word, so a frame can carry other values in those bits and still verify.
+const UNOWNED: &str = r#"{
+  "name": "syn-unowned",
+  "fields": [
+    {"name": "ident", "bytes": 2, "xor": "0xC3A5",
+     "split": [{"name": "hi", "lsb": 8, "width": 4}, {"name": "lo", "lsb": 0, "width": 7}]},
+    {"name": "counter", "bytes": 1},
+    {"name": "length", "bytes": 1},
+    {"name": "crc", "bytes": 2}
+  ],
+  "crc": {"field": "crc", "width": 16, "poly": "0x8005", "init": "0x0000",
+          "refin": true, "refout": true, "xorout": "0x0000",
+          "cover": ["@payload", "counter", "length"]},
+  "length": {"field": "length", "counts": "frame"},
+  "counter": {"field": "counter", "max_gap": 2, "timeout_ms": 0},
+  "judge": {"ident": "ident"}
+}"#;
+
+#[test]
+fn a_split_identifier_is_judged_in_the_bits_its_parts_own() {
+    let p = Profile::parse(UNOWNED).expect("valid");
+    let ident = &p.fields()[p.field_index("ident").expect("ident")];
+    assert_eq!(ident.owned_bits(), 0x0F7F);
+    let counter = &p.fields()[p.field_index("counter").expect("counter")];
+    assert_eq!(counter.owned_bits(), 0xFF, "a plain field owns every bit");
+
+    let values = Values::new().parts("ident", &[("hi", 0x9), ("lo", 0x35)]);
+    let mut rx = indexed(p.clone(), &values, 1);
+    let first = frame(&p, &values, 1, b"xy");
+    let v = rx.receive(0, &first, 0).expect("judged");
+    assert_eq!((v.status, v.failed), (Status::First, 0));
+    // Bits 12 to 15 are the first byte's high nibble and bit 7 the second byte's top bit: written
+    // otherwise, they are no part of the identifier.
+    let mut other = frame(&p, &values, 2, b"xy");
+    other[0] ^= 0xF0;
+    other[1] ^= 0x80;
+    let v = rx.receive(0, &other, 1).expect("judged");
+    assert_eq!((v.status, v.failed), (Status::Ok, 0));
+    // A bit a part owns is: the frame names another identifier.
+    let mut stranger = frame(&p, &values, 3, b"xy");
+    stranger[1] ^= 0x01;
+    let v = rx.receive(0, &stranger, 2).expect("judged");
+    assert_eq!((v.status, v.failed), (Status::Integrity, FAILED_IDENT));
+}
+
 #[test]
 fn a_profile_without_the_length_rule_does_not_judge_the_length() {
     let p = right();

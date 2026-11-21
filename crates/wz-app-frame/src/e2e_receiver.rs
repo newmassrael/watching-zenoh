@@ -18,10 +18,10 @@
 //! 1. The frame is opened under the profile. A frame shorter than the header
 //!    fails integrity as [`FAILED_SHORT`], with an empty payload.
 //! 2. **Integrity.** The CRC, then the rules of the profile's `judge` object:
-//!    the identifier field must equal the expected one ([`FAILED_IDENT`]) and,
-//!    when the profile says so, the length field must agree with the frame
-//!    ([`FAILED_LENGTH`]). A frame that fails any of them is
-//!    [`Status::Integrity`] and moves no state of the stream it is judged in.
+//!    the identifier field must equal the expected one in the bits it owns
+//!    ([`FAILED_IDENT`]) and, when the profile says so, the length field must
+//!    agree with the frame ([`FAILED_LENGTH`]). A frame that fails any of them
+//!    is [`Status::Integrity`] and moves no state of the stream it is judged in.
 //! 3. **The stream.** Under [`Keying::Indexed`] it is the caller's index. Under
 //!    [`Keying::Senders`] it is the slot of the sender identity the frame's
 //!    message cell carries: the slot that holds it, even for a frame that is
@@ -529,7 +529,9 @@ impl Receiver {
             failed |= FAILED_CRC;
         }
         if let (Some(index), Some(expected)) = (rules.ident, self.expected_ident) {
-            if opened.fields[index].value != expected {
+            // The expected value is made as a sender makes it, so it has no bit outside these.
+            let owned = self.profile.fields()[index].owned_bits();
+            if opened.fields[index].value & owned != expected {
                 failed |= FAILED_IDENT;
             }
         }
