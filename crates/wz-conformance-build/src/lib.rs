@@ -390,6 +390,17 @@ mod tests {
             tokio.digest(),
             "the engine alone moves the digest"
         );
+        let no_std_host = of_build("pico", |id| id == "os-posix", |_| None);
+        assert_eq!(
+            (no_std_host.engine, no_std_host.platform),
+            ("coop", "host"),
+            "a host library without `std` runs the cooperative engine"
+        );
+        assert_eq!(
+            no_std_host.digest(),
+            coop.digest(),
+            "the form is not the statement's: the same capabilities on the same engine and host"
+        );
         let zephyr = of_build("pico", |id| id == "os-zephyr", |_| None);
         assert_eq!((zephyr.engine, zephyr.platform), ("coop", "zephyr"));
         assert_ne!(
