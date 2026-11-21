@@ -496,17 +496,16 @@ U10 the ABI's own objects; U11 to U15 the rest; U16 closes the phase.
 ## 7. The heap the C ABI build still links
 
 What a cooperative C library still instantiates with the `Heap` policy, or on the heap, after the
-units on the track so far (U0, U1, U2, U4 in part, U5, U8, U9, and the peer-written tables of
-section 4.5), read from the source and to be confirmed by the symbol diff of the library, and the
+units on the track so far (U0, U1, U2, U4 in part, U5, U8, U9, the peer-written tables of
+section 4.5 and the links' reassembly of section 4.9), read from the source and to be confirmed by the symbol diff of the library, and the
 unit that takes each away:
 
 | what | where | taken away by |
 |------|-------|---------------|
-| a link's reassembly: a growable buffer per chain (`HeapStaging`), up to the slot of the generated pool (`reassembly_pool_mcu`, 4096 bytes), which also caps the chain a snapshot's `PICO_FRAG_MAX_BYTES` admits | `wz-runtime-coop` `reassembly_rx.rs` (`CoopReassembly`), `session_drive.rs` | the unit of section 4.9: a staging lent from each link's part of the arena, sized by the snapshot's `PICO_FRAG_MAX_BYTES`, the delivery lane sized to hold one such message with its key |
 | the reply stage a held query is answered into (`ReplyStage::held_to`, the build's profile) | `wz-capi-coop` `engine.rs`, `engine/query.rs` | U8's remainder: the held query's row of the query plane |
 | the declaration watchers inside the lent observer (`remote_subscribers`, `remote_queryables`, `liveliness`) | `wz-session-core` `slot_observer.rs` (`SlotObserverOf::lent`) | U5's remainder: their lists lent at open, at most `MAX_DECL_OBSERVERS` each |
 | the keys canonized for the ABI's own key expressions (`canonize_keyexpr`, a `Heap` string) | `wz-capi-pico` `keyexpr.rs` | U6 |
-| the liveliness samples, held queries, get events and handed publish legs (`VecDeque`, owned keys and payloads) | `wz-capi-coop` `engine.rs`, `engine/query.rs`, `engine/get.rs`, `engine/liveliness.rs` | U4's remainder |
+| the held queries, get events and handed publish legs (`VecDeque`, owned keys and payloads) | `wz-capi-coop` `engine.rs`, `engine/query.rs`, `engine/get.rs` | U4's remainder |
 | the faces' list, the sample marshal's key and payload copies, the closures | `engine/registry.rs` (`Vec<FaceTables>`), `wz-capi-pico` `pubsub.rs` (`SampleMarshal`), the port's sink factories | 4.6, U9's borrowed marshal, U7 |
 
 ## 8. The decisions this design rests on
