@@ -2707,6 +2707,23 @@ layer_c0_test_discipline() {
     _runci_leg runci_legs_runtime -- _runci_legs_selftest
     _runci_leg runci_leg_ledger_gate.selftest -- python3 scripts/lib/runci_leg_ledger_gate.py --selftest
     _runci_leg runci_leg_ledger_gate --after runci_leg_ledger_gate.selftest -- python3 scripts/lib/runci_leg_ledger_gate.py --check
+    # Every script under scripts/ is run by a lane, selftested by one, imported by a script that
+    # is, or declared with the reason no lane runs it and the owner action that does
+    # (scripts/lib/script_exercise_census.py). A tool no lane ran rotted for a day unseen.
+    _runci_leg script_exercise_census.selftest -- python3 scripts/lib/script_exercise_census.py --selftest
+    _runci_leg script_exercise_census --after script_exercise_census.selftest -- python3 scripts/lib/script_exercise_census.py --check
+    # The selftests of the tools that census found run by hand, by a hook or by another tool and
+    # by no lane: each drives its rules on synthetic input, a text read with no build. The
+    # message catalog's selftest ends by checking the fixture's tables are current.
+    _runci_leg app_plane_oracle.selftest -- bash scripts/app-plane-oracle.sh --selftest
+    _runci_leg loop_milestone.selftest -- python3 scripts/lib/loop_milestone.py --selftest
+    _runci_leg zephyr_cargo_lines.selftest -- python3 scripts/lib/zephyr_cargo_lines.py --selftest
+    _runci_leg capture_anonymise.selftest -- python3 scripts/lib/capture_anonymise.py --selftest
+    _runci_leg capture_provenance_gate.selftest -- bash scripts/lib/capture_provenance_gate.sh --selftest
+    _runci_leg changed_crate_packages.selftest -- python3 scripts/lib/changed_crate_packages.py --selftest
+    _runci_leg merge_tests.selftest -- python3 scripts/lib/merge_tests.py --selftest
+    _runci_leg message_catalog.selftest -- python3 scripts/lib/message_catalog.py --selftest
+    _runci_leg message_catalog_map.selftest -- python3 scripts/lib/message_catalog_map.py --selftest
     # R311y922 — the GATE TEST-PIN lint, item 232's own round. Several lanes
     # pin a SET of test names that must be PRESENT in a feature build, and
     # that pin goes stale when the test is renamed or moved. It has cost two
