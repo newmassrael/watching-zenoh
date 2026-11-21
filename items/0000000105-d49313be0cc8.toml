@@ -6,3 +6,9 @@ commit = "6cb97045f35e82a0cb3574a9a0dd55be96af8a32"
 base = "7deddd43299e974328637f4ab3c9f148f339da0e"
 machine = "mf977c53d872e"
 at = 1795231787
+
+[return]
+reason = "conflict"
+detail = "docs/reason-review-pins.md"
+report = "mb2af4e1c456c:0000000105-d49313be0cc8/attempt-2.log"
+at = 1795231815
