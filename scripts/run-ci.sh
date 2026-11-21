@@ -337,6 +337,12 @@
 #              the real zenoh-pico first as the control.
 #              Opt-in via `--layer S` or `WZ_RUN_LAYER_S=1`; the build
 #              host runs it long (docs/pico-stability-lane.md).
+#   Layer Cmut — the tests notice a change to the code they test: each
+#              scope of deploy/mutation_ratchet.json mutated by cargo-mutants
+#              in a copy of the workspace, its crate's tests run against each
+#              mutant, and its counts held to the committed row. Opt-in via
+#              `--layer Cmut` or `WZ_RUN_LAYER_CMUT=1`; hosted nightly
+#              (docs/mutation-testing.md).
 #
 # Exit codes:
 #   0  every required layer passed
@@ -2701,6 +2707,10 @@ layer_c0_test_discipline() {
     # the fleet as one unit per lane (docs/verdicts-in-the-fleet.md).
     _runci_leg runci_plan.selftest -- python3 scripts/lib/runci_plan.py --selftest
     _runci_leg runci_plan --after runci_plan.selftest -- python3 scripts/lib/runci_plan.py --check
+    # Layer Cmut's table (docs/mutation-testing.md): the gate's own fixtures, then its scopes and
+    # rows. The mutants themselves run nightly; this is what a push can afford of them.
+    _runci_leg mutation_ratchet_gate.selftest -- python3 scripts/lib/mutation_ratchet_gate.py --selftest
+    _runci_leg mutation_ratchet_gate --after mutation_ratchet_gate.selftest -- python3 scripts/lib/mutation_ratchet_gate.py --declared
     # Open-debt item 938 — the leg ledger's rules held on the text, and the
     # census of lanes whose independent gates still stop at the first red; and
     # the ledger's runtime, driven through fixture legs.
@@ -4594,6 +4604,126 @@ layer_c0mut_verdict_legs() {
     python3 scripts/lib/verdict_leg_mutation.py --selftest || return 1
     python3 scripts/lib/verdict_leg_mutation.py || return 1
     return 0
+}
+
+# ─── Layer Cmut — the tests notice a change to the code they test ───
+#
+# Layer C0mut mutates the analyzer's verdict legs; this lane mutates general code. Each scope of
+# deploy/mutation_ratchet.json (a crate and files of it) is handed to cargo-mutants, which changes
+# the files one mutant at a time in a copy of the cargo workspace and runs the crate's own tests
+# against each change. scripts/lib/mutation_ratchet_gate.py then holds the scope's counts to its
+# committed row: a kill rate that falls or a missed count that rises fails, a better one prints the
+# row to commit, and every missed mutant is printed as the test it asks for
+# (docs/mutation-testing.md).
+#
+# Opt-in, as Layer S is: a scope takes hours, so a full sweep skips the lane unless it is asked for
+# (`--layer Cmut` or `WZ_RUN_LAYER_CMUT=1`). `WZ_CMUT_PART=<scope>` runs one scope, which is a
+# fleet unit (scripts/lib/runci_plan.py); unset, every scope runs in turn and the gate reads them
+# together. `WZ_CMUT_JOBS` is how many mutants cargo-mutants builds at once, each in a copy of its
+# own (1). Hosted, the lane runs nightly, a scope a job (.github/workflows/mutation.yml).
+#
+# THE COPY'S SURROUNDINGS. cargo-mutants builds a copy of the workspace (`crates/`), never the
+# checkout: no `--in-place`. The workspace reaches files outside itself by relative path (wz-codecs
+# includes `../../out/wz-codecs/*.rs`, path dependencies go into `vendor/sce`), so the copy is made
+# in a directory that holds a link to every other top-level entry of the checkout: from the copy,
+# `..` holds `out`, `vendor`, `deploy`, `rust-toolchain.toml` and `.cargo` as `crates/..` does.
+# cargo-mutants makes its copy in the system temporary directory, which the lane points at that
+# directory. The checkout is only read.
+#
+# cargo-mutants is run as itself and not as a cargo subcommand, and without a target directory a
+# caller chose: under an artifact root the cargo shim would give the outer command the checkout's
+# mirrored target directory, every copy would inherit it, and the mutated builds would share one
+# target with each other and with every other lane. Each copy builds in its own; the shim passes a
+# workspace outside the checkout through as it is. A cargo a caller named (`CARGO`) is cleared too,
+# so the copies build with the toolchain rust-toolchain.toml pins, which the surroundings hold.
+layer_cmut_code_mutation() {
+    local want="${WZ_CMUT_PART:-}" jobs="${WZ_CMUT_JOBS:-1}"
+    local pin have parts part work rc n=0 fail=0
+    local -a argv=() outcomes=() ran=()
+    if [[ "$ONLY_LAYER" != "Cmut" && "${WZ_RUN_LAYER_CMUT:-0}" != "1" ]]; then
+        echo "Layer Cmut SKIP (opt-in mutation lane; --layer Cmut or WZ_RUN_LAYER_CMUT=1)"
+        return 0
+    fi
+    if [[ ! "$jobs" =~ ^[1-9][0-9]*$ ]]; then
+        echo "  Cmut FAIL: WZ_CMUT_JOBS=$jobs is not a count of at least 1" >&2
+        return 1
+    fi
+    python3 scripts/lib/mutation_ratchet_gate.py --selftest || return 1
+    python3 scripts/lib/mutation_ratchet_gate.py --declared || return 1
+    pin="$(python3 scripts/lib/mutation_ratchet_gate.py --tool-version)" || return 1
+    have="$(cargo-mutants mutants --version 2>/dev/null)" || have=""
+    if [[ "$have" != "cargo-mutants $pin" ]]; then
+        echo "  Cmut FAIL: the table pins cargo-mutants $pin and this machine runs '${have:-none}';" \
+            "bash scripts/install-cargo-mutants.sh installs the pin" >&2
+        return 1
+    fi
+    parts="$(python3 scripts/lib/mutation_ratchet_gate.py --parts)" || return 1
+    if [[ -n "$want" ]] && ! awk -v want="$want" '$1 == want { found = 1 } END { exit !found }' <<< "$parts"; then
+        echo "  Cmut FAIL — WZ_CMUT_PART=$want is none of the table's scopes:" >&2
+        awk '{ print "    " $1 }' <<< "$parts" >&2
+        return 1
+    fi
+    # Read through descriptor 3: the builds and tests inside inherit stdin, and one that read it
+    # would take the scopes still to come.
+    while read -r part _ <&3; do
+        [[ -z "$want" || "$part" == "$want" ]] || continue
+        n=$((n + 1))
+        work="$WZ_ARTIFACTS/target/cmut/$part"
+        rm -rf "$work"
+        if ! _cmut_surroundings "$work/mirror"; then
+            echo "  Cmut $part FAIL — the copy's surroundings could not be laid out in $work/mirror" >&2
+            fail=1
+            continue
+        fi
+        python3 scripts/lib/mutation_ratchet_gate.py --argv "$part" --output "$work/out" \
+            --jobs "$jobs" >"$work/argv" || { fail=1; continue; }
+        mapfile -d '' -t argv <"$work/argv"
+        echo "  Cmut $part: cargo-mutants ${argv[*]}"
+        (cd crates && env -u CARGO -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR \
+            TMPDIR="$work/mirror" cargo-mutants "${argv[@]}")
+        rc=$?
+        rm -rf "$work/mirror"
+        # 2 is a missed mutant and 3 a timeout: outcomes the gate reads. Anything else measured
+        # nothing (4: the unmutated tests failed in the copy; 1: the arguments were refused).
+        case "$rc" in
+            0 | 2 | 3)
+                outcomes+=("$work/out/mutants.out/outcomes.json")
+                ran+=("$part")
+                ;;
+            *)
+                echo "  Cmut $part FAIL — cargo-mutants exited $rc and measured nothing" >&2
+                fail=1
+                ;;
+        esac
+    done 3<<< "$parts"
+    if (( n == 0 )); then
+        echo "  Cmut FAIL — the table lists no scope to run" >&2
+        return 1
+    fi
+    if (( ${#ran[@]} > 0 )); then
+        python3 scripts/lib/mutation_ratchet_gate.py --check "${outcomes[@]}" \
+            --expect "$(IFS=,; printf '%s' "${ran[*]}")" || fail=1
+    fi
+    (( fail == 0 )) || return 1
+    _runci_lane_did Cmut "${#ran[@]}" "scope(s) held to their mutation rows"
+}
+
+# _cmut_surroundings <dir>
+#
+# The directory a scope's copy of `crates/` is made in: a link to every top-level entry of the
+# checkout but `crates` (the copy stands for it), `target` (each copy builds its own) and `.git`
+# (no build reads the checkout's history, and a copy must not write it).
+_cmut_surroundings() {
+    local dir="$1" entry name
+    mkdir -p "$dir" || return 1
+    for entry in "$repo_root"/* "$repo_root"/.[!.]*; do
+        [[ -e "$entry" ]] || continue
+        name="${entry##*/}"
+        case "$name" in
+            crates | target | .git) continue ;;
+        esac
+        ln -s "$entry" "$dir/$name" || return 1
+    done
 }
 
 # ─── Layer U — how many releases behind each pinned upstream is ─────
@@ -28871,6 +29001,7 @@ run_layer B layer_b_verify_codegen || overall=1
 run_layer B2 layer_b2_regen_diff || overall=1
 run_layer C0 layer_c0_test_discipline || overall=1
 run_layer C0mut layer_c0mut_verdict_legs || overall=1
+run_layer Cmut layer_cmut_code_mutation || overall=1
 run_layer C0i layer_c0i_impact_ref_gate || overall=1
 run_layer U layer_u_upstream_release_distance || overall=1
 run_layer C0b layer_c0b_job_budget_margin || overall=1
