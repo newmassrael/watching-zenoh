@@ -461,6 +461,12 @@ pub trait SessionLinks {
     /// What the drive loop pumps for a link this stack opened.
     type Pump: SessionDatagramLink + 'static;
 
+    /// Whether the stack opens links to an IPv6 end. `false` for a stack built without IPv6:
+    /// what reads an endpoint for it refuses a bracketed address as one it never dials and reads
+    /// IPv4 text alone, so an image of such a stack carries no reader of IPv6 text. A constant,
+    /// for that reason, as `Bind::IPV6` is on the slot profile.
+    const IPV6: bool = true;
+
     /// A UDP link that accepts: bound on `port`, with no peer until the first
     /// `InitSyn` it takes names one.
     fn open_acceptor(&self, port: u16) -> Result<OpenedLink<Self::Pump>, LinkOpenError>;
@@ -1353,6 +1359,12 @@ pub trait SlotStack: 'static {
 /// [`LinkOpenError::Exhausted`]. Written beside [`SlotStack`] for the reason that one is.
 #[cfg(feature = "session-slot")]
 pub trait Bind<D> {
+    /// Whether the stack opens links to an IPv6 end. `false` for a stack built without IPv6:
+    /// what reads an endpoint for it refuses a bracketed address as one it never dials and reads
+    /// IPv4 text alone, so an image of such a stack carries no reader of IPv6 text. A constant,
+    /// for that reason, as `DatagramSocket::CAN_SET_RECEIVE_TIMEOUT` is.
+    const IPV6: bool = true;
+
     /// The driver of a link that dials `to`; a protocol the stack has no link for
     /// is [`LinkOpenError::Unsupported`].
     fn bind(&mut self, to: Locator) -> Result<D, LinkOpenError>;

@@ -203,6 +203,9 @@ where
 {
     type Stream = LwipTcpStream<L, RX>;
 
+    // The port's lwIP has no IPv6 (`dial` refuses that family).
+    const IPV6: bool = false;
+
     fn dial(&self, to: SocketAddr) -> Result<Self::Stream, LinkOpenError> {
         // The port's lwIP has no IPv6: a locator of that family is not this stack's to dial.
         let SocketAddr::V4(to) = to else {

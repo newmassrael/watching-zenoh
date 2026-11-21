@@ -487,7 +487,9 @@ IMAGES = (
         # 2,664 on 2026-11-19, read alike on origin 07a955b26 and on the tree that generates the
         # keyexpr relations from SCXML: the six rows below were 8 bytes under (over, for the admin
         # node) their figures before that tree, so it did not move them.
-        peak=2664,
+        # 2,280 bytes on 2026-11-21, read by Layer Qzk on a build host at the tree
+        # that recovers the kit's text (which frame fell was not attributed).
+        peak=2280,
     ),
     # The fixed client with its storage block taken from the kernel heap at start
     # (`overlays/t2g_client_heap.conf`, CONFIG_WZ_STORAGE_HEAP, feature `heap-storage`): the code of
@@ -502,7 +504,9 @@ IMAGES = (
         unit=1,
         entry="wz_app_main",
         # 2,664 on 2026-11-19, the fixed client's chain (see its row).
-        peak=2664,
+        # 2,280 bytes on 2026-11-21, read by Layer Qzk on a build host at the tree
+        # that recovers the kit's text (which frame fell was not attributed).
+        peak=2280,
     ),
     # The same client with the session coalescing a send window into one datagram
     # (`overlays/t2g_client_batching.conf`). The batch writer and its flush path are two more
@@ -555,7 +559,9 @@ IMAGES = (
         unit=1,
         entry="wz_app_main",
         # 2,664 on 2026-11-19, the fixed client's chain (see its row).
-        peak=2664,
+        # 2,280 bytes on 2026-11-21, read by Layer Qzk on a build host at the tree
+        # that recovers the kit's text (which frame fell was not attributed).
+        peak=2280,
     ),
     # The fixed client that ASKS (`overlays/t2g_client_get.conf`): the getter of
     # `wz_session_mcu::slot_getter` is the application layer the observer's drain runs inside, and
@@ -656,7 +662,9 @@ IMAGES = (
         # the path under it is not followed).
         # 2,768 on 2026-11-18: the dial into the send of either address family, as the fixed
         # client's row says, 96 bytes over it. 2,760 on 2026-11-19 (the fixed client's row).
-        peak=2760,
+        # 2,376 bytes on 2026-11-21, read by Layer Qzk on a build host at the tree
+        # that recovers the kit's text (which frame fell was not attributed).
+        peak=2376,
     ),
     # The fixed client over the secure channel (`overlays/t2g_client_tls.conf`, decision D9):
     # the dial completes a TLS 1.3 handshake in Mbed TLS before the session sees a byte, and every
@@ -691,7 +699,9 @@ IMAGES = (
         # 5,152 on 2026-11-18: the node's address and locator text of either family and the send's
         # wider address (deploy/resource_budget.json's row). 5,144 on 2026-11-19 (the fixed
         # client's row).
-        peak=5144,
+        # 4,832 bytes on 2026-11-21, read by Layer Qzk on a build host at the tree
+        # that recovers the kit's text (which frame fell was not attributed).
+        peak=4832,
     ),
     # The fixed-memory ADMIN node over Zephyr's sockets and the secure channel on the T2G kit
     # (`overlays/t2g_admin_fixed_tls.conf`, decision D14 of docs/session-lifecycle-intent.md): it listens,
@@ -721,7 +731,9 @@ IMAGES = (
         # (an `IpAddr`, a `SocketAddr` and a 62-byte locator text of either family), and the send
         # path's wider address (deploy/resource_budget.json's row). 10,920 on 2026-11-19:
         # `fixed_admin::start` 4,448 to 4,456, read alike on origin 07a955b26 (the fixed client's row).
-        peak=10920,
+        # 10,552 bytes on 2026-11-21, read by Layer Qzk on a build host at the tree
+        # that recovers the kit's text (which frame fell was not attributed).
+        peak=10552,
     ),
 )
 
@@ -787,7 +799,13 @@ def frames(disassembly: str) -> list[tuple[int, str]]:
 
 
 _CALL = re.compile(r"\t(?:bl|b|b\.w)\t([0-9a-f]+) <")
-_INDIRECT = re.compile(r"\tblx\t(?:r\d+|ip)")
+#: A call through a register: `blx rN`, and the tail call through a register, `bx rN`, which the
+#: compiler emits where a function's last act is a call through a pointer (a waker's `wake`, a vtable
+#: slot) and it has no frame to pop, in any condition of an IT block. `bx lr` is a return, not a call.
+#: Reading only `blx` lost the call of a function whose register call became its tail when inlining
+#: moved (2026-11-21: `SlotSession::abort` left `hang_up` and ended in `bx r2` into the waker).
+REGISTER_CALL = r"bl?x(?:eq|ne|cs|hs|cc|lo|mi|pl|vs|vc|hi|ls|ge|lt|gt|le|al)?(?:\.n|\.w)?\s+(?:r\d+|sl|fp|ip)\s*$"
+_INDIRECT = re.compile(r"\t" + REGISTER_CALL)
 
 
 @dataclass(frozen=True)

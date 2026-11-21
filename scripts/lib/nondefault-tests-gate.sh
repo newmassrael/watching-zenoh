@@ -1971,14 +1971,17 @@ if [[ "${1:-}" == "--census" ]]; then
         return 0
     }
 
-    # SHARDING (hosted C1cn). The census builds every crate twice and is most of
-    # that job's clock (about 21 of its 26 minutes, wz-runtime-tokio alone nine),
-    # so hosted CI runs it as `WZ_CENSUS_SHARDS` jobs, each examining the members
-    # whose position in the member list is congruent to its `WZ_CENSUS_SHARD`.
+    # SHARDING (hosted C1cn). The census builds every crate twice and is the whole
+    # clock of a census job, so hosted CI runs it as `WZ_CENSUS_SHARDS` jobs. Which
+    # members a shard examines is `census_shard_plan.py`'s: the members dealt by
+    # measured cost (`c1cn_census_weights.tsv`), heaviest first, to the least
+    # loaded shard. A split by position put 1,047 s in one shard and 1,342 s in the
+    # other on run 44778189472, because five members are 1,483 s of the 2,389 s.
+    # Every shard computes the same plan from the same tree, so it is a partition.
     # Unset, the census examines every member, which is what a local run wants.
     # The partition covers every member only if ALL shards run, and this script
-    # cannot see a missing one: change the workflow's `shard` list and
-    # `WZ_CENSUS_SHARDS` together, or a crate silently stops being examined.
+    # cannot see a missing one: `shard_matrix_binding.py` holds the workflow's
+    # `shard` list to `WZ_CENSUS_SHARDS`.
     shards="${WZ_CENSUS_SHARDS:-1}"
     shard="${WZ_CENSUS_SHARD:-0}"
     if ! [[ "$shards" =~ ^[1-9][0-9]*$ && "$shard" =~ ^[0-9]+$ ]] ||
@@ -1987,19 +1990,30 @@ if [[ "${1:-}" == "--census" ]]; then
              "WZ_CENSUS_SHARDS=$shards is not a shard of a positive count" >&2
         exit 1
     fi
-    [[ "$shards" -gt 1 ]] && echo "  census: shard $shard of $shards"
+    planned=""
+    if [[ "$shards" -gt 1 ]]; then
+        echo "  census: shard $shard of $shards"
+        planned="$(python3 "$here/census_shard_plan.py" --shards "$shards" \
+            --shard "$shard" <<<"$members")" || {
+            echo "nondefault-tests: FAIL -- census_shard_plan.py could not plan" \
+                 "shard $shard of $shards" >&2
+            exit 1
+        }
+        planned=" $(tr '\n' ' ' <<<"$planned")"
+    fi
 
     rc=0
     total=0
     crates_with=0
     checked_rows=""
-    member_idx=-1
     mine=" "
     while read -r pkg tier; do
         [[ -n "$pkg" ]] || continue
-        member_idx=$((member_idx + 1))
-        (( member_idx % shards == shard )) || continue
+        [[ "$shards" -eq 1 || "$planned" == *" $pkg "* ]] || continue
         mine="$mine$pkg "
+        # Each member's own census cost, printed after it so that
+        # `c1cn_census_weights.tsv` can be refreshed from a run log.
+        started=$SECONDS
         if [[ "$tier" == "excluded" ]]; then
             echo "  census: $pkg SKIPPED -- gate 7 excludes it from all-features"
             continue
@@ -2029,7 +2043,10 @@ if [[ "${1:-}" == "--census" ]]; then
         fi
         comm -13 "$tmp/d" "$tmp/a" > "$tmp/diff"
         n="$(grep -c . < "$tmp/diff" || true)"
-        [[ "$n" -eq 0 ]] && continue
+        if [[ "$n" -eq 0 ]]; then
+            echo "  census: $pkg 0 only-with-features ($((SECONDS - started))s)"
+            continue
+        fi
         total=$((total + n))
         crates_with=$((crates_with + 1))
 
@@ -2118,7 +2135,7 @@ if [[ "${1:-}" == "--census" ]]; then
         if [[ "$remainder" -eq 0 ]]; then
             line="  census: $pkg $n only-with-features -- $covered run by a leg"
             [[ "$excused" -gt 0 ]] && line="$line, $excused skipped by name"
-            echo "$line"
+            echo "$line ($((SECONDS - started))s)"
         else
             echo "nondefault-tests: FAIL -- $pkg has $n test(s) only a feature" >&2
             echo "  build reaches; legs run $covered and SKIPS excuses $excused," >&2

@@ -461,6 +461,10 @@ impl<T: MsgPutSource + ?Sized> MsgPutSource for &T {
     }
 }
 
+/// The group `MsgPutExtensionsHas0x12` as `MsgPutParts` holds it.
+#[allow(dead_code)]
+pub type MsgPutExtensionsHas0x12Parts<'a> = MsgPutExtensionsHas0x12<&'a [super::ext_entry::ExtEntryParts<'a>], ::sce_forge_runtime::codec::Bounded<&'a [super::zbuf_slice::ZbufSliceParts<'a>], 4294967295>, ::sce_forge_runtime::codec::Bytes<'a, 4294967295>>;
+
 /// A value of `MsgPut` held in the types a caller already has: a source
 /// ([`MsgPutSource`]) whose lists are slices within their bounds and whose
 /// bodies are references.
@@ -474,7 +478,7 @@ pub struct MsgPutParts<'a> {
     /// The `encoding` field.
     pub encoding: Option<&'a super::encoding::EncodingParts<'a>>,
     /// The fields `extensions.has(0x12)` decides, held together (docs/adr/0065 §6 R4).
-    pub extensions_has_0x12: MsgPutExtensionsHas0x12<&'a [super::ext_entry::ExtEntryParts<'a>], ::sce_forge_runtime::codec::Bounded<&'a [super::zbuf_slice::ZbufSliceParts<'a>], 4294967295>, ::sce_forge_runtime::codec::Bytes<'a, 4294967295>>,
+    pub extensions_has_0x12: MsgPutExtensionsHas0x12Parts<'a>,
 }
 
 impl<'a> MsgPutSource for MsgPutParts<'a> {
@@ -682,13 +686,17 @@ impl ListWalk<0> for MsgPutSlicesWalk {
     fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
 }
 
+/// The group `MsgPutExtensionsHas0x12` as `MsgPutView` holds it.
+#[allow(dead_code)]
+pub type MsgPutExtensionsHas0x12View<'a> = MsgPutExtensionsHas0x12<::sce_forge_runtime::codec::Without<ListView<'a, MsgPutExtensionsWalk, 0>>, Bounded<ListView<'a, MsgPutSlicesWalk, 0>, 4294967295>, ::sce_forge_runtime::codec::Bytes<'a, 4294967295>>;
+
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct MsgPutView<'a> {
     pub header: u8,
     pub timestamp: Option<TimestampView<'a>>,
     pub encoding: Option<EncodingView<'a>>,
-    pub extensions_has_0x12: MsgPutExtensionsHas0x12<::sce_forge_runtime::codec::Without<ListView<'a, MsgPutExtensionsWalk, 0>>, Bounded<ListView<'a, MsgPutSlicesWalk, 0>, 4294967295>, ::sce_forge_runtime::codec::Bytes<'a, 4294967295>>,
+    pub extensions_has_0x12: MsgPutExtensionsHas0x12View<'a>,
     pub payload_len: Option<u64>,
     pub slice_count: Option<u32>,
 }

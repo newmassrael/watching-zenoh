@@ -3040,50 +3040,55 @@ enum LentDeclaration<'a> {
     )
 ))]
 impl<'a> LentDeclaration<'a> {
-    /// The declaration, borrowing the text the arguments borrow. `LengthOutOfRange` for a
-    /// keyexpr suffix past the protocol's `u16` length, which is not sent.
-    fn declare(
-        &self,
-    ) -> Result<wz_codecs::lent::Declare<'a>, sce_forge_runtime::codec::CodecError> {
+    /// Hand the declaration, borrowing the text the arguments borrow, to `with`: each kind as
+    /// a declaration of that kind alone ([`crate::lent_control::DeclarationOf`]), so the
+    /// writer a build links for it holds the encoders of the kinds this enum has in that build
+    /// and no other. `LengthOutOfRange` for a keyexpr suffix past the protocol's `u16`
+    /// length, which is not sent.
+    fn compose<W: DeclarationWith>(&self, with: W) -> W::Out {
         match *self {
             #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
-            Self::FinalReply { interest_id } => {
-                Ok(crate::lent_control::declare_final_reply(interest_id))
-            }
+            Self::FinalReply { interest_id } => with.declaration(Ok(
+                crate::lent_control::final_reply_declaration(interest_id),
+            )),
             #[cfg(feature = "declare-subscriber")]
             Self::SubscriberReply {
                 interest_id,
                 subscriber_id,
                 keyexpr,
-            } => crate::lent_control::declare_subscriber_reply_with_id(
+            } => with.declaration(crate::lent_control::subscriber_reply_declaration(
                 interest_id,
                 subscriber_id,
                 keyexpr,
-            ),
+            )),
             #[cfg(feature = "declare-subscriber")]
             Self::Subscriber {
                 id,
                 mapping_id,
                 suffix,
-            } => crate::lent_control::declare_subscriber(id, mapping_id, suffix),
+            } => with.declaration(crate::lent_control::subscriber_declaration(
+                id, mapping_id, suffix,
+            )),
             #[cfg(feature = "declare-queryable")]
             Self::Queryable {
                 id,
                 mapping_id,
                 suffix,
                 complete,
-            } => crate::lent_control::declare_queryable(
+            } => with.declaration(crate::lent_control::queryable_declaration(
                 id,
                 mapping_id,
                 suffix,
                 crate::queryable_info::QueryableInfo::local(complete),
-            ),
+            )),
             #[cfg(feature = "declare-token")]
             Self::Token {
                 id,
                 mapping_id,
                 suffix,
-            } => crate::lent_control::declare_token(id, mapping_id, suffix),
+            } => with.declaration(crate::lent_control::token_declaration(
+                id, mapping_id, suffix,
+            )),
         }
     }
 
@@ -3096,9 +3101,98 @@ impl<'a> LentDeclaration<'a> {
     /// same error, and the dispatch reports that refusal.
     #[inline(never)]
     fn encoded_len(&self) -> usize {
-        self.declare().map_or(0, |declare| {
-            wz_codecs::declare::DeclareWire::measure(&declare).len()
+        self.compose(CountDeclaration)
+    }
+
+    /// The declaration's bytes into `sink`, or the refusal of one that cannot be composed.
+    fn encode(
+        &self,
+        sink: &mut crate::tx_buf::TxSink<'_>,
+    ) -> Result<(), sce_forge_runtime::codec::CodecError> {
+        self.compose(WriteDeclaration(sink))
+    }
+}
+
+/// What [`LentDeclaration::compose`] does with the declaration it composes, whose type is the
+/// kind's own.
+#[cfg(all(
+    not(feature = "alloc"),
+    any(
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "liveliness-token"
+    )
+))]
+trait DeclarationWith {
+    type Out;
+    fn declaration<S: wz_codecs::declare::DeclareSource>(
+        self,
+        declaration: Result<S, sce_forge_runtime::codec::CodecError>,
+    ) -> Self::Out;
+}
+
+/// The bytes a declaration encodes to, zero for one that cannot be composed.
+#[cfg(all(
+    not(feature = "alloc"),
+    any(
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "liveliness-token"
+    )
+))]
+struct CountDeclaration;
+
+#[cfg(all(
+    not(feature = "alloc"),
+    any(
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "liveliness-token"
+    )
+))]
+impl DeclarationWith for CountDeclaration {
+    type Out = usize;
+    fn declaration<S: wz_codecs::declare::DeclareSource>(
+        self,
+        declaration: Result<S, sce_forge_runtime::codec::CodecError>,
+    ) -> usize {
+        declaration.map_or(0, |declaration| {
+            wz_codecs::declare::DeclareWire::measure(&declaration).len()
         })
+    }
+}
+
+/// A declaration written into the transmit sink.
+#[cfg(all(
+    not(feature = "alloc"),
+    any(
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "liveliness-token"
+    )
+))]
+struct WriteDeclaration<'s, 'b>(&'s mut crate::tx_buf::TxSink<'b>);
+
+#[cfg(all(
+    not(feature = "alloc"),
+    any(
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "liveliness-token"
+    )
+))]
+impl DeclarationWith for WriteDeclaration<'_, '_> {
+    type Out = Result<(), sce_forge_runtime::codec::CodecError>;
+    fn declaration<S: wz_codecs::declare::DeclareSource>(
+        self,
+        declaration: Result<S, sce_forge_runtime::codec::CodecError>,
+    ) -> Self::Out {
+        wz_codecs::declare::DeclareWire::encode_source(&declaration?, self.0)
     }
 }
 
@@ -3485,13 +3579,10 @@ impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T>
             return;
         };
         let qos = parts.qos;
-        // The reply's own size, counted by running its writer into a sink that keeps nothing: a
-        // Response has no size constant (its payload's bound is a u32 length), and the link lends
-        // a slot of this size. A reply the writer refuses is refused by the encode below too.
-        let size = {
-            let mut count = sce_forge_runtime::codec::CountSink::new();
-            writer.encode(&mut count).map_or(0, |()| count.len())
-        };
+        // The reply's own size: a Response has no size constant (its payload's bound is a u32
+        // length), and the link lends a slot of this size. A reply the writer refuses is refused
+        // by the encode below too.
+        let size = writer.encoded_len().unwrap_or(0);
         let _ = self
             .dispatch_network_message_at(
                 DispatchStage::Fresh,
@@ -10141,7 +10232,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// [`Self::half_open_cap_available`]: every InitAck size parameter
     /// must be `<=` our InitSyn advertisement (`self.params`), the
     /// zenoh-pico `_Z_ERR_TRANSPORT_OPEN_SN_RESOLUTION` rejection
-    /// condition (unicast/transport.c:123-140). `false` means the peer
+    /// condition (unicast/transport.c:123-140), the batch size only where the
+    /// ABI states zenoh-pico's rule for it (`link_rx.wider_init_ack_batch`,
+    /// [`crate::peer_init_caps::WiderInitAckBatch`]). `false` means the peer
     /// ENLARGED a parameter and the session must be rejected — the
     /// dispatcher drives the FSM's `framing.error` arm (Closing with
     /// `CloseReason::Invalid`, the wire's "invalid parameters" close
@@ -10165,6 +10258,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // i.e. exactly the value the InitSyn put on the wire (0 =
             // unset never reaches the wire), link-capped as it was sent.
             self.own_batch_advertisement(),
+            self.params.link_rx.wider_init_ack_batch,
             sn_res_byte,
             batch_size,
         )
@@ -12898,7 +12992,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             crate::declare_ext_qos::QOS_DECLARE,
             what.encoded_len(),
             crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Declare),
-            as_encoder(&|sink| what.declare()?.encode(sink)),
+            as_encoder(&|sink| what.encode(sink)),
         )
         .map(|_| ())
     }

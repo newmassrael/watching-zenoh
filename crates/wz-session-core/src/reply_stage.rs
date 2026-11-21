@@ -301,12 +301,20 @@ enum RowPayload<P: Storage> {
     Shared(crate::extshm::ShmSendHandle),
 }
 
+/// What a staged row holds of a reply. The timestamp, the attachment and the source info are held
+/// only by a build that puts them on a reply's wire (`pubsub-timestamp`, `pubsub-attachment`,
+/// `reply-source-info`, the gates `crate::lent_response` and the owned `Response` write them
+/// under, and the loopback reads them under): a build without one drops it at both, so a row of
+/// it would hold bytes no reader takes.
 enum RowKind<P: Storage> {
     Reply {
         payload: RowPayload<P>,
         encoding: RowEncoding<P>,
+        #[cfg(feature = "pubsub-timestamp")]
         timestamp: Option<(u64, BoundedVec<u8, ZID_BYTES, P>)>,
+        #[cfg(feature = "pubsub-attachment")]
         attachment: Option<Span<P>>,
+        #[cfg(feature = "reply-source-info")]
         source_info: Option<SourceInfo>,
     },
     #[cfg(feature = "query-reply-err")]
@@ -474,8 +482,11 @@ impl<P: Storage> ReplyStage<P> {
             RowKind::Reply {
                 payload,
                 encoding,
+                #[cfg(feature = "pubsub-timestamp")]
                 timestamp,
+                #[cfg(feature = "pubsub-attachment")]
                 attachment,
+                #[cfg(feature = "reply-source-info")]
                 source_info,
             } => PartsKind::Reply {
                 body: match payload {
@@ -487,11 +498,20 @@ impl<P: Storage> ReplyStage<P> {
                 encoding: self
                     .encoding_of(encoding)
                     .map(|(packed_id, schema)| EncodingParts { packed_id, schema }),
+                #[cfg(feature = "pubsub-timestamp")]
                 timestamp: timestamp
                     .as_ref()
                     .map(|(time, zid)| TimestampParts { time: *time, zid }),
+                #[cfg(not(feature = "pubsub-timestamp"))]
+                timestamp: None,
+                #[cfg(feature = "pubsub-attachment")]
                 attachment: attachment.map(|span| self.bytes(span)),
+                #[cfg(not(feature = "pubsub-attachment"))]
+                attachment: None,
+                #[cfg(feature = "reply-source-info")]
                 source_info: source_info.as_ref(),
+                #[cfg(not(feature = "reply-source-info"))]
+                source_info: None,
             },
             #[cfg(feature = "query-reply-err")]
             RowKind::Err { encoding, payload } => PartsKind::Err {
@@ -651,6 +671,9 @@ impl<P: Storage> ReplyStaging for ReplyStage<P> {
             self.refusals.payload_too_large = self.refusals.payload_too_large.saturating_add(1);
             return Err(ReplyError::PayloadTooLarge);
         }
+        // Sized and bounded as the handler described it, in every build: what a build's features
+        // keep of a reply (`RowKind`) decides what goes out, not which replies a handler is told
+        // were refused.
         let need = parts.keyexpr.len() + payload_len + attachment_len + schema_len;
         // The arena's room. On the fixed policy it is the declared bytes, and the
         // assertion above makes them addressable, so that is the whole check; on the
@@ -680,9 +703,13 @@ impl<P: Storage> ReplyStaging for ReplyStage<P> {
             PartsKind::Reply {
                 body,
                 encoding,
+                #[cfg(feature = "pubsub-timestamp")]
                 timestamp,
+                #[cfg(feature = "pubsub-attachment")]
                 attachment,
+                #[cfg(feature = "reply-source-info")]
                 source_info,
+                ..
             } => RowKind::Reply {
                 payload: match body {
                     PartsBody::Put(payload) => RowPayload::Put(self.put(payload)),
@@ -691,13 +718,16 @@ impl<P: Storage> ReplyStaging for ReplyStage<P> {
                     PartsBody::Shared(handle) => RowPayload::Shared(handle.clone()),
                 },
                 encoding: self.put_encoding(encoding.map(|e| (e.packed_id, e.schema))),
+                #[cfg(feature = "pubsub-timestamp")]
                 timestamp: timestamp.map(|ts| {
                     let mut zid = BoundedVec::default();
                     // The length was checked above, as the responder's was.
                     let _ = zid.extend_from_slice(ts.zid);
                     (ts.time, zid)
                 }),
+                #[cfg(feature = "pubsub-attachment")]
                 attachment: attachment.map(|bytes| self.put(bytes)),
+                #[cfg(feature = "reply-source-info")]
                 source_info: source_info.cloned(),
             },
             #[cfg(feature = "query-reply-err")]
@@ -1004,11 +1034,12 @@ mod tests {
         }
     }
 
-    /// A reply whose bytes come from four places: key, payload, attachment, schema.
+    /// A reply whose bytes come from three places every build holds: key, payload and the schema
+    /// of its encoding.
     fn fat_reply<'a>(
         rid: crate::wire_id::RequestId,
         payload: &'a [u8],
-        attachment: &'a [u8],
+        schema: &'a [u8],
     ) -> ReplyParts<'a> {
         let key = "k";
         ReplyParts {
@@ -1020,11 +1051,48 @@ mod tests {
             ts_stack: None,
             kind: PartsKind::Reply {
                 body: PartsBody::Put(payload),
-                encoding: None,
+                encoding: Some(EncodingParts {
+                    packed_id: 1,
+                    schema: Some(schema),
+                }),
                 timestamp: None,
-                attachment: Some(attachment),
+                attachment: None,
                 source_info: None,
             },
+        }
+    }
+
+    /// A one-byte Put on `"k"` carrying the side-bands a build may or may not hold: a timestamp,
+    /// an attachment and a source info.
+    fn side_band_reply<'a>(
+        zid: &'a [u8],
+        attachment: &'a [u8],
+        source_info: &'a SourceInfo,
+    ) -> ReplyParts<'a> {
+        ReplyParts {
+            rid: 1,
+            keyexpr: "k",
+            responder: None,
+            qos: QosLevel::DEFAULT,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: None,
+            kind: PartsKind::Reply {
+                body: PartsBody::Put(b"v"),
+                encoding: None,
+                timestamp: Some(TimestampParts { time: 42, zid }),
+                attachment: Some(attachment),
+                source_info: Some(source_info),
+            },
+        }
+    }
+
+    /// A source info unlike any default.
+    fn some_source_info() -> SourceInfo {
+        SourceInfo {
+            zid: [3; 16],
+            zid_len: 4,
+            eid: 7,
+            sn: 9,
         }
     }
 
@@ -1109,8 +1177,8 @@ mod tests {
     /// the declared bytes before the rows are used up are refused as `StagingFull`.
     fn arena_runs_out_before_the_rows<P: Storage>() {
         let payload = [1u8; caps::MAX_REPLY_PAYLOAD_BYTES];
-        let attachment = [2u8; caps::MAX_REPLY_PAYLOAD_BYTES];
-        let per_reply = 1 + payload.len() + attachment.len();
+        let schema = [2u8; caps::MAX_REPLY_PAYLOAD_BYTES];
+        let per_reply = 1 + payload.len() + schema.len();
         let fits = caps::REPLY_STAGE_BYTES / per_reply;
         assert!(
             fits < caps::MAX_PENDING_REPLIES,
@@ -1118,12 +1186,9 @@ mod tests {
         );
         let mut stage: ReplyStage<P> = ReplyStage::default();
         for rid in 0..fits as u32 {
-            assert_eq!(
-                stage.stage_parts(fat_reply(rid, &payload, &attachment)),
-                Ok(())
-            );
+            assert_eq!(stage.stage_parts(fat_reply(rid, &payload, &schema)), Ok(()));
         }
-        let beyond = stage.stage_parts(fat_reply(99, &payload, &attachment));
+        let beyond = stage.stage_parts(fat_reply(99, &payload, &schema));
         if P::ENFORCES_CAPACITY {
             assert_eq!(beyond, Err(ReplyError::StagingFull));
             assert_eq!(stage.staged(), fits);
@@ -1174,22 +1239,139 @@ mod tests {
             let PartsKind::Reply {
                 body: PartsBody::Put(payload),
                 encoding: Some(encoding),
-                timestamp: Some(timestamp),
-                attachment: Some(attachment),
                 ..
             } = parts.kind
             else {
-                panic!("the staged reply is a Put with every optional field");
+                panic!("the staged reply is a Put with its encoding");
             };
             assert_eq!(payload, &[seen as u8 + 1; 3]);
             assert_eq!((encoding.packed_id, encoding.schema), (7, Some(&b"s"[..])));
-            assert_eq!((timestamp.time, timestamp.zid), (42, &zid[..]));
-            assert_eq!(attachment, b"att");
             seen += 1;
         });
         assert_eq!(seen, 3);
         assert_eq!(stage.staged(), 0);
         assert_eq!(stage.bytes_held(), 0);
+    }
+
+    /// A reply's timestamp is held and handed back by a build that sends it
+    /// (`pubsub-timestamp`), and not held by one that does not.
+    fn staged_timestamp_follows_the_build<P: Storage>() {
+        let info = some_source_info();
+        let zid = [9u8; 4];
+        let mut stage: ReplyStage<P> = ReplyStage::default();
+        assert_eq!(
+            stage.stage_parts(side_band_reply(&zid, b"att", &info)),
+            Ok(())
+        );
+        let mut drained = 0;
+        stage.drain_parts(|parts| {
+            let PartsKind::Reply {
+                body: PartsBody::Put(_),
+                timestamp,
+                ..
+            } = parts.kind
+            else {
+                panic!("a Put was staged");
+            };
+            #[cfg(feature = "pubsub-timestamp")]
+            {
+                let timestamp = timestamp.expect("the build sends a reply's timestamp");
+                assert_eq!((timestamp.time, timestamp.zid), (42, &zid[..]));
+            }
+            #[cfg(not(feature = "pubsub-timestamp"))]
+            assert!(
+                timestamp.is_none(),
+                "a build that does not send a reply's timestamp does not hold it"
+            );
+            drained += 1;
+        });
+        assert_eq!(drained, 1);
+    }
+
+    /// A reply's attachment is held in the arena and handed back by a build that sends it
+    /// (`pubsub-attachment`); a build that does not holds none of its bytes. Either way the
+    /// reply is sized as it was described.
+    fn staged_attachment_follows_the_build<P: Storage>() {
+        let info = some_source_info();
+        let zid = [9u8; 4];
+        let mut stage: ReplyStage<P> = ReplyStage::default();
+        assert_eq!(
+            stage.stage_parts(side_band_reply(&zid, b"att", &info)),
+            Ok(())
+        );
+        let key_and_payload = "k".len() + b"v".len();
+        #[cfg(feature = "pubsub-attachment")]
+        assert_eq!(stage.bytes_held(), key_and_payload + b"att".len());
+        #[cfg(not(feature = "pubsub-attachment"))]
+        assert_eq!(
+            stage.bytes_held(),
+            key_and_payload,
+            "a build that does not send a reply's attachment holds none of its bytes"
+        );
+        let mut drained = 0;
+        stage.drain_parts(|parts| {
+            let PartsKind::Reply {
+                body: PartsBody::Put(_),
+                attachment,
+                ..
+            } = parts.kind
+            else {
+                panic!("a Put was staged");
+            };
+            #[cfg(feature = "pubsub-attachment")]
+            assert_eq!(attachment, Some(&b"att"[..]));
+            #[cfg(not(feature = "pubsub-attachment"))]
+            assert_eq!(attachment, None);
+            drained += 1;
+        });
+        assert_eq!(drained, 1);
+    }
+
+    /// A reply's source info is held and handed back by a build that sends it
+    /// (`reply-source-info`), and not held by one that does not.
+    fn staged_source_info_follows_the_build<P: Storage>() {
+        let info = some_source_info();
+        let zid = [9u8; 4];
+        let mut stage: ReplyStage<P> = ReplyStage::default();
+        assert_eq!(
+            stage.stage_parts(side_band_reply(&zid, b"att", &info)),
+            Ok(())
+        );
+        let mut drained = 0;
+        stage.drain_parts(|parts| {
+            let PartsKind::Reply {
+                body: PartsBody::Put(_),
+                source_info,
+                ..
+            } = parts.kind
+            else {
+                panic!("a Put was staged");
+            };
+            #[cfg(feature = "reply-source-info")]
+            assert_eq!(source_info, Some(&info));
+            #[cfg(not(feature = "reply-source-info"))]
+            assert_eq!(source_info, None);
+            drained += 1;
+        });
+        assert_eq!(drained, 1);
+    }
+
+    /// An attachment past the payload bound is refused on the fixed policy whether or not the
+    /// build holds attachments: a handler is told the same in every build.
+    fn attachment_past_the_bound_is_refused_in_every_build<P: Storage>() {
+        let big = [7u8; caps::MAX_REPLY_PAYLOAD_BYTES + 1];
+        let info = some_source_info();
+        let zid = [9u8; 4];
+        let mut stage: ReplyStage<P> = ReplyStage::default();
+        let outcome = stage.stage_parts(side_band_reply(&zid, &big, &info));
+        if P::ENFORCES_CAPACITY {
+            assert_eq!(outcome, Err(ReplyError::PayloadTooLarge));
+            assert_eq!(stage.staged(), 0);
+            assert_eq!(stage.refusals().payload_too_large, 1);
+        } else {
+            assert_eq!(outcome, Ok(()));
+            assert_eq!(stage.staged(), 1);
+        }
     }
 
     /// The owned drain builds exactly the record `QueryReply::from_parts` builds from
@@ -1275,6 +1457,10 @@ mod tests {
         exchange_moves_the_replies_and_keeps_the_refusals,
         arena_runs_out_before_the_rows,
         drain_parts_hands_out_what_was_staged,
+        staged_timestamp_follows_the_build,
+        staged_attachment_follows_the_build,
+        staged_source_info_follows_the_build,
+        attachment_past_the_bound_is_refused_in_every_build,
         owned_drain_is_from_parts,
         clear_keeps_the_refusals,
     );

@@ -453,6 +453,14 @@ where
     }
 }
 
+/// Whether a stack of datagram sockets `U`, plain streams `D` and secure channels `L` opens a
+/// link to an IPv6 end: one protocol it carries does. What `Bind::IPV6` and `SessionLinks::IPV6`
+/// answer for it.
+#[cfg(any(feature = "session-slot", feature = "alloc"))]
+const fn opens_ipv6<U: DatagramSocket, D: StreamDial, L: StreamDial>() -> bool {
+    (U::CARRIED && U::IPV6) || (D::CARRIED && D::IPV6) || (L::CARRIED && L::IPV6)
+}
+
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 impl<U, D, L, G> SessionLinks for IpLinks<U, D, L, G>
 where
@@ -464,6 +472,8 @@ where
     G: GroupJoiner,
 {
     type Pump = Rc<HeapIpDriver<U, D::Stream, L::Stream>>;
+
+    const IPV6: bool = opens_ipv6::<U, D, L>();
 
     fn open_acceptor(&self, port: u16) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
         // The peer is whoever opens a session first; the driver is bound by its InitSyn.
@@ -719,6 +729,8 @@ where
     L: StreamDial,
     L::Stream: 'static,
 {
+    const IPV6: bool = opens_ipv6::<U, D, L>();
+
     fn bind(&mut self, to: Locator) -> Result<IpDriver<U, D::Stream, L::Stream>, LinkOpenError> {
         self.bind_initiator(to)
     }
@@ -916,6 +928,7 @@ mod tests {
 
     impl<const V6: bool> DatagramSocket for Datagrams<V6> {
         type Error = NoIpv6;
+        const IPV6: bool = V6;
         fn bind(at: SocketAddr) -> Result<Self, NoIpv6> {
             if at.is_ipv6() && !V6 {
                 return Err(NoIpv6);
@@ -1044,6 +1057,50 @@ mod tests {
     /// A port on the router that refuses every connection.
     const fn refusing() -> SocketAddr {
         SocketAddr::new(ROUTER.ip(), REFUSING)
+    }
+
+    /// The constant a stack's endpoints are read by, through a function so that the assertions
+    /// below are on its answer and not on a constant.
+    #[cfg(feature = "session-slot")]
+    fn bind_opens_ipv6<D, B: Bind<D>>() -> bool {
+        B::IPV6
+    }
+
+    /// A stack opens a link to an IPv6 end when one protocol it carries does, and a stack of
+    /// sockets without IPv6 does not: an endpoint read for it is read as IPv4 alone.
+    #[cfg(any(feature = "session-slot", feature = "alloc"))]
+    #[test]
+    fn a_stack_opens_ipv6_when_a_protocol_it_carries_does() {
+        assert!(opens_ipv6::<Datagrams<true>, NoDial, NoDial>());
+        assert!(!opens_ipv6::<Datagrams<false>, NoDial, NoDial>());
+        assert!(
+            opens_ipv6::<Datagrams<false>, Dial, NoDial>(),
+            "its plain streams reach IPv6 where its datagrams do not"
+        );
+        assert!(
+            !opens_ipv6::<crate::udp_link::NoDatagram, NoDial, NoDial>(),
+            "a stack that carries nothing opens nothing"
+        );
+        #[cfg(feature = "session-slot")]
+        {
+            assert!(!bind_opens_ipv6::<
+                IpDriver<Datagrams<false>, NoStream>,
+                IpStack<Datagrams<false>, NoDial>,
+            >());
+            assert!(bind_opens_ipv6::<
+                IpDriver<Datagrams<false>, Stream>,
+                IpStack<Datagrams<false>, Dial>,
+            >());
+            // A stack of datagram sockets alone answers as its socket does.
+            assert!(bind_opens_ipv6::<
+                crate::udp_link::FixedUdpDriver<Datagrams<true>>,
+                UdpStack<Datagrams<true>>,
+            >());
+            assert!(!bind_opens_ipv6::<
+                crate::udp_link::FixedUdpDriver<Datagrams<false>>,
+                UdpStack<Datagrams<false>>,
+            >());
+        }
     }
 
     #[cfg(feature = "session-slot")]

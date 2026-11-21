@@ -405,8 +405,11 @@ fn regen_codec_deployment(
 ///                      stream_activation, app_link, replay_round,
 ///                      replay_serving (statecharts);
 ///                      tick_elapsed, tick_until_due, key_facts, the keyexpr matcher,
-///                      stream_deadline, declaration_stall_deadline (algorithms);
-///                      key_facts_schema (the event-schema key_facts returns)
+///                      stream_deadline, declaration_stall_deadline,
+///                      take_generation (algorithms);
+///                      key_facts_schema, reset_peer_schema, take_generation_duplicate
+///                      (event-schemas); take_generation_kind, put_outcome (enums);
+///                      take_generation_result (union)
 ///   wz-runtime-tokio : reassembly_pool_ap, session_rx_pool_ap,
 ///                      session_rx_pool_ap_small, session_tx_pool_ap,
 ///                      session_tx_pool_ap_small (buffer-pools)
@@ -488,14 +491,29 @@ fn regen_statecharts_and_pools(root: &Path) {
         "stream_deadline",
         // The declaration-sync watch — when a peer's initial declarations have stalled.
         "declaration_stall_deadline",
+        // The lifecycle reset's duplicate suppression (decision D6): a peer's reset
+        // generation taken into the table of the latest ones, which the caller lends in place.
+        "take_generation",
     ] {
         codegen.emit_algorithm(stem, &algorithms, &sc_out);
     }
-    // The record types the algorithms above return, emitted beside them: an algorithm
-    // names its record's schema as the sibling module `super::<schema>`.
-    for stem in ["key_facts_schema", "keyexpr_shape_schema"] {
+    // The record types the algorithms above take and return, emitted beside them: an
+    // algorithm names its record's schema as the sibling module `super::<schema>`.
+    for stem in [
+        "key_facts_schema",
+        "keyexpr_shape_schema",
+        "reset_peer_schema",
+        "take_generation_duplicate",
+    ] {
         codegen.emit_event_schema(stem, &algorithms, &sc_out);
     }
+    // The enums and unions they name, emitted beside them for the same reason: the answer of
+    // `take_generation` and its tag, and the standard answer of a map's put, which comes from
+    // SCE's standard library at the pin.
+    codegen.emit_enum("take_generation_kind", &algorithms, &sc_out);
+    codegen.emit_union("take_generation_result", &algorithms, &sc_out);
+    let std_collection = repo_relative(root, &root.join("vendor/sce/stdlib/collection"));
+    codegen.emit_enum("put_outcome", &std_collection, &sc_out);
     // The receiving judge of end-to-end protected frames (wz-app-frame `e2e_judge`): the step of
     // a counter from its baseline in the counter's own width, and what that step is. And the
     // instance keys' (`instance_key`): whether the drops held are reported now.

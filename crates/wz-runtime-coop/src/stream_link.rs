@@ -148,6 +148,11 @@ pub trait StreamDial {
     /// [`LinkOpenError::Exhausted`] (retried) when its tables happen to be full.
     const CARRIED: bool = true;
 
+    /// Whether the dial connects to an IPv6 end: `false` on a stack built without IPv6, whose
+    /// dial of one is [`LinkOpenError::Unsupported`]. The datagram twin is
+    /// `DatagramSocket::IPV6`, and a stack's own answer is the union of its protocols'.
+    const IPV6: bool = true;
+
     /// Listen on `at` (port 0: the platform picks one, read back with [`StreamListen::local`])
     /// for the connections of the protocol this dial opens. A stack that listens overrides it;
     /// the answer of one that does not is [`LinkOpenError::Unsupported`], as a dial it does not

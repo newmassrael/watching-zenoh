@@ -36,7 +36,7 @@ use wz_session_core::locality::Locality;
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::pubsub::SubscriberTable;
 use wz_session_core::query::QueryableRegistry;
-use wz_session_core::query_sink::{FnQuerySink, QueryView, ReplyOut};
+use wz_session_core::query_sink::{QuerySinkOf, QueryView, ReplyOut};
 use wz_session_core::registry_error::RegisterError;
 use wz_session_core::replay_cursor::ReplayCursor;
 use wz_session_core::replay_pacing::{RefusalStep, ReplayPacing};
@@ -784,6 +784,121 @@ mod tests {
             }
         );
     }
+
+    /// What an answer staged, in order: the key, the payload and the encoding it named. A reply
+    /// under the responder's bound key, a delete or an error is recorded under an empty key, so a
+    /// test that expects none of them sees one if it comes.
+    #[derive(Default)]
+    struct Staged(Vec<(alloc::string::String, Vec<u8>, Option<u32>)>);
+
+    impl ReplyOut for Staged {
+        fn reply(&mut self, payload: &[u8]) {
+            self.0
+                .push((alloc::string::String::new(), payload.to_vec(), None));
+        }
+        fn reply_keyed(
+            &mut self,
+            keyexpr: &str,
+            payload: &[u8],
+        ) -> Result<(), wz_session_core::query_sink::ReplyError> {
+            self.0
+                .push((alloc::string::String::from(keyexpr), payload.to_vec(), None));
+            Ok(())
+        }
+        fn reply_keyed_encoded_parts(
+            &mut self,
+            keyexpr: &str,
+            payload: &[u8],
+            packed_id: u32,
+            schema: Option<&str>,
+        ) -> Result<(), wz_session_core::query_sink::ReplyError> {
+            assert_eq!(schema, None, "a document names no schema");
+            self.0.push((
+                alloc::string::String::from(keyexpr),
+                payload.to_vec(),
+                Some(packed_id),
+            ));
+            Ok(())
+        }
+        fn reply_del(&mut self) {
+            self.0
+                .push((alloc::string::String::new(), Vec::new(), None));
+        }
+        fn reply_err(&mut self, _encoding_id: Option<u32>, _schema: Option<&[u8]>, payload: &[u8]) {
+            self.0
+                .push((alloc::string::String::new(), payload.to_vec(), None));
+        }
+        fn with_responder(&mut self, _zid: &[u8], _eid: u32) {}
+        fn clear_responder(&mut self) {}
+        fn responder(&self) -> Option<(&[u8], u32)> {
+            None
+        }
+    }
+
+    /// A query asked under `demo/doc`, with nothing else.
+    struct Asked;
+
+    impl QueryView for Asked {
+        fn keyexpr(&self) -> &str {
+            "demo/doc"
+        }
+        fn parameters(&self) -> Option<&[u8]> {
+            None
+        }
+        fn attachment(&self) -> Option<&[u8]> {
+            None
+        }
+        fn rid(&self) -> wz_session_core::wire_id::RequestId {
+            1
+        }
+        fn qos(&self) -> wz_session_core::sample::QosLevel {
+            wz_session_core::sample::QosLevel::DEFAULT
+        }
+    }
+
+    /// The client's queryable, called with the query and the responder as their own types: a
+    /// document is answered as JSON under the key the query asked; a cell answers its put under
+    /// that key, and nothing while it holds no sample or holds a delete.
+    #[test]
+    fn an_answer_replies_under_the_asked_key_through_the_typed_call() {
+        use crate::latest::{LatestCells, LatestSlots};
+
+        let mut document = Answer::Document("{\"t\":1}");
+        let mut out = Staged::default();
+        document.handle_typed(&Asked, &mut out);
+        assert_eq!(
+            out.0,
+            [(
+                alloc::string::String::from("demo/doc"),
+                b"{\"t\":1}".to_vec(),
+                Some(PACKED_APPLICATION_JSON)
+            )]
+        );
+
+        let cells: &'static LatestCells<1, 8> =
+            alloc::boxed::Box::leak(alloc::boxed::Box::new(LatestCells::new()));
+        let mut latest = Answer::Latest(LatestRef {
+            slots: cells,
+            index: 0,
+        });
+        let mut out = Staged::default();
+        latest.handle_typed(&Asked, &mut out);
+        assert!(out.0.is_empty(), "a cell nothing reached answers nothing");
+        cells.put(0, 8, "demo/in", b"9.5", SampleKind::Del);
+        latest.handle_typed(&Asked, &mut out);
+        assert!(out.0.is_empty(), "a delete is no value to answer with");
+        cells.put(0, 8, "demo/in", b"21.5", SampleKind::Put);
+        latest.handle_typed(&Asked, &mut out);
+        assert_eq!(
+            out.0,
+            [(
+                alloc::string::String::from("demo/doc"),
+                b"21.5".to_vec(),
+                None
+            )],
+            "the put, under the key the query asked and not the sample's"
+        );
+    }
 }
 
 /// Send one declaration under `id`: `Ok` once it went out, and why the stage refused it otherwise.
@@ -822,9 +937,11 @@ pub enum Answer {
 
 /// A queryable that answers every query with one JSON document, or from a subscription's latest
 /// sample, under the key the query asked (`z_query_keyexpr`, as zenoh-pico's comparison image
-/// replies): a function and what it answers with, stored inline, so the registry that holds it is
-/// typed by it and the registration allocates nothing.
-pub type DocumentSink = FnQuerySink<Answer>;
+/// replies): what it answers with, stored inline, so the registry that holds it is typed by it and
+/// the registration allocates nothing. The answer is the sink itself, called with the query and
+/// the responder as their own types, so the dispatch reaches it with no function pointer and no
+/// vtable, and of the responder only the methods an answer calls are linked.
+pub type DocumentSink = Answer;
 
 /// The observer's registrations of a client that answers documents and keeps what it subscribes to:
 /// queryables of [`DocumentSink`], subscriptions of [`LatestSink`], and none of the other kinds.
@@ -837,24 +954,26 @@ impl ObserverSinks for DocumentSinks {
     type Undeclared = NoSink;
 }
 
-fn answer(source: &mut Answer, query: &dyn QueryView, out: &mut dyn ReplyOut) {
-    match *source {
-        Answer::Document(body) => {
-            let _ = out.reply_keyed_encoded_parts(
-                query.keyexpr(),
-                body.as_bytes(),
-                PACKED_APPLICATION_JSON,
-                None,
-            );
-        }
-        Answer::Latest(cell) => cell.slots.with(cell.index, &mut |latest| {
-            // A delete is not a value to answer with.
-            if let Some(latest) = latest.filter(|l| l.kind == SampleKind::Put) {
-                let _ = out.reply_keyed(query.keyexpr(), latest.payload);
+impl<V: QueryView, O: ReplyOut> QuerySinkOf<V, O> for Answer {
+    fn handle_typed(&mut self, query: &V, out: &mut O) {
+        match *self {
+            Answer::Document(body) => {
+                let _ = out.reply_keyed_encoded_parts(
+                    query.keyexpr(),
+                    body.as_bytes(),
+                    PACKED_APPLICATION_JSON,
+                    None,
+                );
             }
-        }),
-        #[cfg(feature = "client-verbs")]
-        Answer::Verbs(legs) => legs.answer(query, out),
+            Answer::Latest(cell) => cell.slots.with(cell.index, &mut |latest| {
+                // A delete is not a value to answer with.
+                if let Some(latest) = latest.filter(|l| l.kind == SampleKind::Put) {
+                    let _ = out.reply_keyed(query.keyexpr(), latest.payload);
+                }
+            }),
+            #[cfg(feature = "client-verbs")]
+            Answer::Verbs(legs) => legs.answer(query, out),
+        }
     }
 }
 
@@ -877,7 +996,7 @@ pub fn register_answer(
     source: Answer,
 ) -> Result<(), RegisterError> {
     queryables
-        .register_sink(key, Locality::Any, false, FnQuerySink::new(source, answer))
+        .register_sink(key, Locality::Any, false, source)
         .map(|_id| ())
 }
 

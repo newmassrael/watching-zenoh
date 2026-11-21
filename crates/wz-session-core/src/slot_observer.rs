@@ -184,8 +184,14 @@ pub struct SlotObserverOf<K: ObserverSinks = DefaultSinks> {
 pub trait ObserverSinks {
     /// What a local subscription is delivered to.
     type Subscriber: SampleSink;
-    /// What a local queryable is asked through.
-    type Queryable: QuerySink;
+    /// What a local queryable is asked through, handed the view and the responder of the wire
+    /// dispatch as their own types ([`crate::query::ResponderSink`]): a closed sink is called
+    /// with no vtable.
+    #[cfg(feature = "codec-request")]
+    type Queryable: crate::query::ResponderSink;
+    /// What a local queryable is asked through; a build with no request codec asks none.
+    #[cfg(not(feature = "codec-request"))]
+    type Queryable;
     /// What a peer's declaration is announced to.
     type Declared: DeclSink;
     /// What a peer's undeclaration is announced to.

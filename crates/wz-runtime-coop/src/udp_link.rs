@@ -40,7 +40,7 @@ use core::marker::PhantomData;
 use wz_session_core::byte_cells::ByteBuf;
 #[cfg(feature = "session-slot")]
 use wz_session_core::byte_cells::ByteSource;
-use wz_session_core::datagram_peer::{DatagramVerdict, ForeignCounts, PeerBinding};
+use wz_session_core::datagram_peer::{ForeignCounts, PeerBinding};
 #[cfg(feature = "alloc")]
 use wz_session_core::link::RxFrame;
 use wz_session_core::link::{
@@ -146,6 +146,12 @@ pub trait DatagramSocket: Sized {
     /// `StreamDial::CARRIED`.
     const CARRIED: bool = true;
 
+    /// Whether the platform opens IPv6 sockets: `false` on a stack built without IPv6, whose bind
+    /// of an IPv6 address is refused for its family ([`Self::refuses_address`]). A constant, so
+    /// that a stack of these sockets says so where an endpoint is read (`Bind::IPV6`,
+    /// `SessionLinks::IPV6`) and an image of one carries no reader of IPv6 text.
+    const IPV6: bool = true;
+
     /// Whether `error`, from a [`Self::bind`], says the stack can never open a socket for the
     /// address (the stack has no such family, as an IPv6 address on a stack without IPv6, or the
     /// stack cannot name it): a dial that meets it is `LinkOpenError::Unsupported` and not
@@ -177,6 +183,9 @@ impl DatagramSocket for NoDatagram {
     type Error = ();
 
     const CARRIED: bool = false;
+
+    // A socket that opens nothing opens no IPv6 address either.
+    const IPV6: bool = false;
 
     fn bind(_at: SocketAddr) -> Result<Self, ()> {
         Err(())
@@ -252,8 +261,9 @@ pub fn link_endpoints(proto: LinkProto, local: SocketAddr, peer: SocketAddr) -> 
 pub struct UdpDriver<S: DatagramSocket, B: AsMut<[u8]>, T: TxStore> {
     socket: S,
     binding: PeerBinding<SocketAddr>,
-    /// The link's two ends, `udp/<ip>:<port>` each, written once: when the
-    /// peer is known.
+    /// The link's two ends, `udp/<ip>:<port>` each, written the first time they are asked for
+    /// once the peer is known. Not at the binding: a node that never reads them (no admin space,
+    /// no link statistics) then carries no code that writes a locator's text.
     endpoints: OnceCell<LinkEndpoints>,
     rx_buf: RefCell<B>,
     /// The length of `rx_buf`, the largest datagram the link receives whole.
@@ -348,7 +358,7 @@ impl<S: DatagramSocket, B: AsMut<[u8]>, T: TxStore> UdpDriver<S, B, T> {
 
     fn with_peer(socket: S, peer: Option<SocketAddr>, mut rx_buf: B, tx: T) -> Self {
         let rx_len = rx_buf.as_mut().len();
-        let driver = Self {
+        Self {
             socket,
             binding: match peer {
                 Some(peer) => PeerBinding::dialled(peer),
@@ -363,9 +373,7 @@ impl<S: DatagramSocket, B: AsMut<[u8]>, T: TxStore> UdpDriver<S, B, T> {
             idle_wait_ms: SERVICE_WAIT_MS as u32,
             armed_wait_ms: Cell::new(SERVICE_WAIT_MS),
             owner_waits: false,
-        };
-        driver.note_endpoints();
-        driver
+        }
     }
 
     /// The same link, waited on by its owner when its socket can be
@@ -408,11 +416,7 @@ impl<S: DatagramSocket, B: AsMut<[u8]>, T: TxStore> UdpDriver<S, B, T> {
     /// `InitSyn`) is counted ([`Self::foreign`]) and the caller discards it; the socket is this
     /// link's alone, so nothing it discards is anyone else's.
     fn admit(&self, from: SocketAddr, datagram: &[u8]) -> bool {
-        let verdict = self.binding.admit(from, datagram);
-        if verdict == DatagramVerdict::Bound {
-            self.note_endpoints();
-        }
-        verdict.is_taken()
+        self.binding.admit(from, datagram).is_taken()
     }
 
     /// The next datagram the session reads, in `buf`: the one `service` already read and admitted,
@@ -429,20 +433,6 @@ impl<S: DatagramSocket, B: AsMut<[u8]>, T: TxStore> UdpDriver<S, B, T> {
             if self.admit(from, &buf[..len]) {
                 return Ok(Some(len));
             }
-        }
-    }
-
-    /// Write the link's two ends once the peer is known: at construction for a dialled link, at
-    /// the `InitSyn` that binds an accepting one. The peer never changes after, so neither do
-    /// they.
-    fn note_endpoints(&self) {
-        let Some(peer) = self.binding.peer() else {
-            return;
-        };
-        if self.endpoints.get().is_none() {
-            let _ = self
-                .endpoints
-                .set(link_endpoints(LinkProto::Udp, self.socket.local(), peer));
         }
     }
 
@@ -556,8 +546,15 @@ impl<S: DatagramSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static
 
     fn close_blocking(&self) {}
 
+    // None until the peer is known: a dialled link's from its construction, an accepting one's
+    // from the `InitSyn` that binds it. The peer never changes after, and the socket's own end is
+    // its bind's, so the text written at the first ask is the text of every later one.
     fn link_endpoints(&self) -> Option<&LinkEndpoints> {
-        self.endpoints.get()
+        let peer = self.binding.peer()?;
+        Some(
+            self.endpoints
+                .get_or_init(|| link_endpoints(LinkProto::Udp, self.socket.local(), peer)),
+        )
     }
 
     // A driver whose buffers are declared is bounded by them: the frame it sends is at most the
@@ -761,6 +758,8 @@ impl<S: DatagramSocket + 'static> UdpStack<S> {
 
 #[cfg(feature = "session-slot")]
 impl<S: DatagramSocket + 'static> Bind<FixedUdpDriver<S>> for UdpStack<S> {
+    const IPV6: bool = S::IPV6;
+
     fn bind(&mut self, to: Locator) -> Result<FixedUdpDriver<S>, LinkOpenError> {
         match to.proto {
             LinkProto::Udp => self.bind_initiator(to.at),

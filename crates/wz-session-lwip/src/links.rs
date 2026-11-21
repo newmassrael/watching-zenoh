@@ -170,6 +170,9 @@ pub(crate) fn test_links(link: Rc<LwipLink>) -> LwipLinks {
 impl<L: Deref<Target = LwipLink> + Clone + 'static> SessionLinks for LwipLinks<L> {
     type Pump = LwipSessionLink<L>;
 
+    // The port's lwIP has no IPv6 (`Self::bind_driver` refuses that family).
+    const IPV6: bool = false;
+
     fn open_acceptor(&self, port: u16) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
         // The peer is whoever opens a session first; the driver is bound by its
         // InitSyn.
@@ -214,8 +217,15 @@ mod tests {
     /// and no socket is bound for it.
     #[test]
     fn an_ipv6_locator_is_unsupported_and_binds_no_socket() {
+        fn opens_ipv6<T: SessionLinks>(_: &T) -> bool {
+            T::IPV6
+        }
         let (_serial, link) = wz_link_lwip::lwip_test_link();
         let links = test_links(Rc::new(link));
+        std::assert!(
+            !opens_ipv6(&links),
+            "an endpoint read for this stack is read as IPv4 alone"
+        );
         let v6 = SocketAddr::from((core::net::Ipv6Addr::LOCALHOST, 7552));
         std::assert!(matches!(
             links.open_initiator(Locator::udp(v6)),

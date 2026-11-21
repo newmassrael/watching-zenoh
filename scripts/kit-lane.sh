@@ -17,6 +17,7 @@
 #   scripts/kit-lane.sh build-responder      the host node that answers the asking image (needs cargo)
 #   scripts/kit-lane.sh list                 the images
 #   scripts/kit-lane.sh images               the images whose build needs no kit (the ones Layer Qzk builds)
+#   scripts/kit-lane.sh parts                those images in the parts Layer Qzk can run alone (WZ_QZK_PART)
 #   scripts/kit-lane.sh --selftest           the table of images against the gates and the overlays
 #
 # Images are the keys of the stack gate: zephyr-client-heap (the fixed client with its storage on the
@@ -231,6 +232,9 @@ ADMIN_IMAGES=(zephyr-admin-fixed-tls)
 # Their stack gate rows are in scripts/lib/stack_frame_gate.py and they hold no row of the resource
 # budget (the table declares them not measured on the kit until a run sets one).
 NODE_IMAGES=(zephyr-fixed zephyr-fixed-tcp)
+# The images `build` holds to their rows with no kit: Layer Qzk's population, listed whole by `images`
+# and cut by `parts` into the ceiling groups of scripts/lib/pico_ceiling_gate.py.
+KITLESS_IMAGES=("${IMAGES[@]}" "${ADMIN_IMAGES[@]}")
 # The compare images: run only by `compare`, beside the images above.
 COMPARE_IMAGES=(zephyr-pico-queryable zephyr-pico-queryable-st zephyr-wz-pico-queryable zephyr-wz-pico-queryable-st)
 is_compare_image() { [[ " ${COMPARE_IMAGES[*]} " == *" $1 "* ]]; }
@@ -1746,7 +1750,10 @@ PY
 # ── main ────────────────────────────────────────────────────────────────────────────────────────
 cmd="${1:-}"
 shift || true
-mkdir -p "$LANE_HOME"
+case "$cmd" in
+    list | images | parts) ;; # a listing reads the tables and makes nothing
+    *) mkdir -p "$LANE_HOME" ;;
+esac
 case "$cmd" in
     preflight) preflight "${1:-}" ;;
     build) [[ $# -ge 1 ]] || { echo "usage: $0 build <image>" >&2; exit 64; }; build "$1" ;;
@@ -1761,10 +1768,11 @@ case "$cmd" in
     compare) compare "$@" ;;
     build-responder) build_responder ;;
     list) printf '%s\n' "${IMAGES[@]}" "${ADMIN_IMAGES[@]}" "${NODE_IMAGES[@]}" "${MEASURE_IMAGES[@]}" "${COMPARE_IMAGES[@]}" ;;
-    images) printf '%s\n' "${IMAGES[@]}" "${ADMIN_IMAGES[@]}" ;; # the images `build` holds to their rows with no kit
+    images) printf '%s\n' "${KITLESS_IMAGES[@]}" ;;
+    parts) python3 "$ROOT/scripts/lib/pico_ceiling_gate.py" --parts "${KITLESS_IMAGES[@]}" ;;
     --selftest) selftest ;;
     *)
-        sed -n '12,21p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+        sed -n '12,22p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
         exit 64
         ;;
 esac

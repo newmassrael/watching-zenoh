@@ -78,7 +78,7 @@
 //
 // R311gb-3b — `Box` is no longer imported at module level: the queryable
 // callback store migrated from `Box<dyn FnMut>` (`QueryableCallback`) to
-// the generic `Queryable<C: QuerySink>` sink seam, so production code no
+// the generic `Queryable<C>` sink seam, so production code no
 // longer heap-boxes a handler here (`BoxedQuerySink` owns that on the AP
 // convenience path, in `query_sink`). The only remaining `Box::new(..)`
 // uses are the test module's `NetworkMessage::Request` fixtures, so the
@@ -571,7 +571,7 @@ impl QueryableId {
 // `QueryResponder`) stay `all(codec-request, alloc)` / `alloc`-gated.
 // This brings the queryable side in line with `SubscriberRegistry`,
 // whose control plane is likewise always-compiled.
-struct Queryable<C: QuerySink, P: Storage = Profile> {
+struct Queryable<C, P: Storage = Profile> {
     id: QueryableId,
     /// R311gb (Track 2) — the canonical keyexpr pattern, stored as one
     /// [`BoundedString`] (no-alloc backing on MCU). Matching reads it
@@ -607,7 +607,7 @@ struct Queryable<C: QuerySink, P: Storage = Profile> {
     sink: C,
 }
 
-impl<C: QuerySink, P: Storage> Queryable<C, P> {
+impl<C, P: Storage> Queryable<C, P> {
     /// R311gb (Track 2) — the shared match SSOT for both the wire fire
     /// path ([`QueryableRegistry::fire_matching_queryables`]) and the
     /// no-heap borrowed fire ([`QueryableRegistry::dispatch_borrowed`]):
@@ -2097,6 +2097,29 @@ impl ReplyOut for QueryResponder<'_> {
     }
 }
 
+/// What the wire dispatch of a [`QueryableRegistry`] hands a matched query to: a sink called with
+/// the view the dispatch builds ([`crate::query_sink::ProvenQuery`]) and the responder over the
+/// session's stage ([`QueryResponder`]) as those types, through
+/// [`crate::query_sink::QuerySinkOf`]. A sink of one closed type that implements that for them
+/// is called with no vtable, and of the responder's methods only those it calls are linked; every
+/// [`QuerySink`] is one too, handed the two as trait objects, so the heap profile's boxed
+/// closures are dispatched as they always were.
+#[cfg(all(feature = "codec-request", feature = "storage-profile"))]
+pub trait ResponderSink:
+    for<'q, 'r> crate::query_sink::QuerySinkOf<crate::query_sink::ProvenQuery<'q>, QueryResponder<'r>>
+{
+}
+
+#[cfg(all(feature = "codec-request", feature = "storage-profile"))]
+impl<S> ResponderSink for S where
+    S: ?Sized
+        + for<'q, 'r> crate::query_sink::QuerySinkOf<
+            crate::query_sink::ProvenQuery<'q>,
+            QueryResponder<'r>,
+        >
+{
+}
+
 /// One staged element of the interest-response chain a peer's QUERYABLE
 /// `Interest` is owed (see [`QueryableRegistry::respond_to_queryable_interest`]).
 /// Owned, unlike the id-only liveliness items, because an AGGREGATE reply names
@@ -2136,7 +2159,7 @@ pub enum QueryableInterestReply {
 /// plane (un-gated). The owned-reply wire-dispatch methods
 /// (`dispatch_request` / `local_query` / `dispatch_messages`) live in a
 /// separate `all(codec-request, alloc)` impl block below.
-pub struct QueryableRegistry<C: QuerySink, P: Storage = Profile> {
+pub struct QueryableRegistry<C, P: Storage = Profile> {
     queryables: BoundedVec<Queryable<C, P>, { caps::MAX_QUERYABLES }, P>,
     /// The most queryables the registry admits (`MAX_QUERYABLES`): what the creator of the
     /// registry resolved ([`Self::limit_to`]), the build's value until it does. A growable table
@@ -2171,7 +2194,7 @@ pub struct QueryableRegistry<C: QuerySink, P: Storage = Profile> {
     shm: crate::extshm::ShmReceiveState,
 }
 
-impl<C: QuerySink, P: Storage> Default for QueryableRegistry<C, P> {
+impl<C, P: Storage> Default for QueryableRegistry<C, P> {
     fn default() -> Self {
         Self {
             queryables: BoundedVec::default(),
@@ -2193,7 +2216,7 @@ type UnanswerableFinalHeld = crate::policy_binding::Bound<
     { <crate::policy::QueryUnanswerableFinal as crate::policy_binding::PolicyValue>::HELD },
 >;
 
-impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
+impl<C, P: Storage> QueryableRegistry<C, P> {
     /// Hold the registry to the `MAX_QUERYABLES` its creator resolved: a registration that would
     /// leave more queryables than `quota` admits is refused ([`RegisterError::TableFull`]), and
     /// the queryables already in are kept, as a lowered soft limit keeps what it holds.
@@ -2241,7 +2264,7 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
 #[cfg(all(feature = "codec-request", feature = "storage-profile"))]
 mod in_place;
 
-impl<C: QuerySink> QueryableRegistry<C, Profile> {
+impl<C> QueryableRegistry<C, Profile> {
     /// New empty registry over an explicit sink backing `C`, of this build's
     /// storage profile. Queryable ids start at 1 so 0 stays available as a
     /// sentinel "no queryable" value for any caller-side wrapper that needs one.
@@ -2261,7 +2284,7 @@ impl<C: QuerySink> QueryableRegistry<C, Profile> {
     }
 }
 
-impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
+impl<C, P: Storage> QueryableRegistry<C, P> {
     /// transport-shm -- install the resolver the shared-memory slices of a query's
     /// value are read through. Shared with the other registries by the session,
     /// so a query's value is read by the same resolver a push is. Without one a
@@ -2572,7 +2595,11 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
         staged.push(QueryableInterestReply::Final { interest_id });
         declared
     }
+}
 
+// The borrowed fire takes its view and output as trait objects, so it is the table's one entry
+// that asks its sinks to be `QuerySink`s; the wire dispatch asks a `ResponderSink`.
+impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
     /// R311gb (Track 2) — no-heap fire entry: match `view`'s keyexpr
     /// against every queryable and hand each matching sink the borrowed
     /// [`QueryView`] + the caller-supplied [`ReplyOut`], applying the
@@ -2777,7 +2804,7 @@ impl DispatchOutcome {
 // accumulator). The control plane above (table + register + matching +
 // `dispatch_borrowed`) stays un-gated.
 #[cfg(all(feature = "codec-request", feature = "storage-profile"))]
-impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
+impl<C: ResponderSink, P: Storage> QueryableRegistry<C, P> {
     /// Route an inbound `Request` through the queryable table.
     ///
     /// - Requests whose body is not `RequestVariant::CodecZenohQuery`
@@ -3307,32 +3334,41 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
                     #[cfg(not(feature = "pubsub-ts-stack"))]
                     let carries_stack = false;
                     if lent_value.is_some() || attachment_shared.is_some() || carries_stack {
-                        crate::query_sink::handle_from(
+                        let shared = crate::query_sink::SharedQuery {
+                            base: query_view,
+                            value: lent_value,
+                            attachment: attachment_shared.as_ref(),
+                            #[cfg(feature = "pubsub-ts-stack")]
+                            ts_stack,
+                        };
+                        crate::query_sink::QuerySinkOf::handle_typed(
                             &mut queryable.sink,
-                            &crate::query_sink::SharedQuery {
-                                base: query_view,
-                                value: lent_value,
-                                attachment: attachment_shared.as_ref(),
-                                #[cfg(feature = "pubsub-ts-stack")]
-                                ts_stack,
+                            &crate::query_sink::ProvenQuery {
+                                inner: &shared,
+                                peer: requester,
                             },
-                            requester,
                             &mut responder,
                         )
                     } else {
-                        crate::query_sink::handle_from(
+                        crate::query_sink::QuerySinkOf::handle_typed(
                             &mut queryable.sink,
-                            &query_view,
-                            requester,
+                            &crate::query_sink::ProvenQuery {
+                                inner: &query_view,
+                                peer: requester,
+                            },
                             &mut responder,
                         )
                     }
                 }
+                // The view and the responder are handed over as their own types: a sink of one
+                // closed type is called without a vtable (`ResponderSink`).
                 #[cfg(not(feature = "alloc"))]
-                crate::query_sink::handle_from(
+                crate::query_sink::QuerySinkOf::handle_typed(
                     &mut queryable.sink,
-                    &query_view,
-                    requester,
+                    &crate::query_sink::ProvenQuery {
+                        inner: &query_view,
+                        peer: requester,
+                    },
                     &mut responder,
                 )
             }
@@ -4601,11 +4637,19 @@ mod tests {
             } => {
                 assert_eq!(keyexpr_literal, "demo/a");
                 assert_eq!(payload, b"v1");
-                let ts = timestamp
-                    .as_ref()
-                    .expect("the reply carries the value timestamp");
-                assert_eq!(ts.time, 0x1234);
-                assert_eq!(ts.zid.as_slice(), &[0x07]);
+                #[cfg(feature = "pubsub-timestamp")]
+                {
+                    let ts = timestamp
+                        .as_ref()
+                        .expect("the reply carries the value timestamp");
+                    assert_eq!(ts.time, 0x1234);
+                    assert_eq!(ts.zid.as_slice(), &[0x07]);
+                }
+                #[cfg(not(feature = "pubsub-timestamp"))]
+                assert!(
+                    timestamp.is_none(),
+                    "a build that does not send a reply's timestamp does not stage it"
+                );
                 let enc = encoding
                     .as_ref()
                     .expect("the reply carries the value encoding");
@@ -5363,10 +5407,16 @@ mod tests {
                     keyexpr_literal, "demo/data",
                     "the CONCRETE key, not the `demo/**` the responder is bound to",
                 );
+                #[cfg(feature = "pubsub-timestamp")]
                 assert_eq!(
                     timestamp.as_ref().map(|t| t.time),
                     Some(0x1234),
                     "the Del reply is timestamped",
+                );
+                #[cfg(not(feature = "pubsub-timestamp"))]
+                assert!(
+                    timestamp.is_none(),
+                    "a build that does not send a reply's timestamp does not stage it"
                 );
                 assert!(source_info.is_some(), "the Del reply carries source_info");
             }
@@ -6526,6 +6576,46 @@ mod tests {
             *seen.lock().unwrap(),
             [None, Some([0x1f; 16]), None],
             "a query is asked by whom the link proved when it proved one, and by nobody shown else"
+        );
+    }
+
+    /// A sink typed by the view and the responder, and no `QuerySink`, is dispatched by the wire
+    /// path as a boxed closure is: shown the query and who the link proved, and answering through
+    /// the session's responder.
+    #[test]
+    fn a_sink_typed_by_the_responder_is_dispatched_by_the_wire_path() {
+        type Seen = Arc<Mutex<Vec<(Option<[u8; 16]>, alloc::string::String)>>>;
+        struct Typed(Seen);
+        impl<V: QueryView, O: ReplyOut> crate::query_sink::QuerySinkOf<V, O> for Typed {
+            fn handle_typed(&mut self, query: &V, out: &mut O) {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((query.requester(), query.keyexpr().to_string()));
+                out.reply(b"typed");
+            }
+        }
+        let seen: Seen = Arc::new(Mutex::new(Vec::new()));
+        let mut reg: QueryableRegistry<Typed> = QueryableRegistry::with_sink_backing();
+        reg.register_sink(
+            "metrics/cpu",
+            crate::locality::Locality::Any,
+            false,
+            Typed(Arc::clone(&seen)),
+        )
+        .expect("the table has room");
+        reg.set_requester(Some([0x2e; 16]));
+        let mut replies = ReplyStage::new();
+        let outcome = reg.dispatch_request(
+            &request_query(4, 0, Some("metrics/cpu")),
+            &HashMap::new(),
+            &mut replies,
+        );
+        assert_eq!(outcome.matched, 1);
+        assert_eq!(replies.len(), 1, "the reply went out through the responder");
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [(Some([0x2e; 16]), "metrics/cpu".to_string())]
         );
     }
 

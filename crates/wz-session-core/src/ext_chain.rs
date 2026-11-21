@@ -348,6 +348,10 @@ impl ChainHeaders for ReceivedExtChain {
 /// judged by its header for the message `mid` names and not kept, so the chain's storage does
 /// not grow with its length.
 ///
+/// The loop is generic over the walk, which is a type of its own for each message's document; what
+/// it does with an entry is one function out of line (`keep_handshake_entry`), so that the four
+/// messages' decodes share one copy of it and each holds only its own walk.
+///
 /// An entry's own body is a separate matter: an owned entry carries its bytes
 /// in the SCE default storage, so an extension whose body is a byte string (the
 /// region name, an auth or SHM challenge) still owns a heap copy of it; the
@@ -364,16 +368,43 @@ pub(crate) fn collect_handshake_ext_chain<'a>(
     walked: impl Iterator<Item = wz_codecs::ext_entry::ExtEntryView<'a>>,
     entries: &mut ExtChainOwned,
 ) -> Result<(), crate::parse_error::InboundParseError> {
+    for entry in walked {
+        // On `session-slot` only the entries of an extension the build reads are kept, one each:
+        // a peer that repeats one fills the chain and is refused. Every other build keeps them all.
+        #[cfg(feature = "session-slot")]
+        let read = reads_received_ext(entry.ext_id());
+        #[cfg(not(feature = "session-slot"))]
+        let read = true;
+        keep_handshake_entry(mid, &entry, read, entries)?;
+    }
+    Ok(())
+}
+
+/// One entry of a received handshake chain into the chain the message holds
+/// (`collect_handshake_ext_chain`), kept when `read` says the build reads its extension. On
+/// `session-slot` every entry is judged by its header for the message `mid` names, kept or not,
+/// and the first refused header is what the chain holds of the rest; every other build keeps the
+/// whole chain, which the rule judges entry by entry later.
+#[cfg(any(
+    feature = "codec-init-body",
+    feature = "codec-open-body",
+    feature = "codec-close",
+    feature = "codec-keep-alive"
+))]
+#[inline(never)]
+fn keep_handshake_entry(
+    mid: u8,
+    entry: &wz_codecs::ext_entry::ExtEntryView<'_>,
+    read: bool,
+    entries: &mut ExtChainOwned,
+) -> Result<(), crate::parse_error::InboundParseError> {
     #[cfg(not(feature = "session-slot"))]
     {
-        // The whole chain is kept, so the rule judges it entry by entry later.
-        let _ = mid;
-        for entry in walked {
-            entries.push(received_entry(&entry)?);
-        }
+        let _ = (mid, read);
+        entries.push(received_entry(entry)?);
     }
     #[cfg(feature = "session-slot")]
-    for entry in walked {
+    {
         if entries.refused_header.is_none()
             && crate::ext_admit::judge_ext_chain(
                 crate::ext_admit::ExtCarrier::Transport(mid),
@@ -383,11 +414,7 @@ pub(crate) fn collect_handshake_ext_chain<'a>(
         {
             entries.refused_header = Some(entry.header);
         }
-        // One entry for each extension a build reads: a peer that repeats one fills
-        // the chain and is refused.
-        if reads_received_ext(entry.ext_id())
-            && entries.entries.push(received_entry(&entry)?).is_err()
-        {
+        if read && entries.entries.push(received_entry(entry)?).is_err() {
             return Err(crate::parse_error::InboundParseError::ExtChainOverflow);
         }
     }

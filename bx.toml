@@ -131,6 +131,9 @@ min_free_gb = 170
 # run is lost; the store is what lasts. Where `~/zephyrproject` is already a directory (the installs made by hand on
 # 2026-11-03), provisioning does not replace it and those keep working as they are.
 #
+# `scripts/kit-size-delta.sh` builds kit images in two trees in one run, so its name asks for both
+# tools as the lanes' ids do, and it is placed with no `--host`.
+#
 # A full `bash scripts/run-ci.sh` with no `--layer` runs Qz too and its command line names no lane,
 # so bx cannot tell it from a run of another layer: place such a run with `--host` on a machine
 # that has the toolchain.
@@ -143,7 +146,7 @@ install = "ZEPHYR_SDK_DIR={prefix} ZEPHYR_HOME={scratch}/zephyrproject bash scri
 install_inputs = ["scripts/provision-zephyr.sh", ".github/workflows/ci.yml"]
 prefix_link = "~/zephyr-sdk-{version}"
 packages = ["cmake", "git", "python3-venv", "wget"]
-needed_by = ["Qz"]
+needed_by = ["Qz", "kit-size-delta"]
 
 [tools.zephyr-venv]
 version_file = ".github/workflows/ci.yml"
@@ -154,7 +157,7 @@ install = "ZEPHYR_HOME={prefix} bash scripts/provision-zephyr.sh --workspace"
 install_inputs = ["scripts/provision-zephyr.sh", ".github/workflows/ci.yml"]
 prefix_link = "~/zephyrproject"
 packages = ["git", "python3-venv"]
-needed_by = ["Qz"]
+needed_by = ["Qz", "kit-size-delta"]
 
 # THE SHELLCHECK Layer 0 lints with, at the revision CI installs. `packages` above asks only whether
 # some shellcheck runs, and a machine whose system copy is older answered yes: on 2026-11-06 a fleet
@@ -262,7 +265,8 @@ inputs = [
 outputs = ["docs/.atomic/**", "docs/rounds/pending/**"]
 
 # THE WHOLE GATE AS A SET OF CHECKS the fleet judges unit by unit (bx RFC 0004): `bx --checks ci`.
-# A unit is one lane of `scripts/run-ci.sh`, run the way a hosted job runs it; the planner reads the
+# A unit is one lane of `scripts/run-ci.sh`, run the way a hosted job runs it, or one part of a lane
+# the planner cuts into parts (Layer Qzk, a ceiling group a unit: `Qzk:<part>`); the planner reads the
 # lanes from the script's dispatch table and its header says why each field of a unit is what it is
 # (`scripts/lib/runci_plan.py`). This is the first step of judging every commit before it enters
 # `main`, in the fleet, instead of in the hosted runner pool this account shares with its other

@@ -813,6 +813,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/reply_stage.rs` | S2 | |
 | `crates/wz-session-core/src/request_build.rs` | S2 | |
 | `crates/wz-session-core/src/request_routing_context.rs` | S2 | |
+| `crates/wz-session-core/src/reset_generations.rs` | S2 | |
 | `crates/wz-session-core/src/resource_snapshot.rs` | S3 | |
 | `crates/wz-session-core/src/response_build.rs` | S2 | |
 | `crates/wz-session-core/src/response_final_build.rs` | S2 | |

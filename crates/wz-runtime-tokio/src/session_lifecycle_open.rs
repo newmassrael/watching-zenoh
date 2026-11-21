@@ -532,7 +532,8 @@ mod tests {
         }
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let node = LifecycleQueries::new("0100", "router", Permit, NoSessions)
+        let seed = crate::lifecycle_reset_seed_from_os_entropy().expect("os entropy");
+        let node = LifecycleQueries::new("0100", "router", Permit, NoSessions, seed)
             .with_opener(LinkstateOpener::new(seeded(&[ADVERTISED]), tx));
         let key = format!("@/0100/router/session/open/{}", zid_to_zenoh_hex(PEER_ZID));
         let view = BorrowedQuery {

@@ -37,6 +37,15 @@
 //! accumulator [`crate::query::QueryResponder`] `impl`s [`ReplyOut`]
 //! directly and the dispatch builds a [`BorrowedQuery`] for the inbound
 //! [`QueryView`], so no intermediate wrapper sits on the seam.
+//!
+//! **The typed form.** The queryable registry calls its sinks through
+//! [`QuerySinkOf`], which names the view and the output as the types the
+//! dispatch holds them in. A registry of one closed sink type (the
+//! fixed-memory profile's) then calls it with no vtable between them, and an
+//! image links only the output methods its sink calls. Every [`QuerySink`] is
+//! a [`QuerySinkOf`] for any view and output, handed them as the two trait
+//! objects above, so a boxed closure is dispatched by the same registry and
+//! sees the same contract.
 
 #[cfg(feature = "alloc")]
 use alloc::boxed::Box;
@@ -190,30 +199,17 @@ pub trait QueryView {
     }
 }
 
-/// Hand one matched query to a sink, as arriving from `requester` when the link proved one
-/// (decision D12): the sink reads the view it would have read, and [`QueryView::requester`]
-/// answers with the zid. With none, the view is handed over as it is.
-pub fn handle_from<S: QuerySink + ?Sized>(
-    sink: &mut S,
-    view: &dyn QueryView,
-    requester: Option<[u8; 16]>,
-    out: &mut dyn ReplyOut,
-) {
-    match requester {
-        Some(peer) => sink.handle(&ProvenQuery { inner: view, peer }, out),
-        None => sink.handle(view, out),
-    }
-}
-
-/// A query whose link proved the zid of its sender: every accessor is `inner`'s, and
-/// [`QueryView::requester`] answers `peer`. A separate type and not a field of
-/// [`BorrowedQuery`] for the reason [`SharedQuery`] is one: that struct is built as a literal in a
-/// dozen places that have no link to ask.
+/// A query as the link it arrived on stands (decision D12): every accessor is `inner`'s, and
+/// [`QueryView::requester`] answers `peer` when the link's key proved a zid, `inner`'s own answer
+/// when it proved none. It is the one view the queryable registry hands its sinks, whatever the
+/// dispatcher built, so a sink typed by its view ([`QuerySinkOf`]) is typed by this. A separate
+/// type and not a field of [`BorrowedQuery`] for the reason [`SharedQuery`] is one: that struct is
+/// built as a literal in a dozen places that have no link to ask.
 pub struct ProvenQuery<'a> {
     /// The query as the dispatcher built it.
     pub inner: &'a dyn QueryView,
-    /// The zid the link's key proved.
-    pub peer: [u8; 16],
+    /// The zid the link's key proved, or `None` when it proved none.
+    pub peer: Option<[u8; 16]>,
 }
 
 impl QueryView for ProvenQuery<'_> {
@@ -260,7 +256,7 @@ impl QueryView for ProvenQuery<'_> {
         self.inner.qos()
     }
     fn requester(&self) -> Option<[u8; 16]> {
-        Some(self.peer)
+        self.peer.or_else(|| self.inner.requester())
     }
 }
 
@@ -823,6 +819,23 @@ pub trait QuerySink {
     fn handle(&mut self, query: &dyn QueryView, out: &mut dyn ReplyOut);
 }
 
+/// [`QuerySink`] with the view and the output named as the types the dispatch holds them in,
+/// `V` and `O`, instead of as trait objects (see the module docs, "The typed form"). The
+/// queryable registry dispatches through this; a sink that implements it for its registry's view
+/// and responder is called with no vtable, and nothing of `O` it does not call is linked.
+pub trait QuerySinkOf<V: QueryView + ?Sized, O: ReplyOut + ?Sized> {
+    /// Handle one matched inbound query, as [`QuerySink::handle`] does.
+    fn handle_typed(&mut self, query: &V, out: &mut O);
+}
+
+/// Every [`QuerySink`] takes any view and output, as the trait objects its contract names: the
+/// one bridge between the typed dispatch and a sink of the heap profile.
+impl<V: QueryView, O: ReplyOut, S: QuerySink + ?Sized> QuerySinkOf<V, O> for S {
+    fn handle_typed(&mut self, query: &V, out: &mut O) {
+        self.handle(query, out);
+    }
+}
+
 /// A [`QueryView`] over loose borrowed fields — the canonical impl for a
 /// query not backed by an owned projection (a local / loopback
 /// synthesised query, and the seam's own tests). One `QueryView` impl
@@ -1147,8 +1160,20 @@ mod tests {
         };
         let mut sink = Who([None; 2], 0);
         let mut out = CountingReplyOut::default();
-        handle_from(&mut sink, &view, None, &mut out);
-        handle_from(&mut sink, &view, Some([0x2f; 16]), &mut out);
+        sink.handle(
+            &ProvenQuery {
+                inner: &view,
+                peer: None,
+            },
+            &mut out,
+        );
+        sink.handle(
+            &ProvenQuery {
+                inner: &view,
+                peer: Some([0x2f; 16]),
+            },
+            &mut out,
+        );
         assert_eq!(
             sink.0,
             [Some((None, 7, 8)), Some((Some([0x2f; 16]), 7, 8))],
@@ -1159,6 +1184,64 @@ mod tests {
             None,
             "a view that says nothing shows nobody"
         );
+        let proven = ProvenQuery {
+            inner: &view,
+            peer: Some([0x3c; 16]),
+        };
+        assert_eq!(
+            ProvenQuery {
+                inner: &proven,
+                peer: None,
+            }
+            .requester(),
+            Some([0x3c; 16]),
+            "a link that proved nothing leaves the view's own answer standing"
+        );
+    }
+
+    /// The typed call reaches a sink typed by the view and the output with them as they are, and
+    /// a sink of the two trait objects through the same call: the one shape the registry calls
+    /// both profiles' sinks by.
+    #[test]
+    fn a_typed_call_reaches_a_typed_sink_and_a_trait_object_sink_alike() {
+        struct Typed {
+            key_len: usize,
+            rid: crate::wire_id::RequestId,
+        }
+        impl<'q> QuerySinkOf<BorrowedQuery<'q>, CountingReplyOut> for Typed {
+            fn handle_typed(&mut self, query: &BorrowedQuery<'q>, out: &mut CountingReplyOut) {
+                // The fields themselves, which only a sink handed the concrete view can read.
+                self.key_len = query.keyexpr.len();
+                self.rid = query.rid;
+                out.reply(b"typed");
+            }
+        }
+        let view = BorrowedQuery {
+            keyexpr: "robot/arm",
+            parameters: None,
+            attachment: None,
+            #[cfg(feature = "alloc")]
+            source_info: None,
+            payload: None,
+            #[cfg(feature = "alloc")]
+            encoding: None,
+            rid: 9,
+            is_local: false,
+            #[cfg(feature = "alloc")]
+            qos: crate::sample::QosLevel::DEFAULT,
+        };
+        let mut out = CountingReplyOut::default();
+
+        let mut typed = Typed { key_len: 0, rid: 0 };
+        typed.handle_typed(&view, &mut out);
+        assert_eq!((typed.key_len, typed.rid), (9, 9));
+        assert_eq!((out.replies, out.last_len), (1, 5), "`typed` went out");
+
+        let mut echo = EchoQuerySink::default();
+        echo.handle_typed(&view, &mut out);
+        assert_eq!(echo.calls, 1, "the trait-object sink ran once");
+        assert_eq!((echo.last_key_len, echo.last_rid), (9, 9));
+        assert_eq!((out.replies, out.last_len), (2, 2), "`ok` went out");
     }
 
     #[test]

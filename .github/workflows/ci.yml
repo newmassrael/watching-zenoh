@@ -1703,11 +1703,17 @@ jobs:
   # SHARDED (run 39295676896). One job read `elapsed 1783s of 1800s budget (99%)`
   # and failed its margin step with every gate in it green, 21 of its 26 minutes
   # being the census (`-- --list` of every crate twice; wz-runtime-tokio alone is
-  # nine). The census is now a matrix over the members' positions, the compile
-  # gate and the domain-bundles build run in the last shard only (shard 0 holds
-  # wz-runtime-tokio, about 570 s of the census on a hosted runner, so the two
-  # shards land near 760 s each), and every crate is examined by exactly one
-  # shard.
+  # nine). The census is a matrix, and every crate is examined by exactly one
+  # shard; the builds are the `nondefault-builds` job's.
+  #
+  # THREE SHARDS, DEALT BY COST (run 44790303307: shard 1 read 97 percent, shard 0
+  # was cancelled at 100). Shards took members by position, and five members are
+  # 1,483 s of the census's 2,389 s (run 44778189472), so two shards read 1,047 s
+  # and 1,342 s; a slower runner multiplies both. `census_shard_plan.py` deals the
+  # members by measured cost (`c1cn_census_weights.tsv`), which puts about 797 s
+  # in each of three shards on that run's figures. Two balanced shards would hold
+  # about 1,195 s each, which a runner a third slower than that run's takes past
+  # the budget once the job's own setup (about 220 s) is added.
   #
   # DROP-PROOF INVARIANT (the footprint job's, co-located on purpose): `shard`
   # MUST list exactly [0 .. WZ_CENSUS_SHARDS-1]. The census asserts SHARD <
@@ -1715,7 +1721,7 @@ jobs:
   # crates no longer examined while everything stays green. Change the list and
   # the count together.
   nondefault:
-    name: non-default feature compile + census (Layer C1cn, shard ${{ matrix.shard }}/2)
+    name: non-default feature compile + census (Layer C1cn, shard ${{ matrix.shard }}/3)
     runs-on: ubuntu-22.04
     outputs:
       cache_spec: ${{ steps.cache-series.outputs.spec }}
@@ -1723,9 +1729,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1]
+        shard: [0, 1, 2]
     env:
-      WZ_CENSUS_SHARDS: "2"
+      WZ_CENSUS_SHARDS: "3"
       WZ_CENSUS_SHARD: ${{ matrix.shard }}
       # The census slice only: the builds of this layer are the next job's
       # (`nondefault-builds`), and `scripts/lib/c1cn_part_binding.py` holds the
@@ -4748,7 +4754,14 @@ jobs:
 
       - name: Layer Qzk — the client images build under the gates they are held to
         # The kit lane's build step for each client image: the board's own limits (an arena
-        # outgrown fails the build), the stack chain and bound, and the text. Nothing boots.
+        # outgrown fails the build), the stack chain and bound, and the text. Then the ceiling
+        # under zenoh-pico (docs/upstream-parity.md D8): each image the committed matrix pairs
+        # with a pico reference and that reference, built here as compare builds from this
+        # tree's vendor/zenoh-pico, held cell by cell; only a WIN passes. Nothing boots.
+        # Run whole, every part in turn (`WZ_QZK_PART` unset). The parts are the fleet's
+        # (scripts/lib/runci_plan.py), where the lane's one peak waited for a whole machine;
+        # a hosted job has its runner to itself, and a job per part would spend a slot of
+        # the account's shared runner pool and a Zephyr cache restore for each.
         env:
           WZ_QZ_REQUIRE: "1"
         run: |

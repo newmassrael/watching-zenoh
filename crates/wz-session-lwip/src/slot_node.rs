@@ -77,6 +77,9 @@ impl<L> Bind<LwipUdpDriver> for LwipBinder<'_, L>
 where
     L: Deref<Target = LwipLink> + Clone + 'static,
 {
+    // The port's lwIP has no IPv6 (`LwipLinks::bind_driver` refuses that family).
+    const IPV6: bool = false;
+
     fn bind(&mut self, to: Locator) -> Result<LwipUdpDriver, LinkOpenError> {
         // lwIP's links here are UDP sockets; a `tcp/` or `tls/` endpoint is not this stack's to
         // dial.

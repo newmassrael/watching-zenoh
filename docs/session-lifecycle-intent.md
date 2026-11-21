@@ -1261,8 +1261,8 @@ takes the commander.
 
 Step (1) built (Round 4052). `QueryView::requester()` answers the zid the key of
 the link proved, and `None` otherwise (a claimed zid is `source_info`'s and
-proves nothing); `handle_from` hands a query to a sink as asked by that zid
-(`ProvenQuery` wraps the view, so no literal of `BorrowedQuery` changes);
+proves nothing); the queryable registry hands every sink a `ProvenQuery` that
+answers that zid (it wraps the view, so no literal of `BorrowedQuery` changes);
 `SessionLinkActions::verified_peer_zid` is the session's answer, and the slot
 profile's `SlotDispatch::on_event` says it to the process's observer before each
 dispatch and clears it after. Nothing reads it yet. The heap profile's dispatch

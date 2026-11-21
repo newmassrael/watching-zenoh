@@ -336,10 +336,11 @@ pub mod switchboard;
 // dispatch a matched inbound query through one backing-agnostic seam
 // (model B: AP stores `BoxedQuerySink` heap closures, MCU stores a
 // consumer-supplied closed `enum`, §2.4 static-first dynamic-opt-in).
-// The queryable model-B seam: the registry is generic-over-`C: QuerySink`
+// The queryable model-B seam: the registry is generic over its sink `C`
 // (R311gb-3b), the reply accumulator `query::QueryResponder` impls
-// `ReplyOut` directly, and the dispatch builds a `BorrowedQuery` for the
-// inbound `QueryView` (R311gb-3b-cleanup retired the prior
+// `ReplyOut` directly, and the dispatch hands its view and that responder
+// to the sink as their own types (`QuerySinkOf`), which every `QuerySink`
+// takes as trait objects (R311gb-3b-cleanup retired the prior
 // `QueryEvent`/`ReplyEmitter` wrapper module).
 pub mod query_sink;
 
@@ -2085,6 +2086,11 @@ pub mod lifecycle_wire;
 // tier select.
 #[cfg(feature = "storage-profile")]
 pub mod lifecycle_node;
+
+// The lifecycle reset's table of generations (decision D6): the rule is the SCE algorithm
+// `sources/algorithms/take_generation.scxml`, and each profile states the table's bound.
+#[cfg(feature = "storage-profile")]
+pub mod reset_generations;
 
 // The table every transport of the lifecycle contract is held to (decision D7), for a test of
 // this crate or an adapter in a sibling (`lifecycle-contract`, which the census leg turns on so

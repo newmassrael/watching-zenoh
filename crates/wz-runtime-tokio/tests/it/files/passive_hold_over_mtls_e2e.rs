@@ -347,6 +347,7 @@ where
         "peer",
         Permit,
         a_router.lifecycle_directory(),
+        wz_runtime_tokio::lifecycle_reset_seed_from_os_entropy().expect("os entropy"),
     )
     .with_intent(LoopIntent(a_tx.clone()))
     .with_machines(board.clone())

@@ -339,6 +339,57 @@ derived from the declaration and never chosen by hand:
      with a capability off links none of its symbols (the ABSENCE and PRESENCE of
      `capability_cost_gate.py`, extended to the MCU images).
 
+- **D8. The build cells of the MCU matrix are a ceiling every landing holds (owner, 2026-11-21:
+  "no std no heap 에서 pico 대비 우월했던걸 잃고 있어, 잃지 않도록 개선해").** Run
+  20261031T063515 read the fixed client and the heap client as WIN against single-threaded
+  zenoh-pico in every cell, by 1,224 and 1,292 bytes of text and 1,320 and 1,388 of flash. Every
+  gate after it held an image to its OWN committed row: the fixed client's text row of
+  `deploy/text_budget.json` moved from 142,528 bytes (2026-10-31) to 149,548 (2026-11-03) and to
+  155,796 (2026-11-18), each move with its reason, against the 144,844 the matrix reads for the
+  reference. Nothing compared the image with zenoh-pico, so the text and flash cells went from WIN
+  to LOSS with no gate red. The rule:
+  1. **The ceiling is judged in the same run as the image.** Layer Qzk (`scripts/run-ci.sh`, on
+     hosted CI in the Zephyr job) takes the pairs of the matrix's latest run whose image is one of
+     the images it builds, builds the image and its reference as compare builds in that run (the
+     reference from this tree's `vendor/zenoh-pico`, the way `scripts/kit-lane.sh build` builds
+     it), and `scripts/lib/pico_ceiling_gate.py` judges every cell the build alone decides:
+     text, flash (text + data), static RAM (data + bss: the kernel heap pool and every stack are
+     in it), the stack objects (each thread's and the interrupt stack, found in the debug
+     information by their type, Zephyr's `struct z_thread_stack_element`), and for an image with a
+     kernel heap pool its storage block (stated by the build as `wz_storage_block_bytes`) under
+     the reference's heap peak in the matrix's run. A committed figure of the reference is not
+     used for a cell a build decides: a toolchain, a Zephyr tree or a path that differs moves the
+     reference too, and a cell is a comparison only when both sides moved alike. The lane can be
+     run one ceiling group at a time (`WZ_QZK_PART`, `scripts/kit-lane.sh parts`): a group is a
+     reference with every image the matrix pairs with it, so a reference is never built apart
+     from an image it holds, and an image with no pair is a part of its own. The lane refuses a
+     cut that leaves an image out or puts one in two parts, runs every part when no part is
+     named (hosted CI runs it so), and the fleet's planner gives each part a unit of its own
+     (`scripts/lib/runci_plan.py`), so that no one machine is held for the whole lane.
+  2. **Only WIN passes (D1).** A TIE or a LOSS fails the layer and names the cell, both figures
+     and the difference. The gate has no exception and no allow list.
+  3. **An image's own budget moves only under the ceiling.** `deploy/text_budget.json` and
+     `deploy/resource_budget.json` still record a measured change of an image, with its reason, in
+     the same commit. A move that takes a cell past zenoh-pico's is refused by the ceiling however
+     the row moved; it is answered by taking the bytes back, or by the owner's decision written
+     here, never by a budget.
+  4. **Both sides are compare builds** (`BUILD_VARIANT=compare`, `CONFIG_WZ_MEMORY_REPORT`), as the
+     matrix's size cells were read: the memory report's thread and code are in both images alike,
+     and the cells the gate reads are the cells a compare run on the kit reads. A pair with one
+     side built otherwise is refused.
+  5. **The matrix stays the record of what only a boot measures** (stack used, heap peak,
+     turnaround). The gate's cells are read on every run of Layer Qzk and are not committed.
+  6. **The WIN was taken back (2026-11-21).** The ceiling first read the fixed client as a LOSS
+     (text 1,764 bytes over the reference after the second round of work on it). Four rounds of
+     commits took the bytes back, and the first run of Layer Qzk on their tree reads every cell
+     WIN: text 144,820 against 147,912 (3,092 under), flash 3,188 under, static RAM 9,333 under
+     for the fixed client and 6,341 for the heap client, stack objects 3,456 under, and the heap
+     client's storage block 7,712 against the reference's heap peak of 9,280. The image's own
+     rows moved with it in the same commit (`deploy/text_budget.json`: the fixed client 155,796
+     to 143,720, the commits and the symbols in its `measured`). No boot of the matrix was run
+     again: its boot cells (stack used, heap peak, turnaround) are those of run 20261031T063515,
+     and the caveat of that run in `deploy/upstream_parity.json` says so.
+
 ## 5. Steps
 
 MCU first, by the owner's choice.

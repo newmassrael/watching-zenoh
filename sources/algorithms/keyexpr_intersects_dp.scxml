@@ -42,10 +42,8 @@
     <sce:var name="cn" type="uint32" init="len(c)"/>
     <!-- Row 0: the empty prefix of r shares a key with a prefix of c that is
          all `**`. -->
-    <!-- one: the bit shifted into place. A uint64 local and not a literal: a
-         literal operand of a shift is not typed by the uint64 it is or-ed into
-         (the Rust emit reads `(1 &lt;&lt; m) as u64`, an i32 shift). -->
-    <sce:var name="one" type="uint64" init="1"/>
+    <!-- The bit `1 &lt;&lt; m` is a uint64: a literal takes the type of the uint64
+         it is or-ed into, and a shift the type of its left operand. -->
     <sce:var name="prev" type="uint64" init="1"/>
     <sce:var name="m" type="uint32" init="0"/>
     <sce:var name="cs0" type="uint32" init="0"/>
@@ -59,7 +57,7 @@
       <sce:if cond="keyexpr_chunk_kind(c, cs0, ce0) === 2">
         <sce:var name="below0" type="uint32" init="m - 1"/>
         <sce:if cond="((prev &gt;&gt; below0) &amp; 1) === 1">
-          <sce:assign target="prev" expr="prev | (one &lt;&lt; m)"/>
+          <sce:assign target="prev" expr="prev | (1 &lt;&lt; m)"/>
         </sce:if>
       </sce:if>
       <sce:if cond="ce0 &lt; cn">
@@ -106,7 +104,7 @@
           </sce:else>
         </sce:if>
         <sce:if cond="v">
-          <sce:assign target="cur" expr="cur | (one &lt;&lt; jb)"/>
+          <sce:assign target="cur" expr="cur | (1 &lt;&lt; jb)"/>
         </sce:if>
         <sce:assign target="j" expr="jb"/>
         <sce:if cond="ce &lt; cn">
