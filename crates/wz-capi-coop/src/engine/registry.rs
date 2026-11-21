@@ -107,11 +107,11 @@ pub(super) const LOCAL_FACE: FaceId = u64::MAX;
 /// The application layer of one session. See the module documentation.
 pub(super) struct Registry {
     pub(super) app: SlotObserver,
+    /// The limits the session's open resolved, which every face's tables are held to: a face
+    /// accepted after the open takes them as the dial role's face did.
+    limits: SessionLimits,
     /// The dial role's face first, then the accepted ones in the order they came.
     faces: Vec<FaceTables>,
-    /// The limits the session's open resolved, which each face's tables are held to when the
-    /// face comes.
-    limits: SessionLimits,
     /// The session's own gets pending on its own queryables ([`LOCAL_FACE`]).
     #[cfg(feature = "local-queryable")]
     pub(super) local: Gets,

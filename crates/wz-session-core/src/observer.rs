@@ -425,6 +425,23 @@ impl ApplicationLayerObserver {
             .limit_to(limits.max_pending_liveliness_gets_held());
         observer.replies.limit_to(limits.max_pending_queries_held());
         observer.querier_max_pending_queries = limits.querier_max_pending_queries_held();
+        // What the session's peer fills: the alias table on every build, and the declaration
+        // tables of each plane the build carries.
+        observer
+            .subscribers
+            .limit_peer_aliases_to(limits.max_peer_keyexpr_aliases_held());
+        #[cfg(feature = "declare-subscriber")]
+        observer
+            .remote_subscribers
+            .limit_peer_to(limits.max_remote_decls_held());
+        #[cfg(feature = "declare-queryable")]
+        observer
+            .remote_queryables
+            .limit_peer_to(limits.max_remote_decls_held());
+        #[cfg(feature = "liveliness-subscriber")]
+        observer
+            .liveliness_subscribers
+            .limit_peer_to(limits.max_remote_decls_held());
         observer
             .pending_replies
             .limit_to(limits.max_pending_replies_held());

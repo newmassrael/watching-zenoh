@@ -9,12 +9,13 @@
 //! serves every session, and the process holds it once. This holds the rest:
 //!
 //! - what the peer's wire ids NAME: its keyexpr aliases
-//!   ([`crate::pubsub::SubscriberPeer`], bound by [`crate::caps::MAX_PEER_KEYEXPR_ALIASES`]) and
+//!   ([`crate::pubsub::SubscriberPeer`], bound by `MAX_PEER_KEYEXPR_ALIASES`) and
 //!   the subscribers, queryables and tokens it declared to us
 //!   ([`crate::declare::subscriber::RemoteSubscriberPeer`],
 //!   [`crate::declare::queryable::RemoteQueryablePeer`],
 //!   [`crate::declare::liveliness_subscriber::PeerTokens`], each
-//!   bound by [`crate::caps::MAX_REMOTE_DECLS`]);
+//!   bound by `MAX_REMOTE_DECLS`), each held to the value the creator of the
+//!   session states ([`PeerTables::limit_to`]);
 //! - what it ASKED to be told, and what is staged back to it: its subscriber
 //!   interests ([`crate::caps::MAX_INBOUND_SUB_INTERESTS`]) and the staged
 //!   answers ([`crate::caps::MAX_PENDING_DECLARES`]), the interest answers of the
@@ -155,6 +156,12 @@ impl<P: Storage> PeerTables<P> {
     pub fn limit_to(&mut self, limits: &crate::limits::SessionLimits) {
         self.replies.limit_to(limits.max_pending_replies_held());
         self.finals.limit_to(limits.max_pending_finals_held());
+        self.subscribers
+            .limit_aliases_to(limits.max_peer_keyexpr_aliases_held());
+        let remote_decls = limits.max_remote_decls_held();
+        self.remote_subscribers.limit_to(remote_decls);
+        self.remote_queryables.limit_to(remote_decls);
+        self.tokens.limit_to(remote_decls);
     }
 
     /// Forget everything the peer said and everything owed to it, in place: the
@@ -203,6 +210,79 @@ mod tests {
             );
         }
         assert!(PeerTables::bytes() > 0);
+    }
+
+    /// The tables take the bounds their creator states: held to two, a peer's third alias and
+    /// third subscriber are refused and counted, and the quotas outlive a forgotten peer, as the
+    /// session's limits outlive one link.
+    #[cfg(all(feature = "alloc", feature = "codec-declare"))]
+    #[test]
+    fn the_tables_take_the_bounds_their_creator_states() {
+        use crate::limit_binding::{LimitSpec, Quota};
+        use crate::limits::{MaxPeerKeyexprAliases, MaxRemoteDecls, SessionLimits};
+        use crate::transport_profile::owned::DeclareOwnedVariant;
+        use wz_session_core_test_support as fx;
+
+        let mut limits = SessionLimits::defaults();
+        let aliases = limits.select_max_peer_keyexpr_aliases(Quota::at_most(2));
+        let decls = limits.select_max_remote_decls(Quota::at_most(2));
+        if MaxPeerKeyexprAliases::DOMAIN.is_singleton() || MaxRemoteDecls::DOMAIN.is_singleton() {
+            assert!(
+                aliases.is_err() || decls.is_err(),
+                "a build of one value refuses two"
+            );
+            return;
+        }
+        aliases.expect("two is inside the domain");
+        decls.expect("two is inside the domain");
+        let mut tables = PeerTables::new();
+        tables.limit_to(&limits);
+        let two = Quota::at_most(2);
+        assert_eq!(
+            (
+                tables.subscribers.alias_quota().get(),
+                tables.remote_subscribers.quota().get(),
+                tables.remote_queryables.quota().get(),
+                tables.tokens.quota().get(),
+            ),
+            (two, two, two, two),
+            "every table the peer fills is handed its quota"
+        );
+        let mut subscribers = crate::declare::subscriber::RemoteSubscriberTable::<
+            crate::decl_sink::BoxedDeclSink,
+            crate::decl_sink::BoxedUndeclSink,
+        >::default();
+        let none: hashbrown::HashMap<u64, std::string::String> = hashbrown::HashMap::new();
+        for round in 0..2 {
+            for id in 1..=3u64 {
+                let key = std::format!("bound/{id}");
+                tables
+                    .subscribers
+                    .absorb_declare(&DeclareOwnedVariant::CodecZenohDeclKexpr(fx::decl_kexpr(
+                        id, &key,
+                    )));
+                subscribers.dispatch_declare(
+                    &mut tables.remote_subscribers,
+                    &DeclareOwnedVariant::CodecZenohDeclSubscriber(fx::decl_subscriber(
+                        id,
+                        0,
+                        Some(&key),
+                    )),
+                    &none,
+                );
+            }
+            assert_eq!(
+                (
+                    tables.subscribers.alias_count(),
+                    tables.subscribers.alias_refusals(),
+                    tables.remote_subscribers.declared_count(),
+                    tables.remote_subscribers.refusals(),
+                ),
+                (2, round + 1, 2, round + 1),
+                "round {round}: two held and the third refused, the counts kept across a forget"
+            );
+            tables.forget_peer();
+        }
     }
 
     /// A forgotten peer is an empty one, and its counts survive.

@@ -732,6 +732,314 @@ mod enforcement {
         );
     }
 
+    /// A peer's declaration of the entity `id` in one of the tables it fills, handed to the
+    /// door the session's receive path hands it to. A table answers a peer with nothing: a
+    /// declaration it cannot take is dropped and counted.
+    #[cfg(feature = "codec-declare")]
+    type Declare = fn(&mut ApplicationLayerObserver, u64);
+    /// The peer's withdrawal of the entity `id`.
+    #[cfg(feature = "codec-declare")]
+    type Withdraw = fn(&mut ApplicationLayerObserver, u64);
+    /// How many entities the table holds, and how many declarations it refused.
+    #[cfg(feature = "codec-declare")]
+    type Tally = fn(&ApplicationLayerObserver) -> (usize, u32);
+
+    /// With nothing stated a peer's table takes one past the build's count on the heap and the
+    /// capacity on a fixed backing, refusing none of them, as it did when it read the build's
+    /// constant; the fixed table refuses the next by its room.
+    #[cfg(feature = "codec-declare")]
+    fn declarations_admit_what_the_build_admitted(build: usize, declare: Declare, tally: Tally) {
+        let mut observer = ApplicationLayerObserver::with_limits(&SessionLimits::defaults());
+        let admitted = if crate::bounded::ENFORCES_CAPACITY {
+            build
+        } else {
+            build + 1
+        };
+        for id in 1..=admitted as u64 {
+            declare(&mut observer, id);
+        }
+        assert_eq!(tally(&observer), (admitted, 0));
+        if crate::bounded::ENFORCES_CAPACITY {
+            declare(&mut observer, admitted as u64 + 1);
+            assert_eq!(
+                tally(&observer),
+                (admitted, 1),
+                "refused by the table's room"
+            );
+        }
+    }
+
+    /// Held to two: the third declaration is refused and counted as a full table refuses it,
+    /// and changes nothing held; an id held is declared again without a place, and a place the
+    /// peer withdraws is taken again.
+    #[cfg(feature = "codec-declare")]
+    fn refuses_the_third_declaration(
+        limits: &SessionLimits,
+        declare: Declare,
+        withdraw: Withdraw,
+        tally: Tally,
+    ) {
+        let mut observer = ApplicationLayerObserver::with_limits(limits);
+        declare(&mut observer, 1);
+        declare(&mut observer, 2);
+        assert_eq!(tally(&observer), (2, 0));
+        declare(&mut observer, 3);
+        assert_eq!(tally(&observer), (2, 1), "the third is refused and counted");
+        declare(&mut observer, 2);
+        assert_eq!(tally(&observer), (2, 1), "an id held needs no place");
+        withdraw(&mut observer, 1);
+        assert_eq!(tally(&observer), (1, 1));
+        declare(&mut observer, 3);
+        assert_eq!(tally(&observer), (2, 1), "a place withdrawn is taken again");
+    }
+
+    /// The keyexpr the peer declares the entity `id` of `plane` on: one per id, so no
+    /// declaration repeats another's.
+    #[cfg(feature = "codec-declare")]
+    fn declared_key(plane: &str, id: u64) -> std::string::String {
+        std::format!("bound/{plane}/{id}")
+    }
+
+    /// The peer's aliases the declarations resolve against: none, as every key is literal.
+    #[cfg(any(
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "liveliness-subscriber"
+    ))]
+    fn no_aliases() -> hashbrown::HashMap<u64, std::string::String> {
+        hashbrown::HashMap::new()
+    }
+
+    #[cfg(feature = "codec-declare")]
+    fn alias(observer: &mut ApplicationLayerObserver, id: u64) {
+        let declare = wz_session_core_test_support::declare_envelope_decl_kexpr(
+            wz_session_core_test_support::decl_kexpr(id, &declared_key("alias", id)),
+        );
+        observer.subscribers.dispatch(
+            &crate::network_message::NetworkMessage::Declare(std::boxed::Box::new(declare)),
+            crate::sample::Reliability::Reliable,
+        );
+    }
+
+    #[cfg(feature = "codec-declare")]
+    fn alias_withdrawn(observer: &mut ApplicationLayerObserver, id: u64) {
+        let undeclare = wz_session_core_test_support::declare_envelope_undecl_kexpr(
+            wz_session_core_test_support::undecl_kexpr(id),
+        );
+        observer.subscribers.dispatch(
+            &crate::network_message::NetworkMessage::Declare(std::boxed::Box::new(undeclare)),
+            crate::sample::Reliability::Reliable,
+        );
+    }
+
+    #[cfg(feature = "codec-declare")]
+    fn alias_tally(observer: &ApplicationLayerObserver) -> (usize, u32) {
+        let peer = observer.subscribers.peer();
+        (peer.alias_count(), peer.alias_refusals())
+    }
+
+    /// `MAX_PEER_KEYEXPR_ALIASES` with nothing stated.
+    #[cfg(feature = "codec-declare")]
+    #[test]
+    fn max_peer_keyexpr_aliases_with_nothing_stated_admits_what_the_build_admitted() {
+        declarations_admit_what_the_build_admitted(
+            caps::MAX_PEER_KEYEXPR_ALIASES,
+            alias,
+            alias_tally,
+        );
+    }
+
+    /// `MAX_PEER_KEYEXPR_ALIASES` stated as two: the third alias is refused and counted, and
+    /// a message that names it resolves to nothing, as one naming an id never declared does.
+    #[cfg(feature = "codec-declare")]
+    #[test]
+    fn max_peer_keyexpr_aliases_stated_refuses_the_next() {
+        held_to_two(
+            SessionLimits::select_max_peer_keyexpr_aliases,
+            MaxPeerKeyexprAliases::DOMAIN.is_singleton(),
+            |limits| {
+                refuses_the_third_declaration(limits, alias, alias_withdrawn, alias_tally);
+                let mut observer = ApplicationLayerObserver::with_limits(limits);
+                for id in 1..=3 {
+                    alias(&mut observer, id);
+                }
+                assert_eq!(
+                    observer.subscribers.resolve_inbound_mapping(3),
+                    None,
+                    "the refused alias names nothing"
+                );
+                assert_eq!(
+                    observer.subscribers.resolve_inbound_mapping(2),
+                    Some(declared_key("alias", 2))
+                );
+            },
+        );
+    }
+
+    #[cfg(feature = "declare-subscriber")]
+    fn remote_subscriber(observer: &mut ApplicationLayerObserver, id: u64) {
+        let body = crate::transport_profile::owned::DeclareOwnedVariant::CodecZenohDeclSubscriber(
+            wz_session_core_test_support::decl_subscriber(
+                id,
+                0,
+                Some(&declared_key("subscriber", id)),
+            ),
+        );
+        observer
+            .remote_subscribers
+            .dispatch_declare(&body, &no_aliases());
+    }
+
+    #[cfg(feature = "declare-subscriber")]
+    fn remote_subscriber_withdrawn(observer: &mut ApplicationLayerObserver, id: u64) {
+        let body = crate::transport_profile::owned::DeclareOwnedVariant::CodecZenohUndeclSubscriber(
+            wz_session_core_test_support::undecl_subscriber(id),
+        );
+        observer
+            .remote_subscribers
+            .dispatch_declare(&body, &no_aliases());
+    }
+
+    #[cfg(feature = "declare-subscriber")]
+    fn remote_subscriber_tally(observer: &ApplicationLayerObserver) -> (usize, u32) {
+        let peer = observer.remote_subscribers.peer();
+        (peer.declared_count(), peer.refusals())
+    }
+
+    #[cfg(feature = "declare-queryable")]
+    fn remote_queryable(observer: &mut ApplicationLayerObserver, id: u64) {
+        let body = crate::transport_profile::owned::DeclareOwnedVariant::CodecZenohDeclQueryable(
+            wz_session_core_test_support::decl_queryable(
+                id,
+                0,
+                Some(&declared_key("queryable", id)),
+            ),
+        );
+        observer
+            .remote_queryables
+            .dispatch_declare(&body, &no_aliases());
+    }
+
+    #[cfg(feature = "declare-queryable")]
+    fn remote_queryable_withdrawn(observer: &mut ApplicationLayerObserver, id: u64) {
+        let body = crate::transport_profile::owned::DeclareOwnedVariant::CodecZenohUndeclQueryable(
+            wz_session_core_test_support::undecl_queryable(id),
+        );
+        observer
+            .remote_queryables
+            .dispatch_declare(&body, &no_aliases());
+    }
+
+    #[cfg(feature = "declare-queryable")]
+    fn remote_queryable_tally(observer: &ApplicationLayerObserver) -> (usize, u32) {
+        let peer = observer.remote_queryables.peer();
+        (peer.declared_count(), peer.refusals())
+    }
+
+    #[cfg(feature = "liveliness-subscriber")]
+    fn peer_token(observer: &mut ApplicationLayerObserver, id: u64) {
+        let body = crate::transport_profile::owned::DeclareOwnedVariant::CodecZenohDeclToken(
+            wz_session_core_test_support::decl_token(id, 0, Some(&declared_key("token", id))),
+        );
+        observer
+            .liveliness_subscribers
+            .dispatch_declare(&body, &no_aliases());
+    }
+
+    #[cfg(feature = "liveliness-subscriber")]
+    fn peer_token_withdrawn(observer: &mut ApplicationLayerObserver, id: u64) {
+        let body = crate::transport_profile::owned::DeclareOwnedVariant::CodecZenohUndeclToken(
+            wz_session_core_test_support::undecl_token(id),
+        );
+        observer
+            .liveliness_subscribers
+            .dispatch_declare(&body, &no_aliases());
+    }
+
+    #[cfg(feature = "liveliness-subscriber")]
+    fn peer_token_tally(observer: &ApplicationLayerObserver) -> (usize, u32) {
+        (
+            observer.liveliness_subscribers.peer_token_count(),
+            observer.liveliness_subscribers.peer_token_refusals(),
+        )
+    }
+
+    /// `MAX_REMOTE_DECLS` with nothing stated, in each declaration table the build carries.
+    #[cfg(any(
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "liveliness-subscriber"
+    ))]
+    #[test]
+    fn max_remote_decls_with_nothing_stated_admits_what_the_build_admitted() {
+        #[cfg(feature = "declare-subscriber")]
+        declarations_admit_what_the_build_admitted(
+            caps::MAX_REMOTE_DECLS,
+            remote_subscriber,
+            remote_subscriber_tally,
+        );
+        #[cfg(feature = "declare-queryable")]
+        declarations_admit_what_the_build_admitted(
+            caps::MAX_REMOTE_DECLS,
+            remote_queryable,
+            remote_queryable_tally,
+        );
+        #[cfg(feature = "liveliness-subscriber")]
+        declarations_admit_what_the_build_admitted(
+            caps::MAX_REMOTE_DECLS,
+            peer_token,
+            peer_token_tally,
+        );
+    }
+
+    /// `MAX_REMOTE_DECLS` stated as two, in each declaration table the build carries: one
+    /// quota per table, so a peer's two subscribers leave room for its two queryables.
+    #[cfg(any(
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "liveliness-subscriber"
+    ))]
+    #[test]
+    fn max_remote_decls_stated_refuses_the_next() {
+        held_to_two(
+            SessionLimits::select_max_remote_decls,
+            MaxRemoteDecls::DOMAIN.is_singleton(),
+            |limits| {
+                #[cfg(feature = "declare-subscriber")]
+                refuses_the_third_declaration(
+                    limits,
+                    remote_subscriber,
+                    remote_subscriber_withdrawn,
+                    remote_subscriber_tally,
+                );
+                #[cfg(feature = "declare-queryable")]
+                refuses_the_third_declaration(
+                    limits,
+                    remote_queryable,
+                    remote_queryable_withdrawn,
+                    remote_queryable_tally,
+                );
+                #[cfg(feature = "liveliness-subscriber")]
+                refuses_the_third_declaration(
+                    limits,
+                    peer_token,
+                    peer_token_withdrawn,
+                    peer_token_tally,
+                );
+                #[cfg(all(feature = "declare-subscriber", feature = "declare-queryable"))]
+                {
+                    let mut observer = ApplicationLayerObserver::with_limits(limits);
+                    for id in 1..=2 {
+                        remote_subscriber(&mut observer, id);
+                        remote_queryable(&mut observer, id);
+                    }
+                    assert_eq!(remote_subscriber_tally(&observer), (2, 0));
+                    assert_eq!(remote_queryable_tally(&observer), (2, 0));
+                }
+            },
+        );
+    }
+
     /// `MAX_PENDING_FINALS` with nothing stated: one query past the build's count in one frame
     /// owes every `Final` on the heap, as it did, while a fixed table holds its capacity and
     /// refuses the last request.

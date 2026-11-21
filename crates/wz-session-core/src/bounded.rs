@@ -285,7 +285,7 @@ impl Storage for Heap {
     type Seq<T, const N: usize> = Vec<T>;
     type Text<const N: usize> = String;
     type Offset = u32;
-    type Ids<V, const N: usize> = hashbrown::HashMap<u64, V>;
+    type Ids<V, const N: usize> = crate::id_map::GrowableIdMap<V>;
     #[cfg(target_has_atomic = "64")]
     type Epoch = alloc::sync::Arc<core::sync::atomic::AtomicU64>;
     #[cfg(not(target_has_atomic = "64"))]
@@ -295,7 +295,7 @@ impl Storage for Heap {
     fn peer_space(
         aliases: &crate::id_map::PeerAliases<Self>,
     ) -> crate::wireexpr_resolve::PeerSpace<'_> {
-        crate::wireexpr_resolve::PeerSpace::of_map(aliases)
+        crate::wireexpr_resolve::PeerSpace::of_map(aliases.as_map())
     }
 }
 
