@@ -2114,6 +2114,17 @@ def cmd_selftest() -> int:
            len(grade(libc_named, Measured(900, [], 3, (), (), ()))) == 1)
     expect("one that names it is not",
            grade(libc_named, Measured(900, [], 3, (), (), ("libc.so.6",))) == [])
+    moved_env, moved = configured_rustflags(
+        {"RUSTFLAGS": "-C a=b --remap-path-prefix=/x=/wz", "HOME": "/h"}, "x86_64-unknown-linux-gnu")
+    expect("a configured case's environment flags move into its triple's table",
+           moved == ["--config", 'target.x86_64-unknown-linux-gnu.rustflags='
+                     '["-C", "a=b", "--remap-path-prefix=/x=/wz"]']
+           and "RUSTFLAGS" not in moved_env and moved_env.get("HOME") == "/h")
+    encoded_env, encoded = configured_rustflags(
+        {"CARGO_ENCODED_RUSTFLAGS": "-C\x1fa b", "RUSTFLAGS": "-C c"}, "t")
+    expect("the encoded flags, which cargo reads first, are the ones moved, spaces kept",
+           encoded == ["--config", 'target.t.rustflags=["-C", "a b"]']
+           and not {"RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS"} & encoded_env.keys())
     expect("an unpinned export count is not graded",
            grade(Case("t", "p", "l", "", 1000), Measured(900, [], 99)) == [])
     # The control that keeps ABSENCE honest: every pattern a case forbids is required by some
