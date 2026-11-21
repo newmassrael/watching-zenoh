@@ -202,8 +202,9 @@ pub mod fragment_pacing;
 
 /// A bound on how many of one kind of resource a session holds live at once
 /// (a querier is one): [`quota::Quota`], a counting semaphore that never waits and does no
-/// synchronisation, so each runtime composes it with its own `Mutex`. `0` is no bound,
-/// which is upstream's behaviour. Unconditional, no_std and no_alloc.
+/// synchronisation, so each runtime composes it with its own `Mutex`. Its bound is a limit's
+/// quota ([`limit_binding::Quota`]), whose no bound is upstream's behaviour. Unconditional,
+/// no_std and no_alloc.
 pub mod quota;
 
 /// A position in the sequence of declarations a node owes a peer: [`replay_cursor::ReplayCursor`],

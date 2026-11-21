@@ -11,8 +11,8 @@
 //! id of the node that declared it, and tells [`ReplaySubscriber::appeared`]. Each publisher is
 //! asked once, by one query addressed to it; a publisher that is declared again on another link
 //! is not asked again, and one that left (its queryable undeclared) and comes back is. At most
-//! `quota` queries are in flight at once, a [`crate::quota::Quota`] whose `0` is no bound (the
-//! querier's own bound, `QUERIER_MAX_PENDING_QUERIES`, or a tighter one the caller states); a
+//! `quota` queries are in flight at once, a limit's [`Quota`] (the querier's own bound,
+//! `QUERIER_MAX_PENDING_QUERIES`, or a tighter one the caller states, [`Quota::tighter`]); a
 //! publisher that appears while the quota is used waits, and is asked as a query ends.
 //!
 //! # The round
@@ -50,7 +50,7 @@ use sce_rust_runtime::helpers::session_id::SessionId;
 use sce_rust_runtime::Engine;
 
 use crate::duty_outbox::{Duties, DutyOutbox};
-use crate::quota::Quota;
+use crate::limit_binding::Quota;
 use crate::replay_round::{ReplayRoundActions, ReplayRoundEvent, ReplayRoundPolicy};
 use crate::session_zid::ZID_MAX;
 use crate::wrapping_ticks::{elapsed, MAX_TIMEOUT_TICKS};
@@ -257,7 +257,7 @@ pub struct ReplaySubscriber<'a> {
     held_count: usize,
     deadlines: Deadlines,
     /// The queries in flight, those of an abandoned round included, and their bound.
-    quota: Quota,
+    quota: crate::quota::Quota,
     progress: Mark,
     round: Mark,
     live: LiveBeforeAnswer,
@@ -271,14 +271,14 @@ impl<'a> ReplaySubscriber<'a> {
     /// A subscriber that has asked no one, over `slots` (one row per publisher it can tell) and,
     /// under [`LiveBeforeAnswer::HoldBack`], `held`, cut into cells of `held_cell` bytes plus a
     /// four-byte header (under `deliver` `held` and `held_cell` are not read, and may be empty
-    /// and 0). At most `quota` queries are in flight, `0` for no bound, as a
-    /// [`crate::quota::Quota`] reads it. The round deadline counts from `now`.
+    /// and 0). At most `quota` queries are in flight, held in a [`crate::quota::Quota`]. The
+    /// round deadline counts from `now`.
     pub fn new(
         slots: &'a mut [PublisherSlot],
         held: &'a mut [u8],
         held_cell: usize,
         deadlines: Deadlines,
-        quota: usize,
+        quota: Quota,
         live: LiveBeforeAnswer,
         now: Option<u32>,
     ) -> Result<Self, CreateRefused> {
@@ -322,7 +322,7 @@ impl<'a> ReplaySubscriber<'a> {
             held_head: 0,
             held_count: 0,
             deadlines,
-            quota: Quota::new(quota),
+            quota: crate::quota::Quota::new(quota),
             progress: Mark::default(),
             round,
             live,
@@ -631,7 +631,7 @@ mod tests {
         fn subscriber(
             &mut self,
             cell: usize,
-            quota: usize,
+            quota: Quota,
             live: LiveBeforeAnswer,
         ) -> ReplaySubscriber<'_> {
             ReplaySubscriber::new(
@@ -675,27 +675,34 @@ mod tests {
                     held: &mut [u8],
                     cell: usize,
                     deadlines: Deadlines,
-                    quota: usize,
+                    quota: Quota,
                     live: LiveBeforeAnswer| {
             ReplaySubscriber::new(slots, held, cell, deadlines, quota, live, None).err()
         };
         let deliver = LiveBeforeAnswer::Deliver;
         let hold = LiveBeforeAnswer::HoldBack;
         assert_eq!(
-            make(&mut [], &mut held, 0, DEADLINES, 1, deliver),
+            make(&mut [], &mut held, 0, DEADLINES, Quota::at_most(1), deliver),
             Some(CreateRefused::NoSlots)
         );
         assert_eq!(
-            make(&mut slots, &mut held, 0, DEADLINES, 0, deliver),
+            make(
+                &mut slots,
+                &mut held,
+                0,
+                DEADLINES,
+                Quota::UNBOUNDED,
+                deliver
+            ),
             None,
-            "a quota of 0 is no bound, as every quota's is"
+            "no bound is a quota too"
         );
         let zero = Deadlines {
             progress: 0,
             round: 1,
         };
         assert_eq!(
-            make(&mut slots, &mut held, 0, zero, 1, deliver),
+            make(&mut slots, &mut held, 0, zero, Quota::at_most(1), deliver),
             Some(CreateRefused::DeadlineOutOfRange)
         );
         let past = Deadlines {
@@ -703,22 +710,46 @@ mod tests {
             round: MAX_TIMEOUT_TICKS + 1,
         };
         assert_eq!(
-            make(&mut slots, &mut held, 0, past, 1, deliver),
+            make(&mut slots, &mut held, 0, past, Quota::at_most(1), deliver),
             Some(CreateRefused::DeadlineOutOfRange)
         );
         assert_eq!(
-            make(&mut slots, &mut held, 0, DEADLINES, 1, hold),
+            make(&mut slots, &mut held, 0, DEADLINES, Quota::at_most(1), hold),
             Some(CreateRefused::NoHoldStore),
             "a cell of 0 bytes"
         );
         assert_eq!(
-            make(&mut slots, &mut held, 13, DEADLINES, 1, hold),
+            make(
+                &mut slots,
+                &mut held,
+                13,
+                DEADLINES,
+                Quota::at_most(1),
+                hold
+            ),
             Some(CreateRefused::NoHoldStore),
             "16 bytes hold no cell of 4 + 13"
         );
-        assert_eq!(make(&mut slots, &mut held, 12, DEADLINES, 1, hold), None);
         assert_eq!(
-            make(&mut slots, &mut [], 0, DEADLINES, 1, deliver),
+            make(
+                &mut slots,
+                &mut held,
+                12,
+                DEADLINES,
+                Quota::at_most(1),
+                hold
+            ),
+            None
+        );
+        assert_eq!(
+            make(
+                &mut slots,
+                &mut [],
+                0,
+                DEADLINES,
+                Quota::at_most(1),
+                deliver
+            ),
             None,
             "deliver reads no store"
         );
@@ -727,7 +758,7 @@ mod tests {
     #[test]
     fn each_publisher_is_asked_once_and_a_round_ends_when_every_query_ended() {
         let mut store = Store::new(4, 0, 0);
-        let mut sub = store.subscriber(0, 4, LiveBeforeAnswer::Deliver);
+        let mut sub = store.subscriber(0, Quota::at_most(4), LiveBeforeAnswer::Deliver);
         assert_eq!(sub.phase(), Phase::Idle);
         assert_eq!(sub.appeared(A, 10, Some(5)), Ok(Some(0)));
         assert_eq!(sub.phase(), Phase::Asking);
@@ -751,7 +782,7 @@ mod tests {
     #[test]
     fn a_publisher_that_appears_later_starts_its_own_round_and_one_that_returns_is_asked_again() {
         let mut store = Store::new(2, 0, 0);
-        let mut sub = store.subscriber(0, 2, LiveBeforeAnswer::Deliver);
+        let mut sub = store.subscriber(0, Quota::at_most(2), LiveBeforeAnswer::Deliver);
         assert_eq!(sub.appeared(A, 1, Some(0)), Ok(Some(0)));
         sub.query_ended(0, Some(1));
         assert_eq!(sub.phase(), Phase::Live);
@@ -783,7 +814,7 @@ mod tests {
     #[test]
     fn a_full_table_refuses_a_new_publisher_and_reuses_the_row_of_one_that_left() {
         let mut store = Store::new(1, 0, 0);
-        let mut sub = store.subscriber(0, 1, LiveBeforeAnswer::Deliver);
+        let mut sub = store.subscriber(0, Quota::at_most(1), LiveBeforeAnswer::Deliver);
         assert_eq!(sub.appeared(A, 1, Some(0)), Ok(Some(0)));
         assert_eq!(sub.appeared(B, 2, Some(0)), Err(AppearRefused::Full));
         assert_eq!(sub.counts().table_full, 1);
@@ -800,7 +831,7 @@ mod tests {
     #[test]
     fn the_quota_bounds_the_queries_in_flight_and_a_waiting_publisher_is_asked_as_one_ends() {
         let mut store = Store::new(3, 0, 0);
-        let mut sub = store.subscriber(0, 1, LiveBeforeAnswer::Deliver);
+        let mut sub = store.subscriber(0, Quota::at_most(1), LiveBeforeAnswer::Deliver);
         assert_eq!(sub.appeared(A, 1, Some(0)), Ok(Some(0)));
         assert_eq!(sub.appeared(B, 2, Some(0)), Ok(None), "the quota is used");
         assert_eq!(sub.in_flight(), 1);
@@ -811,9 +842,9 @@ mod tests {
     }
 
     #[test]
-    fn a_quota_of_zero_asks_every_publisher_at_once() {
+    fn an_unbounded_quota_asks_every_publisher_at_once() {
         let mut store = Store::new(3, 0, 0);
-        let mut sub = store.subscriber(0, 0, LiveBeforeAnswer::Deliver);
+        let mut sub = store.subscriber(0, Quota::UNBOUNDED, LiveBeforeAnswer::Deliver);
         assert_eq!(sub.appeared(A, 1, Some(0)), Ok(Some(0)));
         assert_eq!(
             sub.appeared(B, 2, Some(0)),
@@ -830,7 +861,7 @@ mod tests {
     #[test]
     fn a_publisher_that_leaves_before_it_is_asked_is_forgotten() {
         let mut store = Store::new(2, 0, 0);
-        let mut sub = store.subscriber(0, 1, LiveBeforeAnswer::Deliver);
+        let mut sub = store.subscriber(0, Quota::at_most(1), LiveBeforeAnswer::Deliver);
         sub.appeared(A, 1, Some(0)).unwrap();
         assert_eq!(sub.appeared(B, 2, Some(0)), Ok(None));
         sub.gone(B, 2, Some(1));
@@ -844,7 +875,7 @@ mod tests {
     #[test]
     fn a_round_whose_replies_stop_is_abandoned_at_the_progress_deadline() {
         let mut store = Store::new(2, 0, 0);
-        let mut sub = store.subscriber(0, 2, LiveBeforeAnswer::Deliver);
+        let mut sub = store.subscriber(0, Quota::at_most(2), LiveBeforeAnswer::Deliver);
         sub.appeared(A, 1, Some(100)).unwrap();
         assert!(!sub.poll(Some(149)), "49 ticks: not yet");
         assert_eq!(sub.reply(0, Some(140)), ReplyFate::Judge);
@@ -862,7 +893,7 @@ mod tests {
     #[test]
     fn a_round_that_keeps_answering_is_abandoned_at_the_round_deadline() {
         let mut store = Store::new(1, 0, 0);
-        let mut sub = store.subscriber(0, 1, LiveBeforeAnswer::Deliver);
+        let mut sub = store.subscriber(0, Quota::at_most(1), LiveBeforeAnswer::Deliver);
         sub.appeared(A, 1, Some(1000)).unwrap();
         let mut now = 1000;
         while now < 1399 {
@@ -882,7 +913,7 @@ mod tests {
     #[test]
     fn a_deadline_armed_without_a_clock_counts_from_the_next_poll_that_has_one() {
         let mut store = Store::new(1, 0, 0);
-        let mut sub = store.subscriber(0, 1, LiveBeforeAnswer::Deliver);
+        let mut sub = store.subscriber(0, Quota::at_most(1), LiveBeforeAnswer::Deliver);
         sub.appeared(A, 1, None).unwrap();
         assert!(!sub.poll(None), "a poll without a clock judges nothing");
         assert!(!sub.poll(Some(5000)), "dated here");
@@ -894,7 +925,7 @@ mod tests {
     #[test]
     fn a_deadline_runs_across_the_wrap_of_the_tick_counter() {
         let mut store = Store::new(1, 0, 0);
-        let mut sub = store.subscriber(0, 1, LiveBeforeAnswer::Deliver);
+        let mut sub = store.subscriber(0, Quota::at_most(1), LiveBeforeAnswer::Deliver);
         sub.appeared(A, 1, Some(u32::MAX - 10)).unwrap();
         assert!(!sub.poll(Some(38)), "49 ticks across the wrap");
         assert!(sub.poll(Some(39)));
@@ -903,7 +934,7 @@ mod tests {
     #[test]
     fn under_deliver_a_live_sample_is_never_held() {
         let mut store = Store::new(1, 0, 0);
-        let mut sub = store.subscriber(0, 1, LiveBeforeAnswer::Deliver);
+        let mut sub = store.subscriber(0, Quota::at_most(1), LiveBeforeAnswer::Deliver);
         assert_eq!(sub.live(b"x"), LiveFate::Deliver);
         sub.appeared(A, 1, Some(0)).unwrap();
         assert_eq!(sub.live(b"y"), LiveFate::Deliver);
@@ -915,7 +946,7 @@ mod tests {
     #[test]
     fn under_hold_back_live_samples_wait_for_the_first_round_and_come_out_in_order() {
         let mut store = Store::new(2, 4, 8);
-        let mut sub = store.subscriber(8, 2, LiveBeforeAnswer::HoldBack);
+        let mut sub = store.subscriber(8, Quota::at_most(2), LiveBeforeAnswer::HoldBack);
         assert_eq!(
             sub.live(b"l0"),
             LiveFate::Held,
@@ -952,7 +983,7 @@ mod tests {
     #[test]
     fn under_hold_back_a_full_store_abandons_the_round_rather_than_drop_a_sample() {
         let mut store = Store::new(1, 2, 4);
-        let mut sub = store.subscriber(4, 1, LiveBeforeAnswer::HoldBack);
+        let mut sub = store.subscriber(4, Quota::at_most(1), LiveBeforeAnswer::HoldBack);
         sub.appeared(A, 1, Some(0)).unwrap();
         assert_eq!(sub.live(b"a"), LiveFate::Held);
         assert_eq!(sub.live(b"b"), LiveFate::Held);
@@ -965,7 +996,7 @@ mod tests {
     #[test]
     fn under_hold_back_a_sample_longer_than_a_cell_ends_the_round_too() {
         let mut store = Store::new(1, 2, 4);
-        let mut sub = store.subscriber(4, 1, LiveBeforeAnswer::HoldBack);
+        let mut sub = store.subscriber(4, Quota::at_most(1), LiveBeforeAnswer::HoldBack);
         assert_eq!(sub.live(b"ok"), LiveFate::Held);
         assert_eq!(sub.live(b"toolong"), LiveFate::Deliver);
         assert_eq!(sub.phase(), Phase::Live, "no one was asked: live");
@@ -976,7 +1007,7 @@ mod tests {
     #[test]
     fn under_hold_back_no_publisher_at_all_releases_at_the_round_deadline() {
         let mut store = Store::new(1, 2, 4);
-        let mut sub = store.subscriber(4, 1, LiveBeforeAnswer::HoldBack);
+        let mut sub = store.subscriber(4, Quota::at_most(1), LiveBeforeAnswer::HoldBack);
         assert_eq!(sub.live(b"x"), LiveFate::Held);
         assert!(!sub.poll(Some(399)));
         assert!(sub.poll(Some(400)));

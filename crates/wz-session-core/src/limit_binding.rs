@@ -121,6 +121,16 @@ impl Quota {
             None => uncapped,
         }
     }
+
+    /// The tighter of `self` and `other`: a holder bound by both is bound by this one. No bound
+    /// is the widest quota, so it is the other whenever one of the two has a number.
+    pub const fn tighter(self, other: Self) -> Self {
+        if self.0 <= other.0 {
+            self
+        } else {
+            other
+        }
+    }
 }
 
 impl fmt::Display for Quota {
@@ -825,6 +835,27 @@ mod tests {
             Quota::at_most(8)
         );
         assert_eq!(Quota::of_build(None, Quota::UNBOUNDED), Quota::UNBOUNDED);
+    }
+
+    #[test]
+    fn the_tighter_of_two_quotas_is_the_smaller_and_no_bound_is_the_widest() {
+        let unbounded = Quota::UNBOUNDED;
+        assert_eq!(unbounded.tighter(unbounded), unbounded, "neither bounds");
+        assert_eq!(unbounded.tighter(Quota::at_most(4)), Quota::at_most(4));
+        assert_eq!(Quota::at_most(4).tighter(unbounded), Quota::at_most(4));
+        assert_eq!(
+            Quota::at_most(3).tighter(Quota::at_most(4)),
+            Quota::at_most(3)
+        );
+        assert_eq!(
+            Quota::at_most(4).tighter(Quota::at_most(3)),
+            Quota::at_most(3)
+        );
+        assert_eq!(
+            Quota::at_most(0).tighter(unbounded),
+            Quota::at_most(0),
+            "a quota that admits nothing is the tightest"
+        );
     }
 
     #[test]

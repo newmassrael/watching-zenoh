@@ -394,10 +394,13 @@ pub(crate) struct QuerierSlots {
 impl QuerierSlots {
     /// The places of a querier declared now: the build's bound.
     pub(crate) fn new() -> Self {
-        Self::with_limit(wz_session_core::caps::QUERIER_MAX_PENDING_QUERIES)
+        Self::with_limit(wz_session_core::limit_binding::Quota::from_build(
+            wz_session_core::caps::QUERIER_MAX_PENDING_QUERIES,
+            true,
+        ))
     }
 
-    pub(crate) fn with_limit(limit: usize) -> Self {
+    pub(crate) fn with_limit(limit: wz_session_core::limit_binding::Quota) -> Self {
         Self {
             quota: Arc::new(std::sync::Mutex::new(wz_session_core::quota::Quota::new(
                 limit,
@@ -411,16 +414,16 @@ impl QuerierSlots {
         Ok(QueryPlace(Arc::new(QuerySlot::acquire(&self.quota)?)))
     }
 
-    /// Replace the bound; test-only, and takes effect for the queries asked after it. Gated on
-    /// `query-get` as well as `test`: its callers are the query tests, so a test build without
-    /// that feature would carry it unused.
+    /// Replace the bound with at most `most` queries; test-only, and takes effect for the queries
+    /// asked after it. Gated on `query-get` as well as `test`: its callers are the query tests,
+    /// so a test build without that feature would carry it unused.
     #[cfg(all(test, feature = "query-get"))]
-    pub(crate) fn set_limit(&self, limit: usize) {
+    pub(crate) fn set_limit(&self, most: usize) {
         let mut held = match self.quota.lock() {
             Ok(held) => held,
             Err(poisoned) => poisoned.into_inner(),
         };
-        held.set_limit(limit);
+        held.set_limit(wz_session_core::limit_binding::Quota::at_most(most));
     }
 
     /// The queries in flight now. Gated as [`Self::set_limit`] is.

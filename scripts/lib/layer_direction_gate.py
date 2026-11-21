@@ -282,6 +282,7 @@ SESSION_CORE_IDENT = "wz_session_core"
 SESSION_CORE_LIBRARY = frozenset(
     {
         "keyexpr_canon",
+        "limit_binding",
         "policy",
         "quota",
         "replay_publisher",
