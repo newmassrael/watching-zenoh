@@ -380,7 +380,7 @@ pub struct RemoteQueryablePeer<P: Storage = Profile> {
     /// queryable twin of `RemoteSubscriberPeer::aliases`. A change of completeness is news and
     /// is announced; a repeat of what the application knows is not.
     #[cfg(feature = "alloc")]
-    aliases: crate::id_map::DeclaredAliases,
+    aliases: crate::id_map::DeclaredAliases<P>,
     /// Names the policy where no field above does (a build without the session
     /// machinery). Zero-sized.
     _policy: core::marker::PhantomData<P>,
@@ -390,7 +390,7 @@ impl<P: Storage> Default for RemoteQueryablePeer<P> {
     fn default() -> Self {
         Self {
             #[cfg(feature = "alloc")]
-            aliases: crate::id_map::DeclaredAliases::new(),
+            aliases: crate::id_map::DeclaredAliases::default(),
             #[cfg(feature = "storage-profile")]
             declared: DeclaredQueryables::<P>::default(),
             #[cfg(feature = "storage-profile")]
@@ -422,7 +422,7 @@ impl RemoteQueryablePeer<Static> {
             #[cfg(feature = "storage-profile")]
             epoch: (),
             #[cfg(feature = "alloc")]
-            aliases: crate::id_map::DeclaredAliases::new(),
+            aliases: crate::id_map::DeclaredAliases::new_static(),
             _policy: core::marker::PhantomData,
         }
     }

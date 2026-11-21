@@ -245,7 +245,7 @@ pub struct RemoteSubscriberPeer<P: Storage = Profile> {
     /// rows stay in `declared`, so a withdrawal by either id and the matching watches read what
     /// they always read; only the events the observers hear are one per entity.
     #[cfg(feature = "alloc")]
-    aliases: crate::id_map::DeclaredAliases,
+    aliases: crate::id_map::DeclaredAliases<P>,
     /// Names the policy where no field above does (a build without the session
     /// machinery). Zero-sized.
     _policy: core::marker::PhantomData<P>,
@@ -267,7 +267,7 @@ impl<P: Storage> Default for RemoteSubscriberPeer<P> {
             #[cfg(feature = "storage-profile")]
             epoch: <P::Epoch as Default>::default(),
             #[cfg(feature = "alloc")]
-            aliases: crate::id_map::DeclaredAliases::new(),
+            aliases: crate::id_map::DeclaredAliases::default(),
             _policy: core::marker::PhantomData,
         }
     }
@@ -291,7 +291,7 @@ impl RemoteSubscriberPeer<Static> {
             #[cfg(feature = "storage-profile")]
             epoch: (),
             #[cfg(feature = "alloc")]
-            aliases: crate::id_map::DeclaredAliases::new(),
+            aliases: crate::id_map::DeclaredAliases::new_static(),
             _policy: core::marker::PhantomData,
         }
     }

@@ -245,13 +245,6 @@ pub struct PeerTokens<P: Storage = Profile> {
     /// Counted with the table's own refusals ([`Self::refusals`]).
     #[cfg(feature = "storage-profile")]
     oversize: u32,
-    /// The tokens the peer declared by their keyexpr and not by an id (the form a node that
-    /// brokers a token to its peers sends it in: id `0` and the keyexpr beside it, which names the
-    /// token and says nothing of which one), by that keyexpr, with the id this table holds each
-    /// under. Every such token is the id `0` on the wire, so keeping them under it would keep the
-    /// first and refuse the rest as a repeat.
-    #[cfg(all(feature = "storage-profile", feature = "alloc"))]
-    sourced: alloc::collections::BTreeMap<alloc::string::String, u64>,
     /// Names the policy where no field above does (a build without the session
     /// machinery). Zero-sized.
     _policy: core::marker::PhantomData<P>,
@@ -259,6 +252,13 @@ pub struct PeerTokens<P: Storage = Profile> {
 
 /// The first id a token declared by its keyexpr is held under: above any id a peer numbers its
 /// tokens with, so that the two never meet in the table.
+///
+/// A token declared by its keyexpr and not by an id (the form a node that brokers a token to its
+/// peers sends it in: id `0` and the keyexpr beside it, which names the token and says nothing of
+/// which one) is held in the table under an id of its own from here up, and found again by its
+/// keyexpr there. Every such token is the id `0` on the wire, so keeping them under it would keep
+/// the first and refuse the rest as a repeat; and the table already holds each one's keyexpr, so
+/// no second table of them is kept.
 #[cfg(all(
     feature = "codec-declare",
     feature = "storage-profile",
@@ -277,8 +277,6 @@ impl<P: Storage> Default for PeerTokens<P> {
             key_quota: crate::limits::MaxKeyexprBytesHeld::build_default(),
             #[cfg(feature = "storage-profile")]
             oversize: 0,
-            #[cfg(all(feature = "storage-profile", feature = "alloc"))]
-            sourced: alloc::collections::BTreeMap::new(),
             _policy: core::marker::PhantomData,
         }
     }
@@ -297,8 +295,6 @@ impl PeerTokens<Static> {
             key_quota: crate::limits::MaxKeyexprBytesHeld::build_default(),
             #[cfg(feature = "storage-profile")]
             oversize: 0,
-            #[cfg(all(feature = "storage-profile", feature = "alloc"))]
-            sourced: alloc::collections::BTreeMap::new(),
             _policy: core::marker::PhantomData,
         }
     }
@@ -399,6 +395,31 @@ impl<P: Storage> PeerTokens<P> {
     #[cfg(feature = "storage-profile")]
     pub fn forget(&mut self) {
         self.table.reset();
+    }
+}
+
+#[cfg(all(
+    feature = "codec-declare",
+    feature = "storage-profile",
+    feature = "alloc"
+))]
+impl<P: Storage> PeerTokens<P> {
+    /// The id the token declared by its keyexpr `keyexpr` is held under ([`SOURCED_ID_BASE`]), if
+    /// the table holds one.
+    fn sourced_id(&self, keyexpr: &str) -> Option<u64> {
+        self.table.entries().find_map(|(id, held)| {
+            (id >= SOURCED_ID_BASE && held.as_ref() == keyexpr).then_some(id)
+        })
+    }
+
+    /// The id the next token declared by its keyexpr is held under: past every one held.
+    fn next_sourced_id(&self) -> u64 {
+        self.table
+            .entries()
+            .map(|(id, _)| id)
+            .filter(|id| *id >= SOURCED_ID_BASE)
+            .max()
+            .map_or(SOURCED_ID_BASE, |held| held + 1)
     }
 }
 
@@ -977,18 +998,13 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
         // A token declared by its keyexpr (id `0`) is not one id repeated but a token for each
         // keyexpr: it is held under an id of its own, found again by the keyexpr.
         #[cfg(feature = "alloc")]
-        let (id, sourced) = if id == 0 {
-            if peer.sourced.contains_key(resolved) {
+        let id = if id == 0 {
+            if peer.sourced_id(resolved).is_some() {
                 return;
             }
-            let next = peer
-                .sourced
-                .values()
-                .max()
-                .map_or(SOURCED_ID_BASE, |held| held + 1);
-            (next, true)
+            peer.next_sourced_id()
         } else {
-            (id, false)
+            id
         };
         if peer.table.find(id).is_some() {
             return;
@@ -1010,11 +1026,6 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
             .is_err()
         {
             return;
-        }
-        #[cfg(feature = "alloc")]
-        if sourced {
-            peer.sourced
-                .insert(alloc::string::String::from(resolved), id);
         }
         self.fan_to_matching_slots(LivelinessSampleKind::Put, resolved, id, historical);
     }
@@ -1049,7 +1060,7 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
                 peer_keyexpr_table,
                 &mut named,
             ) {
-                Ok(Some(text)) => peer.sourced.remove(text).unwrap_or(id),
+                Ok(Some(text)) => peer.sourced_id(text).unwrap_or(id),
                 _ => id,
             }
         } else {
@@ -1153,8 +1164,6 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
         #[cfg(feature = "storage-profile")]
         {
             let mut flushed = 0usize;
-            #[cfg(feature = "alloc")]
-            peer.sourced.clear();
             while let Some(id) = peer.table.entries().map(|(id, _)| id).min() {
                 let Some(keyexpr) = peer.table.unbind(id) else {
                     break;
@@ -2342,6 +2351,41 @@ mod tests {
         assert_eq!(captured.len(), 2, "two distinct ids are two Puts");
         assert_eq!(captured[1].1, "liveliness/second");
         assert_eq!(reg.peer_token_count(), 2);
+    }
+
+    /// A peer's tokens forgotten in place, their table handed to the next peer, take with them
+    /// every token declared by its keyexpr: the next peer's token on the same keyexpr is told as a
+    /// first, not dropped as a repeat.
+    #[cfg(feature = "storage-profile")]
+    #[test]
+    fn a_forgotten_peer_holds_no_token_declared_by_its_keyexpr() {
+        let mut reg = LivelinessSubscriberRegistry::new();
+        let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
+        reg.register(1, "liveliness/**", false, make_subscriber(sink.clone()))
+            .unwrap();
+        for _ in 0..2 {
+            reg.dispatch_declare(
+                &DeclareOwnedVariant::CodecZenohDeclToken(decl_token(
+                    0,
+                    0,
+                    Some("liveliness/first"),
+                )),
+                &HashMap::new(),
+            );
+            reg.peer.forget();
+        }
+        let captured = sink.lock().unwrap();
+        assert_eq!(
+            captured
+                .iter()
+                .map(|(kind, key, _)| (*kind, key.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (LivelinessSampleKind::Put, "liveliness/first"),
+                (LivelinessSampleKind::Put, "liveliness/first"),
+            ],
+            "each peer's token is told"
+        );
     }
 
     /// Tokens a node declares by their keyexpr (the id `0` of each) are a token for each

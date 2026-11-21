@@ -42,6 +42,8 @@
 #[cfg(feature = "alloc")]
 use hashbrown::HashMap;
 
+#[cfg(feature = "alloc")]
+use crate::bounded::{BoundedVec, Static};
 use crate::bounded::{CapacityFull, Profile, Storage, TextBacking};
 use crate::caps;
 
@@ -364,17 +366,34 @@ pub type DeclaredQueryables<P = Profile> =
 /// one entity twice, as an announcement and as the answer to an interest), so a vector read in
 /// order is all it is: a tree would cost the binary of every build that holds a registry more
 /// than it saves, which is measured (`capability_cost_gate.py`).
+///
+/// Every alias is an id the peer's table of declarations holds, so a policy that bounds that
+/// table at [`caps::MAX_REMOTE_DECLS`] bounds this one there too: the rows are inline, at that
+/// capacity, on every policy but the growable one (`Storage::Scratch`), as the peer's id tables
+/// are, and none is lent.
 #[cfg(feature = "alloc")]
-#[derive(Debug, Default)]
-pub struct DeclaredAliases(alloc::vec::Vec<(u64, u64)>);
+pub struct DeclaredAliases<P: Storage = Profile>(
+    BoundedVec<(u64, u64), { caps::MAX_REMOTE_DECLS }, P::Scratch>,
+);
 
 #[cfg(feature = "alloc")]
-impl DeclaredAliases {
-    /// No aliases. `const`, so a session slot that holds one can be a `static`.
-    pub const fn new() -> Self {
-        Self(alloc::vec::Vec::new())
+impl<P: Storage> Default for DeclaredAliases<P> {
+    fn default() -> Self {
+        Self(BoundedVec::default())
     }
+}
 
+#[cfg(feature = "alloc")]
+impl DeclaredAliases<Static> {
+    /// No aliases, of the static policy. `const`, so a session slot that holds one can be a
+    /// `static`.
+    pub const fn new_static() -> Self {
+        Self(BoundedVec::new_static())
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<P: Storage> DeclaredAliases<P> {
     /// The id the application was told the keyexpr of `id` under, if `id` is an alias.
     pub fn told_as(&self, id: u64) -> Option<u64> {
         self.0
@@ -387,16 +406,21 @@ impl DeclaredAliases {
     pub fn insert(&mut self, id: u64, told: u64) {
         match self.0.iter_mut().find(|(held, _)| *held == id) {
             Some(row) => row.1 = told,
-            None => self.0.push((id, told)),
+            None => {
+                let kept = self.0.push((id, told));
+                debug_assert!(
+                    kept.is_ok(),
+                    "an alias is an id of the peer's declarations, which hold no more"
+                );
+            }
         }
     }
 
     /// Forget `id`, returning the id it stood for if it was an alias.
     pub fn remove(&mut self, id: u64) -> Option<u64> {
         let at = self.0.iter().position(|(held, _)| *held == id)?;
-        Some(self.0.swap_remove(at).1)
+        Some(self.0.remove(at).1)
     }
-
     /// Forget every alias.
     pub fn clear(&mut self) {
         self.0.clear();
@@ -407,6 +431,42 @@ impl DeclaredAliases {
 mod tests {
     use super::*;
     use crate::caps;
+
+    /// The aliases of the static policy are inline, as many as the peer's declarations hold:
+    /// each of `MAX_REMOTE_DECLS` is kept, a repeat rebinds its row, and an id is forgotten by
+    /// itself.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn static_aliases_hold_as_many_as_the_declarations() {
+        let ids = caps::MAX_REMOTE_DECLS as u64;
+        let mut aliases = DeclaredAliases::<Static>::new_static();
+        for id in 0..ids {
+            aliases.insert(id, id + 100);
+        }
+        assert_eq!(aliases.told_as(0), Some(100));
+        assert_eq!(
+            aliases.told_as(ids - 1),
+            Some(ids + 99),
+            "the last one is kept"
+        );
+        aliases.insert(0, 7);
+        assert_eq!(aliases.told_as(0), Some(7), "a repeat rebinds its row");
+        assert_eq!(aliases.remove(0), Some(7));
+        assert_eq!(aliases.told_as(0), None);
+        aliases.clear();
+        assert_eq!(aliases.told_as(1), None);
+    }
+
+    /// The aliases of a peer whose tables are lent are inline as the static policy's: they take
+    /// an alias with no arena having lent them a row.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn lent_aliases_need_no_arena() {
+        let mut aliases = DeclaredAliases::<crate::bounded::Lent>::default();
+        aliases.insert(3, 1);
+        assert_eq!(aliases.told_as(3), Some(1));
+        assert_eq!(aliases.remove(3), Some(1));
+    }
 
     fn fill(table: &mut FixedIdMap<u32, 3>, from: u64, to: u64) {
         for id in from..to {
