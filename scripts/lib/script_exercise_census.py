@@ -184,8 +184,8 @@ DECLARED: dict[str, tuple[str, str]] = {
     ),
     "scripts/pico-compare.sh": (
         "the host performance comparison with zenoh-pico; needs idle pinned CPUs on a build "
-        "host, and the tools it runs (perf_matrix.py, nodrop.py, parity.py) are reached by a "
-        "Layer C0 selftest leg",
+        "host, and the tools it runs (perf_matrix.py, nodrop.py, parity.py, batch_control.py) are "
+        "reached by a Layer C0 selftest leg",
         "run through bx on the performance host (docs/pico-perf-matrix.md)",
     ),
     "scripts/provision-zephyr.sh": (
