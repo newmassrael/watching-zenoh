@@ -1323,6 +1323,12 @@ round_fed_gates=(
     # A sharded job's matrix lists exactly the shards its count names; static, a yaml read.
     "shard_matrix_binding.py"
     "unwired_lane_lint.py"
+    # The soft-job declarations (deploy/soft_jobs.json) against every soft site
+    # of the workflows: a round that adds, renames or promotes a
+    # `continue-on-error` feeds it, and so does the date, since an entry lapses.
+    # A YAML read of the workflows, no build and no network.
+    "soft_job_gate.py --selftest"
+    "soft_job_gate.py --check"
     # R4268 — the planner of `[checks.ci]` (bx.toml): the dispatch table read as
     # the fleet's units. A round that edits the table feeds it, and a table it
     # cannot read is a gate the fleet can no longer run, so the push sees it.

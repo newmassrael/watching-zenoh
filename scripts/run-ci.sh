@@ -2710,6 +2710,18 @@ layer_c0_test_discipline() {
     # one of them created by the round that closed the sibling debt. See the
     # script's docstring for why this is a gate and not a fourth comment.
     _runci_leg unwired_lane_lint -- python3 scripts/lib/unwired_lane_lint.py
+    # R4581 (no register item) — the SOFT-JOB gate, the lint above one axis over:
+    # that one asks whether a lane reaches hosted CI, this one whether a hosted
+    # verdict reaches anyone. A `continue-on-error` job or step concludes success
+    # whatever it did; the Windows package jobs of platform.yml were red on every
+    # hosted run from the day they landed, under runs that all read green. Every
+    # soft site now has an entry in deploy/soft_jobs.json (why it is soft, when it
+    # becomes a gate, the red streak it may show, an expiry), and `--check` holds
+    # sites and entries to each other and each entry to its date, so this leg can
+    # turn red on the calendar alone. The hosted half reads the runs
+    # (`--hosted-last`, docs/agent-reference.md).
+    _runci_leg soft_job_gate.selftest -- python3 scripts/lib/soft_job_gate.py --selftest
+    _runci_leg soft_job_gate --after soft_job_gate.selftest -- python3 scripts/lib/soft_job_gate.py --check
     # R4268 — the planner of bx.toml's `[checks.ci]`, which hands this table to
     # the fleet as one unit per lane (docs/verdicts-in-the-fleet.md).
     _runci_leg runci_plan.selftest -- python3 scripts/lib/runci_plan.py --selftest
