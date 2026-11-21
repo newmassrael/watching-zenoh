@@ -531,10 +531,10 @@ local-queryable = ["wz-capi-core?/local-queryable", "wz-capi-coop?/local-queryab
 # cancellation token, and the option fields that carry them (`reliability`, `source_info`,
 # `cancellation_token`). Off, those fields are not in the option structs a program allocates,
 # which are then the smaller structs pico's default header declares. None of it is an engine's:
-# it selects neither (`wz-capi-core`'s is a marker its own code reads). The cancellation token's
-# cancel blocks on the host's condition variable (`wz-capi-port`'s `cancellation`), so it selects
-# `std`, as do the planes below whose modules are still written against the host's library.
-unstable-api = ["std", "wz-capi-core?/unstable-api"]
+# it selects neither (`wz-capi-core`'s is a marker its own code reads). Its modules are `core` and
+# `alloc`, so it selects no `std`: the cancellation token is in a build with `query` too, which
+# brings the token's wait.
+unstable-api = ["wz-capi-core?/unstable-api"]
 # `config-document`: `wz_ext_config_document`, the door that hands a config the zenoh JSON5 document
 # the zenoh-c ABI reads, so one document states both ABIs' policies. Off by default: zenoh-pico's
 # config is a set of numbered keys and reads no document, and the door links a JSON5 reader a
