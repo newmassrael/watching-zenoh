@@ -4013,11 +4013,15 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         // (`enabled().get(whatami).then(|| ..)`, runtime/mod.rs:147), so a
         // peer / client session gets the non-stamping handle and only a
         // router-role one gets a clock. Its `clock-quality-stamping` policy is the snapshot's.
+        // A session holds a session's limits alone, so its clock runs under the build's runtime
+        // limits; a host that holds the node's builds the clock with them
+        // ([`Self::with_timestamping`], [`Self::with_node_clock`]).
         let node_hlc = crate::node_clock::NodeHlc::for_node_by(
             &zid,
             actions.params.whatami,
             crate::node_clock::TimestampingEnabled::default(),
             &policy,
+            &wz_session_core::limits::RuntimeLimits::BUILD,
         );
         let local_live = R::with_mutex_mut(&observer, |o| o.subscribers.local_live());
         let querier_max_pending_queries =
@@ -4124,7 +4128,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     }
 
     /// Rebuild this session's node clock against the `timestamping.enabled` map
-    /// a HOST read out of its config document.
+    /// a HOST read out of its config document, bounded by `limits`, the runtime limits the
+    /// host resolved for the node (`CLOCK_MAX_FORWARD_STEP_MS`).
     ///
     /// R2112 (open-debt item 102) — [`Self::new`] derives the clock from
     /// zenoh's shipped map LITERALLY, and that was the only reachable spelling:
@@ -4144,9 +4149,13 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     ///
     /// ```text
     /// let session = TokioSession::new(actions, observer, clock)
-    ///     .with_timestamping(TimestampingEnabled::default().with_role(role, on));
+    ///     .with_timestamping(TimestampingEnabled::default().with_role(role, on), &limits);
     /// ```
-    pub fn with_timestamping(self, enabled: crate::node_clock::TimestampingEnabled) -> Self
+    pub fn with_timestamping(
+        self,
+        enabled: crate::node_clock::TimestampingEnabled,
+        limits: &wz_session_core::limits::RuntimeLimits,
+    ) -> Self
     where
         <Unicast as TransportState<R, T>>::Payload: Clone,
     {
@@ -4157,6 +4166,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             self.transport.params.whatami,
             enabled,
             self.policy(),
+            limits,
         );
         self.with_node_clock(hlc)
     }

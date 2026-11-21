@@ -207,6 +207,7 @@ mod the_node_clock_lent_as_uhlc {
             TimestampingEnabled::all(true),
             TraceEpoch,
             &wz_session_core::policy::SessionPolicy::defaults(),
+            &wz_session_core::limits::RuntimeLimits::BUILD,
         );
         let reference = uhlc::HLCBuilder::new()
             .with_clock(trace_clock)
@@ -285,6 +286,7 @@ mod the_node_clock_lent_as_uhlc {
             TimestampingEnabled::default(),
             TraceEpoch,
             &wz_session_core::policy::SessionPolicy::defaults(),
+            &wz_session_core::limits::RuntimeLimits::BUILD,
         );
         assert_eq!(node.next_word(), None);
         assert_eq!(node.absorb_word(1), None);

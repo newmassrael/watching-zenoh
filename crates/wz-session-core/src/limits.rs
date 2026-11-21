@@ -1183,6 +1183,49 @@ mod enforcement {
             },
         );
     }
+
+    /// The build's sampler under `limits`, with one snapshot taken at time 0, so the next is due
+    /// a period on.
+    fn sampled_at_zero(limits: &RuntimeLimits) -> crate::resource_snapshot::BuildSampler {
+        use crate::resource_snapshot::{BuildSampler, MessageReading, ResourceReading};
+        let mut sampler = BuildSampler::of_limits(limits, 0);
+        sampler.take(0, ResourceReading::default(), MessageReading::default());
+        sampler
+    }
+
+    /// `SNAPSHOT_PERIOD_MS` with nothing stated: the sampler holds the build's period, the next
+    /// snapshot due that many milliseconds after the last and not a microsecond before.
+    #[test]
+    fn snapshot_period_ms_with_nothing_stated_holds_the_builds_period() {
+        let sampler = sampled_at_zero(&RuntimeLimits::defaults());
+        let period_us = caps::SNAPSHOT_PERIOD_MS as u32 * 1000;
+        assert_eq!(sampler.until_due_us(0), period_us);
+        assert!(!sampler.is_due(period_us - 1));
+        assert!(sampler.is_due(period_us));
+    }
+
+    /// `SNAPSHOT_PERIOD_MS` stated: the sampler takes the stated period, not the build's. A build
+    /// that keeps the build's value alone refuses the statement itself.
+    #[test]
+    fn snapshot_period_ms_stated_is_the_period_the_sampler_uses() {
+        let value = if caps::SNAPSHOT_PERIOD_MS == 250 {
+            125
+        } else {
+            250
+        };
+        let mut limits = RuntimeLimits::defaults();
+        let stated = limits.select_snapshot_period_ms(value);
+        if SnapshotPeriodMs::DOMAIN.is_singleton() {
+            assert!(stated.is_err(), "a build of one value refuses another");
+            return;
+        }
+        stated.expect("the period is inside the domain");
+        let sampler = sampled_at_zero(&limits);
+        let period_us = value as u32 * 1000;
+        assert_eq!(sampler.until_due_us(0), period_us);
+        assert!(!sampler.is_due(period_us - 1));
+        assert!(sampler.is_due(period_us));
+    }
 }
 
 #[cfg(test)]

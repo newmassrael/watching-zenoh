@@ -3430,7 +3430,7 @@ pub(crate) async fn run_demo(
     // announced, so this session and its wire role cannot disagree about which
     // entry of the map applies.
     let session = TokioSession::new(actions.clone(), observer.clone(), Arc::new(session_clock))
-        .with_timestamping(timestamping.map_for(node_whatami));
+        .with_timestamping(timestamping.map_for(node_whatami), &tuning.runtime_limits);
     refuse_a_refused_clock(session.node_hlc())?;
     // `aggregation/{subscribers,publishers}`: set before the first declaration
     // below, since a declaration keeps the key it was made under.
@@ -4664,12 +4664,14 @@ async fn run_peer_until(
     // the peer hat in `North` and a broker hat for the clients south of it.
     // A client node runs the pin's client hat in `North`, as the node engine opens one
     // (`RouterForwarder::for_node` at Client); a peer runs the peer hat.
-    // The forwarder's machines read the node's snapshot, the one its sessions are handed.
+    // The forwarder's machines read the node's snapshot, the one its sessions are handed, and its
+    // clock the node's runtime limits.
     let forwarder = RouterForwarder::for_node(
         role,
         Zid::from_slice(&params.zid),
         opts.timestamping.map_for(role),
         &params.policy,
+        &tuning.runtime_limits,
     );
     let forwarder = forwarder
         .with_drop_future_timestamp(opts.timestamping.drop_future_timestamp())
@@ -5202,7 +5204,7 @@ async fn run_peer_until(
             let snapshot_zid = zid_to_zenoh_hex(&params.zid);
             let snapshot_key = snapshot_key(&snapshot_zid);
             let snapshot_cfg = wz_config.clone();
-            let service = SnapshotService::new();
+            let service = SnapshotService::new(&tuning.runtime_limits);
             let messages = forwarder.messages_view();
             // The task runs as long as the node does; its handle is not kept.
             drop(service.spawn(move || messages.reading()));
@@ -6591,13 +6593,15 @@ async fn run_router_hat_until(
     //
     // Shared, because under the `routing-face-drive` policy's upstream value each face's drive
     // is a task of its own and holds the forwarder (`peer_loop_shared`).
-    // The router's machines read the node's snapshot, the one its sessions are handed.
+    // The router's machines read the node's snapshot, the one its sessions are handed, and its
+    // clock the node's runtime limits.
     let forwarder = Arc::new(
         RouterForwarder::for_node(
             wz::runtime_tokio::session_glue::WhatAmI::Router,
             Zid::from_slice(&params.zid),
             node_timestamping,
             &params.policy,
+            &opts.tuning.runtime_limits,
         )
         .with_drop_future_timestamp(opts.timestamping.drop_future_timestamp())
         .with_south_partition(opts.south_partition.clone()),
@@ -7370,7 +7374,7 @@ async fn run_router_hat_until(
             let snapshot_zid = zid_to_zenoh_hex(&params.zid);
             let snapshot_key = snapshot_key(&snapshot_zid);
             let snapshot_cfg = Arc::clone(&host_cfg);
-            let service = SnapshotService::new();
+            let service = SnapshotService::new(&opts.tuning.runtime_limits);
             let messages = forwarder.messages_view();
             // What the router's unicast faces have counted, and what each group it joined has.
             let group_readers = group_readers;

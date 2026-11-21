@@ -82,6 +82,7 @@
 //! before by a cfg that silently compiles a proof out.
 
 use wz_codecs::whatami::WhatAmI;
+use wz_session_core::limits::RuntimeLimits;
 use wz_session_core::policy::SessionPolicy;
 
 /// zenoh's `timestamping.enabled` per-role map: whether a node of a given role
@@ -316,12 +317,6 @@ impl wz_session_core::epoch::EpochSource for NodeEpoch {
     }
 }
 
-/// How far ahead of the clock a remote timestamp may be before the clock refuses it, in
-/// milliseconds, when the host states nothing: the `CLOCK_MAX_FORWARD_STEP_MS` limit, whose default
-/// is `uhlc`'s `DEFAULT_DELTA_MS`, which zenoh's node clock runs with.
-#[cfg(feature = "time-hlc")]
-const DEFAULT_MAX_DELTA_MS: u64 = wz_session_core::caps::CLOCK_MAX_FORWARD_STEP_MS as u64;
-
 /// The environment variable that states the bound, as `uhlc` names it.
 const MAX_DELTA_VARIABLE: &str = "UHLC_MAX_DELTA_MS";
 
@@ -379,18 +374,21 @@ impl core::fmt::Display for MaxDeltaRefused {
 
 impl std::error::Error for MaxDeltaRefused {}
 
-/// The bound, from what the environment holds for `UHLC_MAX_DELTA_MS` (`std::env::var`'s answer).
-/// `uhlc` reads that variable on its `std` profile and a zenoh node therefore honours it; the same
-/// variable moves this node's bound, so an operator's setting means the same on both. Absent, the
-/// bound is the build's. Stated, it is read as `uhlc` reads it (`s.parse()` into a `u64`) and
-/// selected as the `CLOCK_MAX_FORWARD_STEP_MS` of a runtime's limits, so a value the build does
-/// not allow is refused as any selection of that limit is.
+/// The bound the clock runs with: the `CLOCK_MAX_FORWARD_STEP_MS` of `limits`, the runtime limits
+/// the node's creator handed it, unless the environment states another for `UHLC_MAX_DELTA_MS`
+/// (`stated`, `std::env::var`'s answer). `uhlc` reads that variable on its `std` profile and a
+/// zenoh node therefore honours it; the same variable moves this node's bound over what its
+/// creator resolved, so an operator's setting means the same on both. Stated, it is read as `uhlc`
+/// reads it (`s.parse()` into a `u64`) and selected over `limits`, so a value the build does not
+/// allow is refused as any selection of that limit is.
 #[cfg(feature = "time-hlc")]
 fn max_delta_from(
     stated: Result<String, std::env::VarError>,
+    limits: &RuntimeLimits,
 ) -> Result<wz_session_core::ntp64::Ntp64, MaxDeltaRefused> {
-    let ms = match stated {
-        Err(std::env::VarError::NotPresent) => DEFAULT_MAX_DELTA_MS,
+    let mut limits = *limits;
+    match stated {
+        Err(std::env::VarError::NotPresent) => {}
         Err(std::env::VarError::NotUnicode(_)) => return Err(MaxDeltaRefused::NotUnicode),
         Ok(text) => {
             let ms = match text.parse::<u64>() {
@@ -400,15 +398,13 @@ fn max_delta_from(
             let Ok(value) = usize::try_from(ms) else {
                 return Err(MaxDeltaRefused::TooLarge { stated_ms: ms });
             };
-            let mut limits = wz_session_core::limits::RuntimeLimits::defaults();
             limits
                 .select_clock_max_forward_step_ms(value)
                 .map_err(MaxDeltaRefused::OutsideDomain)?;
-            limits.clock_max_forward_step_ms() as u64
         }
-    };
+    }
     Ok(wz_session_core::ntp64::Ntp64::from_duration(
-        core::time::Duration::from_millis(ms),
+        core::time::Duration::from_millis(limits.clock_max_forward_step_ms() as u64),
     ))
 }
 
@@ -431,16 +427,19 @@ impl NodeHlc {
     /// `policy` is the snapshot the node's creator resolved: the node's `clock-quality-stamping`
     /// policy is the one it holds, read once, here.
     ///
-    /// The clock's bound is the build's `CLOCK_MAX_FORWARD_STEP_MS` unless `UHLC_MAX_DELTA_MS`
-    /// states another. A stated bound the node does not honour is refused: the node is built
-    /// without the clock, and [`Self::clock_refused`] says why, so its creator can refuse to go
-    /// on with it.
+    /// `limits` is the snapshot of the runtime limits the node's creator resolved: the clock's
+    /// bound is its `CLOCK_MAX_FORWARD_STEP_MS` unless `UHLC_MAX_DELTA_MS` states another. A
+    /// creator that holds no runtime limits of its own hands
+    /// [`RuntimeLimits::BUILD`](wz_session_core::limits::RuntimeLimits::BUILD). A stated bound the
+    /// node does not honour is refused: the node is built without the clock, and
+    /// [`Self::clock_refused`] says why, so its creator can refuse to go on with it.
     #[cfg_attr(not(feature = "time-hlc"), allow(unused_variables))]
     pub fn for_node_by(
         zid: &[u8],
         whatami: WhatAmI,
         enabled: TimestampingEnabled,
         policy: &SessionPolicy,
+        limits: &RuntimeLimits,
     ) -> Self {
         #[cfg(all(feature = "time-hlc", feature = "clock-source"))]
         {
@@ -450,6 +449,7 @@ impl NodeHlc {
                 enabled,
                 &crate::clock_registry::GLOBAL,
                 policy,
+                limits,
             )
         }
         #[cfg(all(feature = "time-hlc", not(feature = "clock-source")))]
@@ -461,6 +461,7 @@ impl NodeHlc {
                 crate::timestamp_source::SystemEpoch,
                 StandingHome::Own(Box::default()),
                 policy.clock_quality_stamping(),
+                limits,
             )
         }
         #[cfg(not(feature = "time-hlc"))]
@@ -479,6 +480,7 @@ impl NodeHlc {
         enabled: TimestampingEnabled,
         registry: &'static crate::clock_registry::ClockRegistry,
         policy: &SessionPolicy,
+        limits: &RuntimeLimits,
     ) -> Self {
         Self::over_source(
             zid,
@@ -487,6 +489,7 @@ impl NodeHlc {
             crate::clock_registry::RegisteredOrSystem(registry),
             StandingHome::Shared(registry),
             policy.clock_quality_stamping(),
+            limits,
         )
     }
 
@@ -500,6 +503,7 @@ impl NodeHlc {
         enabled: TimestampingEnabled,
         source: impl wz_session_core::epoch::EpochSource + Send + Sync + 'static,
         policy: &SessionPolicy,
+        limits: &RuntimeLimits,
     ) -> Self {
         Self::over_source(
             zid,
@@ -508,11 +512,13 @@ impl NodeHlc {
             source,
             StandingHome::Own(Box::default()),
             policy.clock_quality_stamping(),
+            limits,
         )
     }
 
     /// The node over `source`, for the role gate `enabled` says, keeping its standing in
-    /// `standing` and stamping data as `stamping` says.
+    /// `standing`, stamping data as `stamping` says and bounded as `limits` and the environment
+    /// say.
     #[cfg(feature = "time-hlc")]
     fn over_source(
         zid: &[u8],
@@ -521,6 +527,7 @@ impl NodeHlc {
         source: impl wz_session_core::epoch::EpochSource + Send + Sync + 'static,
         standing: StandingHome,
         stamping: wz_session_core::policy::ClockQualityStamping,
+        limits: &RuntimeLimits,
     ) -> Self {
         Self::over_source_bounded(
             zid,
@@ -529,7 +536,7 @@ impl NodeHlc {
             source,
             standing,
             stamping,
-            max_delta_from(std::env::var(MAX_DELTA_VARIABLE)),
+            max_delta_from(std::env::var(MAX_DELTA_VARIABLE), limits),
         )
     }
 

@@ -118,9 +118,7 @@ ALLOWED: tuple[tuple[str, str, str], ...] = (
 #: (path pattern relative to the root, innermost item, reason): a site that reads a snapshot it
 #: built itself from another statement than its creator's, so its read moves no limit. One line per
 #: site.
-OWN_SNAPSHOTS: tuple[tuple[str, str, str], ...] = (
-    ("crates/wz-node-time/src/node_clock.rs", "max_delta_from", "the clock selects UHLC_MAX_DELTA_MS from the environment into a RuntimeLimits of its own and reads it back; the node's resolved snapshot does not reach it"),
-)
+OWN_SNAPSHOTS: tuple[tuple[str, str, str], ...] = ()
 
 #: A path that ends in `caps::<NAME>`.
 READ_RE = re.compile(r"(?<![\w])caps\s*::\s*(?P<name>[A-Z][A-Z0-9_]*)\b")

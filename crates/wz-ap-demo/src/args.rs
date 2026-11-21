@@ -6083,6 +6083,49 @@ mod stock_config_tests {
         assert!(refused.contains("`key-set` = `ajar`"), "{refused}");
     }
 
+    /// The file's `wz` member states the node's runtime limits too, and the tuning `main` reads
+    /// hands them to the machines the node makes for itself; a file that states none, and a node
+    /// no file describes, run under the build defaults.
+    #[test]
+    fn the_wz_member_of_the_file_states_the_node_runtime_limits_the_tuning_hands_on() {
+        use wz::runtime_tokio::limits::RuntimeLimits;
+        assert_eq!(
+            TransportTuning::default().runtime_limits,
+            RuntimeLimits::defaults()
+        );
+        let silent = expand(
+            &["--config", "z.json5"],
+            r#"{ connect: { endpoints: ["tcp/r:7447"] } }"#,
+        )
+        .unwrap();
+        assert_eq!(silent.policies.limits.runtime, RuntimeLimits::defaults());
+
+        let mut stated = RuntimeLimits::defaults();
+        let value = if stated.snapshot_period_ms() == 250 {
+            125
+        } else {
+            250
+        };
+        if stated.select_snapshot_period_ms(value).is_err() {
+            // A build that keeps the build's value alone refuses the statement; the reader's own
+            // tests hold it to that.
+            return;
+        }
+        let chosen = expand(
+            &["--config", "z.json5"],
+            &format!(
+                r#"{{ connect: {{ endpoints: ["tcp/r:7447"] }},
+                     wz: {{ limits: {{ SNAPSHOT_PERIOD_MS: {value} }} }} }}"#
+            ),
+        )
+        .unwrap();
+        assert_eq!(chosen.policies.limits.runtime, stated);
+        let tuning = TransportTuning::from_argv(&chosen.argv)
+            .expect("the expansion is parseable")
+            .with_runtime_limits(chosen.policies.limits.runtime);
+        assert_eq!(tuning.runtime_limits.snapshot_period_ms(), value);
+    }
+
     /// R311y843 — every key wz REPORTS as honoured, paired with whether the
     /// demo does anything at all with it.
     ///
@@ -10862,6 +10905,9 @@ pub(crate) struct TransportTuning {
     /// The snapshot of the node's policies ([`resolve_policy`]): every session the node opens is
     /// handed it, and the defaults above that a policy decides are taken from it.
     pub(crate) policy: wz::runtime_tokio::policy::SessionPolicy,
+    /// The snapshot of the node's runtime limits ([`resolve_runtime_limits`]): the machines the
+    /// node makes for itself, its clock and its resource snapshot, are handed it.
+    pub(crate) runtime_limits: wz::runtime_tokio::limits::RuntimeLimits,
 }
 
 /// The snapshot of the policies of a demo node no `--config` file describes, and of the sessions
@@ -10871,6 +10917,14 @@ pub(crate) struct TransportTuning {
 /// ([`TransportTuning::from_argv_under`]) and its scouting sockets.
 pub(crate) fn resolve_policy() -> wz::runtime_tokio::policy::SessionPolicy {
     wz::runtime_tokio::policy::SessionPolicy::defaults()
+}
+
+/// The runtime limits of a demo node no `--config` file describes: the build defaults. A node a
+/// file describes runs under the limits the file's `wz` member resolved
+/// (`StockConfigExpansion::policies`), which `main` hands its tuning
+/// ([`TransportTuning::with_runtime_limits`]).
+pub(crate) fn resolve_runtime_limits() -> wz::runtime_tokio::limits::RuntimeLimits {
+    wz::runtime_tokio::limits::RuntimeLimits::defaults()
 }
 
 /// R2925 — the demo's flag for each priority's queue size, indexed by the
@@ -10907,7 +10961,18 @@ impl TransportTuning {
             open_timeout: wz::runtime_tokio::session_open::OPEN_TIMEOUT,
             stats_filters: Default::default(),
             policy,
+            runtime_limits: resolve_runtime_limits(),
         }
+    }
+
+    /// `self` whose node runs under `limits`, the runtime limits its creator resolved
+    /// (builder): what `main` hands the tuning of a node a `--config` file describes.
+    pub(crate) fn with_runtime_limits(
+        mut self,
+        limits: wz::runtime_tokio::limits::RuntimeLimits,
+    ) -> Self {
+        self.runtime_limits = limits;
+        self
     }
 
     /// Read `--batch-size <n>` / `--lease-ms <n>` off the command line.
