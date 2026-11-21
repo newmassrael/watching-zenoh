@@ -114,8 +114,7 @@ use crate::reply_acceptance::ReplyKeyExpr;
 // on the growable backing and tables that refuse and count on the fixed one.
 #[cfg(all(feature = "codec-request", feature = "storage-profile"))]
 use crate::reply_stage::{
-    EncodingParts, FinalStage, PartsBody, PartsKind, ReplyParts, ReplyStage, ReplyStaging,
-    StagesReplies,
+    EncodingParts, FinalStage, PartsBody, PartsKind, ReplyParts, ReplyStage, StagesReplies,
 };
 // The staging methods that take an owned hint (the timestamp) and the `Final` table's
 // trait are the heap profile's: a build with no allocator stages through `ReplyParts`.
@@ -3717,6 +3716,9 @@ pub fn response_final_for(rid: crate::wire_id::RequestId) -> ResponseFinalOwned 
 ))]
 mod tests {
     use super::*;
+    // The responder stages through `StagesReplies`; the tests read the stage back through the
+    // staging trait's `nth` and `drain_staged`.
+    use crate::reply_stage::ReplyStaging as _;
     use hashbrown::HashMap;
     // R311gb-3b — `Box` lives here (not at module level): its only uses
     // are the `NetworkMessage::Request(Box::new(..))` fixtures below, and
