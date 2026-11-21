@@ -70,7 +70,9 @@ What is not carried, and why:
     expression is the shard index, and the count beside it (the same name with
     an `S`, `WZ_LEGS_SHARD` of `WZ_LEGS_SHARDS`) goes with it; a key whose value
     differs between the jobs that run one lane (`WZ_C1CN_PART`) is the part. A
-    unit runs the whole lane, which is what each of those keys unset means.
+    unit runs the whole lane, which is what each of those keys unset means,
+    unless the lane is one this planner cuts into parts itself (below): then it
+    runs one part, under the key the lane reads its part from.
   * Any other expression (`GH_TOKEN`): a secret of the hosted run, which a
     build machine does not hold.
   * Steps that need `sudo` (apt packages, a kernel module, a raised limit):
@@ -117,10 +119,41 @@ machines whose slot had never built a zenoh-pico CLI or zenohd, and five of them
 failed as "ran nothing" (E, E6i, E8t, C1cd, Z); a lane that ran some of its legs
 passed with the rest skipped, which hosted would have failed.
 
+## A lane in parts
+
+A lane whose one run holds a build machine for too long, or asks more of one
+machine than the fleet can give without emptying it, is planned as one unit per
+part when the lane can be told to run one part and lists its parts itself
+(`PARTED_LANES`: the key the lane reads, the command that lists the parts). The
+unit is `<lane>:<part>` and runs
+
+    python3 scripts/lib/runci_plan.py --layer <lane> --part <part>
+
+which is the lane's unit with that key set to the part; `--layer <lane>` alone
+still runs the lane whole, with the key cleared. The parts are read from the
+tree each time the set is planned and never written here. A listing that fails,
+lists nothing, names a part twice or names one a unit cannot carry fails the
+plan, and so does a lane whose function does not read its key, whose every
+part would run the whole lane: a part missing from the plan is a part no
+machine judges.
+
+Layer Qzk is the one so far. Measured 2026-11-21: run whole, it builds six
+images and, for the ceiling under zenoh-pico (docs/upstream-parity.md D8), each
+paired image again with its reference, one build after another; the fleet
+learned its peak as about 24 GB and reserved it as one block, which on build
+machines of 30 GB waited for a whole idle machine, sat 50 minutes at the head of
+the queue and was cancelled with no verdict. Its parts are its ceiling groups (a
+reference with every image the matrix pairs with it, so the reference is still
+built in the run that holds those images under it) and each unpaired image
+alone (`scripts/kit-lane.sh parts`). The lane holds the parts to its images
+before it builds, and run with no part it runs every part in turn, so the units
+together judge what the hosted job judges.
+
 Every unit names the same `exclusive` token. A hosted job has a machine to
 itself; the lanes were written for that, and some of them bind fixed ports and
 fixed paths. Until a unit runs in an image and a network of its own (RFC 0034),
-two lanes do not share a machine at once. The parallelism is across machines.
+two lanes do not share a machine at once, nor two parts of one lane. The
+parallelism is across machines.
 
 The list is the dispatch table, in its order, and nothing else: every lane of
 the table is wired into hosted CI (`unwired_lane_lint.py`), so the table is the
@@ -222,6 +255,16 @@ LANE_PACKAGES: dict[str, list[str]] = {
     "E": ["python3-venv"],
     "Qz": ["python3-venv"],
 }
+
+
+# Lanes cut into parts (see the docstring): the env key the lane's function reads its part from, and
+# the command, run from the repository root, that prints the parts one per line, the name first.
+PARTED_LANES: dict[str, tuple[str, list[str]]] = {
+    "Qzk": ("WZ_QZK_PART", ["bash", "scripts/kit-lane.sh", "parts"]),
+}
+
+# A part's name as a unit's name and an argument carry it: no space and no separator of either.
+PART_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
 
 
 def lane_commands() -> dict[str, list[str]]:
@@ -364,12 +407,35 @@ def read_workflow() -> dict:
     return yaml.safe_load(CI_YML.read_text(encoding="utf-8"))
 
 
-def unit(lane: str, asks: Asks) -> dict:
-    """One plan line. A requirement field is written only when it names something: bx reads
-    an absent field as nothing asked."""
+def read_parts(lane: str, argv: list[str]) -> list[str]:
+    """The names of the parts `argv` lists for `lane`, in its order (see the docstring for what
+    is refused)."""
+    shown = " ".join(argv)
+    done = subprocess.run(argv, capture_output=True, text=True, check=False)
+    if done.returncode != 0:
+        said = (done.stderr or done.stdout).strip()
+        raise ValueError(f"lane {lane}: `{shown}` failed (rc={done.returncode}): {said}")
+    names = [line.split()[0] for line in done.stdout.splitlines() if line.strip()]
+    if not names:
+        raise ValueError(f"lane {lane}: `{shown}` lists no part, and a lane with none is not planned")
+    twice = sorted({n for n in names if names.count(n) > 1})
+    if twice:
+        raise ValueError(f"lane {lane}: `{shown}` names part(s) twice: {', '.join(twice)}")
+    bad = [n for n in names if not PART_NAME.match(n)]
+    if bad:
+        raise ValueError(f"lane {lane}: `{shown}` names part(s) a unit cannot carry: {', '.join(bad)}")
+    return names
+
+
+def unit(lane: str, asks: Asks, part: str | None = None) -> dict:
+    """One plan line, of the whole lane or of one part of it. A requirement field is written
+    only when it names something: bx reads an absent field as nothing asked."""
+    argv = ["python3", "scripts/lib/runci_plan.py", "--layer", lane]
+    if part is not None:
+        argv += ["--part", part]
     u: dict = {
-        "name": lane,
-        "argv": ["python3", "scripts/lib/runci_plan.py", "--layer", lane],
+        "name": lane if part is None else f"{lane}:{part}",
+        "argv": argv,
         "exclusive": [EXCLUSIVE],
     }
     for key in ("needs", "packages", "capabilities"):
@@ -384,13 +450,16 @@ def plan(
     hosted: dict[str, Hosted],
     commands: dict[str, list[str]] | None = None,
     packages_by_lane: dict[str, list[str]] | None = None,
+    parted: dict[str, tuple[str, list[str]]] | None = None,
 ) -> list[dict]:
     """The units. Raises on a lane the workflow does not run: its unit would have nothing to
     say how the hosted job runs it (`unwired_lane_lint.py` holds the same set). Raises too on
-    a `commands` or `packages_by_lane` entry for a lane the table no longer has, which would ask
-    nothing of anyone. Their defaults are the tables above."""
+    a `commands`, `packages_by_lane` or `parted` entry for a lane the table no longer has, which
+    would ask nothing of anyone, and on a parted lane whose parts cannot be planned (`read_parts`)
+    or whose function never reads its key. Their defaults are the tables above."""
     commands = lane_commands() if commands is None else commands
     packages_by_lane = LANE_PACKAGES if packages_by_lane is None else packages_by_lane
+    parted = PARTED_LANES if parted is None else parted
     ids = lanes(text)
     if only is not None:
         unknown = [o for o in only if o not in ids]
@@ -400,21 +469,44 @@ def plan(
     unwired = [i for i in ids if i not in hosted]
     if unwired:
         raise ValueError(f"lane(s) no step of {CI_YML} runs: {', '.join(unwired)}")
-    stale = sorted((set(commands) | set(packages_by_lane)) - set(lanes(text)))
+    stale = sorted((set(commands) | set(packages_by_lane) | set(parted)) - set(lanes(text)))
     if stale:
-        raise ValueError(f"a lane requirement table names lane(s) the dispatch table no longer has: "
-                         f"{', '.join(stale)}")
+        raise ValueError(f"a lane table of this planner names lane(s) the dispatch table no longer "
+                         f"has: {', '.join(stale)}")
+    bodies = lane_bodies(text)
+    deaf = sorted(lane for lane, (key, _) in parted.items() if f"${{{key}" not in bodies[lane])
+    if deaf:
+        raise ValueError(f"lane(s) whose function never reads its part key, so that every part's unit "
+                         f"would run the whole lane: {', '.join(deaf)}")
     asks = lane_asks(text, commands, packages_by_lane)
-    return [unit(i, asks[i]) for i in ids]
+    units: list[dict] = []
+    for i in ids:
+        if i in parted:
+            units += [unit(i, asks[i], part) for part in read_parts(i, parted[i][1])]
+        else:
+            units.append(unit(i, asks[i]))
+    return units
 
 
-def run_lane(lane: str, hosted: dict[str, Hosted]) -> int:
-    """Do for `lane` what its hosted job does (the docstring's two steps)."""
+def run_lane(lane: str, hosted: dict[str, Hosted], part: str | None = None) -> int:
+    """Do for `lane` what its hosted job does (the docstring's two steps), for one part of it
+    when `part` is given."""
     if lane not in hosted:
         print(f"runci_plan: no step of {CI_YML} runs lane {lane}", file=sys.stderr)
         return 2
+    if part is not None and lane not in PARTED_LANES:
+        print(f"runci_plan: lane {lane} is not one of PARTED_LANES; it has no part to run", file=sys.stderr)
+        return 2
     h = hosted[lane]
     base = dict(os.environ)
+    lane_env = dict(h.env)
+    if lane in PARTED_LANES:
+        # A key left in the caller's environment would cut the whole lane down to a part.
+        key = PARTED_LANES[lane][0]
+        base.pop(key, None)
+        lane_env.pop(key, None)
+        if part is not None:
+            lane_env[key] = part
     for env, argv in h.prep:
         shown = " ".join([*(f"{k}={v}" for k, v in env.items() if k not in base or base[k] != v), "bash", *argv])
         print(f"runci_plan: {lane}: provisioning as the hosted job does: {shown}", flush=True)
@@ -422,14 +514,14 @@ def run_lane(lane: str, hosted: dict[str, Hosted]) -> int:
         if rc != 0:
             print(f"runci_plan: {lane}: provisioning failed (rc={rc}): bash {' '.join(argv)}", file=sys.stderr)
             return rc
-    print(f"runci_plan: {lane}: env {' '.join(f'{k}={v}' for k, v in sorted(h.env.items()))}", flush=True)
-    return subprocess.call(["bash", str(RUNCI), "--layer", lane], env={**base, **h.env})
+    print(f"runci_plan: {lane}: env {' '.join(f'{k}={v}' for k, v in sorted(lane_env.items()))}", flush=True)
+    return subprocess.call(["bash", str(RUNCI), "--layer", lane], env={**base, **lane_env})
 
 
 def selftest() -> int:
     table = (
         "layer_a_x() {\n    WZ_PROTOC_REQUIRE=1 cargo test -p x\n}\n"
-        "layer_c1_y() {\n    runner=(bash \"$PWD/scripts/lib/netns-sandbox.sh\")\n}\n"
+        "layer_c1_y() {\n    local part=\"${WZ_C1_PART:-}\"\n    runner=(bash \"$PWD/scripts/lib/netns-sandbox.sh\")\n}\n"
         "run_layer A layer_a_x || overall=1\n"
         "# run_layer Z layer_z_in_a_comment || overall=1\n"
         "    run_layer Y layer_y_indented || overall=1\n"
@@ -460,14 +552,14 @@ def selftest() -> int:
     commands = {"A": ["gh"]}
     packages = {"A": ["python3-venv"]}
     cases = 0
-    got = [u["name"] for u in plan(table, None, hosted, commands, {})]
+    got = [u["name"] for u in plan(table, None, hosted, commands, {}, {})]
     assert got == ["A", "C1"], f"the table reads {got}, want ['A', 'C1'] (comment and indented lines are not lanes)"
     cases += 1
-    u = plan(table, ["C1"], hosted, commands, {})[0]
+    u = plan(table, ["C1"], hosted, commands, {}, {})[0]
     assert u["argv"] == ["python3", "scripts/lib/runci_plan.py", "--layer", "C1"], u
     assert u["exclusive"] == [EXCLUSIVE], u
     cases += 1
-    a_unit, c1_unit = plan(table, None, hosted, commands, packages)
+    a_unit, c1_unit = plan(table, None, hosted, commands, packages, {})
     assert a_unit == {"name": "A", "argv": ["python3", "scripts/lib/runci_plan.py", "--layer", "A"],
                       "exclusive": [EXCLUSIVE], "needs": ["gh", "protoc"],
                       "packages": ["libprotobuf-dev", "python3-venv"]}, (
@@ -485,7 +577,7 @@ def selftest() -> int:
         ({}, {"Gone": ["python3-venv"]}, "a package"),
     ):
         try:
-            plan(table, None, hosted, stale_commands, stale_packages)
+            plan(table, None, hosted, stale_commands, stale_packages, {})
         except ValueError:
             cases += 1
         else:
@@ -499,6 +591,46 @@ def selftest() -> int:
     # one without `gcc-multilib` fails the lane's own probe, so the unit has to ask for it.
     assert merged["C1p32"] == ["cc"] and "gcc-multilib" in LANE_PACKAGES["C1p32"], (
         merged.get("C1p32"), LANE_PACKAGES.get("C1p32"))
+    cases += 1
+
+    def lister(source: str) -> dict[str, tuple[str, list[str]]]:
+        return {"C1": ("WZ_C1_PART", [sys.executable, "-c", source])}
+
+    a_unit, *c1_units = plan(table, None, hosted, commands, {},
+                             lister("print('p1 x y'); print(); print('p+2 z')"))
+    assert [u["name"] for u in c1_units] == ["C1:p1", "C1:p+2"], (
+        f"lane C1 in parts plans {c1_units}: one unit a part, in the listing's order, a blank line none"
+    )
+    assert c1_units[1] == {"name": "C1:p+2",
+                           "argv": ["python3", "scripts/lib/runci_plan.py", "--layer", "C1", "--part", "p+2"],
+                           "exclusive": [EXCLUSIVE], "capabilities": [SANDBOX_CAPABILITY]}, (
+        f"a part's unit is {c1_units[1]}: the lane's unit with the part on its argv"
+    )
+    assert a_unit["name"] == "A" and "--part" not in a_unit["argv"], a_unit
+    cases += 1
+    for source, what in (
+        ("import sys; sys.exit(3)", "a listing that fails"),
+        ("pass", "a listing of no part"),
+        ("print('p1 x'); print('p1 y')", "a part listed twice"),
+        ("print('p:1 x')", "a part name a unit cannot carry"),
+    ):
+        try:
+            plan(table, None, hosted, commands, {}, lister(source))
+        except ValueError:
+            cases += 1
+        else:
+            raise AssertionError(f"{what} was planned instead of refused")
+    for parted, what in (
+        ({"Gone": ("WZ_GONE_PART", [sys.executable, "-c", "print('p1 x')"])}, "a lane the table lacks"),
+        ({"A": ("WZ_A_PART", [sys.executable, "-c", "print('p1 x')"])}, "a lane that never reads its key"),
+    ):
+        try:
+            plan(table, None, hosted, commands, {}, parted)
+        except ValueError:
+            cases += 1
+        else:
+            raise AssertionError(f"parts of {what} were planned instead of refused")
+    assert PARTED_LANES["Qzk"][0] == "WZ_QZK_PART", PARTED_LANES
     cases += 1
     a = hosted["A"]
     assert a.env == {"WZ_DECLINED_EXPECT": "", "RUST_BACKTRACE": "1", "WZ_PICO_REQUIRE": "1"}, (
@@ -545,7 +677,10 @@ def main() -> int:
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--check", action="store_true", help="plan, and print only how many units (for a hook)")
     ap.add_argument("--layer", help="run this lane as its hosted job does (what a unit runs)")
+    ap.add_argument("--part", help="with --layer: run this part of the lane (a lane of PARTED_LANES)")
     args = ap.parse_args()
+    if args.part is not None and args.layer is None:
+        ap.error("--part runs a part of the lane --layer names, and no --layer was given")
     if args.selftest:
         return selftest()
     for path in (RUNCI, CI_YML):
@@ -554,7 +689,7 @@ def main() -> int:
             return 2
     hosted = hosted_runs(read_workflow())
     if args.layer is not None:
-        return run_lane(args.layer, hosted)
+        return run_lane(args.layer, hosted, args.part)
     only = [o for o in args.only.split(",") if o] if args.only is not None else None
     try:
         units = plan(RUNCI.read_text(encoding="utf-8"), only, hosted)
@@ -562,7 +697,7 @@ def main() -> int:
         print(f"runci_plan: {e}", file=sys.stderr)
         return 2
     if args.check:
-        print(f"runci_plan: OK -- {len(units)} lane(s) of {RUNCI} planned as units of [checks.ci]")
+        print(f"runci_plan: OK -- {len(units)} unit(s) of [checks.ci] planned from the lanes of {RUNCI}")
         return 0
     for u in units:
         print(json.dumps(u, separators=(",", ":")))
