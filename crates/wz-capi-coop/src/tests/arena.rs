@@ -469,6 +469,54 @@ fn each_faces_peer_tables_take_the_values_the_open_resolved() {
     );
 }
 
+/// Each link the session may hold is lent a buffer for each chain it stages at once, as long as
+/// the session's `PICO_FRAG_MAX_BYTES`: the build's for a session that states none, the value a
+/// session lowers it to, and a value over the build's refuses the plan under its own name.
+#[test]
+fn each_link_is_lent_reassembly_buffers_of_the_snapshots_length() {
+    use wz_runtime_coop::reassembly_rx::LENT_CHAINS;
+
+    let config = CoopConfig {
+        max_faces: 2,
+        ..client_config()
+    };
+    let built = ArenaPlan::of(&config, &SessionLimits::defaults()).expect("lays an arena out");
+    assert_eq!(row(&built, "reassembly buffers").count, 3 * LENT_CHAINS);
+    assert_eq!(
+        row(&built, "reassembly buffers").entry_bytes,
+        caps::PICO_FRAG_MAX_BYTES
+    );
+    assert_eq!(
+        built.reassembly(),
+        (caps::PICO_FRAG_MAX_BYTES, 3 * LENT_CHAINS)
+    );
+    let mut lowered = SessionLimits::defaults();
+    if lowered
+        .select_pico_frag_max_bytes(Quota::at_most(1024))
+        .is_ok()
+    {
+        let plan = ArenaPlan::of(&config, &lowered).expect("lays an arena out");
+        assert_eq!(row(&plan, "reassembly buffers").entry_bytes, 1024);
+    }
+    let over = caps::PICO_FRAG_MAX_BYTES + 1;
+    let mut raised = SessionLimits::defaults();
+    if raised
+        .select_pico_frag_max_bytes(Quota::at_most(over))
+        .is_ok()
+    {
+        assert_eq!(
+            ArenaPlan::of(&config, &raised),
+            Err(ArenaRefused::Limit {
+                limit: "PICO_FRAG_MAX_BYTES",
+                why: UnlentRows::OverCeiling {
+                    value: over,
+                    ceiling: caps::PICO_FRAG_MAX_BYTES,
+                },
+            })
+        );
+    }
+}
+
 /// The queries held for their callbacks are the value of `MAX_PENDING_FINALS` the open resolved,
 /// the build's for a session that states none.
 #[cfg(feature = "queryable")]

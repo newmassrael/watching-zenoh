@@ -63,13 +63,15 @@ use wz_capi_port::{
 };
 #[cfg(feature = "ticker")]
 use wz_capi_port::{Tick, TickerId};
+use wz_runtime_coop::reassembly_rx::{lent_reassembly, LentChains, LENT_CHAINS};
 use wz_runtime_coop::session_drive::{
-    spawn_session, wait_any, LinkReadiness, LinkWritability, OpenedLink, SessionDatagramLink,
-    SessionDriveConfig, SessionLinks, SessionRole,
+    spawn_session_with_router, wait_any, LinkReadiness, LinkWritability, OpenedLink,
+    SessionDatagramLink, SessionDriveConfig, SessionLinks, SessionRole,
 };
 #[cfg(feature = "listen")]
 use wz_runtime_coop::session_drive::{LinkListener, LinkOpenError};
 use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTime};
+use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::close_reason::CloseReason;
 use wz_session_core::declare::matching::BoxedMatchingSink;
 use wz_session_core::declare::queryable::QuerierCriterion;
@@ -1020,6 +1022,9 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// The session's delivery lane, which every link's gate asks before it reads a batch
     /// (`crate::lane::LaneGate`).
     lane: Arc<Mutex<SampleLane>>,
+    /// The buffers the session's links stage the chains of their fragmented messages in, lent
+    /// from the arena (`ArenaPlan::reassembly`).
+    reassembly: LentByteCells,
     /// The memory the open reserved for what the session's limits size (`crate::arena`). Last,
     /// so every table lent from it is dropped before it gives its memory back.
     arena: SessionArena,
@@ -1604,7 +1609,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         );
         #[cfg(not(feature = "queryable"))]
         let dispatch = dispatch_all(self.registry.clone(), face, actions.clone());
-        let task = spawn_session(
+        // The link's fragmented messages are staged in buffers of the session's arena, as many
+        // chains at once as the table has buffers free for it; a chain that finds none is refused
+        // and counted, and the buffers go back when the session over the link ends.
+        let reassembly = lent_reassembly(
+            &self.policy,
+            LentChains::claim(&self.reassembly, LENT_CHAINS),
+        );
+        let task = spawn_session_with_router(
             &self.local,
             link.clone(),
             actions.clone(),
@@ -1614,6 +1626,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 role,
                 max_iters: None,
             },
+            reassembly,
             dispatch,
         );
         self.local.run_until_idle();
@@ -2555,6 +2568,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let mut arena = SessionArena::reserve(&plan, memory).map_err(OpenError::Arena)?;
         links.lend_buffers(arena.lend_links(&plan).map_err(OpenError::Arena)?);
         let (lane_area, lane_bytes) = arena.lend_lane(&plan).map_err(OpenError::Arena)?;
+        let reassembly = arena.lend_reassembly(&plan).map_err(OpenError::Arena)?;
         // SAFETY: the area is the arena's, lent to the lane alone, and the arena is the session's
         // and given back only when the session is let go, after its last delivery.
         let samples = Arc::new(Mutex::new(unsafe {
@@ -2682,6 +2696,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             #[cfg(feature = "ticker")]
             tickers: Tickers::default(),
             lane: samples.clone(),
+            reassembly,
             arena,
         };
         #[cfg(feature = "queryable")]

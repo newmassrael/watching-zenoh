@@ -90,6 +90,8 @@ use wz_session_core::drive::report_outcome_reassembling;
 // helper, not a unicast-drive one).
 #[cfg(feature = "reassembly")]
 use wz_session_core::reassembly_dispatch::sweep_reporting;
+#[cfg(feature = "reassembly")]
+use wz_session_core::{chain_staging::ChainStaging, reassembly_dispatch::ReassemblyDispatcher};
 
 #[cfg(not(feature = "session-slot"))]
 use crate::link_storage::LinkTables;
@@ -652,6 +654,104 @@ where
     }
 }
 
+/// The reassembly Router a pump builds for itself when its maker hands it none (`SessionPump::new`):
+/// the generated pool's Router of growable chains, or with `rx-in-place` the session's own Router
+/// staging into the slots of a `reassembly_pool_mcu` table it owns (`ReassemblyArena`), where a
+/// fragment is read where the link holds it and copied once, into its slot.
+#[cfg(all(feature = "reassembly", not(feature = "rx-in-place")))]
+pub type DefaultRouter = CoopReassembly;
+
+/// See the copying receive's form.
+#[cfg(all(feature = "reassembly", feature = "rx-in-place"))]
+pub type DefaultRouter = InPlaceReassembly;
+
+/// Without `reassembly` a pump rejoins no fragment and holds no Router.
+#[cfg(not(feature = "reassembly"))]
+pub type DefaultRouter = ();
+
+/// What the drive loop asks of the reassembly Router a pump stages its fragments in, whatever arena
+/// the Router stages into: the loop is written once, and a session whose maker lends its chains
+/// their buffers (`SessionPump::with_router`) runs it as one that builds its own Router does.
+pub trait PumpRouter {
+    /// End the chains past their deadline, telling `on_event` how many.
+    #[cfg(feature = "reassembly")]
+    fn pump_sweep<F: FnMut(IterationEvent<'_, '_>)>(&mut self, now_ms: u64, on_event: &mut F);
+
+    /// Hand `outcome` of the copying receive to `on_event` through the reassembly.
+    #[cfg(all(feature = "reassembly", feature = "alloc"))]
+    fn pump_report<R, T, F>(
+        &mut self,
+        outcome: &wz_session_core::driver_loop::DriverLoopOutcome,
+        actions: &wz_session_core::session_actions::SessionLinkActions<R, T>,
+        now_ms: u64,
+        on_event: &mut F,
+    ) where
+        R: wz_session_core::link::SessionRuntime,
+        T: TimeSource,
+        F: FnMut(IterationEvent<'_, '_>) + ?Sized;
+
+    /// Dispatch one datagram read where the link holds it, its fragments staged through this
+    /// Router.
+    #[cfg(all(feature = "reassembly", feature = "rx-in-place"))]
+    fn pump_dispatch<R, T>(
+        &mut self,
+        unit: &[u8],
+        actions: &wz_session_core::session_actions::SessionLinkActions<R, T>,
+        engine: &mut SessionEngine<R, T>,
+        record: &mut RecordBuf,
+        now_ms: u64,
+        on_event: &mut dyn EventSink,
+    ) -> DatagramPath
+    where
+        R: wz_session_core::link::SessionRuntime,
+        T: TimeSource;
+}
+
+#[cfg(feature = "reassembly")]
+impl<const SLOTS: usize, const CAP: usize, S> PumpRouter for ReassemblyDispatcher<SLOTS, CAP, S>
+where
+    S: ChainStaging<SLOTS, CAP>,
+{
+    fn pump_sweep<F: FnMut(IterationEvent<'_, '_>)>(&mut self, now_ms: u64, on_event: &mut F) {
+        sweep_reporting(self, now_ms, on_event);
+    }
+
+    #[cfg(feature = "alloc")]
+    fn pump_report<R, T, F>(
+        &mut self,
+        outcome: &wz_session_core::driver_loop::DriverLoopOutcome,
+        actions: &wz_session_core::session_actions::SessionLinkActions<R, T>,
+        now_ms: u64,
+        on_event: &mut F,
+    ) where
+        R: wz_session_core::link::SessionRuntime,
+        T: TimeSource,
+        F: FnMut(IterationEvent<'_, '_>) + ?Sized,
+    {
+        report_outcome_reassembling(outcome, self, actions, now_ms, on_event);
+    }
+
+    #[cfg(feature = "rx-in-place")]
+    fn pump_dispatch<R, T>(
+        &mut self,
+        unit: &[u8],
+        actions: &wz_session_core::session_actions::SessionLinkActions<R, T>,
+        engine: &mut SessionEngine<R, T>,
+        record: &mut RecordBuf,
+        now_ms: u64,
+        on_event: &mut dyn EventSink,
+    ) -> DatagramPath
+    where
+        R: wz_session_core::link::SessionRuntime,
+        T: TimeSource,
+    {
+        dispatch_datagram_reassembling(unit, actions, engine, record, self, now_ms, on_event)
+    }
+}
+
+#[cfg(not(feature = "reassembly"))]
+impl PumpRouter for () {}
+
 /// One MCU session, ready to be advanced one iteration at a time.
 ///
 /// R2364 — extracted from `run_session`, whose body this used to be
@@ -669,10 +769,14 @@ where
 /// `D` is the type of the driver the session sends through: the trait object by default, the
 /// driver's own type for the profile whose image names it, which is what makes the calls the
 /// engine's actions make through the link direct ones.
+///
+/// `R` is the reassembly Router the session stages its fragments in ([`PumpRouter`]): the one the
+/// pump builds for itself ([`DefaultRouter`]), or one its maker hands it.
 pub struct SessionPump<
     C: ClockSource,
     L: SessionDatagramLink,
     D: BoxedLinkDriver + ?Sized + 'static = dyn BoxedLinkDriver,
+    R = DefaultRouter,
 > {
     runtime: CoopRuntime<C, D>,
     link: L,
@@ -680,14 +784,11 @@ pub struct SessionPump<
     clock: CoopTime<C>,
     engine: SessionEngine<CoopRuntime<C, D>, CoopTime<C>>,
     deadline_tracker: HandshakeDeadlineTracker,
-    #[cfg(all(feature = "reassembly", not(feature = "rx-in-place")))]
-    reasm: CoopReassembly,
-    /// `rx-in-place` — the session's own reassembly Router, staging into the
-    /// slots of a `reassembly_pool_mcu` table this session owns
-    /// ([`ReassemblyArena`]): a fragment is read where the link holds it and
-    /// copied once, into its slot.
-    #[cfg(all(feature = "reassembly", feature = "rx-in-place"))]
-    reasm: InPlaceReassembly,
+    /// The reassembly Router the session's fragments are staged in.
+    #[cfg(feature = "reassembly")]
+    reasm: R,
+    #[cfg(not(feature = "reassembly"))]
+    _router: core::marker::PhantomData<R>,
     /// `rx-in-place` — the one-record buffer each inbound record is decoded
     /// into and dispatched from. Allocated once, with the pump, for one
     /// record; a datagram costs it nothing however many records it carries.
@@ -866,6 +967,31 @@ impl<C: ClockSource, L: SessionDatagramLink, D: BoxedLinkDriver + ?Sized + 'stat
     pub fn reassembly(&self) -> &InPlaceReassembly {
         &self.reasm
     }
+}
+
+impl<
+        C: ClockSource,
+        L: SessionDatagramLink,
+        D: BoxedLinkDriver + ?Sized + 'static,
+        R: PumpRouter,
+    > SessionPump<C, L, D, R>
+{
+    /// The pump `SessionPump::new` builds, over a reassembly Router its maker built: one whose
+    /// chains stage into buffers the session's arena lent, so the session's fragments cost the
+    /// heap nothing and are bounded by the buffers' length. Never inlined, for the reason `new`
+    /// is not.
+    #[cfg(feature = "reassembly")]
+    #[inline(never)]
+    pub fn with_router(
+        runtime: CoopRuntime<C, D>,
+        link: L,
+        actions: SessionHandle<C, D>,
+        clock: CoopTime<C>,
+        config: SessionDriveConfig,
+        reasm: R,
+    ) -> Self {
+        Self::build(runtime, link, actions, clock, config, reasm)
+    }
 
     /// What `Self::new` and [`Self::with_reassembly_arena`] share: the pump as a value, made by
     /// [`Self::build_in`] in a place of its own.
@@ -876,8 +1002,7 @@ impl<C: ClockSource, L: SessionDatagramLink, D: BoxedLinkDriver + ?Sized + 'stat
         actions: SessionHandle<C, D>,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
-        #[cfg(all(feature = "reassembly", not(feature = "rx-in-place")))] reasm: CoopReassembly,
-        #[cfg(all(feature = "reassembly", feature = "rx-in-place"))] reasm: InPlaceReassembly,
+        #[cfg(feature = "reassembly")] reasm: R,
     ) -> Self {
         let mut place = MaybeUninit::<Self>::uninit();
         Self::build_in(
@@ -913,8 +1038,7 @@ impl<C: ClockSource, L: SessionDatagramLink, D: BoxedLinkDriver + ?Sized + 'stat
         actions: SessionHandle<C, D>,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
-        #[cfg(all(feature = "reassembly", not(feature = "rx-in-place")))] reasm: CoopReassembly,
-        #[cfg(all(feature = "reassembly", feature = "rx-in-place"))] reasm: InPlaceReassembly,
+        #[cfg(feature = "reassembly")] reasm: R,
     ) {
         let SessionDriveConfig {
             timeouts,
@@ -954,6 +1078,8 @@ impl<C: ClockSource, L: SessionDatagramLink, D: BoxedLinkDriver + ?Sized + 'stat
                 .write(HandshakeDeadlineTracker::new(timeouts));
             #[cfg(feature = "reassembly")]
             core::ptr::addr_of_mut!((*at).reasm).write(reasm);
+            #[cfg(not(feature = "reassembly"))]
+            core::ptr::addr_of_mut!((*at)._router).write(core::marker::PhantomData);
             #[cfg(feature = "rx-in-place")]
             core::ptr::addr_of_mut!((*at).record).write(new_record_buf());
             #[cfg(feature = "rx-in-place")]
@@ -1072,7 +1198,8 @@ impl<C: ClockSource, L: SessionDatagramLink, D: BoxedLinkDriver + ?Sized + 'stat
         // loop calls the same primitive). A stalled chain whose continuation
         // never arrives is reclaimed here once `now_ms` crosses its deadline.
         #[cfg(feature = "reassembly")]
-        sweep_reporting(&mut self.reasm, now_ms, &mut |event| on_event.event(event));
+        self.reasm
+            .pump_sweep(now_ms, &mut |event| on_event.event(event));
 
         // R311y632 (§17) — the parked remainder of the LAST unit first. A unit
         // is a batch, and `try_recv` below would otherwise hold the second
@@ -1082,13 +1209,10 @@ impl<C: ClockSource, L: SessionDatagramLink, D: BoxedLinkDriver + ?Sized + 'stat
         #[cfg(feature = "alloc")]
         if let Some(outcome) = dispatch_pending(&self.actions, &mut self.engine) {
             #[cfg(feature = "reassembly")]
-            report_outcome_reassembling(
-                &outcome,
-                &mut self.reasm,
-                &self.actions,
-                now_ms,
-                &mut |event| on_event.event(event),
-            );
+            self.reasm
+                .pump_report(&outcome, &self.actions, now_ms, &mut |event| {
+                    on_event.event(event)
+                });
             #[cfg(not(feature = "reassembly"))]
             on_event.event(IterationEvent::Poll(&outcome));
             return None;
@@ -1116,15 +1240,8 @@ impl<C: ClockSource, L: SessionDatagramLink, D: BoxedLinkDriver + ?Sized + 'stat
             // the reassembly hand-off.
             let received = link.recv_with(&mut |unit| {
                 #[cfg(feature = "reassembly")]
-                let path = dispatch_datagram_reassembling(
-                    unit,
-                    actions,
-                    engine,
-                    record,
-                    reasm,
-                    now_ms,
-                    &mut *on_event,
-                );
+                let path =
+                    reasm.pump_dispatch(unit, actions, engine, record, now_ms, &mut *on_event);
                 #[cfg(not(feature = "reassembly"))]
                 let path = dispatch_datagram(unit, actions, engine, record, &mut *on_event);
                 paths.count(path);
@@ -1143,13 +1260,10 @@ impl<C: ClockSource, L: SessionDatagramLink, D: BoxedLinkDriver + ?Sized + 'stat
             let outcome =
                 dispatch_link_event(LinkEvent::Rx(frame), &self.actions, &mut self.engine);
             #[cfg(feature = "reassembly")]
-            report_outcome_reassembling(
-                &outcome,
-                &mut self.reasm,
-                &self.actions,
-                now_ms,
-                &mut |event| on_event.event(event),
-            );
+            self.reasm
+                .pump_report(&outcome, &self.actions, now_ms, &mut |event| {
+                    on_event.event(event)
+                });
             #[cfg(not(feature = "reassembly"))]
             on_event.event(IterationEvent::Poll(&outcome));
             return None;
@@ -1287,6 +1401,36 @@ where
         config,
         on_event,
     ))
+}
+
+/// [`spawn_session`] over a reassembly Router its maker built (`SessionPump::with_router`): a
+/// session whose fragment chains stage into buffers its session's arena lent.
+#[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
+pub fn spawn_session_with_router<C, L, R, F>(
+    local: &CoopLocalSet<C>,
+    link: L,
+    actions: SessionHandle<C>,
+    clock: CoopTime<C>,
+    config: SessionDriveConfig,
+    reasm: R,
+    mut on_event: F,
+) -> CoopLocalJoinHandle<DriverOutcome>
+where
+    C: ClockSource + 'static,
+    L: SessionDatagramLink + 'static,
+    R: PumpRouter + 'static,
+    F: FnMut(IterationEvent<'_, '_>) + 'static,
+{
+    let runtime = local.runtime().clone();
+    local.spawn_local(async move {
+        let mut pump = SessionPump::with_router(runtime, link, actions, clock, config, reasm);
+        loop {
+            if let Some(outcome) = pump.step(&mut on_event) {
+                return outcome;
+            }
+            yield_now().await;
+        }
+    })
 }
 
 // ───────────── the pump in a cell of a table the image declares ─────────────

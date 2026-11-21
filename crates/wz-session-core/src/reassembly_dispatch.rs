@@ -1944,6 +1944,111 @@ mod tests {
         assert_eq!(d.capacity_refusals(), 1);
     }
 
+    /// A table of `count` buffers of `size` bytes over memory the test process leaks, so it outlives
+    /// every buffer claimed from it.
+    fn lent_cells(size: usize, count: usize) -> crate::byte_cells::LentByteCells {
+        use crate::bounded::{Arena, ARENA_ALIGN};
+
+        #[derive(Clone, Copy)]
+        #[repr(C, align(16))]
+        struct Block([u8; ARENA_ALIGN]);
+
+        let bytes = Arena::byte_cells_bytes(size, count).expect("within the address space");
+        let blocks = bytes.div_ceil(ARENA_ALIGN).max(1);
+        let region: &'static mut [Block] = vec![Block([0; ARENA_ALIGN]); blocks].leak();
+        // SAFETY: the region is aligned to `ARENA_ALIGN`, as its blocks are, holds at least
+        // `bytes` bytes, and is leaked, so nothing else uses it and it outlives every buffer.
+        let mut arena =
+            unsafe { Arena::over(core::ptr::NonNull::from(region).cast::<u8>(), bytes) };
+        arena
+            .lend_byte_cells(size, count)
+            .expect("the arena is laid out for the table")
+    }
+
+    /// A Router over chains staged in lent buffers ends a chain at the buffer's length, the
+    /// session's bound, though its slot's `CAP` would hold more: as pico ends a chain past its
+    /// `FRAG_MAX_SIZE`. A chain of exactly the bound reassembles.
+    #[test]
+    fn a_chain_past_the_lent_bound_is_refused() {
+        use crate::chain_staging::LentStaging;
+
+        let cells = lent_cells(8, 2);
+        let mut d: ReassemblyDispatcher<4, 64, LentStaging<4, 64>> =
+            ReassemblyDispatcher::with_staging(
+                ReassemblyConfig::new(2, 5_000),
+                LentStaging::claim(&cells, 2),
+            );
+        let mut out = None;
+        d.ingest(frag(PEER_A, true, 1, 1, b"aaaa"), MASK, 0, |_| {});
+        let r = d.ingest(frag(PEER_A, true, 2, 0, b"bbbb"), MASK, 0, |m| {
+            out = Some(m.to_vec())
+        });
+        assert_eq!(r, IngestOutcome::Reassembled);
+        assert_eq!(out.as_deref(), Some(&b"aaaabbbb"[..]));
+
+        d.ingest(frag(PEER_A, true, 3, 1, b"aaaa"), MASK, 0, |_| {});
+        let r = d.ingest(frag(PEER_A, true, 4, 0, b"bbbbb"), MASK, 0, |_| {
+            panic!("past the bound, no deliver")
+        });
+        assert_eq!(r, IngestOutcome::Aborted(AbortReason::CapacityOverflow));
+        assert_eq!(d.capacity_refusals(), 1);
+        assert_eq!(d.active_chains(), 0);
+        assert_eq!(d.staging_available(), 2, "both buffers are free again");
+    }
+
+    /// A lent staging serves as many chains as it claimed buffers, gives a buffer back when its
+    /// chain ends, and gives every buffer back to its table when it is dropped.
+    #[test]
+    fn a_lent_staging_serves_the_buffers_it_claimed() {
+        use crate::chain_staging::{ChainStaging, LentStaging};
+
+        let cells = lent_cells(8, 3);
+        let mut staging = LentStaging::<4, 64>::claim(&cells, 2);
+        assert_eq!((staging.available(), cells.in_use()), (2, 2));
+        assert_eq!(staging.capacity(), 8, "a buffer's length, under CAP");
+        let first = staging.acquire().expect("a buffer");
+        let second = staging.acquire().expect("the other buffer");
+        assert!(staging.acquire().is_none(), "no third chain");
+        staging.release(first);
+        assert_eq!(staging.available(), 1);
+        staging.release(second);
+        drop(staging);
+        assert_eq!(
+            cells.in_use(),
+            0,
+            "dropped, the staging gave its buffers back"
+        );
+        assert_eq!(LentStaging::<4, 64>::none().available(), 0);
+    }
+
+    /// A reservation is staged as far as it was filled, and a commit past it is refused.
+    #[test]
+    fn a_lent_chain_stages_what_its_filler_wrote() {
+        use crate::chain_staging::{ChainStaging, LentStaging, StagingError};
+
+        let cells = lent_cells(8, 1);
+        let mut staging = LentStaging::<1, 64>::claim(&cells, 1);
+        let mut chain = staging.acquire().expect("a buffer");
+        staging.append(&mut chain, b"ab").expect("room");
+        staging
+            .buf(&mut chain, 4)
+            .expect("room for four")
+            .copy_from_slice(b"cdef");
+        staging.commit(&mut chain, 3).expect("three of four filled");
+        assert_eq!(staging.bytes(&chain), b"abcde");
+        assert!(!staging.fits(&chain, 4), "five staged, eight the most");
+        assert_eq!(
+            staging.buf(&mut chain, 4).err(),
+            Some(StagingError::ChainCapExceeded)
+        );
+        staging.buf(&mut chain, 1).expect("room for one");
+        assert_eq!(
+            staging.commit(&mut chain, 2),
+            Err(StagingError::ChainCapExceeded)
+        );
+        staging.release(chain);
+    }
+
     /// A first fragment already past the bound never opens a chain.
     #[test]
     fn a_first_fragment_past_the_bound_opens_no_chain() {

@@ -32,6 +32,11 @@
 //!   first;
 //! - the session's delivery lane (`DELIVERY_LANE_BYTES`, under the build's), the bytes of what
 //!   it hands its subscribers' callbacks after its lock (`crate::lane`), lent next;
+//! - the buffers each link of the session stages the chains of its fragmented messages in, one
+//!   for each chain it stages at once (`LENT_CHAINS` of `wz_runtime_coop::reassembly_rx`), each
+//!   as long as the largest message the session rejoins (`PICO_FRAG_MAX_BYTES`, under the build's,
+//!   which a chain past it is ended at, as pico ends one), with the flags that say which are lent
+//!   (`SessionArena::lend_reassembly`), lent after the lane;
 //! - the engine's own record of each declaration it announces and announces again over a new
 //!   link ([`EntityRows`]): its subscribers, queryables, tokens and liveliness subscribers under
 //!   the limits of the application's tables, the key expressions it declares
@@ -48,11 +53,9 @@
 //! as `max_faces` admits, each a link it attaches or accepts; one that listens holds as many again
 //! in their handshake as `accept_pending` admits. A group's face is no link of the session's: it
 //! has a row of gets and no buffers. These are the tables whose limits bind at the open
-//! (`binding_fixed = "open"`). A link's reassembly and what a group's members rejoin join the
-//! plan with the units that lend them from the arena and bound them by limits of their own
-//! (`docs/c-abi-no-heap-pools.md`, sections 4.9 and 4.14): reserved
-//! before then, they would be memory nothing uses, and a link's reassembly is sized by
-//! `max_message_size`, which upstream's default leaves at a gibibyte.
+//! (`binding_fixed = "open"`). What a group's members rejoin joins the plan with the unit that
+//! lends it from the arena and bounds it by limits of its own (`docs/c-abi-no-heap-pools.md`,
+//! section 4.14): reserved before then, it would be memory nothing uses.
 //!
 //! # The reservation is the report
 //!
@@ -71,6 +74,7 @@ use core::alloc::Layout;
 use core::ptr::NonNull;
 
 use wz_runtime_coop::link_storage::LinkTables;
+use wz_runtime_coop::reassembly_rx::LENT_CHAINS;
 use wz_session_core::bounded::{Arena, BoundedVec, LendRefused, Lent, ARENA_ALIGN};
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::caps;
@@ -115,7 +119,7 @@ impl ArenaRow {
 }
 
 /// The most rows a plan holds: every row of the build with every feature.
-pub const ARENA_ROWS: usize = 20;
+pub const ARENA_ROWS: usize = 22;
 
 /// The slots each link is lent to encode its frames into: a batching session holds a batch open in
 /// one slot while it encodes the next message, which does not join it, into another.
@@ -227,6 +231,10 @@ pub struct ArenaPlan {
     link_bytes: usize,
     /// The bytes of the session's delivery lane (`crate::lane`).
     lane_bytes: usize,
+    /// The length of each buffer a link stages a fragmented message's chain in.
+    reassembly_bytes: usize,
+    /// How many such buffers, for every link the session may hold.
+    reassembly_chains: usize,
     entities: EntityRows,
     gets: GetTables,
     peers: FacePeers,
@@ -241,6 +249,12 @@ impl ArenaPlan {
         // A buffer and a slot of the batch hold a whole batch of either link: a stream link's
         // length is counted inside the batch it negotiates (`STREAM_BATCH_LENGTH_BYTES`).
         let link_bytes = link_batch(config, limits)?;
+        // The largest message a link rejoins is decided before the lane that hands it on, so a
+        // value over the build's is refused under its own name.
+        let reassembly_bytes = lent::<{ caps::PICO_FRAG_MAX_BYTES }>(
+            "PICO_FRAG_MAX_BYTES",
+            limits.pico_frag_max_bytes(),
+        )?;
         let mut plan = Self {
             rows: [NO_ROW; ARENA_ROWS],
             len: 0,
@@ -250,6 +264,8 @@ impl ArenaPlan {
                 "DELIVERY_LANE_BYTES",
                 Quota::at_most(limits.delivery_lane_bytes()),
             )?,
+            reassembly_bytes,
+            reassembly_chains: times(LENT_CHAINS, links)?,
             entities: EntityRows::default(),
             gets: GetTables::default(),
             peers: FacePeers::default(),
@@ -289,6 +305,19 @@ impl ArenaPlan {
             LentByteCells::FLAG_BYTES,
         );
         plan.put("delivery lane", "DELIVERY_LANE_BYTES", 1, plan.lane_bytes);
+        // The links' reassembly buffers, lent next (`SessionArena::lend_reassembly`).
+        plan.put(
+            "reassembly flags",
+            "PICO_FRAG_MAX_BYTES",
+            plan.reassembly_chains,
+            LentByteCells::FLAG_BYTES,
+        );
+        plan.put(
+            "reassembly buffers",
+            "PICO_FRAG_MAX_BYTES",
+            plan.reassembly_chains,
+            plan.reassembly_bytes,
+        );
         plan.put(
             "subscribers",
             "MAX_SUBSCRIPTIONS",
@@ -447,6 +476,12 @@ impl ArenaPlan {
     /// each.
     pub fn peers(&self) -> FacePeers {
         self.peers
+    }
+
+    /// The length of each buffer a link stages a fragmented message's chain in, and how many
+    /// buffers the arena lends for every link the session may hold.
+    pub fn reassembly(&self) -> (usize, usize) {
+        (self.reassembly_bytes, self.reassembly_chains)
     }
 
     /// How many queries the session holds for its queryables' callbacks at once
@@ -734,6 +769,19 @@ impl SessionArena {
         // a buffer dropped then would write its cell's flag into an arena given back before it.
         core::mem::forget(buffer);
         Ok((NonNull::new(base).ok_or(refused)?, bytes))
+    }
+
+    /// Lend the links' reassembly buffers `plan` lays out, next after the lane: a table the session
+    /// holds for its life, from which each link claims a buffer for each chain it stages at once
+    /// when its session starts and gives them back when it ends. Refused only by an arena reserved
+    /// by another plan.
+    pub(crate) fn lend_reassembly(
+        &mut self,
+        plan: &ArenaPlan,
+    ) -> Result<LentByteCells, ArenaRefused> {
+        self.arena
+            .lend_byte_cells(plan.reassembly_bytes, plan.reassembly_chains)
+            .map_err(ArenaRefused::Lend)
     }
 
     /// Lend a table of `rows` rows, at most `N`, from the arena: the next span of it. Refused,

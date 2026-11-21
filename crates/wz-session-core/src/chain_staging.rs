@@ -50,6 +50,8 @@
 //! question asked of the arena, on the same rule as `append`, so the answer
 //! stays the trait's.
 
+use crate::byte_cells::{ByteBuf, LentByteCells};
+
 /// Why an arena refused bytes.
 ///
 /// A named type rather than `Err(())` — which is what the pre-seam private
@@ -358,6 +360,145 @@ impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for HeapStag
     fn lend(&mut self, chain: Self::Chain) -> Result<crate::link::RxBytes, Self::Chain> {
         self.outstanding = self.outstanding.saturating_sub(1);
         Ok(crate::link::RxBytes::lend(chain.buf.into_vec()))
+    }
+}
+
+/// An arena whose chains are staged into buffers a session's arena lent ([`LentByteCells`]): a
+/// buffer for each chain the staging claimed when it was made, which go back to their table when
+/// it is dropped, and a chain at most as long as a buffer and as `CAP`. The buffers are as long
+/// as the session's bound on a rejoined message, so the bound is the buffer's and nothing is
+/// allocated when a chain starts or grows.
+///
+/// A staging made with fewer buffers than its Router has slots serves fewer chains at once: a
+/// chain that finds every buffer taken is refused as pool exhaustion, which the Router's per-peer
+/// quota keeps a link's one peer from reaching when the staging holds a buffer for each chain the
+/// quota admits.
+pub struct LentStaging<const SLOTS: usize, const CAP: usize> {
+    bufs: [Option<ByteBuf>; SLOTS],
+    /// Which buffers a chain holds.
+    open: [bool; SLOTS],
+    /// The longest chain: a buffer's length, at most `CAP`.
+    capacity: usize,
+}
+
+/// One chain's staging in a [`LentStaging`]: which buffer, and how much of it is staged.
+pub struct LentChain {
+    at: usize,
+    len: usize,
+    /// Bytes handed out by the most recent [`ChainStaging::buf`] and not yet resolved by
+    /// [`ChainStaging::commit`].
+    reserved: usize,
+}
+
+impl<const SLOTS: usize, const CAP: usize> LentStaging<SLOTS, CAP> {
+    /// A staging of `chains` buffers of `cells`, at most `SLOTS`, claimed now: fewer when the
+    /// table has fewer free.
+    pub fn claim(cells: &LentByteCells, chains: usize) -> Self {
+        let mut claimed = 0usize;
+        let bufs = core::array::from_fn(|_| {
+            if claimed < chains {
+                claimed += 1;
+                cells.claim()
+            } else {
+                None
+            }
+        });
+        Self {
+            bufs,
+            open: [false; SLOTS],
+            capacity: cells.size().min(CAP),
+        }
+    }
+
+    /// A staging of no buffers, which refuses every chain: that of a link its session had no
+    /// buffers for.
+    pub fn none() -> Self {
+        Self {
+            bufs: core::array::from_fn(|_| None),
+            open: [false; SLOTS],
+            capacity: 0,
+        }
+    }
+
+    /// The longest chain the staging takes.
+    pub const fn capacity(&self) -> usize {
+        self.capacity
+    }
+}
+
+impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for LentStaging<SLOTS, CAP> {
+    type Chain = LentChain;
+
+    fn acquire(&mut self) -> Option<Self::Chain> {
+        let at = (0..SLOTS).find(|&at| self.bufs[at].is_some() && !self.open[at])?;
+        self.open[at] = true;
+        Some(LentChain {
+            at,
+            len: 0,
+            reserved: 0,
+        })
+    }
+
+    fn release(&mut self, chain: Self::Chain) {
+        self.open[chain.at] = false;
+    }
+
+    fn append(&mut self, chain: &mut Self::Chain, payload: &[u8]) -> Result<(), StagingError> {
+        if !self.fits(chain, payload.len()) {
+            return Err(StagingError::ChainCapExceeded);
+        }
+        let buf = self.bufs[chain.at]
+            .as_mut()
+            .ok_or(StagingError::ChainCapExceeded)?;
+        let end = chain.len + payload.len();
+        buf.as_mut_slice()[chain.len..end].copy_from_slice(payload);
+        chain.len = end;
+        Ok(())
+    }
+
+    fn bytes<'a>(&'a self, chain: &'a Self::Chain) -> &'a [u8] {
+        match self.bufs[chain.at].as_ref() {
+            Some(buf) => &buf.as_slice()[..chain.len],
+            None => &[],
+        }
+    }
+
+    fn fits(&self, chain: &Self::Chain, len: usize) -> bool {
+        chain
+            .len
+            .checked_add(len)
+            .is_some_and(|total| total <= self.capacity)
+    }
+
+    fn buf<'a>(
+        &'a mut self,
+        chain: &'a mut Self::Chain,
+        want: usize,
+    ) -> Result<&'a mut [u8], StagingError> {
+        if !self.fits(chain, want) {
+            return Err(StagingError::ChainCapExceeded);
+        }
+        let buf = self.bufs[chain.at]
+            .as_mut()
+            .ok_or(StagingError::ChainCapExceeded)?;
+        chain.reserved = want;
+        Ok(&mut buf.as_mut_slice()[chain.len..chain.len + want])
+    }
+
+    fn commit(&mut self, chain: &mut Self::Chain, filled: usize) -> Result<(), StagingError> {
+        if filled > chain.reserved {
+            return Err(StagingError::ChainCapExceeded);
+        }
+        // The buffer never grew for the reservation, so what was filled is what the chain gains.
+        chain.len += filled;
+        chain.reserved = 0;
+        Ok(())
+    }
+
+    fn available(&self) -> usize {
+        (0..SLOTS)
+            .filter(|&at| self.bufs[at].is_some() && !self.open[at])
+            .count()
     }
 }
 

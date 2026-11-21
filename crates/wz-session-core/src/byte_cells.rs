@@ -206,6 +206,12 @@ impl ByteBuf {
         unsafe { core::slice::from_raw_parts_mut(self.base, self.len) }
     }
 
+    /// The buffer's bytes.
+    pub fn as_slice(&self) -> &[u8] {
+        // SAFETY: as `as_mut_slice`; `&self` lets the caller hold only shared borrows of them.
+        unsafe { core::slice::from_raw_parts(self.base, self.len) }
+    }
+
     /// The buffer's first byte and its length, for a user that hands the memory on (a frame
     /// encoded in place). Valid for as long as the claim is.
     pub fn raw(&self) -> (*mut u8, usize) {

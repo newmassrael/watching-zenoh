@@ -50,6 +50,8 @@
 //! [`ReassemblyDispatcher`]: wz_session_core::reassembly_dispatch::ReassemblyDispatcher
 //! [`BoundedVec`]: wz_session_core::bounded::BoundedVec
 
+use wz_session_core::caps;
+use wz_session_core::chain_staging::LentStaging;
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::reassembly_dispatch::{PoolOverflow, ReassemblyConfig, ReassemblyDispatcher};
 
@@ -94,6 +96,25 @@ pub fn mcu_reassembly_config(policy: &SessionPolicy) -> ReassemblyConfig {
 /// module docs).
 pub fn mcu_reassembly(policy: &SessionPolicy) -> CoopReassembly {
     CoopReassembly::new(mcu_reassembly_config(policy))
+}
+
+/// How many chains of one link's copying receive are staged at once in buffers its session lent:
+/// the chains the per-peer quota admits, since a unicast link carries one peer.
+pub const LENT_CHAINS: usize = crate::reassembly_pool_mcu::PER_PEER_QUOTA as usize;
+
+/// The staging of a Router whose chains lie in buffers a session's arena lent
+/// ([`LentStaging`]), each at most the build's `PICO_FRAG_MAX_BYTES` long.
+pub type LentChains = LentStaging<MCU_REASSEMBLY_SLOTS, { caps::PICO_FRAG_MAX_BYTES }>;
+
+/// The reassembly Router of a session whose chains stage into buffers its arena lent: the pool's
+/// slots and config, the build's `PICO_FRAG_MAX_BYTES` as the slot's ceiling, and each chain bounded
+/// by its buffer, which is as long as the value the session opened under.
+pub type LentReassembly =
+    ReassemblyDispatcher<MCU_REASSEMBLY_SLOTS, { caps::PICO_FRAG_MAX_BYTES }, LentChains>;
+
+/// The Router of a session whose snapshot is `policy`, staging into `chains`.
+pub fn lent_reassembly(policy: &SessionPolicy, chains: LentChains) -> LentReassembly {
+    LentReassembly::with_staging(mcu_reassembly_config(policy), chains)
 }
 
 #[cfg(feature = "rx-in-place")]
@@ -724,6 +745,38 @@ mod tests {
         assert_eq!(r1, IngestOutcome::Reassembled);
         assert!(delivered, "completion delivered the reassembled message");
         assert_eq!(reasm.active_chains(), 0);
+    }
+
+    /// A lent Router's ceiling is the build's `PICO_FRAG_MAX_BYTES`, and its chains are bounded by
+    /// the buffers its session lent: a chain past its buffer ends as one past the bound does, and
+    /// the buffer goes back for the next chain.
+    #[test]
+    fn a_lent_router_bounds_a_chain_by_its_buffer() {
+        use core::ptr::NonNull;
+        use wz_session_core::bounded::Arena;
+        use wz_session_core::reassembly_dispatch::AbortReason;
+
+        #[repr(C, align(16))]
+        struct Memory([u8; 256]);
+
+        let mut memory = Memory([0; 256]);
+        // SAFETY: the memory is aligned as an arena's spans start, 256 bytes long, used by nothing
+        // else, and outlives the arena, the table and the Router, which are dropped before it.
+        let mut arena = unsafe { Arena::over(NonNull::from(&mut memory).cast::<u8>(), 256) };
+        let cells = arena
+            .lend_byte_cells(16, LENT_CHAINS)
+            .expect("the memory holds the table");
+        let mut reasm = lent_reassembly(
+            &SessionPolicy::defaults(),
+            LentChains::claim(&cells, LENT_CHAINS),
+        );
+        assert_eq!(reasm.max_message_bytes(), caps::PICO_FRAG_MAX_BYTES);
+        reasm.ingest(frag(1, 1, b"0123456789"), MASK, 0, |_| {});
+        let r = reasm.ingest(frag(2, 0, b"0123456789"), MASK, 0, |_| {
+            panic!("past the buffer, no deliver")
+        });
+        assert_eq!(r, IngestOutcome::Aborted(AbortReason::CapacityOverflow));
+        assert_eq!(reasm.staging_available(), LENT_CHAINS);
     }
 
     /// The deadline sweep — the per-tick half of the drive loop — reclaims
