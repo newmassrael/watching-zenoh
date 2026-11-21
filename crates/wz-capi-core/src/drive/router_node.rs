@@ -618,6 +618,7 @@ pub(crate) fn open_router_blocking(
         session_defaults,
         session_policy,
         session_limits,
+        runtime_limits,
         ..
     } = stance;
     // The prefix as the forwarder takes it. The plan validated the text, so one that does not
@@ -803,6 +804,7 @@ pub(crate) fn open_router_blocking(
                 scout_intents,
                 #[cfg(feature = "scout")]
                 scouting,
+                runtime_limits,
                 node_shutdown,
                 node_stop,
                 tx,
@@ -907,6 +909,7 @@ async fn run_router(
     dial_intents: Option<wz_runtime_tokio::accept_loop::DialIntentReceiver>,
     scout_intents: Option<wz_runtime_tokio::accept_loop::DialIntentSender>,
     #[cfg(feature = "scout")] scouting: Option<ScoutingPlan>,
+    runtime_limits: wz_session_core::limits::RuntimeLimits,
     shutdown: Arc<Notify>,
     stop: Arc<AtomicBool>,
     tx: Reporter<Result<Vec<String>, OpenError>>,
@@ -1033,6 +1036,8 @@ async fn run_router(
             return;
         }
     };
+    // The node's runtime limits, which the face loop holds its directory of locators to.
+    let dial_config = dial_config.with_runtime_limits(runtime_limits);
     let params = match init_params(role.whatami(), zid, link_conf) {
         Ok(params) => params,
         Err(error) => {

@@ -42,14 +42,16 @@
 //! displaces the soft-state row that would expire first; a table of declared
 //! hints only refuses it, and counts the refusal.
 
-use crate::caps::MAX_LOCATOR_LEN;
 use crate::credential_identity::CREDENTIAL_ZID_BYTES;
+use crate::limit_binding::Quota;
+use crate::limits::{MaxLocatorLenHeld, RuntimeLimits};
 
 /// A zid in its sixteen-byte form ([`crate::credential_identity::zid_from_wire`]).
 pub type DirectoryZid = [u8; CREDENTIAL_ZID_BYTES];
 
-/// A locator's text, as a node advertises it.
-pub type LocatorText = heapless::String<MAX_LOCATOR_LEN>;
+/// A locator's text, as a node advertises it, in a row sized by the build's
+/// [`crate::caps::MAX_LOCATOR_LEN`].
+pub type LocatorText = heapless::String<{ crate::caps::MAX_LOCATOR_LEN }>;
 
 /// Who confirmed a hint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,7 +88,8 @@ pub enum Lifetime {
 /// Why a confirmation was not taken.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DirectoryRefusal {
-    /// The locator is longer than [`MAX_LOCATOR_LEN`] bytes.
+    /// The locator is longer than the directory admits
+    /// ([`LocatorDirectory::locator_len`]).
     LocatorTooLong,
     /// Every row holds a declared hint, so none can make room.
     Full,
@@ -147,6 +150,10 @@ pub struct LocatorDirectory<const N: usize> {
     /// Oldest confirmation first, so the newest is at the end.
     rows: heapless::Vec<DirectoryRow, N>,
     refused: usize,
+    /// The longest locator a new row may hold, `MAX_LOCATOR_LEN` as the creator's runtime
+    /// limits state it ([`Self::limit_to`]). The rows hold the build's longest, so a stated
+    /// value can only be shorter.
+    locator_len: MaxLocatorLenHeld,
 }
 
 impl<const N: usize> Default for LocatorDirectory<N> {
@@ -156,12 +163,26 @@ impl<const N: usize> Default for LocatorDirectory<N> {
 }
 
 impl<const N: usize> LocatorDirectory<N> {
-    /// An empty directory.
+    /// An empty directory, holding locators to the build's `MAX_LOCATOR_LEN` until its
+    /// creator states the node's ([`Self::limit_to`]).
     pub const fn new() -> Self {
         Self {
             rows: heapless::Vec::new(),
             refused: 0,
+            locator_len: RuntimeLimits::BUILD.max_locator_len_held(),
         }
+    }
+
+    /// Holds the locators of new rows to `quota`, `MAX_LOCATOR_LEN` as the creator's runtime
+    /// limits state it: a confirmation of a new hint whose locator is longer is refused as
+    /// [`DirectoryRefusal::LocatorTooLong`]. The rows already held stay.
+    pub fn limit_to(&mut self, quota: MaxLocatorLenHeld) {
+        self.locator_len = quota;
+    }
+
+    /// The longest locator, in bytes, a new row may hold.
+    pub const fn locator_len(&self) -> Quota {
+        self.locator_len.get()
     }
 
     /// `source` confirms that `zid` may be reached at `locator`, at `now_ms`, for
@@ -188,6 +209,10 @@ impl<const N: usize> LocatorDirectory<N> {
         let mut row = match self.position(&zid, locator) {
             Some(at) => self.rows.remove(at),
             None => {
+                if !self.locator_len.admits(locator.len()) {
+                    self.refused += 1;
+                    return Err(DirectoryRefusal::LocatorTooLong);
+                }
                 let Ok(text) = LocatorText::try_from(locator) else {
                     self.refused += 1;
                     return Err(DirectoryRefusal::LocatorTooLong);
@@ -308,6 +333,7 @@ impl<const N: usize> LocatorDirectory<N> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::caps::MAX_LOCATOR_LEN;
 
     const A: DirectoryZid = [0xa1; 16];
     const B: DirectoryZid = [0xb2; 16];

@@ -52,7 +52,7 @@ use core::ops::{Deref, DerefMut};
 #[cfg(feature = "session-slot")]
 use critical_section::Mutex;
 use wz_runtime_core::TimeSource;
-use wz_session_core::caps::MAX_LOCATOR_LEN;
+use wz_session_core::caps;
 #[cfg(all(feature = "rx-in-place", not(feature = "reassembly")))]
 use wz_session_core::drive::dispatch_datagram;
 #[cfg(all(not(feature = "rx-in-place"), feature = "alloc"))]
@@ -376,13 +376,13 @@ impl Locator {
     }
 
     /// zenoh's text of the locator, the [`Display`](core::fmt::Display) text, written without
-    /// `core::fmt` into text of [`MAX_LOCATOR_LEN`] bytes.
+    /// `core::fmt` into text of [`MAX_LOCATOR_LEN`](caps::MAX_LOCATOR_LEN) bytes.
     ///
     /// Every IPv4 locator fits: the bound is held at compile time to at least
     /// [`LONGEST_IPV4_LOCATOR_LEN`]. An IPv6 locator is up to [`LONGEST_IP_LOCATOR_LEN`] bytes,
     /// inside the default bound; in a build whose bound is shorter, the text of a longer one is
     /// refused, which [`FixedText::finish`] reports, never a locator cut short.
-    pub fn text(&self) -> FixedText<MAX_LOCATOR_LEN> {
+    pub fn text(&self) -> FixedText<{ caps::MAX_LOCATOR_LEN }> {
         let mut text = FixedText::new();
         text.push_str(self.proto.scheme());
         text.push('/');
@@ -392,9 +392,9 @@ impl Locator {
 }
 
 /// The longest IPv4 locator text, 25 bytes: every scheme is three letters, and the widest end is
-/// `255.255.255.255:65535`. It is the least [`MAX_LOCATOR_LEN`] may be, because every link of this
-/// engine is an IP link and every stack it runs over carries IPv4: a build whose bound could not
-/// name an IPv4 end could name no end at all.
+/// `255.255.255.255:65535`. It is the least [`MAX_LOCATOR_LEN`](caps::MAX_LOCATOR_LEN) may
+/// be, because every link of this engine is an IP link and every stack it runs over carries
+/// IPv4: a build whose bound could not name an IPv4 end could name no end at all.
 pub const LONGEST_IPV4_LOCATOR_LEN: usize = "tcp/255.255.255.255:65535".len();
 
 /// The longest IP locator text, 62 bytes: an IPv6 end with every group written out and the widest
@@ -404,7 +404,7 @@ pub const LONGEST_IP_LOCATOR_LEN: usize =
     "tcp/[ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff%4294967295]:65535".len();
 
 const _: () = assert!(
-    MAX_LOCATOR_LEN >= LONGEST_IPV4_LOCATOR_LEN,
+    caps::MAX_LOCATOR_LEN >= LONGEST_IPV4_LOCATOR_LEN,
     "MAX_LOCATOR_LEN cannot hold an IPv4 locator such as udp/255.255.255.255:65535 (25 bytes)"
 );
 

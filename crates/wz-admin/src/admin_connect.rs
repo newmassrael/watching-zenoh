@@ -60,7 +60,7 @@
 use crate::admin_config_space::{
     subkey_in_config_space, write_config_space_pattern, ConfigSpaceRefusal,
 };
-use wz_session_core::caps::MAX_STATIC_CONNECT;
+use wz_session_core::caps;
 use wz_session_core::json5_lex::{Json5Error, Lexer};
 
 /// The config sub-key this surface carries, as upstream spells it.
@@ -98,7 +98,7 @@ pub enum ConnectWriteOutcome {
     OtherKey,
     /// The payload is not the JSON5 this key takes.
     Malformed(Json5Error),
-    /// More endpoints than [`MAX_STATIC_CONNECT`].
+    /// More endpoints than [`MAX_STATIC_CONNECT`](wz_session_core::caps::MAX_STATIC_CONNECT).
     TooMany,
     /// One endpoint is longer than [`MAX_LOCATOR_LEN`](wz_session_core::caps::MAX_LOCATOR_LEN) bytes.
     EndpointTooLong,
@@ -340,7 +340,7 @@ fn push_entry(
     out: Option<&mut ConnectEndpoints>,
 ) -> Result<(), Refusal> {
     *count += 1;
-    if *count > MAX_STATIC_CONNECT {
+    if *count > caps::MAX_STATIC_CONNECT {
         return Err(Refusal::TooMany);
     }
     if let Some(list) = out {
@@ -368,7 +368,8 @@ fn endpoint_group(
     let mut strategy: Option<LocatorsStrategy> = None;
     // The locators are held until the strategy is known, as they may come
     // first. Room for the whole list: a group cannot be larger than it.
-    let mut locators: heapless::Vec<EndpointText, MAX_STATIC_CONNECT> = heapless::Vec::new();
+    let mut locators: heapless::Vec<EndpointText, { caps::MAX_STATIC_CONNECT }> =
+        heapless::Vec::new();
     let mut saw_locators = false;
     loop {
         lex.skip_trivia()?;
@@ -495,7 +496,7 @@ fn endpoint_shape_ok(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wz_session_core::caps::MAX_LOCATOR_LEN;
+    use wz_session_core::caps::{MAX_LOCATOR_LEN, MAX_STATIC_CONNECT};
     // `std`, not `alloc`: this module builds without an allocator, and the
     // crate links `std` for tests only (lib.rs).
     use std::format;

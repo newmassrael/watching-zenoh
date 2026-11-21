@@ -303,7 +303,9 @@ struct SpawnedTasks {
 /// is made.
 ///
 /// And every dial config carries the node's `transport/unicast/open_timeout`
-/// (`--open-timeout-ms`), the bound each open of an endpoint it dials runs within.
+/// (`--open-timeout-ms`), the bound each open of an endpoint it dials runs within,
+/// and the node's runtime limits, which the loop that dials holds its directory of
+/// locators to.
 fn build_dial_config(
     tls_ca: &Option<String>,
     quic_ca: &Option<String>,
@@ -311,7 +313,8 @@ fn build_dial_config(
 ) -> io::Result<DialConfig> {
     let cfg = DialConfig::default()
         .with_link_defaults(tuning.link_defaults.clone())
-        .with_open_timeout(tuning.open_timeout);
+        .with_open_timeout(tuning.open_timeout)
+        .with_runtime_limits(tuning.runtime_limits);
     let cfg = apply_tls_ca(cfg, tls_ca)?;
     let cfg = apply_quic_ca(cfg, quic_ca)?;
     Ok(cfg)

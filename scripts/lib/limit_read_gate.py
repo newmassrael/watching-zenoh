@@ -116,6 +116,10 @@ ALLOWED: tuple[tuple[str, str, str], ...] = (
     ("crates/wz-app-frame/src/message_catalog.rs", "build_limits", "the catalog's door reads a deployment's catalog with no session in reach, so it judges a message's replay depth against the build's REPLAY_DEPTH_MAX; the replay cache made on a session judges it again against that session's"),
     ("crates/wz-session-core/src/reply_stage.rs", "payload_most", "a reply stage of a policy that enforces its capacity sized its arena for MAX_PENDING_REPLIES replies of this payload, so it keeps the build's value beside the stated one where the profile grows and a statement could raise the bound past what that arena was sized for"),
     ("crates/wz-session-core/src/lent_control.rs", "NAMED_KEYEXPR_BYTES", "the length of the body array a NamedKeyexpr holds (header, widest id, a key of the build's capacity); the constructor refuses past the session's quota, which the domain keeps at most that capacity"),
+    ("crates/wz-runtime-coop/src/session_drive.rs", "_", "a build-time assertion on the storage the constant sizes: the cooperative engine's locator text holds every IPv4 locator"),
+    ("crates/wz-session-mcu/src/connect_manager.rs", "new", "a compile-time check of the endpoints a fixed image names against the endpoint and locator rows the build sizes; the fixed connect manager holds no snapshot"),
+    ("crates/wz-session-mcu/src/connect_manager.rs", "PEERS", "a constant that sizes the fixed connect manager's peer and dial tables from the endpoint rows the build sizes"),
+    ("crates/wz-admin/src/admin_connect.rs", "push_entry", "the admin write fills a heapless list of the build's endpoint rows on every backing, and refuses the entry that list has no row for"),
 )
 
 #: (path pattern relative to the root, innermost item, reason): a site that reads a snapshot it

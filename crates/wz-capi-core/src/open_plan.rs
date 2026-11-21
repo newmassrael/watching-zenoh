@@ -40,13 +40,13 @@ use wz_runtime_tokio::session_glue::{KeepAliveConf, LinkRxConf, TxQueueConf, Wha
 use wz_runtime_tokio::session_open::{SessionOffer, TransportMode};
 use wz_runtime_tokio::startup_phase::PhasePolicy;
 use wz_runtime_tokio::zenoh_config::{
-    config_key_in_build, default_listen_endpoint, honours_config_key, ConfigIngestError,
-    ShmInitMode, ZenohConfigIngest, ZenohNodeConfig, UNHONOURED_READER_GAP,
+    admit_connect_list, config_key_in_build, default_listen_endpoint, honours_config_key,
+    ConfigIngestError, ShmInitMode, ZenohConfigIngest, ZenohNodeConfig, UNHONOURED_READER_GAP,
     UNHONOURED_UPSTREAM_CONFIG_KEYS, UPSTREAM_INERT_CONFIG_KEYS, WZ_EXTENSION_CONFIG_KEYS,
 };
 #[cfg(feature = "routing-namespace")]
 use wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr;
-use wz_session_core::limits::SessionLimits;
+use wz_session_core::limits::{RuntimeLimits, SessionLimits};
 use wz_session_core::region_partition::SouthPartition;
 
 use crate::drive::{
@@ -398,6 +398,10 @@ pub enum OpenRefusal {
     /// never opened on part of the policies or the limits it was given, nor on the build defaults
     /// in their place.
     Policies,
+    /// The endpoints to dial are more than the node's runtime limits admit (`MAX_STATIC_CONNECT`
+    /// as `wz/limits` states it, [`ConfigIngestError::ConnectPastLimit`]). A node bounded to
+    /// fewer peers does not open on a part of the list.
+    ConnectPastLimit,
 }
 
 impl OpenRefusal {
@@ -426,6 +430,7 @@ impl OpenRefusal {
             Self::Aggregation => "aggregation/subscribers, aggregation/publishers",
             Self::StatsNotInBuild => "stats/filters",
             Self::Policies => "wz/profile, wz/policies, wz/limits",
+            Self::ConnectPastLimit => "connect/endpoints, wz/limits/MAX_STATIC_CONNECT",
         }
     }
 }
@@ -934,6 +939,10 @@ pub struct OpenPlan {
     /// the same machines as [`Self::session_policy`]: a table reads its bound here and never from
     /// the build.
     pub session_limits: SessionLimits,
+    /// The snapshot of the node's runtime limits the open resolved ([`resolve_snapshot`]),
+    /// handed to the machines of the node the open runs: the directory of the locators it dials
+    /// from reads its bound here and never from the build.
+    pub runtime_limits: RuntimeLimits,
 }
 
 /// The policies and the limits an open from `node` (the document the open read, or `None` when
@@ -1104,6 +1113,10 @@ impl OpenPlan {
             // run under is not known, so nothing else about the open is decided.
             Some(Err(ConfigIngestError::PoliciesRefused { .. })) => {
                 return Err(OpenRefusal::Policies)
+            }
+            // The document's own connect list, longer than the limits it states admit.
+            Some(Err(ConfigIngestError::ConnectPastLimit { .. })) => {
+                return Err(OpenRefusal::ConnectPastLimit)
             }
             Some(Err(_)) | None => None,
         };
@@ -1332,6 +1345,10 @@ impl OpenPlan {
         } else {
             connect
         };
+        // The list to dial, whoever stated it, is held to the node's runtime limits.
+        if admit_connect_list(connect.len(), &snapshot.limits.runtime).is_err() {
+            return Err(OpenRefusal::ConnectPastLimit);
+        }
         // `transport/link/protocols`, when the document states it, is the whitelist of the
         // unicast links the node makes: an endpoint to listen on or dial whose protocol it leaves
         // out is refused, as upstream refuses it when it makes the link manager. A group is a
@@ -1419,6 +1436,7 @@ impl OpenPlan {
             session,
             session_policy,
             session_limits: snapshot.limits.session,
+            runtime_limits: snapshot.limits.runtime,
         })
     }
 
@@ -1541,6 +1559,7 @@ impl OpenPlan {
                 session_defaults: self.session,
                 session_policy: self.session_policy,
                 session_limits: self.session_limits,
+                runtime_limits: self.runtime_limits,
                 // A plan reads a zenoh configuration document, which names no transport of the
                 // program's.
                 #[cfg(feature = "app-transport")]
@@ -1902,6 +1921,117 @@ mod tests {
             resolve_snapshot(None).limits.session,
             SessionLimits::defaults()
         );
+    }
+
+    /// The plan holds the runtime limits the document's `wz/limits` states for the node, for
+    /// each member of the corpus the plan takes, and the build's with no document.
+    #[test]
+    fn the_plan_holds_the_runtime_limits_the_document_states() {
+        use wz_session_core::limit_corpus::cases;
+
+        for case in cases() {
+            let Ok(plan) = plan_of(
+                WhatAmI::Client,
+                &["tcp/127.0.0.1:7447"],
+                &[],
+                &case.document(),
+            ) else {
+                assert!(!case.node.is_selected(), "{}: refused", case.name);
+                continue;
+            };
+            if let Err(why) = case.node.check_runtime(&plan.runtime_limits) {
+                panic!("{}: {why}", case.name);
+            }
+            let node = node_of(&case.document());
+            assert_eq!(
+                resolve_snapshot(Some(&node)).limits.runtime,
+                plan.runtime_limits,
+                "{}",
+                case.name
+            );
+        }
+        assert_eq!(
+            resolve_snapshot(None).limits.runtime,
+            RuntimeLimits::defaults()
+        );
+    }
+
+    /// `count` endpoints to dial, each its own port.
+    fn endpoints_to_dial(count: u16) -> Vec<String> {
+        (0..count)
+            .map(|port| format!("tcp/127.0.0.1:{}", 7447 + port))
+            .collect()
+    }
+
+    /// `MAX_STATIC_CONNECT` with nothing stated: the heap holds no bound, so a node dials nine
+    /// endpoints, more than a fixed image's rows, as it did before the limit was read.
+    #[test]
+    fn max_static_connect_with_nothing_stated_admits_nine() {
+        use wz_session_core::limit_binding::Quota;
+        assert_eq!(
+            RuntimeLimits::defaults().max_static_connect(),
+            Quota::UNBOUNDED
+        );
+        let nine = endpoints_to_dial(9);
+        let texts: Vec<&str> = nine.iter().map(String::as_str).collect();
+        let plan = plan_of(WhatAmI::Client, &texts, &[], "{}").expect("no bound is stated");
+        assert_eq!(plan.connect, nine);
+        let document = format!(
+            r#"{{ connect: {{ endpoints: [{}] }} }}"#,
+            nine.iter()
+                .map(|endpoint| format!("{endpoint:?}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        assert!(ZenohNodeConfig::from_json5(&document).is_ok());
+    }
+
+    /// `MAX_STATIC_CONNECT` stated as two: a list of three, stated by the caller or by the
+    /// document, refuses the open by the limit's name, and a list of two opens.
+    #[test]
+    fn max_static_connect_stated_as_two_refuses_three_by_name() {
+        use wz_session_core::limit_binding::LimitSpec;
+        use wz_session_core::limits::MaxStaticConnect;
+        let limits = r#"wz: { limits: { MAX_STATIC_CONNECT: 2 } }"#;
+        let stated = format!("{{ {limits} }}");
+        let three = endpoints_to_dial(3);
+        let texts: Vec<&str> = three.iter().map(String::as_str).collect();
+        if MaxStaticConnect::DOMAIN.is_singleton() {
+            // A build that keeps the build's value alone refuses the statement itself.
+            assert_eq!(
+                refusal_of(WhatAmI::Client, &texts, &[], &stated),
+                OpenRefusal::Policies
+            );
+            return;
+        }
+        assert_eq!(
+            refusal_of(WhatAmI::Client, &texts, &[], &stated),
+            OpenRefusal::ConnectPastLimit
+        );
+        assert!(OpenRefusal::ConnectPastLimit
+            .key()
+            .contains("MAX_STATIC_CONNECT"));
+        let in_document = format!(
+            r#"{{ {limits}, connect: {{ endpoints: [{}] }} }}"#,
+            three
+                .iter()
+                .map(|endpoint| format!("{endpoint:?}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        assert_eq!(
+            ZenohNodeConfig::from_json5(&in_document).map(|_| ()),
+            Err(ConfigIngestError::ConnectPastLimit {
+                endpoints: 3,
+                limit: wz_session_core::limit_binding::Quota::at_most(2),
+            })
+        );
+        assert_eq!(
+            refusal_of(WhatAmI::Client, &[], &[], &in_document),
+            OpenRefusal::ConnectPastLimit
+        );
+        let plan = plan_of(WhatAmI::Client, &texts[..2], &[], &stated).expect("two are admitted");
+        assert_eq!(plan.connect.len(), 2);
     }
 
     /// A peer is a forwarding node when it accepts sessions and asks nothing the node does not

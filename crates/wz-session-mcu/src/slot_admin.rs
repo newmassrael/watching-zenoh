@@ -35,7 +35,7 @@ use wz_runtime_coop::session_drive::{Accept, SessionDriveConfig, SessionRole, Sl
 use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::ClockSource;
 use wz_session_core::bounded::{BoundedVec, CapacityFull};
-use wz_session_core::caps::{self, MAX_STATIC_CONNECT};
+use wz_session_core::caps;
 use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::locator_directory::{DirectoryRefusal, DirectoryZid, Lifetime, LocatorSource};
 use wz_session_core::session_timeouts::SessionTimeouts;
@@ -270,7 +270,8 @@ where
             .for_each(|(_, session)| row_of(session));
         self.status.set_session_rows(rows);
         let mut live = self.manager.sessions();
-        let mut endpoints: BoundedVec<(&str, DialStatus), MAX_STATIC_CONNECT> = BoundedVec::new();
+        let mut endpoints: BoundedVec<(&str, DialStatus), { caps::MAX_STATIC_CONNECT }> =
+            BoundedVec::new();
         for (endpoint, state) in self.manager.states() {
             let status = match state {
                 SlotState::Live => DialStatus::Live {

@@ -134,8 +134,8 @@ use wz_routing_graph::Zid;
 pub use wz_routing_graph::{link_weights_from_config, DuplicateLinkWeight, TransportWeight};
 use wz_session_core::json::escape_into;
 use wz_session_core::json5::{number_as_u64, Json5Value};
-use wz_session_core::limit_binding::{LimitValue, UNBOUNDED};
-use wz_session_core::limits::{RUNTIME_LIMITS, SESSION_LIMITS};
+use wz_session_core::limit_binding::{LimitValue, Quota, UNBOUNDED};
+use wz_session_core::limits::{RuntimeLimits, RUNTIME_LIMITS, SESSION_LIMITS};
 // R2652 — the ACL subject axis `link_protocols` is TYPED in the retained inputs,
 // because upstream types it too; the reader therefore names the enum rather than
 // carrying protocol text it has already validated.
@@ -5156,6 +5156,16 @@ pub enum ConfigIngestError {
         /// How many more were found past those held.
         unreported: usize,
     },
+    /// `connect/endpoints` lists more endpoints than the node's runtime limits admit
+    /// (`MAX_STATIC_CONNECT`, as `wz/limits` states it; no bound on the heap unless a layer
+    /// states one). A node told to hold more peers than it was bounded to does not open on a part
+    /// of the list ([`admit_connect_list`]).
+    ConnectPastLimit {
+        /// How many endpoints the list holds, each endpoint of a group counted.
+        endpoints: usize,
+        /// The most the node's runtime limits admit.
+        limit: Quota,
+    },
 }
 
 impl core::fmt::Display for ConfigIngestError {
@@ -5208,11 +5218,34 @@ impl core::fmt::Display for ConfigIngestError {
                     more => write!(f, "; and {more} more"),
                 }
             }
+            ConfigIngestError::ConnectPastLimit { endpoints, limit } => write!(
+                f,
+                "connect/endpoints lists {endpoints} endpoints, more than the node's \
+                 MAX_STATIC_CONNECT ({limit}) admits"
+            ),
         }
     }
 }
 
 impl core::error::Error for ConfigIngestError {}
+
+/// `Ok` when a connect list of `endpoints` endpoints is inside `MAX_STATIC_CONNECT` as the
+/// node's runtime limits `limits` state it, or the refusal that names the list. Every open of
+/// the node asks it of the list it dials, whether the list came from the document or from the
+/// caller.
+pub fn admit_connect_list(
+    endpoints: usize,
+    limits: &RuntimeLimits,
+) -> Result<(), ConfigIngestError> {
+    if limits.max_static_connect_held().admits(endpoints) {
+        Ok(())
+    } else {
+        Err(ConfigIngestError::ConnectPastLimit {
+            endpoints,
+            limit: limits.max_static_connect(),
+        })
+    }
+}
 
 /// The top-level member of a document that holds wz's own statements about the node: the profile
 /// it names (`wz/profile`), the policies it states (`wz/policies`) and the limits it states
@@ -8351,6 +8384,8 @@ impl ZenohNodeConfig {
             EndpointElements::StringsOrGroups,
         )? {
             ModeRead::Value(v) => {
+                // The limits the `wz` member resolved above bound the list.
+                admit_connect_list(v.len(), &out.policies.limits.runtime)?;
                 out.connect = v;
                 named.push("connect/endpoints");
             }

@@ -10,7 +10,7 @@
 //! their own feature (`connect-endpoints`), and `admin_connect` re-exports them under the names it
 //! always had.
 
-use crate::caps::{MAX_LOCATOR_LEN, MAX_STATIC_CONNECT};
+use crate::caps;
 
 /// One endpoint, copied out of the write. Owned, because the buffer the
 /// write arrived in is reused before the connection is made.
@@ -19,7 +19,7 @@ use crate::caps::{MAX_LOCATOR_LEN, MAX_STATIC_CONNECT};
 /// capacity is advisory when `alloc` is on, so the same write would be
 /// refused as too long on an MCU and accepted on an AP. A verdict on the wire
 /// must not depend on which allocator the node was built with.
-pub type EndpointText = heapless::String<MAX_LOCATOR_LEN>;
+pub type EndpointText = heapless::String<{ caps::MAX_LOCATOR_LEN }>;
 
 /// R2841 — how a group of locators is to be used: upstream's
 /// `LocatorsStrategy`, spelled `allOf` / `oneOf` on the wire:
@@ -89,7 +89,7 @@ impl ConnectEntry {
 /// `heapless` for the same reason as [`EndpointText`]: `BoundedVec::push`
 /// never refuses under `alloc`. The capacity counts entries, so a group of
 /// three takes three.
-pub type ConnectEndpoints = heapless::Vec<ConnectEntry, MAX_STATIC_CONNECT>;
+pub type ConnectEndpoints = heapless::Vec<ConnectEntry, { caps::MAX_STATIC_CONNECT }>;
 
 /// R2841 — how many entries of `list` belong to group `index`.
 pub fn group_len(list: &[ConnectEntry], index: u8) -> usize {

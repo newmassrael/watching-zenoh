@@ -125,7 +125,6 @@ use crate::session_open::{
 // its re-dial waits by it, and this module's fixtures name it.
 #[cfg(any(test, feature = "transport-multilink"))]
 use crate::session_open::MeshDialKey;
-use wz_session_core::caps::MAX_LOCATOR_LEN;
 use wz_session_core::locator::AnyLocator;
 use wz_session_core::locator_directory::{
     DirectoryRefusal, DirectoryZid, Lifetime, LocatorDirectory, LocatorSource,
@@ -411,8 +410,9 @@ pub fn learn_locators(
             // dial that peer at it.
             Err(DirectoryRefusal::LocatorTooLong) => log::warn!(
                 "directory: a {source:?} locator of {} bytes is longer than this node's \
-                 MAX_LOCATOR_LEN ({MAX_LOCATOR_LEN}) and is not kept: `{locator}`",
-                locator.len()
+                 MAX_LOCATOR_LEN ({}) and is not kept: `{locator}`",
+                locator.len(),
+                directory.locator_len()
             ),
             Err(why) => log::debug!("directory: `{locator}` not taken for a node ({why:?})"),
         }
@@ -3350,6 +3350,8 @@ async fn face_drive_loop_core(
     // each gives them. Boxed, because a table of its rows is too large for the
     // loop's future to carry inline.
     let mut directory: Box<LoopDirectory> = Box::new(LoopDirectory::new());
+    // The longest locator a hint may name is the node's, as its runtime limits state it.
+    directory.limit_to(dial_config.runtime_limits.max_locator_len_held());
     // R311y786 — the per-link re-dial waits of the multilink per-link re-add,
     // replacing the fixed `RECONNECT_BACKOFF_MS`. Loop-local (not per-face)
     // because the growth must survive the FaceId churn of the retries it is
@@ -5848,6 +5850,7 @@ mod tests {
     /// and the node's other locators are still taken.
     #[test]
     fn a_locator_past_the_nodes_limit_is_refused_and_counted_and_the_rest_taken() {
+        use wz_session_core::caps::MAX_LOCATOR_LEN;
         let wrapping = "tcp/:7447".len();
         let long = format!("tcp/{}:7447", "h".repeat(MAX_LOCATOR_LEN + 1 - wrapping));
         assert_eq!(long.len(), MAX_LOCATOR_LEN + 1);
@@ -5871,6 +5874,33 @@ mod tests {
             [short],
             "only the locator that fits is a candidate"
         );
+    }
+
+    /// A directory held to the `MAX_LOCATOR_LEN` the node's runtime limits state refuses a
+    /// locator longer than that, though its rows could hold it, and takes the one that fits.
+    #[test]
+    fn a_locator_past_the_limit_the_node_states_is_refused_though_a_row_could_hold_it() {
+        use wz_session_core::limit_binding::Quota;
+        use wz_session_core::limits::RuntimeLimits;
+        let mut limits = RuntimeLimits::defaults();
+        if limits.select_max_locator_len(Quota::at_most(18)).is_err() {
+            // The build allows one value: the rows are the only bound.
+            return;
+        }
+        let mut directory = Box::new(LoopDirectory::new());
+        directory.limit_to(limits.max_locator_len_held());
+        let fits = "tcp/127.0.0.1:7447".to_owned();
+        let longer = "tcp/127.0.0.10:7447".to_owned();
+        let zid = [0xAB; 16];
+        learn_locators(
+            &mut directory,
+            &zid,
+            &[longer, fits.clone()],
+            LocatorSource::Linkstate,
+            0,
+        );
+        assert_eq!(directory.refused(), 1, "the longer one is refused");
+        assert_eq!(candidate_locators(&directory, &zid, 0), [fits]);
     }
 
     /// A discovery weighed by a loop whose directory has heard nothing else.

@@ -92,6 +92,76 @@ mod enforcement {
         assert_eq!(third.entity_id(), second.entity_id() + 1);
     }
 
+    /// A directory of a node's locators, held to the `MAX_LOCATOR_LEN` of `limits` as the
+    /// loop that dials from it holds it.
+    fn locator_directory(limits: &RuntimeLimits) -> crate::locator_directory::LocatorDirectory<4> {
+        let mut directory = crate::locator_directory::LocatorDirectory::new();
+        directory.limit_to(limits.max_locator_len_held());
+        directory
+    }
+
+    /// A Hello's confirmation that one node may be reached at `locator`.
+    fn confirm_hint(
+        directory: &mut crate::locator_directory::LocatorDirectory<4>,
+        locator: &str,
+    ) -> Result<(), crate::locator_directory::DirectoryRefusal> {
+        use crate::locator_directory::{Lifetime, LocatorSource};
+        directory.confirm(
+            [0xa1; 16],
+            locator,
+            LocatorSource::Hello,
+            0,
+            Lifetime::Millis(1_000),
+        )
+    }
+
+    /// `MAX_LOCATOR_LEN` with nothing stated: the directory keeps a locator of the build's length
+    /// and refuses one a byte longer, as its rows sized by the build did.
+    #[test]
+    fn max_locator_len_with_nothing_stated_admits_what_the_build_admitted() {
+        use crate::locator_directory::DirectoryRefusal;
+        let mut directory = locator_directory(&RuntimeLimits::defaults());
+        assert_eq!(
+            directory.locator_len(),
+            Quota::at_most(caps::MAX_LOCATOR_LEN)
+        );
+        let longest = "l".repeat(caps::MAX_LOCATOR_LEN);
+        confirm_hint(&mut directory, &longest).expect("the build's length is kept");
+        let longer = "l".repeat(caps::MAX_LOCATOR_LEN + 1);
+        assert_eq!(
+            confirm_hint(&mut directory, &longer),
+            Err(DirectoryRefusal::LocatorTooLong)
+        );
+        assert_eq!(directory.len(), 1);
+        assert_eq!(directory.refused(), 1);
+    }
+
+    /// `MAX_LOCATOR_LEN` stated as two: a locator of three bytes is refused as too long and
+    /// counted, the rows held stay as they were, and a hint already held is refreshed.
+    #[test]
+    fn max_locator_len_stated_refuses_the_next_byte_and_keeps_the_rows() {
+        use crate::locator_directory::DirectoryRefusal;
+        let mut limits = RuntimeLimits::defaults();
+        let stated = limits.select_max_locator_len(Quota::at_most(2));
+        if MaxLocatorLen::DOMAIN.is_singleton() {
+            // A build that keeps the build's value alone refuses the statement itself.
+            assert!(stated.is_err(), "a build of one value refuses two");
+            return;
+        }
+        stated.expect("two is inside the domain");
+        let mut directory = locator_directory(&limits);
+        assert_eq!(directory.locator_len(), Quota::at_most(2));
+        confirm_hint(&mut directory, "ab").expect("under the quota");
+        assert_eq!(
+            confirm_hint(&mut directory, "abc"),
+            Err(DirectoryRefusal::LocatorTooLong)
+        );
+        assert_eq!(directory.len(), 1, "a refusal leaves the rows as they were");
+        assert_eq!(directory.refused(), 1);
+        confirm_hint(&mut directory, "ab").expect("a held hint is refreshed");
+        assert_eq!(directory.len(), 1);
+    }
+
     /// One entry of a bound's table, the `index`th, taken through the door its creator uses.
     type Admit = fn(&mut ApplicationLayerObserver, usize) -> Result<(), RegisterError>;
     /// The `index`th entry let go; whether it was held.
