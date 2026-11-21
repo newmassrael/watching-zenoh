@@ -7,13 +7,19 @@
 //! The target is a session that takes every byte it needs when it opens, from the configured
 //! limits, and allocates nothing after (`docs/upstream-parity.md` D12). Two sessions open over
 //! the program's own transport (an in-memory pipe, `support/pipe_pair.rs`), and once both are open
-//! and their routes are made each operation family runs a warm-up and then `ROUNDS` rounds with
-//! the allocator counting. One line per family is printed:
+//! and their routes are made each operation family is counted in `WINDOWS` windows, each a warm-up
+//! and then `ROUNDS` rounds with the allocator counting. One line per family is printed:
 //!
 //! ```text
-//! no-heap: <family> allocs=<n> bytes=<b> rounds=<r>
+//! no-heap: <family> allocs=<n> bytes=<b> rounds=<r> windows=<k> max_allocs=<m>
 //! no-heap: <family> not-built
 //! ```
+//!
+//! `allocs` and `bytes` are the window that allocated least, `max_allocs` the window that
+//! allocated most. The threads' interleaving (how many turns the receiving thread takes in a round,
+//! what one round's messages leave for the next) only adds allocations to a window and never takes
+//! away the ones the operation makes, so the least window is the operation's own cost and is what a
+//! row grades; a row locked at 0 grades the most, since it claims no window allocates at all.
 //!
 //! With `WZ_NO_HEAP_READING` set, the lines are written to the file it names as well.
 //! `scripts/lib/no_heap_ratchet_gate.py --check` holds those lines to `deploy/no_heap_ratchet.json`:
@@ -67,8 +73,11 @@ static ALLOCATOR: Injecting = Injecting;
 /// exchanges (a route, a buffer grown to its size) is made, and rounds counted.
 const WARM_UP: usize = 20;
 const ROUNDS: usize = 100;
-/// How long the sessions are left before a family's count, so that what the warm-up started on
-/// another thread has ended.
+/// The windows a family is counted in.
+const WINDOWS: usize = 5;
+/// How long the sessions are left before a window opens, so that what the warm-up started on
+/// another thread has ended, and before it closes, so that what its own rounds started is counted
+/// in it rather than lost from it, which would let a window read below the operation's cost.
 const SETTLE: Duration = Duration::from_millis(100);
 /// The prefix of every line the gate reads.
 const PREFIX: &str = "no-heap:";
@@ -174,6 +183,15 @@ fn part_of(seen: &Seen, part: Part) -> (u64, u64) {
             seen.bytes - seen.calling_bytes,
         ),
     }
+}
+
+/// The allocations and bytes of `part` in the window of `windows` that allocated least (of two as
+/// few, the one of fewer bytes), and the allocations of the window that allocated most.
+fn reading_of(windows: &[Seen], part: Part) -> (u64, u64, u64) {
+    let counts = windows.iter().map(|seen| part_of(seen, part));
+    let (allocs, bytes) = counts.clone().min().expect("a family has a window");
+    let most = counts.map(|(n, _)| n).max().unwrap_or(allocs);
+    (allocs, bytes, most)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -674,8 +692,8 @@ unsafe fn config_document() {
     z_config_drop(z_config_move(&mut config));
 }
 
-/// The warm-up and the counted rounds of `round`.
-unsafe fn measure(bench: &mut Bench, round: Round) -> Seen {
+/// One window of `round`: the warm-up and the counted rounds.
+unsafe fn window(bench: &mut Bench, round: Round) -> Seen {
     for _ in 0..WARM_UP {
         bench.run(round);
     }
@@ -684,12 +702,22 @@ unsafe fn measure(bench: &mut Bench, round: Round) -> Seen {
     for _ in 0..ROUNDS {
         bench.run(round);
     }
+    std::thread::sleep(SETTLE);
     let seen = close_window();
     assert!(
         !seen.fired,
         "a window that fails nothing failed an allocation"
     );
     seen
+}
+
+/// Every window of `round`.
+unsafe fn measure(bench: &mut Bench, round: Round) -> Vec<Seen> {
+    let mut windows = Vec::with_capacity(WINDOWS);
+    for _ in 0..WINDOWS {
+        windows.push(window(bench, round));
+    }
+    windows
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -717,7 +745,7 @@ fn allocations_after_open_are_counted_per_operation_family() {
     mark_calling_thread();
     let (seen, balanced, dropped) = unsafe {
         let mut bench = Bench::open();
-        let seen: Vec<(Round, Seen)> = Round::ALL
+        let seen: Vec<(Round, Vec<Seen>)> = Round::ALL
             .into_iter()
             .filter(|round| round.built())
             .map(|round| (round, measure(&mut bench, round)))
@@ -732,9 +760,10 @@ fn allocations_after_open_are_counted_per_operation_family() {
     let mut reading = String::new();
     for (name, round, part) in FAMILIES {
         let line = match seen.iter().find(|(of, _)| *of == round) {
-            Some((_, window)) => {
-                let (allocs, bytes) = part_of(window, part);
-                format!("{PREFIX} {name} allocs={allocs} bytes={bytes} rounds={ROUNDS}")
+            Some((_, windows)) => {
+                let (allocs, bytes, most) = reading_of(windows, part);
+                let least = format!("allocs={allocs} bytes={bytes} rounds={ROUNDS}");
+                format!("{PREFIX} {name} {least} windows={WINDOWS} max_allocs={most}")
             }
             None => format!("{PREFIX} {name} not-built"),
         };

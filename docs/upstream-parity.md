@@ -494,13 +494,21 @@ derived from the declaration and never chosen by hand:
   over the program's own transport, and each operation family (a publisher declared and
   undeclared, a small put and one near the batch limit, the subscriber's receiving of each, a get
   and the queryable's reply, a key expression declared, a liveliness token and a liveliness get,
-  end-to-end protection and judging, the replay cache's put, a config handed a document) runs a
-  warm-up and then a fixed number of rounds with the allocator counting.
-  `scripts/lib/no_heap_ratchet_gate.py` holds each family's allocations a round to its row of
+  end-to-end protection and judging, the replay cache's put, a config handed a document) is
+  counted in several independent windows, each a warm-up and then a fixed number of rounds with the
+  allocator counting, and its reading is the window that allocated least, with the most beside it.
+  A family counted over the sessions' threads reads, besides what the operation allocates, what
+  the threads' interleaving adds (how many turns the receiving thread takes in a round, the work
+  one round's messages leave for the next), and one window of such a family varied on one commit
+  by more than any tolerance holds. The interleaving only adds allocations to a window and never
+  takes away the ones the operation makes (each window waits before it closes, so what its rounds
+  started is counted in it), so the least window is the operation's own cost and is what a row
+  grades; a row locked at 0 claims no allocation at all and grades the most window.
+  `scripts/lib/no_heap_ratchet_gate.py` holds each family's least allocations a round to its row of
   `deploy/no_heap_ratchet.json`: a rise above the row and its tolerance fails, a fall prints the
-  tighter row to commit, a family that reads 0 is locked and fails on any allocation after, a
-  family of the table the reading lacks or one the table lacks fails, and a row not filled yet is
-  NOT-MEASURED, which fails the lane too. A row above 0 is an open debt in the sense of D5 and
+  tighter row to commit, a family that reads 0 in every window is locked and fails when any window
+  allocates after, a family of the table the reading lacks or one the table lacks fails, and a row
+  not filled yet is NOT-MEASURED, which fails the lane too. A row above 0 is an open debt in the sense of D5 and
   names its store entry. The target is every row locked at 0.
 - **D13. The AP presets are held against upstream zenoh in every aspect, as a ratchet and a debt loop
   (owner, 2026-11-21).** After the C ABI presets move to one cooperative engine with no heap after open,

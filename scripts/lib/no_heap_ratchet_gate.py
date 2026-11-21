@@ -14,15 +14,32 @@ operations makes after open may only fall, and a family that reached zero is loc
 ## The reading
 
 Layer C1nh runs `crates/wz-capi-pico/tests/no_heap_after_open.rs` on the cooperative engine. Once two
-sessions are open over the program's own transport, each family runs a warm-up and then a fixed
-number of rounds with the allocator counting, and the test prints one line a family:
+sessions are open over the program's own transport, each family is measured in a number of
+independent windows, each a warm-up and then a fixed number of rounds with the allocator counting,
+and the test prints one line a family:
 
-    no-heap: <family> allocs=<n> bytes=<b> rounds=<r>
+    no-heap: <family> allocs=<n> bytes=<b> rounds=<r> windows=<k> max_allocs=<m>
     no-heap: <family> not-built
+
+`allocs` and `bytes` are those of the window that allocated least, `rounds` the rounds of one
+window, `windows` how many windows were counted and `max_allocs` the allocations of the window that
+allocated most.
+
+## Why the least window
+
+A family counted over the sessions' threads as well as the calling one reads, besides what the
+operation itself allocates, whatever the threads' interleaving adds: how many times the receiving
+thread runs in a round, and the work one round's messages leave for the next. On one commit such a
+family's single window varied by more than any tolerance a ratchet can hold. The interleaving only
+adds allocations to a window; it never takes away the ones the operation makes, so the least of
+independent windows is the operation's own cost, and it is what an unlocked row grades. A row
+locked at 0 claims the operation allocates nothing at all, so it grades the most: a family whose
+row is locked fails when any window allocates.
 
 The gate reads every line that carries `no-heap:` (libtest may write the test's name on that line
 before it) and no other line. A line that carries it and is neither form is refused, as is a
-family read twice and a count of no round: a reading that cannot be read is not read as clean.
+family read twice, a count of no round or no window, a most below the least, and one window whose
+least and most differ: a reading that cannot be read is not read as clean.
 
 ## The table
 
@@ -30,21 +47,25 @@ family read twice and a count of no round: a reading that cannot be read is not 
 
     {"allocs_per_round": <number or null>, "locked": <bool>, "debt": <id or null>}
 
-`allocs_per_round` is the reading's allocations over its rounds rounded up to three places. A row
-at 0 is locked, a locked row holds 0 and owes no debt, and a row above 0 or not measured yet
-names the store inventory entry it is registered under (`debt-<id>`), or `debt-TBD` until it is.
+`allocs_per_round` is the least window's allocations over its rounds, rounded up to three places.
+A family is locked once every window reads 0; a family whose least window reads 0 while another
+window does not keeps an unlocked row at its most window's figure, the least figure above 0 the
+reading supports. A row at 0 is locked, a locked row holds 0 and owes no debt, and a row above 0
+or not measured yet names the store inventory entry it is registered under (`debt-<id>`), or
+`debt-TBD` until it is.
 
 ## The rules of --check
 
-    a family above its row times one plus the tolerance           FAIL
-    a locked family that allocates at all                          FAIL
+    a family whose least window is above its row times one plus
+    the tolerance                                                  FAIL
+    a locked family that allocates in any window                   FAIL
     a family of the table the reading has no line for              FAIL
     a family of the reading the table has no row for               FAIL
     a row above 0 whose debt is still the placeholder              FAIL
     a malformed reading or table                                   FAIL
     a row not filled yet, or a family the build did not have       NOT-MEASURED
     a family below its row                                         PASS, the tighter row printed
-    a family that read 0                                           PASS, the locked row printed
+    a family that read 0 in every window                           PASS, the locked row printed
 
 NOT-MEASURED is never a pass: the exit status is 1 for a FAIL, 3 for NOT-MEASURED and no FAIL,
 and 0 only when every row was judged and held.
@@ -82,7 +103,8 @@ ROW_KEYS = {"allocs_per_round", "locked", "debt"}
 PREFIX = "no-heap:"
 NOT_BUILT = "not-built"
 FAMILY_NAME = re.compile(r"^[a-z0-9][a-z0-9-]*$")
-MEASURED = re.compile(r"^allocs=(\d+) bytes=(\d+) rounds=(\d+)$")
+MEASURED = re.compile(r"^allocs=(\d+) bytes=(\d+) rounds=(\d+) windows=(\d+) max_allocs=(\d+)$")
+MEASURED_FORM = "allocs=<n> bytes=<b> rounds=<r> windows=<k> max_allocs=<m>"
 # A debt is an entry of the store's inventory (`debt-<id>`), as every new open debt is; the
 # placeholder stands only until the row is measured.
 DEBT_ID = re.compile(r"debt-[a-z0-9][a-z0-9-]*")
@@ -101,25 +123,44 @@ class Refused(Exception):
 
 @dataclass(frozen=True)
 class Reading:
-    """One family's line: its counts, or None for each when the build has not the family."""
+    """One family's line: the least window's counts, the rounds of a window, the windows counted
+    and the most window's allocations, or None for each when the build has not the family."""
 
     family: str
     allocs: int | None
     nbytes: int | None
     rounds: int | None
+    windows: int | None = None
+    max_allocs: int | None = None
 
     @property
     def built(self) -> bool:
         return self.allocs is not None
 
+    def _per_round_up(self, allocs: int) -> float:
+        assert self.rounds
+        return -(-allocs * PLACES // self.rounds) / PLACES
+
     def ceiling(self) -> float:
-        """The allocations a round, rounded up to three places."""
-        assert self.allocs is not None and self.rounds
-        return -(-self.allocs * PLACES // self.rounds) / PLACES
+        """The least window's allocations a round, rounded up to three places."""
+        assert self.allocs is not None
+        return self._per_round_up(self.allocs)
+
+    def zero_everywhere(self) -> bool:
+        """Whether every window read 0, which is what locks a family."""
+        return self.max_allocs == 0
+
+    def figure(self) -> float:
+        """The figure of the unlocked row this reading writes: the least window's, or, when that
+        is 0 and another window's is not, the most window's (a row at 0 is a locked one)."""
+        assert self.allocs is not None and self.max_allocs is not None
+        return self.ceiling() if self.allocs > 0 else self._per_round_up(self.max_allocs)
 
     def shown(self) -> str:
-        return (f"{self.allocs} allocation(s) of {self.nbytes} byte(s) in {self.rounds} round(s), "
-                f"{self.allocs / self.rounds:.3f} a round")
+        assert self.allocs is not None and self.max_allocs is not None and self.rounds
+        return (f"least of {self.windows} window(s): {self.allocs} allocation(s) of {self.nbytes} "
+                f"byte(s) in {self.rounds} round(s), {self.allocs / self.rounds:.3f} a round; "
+                f"most: {self.max_allocs}, {self.max_allocs / self.rounds:.3f} a round")
 
 
 @dataclass(frozen=True)
@@ -159,13 +200,24 @@ def parse_reading(text: str) -> tuple[dict[str, Reading], list[str]]:
         else:
             measured = MEASURED.match(body)
             if measured is None:
-                findings.append(f"{where}: is neither `allocs=<n> bytes=<b> rounds=<r>` nor `not-built`")
+                findings.append(f"{where}: is neither `{MEASURED_FORM}` nor `{NOT_BUILT}`")
                 continue
-            allocs, nbytes, rounds = (int(g) for g in measured.groups())
+            allocs, nbytes, rounds, windows, max_allocs = (int(g) for g in measured.groups())
             if rounds == 0:
                 findings.append(f"{where}: counts no round, so it measures nothing")
                 continue
-            reading = Reading(family, allocs, nbytes, rounds)
+            if windows == 0:
+                findings.append(f"{where}: counts no window, so it measures nothing")
+                continue
+            if max_allocs < allocs:
+                findings.append(f"{where}: its most window ({max_allocs}) is below its least "
+                                f"({allocs}), which no count of windows gives")
+                continue
+            if windows == 1 and max_allocs != allocs:
+                findings.append(f"{where}: one window is both the least and the most, so "
+                                f"max_allocs is allocs")
+                continue
+            reading = Reading(family, allocs, nbytes, rounds, windows, max_allocs)
         if family in found:
             findings.append(f"{where}: family {family} is read twice")
             continue
@@ -269,12 +321,12 @@ def row_json(row: Row) -> dict:
 
 
 def fill_row(reading: Reading, row: Row | None) -> dict:
-    """The row a measured reading writes: locked at 0, or its ceiling with the debt the row names
-    (the placeholder for a family that had none)."""
-    if reading.allocs == 0:
+    """The row a measured reading writes: locked at 0 when every window read 0, or its figure with
+    the debt the row names (the placeholder for a family that had none)."""
+    if reading.zero_everywhere():
         return dict(LOCKED_ROW)
     debt = row.debt if row is not None and row.debt is not None else DEBT_PLACEHOLDER
-    return {"allocs_per_round": reading.ceiling(), "locked": False, "debt": debt}
+    return {"allocs_per_round": reading.figure(), "locked": False, "debt": debt}
 
 
 def judge(found: dict[str, Reading], rows: dict[str, Row], tolerance: float) -> list[Judged]:
@@ -306,32 +358,37 @@ def judge(found: dict[str, Reading], rows: dict[str, Row], tolerance: float) -> 
                               fill_row(reading, row)))
             continue
         if row.locked:
-            if reading.allocs == 0:
+            if reading.zero_everywhere():
                 out.append(Judged(family, "PASS", f"{shown}; locked at 0"))
             else:
-                out.append(Judged(family, "FAIL", f"{shown}; the family is locked at 0 allocations a "
-                                                  f"round, so what allocates after open again is the "
-                                                  f"regression to take back"))
+                out.append(Judged(family, "FAIL", f"{shown}; the family is locked at 0 allocations "
+                                                  f"a round and a window allocated, so what "
+                                                  f"allocates after open is the regression"))
             continue
+        assert reading.allocs is not None and reading.rounds
         per_round = reading.allocs / reading.rounds
         if per_round > row.ceiling * (1 + tolerance):
-            out.append(Judged(family, "FAIL", f"{shown}; above the row's {row.ceiling} a round by more "
-                                              f"than the tolerance {tolerance}: allocations after open "
-                                              f"may only fall"))
+            out.append(Judged(family, "FAIL", f"{shown}; its least window is above the row's "
+                                              f"{row.ceiling} a round by more than the tolerance "
+                                              f"{tolerance}: allocations after open may only fall"))
             continue
         if row.debt is None or not DEBT_ID.fullmatch(row.debt):
             out.append(Judged(family, "FAIL", f"{shown}; a family that still allocates is an open debt, "
                                               f"and its row names {row.debt!r}: register it in the "
                                               f"store's inventory and write its `debt-<id>`"))
             continue
-        if reading.allocs == 0:
-            out.append(Judged(family, "PASS", f"{shown}; it reached 0, so lock the row and close "
-                                              f"{row.debt}", dict(LOCKED_ROW)))
-        elif reading.ceiling() < row.ceiling:
-            out.append(Judged(family, "PASS", f"{shown}; under the row's {row.ceiling}, so tighten it",
-                              fill_row(reading, row)))
+        if reading.zero_everywhere():
+            out.append(Judged(family, "PASS", f"{shown}; it reached 0 in every window, so lock the "
+                                              f"row and close {row.debt}", dict(LOCKED_ROW)))
+            continue
+        not_yet = ("" if reading.allocs > 0 else
+                   "; its least window reads 0 but another does not, and a family is locked only "
+                   "when every window reads 0")
+        if reading.figure() < row.ceiling:
+            out.append(Judged(family, "PASS", f"{shown}; under the row's {row.ceiling}, so tighten "
+                                              f"it{not_yet}", fill_row(reading, row)))
         else:
-            out.append(Judged(family, "PASS", f"{shown}; within the row's {row.ceiling}"))
+            out.append(Judged(family, "PASS", f"{shown}; within the row's {row.ceiling}{not_yet}"))
     return out
 
 
@@ -429,8 +486,11 @@ def _row(ceiling: float | None, locked: bool = False, debt: str | None = "debt-d
     return {"allocs_per_round": ceiling, "locked": locked, "debt": debt}
 
 
-def _line(family: str, allocs: int, rounds: int = 100, nbytes: int = 640) -> str:
-    return f"{PREFIX} {family} allocs={allocs} bytes={nbytes} rounds={rounds}"
+def _line(family: str, allocs: int, rounds: int = 100, nbytes: int = 640, windows: int = 5,
+          max_allocs: int | None = None) -> str:
+    most = allocs if max_allocs is None else max_allocs
+    return (f"{PREFIX} {family} allocs={allocs} bytes={nbytes} rounds={rounds} windows={windows} "
+            f"max_allocs={most}")
 
 
 def _run(reading: str, table: str) -> tuple[int, str]:
@@ -451,31 +511,45 @@ def selftest() -> int:
     assert "FAIL" not in shown, shown
     cases += 1
 
-    # A rise above the row by more than the tolerance fails; within the tolerance it holds.
-    status, shown = _run(clean.replace("allocs=200", "allocs=211"), base)
+    # The row grades the least window: a least above the row by more than the tolerance fails,
+    # within it holds, and a most far above the row with the least held passes.
+    status, shown = _run(clean.replace(_line("put-small", 200), _line("put-small", 211)), base)
     assert status == 1 and "FAIL put-small" in shown and "may only fall" in shown, shown
     cases += 1
-    status, shown = _run(clean.replace("allocs=200", "allocs=209"), base)
+    status, shown = _run(clean.replace(_line("put-small", 200), _line("put-small", 209)), base)
     assert status == 0, f"a reading within the tolerance failed: {shown}"
     cases += 1
+    status, shown = _run(clean.replace(_line("put-small", 200),
+                                       _line("put-small", 200, max_allocs=900)), base)
+    assert status == 0 and "FAIL" not in shown, f"a noisy most failed a held least: {shown}"
+    cases += 1
 
-    # A fall passes and prints the tighter row; a fall to 0 prints the locked row.
-    status, shown = _run(clean.replace("allocs=200", "allocs=150"), base)
+    # A fall passes and prints the tighter row; a fall to 0 in every window prints the locked row.
+    status, shown = _run(clean.replace(_line("put-small", 200), _line("put-small", 150)), base)
     assert status == 0, shown
     assert format_row("put-small", _row(1.5)) in shown, f"a fall printed no row to commit: {shown}"
     cases += 1
-    status, shown = _run(clean.replace("allocs=200", "allocs=0"), base)
+    status, shown = _run(clean.replace(_line("put-small", 200), _line("put-small", 0)), base)
     assert status == 0 and format_row("put-small", LOCKED_ROW) in shown, shown
     cases += 1
 
-    # The ceiling is rounded up, never down: 1 in 3 rounds is 0.334.
-    assert Reading("x", 1, 0, 3).ceiling() == 0.334, Reading("x", 1, 0, 3).ceiling()
+    # A least of 0 with a most above it is not locked: the row it prints is the most's figure.
+    status, shown = _run(clean.replace(_line("put-small", 200),
+                                       _line("put-small", 0, max_allocs=30)), base)
+    assert status == 0 and format_row("put-small", LOCKED_ROW) not in shown, shown
+    assert format_row("put-small", _row(0.3)) in shown and "every window" in shown, shown
     cases += 1
 
-    # A locked row above 0 fails.
-    status, shown = _run(clean.replace(_line("get", 0), _line("get", 1)), base)
-    assert status == 1 and "FAIL get" in shown and "locked at 0" in shown, shown
+    # The ceiling is rounded up, never down: 1 in 3 rounds is 0.334.
+    assert Reading("x", 1, 0, 3, 1, 1).ceiling() == 0.334, Reading("x", 1, 0, 3, 1, 1).ceiling()
     cases += 1
+
+    # A locked row fails when any window allocates, the least one or another.
+    for least, most in ((1, 1), (0, 1)):
+        status, shown = _run(clean.replace(_line("get", 0), _line("get", least, max_allocs=most)),
+                             base)
+        assert status == 1 and "FAIL get" in shown and "locked at 0" in shown, (least, most, shown)
+        cases += 1
 
     # A family of the table the reading lacks fails; one the table lacks fails.
     status, shown = _run(clean.replace(_line("get", 0), ""), base)
@@ -508,9 +582,14 @@ def selftest() -> int:
     # Malformed lines are refused rather than skipped.
     for bad, needle in (
         (f"{PREFIX} put-small allocs=2 bytes=3", "neither"),
-        (f"{PREFIX} put-small allocs=-2 bytes=3 rounds=100", "neither"),
-        (f"{PREFIX} Put_Small allocs=2 bytes=3 rounds=100", "names no family"),
-        (f"{PREFIX} put-small allocs=2 bytes=3 rounds=0", "counts no round"),
+        (f"{PREFIX} put-small allocs=2 bytes=3 rounds=100", "neither"),
+        (f"{PREFIX} put-small allocs=2 bytes=3 rounds=100 windows=5", "neither"),
+        (_line("put-small", -2), "neither"),
+        (_line("Put_Small", 2), "names no family"),
+        (_line("put-small", 2, rounds=0), "counts no round"),
+        (_line("put-small", 2, windows=0), "counts no window"),
+        (_line("put-small", 200, max_allocs=199), "below its least"),
+        (_line("put-small", 200, windows=1, max_allocs=201), "one window"),
         (_line("put-small", 200) + "\n" + _line("put-small", 200), "read twice"),
     ):
         status, shown = _run(bad + "\n" + _line("get", 0), base)
@@ -538,12 +617,19 @@ def selftest() -> int:
         assert status == 1 and needle in shown, f"a table with {needle!r} was used: {shown}"
         cases += 1
 
-    # --fill writes the measured rows and never loosens a filled one.
-    rows, notes = fill(clean.replace("allocs=200", "allocs=300"), base)
+    # --fill writes the least window's figure, locks only a family at 0 in every window, and
+    # never loosens a filled row.
+    rows, notes = fill(clean.replace(_line("put-small", 200), _line("put-small", 300)), base)
     assert rows is not None and rows["put-small"] == _row(2.0) and notes, (rows, notes)
-    rows, notes = fill(clean.replace("allocs=200", "allocs=150"), nulled)
+    rows, notes = fill(clean.replace(_line("put-small", 200),
+                                     _line("put-small", 150, max_allocs=400)), nulled)
     assert rows is not None and rows["put-small"] == _row(1.5, debt=DEBT_PLACEHOLDER), rows
     assert rows["get"] == LOCKED_ROW and not notes, (rows, notes)
+    rows, notes = fill(clean.replace(_line("put-small", 200), _line("put-small", 0, max_allocs=7)),
+                       nulled)
+    assert rows is not None and rows["put-small"] == _row(0.07, debt=DEBT_PLACEHOLDER), rows
+    rows, notes = fill(clean.replace(_line("get", 0), _line("get", 0, max_allocs=2)), base)
+    assert rows is not None and rows["get"] == LOCKED_ROW and notes, (rows, notes)
     rows, notes = fill("noise only", base)
     assert rows is None and notes, (rows, notes)
     cases += 1
