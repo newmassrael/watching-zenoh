@@ -489,11 +489,11 @@ pub fn new_session_actions<T: TimeSource>(
     #[cfg(feature = "transport-batching")]
     if batching {
         let staged = Arc::downgrade(&actions);
-        let flush: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-            if let Some(actions) = staged.upgrade() {
-                actions.flush_staged();
-            }
-        });
+        let flush: Arc<dyn Fn() -> wz_session_core::link::IdleFlush + Send + Sync> =
+            Arc::new(move || match staged.upgrade() {
+                Some(actions) => actions.flush_staged(),
+                None => wz_session_core::link::IdleFlush::Drained,
+            });
         if flushing_driver.set_idle_flush(flush) {
             actions.set_auto_batching(true);
         }
@@ -5068,7 +5068,9 @@ mod batch_tx_tests {
     /// installs, and runs it when the test says the writer fell idle.
     struct IdleFlushLink {
         frames: std::sync::Mutex<Vec<Vec<u8>>>,
-        flush: std::sync::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
+        flush: std::sync::Mutex<
+            Option<std::sync::Arc<dyn Fn() -> wz_session_core::link::IdleFlush + Send + Sync>>,
+        >,
     }
 
     impl super::BoxedLinkDriver for IdleFlushLink {
@@ -5082,7 +5084,10 @@ mod batch_tx_tests {
         }
         fn open_blocking(&self) {}
         fn close_blocking(&self) {}
-        fn set_idle_flush(&self, hook: std::sync::Arc<dyn Fn() + Send + Sync>) -> bool {
+        fn set_idle_flush(
+            &self,
+            hook: std::sync::Arc<dyn Fn() -> wz_session_core::link::IdleFlush + Send + Sync>,
+        ) -> bool {
             *self.flush.lock().expect("flush") = Some(hook);
             true
         }
@@ -5105,7 +5110,7 @@ mod batch_tx_tests {
         let flush = link.flush.lock().expect("flush").clone();
         if let Some(flush) = &flush {
             // The writer fell idle: what the session staged is owed a write now.
-            flush();
+            let _ = flush();
         }
         let frames = link.frames.lock().expect("frames").clone();
         let per_frame = frames

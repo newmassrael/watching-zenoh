@@ -72,7 +72,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{watch, Notify};
 use tokio::time::timeout;
-use wz_session_core::link::RoomWait;
+use wz_session_core::link::{IdleFlush, RoomWait};
 use wz_session_core::qos::Priority;
 
 use crate::runtime_impl::TokioJoinHandle;
@@ -182,6 +182,7 @@ pub fn outbound_channel_with_capacity(
         idle_hook: PlainMutex::new(None),
         flush_wanted: AtomicBool::new(false),
         staged: AtomicU64::new(0),
+        first_staged_ns: AtomicU64::new(0),
         staged_at_flush: AtomicU64::new(0),
         batching_time_limit_us: AtomicU64::new(wz_session_core::link::BATCHING_TIME_LIMIT_US),
         epoch: Instant::now(),
@@ -194,7 +195,10 @@ pub fn outbound_channel_with_capacity(
         OutboundTx {
             shared: shared.clone(),
         },
-        OutboundRx { shared },
+        OutboundRx {
+            shared,
+            backoff: Backoff::default(),
+        },
     )
 }
 
@@ -288,8 +292,8 @@ struct Lanes {
     /// Wakes the (single) writer when a frame lands or the last sender goes.
     ready: Notify,
     /// Wakes the writer ONLY for a frame that landed, which is what it waits for while it
-    /// lets producers finish (see `let_producers_finish`): `ready` also carries the request
-    /// to flush what is staged, which is the very thing that wait is for putting off.
+    /// backs off (see `OutboundRx::hold_back`): `ready` also carries the request to flush
+    /// what is staged, which is the very thing that wait is for putting off.
     frame_ready: Notify,
     /// Wakes senders waiting for room when the writer frees some, or the
     /// queue closes.
@@ -303,18 +307,22 @@ struct Lanes {
     /// hook. It is what keeps the wake to one per idle spell and not one per message.
     flush_wanted: AtomicBool,
     /// How many messages senders have staged for the hook to flush, ever
-    /// ([`OutboundTx::wake_for_flush`] counts each). The writer reads it twice a few
-    /// microseconds apart to tell producers that are still adding from producers that
-    /// have stopped, which is zenoh's batching backoff
-    /// (`io/zenoh-transport/src/common/pipeline.rs` @ `fn try_pull_deep(`: pull once
-    /// "no new bytes have been written on the batch").
+    /// ([`OutboundTx::wake_for_flush`] counts each). A writer that is backing off reads it at
+    /// each look and flushes when it has not moved since the last one, which is zenoh's
+    /// batching backoff (`io/zenoh-transport/src/common/pipeline.rs` @ `fn try_pull_deep(`:
+    /// pull once "no new bytes have been written on the batch").
     staged: AtomicU64,
+    /// When the first message since the writer's last flush was staged, in nanoseconds from
+    /// `epoch`: the open frames' first write, which the batching time limit counts from, as
+    /// upstream's counts from its batch's (`io/zenoh-transport/src/common/pipeline.rs` @
+    /// `.saturating_sub(self.backoff.atomic.first_write.load(Ordering::Relaxed));`).
+    first_staged_ns: AtomicU64,
     /// What [`Self::staged`] stood at when the writer last came to flush: the writer's alone.
     /// The difference at the next flush is how many messages the producers staged in between,
     /// which is what tells a stream from a lone message.
     staged_at_flush: AtomicU64,
     /// The longest the writer lets producers that are still staging keep adding before it
-    /// flushes, in microseconds (`let_producers_finish`): the session's
+    /// flushes, in microseconds (`OutboundRx::hold_back`): the session's
     /// `transport/link/tx/queue/batching/time_limit`, handed over with the queue's shape at
     /// Established, and the writer's own bound before then. Written by a reshape, read by the
     /// writer, so it is an atomic beside the lanes and not a field behind their lock.
@@ -347,6 +355,14 @@ impl Lanes {
     /// Nanoseconds since the queue was made.
     fn now_ns(&self) -> u64 {
         self.epoch.elapsed().as_nanos() as u64
+    }
+
+    /// Microseconds since the first message the open frames hold was staged
+    /// ([`Self::first_staged_ns`]).
+    fn open_us(&self) -> u64 {
+        self.now_ns()
+            .saturating_sub(self.first_staged_ns.load(Ordering::Relaxed))
+            / 1_000
     }
 
     /// A write of this queue's frames has finished: the line has spoken now.
@@ -639,27 +655,72 @@ impl Drop for RoleGuard {
     }
 }
 
-/// The writer's idle hook.
-type IdleHook = Arc<dyn Fn() + Send + Sync>;
+/// The writer's idle hook: the session's flush of its open batch frames, answering whether a
+/// producer held one of them ([`IdleFlush`]).
+type IdleHook = Arc<dyn Fn() -> IdleFlush + Send + Sync>;
 
-/// How far apart the writer's two reads of the staged count are: long enough that a
-/// producer that stages a message every microsecond or two shows up in it.
-const COALESCE_PROBE: Duration = Duration::from_micros(3);
+/// The writer's batching backoff, upstream's (`io/zenoh-transport/src/common/pipeline.rs` @
+/// `fn try_pull_deep(`): entered when the idle flush found a producer holding an open frame
+/// ([`IdleFlush::SenderHeld`]), left when a flush finds none or a whole frame is taken.
+#[derive(Clone, Copy, Debug, Default)]
+struct Backoff {
+    /// The writer is backing off: it looks again before it flushes.
+    active: bool,
+    /// [`Lanes::staged`] at the writer's last look. Unchanged at the next one, the producers
+    /// have stopped adding, and the open frames go.
+    seen: u64,
+}
 
-/// How many probes the writer spins through before it decides the producers are a stream and
-/// stops spinning: a producer that is still adding after this many reads, microseconds of
-/// them, is not about to stop, and the wait that remains is better spent asleep than on the
-/// core.
-const COALESCE_SPIN_PROBES: u32 = 3;
+impl Backoff {
+    /// Whether the writer, backing off, holds the open frames back for now: `true` after it
+    /// waited, for a frame to land or for the rest of the batching time limit, and then it
+    /// looks again; `false` when it is to flush them now.
+    ///
+    /// Upstream's backoff (`io/zenoh-transport/src/common/pipeline.rs` @ `fn try_pull_deep(`):
+    /// a writer that is not backing off flushes at once; one that is flushes when no message
+    /// was staged since its last look, or when the open frames' first message was staged the
+    /// limit ago (`if diff >= self.backoff.threshold {`), and otherwise waits for what is left
+    /// of the limit or for a frame, whichever is first. While it waits a producer that stages
+    /// does not wake it: the request to flush stands, so a sender's wake finds it raised.
+    /// Upstream's wait is the same (`tokio::time::timeout(` on its batches' notifier), after a
+    /// yield, because the producer it backs off for may be waiting for the CPU this task holds.
+    ///
+    /// The backoff is entered only when the flush found a producer holding an open frame
+    /// ([`IdleFlush::SenderHeld`]), which is what upstream reads off its batch's lock. Whether
+    /// producers are still adding is never read off their progress over a few microseconds: a
+    /// producer that lost its CPU makes none, and reads as one that stopped.
+    async fn hold_back(&mut self, shared: &Lanes) -> bool {
+        let limit_us = shared.batching_time_limit_us.load(Ordering::Relaxed);
+        if !self.active || limit_us == 0 {
+            return false;
+        }
+        let staged = shared.staged.load(Ordering::Relaxed);
+        let moved = staged != self.seen;
+        self.seen = staged;
+        if !moved {
+            return false;
+        }
+        let open_us = shared.open_us();
+        if open_us >= limit_us {
+            return false;
+        }
+        tokio::task::yield_now().await;
+        tokio::select! {
+            _ = shared.frame_ready.notified() => {}
+            _ = tokio::time::sleep(Duration::from_micros(limit_us - open_us)) => {}
+        }
+        true
+    }
+}
 
 /// How many messages the producers staged between two flushes for the writer to call it a
-/// stream and give up the CPU once before it flushes (`let_producers_finish`).
+/// stream and give up the CPU once before it flushes (`OutboundRx::note_flush`).
 /// A request and its reply are one message per flush, a burst of a few are a few; a producer
 /// that fills the writer's time is hundreds.
 const STREAM_STAGED_MIN: u64 = 32;
 
-/// How many messages staged since the last flush still make a lone message or a pair: the
-/// writer flushes at once, without the probes of `let_producers_finish`.
+/// How many messages staged since the last flush still make a lone message or a pair, which a
+/// sender may flush on its own thread (`flush_inline`).
 const LONE_STAGED_MAX: u64 = 2;
 
 /// How long no flush may have run for a sender to flush its own message (`flush_inline`): a
@@ -1979,9 +2040,15 @@ impl OutboundTx {
             .wrapping_add(1);
         if !self.shared.flush_wanted.load(Ordering::Relaxed)
             && !self.shared.flush_wanted.swap(true, Ordering::SeqCst)
-            && !self.flush_inline(staged)
         {
-            self.shared.ready.notify_one();
+            // The first message staged since the writer's last flush: the open frames' first
+            // write, which the batching time limit counts from.
+            self.shared
+                .first_staged_ns
+                .store(self.shared.now_ns(), Ordering::Relaxed);
+            if !self.flush_inline(staged) {
+                self.shared.ready.notify_one();
+            }
         }
     }
 
@@ -2976,6 +3043,8 @@ enum TakeMode {
 /// The receiving half of [`outbound_channel`].
 pub struct OutboundRx {
     shared: Arc<Lanes>,
+    /// The writer's batching backoff: the writer's alone.
+    backoff: Backoff,
 }
 
 impl OutboundRx {
@@ -3083,77 +3152,26 @@ impl OutboundRx {
         self
     }
 
-    /// Before the idle hook flushes, let producers that are still staging finish: while the
-    /// staged count moves between two reads a few microseconds apart, wait, for at most the
-    /// queue's batching bound (`Lanes::batching_time_limit_us`, upstream's
-    /// `batching/time_limit`; nothing at all when it is zero). A producer that stops (a lone
-    /// message, the end of a burst) is
-    /// seen to have stopped by the second read, so the flush it is owed leaves within
-    /// microseconds; a producer that does not stop is flushed by the limit, and by its own
-    /// frame filling up before that. Without the wait the writer, which is faster than a
-    /// producer that has to build each message, flushes after nearly every one and sends a
-    /// few hundred bytes a write where zenoh sends kilobytes.
+    /// The bookkeeping of a flush the writer is about to run, answering [`Lanes::staged`] as it
+    /// stands, which a backoff that follows compares its next look with.
     ///
-    /// The first reads are a spin and not a sleep, because a sleep cannot be as short as the
-    /// few microseconds a lone message may wait: the runtime's timer has a millisecond
-    /// granularity. The spin is [`COALESCE_SPIN_PROBES`] reads, microseconds in all, so it
-    /// holds the thread for no longer than a write does. A producer that is still adding
-    /// after them is a stream, and from there the writer WAITS on the runtime, giving the
-    /// thread back: the `tx` runtime has one worker for every link writer of the process, so
-    /// a writer that held it (spinning, or asleep on the thread) for the length of a stream
-    /// would starve every other link's writer for as long. It wakes when a frame lands
-    /// (answered `true`: the producers are filling frames, and a frame is the work to do now,
-    /// not the partial frames that are still open) or when the bound passes (`false`: flush
-    /// what is open).
-    async fn let_producers_finish(&self) -> bool {
-        // A stream: the producers staged many messages since the last flush, so the writer is
-        // being woken to write a few hundred bytes at a time. When the producer shares the
-        // writer's CPU the wake preempted it, and the flush now would take the CPU back from
-        // it again and again; give the CPU up once, so that the producer fills what it can
-        // first. With a CPU of its own the producer is not waiting for this, and the call
-        // returns at once.
+    /// A stream: the producers staged many messages since the last flush, so the writer is
+    /// being woken to write a few hundred bytes at a time. When a producer shares the writer's
+    /// CPU the wake preempted it, and the flush now would take the CPU back from it again and
+    /// again; give the CPU up once, so that the producer fills what it can first. With a CPU of
+    /// its own the producer is not waiting for this, and the call returns at once.
+    fn note_flush(&self) -> u64 {
         let staged = self.shared.staged.load(Ordering::Relaxed);
         let since_flush = staged.wrapping_sub(self.shared.staged_at_flush.load(Ordering::Relaxed));
         if since_flush >= STREAM_STAGED_MIN {
             std::thread::yield_now();
         }
-        self.shared.staged_at_flush.store(
-            self.shared.staged.load(Ordering::Relaxed),
-            Ordering::Relaxed,
-        );
+        let staged = self.shared.staged.load(Ordering::Relaxed);
+        self.shared.staged_at_flush.store(staged, Ordering::Relaxed);
         self.shared
             .last_flush_ns
             .store(self.shared.now_ns(), Ordering::Relaxed);
-        // A lone message (a request, a reply): the producers staged one or two since the last
-        // flush, so there is no stream to wait out and nothing for the probes below to find,
-        // and the message would wait for them for nothing. A burst that starts here is
-        // flushed in its first message and then coalesced from the second flush on, when
-        // what was staged since is more than a few.
-        if since_flush <= LONE_STAGED_MAX {
-            return false;
-        }
-        // A bound of nothing holds nothing back, the probes included: upstream's backoff with a
-        // zero threshold pulls the open batch the first time it looks.
-        let limit_us = self.shared.batching_time_limit_us.load(Ordering::Relaxed);
-        if limit_us == 0 {
-            return false;
-        }
-        let mut seen = self.shared.staged.load(Ordering::Relaxed);
-        for _ in 0..COALESCE_SPIN_PROBES {
-            let probe = Instant::now();
-            while probe.elapsed() < COALESCE_PROBE {
-                std::hint::spin_loop();
-            }
-            let now = self.shared.staged.load(Ordering::Relaxed);
-            if now == seen {
-                return false;
-            }
-            seen = now;
-        }
-        tokio::select! {
-            _ = self.shared.frame_ready.notified() => true,
-            _ = tokio::time::sleep(Duration::from_micros(limit_us)) => false,
-        }
+        staged
     }
 
     async fn recv_wire_tagged_with(&mut self, mode: TakeMode) -> Option<(Priority, WireFrame)> {
@@ -3207,7 +3225,10 @@ impl OutboundRx {
                 }
                 match taken {
                     Taken::Frame(priority, out) => {
-                        return Some((priority, self.wire(out).holding(role)))
+                        // A whole frame ends a backoff, as upstream's pull of a full batch does
+                        // (`io/zenoh-transport/src/common/pipeline.rs` @ `fn try_pull(`).
+                        self.backoff.active = false;
+                        return Some((priority, self.wire(out).holding(role)));
                     }
                     Taken::Empty if finished => return None,
                     // Nothing queued and the writer is about to wait: this is the moment
@@ -3224,19 +3245,37 @@ impl OutboundRx {
                         if let Some(hook) = hook {
                             idle_hook_ran = true;
                             // Cleared before the hook runs, and only a flag that stood means
-                            // something was staged since the last flush: no wait for a
+                            // something was staged since the last flush: no backoff for a
                             // writer that is merely going to sleep.
-                            if self.shared.flush_wanted.swap(false, Ordering::SeqCst)
-                                && self.let_producers_finish().await
-                            {
-                                // A frame landed while the producers were still staging: take
-                                // it. The open frames stay open for the next idle, which the
-                                // request raised again will coalesce and then flush.
+                            if !self.shared.flush_wanted.swap(false, Ordering::SeqCst) {
+                                let _ = hook();
+                                continue;
+                            }
+                            if self.backoff.hold_back(&self.shared).await {
+                                // Backing off, the producers still adding: a frame landed or
+                                // the wait ran out. Look again, the request standing.
                                 idle_hook_ran = false;
                                 self.shared.flush_wanted.store(true, Ordering::SeqCst);
                                 continue;
                             }
-                            hook();
+                            let seen = self.note_flush();
+                            if hook() == IdleFlush::SenderHeld
+                                && self.shared.open_us()
+                                    < self.shared.batching_time_limit_us.load(Ordering::Relaxed)
+                            {
+                                // A producer is adding to a frame the flush had to leave open:
+                                // back off, as upstream's writer does when it cannot take its
+                                // batch's lock, and look again. Past the limit it does not: a
+                                // sender that still holds its frame then is the one to wake
+                                // the writer when it lets go (`tx_staged`), and a writer
+                                // that looked again and again would only spin.
+                                self.backoff = Backoff { active: true, seen };
+                                idle_hook_ran = false;
+                                self.shared.flush_wanted.store(true, Ordering::SeqCst);
+                                tokio::task::yield_now().await;
+                                continue;
+                            }
+                            self.backoff.active = false;
                             continue;
                         }
                     }
@@ -4216,6 +4255,7 @@ mod tests {
         let hook_tx = tx.clone();
         tx.set_idle_hook(Arc::new(move || {
             let _ = hook_tx.send(Priority::DEFAULT, b"frame".to_vec());
+            IdleFlush::Drained
         }));
 
         tx.wake_for_flush();
@@ -4244,6 +4284,7 @@ mod tests {
         let hook_tx = tx.clone();
         tx.set_idle_hook(Arc::new(move || {
             let _ = hook_tx.send(Priority::DEFAULT, b"abcdefgh".to_vec());
+            IdleFlush::Drained
         }));
 
         tx.wake_for_flush();
@@ -4289,11 +4330,12 @@ mod tests {
         );
     }
 
-    /// How long the writer held a stream back before it flushed, on a queue whose shape states
-    /// the batching bound `limit_us`, while a producer thread keeps staging; and whether a
-    /// frame landing ended the wait rather than the bound. The clock is the runtime's, paused,
-    /// so the wait is read in the timer's time and not in the machine's.
-    async fn held_while_a_producer_stages(limit_us: u64) -> (Duration, bool) {
+    /// A queue shaped with the batching bound `limit_us`, whose idle hook answers `answer` and
+    /// keeps the instant of every call, a frame handed to the queue on each `Drained`.
+    fn shaped_with_hook(
+        limit_us: u64,
+        answer: impl Fn(usize) -> IdleFlush + Send + Sync + 'static,
+    ) -> (OutboundTx, OutboundRx, Arc<std::sync::Mutex<Vec<Instant>>>) {
         use wz_session_core::link::{TxPipeline, TxQueueShape};
         let (tx, rx) = outbound_channel();
         tx.reshape(TxQueueShape {
@@ -4306,65 +4348,108 @@ mod tests {
                 ..TxPipeline::DEFAULT
             },
         });
-        let stop = Arc::new(AtomicBool::new(false));
-        let producer = {
-            let shared = tx.shared.clone();
-            let stop = stop.clone();
-            std::thread::spawn(move || {
-                while !stop.load(Ordering::Relaxed) {
-                    shared.staged.fetch_add(1, Ordering::Relaxed);
-                    std::hint::spin_loop();
-                }
-            })
-        };
-        // A stream, not a lone message: more than a couple staged since the last flush, and the
-        // producer seen moving before the writer looks.
-        let before = tx.shared.staged.fetch_add(10, Ordering::Relaxed);
-        while tx.shared.staged.load(Ordering::Relaxed) <= before + 10 {
-            std::thread::yield_now();
-        }
-        let started = tokio::time::Instant::now();
-        let frame_landed = rx.let_producers_finish().await;
-        let held = started.elapsed();
-        stop.store(true, Ordering::Relaxed);
-        producer.join().expect("the producer thread");
-        (held, frame_landed)
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let hook_calls = calls.clone();
+        let hook_tx = tx.clone();
+        tx.set_idle_hook(Arc::new(move || {
+            let mut calls = hook_calls.lock().expect("hook calls");
+            calls.push(Instant::now());
+            let said = answer(calls.len());
+            if said == IdleFlush::Drained {
+                let _ = hook_tx.send(Priority::DEFAULT, b"flushed".to_vec());
+            }
+            said
+        }));
+        (tx, rx, calls)
     }
 
-    /// `transport/link/tx/queue/batching/time_limit`, read off how long the writer holds a
-    /// stream back: the bound its queue's shape states, and nothing at all for a bound of zero,
-    /// which is upstream's backoff with a zero threshold. The control establishes that this
-    /// machine lets the probes see the producer moving, which is what makes the zero's answer
-    /// the bound's and not a producer that had stopped.
-    #[tokio::test(start_paused = true)]
-    async fn the_writer_holds_a_stream_back_for_the_batching_bound_and_no_longer() {
-        const LIMIT_US: u64 = 50_000;
-        const ATTEMPTS: usize = 50;
-        let mut held_for_the_bound = false;
-        for _ in 0..ATTEMPTS {
-            let (held, frame_landed) = held_while_a_producer_stages(LIMIT_US).await;
-            assert!(
-                !frame_landed,
-                "no frame landed: only the bound ends the wait"
-            );
-            assert!(
-                held <= Duration::from_micros(LIMIT_US) + Duration::from_millis(1),
-                "the writer held the stream {held:?}, past its bound"
-            );
-            if held >= Duration::from_micros(LIMIT_US) {
-                held_for_the_bound = true;
-                break;
+    /// A producer thread that stages until told to stop, on `tx`'s count.
+    fn staging_producer(tx: &OutboundTx) -> (Arc<AtomicBool>, std::thread::JoinHandle<()>) {
+        let stop = Arc::new(AtomicBool::new(false));
+        let shared = tx.shared.clone();
+        let flag = stop.clone();
+        let producer = std::thread::spawn(move || {
+            while !flag.load(Ordering::Relaxed) {
+                shared.staged.fetch_add(1, Ordering::Relaxed);
+                std::hint::spin_loop();
             }
+        });
+        (stop, producer)
+    }
+
+    /// `transport/link/tx/queue/batching/time_limit`, upstream's backoff threshold: a writer whose
+    /// flush finds a producer holding an open frame looks again, and holds the frames back while
+    /// the producers keep staging until the bound has passed since the first of them, and no
+    /// longer. Past the bound a sender that still holds its frame is the one to wake the writer,
+    /// so the writer does not keep looking.
+    #[tokio::test]
+    async fn a_writer_told_a_sender_held_a_frame_backs_off_for_the_bound_and_no_longer() {
+        const LIMIT: Duration = Duration::from_millis(50);
+        let (tx, mut rx, calls) =
+            shaped_with_hook(LIMIT.as_micros() as u64, |_| IdleFlush::SenderHeld);
+        let (stop, producer) = staging_producer(&tx);
+        let staged_at = Instant::now();
+        tx.wake_for_flush();
+        let writer = tokio::spawn(async move { rx.recv_wire_packed().await.is_some() });
+        tokio::time::sleep(LIMIT * 4).await;
+        stop.store(true, Ordering::Relaxed);
+        producer.join().expect("the producer thread");
+        writer.abort();
+        let calls = calls.lock().expect("hook calls").clone();
+        assert!(calls.len() >= 2, "the writer backed off and looked again");
+        for (n, call) in calls.iter().enumerate().skip(1) {
+            let at = call.duration_since(staged_at);
+            assert!(
+                at >= LIMIT,
+                "flush {n} came {at:?} after the first message, inside the bound"
+            );
         }
+        let second = calls[1].duration_since(staged_at);
         assert!(
-            held_for_the_bound,
-            "CONTROL: in {ATTEMPTS} attempts the probes never saw the producer moving, so the \
-             zero below would prove nothing"
+            second < LIMIT + Duration::from_millis(150),
+            "the second flush came {second:?} after the first message, long past the bound"
         );
-        for _ in 0..ATTEMPTS {
-            let (held, _) = held_while_a_producer_stages(0).await;
-            assert_eq!(held, Duration::ZERO, "a zero bound holds nothing back");
-        }
+        // Past the bound the writer does not look again for a held frame: a third call is the
+        // idle run it makes on any wake (the request's own notice, still stored), not a spin.
+        assert!(
+            calls.len() <= 3,
+            "{} flushes: past the bound the writer kept looking",
+            calls.len()
+        );
+    }
+
+    /// A bound of nothing holds nothing back: a writer whose flush finds a producer holding a
+    /// frame does not look again, as upstream's backoff with a zero threshold pulls at its first
+    /// look. The control is the test above, the same producer and hook under a bound of 50 ms.
+    #[tokio::test]
+    async fn a_zero_batching_bound_never_backs_off() {
+        let (tx, mut rx, calls) = shaped_with_hook(0, |_| IdleFlush::SenderHeld);
+        let (stop, producer) = staging_producer(&tx);
+        tx.wake_for_flush();
+        let writer = tokio::spawn(async move { rx.recv_wire_packed().await.is_some() });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        stop.store(true, Ordering::Relaxed);
+        producer.join().expect("the producer thread");
+        writer.abort();
+        assert_eq!(calls.lock().expect("hook calls").len(), 1);
+    }
+
+    /// A flush that found no producer holding a frame leaves at once, whatever the bound and
+    /// however fast the producers stage: the writer holds back only for a producer caught in the
+    /// middle of adding, which is upstream's rule, and never for the count moving.
+    #[tokio::test]
+    async fn a_flush_that_found_no_sender_holding_leaves_at_once_under_a_long_bound() {
+        let (tx, mut rx, calls) = shaped_with_hook(10_000_000, |_| IdleFlush::Drained);
+        let (stop, producer) = staging_producer(&tx);
+        tx.wake_for_flush();
+        let frame = tokio::time::timeout(Duration::from_secs(5), rx.recv_wire_packed())
+            .await
+            .expect("the flush left well inside the bound")
+            .expect("a frame");
+        stop.store(true, Ordering::Relaxed);
+        producer.join().expect("the producer thread");
+        assert_eq!(&*frame, b"flushed");
+        assert_eq!(calls.lock().expect("hook calls").len(), 1);
     }
 
     /// A queue that has not been shaped yet holds a stream back for the writer's own bound,
@@ -4574,6 +4659,7 @@ mod tests {
         let hook_tx = tx.clone();
         tx.set_idle_hook(Arc::new(move || {
             let _ = hook_tx.send(Priority::DEFAULT, b"frame".to_vec());
+            IdleFlush::Drained
         }));
         let in_a_minute = tx.shared.now_ns() + 60_000_000_000;
         tx.shared
@@ -4612,6 +4698,7 @@ mod tests {
         let hook_tx = tx.clone();
         tx.set_idle_hook(Arc::new(move || {
             let _ = hook_tx.send(Priority::DEFAULT, b"late".to_vec());
+            IdleFlush::Drained
         }));
         drop(rx);
 

@@ -11223,7 +11223,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 self.tx_conduits.leave_control_open();
             }
             // Whatever the outcome, not only a message staged: the writer's flush skips a
-            // conduit whose lock a sender holds ([`Self::flush_open_batch_nowait`]), and
+            // conduit whose lock a sender holds ([`Self::try_flush_open_batch`]), and
             // this sender, done with its conduit, is who tells it to come back. A send that
             // was dropped for congestion, or refused, has staged nothing, but may have
             // been holding the lock of a conduit with a frame still open.
@@ -11808,7 +11808,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// [`Self::flush_open_batch`] for the link's writer, which must never WAIT for a conduit's
-    /// lock: a conduit whose lock is held is skipped, and left open.
+    /// lock: a conduit whose lock is held is skipped, and left open. Answers whether every
+    /// conduit was taken and drained: `false` when a sender held one.
     ///
     /// A sender holds its conduit's lock across its wait for room on the link
     /// ([`PushDeadline`]: the wait is part of the congestion decision that precedes the
@@ -11819,17 +11820,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// because a sender that finds the writer owed a flush asks for one again when it is done
     /// with the conduit, whatever the outcome ([`Self::dispatch_network_message_at`]'s last
     /// step), and the writer then runs this again and finds the lock free.
-    #[cfg(feature = "transport-batching")]
-    fn flush_open_batch_nowait(&self) {
-        let _ = self.try_flush_open_batch();
-    }
-
-    /// [`Self::flush_open_batch_nowait`], answering whether every conduit was taken and drained.
-    /// `false` when a conduit's lock was held by a sender, which left that conduit as it was.
     ///
-    /// A probe needs the answer: a control message is a barrier for the data staged before it, so
-    /// a probe that could not drain every conduit may not go ahead, and is told to come back
-    /// (see [`DispatchStage::Probe`]).
+    /// Two callers need the answer. The writer's flush ([`Self::flush_staged`]) hands it on:
+    /// a sender holding a conduit is a producer still adding, which is when the writer backs
+    /// off. And a probe: a control message is a barrier for the data staged before it, so a
+    /// probe that could not drain every conduit may not go ahead, and is told to come back (see
+    /// [`DispatchStage::Probe`]).
     #[cfg(feature = "transport-batching")]
     fn try_flush_open_batch(&self) -> bool {
         self.drain_conduits(|_| true, false)
@@ -11861,7 +11857,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// Send the frame open in one conduit, under that conduit's lock (`batch`): the body of
-    /// the walks of [`Self::flush_open_batch`] and [`Self::flush_open_batch_nowait`].
+    /// the walks of [`Self::flush_open_batch`] and [`Self::try_flush_open_batch`].
     #[cfg(feature = "transport-batching")]
     fn flush_conduit(&self, idx: usize, priority: Priority, batch: &mut BatchTx) {
         // Lowered before the frame is taken, under the lock that keeps a control message from
@@ -11993,13 +11989,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// leaves when it overflows, when an express message or a keepalive goes out, or when the
     /// caller flushes or stops it. Draining it here sent each message as soon as the writer
     /// fell idle, so a caller's batch never held more than one burst.
-    pub fn flush_staged(&self) {
+    ///
+    /// Answers [`crate::link::IdleFlush::SenderHeld`] when a sender held a conduit's lock, which
+    /// left that conduit's frame open: the writer backs off for the batching time limit then,
+    /// as upstream's does when it cannot take its batch's lock.
+    pub fn flush_staged(&self) -> crate::link::IdleFlush {
         // The writer calls this, and a writer must not wait for a conduit's lock: see
-        // [`Self::flush_open_batch_nowait`].
+        // [`Self::try_flush_open_batch`].
         #[cfg(feature = "transport-batching")]
-        if !self.tx_conduits.caller_window_open() {
-            self.flush_open_batch_nowait();
+        if !self.tx_conduits.caller_window_open() && !self.try_flush_open_batch() {
+            return crate::link::IdleFlush::SenderHeld;
         }
+        crate::link::IdleFlush::Drained
     }
 
     /// R311jq — typed chokepoint entries: each hands its per-type body
