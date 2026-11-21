@@ -235,6 +235,9 @@ pub struct LinkRxConf {
     pub max_message_size: usize,
     /// How a link over a TCP connection sizes its MTU.
     pub tcp_mtu: TcpLinkMtu,
+    /// What an opening session does with an InitAck that names a larger batch
+    /// than its InitSyn advertised.
+    pub wider_init_ack_batch: WiderInitAckBatch,
 }
 
 /// Upstream's default `transport/link/rx/buffer_size`, one batch of the
@@ -247,9 +250,12 @@ impl Default for LinkRxConf {
             buffer_size: RX_BUFFER_SIZE,
             max_message_size: RX_MAX_MESSAGE_SIZE,
             tcp_mtu: TcpLinkMtu::HalfMssMultiple,
+            wider_init_ack_batch: WiderInitAckBatch::Adopt,
         }
     }
 }
+
+pub use crate::peer_init_caps::WiderInitAckBatch;
 
 /// How a link over a TCP connection sizes its MTU: the two rules wz's presets
 /// differ by.

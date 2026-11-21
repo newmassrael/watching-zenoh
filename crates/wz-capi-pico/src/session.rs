@@ -143,11 +143,14 @@ const fn pico_batch(bytes: usize) -> u16 {
 /// (`vendor/zenoh-pico/src/transport/unicast/transport.c` @ `ztu->_common._zbuf = _z_zbuf_make(zbuf_size);`).
 ///
 /// A link over TCP is as wide as pico's, the widest batch whatever the connection
-/// ([`TcpLinkMtu::Widest`](wz_session_core::session_init_params::TcpLinkMtu::Widest)).
+/// ([`TcpLinkMtu::Widest`](wz_session_core::session_init_params::TcpLinkMtu::Widest)), and an
+/// opening session refuses an InitAck that names a larger batch than it offered, as pico does
+/// ([`WiderInitAckBatch::Refuse`](wz_session_core::session_init_params::WiderInitAckBatch::Refuse)).
 const PICO_LINK_RX: LinkRxConf = LinkRxConf {
     buffer_size: wz_session_core::session_init_params::RX_BUFFER_SIZE,
     max_message_size: wz_session_core::caps::PICO_FRAG_MAX_BYTES,
     tcp_mtu: wz_session_core::session_init_params::TcpLinkMtu::Widest,
+    wider_init_ack_batch: wz_session_core::session_init_params::WiderInitAckBatch::Refuse,
 };
 
 /// How long a listening session of this ABI gives an inbound link, pico's

@@ -257,7 +257,9 @@ pub use wz_session_core::session_init_params::SessionInitParams;
 /// caller that fills one from its own input and reports the refusal in its own words.
 pub use wz_session_core::session_init_params::TxQueueConfError;
 /// R2924 — the outbound queue configuration a [`SessionInitParams`] carries.
-pub use wz_session_core::session_init_params::{KeepAliveConf, LinkRxConf, TxQueueConf};
+pub use wz_session_core::session_init_params::{
+    KeepAliveConf, LinkRxConf, TxQueueConf, WiderInitAckBatch,
+};
 /// The type of [`SessionInitParams::zid`], named where the bundle is.
 pub use wz_session_core::session_zid::{SessionZid, ZidError};
 // Re-exported alongside `SessionInitParams` so a caller naming the param
@@ -7680,13 +7682,14 @@ mod init_advertisement_tests {
     /// (`io/zenoh-transport/src/unicast/establishment/open.rs` @
     /// `.min(link_unicast.config.batch.mtu)`): a node
     /// configured for 1024 whose link takes 256 says 256 in its InitSyn and its
-    /// InitAck, refuses an InitAck that enlarges the 256 it sent, and sends to
-    /// the same 256. Before the cap the InitSyn said 1024 and a peer that
+    /// InitAck, refuses (under zenoh-pico's rule) an InitAck that enlarges the 256
+    /// it sent, and sends to the same 256. Before the cap the InitSyn said 1024 and a peer that
     /// believed it sent batches the node could not receive.
     #[test]
     fn the_advertised_batch_is_capped_by_what_the_link_receives() {
         use super::{
             new_session_actions, BoxedLinkDriver, ExtChainRole, LinkSendOutcome, PeerInitCaps,
+            WiderInitAckBatch,
         };
         use crate::runtime_impl::TokioTime;
         use crate::Reliability;
@@ -7707,6 +7710,9 @@ mod init_advertisement_tests {
 
         let mut params = fixture_session_init_params();
         params.batch_size = 1024;
+        // zenoh-pico's rule, under which a wider InitAck batch is refused, so the last two
+        // assertions read which size the refusal is measured against.
+        params.link_rx.wider_init_ack_batch = WiderInitAckBatch::Refuse;
         let actions = new_session_actions(Arc::new(SmallSlots), params, TokioTime::new());
         let advertised = |is_ack: bool, role: ExtChainRole| {
             let wire = actions
