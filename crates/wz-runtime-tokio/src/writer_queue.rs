@@ -672,8 +672,8 @@ struct Backoff {
 }
 
 impl Backoff {
-    /// Whether the writer, backing off, holds the open frames back for now: `true` after it
-    /// waited, for a frame to land or for the rest of the batching time limit, and then it
+    /// Whether the writer, backing off, holds the open frames back at this look: `true` after
+    /// it waited, for a frame to land or for the rest of the batching time limit, and then it
     /// looks again; `false` when it is to flush them now.
     ///
     /// Upstream's backoff (`io/zenoh-transport/src/common/pipeline.rs` @ `fn try_pull_deep(`):
