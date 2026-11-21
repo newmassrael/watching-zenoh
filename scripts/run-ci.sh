@@ -14650,7 +14650,8 @@ layer_c1m_session_lwip() {
     # a full table refused, counted, its group socket given back) and run as a task of
     # a static runtime: 3 = what that command PRINTED.
     wz_test_args wz-session-lwip multicast_slot
-    _runci_guarded_test "C1m multicast slot" 3 \
+    # 3 -> 4 (2026-11-22, printed by the command on a build host): the runtime-config 4b slot work added a case to tests/multicast_slot.rs.
+    _runci_guarded_test "C1m multicast slot" 4 \
         cargo test -p wz-session-lwip \
         --features transport-multicast,codec-push,codec-response-final,session-slot,static-link-storage \
         "${WZ_TEST_ARGS[@]}" --quiet || return 1

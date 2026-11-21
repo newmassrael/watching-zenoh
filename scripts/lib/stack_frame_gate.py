@@ -226,6 +226,11 @@ IMAGES = (
     # rule instead of `write!` into fixed text: `core::fmt` writes through a register, which the
     # reader does not follow, and the rule's text writer is direct calls, so the chain now reaches
     # a path it could not see before. The kit's reading was not taken again.
+    #
+    # 12,616 bytes over the same 15 frames on hosted run 44895098050 (`c72460b30`) and on a build
+    # host at the runtime-config 4b integration tree: `start` is 5,584, and the rest of the chain
+    # is the frames above. The commits between `581714684` and `c72460b30` were not bisected (no
+    # hosted run reached Qzb between them). The kit's reading was not taken again.
     Image(
         key="zephyr-fixed",
         elf=None,
@@ -233,7 +238,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=13512,
+        peak=12616,
     ),
     # The same node over `tcp/` (`overlays/t2g_tcp.conf` after `overlays/t2g_fixed.conf`, the node of
     # `fixed_tcp.rs`): the stack is the fixed-memory overlay's, which the TCP overlay does not state
@@ -255,6 +260,12 @@ IMAGES = (
     # 2026-11-16 (not bisected: no hosted run reached Qzb between them) and the 40 `start` gave
     # back are this window's. The chain is now over the kit's reading of 2026-11-05 (13,240),
     # which was not taken again, so the resource budget's row no longer carries `chain_misses`.
+    #
+    # 12,032 bytes over the same 6 frames on hosted run 44895098050 (`c72460b30`) and on a build
+    # host at the runtime-config 4b integration tree: `wz_app_main` 3,872, `fixed_tcp::start` 5,056
+    # (6,416), the observer's install and the canonizer as before. The commits since `65ec9acd16`
+    # were not bisected. The chain is under the kit's reading of 2026-11-05 (13,240) again, so the
+    # resource budget's row carries `chain_misses` again.
     Image(
         key="zephyr-fixed-tcp",
         elf=None,
@@ -262,7 +273,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=13416,
+        peak=12032,
     ),
     # The Zephyr CLIENT on the fixed-memory profile: the same rule, over the overlay of its own.
     # Its `run` is inlined into the board's `wz_app_main`, which is the thread's entry symbol.
