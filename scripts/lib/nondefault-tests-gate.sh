@@ -1807,6 +1807,13 @@ a memory leg of Layer S, run by it with --ignored on each engine (8 passed guard
 a memory leg of Layer S, run by it with --ignored on each engine (8 passed guarded); this table never passes --ignored"
     "wz-capi-pico|gets_between_open_sessions_are_counted_for_their_allocations|\
 a memory leg of Layer S, run by it with --ignored on each engine (8 passed guarded); this table never passes --ignored"
+    # The conformance corpus's arm for the codecs SCE generates from its layouts
+    # (`wz-app-frame`'s `fixed_records_tests`, behind `sce-generated-codec`): it fails naming each
+    # layout whose generated codec the test module does not list, and it lists none until a build
+    # links them, so no leg of this table runs it. The corpus itself runs in the crate's default
+    # build, through the hand-written builder and opener.
+    "wz-app-frame|fixed_records_tests::generated_codec_matches_the_corpus|\
+the arm of generated codecs, which fails until each layout's codec is listed; the default build runs the corpus"
 )
 
 if [[ ${#LEGS[@]} -eq 0 ]]; then

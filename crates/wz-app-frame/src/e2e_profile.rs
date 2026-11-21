@@ -52,7 +52,9 @@
 //!   value, `lsb` counting from the least significant bit. On BUILD the parts
 //!   are OR-ed at their `lsb`, then XORed with `xor`, then written; on OPEN the
 //!   field is read, XORed, then split. The order matters and is the whole
-//!   point of keeping the two apart.
+//!   point of keeping the two apart. A bit no part owns is written as the
+//!   `xor`'s bit and read by nothing: no part holds it, and a receiver judges
+//!   a split identifier in the bits its parts own ([`Field::owned_bits`]).
 //! * `crc.cover` is the FEEDING ORDER: field names, and `"@payload"` for the
 //!   body. The CRC field itself is never covered, and there is no zero-fill
 //!   step. Each covered field is fed as it stands ON THE WIRE (after `xor`), big
@@ -273,6 +275,19 @@ impl Field {
     /// The largest value the field holds.
     pub fn max_value(&self) -> u64 {
         width_mask((self.bytes * 8) as u8)
+    }
+
+    /// The bits of the logical value that mean something: every bit of a plain
+    /// field, and the bits the parts own of a split one. A sender writes the
+    /// others as the `xor` gives them and another sender may write them
+    /// otherwise, so nothing that judges the field reads them.
+    pub fn owned_bits(&self) -> u64 {
+        if self.parts.is_empty() {
+            return self.max_value();
+        }
+        self.parts
+            .iter()
+            .fold(0, |owned, part| owned | (part.max_value() << part.lsb))
     }
 }
 

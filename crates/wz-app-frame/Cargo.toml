@@ -67,6 +67,12 @@ fixtures = ["alloc"]
 # frames they cut. The replay cache's subscriber turns it on; off, a receiver keeps no CRC.
 replay = ["alloc"]
 
+# `generated_codec_matches_the_corpus` (`src/fixed_records_tests.rs`): the conformance corpus of
+# the fixed records of a protected frame (`conformance/`) run through the codecs SCE generates from
+# its layouts, each listed there as a build links it. Off, every build runs the corpus through the
+# hand-written builder and opener alone; on with a layout's codec unlisted, the arm fails naming it.
+sce-generated-codec = ["alloc"]
+
 [dependencies]
 wz-session-core = { path = "../wz-session-core", default-features = false, optional = true }
 
