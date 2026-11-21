@@ -2597,6 +2597,65 @@ mod build_numbers {
         );
     }
 
+    /// The row of the report named `part`.
+    #[cfg(feature = "session-memory")]
+    fn memory_row(
+        memory: &wz_session_core::session_memory::SessionMemory,
+        part: &core::ffi::CStr,
+    ) -> wz_session_core::session_memory::MemoryRow {
+        *memory
+            .rows()
+            .iter()
+            .find(|row| row.part == part)
+            .expect("the report has the part")
+    }
+
+    /// `PICO_UNICAST_BATCH_BYTES` stated: the report of a session's memory counts each link's
+    /// queued batches at the stated size, as many as the queue the open builds from the same
+    /// snapshot, and its tables for that snapshot.
+    #[cfg(feature = "session-memory")]
+    #[test]
+    fn session_memory_counts_the_stated_unicast_batch() {
+        let value = another(caps::PICO_UNICAST_BATCH_BYTES);
+        stated(
+            |limits| limits.select_pico_unicast_batch_bytes(value),
+            |limits| {
+                let (tx_queue, _) = pico_link_policy(&SessionPolicy::defaults(), &limits);
+                let basis = memory_basis(None, &tx_queue, &limits);
+                assert_eq!(basis.limits, limits);
+                let queue = memory_row(&basis.report(), c"link transmit queues");
+                assert_eq!(queue.entry_bytes, value);
+                assert_eq!(queue.count, Some(tx_queue.sizes.iter().sum()));
+            },
+        );
+    }
+
+    /// `PICO_FRAG_MAX_BYTES` stated: the report counts each link's two reassemblies at the
+    /// stated size, and a snapshot that states no bound leaves the row without a count.
+    #[cfg(feature = "session-memory")]
+    #[test]
+    fn session_memory_counts_the_stated_reassembly() {
+        let tx_queue =
+            |limits: &SessionLimits| pico_link_policy(&SessionPolicy::defaults(), limits).0;
+        let value = another(caps::PICO_FRAG_MAX_BYTES);
+        stated(
+            |limits| limits.select_pico_frag_max_bytes(Quota::at_most(value)),
+            |limits| {
+                let memory = memory_basis(None, &tx_queue(&limits), &limits).report();
+                let reassembly = memory_row(&memory, c"link reassembly");
+                assert_eq!((reassembly.count, reassembly.entry_bytes), (Some(2), value));
+            },
+        );
+        stated(
+            |limits| limits.select_pico_frag_max_bytes(Quota::UNBOUNDED),
+            |limits| {
+                let memory = memory_basis(None, &tx_queue(&limits), &limits).report();
+                assert_eq!(memory_row(&memory, c"link reassembly").count, None);
+                assert_eq!(memory.total(), None);
+            },
+        );
+    }
+
     /// `PICO_MULTICAST_BATCH_BYTES` with nothing stated: a group's Join states the build's batch
     /// size.
     #[cfg(feature = "multicast-transport")]

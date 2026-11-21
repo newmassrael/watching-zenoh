@@ -8,7 +8,9 @@
 //! when every row is; the rows of the tables are the session core's for the limits the session
 //! opened under, entry for entry; a session that dials holds one link, whose queue, buffer and
 //! reassembly are the numbers its open handed the engine; a listener's links are bounded as its
-//! engine bounds them; a row past the last and the null arguments are refused by name.
+//! engine bounds them; a row past the last and the null arguments are refused by name. With the
+//! document door, a session opened with a document that lowers the batch size reports its link's
+//! queue at the lowered size, as its snapshot holds it, and not at the build's.
 
 #![cfg(all(feature = "session-memory", feature = "peer"))]
 
@@ -235,4 +237,90 @@ fn a_row_past_the_last_and_null_arguments_are_refused() {
             Z_ERR_NULL
         );
     });
+}
+
+/// A batch size no deployment states: under the build's, so the lowered report is told apart.
+#[cfg(feature = "config-document")]
+const LOWERED_BATCH_BYTES: usize = 1031;
+
+/// A session opened with a document that lowers `PICO_UNICAST_BATCH_BYTES` reports its link's
+/// queue at the lowered size, as the snapshot its open resolved holds it; the rest of the report
+/// is the build's, and the total is still the sum of the rows. A build whose domain keeps the
+/// batch size to its own value refuses the document at the door, by name.
+#[cfg(feature = "config-document")]
+#[test]
+fn a_document_that_lowers_the_batch_size_is_the_batch_the_report_counts() {
+    use wz_capi_pico::config_policy::wz_ext_config_document;
+    use wz_capi_pico::result::Z_ERR_CONFIG_INVALID_VALUE;
+    use wz_capi_pico::z_config_drop;
+
+    let mut lowered = SessionLimits::defaults();
+    let selectable = lowered
+        .select_pico_unicast_batch_bytes(LOWERED_BATCH_BYTES)
+        .is_ok();
+    unsafe {
+        let port = free_port();
+        let mut listener = open_role(port, Z_CONFIG_LISTEN_KEY);
+        let endpoint = CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
+        let document = CString::new(format!(
+            "{{ wz: {{ limits: {{ PICO_UNICAST_BATCH_BYTES: {LOWERED_BATCH_BYTES} }} }} }}"
+        ))
+        .unwrap();
+        let mut cfg: z_owned_config_t = std::mem::zeroed();
+        assert_eq!(z_config_default(&mut cfg), Z_OK);
+        assert_eq!(
+            zp_config_insert(
+                z_config_loan_mut(&mut cfg),
+                Z_CONFIG_CONNECT_KEY,
+                endpoint.as_ptr()
+            ),
+            Z_OK
+        );
+        let stated = wz_ext_config_document(z_config_loan_mut(&mut cfg), document.as_ptr());
+        if !selectable {
+            assert_eq!(stated, Z_ERR_CONFIG_INVALID_VALUE);
+            z_config_drop(z_config_move(&mut cfg));
+            z_session_drop(z_session_move(&mut listener));
+            return;
+        }
+        assert_eq!(stated, Z_OK);
+        let mut dialer = open_config(cfg);
+        let (_, at_build) = report(z_session_loan(&listener));
+        let (summary, rows) = report(z_session_loan(&dialer));
+
+        let queue = row(&rows, "link transmit queues");
+        assert_eq!(
+            (queue.door.bounded, queue.door.count, queue.door.entry_bytes),
+            (1, queued_batches(&lowered), LOWERED_BATCH_BYTES)
+        );
+        assert_eq!(
+            queue.door.total_bytes,
+            queued_batches(&lowered) * LOWERED_BATCH_BYTES
+        );
+        // The tables are the session core's rows for the lowered snapshot, which states no table
+        // other than the build does.
+        let tables = session_tables(&lowered, &Captures::default());
+        for (door, core) in rows.iter().zip(tables.rows()) {
+            assert_eq!(door.door.entry_bytes, core.entry_bytes, "{door:?}");
+        }
+        // The listener, opened with no document, still counts its queues at the build's size.
+        assert_eq!(
+            row(&at_build, "link transmit queues").door.entry_bytes,
+            SessionLimits::defaults().pico_unicast_batch_bytes()
+        );
+
+        let sum: usize = rows
+            .iter()
+            .filter(|row| row.door.bounded == 1)
+            .map(|row| row.door.total_bytes)
+            .sum();
+        assert_eq!(summary.total_bytes, sum);
+        assert_eq!(
+            summary.bounded,
+            u8::from(rows.iter().all(|row| row.door.bounded == 1))
+        );
+
+        z_session_drop(z_session_move(&mut dialer));
+        z_session_drop(z_session_move(&mut listener));
+    }
 }
