@@ -2525,6 +2525,115 @@ zenoh = "none"
 reason = "No key of upstream's configuration bounds the key expressions a session declares, and zenoh-pico has no constant for them; the default is one key for each entity the other defaults admit (16 subscribers, 16 queryables, 8 tokens, 8 liveliness subscribers, 16 publishers, 16 queriers)."
 
 [[limit]]
+id = "HELD_SESSIONS"
+kconfig = "WZ_LIMIT_HELD_SESSIONS"
+kind = "bound"
+driven = "local"
+default = 4
+storage = "capacity"
+scope = "runtime"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The sessions a program of the pico C ABI holds open at once: the slots of
+the pool of sessions the library reserves at its first object when the
+program reserved none (object-pool). One more is refused at its open.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the sessions a program opens, and zenoh-pico allocates each on the heap with no constant; four lets a program hold a session per role it plays (a client, a peer, a test's two ends) with room left."
+
+[[limit]]
+id = "HELD_SAMPLES"
+kconfig = "WZ_LIMIT_HELD_SAMPLES"
+kind = "bound"
+driven = "local"
+default = 16
+storage = "capacity"
+scope = "runtime"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The owned samples a program of the pico C ABI holds at once (taken out of
+a callback, cloned, or held in a channel): the slots of the pool of samples
+the library reserves at its first object when the program reserved none
+(object-pool). One more is refused, its source untouched.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the samples a program holds, and zenoh-pico allocates each on the heap with no constant; sixteen is MAX_SUBSCRIPTIONS's default, one held sample for each subscriber of a session."
+
+[[limit]]
+id = "HELD_REPLIES"
+kconfig = "WZ_LIMIT_HELD_REPLIES"
+kind = "bound"
+driven = "local"
+default = 16
+storage = "capacity"
+scope = "runtime"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The owned replies and reply errors a program of the pico C ABI holds at
+once: the slots of the pool of replies the library reserves at its first
+object when the program reserved none (object-pool). One more is refused,
+its source untouched.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the replies a program holds, and zenoh-pico allocates each on the heap with no constant; sixteen is MAX_PENDING_QUERIES's default, one held reply for each get a session holds pending."
+
+[[limit]]
+id = "HELD_QUERIES"
+kconfig = "WZ_LIMIT_HELD_QUERIES"
+kind = "bound"
+driven = "local"
+default = 8
+storage = "capacity"
+scope = "runtime"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The owned queries a program of the pico C ABI holds at once, each keeping
+its query's answer open: the slots of the pool of queries the library
+reserves at its first object when the program reserved none (object-pool).
+One more is refused, its source untouched.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the queries a program keeps, and zenoh-pico allocates each on the heap with no constant; eight is MAX_PENDING_FINALS's default, the queries a session holds for its callbacks at once."
+
+[[limit]]
+id = "HELD_PAYLOADS"
+kconfig = "WZ_LIMIT_HELD_PAYLOADS"
+kind = "bound"
+driven = "local"
+default = 32
+storage = "capacity"
+scope = "runtime"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The owned payloads (z_owned_bytes_t) a program of the pico C ABI holds at
+once: the slots of the pool of payloads the library reserves at its first
+object when the program reserved none (object-pool). A constructor past it
+answers out of memory and leaves its payload null.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the payloads a program holds, and zenoh-pico allocates each on the heap with no constant; thirty-two is one payload for each held sample and held reply of the other defaults."
+
+[[limit]]
 id = "MAX_PENDING_LIVELINESS_GETS"
 kconfig = "WZ_LIMIT_MAX_PENDING_LIVELINESS_GETS"
 kind = "bound"

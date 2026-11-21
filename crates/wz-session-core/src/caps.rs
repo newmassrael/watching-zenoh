@@ -226,6 +226,26 @@ pub const MAX_MATCHING_LISTENERS: usize = generated::MAX_MATCHING_LISTENERS;
 /// entity that names it). A declaration of one more distinct key is refused, having sent nothing.
 pub const MAX_DECLARED_KEYEXPRS: usize = generated::MAX_DECLARED_KEYEXPRS;
 
+/// The sessions a program holds through the C ABI open at once: the slots of the process's pool of
+/// sessions, reserved at the library's first object when the program reserved none.
+pub const HELD_SESSIONS: usize = generated::HELD_SESSIONS;
+
+/// The owned samples a program holds through the C ABI at once: the slots of the process's pool of
+/// samples, reserved as [`HELD_SESSIONS`]'s is.
+pub const HELD_SAMPLES: usize = generated::HELD_SAMPLES;
+
+/// The owned replies and reply errors a program holds through the C ABI at once: the slots of the
+/// process's pool of replies, reserved as [`HELD_SESSIONS`]'s is.
+pub const HELD_REPLIES: usize = generated::HELD_REPLIES;
+
+/// The owned queries a program holds through the C ABI at once: the slots of the process's pool of
+/// queries, reserved as [`HELD_SESSIONS`]'s is.
+pub const HELD_QUERIES: usize = generated::HELD_QUERIES;
+
+/// The owned payloads a program holds through the C ABI at once: the slots of the process's pool of
+/// payloads, reserved as [`HELD_SESSIONS`]'s is.
+pub const HELD_PAYLOADS: usize = generated::HELD_PAYLOADS;
+
 /// Maximum number of concurrently-outstanding pending liveliness GET
 /// (snapshot) queries in a
 /// [`crate::declare::liveliness_get::LivelinessGetRegistry`]. Bounds the
