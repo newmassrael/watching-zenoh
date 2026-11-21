@@ -240,9 +240,9 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     ///
     /// `peer` is the sending peer's side: whose aliases the keyexpr resolves
     /// through and whose zid names a self-echo.
-    pub(super) fn dispatch_in_place(
+    pub(super) fn dispatch_in_place<Q: Storage>(
         &mut self,
-        peer: &SubscriberPeer<P>,
+        peer: &SubscriberPeer<Q>,
         record: &InPlaceRecord<'_, '_>,
     ) {
         // A lent Request or Response is the queryables' or the pending gets'.
@@ -275,9 +275,9 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
 
     /// The lent delivery itself: nothing on the heap for a Put whose keyexpr
     /// fits, short of a timestamp or encoding hint a subscriber asks for.
-    fn deliver_lent(
+    fn deliver_lent<Q: Storage>(
         &mut self,
-        peer: &SubscriberPeer<P>,
+        peer: &SubscriberPeer<Q>,
         push: &Push<'_>,
         reliability: Reliability,
     ) -> Result<(), Fallback> {
@@ -354,9 +354,9 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     /// copying receive takes ([`Self::dispatch_push`]), so a Put the lent form
     /// cannot represent is delivered exactly as it always was.
     #[cfg(feature = "alloc")]
-    fn dispatch_owned_projection(
+    fn dispatch_owned_projection<Q: Storage>(
         &mut self,
-        peer: &SubscriberPeer<P>,
+        peer: &SubscriberPeer<Q>,
         push: &Push<'_>,
         reliability: Reliability,
     ) {
@@ -380,9 +380,9 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     ///
     /// A key the peer never declared (or the empty key) is dropped, as the owned path
     /// drops it, and one record's key never affects another's.
-    pub(super) fn dispatch_plain_puts(
+    pub(super) fn dispatch_plain_puts<Q: Storage>(
         &mut self,
-        peer: &SubscriberPeer<P>,
+        peer: &SubscriberPeer<Q>,
         reliable: bool,
         frame: &crate::link::RxBytes,
         puts: &[crate::plain_push::PlainPut],

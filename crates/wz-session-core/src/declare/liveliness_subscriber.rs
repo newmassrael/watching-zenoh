@@ -87,7 +87,9 @@ use crate::transport_profile::owned::DeclareOwnedVariant;
 ))]
 use wz_codecs::lent::DeclareVariant;
 
-use crate::bounded::{BoundedString, BoundedVec, Profile, Static, Storage};
+use crate::bounded::{
+    Arena, BoundedString, BoundedVec, LendRefused, Lent, Profile, Static, Storage,
+};
 use crate::caps;
 #[cfg(feature = "alloc")]
 use crate::driver_loop::DriverLoopOutcome;
@@ -604,6 +606,18 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberTable<C, Profile> {
     }
 }
 
+impl<C: LivelinessSampleSink> LivelinessSubscriberTable<C, Lent> {
+    /// An empty table whose subscribers are `rows` rows lent from `arena`, at most
+    /// `MAX_LIVELINESS_SUBSCRIPTIONS`: a session's, at its open. Refused, taking nothing, past
+    /// that ceiling or past what the arena has left.
+    pub fn lent(arena: &mut Arena, rows: usize) -> Result<Self, LendRefused> {
+        Ok(Self {
+            slots: arena.lend(rows)?,
+            ..Self::default()
+        })
+    }
+}
+
 impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
     /// The bytes one liveliness subscriber takes in the table's storage: its pattern's text with
     /// it where the storage policy keeps the text in the row, and its sink as the table holds it.
@@ -656,9 +670,9 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
     ///
     /// S9a — `peer` is the registering session's peer side: a history subscriber
     /// is replayed the tokens THAT peer holds.
-    pub fn register(
+    pub fn register<Q: Storage>(
         &mut self,
-        peer: &PeerTokens<P>,
+        peer: &PeerTokens<Q>,
         interest_id: u64,
         keyexpr: &str,
         history: bool,
@@ -804,9 +818,9 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
     /// the two share one body, the way `dispatch_messages` shares
     /// [`dispatch_messages_unclaimed`](Self::dispatch_messages_unclaimed)'s.
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-    pub fn dispatch_declare<'a>(
+    pub fn dispatch_declare<'a, Q: Storage>(
         &mut self,
-        peer: &mut PeerTokens<P>,
+        peer: &mut PeerTokens<Q>,
         body: &DeclareOwnedVariant,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
@@ -841,9 +855,9 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
     /// rather than pico: the two disagree, and this gate is the side that keeps
     /// `history = false` truthful.
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-    pub fn dispatch_declare_historical<'a>(
+    pub fn dispatch_declare_historical<'a, Q: Storage>(
         &mut self,
-        peer: &mut PeerTokens<P>,
+        peer: &mut PeerTokens<Q>,
         body: &DeclareOwnedVariant,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         historical: bool,
@@ -895,9 +909,9 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
         feature = "storage-profile",
         feature = "session-slot"
     ))]
-    pub fn dispatch_declare_view_historical<'a, 'f>(
+    pub fn dispatch_declare_view_historical<'a, 'f, Q: Storage>(
         &mut self,
-        peer: &mut PeerTokens<P>,
+        peer: &mut PeerTokens<Q>,
         body: &DeclareVariant<'f>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         historical: bool,
@@ -937,9 +951,9 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
     /// What a declared peer token does once its keyexpr is resolved, whichever
     /// form carried the declaration: bind it and fan a `Put` to the matching slots.
     #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
-    fn apply_token_declared(
+    fn apply_token_declared<Q: Storage>(
         &mut self,
-        peer: &mut PeerTokens<P>,
+        peer: &mut PeerTokens<Q>,
         id: u64,
         resolved: &str,
         historical: bool,
@@ -984,7 +998,8 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
         // is REFUSED and counted, and is not announced to the subscribers:
         // what they are told is what the table holds, so a later
         // `UndeclToken` can name it.
-        let Ok(text) = key_text_within::<P>(resolved, peer.key_quota) else {
+        // Of the peer's own policy: the row it is kept in is that peer's table's.
+        let Ok(text) = key_text_within::<Q>(resolved, peer.key_quota) else {
             peer.oversize = peer.oversize.saturating_add(1);
             return;
         };
@@ -1010,9 +1025,9 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
     /// keyexpr the table held for the id or, for an id it never held, the one the
     /// retraction carries.
     #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
-    fn apply_token_undeclared<'k, E: crate::ext_view::ExtEntryView>(
+    fn apply_token_undeclared<'k, E: crate::ext_view::ExtEntryView, Q: Storage>(
         &mut self,
-        peer: &mut PeerTokens<P>,
+        peer: &mut PeerTokens<Q>,
         id: u64,
         exts: Option<&'k [E]>,
         peer_keyexpr_table: MappingSpaces<'k>,
@@ -1131,7 +1146,10 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
     /// iterated while a sink runs" property are the ones a drain-then-sort gave,
     /// and nothing is collected, so a link loss allocates nothing on the fixed
     /// backing. `peer` is the session whose link was lost.
-    pub fn flush_peer_tokens_on_link_loss(&mut self, peer: &mut PeerTokens<P>) -> usize {
+    pub fn flush_peer_tokens_on_link_loss<Q: Storage>(
+        &mut self,
+        peer: &mut PeerTokens<Q>,
+    ) -> usize {
         #[cfg(feature = "storage-profile")]
         {
             let mut flushed = 0usize;
@@ -1203,7 +1221,11 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
     /// same shape as the sibling flush): `peer_token_table` is the wire-side
     /// resolution state and does not exist on the no-alloc control plane, so
     /// `0` is the honest answer there — nothing is known to replay.
-    pub fn replay_known_tokens(&mut self, peer: &PeerTokens<P>, interest_id: u64) -> usize {
+    pub fn replay_known_tokens<Q: Storage>(
+        &mut self,
+        peer: &PeerTokens<Q>,
+        interest_id: u64,
+    ) -> usize {
         #[cfg(feature = "storage-profile")]
         {
             let slots = &mut self.slots;
@@ -1320,9 +1342,9 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
     /// sends, so the snapshot-complete signal never fired on a real
     /// wz<->wz / wz<->pico exchange.)
     #[cfg(feature = "alloc")]
-    pub fn dispatch_messages<'a>(
+    pub fn dispatch_messages<'a, Q: Storage>(
         &mut self,
-        peer: &mut PeerTokens<P>,
+        peer: &mut PeerTokens<Q>,
         messages: &[NetworkMessage],
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
@@ -1349,9 +1371,9 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
     /// The two entry points share ONE body: `dispatch_messages` is this with a
     /// closure that claims nothing.
     #[cfg(feature = "alloc")]
-    pub fn dispatch_messages_unclaimed<'a>(
+    pub fn dispatch_messages_unclaimed<'a, Q: Storage>(
         &mut self,
-        peer: &mut PeerTokens<P>,
+        peer: &mut PeerTokens<Q>,
         messages: &[NetworkMessage],
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         claimed: &dyn Fn(u64) -> bool,
@@ -1451,9 +1473,9 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
     /// no-ops here (the liveliness signal path lives entirely in the
     /// `Declare` / `Interest` MIDs).
     #[cfg(feature = "storage-profile")]
-    pub fn dispatch_iteration_event<'a>(
+    pub fn dispatch_iteration_event<'a, Q: Storage>(
         &mut self,
-        peer: &mut PeerTokens<P>,
+        peer: &mut PeerTokens<Q>,
         event: IterationEvent<'_, '_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
@@ -1463,9 +1485,9 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
     /// [`Self::dispatch_iteration_event`] with the claim filter of
     /// [`Self::dispatch_messages_unclaimed`].
     #[cfg(feature = "storage-profile")]
-    pub fn dispatch_iteration_event_unclaimed<'a>(
+    pub fn dispatch_iteration_event_unclaimed<'a, Q: Storage>(
         &mut self,
-        peer: &mut PeerTokens<P>,
+        peer: &mut PeerTokens<Q>,
         event: IterationEvent<'_, '_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         claimed: &dyn Fn(u64) -> bool,

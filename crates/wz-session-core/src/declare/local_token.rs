@@ -70,7 +70,9 @@
 //! emits them through the sink. Wire ordering is preserved — every
 //! `DeclToken` precedes the terminating `DeclFinal`.
 
-use crate::bounded::{BoundedString, BoundedVec, CapacityFull, Profile, Storage};
+use crate::bounded::{
+    Arena, BoundedString, BoundedVec, CapacityFull, LendRefused, Lent, Profile, Storage,
+};
 use crate::caps;
 use crate::keyexpr_match::keyexpr_intersects;
 use crate::registry_error::RegisterError;
@@ -208,6 +210,18 @@ impl LocalTokenRegistry<Profile> {
     }
 }
 
+impl LocalTokenRegistry<Lent> {
+    /// An empty registry whose tokens are `rows` rows lent from `arena`, at most
+    /// `MAX_LOCAL_TOKENS`: a session's, at its open. Refused, taking nothing, past that ceiling
+    /// or past what the arena has left.
+    pub fn lent(arena: &mut Arena, rows: usize) -> Result<Self, LendRefused> {
+        Ok(Self {
+            tokens: arena.lend(rows)?,
+            ..Self::default()
+        })
+    }
+}
+
 impl<P: Storage> LocalTokenRegistry<P> {
     /// The bytes one held token takes in the table's storage: its key's text with it where the
     /// storage policy keeps the text in the row.
@@ -244,9 +258,9 @@ impl<P: Storage> LocalTokenRegistry<P> {
     /// its storage's capacity, where `admits` compares nothing, compiles each caller to the
     /// storage's check alone.
     #[inline(always)]
-    fn has_room(
+    fn has_room<Q: Storage>(
         &self,
-        pending: &BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }, P>,
+        pending: &BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }, Q>,
         count: usize,
     ) -> bool {
         pending.free_slots() >= count
@@ -337,11 +351,11 @@ impl<P: Storage> LocalTokenRegistry<P> {
     /// also bounded by the quota the creator stated
     /// ([`Self::limit_interest_replies_to`]); on the growable backing with no
     /// quota stated it is unbounded and this never refuses.
-    pub fn respond_to_interest_borrowed(
+    pub fn respond_to_interest_borrowed<Q: Storage>(
         &self,
         pattern: Option<&str>,
         interest_id: u64,
-        pending: &mut BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }, P>,
+        pending: &mut BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }, Q>,
     ) -> Result<usize, CapacityFull<()>> {
         let matching = self
             .tokens
@@ -396,11 +410,11 @@ impl<P: Storage> LocalTokenRegistry<P> {
     /// `Err` only when the staging refused the whole chain; see
     /// [`Self::respond_to_interest_borrowed`]. Every no-op above is `Ok`.
     #[cfg(feature = "alloc")]
-    pub fn respond_to_interest<'a>(
+    pub fn respond_to_interest<'a, Q: Storage>(
         &self,
         interest: &InterestOwned,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
-        pending: &mut BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }, P>,
+        pending: &mut BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }, Q>,
     ) -> Result<(), CapacityFull<()>> {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         if !interest.c() {
@@ -445,11 +459,11 @@ impl<P: Storage> LocalTokenRegistry<P> {
     /// answered with the terminating `Final` alone, as the subscriber side
     /// answers it.
     #[cfg(all(feature = "storage-profile", feature = "session-slot"))]
-    pub fn respond_to_interest_view<'a, 'f>(
+    pub fn respond_to_interest_view<'a, 'f, Q: Storage>(
         &self,
         interest: &wz_codecs::lent::Interest<'f>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
-        pending: &mut BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }, P>,
+        pending: &mut BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }, Q>,
     ) -> Result<(), CapacityFull<()>> {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         if !interest.c() {
@@ -498,11 +512,11 @@ impl<P: Storage> LocalTokenRegistry<P> {
     /// the fixed backing's bound meets the batching; a refused chain does not
     /// stop the frame, because the next Interest may need fewer slots.
     #[cfg(feature = "alloc")]
-    pub fn dispatch_messages<'a>(
+    pub fn dispatch_messages<'a, Q: Storage>(
         &self,
         messages: &[NetworkMessage],
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
-        pending: &mut BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }, P>,
+        pending: &mut BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }, Q>,
     ) -> usize {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         let mut refused = 0usize;
@@ -524,11 +538,11 @@ impl<P: Storage> LocalTokenRegistry<P> {
     /// no-ops. `alloc`-gated (consumes owned messages). Returns the refused
     /// chain count of [`Self::dispatch_messages`].
     #[cfg(feature = "storage-profile")]
-    pub fn dispatch_iteration_event<'a>(
+    pub fn dispatch_iteration_event<'a, Q: Storage>(
         &self,
         event: IterationEvent<'_, '_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
-        pending: &mut BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }, P>,
+        pending: &mut BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }, Q>,
     ) -> usize {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         match event {

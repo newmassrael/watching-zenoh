@@ -47,6 +47,7 @@ use crate::arena::{
 };
 use wz_session_core::bounded::{BoundedVec, Lent};
 use wz_session_core::caps;
+use wz_session_core::slot_observer::ObserverRows;
 
 // The operating system the engine runs on: its mutex, its threads and its sleep are `std`'s on a
 // host and the kernel's on an MCU (`docs/upstream-parity.md` section 5a, E1).
@@ -2552,6 +2553,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let live_subs = arena
             .lend(entities.liveliness_subscribers)
             .map_err(OpenError::Arena)?;
+        // The application's tables, lent from the rows the plan counts for them.
+        let registry = Registry::new(
+            &resolve_limits(&config),
+            arena.arena_mut(),
+            ObserverRows {
+                subscribers: entities.subscribers,
+                queryables: entities.queryables,
+                local_tokens: entities.tokens,
+                liveliness_subscribers: entities.liveliness_subscribers,
+            },
+        )
+        .map_err(|lend| OpenError::Arena(ArenaRefused::Lend(lend)))?;
         let runtime = CoopRuntime::new(clock.clone());
         let local = CoopLocalSet::new(&runtime);
         // The dial role's link, each port, each group and the clock's word: what a session waits on
@@ -2563,7 +2576,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             local,
             runtime,
             clock,
-            registry: Rc::new(RefCell::new(Registry::new(&resolve_limits(&config)))),
+            registry: Rc::new(RefCell::new(registry)),
             faces: vec![Face {
                 id: DIAL_FACE,
                 link: Link::Waiting { at_us: u64::MAX },

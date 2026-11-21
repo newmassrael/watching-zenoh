@@ -98,7 +98,7 @@ use alloc::string::String;
 // a subset no lane built until Layer C1bj. Fully qualifying removes the
 // coupling rather than restating it in a longer cfg.
 
-use crate::bounded::{BoundedString, BoundedVec, Profile, Storage};
+use crate::bounded::{Arena, BoundedString, BoundedVec, LendRefused, Lent, Profile, Storage};
 // Not every build reads a held chain here: the arms that do are gated on the body codecs.
 use crate::caps;
 #[cfg(feature = "storage-profile")]
@@ -780,6 +780,18 @@ impl<C: SampleSink> SubscriberTable<C, Profile> {
     }
 }
 
+impl<C: SampleSink> SubscriberTable<C, Lent> {
+    /// An empty table whose subscriptions are `rows` rows lent from `arena`, at most
+    /// `MAX_SUBSCRIPTIONS`: a session's, at its open. Refused, taking nothing, past that ceiling
+    /// or past what the arena has left.
+    pub fn lent(arena: &mut Arena, rows: usize) -> Result<Self, LendRefused> {
+        Ok(Self {
+            subscribers: arena.lend(rows)?,
+            ..Self::default()
+        })
+    }
+}
+
 impl<C: SampleSink, P: Storage> Default for SubscriberTable<C, P> {
     fn default() -> Self {
         Self {
@@ -1248,9 +1260,9 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     /// aliases, its interests), passed in so one table serves many sessions; a
     /// [`SubscriberRegistry`] passes its own.
     #[cfg(feature = "storage-profile")]
-    pub fn dispatch_iteration_event(
+    pub fn dispatch_iteration_event<Q: Storage>(
         &mut self,
-        peer: &mut SubscriberPeer<P>,
+        peer: &mut SubscriberPeer<Q>,
         event: IterationEvent<'_, '_>,
     ) {
         match event {
@@ -1300,9 +1312,9 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     /// `respond_to_subscriber_interest_view`); a record of any other kind is another
     /// registry's.
     #[cfg(feature = "session-slot")]
-    fn dispatch_in_place_control(
+    fn dispatch_in_place_control<Q: Storage>(
         &mut self,
-        peer: &mut SubscriberPeer<P>,
+        peer: &mut SubscriberPeer<Q>,
         record: &crate::driver_loop::InPlaceRecord<'_, '_>,
     ) {
         #[cfg(feature = "codec-declare")]
@@ -1338,9 +1350,9 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     /// S9a — `peer` is the sending peer's side of the registry; see
     /// [`dispatch_iteration_event`](Self::dispatch_iteration_event).
     #[cfg(feature = "alloc")]
-    pub fn dispatch(
+    pub fn dispatch<Q: Storage>(
         &mut self,
-        peer: &mut SubscriberPeer<P>,
+        peer: &mut SubscriberPeer<Q>,
         message: &NetworkMessage,
         _reliability: Reliability,
     ) {
@@ -1399,9 +1411,9 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     /// [`KeyexprBuf`] holds cannot be remembered and is answered with its
     /// terminating `Final` alone, as an over-long one always was.
     #[cfg(all(feature = "alloc", feature = "declare-subscriber"))]
-    fn respond_to_subscriber_interest(
+    fn respond_to_subscriber_interest<Q: Storage>(
         &mut self,
-        peer: &mut SubscriberPeer<P>,
+        peer: &mut SubscriberPeer<Q>,
         interest: &InterestOwned,
     ) {
         let SubscriberPeer {
@@ -1451,9 +1463,9 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         feature = "declare-subscriber",
         feature = "session-slot"
     ))]
-    fn respond_to_subscriber_interest_view(
+    fn respond_to_subscriber_interest_view<Q: Storage>(
         &mut self,
-        peer: &mut SubscriberPeer<P>,
+        peer: &mut SubscriberPeer<Q>,
         interest: &wz_codecs::lent::Interest<'_>,
     ) {
         let SubscriberPeer {
@@ -1518,9 +1530,9 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     /// written and whose staging buffer is filled; the subscription table this
     /// answers from is `self`'s, and one table serves every peer.
     #[cfg(feature = "declare-subscriber")]
-    pub fn respond_to_subscriber_interest_borrowed(
+    pub fn respond_to_subscriber_interest_borrowed<Q: Storage>(
         &mut self,
-        peer: &mut SubscriberPeer<P>,
+        peer: &mut SubscriberPeer<Q>,
         interest_id: u64,
         pattern: Option<&str>,
         aggregate: bool,
@@ -1541,9 +1553,9 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     /// alone, so the owned entry can hold the keyexpr it resolved out of the
     /// peer's other half while it runs.
     #[cfg(feature = "declare-subscriber")]
-    fn respond_to_interest(
+    fn respond_to_interest<Q: Storage>(
         &mut self,
-        interests: &mut InterestSide<P>,
+        interests: &mut InterestSide<Q>,
         interest_id: u64,
         pattern: Option<&str>,
         aggregate: bool,
@@ -1566,7 +1578,8 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         {
             true
         } else {
-            let mut keyexpr = BoundedString::<{ caps::MAX_KEYEXPR_BYTES }, P>::default();
+            // Of the interest side's own policy: the row it is kept in is that side's.
+            let mut keyexpr = BoundedString::<{ caps::MAX_KEYEXPR_BYTES }, Q>::default();
             let text = pattern.unwrap_or("**");
             if !self.key_quota.admits(text.len()) || keyexpr.push_str(text).is_err() {
                 // A keyexpr past the bounded field cannot be replied with
@@ -1707,14 +1720,14 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     /// [`SubscriberPeer::reconcile`], which finds the same subscriptions by their
     /// ids instead of by being told.
     #[cfg(feature = "declare-subscriber")]
-    fn stage_future_subscriber_pushes(
+    fn stage_future_subscriber_pushes<Q: Storage>(
         &self,
-        interests: &mut InterestSide<P>,
+        interests: &mut InterestSide<Q>,
         new_id: SubscriptionId,
     ) {
         // Of the interest table's own policy: it holds every row the table can, so the loop
         // below stops only where the table itself would.
-        let mut hits: BoundedVec<(u64, bool), { caps::MAX_INBOUND_SUB_INTERESTS }, P> =
+        let mut hits: BoundedVec<(u64, bool), { caps::MAX_INBOUND_SUB_INTERESTS }, Q> =
             BoundedVec::default();
         {
             // The new subscription's pattern is read back out of the table
@@ -1773,9 +1786,9 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     /// them away. `an_unrelated_unregister_stages_no_aggregate_retraction` is
     /// the red that keeps this line honest; the wire tests are not.
     #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
-    fn stage_emptied_aggregate_retracts(&self, interests: &mut InterestSide<P>) {
+    fn stage_emptied_aggregate_retracts<Q: Storage>(&self, interests: &mut InterestSide<Q>) {
         // Of the interest table's own policy, as in `stage_future_subscriber_pushes`.
-        let mut hits: BoundedVec<u64, { caps::MAX_INBOUND_SUB_INTERESTS }, P> =
+        let mut hits: BoundedVec<u64, { caps::MAX_INBOUND_SUB_INTERESTS }, Q> =
             BoundedVec::default();
         for row in interests.rows.iter() {
             if row.aggregate
@@ -1807,9 +1820,9 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     /// than at stage time is what makes the pair idempotent — two staged
     /// retractions for one interest emit once.
     #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
-    pub fn take_aggregate_retract(
+    pub fn take_aggregate_retract<Q: Storage>(
         &self,
-        peer: &mut SubscriberPeer<P>,
+        peer: &mut SubscriberPeer<Q>,
         interest_id: u64,
     ) -> Option<u64> {
         let rows = &mut peer.interests.rows;
@@ -1866,9 +1879,9 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     /// peer's (`peer`); the subscription a `Concrete` resolves through is the
     /// table's.
     #[cfg(feature = "declare-subscriber")]
-    pub fn sub_interest_reply<'a>(
+    pub fn sub_interest_reply<'a, Q: Storage>(
         &'a self,
-        peer: &'a SubscriberPeer<P>,
+        peer: &'a SubscriberPeer<Q>,
         item: &SubInterestReply,
     ) -> Option<(u64, &'a str)> {
         match item {
@@ -1914,9 +1927,9 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     /// `is_remote = false` semantic).
     #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
     #[cfg(feature = "alloc")]
-    fn dispatch_push(
+    fn dispatch_push<Q: Storage>(
         &mut self,
-        peer: &SubscriberPeer<P>,
+        peer: &SubscriberPeer<Q>,
         push: &PushOwned,
         reliability: Reliability,
         is_remote: bool,
@@ -2419,7 +2432,11 @@ fn fire_by_selection<C: SampleSink, P: Storage>(
 /// `0` unless the image asks for the memory. Zero leaves the memory out, and every message is
 /// matched afresh.
 const fn memo_slots<P: Storage>(stated: usize) -> usize {
-    if P::ENFORCES_CAPACITY {
+    // A table whose rows are lent at open holds none: each slot is rows of its own (its key and
+    // its hits), which only the arena that lends the table could give it.
+    if P::LENT_AT_OPEN {
+        0
+    } else if P::ENFORCES_CAPACITY {
         caps::MATCH_MEMO_FIXED_SLOTS
     } else {
         stated
@@ -3533,7 +3550,7 @@ impl<P: Storage> SubscriberPeer<P> {
     ///
     /// A no-op when the table did not move. Staging that does not fit is counted
     /// and refused, as everywhere else.
-    pub fn reconcile<C: SampleSink>(&mut self, table: &SubscriberTable<C, P>) {
+    pub fn reconcile<C: SampleSink, R: Storage>(&mut self, table: &SubscriberTable<C, R>) {
         let interests = &mut self.interests;
         if interests.reconciled_epoch == table.epoch {
             return;

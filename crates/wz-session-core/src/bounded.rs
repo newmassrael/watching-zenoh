@@ -112,6 +112,10 @@ pub trait Storage {
     /// backing grows past it (`false`).
     const ENFORCES_CAPACITY: bool;
 
+    /// Whether a table of this policy has rows only where its maker lent it some from an
+    /// arena (`true`), so a sequence a table makes for itself by `Default` has none.
+    const LENT_AT_OPEN: bool;
+
     /// The element sequence of a [`BoundedVec<T, N, Self>`].
     type Seq<T, const N: usize>: SeqBacking<T>;
 
@@ -294,6 +298,7 @@ pub struct Heap;
 #[cfg(feature = "alloc")]
 impl Storage for Heap {
     const ENFORCES_CAPACITY: bool = false;
+    const LENT_AT_OPEN: bool = false;
     type Seq<T, const N: usize> = Vec<T>;
     type Text<const N: usize> = String;
     type Offset = u32;
@@ -317,6 +322,7 @@ pub struct Static;
 
 impl Storage for Static {
     const ENFORCES_CAPACITY: bool = true;
+    const LENT_AT_OPEN: bool = false;
     type Seq<T, const N: usize> = heapless::Vec<T, N>;
     type Text<const N: usize> = heapless::String<N>;
     type Offset = u16;
@@ -346,6 +352,7 @@ pub struct Lent;
 
 impl Storage for Lent {
     const ENFORCES_CAPACITY: bool = true;
+    const LENT_AT_OPEN: bool = true;
     type Seq<T, const N: usize> = LentSeq<T>;
     type Text<const N: usize> = heapless::String<N>;
     // A span of a lent table addresses rows of an arena a host session may size past 64 KiB.

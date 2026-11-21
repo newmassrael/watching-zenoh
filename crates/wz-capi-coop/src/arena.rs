@@ -595,7 +595,6 @@ impl SessionArena {
     }
 
     /// The arena, to lend from.
-    #[cfg(all(test, feature = "std"))]
     pub(crate) fn arena_mut(&mut self) -> &mut Arena {
         &mut self.arena
     }

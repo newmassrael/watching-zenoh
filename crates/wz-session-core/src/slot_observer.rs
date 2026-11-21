@@ -37,6 +37,7 @@
 // forms, so they, and what only they name, sit behind `alloc`.
 use core::mem::MaybeUninit;
 
+use crate::bounded::{Arena, LendRefused, Lent, Profile, Storage};
 use crate::decl_sink::{DeclSink, UndeclSink};
 #[cfg(all(feature = "alloc", feature = "liveliness-token"))]
 use crate::declare::liveliness::LivelinessRegistry;
@@ -152,15 +153,22 @@ impl OtherPeers for NoOtherPeers {
 /// What the application registered, shared by every session of the process. See
 /// the module documentation. The sinks it registers are the types `K` names
 /// ([`ObserverSinks`]): [`SlotObserver`] is the heap profile's, with boxed closures.
-pub struct SlotObserverOf<K: ObserverSinks = DefaultSinks> {
+///
+/// `P` is the storage of the tables the application writes (its subscriptions,
+/// queryables, tokens and liveliness subscribers): the build's [`Profile`], or
+/// [`Lent`] for an observer whose rows a session's arena lent at its open
+/// ([`SlotObserverOf::lent`]). What a peer writes is in the [`PeerTables`] each
+/// call is handed, of their own policy; the declaration watchers are installed once
+/// and stay the build's profile's.
+pub struct SlotObserverOf<K: ObserverSinks = DefaultSinks, P: Storage = Profile> {
     /// The local subscriptions. One registration serves every session.
-    pub subscribers: SubscriberTable<K::Subscriber>,
+    pub subscribers: SubscriberTable<K::Subscriber, P>,
     /// The statechart switchboard (the keyexpr -> event table).
     #[cfg(feature = "switchboard")]
     pub switchboard: SwitchboardRegistry,
     /// The local queryables.
     #[cfg(feature = "query-queryable")]
-    pub queryables: QueryableRegistry<K::Queryable>,
+    pub queryables: QueryableRegistry<K::Queryable, P>,
     /// The application's listeners on the subscribers a peer declares.
     #[cfg(feature = "declare-subscriber")]
     pub remote_subscribers: RemoteSubscriberTable<K::Declared, K::Undeclared>,
@@ -173,11 +181,25 @@ pub struct SlotObserverOf<K: ObserverSinks = DefaultSinks> {
         LivelinessRegistry<crate::decl_sink::BoxedDeclSink, crate::decl_sink::BoxedUndeclSink>,
     /// The tokens wz itself holds, answered to a peer's interest.
     #[cfg(feature = "liveliness-token")]
-    pub local_tokens: LocalTokenRegistry,
+    pub local_tokens: LocalTokenRegistry<P>,
     /// The local liveliness subscribers.
     #[cfg(feature = "liveliness-subscriber")]
     pub liveliness_subscribers:
-        LivelinessSubscriberTable<crate::declare::liveliness_sample::BoxedLivelinessSampleSink>,
+        LivelinessSubscriberTable<crate::declare::liveliness_sample::BoxedLivelinessSampleSink, P>,
+}
+
+/// How many rows each application table of an observer of the lent policy is lent
+/// ([`SlotObserverOf::lent`]): the values of their limits the session's open resolved.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ObserverRows {
+    /// The subscriptions (`MAX_SUBSCRIPTIONS`).
+    pub subscribers: usize,
+    /// The queryables (`MAX_QUERYABLES`).
+    pub queryables: usize,
+    /// The tokens the session holds (`MAX_LOCAL_TOKENS`).
+    pub local_tokens: usize,
+    /// The liveliness subscribers (`MAX_LIVELINESS_SUBSCRIPTIONS`).
+    pub liveliness_subscribers: usize,
 }
 
 /// The sink types a node registers on its [`SlotObserverOf`]: one type for each kind of
@@ -436,57 +458,6 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
         observer
     }
 
-    /// Hold each registry to the limits `limits` states: what the creator of the session resolved
-    /// for it. A table reads its bound here and never from the build. In place, as the observer of a
-    /// node is built where it stays ([`ObserverCell::init_with`]) and is never a value; what each
-    /// registry holds is kept, and what it is asked for next is held to the new quota, so a node
-    /// states its limits before it registers. The tables of each peer, which this observer does not
-    /// hold, are held to the same limits by [`PeerTables::limit_to`].
-    pub fn limit_to(&mut self, limits: &crate::limits::SessionLimits) {
-        self.subscribers.limit_to(limits.max_subscriptions_held());
-        #[cfg(feature = "query-queryable")]
-        self.queryables.limit_to(limits.max_queryables_held());
-        self.subscribers.limit_memo_to(limits.match_memo_slots());
-        // The longest key every table the application registers in stores; the tables each
-        // peer fills are held to it by `PeerTables::limit_to`.
-        let keys = limits.max_keyexpr_bytes_held();
-        self.subscribers.limit_keys_to(keys);
-        #[cfg(feature = "query-queryable")]
-        self.queryables.limit_keys_to(keys);
-        #[cfg(feature = "liveliness-token")]
-        self.local_tokens.limit_keys_to(keys);
-        #[cfg(feature = "liveliness-subscriber")]
-        self.liveliness_subscribers.limit_keys_to(keys);
-        #[cfg(feature = "query-queryable")]
-        self.queryables.limit_query_sizes_to(
-            limits.query_parameters_max_bytes_held(),
-            limits.query_attachment_max_bytes_held(),
-        );
-        #[cfg(feature = "declare-subscriber")]
-        self.subscribers
-            .limit_interests_to(limits.max_inbound_sub_interests_held());
-        #[cfg(feature = "declare-subscriber")]
-        self.subscribers
-            .limit_interest_replies_to(limits.max_pending_declares_held());
-        #[cfg(feature = "declare-subscriber")]
-        self.remote_subscribers
-            .limit_observers_to(limits.max_decl_observers_held());
-        #[cfg(feature = "declare-queryable")]
-        self.remote_queryables
-            .limit_observers_to(limits.max_decl_observers_held());
-        #[cfg(feature = "liveliness-token")]
-        self.liveliness
-            .limit_observers_to(limits.max_decl_observers_held());
-        #[cfg(feature = "liveliness-token")]
-        self.local_tokens.limit_to(limits.max_local_tokens_held());
-        #[cfg(feature = "liveliness-token")]
-        self.local_tokens
-            .limit_interest_replies_to(limits.max_pending_declares_held());
-        #[cfg(feature = "liveliness-subscriber")]
-        self.liveliness_subscribers
-            .limit_to(limits.max_liveliness_subscriptions_held());
-    }
-
     /// Write an observer with nothing registered at `at`, one registry at a time, so the
     /// observer is never a value of its own on any stack: the largest value this holds
     /// is one registry. The single list of fields, which [`Self::new`] shares.
@@ -563,6 +534,94 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
                 liveliness_subscribers: _,
         } = observer;
     }
+}
+
+impl<K: ObserverSinks> SlotObserverOf<K, Lent> {
+    /// An observer with nothing registered whose application tables are lent from `arena`, as
+    /// many rows each as `rows` states, and held to `limits` as [`SlotObserverOf::with_limits`]
+    /// holds one. Refused, the rows lent so far going back with the arena, when the arena has not
+    /// the room. The declaration watchers are the build's profile's: their lists are installed
+    /// once, at most `MAX_DECL_OBSERVERS` each.
+    pub fn lent(
+        arena: &mut Arena,
+        rows: ObserverRows,
+        limits: &crate::limits::SessionLimits,
+    ) -> Result<Self, LendRefused> {
+        let mut observer = Self {
+            subscribers: SubscriberTable::lent(arena, rows.subscribers)?,
+            #[cfg(feature = "switchboard")]
+            switchboard: SwitchboardRegistry::new(),
+            #[cfg(feature = "query-queryable")]
+            queryables: QueryableRegistry::lent(arena, rows.queryables)?,
+            #[cfg(feature = "declare-subscriber")]
+            remote_subscribers: RemoteSubscriberTable::with_sink_backing(),
+            #[cfg(feature = "declare-queryable")]
+            remote_queryables: RemoteQueryableTable::with_sink_backing(),
+            #[cfg(feature = "liveliness-token")]
+            liveliness: LivelinessRegistry::new(),
+            #[cfg(feature = "liveliness-token")]
+            local_tokens: LocalTokenRegistry::lent(arena, rows.local_tokens)?,
+            #[cfg(feature = "liveliness-subscriber")]
+            liveliness_subscribers: LivelinessSubscriberTable::lent(
+                arena,
+                rows.liveliness_subscribers,
+            )?,
+        };
+        observer.limit_to(limits);
+        Ok(observer)
+    }
+}
+
+impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
+    /// Hold each registry to the limits `limits` states: what the creator of the session resolved
+    /// for it. A table reads its bound here and never from the build. In place, as the observer of a
+    /// node is built where it stays ([`ObserverCell::init_with`]) and is never a value; what each
+    /// registry holds is kept, and what it is asked for next is held to the new quota, so a node
+    /// states its limits before it registers. The tables of each peer, which this observer does not
+    /// hold, are held to the same limits by [`PeerTables::limit_to`].
+    pub fn limit_to(&mut self, limits: &crate::limits::SessionLimits) {
+        self.subscribers.limit_to(limits.max_subscriptions_held());
+        #[cfg(feature = "query-queryable")]
+        self.queryables.limit_to(limits.max_queryables_held());
+        self.subscribers.limit_memo_to(limits.match_memo_slots());
+        // The longest key every table the application registers in stores; the tables each
+        // peer fills are held to it by `PeerTables::limit_to`.
+        let keys = limits.max_keyexpr_bytes_held();
+        self.subscribers.limit_keys_to(keys);
+        #[cfg(feature = "query-queryable")]
+        self.queryables.limit_keys_to(keys);
+        #[cfg(feature = "liveliness-token")]
+        self.local_tokens.limit_keys_to(keys);
+        #[cfg(feature = "liveliness-subscriber")]
+        self.liveliness_subscribers.limit_keys_to(keys);
+        #[cfg(feature = "query-queryable")]
+        self.queryables.limit_query_sizes_to(
+            limits.query_parameters_max_bytes_held(),
+            limits.query_attachment_max_bytes_held(),
+        );
+        #[cfg(feature = "declare-subscriber")]
+        self.subscribers
+            .limit_interests_to(limits.max_inbound_sub_interests_held());
+        #[cfg(feature = "declare-subscriber")]
+        self.subscribers
+            .limit_interest_replies_to(limits.max_pending_declares_held());
+        #[cfg(feature = "declare-subscriber")]
+        self.remote_subscribers
+            .limit_observers_to(limits.max_decl_observers_held());
+        #[cfg(feature = "declare-queryable")]
+        self.remote_queryables
+            .limit_observers_to(limits.max_decl_observers_held());
+        #[cfg(feature = "liveliness-token")]
+        self.liveliness
+            .limit_observers_to(limits.max_decl_observers_held());
+        #[cfg(feature = "liveliness-token")]
+        self.local_tokens.limit_to(limits.max_local_tokens_held());
+        #[cfg(feature = "liveliness-token")]
+        self.local_tokens
+            .limit_interest_replies_to(limits.max_pending_declares_held());
+        #[cfg(feature = "liveliness-subscriber")]
+        self.liveliness_subscribers
+            .limit_to(limits.max_liveliness_subscriptions_held());
 
     /// Say which zid the key of the link of the session about to be dispatched PROVED, or `None`
     /// (decision D12): the queryables answer the queries of that dispatch with it as
@@ -1161,5 +1220,125 @@ mod tests {
             "an M=0 alias must refuse with no own space, never fall back to the peer's table"
         );
         assert!(f.declared.lock().unwrap().is_empty());
+    }
+}
+
+#[cfg(all(test, feature = "alloc"))]
+mod lent_tests {
+    //! An observer whose application tables a session's arena lent: the rows lent are what bound
+    //! them, and the tables answer a peer side of another policy.
+    use super::*;
+    use crate::bounded::ARENA_ALIGN;
+    use crate::limits::SessionLimits;
+    use crate::locality::Locality;
+    use crate::registry_error::RegisterError;
+    use crate::sink::{BoxedSink, SampleView};
+    use core::ptr::NonNull;
+
+    /// One block of an arena's memory, aligned as an arena's spans start.
+    #[derive(Clone, Copy)]
+    #[repr(C, align(16))]
+    struct Block([u8; ARENA_ALIGN]);
+
+    /// An arena over `bytes` bytes the test process leaks, so it outlives every table lent from it.
+    fn arena(bytes: usize) -> Arena {
+        let blocks = bytes.div_ceil(ARENA_ALIGN);
+        let region: &'static mut [Block] = std::vec![Block([0; ARENA_ALIGN]); blocks].leak();
+        // SAFETY: the region is aligned to `ARENA_ALIGN`, as its blocks are, holds at least
+        // `bytes` bytes, and is leaked, so nothing else uses it and it outlives every lent table.
+        unsafe { Arena::over(NonNull::from(region).cast::<u8>(), bytes) }
+    }
+
+    fn sink() -> BoxedSink {
+        BoxedSink::new(|_sample: &dyn SampleView| {})
+    }
+
+    fn lent_with(subscribers: usize) -> SlotObserverOf<HeapSinks, Lent> {
+        let rows = ObserverRows {
+            subscribers,
+            ..ObserverRows::default()
+        };
+        SlotObserverOf::<HeapSinks, Lent>::lent(
+            &mut arena(1 << 16),
+            rows,
+            &SessionLimits::defaults(),
+        )
+        .expect("the arena has the rows")
+    }
+
+    /// Two subscriptions lent, under a quota that admits more: the third is refused as a full
+    /// table, and the row an unregistration gives back takes the next.
+    #[test]
+    fn a_lent_observer_refuses_past_the_rows_it_was_lent() {
+        let mut observer = lent_with(2);
+        let first = observer
+            .subscribers
+            .register_sink("demo/a", Locality::Any, sink())
+            .expect("a row is free");
+        observer
+            .subscribers
+            .register_sink("demo/b", Locality::Any, sink())
+            .expect("the last row is free");
+        assert!(matches!(
+            observer
+                .subscribers
+                .register_sink("demo/c", Locality::Any, sink()),
+            Err(RegisterError::TableFull)
+        ));
+        assert!(observer.subscribers.unregister(first));
+        assert!(observer
+            .subscribers
+            .register_sink("demo/c", Locality::Any, sink())
+            .is_ok());
+    }
+
+    /// An arena without the room refuses the observer: nothing past what it has is lent. (A build
+    /// whose ceiling is under one row refuses it past the ceiling instead; either is a refusal.)
+    #[test]
+    fn a_lent_observer_the_arena_cannot_hold_is_refused() {
+        let rows = ObserverRows {
+            subscribers: 1,
+            ..ObserverRows::default()
+        };
+        let refused = SlotObserverOf::<HeapSinks, Lent>::lent(
+            &mut arena(0),
+            rows,
+            &SessionLimits::defaults(),
+        );
+        assert!(refused.is_err());
+    }
+
+    /// A lent table answers a peer side of the build's profile: a subscription registered after
+    /// the peer's FUTURE interest is staged for that peer when it reconciles.
+    #[cfg(feature = "declare-subscriber")]
+    #[test]
+    fn a_lent_table_stages_a_future_push_for_a_peer_of_another_policy() {
+        let mut observer = lent_with(2);
+        let mut peer: crate::pubsub::SubscriberPeer = crate::pubsub::SubscriberPeer::default();
+        let now = observer
+            .subscribers
+            .respond_to_subscriber_interest_borrowed(
+                &mut peer,
+                7,
+                Some("demo/**"),
+                false,
+                true,
+                true,
+            );
+        assert_eq!(now, 0, "nothing subscribes yet");
+        let _ = peer.take_staged_sub_interest_replies();
+        let id = observer
+            .subscribers
+            .register_sink("demo/a", Locality::Any, sink())
+            .expect("a row is free");
+        peer.reconcile(&observer.subscribers);
+        let staged = peer.take_staged_sub_interest_replies();
+        assert!(staged.iter().any(|item| matches!(
+            item,
+            crate::pubsub::SubInterestReply::Concrete {
+                interest_id: 7,
+                subscription_id,
+            } if *subscription_id == id.as_u64()
+        )));
     }
 }

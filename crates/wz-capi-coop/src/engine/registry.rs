@@ -22,6 +22,7 @@
 //! so the verdicts that one face's dispatch reaches count the other faces' declarations beside
 //! its own ([`Others`], `slot_observer::OtherPeers`).
 
+use wz_session_core::bounded::{Arena, LendRefused, Lent};
 use wz_session_core::driver_loop::IterationEvent;
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::peer_tables::PeerTables;
@@ -29,7 +30,9 @@ use wz_session_core::reply_sink::{BoxedReplySink, ConsolidatingSink};
 #[cfg(feature = "queryable")]
 use wz_session_core::reply_stage::FinalStage;
 use wz_session_core::response_sink::{DeclareReplySink, LivelinessGetPrune, ResponseSink};
-use wz_session_core::slot_observer::{OtherPeers, Requesters, SlotObserver};
+use wz_session_core::slot_observer::{
+    HeapSinks, ObserverRows, OtherPeers, Requesters, SlotObserverOf,
+};
 use wz_session_core::wireexpr_resolve::SharedOwnMappingSpace;
 
 use wz_session_core::declare::matching::BoxedMatchingSink;
@@ -110,9 +113,13 @@ impl OtherPeers for Others<'_> {
 #[cfg(feature = "local-queryable")]
 pub(super) const LOCAL_FACE: FaceId = u64::MAX;
 
+/// What the application registered on the session: its tables' rows lent from the session's
+/// arena at its open, each as many as the limit the open resolved.
+pub(super) type App = SlotObserverOf<HeapSinks, Lent>;
+
 /// The application layer of one session. See the module documentation.
 pub(super) struct Registry {
-    pub(super) app: SlotObserver,
+    pub(super) app: App,
     /// The limits the session's open resolved, which every face's tables are held to: a face
     /// accepted after the open takes them as the dial role's face did.
     limits: SessionLimits,
@@ -133,17 +140,23 @@ pub(super) struct Registry {
 /// The application's part, one face's tables and the other faces', apart so each can be used as
 /// its call needs.
 struct Split<'a> {
-    app: &'a mut SlotObserver,
+    app: &'a mut App,
     face: &'a mut FaceTables,
     others: Others<'a>,
 }
 
 impl Registry {
     /// A session that holds nothing and has been told nothing, with its dial face, its tables
-    /// held to the session limits its open resolved.
-    pub(super) fn new(limits: &SessionLimits) -> Self {
-        Self {
-            app: SlotObserver::with_limits(limits),
+    /// held to the session limits its open resolved and the application's lent from `arena`,
+    /// `rows` of each. Refused when the arena has not the rows, which one reserved by the plan
+    /// that counts them always has.
+    pub(super) fn new(
+        limits: &SessionLimits,
+        arena: &mut Arena,
+        rows: ObserverRows,
+    ) -> Result<Self, LendRefused> {
+        Ok(Self {
+            app: App::lent(arena, rows, limits)?,
             faces: vec![FaceTables::new(DIAL_FACE, limits)],
             limits: *limits,
             #[cfg(feature = "local-queryable")]
@@ -153,7 +166,7 @@ impl Registry {
                 feature = "declarations-synced-event"
             ))]
             decl_watches: alloc::sync::Arc::default(),
-        }
+        })
     }
 
     /// The tables of every face, the dial role's first.

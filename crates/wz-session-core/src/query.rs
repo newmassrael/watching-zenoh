@@ -101,7 +101,7 @@ use alloc::vec::Vec;
 
 // R311gb (Track 2) — bounded backing + the capacity SSOT for the
 // no-alloc control plane (queryable table + per-row keyexpr pattern).
-use crate::bounded::{BoundedString, BoundedVec, Profile, Storage};
+use crate::bounded::{Arena, BoundedString, BoundedVec, LendRefused, Lent, Profile, Storage};
 use crate::caps;
 use crate::query_mode::QueryTarget;
 use crate::registry_error::RegisterError;
@@ -2329,6 +2329,18 @@ impl<C> QueryableRegistry<C, Profile> {
     /// `Default`.
     pub fn with_sink_backing() -> Self {
         Self::default()
+    }
+}
+
+impl<C> QueryableRegistry<C, Lent> {
+    /// An empty registry whose queryables are `rows` rows lent from `arena`, at most
+    /// `MAX_QUERYABLES`: a session's, at its open. Refused, taking nothing, past that ceiling or
+    /// past what the arena has left.
+    pub fn lent(arena: &mut Arena, rows: usize) -> Result<Self, LendRefused> {
+        Ok(Self {
+            queryables: arena.lend(rows)?,
+            ..Self::default()
+        })
     }
 }
 
