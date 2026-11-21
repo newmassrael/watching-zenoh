@@ -306,6 +306,9 @@ pub struct StreamDriver<S: StreamSocket, B: AsMut<[u8]>, T: TxStore> {
     rx_len: usize,
     /// How many bytes at the front of `rx_buf` were received and not yet handed to the session.
     held: Cell<usize>,
+    /// Whether the session asked, while a batch is lent, to keep it
+    /// ([`SessionDatagramLink::keep`]): it then stays at the front, lent again by the next receive.
+    keeping: Cell<bool>,
     /// The memory the session encodes its frames into, and which of it is out.
     tx: TxLender<T>,
     /// Why the link is gone, once it is.
@@ -342,6 +345,7 @@ impl<S: StreamSocket, B: AsMut<[u8]>, T: TxStore> StreamDriver<S, B, T> {
             rx_buf: RefCell::new(rx_buf),
             rx_len,
             held: Cell::new(0),
+            keeping: Cell::new(false),
             tx: TxLender::new(tx),
             lost: Cell::new(None),
             error: Cell::new(None),
@@ -396,7 +400,11 @@ impl<S: StreamSocket, B: AsMut<[u8]>, T: TxStore> StreamDriver<S, B, T> {
                 Front::Batch(len) => {
                     let end = STREAM_BATCH_LENGTH_BYTES + len;
                     if len > 0 {
+                        self.keeping.set(false);
                         f(&bytes[STREAM_BATCH_LENGTH_BYTES..end]);
+                        if self.keeping.replace(false) {
+                            return true;
+                        }
                     }
                     bytes.copy_within(end..held, 0);
                     self.held.set(held - end);
@@ -564,6 +572,16 @@ impl<S: StreamSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static> 
 
     fn holds_input(&self) -> bool {
         self.batch_held()
+    }
+
+    // A batch lies in the link's own receive buffer until the link moves what follows it to the
+    // front: a batch kept is left where it lies, and costs no copy.
+    fn keeps_input(&self) -> bool {
+        true
+    }
+
+    fn keep(&self) {
+        self.keeping.set(true);
     }
 
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
@@ -757,6 +775,41 @@ mod tests {
         let mut got = None;
         link.recv_with(&mut |bytes| got = Some(bytes.to_vec()));
         got
+    }
+
+    /// A batch the session asks the link to keep, from inside the lend, is lent again whole by the
+    /// next receive, before the batch behind it and with no read of the stream; one not kept is
+    /// let go, and the next receive hands the batch behind it.
+    #[test]
+    fn a_kept_batch_is_lent_again_before_the_next() {
+        let link = link();
+        assert!(link.keeps_input());
+        let mut wire = batch(b"one");
+        wire.extend(batch(b"two"));
+        queue(&link, &wire);
+        let mut got = None;
+        assert!(link.recv_with(&mut |bytes| {
+            got = Some(bytes.to_vec());
+            link.keep();
+        }));
+        assert_eq!(got.as_deref(), Some(&b"one"[..]));
+        let reads = link.socket.reads.get();
+        assert_eq!(
+            received(&link).as_deref(),
+            Some(&b"one"[..]),
+            "kept: lent again"
+        );
+        assert_eq!(
+            link.socket.reads.get(),
+            reads,
+            "from the buffer, with no read"
+        );
+        assert_eq!(
+            received(&link).as_deref(),
+            Some(&b"two"[..]),
+            "let go: the next"
+        );
+        assert_eq!(received(&link), None);
     }
 
     #[test]

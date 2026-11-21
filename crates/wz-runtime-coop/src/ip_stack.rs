@@ -245,6 +245,18 @@ where
         either!(self, link => link.holds_input())
     }
 
+    fn takes_input(&self) -> bool {
+        either!(self, link => link.takes_input())
+    }
+
+    fn keeps_input(&self) -> bool {
+        either!(self, link => link.keeps_input())
+    }
+
+    fn keep(&self) {
+        either!(self, link => link.keep())
+    }
+
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
         either!(self, link => link.readiness())

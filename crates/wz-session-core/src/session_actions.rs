@@ -2441,6 +2441,20 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     pub multilink_pubkey: R::Mutex<Option<alloc::vec::Vec<u8>>>,
 }
 
+/// Where the dispatch of a datagram its link keeps goes on from on a later step
+/// ([`crate::driver_loop::EventSink::holds_datagram`]): the link lends the same bytes again, and
+/// the dispatch reads on from here instead of from the datagram's start.
+#[cfg(feature = "alloc")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DatagramResume {
+    /// The transport message to read next, as its offset in the datagram.
+    pub unit: usize,
+    /// For a `Frame` some of whose records were handed: where its next record starts, as an
+    /// offset in that message. The `Frame` was admitted (its SN taken, its bytes counted) when it
+    /// was first read, and is not admitted again.
+    pub record: Option<usize>,
+}
+
 /// R311y205 (transport-multilink IMPL-2a) — the PER-LINK state: exactly the 5
 /// fields that belong to ONE physical link, not the logical session. Split out
 /// of the former flat `SessionLinkActions`: `driver` is the per-link write seam
@@ -2511,6 +2525,11 @@ pub struct LinkState<R: SessionRuntime> {
     /// ([`crate::drive::dispatch_datagram`]).
     #[cfg(feature = "alloc")]
     pub pending_batch: R::Mutex<Option<crate::link::RxBytes>>,
+    /// Where the dispatch of the datagram the link keeps goes on from, while it keeps one: the
+    /// zero-copy form of [`Self::pending_batch`] for a link that receives into a buffer of its own.
+    /// Per link, as `pending_batch` is.
+    #[cfg(feature = "alloc")]
+    pub datagram_resume: R::Mutex<Option<DatagramResume>>,
     /// R84 — monotonic timestamp in milliseconds captured when the
     /// session FSM enters the `Established` state. Populated by the
     /// `record_established_at()` Lua action wired to the
@@ -4055,6 +4074,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 last_inbound_at: R::new_mutex(None::<u64>),
                 #[cfg(feature = "alloc")]
                 pending_batch: R::new_mutex(None::<crate::link::RxBytes>),
+                #[cfg(feature = "alloc")]
+                datagram_resume: R::new_mutex(None::<DatagramResume>),
                 established_at: R::new_mutex(None::<u64>),
                 last_outbound_at: R::new_mutex(None::<u64>),
                 transport_available: R::new_mutex(true),
@@ -9973,6 +9994,25 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(feature = "alloc")]
     pub fn take_pending_batch(&self) -> Option<crate::link::RxBytes> {
         R::with_mutex_mut(&self.link.pending_batch, |slot| slot.take())
+    }
+
+    /// Note where the dispatch of the datagram the link keeps goes on from.
+    #[cfg(feature = "alloc")]
+    pub fn set_datagram_resume(&self, resume: DatagramResume) {
+        R::with_mutex_mut(&self.link.datagram_resume, |slot| *slot = Some(resume));
+    }
+
+    /// Take where the dispatch of the datagram the link lends again goes on from, if it stopped.
+    #[cfg(feature = "alloc")]
+    pub fn take_datagram_resume(&self) -> Option<DatagramResume> {
+        R::with_mutex_mut(&self.link.datagram_resume, |slot| slot.take())
+    }
+
+    /// Whether the dispatch of the datagram being lent stopped before its end, so the link is to
+    /// keep it.
+    #[cfg(feature = "alloc")]
+    pub fn resumes_datagram(&self) -> bool {
+        R::with_mutex_mut(&self.link.datagram_resume, |slot| slot.is_some())
     }
 
     /// R2678 (`session-close-ingress`) — ask this session to close.

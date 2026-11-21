@@ -1507,6 +1507,102 @@ async fn an_in_place_frame_followed_by_a_second_frame_leaves_it_for_the_next_uni
     assert_eq!(seen, vec![(true, 1), (false, 0), (true, 2)]);
 }
 
+/// A datagram its link keeps is read where it lies, one record for each lend while the host has
+/// room for no more: a Frame of three Pushes and a Frame behind it are handed over four lends of
+/// the same bytes, in order and each once. The Frame read part-way is not admitted again (its SN
+/// is not refused as a duplicate), and nothing is parked as a copy to wait.
+#[cfg(feature = "codec-push")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_kept_datagram_is_read_on_from_where_it_stopped() {
+    use wz_codecs::lent::Push;
+    use wz_session_core::drive::{dispatch_datagram, dispatch_pending};
+    use wz_session_core::driver_loop::{EventSink, IterationEvent};
+    use wz_session_core::network_message::new_record_buf;
+
+    /// A host with room for one record each time the datagram is lent.
+    #[derive(Default)]
+    struct OneAtATime {
+        seen: Vec<(bool, u64)>,
+        refused: usize,
+        handed: usize,
+    }
+
+    impl EventSink for OneAtATime {
+        fn event(&mut self, event: IterationEvent<'_, '_>) {
+            match event {
+                IterationEvent::InPlace(rec) => {
+                    self.seen.push((rec.reliable(), rec.sn()));
+                    self.handed += 1;
+                }
+                IterationEvent::Poll(DriverLoopOutcome::FramePayload {
+                    reliable,
+                    sn,
+                    messages,
+                    ..
+                }) if !messages.is_empty() => {
+                    self.seen.push((*reliable, *sn));
+                    self.handed += 1;
+                }
+                IterationEvent::Poll(DriverLoopOutcome::RxSnRejected { .. }) => self.refused += 1,
+                _ => {}
+            }
+        }
+
+        fn takes_another(&mut self) -> bool {
+            self.handed == 0
+        }
+
+        fn holds_datagram(&self) -> bool {
+            true
+        }
+    }
+
+    let (actions, mut engine) = fresh_setup();
+    drive_to_sent_init_syn(&mut engine);
+
+    let push = || {
+        let push = Push {
+            header: 0x1D,
+            ..Push::default()
+        };
+        wz_codecs_test_support::with_empty_inline_put(push).encode_to_vec()
+    };
+    // [Frame(reliable, sn 1) Push Push Push][Frame(best-effort, sn 0) Push]
+    let mut unit = vec![0x25, 0x01];
+    unit.extend(push());
+    unit.extend(push());
+    unit.extend(push());
+    unit.extend([0x05, 0x00]);
+    unit.extend(push());
+
+    let mut record = new_record_buf();
+    let mut sink = OneAtATime::default();
+    let mut lends = 0;
+    loop {
+        sink.handed = 0;
+        dispatch_datagram(&unit, &actions, &mut engine, &mut record, &mut sink);
+        lends += 1;
+        if !actions.resumes_datagram() {
+            break;
+        }
+        assert!(lends < 8, "each lend moves the dispatch on");
+    }
+    assert_eq!(
+        sink.seen,
+        vec![(true, 1), (true, 1), (true, 1), (false, 0)],
+        "each record once, in order"
+    );
+    assert_eq!(lends, 4, "one record for each lend");
+    assert_eq!(
+        sink.refused, 0,
+        "the Frame read part-way is not admitted again"
+    );
+    assert!(
+        dispatch_pending(&actions, &mut engine).is_none(),
+        "nothing was copied to wait"
+    );
+}
+
 /// A frame the SN gate refuses is dropped with its records, and the frame of the other
 /// reliability behind it in the same batch is still delivered: upstream drains a refused frame's
 /// reader and reads the batch on. The discriminator is the empty queue again: the best-effort

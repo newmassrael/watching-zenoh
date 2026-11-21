@@ -1111,6 +1111,21 @@ pub trait EventSink {
     fn record(&mut self, record: InPlaceRecord<'_, '_>) {
         self.event(IterationEvent::InPlace(record));
     }
+
+    /// Whether the host takes another record now. A host whose delivery has no room left for
+    /// what one more record can hand it answers `false`, and the walk of a datagram the link
+    /// keeps ([`Self::holds_datagram`]) stops before the next record, to go on from it on a later
+    /// step. Asked only after a record was handed, so a step always moves on. Defaults to `true`.
+    fn takes_another(&mut self) -> bool {
+        true
+    }
+
+    /// Whether the datagram being dispatched stays where the link holds it when its dispatch
+    /// stops before its end, to be lent again whole on a later step. Defaults to `false`: what
+    /// follows the first message is then parked as a copy, or, with no allocator, read at once.
+    fn holds_datagram(&self) -> bool {
+        false
+    }
 }
 
 impl<F: FnMut(IterationEvent<'_, '_>) + ?Sized> EventSink for F {

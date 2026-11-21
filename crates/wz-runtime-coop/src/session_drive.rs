@@ -205,6 +205,20 @@ pub trait SessionDatagramLink {
         true
     }
 
+    /// Whether the link can keep the datagram it is lending ([`Self::keep`]) and lend the same
+    /// bytes again: a link that receives into a buffer of its own, which nothing writes until it
+    /// reads the next datagram. A session whose delivery cannot take all of a datagram then stops
+    /// part-way and goes on from there on a later step, and nothing is copied to wait. The
+    /// provided form answers `false`, and the session reads on or parks a copy of the rest.
+    fn keeps_input(&self) -> bool {
+        false
+    }
+
+    /// Keep the datagram being lent: called from inside the `f` of [`Self::recv_with`], it has
+    /// the next `recv_with` lend the same bytes again, before any other datagram. Does nothing on
+    /// a link that does not keep ([`Self::keeps_input`]).
+    fn keep(&self) {}
+
     /// A wait for this link's next input that its OWNER makes, from any thread and with nothing
     /// of the session's held, for a link opened to be waited on that way: its [`Self::service`]
     /// then does not wait, so the loop that drives it never sleeps under its owner's lock. `None`
@@ -280,6 +294,34 @@ pub fn wait_any(waits: &[Arc<dyn LinkReadiness>], timeout_ms: u32) {
     }
 }
 
+/// The loop's sink as the dispatch of a datagram sees it: what is handed goes to `sink`, and
+/// whether the session takes another record, and whether the datagram stays where the link holds
+/// it when the dispatch stops, are the link's to say.
+#[cfg(feature = "rx-in-place")]
+struct LinkSink<'a, L: ?Sized, F: ?Sized> {
+    link: &'a L,
+    sink: &'a mut F,
+}
+
+#[cfg(feature = "rx-in-place")]
+impl<L: SessionDatagramLink + ?Sized, F: EventSink + ?Sized> EventSink for LinkSink<'_, L, F> {
+    fn event(&mut self, event: IterationEvent<'_, '_>) {
+        self.sink.event(event)
+    }
+
+    fn record(&mut self, record: wz_session_core::driver_loop::InPlaceRecord<'_, '_>) {
+        self.sink.record(record)
+    }
+
+    fn takes_another(&mut self) -> bool {
+        self.link.takes_input()
+    }
+
+    fn holds_datagram(&self) -> bool {
+        self.link.keeps_input()
+    }
+}
+
 /// A shared link is a link: the same object is usually the session's
 /// `Rc<dyn BoxedLinkDriver>` sink too, so the loop takes a clone of that `Rc`.
 ///
@@ -314,6 +356,18 @@ impl<T: SessionDatagramLink + ?Sized> SessionDatagramLink for Rc<T> {
 
     fn holds_input(&self) -> bool {
         (**self).holds_input()
+    }
+
+    fn takes_input(&self) -> bool {
+        (**self).takes_input()
+    }
+
+    fn keeps_input(&self) -> bool {
+        (**self).keeps_input()
+    }
+
+    fn keep(&self) {
+        (**self).keep()
     }
 
     #[cfg(feature = "alloc")]
@@ -1253,12 +1307,21 @@ impl<
             // it completes is read in that slot; every outcome goes through
             // the reassembly hand-off.
             let received = link.recv_with(&mut |unit| {
+                let mut sink = LinkSink {
+                    link,
+                    sink: &mut *on_event,
+                };
                 #[cfg(feature = "reassembly")]
-                let path =
-                    reasm.pump_dispatch(unit, actions, engine, record, now_ms, &mut *on_event);
+                let path = reasm.pump_dispatch(unit, actions, engine, record, now_ms, &mut sink);
                 #[cfg(not(feature = "reassembly"))]
-                let path = dispatch_datagram(unit, actions, engine, record, &mut *on_event);
+                let path = dispatch_datagram(unit, actions, engine, record, &mut sink);
                 paths.count(path);
+                // The dispatch stopped where the session had no room: the link keeps the
+                // datagram, and a later step reads on from there.
+                #[cfg(feature = "alloc")]
+                if actions.resumes_datagram() {
+                    link.keep();
+                }
             });
             if received {
                 return None;
@@ -1602,6 +1665,18 @@ impl<D: SessionDatagramLink + 'static> SessionDatagramLink for DriverPump<D> {
 
     fn holds_input(&self) -> bool {
         self.0.holds_input()
+    }
+
+    fn takes_input(&self) -> bool {
+        self.0.takes_input()
+    }
+
+    fn keeps_input(&self) -> bool {
+        self.0.keeps_input()
+    }
+
+    fn keep(&self) {
+        self.0.keep()
     }
 }
 

@@ -1871,7 +1871,16 @@ pub fn dispatch_datagram<R: SessionRuntime, T: TimeSource>(
     record: &mut crate::network_message::RecordBuf,
     on_event: &mut dyn crate::driver_loop::EventSink,
 ) -> DatagramPath {
-    let (path, used) = dispatch_datagram_unit(unit, actions, engine, record, on_event);
+    // A link that keeps its datagram: the dispatch reads it where it lies and stops where the
+    // host has no room, to go on from there when the link lends it again.
+    #[cfg(feature = "alloc")]
+    if on_event.holds_datagram() {
+        return dispatch_kept(unit, actions, on_event, &mut |unit, resume, on_event| {
+            dispatch_datagram_unit(unit, resume, true, actions, engine, record, on_event)
+        });
+    }
+    let (path, used, _) =
+        dispatch_datagram_unit(unit, None, false, actions, engine, record, on_event);
     // A datagram that holds more than one message: the heap profile parks what
     // follows the first (`dispatch_pending` reads it next turn), and a build with no
     // allocator reads the rest where the datagram lies, a message at a time, as
@@ -1880,7 +1889,8 @@ pub fn dispatch_datagram<R: SessionRuntime, T: TimeSource>(
     {
         let mut at = used;
         while at > 0 && at < unit.len() {
-            let (_, used) = dispatch_datagram_unit(&unit[at..], actions, engine, record, on_event);
+            let (_, used, _) =
+                dispatch_datagram_unit(&unit[at..], None, false, actions, engine, record, on_event);
             at = if used == 0 { unit.len() } else { at + used };
         }
     }
@@ -1889,38 +1899,135 @@ pub fn dispatch_datagram<R: SessionRuntime, T: TimeSource>(
     path
 }
 
-/// [`dispatch_datagram`] for the unit at the front of `unit`: which path it took, and
-/// how many bytes of `unit` that unit was. A `Fragment` and a lean batch
+/// The dispatch of a datagram its link keeps ([`crate::driver_loop::EventSink::holds_datagram`]):
+/// its transport messages one after the other where the datagram lies, from where the last step
+/// stopped, `unit_at` reading each (its unit, where the next record of a `Frame` stopped in
+/// starts). Before each message after the first, and inside a `Frame` before each record after
+/// the first, the host is asked whether it takes another; where it does not, the dispatch notes
+/// where it stopped ([`SessionLinkActions::set_datagram_resume`]) and the link keeps the datagram
+/// for a later step. Nothing is copied to wait: the datagram stays in the link's buffer, which it
+/// does not read into again until the dispatch has gone through it.
+#[cfg(all(feature = "alloc", feature = "codec-frame"))]
+fn dispatch_kept<R: SessionRuntime, T: TimeSource>(
+    datagram: &[u8],
+    actions: &SessionLinkActions<R, T>,
+    on_event: &mut dyn crate::driver_loop::EventSink,
+    unit_at: &mut dyn FnMut(
+        &[u8],
+        Option<usize>,
+        &mut dyn crate::driver_loop::EventSink,
+    ) -> (DatagramPath, usize, bool),
+) -> DatagramPath {
+    use crate::session_actions::DatagramResume;
+    let resume = actions.take_datagram_resume();
+    let mut at = resume.map_or(0, |resume| resume.unit);
+    let mut next_record = resume.and_then(|resume| resume.record);
+    let mut path = None;
+    while at < datagram.len() {
+        if path.is_some() && !on_event.takes_another() {
+            actions.set_datagram_resume(DatagramResume {
+                unit: at,
+                record: None,
+            });
+            break;
+        }
+        let (read_by, used, stopped) = unit_at(&datagram[at..], next_record.take(), &mut *on_event);
+        path.get_or_insert(read_by);
+        if stopped {
+            actions.set_datagram_resume(DatagramResume {
+                unit: at,
+                record: Some(used),
+            });
+            break;
+        }
+        if used == 0 {
+            break;
+        }
+        at += used;
+    }
+    path.unwrap_or(DatagramPath::InPlace)
+}
+
+/// [`dispatch_datagram`] for the unit at the front of `unit`: which path it took, how many
+/// bytes of `unit` that unit was, and whether it stopped part-way. A `Fragment` and a lean batch
 /// consume what is left of the datagram by construction; a `Frame` consumes its records, and
 /// a handshake message, a KeepAlive or a Close their own length, which a build with no
-/// allocator reads and goes on from.
+/// allocator reads and goes on from. For a datagram the link keeps (`kept`), a `Frame` may stop
+/// before a record, the bytes it consumed then being where that record starts, and `resume` is
+/// where its records go on from on a later step ([`frame_in_place`]).
 #[cfg(feature = "codec-frame")]
 fn dispatch_datagram_unit<R: SessionRuntime, T: TimeSource>(
     unit: &[u8],
+    resume: Option<usize>,
+    kept: bool,
     actions: &SessionLinkActions<R, T>,
     engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
     record: &mut crate::network_message::RecordBuf,
     on_event: &mut dyn crate::driver_loop::EventSink,
-) -> (DatagramPath, usize) {
+) -> (DatagramPath, usize, bool) {
     match in_place_unit(unit, actions, false) {
         Ok(InPlaceUnit::Frame(head, payload_at)) => {
-            let (path, read) =
-                frame_in_place(unit, head, payload_at, actions, engine, record, on_event);
-            (path, unit_after_in_place_frame(unit, read, actions))
+            let (path, read, stopped) = frame_in_place(
+                unit, head, payload_at, resume, kept, actions, engine, record, on_event,
+            );
+            (path, unit_after_frame(unit, read, kept, actions), stopped)
         }
         // Not produced when fragments are not asked for; were it, a path with
         // no Router to stage it into copies it, which is the answer below.
         #[cfg(feature = "reassembly")]
         Ok(InPlaceUnit::Fragment(..)) => {
-            dispatch_copied(unit, CopyReason::Fragment, actions, engine, on_event)
+            dispatch_copied_of(unit, CopyReason::Fragment, kept, actions, engine, on_event)
         }
         #[cfg(feature = "transport-lowlatency")]
         Ok(InPlaceUnit::Lean) => (
             lean_in_place(unit, actions, engine, record, on_event),
             unit.len(),
+            false,
         ),
-        Err(reason) => dispatch_copied(unit, reason, actions, engine, on_event),
+        Err(reason) => dispatch_copied_of(unit, reason, kept, actions, engine, on_event),
     }
+}
+
+/// How much of `unit` the `Frame` at its front was, its records read up to `read`: for a datagram
+/// the link keeps (`kept`), `read`, and the dispatch reads on from there where the datagram lies;
+/// otherwise what [`unit_after_in_place_frame`] answers.
+#[cfg(feature = "codec-frame")]
+fn unit_after_frame<R: SessionRuntime, T: TimeSource>(
+    unit: &[u8],
+    read: usize,
+    kept: bool,
+    actions: &SessionLinkActions<R, T>,
+) -> usize {
+    if kept {
+        read
+    } else {
+        unit_after_in_place_frame(unit, read, actions)
+    }
+}
+
+/// [`dispatch_copied`], with whether it stopped part-way (it never does). For a datagram the link
+/// keeps (`kept`), what the copying path parked of the rest is taken back and the datagram read on
+/// from where the message ended, where it lies; a compressed batch is the exception, as what was
+/// parked of it came out of the decompressor and is not the datagram's.
+#[cfg(feature = "codec-frame")]
+fn dispatch_copied_of<R: SessionRuntime, T: TimeSource>(
+    unit: &[u8],
+    reason: CopyReason,
+    kept: bool,
+    actions: &SessionLinkActions<R, T>,
+    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    on_event: &mut dyn crate::driver_loop::EventSink,
+) -> (DatagramPath, usize, bool) {
+    let (path, used) = dispatch_copied(unit, reason, actions, engine, on_event);
+    #[cfg(feature = "alloc")]
+    if kept && reason != CopyReason::Compressed {
+        if let Some(rest) = actions.take_pending_batch() {
+            return (path, unit.len().saturating_sub(rest.len()), false);
+        }
+    }
+    #[cfg(not(feature = "alloc"))]
+    let _ = kept;
+    (path, used, false)
 }
 
 /// [`dispatch_datagram`] for a session that reassembles: the same path for
@@ -1971,16 +2078,28 @@ where
     T: TimeSource,
     S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
 {
-    let (path, used) =
-        dispatch_datagram_reassembling_unit(unit, actions, engine, record, reasm, now_ms, on_event);
+    // A link that keeps its datagram, as [`dispatch_datagram`] reads it.
+    #[cfg(feature = "alloc")]
+    if on_event.holds_datagram() {
+        return dispatch_kept(unit, actions, on_event, &mut |unit, resume, on_event| {
+            dispatch_datagram_reassembling_unit(
+                unit, resume, true, actions, engine, record, reasm, now_ms, on_event,
+            )
+        });
+    }
+    let (path, used, _) = dispatch_datagram_reassembling_unit(
+        unit, None, false, actions, engine, record, reasm, now_ms, on_event,
+    );
     // The rest of a datagram that holds more than one message, as
     // [`dispatch_datagram`] reads it.
     #[cfg(not(feature = "alloc"))]
     {
         let mut at = used;
         while at > 0 && at < unit.len() {
-            let (_, used) = dispatch_datagram_reassembling_unit(
+            let (_, used, _) = dispatch_datagram_reassembling_unit(
                 &unit[at..],
+                None,
+                false,
                 actions,
                 engine,
                 record,
@@ -1997,17 +2116,21 @@ where
 }
 
 /// [`dispatch_datagram_reassembling`] for the unit at the front of `unit`, with the
-/// number of bytes of `unit` it was.
+/// number of bytes of `unit` it was and whether it stopped part-way, as
+/// [`dispatch_datagram_unit`] answers them.
 #[cfg(feature = "reassembly")]
+#[allow(clippy::too_many_arguments)]
 fn dispatch_datagram_reassembling_unit<R, T, const SLOTS: usize, const CAP: usize, S>(
     unit: &[u8],
+    resume: Option<usize>,
+    kept: bool,
     actions: &SessionLinkActions<R, T>,
     engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
     record: &mut crate::network_message::RecordBuf,
     reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
     now_ms: u64,
     on_event: &mut dyn crate::driver_loop::EventSink,
-) -> (DatagramPath, usize)
+) -> (DatagramPath, usize, bool)
 where
     R: SessionRuntime,
     T: TimeSource,
@@ -2019,18 +2142,21 @@ where
                 unit, head, payload_at, actions, engine, record, reasm, now_ms, on_event,
             ),
             unit.len(),
+            false,
         ),
         Ok(InPlaceUnit::Frame(head, payload_at)) => {
-            let (path, read) = frame_in_place(
+            let (path, read, stopped) = frame_in_place(
                 unit,
                 head,
                 payload_at,
+                resume,
+                kept,
                 actions,
                 engine,
                 record,
                 &mut through_hand_off(reasm, actions, now_ms, on_event),
             );
-            (path, unit_after_in_place_frame(unit, read, actions))
+            (path, unit_after_frame(unit, read, kept, actions), stopped)
         }
         #[cfg(feature = "transport-lowlatency")]
         Ok(InPlaceUnit::Lean) => (
@@ -2042,10 +2168,12 @@ where
                 &mut through_hand_off(reasm, actions, now_ms, on_event),
             ),
             unit.len(),
+            false,
         ),
-        Err(reason) => dispatch_copied(
+        Err(reason) => dispatch_copied_of(
             unit,
             reason,
+            kept,
             actions,
             engine,
             &mut through_hand_off(reasm, actions, now_ms, on_event),
@@ -2095,6 +2223,14 @@ where
 
     fn record(&mut self, record: crate::driver_loop::InPlaceRecord<'_, '_>) {
         self.on_event.record(record);
+    }
+
+    fn takes_another(&mut self) -> bool {
+        self.on_event.takes_another()
+    }
+
+    fn holds_datagram(&self) -> bool {
+        self.on_event.holds_datagram()
     }
 }
 
@@ -2239,6 +2375,7 @@ fn lean_in_place<R: SessionRuntime, T: TimeSource>(
         &mut || Ok(alloc::vec::Vec::new()),
         RECORD_FORM,
         RecordSource::Frame,
+        false,
         actions,
         record,
         on_event,
@@ -2295,21 +2432,30 @@ fn frame_records_extent(payload: &[u8], record: &mut crate::network_message::Rec
         .unwrap_or(payload.len())
 }
 
-/// The admissible `Frame` at the front of a unit, read where it lies.
+/// The admissible `Frame` at the front of a unit, read where it lies: the path, how far into the
+/// unit the read went, and whether it stopped before a record of the `Frame` because the host
+/// had no room for it (`may_stop`, a link that keeps its datagram). `resume` is where the next
+/// record starts in a `Frame` an earlier step stopped in: its head was admitted then, and its
+/// records are read on from there.
 #[cfg(feature = "codec-frame")]
+#[allow(clippy::too_many_arguments)]
 fn frame_in_place<R: SessionRuntime, T: TimeSource>(
     unit: &[u8],
     head: crate::inbound::FrameHead<crate::inbound::InPlaceExtChain>,
     payload_at: usize,
+    resume: Option<usize>,
+    may_stop: bool,
     actions: &SessionLinkActions<R, T>,
     engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
     record: &mut crate::network_message::RecordBuf,
     on_event: &mut dyn crate::driver_loop::EventSink,
-) -> (DatagramPath, usize) {
+) -> (DatagramPath, usize, bool) {
     use crate::driver_loop::IterationEvent;
     use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
-    account_unit_in_place(unit, actions);
-    actions.stamp_rx_activity();
+    if resume.is_none() {
+        account_unit_in_place(unit, actions);
+        actions.stamp_rx_activity();
+    }
     let priority = head.priority();
     let crate::inbound::FrameHead {
         reliable,
@@ -2322,7 +2468,11 @@ fn frame_in_place<R: SessionRuntime, T: TimeSource>(
     // The frame's own chain is owned only for an owned record (the heap profile's).
     #[cfg(not(feature = "alloc"))]
     let _ = chain;
-    if let Some(refused) = refuse_frame_in_place(actions, engine, priority, reliable, sn) {
+    let refused = match resume {
+        Some(_) => None,
+        None => refuse_frame_in_place(actions, engine, priority, reliable, sn),
+    };
+    if let Some(refused) = refused {
         on_event.event(IterationEvent::Poll(&refused));
         // A frame the SN gate refused is dropped with its records, and the batch goes on behind
         // them: a frame of the other reliability may follow it in the same batch. Upstream drains
@@ -2335,8 +2485,9 @@ fn frame_in_place<R: SessionRuntime, T: TimeSource>(
             }
             _ => unit.len(),
         };
-        return (DatagramPath::InPlace, end);
+        return (DatagramPath::InPlace, end, false);
     }
+    let records_at = resume.unwrap_or(payload_at);
     let carrier = RecordCarrier {
         reliable,
         sn,
@@ -2347,26 +2498,28 @@ fn frame_in_place<R: SessionRuntime, T: TimeSource>(
     // The frame's own chain is handed over owned only with an owned record:
     // a frame whose every record is lent never owns it.
     let walked = walk_records_in_place(
-        &unit[payload_at..],
+        &unit[records_at..],
         carrier,
         #[cfg(feature = "alloc")]
         &mut || chain.owned(unit),
         RECORD_FORM,
         RecordSource::Frame,
+        may_stop,
         actions,
         record,
         on_event,
     );
     match walked {
         // The walk ends at a transport message of the same batch (a second Frame header, a
-        // KeepAlive): the unit goes on from there.
-        Ok(read) => (DatagramPath::InPlace, payload_at + read),
+        // KeepAlive): the unit goes on from there. Or it stopped before a record, which the next
+        // step reads from.
+        Ok((read, stopped)) => (DatagramPath::InPlace, records_at + read, stopped),
         Err(parse_err) => {
             engine.process_event(E::FramingError);
             on_event.event(IterationEvent::Poll(&DriverLoopOutcome::ParseError(
                 parse_err,
             )));
-            (DatagramPath::InPlace, unit.len())
+            (DatagramPath::InPlace, unit.len(), false)
         }
     }
 }
@@ -2479,10 +2632,11 @@ fn walk_records_in_place<R: SessionRuntime, T: TimeSource>(
     >,
     form: crate::network_message::RecordForm,
     source: RecordSource,
+    may_stop: bool,
     actions: &SessionLinkActions<R, T>,
     record: &mut crate::network_message::RecordBuf,
     on_event: &mut dyn crate::driver_loop::EventSink,
-) -> Result<usize, crate::parse_error::InboundParseError> {
+) -> Result<(usize, bool), crate::parse_error::InboundParseError> {
     use crate::driver_loop::IterationEvent;
     #[cfg(feature = "alloc")]
     use crate::network_message::WalkedRecord;
@@ -2516,66 +2670,76 @@ fn walk_records_in_place<R: SessionRuntime, T: TimeSource>(
     #[cfg(feature = "alloc")]
     let mut outcome: Option<DriverLoopOutcome> = None;
     let mut dispatched = false;
-    let read = crate::network_message::try_for_each_record(payload, record, form, |one| {
-        // A build with no allocator walks no owned record: every one is lent.
-        #[cfg(all(
-            not(feature = "alloc"),
-            any(
-                feature = "codec-push",
-                feature = "codec-request",
-                feature = "codec-response",
-                feature = "session-slot"
-            )
-        ))]
-        crate::driver_loop::report_lent_record(one, reliable, sn, priority, on_event);
-        // ... and one with no allocator and no lent kind walks no record at all.
-        #[cfg(all(
-            not(feature = "alloc"),
-            not(any(
-                feature = "codec-push",
-                feature = "codec-request",
-                feature = "codec-response",
-                feature = "session-slot"
-            ))
-        ))]
-        let _ = one;
-        #[cfg(feature = "alloc")]
-        match one {
-            WalkedRecord::Owned(one) => {
-                let outcome = match &mut outcome {
-                    Some(outcome) => outcome,
-                    None => outcome.insert(empty(extensions()?)),
-                };
-                if let DriverLoopOutcome::FramePayload { messages, .. } = outcome {
-                    hand_record_to(messages, one);
-                    if source == RecordSource::Frame {
-                        *messages = count_rx_network_messages(actions, core::mem::take(messages));
+    // Set once the host has no room for another record; the walk then ends before the next.
+    let stopping = core::cell::Cell::new(false);
+    let go_on = || !stopping.get();
+    let (read, stopped) =
+        crate::network_message::try_for_each_record_while(payload, record, form, &go_on, |one| {
+            // A build with no allocator walks no owned record: every one is lent.
+            #[cfg(all(
+                not(feature = "alloc"),
+                any(
+                    feature = "codec-push",
+                    feature = "codec-request",
+                    feature = "codec-response",
+                    feature = "session-slot"
+                )
+            ))]
+            crate::driver_loop::report_lent_record(one, reliable, sn, priority, on_event);
+            // ... and one with no allocator and no lent kind walks no record at all.
+            #[cfg(all(
+                not(feature = "alloc"),
+                not(any(
+                    feature = "codec-push",
+                    feature = "codec-request",
+                    feature = "codec-response",
+                    feature = "session-slot"
+                ))
+            ))]
+            let _ = one;
+            #[cfg(feature = "alloc")]
+            match one {
+                WalkedRecord::Owned(one) => {
+                    let outcome = match &mut outcome {
+                        Some(outcome) => outcome,
+                        None => outcome.insert(empty(extensions()?)),
+                    };
+                    if let DriverLoopOutcome::FramePayload { messages, .. } = outcome {
+                        hand_record_to(messages, one);
+                        if source == RecordSource::Frame {
+                            *messages =
+                                count_rx_network_messages(actions, core::mem::take(messages));
+                        }
+                    }
+                    // The reassembled message's copying path strips the namespace
+                    // off its outcome before the fan-out; so does this one.
+                    #[cfg(all(feature = "reassembly", feature = "routing-namespace"))]
+                    if source == RecordSource::Reassembled {
+                        actions.apply_namespace_ingress(outcome);
+                    }
+                    on_event.event(IterationEvent::Poll(outcome));
+                    if let DriverLoopOutcome::FramePayload { messages, .. } = outcome {
+                        take_record_back(messages, one);
                     }
                 }
-                // The reassembled message's copying path strips the namespace
-                // off its outcome before the fan-out; so does this one.
-                #[cfg(all(feature = "reassembly", feature = "routing-namespace"))]
-                if source == RecordSource::Reassembled {
-                    actions.apply_namespace_ingress(outcome);
-                }
-                on_event.event(IterationEvent::Poll(outcome));
-                if let DriverLoopOutcome::FramePayload { messages, .. } = outcome {
-                    take_record_back(messages, one);
+                // Every lent kind becomes its in-place event in the one place that makes
+                // them, shared with the multicast receive path.
+                #[cfg(any(
+                    feature = "codec-push",
+                    feature = "codec-request",
+                    feature = "codec-response",
+                    feature = "session-slot"
+                ))]
+                lent => {
+                    crate::driver_loop::report_lent_record(lent, reliable, sn, priority, on_event)
                 }
             }
-            // Every lent kind becomes its in-place event in the one place that makes
-            // them, shared with the multicast receive path.
-            #[cfg(any(
-                feature = "codec-push",
-                feature = "codec-request",
-                feature = "codec-response",
-                feature = "session-slot"
-            ))]
-            lent => crate::driver_loop::report_lent_record(lent, reliable, sn, priority, on_event),
-        }
-        dispatched = true;
-        Ok(())
-    })?;
+            dispatched = true;
+            if may_stop && !on_event.takes_another() {
+                stopping.set(true);
+            }
+            Ok(())
+        })?;
     if !dispatched {
         #[cfg(feature = "alloc")]
         on_event.event(IterationEvent::Poll(&empty(extensions()?)));
@@ -2588,7 +2752,7 @@ fn walk_records_in_place<R: SessionRuntime, T: TimeSource>(
             priority,
         }));
     }
-    Ok(read)
+    Ok((read, stopped))
 }
 
 /// The admissible `Fragment` at the front of a unit, staged into its chain's
@@ -2681,6 +2845,7 @@ where
                 &mut || Ok(alloc::vec::Vec::new()),
                 REASSEMBLED_RECORD_FORM,
                 RecordSource::Reassembled,
+                false,
                 actions,
                 record,
                 &mut *on_event,

@@ -764,6 +764,14 @@ impl<P: SessionDatagramLink> SessionDatagramLink for LaneGate<P> {
         !self.shut() && self.pump.takes_input()
     }
 
+    fn keeps_input(&self) -> bool {
+        self.pump.keeps_input()
+    }
+
+    fn keep(&self) {
+        self.pump.keep()
+    }
+
     fn readiness(&self) -> Option<Box<dyn LinkReadiness>> {
         self.pump.readiness()
     }

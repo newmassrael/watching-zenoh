@@ -1367,8 +1367,30 @@ pub(crate) fn try_for_each_record<'f>(
     payload: &'f [u8],
     record: &mut RecordBuf,
     form: RecordForm,
-    mut each: impl FnMut(WalkedRecord<'_, 'f>) -> Result<(), crate::parse_error::InboundParseError>,
+    each: impl FnMut(WalkedRecord<'_, 'f>) -> Result<(), crate::parse_error::InboundParseError>,
 ) -> Result<usize, crate::parse_error::InboundParseError> {
+    try_for_each_record_while(payload, record, form, &|| true, each).map(|(read, _)| read)
+}
+
+/// [`try_for_each_record`] that ends the walk before a record when `go_on` answers `false`:
+/// how far the walk read, and whether it ended so, with records of the payload still unread.
+/// What a receive path asks whose consumer may have no room for another record.
+#[cfg(all(
+    feature = "codec-frame",
+    any(
+        test,
+        feature = "session-unicast",
+        all(feature = "session-multicast", not(feature = "alloc"))
+    )
+))]
+pub(crate) fn try_for_each_record_while<'f>(
+    payload: &'f [u8],
+    record: &mut RecordBuf,
+    form: RecordForm,
+    go_on: &dyn Fn() -> bool,
+    mut each: impl FnMut(WalkedRecord<'_, 'f>) -> Result<(), crate::parse_error::InboundParseError>,
+) -> Result<(usize, bool), crate::parse_error::InboundParseError> {
+    let mut stopped = false;
     // Without a lendable codec there is nothing to lend, and every form is owned.
     #[cfg(not(any(
         all(
@@ -1393,6 +1415,10 @@ pub(crate) fn try_for_each_record<'f>(
                 .map_err(crate::parse_error::InboundParseError::Codec)?[0]
                 & 0x1F,
         ) {
+            break;
+        }
+        if !go_on() {
+            stopped = true;
             break;
         }
         // The slot profile's form lends every kind, so there is no owned decode
@@ -1448,8 +1474,8 @@ pub(crate) fn try_for_each_record<'f>(
     }
     record.clear();
     // How much of the payload the walk read: all of it, or up to the transport message that
-    // ended it.
-    Ok(payload.len() - cursor.remaining())
+    // ended it, or up to the record `go_on` stopped it before.
+    Ok((payload.len() - cursor.remaining(), stopped))
 }
 
 /// The lent half of [`try_for_each_record`]: when the record at the cursor is of

@@ -110,6 +110,14 @@ impl<P: SessionDatagramLink, C: ClockSource + 'static> SessionDatagramLink for A
         !self.shut() && self.pump.takes_input()
     }
 
+    fn keeps_input(&self) -> bool {
+        self.pump.keeps_input()
+    }
+
+    fn keep(&self) {
+        self.pump.keep()
+    }
+
     fn readiness(&self) -> Option<Box<dyn LinkReadiness>> {
         self.pump.readiness()
     }

@@ -289,6 +289,11 @@ pub struct UdpDriver<S: DatagramSocket, B: AsMut<[u8]>, T: TxStore> {
     /// into the stack. Judged when it is read, so only its length is held and not its source: a
     /// datagram the binding does not admit is discarded there and holds nothing.
     stash: Cell<Option<usize>>,
+    /// The length of the datagram at the front of `rx_buf` that its session asked the link to keep
+    /// ([`SessionDatagramLink::keep`]), lent again whole by the next receive before any other.
+    kept: Cell<Option<usize>>,
+    /// Whether the session asked, while a datagram is lent, to keep it.
+    keeping: Cell<bool>,
     /// The last receive failure, kept for the deploy to report: the loop's
     /// seam returns a frame or nothing, and a socket that fails must not
     /// read as a quiet one.
@@ -383,6 +388,8 @@ impl<S: DatagramSocket, B: AsMut<[u8]>, T: TxStore> UdpDriver<S, B, T> {
             rx_len,
             tx: TxLender::new(tx),
             stash: Cell::new(None),
+            kept: Cell::new(None),
+            keeping: Cell::new(false),
             rx_error: Cell::new(None),
             idle_wait_ms: SERVICE_WAIT_MS as u32,
             armed_wait_ms: Cell::new(SERVICE_WAIT_MS),
@@ -650,6 +657,9 @@ impl<S: DatagramSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static
     fn try_recv(&self) -> Option<RxFrame> {
         let mut buf = self.rx_buf.borrow_mut();
         let bytes: &mut [u8] = buf.as_mut();
+        if let Some(len) = self.kept.take() {
+            return Some(RxFrame::new(bytes[..len].to_vec()));
+        }
         match self.next_admitted(bytes) {
             Ok(Some(len)) => Some(RxFrame::new(bytes[..len].to_vec())),
             Ok(None) => None,
@@ -661,7 +671,17 @@ impl<S: DatagramSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static
     }
 
     fn holds_input(&self) -> bool {
-        self.stash.get().is_some() || self.socket.holds_datagram()
+        self.stash.get().is_some() || self.kept.get().is_some() || self.socket.holds_datagram()
+    }
+
+    // The datagram lies in the link's own receive buffer, which nothing writes until the link
+    // reads the next one: a datagram kept is lent from where it lies, and costs no copy.
+    fn keeps_input(&self) -> bool {
+        true
+    }
+
+    fn keep(&self) {
+        self.keeping.set(true);
     }
 
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
@@ -680,17 +700,23 @@ impl<S: DatagramSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static
     fn recv_with(&self, f: &mut dyn FnMut(&[u8])) -> bool {
         let mut buf = self.rx_buf.borrow_mut();
         let bytes: &mut [u8] = buf.as_mut();
-        match self.next_admitted(bytes) {
-            Ok(Some(len)) => {
-                f(&bytes[..len]);
-                true
-            }
-            Ok(None) => false,
-            Err(e) => {
-                self.rx_error.set(Some(e));
-                false
-            }
+        let len = match self.kept.take() {
+            Some(len) => len,
+            None => match self.next_admitted(bytes) {
+                Ok(Some(len)) => len,
+                Ok(None) => return false,
+                Err(e) => {
+                    self.rx_error.set(Some(e));
+                    return false;
+                }
+            },
+        };
+        self.keeping.set(false);
+        f(&bytes[..len]);
+        if self.keeping.replace(false) {
+            self.kept.set(Some(len));
         }
+        true
     }
 }
 
