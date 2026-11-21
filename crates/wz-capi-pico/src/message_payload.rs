@@ -30,9 +30,13 @@
 //! threads, one call at a time. `_new` makes an owned handle, every door that uses one takes the
 //! loan, and `_drop` releases it and leaves the gravestone.
 
+use alloc::borrow::ToOwned;
+use alloc::boxed::Box;
+use alloc::ffi::CString;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::sync::Arc;
 use core::ffi::{c_char, c_void, CStr};
-use std::ffi::CString;
-use std::sync::Arc;
 
 use wz_app_frame::message_payload::{Given, Got, Payload, Refusal, Wanted};
 use wz_app_frame::proto_decode::SchemaSet;
