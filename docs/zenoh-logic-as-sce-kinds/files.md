@@ -259,6 +259,8 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-pico/src/matching.rs` | S7 | |
 | `crates/wz-capi-pico/src/message_catalog.rs` | S12 | |
 | `crates/wz-capi-pico/src/message_payload.rs` | S12 | |
+| `crates/wz-capi-pico/src/object_pool.rs` | S12 | |
+| `crates/wz-capi-pico/src/object_slot.rs` | S7 | |
 | `crates/wz-capi-pico/src/option_fields.rs` | S12 | |
 | `crates/wz-capi-pico/src/os/arith.rs` | S12 | |
 | `crates/wz-capi-pico/src/os/mod.rs` | S7 | |
