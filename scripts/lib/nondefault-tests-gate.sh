@@ -488,6 +488,12 @@ transport-link-unixpipe,transport-link-ws|"
     # what the target asserts of a build without `declarations-synced-event`.
     "wz-capi-pico|hook|remote-declaration-watch,declarations-synced-event|"
     "wz-capi-pico|hook|remote-declaration-watch|--test=decl_watch_doors"
+    # The most memory a session holds (`wz_ext_session_memory`, `_row`): the unit tests of the rows
+    # this ABI adds and of how a row is handed over (`session_memory::`), and the doors over a
+    # listener and a session that dials it (`files::session_memory_door::`), on each engine: the
+    # filter names both, and a listener's links are bounded as its engine bounds them.
+    "wz-capi-pico|hook|session-memory|session_memory"
+    "wz-capi-pico|hook|-default,engine-coop,peer,multi-thread,link-udp,session-memory|session_memory"
     # What those doors do, once, in the port both C ABIs and both engines share
     # (`wz-capi-port`'s `observation`): the unit tests of the clock callback and of the refusals.
     # `time-base` joins: the time base made from a door's C calls (`time_base::`), its read and the
