@@ -4,10 +4,12 @@
 //! The answering end of a query: the router asks, the session's queryable answers outside the
 //! session's lock, and the Final follows the replies.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use wz_capi_port::{HeldQuery, QueryCallback, QueryHolder, SessionDrive, SessionEngine, WireKey};
+use wz_session_core::limit_binding::Quota;
 use wz_session_core::locality::Locality;
 use wz_session_core::query_sink::{QueryView, ReplyOut};
 
@@ -104,4 +106,56 @@ fn a_kept_query_holds_its_final_until_it_is_dropped() {
         router.seen(|s| s.answers.len()) >= 2
     });
     assert_eq!(router.seen(|s| s.answers.clone()), vec!["reply", "final"]);
+}
+
+/// The session holds the Finals of at most `MAX_PENDING_FINALS` queries for their callbacks: a
+/// query that finds every row taken is answered with its Final at once, its callback never run,
+/// and counted, while the kept query's Final still waits for it. The CONTROL is the first query,
+/// kept with its Final held.
+#[test]
+fn a_query_no_hold_row_takes_is_answered_with_its_final_at_once() {
+    let Some(limits) =
+        super::entity_tables::lowered(|l| l.select_max_pending_finals(Quota::at_most(1)).is_ok())
+    else {
+        return;
+    };
+    let router = Router::start(CatchAll::None);
+    let engine = super::entity_tables::open_under(&router, limits);
+    let kept: Arc<Mutex<Option<Box<dyn HeldQuery>>>> = Arc::new(Mutex::new(None));
+    let called = Arc::new(AtomicUsize::new(0));
+    let (slot, count) = (kept.clone(), called.clone());
+    declare(&engine, "demo/h/**", move |holder, query, _out| {
+        count.fetch_add(1, Ordering::SeqCst);
+        *slot.lock().unwrap() = Some(holder.hold_query(query));
+    });
+    until(&engine, "the router to see the queryable", || {
+        router.seen(|s| s.declares) >= 1
+    });
+    router.send(Command::Query(9, "demo/h/a"));
+    until(&engine, "the callback to keep the first query", || {
+        kept.lock().unwrap().is_some()
+    });
+    assert!(
+        router.seen(|s| s.answers.is_empty()),
+        "CONTROL: the kept query's Final waits for it"
+    );
+
+    router.send(Command::Query(10, "demo/h/b"));
+    until(&engine, "the second query's Final", || {
+        router.seen(|s| s.answers.len()) >= 1
+    });
+    assert_eq!(router.seen(|s| s.answers.clone()), vec!["final"]);
+    assert_eq!(
+        called.load(Ordering::SeqCst),
+        1,
+        "the second query's callback never ran"
+    );
+    assert_eq!(engine.queries_unheld(), 1);
+
+    let held = kept.lock().unwrap().take();
+    drop(held);
+    until(&engine, "the kept query's Final", || {
+        router.seen(|s| s.answers.len()) >= 2
+    });
+    assert_eq!(router.seen(|s| s.answers.clone()), vec!["final", "final"]);
 }

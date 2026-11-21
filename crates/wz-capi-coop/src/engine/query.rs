@@ -19,6 +19,11 @@
 //! A query the callback keeps ([`CoopHolder::hold_query`]) is one hold more, released when the C
 //! program drops it; until then it answers on its own link.
 //!
+//! The holds are rows of a fixed table, as many as the session's `MAX_PENDING_FINALS`. A query that
+//! arrives when every row is taken is not handed to a callback: nothing holds its Final, so the
+//! dispatch sends it at once, and the query is counted. The asker hears the end of an answer with
+//! no reply rather than nothing.
+//!
 //! ## A query belongs to its link
 //!
 //! Each link the session dials has a GENERATION. A query is held and answered under the
@@ -41,6 +46,8 @@ use wz_capi_port::sync::Lock;
 use wz_capi_port::{HeldQuery, QblId, QueryHolder};
 use wz_runtime_coop::session_drive::SessionLinks;
 use wz_runtime_coop::ClockSource;
+use wz_session_core::bounded::{BoundedVec, Static};
+use wz_session_core::caps;
 use wz_session_core::query::QueryResponder;
 use wz_session_core::query_sink::{QueryView, ReplyOut};
 use wz_session_core::reply_acceptance::ReplyKeyExpr;
@@ -140,26 +147,49 @@ struct FinalHold {
     due: Option<QosLevel>,
 }
 
-/// The Finals held open, by the link generation and request id they answer.
-#[derive(Default)]
-pub(super) struct FinalHolds(Vec<FinalHold>);
+/// The Finals held open, by the link generation and request id they answer: one row for each
+/// query a callback is still to answer or a C program keeps, at most `rows` of them, the value of
+/// `MAX_PENDING_FINALS` the session's open resolved under the build's. The table is the plane's
+/// own and fixed in size, as the plane is shared with what answers outside the session's lock.
+pub(super) struct FinalHolds {
+    holds: BoundedVec<FinalHold, { caps::MAX_PENDING_FINALS }, Static>,
+    rows: usize,
+}
 
 impl FinalHolds {
-    /// One hold more on the Final of `rid` on link `generation`.
-    pub(super) fn take(&mut self, generation: u64, rid: wz_session_core::wire_id::RequestId) {
-        match self
-            .0
+    /// No Final held, and room for the Finals of `rows` queries.
+    pub(super) fn holding(rows: usize) -> Self {
+        Self {
+            holds: BoundedVec::new_static(),
+            rows,
+        }
+    }
+
+    /// One hold more on the Final of `rid` on link `generation`: `false`, holding nothing, when no
+    /// hold of that query is open and every row is taken.
+    pub(super) fn take(
+        &mut self,
+        generation: u64,
+        rid: wz_session_core::wire_id::RequestId,
+    ) -> bool {
+        if let Some(hold) = self
+            .holds
             .iter_mut()
             .find(|h| h.generation == generation && h.rid == rid)
         {
-            Some(hold) => hold.holds += 1,
-            None => self.0.push(FinalHold {
-                generation,
-                rid,
-                holds: 1,
-                due: None,
-            }),
+            hold.holds += 1;
+            return true;
         }
+        self.holds.len() < self.rows
+            && self
+                .holds
+                .push(FinalHold {
+                    generation,
+                    rid,
+                    holds: 1,
+                    due: None,
+                })
+                .is_ok()
     }
 
     /// The dispatch owes the Final of `rid`: `true` when nothing holds it, so it goes out now,
@@ -171,7 +201,7 @@ impl FinalHolds {
         qos: QosLevel,
     ) -> bool {
         match self
-            .0
+            .holds
             .iter_mut()
             .find(|h| h.generation == generation && h.rid == rid)
         {
@@ -190,15 +220,15 @@ impl FinalHolds {
         rid: wz_session_core::wire_id::RequestId,
     ) -> Option<QosLevel> {
         let at = self
-            .0
+            .holds
             .iter()
             .position(|h| h.generation == generation && h.rid == rid)?;
-        let hold = &mut self.0[at];
+        let hold = &mut self.holds[at];
         hold.holds = hold.holds.saturating_sub(1);
         if hold.holds > 0 {
             return None;
         }
-        self.0.swap_remove(at).due
+        self.holds.remove(at).due
     }
 }
 
@@ -210,7 +240,6 @@ pub(super) const LOCAL_QUERY: u64 = 0;
 
 /// What the queryable plane shares between the session's state, its dispatch, the observer's
 /// queryables and the queries a C program keeps.
-#[derive(Default)]
 pub(super) struct QueryPlane {
     /// The generation of the link dialled last: each link is given the next.
     pub(super) generation: AtomicU64,
@@ -226,13 +255,33 @@ pub(super) struct QueryPlane {
     /// The queries waiting for their callbacks, in the order they arrived: the queryable they
     /// matched, the query, and the generation of its link.
     pub(super) queries: Mutex<VecDeque<(QblId, OwnedQuery, u64)>>,
+    /// The queries that found no row to hold their Final and were answered with it at once.
+    unheld: AtomicU64,
 }
 
 impl QueryPlane {
-    /// What the observer's queryable `id` does with a query: copy it out and hold its Final.
+    /// A plane that holds the Finals of at most `rows` queries at once ([`FinalHolds`]).
+    pub(super) fn holding(rows: usize) -> Self {
+        Self {
+            generation: AtomicU64::new(0),
+            arriving: AtomicU64::new(0),
+            #[cfg(feature = "local-queryable")]
+            asking: AtomicBool::new(false),
+            holds: Mutex::new(FinalHolds::holding(rows)),
+            queries: Mutex::new(VecDeque::new()),
+            unheld: AtomicU64::new(0),
+        }
+    }
+
+    /// What the observer's queryable `id` does with a query: copy it out and hold its Final. A
+    /// query no row can hold is not handed to a callback: nothing holds its Final, so the dispatch
+    /// that owes it sends it at once and the asker is not left without an end. It is counted.
     pub(super) fn arrive(&self, id: QblId, view: &dyn QueryView) {
         let generation = self.arriving_on();
-        lock(&self.holds).take(generation, view.rid());
+        if !lock(&self.holds).take(generation, view.rid()) {
+            self.unheld.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
         lock(&self.queries).push_back((id, OwnedQuery::of(view), generation));
     }
 
@@ -319,8 +368,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> QueryHolder fo
             if at != Arc::as_ptr(&engine) as usize || rid != view.rid() {
                 return None;
             }
-            lock(&engine.plane.holds).take(generation, rid);
-            Some((generation, rid))
+            // The query is being answered, so its Final is held already and this takes no row.
+            lock(&engine.plane.holds)
+                .take(generation, rid)
+                .then_some((generation, rid))
         });
         Box::new(CoopHeld {
             engine: self.engine.clone(),
@@ -335,6 +386,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> QueryHolder fo
         self.engine
             .upgrade()
             .map_or(true, |engine| super::SessionEngine::is_closed(&*engine))
+    }
+}
+
+impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
+    /// How many queries found no row to hold their Final and were answered with it at once.
+    #[cfg(test)]
+    pub(crate) fn queries_unheld(&self) -> u64 {
+        self.plane.unheld.load(Ordering::Relaxed)
     }
 }
 

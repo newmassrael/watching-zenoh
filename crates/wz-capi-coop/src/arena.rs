@@ -203,6 +203,7 @@ pub struct ArenaPlan {
     link_bytes: usize,
     entities: EntityRows,
     gets: GetTables,
+    held_queries: usize,
 }
 
 impl ArenaPlan {
@@ -225,6 +226,7 @@ impl ArenaPlan {
             link_bytes,
             entities: EntityRows::default(),
             gets: GetTables::default(),
+            held_queries: 0,
         };
         let faces = faces_of(config).ok_or(ArenaRefused::TooLarge)?;
         // The links' rows are lent when the session opens, in this order (`SessionArena::lend_links`).
@@ -330,6 +332,15 @@ impl ArenaPlan {
             plan.gets.tables,
             FaceGets::arena_bytes(plan.gets.rows).ok_or(ArenaRefused::TooLarge)?,
         );
+        plan.held_queries = if cfg!(feature = "queryable") {
+            lent(
+                "MAX_PENDING_FINALS",
+                limits.max_pending_finals(),
+                caps::MAX_PENDING_FINALS,
+            )?
+        } else {
+            0
+        };
         plan.entities = entity_rows(limits)?;
         plan.put_entities()?;
         plan.reserved_bytes().ok_or(ArenaRefused::TooLarge)?;
@@ -402,6 +413,14 @@ impl ArenaPlan {
     /// The tables of pending gets the arena lends, and the rows of each.
     pub fn gets(&self) -> GetTables {
         self.gets
+    }
+
+    /// How many queries the session holds for its queryables' callbacks at once
+    /// (`MAX_PENDING_FINALS`), resolved as the arena's rows are and none in a build without
+    /// `queryable`. They are no row of the arena: the query plane holds them in a fixed table of
+    /// its own, as it is shared with what answers outside the session's lock.
+    pub fn held_queries(&self) -> usize {
+        self.held_queries
     }
 
     /// Add a row. A plan has room for every row of the build with every feature (`ARENA_ROWS`).

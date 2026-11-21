@@ -264,6 +264,26 @@ fn a_listener_lays_out_the_gets_of_each_face_it_admits() {
     );
 }
 
+/// The queries held for their callbacks are the value of `MAX_PENDING_FINALS` the open resolved,
+/// the build's for a session that states none.
+#[cfg(feature = "queryable")]
+#[test]
+fn the_plan_holds_the_queries_its_limit_resolves() {
+    let built =
+        ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
+    assert_eq!(built.held_queries(), caps::MAX_PENDING_FINALS);
+    let mut lowered = SessionLimits::defaults();
+    if lowered
+        .select_max_pending_finals(Quota::at_most(1))
+        .is_err()
+    {
+        // A build that keeps the limit to its own value has no other.
+        return;
+    }
+    let at_one = ArenaPlan::of(&client_config(), &lowered).expect("lays an arena out");
+    assert_eq!(at_one.held_queries(), 1);
+}
+
 /// An arena past the address space is refused before any memory is asked.
 #[test]
 fn an_arena_past_the_address_space_is_refused() {

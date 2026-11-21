@@ -2637,7 +2637,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             #[cfg(feature = "queryable")]
             queryables,
             #[cfg(feature = "queryable")]
-            plane: Arc::new(QueryPlane::default()),
+            plane: Arc::new(QueryPlane::holding(plan.held_queries())),
             #[cfg(feature = "query")]
             pending_gets: Vec::new(),
             #[cfg(feature = "query")]
