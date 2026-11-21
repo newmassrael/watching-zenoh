@@ -84,9 +84,18 @@ literals blanked, and refuses:
 7. THE DIRECTION. No other file of the crate's `src` names a door
    (`crate::<door>` or `super::<door>`), comments included: the core never
    depends on the extension layer.
+8. A CORE VALUE HELD AS NOTHING. The doors' library declares each core type the
+   doors only point at as a type of no size (`wz-capi-pico-ext/src/core_view.rs`).
+   A door names such a type only behind a pointer or a reference, or as the
+   target of a cast: a field, a local, an argument, a result or a size of it is
+   refused, since in that library a copy holds nothing and a pointer to the copy
+   points into the door's own memory, which the core reads as its value. A door
+   that keeps a copy of a core value has the view declare it as storage of the
+   core's size, which the core's tests hold to the core.
 
 A door listed with no file is a finding (the list is renamed with the door), and
-no door file at all is a failure to grade.
+no door file at all is a failure to grade, as is no view, or a view in which the
+gate reads no type of no size.
 
 ## Modes
 
@@ -240,7 +249,7 @@ def grade(meta: dict, in_core: frozenset[str]) -> tuple[list[str], str]:
     return findings, census
 
 
-# ---- The extension layer of the pico C ABI (rules 4 to 7) -----------------------------------
+# ---- The extension layer of the pico C ABI (rules 4 to 8) -----------------------------------
 
 PICO = "wz-capi-pico"
 
@@ -326,6 +335,21 @@ NOT_A_LITERAL_AFTER = frozenset(
 )
 FIELD_READ = re.compile(rf"(?<!\.)\.\s*({_IDENT})\b(?!\s*(?:\(|::|!))")
 STRUCT_HEAD = re.compile(rf"\b(?:struct|union)\s+({_IDENT})\b[^;{{(]*\{{")
+
+# The doors' library's view of the core, beside the pico crate, and the declaration it gives a
+# type the doors only point at: one field of no size.
+EXT_CRATE = "wz-capi-pico-ext"
+VIEW_FILE = "src/core_view.rs"
+NO_SIZE_DECL = re.compile(
+    rf"\bstruct\s+({_IDENT})\s*\{{\s*_opaque\s*:\s*\[\s*u8\s*;\s*0\s*\]\s*,?\s*\}}"
+)
+# What a type of no size may follow where a door names it: a pointer, a reference, a `NonNull`,
+# or the turbofish of a cast or a null pointer, each of which leaves the value where the core put
+# it.
+BEHIND_A_POINTER = re.compile(
+    r"(?:\*\s*(?:const|mut)|&\s*(?:'\w+\s*)?(?:mut)?|\bNonNull\s*<"
+    r"|\b(?:cast|cast_const|cast_mut|null|null_mut)\s*::\s*<)$"
+)
 
 
 def _decl(name: str) -> re.Pattern[str]:
@@ -503,7 +527,7 @@ def judge_external(segs: list[str]) -> str | None:
 def grade_extension(
     src: Path, deps: set[str], doors: frozenset[str] = EXTENSION_DOORS
 ) -> tuple[list[str], str]:
-    """The findings of rules 4 to 7 over the pico crate's `src`, and a census."""
+    """The findings of rules 4 to 8 over the pico crate's `src`, and a census."""
     findings: list[str] = []
     if not (src / "lib.rs").is_file():
         raise InputError(f"{src}: no crate root (lib.rs)")
@@ -516,6 +540,17 @@ def grade_extension(
         )
     if not present:
         raise InputError(f"{src}: no extension door file to read")
+    view = src.parent.parent / EXT_CRATE / VIEW_FILE
+    if not view.is_file():
+        raise InputError(
+            f"{view}: no view of the core for the doors' library, so no type of no size to hold"
+        )
+    no_size = sorted(set(NO_SIZE_DECL.findall(_code(view))))
+    if not no_size:
+        raise InputError(f"{view}: the gate reads no type of no size in the doors' view")
+    held = re.compile(
+        rf"(?<![\w:])(?:(?:crate|super)\s*::\s*{_IDENT}\s*::\s*)?({'|'.join(no_size)})\b"
+    )
     if module_file(src, EXTENSION_INTERFACE) is None:
         findings.append(
             f"{src.name}/ has no `{EXTENSION_INTERFACE}.rs`: the doors have no interface"
@@ -660,6 +695,18 @@ def grade_extension(
                     chars[i] = " "
         body = "".join(chars)
 
+        # 8. A type the doors' library declares of no size, held by value.
+        for hit in held.finditer(body):
+            if BEHIND_A_POINTER.search(body[max(0, hit.start() - 64) : hit.start()].rstrip()):
+                continue
+            findings.append(
+                f"{rel}:{_line(code, hit.start())} holds `{hit.group(1)}` by value, a type the "
+                f"doors' library declares of no size ({EXT_CRATE}/{VIEW_FILE}): there a copy "
+                f"holds nothing and a pointer to it points into the door's own memory, which the "
+                f"core reads as its value; point at it, or declare it in the view as storage of "
+                f"the core's size, which the core's tests hold to the core"
+            )
+
         for hit in CRATE_INLINE.finditer(body):
             segs = [hit.group(1)] + [s.strip() for s in hit.group(2).split("::")]
             item = judge(segs, False, hit.start(), "::".join(segs))
@@ -702,7 +749,8 @@ def grade_extension(
 
     census = (
         f"{len(present)} extension door(s) read, {graded} path(s) into the stack graded, "
-        f"{len(core_files)} core file(s) read for the direction"
+        f"{len(core_files)} core file(s) read for the direction, "
+        f"{len(no_size)} type(s) of no size in the doors' view"
     )
     return findings, census
 
@@ -1050,10 +1098,33 @@ fn id() -> z_id_t {
 """
 
 
+# The doors' library's view in miniature: a loan only pointed at, of no size, and a loan the doors
+# keep a copy of, of the core's size.
+_EXT_VIEW = """pub mod pubsub {
+    /// A loaned publisher, only pointed at.
+    #[repr(C)]
+    pub struct z_loaned_publisher_t {
+        _opaque: [u8; 0],
+    }
+}
+pub mod session {
+    /// A loaned session, two words of the core's.
+    #[repr(C)]
+    pub struct z_loaned_session_t {
+        _opaque: [*mut core::ffi::c_void; 2],
+    }
+}
+"""
+
+
 def _extension_fixture(
-    root: Path, door: str = "", core: dict[str, str | None] | None = None
+    root: Path,
+    door: str = "",
+    core: dict[str, str | None] | None = None,
+    view: str | None = _EXT_VIEW,
 ) -> Path:
-    """The fixture crate's `src` under `root`, its door `e2e_sender` the clean one and `door`."""
+    """The fixture crate's `src` under `root`, its door `e2e_sender` the clean one and `door`,
+    and the doors' library's view beside it."""
     src = root / PICO / "src"
     src.mkdir(parents=True)
     files: dict[str, str | None] = {**_EXT_CORE, "e2e_sender.rs": _EXT_CLEAN + door}
@@ -1061,11 +1132,15 @@ def _extension_fixture(
     for name, text in files.items():
         if text is not None:
             (src / name).write_text(text, encoding="utf-8")
+    if view is not None:
+        path = root / EXT_CRATE / VIEW_FILE
+        path.parent.mkdir(parents=True)
+        path.write_text(view, encoding="utf-8")
     return src
 
 
 def _extension_selftest() -> int:
-    """The rows of rules 4 to 7, red-first; how many did not hold."""
+    """The rows of rules 4 to 8, red-first; how many did not hold."""
     session_names_a_door = _EXT_CORE["session.rs"] + "use crate::e2e_sender::thing;\n"
     interface_names_a_door = _EXT_CORE["ext_interface.rs"] + "// read by crate::e2e\n"
     # (name, door text, core files, doors, should fail, substring a finding carries)
@@ -1181,6 +1256,34 @@ def _extension_selftest() -> int:
             "no interface",
             "", {"ext_interface.rs": None}, _EXT_DOORS, True, "has no `ext_interface.rs`",
         ),
+        (
+            "a loan of no size kept in a field",
+            "struct Kept {\n    publisher: z_loaned_publisher_t,\n}\n",
+            {}, _EXT_DOORS, True, "declares of no size",
+        ),
+        (
+            "a loan of no size read into a local",
+            "unsafe fn v(p: *const z_loaned_publisher_t) {\n"
+            "    let _kept: z_loaned_publisher_t = core::ptr::read(p);\n}\n",
+            {}, _EXT_DOORS, True, "declares of no size",
+        ),
+        (
+            "the size of a loan of no size",
+            "fn w() -> usize {\n    core::mem::size_of::<z_loaned_publisher_t>()\n}\n",
+            {}, _EXT_DOORS, True, "declares of no size",
+        ),
+        (
+            "a loan of no size pointed at, referred to and cast to",
+            "fn x(p: *const z_loaned_publisher_t, q: &z_loaned_publisher_t) "
+            "-> *mut z_loaned_publisher_t {\n"
+            "    p.cast::<z_loaned_publisher_t>().cast_mut()\n}\n",
+            {}, _EXT_DOORS, False, "",
+        ),
+        (
+            "a loan the view sizes as the core's, kept in a field",
+            "struct Held {\n    session: z_loaned_session_t,\n}\n",
+            {}, _EXT_DOORS, False, "",
+        ),
     ]
     bad = 0
     for name, door, core, doors, should_fail, needle in rows:
@@ -1206,6 +1309,23 @@ def _extension_selftest() -> int:
             src = _extension_fixture(Path(tmp), "", core)
             try:
                 grade_extension(src, _EXT_DEPS, doors)
+                ok = False
+            except InputError as e:
+                ok = needle in str(e)
+        print(f"  selftest {'ok  ' if ok else 'BAD '} {name}: refused")
+        if not ok:
+            bad += 1
+
+    # Without the view the types the doors only point at are unknown: refused, not passed.
+    view_rows = [
+        ("no view of the core", None, "no view of the core"),
+        ("a view with no type of no size", "pub mod abi {}\n", "no type of no size"),
+    ]
+    for name, view, needle in view_rows:
+        with tempfile.TemporaryDirectory() as tmp:
+            src = _extension_fixture(Path(tmp), view=view)
+            try:
+                grade_extension(src, _EXT_DEPS, _EXT_DOORS)
                 ok = False
             except InputError as e:
                 ok = needle in str(e)

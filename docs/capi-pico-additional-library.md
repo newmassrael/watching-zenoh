@@ -22,7 +22,7 @@ versioned C interface through which the doors read what the core holds beyond th
 session's facts, a payload's bytes in place, and the core's in-callback mark. Of the other crates
 of the stack a door names only stateless libraries (`wz-app-frame`, the models and pure values of
 `wz-session-core`). No file of the core names a door, comments included.
-`scripts/lib/layer_direction_gate.py` holds both directions over the sources (its rules 4 to 7 and
+`scripts/lib/layer_direction_gate.py` holds both directions over the sources (its rules 4 to 8 and
 `EXTENSION_DOORS`).
 
 ## Two forms from one source
@@ -64,11 +64,15 @@ The boundary is an hourglass: a narrow C interface between two libraries that ea
 state, allocator and runtime.
 
 1. **Handles are opaque.** A value of the core that a door holds (an owned string, a key
-   expression view, a closure, a subscriber, a queryable) is declared in `core_view.rs` as so many
-   words of storage, the core's size, with no field the door could read; a type only pointed at is
-   a type of no size. Fields are declared only where the C header declares them for a program to
-   set (`z_get_options_t`) or read (`wz_ext_session_facts_t`, `wz_ext_decl_event_t`, `z_id_t`). A
-   door's own handles (`wz_ext_owned_e2e_sender_t`, ...) are a word the core never reads.
+   expression view, a closure, a subscriber, a queryable, the copy of a loaned session or publisher
+   a replay door keeps) is declared in `core_view.rs` as so many words of storage, the core's size,
+   with no field the door could read; a type only pointed at is a type of no size. A door never
+   holds a type of no size by value: in the doors' library the copy would hold nothing, and a
+   pointer to it would point into the door's own memory, which the core reads as its value
+   (`layer_direction_gate.py` rule 8). Fields are declared only where the C header declares them
+   for a program to set (`z_get_options_t`) or read (`wz_ext_session_facts_t`,
+   `wz_ext_decl_event_t`, `z_id_t`). A door's own handles (`wz_ext_owned_e2e_sender_t`, ...) are a
+   word the core never reads.
 2. **What a library allocates, that library frees.** A door boxes its own state and frees it in its
    own `*_drop`. A refusal string a door writes is made by the core's `z_string_copy_from_substr`
    and dropped by the program with the core's `z_string_drop`. A payload a door puts is made by the
