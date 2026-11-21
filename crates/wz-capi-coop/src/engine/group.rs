@@ -36,6 +36,7 @@ use wz_session_core::declare_build::{
 use wz_session_core::declare_form::{GroupDeclaration, GroupKey, RetractionKey};
 use wz_session_core::driver_loop::IterationEvent;
 use wz_session_core::interest_build::{build_interest_exact, build_interest_final, InterestKinds};
+use wz_session_core::limits::SessionLimits;
 use wz_session_core::locality::Locality;
 use wz_session_core::metadata::PushMetadata;
 use wz_session_core::multicast_dispatch::MulticastConfig;
@@ -233,6 +234,8 @@ pub(super) struct GroupJoining {
     pub(super) transport: alloc::boxed::Box<dyn GroupTransport>,
     pub(super) params: MulticastParams,
     pub(super) policy: SessionPolicy,
+    /// The session limits the session's open resolved: the group's replies are held to them.
+    pub(super) limits: SessionLimits,
     pub(super) pace: Rc<dyn Pace>,
     /// The generation a member's query is held and answered under (`queryable`).
     #[cfg(feature = "queryable")]
@@ -309,6 +312,7 @@ impl GroupFace {
             transport,
             params,
             policy,
+            limits,
             pace,
             #[cfg(feature = "queryable")]
             generation,
@@ -321,8 +325,9 @@ impl GroupFace {
             label: GroupLabel::of(&join),
         });
         // Bounded as the tokio engine bounds its group's pipeline: the queue's sizes, in batches
-        // of the group's batch, one lane when it runs no QoS.
-        let tx = GroupTxStage::new(&params);
+        // of the group's batch, one lane when it runs no QoS. The replies it holds are bounded by
+        // the session's limits.
+        let tx = GroupTxStage::with_limits(&params, &limits);
         let room = transport.writability().map(Arc::from);
         let input = transport.readiness().map(Arc::from);
         let due = GroupDue::default();

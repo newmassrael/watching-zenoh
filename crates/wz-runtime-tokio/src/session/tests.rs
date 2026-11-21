@@ -7956,6 +7956,55 @@ fn a_querier_takes_the_bound_its_sessions_creator_stated() {
     assert_eq!(querier.slots.pending(), 2, "and takes no place");
 }
 
+/// The replies a handler job or a held query stages apart from the observer are held to the
+/// bounds the session's creator stated to its observer, read when the session is made: a session
+/// over an observer held to a payload of two refuses a reply of three to the handler, and one
+/// over an observer made with no snapshot holds the build's bounds.
+#[cfg(all(feature = "transport-unicast", feature = "query-queryable"))]
+#[test]
+fn a_sessions_reply_bounds_are_the_ones_its_creator_stated() {
+    use wz_session_core::limit_binding::{LimitSpec, Quota};
+    use wz_session_core::limits::{MaxReplyPayloadBytes, SessionLimits};
+    use wz_session_core::query_sink::{ReplyError, ReplyOut};
+    use wz_session_core::reply_stage::{ReplyBounds, ReplyStage};
+
+    let (actions, _driver) = recording_actions();
+    let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
+    let plain = TokioSession::new(actions, observer, Arc::new(TokioTime::new()));
+    assert_eq!(plain.reply_bounds, ReplyBounds::BUILD);
+
+    let mut limits = SessionLimits::defaults();
+    let stated = limits.select_max_reply_payload_bytes(Quota::at_most(2));
+    if MaxReplyPayloadBytes::DOMAIN.is_singleton() {
+        assert!(stated.is_err(), "a build of one value refuses two");
+        return;
+    }
+    stated.expect("two is inside the domain");
+    let (actions, _driver) = recording_actions();
+    let observer = Arc::new(crate::sync::PlainMutex::new(
+        ApplicationLayerObserver::with_limits(&limits),
+    ));
+    let session = TokioSession::new(actions, observer, Arc::new(TokioTime::new()));
+    assert_eq!(session.reply_bounds, ReplyBounds::of(&limits));
+
+    let mut replies = ReplyStage::held_to(session.reply_bounds);
+    {
+        let mut responder = wz_session_core::query::QueryResponder::new(
+            1,
+            String::from("home/temp"),
+            wz_session_core::reply_acceptance::ReplyKeyExpr::from_parameter_bytes(None),
+            wz_session_core::sample::QosLevel::DEFAULT,
+            &mut replies,
+        );
+        assert_eq!(
+            responder.try_reply(b"abc"),
+            Err(ReplyError::PayloadTooLarge)
+        );
+        assert_eq!(responder.try_reply(b"ab"), Ok(()));
+    }
+    assert_eq!(replies.len(), 1, "the refused reply was not staged");
+}
+
 /// The aliased querier holds the same bound.
 #[cfg(all(
     feature = "codec-declare",

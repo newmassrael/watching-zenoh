@@ -2174,10 +2174,16 @@ pub struct QueryableRegistry<C, P: Storage = Profile> {
     /// (decision D12): handed to every matched queryable as [`QueryView::requester`]. Set by the
     /// session before it dispatches, since the registry is the session's and so is the link.
     requester: Option<[u8; 16]>,
+    /// The most bytes of selector parameters (`QUERY_PARAMETERS_MAX_BYTES`) a query from a peer
+    /// may carry for a queryable to run it: what the creator of the registry resolved
+    /// ([`Self::limit_query_sizes_to`]), the build's value until it does.
+    max_parameters: crate::limits::QueryParametersMaxBytesHeld,
+    /// The most bytes of attachment (`QUERY_ATTACHMENT_MAX_BYTES`) a query from a peer may
+    /// carry for a queryable to run it, held as `max_parameters` is.
+    max_attachment: crate::limits::QueryAttachmentMaxBytesHeld,
     /// How many queries from a peer were not run because their parameters or their attachment
-    /// were longer than the build's bound ([`caps::QUERY_PARAMETERS_MAX_BYTES`],
-    /// [`caps::QUERY_ATTACHMENT_MAX_BYTES`]). Saturating: a counter that wrapped would hide the
-    /// refusals it exists to show.
+    /// were longer than the bound the registry is held to ([`Self::query_size_bounds`]).
+    /// Saturating: a counter that wrapped would hide the refusals it exists to show.
     oversize_refused: u32,
     /// The session's `query-unanswerable-final` value, which the session states before every
     /// dispatch ([`Self::set_unanswerable_final`]): with `empty-final` a query whose key does not
@@ -2201,6 +2207,8 @@ impl<C, P: Storage> Default for QueryableRegistry<C, P> {
             quota: Default::default(),
             next_id: 1,
             requester: None,
+            max_parameters: Default::default(),
+            max_attachment: Default::default(),
             oversize_refused: 0,
             unanswerable_final: UnanswerableFinalHeld::default(),
             #[cfg(feature = "transport-shm")]
@@ -2222,6 +2230,29 @@ impl<C, P: Storage> QueryableRegistry<C, P> {
     /// the queryables already in are kept, as a lowered soft limit keeps what it holds.
     pub fn limit_to(&mut self, quota: crate::limits::MaxQueryablesHeld) {
         self.quota = quota;
+    }
+
+    /// Hold the queries from a peer to the sizes the registry's creator resolved: a query whose
+    /// selector parameters are longer than `parameters` admits (`QUERY_PARAMETERS_MAX_BYTES`),
+    /// or whose attachment is longer than `attachment` admits (`QUERY_ATTACHMENT_MAX_BYTES`),
+    /// reaches no queryable, is counted ([`Self::oversize_refusals`]) and is still owed its
+    /// final. A query of the registry's own session is not held to them.
+    pub fn limit_query_sizes_to(
+        &mut self,
+        parameters: crate::limits::QueryParametersMaxBytesHeld,
+        attachment: crate::limits::QueryAttachmentMaxBytesHeld,
+    ) {
+        self.max_parameters = parameters;
+        self.max_attachment = attachment;
+    }
+
+    /// The most bytes of selector parameters and of attachment a query from a peer may carry
+    /// for a queryable of this registry to run it ([`Self::limit_query_sizes_to`]), in that
+    /// order.
+    pub const fn query_size_bounds(
+        &self,
+    ) -> (crate::limit_binding::Quota, crate::limit_binding::Quota) {
+        (self.max_parameters.get(), self.max_attachment.get())
     }
 
     /// How many queries from a peer were refused for their size: not run by any queryable, and
@@ -2714,19 +2745,19 @@ struct QueryProjection<'q> {
     ts_stack: Option<&'q crate::ts_stack::TsStack>,
 }
 
-/// Whether a query's parameters or its attachment are longer than the bound for each, `0`
-/// meaning none. Taking the bounds as arguments keeps the rule testable at every value, where
-/// the build fixes only one.
+/// Whether a query's parameters or its attachment are longer than the bound for each admits.
+/// Taking the bounds as arguments keeps the rule testable at every value, where a build or a
+/// snapshot fixes only one.
 #[cfg(all(feature = "codec-request", feature = "storage-profile"))]
 const fn request_past_bounds(
     parameters: Option<&[u8]>,
     attachment: Option<&[u8]>,
-    max_parameters: usize,
-    max_attachment: usize,
+    max_parameters: crate::limit_binding::Quota,
+    max_attachment: crate::limit_binding::Quota,
 ) -> bool {
-    const fn past(field: Option<&[u8]>, bound: usize) -> bool {
+    const fn past(field: Option<&[u8]>, bound: crate::limit_binding::Quota) -> bool {
         match field {
-            Some(bytes) => bound != 0 && bytes.len() > bound,
+            Some(bytes) => !bound.admits(bytes.len()),
             None => false,
         }
     }
@@ -3260,16 +3291,17 @@ impl<C: ResponderSink, P: Storage> QueryableRegistry<C, P> {
             let _ = plain_value;
             None
         };
-        // A query from a peer that is longer than the build allows runs nowhere. It is still a
+        // A query from a peer that is longer than the session allows runs nowhere. It is still a
         // query that was routed (the caller owes its final, as for one that matched nobody), so
         // the asker's query ends with no reply and does not wait out its timeout. The one body
         // both receive paths fire through is the one place the bound is read.
+        let (max_parameters, max_attachment) = self.query_size_bounds();
         if is_remote
             && request_past_bounds(
                 parameters_view,
                 attachment_view,
-                caps::QUERY_PARAMETERS_MAX_BYTES,
-                caps::QUERY_ATTACHMENT_MAX_BYTES,
+                max_parameters,
+                max_attachment,
             )
         {
             self.oversize_refused = self.oversize_refused.saturating_add(1);
@@ -4204,27 +4236,34 @@ mod tests {
         );
     }
 
-    /// The rule at every value of the two bounds, which the build fixes only one of: `0` is no
-    /// bound, a bound is a length that may be filled and not passed, and each field has its own.
+    /// The rule at every value of the two bounds, which a build or a snapshot fixes only one of:
+    /// no bound admits any length, a bound is a length that may be filled and not passed, and
+    /// each field has its own.
     #[test]
     fn a_query_is_past_a_bound_only_when_a_field_is_longer_than_its_own() {
+        use crate::limit_binding::Quota;
         let (p, a) = (Some(&b"12345678"[..]), Some(&b"abc"[..]));
+        let none = Quota::UNBOUNDED;
+        let at = Quota::at_most;
         // No bound for either: whatever the length.
-        assert!(!request_past_bounds(p, a, 0, 0));
+        assert!(!request_past_bounds(p, a, none, none));
         // A bound that the field fills exactly is not passed; one byte past it is.
-        assert!(!request_past_bounds(p, None, 8, 0));
-        assert!(request_past_bounds(p, None, 7, 0));
-        assert!(!request_past_bounds(None, a, 0, 3));
-        assert!(request_past_bounds(None, a, 0, 2));
+        assert!(!request_past_bounds(p, None, at(8), none));
+        assert!(request_past_bounds(p, None, at(7), none));
+        assert!(!request_past_bounds(None, a, none, at(3)));
+        assert!(request_past_bounds(None, a, none, at(2)));
         // The bounds are separate: one field under its own does not excuse the other.
-        assert!(request_past_bounds(p, a, 8, 2));
-        assert!(request_past_bounds(p, a, 7, 3));
-        assert!(!request_past_bounds(p, a, 8, 3));
+        assert!(request_past_bounds(p, a, at(8), at(2)));
+        assert!(request_past_bounds(p, a, at(7), at(3)));
+        assert!(!request_past_bounds(p, a, at(8), at(3)));
         // A field that is absent is never past a bound.
-        assert!(!request_past_bounds(None, None, 1, 1));
+        assert!(!request_past_bounds(None, None, at(1), at(1)));
         // A bound of one field does not read the other.
-        assert!(!request_past_bounds(p, a, 0, 3));
-        assert!(!request_past_bounds(p, a, 8, 0));
+        assert!(!request_past_bounds(p, a, none, at(3)));
+        assert!(!request_past_bounds(p, a, at(8), none));
+        // A bound of zero admits an empty field and nothing longer.
+        assert!(!request_past_bounds(Some(&b""[..]), None, at(0), none));
+        assert!(request_past_bounds(Some(&b"x"[..]), None, at(0), none));
     }
 
     /// A node of this build refuses, or does not, a query of a peer past the build's bound, and

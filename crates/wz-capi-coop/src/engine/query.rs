@@ -354,7 +354,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> HeldQuery for 
         let (Some((generation, rid)), Some(engine)) = (self.held, self.engine.upgrade()) else {
             return;
         };
-        let mut replies = ReplyStage::new();
+        let mut replies = ReplyStage::held_to(engine.reply_bounds);
         {
             let mut responder = responder_for(
                 rid,

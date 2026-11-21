@@ -436,6 +436,11 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
             .limit_to(limits.max_subscriptions_held());
         #[cfg(feature = "query-queryable")]
         observer.queryables.limit_to(limits.max_queryables_held());
+        #[cfg(feature = "query-queryable")]
+        observer.queryables.limit_query_sizes_to(
+            limits.query_parameters_max_bytes_held(),
+            limits.query_attachment_max_bytes_held(),
+        );
         #[cfg(feature = "declare-subscriber")]
         observer
             .subscribers

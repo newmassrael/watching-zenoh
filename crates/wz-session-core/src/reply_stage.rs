@@ -17,8 +17,9 @@
 //! the capacity on the fixed one. A table that cannot take another entry, by its quota
 //! or by its storage, REFUSES it, COUNTS it, and tells whoever asked:
 //!
-//! - a reply the stage has no room for, or whose payload is longer than
-//!   [`caps::MAX_REPLY_PAYLOAD_BYTES`], is an `Err` to the queryable's handler
+//! - a reply the stage has no room for, or whose payload is longer than the stage's
+//!   payload bound (`MAX_REPLY_PAYLOAD_BYTES`, held in [`ReplyBounds`] beside the
+//!   count), is an `Err` to the queryable's handler
 //!   ([`crate::query_sink::ReplyError::StagingFull`],
 //!   [`crate::query_sink::ReplyError::PayloadTooLarge`]) and is counted
 //!   in [`crate::reply_stage::ReplyRefusals`]. It is never truncated and never built on the heap in
@@ -51,6 +52,7 @@
 
 use crate::bounded::{BoundedVec, Profile, SpanOffset, Static, Storage};
 use crate::caps;
+use crate::limit_binding::Quota;
 #[cfg(feature = "alloc")]
 use crate::query::QueryReply;
 use crate::query_sink::ReplyError;
@@ -271,8 +273,50 @@ pub struct ReplyRefusals {
     /// capacity of `MAX_PENDING_REPLIES` admits, or the byte arena had no room left
     /// for the reply's bytes).
     pub staging_full: u32,
-    /// Replies whose payload was longer than [`caps::MAX_REPLY_PAYLOAD_BYTES`].
+    /// Replies whose payload, or attachment, was longer than the stage's payload bound
+    /// (`MAX_REPLY_PAYLOAD_BYTES`, [`ReplyBounds`]).
     pub payload_too_large: u32,
+}
+
+/// The bounds a [`ReplyStage`] holds the replies staged in it to: how many it holds
+/// (`MAX_PENDING_REPLIES`) and how many bytes the payload of one, and its attachment, may
+/// take (`MAX_REPLY_PAYLOAD_BYTES`), as the creator of the session resolved them. Taken out
+/// of the session's snapshot once ([`Self::of`]), so a stage a runtime makes to answer one
+/// query outside the session's lock is held as the session's own stage is. Where the build
+/// allows each limit one value it holds no byte.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ReplyBounds {
+    replies: crate::limits::MaxPendingRepliesHeld,
+    payload: crate::limits::MaxReplyPayloadBytesHeld,
+}
+
+impl ReplyBounds {
+    /// The build's bounds: what a stage that no snapshot reached holds.
+    pub const BUILD: Self = Self {
+        replies: crate::limits::MaxPendingRepliesHeld::build_default(),
+        payload: crate::limits::MaxReplyPayloadBytesHeld::build_default(),
+    };
+
+    /// The bounds `limits` states.
+    pub const fn of(limits: &crate::limits::SessionLimits) -> Self {
+        Self {
+            replies: limits.max_pending_replies_held(),
+            payload: limits.max_reply_payload_bytes_held(),
+        }
+    }
+
+    /// The most bytes of payload, and of attachment, one reply staged on the policy `P` may
+    /// take: the stated bound, and on a policy that enforces its capacity no more than the
+    /// build's value as well, since that policy's arena is sized for `MAX_PENDING_REPLIES`
+    /// replies of it whatever the profile lets a statement raise the bound to.
+    const fn payload_most<P: Storage>(self) -> Quota {
+        let stated = self.payload.get();
+        if P::ENFORCES_CAPACITY {
+            stated.tighter(Quota::at_most(caps::MAX_REPLY_PAYLOAD_BYTES))
+        } else {
+            stated
+        }
+    }
 }
 
 /// The offset a stage of policy `P` addresses its arena with.
@@ -351,7 +395,9 @@ struct Row<P: Storage> {
 /// `usize::MAX`.
 ///
 /// On both, a reply that would leave more rows staged than the quota its creator
-/// stated ([`Self::limit_to`]) is refused and counted as a full stage is.
+/// stated ([`Self::limit_to`]) is refused and counted as a full stage is, and a reply
+/// whose payload or attachment is longer than the payload bound it stated is refused and
+/// counted as too large.
 ///
 /// The policy defaults to this build's [`Profile`], so `ReplyStage` alone is the
 /// build's stage.
@@ -359,11 +405,12 @@ pub struct ReplyStage<P: Storage = Profile> {
     rows: BoundedVec<Row<P>, { caps::MAX_PENDING_REPLIES }, P>,
     arena: BoundedVec<u8, { caps::REPLY_STAGE_BYTES }, P>,
     refusals: ReplyRefusals,
-    /// The most replies the stage holds (`MAX_PENDING_REPLIES`): what the creator of the
-    /// session resolved ([`Self::limit_to`]), the build's value until it does. A growable
-    /// stage refuses nothing by its storage, so this is what bounds it; where the build fixes
-    /// the bound to the storage's capacity it is held in no byte and the storage refuses alone.
-    quota: crate::limits::MaxPendingRepliesHeld,
+    /// The most replies the stage holds (`MAX_PENDING_REPLIES`) and the longest payload it
+    /// takes (`MAX_REPLY_PAYLOAD_BYTES`): what the creator of the session resolved
+    /// ([`Self::limit_to`]), the build's values until it does. A growable stage refuses
+    /// nothing by its storage, so these are what bound it; where the build fixes a bound to
+    /// one value it is held in no byte.
+    bounds: ReplyBounds,
 }
 
 impl ReplyStage<Static> {
@@ -377,15 +424,22 @@ impl ReplyStage<Static> {
                 staging_full: 0,
                 payload_too_large: 0,
             },
-            quota: crate::limits::MaxPendingRepliesHeld::build_default(),
+            bounds: ReplyBounds::BUILD,
         }
     }
 }
 
 impl ReplyStage<Profile> {
-    /// An empty stage of this build's profile. `const`, so a session slot that holds
-    /// one can be a `static`.
+    /// An empty stage of this build's profile, held to the build's bounds. `const`, so a
+    /// session slot that holds one can be a `static`.
     pub const fn new() -> Self {
+        Self::held_to(ReplyBounds::BUILD)
+    }
+
+    /// An empty stage of this build's profile, held to `bounds`: the stage a runtime makes to
+    /// answer one query, held as the stage of the session the query came to is
+    /// ([`Self::bounds`]).
+    pub const fn held_to(bounds: ReplyBounds) -> Self {
         Self {
             rows: BoundedVec::new(),
             arena: BoundedVec::new(),
@@ -393,18 +447,25 @@ impl ReplyStage<Profile> {
                 staging_full: 0,
                 payload_too_large: 0,
             },
-            quota: crate::limits::MaxPendingRepliesHeld::build_default(),
+            bounds,
         }
     }
 }
 
 impl<P: Storage> ReplyStage<P> {
-    /// Hold the stage to the `MAX_PENDING_REPLIES` its creator resolved: a reply that would
-    /// leave more rows staged than `quota` admits is refused
-    /// ([`ReplyError::StagingFull`], counted in [`ReplyRefusals::staging_full`]), and the
-    /// replies already staged are kept, as a lowered soft limit keeps what it holds.
-    pub fn limit_to(&mut self, quota: crate::limits::MaxPendingRepliesHeld) {
-        self.quota = quota;
+    /// Hold the stage to the bounds its creator resolved: a reply that would leave more rows
+    /// staged than `MAX_PENDING_REPLIES` admits is refused ([`ReplyError::StagingFull`],
+    /// counted in [`ReplyRefusals::staging_full`]), one whose payload or attachment is longer
+    /// than `MAX_REPLY_PAYLOAD_BYTES` admits is refused ([`ReplyError::PayloadTooLarge`],
+    /// counted in [`ReplyRefusals::payload_too_large`]), and the replies already staged are
+    /// kept, as a lowered soft limit keeps what it holds.
+    pub fn limit_to(&mut self, bounds: ReplyBounds) {
+        self.bounds = bounds;
+    }
+
+    /// The bounds the stage holds its replies to ([`Self::limit_to`]).
+    pub const fn bounds(&self) -> ReplyBounds {
+        self.bounds
     }
 
     /// What this stage has refused since it was made.
@@ -629,7 +690,7 @@ impl<P: Storage> Default for ReplyStage<P> {
             rows: BoundedVec::default(),
             arena: BoundedVec::default(),
             refusals: ReplyRefusals::default(),
-            quota: crate::limits::MaxPendingRepliesHeld::build_default(),
+            bounds: ReplyBounds::BUILD,
         }
     }
 }
@@ -672,13 +733,14 @@ impl<P: Storage> ReplyStaging for ReplyStage<P> {
                 "a staged reply's bytes are addressed by offsets of the policy's width"
             );
         }
-        if self.rows.free_slots() == 0 || !self.quota.admits(self.rows.len() + 1) {
+        if self.rows.free_slots() == 0 || !self.bounds.replies.admits(self.rows.len() + 1) {
             self.refusals.staging_full = self.refusals.staging_full.saturating_add(1);
             return Err(ReplyError::StagingFull);
         }
-        // The bounds a peer's query must not be able to move are the fixed policy's:
-        // the payload length and the identity lengths the row can hold. The growable
-        // policy has neither a payload cap nor an identity cap, as it never had.
+        // The bounds a peer's query must not be able to move: the payload length the session
+        // states, on every policy, and the identity lengths the row can hold, on the fixed one.
+        // The growable policy has no identity cap, and no payload cap until one is stated.
+        let payload_most = self.bounds.payload_most::<P>();
         let identity_too_long = parts
             .responder
             .is_some_and(|(zid, _)| zid.len() > ZID_BYTES)
@@ -686,10 +748,9 @@ impl<P: Storage> ReplyStaging for ReplyStage<P> {
                 &parts.kind,
                 PartsKind::Reply { timestamp: Some(ts), .. } if ts.zid.len() > ZID_BYTES
             );
-        if P::ENFORCES_CAPACITY
-            && (payload_len > caps::MAX_REPLY_PAYLOAD_BYTES
-                || attachment_len > caps::MAX_REPLY_PAYLOAD_BYTES
-                || identity_too_long)
+        if !payload_most.admits(payload_len)
+            || !payload_most.admits(attachment_len)
+            || (P::ENFORCES_CAPACITY && identity_too_long)
         {
             self.refusals.payload_too_large = self.refusals.payload_too_large.saturating_add(1);
             return Err(ReplyError::PayloadTooLarge);

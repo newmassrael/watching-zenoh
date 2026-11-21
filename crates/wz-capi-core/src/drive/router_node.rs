@@ -661,7 +661,8 @@ pub(crate) fn open_router_blocking(
         timestamping,
         &session_policy,
         &wz_session_core::limits::RuntimeLimits::BUILD,
-    );
+    )
+    .with_limits(&session_limits);
     // The forwarder built the node's clock: a stated bound it refused fails the open here, before
     // any listener is bound, as the registry's open does.
     refuse_a_refused_clock(&forwarder.node_hlc())?;
