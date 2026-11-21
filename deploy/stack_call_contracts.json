@@ -25,7 +25,7 @@
     "planner-emit": {"zephyr-client-fixed": 3, "zephyr-client-heap": 3, "zephyr-client-fixed-batching": 3, "zephyr-client-fixed-get": 3, "zephyr-admin-fixed-tls": 3, "zephyr-client-fixed-tls": 3},
     "record": {"zephyr-client-fixed": 1, "zephyr-client-heap": 1, "zephyr-client-fixed-batching": 1, "zephyr-client-fixed-get": 3, "zephyr-admin-fixed-tls": 6, "zephyr-client-fixed-tls": 1},
     "own-mapping": {"zephyr-client-fixed": 0, "zephyr-client-heap": 0, "zephyr-client-fixed-batching": 0, "zephyr-client-fixed-get": 1, "zephyr-admin-fixed-tls": 2},
-    "answer-reply": {"zephyr-client-fixed": 6, "zephyr-client-heap": 6, "zephyr-client-fixed-batching": 6, "zephyr-client-fixed-get": 6, "zephyr-client-fixed-tls": 6},
+    "answer-reply": {"zephyr-client-fixed": 0, "zephyr-client-heap": 0, "zephyr-client-fixed-batching": 0, "zephyr-client-fixed-get": 0, "zephyr-client-fixed-tls": 0},
     "byte-cells": {"zephyr-client-fixed": 2, "zephyr-client-heap": 2, "zephyr-client-fixed-batching": 2, "zephyr-client-fixed-get": 2, "zephyr-admin-fixed-tls": 2, "zephyr-client-fixed-tls": 2},
     "fmt-builders": {"zephyr-client-fixed": 0, "zephyr-client-heap": 0, "zephyr-client-fixed-batching": 0, "zephyr-client-fixed-get": 5},
     "app-main": {"zephyr-client-fixed": 0, "zephyr-client-heap": 0, "zephyr-client-fixed-batching": 0, "zephyr-client-fixed-get": 0, "zephyr-admin-fixed-tls": 6},
@@ -126,8 +126,8 @@
     {
       "id": "queryable",
       "where": {"file": "query_sink.rs", "anchor": "(self.call)(&mut self.state, query, out)"},
-      "callees": "slot_client::answer|admin_fixed::answer_admin_query$",
-      "why": "the function a queryable was registered with: the client's answer, or the admin node's answer to the admin space"
+      "callees": "admin_fixed::answer_admin_query$",
+      "why": "the function a queryable was registered with: the admin node's answer to the admin space. The client's answer is no function pointer: its registry holds the answer itself and calls it with the query and the responder as their own types (QuerySinkOf), a direct call"
     },
     {
       "id": "planner-call",
@@ -234,7 +234,7 @@
       "id": "answer-reply",
       "where": {"file": "slot_client.rs"},
       "callees": "ReplyOut>::reply_keyed_encoded_parts$|ReplyOut>::reply_keyed$|QueryView>::keyexpr$",
-      "why": "the queryable's answer reads the query's key and replies with a document or the latest value"
+      "why": "the queryable's answer reads the query's key and replies with a document or the latest value. It is handed the query and the session's responder as their own types (`impl QuerySinkOf<V, O> for Answer`), so the six images make none of these calls through a register (pins 0); a call through a register that appears in this file is read against these callees"
     },
     {
       "id": "byte-cells",
@@ -271,6 +271,12 @@
       "where": {"file": "tx_buf.rs", "anchor": "self.buf.reserve(n)"},
       "callees": "TxBuf>::reserve$",
       "why": "the codec's sink reserves in the buffer it writes"
+    },
+    {
+      "id": "sink-vle-byte",
+      "where": {"file": "forge-runtime/src/codec.rs", "anchor": "while v >= 0x80 && n < cont_max"},
+      "callees": "TxBuf>::append_byte$",
+      "why": "the base-128 writer of a varint (`CodecSink::write_vle_inner`) writes each byte through `write_u8`, which the sink over a lent slot (`TxSink`, tx_buf.rs) answers with `self.buf.append_byte(b)` on the buffer it holds as a trait object (rule txbuf-append-byte-sink); inlined into the writer of a declaration and of a key expression, the call has no line of its own in the line table and is placed on the loop's line, the line before it"
     },
     {
       "id": "fmt-arg",
