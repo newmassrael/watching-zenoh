@@ -1432,7 +1432,8 @@ def limit_binding_problems(lid: str, lim: dict) -> list[str]:
 
     A capacity sizes storage, so no profile decides it while running; a quota bounds storage that
     is already there, so no profile fixes it at the build; a limit that is both is the capacity of
-    the fixed profile and a quota of the heap profile. A limit neither profile reads is no limit.
+    the fixed profile, sized at the build or lent at the open under the build's value, and a quota
+    of the heap profile. A limit neither profile reads is no limit.
     """
     where = f"limit `{lid}`"
     out = limit_scope_problems(where, lim)
@@ -1456,10 +1457,11 @@ def limit_binding_problems(lid: str, lim: dict) -> list[str]:
             if stage == "build":
                 out.append(f"{where}: a `quota` bounds storage that is already there, so it is "
                            f"decided at the open or later; its `{key}` is 'build'")
-    elif storage == "both" and (fixed != "build" or heap not in ("open", "live")):
+    elif storage == "both" and (fixed not in ("build", "open") or heap not in ("open", "live")):
         out.append(f"{where}: a limit that is `both` is the capacity of the fixed profile, decided at "
-                   f"'build', and a quota of the heap profile, decided at 'open' or 'live'; it says "
-                   f"`binding_heap` {heap!r} and `binding_fixed` {fixed!r}")
+                   f"'build', or at 'open' for storage lent from the session's arena when it opens "
+                   f"under the build's value, and a quota of the heap profile, decided at 'open' or "
+                   f"'live'; it says `binding_heap` {heap!r} and `binding_fixed` {fixed!r}")
     return out
 
 
@@ -5785,8 +5787,10 @@ def cmd_selftest() -> int:
     expect("a quota decided while running validates",
            validate_decl(read_decl_toml(limit_text(storage='"quota"', binding_heap='"live"',
                                                    binding_fixed='"live"'))) == [])
-    expect("a limit that is both, decided at the open by the fixed profile, is refused",
-           limit_refused(limit_text(binding_fixed='"open"'), "a limit that is `both`"))
+    expect("a limit that is both, lent at the open by the fixed profile, validates",
+           validate_decl(read_decl_toml(limit_text(binding_fixed='"open"'))) == [])
+    expect("a limit that is both, decided while running by the fixed profile, is refused",
+           limit_refused(limit_text(binding_fixed='"live"'), "a limit that is `both`"))
     expect("a limit that is both, fixed at the build by the heap profile, is refused",
            limit_refused(limit_text(binding_heap='"build"'), "a limit that is `both`"))
     expect("a limit neither storage profile reads is refused",

@@ -131,7 +131,59 @@ impl Quota {
             other
         }
     }
+
+    /// How many rows (or bytes) the storage this bound sizes is lent when its session opens
+    /// (`binding_fixed = "open"`, `crate::bounded::Lent`), `self` being the value the open
+    /// selected and `ceiling` the build's value of the limit.
+    ///
+    /// The build fixes the most memory a session may take, and a stage after it chooses within
+    /// that and never adds to it, so `self` is lent where it is at most the ceiling and refused
+    /// where it is more. A quota of no bound states no bound tighter than the build's own and is
+    /// lent the ceiling: a build that sizes storage by the limit has no such quota in its domain,
+    /// and on one whose table grows it is the growable table's "no bound of its own". A ceiling of
+    /// no bound sizes nothing and is refused.
+    pub const fn lent_under(self, ceiling: Self) -> Result<usize, UnlentRows> {
+        let Some(ceiling) = ceiling.most() else {
+            return Err(UnlentRows::NoCeiling);
+        };
+        match self.most() {
+            None => Ok(ceiling),
+            Some(value) if value <= ceiling => Ok(value),
+            Some(value) => Err(UnlentRows::OverCeiling { value, ceiling }),
+        }
+    }
 }
+
+/// Why a bound gives the storage it sizes no length at open ([`Quota::lent_under`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnlentRows {
+    /// The build states no value of the limit (a build value of `0` read as no bound), so
+    /// nothing sizes the storage, and storage lent at open needs a number.
+    NoCeiling,
+    /// The value selected is over the build's: a stage after the build only lowers it.
+    OverCeiling {
+        /// The value selected.
+        value: usize,
+        /// The build's value.
+        ceiling: usize,
+    },
+}
+
+impl fmt::Display for UnlentRows {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoCeiling => f.write_str(
+                "the build states no value of the limit, so the storage it sizes has no length",
+            ),
+            Self::OverCeiling { value, ceiling } => write!(
+                f,
+                "{value} is over the build's {ceiling}, which a later stage may only lower"
+            ),
+        }
+    }
+}
+
+impl core::error::Error for UnlentRows {}
 
 impl fmt::Display for Quota {
     /// `unbounded`, or the number.
@@ -1127,5 +1179,43 @@ mod tests {
         assert!(!limit_defaults_only(Some("full")));
         assert!(limit_defaults_only(Some("defaults")));
         assert_eq!(limit_defaults_only(None), cfg!(target_os = "none"));
+    }
+
+    /// A value the open selects at or under the build's is lent as selected, `0` included: a
+    /// table of no rows admits nothing.
+    #[test]
+    fn a_quota_at_or_under_the_ceiling_is_lent_as_selected() {
+        let ceiling = Quota::at_most(8);
+        assert_eq!(Quota::at_most(3).lent_under(ceiling), Ok(3));
+        assert_eq!(Quota::at_most(8).lent_under(ceiling), Ok(8));
+        assert_eq!(Quota::at_most(0).lent_under(ceiling), Ok(0));
+    }
+
+    /// A value over the build's is refused, naming both: the build fixes the most a session may
+    /// take, and a later stage only lowers it.
+    #[test]
+    fn a_quota_over_the_ceiling_is_refused() {
+        assert_eq!(
+            Quota::at_most(9).lent_under(Quota::at_most(8)),
+            Err(UnlentRows::OverCeiling {
+                value: 9,
+                ceiling: 8
+            })
+        );
+    }
+
+    /// A quota of no bound is lent the ceiling; a ceiling of no bound sizes nothing, whatever the
+    /// quota.
+    #[test]
+    fn no_bound_is_lent_the_ceiling_and_no_ceiling_is_refused() {
+        assert_eq!(Quota::UNBOUNDED.lent_under(Quota::at_most(8)), Ok(8));
+        assert_eq!(
+            Quota::at_most(3).lent_under(Quota::UNBOUNDED),
+            Err(UnlentRows::NoCeiling)
+        );
+        assert_eq!(
+            Quota::UNBOUNDED.lent_under(Quota::from_build(0, true)),
+            Err(UnlentRows::NoCeiling)
+        );
     }
 }

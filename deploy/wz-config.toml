@@ -78,6 +78,10 @@
 # capacity of the fixed storage profile and a quota of the heap profile. `binding_heap` and
 # `binding_fixed` are its binding (below) under each storage profile, `none` where that profile
 # does not read it. A capacity is decided by the open at the latest, a quota at the open or later.
+# The fixed profile decides the capacity of a limit that is `both` at the build, or at the open
+# where the storage is lent from the memory a session reserves when it opens (`bounded::Lent`,
+# docs/c-abi-no-heap-pools.md): the build's value is then the ceiling, and a document's
+# `wz/limits` may only lower it.
 #
 # `read` says where the machines of the limit's scope read it. `snapshot`: from the snapshot of
 # the limits their creator resolved and hands them, so a value a document states reaches them.
@@ -2128,7 +2132,7 @@ default = 16
 storage = "both"
 scope = "session"
 binding_heap = "open"
-binding_fixed = "build"
+binding_fixed = "open"
 read = "snapshot"
 wire = "none"
 help = '''
@@ -2296,7 +2300,7 @@ default = 16
 storage = "both"
 scope = "session"
 binding_heap = "open"
-binding_fixed = "build"
+binding_fixed = "open"
 read = "snapshot"
 wire = "none"
 help = '''
@@ -2319,7 +2323,7 @@ default = 16
 storage = "both"
 scope = "session"
 binding_heap = "open"
-binding_fixed = "build"
+binding_fixed = "open"
 read = "snapshot"
 wire = "none"
 help = '''
@@ -2392,7 +2396,7 @@ default = 8
 storage = "both"
 scope = "session"
 binding_heap = "open"
-binding_fixed = "build"
+binding_fixed = "open"
 read = "snapshot"
 wire = "none"
 help = '''
@@ -2415,7 +2419,7 @@ default = 8
 storage = "both"
 scope = "session"
 binding_heap = "open"
-binding_fixed = "build"
+binding_fixed = "open"
 read = "snapshot"
 # `wire` is none: within the limit no byte a peer sees changes; past it, what does not fit is
 # left out.
@@ -2439,7 +2443,7 @@ default = 8
 storage = "both"
 scope = "session"
 binding_heap = "open"
-binding_fixed = "build"
+binding_fixed = "open"
 read = "snapshot"
 wire = "none"
 help = '''
