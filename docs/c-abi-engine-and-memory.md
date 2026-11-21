@@ -67,8 +67,9 @@ Every figure here is a committed reading or a reading a gate prints; an estimate
   shared).
 - **E3. No heap in the C ABI presets.** All memory a session uses is reserved when it opens, sized
   from the limits it opens under (the configuration document's `wz/limits` over the build's
-  limits), so no allocation happens after open: the rule of the functional-safety coding standards
-  that nothing is allocated after initialisation. An exhausted pool answers with the code pico
+  limits, which it may only lower: decision Q2), so no allocation happens after open: the
+  rule of the functional-safety coding standards that nothing is allocated after
+  initialisation. An exhausted pool answers with the code pico
   already has for it (`_Z_ERR_SYSTEM_OUT_OF_MEMORY`, `Z_ERR_SYSTEM_OUT_OF_MEMORY` in
   `crates/wz-capi-pico/src/result.rs`) or, where pico refuses a value, the code pico gives for that
   value; no ABI changes. There is one form of each C ABI: no second, heap-backed form beside the
@@ -95,6 +96,13 @@ Every figure here is a committed reading or a reading a gate prints; an estimate
   criterion (d), `no-allocation-in-operation` (D11, `docs/completeness-scoreboard.md`), is
   extended from the MCU images to the C ABI host libraries.
 
+- **E7. The releases, and the end state that closes them** (owner, 2026-11-21). The PoC release
+  of 2026-12-01 is phase P1 (section 6): the cooperative engine, with `std` and the heap. The
+  `no_std`, no-heap release follows phases P2 to P4. The end state is gated, each gate locked
+  once met: D9, every pico-ABI case at a ratio of at most 1.0, locked at WIN; D10, every cell of
+  the host performance matrix WIN, locked; D12, the allocations a session makes after its open,
+  0 in every family of the P2 ratchet and locked there.
+
 ## 3. Consequences
 
 What is gained: one copy of every rule; a session that cannot fail for memory once it is open; a
@@ -115,7 +123,7 @@ What is lost, stated:
   `unbounded` (or whose build default is the no-bound 0: `QUERY_PARAMETERS_MAX_BYTES`,
   `QUERY_ATTACHMENT_MAX_BYTES`, `QUERIER_MAX_PENDING_QUERIES`) is refused at open with
   `Z_ERR_CONFIG_INVALID_VALUE`, as `object_pool.rs` already refuses a pool of no bound. The pico
-  preset states a finite default for each (open question Q3).
+  preset states a finite default for each (decision Q3, section 7).
 - **A panic ends the process.** A `no_std` library does not unwind; the doors' `catch_unwind`
   (`ffi::guarded`) answering an error code goes. Memory and the wire are refused by code, not by
   panic, so what is left to panic is a defect.
@@ -156,7 +164,7 @@ source and the `footprint_attribution.py` scope that turns it into a measurement
 
 | what | bytes | basis | removed by |
 |------|------:|-------|-----------|
-| unwind tables, landing pads, `catch_unwind` at every door | about 187,000 | estimate: the 18.2 percent the tokio client measured (`pico-client` 1,989,401 to `pico-client-small` 1,627,962, 361,439 bytes) applied to the cooperative client | P4 (a `no_std` library cannot unwind), or earlier by a `panic = "abort"` shipped profile (open question Q5) |
+| unwind tables, landing pads, `catch_unwind` at every door | about 187,000 | estimate: the 18.2 percent the tokio client measured (`pico-client` 1,989,401 to `pico-client-small` 1,627,962, 361,439 bytes) applied to the cooperative client | P4 (a `no_std` library cannot unwind), or earlier by a `panic = "abort"` shipped profile once the no-panic gate holds (decision Q5) |
 | `std`'s panic hook and backtrace symbolizer (`backtrace_rs`, `gimli`, `addr2line`, `miniz_oxide`, `rustc_demangle`) | 150,000 to 350,000 | estimate (`host-size-debt.md` Q5); `panic = "abort"` alone keeps it | P4 |
 | the allocator's growth paths and the collections (`RawVec` growth, B-trees, `hashbrown`, deques, the drop glue of boxed trait objects, text built with `format!`) | not estimated | no reading; scope `alloc::\|hashbrown\|btree\|as core::fmt::(Debug\|Display)` before and after | P2 |
 | `log` call sites (21 in `wz-session-core`) | small | estimate (`host-size-debt.md` Q4) | a static level for the C libraries (open question) |
@@ -196,7 +204,9 @@ before and after); P4 changes no path a message takes. The end state is every ro
 ## 6. Migration
 
 Each phase has a gate that judges it and a ratchet that keeps what it took. A ratchet's row only
-moves toward its target, and a reading under it is committed as the tighter row.
+moves toward its target, and a reading under it is committed as the tighter row. The PoC release of
+2026-12-01 is P1; the `no_std`, no-heap release follows P2 to P4; the gates of E7 close the end
+state.
 
 - **P1. The package on the cooperative engine (`std`).** The shipped pico library (the Linux
   `.so`, the Windows DLL of `scripts/lib/pico_windows_package.py`) is built on the cooperative
@@ -219,14 +229,16 @@ moves toward its target, and a reading under it is committed as the tighter row.
   `serial-drive-own-thread`, `rx-busy-poll`, `transport-link-unixpipe`, `transport-link-quic`,
   `transport-link-tls`, `transport-link-ws`, `transport-link-serial`, `raweth-transport`. What
   each becomes: `default` names `engine-coop` (P1); `gossip` is linked and never started in
-  the pico ABI (`gossip: None` in every build, `host-size-debt.md` Q3) and leaves its default;
+  the pico ABI (`gossip: None` in every build, `host-size-debt.md` Q3), leaves the pico
+  preset's default and becomes an opt-in the cooperative engine starts (decision Q7);
   `serial-drive-own-thread` and `rx-busy-poll` are knobs of the tokio engine and retire with it;
   `transport-link-tls` (rustls on the tokio engine) gives way to `tls-mbedtls`, the cooperative
   engine's channel over the same `Z_CONFIG_TLS_*` keys (L6 of `docs/capi-pico-on-coop-engine.md`); `transport-link-ws`,
   `transport-link-serial` and `raweth-transport` become link drivers of the cooperative runtime;
-  `transport-link-unixpipe` and `transport-link-quic` are wz's own links on the pico ABI (open
-  question Q6). The ratchet is a row of `deploy/no_heap_ratchet.json` or a table of its own,
-  whichever the gate's worker chooses; it is counted from the manifest, never written by hand.
+  `transport-link-unixpipe` and `transport-link-quic`, wz's own links on the pico ABI, become
+  link drivers of the cooperative runtime too, opt-in in the pico preset (decision Q6). The
+  ratchet is a row of `deploy/no_heap_ratchet.json` or a table of its own, whichever the gate's
+  worker chooses; it is counted from the manifest, never written by hand.
 - **P4. The `no_std` host library, Linux then Windows.** The cooperative build without `std`
   over `wz-runtime-posix`: the os seam of section 5a of `docs/upstream-parity.md` (thread
   identity, spawn, sleep, the clock) answered by the OS layer, the lock the port's `sync::Lock`,
@@ -250,31 +262,48 @@ moves toward its target, and a reading under it is committed as the tighter row.
   among them, nothing shared but the rings between cores (`docs/parallel-faces-design.md`,
   `docs/router-data-plane-scaling.md`). Gate: the router's cells of the performance matrices.
 
-## 7. Open questions for the owner
+## 7. Decisions of the owner (2026-11-21)
 
-Product decisions only; each is restated in `docs/c-abi-no-heap-pools.md` where it bites.
+The questions this record left open, decided. Each keeps its number, so a reference to it in
+`docs/c-abi-no-heap-pools.md` still reads, and each is restated there where it bites.
 
-- **Q1. Where the objects made before any session live.** A config, bytes, strings, encodings,
-  closures and channels are made by a pico program before `z_open` and outlive `z_close`. Either
-  the library reserves its process pools at its first call, sized by the build's limits (an
-  unchanged pico program works; "initialisation" is the first call), or a program must call a
-  reservation door first (`wz_ext_object_pool_reserve` or `_place` exist), which no pico program
-  does.
-- **Q2. Whether the configuration document may raise a limit above the build's.** Sizing at open
-  from `wz/limits` lets a host library be configured without a rebuild; the build's value is then
-  a default, not a ceiling, for the limits whose storage is reserved at open. The MCU images keep
-  the build as the ceiling.
-- **Q3. The pico preset's finite values for the limits that are unbounded today**
+- **Q1. The objects made before any session live in process pools the library reserves at its
+  first call.** A config, bytes, strings, encodings, closures and channels are made by a pico
+  program before `z_open` and outlive `z_close`. The library reserves its process pools once,
+  at the first call a program makes into it, sized from the build's limits, so that call is the
+  initialisation after which nothing is allocated. No reservation door is required; one
+  (`wz_ext_object_pool_reserve`, `_place`) may be offered beside it, for a program that places
+  the memory itself. Reason: the drop-in contract. An existing pico program runs unchanged, and
+  no pico program calls a door pico does not have.
+- **Q2. The document's `wz/limits` may only lower a build value, never raise it.** Reason: the
+  build fixes the worst-case memory, which is the basis a certification is made on; the
+  document chooses within it. A host library is configured without a rebuild inside that bound,
+  and the MCU images keep the build as their ceiling as before.
+- **Q3. Every limit that sizes a pool is finite in the pico preset.** The limits unbounded today
   (`QUERY_PARAMETERS_MAX_BYTES`, `QUERY_ATTACHMENT_MAX_BYTES`, `QUERIER_MAX_PENDING_QUERIES`)
-  and for the new ones the pool note names.
-- **Q4. A full delivery lane: refuse and count, or hold the reader.** zenoh-pico runs a callback
-  inside the read and never queues; the cooperative engine queues so that no callback runs under
-  the session's lock (D8 of `docs/capi-pico-on-coop-engine.md`). With a fixed lane a burst past
-  it is either dropped and counted (as an offloaded subscriber's lane does today) or left unread
-  in the socket until the lane drains.
-- **Q5. `panic = "abort"` for the shipped library before P4.** It takes the unwinding share
-  early (section 5); a panic in a door then ends the process where it returns an error code today.
-- **Q6. The links that are wz's own on the pico ABI** (`unixpipe/`, `quic/`): port them to the
-  cooperative runtime, or leave them to the zenoh-c and Rust presets.
-- **Q7. `gossip` out of the pico ABI's default** (`host-size-debt.md` Q3), since it is never
-  started there.
+  and each new limit of the pool note take, in the pico preset, zenoh-pico's own compile-time
+  constant where pico has one, cited as `vendor/zenoh-pico/<file>` @ the `#define`, and
+  otherwise a value stated with its reason. Reason: a pool of no bound cannot be reserved
+  (section 3), and pico's own constant makes the preset hold what pico holds wherever pico bounds
+  the same thing.
+- **Q4. A full delivery lane is zenoh's congestion control.** Reliable, blocking traffic applies
+  backpressure: the engine stops reading the link while the lane is full, so the transport's
+  own flow control carries the wait back to the sender. Drop-policy and best-effort traffic is
+  dropped and counted. Reason: this is what a message's congestion control already states in
+  zenoh (`block` holds the sender, `drop` drops), so the lane keeps that meaning rather than
+  adding a third one.
+- **Q5. `panic = "abort"` comes with a no-panic gate.** The shipped profile switches to abort
+  only once a gate proves the shipped C library's panic paths absent: a link-time check that no
+  panic entry is reachable from the exported doors. Until then the library unwinds and the
+  doors' `catch_unwind` (`ffi::guarded`) stays. Reason: with abort, a panic that reaches a door
+  ends the process where it returns an error code today; the gate makes "no door panics" a
+  measured property before the unwinding share of section 5 is taken.
+- **Q6. Every link moves to the cooperative engine.** `unixpipe`, `quic`, `ws`, `serial`, `tls`
+  and raw Ethernet become link drivers of the cooperative runtime. The pico preset's default
+  enables zenoh-pico's own set of links; the others are opt-in. Reason: wz is a framework and
+  zenoh-pico is one of its presets, so a link pico lacks is a capability of wz that the preset
+  leaves off, not one that leaves wz because upstream lacks it.
+- **Q7. `gossip` is off in the pico preset's default and becomes a working opt-in on the
+  cooperative engine.** Reason: in the pico ABI it is linked and never started today
+  (`gossip: None` in every build, `host-size-debt.md` Q3), which is code paid for and not run.
+  As an opt-in it is started and does what it states; off, it is not linked.

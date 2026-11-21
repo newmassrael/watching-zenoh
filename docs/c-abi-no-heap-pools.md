@@ -73,7 +73,8 @@ static array if the measurement shows no cost.
 
 Sites are the site lines of section 1, files in the order of their count. A limit in backticks is
 in `deploy/wz-config.toml` today; a NEW one is written in plain text and is added by the unit that
-first needs it, with its pico-preset default (open question Q3 of the record).
+first needs it, with its pico-preset default (decision Q3 of the record: zenoh-pico's own constant
+where pico has one, else a value stated with its reason).
 
 | kind | site lines | files | where most of them are |
 |------|----------:|------:|------------------------|
@@ -122,7 +123,7 @@ string arrays, encodings and their schema, owned key expressions not declared on
 - Form: the existing per-kind object pools for the objects; the payload bytes in a block pool of
   the same slot classes (16 bytes to 16 KiB), a payload taking the smallest class that holds it.
   A payload is shared by reference count inside its block, not by `Arc`.
-- Lifetime: process pools reserved at the library's first call (open question Q1 of the record);
+- Lifetime: process pools reserved at the library's first call (decision Q1 of the record);
   a slot is returned by the drop of the owned object, from any thread.
 - Exhausted: the call that would make or copy the object answers `_Z_ERR_SYSTEM_OUT_OF_MEMORY` and
   leaves the source untouched. A sample delivered to a callback is a loan of the delivery lane
@@ -260,8 +261,9 @@ payloads).
   before the end skips to the start and stays in one piece), each event a header and its bytes; a
   callback gets a view of its event in the ring.
 - Lifetime: from the dispatch that queued it to the return of the callback it was handed to.
-- Exhausted: the event is refused and counted (open question Q4 of the record: or the reader is
-  held).
+- Exhausted: as the event's congestion control says (decision Q4 of the record): for reliable,
+  blocking traffic the engine stops reading the link until the lane drains, so the transport's
+  flow control holds the sender; drop-policy and best-effort traffic is dropped and counted.
 
 ### 4.11 Runtime: tasks, timers, wakers
 
@@ -378,7 +380,8 @@ F        = 1 for a session that only dials; 1 + MAX_FACES + MAX_ACCEPT_PENDING f
 `row(T)` is the registry's own `ROW_BYTES` (the branch states it per registry) and the capacity
 of a table is its limit, so the function is exact by construction: the arena is the worst case,
 not an estimate of it. The process pools (4.1, 4.12, 4.13) are a second sum of the same shape,
-reserved once, at the library's first call or by the reservation door (open question Q1).
+reserved once, at the library's first call (decision Q1; a reservation door is an addition,
+never required).
 
 **The report is the reservation.** The branch `poc-q4-worst-memory` computes the same rows to
 report them (`wz_ext_session_memory`, `MemoryBasis`, `session_tables`), with a flag
@@ -440,7 +443,7 @@ suites (C1co, Layer Z) unchanged.
    `owed_replies.rs`. Families: `z_get`, query answered. Tests: a get past its table refused
    having sent nothing; a query with no held-query row answered with its Final at once.
 10. **U9. Handle objects and payloads from the process pools.** `wz-capi-pico` `object_slot.rs`
-    (no heap fallback), `object_pool.rs` (reserved at the first call, open question Q1),
+    (no heap fallback), `object_pool.rs` (reserved at the first call, decision Q1),
     `bytes.rs`, `string_array.rs`, `encoding.rs`, `config.rs`. Family: owned values. Tests:
     `z_bytes_copy_from_buf` past HELD_PAYLOAD_BYTES answers the code and leaves the source; every
     pool's count after a drop.
@@ -474,9 +477,11 @@ The order: U0 and U1 lay the ground; U2 to U4 are the traffic path, where the al
 message are and where a performance gain is expected; U5 to U8 the declarations and queries; U9 and
 U10 the ABI's own objects; U11 to U15 the rest; U16 closes the phase.
 
-## 7. Open questions
+## 7. The decisions this design rests on
 
-The product decisions this design needs are Q1 to Q4 of `docs/c-abi-engine-and-memory.md`
-section 7: where the objects made before any session live, whether the document may raise a limit
-above the build's, the pico preset's finite values for the unbounded and the new limits, and
-whether a full delivery lane drops or holds the reader.
+The product decisions this design needed are Q1 to Q4 of `docs/c-abi-engine-and-memory.md`
+section 7, decided by the owner on 2026-11-21: the objects made before any session live in
+process pools the library reserves at its first call (Q1); the document's `wz/limits` only
+lowers a build value, so an arena never exceeds what the build fixes (Q2); every limit that sizes
+a pool is finite in the pico preset, zenoh-pico's own constant where pico has one (Q3); and a full
+delivery lane holds the reader for reliable, blocking traffic and drops and counts the rest (Q4).
