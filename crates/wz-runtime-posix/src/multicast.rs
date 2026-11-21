@@ -825,8 +825,6 @@ mod tests {
     use crate::net::{PosixNetError, PosixUdpSocket};
     use alloc::borrow::ToOwned;
     use core::ffi::c_int;
-    use std::time::{Duration, Instant};
-    use wz_runtime_coop::session_drive::LinkReadiness;
     // The tests open concrete sockets, whose datagram methods are the trait's; the code above
     // reaches them through the `MulticastSocket` bound alone.
     use wz_runtime_coop::udp_link::DatagramSocket;
@@ -1163,100 +1161,106 @@ mod tests {
         assert!(!full(PosixNetError::Recv(libc::EAGAIN)));
     }
 
-    /// The send socket's room is the group's: a datagram it takes is sent and the socket has room,
-    /// asked by the session's loop or from outside it; a group that was left fails its send, has
-    /// room at once for the send to fail on, and gives no wait to ask. A send socket aimed at a
-    /// loopback port stands in for one joined to a group, which needs a multicast route.
-    #[test]
-    fn the_send_sockets_room_is_the_groups() {
-        let peer =
-            PosixUdpSocket::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).expect("a peer");
-        let write = PosixUdpSocket::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
-            .expect("a send socket");
-        write.make_nonblocking().expect("non-blocking");
-        let mut transport = HostGroupTransport {
-            read: None,
-            write: Some(write),
-            group: peer.local(),
-            rx: Vec::new(),
-            failed: false,
-        };
-        let outside = transport.writability().expect("a wait from outside");
-        assert_eq!(transport.try_send_to_group(b"datagram"), GroupSend::Sent);
-        let mut got = [0u8; 16];
-        let (len, _) = peer
-            .recv_waiting(&mut got)
-            .expect("no error")
-            .expect("the datagram arrived");
-        assert_eq!(&got[..len], b"datagram");
-        assert!(transport.wait_for_room(1_000));
-        assert!(outside.wait_writable(1_000));
+    // A wait made from outside the loop is a seam of the heap profile alone: a build that unifies
+    // the slot profile in has neither the waits nor these two tests.
+    wz_runtime_coop::with_heap_link_seams! {
+        /// The send socket's room is the group's: a datagram it takes is sent and the socket has room,
+        /// asked by the session's loop or from outside it; a group that was left fails its send, has
+        /// room at once for the send to fail on, and gives no wait to ask. A send socket aimed at a
+        /// loopback port stands in for one joined to a group, which needs a multicast route.
+        #[test]
+        fn the_send_sockets_room_is_the_groups() {
+            let peer =
+                PosixUdpSocket::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).expect("a peer");
+            let write = PosixUdpSocket::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+                .expect("a send socket");
+            write.make_nonblocking().expect("non-blocking");
+            let mut transport = HostGroupTransport {
+                read: None,
+                write: Some(write),
+                group: peer.local(),
+                rx: Vec::new(),
+                failed: false,
+            };
+            let outside = transport.writability().expect("a wait from outside");
+            assert_eq!(transport.try_send_to_group(b"datagram"), GroupSend::Sent);
+            let mut got = [0u8; 16];
+            let (len, _) = peer
+                .recv_waiting(&mut got)
+                .expect("no error")
+                .expect("the datagram arrived");
+            assert_eq!(&got[..len], b"datagram");
+            assert!(transport.wait_for_room(1_000));
+            assert!(outside.wait_writable(1_000));
 
-        transport.close();
-        assert_eq!(transport.try_send_to_group(b"left"), GroupSend::Failed);
-        assert!(transport.wait_for_room(1_000));
-        assert!(transport.writability().is_none());
-        assert!(
-            outside.wait_writable(1_000),
-            "a wait made after the leave asks a socket still open"
-        );
-    }
+            transport.close();
+            assert_eq!(transport.try_send_to_group(b"left"), GroupSend::Failed);
+            assert!(transport.wait_for_room(1_000));
+            assert!(transport.writability().is_none());
+            assert!(
+                outside.wait_writable(1_000),
+                "a wait made after the leave asks a socket still open"
+            );
+        }
 
-    /// The joined socket's input is waited for from outside the session's loop: the wait is waited
-    /// out while nothing is queued and returns long before its time once a datagram is, alone or
-    /// beside another socket; the datagram is then taken with its source, and a group that was left
-    /// gives no wait and reads nothing, and is not a failed link.
-    #[test]
-    fn the_joined_sockets_input_is_waited_for_and_taken() {
-        use alloc::sync::Arc;
+        /// The joined socket's input is waited for from outside the session's loop: the wait is waited
+        /// out while nothing is queued and returns long before its time once a datagram is, alone or
+        /// beside another socket; the datagram is then taken with its source, and a group that was left
+        /// gives no wait and reads nothing, and is not a failed link.
+        #[test]
+        fn the_joined_sockets_input_is_waited_for_and_taken() {
+            use alloc::sync::Arc;
+            use std::time::{Duration, Instant};
+            use wz_runtime_coop::session_drive::LinkReadiness;
 
-        let read = PosixUdpSocket::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
-            .expect("a joined socket");
-        let to = read.local();
-        let peer =
-            PosixUdpSocket::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).expect("a peer");
-        let other = PosixUdpSocket::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
-            .expect("another link's socket");
-        let mut transport = HostGroupTransport {
-            read: Some(read),
-            write: None,
-            group: to,
-            rx: alloc::vec![0; 64],
-            failed: false,
-        };
-        let ready = transport.readiness().expect("a wait from outside");
-        let started = Instant::now();
-        ready.wait_readable(50);
-        assert!(
-            started.elapsed() >= Duration::from_millis(40),
-            "nothing queued"
-        );
-        let beside: Arc<dyn LinkReadiness> = Arc::from(other.readiness().expect("a wait"));
-        let started = Instant::now();
-        ready.wait_readable_among(&[Arc::clone(&beside)], 50);
-        assert!(
-            started.elapsed() >= Duration::from_millis(40),
-            "nothing queued on either"
-        );
+            let read = PosixUdpSocket::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+                .expect("a joined socket");
+            let to = read.local();
+            let peer =
+                PosixUdpSocket::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).expect("a peer");
+            let other = PosixUdpSocket::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+                .expect("another link's socket");
+            let mut transport = HostGroupTransport {
+                read: Some(read),
+                write: None,
+                group: to,
+                rx: alloc::vec![0; 64],
+                failed: false,
+            };
+            let ready = transport.readiness().expect("a wait from outside");
+            let started = Instant::now();
+            ready.wait_readable(50);
+            assert!(
+                started.elapsed() >= Duration::from_millis(40),
+                "nothing queued"
+            );
+            let beside: Arc<dyn LinkReadiness> = Arc::from(other.readiness().expect("a wait"));
+            let started = Instant::now();
+            ready.wait_readable_among(&[Arc::clone(&beside)], 50);
+            assert!(
+                started.elapsed() >= Duration::from_millis(40),
+                "nothing queued on either"
+            );
 
-        peer.send_to(to, b"member").expect("sent");
-        let started = Instant::now();
-        ready.wait_readable_among(&[beside], 5_000);
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "a datagram queued"
-        );
-        let mut seen = None;
-        assert!(transport.recv_with(&mut |bytes, from| seen = Some((bytes.to_vec(), from))));
-        assert_eq!(seen, Some((b"member".to_vec(), peer.local())));
-        assert!(!transport.recv_with(&mut |_, _| panic!("one datagram was sent")));
+            peer.send_to(to, b"member").expect("sent");
+            let started = Instant::now();
+            ready.wait_readable_among(&[beside], 5_000);
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "a datagram queued"
+            );
+            let mut seen = None;
+            assert!(transport.recv_with(&mut |bytes, from| seen = Some((bytes.to_vec(), from))));
+            assert_eq!(seen, Some((b"member".to_vec(), peer.local())));
+            assert!(!transport.recv_with(&mut |_, _| panic!("one datagram was sent")));
 
-        transport.close();
-        assert!(transport.readiness().is_none(), "a group left gives none");
-        assert!(!transport.recv_with(&mut |_, _| panic!("a datagram for a group that was left")));
-        assert!(
-            transport.carrier_up(),
-            "a released link is not a failed one"
-        );
+            transport.close();
+            assert!(transport.readiness().is_none(), "a group left gives none");
+            assert!(!transport.recv_with(&mut |_, _| panic!("a datagram for a group that was left")));
+            assert!(
+                transport.carrier_up(),
+                "a released link is not a failed one"
+            );
+        }
     }
 }
