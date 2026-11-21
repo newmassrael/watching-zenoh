@@ -395,6 +395,227 @@ mod enforcement {
             },
         );
     }
+
+    /// One frame of queries on `bound/reply`, one for each request id of `rids`, as a peer
+    /// sends them.
+    #[cfg(feature = "query-queryable")]
+    fn queries(rids: core::ops::Range<u32>) -> crate::driver_loop::DriverLoopOutcome {
+        let messages = rids
+            .map(|rid| {
+                let request =
+                    crate::request_build::build_request_query(rid, 0, Some("bound/reply"))
+                        .expect("a literal key builds");
+                crate::network_message::NetworkMessage::Request(std::boxed::Box::new(request))
+            })
+            .collect();
+        crate::driver_loop::DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages,
+            has_ext: false,
+            extensions: std::vec::Vec::new(),
+            priority: crate::qos::Priority::DEFAULT,
+        }
+    }
+
+    /// A one-byte reply on `bound/reply`, as a queryable of a peer's session describes it.
+    #[cfg(feature = "query-queryable")]
+    fn reply_parts() -> crate::reply_stage::ReplyParts<'static> {
+        use crate::reply_stage::{PartsBody, PartsKind, ReplyParts};
+        ReplyParts {
+            rid: 0,
+            keyexpr: "bound/reply",
+            responder: None,
+            qos: crate::sample::QosLevel::DEFAULT,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: None,
+            kind: PartsKind::Reply {
+                body: PartsBody::Put(b"r"),
+                encoding: None,
+                timestamp: None,
+                attachment: None,
+                source_info: None,
+            },
+        }
+    }
+
+    /// `MAX_PENDING_REPLIES` with nothing stated: a queryable answers one query once past the
+    /// build's count, and the heap stages every answer, as it did, while a fixed stage holds its
+    /// capacity and refuses the last.
+    #[cfg(feature = "query-queryable")]
+    #[test]
+    fn max_pending_replies_with_nothing_stated_admits_what_the_build_admitted() {
+        let mut observer = ApplicationLayerObserver::with_limits(&SessionLimits::defaults());
+        observer
+            .queryables
+            .register("bound/reply", |_, responder| {
+                for _ in 0..=caps::MAX_PENDING_REPLIES {
+                    responder.reply(b"r");
+                }
+            })
+            .expect("no quota is stated on the queryables");
+        observer.dispatch_event(crate::driver_loop::IterationEvent::Poll(&queries(0..1)));
+        let refused = usize::from(crate::bounded::ENFORCES_CAPACITY);
+        assert_eq!(
+            observer.pending_reply_count(),
+            caps::MAX_PENDING_REPLIES + 1 - refused
+        );
+        assert_eq!(
+            observer.reply_refusals().staging_full,
+            u32::from(crate::bounded::ENFORCES_CAPACITY)
+        );
+    }
+
+    /// `MAX_PENDING_REPLIES` stated as two: the third reply is refused to the handler as a full
+    /// stage and counted, the two staged and the query's `Final` are kept, and the stage keeps
+    /// its quota when its replies are taken to be sent. A peer's tables, where a slot observer
+    /// stages, are held the same, and keep the quota when the peer is forgotten.
+    #[cfg(feature = "query-queryable")]
+    #[test]
+    fn max_pending_replies_stated_refuses_the_next() {
+        use crate::query_sink::ReplyError;
+        use crate::reply_stage::ReplyStaging;
+        use std::sync::{Arc, Mutex};
+        held_to_two(
+            SessionLimits::select_max_pending_replies,
+            MaxPendingReplies::DOMAIN.is_singleton(),
+            |limits| {
+                let mut observer = ApplicationLayerObserver::with_limits(limits);
+                let answers = Arc::new(Mutex::new(std::vec::Vec::new()));
+                let told = Arc::clone(&answers);
+                observer
+                    .queryables
+                    .register("bound/reply", move |_, responder| {
+                        let mut seen = told.lock().expect("not poisoned");
+                        for _ in 0..3 {
+                            seen.push(responder.try_reply(b"r"));
+                        }
+                    })
+                    .expect("no quota is stated on the queryables");
+                observer.dispatch_event(crate::driver_loop::IterationEvent::Poll(&queries(0..1)));
+                assert_eq!(
+                    *answers.lock().expect("not poisoned"),
+                    [Ok(()), Ok(()), Err(ReplyError::StagingFull)]
+                );
+                assert_eq!(observer.pending_reply_count(), 2);
+                assert_eq!(observer.reply_refusals().staging_full, 1);
+                assert_eq!(
+                    observer.pending_final_count(),
+                    1,
+                    "the query still owes its Final"
+                );
+
+                let mut owed = crate::owed_replies::OwedReplies::new();
+                observer.take_owed_reply_bodies(&mut owed);
+                assert_eq!(observer.pending_reply_count(), 0);
+                observer.dispatch_event(crate::driver_loop::IterationEvent::Poll(&queries(1..2)));
+                assert_eq!(
+                    observer.pending_reply_count(),
+                    2,
+                    "the quota stayed with the stage"
+                );
+                assert_eq!(observer.reply_refusals().staging_full, 2);
+
+                let mut peers = crate::peer_tables::PeerTables::new();
+                peers.limit_to(limits);
+                assert_eq!(peers.replies.stage_parts(reply_parts()), Ok(()));
+                assert_eq!(peers.replies.stage_parts(reply_parts()), Ok(()));
+                assert_eq!(
+                    peers.replies.stage_parts(reply_parts()),
+                    Err(ReplyError::StagingFull)
+                );
+                assert_eq!(peers.replies.staged(), 2);
+                peers.forget_peer();
+                assert_eq!(peers.replies.stage_parts(reply_parts()), Ok(()));
+                assert_eq!(peers.replies.stage_parts(reply_parts()), Ok(()));
+                assert_eq!(
+                    peers.replies.stage_parts(reply_parts()),
+                    Err(ReplyError::StagingFull)
+                );
+                assert_eq!(peers.replies.refusals().staging_full, 2);
+            },
+        );
+    }
+
+    /// `MAX_PENDING_FINALS` with nothing stated: one query past the build's count in one frame
+    /// owes every `Final` on the heap, as it did, while a fixed table holds its capacity and
+    /// refuses the last request.
+    #[cfg(feature = "query-queryable")]
+    #[test]
+    fn max_pending_finals_with_nothing_stated_admits_what_the_build_admitted() {
+        let mut observer = ApplicationLayerObserver::with_limits(&SessionLimits::defaults());
+        observer
+            .queryables
+            .register("bound/reply", |_, _| {})
+            .expect("no quota is stated on the queryables");
+        let past = u32::try_from(caps::MAX_PENDING_FINALS + 1).expect("a test count");
+        observer.dispatch_event(crate::driver_loop::IterationEvent::Poll(&queries(0..past)));
+        let refused = usize::from(crate::bounded::ENFORCES_CAPACITY);
+        assert_eq!(
+            observer.pending_final_count(),
+            caps::MAX_PENDING_FINALS + 1 - refused
+        );
+        assert_eq!(
+            observer.request_refusals(),
+            u32::from(crate::bounded::ENFORCES_CAPACITY)
+        );
+    }
+
+    /// `MAX_PENDING_FINALS` stated as two: the third request is refused before its queryable
+    /// runs, so it stages no reply and owes no `Final`, and is counted; the table keeps its
+    /// quota and its count when the owed `Final`s are taken to be sent. A peer's tables are
+    /// held the same.
+    #[cfg(feature = "query-queryable")]
+    #[test]
+    fn max_pending_finals_stated_refuses_the_next() {
+        use crate::reply_stage::FinalStaging;
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        held_to_two(
+            SessionLimits::select_max_pending_finals,
+            MaxPendingFinals::DOMAIN.is_singleton(),
+            |limits| {
+                let mut observer = ApplicationLayerObserver::with_limits(limits);
+                let ran = Arc::new(AtomicUsize::new(0));
+                let runs = Arc::clone(&ran);
+                observer
+                    .queryables
+                    .register("bound/reply", move |_, responder| {
+                        runs.fetch_add(1, Ordering::Relaxed);
+                        responder.reply(b"r");
+                    })
+                    .expect("no quota is stated on the queryables");
+                observer.dispatch_event(crate::driver_loop::IterationEvent::Poll(&queries(0..3)));
+                assert_eq!(
+                    ran.load(Ordering::Relaxed),
+                    2,
+                    "the third request reached no queryable"
+                );
+                assert_eq!(observer.pending_reply_count(), 2);
+                assert_eq!(observer.pending_final_count(), 2);
+                assert_eq!(observer.request_refusals(), 1);
+
+                assert_eq!(observer.take_pending_final_rids().len(), 2);
+                assert_eq!(observer.pending_final_count(), 0);
+                observer.dispatch_event(crate::driver_loop::IterationEvent::Poll(&queries(3..6)));
+                assert_eq!(ran.load(Ordering::Relaxed), 4);
+                assert_eq!(
+                    observer.pending_final_count(),
+                    2,
+                    "the quota stayed with the table"
+                );
+                assert_eq!(observer.request_refusals(), 2, "and so did the count");
+
+                let mut peers = crate::peer_tables::PeerTables::new();
+                peers.limit_to(limits);
+                peers.finals.owe(1, crate::sample::QosLevel::DEFAULT);
+                peers.finals.owe(2, crate::sample::QosLevel::DEFAULT);
+                assert!(!peers.finals.has_room());
+                assert_eq!(peers.finals.take_owed().len(), 2);
+                assert!(peers.finals.has_room(), "a place is free under the quota");
+            },
+        );
+    }
 }
 
 #[cfg(test)]
