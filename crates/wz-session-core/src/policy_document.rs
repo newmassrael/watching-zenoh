@@ -274,6 +274,8 @@ impl Resolved {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LimitOrigin {
     BuildDefault,
+    /// Only the reader of a document states it, which a build without `alloc` does not have.
+    #[cfg(feature = "alloc")]
     Document,
     Api,
 }
@@ -282,6 +284,7 @@ impl LimitOrigin {
     const fn origin(self) -> Origin {
         match self {
             Self::BuildDefault => Origin::BuildDefault,
+            #[cfg(feature = "alloc")]
             Self::Document => Origin::Document,
             Self::Api => Origin::Api,
         }

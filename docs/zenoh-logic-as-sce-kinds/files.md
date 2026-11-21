@@ -731,6 +731,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/lifecycle_query.rs` | S2 | |
 | `crates/wz-session-core/src/lifecycle_wire.rs` | S1 | |
 | `crates/wz-session-core/src/limit_binding.rs` | S10 | |
+| `crates/wz-session-core/src/limit_corpus.rs` | excluded: test | the documents and the snapshots each door's tests assert, shared by those tests; no machine reads it |
 | `crates/wz-session-core/src/limits.rs` | S10 | |
 | `crates/wz-session-core/src/limits_generated.rs` | S10 | |
 | `crates/wz-session-core/src/link.rs` | S1 | |

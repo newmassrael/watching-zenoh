@@ -13724,7 +13724,9 @@ layer_c1m_session_lwip() {
     # and its end is a lost session to a machine a dialling open moved on (decision D10).
     # 55 -> 57, counted from the source: the in-memory network's IPv6 test (as in the default leg)
     # and the dial reader's bracketed IPv6 address (`dial::parse_tests`, which `dial` compiles).
-    _runci_guarded_test "C1m mcu adminspace-write" 57 \
+    # 57 -> 61, printed: main at `b58b71c19` already printed 61 on one machine, so the source
+    # counts above missed four; the limits rounds add none to this leg.
+    _runci_guarded_test "C1m mcu adminspace-write" 61 \
         cargo test -p wz-session-mcu --features adminspace-write --quiet || return 1
     _runci_guarded_test "C1m mcu peer nodes" 27 \
         env WZ_LIMIT_MAX_PEER_NODES=2 \
@@ -13748,7 +13750,9 @@ layer_c1m_session_lwip() {
     # 59 -> 62: the same three as the adminspace-write leg (decision D10).
     # 63 -> 65, counted from the source: the same two as the adminspace-write leg.
     # 65 -> 67, counted from the source: the same two IPv6 tests as the adminspace-write leg.
-    _runci_guarded_test "C1m mcu adminspace read+write" 67 \
+    # 67 -> 72, printed: main at `b58b71c19` printed 71 on one machine (four the source counts
+    # missed), and the limits rounds add one, an admin node's observer held to its session's limits.
+    _runci_guarded_test "C1m mcu adminspace read+write" 72 \
         cargo test -p wz-session-mcu --features adminspace-core,adminspace-write --quiet || return 1
     # The fixed-memory client node's shared mechanism (`slot_node`, compiled only on the slot profile
     # with the client core): no leg above selects both, so its tests ran in none until this one. 28 =
