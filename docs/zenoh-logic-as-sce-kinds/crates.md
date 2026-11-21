@@ -56,6 +56,7 @@ The `Where` column holds the slices that read the crate (`S1, S2`), or
 | `wz-fuzz` | excluded: test | Fuzz targets over the C ABI. |
 | `wz-host-interop-tests` | excluded: test | Router interop tests for macOS and Windows hosts. |
 | `wz-host-net` | S9 | |
+| `wz-host-sync` | S9 | |
 | `wz-integration-tests` | excluded: test | The merged integration test binaries. |
 | `wz-link-lwip` | S9 | |
 | `wz-mcu-clock` | S9 | |

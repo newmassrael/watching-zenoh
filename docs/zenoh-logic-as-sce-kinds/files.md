@@ -72,6 +72,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-app-frame/src/e2e_receiver.rs` | S11 | |
 | `crates/wz-app-frame/src/e2e_rules_tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-app-frame/src/e2e_stream_sender.rs` | S11 | |
+| `crates/wz-app-frame/src/fixed_records_tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-app-frame/src/instance_key.rs` | S11 | |
 | `crates/wz-app-frame/src/instance_key_tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-app-frame/src/lib.rs` | S10, S11 | |
@@ -156,6 +157,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-c/src/zid.rs` | S8 | |
 | `crates/wz-capi-coop/src/admission_gate.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine.rs` | S7 | |
+| `crates/wz-capi-coop/src/engine/decl_watch.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/faces.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/get.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/group.rs` | S7 | |
@@ -190,6 +192,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-coop/src/tests/shared_key_ids.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/snapshot.rs` | S7 | |
 | `crates/wz-capi-coop/src/tests/ticker.rs` | S7 | |
+| `crates/wz-capi-coop/src/tests/timestamps.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tls.rs` | S7 | |
 | `crates/wz-capi-core/src/caller_span.rs` | S7 | |
 | `crates/wz-capi-core/src/codec.rs` | S7 | |
@@ -264,6 +267,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-pico/src/option_fields.rs` | S12 | |
 | `crates/wz-capi-pico/src/os/arith.rs` | S12 | |
 | `crates/wz-capi-pico/src/os/mod.rs` | S7 | |
+| `crates/wz-capi-pico/src/os/no_std_host.rs` | S7 | |
 | `crates/wz-capi-pico/src/os/unix.rs` | S7 | |
 | `crates/wz-capi-pico/src/os/windows.rs` | S7 | |
 | `crates/wz-capi-pico/src/os/zephyr.rs` | S7 | |
@@ -343,6 +347,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-ext-pubsub/src/advanced_subscriber/state.rs` | S6 | |
 | `crates/wz-ext-pubsub/src/advanced_subscriber/state/tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-ext-pubsub/src/lib.rs` | S6, S10 | |
+| `crates/wz-ext-pubsub/src/sync.rs` | S6 | |
 | `crates/wz-ext-pubsub/src/time_range.rs` | S6, S10 | |
 | `crates/wz-host-net/src/lib.rs` | S9 | |
 | `crates/wz-host-net/src/link_interfaces.rs` | S9 | |
@@ -352,6 +357,9 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-host-net/src/link_interfaces/tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-host-net/src/multicast.rs` | S9 | |
 | `crates/wz-host-net/src/multicast/tests.rs` | excluded: test | Test-only file by its name. |
+| `crates/wz-host-sync/src/lib.rs` | S9 | |
+| `crates/wz-host-sync/src/unix.rs` | S9 | |
+| `crates/wz-host-sync/src/windows.rs` | S9 | |
 | `crates/wz-link-lwip/src/ethernet.rs` | S9 | |
 | `crates/wz-link-lwip/src/lib.rs` | S9 | |
 | `crates/wz-link-lwip/src/mac_rx_pool.rs` | S9 | |
@@ -431,9 +439,12 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-runtime-posix/src/file.rs` | S9 | |
 | `crates/wz-runtime-posix/src/glue.rs` | S9 | |
 | `crates/wz-runtime-posix/src/group.rs` | S9 | |
+| `crates/wz-runtime-posix/src/interfaces.rs` | S9 | |
 | `crates/wz-runtime-posix/src/lib.rs` | S9 | |
 | `crates/wz-runtime-posix/src/links.rs` | S9 | |
+| `crates/wz-runtime-posix/src/multicast.rs` | S9 | |
 | `crates/wz-runtime-posix/src/net.rs` | S9 | |
+| `crates/wz-runtime-posix/src/scouting.rs` | S9 | |
 | `crates/wz-runtime-posix/src/slot.rs` | S9 | |
 | `crates/wz-runtime-posix/src/windows/group.rs` | S9 | |
 | `crates/wz-runtime-posix/src/stream.rs` | S9 | |
