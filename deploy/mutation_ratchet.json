@@ -1,0 +1,60 @@
+{
+  "cargo_mutants_version": "25.3.1",
+  "scopes": {
+    "session-core-sequence": {
+      "package": "wz-session-core",
+      "files": [
+        "crates/wz-session-core/src/sn.rs",
+        "crates/wz-session-core/src/wrapping_ticks.rs",
+        "crates/wz-session-core/src/stream_window.rs"
+      ],
+      "timeout_multiplier": 3,
+      "why": "The arithmetic a transport orders its frames by: the sequence-number ring and its half-window precedence, a span of ticks over a counter that wraps, and the frame boundaries a stream link reads out of the bytes that arrived.",
+      "row": null
+    },
+    "session-core-establishment": {
+      "package": "wz-session-core",
+      "files": [
+        "crates/wz-session-core/src/accept_state.rs",
+        "crates/wz-session-core/src/handshake_stray.rs",
+        "crates/wz-session-core/src/link_admission.rs"
+      ],
+      "timeout_multiplier": 3,
+      "why": "What a unicast establishment decides: the state an acceptor's cookie carries for each extension, what a handshake step does with a message it does not await, and which of two links to one node a session keeps.",
+      "row": null
+    },
+    "session-core-liveness": {
+      "package": "wz-session-core",
+      "files": [
+        "crates/wz-session-core/src/lease.rs",
+        "crates/wz-session-core/src/retry_period.rs",
+        "crates/wz-session-core/src/admission_retry.rs"
+      ],
+      "timeout_multiplier": 3,
+      "why": "When a session gives up or tries again: the lease deadline and its wire unit, the wait between dials and how it grows, and how often a publish is offered again when no link had room.",
+      "row": null
+    },
+    "codecs-hand-written": {
+      "package": "wz-codecs",
+      "files": [
+        "crates/wz-codecs/src/vle.rs",
+        "crates/wz-codecs/src/whatami.rs",
+        "crates/wz-codecs/src/encoding_ids.rs"
+      ],
+      "timeout_multiplier": 3,
+      "why": "The hand-written part of the codec crate: the variable-length integer, the node role and the encoding id table. The rest of the crate is generated from sources/codecs into out/ and is not a scope's file.",
+      "row": null
+    },
+    "capi-pico-doors": {
+      "package": "wz-capi-pico",
+      "files": [
+        "crates/wz-capi-pico/src/encoding.rs",
+        "crates/wz-capi-pico/src/string_array.rs",
+        "crates/wz-capi-pico/src/zid.rs"
+      ],
+      "timeout_multiplier": 4,
+      "why": "Door glue of the pico C ABI: the encoding, string array and identity doors, each a C export over a Rust value whose edge cases (a null or empty argument, an out-of-range index, the byte order of a rendered id) a C program relies on. The multiplier is higher because the crate's suite opens sessions over loopback.",
+      "row": null
+    }
+  }
+}
