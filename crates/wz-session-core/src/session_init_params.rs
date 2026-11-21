@@ -468,13 +468,9 @@ pub struct TxQueueConf {
     /// The `tx-expiry-keeps-session` policy: what a blocking message that found no room in
     /// its deadline costs. `false`, upstream's behaviour, closes the session as unresponsive
     /// and tells the sender nothing. `true` drops the message, reports the transport as not
-    /// available, and keeps the session open.
+    /// available, and keeps the session open, until as many in a row as `TX_EXPIRY_CLOSE_AFTER`
+    /// of the session's snapshot ([`SessionInitParams::limits`]) close it after all.
     pub expiry_keeps_session: bool,
-    /// The `TX_EXPIRY_CLOSE_AFTER` limit of `tx-expiry-keeps-session`: how many blocking
-    /// messages in a row may find no room before the session is closed after all
-    /// ([`crate::tx_deadline::ExpiryRun`]). `0` never closes it. Read only when
-    /// [`Self::expiry_keeps_session`] is `true`.
-    pub expiry_close_after: u16,
     /// `batching/enabled`: whether the session stages its messages into an open frame per
     /// conduit that the link's writer flushes when it falls idle, so that a burst leaves in few
     /// large frames. `false` sends every message as a frame of its own as soon as it is staged,
@@ -526,21 +522,6 @@ const fn no_progress_us(policy: &SessionPolicy) -> Option<u64> {
     } else {
         None
     }
-}
-
-// `TX_EXPIRY_CLOSE_AFTER` is held in 16 bits (`TxQueueConf::expiry_close_after` and the run it
-// is compared with, `tx_deadline::ExpiryRun`), so that both sit in the padding the session already
-// has. A larger limit would be a run the session cannot count, so it is refused when the build is
-// made rather than read as a smaller one.
-const _: () = assert!(
-    crate::caps::TX_EXPIRY_CLOSE_AFTER <= u16::MAX as usize,
-    "TX_EXPIRY_CLOSE_AFTER is at most 65535: a session counts the run of expiries in a u16"
-);
-
-/// `TX_EXPIRY_CLOSE_AFTER` as [`TxQueueConf::expiry_close_after`] carries it, which the
-/// assertion above holds in range.
-const fn build_expiry_close_after() -> u16 {
-    crate::caps::TX_EXPIRY_CLOSE_AFTER as u16
 }
 
 /// `PICO_TX_QUEUE_SIZE` as the size of a queue: upstream's `MIN_SIZE..=MAX_SIZE`, the nearest end
@@ -617,7 +598,6 @@ impl TxQueueConf {
             wait_before_close_us: WAIT_BEFORE_CLOSE_US,
             no_progress_us: None,
             expiry_keeps_session: false,
-            expiry_close_after: build_expiry_close_after(),
             batching: true,
             batching_time_limit_us: crate::link::BATCHING_TIME_LIMIT_US,
             allocation: crate::link::QueueAllocation::Lazy,
@@ -657,7 +637,6 @@ impl TxQueueConf {
             wait_before_close_us: WAIT_BEFORE_CLOSE_US,
             no_progress_us: no_progress_us(policy),
             expiry_keeps_session: policy.tx_expiry_keeps_session(),
-            expiry_close_after: build_expiry_close_after(),
             batching: true,
             batching_time_limit_us: crate::link::BATCHING_TIME_LIMIT_US,
             allocation: crate::link::QueueAllocation::Lazy,
@@ -947,20 +926,6 @@ mod no_progress_tests {
         assert!(!zenoh_queue().expiry_keeps_session);
         assert_eq!(pico_queue().no_progress_us, None);
         assert!(!pico_queue().expiry_keeps_session);
-        assert_eq!(zenoh_queue().expiry_close_after, 0);
-        assert_eq!(pico_queue().expiry_close_after, 0);
-    }
-
-    /// Every queue carries `TX_EXPIRY_CLOSE_AFTER` exactly as the build states it: a value the
-    /// 16-bit run cannot count is refused when the build is made, never read as a smaller one.
-    #[test]
-    fn every_queue_carries_the_stated_expiry_close_after_exactly() {
-        for queue in [TxQueueConf::upstream(), zenoh_queue(), pico_queue()] {
-            assert_eq!(
-                usize::from(queue.expiry_close_after),
-                crate::caps::TX_EXPIRY_CLOSE_AFTER
-            );
-        }
     }
 
     /// A droppable message behind a held conduit: zenoh's profile waits for room out of

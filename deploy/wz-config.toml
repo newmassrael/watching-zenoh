@@ -2894,7 +2894,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "live"
 binding_fixed = "open"
-read = "build"
+read = "snapshot"
 wire = "timing"
 help = '''
 How many blocking messages in a row may find no room within their deadline
@@ -3429,7 +3429,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "live"
 binding_fixed = "open"
-read = "build"
+read = "snapshot"
 wire = "timing"
 help = '''
 How many declarations one turn of a paced declaration replay sends, when the
@@ -3451,7 +3451,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "live"
 binding_fixed = "live"
-read = "build"
+read = "snapshot"
 wire = "none"
 help = '''
 How long, in milliseconds, a node waits for the peer's answer to an interest it
@@ -3475,7 +3475,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "live"
 binding_fixed = "open"
-read = "build"
+read = "snapshot"
 wire = "timing"
 help = '''
 How long, in milliseconds, a paced declaration replay waits between two of its
@@ -3498,7 +3498,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "none"
-read = "build"
+read = "snapshot"
 wire = "none"
 help = '''
 How long, in milliseconds, a session waits for the next of its peer's initial
@@ -3526,7 +3526,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "open"
-read = "build"
+read = "snapshot"
 wire = "timing"
 help = '''
 How long, in milliseconds, a paced declaration replay waits before it tries
@@ -3553,7 +3553,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "open"
-read = "build"
+read = "snapshot"
 wire = "none"
 help = '''
 How long, in milliseconds, a paced declaration replay that retries refused

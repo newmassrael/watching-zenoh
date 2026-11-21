@@ -212,10 +212,11 @@ fn a_session_replays_at_the_pace_of_the_snapshot_it_is_handed() {
         handed,
     )
     .expect("the session opens");
+    let limits = wz_session_core::limits::SessionLimits::defaults();
     let (pacing, held) = engine.policy_in_force().expect("the session is open");
     assert_eq!(held, handed);
-    assert_eq!(pacing, ReplayPacing::of_policy(&handed));
-    assert_ne!(pacing, ReplayPacing::of_policy(&build));
+    assert_eq!(pacing, ReplayPacing::of_snapshots(&handed, &limits));
+    assert_ne!(pacing, ReplayPacing::of_snapshots(&build, &limits));
     SessionDrive::close(&*engine);
 
     // Control: the open that resolves its own snapshot holds the build's and its pace.
@@ -223,8 +224,43 @@ fn a_session_replays_at_the_pace_of_the_snapshot_it_is_handed() {
     let own = open_with(config(&second));
     let (pacing, held) = own.policy_in_force().expect("the session is open");
     assert_eq!(held, build);
-    assert_eq!(pacing, ReplayPacing::of_policy(&build));
+    assert_eq!(pacing, ReplayPacing::of_snapshots(&build, &limits));
     SessionDrive::close(&*own);
+}
+
+/// The pace limits of the snapshot a session opens with are the pace it replays at: a burst the
+/// config's limits state is the burst of the dial face's pace, not the build's.
+#[test]
+fn a_session_replays_at_the_pace_limits_of_the_snapshot_it_is_handed() {
+    use wz_session_core::policy::{DeclarationSyncPacing, SessionPolicy};
+    let mut paced = SessionPolicy::defaults();
+    if paced
+        .select_declaration_sync_pacing(DeclarationSyncPacing::On)
+        .is_err()
+    {
+        // The build keeps pacing off: no snapshot paces a replay.
+        return;
+    }
+    let mut limits = wz_session_core::limits::SessionLimits::defaults();
+    if limits.select_declaration_sync_burst_messages(3).is_err() {
+        // A build of one value refuses another: there is no other snapshot to hand.
+        return;
+    }
+    let router = Router::start(CatchAll::None);
+    let engine = Engine::open_with_policy(
+        super::PosixLinks::new(super::LOOPBACK, super::PosixTcpDial).waited_by_owner(),
+        super::PosixClock,
+        super::PosixEntropy,
+        CoopConfig {
+            limits,
+            ..config(&router)
+        },
+        paced,
+    )
+    .expect("the session opens");
+    let (pacing, _) = engine.policy_in_force().expect("the session is open");
+    assert_eq!(pacing.map(|pace| pace.burst()), Some(3));
+    SessionDrive::close(&*engine);
 }
 
 /// Without a pace the replay is one turn: everything the session holds goes out when the link

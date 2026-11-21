@@ -10,6 +10,7 @@
 //! (`io/zenoh-transport/src/multicast/link.rs` @ `let tpc = TransmissionPipelineConf {`),
 //! so the two transports share one deadline rather than two copies of it.
 
+use crate::limit_binding::Quota;
 use crate::link::RoomWait;
 use crate::session_init_params::TxQueueConf;
 
@@ -76,15 +77,15 @@ impl ExpiryRun {
         self.run = 0;
     }
 
-    /// A blocking message expired. Whether this is the `close_after`-th in the run, which is
-    /// the one that closes the session; every expiry after it is too, so a close asked for twice
-    /// is the same close. `0` never closes.
-    pub fn expired(&mut self, close_after: u16) -> bool {
-        if close_after == 0 {
+    /// A blocking message expired. Whether the run it completes is as long as `close_after`
+    /// allows, which is the expiry that closes the session; every expiry after it is too, so a
+    /// close asked for twice is the same close. With no bound no run closes it.
+    pub fn expired(&mut self, close_after: Quota) -> bool {
+        if close_after.is_unbounded() {
             return false;
         }
         self.run = self.run.saturating_add(1);
-        self.run >= close_after
+        !close_after.admits(usize::from(self.run) + 1)
     }
 }
 
@@ -274,7 +275,7 @@ mod tests {
     fn a_run_of_expiries_never_closes_when_no_count_is_stated() {
         let mut run = ExpiryRun::default();
         for _ in 0..10_000 {
-            assert!(!run.expired(0));
+            assert!(!run.expired(Quota::UNBOUNDED));
         }
     }
 
@@ -282,31 +283,33 @@ mod tests {
     /// it are kept.
     #[test]
     fn the_expiry_that_completes_the_run_closes_the_session() {
+        let three = Quota::at_most(3);
         let mut run = ExpiryRun::default();
-        assert!(!run.expired(3));
-        assert!(!run.expired(3));
-        assert!(run.expired(3));
+        assert!(!run.expired(three));
+        assert!(!run.expired(three));
+        assert!(run.expired(three));
         // A close asked for again is the same close.
-        assert!(run.expired(3));
+        assert!(run.expired(three));
     }
 
     /// A count of one is upstream's own answer, the first expiry closes it.
     #[test]
     fn a_count_of_one_closes_at_the_first_expiry() {
-        assert!(ExpiryRun::default().expired(1));
+        assert!(ExpiryRun::default().expired(Quota::at_most(1)));
     }
 
     /// A message that finds room ends the run: the expiries on either side of it are two runs
     /// of two, not one of four, so a link that blocks now and then is never closed.
     #[test]
     fn a_push_between_expiries_starts_the_count_again() {
+        let three = Quota::at_most(3);
         let mut run = ExpiryRun::default();
-        assert!(!run.expired(3));
-        assert!(!run.expired(3));
+        assert!(!run.expired(three));
+        assert!(!run.expired(three));
         run.pushed();
-        assert!(!run.expired(3));
-        assert!(!run.expired(3));
-        assert!(run.expired(3));
+        assert!(!run.expired(three));
+        assert!(!run.expired(three));
+        assert!(run.expired(three));
     }
 
     /// A push with no run open changes nothing.
@@ -314,8 +317,8 @@ mod tests {
     fn a_push_with_no_run_open_leaves_the_count_at_zero() {
         let mut run = ExpiryRun::default();
         run.pushed();
-        assert!(!run.expired(2));
-        assert!(run.expired(2));
+        assert!(!run.expired(Quota::at_most(2)));
+        assert!(run.expired(Quota::at_most(2)));
     }
 
     /// Under pico's transmit model a droppable message asks for room as long

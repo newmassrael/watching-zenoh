@@ -17441,6 +17441,36 @@ async fn a_declaration_made_during_the_wait_restarts_it() {
     );
 }
 
+/// `DECLARATION_SYNC_INTERVAL_MS` stated in the session's snapshot is the step of the wait for
+/// stable declarations: a session that owes nothing is stable only once a whole stated interval
+/// has passed with nothing changed.
+#[tokio::test]
+async fn declaration_sync_interval_ms_stated_is_the_step_of_the_wait_for_stable_declarations() {
+    let mut params = fixture_session_init_params();
+    if params
+        .limits
+        .select_declaration_sync_interval_ms(300)
+        .is_err()
+    {
+        // A build of one value refuses another: there is no other snapshot to hand.
+        return;
+    }
+    let (actions, _driver) = recording_actions_with_params(params);
+    let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
+    let session = TokioSession::new(actions, observer, Arc::new(TokioTime::new()));
+    let started = std::time::Instant::now();
+    assert!(
+        session
+            .wait_declarations_stable(std::time::Duration::from_secs(5))
+            .await,
+        "nothing owed"
+    );
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(300),
+        "the wait stepped by the stated interval"
+    );
+}
+
 /// One inbound Push on `demo/data`, as the drive loop would dispatch it.
 #[cfg(all(
     feature = "declare-subscriber",

@@ -21,13 +21,14 @@ use core::cell::Cell;
 use crate::limit_binding::{LimitDomain, LimitSpec, OutsideLimitDomain};
 use crate::limits::{
     DeclarationSyncRetryIntervalMs, DeclarationSyncRetryIntervalMsHeld,
-    DeclarationSyncTxNoProgressMs, DeclarationSyncTxNoProgressMsHeld,
+    DeclarationSyncTxNoProgressMs, DeclarationSyncTxNoProgressMsHeld, SessionLimits,
 };
+use crate::policy::SessionPolicy;
 
 /// A pace of `burst` declarations a turn and `interval_ms` between turns, and the answer to a turn
 /// the link refused. A host holds it as an `Option`, so a test, or a caller that wants pacing on
-/// whatever its snapshot says, can state it, and the snapshot of the session that replays states
-/// it through [`Self::of_policy`].
+/// whatever its snapshot says, can state it, and the snapshots of the session that replays state
+/// it through [`Self::of_snapshots`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReplayPacing {
     burst: usize,
@@ -106,24 +107,25 @@ impl ReplayPacing {
         RefusalStep::RetryIn(retry_ms)
     }
 
-    /// The pace `policy` states, the snapshot of the session that replays: `None`, upstream's one
-    /// call, unless its `declaration-sync-pacing` policy is on, in which case the pace is the
-    /// burst and interval limits, and its answer to a refused turn the two retry limits
-    /// ([`Self::new`]). The limits are checked where they are used, at compile time, so a build
-    /// that sets the burst or the interval to zero does not build.
-    pub const fn of_policy(policy: &crate::policy::SessionPolicy) -> Option<Self> {
-        const _: () = assert!(
-            crate::caps::DECLARATION_SYNC_BURST_MESSAGES >= 1
-                && crate::caps::DECLARATION_SYNC_INTERVAL_MS >= 1,
-            "DECLARATION_SYNC_BURST_MESSAGES and DECLARATION_SYNC_INTERVAL_MS must be at least 1"
-        );
-        if policy.declaration_sync_pacing() {
-            Self::new(
-                crate::caps::DECLARATION_SYNC_BURST_MESSAGES,
-                crate::caps::DECLARATION_SYNC_INTERVAL_MS as u64,
-            )
-        } else {
-            None
+    /// The pace the two snapshots of the session that replays state: `None`, upstream's one
+    /// call, unless the `declaration-sync-pacing` policy of `policy` is on, in which case the
+    /// pace is the burst and the interval `limits` holds, and its answer to a refused turn the
+    /// two retry limits `limits` holds. The declaration's ranges hold the burst and the interval
+    /// to at least 1, so every snapshot's values make a pace ([`Self::new`]).
+    pub const fn of_snapshots(policy: &SessionPolicy, limits: &SessionLimits) -> Option<Self> {
+        if !policy.declaration_sync_pacing() {
+            return None;
+        }
+        match Self::new(
+            limits.declaration_sync_burst_messages(),
+            limits.declaration_sync_interval_ms() as u64,
+        ) {
+            Some(pace) => Some(Self {
+                retry_interval_ms: limits.declaration_sync_retry_interval_ms_held(),
+                no_progress_ms: limits.declaration_sync_tx_no_progress_ms_held(),
+                ..pace
+            }),
+            None => None,
         }
     }
 
@@ -242,7 +244,7 @@ mod tests {
     #[test]
     fn the_build_defaults_state_a_pace_exactly_when_the_policy_is_on() {
         let defaults = crate::policy::SessionPolicy::defaults();
-        let pace = ReplayPacing::of_policy(&defaults);
+        let pace = ReplayPacing::of_snapshots(&defaults, &SessionLimits::defaults());
         assert_eq!(pace.is_some(), defaults.declaration_sync_pacing());
         if let Some(pace) = pace {
             assert_eq!(pace.burst(), crate::caps::DECLARATION_SYNC_BURST_MESSAGES);
@@ -276,14 +278,15 @@ mod tests {
         let mut off = on;
         off.select_declaration_sync_pacing(DeclarationSyncPacing::Off)
             .expect("the domain holds both values");
+        let limits = SessionLimits::defaults();
         assert_eq!(
-            ReplayPacing::of_policy(&on),
+            ReplayPacing::of_snapshots(&on, &limits),
             ReplayPacing::new(
                 crate::caps::DECLARATION_SYNC_BURST_MESSAGES,
                 crate::caps::DECLARATION_SYNC_INTERVAL_MS as u64
             )
         );
-        assert_eq!(ReplayPacing::of_policy(&off), None);
+        assert_eq!(ReplayPacing::of_snapshots(&off, &limits), None);
     }
 
     /// With no retry interval a refused turn ends the replay, as it always did; with one, the

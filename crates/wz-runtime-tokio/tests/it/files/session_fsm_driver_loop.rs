@@ -436,6 +436,82 @@ async fn the_declaration_watch_runs_from_the_establishment_until_the_peers_final
     }
 }
 
+/// A session under `until-declarations-synced` whose snapshot is `limits`, walked to its
+/// establishment with an engine noting its events, so the watch of the peer's initial declarations
+/// runs; with its engine and the time of the establishment. `None` where the build's domain of the
+/// policy leaves that mode out.
+fn watched_session(
+    limits: wz_session_core::limits::SessionLimits,
+) -> Option<(
+    Arc<SessionLinkActions>,
+    Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>,
+    u64,
+)> {
+    use wz_runtime_tokio::policy::ReliableGapReconnect as Mode;
+    use wz_runtime_tokio::session_glue::IterationEvent;
+    use wz_session_core::lease::LeaseCheckOutcome;
+
+    let mut params = fixture_session_init_params();
+    params
+        .policy
+        .select_reliable_gap_reconnect(Mode::UntilDeclarationsSynced)
+        .ok()?;
+    params.limits = limits;
+    let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopOutboundDriver::default());
+    let actions = new_session_actions(outbound, params, TokioTime::new());
+    let mut engine = new_session_engine(&actions);
+    engine.initialize().unwrap_or_else(|never| match never {});
+    drive_to_established(&mut engine);
+    let established = actions
+        .link
+        .established_at
+        .lock()
+        .unwrap()
+        .expect("the establishment is stamped");
+    actions.note_declare_finals_in(IterationEvent::Lease(LeaseCheckOutcome::WithinLease));
+    Some((actions, engine, established))
+}
+
+// `DECLARATION_SYNC_RX_NO_PROGRESS_MS` with nothing stated: the watch runs for the build's window
+// after the establishment, and keeps none where the build's window is 0.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn declaration_sync_rx_no_progress_ms_with_nothing_stated_is_the_builds_window() {
+    let Some((actions, _engine, established)) =
+        watched_session(wz_session_core::limits::SessionLimits::defaults())
+    else {
+        return;
+    };
+    let build = wz_session_core::caps::DECLARATION_SYNC_RX_NO_PROGRESS_MS as u64;
+    let expected = if build == 0 {
+        None
+    } else {
+        Some(established + build)
+    };
+    assert_eq!(actions.declaration_watch_deadline(), expected);
+}
+
+// `DECLARATION_SYNC_RX_NO_PROGRESS_MS` stated in the session's snapshot: the watch runs for the
+// stated window after the establishment, whatever the build's window is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn declaration_sync_rx_no_progress_ms_stated_is_the_window_the_watch_runs_for() {
+    const WINDOW: usize = 250;
+    let mut limits = wz_session_core::limits::SessionLimits::defaults();
+    if limits
+        .select_declaration_sync_rx_no_progress_ms(WINDOW)
+        .is_err()
+    {
+        // A build of one value refuses another: there is no other snapshot to hand.
+        return;
+    }
+    let Some((actions, _engine, established)) = watched_session(limits) else {
+        return;
+    };
+    assert_eq!(
+        actions.declaration_watch_deadline(),
+        Some(established + WINDOW as u64)
+    );
+}
+
 // `until-declarations-synced-when-begun`: the side of the link is the one the
 // establishment ran (the InitSyn sent, or the InitAck), and a window that runs
 // out settles an ACCEPTED link whose peer began nothing, where a dialled link
