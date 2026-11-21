@@ -21,8 +21,12 @@
 //! threads may read one at once. A message and a node are named by their index: the place of the
 //! message in the catalog's `messages` and of the node in its `nodes`.
 
+use alloc::boxed::Box;
+use alloc::ffi::CString;
+use alloc::format;
+use alloc::string::ToString;
+use alloc::vec::Vec;
 use core::ffi::{c_char, c_void, CStr};
-use std::ffi::CString;
 
 use wz_app_frame::message_catalog::{build_limits, Catalog};
 

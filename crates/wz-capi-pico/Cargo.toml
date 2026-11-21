@@ -408,10 +408,9 @@ e2e-sender-demux = ["e2e-receiver", "wz-capi-core?/e2e-sender-demux"]
 # (`wz_ext_message_catalog_*`): each message's entry, and the sender, the receiver and the
 # supervision rows made from it in a build that has those doors too. wz's own, off as the reference
 # build is, part of the unstable surface. The reader is `wz-app-frame`'s; a catalog is immutable
-# once read, so it needs no lock, but its text and refusals are the host's strings: it selects
+# once read, so it needs no lock, and its text and refusals are `alloc`'s strings: it selects no
 # `std`, and neither engine.
 message-catalog = [
-    "std",
     "unstable-api",
     "dep:wz-app-frame",
     "wz-capi-core?/message-catalog",
