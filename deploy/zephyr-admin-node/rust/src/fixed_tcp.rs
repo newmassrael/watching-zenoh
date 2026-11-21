@@ -39,6 +39,7 @@ use wz_runtime_coop::udp_link::NoDatagram;
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeCell};
 use wz_session_core::byte_cells::ByteCells;
 use wz_session_core::entropy::EntropySource;
+use wz_session_core::limits::SessionLimits;
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::session_init_params::{cookie_bytes, zid_bytes, SessionInitParams};
 use wz_session_core::session_slot::SessionSlots;
@@ -66,8 +67,8 @@ use wz_session_mcu::slot_host::SessionHost;
 
 use crate::net_lwip::{service_ports, LwipMacNet, MAX_PORTS};
 use crate::{
-    resolve_policy, BATCH_SIZE, BUSY_PASSES_MAX, IDLE_SLEEP_US, LISTEN_PORT, STACK_CHECK_MS,
-    TICK_HZ,
+    resolve_limits, resolve_policy, BATCH_SIZE, BUSY_PASSES_MAX, IDLE_SLEEP_US, LISTEN_PORT,
+    STACK_CHECK_MS, TICK_HZ,
 };
 
 /// Sessions the node holds at most, accepted and dialled together.
@@ -257,6 +258,8 @@ struct Factory {
     observer: &'static ObserverCell<Sinks>,
     /// The snapshot every session is made with.
     policy: SessionPolicy,
+    /// The limits every session is made with, which the peer tables of its slot are held to.
+    limits: SessionLimits,
 }
 
 impl SessionFactory<Clock, Driver> for Factory {
@@ -282,7 +285,7 @@ impl SessionFactory<Clock, Driver> for Factory {
             tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(&self.policy),
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
             policy: self.policy,
-            limits: wz_session_core::limits::SessionLimits::BUILD,
+            limits: self.limits,
             cookie_signing_key: SigningKey::from_slice(&self.key).expect("32-byte key"),
         }
     }
@@ -310,10 +313,12 @@ fn locator(address: [u8; 4]) -> FixedText<LOCATOR_BYTES> {
 fn install_observer(
     zid_hex: &str,
     locators: &[&str],
+    limits: SessionLimits,
 ) -> Result<&'static ObserverCell<Sinks>, &'static core::ffi::CStr> {
     let identity = FixedNodeIdentity::new(zid_hex, "peer", VERSION, locators)
         .map_err(|_| c"wz: FAIL - the node's identity does not fit its fixed fields")?;
     let installed = STORAGE.app.install_with(|observer| {
+        observer.limit_to(&limits);
         if host_connect_writes_fixed(&mut observer.subscribers, zid_hex, "peer", &CONTROL.control)
             .is_err()
         {
@@ -392,7 +397,8 @@ fn start(net: &LwipMacNet) -> Result<Running, i32> {
 
     // The application's registrations, on the observer every session of the node dispatches to. A node
     // whose registrations were refused would run without its admin space: stop instead.
-    let observer = match install_observer(zid_hex, &locator_refs[..count]) {
+    let limits = resolve_limits();
+    let observer = match install_observer(zid_hex, &locator_refs[..count], limits) {
         Ok(observer) => observer,
         Err(why) => {
             log(why);
@@ -442,6 +448,7 @@ fn start(net: &LwipMacNet) -> Result<Running, i32> {
                 key,
                 observer,
                 policy,
+                limits,
             })
         })
         .ok_or(3)?;

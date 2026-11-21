@@ -52,6 +52,7 @@ use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeC
 use wz_session_core::byte_cells::ByteCells;
 use wz_session_core::connect_endpoints::{ConnectEndpoints, ConnectEntry, EndpointText};
 use wz_session_core::entropy::EntropySource;
+use wz_session_core::limits::SessionLimits;
 use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::session_init_params::{
@@ -561,31 +562,39 @@ impl InstallRefused {
     }
 }
 
-/// Build the observer in `app`, where it stays, register a queryable for each of `documents` on
-/// it and record its declaration in `declared`.
+/// Build the observer in `app`, where it stays, hold it to `limits` (the snapshot the node's
+/// creator resolved), register a queryable for each of `documents` on it and record its declaration
+/// in `declared`.
 ///
 /// Its own function, not inlined into the loop, for the stack: the observer itself is large and
 /// is never a value.
 #[inline(never)]
 pub fn install_documents<const N: usize>(
     app: &'static SlotApp<DocumentSinks>,
+    limits: SessionLimits,
     documents: &[Document],
     declared: &Declared<N>,
 ) -> Result<&'static ObserverCell<DocumentSinks>, InstallRefused> {
-    install_entities(app, documents, &Entities::NONE, declared)
+    install_entities(app, limits, documents, &Entities::NONE, declared)
 }
 
 /// [`install_documents`], and the subscriptions, the queryables that answer from them, the
 /// liveliness tokens and the lifecycle verbs. The declarations are recorded in this order: the
 /// documents, the mirrors, the verbs, the subscriptions, the tokens.
+///
+/// The observer is held to `limits` before anything is registered on it, so a registration past a
+/// stated quota is refused as one past the build's capacity is. `limits` is taken by value: where
+/// the build allows each limit one value it holds no byte and is no argument at all.
 #[inline(never)]
 pub fn install_entities<const N: usize>(
     app: &'static SlotApp<DocumentSinks>,
+    limits: SessionLimits,
     documents: &[Document],
     entities: &Entities<'_>,
     declared: &Declared<N>,
 ) -> Result<&'static ObserverCell<DocumentSinks>, InstallRefused> {
     let installed = app.install_with(|observer| {
+        observer.limit_to(&limits);
         for document in documents {
             register_document(&mut observer.queryables, document.key, document.body)
                 .map_err(|_| InstallRefused::Registry)?;
@@ -695,15 +704,26 @@ impl NodeIdentity {
     }
 
     /// zenoh 1.x's handshake shape as a client, with a batch the receive slot holds whole, for a
-    /// session whose machines read `policy`, the snapshot the node's creator resolved.
-    pub fn params(&self, batch_size: u16, policy: &SessionPolicy) -> SessionInitParams {
-        self.params_as(WhatAmI::Client, batch_size, policy)
+    /// session whose machines read `policy` and whose tables are held to `limits`, the snapshots
+    /// the node's creator resolved.
+    pub fn params(
+        &self,
+        batch_size: u16,
+        policy: &SessionPolicy,
+        limits: &SessionLimits,
+    ) -> SessionInitParams {
+        self.params_as(WhatAmI::Client, batch_size, policy, limits)
     }
 
     /// The same shape presented as a peer: what a node that accepts connections says to the
     /// side that opened one, since a stock client refuses another client.
-    pub fn accepted_params(&self, batch_size: u16, policy: &SessionPolicy) -> SessionInitParams {
-        self.params_as(WhatAmI::Peer, batch_size, policy)
+    pub fn accepted_params(
+        &self,
+        batch_size: u16,
+        policy: &SessionPolicy,
+        limits: &SessionLimits,
+    ) -> SessionInitParams {
+        self.params_as(WhatAmI::Peer, batch_size, policy, limits)
     }
 
     fn params_as(
@@ -711,6 +731,7 @@ impl NodeIdentity {
         whatami: WhatAmI,
         batch_size: u16,
         policy: &SessionPolicy,
+        limits: &SessionLimits,
     ) -> SessionInitParams {
         SessionInitParams {
             whatami,
@@ -725,7 +746,7 @@ impl NodeIdentity {
             tx_queue: TxQueueConf::of_policy(policy),
             link_rx: LinkRxConf::default(),
             policy: *policy,
-            limits: wz_session_core::limits::SessionLimits::BUILD,
+            limits: *limits,
             cookie_signing_key: SigningKey::from_slice(&self.key).expect("32-byte key"),
         }
     }
@@ -779,6 +800,7 @@ pub struct ClientFactory<E, L> {
     identity: NodeIdentity,
     batch_size: u16,
     policy: SessionPolicy,
+    limits: SessionLimits,
     entropy: fn() -> E,
     observer: &'static ObserverCell<DocumentSinks>,
     layer: L,
@@ -799,11 +821,13 @@ where
     }
 
     fn params(&mut self) -> SessionInitParams {
-        self.identity.params(self.batch_size, &self.policy)
+        self.identity
+            .params(self.batch_size, &self.policy, &self.limits)
     }
 
     fn accepted_params(&mut self) -> SessionInitParams {
-        self.identity.accepted_params(self.batch_size, &self.policy)
+        self.identity
+            .accepted_params(self.batch_size, &self.policy, &self.limits)
     }
 
     fn events(&mut self, handle: &SessionHandle<C, D>) -> Self::Events {
@@ -1045,6 +1069,13 @@ pub struct ClientNode<
     /// with. On a target with no operating system every policy the image does not widen is one
     /// value, and such a policy takes no byte here.
     pub policy: SessionPolicy,
+    /// The value of every limit the node's tables are held to: the snapshot the platform resolved
+    /// for the node ([`SessionLimits::BUILD`] where it resolves nothing). The node's observer is held
+    /// to it before anything is registered on it, and every session the node dials or accepts is
+    /// made with it, so the peer tables of the session's slot are held to it when the session is
+    /// opened. On a target with no operating system every limit the image does not widen is one
+    /// value, and such a limit takes no byte here.
+    pub limits: SessionLimits,
     /// A fresh entropy source for one session.
     pub entropy: fn() -> E,
     /// The endpoints it dials.
@@ -1158,6 +1189,7 @@ where
             identity,
             batch_size,
             policy,
+            limits,
             entropy,
             endpoints,
             peers,
@@ -1195,7 +1227,8 @@ where
         // The application's registrations, on the observer the session dispatches to. A node
         // whose registrations were refused would declare what nothing answers: stop instead,
         // with the reason.
-        let observer = match install_entities(&storage.app, documents, &entities, declared) {
+        let observer = match install_entities(&storage.app, limits, documents, &entities, declared)
+        {
             Ok(observer) => observer,
             Err(why) => {
                 port.log(&[Str(why.message())]);
@@ -1214,6 +1247,7 @@ where
                 identity,
                 batch_size,
                 policy,
+                limits,
                 entropy,
                 observer,
                 layer,
@@ -1385,6 +1419,7 @@ struct Assembly<'a, E, L, X, const ACCEPTS: usize> {
     identity: NodeIdentity,
     batch_size: u16,
     policy: SessionPolicy,
+    limits: SessionLimits,
     entropy: fn() -> E,
     observer: &'static ObserverCell<DocumentSinks>,
     layer: L,
@@ -1489,6 +1524,7 @@ where
         identity,
         batch_size,
         policy,
+        limits,
         entropy,
         observer,
         layer,
@@ -1504,6 +1540,7 @@ where
             identity,
             batch_size,
             policy,
+            limits,
             entropy,
             observer,
             layer,
@@ -1662,7 +1699,7 @@ mod tests {
     #[test]
     fn the_handshake_is_a_client_of_the_batch_the_platform_states() {
         let identity = NodeIdentity::new(&[1, 2, 3, 4], [9u8; SIGNING_KEY_BYTES]).unwrap();
-        let params = identity.params(1472, &SessionPolicy::defaults());
+        let params = identity.params(1472, &SessionPolicy::defaults(), &SessionLimits::BUILD);
         assert_eq!(params.whatami, WhatAmI::Client);
         assert_eq!(params.zid, zid_bytes(&[1, 2, 3, 4]));
         assert_eq!(params.batch_size, 1472);
@@ -1676,8 +1713,8 @@ mod tests {
     fn a_session_a_peer_opened_is_met_as_a_peer_and_is_otherwise_the_same() {
         let identity = NodeIdentity::new(&[1, 2, 3, 4], [9u8; SIGNING_KEY_BYTES]).unwrap();
         let policy = SessionPolicy::defaults();
-        let dialled = identity.params(1472, &policy);
-        let accepted = identity.accepted_params(1472, &policy);
+        let dialled = identity.params(1472, &policy, &SessionLimits::BUILD);
+        let accepted = identity.accepted_params(1472, &policy, &SessionLimits::BUILD);
         // A stock client refuses another client, so the mode is the one thing that differs.
         assert_eq!(accepted.whatami, WhatAmI::Peer);
         assert_eq!(dialled.whatami, WhatAmI::Client);
@@ -1708,8 +1745,8 @@ mod tests {
                 continue;
             }
             for params in [
-                identity.params(1472, &policy),
-                identity.accepted_params(1472, &policy),
+                identity.params(1472, &policy, &SessionLimits::BUILD),
+                identity.accepted_params(1472, &policy, &SessionLimits::BUILD),
             ] {
                 assert_eq!(params.policy, policy);
                 assert_eq!(params.policy.tx_expiry_keeps_session(), keeps);
@@ -1718,6 +1755,37 @@ mod tests {
             built += 1;
         }
         assert!(built >= 1, "the build's domain holds at least its default");
+    }
+
+    /// A session the node makes is opened with the limits the node's creator handed it, and not
+    /// the build's: `MAX_REMOTE_DECLS` stated as two is what the dialled and the accepted
+    /// parameters carry, so the peer tables of the slot the session is opened in are held to it.
+    /// The CONTROL is the build's snapshot, which they carry when it is the one handed.
+    #[test]
+    fn the_sessions_the_node_makes_carry_the_limits_it_is_handed() {
+        use wz_session_core::limit_binding::{LimitSpec, Quota};
+        use wz_session_core::limits::MaxRemoteDecls;
+        let identity = NodeIdentity::new(&[1, 2, 3, 4], [9u8; SIGNING_KEY_BYTES]).unwrap();
+        let policy = SessionPolicy::defaults();
+        let mut stated = SessionLimits::BUILD;
+        if stated.select_max_remote_decls(Quota::at_most(2)).is_err() {
+            // A build of one value refuses two: it has no other snapshot to hand the node.
+            assert!(MaxRemoteDecls::DOMAIN.is_singleton());
+            return;
+        }
+        assert_ne!(stated, SessionLimits::BUILD, "two is not the build's value");
+        for params in [
+            identity.params(1472, &policy, &stated),
+            identity.accepted_params(1472, &policy, &stated),
+        ] {
+            assert_eq!(params.limits, stated);
+        }
+        for params in [
+            identity.params(1472, &policy, &SessionLimits::BUILD),
+            identity.accepted_params(1472, &policy, &SessionLimits::BUILD),
+        ] {
+            assert_eq!(params.limits, SessionLimits::BUILD);
+        }
     }
 
     #[test]
@@ -1752,7 +1820,7 @@ mod tests {
         ];
         // A build that allows fewer queryables than documents cannot run this test.
         assert!(MAX_QUERYABLES >= documents.len());
-        install_documents(app(), &documents, declared).unwrap();
+        install_documents(app(), SessionLimits::BUILD, &documents, declared).unwrap();
         let all = declared.all();
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].key, "demo/a");
@@ -1779,6 +1847,7 @@ mod tests {
         let unnamed: &'static VerbLegs = Box::leak(Box::new(VerbLegs::new(node)));
         let refused = install_entities(
             app(),
+            SessionLimits::BUILD,
             &documents,
             &Entities {
                 verbs: Some(unnamed),
@@ -1798,6 +1867,7 @@ mod tests {
         let declared = declared::<2>();
         install_entities(
             app(),
+            SessionLimits::BUILD,
             &documents,
             &Entities {
                 verbs: Some(legs),
@@ -1851,6 +1921,7 @@ mod tests {
         let declared = declared::<4>();
         install_entities(
             app(),
+            SessionLimits::BUILD,
             &documents,
             &Entities {
                 subscriptions: &subscriptions,
@@ -1887,6 +1958,7 @@ mod tests {
         let declared = declared::<1>();
         let result = install_entities(
             app(),
+            SessionLimits::BUILD,
             &[],
             &Entities {
                 tokens: &["demo/alive"],
@@ -1913,6 +1985,7 @@ mod tests {
         assert_eq!(
             install_entities(
                 app(),
+                SessionLimits::BUILD,
                 &[],
                 &Entities {
                     tokens: &["demo/a", "demo/b"],
@@ -1933,6 +2006,7 @@ mod tests {
         let shared = app();
         let observer = install_entities(
             shared,
+            SessionLimits::BUILD,
             &[],
             &Entities {
                 subscriptions: &subscriptions,
@@ -1974,6 +2048,7 @@ mod tests {
         assert_eq!(
             install_entities(
                 app(),
+                SessionLimits::BUILD,
                 &[],
                 &Entities {
                     subscriptions: &subscriptions,
@@ -1986,6 +2061,54 @@ mod tests {
         );
     }
 
+    /// The node's observer is held to the limits its creator states before anything is registered
+    /// on it: with `MAX_SUBSCRIPTIONS` stated as two, the third subscription is refused and stops
+    /// the node, and the refusal leaves the two subscriptions registered and declared. The CONTROL
+    /// is the same install under the build's limits, which takes the third.
+    #[test]
+    fn a_stated_quota_of_two_subscriptions_refuses_the_third_on_the_slot_observer() {
+        use wz_session_core::limit_binding::{LimitSpec, Quota};
+        use wz_session_core::limits::MaxSubscriptions;
+        // A build whose limits are below what this test declares cannot compile it.
+        const { assert!(MAX_SUBSCRIPTIONS >= 3) };
+        let mut stated = SessionLimits::BUILD;
+        if stated.select_max_subscriptions(Quota::at_most(2)).is_err() {
+            // A build of one value refuses two: it has no other snapshot to hand the node.
+            assert!(MaxSubscriptions::DOMAIN.is_singleton());
+            return;
+        }
+        let slots = cells::<1, 8>();
+        let subscriptions = [
+            subscription("demo/a", slots, 0),
+            subscription("demo/b", slots, 0),
+            subscription("demo/c", slots, 0),
+        ];
+        let entities = Entities {
+            subscriptions: &subscriptions,
+            ..Entities::NONE
+        };
+
+        let held = app();
+        let declared = declared::<3>();
+        assert_eq!(
+            install_entities(held, stated, &[], &entities, declared).err(),
+            Some(InstallRefused::Subscriptions)
+        );
+        let observer = held
+            .get()
+            .expect("the observer was built before the refusal");
+        assert_eq!(observer.borrow_mut().subscribers.len(), 2);
+        assert_eq!(declared.all().len(), 2, "the refused one is not declared");
+
+        // CONTROL: the build's limits take the subscription the stated ones refused.
+        let control = app();
+        let declared = declared::<3>();
+        let observer = install_entities(control, SessionLimits::BUILD, &[], &entities, declared)
+            .expect("the build's limits take it");
+        assert_eq!(observer.borrow_mut().subscribers.len(), 3);
+        assert_eq!(declared.all().len(), 3);
+    }
+
     #[test]
     fn more_entities_than_declarations_stops_the_node() {
         const { assert!(MAX_SUBSCRIPTIONS >= 1) };
@@ -1994,6 +2117,7 @@ mod tests {
         assert_eq!(
             install_entities(
                 app(),
+                SessionLimits::BUILD,
                 &[],
                 &Entities {
                     subscriptions: &subscriptions,
@@ -2009,7 +2133,7 @@ mod tests {
     #[test]
     fn a_node_with_no_documents_declares_nothing() {
         let declared = declared::<2>();
-        install_documents(app(), &[], declared).unwrap();
+        install_documents(app(), SessionLimits::BUILD, &[], declared).unwrap();
         assert!(declared.all().is_empty());
     }
 
@@ -2028,7 +2152,7 @@ mod tests {
         // The registry takes both, so the refusal is the declarations' own.
         assert!(MAX_QUERYABLES >= documents.len());
         assert_eq!(
-            install_documents(app(), &documents, declared::<1>()).err(),
+            install_documents(app(), SessionLimits::BUILD, &documents, declared::<1>()).err(),
             Some(InstallRefused::TooManyDeclarations)
         );
     }
@@ -2043,7 +2167,13 @@ mod tests {
             .collect();
         // The declarations would hold them all, so the refusal is the registry's.
         assert_eq!(
-            install_documents(app(), &documents, declared::<{ MAX_QUERYABLES + 1 }>()).err(),
+            install_documents(
+                app(),
+                SessionLimits::BUILD,
+                &documents,
+                declared::<{ MAX_QUERYABLES + 1 }>()
+            )
+            .err(),
             Some(InstallRefused::Registry)
         );
     }
@@ -2051,9 +2181,9 @@ mod tests {
     #[test]
     fn the_observer_is_not_built_twice() {
         let shared = app();
-        install_documents(shared, &[], declared::<0>()).unwrap();
+        install_documents(shared, SessionLimits::BUILD, &[], declared::<0>()).unwrap();
         assert_eq!(
-            install_documents(shared, &[], declared::<0>()).err(),
+            install_documents(shared, SessionLimits::BUILD, &[], declared::<0>()).err(),
             Some(InstallRefused::Twice)
         );
     }

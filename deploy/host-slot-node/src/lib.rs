@@ -20,6 +20,7 @@ use core::marker::PhantomData;
 use wz_runtime_posix::glue::{log_parts, yield_us};
 use wz_runtime_posix::PosixEntropy;
 use wz_session_core::entropy::EntropySource;
+use wz_session_core::limits::SessionLimits;
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::text_out::LogPart;
 use wz_session_mcu::slot_node::{NodePort, SIGNING_KEY_BYTES, ZID_MAX};
@@ -134,6 +135,13 @@ pub fn fresh_signing_key() -> Result<[u8; SIGNING_KEY_BYTES], &'static str> {
 /// defaults until the node reads a run-time document.
 pub fn resolve_policy() -> SessionPolicy {
     SessionPolicy::defaults()
+}
+
+/// The limits of every session a node of this host opens, which the node's observer and the peer
+/// tables of each session's slot are held to. Resolved where the snapshot of the policies is: the
+/// build's values until the node reads a run-time document.
+pub fn resolve_limits() -> SessionLimits {
+    SessionLimits::defaults()
 }
 
 /// How a node joins its multicast group on the host.

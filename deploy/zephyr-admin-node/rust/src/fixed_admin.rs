@@ -48,6 +48,7 @@ use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeC
 use wz_session_core::byte_cells::ByteCells;
 use wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES;
 use wz_session_core::entropy::EntropySource;
+use wz_session_core::limits::SessionLimits;
 use wz_session_core::locator_directory::DirectoryZid;
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::session_init_params::{cookie_bytes, zid_bytes, SessionInitParams};
@@ -72,7 +73,7 @@ use wz_session_mcu::slot_host::SessionHost;
 use wz_tls_mbedtls::stream::{AcceptBudget, TlsDial, TlsListener};
 
 use crate::fixed_tls::{self, Stack};
-use crate::{resolve_policy, BATCH_SIZE, IDLE_SLEEP_US, STACK_CHECK_MS, TICK_HZ};
+use crate::{resolve_limits, resolve_policy, BATCH_SIZE, IDLE_SLEEP_US, STACK_CHECK_MS, TICK_HZ};
 
 /// The port the node accepts secure channels on.
 pub const TLS_PORT: u16 = 7448;
@@ -293,6 +294,8 @@ struct Factory {
     observer: &'static ObserverCell<Sinks>,
     /// The snapshot every session is made with.
     policy: SessionPolicy,
+    /// The limits every session is made with, which the peer tables of its slot are held to.
+    limits: SessionLimits,
 }
 
 impl SessionFactory<Clock, Driver> for Factory {
@@ -319,7 +322,7 @@ impl SessionFactory<Clock, Driver> for Factory {
             tx_queue: wz_session_core::session_init_params::TxQueueConf::of_policy(&self.policy),
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
             policy: self.policy,
-            limits: wz_session_core::limits::SessionLimits::BUILD,
+            limits: self.limits,
             cookie_signing_key: SigningKey::from_slice(&self.key).expect("32-byte key"),
         }
     }
@@ -352,11 +355,13 @@ fn clock_ms() -> u64 {
 fn install_observer(
     zid_hex: &str,
     locators: &[&str],
+    limits: SessionLimits,
 ) -> Result<&'static ObserverCell<Sinks>, &'static core::ffi::CStr> {
     static APP: SlotApp<Sinks> = SlotApp::new();
     let identity = FixedNodeIdentity::new(zid_hex, "peer", VERSION, locators)
         .map_err(|_| c"wz: FAIL - the node's identity does not fit its fixed fields")?;
     let installed = APP.install_with(|observer| {
+        observer.limit_to(&limits);
         if host_connect_writes_fixed(&mut observer.subscribers, zid_hex, "peer", &CONTROL.control)
             .is_err()
         {
@@ -424,7 +429,8 @@ fn start() -> Result<Running, i32> {
     let mut zid_text: FixedText<33> = FixedText::new();
     write_zenoh_hex(&zid, &mut zid_text);
     let own_locator = locator(address);
-    let observer = match install_observer(zid_text.prefix(), &[own_locator.prefix()]) {
+    let limits = resolve_limits();
+    let observer = match install_observer(zid_text.prefix(), &[own_locator.prefix()], limits) {
         Ok(observer) => observer,
         Err(why) => {
             log(why);
@@ -481,6 +487,7 @@ fn start() -> Result<Running, i32> {
                 key,
                 observer,
                 policy,
+                limits,
             })
         })
         .ok_or(3)?;

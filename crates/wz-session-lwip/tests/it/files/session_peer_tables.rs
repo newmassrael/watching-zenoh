@@ -249,6 +249,78 @@ fn a_slot_comes_back_with_empty_peer_tables() {
     );
 }
 
+/// A session opened in a slot holds the slot's peer tables to the limits of the parameters it was
+/// opened with: with `MAX_PENDING_FINALS` stated as two, the third request finds no room and is
+/// refused and counted, and the refusal leaves the two `Final`s owed. The CONTROL is the next
+/// session in the same slot, opened under the build's limits, which owes the third: the quota is
+/// each session's own and is not left behind by the one before.
+#[test]
+fn a_stated_quota_of_two_finals_refuses_the_third_in_a_slot_built_session() {
+    use wz_session_core::limit_binding::{LimitSpec, Quota};
+    use wz_session_core::limits::{MaxPendingFinals, SessionLimits};
+    let mut stated = SessionLimits::BUILD;
+    if stated.select_max_pending_finals(Quota::at_most(2)).is_err() {
+        // A build of one value refuses two: it has no other snapshot to hand the session.
+        assert!(MaxPendingFinals::DOMAIN.is_singleton());
+        return;
+    }
+    // A build whose finals table holds fewer than three cannot compile the control.
+    const { assert!(caps::MAX_PENDING_FINALS >= 3) };
+    static TABLE: Table = SessionSlots::new();
+    static RUNTIME: wz_runtime_coop::RuntimeCell<Frozen, 1, 64, 1> =
+        wz_runtime_coop::RuntimeCell::new();
+    let (_serial, link) = wz_link_lwip::lwip_test_link();
+    let link = Rc::new(link);
+    let runtime = RUNTIME
+        .start::<LwipUdpDriver>(Frozen)
+        .expect("the runtime is started once");
+
+    let claim = TABLE
+        .claim(driver_on(&link, 7745), Fill)
+        .ok()
+        .expect("slot");
+    let held = new_session_in_slot(
+        claim,
+        || SessionInitParams {
+            limits: stated,
+            ..params(0xd1)
+        },
+        CoopTime::new(&runtime),
+    );
+    {
+        let mut peers = held.peers().borrow_mut();
+        for rid in 0..2 {
+            assert!(peers.finals.has_room(), "under the stated quota");
+            peers.finals.owe(rid, QosLevel::DEFAULT);
+        }
+        assert!(
+            !peers.finals.has_room(),
+            "the third request finds no room under the stated quota"
+        );
+        peers.finals.refuse_request();
+        assert_eq!(
+            (peers.finals.len(), peers.finals.refusals()),
+            (2, 1),
+            "(finals owed, requests refused) after the refusal"
+        );
+    }
+    drop(held);
+    assert_eq!(TABLE.in_use(), 0, "the slot came back");
+
+    // CONTROL: the next session in the slot, under the build's limits, owes the third.
+    let claim = TABLE
+        .claim(driver_on(&link, 7746), Fill)
+        .ok()
+        .expect("slot");
+    let built = new_session_in_slot(claim, || params(0xd2), CoopTime::new(&runtime));
+    let mut peers = built.peers().borrow_mut();
+    for rid in 0..3 {
+        assert!(peers.finals.has_room(), "under the build's limits");
+        peers.finals.owe(rid, QosLevel::DEFAULT);
+    }
+    assert_eq!(peers.finals.len(), 3);
+}
+
 #[test]
 fn the_peer_tables_count_in_the_slot_size() {
     let slot = Table::slot_bytes();

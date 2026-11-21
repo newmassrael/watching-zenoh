@@ -433,6 +433,7 @@ fn start(port: &mut ZephyrPort) -> Result<impl NodeLoop<ZephyrPort>, i32> {
         identity,
         batch_size: BATCH_SIZE,
         policy: crate::resolve_policy(),
+        limits: crate::resolve_limits(),
         entropy: || ZephyrEntropy,
         endpoints: &ENDPOINTS,
         peers: &[],

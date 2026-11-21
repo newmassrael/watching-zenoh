@@ -435,9 +435,10 @@ where
     }
 
     /// Build the session in this slot: the bundle, over this driver, with this
-    /// entropy source installed. Everything the session holds is in the slot
-    /// afterwards, and the returned handle is the first count on it (the claim's
-    /// own count moves to it).
+    /// entropy source installed, and the slot's peer tables held to the limits of
+    /// `params` ([`SessionInitParams::limits`]). Everything the session holds is in
+    /// the slot afterwards, and the returned handle is the first count on it (the
+    /// claim's own count moves to it).
     ///
     /// The bundle is built in the slot, field by field (`SessionLinkActions::build_in`), and is
     /// never a value on the stack: its two halves are written one field at a time, so the
@@ -455,6 +456,13 @@ where
     pub fn open(self, params: impl FnOnce() -> SessionInitParams, clock: T) -> SlotRef<R, T> {
         let params = params();
         let cell = self.cell;
+        // The peer tables are the slot's and outlive each session in it: every session opened here
+        // holds them to its own limits before its peer can write a row. A snapshot of no byte has
+        // one value, the build's, which the tables hold from their making, so a build whose every
+        // limit is one value hands nothing and borrows nothing here.
+        if const { core::mem::size_of::<crate::limits::SessionLimits>() != 0 } {
+            cell.peers.borrow_mut().limit_to(&params.limits);
+        }
         // SAFETY: the claim holds the slot `Claimed`, so the driver and the
         // entropy source are written. The references made here are `'static`
         // because the slot is, and are valid until the slot is released, which
@@ -525,8 +533,8 @@ impl<R: SessionRuntime + 'static, T: TimeSource + 'static> SlotRef<R, T> {
 
     /// The tables this session's PEER writes, or that are owed to it: its keyexpr
     /// aliases, the declarations it made, its interests, the replies and `Final`s
-    /// its queries owe. The slot's own, never another session's, and bounded by
-    /// the deploy `limits` ([`PeerTables`]).
+    /// its queries owe. The slot's own, never another session's, and held to the
+    /// limits of the parameters the session was opened with ([`PeerTables::limit_to`]).
     ///
     /// A `RefCell`: the profile drives a session from one cooperative task, so a
     /// borrow is held across no suspension and never contended; a borrow taken
