@@ -6440,6 +6440,30 @@
         "No image calls the slot build's MulticastReplyQueue::limit_to yet; the C ABI's StatedTxQueue has no witness against upstream's wait_before_close.",
         "C1bzr was run for the two crates whose links moved, not settled over every shard; hosted settles it."
       ]
+    },
+    "Round 4589": {
+      "decision_summary": "The C ABI presets move to one cooperative engine with no heap after open (owner decision recorded in docs/c-abi-engine-and-memory.md, pool design in docs/c-abi-no-heap-pools.md). This round lands what does not wait for the no-heap units: the delivered package profile on the cooperative engine (P1), the no_std host form of the pico library (P4, os-posix), D12 (no heap after open, read as the least of five windows per family) and D13 (AP presets against upstream zenoh) as ratchets, the Windows packages attached to tagged releases, one normalization rule for build paths and time, the host size debt analysis, and the fixed-record corpus for generated codecs. The no-heap units are held until the cooperative client is at or below main's size (owner, 2026-11-21).",
+      "changes_bullets": [
+        "Package profile host-peer-ext on the cooperative engine (engine axis); config-document in the package; Windows package and example steps promoted to gates.",
+        "Cooperative engine: declaration watch, udp/ unicast listener, per-session timestamp opt-in.",
+        "os-posix no_std host form: wz-host-sync, libc linked explicitly, rust_eh_personality answered, every package capability without std, scouting and groups over wz-runtime-posix.",
+        "wz-ext-pubsub and wz-node-time build without std; ext-pubsub keeps hash maps with a fixed seed.",
+        "Layer C1nh + no_heap_ratchet_gate.py (least of five windows; idle family); ap_matrix.py + deploy/ap_superiority.json; release.yml Windows packages; build_normalization.py.",
+        "Layer S storm cuts placed by round; D9 row for pico-client-coop-nostd (1.4024).",
+        "wz-app-frame fixed-record corpus; a split identifier judged in the bits its parts own."
+      ],
+      "verification_bullets": [
+        "Fleet lanes 0, C0, C1cs, C1nh, S, C1p32, C1cf pass on the landing branch. Tests: cooperative engine 615 set, decl_watch, timestamps, udp_listener, app_link (std and host-lock-sys), wz-runtime-posix, wz-host-sync, wz-node-time, wz-ext-pubsub, wz-app-frame, pico default and cooperative libs; nine C examples pass on the std and the no_std forms plus the app transport program; measured pico-client-coop 2.62x and pico-client-coop-nostd 1.40x of zenoh-pico; the default pico library's +30 KB from BTreeMap traced by symbol diff and taken back. The failing Layer S seed passes on main and the branch twice each; the storm now places its cuts by round."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "No-heap units (U0..U9 and the delivery lane) continue on branch noheap-track; they land when the cooperative client is at or below 2.56x.",
+        "D13 first reading: every AP cell LOSS or TIE (router fan-out 33x, throughput 2-5x); rows to fill and register as debts.",
+        "The idle no-heap family reads 0.1 a round (a periodic allocation), unlocked.",
+        "L1(a) batch-size test and the Q4 memory report verified on their branches, next landing."
+      ]
     }
   },
   "inventory_entries": {
