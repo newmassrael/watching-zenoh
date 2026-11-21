@@ -63,8 +63,19 @@ pub(crate) struct PicoSessionExt {
     #[cfg(feature = "query")]
     pub(crate) policy: SessionPolicy,
     /// The session limits the session runs under, as its open resolved them: what the door that
-    /// reports the session's facts reads the bound of a querier from.
-    #[cfg(feature = "query")]
+    /// reports the session's facts reads the bound of a querier from, in a build that has it
+    /// (`ext_interface`'s capabilities and `query`).
+    #[cfg(all(
+        feature = "query",
+        any(
+            feature = "e2e-sender",
+            feature = "e2e-receiver",
+            feature = "e2e-supervision",
+            feature = "instance-key",
+            feature = "message-catalog",
+            feature = "replay-cache"
+        )
+    ))]
     pub(crate) limits: SessionLimits,
 }
 
@@ -101,7 +112,17 @@ impl PicoSessionExt {
         #[cfg(not(any(feature = "query", feature = "advanced", feature = "clock-source")))]
         let _ = policy;
         // The limits are read by the door that reports the session's facts alone.
-        #[cfg(not(feature = "query"))]
+        #[cfg(not(all(
+            feature = "query",
+            any(
+                feature = "e2e-sender",
+                feature = "e2e-receiver",
+                feature = "e2e-supervision",
+                feature = "instance-key",
+                feature = "message-catalog",
+                feature = "replay-cache"
+            )
+        )))]
         let _ = limits;
         #[cfg(feature = "connectivity")]
         let connectivity = Connectivity::new();
@@ -135,7 +156,17 @@ impl PicoSessionExt {
             admin_space: crate::admin_space::AdminSpaceSlot::new(None),
             #[cfg(feature = "query")]
             policy,
-            #[cfg(feature = "query")]
+            #[cfg(all(
+                feature = "query",
+                any(
+                    feature = "e2e-sender",
+                    feature = "e2e-receiver",
+                    feature = "e2e-supervision",
+                    feature = "instance-key",
+                    feature = "message-catalog",
+                    feature = "replay-cache"
+                )
+            ))]
             limits,
         }
     }
