@@ -238,6 +238,110 @@ mod enforcement {
         assert_eq!(kept.first(), Some(&1), "the oldest gave way");
     }
 
+    /// A transport whose program takes every link up and every byte sent, under a host lock, as a
+    /// session that opens links over it sees it under `limits`.
+    #[cfg(all(feature = "app-link", target_has_atomic = "ptr"))]
+    fn app_transport(limits: &SessionLimits) -> crate::app_transport::SessionTransport {
+        use crate::app_link_table::{
+            AppLinkKind, AppLinkTable, LinkHandle, ProgramOpen, ProgramSend,
+        };
+        use crate::app_transport::{AppPort, AppTransport, SessionTransport, TableLock};
+        struct Lock(std::sync::Mutex<AppLinkTable>);
+        impl TableLock for Lock {
+            fn lock_with(&self, f: &mut dyn FnMut(&mut AppLinkTable)) {
+                f(&mut self.0.lock().unwrap());
+            }
+        }
+        struct Up;
+        impl AppPort for Up {
+            fn open(&self, _: LinkHandle, _: AppLinkKind, _: &str) -> ProgramOpen {
+                ProgramOpen::Up
+            }
+            fn send(&self, _: LinkHandle, bytes: &[u8]) -> ProgramSend {
+                ProgramSend::Wrote(bytes.len())
+            }
+            fn close(&self, _: LinkHandle) {}
+        }
+        let transport = AppTransport::new(
+            std::boxed::Box::new(Lock(std::sync::Mutex::new(AppLinkTable::new()))),
+            std::boxed::Box::new(Up),
+        );
+        SessionTransport::new(std::sync::Arc::new(transport), limits)
+    }
+
+    /// `APP_LINK_QUEUE_BYTES` with nothing stated: a link queues the build's number of bytes the
+    /// session has not read and refuses the next byte.
+    #[cfg(all(feature = "app-link", target_has_atomic = "ptr"))]
+    #[test]
+    fn app_link_queue_bytes_with_nothing_stated_admits_what_the_build_admitted() {
+        use crate::app_link_table::{AppLinkKind, InboundRefusal};
+        let build = caps::APP_LINK_QUEUE_BYTES;
+        if build < 2 {
+            // An empty queue takes anything, so a bound under two bytes refuses nothing here.
+            return;
+        }
+        let session = app_transport(&SessionLimits::defaults());
+        let link = session.begin_open(AppLinkKind::StreamDial, "tcp/192.0.2.1:7447");
+        let transport = &session.transport;
+        transport
+            .received(link, &std::vec![0u8; build - 1], None)
+            .expect("an empty queue takes the bytes");
+        transport
+            .received(link, b"a", None)
+            .expect("the build's bound is reached, not passed");
+        assert_eq!(
+            transport.received(link, b"b", None),
+            Err(InboundRefusal::Full)
+        );
+        assert_eq!(transport.with(|table| table.queued_bytes(link)), build);
+    }
+
+    /// `APP_LINK_QUEUE_BYTES` stated as two: the third byte is refused and nothing of it is
+    /// taken, while a link another session opened over the same transport keeps its own bound.
+    #[cfg(all(feature = "app-link", target_has_atomic = "ptr"))]
+    #[test]
+    fn app_link_queue_bytes_stated_refuses_the_next() {
+        use crate::app_link_table::{AppLinkKind, InboundRefusal};
+        held_to_two(
+            SessionLimits::select_app_link_queue_bytes,
+            AppLinkQueueBytes::DOMAIN.is_singleton(),
+            |limits| {
+                let session = app_transport(limits);
+                let link = session.begin_open(AppLinkKind::StreamDial, "tcp/192.0.2.1:7447");
+                let transport = &session.transport;
+                transport
+                    .received(link, b"a", None)
+                    .expect("under the quota");
+                transport
+                    .received(link, b"b", None)
+                    .expect("under the quota");
+                assert_eq!(
+                    transport.received(link, b"c", None),
+                    Err(InboundRefusal::Full)
+                );
+                assert_eq!(transport.with(|table| table.queued_bytes(link)), 2);
+                let other = crate::app_transport::SessionTransport::new(
+                    std::sync::Arc::clone(transport),
+                    &SessionLimits::defaults(),
+                );
+                let wide = other.begin_open(AppLinkKind::StreamDial, "tcp/192.0.2.2:7447");
+                transport
+                    .received(wide, b"a", None)
+                    .expect("under the quota");
+                transport
+                    .received(wide, b"b", None)
+                    .expect("under the quota");
+                if caps::APP_LINK_QUEUE_BYTES >= 3 {
+                    assert_eq!(
+                        transport.received(wide, b"c", None),
+                        Ok(()),
+                        "the build's bound is the other session's"
+                    );
+                }
+            },
+        );
+    }
+
     /// `LINK_NOTED_REQUESTS` stated as two: a link remembers the last two queries it noted.
     #[cfg(feature = "shared-key-ids")]
     #[test]

@@ -142,7 +142,7 @@ use wz_session_core::serial_link::SerialRole;
 #[cfg(feature = "transport-link-app")]
 use crate::app_link::{wire_app_stream, AppListener, AppReadDriver, AppStream};
 #[cfg(feature = "transport-link-app")]
-use wz_session_core::app_transport::AppTransport;
+use wz_session_core::app_transport::SessionTransport;
 
 // R311oa — the TLS arm, like serial, rides this tcp+unicast-gated module as
 // an additive transport (transport-link-tls forwards transport-link-tcp, so
@@ -324,10 +324,11 @@ pub struct DialConfig {
     /// its handshake on one clock ([`open_within`]). [`OPEN_TIMEOUT`] unless the node states
     /// another.
     pub open_timeout: std::time::Duration,
-    /// The transport the program supplies, which carries every dial of this config in place of
-    /// the system's sockets. `None` (the default) dials the sockets the locator names.
+    /// The transport the program supplies, as the session that dials opens its links over it,
+    /// which carries every dial of this config in place of the system's sockets. `None` (the
+    /// default) dials the sockets the locator names.
     #[cfg(feature = "transport-link-app")]
-    pub app: Option<Arc<AppTransport>>,
+    pub app: Option<SessionTransport>,
 }
 
 impl Default for DialConfig {
@@ -448,9 +449,10 @@ impl DialConfig {
         self
     }
 
-    /// Dial over the transport the program supplies rather than the system's sockets.
+    /// Dial over the transport the program supplies rather than the system's sockets, each link
+    /// held to the bound `app` carries for its session.
     #[cfg(feature = "transport-link-app")]
-    pub fn with_app_transport(mut self, app: Arc<AppTransport>) -> Self {
+    pub fn with_app_transport(mut self, app: SessionTransport) -> Self {
         self.app = Some(app);
         self
     }
@@ -624,13 +626,14 @@ pub struct AcceptConfig {
     /// The transport the program supplies, which carries every listen of this config in place of
     /// the system's sockets, the accept mirror of [`DialConfig::app`].
     #[cfg(feature = "transport-link-app")]
-    pub app: Option<Arc<AppTransport>>,
+    pub app: Option<SessionTransport>,
 }
 
 impl AcceptConfig {
-    /// Listen over the transport the program supplies rather than the system's sockets.
+    /// Listen over the transport the program supplies rather than the system's sockets, each
+    /// link held to the bound `app` carries for its session.
     #[cfg(feature = "transport-link-app")]
-    pub fn with_app_transport(mut self, app: Arc<AppTransport>) -> Self {
+    pub fn with_app_transport(mut self, app: SessionTransport) -> Self {
         self.app = Some(app);
         self
     }
@@ -4079,15 +4082,15 @@ pub async fn bind_endpoint_with_config(
 /// which an open names as an unknown scheme: the program's transport carries every link of the
 /// config or none, and no locator falls through to the system's sockets.
 #[cfg(feature = "transport-link-app")]
-async fn dial_app(app: &Arc<AppTransport>, connect: &str) -> io::Result<DialedLink> {
+async fn dial_app(app: &SessionTransport, connect: &str) -> io::Result<DialedLink> {
     use wz_session_core::app_link_table::{kind_for_locator, AppLinkKind};
     match kind_for_locator(connect, false) {
         Some(AppLinkKind::StreamDial) => Ok(DialedLink::App(
-            crate::app_link::dial_stream(app, connect).await?,
+            crate::app_link::dial_stream(&app.transport, connect, app.queue).await?,
         )),
         #[cfg(feature = "transport-link-udp")]
         Some(AppLinkKind::Datagram) => Ok(DialedLink::AppDatagram(
-            crate::app_link::dial_datagram(app, connect).await?,
+            crate::app_link::dial_datagram(&app.transport, connect, app.queue).await?,
         )),
         _ => Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -4099,15 +4102,15 @@ async fn dial_app(app: &Arc<AppTransport>, connect: &str) -> io::Result<DialedLi
 /// Listen on `listen` over the transport the program supplies, refusing what [`dial_app`]
 /// refuses for the same reason.
 #[cfg(feature = "transport-link-app")]
-async fn bind_app(app: &Arc<AppTransport>, listen: &str) -> io::Result<BoundListener> {
+async fn bind_app(app: &SessionTransport, listen: &str) -> io::Result<BoundListener> {
     use wz_session_core::app_link_table::{kind_for_locator, AppLinkKind};
     match kind_for_locator(listen, true) {
         Some(AppLinkKind::StreamListen) => Ok(BoundListener::App(
-            crate::app_link::listen_stream(app, listen).await?,
+            crate::app_link::listen_stream(&app.transport, listen, app.queue).await?,
         )),
         #[cfg(feature = "transport-link-udp")]
         Some(AppLinkKind::DatagramListen) => Ok(BoundListener::AppDatagram(
-            crate::app_link::listen_datagram(app, listen).await?,
+            crate::app_link::listen_datagram(&app.transport, listen, app.queue).await?,
         )),
         _ => Err(io::Error::new(
             io::ErrorKind::Unsupported,

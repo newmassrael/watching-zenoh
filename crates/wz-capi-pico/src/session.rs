@@ -1467,8 +1467,10 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     let opened = match request.app_transport {
         Some(transport) => wz_capi_coop::CoopEngine::open_with_key_ids(
             app_links_on(
-                wz_capi_coop::app_link::AppLinks::new(transport)
-                    .with_rx_capacity(wz_session_core::caps::PICO_UNICAST_BATCH_BYTES),
+                wz_capi_coop::app_link::AppLinks::new(
+                    wz_session_core::app_transport::SessionTransport::new(transport, &limits),
+                )
+                .with_rx_capacity(wz_session_core::caps::PICO_UNICAST_BATCH_BYTES),
                 &clock,
             ),
             clock,

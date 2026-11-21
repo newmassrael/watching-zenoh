@@ -3171,7 +3171,7 @@ storage = "quota"
 scope = "link"
 binding_heap = "open"
 binding_fixed = "none"
-read = "build"
+read = "snapshot"
 # `wire` is timing: past the bound the program's bytes are refused and handed in again once the
 # session has read the queue down, so a peer receives the same bytes later.
 wire = "timing"

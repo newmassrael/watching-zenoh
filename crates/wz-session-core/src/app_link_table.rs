@@ -42,6 +42,7 @@ use sce_rust_runtime::Engine;
 
 use crate::app_link::{AppLinkActions, AppLinkEvent, AppLinkPolicy, AppLinkState};
 use crate::duty_outbox::DutyOutbox;
+use crate::limit_binding::Quota;
 
 /// The id every link's machine is built under (SCE ADR 0045: the host gives a machine its id). A
 /// constant, so the generated constructor never refuses it.
@@ -353,10 +354,15 @@ struct Link {
     /// Bytes a writer that cannot wait handed over and the program has not taken yet (an engine
     /// whose stream seam takes every byte or fails; [`AppLinkTable::hold_remainder`]).
     remainder: Vec<u8>,
+    /// The most bytes the link queues in either direction: what the program handed in and the
+    /// session has not read, and what a writer that cannot wait handed over and the program has
+    /// not taken. The `APP_LINK_QUEUE_BYTES` of the session that opened the link, or of the
+    /// listener it was accepted on.
+    queue: Quota,
 }
 
 impl Link {
-    fn new(kind: AppLinkKind) -> Self {
+    fn new(kind: AppLinkKind, queue: Quota) -> Self {
         let mut machine = Engine::new(AppLinkPolicy::new_with_checked_session_id(
             APP_LINK_SESSION_ID,
             LinkDuties {
@@ -381,7 +387,14 @@ impl Link {
             released: false,
             refused_full: false,
             remainder: Vec::new(),
+            queue,
         }
+    }
+
+    /// Whether the link takes what would leave `count` bytes queued in one direction. A quota of
+    /// 0 is read as 1: a link always takes one byte.
+    fn admits(&self, count: usize) -> bool {
+        count <= 1 || self.queue.admits(count)
     }
 
     fn state(&self) -> AppLinkState {
@@ -398,9 +411,13 @@ impl Link {
     }
 
     /// After a read: a link that refused the program for being full and is now read down to half
-    /// of `bound` is one the program is told of.
-    fn note_read(&mut self, handle: LinkHandle, bound: usize, drained: &mut Vec<LinkHandle>) {
-        if self.refused_full && self.queued() <= bound / 2 {
+    /// of its bound is one the program is told of. A link with no bound refuses nothing.
+    fn note_read(&mut self, handle: LinkHandle, drained: &mut Vec<LinkHandle>) {
+        let read_down = match self.queue.most() {
+            Some(most) => self.queued() <= most.max(1) / 2,
+            None => true,
+        };
+        if self.refused_full && read_down {
             self.refused_full = false;
             drained.push(handle);
         }
@@ -438,14 +455,11 @@ fn keep(slot: &mut Option<Waker>, waker: Option<&Waker>) {
     }
 }
 
-/// The links of one transport.
+/// The links of one transport. The transport may carry the links of several sessions, so each
+/// link keeps the queue bound of the session that opened it ([`Self::reserve`]).
 pub struct AppLinkTable {
     links: BTreeMap<LinkHandle, Link>,
     next: LinkHandle,
-    /// The most bytes one link queues in either direction: what the program handed in and the
-    /// session has not read, and what a writer that cannot wait handed over and the program has
-    /// not taken.
-    bound: usize,
     /// The links read down since the host last asked ([`Self::take_drained`]).
     drained: Vec<LinkHandle>,
 }
@@ -457,25 +471,13 @@ impl Default for AppLinkTable {
 }
 
 impl AppLinkTable {
-    /// A table with no link, whose links queue at most the build's `APP_LINK_QUEUE_BYTES`.
+    /// A table with no link.
     pub const fn new() -> Self {
-        Self::with_queue_bound(crate::caps::APP_LINK_QUEUE_BYTES)
-    }
-
-    /// A table with no link, whose links queue at most `bound` bytes in each direction. A bound
-    /// of 0 is taken as 1: a link always takes the program's bytes when its queue is empty.
-    pub const fn with_queue_bound(bound: usize) -> Self {
         Self {
             links: BTreeMap::new(),
             next: 1,
-            bound: if bound == 0 { 1 } else { bound },
             drained: Vec::new(),
         }
-    }
-
-    /// The most bytes one link queues in either direction.
-    pub fn queue_bound(&self) -> usize {
-        self.bound
     }
 
     /// The links read down since the last call, for the host to tell the program of.
@@ -522,10 +524,13 @@ impl AppLinkTable {
         handle
     }
 
-    /// A new link of `kind`, Opening, before the program is asked to open it.
-    pub fn reserve(&mut self, kind: AppLinkKind) -> LinkHandle {
+    /// A new link of `kind`, Opening, before the program is asked to open it, which queues at most
+    /// `queue` bytes in each direction: the `APP_LINK_QUEUE_BYTES` of the session that opens it.
+    /// A link always takes the program's bytes when its queue is empty, so a quota of 0 holds one
+    /// chunk at a time. The streams or sources accepted on a listener keep the listener's.
+    pub fn reserve(&mut self, kind: AppLinkKind, queue: Quota) -> LinkHandle {
         let handle = self.take_handle();
-        self.links.insert(handle, Link::new(kind));
+        self.links.insert(handle, Link::new(kind, queue));
         handle
     }
 
@@ -612,8 +617,9 @@ impl AppLinkTable {
             AppLinkState::Closing | AppLinkState::Closed => return Err(InboundRefusal::Closed),
             AppLinkState::Open | AppLinkState::Blocked => {}
         }
+        let queue = link.queue;
         let handle = self.take_handle();
-        let mut stream = Link::new(accepted_kind);
+        let mut stream = Link::new(accepted_kind, queue);
         stream.remote = Some(String::from(remote));
         // Nobody waits on the new link yet, so its entry wakes nobody.
         let _ = stream.drive(handle, AppLinkEvent::LinkAccepted);
@@ -661,7 +667,7 @@ impl AppLinkTable {
         }
         // Past the bound nothing is taken, and the program learns when to hand it in again. An
         // empty queue takes anything, so a datagram larger than the bound is not refused forever.
-        if !link.rx.is_empty() && link.queued() + bytes.len() > self.bound {
+        if !link.rx.is_empty() && !link.admits(link.queued() + bytes.len()) {
             link.refused_full = true;
             return Err(InboundRefusal::Full);
         }
@@ -703,7 +709,7 @@ impl AppLinkTable {
             }
         }
         if copied > 0 {
-            link.note_read(handle, self.bound, &mut self.drained);
+            link.note_read(handle, &mut self.drained);
             return StreamRead::Bytes(copied);
         }
         if buf.is_empty() {
@@ -736,7 +742,7 @@ impl AppLinkTable {
             return DatagramRead::End;
         };
         if let Some(datagram) = link.rx.pop_front() {
-            link.note_read(handle, self.bound, &mut self.drained);
+            link.note_read(handle, &mut self.drained);
             return DatagramRead::Datagram(datagram);
         }
         if link.is_gone() {
@@ -881,7 +887,7 @@ impl AppLinkTable {
         if link.is_gone() {
             return Err(InboundRefusal::Closed);
         }
-        if link.remainder.len() + bytes.len() > self.bound {
+        if !link.admits(link.remainder.len() + bytes.len()) {
             return Err(InboundRefusal::Full);
         }
         link.remainder.extend_from_slice(bytes);
@@ -980,9 +986,17 @@ mod tests {
         n
     }
 
+    /// The queue bound of a link whose test does not reach it.
+    const QUEUE: Quota = Quota::at_most(1 << 16);
+
     /// A dialled stream, reported up by the program.
     fn open_stream(table: &mut AppLinkTable) -> LinkHandle {
-        let handle = table.reserve(AppLinkKind::StreamDial);
+        open_stream_under(table, QUEUE)
+    }
+
+    /// [`open_stream`] of a link that queues at most `queue` bytes.
+    fn open_stream_under(table: &mut AppLinkTable, queue: Quota) -> LinkHandle {
+        let handle = table.reserve(AppLinkKind::StreamDial, queue);
         assert!(table.opened(handle, ProgramOpen::Pending).is_empty());
         let _ = table.event(handle, ProgramEvent::Connected).expect("up");
         handle
@@ -1026,19 +1040,19 @@ mod tests {
     #[test]
     fn a_handle_is_never_zero_and_never_reused() {
         let mut table = AppLinkTable::new();
-        let first = table.reserve(AppLinkKind::StreamDial);
+        let first = table.reserve(AppLinkKind::StreamDial, QUEUE);
         assert_ne!(first, 0);
         let _ = table.release(first);
         let _ = table.close_done(first);
         assert_eq!(table.state(first), None, "released and closed: forgotten");
-        let second = table.reserve(AppLinkKind::StreamDial);
+        let second = table.reserve(AppLinkKind::StreamDial, QUEUE);
         assert_ne!(second, first);
     }
 
     #[test]
     fn an_open_the_program_answers_up_is_open_and_wakes_the_opener() {
         let mut table = AppLinkTable::new();
-        let handle = table.reserve(AppLinkKind::StreamDial);
+        let handle = table.reserve(AppLinkKind::StreamDial, QUEUE);
         let (count, waker) = counter();
         assert_eq!(table.poll_open(handle, Some(&waker)), OpenProgress::Opening);
         assert_eq!(wakes(table.opened(handle, ProgramOpen::Up)), 1);
@@ -1050,7 +1064,7 @@ mod tests {
     #[test]
     fn a_pending_open_comes_up_on_connected() {
         let mut table = AppLinkTable::new();
-        let handle = table.reserve(AppLinkKind::StreamDial);
+        let handle = table.reserve(AppLinkKind::StreamDial, QUEUE);
         assert!(table.opened(handle, ProgramOpen::Pending).is_empty());
         assert_eq!(table.state(handle), Some(AppLinkState::Opening));
         let (_count, waker) = counter();
@@ -1070,7 +1084,7 @@ mod tests {
     #[test]
     fn a_report_from_the_program_before_its_open_returned_stands() {
         let mut table = AppLinkTable::new();
-        let handle = table.reserve(AppLinkKind::StreamDial);
+        let handle = table.reserve(AppLinkKind::StreamDial, QUEUE);
         let _ = table.event(handle, ProgramEvent::Connected).unwrap();
         // Then the open returns, answering pending: the link stays up.
         assert!(table.opened(handle, ProgramOpen::Pending).is_empty());
@@ -1080,13 +1094,13 @@ mod tests {
     #[test]
     fn a_refused_open_is_closed_and_the_opener_hears_it() {
         let mut table = AppLinkTable::new();
-        let handle = table.reserve(AppLinkKind::StreamDial);
+        let handle = table.reserve(AppLinkKind::StreamDial, QUEUE);
         let (_count, waker) = counter();
         let _ = table.poll_open(handle, Some(&waker));
         assert_eq!(wakes(table.opened(handle, ProgramOpen::Refused)), 1);
         assert_eq!(table.poll_open(handle, None), OpenProgress::Closed);
         // A pending open the program later reports closed is the same.
-        let other = table.reserve(AppLinkKind::StreamDial);
+        let other = table.reserve(AppLinkKind::StreamDial, QUEUE);
         let _ = table.opened(other, ProgramOpen::Pending);
         let _ = table.event(other, ProgramEvent::Closed).unwrap();
         assert_eq!(table.poll_open(other, None), OpenProgress::Closed);
@@ -1095,7 +1109,7 @@ mod tests {
     #[test]
     fn bytes_before_connected_are_refused() {
         let mut table = AppLinkTable::new();
-        let handle = table.reserve(AppLinkKind::StreamDial);
+        let handle = table.reserve(AppLinkKind::StreamDial, QUEUE);
         assert_eq!(
             table.received(handle, b"early", None).unwrap_err(),
             InboundRefusal::NotOpen
@@ -1395,7 +1409,7 @@ mod tests {
     #[test]
     fn releasing_an_opening_link_closes_it_on_the_program() {
         let mut table = AppLinkTable::new();
-        let handle = table.reserve(AppLinkKind::StreamDial);
+        let handle = table.reserve(AppLinkKind::StreamDial, QUEUE);
         let _ = table.opened(handle, ProgramOpen::Pending);
         let effects = table.release(handle);
         assert_eq!(effects.close, [handle]);
@@ -1408,7 +1422,7 @@ mod tests {
     #[test]
     fn a_listener_queues_the_streams_the_program_accepts() {
         let mut table = AppLinkTable::new();
-        let listener = table.reserve(AppLinkKind::StreamListen);
+        let listener = table.reserve(AppLinkKind::StreamListen, QUEUE);
         // Not listening yet.
         assert_eq!(
             table
@@ -1446,7 +1460,7 @@ mod tests {
     #[test]
     fn a_datagram_listener_accepts_each_source_as_a_datagram_link() {
         let mut table = AppLinkTable::new();
-        let listener = table.reserve(AppLinkKind::DatagramListen);
+        let listener = table.reserve(AppLinkKind::DatagramListen, QUEUE);
         let _ = table.opened(listener, ProgramOpen::Up);
         let (link, _) = table.accepted(listener, "udp/198.51.100.7:40000").unwrap();
         assert_eq!(table.kind(link), Some(AppLinkKind::DatagramAccepted));
@@ -1484,7 +1498,7 @@ mod tests {
     #[test]
     fn a_released_listener_takes_its_untaken_streams_with_it() {
         let mut table = AppLinkTable::new();
-        let listener = table.reserve(AppLinkKind::StreamListen);
+        let listener = table.reserve(AppLinkKind::StreamListen, QUEUE);
         let _ = table.opened(listener, ProgramOpen::Up);
         let (stream, _) = table.accepted(listener, "tcp/198.51.100.9:40003").unwrap();
         let effects = table.release(listener);
@@ -1502,7 +1516,7 @@ mod tests {
     #[test]
     fn a_datagram_is_read_whole_with_the_locator_it_came_from() {
         let mut table = AppLinkTable::new();
-        let handle = table.reserve(AppLinkKind::Group);
+        let handle = table.reserve(AppLinkKind::Group, QUEUE);
         let _ = table.opened(handle, ProgramOpen::Up);
         let _ = table
             .received(handle, b"one", Some("udp/198.51.100.4:7447"))
@@ -1547,8 +1561,8 @@ mod tests {
 
     #[test]
     fn bytes_past_the_bound_are_refused_and_change_nothing() {
-        let mut table = AppLinkTable::with_queue_bound(8);
-        let handle = open_stream(&mut table);
+        let mut table = AppLinkTable::new();
+        let handle = open_stream_under(&mut table, Quota::at_most(8));
         let _ = table.received(handle, b"abcdef", None).unwrap();
         assert_eq!(
             table.received(handle, b"ghi", None).unwrap_err(),
@@ -1566,8 +1580,8 @@ mod tests {
 
     #[test]
     fn a_refused_program_is_told_once_the_queue_is_read_down_to_half() {
-        let mut table = AppLinkTable::with_queue_bound(8);
-        let handle = open_stream(&mut table);
+        let mut table = AppLinkTable::new();
+        let handle = open_stream_under(&mut table, Quota::at_most(8));
         let _ = table.received(handle, b"abcdefgh", None).unwrap();
         assert!(table.received(handle, b"i", None).is_err());
         let mut buf = [0u8; 3];
@@ -1596,8 +1610,8 @@ mod tests {
 
     #[test]
     fn a_link_never_refused_is_never_reported_drained() {
-        let mut table = AppLinkTable::with_queue_bound(8);
-        let handle = open_stream(&mut table);
+        let mut table = AppLinkTable::new();
+        let handle = open_stream_under(&mut table, Quota::at_most(8));
         let _ = table.received(handle, b"abc", None).unwrap();
         let mut buf = [0u8; 8];
         let _ = table.read_stream(handle, &mut buf, None);
@@ -1606,8 +1620,8 @@ mod tests {
 
     #[test]
     fn an_empty_queue_takes_a_datagram_larger_than_the_bound() {
-        let mut table = AppLinkTable::with_queue_bound(4);
-        let handle = table.reserve(AppLinkKind::Datagram);
+        let mut table = AppLinkTable::new();
+        let handle = table.reserve(AppLinkKind::Datagram, Quota::at_most(4));
         let _ = table.opened(handle, ProgramOpen::Up);
         let _ = table.received(handle, b"longer", None).unwrap();
         assert_eq!(
@@ -1623,8 +1637,8 @@ mod tests {
 
     #[test]
     fn a_held_remainder_is_offered_in_order_and_dropped_as_taken() {
-        let mut table = AppLinkTable::with_queue_bound(8);
-        let handle = open_stream(&mut table);
+        let mut table = AppLinkTable::new();
+        let handle = open_stream_under(&mut table, Quota::at_most(8));
         table.hold_remainder(handle, b"abc").unwrap();
         table.hold_remainder(handle, b"de").unwrap();
         assert_eq!(table.remainder(handle), b"abcde");
@@ -1646,6 +1660,64 @@ mod tests {
         assert_eq!(
             table.hold_remainder(handle, b"x").unwrap_err(),
             InboundRefusal::Closed
+        );
+    }
+
+    #[test]
+    fn each_link_is_held_to_the_bound_it_was_opened_with() {
+        let mut table = AppLinkTable::new();
+        let narrow = open_stream_under(&mut table, Quota::at_most(4));
+        let wide = open_stream_under(&mut table, Quota::at_most(8));
+        let _ = table.received(narrow, b"abc", None).unwrap();
+        let _ = table.received(wide, b"abc", None).unwrap();
+        assert_eq!(
+            table.received(narrow, b"de", None).unwrap_err(),
+            InboundRefusal::Full
+        );
+        let _ = table.received(wide, b"de", None).unwrap();
+        assert_eq!(table.queued_bytes(narrow), 3, "the refusal took nothing");
+        assert_eq!(table.queued_bytes(wide), 5);
+    }
+
+    #[test]
+    fn an_accepted_link_keeps_the_bound_of_its_listener() {
+        let mut table = AppLinkTable::new();
+        let listener = table.reserve(AppLinkKind::StreamListen, Quota::at_most(4));
+        let _ = table.opened(listener, ProgramOpen::Up);
+        let (stream, _) = table.accepted(listener, "tcp/198.51.100.9:40004").unwrap();
+        let _ = table.received(stream, b"abcd", None).unwrap();
+        assert_eq!(
+            table.received(stream, b"e", None).unwrap_err(),
+            InboundRefusal::Full
+        );
+        assert_eq!(table.queued_bytes(stream), 4);
+    }
+
+    #[test]
+    fn a_link_with_no_bound_takes_every_byte() {
+        let mut table = AppLinkTable::new();
+        let handle = open_stream_under(&mut table, Quota::UNBOUNDED);
+        for _ in 0..4 {
+            let _ = table.received(handle, &[0u8; 1024], None).unwrap();
+        }
+        assert_eq!(table.queued_bytes(handle), 4096);
+        table.hold_remainder(handle, &[0u8; 4096]).unwrap();
+        assert_eq!(table.remainder(handle).len(), 4096);
+    }
+
+    #[test]
+    fn a_link_of_no_bytes_holds_one_byte_at_a_time() {
+        let mut table = AppLinkTable::new();
+        let handle = open_stream_under(&mut table, Quota::at_most(0));
+        let _ = table.received(handle, b"ab", None).unwrap();
+        assert_eq!(
+            table.received(handle, b"c", None).unwrap_err(),
+            InboundRefusal::Full
+        );
+        table.hold_remainder(handle, b"x").unwrap();
+        assert_eq!(
+            table.hold_remainder(handle, b"y").unwrap_err(),
+            InboundRefusal::Full
         );
     }
 }

@@ -18,7 +18,7 @@ use wz_runtime_posix::{PosixClock, PosixEntropy};
 use wz_session_core::app_link_table::{
     AppLinkKind, AppLinkTable, LinkHandle, ProgramEvent, ProgramOpen, ProgramSend,
 };
-use wz_session_core::app_transport::{AppPort, AppTransport, TableLock};
+use wz_session_core::app_transport::{AppPort, AppTransport, SessionTransport, TableLock};
 use wz_session_core::locality::Locality;
 use wz_session_core::multicast_params::GroupJoinRule;
 use wz_session_core::publish_options::PublishOptions;
@@ -221,7 +221,8 @@ fn open_member(
         }),
     ));
     *own.lock().unwrap() = Arc::downgrade(&transport);
-    Engine::open(AppLinks::new(transport), PosixClock, PosixEntropy, config)
+    let links = AppLinks::new(SessionTransport::new(transport, &config.limits));
+    Engine::open(links, PosixClock, PosixEntropy, config)
 }
 
 /// Wait, for at most five seconds, until `done`: each session is stepped by its read task.
@@ -931,7 +932,10 @@ mod congested {
             ..member_config(1, GROUP)
         };
         let engine = Engine::open(
-            AppLinks::new(Arc::clone(&transport)),
+            AppLinks::new(SessionTransport::new(
+                Arc::clone(&transport),
+                &config.limits,
+            )),
             PosixClock,
             PosixEntropy,
             config,
@@ -1248,7 +1252,10 @@ mod cut {
                 ..member_config(member, GROUP)
             };
             let engine = Engine::open(
-                AppLinks::new(Arc::clone(&transport)),
+                AppLinks::new(SessionTransport::new(
+                    Arc::clone(&transport),
+                    &config.limits,
+                )),
                 PosixClock,
                 PosixEntropy,
                 config,
@@ -1458,7 +1465,10 @@ mod woken {
             Box::new(AlonePort(Arc::clone(&stack))),
         ));
         let engine = CoopEngine::open(
-            AppLinks::new(Arc::clone(&transport)),
+            AppLinks::new(SessionTransport::new(
+                Arc::clone(&transport),
+                &config.limits,
+            )),
             clock,
             PosixEntropy,
             config,
