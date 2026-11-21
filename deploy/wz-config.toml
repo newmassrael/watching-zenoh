@@ -1501,15 +1501,16 @@ id = "object-pool"
 kconfig = "WZ_CAP_OBJECT_POOL"
 # Off by default: zenoh-pico allocates the objects behind its owned handles from the heap as it
 # makes them, and so does a build made as it is. A program that must make no allocation while it
-# runs turns it on and reserves the pools once, before it makes the objects; each count it states
-# is held to the bound of the session limit that bounds the object. The pico ABI's doors are
-# wz_ext_* and part of its unstable surface.
+# runs turns it on: the first object reserves the pools from the build's limits (HELD_* and the
+# session limits), or the program reserves its own before it, each count it states held to the
+# bound of the session limit that bounds the object. The pico ABI's doors are wz_ext_* and part of
+# its unstable surface.
 default = "off"
 os_needs = []
 upstream_off = ["zenoh-pico"]
 abis = ["core", "pico"]
 implies = ["unstable-api"]
-help = "Fixed pools, one per kind of object, that the objects behind the owned handles (sessions, publishers, subscribers, queryables, liveliness tokens and subscribers, owned samples, replies, queries and payloads) are taken from in place of the heap once the program reserves them; a full pool refuses the object with _Z_ERR_SYSTEM_OUT_OF_MEMORY (wz_ext_object_pool_*, wz-own doors)."
+help = "Fixed pools, one per kind of object, that the objects behind the owned handles (sessions, publishers, subscribers, queryables, liveliness tokens and subscribers, owned samples, replies, queries and payloads) are taken from in place of the heap, reserved by the first object from the build's limits or by the program before it; a full pool refuses the object with _Z_ERR_SYSTEM_OUT_OF_MEMORY (wz_ext_object_pool_*, wz-own doors)."
 
 [[capability]]
 id = "object-pool-region"

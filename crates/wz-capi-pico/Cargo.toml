@@ -486,8 +486,9 @@ time-base = [
 ]
 # `object-pool`: fixed pools, one per kind of object, that the objects behind the owned handles (a
 # session, a publisher, a subscriber, a queryable, a liveliness token, an owned sample, reply or
-# query, a payload) are taken from in place of the heap once the program reserves them
-# (`wz_ext_object_pool_*`), each count held to the bound of the session limit that bounds the
+# query, a payload) are taken from in place of the heap, with no fallback to it: reserved by the
+# first object from the build's limits (`HELD_*` and the session limits), or by the program before
+# it (`wz_ext_object_pool_*`), each count held to the bound of the session limit that bounds the
 # object. A full pool refuses the object with `_Z_ERR_SYSTEM_OUT_OF_MEMORY`. wz's own, off as the
 # reference build is, and part of the unstable surface. The pools are this ABI's and serve either
 # engine, so it selects neither.

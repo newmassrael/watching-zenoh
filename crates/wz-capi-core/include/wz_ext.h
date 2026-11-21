@@ -1863,8 +1863,8 @@ bool wz_ext_internal_time_base_check(const wz_ext_owned_time_base_t *this_);
  * The object behind each owned handle of a session, a publisher, a
  * subscriber, a queryable, a liveliness token or subscriber, and behind an
  * owned sample, reply, reply error, query or payload, taken from fixed pools
- * the program reserves once, in place of the heap, so that the program makes
- * no allocation for them while it runs. Part of the unstable surface, and
+ * reserved once, in place of the heap, so that the program makes no
+ * allocation for them while it runs. Part of the unstable surface, and
  * present only in a build with the object-pool capability;
  * wz_ext_object_pool_place also needs object-pool-region.
  *
@@ -1886,10 +1886,16 @@ bool wz_ext_internal_time_base_check(const wz_ext_owned_time_base_t *this_);
  * other counts are as stated, 0 being none. A count of an object the build
  * has none of is not read.
  *
- * RUNNING. Before a reservation, and after a release, every object is the
- * heap's, as in a build without the capability. While pools are reserved, a
- * pool with no free slot refuses the object: the call that wanted it answers
- * _Z_ERR_SYSTEM_OUT_OF_MEMORY having opened, declared or held nothing (z_open,
+ * RESERVING. With nothing reserved, the first object the program makes
+ * reserves the build's pools: HELD_SESSIONS sessions, each with the entities
+ * its limits admit, and HELD_SAMPLES, HELD_REPLIES, HELD_QUERIES and
+ * HELD_PAYLOADS of the owned values. A program that states counts of its own
+ * reserves them before its first object instead.
+ *
+ * RUNNING. Nothing falls back to the heap. A pool with no free slot, or a
+ * build's reservation the heap cannot give, refuses the object: the call that
+ * wanted it answers _Z_ERR_SYSTEM_OUT_OF_MEMORY having opened, declared or
+ * held nothing (z_open,
  * z_declare_publisher, z_declare_subscriber, z_declare_queryable,
  * z_liveliness_declare_token, z_liveliness_declare_subscriber, the clone and
  * take_from_loaned of a sample, reply, reply error or query, and the
@@ -1952,10 +1958,10 @@ z_result_t wz_ext_object_pool_place(void *base, size_t len,
 z_result_t wz_ext_object_pool_class(size_t class_index,
                                     wz_ext_object_pool_class_t *out);
 
-/* Give the pools up: the heap's memory is freed, the program's is the
- * program's again, and objects are the heap's once more. Z_OK, also when
- * none are reserved; Z_EINVAL while an object is held in them, which keeps
- * them. */
+/* Give the pools up: the heap's memory is freed and the program's is the
+ * program's again; the next object reserves the build's pools again. Z_OK,
+ * also when none are reserved; Z_EINVAL while an object is held in them,
+ * which keeps them. */
 z_result_t wz_ext_object_pool_release(void);
 
 /* ================================================ the message catalog

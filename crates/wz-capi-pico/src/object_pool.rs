@@ -12,11 +12,19 @@
 //!
 //! # Reserving
 //!
-//! The program states how many of each object it holds at once (`wz_ext_object_pool_counts_t`)
-//! and reserves the pools once, before the first object it wants pooled: from the heap in one
-//! allocation (`wz_ext_object_pool_reserve`) or, with the `object-pool-region` capability, over
-//! memory it hands over (`wz_ext_object_pool_place`), whose size `wz_ext_object_pool_bytes`
-//! answers. A reservation is all or nothing: a refused one leaves no pool and touches no memory.
+//! The pools are reserved once, at the first object the program makes, from the build's limits
+//! (`docs/c-abi-engine-and-memory.md`, decision Q1): an existing program runs unchanged, and after
+//! that first call nothing of what the pools hold is allocated. The build's counts are
+//! `HELD_SESSIONS` sessions, each holding as many entities as the session limits the library opens
+//! under admit within the build's values (`MAX_PUBLISHERS`, `MAX_SUBSCRIPTIONS`, `MAX_QUERYABLES`,
+//! `MAX_LOCAL_TOKENS`, `MAX_LIVELINESS_SUBSCRIPTIONS`), and `HELD_SAMPLES`, `HELD_REPLIES`,
+//! `HELD_QUERIES` and `HELD_PAYLOADS` of the values it holds; one allocation from the heap.
+//!
+//! A program that states its own counts reserves the pools before its first object instead:
+//! from the heap in one allocation (`wz_ext_object_pool_reserve`) or, with the
+//! `object-pool-region` capability, over memory it hands over (`wz_ext_object_pool_place`), whose
+//! size `wz_ext_object_pool_bytes` answers. A reservation is all or nothing: a refused one leaves
+//! no pool and touches no memory.
 //!
 //! # The counts and the limits of a session
 //!
@@ -39,16 +47,15 @@
 //! free. The pools are reported by slot size (`wz_ext_object_pool_class`), the kinds of one size
 //! together. A pool with no free slot refuses the object:
 //! the call answers `_Z_ERR_SYSTEM_OUT_OF_MEMORY` having declared or opened nothing, and the
-//! refusal is counted (`wz_ext_object_pool_class`). Once the pools are reserved nothing falls back
-//! to the heap. An object let go frees its slot for the next one. Before the reservation the
-//! objects are the heap's, as in a build without the capability, and one made then goes back to the
-//! heap when it is let go (`crate::object_slot`).
+//! refusal is counted (`wz_ext_object_pool_class`). Nothing falls back to the heap: when the
+//! build's pools cannot be reserved either, the object is refused the same way. An object let go
+//! frees its slot for the next one.
 //!
 //! # Releasing
 //!
 //! `wz_ext_object_pool_release` gives the pools up when no object is held in them: the heap's
-//! memory is freed, the program's is the program's again, and the objects are the heap's once
-//! more.
+//! memory is freed and the program's is the program's again. The next object reserves the
+//! build's pools again, unless the program reserves its own first.
 //!
 //! What a pool holds is the object behind a handle. The bytes a payload carries, the configs, key
 //! expressions, strings, encodings and closures, and the owned values of the other doors are the
@@ -60,6 +67,8 @@ use core::ffi::c_void;
 use core::ptr::NonNull;
 
 use wz_capi_port::sync::Lock;
+use wz_session_core::caps;
+use wz_session_core::limit_binding::Quota;
 use wz_session_core::limits::SessionLimits;
 
 use crate::ffi::guarded;
@@ -396,16 +405,16 @@ impl Pools {
         }
     }
 
-    /// A free slot of the pool of `kind`, whose objects are of size class `class`, or `None`,
-    /// counted, when it has none. Only that pool is asked: a slot of another kind's pool is never
-    /// taken, so each kind holds what the program stated for it and no more.
+    /// A free slot of the pool of `kind` for an object of size class `class`, or `None`, counted
+    /// in the pool's class, when it has none. Only that pool is asked: a slot of another kind's
+    /// pool is never taken, so each kind holds what the program stated for it and no more.
     fn take(&mut self, kind: Kind, class: usize) -> Option<NonNull<u8>> {
         let pool = &mut self.pools[kind as usize];
         debug_assert!(
-            pool.slots == 0 || pool.class == class,
-            "an object is taken from the pool of its own kind"
+            pool.slots == 0 || class <= pool.class,
+            "an object is taken from the pool of its own kind, whose slots hold it"
         );
-        let count = &mut self.counts[class];
+        let count = &mut self.counts[pool.class];
         let Some(slot) = pool.free else {
             count.refused = count.refused.saturating_add(1);
             return None;
@@ -416,6 +425,12 @@ impl Pools {
         count.in_use += 1;
         count.high_water = count.high_water.max(count.in_use);
         Some(slot)
+    }
+
+    /// Whether `place` lies in the memory of the pools.
+    #[cfg(test)]
+    fn lies_in(&self, place: NonNull<u8>) -> bool {
+        (place.as_ptr() as usize).wrapping_sub(self.base.as_ptr() as usize) < self.bytes
     }
 
     /// Give `place` back to the pool it lies in; `false` when it lies in none of them.
@@ -488,22 +503,72 @@ unsafe impl Send for Reserved {}
 
 static RESERVED: Lock<Reserved> = Lock::new(Reserved(None));
 
-/// What [`take`] found for an object.
-pub(crate) enum Taken {
-    /// A free slot of the pool of the object's kind.
-    Pooled(NonNull<u8>),
-    /// The pool of the object's kind has no free slot.
-    Full,
-    /// No pool is reserved: the object is the heap's.
-    Unreserved,
+/// A slot for a `T` of `kind`, from that kind's pool, or `None` when it has none free. The first
+/// object a program makes reserves the build's pools when it reserved none ([`reserve_built`]);
+/// when they cannot be reserved either, every object is refused and the next asks again.
+pub(crate) fn take<T>(kind: Kind) -> Option<NonNull<u8>> {
+    let class = const { class_for::<T>() };
+    RESERVED.with(|reserved| {
+        if reserved.0.is_none() {
+            reserved.0 = reserve_built();
+        }
+        reserved.0.as_mut()?.take(kind, class)
+    })
 }
 
-/// A slot for a `T` of `kind`, from that kind's pool.
-pub(crate) fn take<T>(kind: Kind) -> Taken {
-    let class = const { class_for::<T>() };
-    RESERVED.with(|reserved| match reserved.0.as_mut() {
-        None => Taken::Unreserved,
-        Some(pools) => pools.take(kind, class).map_or(Taken::Full, Taken::Pooled),
+/// The counts of the build's pools: `HELD_SESSIONS` sessions, each holding as many of each entity
+/// as the limits the library opens a session under admit within the build's value of the limit,
+/// and the owned values' own limits. Refused only by a build whose counts are past the address
+/// space.
+fn built_counts() -> Result<wz_ext_object_pool_counts_t, Unplanned> {
+    let limits = session_limits();
+    let each = |value: Quota, build: usize| value.lent_under(Quota::at_most(build)).ok();
+    let bounds = Bounds {
+        subscribers: each(limits.max_subscriptions(), caps::MAX_SUBSCRIPTIONS),
+        queryables: each(limits.max_queryables(), caps::MAX_QUERYABLES),
+        liveliness_tokens: each(limits.max_local_tokens(), caps::MAX_LOCAL_TOKENS),
+        liveliness_subscribers: each(
+            limits.max_liveliness_subscriptions(),
+            caps::MAX_LIVELINESS_SUBSCRIPTIONS,
+        ),
+    };
+    let built = wz_ext_object_pool_counts_t {
+        sessions: caps::HELD_SESSIONS,
+        publishers: each(limits.max_publishers(), caps::MAX_PUBLISHERS).unwrap_or(0),
+        // Each of these at the bound of its limit, which a count left at zero takes.
+        subscribers: 0,
+        queryables: 0,
+        liveliness_tokens: 0,
+        liveliness_subscribers: 0,
+        samples: caps::HELD_SAMPLES,
+        replies: caps::HELD_REPLIES,
+        queries: caps::HELD_QUERIES,
+        bytes: caps::HELD_PAYLOADS,
+    };
+    resolve(&built, &bounds)
+}
+
+/// The build's pools ([`built_counts`]) from the heap in one allocation: what the first object a
+/// program makes reserves when it reserved none. `None` when the counts make no pool or the heap
+/// has not the memory.
+fn reserve_built() -> Option<Pools> {
+    let plan = built_counts().and_then(|objects| Plan::of(&objects)).ok()?;
+    let layout = Layout::from_size_align(plan.bytes().ok()?, SLOT_ALIGN).ok()?;
+    // SAFETY: the layout is not of zero bytes: a plan has a slot.
+    let base = NonNull::new(unsafe { alloc::alloc::alloc(layout) })?;
+    // SAFETY: the allocation is this layout's, aligned to the slot, as long as the plan and no
+    // one else's.
+    Some(unsafe { Pools::over(base, &plan, Origin::Heap(layout)) })
+}
+
+/// Whether `place` lies in the pools reserved now.
+#[cfg(test)]
+pub(crate) fn lies_in_pools(place: NonNull<u8>) -> bool {
+    RESERVED.with(|reserved| {
+        reserved
+            .0
+            .as_ref()
+            .is_some_and(|pools| pools.lies_in(place))
     })
 }
 
@@ -959,6 +1024,110 @@ mod tests {
         assert!(pools.give_back(second));
         assert_eq!(pools.held(), 0);
         assert_eq!(pools.report(2).high_water, 3);
+    }
+
+    /// The build's counts: its sessions, each holding as many of each entity as the session's
+    /// limits admit within the build's values, and the owned values' own limits.
+    #[test]
+    fn the_build_counts_are_the_builds_limits() {
+        let objects = built_counts().expect("the build's counts make pools");
+        assert_eq!(objects.sessions, caps::HELD_SESSIONS);
+        assert_eq!(
+            (
+                objects.samples,
+                objects.replies,
+                objects.queries,
+                objects.bytes
+            ),
+            (
+                caps::HELD_SAMPLES,
+                caps::HELD_REPLIES,
+                caps::HELD_QUERIES,
+                caps::HELD_PAYLOADS
+            )
+        );
+        let limits = session_limits();
+        let per_session = |value: Quota, build: usize| {
+            value
+                .lent_under(Quota::at_most(build))
+                .expect("the session's limits are within the build's")
+                * caps::HELD_SESSIONS
+        };
+        assert_eq!(
+            objects.publishers,
+            per_session(limits.max_publishers(), caps::MAX_PUBLISHERS)
+        );
+        assert_eq!(
+            objects.subscribers,
+            per_session(limits.max_subscriptions(), caps::MAX_SUBSCRIPTIONS)
+        );
+        let queryables = per_session(limits.max_queryables(), caps::MAX_QUERYABLES);
+        assert_eq!(
+            objects.queryables,
+            if cfg!(feature = "queryable") {
+                queryables
+            } else {
+                0
+            }
+        );
+        let tokens = per_session(limits.max_local_tokens(), caps::MAX_LOCAL_TOKENS);
+        assert_eq!(
+            objects.liveliness_tokens,
+            if cfg!(feature = "liveliness") {
+                tokens
+            } else {
+                0
+            }
+        );
+    }
+
+    /// Each pool of the build's plan takes as many objects as its count and refuses, counted, the
+    /// one past it; every slot given back, the pools hold nothing.
+    #[test]
+    fn each_pool_of_the_build_takes_its_count_and_refuses_one_more() {
+        let plan = Plan::of(&built_counts().expect("the build's counts"))
+            .expect("the build's counts make pools");
+        let bytes = plan.bytes().expect("within the address space");
+        let layout = Layout::from_size_align(bytes, SLOT_ALIGN).expect("a layout");
+        // SAFETY: a plan has a slot, so the layout is not of zero bytes.
+        let base = NonNull::new(unsafe { alloc::alloc::alloc(layout) })
+            .expect("the test's heap has the memory");
+        // SAFETY: the allocation is this layout's, aligned to the slot, as long as the plan and
+        // no one else's; the pools free it when dropped.
+        let mut pools = unsafe { Pools::over(base, &plan, Origin::Heap(layout)) };
+        let mut check = |kind: Kind| {
+            let count = plan.slots[kind as usize];
+            let class = plan.classes[kind as usize];
+            let taken: alloc::vec::Vec<NonNull<u8>> = (0..count)
+                .map(|_| pools.take(kind, class).expect("a slot within its count"))
+                .collect();
+            let refused = pools.report(class).refused;
+            assert_eq!(
+                pools.take(kind, class),
+                None,
+                "{kind:?}: one past its count is refused"
+            );
+            assert_eq!(pools.report(class).refused, refused + 1, "and counted");
+            for slot in taken {
+                assert!(pools.give_back(slot), "{kind:?}: its slot goes back");
+            }
+        };
+        check(Kind::Session);
+        check(Kind::Publisher);
+        check(Kind::Subscriber);
+        #[cfg(feature = "queryable")]
+        check(Kind::Queryable);
+        #[cfg(feature = "liveliness")]
+        check(Kind::LivelinessToken);
+        #[cfg(feature = "liveliness")]
+        check(Kind::LivelinessSubscriber);
+        check(Kind::Sample);
+        #[cfg(feature = "query")]
+        check(Kind::Reply);
+        #[cfg(feature = "queryable")]
+        check(Kind::Query);
+        check(Kind::Bytes);
+        assert_eq!(pools.held(), 0);
     }
 
     /// The limits a session opens under are read where they bound an entity.

@@ -5,6 +5,8 @@
 //!
 //! One test, in a process of its own, because the pools are the process's: the arms run in order
 //! against them, and an object another test made while they are reserved would be taken from them.
+//! The first object of the process reserves the build's pools, so the arms give those up before a
+//! program's own are reserved.
 //! The counts state every entity, so the arms hold in a build whose limits bound none of them.
 
 #![cfg(all(feature = "object-pool", feature = "peer"))]
@@ -88,12 +90,35 @@ unsafe fn publisher(session: &z_owned_session_t, key: &CStr) -> (z_owned_publish
 fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_when_empty() {
     // SAFETY: every owned value below is made and dropped through the library's own doors, once.
     unsafe {
-        // ARM 1: nothing reserved, so a payload is the heap's and no pool has a slot.
-        let (mut early, code) = payload(c"made before the pools");
-        assert_eq!(code, Z_OK);
-        assert_eq!(slots(), 0);
+        // ARM 1: nothing reserved, so the first payload reserves the build's pools and takes a
+        // slot of them; dropped, it gives the slot back once, and a second drop of its moved-from
+        // handle gives nothing. Empty, the build's pools are given up.
+        assert_eq!(
+            slots(),
+            0,
+            "CONTROL: nothing is reserved before the first object"
+        );
         assert_eq!(classes()[0].slot_bytes, 16);
         assert_eq!(classes()[1].slot_bytes, 32);
+        let (mut early, code) = payload(c"made before any reservation");
+        assert_eq!(code, Z_OK);
+        assert!(slots() > 0, "the first object reserved the build's pools");
+        assert_eq!(in_use(), 1, "and lies in them");
+        let unused = wz_ext_object_pool_counts_t {
+            bytes: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            wz_ext_object_pool_reserve(&unused),
+            Z_EINVAL,
+            "the build's pools are reserved already"
+        );
+        z_bytes_drop(z_bytes_move(&mut early));
+        assert_eq!(in_use(), 0, "a dropped payload gives its slot back");
+        z_bytes_drop(z_bytes_move(&mut early));
+        assert_eq!(in_use(), 0, "and only once");
+        assert_eq!(wz_ext_object_pool_release(), Z_OK);
+        assert_eq!(slots(), 0);
 
         // ARM 2: counts that make no pool are refused, and reserve nothing.
         assert_eq!(wz_ext_object_pool_reserve(std::ptr::null()), Z_ERR_NULL);
@@ -166,10 +191,7 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
         assert_eq!(wz_ext_object_pool_release(), Z_EINVAL);
         assert_eq!(slots(), 1 + 1 + 1 + held_by_plane + 2);
 
-        // ARM 6: the payload made before the pools goes back to the heap, the pools untouched;
-        // a pooled one let go makes room for the next.
-        z_bytes_drop(z_bytes_move(&mut early));
-        assert_eq!(in_use(), 2);
+        // ARM 6: a pooled payload let go makes room for the next.
         z_bytes_drop(z_bytes_move(&mut second));
         assert_eq!(in_use(), 1);
         let (mut again, code) = payload(c"again");
@@ -210,7 +232,8 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
         assert_eq!(code, Z_OK);
         assert_eq!(in_use(), 4);
 
-        // ARM 9: everything let go, the pools are given up, and objects are the heap's again.
+        // ARM 9: everything let go, the pools are given up, and the next object reserves the
+        // build's pools again: three payloads fit where the program's pools held two.
         z_publisher_drop(z_publisher_move(&mut redeclared));
         z_session_drop(z_session_move(&mut session));
         z_bytes_drop(z_bytes_move(&mut first));
@@ -222,13 +245,21 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
         let mut after: Vec<z_owned_bytes_t> = (0..3)
             .map(|_| {
                 let (bytes, code) = payload(c"after");
-                assert_eq!(code, Z_OK, "the heap's, past the two the pools held");
+                assert_eq!(
+                    code, Z_OK,
+                    "the build's pools, past the two the program's held"
+                );
                 bytes
             })
             .collect();
+        assert!(slots() > 0, "the build's pools are reserved again");
+        assert_eq!(in_use(), 3);
         for bytes in &mut after {
             z_bytes_drop(z_bytes_move(bytes));
         }
+        assert_eq!(in_use(), 0);
+        assert_eq!(wz_ext_object_pool_release(), Z_OK);
+        assert_eq!(slots(), 0);
 
         #[cfg(feature = "object-pool-region")]
         region_arms();

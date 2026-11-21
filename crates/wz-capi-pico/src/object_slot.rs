@@ -7,14 +7,13 @@
 //! Each such object is placed with [`Slot::take`] and [`Slot::fill`], and let go with [`release`].
 //! Without the `object-pool` capability a slot is the heap's: the same allocation the `Box` it
 //! replaces made, so a build without the capability is the build it was. With it, a slot comes from
-//! the fixed pool the program reserved for the object's kind (`crate::object_pool`), and a pool
-//! with no room refuses the object; the call that wanted it answers `_Z_ERR_SYSTEM_OUT_OF_MEMORY`
+//! the fixed pool of the object's kind (`crate::object_pool`), the program's or, when it reserved
+//! none, the build's, which the first object reserves; a pool with no room refuses the object, and
+//! nothing falls back to the heap. The call that wanted it answers `_Z_ERR_SYSTEM_OUT_OF_MEMORY`
 //! and has declared or opened nothing, because each caller takes its slot before it does either.
 //!
-//! A slot is the heap's in a build with the capability too, until the program reserves the pools,
-//! and an object let go is given back to whichever of the two it lies in. So an object placed
-//! before the reservation, or by a constructor that still boxes it, is released correctly either
-//! way: what decides is where the object lies, never which build placed it.
+//! An object let go is given back to where it lies: its pool, or the heap for one a constructor
+//! still boxes. What decides is where the object lies, never which build placed it.
 
 use core::mem::MaybeUninit;
 use core::ptr::NonNull;
@@ -52,22 +51,18 @@ pub(crate) struct Slot<T> {
 }
 
 impl<T> Slot<T> {
-    /// A place for one `T` of `kind`, or `None` when the pool the program reserved for that kind
-    /// is full.
+    /// A place for one `T` of `kind`, or `None` when the pool of that kind is full.
+    #[cfg(feature = "object-pool")]
     pub(crate) fn take(kind: Kind) -> Option<Self> {
-        // Without the pools every place is the heap's, whatever its kind.
-        #[cfg(not(feature = "object-pool"))]
+        crate::object_pool::take::<T>(kind).map(|place| Self {
+            place: place.cast(),
+        })
+    }
+
+    /// A place for one `T`: without the pools every place is the heap's, whatever its kind.
+    #[cfg(not(feature = "object-pool"))]
+    pub(crate) fn take(kind: Kind) -> Option<Self> {
         let _ = kind;
-        #[cfg(feature = "object-pool")]
-        match crate::object_pool::take::<T>(kind) {
-            crate::object_pool::Taken::Pooled(place) => {
-                return Some(Self {
-                    place: place.cast(),
-                })
-            }
-            crate::object_pool::Taken::Full => return None,
-            crate::object_pool::Taken::Unreserved => {}
-        }
         Some(Self {
             place: NonNull::from(Box::leak(Box::new(MaybeUninit::<T>::uninit()))),
         })
@@ -139,18 +134,37 @@ mod tests {
         }
     }
 
-    /// With no pool reserved a slot is always there, a filled one holds its value, and a release
-    /// drops the value once.
+    /// A slot is there for a sample (the heap's, or one of the build's pools the first object
+    /// reserves), a filled one holds its value, and a release drops the value once.
     #[test]
     fn a_filled_slot_holds_its_value_and_a_release_drops_it_once() {
         let drops = core::cell::Cell::new(0);
         let object = Slot::take(Kind::Sample)
-            .expect("the heap has room")
+            .expect("a sample has a place")
             .fill(Counted(&drops));
         assert_eq!(drops.get(), 0, "filling drops nothing");
         // SAFETY: `object` was filled just above and is released once.
         unsafe { release(object) };
         assert_eq!(drops.get(), 1);
+    }
+
+    /// With the pools, a slot lies in the pool of its kind, and a release gives it back to it:
+    /// nothing is the heap's.
+    #[cfg(feature = "object-pool")]
+    #[test]
+    fn a_slot_lies_in_the_pools_and_goes_back_to_them() {
+        let drops = core::cell::Cell::new(0);
+        let object = Slot::take(Kind::Sample)
+            .expect("the build's pools hold samples")
+            .fill(Counted(&drops));
+        let place = NonNull::new(object.cast::<u8>()).expect("a place");
+        assert!(
+            crate::object_pool::lies_in_pools(place),
+            "the place is a pool's, not the heap's"
+        );
+        // SAFETY: `object` was filled just above and is released once.
+        unsafe { release(object) };
+        assert_eq!(drops.get(), 1, "the value is dropped once");
     }
 
     /// An object a `Box` made is released as one a slot made: where it lies decides.
