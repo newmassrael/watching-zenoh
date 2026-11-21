@@ -30,21 +30,21 @@
 //!
 //! # The lock
 //!
-//! The status, the arena and the busy count live behind one `critical_section` lock,
-//! as `crate::admin_status::NodeStatus` does, and a GET holds it for the whole
-//! answer: the legs are rendered from the rows where they lie, which is what removes
-//! the clone. On a single-core cooperative runtime nothing else contends for it
-//! except the shell's own `set_sessions`, which runs between GETs; the interrupt-off
-//! time of one answer has NOT been measured on a board.
+//! The status, the arena and the busy count live behind one critical section of the
+//! runtime's (`wz_runtime_coop::cs`), as `crate::admin_status::NodeStatus` does, and a
+//! GET holds it for the whole answer: the legs are rendered from the rows where they
+//! lie, which is what removes the clone. On a single-core cooperative runtime nothing
+//! else contends for it except the shell's own `set_sessions`, which runs between
+//! GETs; the interrupt-off time of one answer has NOT been measured on a board.
 
 use core::cell::{Cell, RefCell};
 
-use critical_section::Mutex;
 use wz_admin::admin_reply::{AdminReplyArena, AdminReplyRefusals};
 use wz_admin::adminspace::{
     write_admin_queryable_key, AdminLegEncoding, AdminLinkList, AdminLinkWeight, AdminNodeFacts,
     AdminSessionRef,
 };
+use wz_runtime_coop::cs::Mutex;
 use wz_session_core::bounded::BoundedVec;
 use wz_session_core::caps;
 #[cfg(feature = "lifecycle-verbs")]
@@ -312,7 +312,7 @@ impl<const SESSIONS: usize> FixedNodeStatus<SESSIONS> {
         &self,
         rows: impl IntoIterator<Item = Result<FixedAdminSession, RowRefused>>,
     ) {
-        critical_section::with(|cs| {
+        wz_runtime_coop::cs::with(|cs| {
             let mut state = self.state.borrow(cs).borrow_mut();
             state.sessions.clear();
             for row in rows {
@@ -335,7 +335,7 @@ impl<const SESSIONS: usize> FixedNodeStatus<SESSIONS> {
     /// Replace the endpoint statuses the `status/connect` leg reports, each as
     /// `(endpoint, status)`; refusals are counted as for sessions.
     pub fn set_endpoints<'a>(&self, rows: impl IntoIterator<Item = (&'a str, DialStatus)>) {
-        critical_section::with(|cs| {
+        wz_runtime_coop::cs::with(|cs| {
             let mut state = self.state.borrow(cs).borrow_mut();
             state.endpoints.clear();
             for (endpoint, status) in rows {
@@ -358,17 +358,17 @@ impl<const SESSIONS: usize> FixedNodeStatus<SESSIONS> {
     /// Change the read permit at runtime, as upstream's
     /// `adminspace/permissions/read` does.
     pub fn set_read_permit(&self, permit: bool) {
-        critical_section::with(|cs| self.state.borrow(cs).borrow_mut().permit_read = permit);
+        wz_runtime_coop::cs::with(|cs| self.state.borrow(cs).borrow_mut().permit_read = permit);
     }
 
     /// How many session rows the node reports now.
     pub fn session_count(&self) -> usize {
-        critical_section::with(|cs| self.state.borrow(cs).borrow().sessions.len())
+        wz_runtime_coop::cs::with(|cs| self.state.borrow(cs).borrow().sessions.len())
     }
 
     /// What this status refused since it was made, by why.
     pub fn refusals(&self) -> StatusRefusals {
-        critical_section::with(|cs| self.state.borrow(cs).borrow().refusals)
+        wz_runtime_coop::cs::with(|cs| self.state.borrow(cs).borrow().refusals)
     }
 }
 
@@ -438,14 +438,14 @@ impl<const BODY: usize> AdminHost<BODY> {
     /// What the arena refused since it was made, by why: legs too large for the
     /// buffer, keys too long, replies the session's stage refused.
     pub fn refusals(&self) -> AdminReplyRefusals {
-        critical_section::with(|cs| self.arena.borrow(cs).borrow().refusals())
+        wz_runtime_coop::cs::with(|cs| self.arena.borrow(cs).borrow().refusals())
     }
 
     /// How many GETs found the arena in use and were not answered. A handler cannot
     /// re-enter the arena on a cooperative runtime, so a count above zero is a
     /// defect, and is reported rather than papered over.
     pub fn busy_refusals(&self) -> u32 {
-        critical_section::with(|cs| self.busy.borrow(cs).get())
+        wz_runtime_coop::cs::with(|cs| self.busy.borrow(cs).get())
     }
 }
 
@@ -853,7 +853,7 @@ impl VerbLegs {
         let Some((zid_hex, whatami)) = self.named() else {
             return;
         };
-        critical_section::with(|cs| {
+        wz_runtime_coop::cs::with(|cs| {
             let Ok(mut arena) = self.host.arena.borrow(cs).try_borrow_mut() else {
                 let busy = self.host.busy.borrow(cs);
                 busy.set(busy.get().saturating_add(1));
@@ -873,7 +873,7 @@ fn answer_admin_query<const BODY: usize, const SESSIONS: usize, O: InBand>(
     let identity = &held.identity;
     let (status, host, config, connect, open) =
         (held.status, held.host, held.config, held.connect, held.open);
-    critical_section::with(|cs| {
+    wz_runtime_coop::cs::with(|cs| {
         let state = status.state.borrow(cs).borrow();
         let Ok(mut arena) = host.arena.borrow(cs).try_borrow_mut() else {
             let busy = host.busy.borrow(cs);

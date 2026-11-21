@@ -1156,14 +1156,14 @@ impl Tables {
 /// node is driven by one cooperative loop, which is the only thing that reaches it, and the guard
 /// makes that a property the type has and not a rule a caller keeps.
 pub struct PeerStore {
-    tables: critical_section::Mutex<core::cell::RefCell<Tables>>,
+    tables: wz_runtime_coop::cs::Mutex<core::cell::RefCell<Tables>>,
 }
 
 impl PeerStore {
     /// An empty store: no peer held. `const`, so a `static` can be one.
     pub const fn new() -> Self {
         Self {
-            tables: critical_section::Mutex::new(core::cell::RefCell::new(Tables {
+            tables: wz_runtime_coop::cs::Mutex::new(core::cell::RefCell::new(Tables {
                 planner: Planner::new(),
                 directory: LocatorDirectory::new(),
                 now_ms: 0,
@@ -1178,7 +1178,7 @@ impl PeerStore {
 
     /// Run `f` on the tables.
     fn with<R>(&self, f: impl FnOnce(&mut Tables) -> R) -> R {
-        critical_section::with(|cs| f(&mut self.tables.borrow_ref_mut(cs)))
+        wz_runtime_coop::cs::with(|cs| f(&mut self.tables.borrow_ref_mut(cs)))
     }
 }
 

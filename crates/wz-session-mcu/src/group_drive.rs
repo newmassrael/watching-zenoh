@@ -521,7 +521,7 @@ impl MulticastReplyQueue {
 
     /// How many replies are waiting.
     pub fn len(&self) -> usize {
-        critical_section::with(|_| self.items.borrow().len())
+        wz_runtime_coop::cs::with(|_| self.items.borrow().len())
     }
 
     /// Whether no reply is waiting.
@@ -531,17 +531,17 @@ impl MulticastReplyQueue {
 
     /// How many replies were dropped for want of room since the queue was made.
     pub fn dropped(&self) -> u32 {
-        critical_section::with(|_| self.dropped.get())
+        wz_runtime_coop::cs::with(|_| self.dropped.get())
     }
 
     /// Drain one queued reply for the loop's `next_tx` seam (FIFO order). `None`
     /// when empty: the loop then keeps serving RX and the JOIN beacon.
     pub fn pop(&self) -> Option<MulticastTxItem> {
-        critical_section::with(|_| self.items.borrow_mut().pop_front())
+        wz_runtime_coop::cs::with(|_| self.items.borrow_mut().pop_front())
     }
 
     fn push(&self, item: MulticastTxItem) {
-        let refused = critical_section::with(|_| {
+        let refused = wz_runtime_coop::cs::with(|_| {
             self.items
                 .borrow_mut()
                 .push_back(item)
@@ -2108,19 +2108,19 @@ impl<
 
     /// How many cells hold a session.
     pub fn in_use(&self) -> usize {
-        critical_section::with(|_| self.cells.iter().filter(|cell| cell.taken.get()).count())
+        wz_runtime_coop::cs::with(|_| self.cells.iter().filter(|cell| cell.taken.get()).count())
     }
 
     /// How many claims were refused for want of a free cell.
     pub fn refused(&self) -> u32 {
-        critical_section::with(|_| self.refused.get())
+        wz_runtime_coop::cs::with(|_| self.refused.get())
     }
 
     /// How many JOINs the peer tables of the sessions the cells hold now have turned away for want
     /// of a free row ([`MulticastDispatcher::join_refusals`]), as of each pump's last step. A
     /// session that ended takes its count with it, as it takes its members.
     pub fn join_refusals(&self) -> u32 {
-        critical_section::with(|_| {
+        wz_runtime_coop::cs::with(|_| {
             self.cells
                 .iter()
                 .filter(|cell| cell.taken.get())
@@ -2147,13 +2147,13 @@ impl<
         session: MulticastSession<T, MAX_PEERS>,
     ) -> Result<MulticastRef<C, T, MAX_PEERS>, MulticastSpawnRefused> {
         let cell =
-            critical_section::with(|_| self.cells.iter().find(|cell| !cell.taken.replace(true)));
+            wz_runtime_coop::cs::with(|_| self.cells.iter().find(|cell| !cell.taken.replace(true)));
         let Some(cell) = cell else {
-            critical_section::with(|_| self.refused.set(self.refused.get().saturating_add(1)));
+            wz_runtime_coop::cs::with(|_| self.refused.set(self.refused.get().saturating_add(1)));
             return Err(MulticastSpawnRefused::NoCell);
         };
         // A new session's table has turned nobody away, whatever the cell's last one did.
-        critical_section::with(|_| cell.join_refusals.set(0));
+        wz_runtime_coop::cs::with(|_| cell.join_refusals.set(0));
         // SAFETY: the cell is `taken` by this call alone, so nothing else reaches its
         // three places, and each is uninitialised: it was never written, or the
         // `MulticastRef` that freed the cell dropped what it held. The session and
@@ -2244,7 +2244,7 @@ impl<C: ClockSource + 'static, T: GroupTransport + 'static, const MAX_PEERS: usi
     fn publish_join_refusals(&mut self) {
         let count = self.dispatcher().join_refusals();
         if count != self.cell.join_refusals.get() {
-            critical_section::with(|_| self.cell.join_refusals.set(count));
+            wz_runtime_coop::cs::with(|_| self.cell.join_refusals.set(count));
         }
     }
 
@@ -2281,7 +2281,7 @@ impl<C: ClockSource + 'static, T: GroupTransport + 'static, const MAX_PEERS: usi
             (*self.cell.runtime.get()).assume_init_drop();
             (*self.cell.session.get()).assume_init_drop();
         }
-        critical_section::with(|_| self.cell.taken.set(false));
+        wz_runtime_coop::cs::with(|_| self.cell.taken.set(false));
     }
 }
 
