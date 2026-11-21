@@ -115,9 +115,11 @@ Samples, replies and queries the program holds (`z_sample_clone`, `z_reply_clone
 past its callback), payload bytes (`bytes.rs`: `ByteBuf` over `Arc<Backing>`), strings and
 string arrays, encodings and their schema, owned key expressions not declared on a session.
 
-- Bound: the counts of `wz_ext_object_pool_counts_t` become limits: NEW HELD_SAMPLES,
-  HELD_REPLIES, HELD_QUERIES, HELD_OBJECTS (strings, encodings, string arrays, key expressions,
-  configs), and NEW HELD_PAYLOAD_BYTES for the bytes they carry; one payload is at most
+- Bound: the counts of `wz_ext_object_pool_counts_t` become limits: `HELD_SESSIONS`,
+  `HELD_SAMPLES`, `HELD_REPLIES`, `HELD_QUERIES` and `HELD_PAYLOADS` (the payload handles; the
+  entities take their session limits times `HELD_SESSIONS`), NEW HELD_OBJECTS (strings,
+  encodings, string arrays, key expressions, configs), and NEW HELD_PAYLOAD_BYTES for the bytes
+  the payloads carry; one payload is at most
   `PICO_FRAG_MAX_BYTES`, one key at most `MAX_KEYEXPR_BYTES`. The C struct stays the door that
   states them in C.
 - Form: the existing per-kind object pools for the objects; the payload bytes in a block pool of
@@ -172,9 +174,13 @@ payload, attachment), its Final owed until the hold is dropped; the replies a qu
   `QUERY_PARAMETERS_MAX_BYTES`, `QUERY_ATTACHMENT_MAX_BYTES`, `MAX_MULTICAST_REPLIES`; a query's
   payload at most `PICO_FRAG_MAX_BYTES`. The three whose 0 is no bound need a finite value
   (record, section 3).
-- Form: `Lent` tables; a held query's bytes in a per-session block pool of the query's own rows
-  (each row sized by the parameter, attachment and payload limits); a cancellation token is a slot
-  of the get's row with a fixed number of handlers (one leg on the cooperative engine).
+- Form: `Lent` tables; one table of pending gets for each face the session may hold, lent at open
+  and taken by a face when it comes (a face dialled past the faces the config admits reserves its
+  own from the session's memory); the held queries' Finals in a fixed table of the query plane,
+  `MAX_PENDING_FINALS` rows resolved at open, as the plane is shared outside the session's lock; a
+  held query's bytes in a per-session block pool of the query's own rows (each row sized by the
+  parameter, attachment and payload limits); a cancellation token is a slot of the get's row with
+  a fixed number of handlers (one leg on the cooperative engine).
 - Lifetime: a get from `z_get` to its last reply's drop or its deadline; a held query from its
   dispatch to the drop of the program's hold.
 - Exhausted: `z_get` answers `_Z_ERR_SYSTEM_OUT_OF_MEMORY` having sent nothing; a query that
