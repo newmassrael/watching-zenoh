@@ -83,8 +83,13 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
 # `host-lock` comes with `std` below: on a host the runtime's critical sections are a lock of the
 # process and no `critical-section` implementation is linked (wz-runtime-coop's src/cs.rs); an MCU
 # image links its own.
+# The receive is in place (`rx-in-place`): each inbound datagram is read where the link's buffer
+# holds it, its records handed to the session's tables lent and one at a time, so a link keeps a
+# datagram its session stopped in and none is copied to wait (the delivery lane's gate). The one
+# receive of the C ABI's engine.
 wz-runtime-coop = { path = "../wz-runtime-coop", default-features = false, features = [
     "alloc",
+    "rx-in-place",
     "transport-batching",
 ] }
 # The engine's 64-bit counters (entity ids, link generations): native where the target has a
@@ -273,13 +278,6 @@ declarations-synced-event = []
 # no dependency line: unified into a build that holds the tokio engine it would make that engine's
 # sessions refuse where they fall back, which `wz-runtime-tokio` refuses to build.
 tx-lend-only = ["wz-session-core/tx-lend-only"]
-# The receive in place (`wz-runtime-coop`'s `rx-in-place`): each inbound datagram is read where the
-# link's buffer holds it, and its Push, Request and Response records are handed to the session's
-# tables lent for the dispatch, so none is copied out of the frame or built as an owned message.
-# A SELECTOR, off by default and named by the C library's final build, as `tx-lend-only` is: the
-# records are dispatched one call deeper than the copying receive does, so an image selects it
-# once its stack measurement allows.
-rx-in-place = ["wz-runtime-coop/rx-in-place"]
 # A clock the program moves (a time base it supplies, `wz-capi-pico`'s `time-base`): the word that
 # tells a read the clock moved on (`CoopConfig::clock_moves`), which ends the read's wait beside
 # its links. Off, which is pico's build, no program moves the clock, the config's field holds no

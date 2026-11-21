@@ -619,7 +619,6 @@ impl SampleLane {
     /// lane's state when made): the session's own puts, the tokens a liveliness subscriber is
     /// handed when it is declared, a group's records. Only the first is a defect when it holds
     /// its sender and finds no room.
-    #[cfg(feature = "rx-in-place")]
     pub(crate) fn offering_gated(&mut self, gated: bool) {
         self.gated = gated;
     }

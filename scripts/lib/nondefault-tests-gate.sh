@@ -674,6 +674,10 @@ transport-link-unixpipe,transport-link-ws|"
     # `rx-in-place`, a selector the C library's final build names): a Push and a get's reply read
     # where the link's buffer holds them reach the subscriber and the get. `query` is the get's.
     "wz-capi-coop|hook|query,rx-in-place|tests::in_place::"
+    # The receive in place on the cooperative engine (`tests::in_place::`, 2; the engine's one
+    # receive): a Push and a get's reply read where the link's buffer holds them reach the
+    # subscriber and the get. `query` is the get's.
+    "wz-capi-coop|hook|query|tests::in_place::"
     # What a hosted OS tells a node about its network, and the multicast sockets built from it,
     # which the tokio runtime and the cooperative host both open. The `#iface=` honor (the v4 and
     # v6 interface selectors and the tests that read them off the loopback) is compiled only with

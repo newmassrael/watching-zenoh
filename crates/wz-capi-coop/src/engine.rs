@@ -1340,10 +1340,8 @@ fn leg(result: Result<(), SendWireError>) -> Result<usize, FanoutError> {
 /// The lane told, while a link's record is dispatched, that what is offered waited for room
 /// ([`SampleLane::offering_gated`]), and told otherwise again when the dispatch is done, or
 /// unwinds.
-#[cfg(feature = "rx-in-place")]
 struct Gated<'a>(&'a Mutex<SampleLane>);
 
-#[cfg(feature = "rx-in-place")]
 impl<'a> Gated<'a> {
     fn over(lane: &'a Mutex<SampleLane>) -> Self {
         lock(lane).offering_gated(true);
@@ -1351,7 +1349,6 @@ impl<'a> Gated<'a> {
     }
 }
 
-#[cfg(feature = "rx-in-place")]
 impl Drop for Gated<'_> {
     fn drop(&mut self) {
         lock(self.0).offering_gated(false);
@@ -1372,12 +1369,7 @@ fn dispatch_holding_finals<C: ClockSource + 'static>(
     lane: Arc<Mutex<SampleLane>>,
 ) -> impl FnMut(wz_session_core::driver_loop::IterationEvent<'_, '_>) + 'static {
     move |event| {
-        // The record waited for the room one record can take only where the link keeps its
-        // datagram and the session is handed it a record at a time (`rx-in-place`).
-        #[cfg(feature = "rx-in-place")]
         let _gated = Gated::over(&lane);
-        #[cfg(not(feature = "rx-in-place"))]
-        let _ = &lane;
         let mut registry = registry.borrow_mut();
         // The queries this frame carries arrive on this face's link, whichever was dialled last.
         plane.arriving.store(generation, Ordering::Release);
@@ -1433,12 +1425,7 @@ fn dispatch_all<C: ClockSource + 'static>(
     lane: Arc<Mutex<SampleLane>>,
 ) -> impl FnMut(wz_session_core::driver_loop::IterationEvent<'_, '_>) + 'static {
     move |event| {
-        // The record waited for the room one record can take only where the link keeps its
-        // datagram and the session is handed it a record at a time (`rx-in-place`).
-        #[cfg(feature = "rx-in-place")]
         let _gated = Gated::over(&lane);
-        #[cfg(not(feature = "rx-in-place"))]
-        let _ = &lane;
         let mut registry = registry.borrow_mut();
         // The application's tables serve every face: this face's session states its own answer
         // to a query it cannot resolve before its frame is dispatched, as one with queryables does.

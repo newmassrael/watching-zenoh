@@ -615,7 +615,6 @@ fn a_token_for_several_subscribers_is_written_once() {
 
 /// A record the gate let through that holds its sender and finds no room is a defect: a debug
 /// build stops there, and a release build counts it apart.
-#[cfg(feature = "rx-in-place")]
 #[test]
 #[cfg_attr(
     debug_assertions,
