@@ -670,6 +670,10 @@ transport-link-unixpipe,transport-link-ws|"
     # once, and a watch undeclared or a session closed letting go of its sink; `liveliness` joins
     # for the watch of tokens. Without either feature the first row runs the refusal by name.
     "wz-capi-coop|hook|declarations-synced-event,liveliness,remote-declaration-watch|decl_watch"
+    # The receive in place on the cooperative engine (`tests::in_place::`, 2, compiled with
+    # `rx-in-place`, a selector the C library's final build names): a Push and a get's reply read
+    # where the link's buffer holds them reach the subscriber and the get. `query` is the get's.
+    "wz-capi-coop|hook|query,rx-in-place|tests::in_place::"
     # What a hosted OS tells a node about its network, and the multicast sockets built from it,
     # which the tokio runtime and the cooperative host both open. The `#iface=` honor (the v4 and
     # v6 interface selectors and the tests that read them off the loopback) is compiled only with

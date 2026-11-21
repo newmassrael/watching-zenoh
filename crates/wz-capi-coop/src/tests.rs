@@ -1429,6 +1429,8 @@ mod get;
 mod group;
 #[cfg(feature = "group-host")]
 mod host_group;
+#[cfg(feature = "rx-in-place")]
+mod in_place;
 mod link_sets;
 #[cfg(all(feature = "listen", feature = "query", feature = "queryable"))]
 mod listen;

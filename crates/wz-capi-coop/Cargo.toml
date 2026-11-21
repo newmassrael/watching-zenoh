@@ -273,6 +273,13 @@ declarations-synced-event = []
 # no dependency line: unified into a build that holds the tokio engine it would make that engine's
 # sessions refuse where they fall back, which `wz-runtime-tokio` refuses to build.
 tx-lend-only = ["wz-session-core/tx-lend-only"]
+# The receive in place (`wz-runtime-coop`'s `rx-in-place`): each inbound datagram is read where the
+# link's buffer holds it, and its Push, Request and Response records are handed to the session's
+# tables lent for the dispatch, so none is copied out of the frame or built as an owned message.
+# A SELECTOR, off by default and named by the C library's final build, as `tx-lend-only` is: the
+# records are dispatched one call deeper than the copying receive does, so an image selects it
+# once its stack measurement allows.
+rx-in-place = ["wz-runtime-coop/rx-in-place"]
 # A clock the program moves (a time base it supplies, `wz-capi-pico`'s `time-base`): the word that
 # tells a read the clock moved on (`CoopConfig::clock_moves`), which ends the read's wait beside
 # its links. Off, which is pico's build, no program moves the clock, the config's field holds no
