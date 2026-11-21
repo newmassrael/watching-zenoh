@@ -2716,7 +2716,7 @@ layer_c0_test_discipline() {
     # one of them created by the round that closed the sibling debt. See the
     # script's docstring for why this is a gate and not a fourth comment.
     _runci_leg unwired_lane_lint -- python3 scripts/lib/unwired_lane_lint.py
-    # R4581 (no register item) — the SOFT-JOB gate, the lint above one axis over:
+    # R4582 (no register item) — the SOFT-JOB gate, the lint above one axis over:
     # that one asks whether a lane reaches hosted CI, this one whether a hosted
     # verdict reaches anyone. A `continue-on-error` job or step concludes success
     # whatever it did; the Windows package jobs of platform.yml were red on every

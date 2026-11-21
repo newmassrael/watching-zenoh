@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""R4581 (no register item) -- the completeness scoreboard: wz's architecture is held to be
+"""R4582 (no register item) -- the completeness scoreboard: wz's architecture is held to be
 more complete than zenoh-pico's, and than a deployment's own pico-compatible build, by four
 criteria, each a figure that may not get worse.
 

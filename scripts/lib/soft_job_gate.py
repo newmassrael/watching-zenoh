@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""R4581 (no register item) -- every soft job of a workflow carries a promise, and keeps it.
+"""R4582 (no register item) -- every soft job of a workflow carries a promise, and keeps it.
 
 ## The defect this closes
 

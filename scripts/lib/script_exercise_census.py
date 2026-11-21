@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""R4581 (no register item) -- every script under scripts/ is exercised by a lane, or a row here
+"""R4582 (no register item) -- every script under scripts/ is exercised by a lane, or a row here
 says why no lane runs it.
 
 ## The defect, measured
