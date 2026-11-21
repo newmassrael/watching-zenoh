@@ -41,8 +41,8 @@ use wz_session_core::session_slot::SessionSlots;
 use wz_session_core::session_timeouts::SessionTimeouts;
 
 use crate::{
-    acceptor_params, resolve_policy, wires, AcceptorE2eReport, AcceptorStage, ClockSource,
-    DataMode, Run, MAX_ITERS, PEER_PORT, SESSION_PORT,
+    acceptor_params, resolve_limits, resolve_policy, wires, AcceptorE2eReport, AcceptorStage,
+    ClockSource, DataMode, Run, MAX_ITERS, PEER_PORT, SESSION_PORT,
 };
 
 /// Rx queue depth of the reactive peer socket: it receives only the acceptor's
@@ -240,7 +240,11 @@ where
     // R311y819 -- through the MCU construction seam, which draws the cookie nonce from
     // the supplied `EntropySource`; the signing key is drawn from the same source first.
     let mut entropy = entropy;
-    let mut params = Some(acceptor_params(&mut entropy, &resolve_policy()));
+    let mut params = Some(acceptor_params(
+        &mut entropy,
+        &resolve_policy(),
+        &resolve_limits(),
+    ));
     let mut entropy = Some(entropy);
     let mut on_fragment = Some(on_fragment);
     let mut session: Option<OpenedSession<C, LwipUdpDriver>> = None;
