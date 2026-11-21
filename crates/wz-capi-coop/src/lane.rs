@@ -17,6 +17,10 @@
 //! handed a view of the sample where it lies ([`LaneSample`]); the slot and its bytes are given
 //! back when the callback returns.
 //!
+//! A liveliness subscriber's samples, a token appearing or retracted, take the same lane in the
+//! order they happen among the subscribers' samples: the token's key is the slot's bytes, and its
+//! kind and id are the event at the slot.
+//!
 //! # A full lane (decision Q4)
 //!
 //! What a full lane does is what the sample's congestion control says. A sample sent reliably
@@ -39,6 +43,8 @@ use wz_capi_port::{MatchId, SubId};
 use wz_runtime_coop::session_drive::{LinkReadiness, LinkWritability, SessionDatagramLink};
 use wz_session_core::bounded::{BoundedVec, Static};
 use wz_session_core::caps;
+#[cfg(feature = "liveliness")]
+use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
 use wz_session_core::delivery_lane::{DeliveryLane, Next};
 use wz_session_core::limit_binding::Quota;
 use wz_session_core::limits::SessionLimits;
@@ -108,11 +114,25 @@ pub(crate) fn holding_a_message<const FRAG: usize, const KEY: usize>(
     limits
 }
 
-/// What a sample is, besides its bytes: kept at its event slot of the lane.
+/// What waits at an event slot of the lane, besides its bytes.
+#[derive(Clone)]
+enum Event {
+    /// A sample, for the callback of the subscriber it names.
+    Sample(SubId, Record),
+    /// A token's appearance or retraction, for the callback of the liveliness subscriber it
+    /// names; the token's key is the slot's bytes.
+    #[cfg(feature = "liveliness")]
+    Liveliness {
+        subscriber: SubId,
+        kind: LivelinessSampleKind,
+        key: usize,
+        token_id: u64,
+    },
+}
+
+/// What a sample is, besides its bytes.
 #[derive(Clone)]
 struct Record {
-    /// The subscriber whose callback the sample goes to.
-    subscriber: SubId,
     kind: SampleKind,
     reliability: Reliability,
     qos: Option<QosLevel>,
@@ -142,7 +162,7 @@ pub struct LaneCounts {
 /// session's arena lent it.
 pub(crate) struct SampleLane {
     lane: DeliveryLane<{ caps::DELIVERY_LANE_EVENTS }>,
-    records: [Option<Record>; caps::DELIVERY_LANE_EVENTS],
+    records: [Option<Event>; caps::DELIVERY_LANE_EVENTS],
     area: NonNull<u8>,
     /// A delivery holds the head: another thread that delivers finds nothing until it completes.
     handing: bool,
@@ -212,21 +232,57 @@ impl SampleLane {
             at += part.len();
         }
         let index = reservation.index();
-        self.records[index] = Some(Record {
+        self.records[index] = Some(Event::Sample(
             subscriber,
-            kind: sample.kind(),
-            reliability: sample.reliability(),
-            qos: sample.qos(),
-            key: key.len(),
-            payload: payload.len(),
-            attachment: attachment.map(<[u8]>::len),
-            encoding: encoding.map(|(id, schema)| (id, schema.map(<[u8]>::len))),
-            timestamp: timestamp.map(|(time, zid)| (time, zid.len())),
-            source_info: sample.source_info().cloned(),
-        });
+            Record {
+                kind: sample.kind(),
+                reliability: sample.reliability(),
+                qos: sample.qos(),
+                key: key.len(),
+                payload: payload.len(),
+                attachment: attachment.map(<[u8]>::len),
+                encoding: encoding.map(|(id, schema)| (id, schema.map(<[u8]>::len))),
+                timestamp: timestamp.map(|(time, zid)| (time, zid.len())),
+                source_info: sample.source_info().cloned(),
+            },
+        ));
         if self.lane.publish(reservation, 1).is_err() {
             self.records[index] = None;
             self.refuse(sample);
+        }
+    }
+
+    /// Queue a token's appearance or retraction, `sample`, for the callback of liveliness
+    /// subscriber `subscriber`, or count it when the lane has no room for its key. A token is
+    /// declared and retracted by a declaration, which holds its sender, so a refusal is counted
+    /// with the samples that do ([`LaneCounts::held_over`]).
+    #[cfg(feature = "liveliness")]
+    pub(crate) fn offer_liveliness(&mut self, subscriber: SubId, sample: &LivelinessSample<'_>) {
+        let key = sample.keyexpr.as_bytes();
+        let Ok(reservation) = self.lane.reserve(key.len()) else {
+            self.counts.held_over = self.counts.held_over.saturating_add(1);
+            return;
+        };
+        // SAFETY: the lane placed the key's bytes contiguously at `reservation.offset()`, inside
+        // the area (`DeliveryLane::reserve`), where no other event's bytes lie until this one is
+        // completed; `key` is the sample's and not the area's.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                key.as_ptr(),
+                self.area.as_ptr().add(reservation.offset()),
+                key.len(),
+            )
+        };
+        let index = reservation.index();
+        self.records[index] = Some(Event::Liveliness {
+            subscriber,
+            kind: sample.kind,
+            key: key.len(),
+            token_id: sample.token_id,
+        });
+        if self.lane.publish(reservation, 1).is_err() {
+            self.records[index] = None;
+            self.counts.held_over = self.counts.held_over.saturating_add(1);
         }
     }
 
@@ -251,10 +307,9 @@ impl SampleLane {
         }
     }
 
-    /// The sample at the head of the lane, for its subscriber's callback: held by this delivery
-    /// until [`Self::complete`]. `None` when the lane is empty or another delivery holds the
-    /// head.
-    pub(crate) fn take_front(&mut self) -> Option<(SubId, LaneSample)> {
+    /// What is at the head of the lane, and whose callback it is for: held by this delivery until
+    /// [`Self::complete`]. `None` when the lane is empty or another delivery holds the head.
+    pub(crate) fn take_front(&mut self) -> Option<(SubId, LaneItem)> {
         if self.handing {
             return None;
         }
@@ -262,7 +317,7 @@ impl SampleLane {
             let Next::Ready(delivery) = self.lane.front() else {
                 return None;
             };
-            let Some(record) = self.records[delivery.index].clone() else {
+            let Some(event) = self.records[delivery.index].clone() else {
                 // A published slot always has its record; one without is passed over.
                 self.lane.complete();
                 continue;
@@ -270,7 +325,26 @@ impl SampleLane {
             self.handing = true;
             // SAFETY: the head's bytes are inside the area (`DeliveryLane::front`).
             let base = unsafe { self.area.as_ptr().add(delivery.offset) };
-            return Some((record.subscriber, LaneSample { record, base }));
+            return Some(match event {
+                Event::Sample(subscriber, record) => {
+                    (subscriber, LaneItem::Sample(LaneSample { record, base }))
+                }
+                #[cfg(feature = "liveliness")]
+                Event::Liveliness {
+                    subscriber,
+                    kind,
+                    key,
+                    token_id,
+                } => (
+                    subscriber,
+                    LaneItem::Liveliness(LaneLiveliness {
+                        kind,
+                        key,
+                        token_id,
+                        base,
+                    }),
+                ),
+            });
         }
     }
 
@@ -314,6 +388,43 @@ fn holds_sender(sample: &dyn SampleView) -> bool {
         && sample
             .qos()
             .is_some_and(|qos| qos.congestion() != CongestionControl::Drop)
+}
+
+/// What a delivery takes from the head of the lane, where its bytes lie. Valid until the delivery
+/// that took it completes it.
+pub(crate) enum LaneItem {
+    /// A sample, for a subscriber's callback.
+    Sample(LaneSample),
+    /// A token's appearance or retraction, for a liveliness subscriber's callback.
+    #[cfg(feature = "liveliness")]
+    Liveliness(LaneLiveliness),
+}
+
+/// A token's appearance or retraction at the head of the lane, its key where it lies.
+#[cfg(feature = "liveliness")]
+pub(crate) struct LaneLiveliness {
+    kind: LivelinessSampleKind,
+    key: usize,
+    token_id: u64,
+    base: *const u8,
+}
+
+#[cfg(feature = "liveliness")]
+impl LaneLiveliness {
+    /// The sample, for the liveliness subscriber's callback.
+    pub(crate) fn as_sample(&self) -> LivelinessSample<'_> {
+        // SAFETY: the key's bytes were a `&str`'s, written at `base` (`SampleLane::offer_liveliness`),
+        // and are not written again until the delivery that holds the head completes it, which is
+        // after this view is gone.
+        let keyexpr = unsafe {
+            core::str::from_utf8_unchecked(core::slice::from_raw_parts(self.base, self.key))
+        };
+        LivelinessSample {
+            kind: self.kind,
+            keyexpr,
+            token_id: self.token_id,
+        }
+    }
 }
 
 /// A sample at the head of the lane, where its bytes lie: what a subscriber's callback is handed.

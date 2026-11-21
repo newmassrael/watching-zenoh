@@ -13,24 +13,22 @@
 //! A liveliness subscriber is the observer's, registered under the id its Interest carries, and
 //! its Interest is sent again over each new link. What the observer hands its sink happens under
 //! the session's lock, and a C callback never runs there (decision D8), so the sink only queues
-//! an owned copy of each sample: a token declared, retracted, already alive when the subscriber
-//! asked for its history, or gone with a lost link. The deliveries hand them out with no lock
-//! held.
+//! each sample in the session's delivery lane (`crate::lane`): a token declared, retracted,
+//! already alive when the subscriber asked for its history, or gone with a lost link. The
+//! deliveries hand them out with no lock held.
 
-use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 
 use wz_capi_port::os::Mutex;
 
 use wz_capi_port::{SubId, TokenId, WireKey};
 use wz_runtime_coop::ClockSource;
-use wz_session_core::declare::liveliness_sample::{
-    BoxedLivelinessSampleSink, LivelinessSample, LivelinessSampleKind,
-};
+use wz_session_core::declare::liveliness_sample::{BoxedLivelinessSampleSink, LivelinessSample};
 use wz_session_core::declare_form::RetractionKey;
 use wz_session_mcu::dial::McuActions;
 
 use super::lock;
+use crate::lane::SampleLane;
 #[allow(unused_imports)]
 use crate::prelude::*;
 
@@ -38,9 +36,6 @@ use crate::prelude::*;
 /// subscriber's is.
 pub(super) type LivelinessCallback =
     Arc<Mutex<Box<dyn for<'a> FnMut(LivelinessSample<'a>) + Send + 'static>>>;
-
-/// The samples the liveliness subscribers' sinks queued, in the order they happened.
-pub(super) type LivelinessQueue = Arc<Mutex<VecDeque<(SubId, OwnedLivelinessSample)>>>;
 
 /// A token the session holds: what its declaration says on the wire, kept to announce it again
 /// over a new link; holding the key also keeps alive what it holds.
@@ -103,36 +98,11 @@ impl LiveSubEntry {
     }
 }
 
-/// A liveliness sample as the observer handed it, owned, so it outlives the lock it was handed
-/// out under.
-pub(super) struct OwnedLivelinessSample {
-    kind: LivelinessSampleKind,
-    keyexpr: String,
-    token_id: u64,
-}
-
-impl OwnedLivelinessSample {
-    /// The sample, borrowed again for its callback.
-    pub(super) fn as_sample(&self) -> LivelinessSample<'_> {
-        LivelinessSample {
-            kind: self.kind,
-            keyexpr: &self.keyexpr,
-            token_id: self.token_id,
-        }
-    }
-}
-
-/// The sink subscriber `id` is registered with: each sample is queued as an owned copy.
-pub(super) fn sample_sink(id: SubId, queue: &LivelinessQueue) -> BoxedLivelinessSampleSink {
-    let queue = Arc::clone(queue);
+/// The sink subscriber `id` is registered with: each sample is queued in the session's delivery
+/// lane, its key copied into the lane's bytes.
+pub(super) fn sample_sink(id: SubId, lane: &Arc<Mutex<SampleLane>>) -> BoxedLivelinessSampleSink {
+    let lane = Arc::clone(lane);
     BoxedLivelinessSampleSink::new(move |sample: LivelinessSample<'_>| {
-        lock(&queue).push_back((
-            id,
-            OwnedLivelinessSample {
-                kind: sample.kind,
-                keyexpr: sample.keyexpr.to_owned(),
-                token_id: sample.token_id,
-            },
-        ));
+        lock(&lane).offer_liveliness(id, &sample);
     })
 }

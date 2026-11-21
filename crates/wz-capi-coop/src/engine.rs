@@ -45,7 +45,7 @@ use crate::prelude::*;
 use crate::arena::{
     AllocatorMemory, ArenaMemory, ArenaPlan, ArenaRefused, EntityRows, SessionArena,
 };
-use crate::lane::{LaneCounts, LaneGate, MatchFlips, SampleLane};
+use crate::lane::{LaneCounts, LaneGate, LaneItem, MatchFlips, SampleLane};
 use wz_session_core::bounded::{BoundedString, BoundedVec, Lent};
 use wz_session_core::caps;
 use wz_session_core::slot_observer::ObserverRows;
@@ -179,7 +179,7 @@ use wz_session_core::query_options::DEFAULT_QUERY_TIMEOUT_MS;
 mod liveliness;
 #[cfg(feature = "liveliness")]
 use {
-    liveliness::{LiveSubEntry, LivelinessCallback, LivelinessQueue, TokenEntry},
+    liveliness::{LiveSubEntry, LivelinessCallback, TokenEntry},
     wz_capi_port::{LivelinessSink, TokenId},
 };
 
@@ -590,9 +590,6 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     /// What the session's watchers of its faces are owed, and who they are (`connectivity`).
     #[cfg(feature = "connectivity")]
     faces: Arc<FacePlane>,
-    /// What the liveliness subscribers' sinks queued for their callbacks (`liveliness`).
-    #[cfg(feature = "liveliness")]
-    live_samples: LivelinessQueue,
     /// The program's watches of what the peers declare and what is owed to them, shared with the
     /// registry whose observers stage it (`decl_watch`).
     #[cfg(any(
@@ -2759,8 +2756,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             gets,
             #[cfg(feature = "connectivity")]
             faces,
-            #[cfg(feature = "liveliness")]
-            live_samples: Arc::new(Mutex::new(VecDeque::new())),
             #[cfg(any(
                 feature = "remote-declaration-watch",
                 feature = "declarations-synced-event"
@@ -3085,35 +3080,41 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // through the body and a callback that steps the session again would wait on it.
         loop {
             let next = lock(&self.samples).take_front();
-            let Some((id, sample)) = next else {
+            let Some((id, item)) = next else {
                 break;
             };
             // The head goes back to the lane when the callback returns, or unwinds.
             let _handed = Handed(&self.samples);
-            let callback = lock(&self.targets)
-                .iter()
-                .find_map(|(t, target)| match target {
-                    Target::Subscriber(cb) if *t == TargetKey::Subscriber(id) => Some(cb.clone()),
-                    _ => None,
-                });
-            if let Some(callback) = callback {
-                (lock(&callback))(&sample);
-            }
-        }
-        #[cfg(feature = "liveliness")]
-        loop {
-            let next = lock(&self.live_samples).pop_front();
-            let Some((id, sample)) = next else {
-                break;
-            };
-            let callback = lock(&self.targets)
-                .iter()
-                .find_map(|(t, target)| match target {
-                    Target::Liveliness(cb) if *t == TargetKey::Liveliness(id) => Some(cb.clone()),
-                    _ => None,
-                });
-            if let Some(callback) = callback {
-                (lock(&callback))(sample.as_sample());
+            match item {
+                LaneItem::Sample(sample) => {
+                    let callback =
+                        lock(&self.targets)
+                            .iter()
+                            .find_map(|(t, target)| match target {
+                                Target::Subscriber(cb) if *t == TargetKey::Subscriber(id) => {
+                                    Some(cb.clone())
+                                }
+                                _ => None,
+                            });
+                    if let Some(callback) = callback {
+                        (lock(&callback))(&sample);
+                    }
+                }
+                #[cfg(feature = "liveliness")]
+                LaneItem::Liveliness(sample) => {
+                    let callback =
+                        lock(&self.targets)
+                            .iter()
+                            .find_map(|(t, target)| match target {
+                                Target::Liveliness(cb) if *t == TargetKey::Liveliness(id) => {
+                                    Some(cb.clone())
+                                }
+                                _ => None,
+                            });
+                    if let Some(callback) = callback {
+                        (lock(&callback))(sample.as_sample());
+                    }
+                }
             }
         }
         // A face that came up or went down, told to each watcher as it stands now: the list is
@@ -5153,7 +5154,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             u64::from(id),
             &keyexpr,
             history,
-            liveliness::sample_sink(id, &self.live_samples),
+            liveliness::sample_sink(id, &self.samples),
         );
         // Refused by the observer, the declaration is refused, as a subscriber's is.
         if registered.is_err() {
@@ -5273,8 +5274,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         // lock held, as a sent leg is.
         let handed = core::mem::take(&mut *lock(&self.handed));
         drop(handed);
-        #[cfg(feature = "liveliness")]
-        drop(core::mem::take(&mut *lock(&self.live_samples)));
         #[cfg(feature = "query")]
         drop(core::mem::take(&mut *lock(&self.gets.events)));
         // The queries no callback will now answer, and the callbacks' C contexts, are dropped

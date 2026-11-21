@@ -16,7 +16,9 @@ use wz_session_core::sample::{
 };
 use wz_session_core::sink::SampleView;
 
-use crate::lane::{LaneCounts, MatchFlips, SampleLane};
+use wz_capi_port::SubId;
+
+use crate::lane::{LaneCounts, LaneItem, LaneSample, MatchFlips, SampleLane};
 
 /// The QoS byte of a sample sent at the data priority whose congestion control holds its sender.
 const BLOCK: u8 = 0x05 | 0x08;
@@ -32,6 +34,15 @@ fn lane(bytes: usize, events: usize) -> Option<SampleLane> {
     let area: &'static mut [u8] = vec![0u8; bytes].leak();
     // SAFETY: the area is leaked, so it outlives the lane, and nothing else uses it.
     Some(unsafe { SampleLane::over(NonNull::from(area).cast::<u8>(), bytes, &limits) })
+}
+
+/// The sample at the head of `lane`, and whose it is, held by the caller until it completes it.
+fn front(lane: &mut SampleLane) -> Option<(SubId, LaneSample)> {
+    match lane.take_front()? {
+        (id, LaneItem::Sample(sample)) => Some((id, sample)),
+        #[cfg(feature = "liveliness")]
+        (_, LaneItem::Liveliness(_)) => panic!("a sample was offered, not a token"),
+    }
 }
 
 /// A best-effort put of `payload` on `demo/lane`.
@@ -62,7 +73,7 @@ fn a_sample_is_handed_as_it_was_offered() {
         .with_reliability(Reliability::BestEffort);
     lane.offer(7, &sample);
     {
-        let (id, view) = lane.take_front().expect("the sample is at the head");
+        let (id, view) = front(&mut lane).expect("the sample is at the head");
         assert_eq!(id, 7);
         assert_eq!(view.keyexpr(), "demo/a");
         assert_eq!(view.payload(), b"payload");
@@ -87,7 +98,7 @@ fn a_sample_with_no_metadata_is_handed_with_none() {
     };
     lane.offer(1, &Sample::new_del("demo/gone"));
     {
-        let (_, view) = lane.take_front().expect("the sample is at the head");
+        let (_, view) = front(&mut lane).expect("the sample is at the head");
         assert_eq!(view.keyexpr(), "demo/gone");
         assert_eq!(view.kind(), SampleKind::Del);
         assert!(view.payload().is_empty());
@@ -107,11 +118,11 @@ fn a_second_delivery_finds_the_head_held() {
     };
     lane.offer(1, &best_effort(8));
     lane.offer(2, &best_effort(8));
-    let (first, _) = lane.take_front().expect("the first sample");
+    let (first, _) = front(&mut lane).expect("the first sample");
     assert_eq!(first, 1);
     assert!(lane.take_front().is_none(), "the head is held");
     lane.complete();
-    let (second, _view) = lane.take_front().expect("the second sample");
+    let (second, _view) = front(&mut lane).expect("the second sample");
     assert_eq!(second, 2);
 }
 
@@ -149,7 +160,7 @@ fn a_full_lane_drops_what_may_be_dropped_and_counts_apart_what_holds_its_sender(
             held_over: 1
         }
     );
-    let (_, view) = lane.take_front().expect("the first sample is kept");
+    let (_, view) = front(&mut lane).expect("the first sample is kept");
     assert_eq!(view.payload().len(), 8);
 }
 
@@ -271,4 +282,52 @@ fn a_lane_is_sized_from_the_sessions_message() {
     let kept =
         holding_a_message::<{ caps::PICO_FRAG_MAX_BYTES }, { caps::MAX_KEYEXPR_BYTES }>(long);
     assert_eq!(kept.delivery_lane_bytes(), long.delivery_lane_bytes());
+}
+
+/// A token's appearance takes the lane in the order it happens among the samples, handed back with
+/// its key where it lies; a token whose key finds no room is counted with the samples that hold
+/// their sender.
+#[cfg(feature = "liveliness")]
+#[test]
+fn a_token_takes_the_lane_in_order_with_the_samples() {
+    use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
+
+    let Some(mut lane) = lane(64, 4) else {
+        return;
+    };
+    lane.offer(1, &best_effort(8));
+    lane.offer_liveliness(
+        2,
+        &LivelinessSample {
+            kind: LivelinessSampleKind::Put,
+            keyexpr: "demo/alive",
+            token_id: 9,
+        },
+    );
+    let (first, _) = front(&mut lane).expect("the sample first");
+    assert_eq!(first, 1);
+    lane.complete();
+    let Some((id, LaneItem::Liveliness(token))) = lane.take_front() else {
+        panic!("the token next");
+    };
+    assert_eq!(id, 2);
+    let sample = token.as_sample();
+    assert_eq!(
+        (sample.kind, sample.keyexpr, sample.token_id),
+        (LivelinessSampleKind::Put, "demo/alive", 9)
+    );
+    lane.complete();
+    assert!(lane.take_front().is_none(), "nothing is left");
+
+    let long = "k".repeat(100);
+    lane.offer_liveliness(
+        3,
+        &LivelinessSample {
+            kind: LivelinessSampleKind::Delete,
+            keyexpr: &long,
+            token_id: 1,
+        },
+    );
+    assert_eq!(lane.counts().held_over, 1, "a key past the whole lane");
+    assert!(lane.take_front().is_none());
 }
