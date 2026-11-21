@@ -243,6 +243,7 @@ mod tests {
             targeted_query: 0,
             reserved: [0; 7],
             querier_max_pending_queries: 0,
+            replay_depth_max: 0,
         }
     }
 

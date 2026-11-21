@@ -113,6 +113,7 @@ def declared_pending(decl: dict) -> dict[str, str]:
 #: stay a read of the build. One line per allowed site.
 ALLOWED: tuple[tuple[str, str, str], ...] = (
     ("crates/wz-session-core/src/pubsub.rs", "_", "a build-time assertion on the storage the constant sizes: a fixed table's rows fit the u16 positions of the match cache"),
+    ("crates/wz-app-frame/src/message_catalog.rs", "build_limits", "the catalog's door reads a deployment's catalog with no session in reach, so it judges a message's replay depth against the build's REPLAY_DEPTH_MAX; the replay cache made on a session judges it again against that session's"),
 )
 
 #: (path pattern relative to the root, innermost item, reason): a site that reads a snapshot it

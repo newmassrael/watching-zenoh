@@ -1183,6 +1183,79 @@ mod enforcement {
             },
         );
     }
+
+    /// The shape of a replay cache of `depth` frames for one instance.
+    #[cfg(feature = "replay-cache")]
+    fn replay_shape(depth: usize) -> crate::replay_publisher::Shape {
+        crate::replay_publisher::Shape {
+            depth,
+            instances: 1,
+            frame_max: 4,
+        }
+    }
+
+    /// The storage of a replay cache of `depth` frames for one instance, every byte `0xA5`.
+    #[cfg(feature = "replay-cache")]
+    fn replay_storage(depth: usize) -> std::vec::Vec<u8> {
+        let bytes = replay_shape(depth).storage_bytes();
+        std::vec![0xA5; bytes.expect("a small shape")]
+    }
+
+    /// A replay cache of `depth` frames for one instance over `storage`, made as the replay door
+    /// makes it: held to the `REPLAY_DEPTH_MAX` of the session it is made on.
+    #[cfg(feature = "replay-cache")]
+    fn replay_cache(
+        limits: &SessionLimits,
+        depth: usize,
+        storage: &mut [u8],
+    ) -> Result<(), crate::replay_publisher::CreateRefused> {
+        crate::replay_publisher::ReplayPublisher::new(
+            storage,
+            replay_shape(depth),
+            limits.replay_depth_max(),
+            false,
+        )
+        .map(|_| ())
+    }
+
+    /// `REPLAY_DEPTH_MAX` with nothing stated: a cache as deep as the build's value is made, and
+    /// one frame deeper is refused, on every profile.
+    #[cfg(feature = "replay-cache")]
+    #[test]
+    fn replay_depth_max_with_nothing_stated_admits_what_the_build_admitted() {
+        let limits = SessionLimits::defaults();
+        let mut storage = replay_storage(caps::REPLAY_DEPTH_MAX);
+        replay_cache(&limits, caps::REPLAY_DEPTH_MAX, &mut storage).expect("no quota is stated");
+        let mut storage = replay_storage(caps::REPLAY_DEPTH_MAX + 1);
+        assert_eq!(
+            replay_cache(&limits, caps::REPLAY_DEPTH_MAX + 1, &mut storage),
+            Err(crate::replay_publisher::CreateRefused::DepthOutOfRange)
+        );
+    }
+
+    /// `REPLAY_DEPTH_MAX` stated as two: a cache of three frames is refused as out of range and
+    /// writes none of its storage, and a cache of two is made.
+    #[cfg(feature = "replay-cache")]
+    #[test]
+    fn replay_depth_max_stated_as_two_refuses_a_deeper_cache() {
+        held_to_two(
+            SessionLimits::select_replay_depth_max,
+            ReplayDepthMax::DOMAIN.is_singleton(),
+            |limits| {
+                let mut storage = replay_storage(3);
+                assert_eq!(
+                    replay_cache(limits, 3, &mut storage),
+                    Err(crate::replay_publisher::CreateRefused::DepthOutOfRange)
+                );
+                assert!(
+                    storage.iter().all(|&byte| byte == 0xA5),
+                    "a refusal writes none of the storage"
+                );
+                let mut storage = replay_storage(2);
+                replay_cache(limits, 2, &mut storage).expect("under the quota");
+            },
+        );
+    }
 }
 
 #[cfg(test)]

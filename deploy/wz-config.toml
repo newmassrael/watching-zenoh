@@ -3299,7 +3299,7 @@ storage = "both"
 scope = "entity"
 binding_heap = "open"
 binding_fixed = "build"
-read = "build"
+read = "snapshot"
 wire = "none"
 help = '''
 The deepest replay a message may keep: how many of the frames it last sent, as

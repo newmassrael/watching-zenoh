@@ -599,7 +599,8 @@ fn the_publisher_doors_refuse_by_name() {
 }
 
 /// What the replay doors read of a session they read through the extension interface: the
-/// session's own snapshot of the build's policies and the querier's bound, open and then closed.
+/// session's own snapshot of the build's policies, the querier's bound and the replay depth's,
+/// open and then closed.
 #[test]
 fn the_core_reports_a_session_s_facts_through_the_extension_interface() {
     use wz_capi_pico::ext_interface::{
@@ -642,6 +643,10 @@ fn the_core_reports_a_session_s_facts_through_the_extension_interface() {
         assert_eq!(
             facts.querier_max_pending_queries,
             wz_session_core::caps::QUERIER_MAX_PENDING_QUERIES
+        );
+        assert_eq!(
+            facts.replay_depth_max,
+            wz_session_core::caps::REPLAY_DEPTH_MAX
         );
 
         z_close(z_session_loan_mut(&mut session), std::ptr::null());

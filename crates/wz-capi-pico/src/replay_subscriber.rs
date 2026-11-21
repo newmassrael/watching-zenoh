@@ -712,7 +712,7 @@ unsafe extern "C" fn on_declaration(context: *mut c_void, event: *const wz_ext_d
 }
 
 /// A count of the C interface as a quota: `0` is no bound, any other number the most admitted.
-fn quota_of_count(count: usize) -> Quota {
+pub(crate) fn quota_of_count(count: usize) -> Quota {
     if count == 0 {
         Quota::UNBOUNDED
     } else {

@@ -288,6 +288,7 @@ fn every_value_the_doors_allocate_has_the_core_s_layout() {
         targeted_query,
         reserved,
         querier_max_pending_queries,
+        replay_depth_max,
     );
 }
 

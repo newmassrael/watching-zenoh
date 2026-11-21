@@ -49,7 +49,7 @@ use wz_session_core::limit_binding::Quota;
 /// The major version of this interface.
 pub const WZ_EXT_INTERFACE_MAJOR: u16 = 1;
 /// The minor version of this interface.
-pub const WZ_EXT_INTERFACE_MINOR: u16 = 0;
+pub const WZ_EXT_INTERFACE_MINOR: u16 = 1;
 
 /// `replay_reply_shape` of the session facts: one reply per frame, as it was sent.
 pub const WZ_EXT_REPLAY_SHAPE_FRAME_PER_SAMPLE: u8 = 0;
@@ -70,8 +70,8 @@ pub struct wz_ext_interface_version_t {
     pub minor: u16,
 }
 
-/// What the core says of a session that a door of the additional features reads. 24 bytes on a
-/// 64-bit target, 20 on a 32-bit one.
+/// What the core says of a session that a door of the additional features reads. 32 bytes on a
+/// 64-bit target, 24 on a 32-bit one.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct wz_ext_session_facts_t {
@@ -91,12 +91,15 @@ pub struct wz_ext_session_facts_t {
     pub reserved: [u8; 7],
     /// How many queries one querier of the session may have in flight at once, 0 for no bound.
     pub querier_max_pending_queries: usize,
+    /// How many frames one instance's ring of a replay cache made on the session may keep
+    /// (`REPLAY_DEPTH_MAX`), 0 for no bound. Added in minor version 1.
+    pub replay_depth_max: usize,
 }
 
 /// `quota` as a count of this interface, whose fields write no bound as `0`: the number, or `0`
 /// for none. A quota of `0`, which admits nothing, has no count of its own here; no open of this
-/// ABI holds a session to it, for a session's limits are the build's and the build reads its `0`
-/// as no bound.
+/// ABI holds a session to it, for a document that states a bound as `0` is refused and the build
+/// reads its `0` as no bound.
 #[cfg(feature = "query")]
 fn count_of_quota(quota: Quota) -> usize {
     quota.most().unwrap_or(0)
@@ -192,6 +195,7 @@ pub unsafe extern "C" fn wz_ext_interface_session_facts(
             querier_max_pending_queries: count_of_quota(
                 handle.ext.limits.querier_max_pending_queries(),
             ),
+            replay_depth_max: count_of_quota(handle.ext.limits.replay_depth_max()),
         };
         Z_OK
     })
@@ -267,7 +271,14 @@ mod tests {
             core::mem::offset_of!(wz_ext_session_facts_t, querier_max_pending_queries),
             16
         );
-        assert_eq!(size_of::<wz_ext_session_facts_t>(), 16 + size_of::<usize>());
+        assert_eq!(
+            core::mem::offset_of!(wz_ext_session_facts_t, replay_depth_max),
+            16 + size_of::<usize>()
+        );
+        assert_eq!(
+            size_of::<wz_ext_session_facts_t>(),
+            16 + 2 * size_of::<usize>()
+        );
     }
 
     #[test]
@@ -354,6 +365,7 @@ mod tests {
             targeted_query: 7,
             reserved: [7; 7],
             querier_max_pending_queries: 7,
+            replay_depth_max: 7,
         };
         let mut facts = blank;
         // SAFETY: a local the doors may write, a null session and a gravestone's loan.
