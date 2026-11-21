@@ -14,7 +14,9 @@
 #
 # `no_std` with `alloc` without its `std` feature: the advanced plane is a host-profile capability
 # (it is not in the MCU profile), and the pico C ABI's host library without `std` hosts it over the
-# host's own lock (`host-sync`) and a wall-clock instant of its own (`time_range::EpochTime`).
+# host's own lock (`host-sync`) and a wall-clock instant of its own (`time_range::EpochTime`). With
+# neither feature the crate is its grammars (the `@adv` keys, the `_time` selector): the cache, the
+# publisher and the subscriber are under a lock, and a feature that asks for them asks for one.
 #
 # `rlib` only: a Rust-internal seam, like `wz-capi-port` and `wz-host-net`.
 

@@ -160,15 +160,23 @@ pub fn ntp64_to_system_time(ntp64: u64) -> WallTime {
 /// clock's limits, the parameter list and the NTP64 reading.
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
 
-    fn at(secs: u64) -> SystemTime {
-        UNIX_EPOCH + Duration::from_secs(secs)
+    /// `secs` after the epoch, as the build's own instant: `SystemTime` with `std`, an
+    /// [`EpochTime`] without it.
+    fn at(secs: u64) -> WallTime {
+        after_epoch(Duration::from_secs(secs))
     }
 
-    fn r(s: &str, now: u64) -> TimeRange<SystemTime> {
+    /// `by` after `from`.
+    fn later(from: WallTime, by: Duration) -> WallTime {
+        from.checked_add(by).expect("an instant the clock holds")
+    }
+
+    fn r(s: &str, now: u64) -> TimeRange<WallTime> {
         resolve(parse(s).unwrap(), at(now))
     }
 
@@ -181,12 +189,12 @@ mod tests {
         assert!(!inside.contains(at(989)));
         assert!(!inside.contains(at(1_011)));
         // Absolute bounds, at the epoch.
-        assert!(r("[1970-01-01T00:00:00Z..]", now).contains(UNIX_EPOCH));
-        assert!(r("[..1970-01-01T00:00:00Z]", now).contains(UNIX_EPOCH));
-        assert!(!r("]1970-01-01T00:00:00Z..]", now).contains(UNIX_EPOCH));
-        assert!(!r("[..1970-01-01T00:00:00Z[", now).contains(UNIX_EPOCH));
+        assert!(r("[1970-01-01T00:00:00Z..]", now).contains(EPOCH));
+        assert!(r("[..1970-01-01T00:00:00Z]", now).contains(EPOCH));
+        assert!(!r("]1970-01-01T00:00:00Z..]", now).contains(EPOCH));
+        assert!(!r("[..1970-01-01T00:00:00Z[", now).contains(EPOCH));
         // Both ends open holds everything, the epoch included.
-        assert!(r("[..]", now).contains(UNIX_EPOCH));
+        assert!(r("[..]", now).contains(EPOCH));
     }
 
     /// A negative `;` duration from a fixed start is a range whose end lies before its start,
@@ -238,17 +246,17 @@ mod tests {
 
     #[test]
     fn ntp64_words_read_as_uhlc_reads_them() {
-        assert_eq!(ntp64_to_system_time(0), UNIX_EPOCH);
+        assert_eq!(ntp64_to_system_time(0), EPOCH);
         assert_eq!(ntp64_to_system_time(5u64 << 32), at(5));
         // Half a second is exactly 2^31 of the 2^32 fraction.
         assert_eq!(
             ntp64_to_system_time((5u64 << 32) | (1 << 31)),
-            at(5) + Duration::from_millis(500)
+            later(at(5), Duration::from_millis(500))
         );
         // The smallest fraction rounds UP to a nanosecond (ceil(1e9 / 2^32) = 1).
         assert_eq!(
             ntp64_to_system_time(1),
-            UNIX_EPOCH + Duration::from_nanos(1)
+            later(EPOCH, Duration::from_nanos(1))
         );
         // The largest rounds up to a whole second, which carries.
         assert_eq!(ntp64_to_system_time(0xFFFF_FFFF), at(1));

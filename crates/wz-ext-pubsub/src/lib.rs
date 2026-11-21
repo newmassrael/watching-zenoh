@@ -12,20 +12,29 @@
 //!
 //! Without `std` it is `no_std` with `alloc`, for the pico C ABI's host library without `std`: its
 //! locks are the host's own (`host-sync`), and a wall-clock instant is an [`time_range::EpochTime`].
+//! A build with neither `std` nor `host-sync` has no lock, and is the crate's grammars alone: the
+//! `@adv` keys and the `_time` selector. The cache, the publisher and the subscriber hold their
+//! state under a lock, so they need one of the two.
 //!
 //! The crate reads no clock, spawns nothing and holds no socket. A rule that needs "now" takes it
 //! as an argument. The design, and the steps that move the rest of the mechanism here, are in
 //! `docs/advanced-pubsub-on-a-neutral-core.md`.
 
-#![cfg_attr(not(feature = "std"), no_std)]
+// A test executable links `std` whatever the build, so a test may read `std`'s clock beside the
+// build's own.
+#![cfg_attr(not(any(feature = "std", test)), no_std)]
 
 extern crate alloc;
 
-// Without `std` the locks are the host's own (`wz-host-sync`); a build with neither has none.
-#[cfg(not(any(feature = "std", feature = "host-sync")))]
+// The publisher and the subscriber hold their state under a lock: `std`'s, or without it the host's
+// own (`wz-host-sync`). A build with neither has none to give them.
+#[cfg(all(
+    not(any(feature = "std", feature = "host-sync")),
+    any(feature = "advanced-publisher", feature = "advanced-subscriber")
+))]
 compile_error!(
-    "wz-ext-pubsub: a build without `std` takes its locks through the host's own calls: name \
-     `host-sync`"
+    "wz-ext-pubsub: the advanced publisher and subscriber take a lock: name `std`, or `host-sync` \
+     for a build without it"
 );
 
 /// What `std`'s prelude gives a module and `core`'s does not. Each module takes it whole, as it
@@ -40,8 +49,10 @@ mod prelude {
     pub(crate) use alloc::vec::Vec;
 }
 
+#[cfg(any(feature = "std", feature = "host-sync"))]
 mod sync;
 
+#[cfg(any(feature = "std", feature = "host-sync"))]
 pub mod advanced_cache;
 pub mod advanced_ke;
 #[cfg(feature = "advanced-publisher")]
