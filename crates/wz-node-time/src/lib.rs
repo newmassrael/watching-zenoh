@@ -3,8 +3,9 @@
 
 //! The node's time (§5.18), with no runtime in it.
 //!
-//! * `timestamp_source`: the wall clock as an NTP64 word, its plain-milliseconds sibling, the
-//!   process's [`EpochSource`](wz_session_core::epoch::EpochSource), and the fallback stamper an
+//! * `timestamp_source` (with `std` or `host-sync`): the wall clock as an NTP64 word, its
+//!   plain-milliseconds sibling, the process's
+//!   [`EpochSource`](wz_session_core::epoch::EpochSource), and the fallback stamper an
 //!   auto-stamping consumer borrows the node clock through.
 //! * `node_clock`: the node-scoped Hybrid Logical Clock, the per-role switch that decides whether
 //!   a node has one, and the forward-path stamp.
@@ -16,16 +17,18 @@
 //! The tokio runtime re-exports both modules at the paths it has always had, and the cooperative
 //! engine hosts the same ones (`docs/advanced-pubsub-on-a-neutral-core.md`).
 
-#![cfg_attr(not(feature = "std"), no_std)]
+// A test executable links `std` whatever the build, so a test may read the environment.
+#![cfg_attr(not(any(feature = "std", test)), no_std)]
 
 extern crate alloc;
 
-// Without `std` the node's wall clock and the lock its clock's standing is under are the host's own
-// (`wz-host-sync`); a build with neither has no clock to read.
-#[cfg(not(any(feature = "std", feature = "host-sync")))]
+// The node's HLC reads the wall clock and keeps its standing under a lock: `std`'s, or without it
+// the host's own (`wz-host-sync`). A build with neither has no clock, and is the crate's core: the
+// per-role switch and a node that holds no clock, which is the node of a build without `time-hlc`.
+#[cfg(all(feature = "time-hlc", not(any(feature = "std", feature = "host-sync"))))]
 compile_error!(
-    "wz-node-time: a build without `std` reads the wall clock and takes its lock through the host's \
-     own calls: name `host-sync`"
+    "wz-node-time: `time-hlc` reads the wall clock and takes a lock: name `std`, or `host-sync` \
+     for a build without it"
 );
 
 #[cfg(feature = "clock-source")]
@@ -37,4 +40,6 @@ pub mod node_clock;
 pub mod standing_cell;
 #[cfg(feature = "time-base")]
 pub mod time_base;
+// The wall clock, which a build reads through `std` or the host's own calls.
+#[cfg(any(feature = "std", feature = "host-sync"))]
 pub mod timestamp_source;

@@ -36,6 +36,8 @@ crate-type = ["rlib"]
 # Without it the crate is `no_std` with `alloc`, for the pico C ABI's host library without `std`:
 # the wall clock and the lock are the host's own (`host-sync`), and the bound is the build's
 # `CLOCK_MAX_FORWARD_STEP_MS`, the same default, since a library has no environment of its own.
+# With neither the crate has no clock: the per-role switch and a node that holds none, and
+# `time-hlc` asks for one of the two.
 default = ["std"]
 std = []
 # The host's wall clock and lock over its own calls (`wz-host-sync`), for a build without `std`.
