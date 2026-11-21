@@ -10,8 +10,18 @@
 //! A dialer whose configuration says `true` arms a task with the expiry of the chain the listener
 //! presented and closes the link when it fires (`io/zenoh-links/zenoh-link-tls/src/unicast.rs` @
 //! `if client_config.tls_close_link_on_expiration {`); with `false`, upstream's default, a link
-//! outlives the certificate it was opened under. A dial after the expiry is refused by the
-//! certificate check itself, so a closed link stays closed.
+//! outlives the certificate it was opened under.
+//!
+//! A closed link is not the end of the dialer's `tls/` links. A client whose session closes dials
+//! again at once (`zenoh/src/net/runtime/orchestrator.rs` @ `fn closed_session`, the first try
+//! after `Duration::ZERO`), and the certificate check reads the time in whole seconds and refuses
+//! only a time past the expiry, so a dial in the second the certificate ends on is accepted. That
+//! link's own expiry task is spawned inside `Arc::new_cyclic` with its time already past
+//! (`io/zenoh-links/zenoh-link-tls/src/unicast.rs` @ `Arc::<LinkUnicastTls>::new_cyclic`), and
+//! when it runs before the link is built it cannot reach the link and ends without closing it
+//! (`io/zenoh-link-commons/src/tls.rs` @ `if let Some(link) = link.upgrade() {`). Upstream
+//! itself can therefore hold a `tls/` link after the expiry, a new one; the rule this file holds
+//! is about the link the certificate was valid for.
 //!
 //! ## The observer
 //!
@@ -19,7 +29,8 @@
 //! is made, and it is the same in every run; only the dialer changes. Its own adminspace says
 //! which sessions it holds and over which links (`@/<zid>/router`, read by a separate querier
 //! over its `tcp/` listener), so the verdict is zenohd's account of the link and not the
-//! dialer's: a `tls/` link listed before the expiry, and listed or not some seconds after it.
+//! dialer's: a `tls/` link listed before the expiry, and that same link, named by the dialer's
+//! end of it, listed or not some seconds after it.
 //!
 //! Each document is run by zenohd first, which must keep the link without the key and lose it
 //! with the key, and then by the demo, which must do what zenohd did.
@@ -46,7 +57,7 @@ const LIFETIME: Duration = Duration::from_secs(20);
 const LISTED_BEFORE_EXPIRY: Duration = Duration::from_secs(3);
 
 /// How long after the expiry the listener is asked again: the close is immediate, and a redial
-/// the expired certificate refuses fits in it many times.
+/// from the second the certificate ends on is a new link with a new dialer's end.
 const READ_AFTER_EXPIRY: Duration = Duration::from_secs(5);
 
 /// The two dialers handed the document.
@@ -57,11 +68,11 @@ enum Dialer {
 }
 
 /// What the listener said about one dialer: whether its `tls/` link was listed before the expiry,
-/// and whether it was listed after it.
+/// and whether that same link was still listed after it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Seen {
     listed_before: bool,
-    listed_after: bool,
+    kept_after: bool,
 }
 
 /// The dialer's document: a client dialing the listener's `tls/` endpoint, no scouting, the
@@ -132,11 +143,24 @@ fn zenohd_admin_report(tcp_port: u16) -> String {
     line.replace("\\\"", "\"")
 }
 
-/// Whether the listening zenohd lists a session over a `tls/` link. The querier's own session is
-/// over `tcp/`, and a link's ends are the only `src`/`dst` fields of the report.
-fn tls_link_listed(tcp_port: u16) -> bool {
+/// The dialer's ends of the `tls/` links the listening zenohd lists, each a locator such as
+/// `tls/127.0.0.1:58058`. The querier's own session is over `tcp/`, a link's ends are the only
+/// `src`/`dst` fields of the report, and the end on `tls_port` is the listener's, so what is
+/// left names one link: a redial comes from another port.
+fn tls_dialer_ends(tcp_port: u16, tls_port: u16) -> Vec<String> {
     let report = zenohd_admin_report(tcp_port);
-    report.contains("\"dst\":\"tls/") || report.contains("\"src\":\"tls/")
+    let listener_end = format!(":{tls_port}");
+    let mut ends = Vec::new();
+    for field in ["\"dst\":\"", "\"src\":\""] {
+        for (at, _) in report.match_indices(field) {
+            let rest = &report[at + field.len()..];
+            let locator = rest.split('"').next().unwrap_or_default();
+            if locator.starts_with("tls/") && !locator.ends_with(&listener_end) {
+                ends.push(locator.to_owned());
+            }
+        }
+    }
+    ends
 }
 
 /// One run: a fresh certificate expiring [`LIFETIME`] from now, a zenohd listening under it, and
@@ -178,17 +202,20 @@ fn observe(dialer: Dialer, close: Option<bool>) -> (Seen, String) {
             .unwrap_or_else(|e| panic!("spawn {dialer:?}: {e}")),
     );
 
-    let mut listed_before = false;
+    let mut before = Vec::new();
     while Instant::now() + LISTED_BEFORE_EXPIRY < deadline {
-        if tls_link_listed(tcp_port) {
-            listed_before = true;
+        before = tls_dialer_ends(tcp_port, tls_port);
+        if !before.is_empty() {
             break;
         }
         std::thread::sleep(Duration::from_millis(250));
     }
-    let listed_after = if listed_before {
+    let listed_before = !before.is_empty();
+    let kept_after = if listed_before {
         std::thread::sleep(deadline.saturating_duration_since(Instant::now()) + READ_AFTER_EXPIRY);
-        tls_link_listed(tcp_port)
+        tls_dialer_ends(tcp_port, tls_port)
+            .iter()
+            .any(|end| before.contains(end))
     } else {
         false
     };
@@ -200,7 +227,7 @@ fn observe(dialer: Dialer, close: Option<bool>) -> (Seen, String) {
     (
         Seen {
             listed_before,
-            listed_after,
+            kept_after,
         },
         read_captured(&mut log),
     )
@@ -222,11 +249,11 @@ fn a_tls_dialer_closes_on_the_listeners_expiry_only_when_told_to_as_zenohd_does(
     assert_demo_binary_newer_than_sources(&demo);
     let kept = Seen {
         listed_before: true,
-        listed_after: true,
+        kept_after: true,
     };
     let closed = Seen {
         listed_before: true,
-        listed_after: false,
+        kept_after: false,
     };
     for (close, expected) in [(None, kept), (Some(true), closed)] {
         // The ADJUDICATOR first: zenohd on the same document must do what upstream's rule says,
