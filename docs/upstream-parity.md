@@ -390,6 +390,21 @@ derived from the declaration and never chosen by hand:
      again: its boot cells (stack used, heap peak, turnaround) are those of run 20261031T063515,
      and the caveat of that run in `deploy/upstream_parity.json` says so.
 
+- **D9. Completeness is a scoreboard of four criteria, each held by a ratchet (owner,
+  2026-11-21).** wz's architecture is to be more complete than zenoh-pico's and than a
+  deployment's own pico-compatible build. The criteria: (a) upstream's own tests (zenoh-pico's
+  API tests in Layer Z, zenoh-c's tests in Layer C1cc) pass on wz at least as many programs as on
+  the original library; (b) a deployment's feature catalogue, a document kept outside this
+  repository, is accepted whole as switches of `deploy/wz-config.toml` that are off by
+  default; (c) the inventory's PARTIAL atoms and the logic census's unplaced crates and files are
+  zero; (d) the structural contracts (layer direction, the hourglass C ABI, no allocation in
+  operation, lock order) each have a gate a lane runs. `scripts/lib/completeness_gate.py`
+  reads every figure from the gate or the lane that computes it, in Layer C0, and holds it to its
+  row of `deploy/completeness_ratchet.json`: a figure may not get worse, a shortfall names its
+  debt, and a criterion met is locked. Criterion (b) is measured only where the catalogue is
+  given (`WZ_FEATURE_CATALOGUE`), and its figure stays with the document. What each figure is and
+  how it is read: `docs/completeness-scoreboard.md`.
+
 ## 5. Steps
 
 MCU first, by the owner's choice.
