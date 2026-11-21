@@ -275,7 +275,9 @@ pub fn register_fan(token: &Arc<CancellationToken>) -> Option<(Arc<CancellableFa
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
+    // The tests' own shared state is std's, as it was; the token's lock is the port's.
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
     use std::time::Duration;
 
     /// A registration made before cancel has its handler run; one attempted

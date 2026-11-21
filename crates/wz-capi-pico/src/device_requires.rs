@@ -20,6 +20,7 @@ use wz_session_core::WhatAmI;
 
 use crate::abi::{z_loaned_config_t, z_owned_string_t};
 use crate::config::ConfigState;
+use crate::prelude::*;
 use crate::result::{ZResult, Z_ERR_NULL, Z_OK};
 use crate::session::{open_config, tls_files_named, OpenConfig};
 
