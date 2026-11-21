@@ -45,7 +45,7 @@ impl LimitSpec for MaxKeyexprBytes {
     type Value = Quota;
     const LIMIT: &'static str = "MAX_KEYEXPR_BYTES";
     const DRIVEN: Option<Driven> = Some(Driven::Remote);
-    const READ_FROM_SNAPSHOT: bool = false;
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = Some(caps::MAX_KEYEXPR_BYTES);
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::at_most(caps::MAX_KEYEXPR_BYTES);
@@ -86,7 +86,7 @@ impl LimitSpec for MatchMemoSlots {
     type Value = usize;
     const LIMIT: &'static str = "MATCH_MEMO_SLOTS";
     const DRIVEN: Option<Driven> = None;
-    const READ_FROM_SNAPSHOT: bool = false;
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(0, 4294967295, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -108,7 +108,7 @@ impl LimitSpec for DeliveryLaneEvents {
     type Value = Quota;
     const LIMIT: &'static str = "DELIVERY_LANE_EVENTS";
     const DRIVEN: Option<Driven> = Some(Driven::Remote);
-    const READ_FROM_SNAPSHOT: bool = false;
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = Some(caps::DELIVERY_LANE_EVENTS);
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::at_most(caps::DELIVERY_LANE_EVENTS);
@@ -130,7 +130,7 @@ impl LimitSpec for DeliveryLaneBytes {
     type Value = usize;
     const LIMIT: &'static str = "DELIVERY_LANE_BYTES";
     const DRIVEN: Option<Driven> = None;
-    const READ_FROM_SNAPSHOT: bool = false;
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(1, 4294967295, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -150,7 +150,7 @@ impl LimitSpec for DeliveryLaneCallbacks {
     type Value = Quota;
     const LIMIT: &'static str = "DELIVERY_LANE_CALLBACKS";
     const DRIVEN: Option<Driven> = Some(Driven::Remote);
-    const READ_FROM_SNAPSHOT: bool = false;
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::from_build(caps::DELIVERY_LANE_CALLBACKS, false);
@@ -214,7 +214,7 @@ impl LimitSpec for LinkNotedRequests {
     type Value = usize;
     const LIMIT: &'static str = "LINK_NOTED_REQUESTS";
     const DRIVEN: Option<Driven> = None;
-    const READ_FROM_SNAPSHOT: bool = false;
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(1, 4294967295, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -387,7 +387,7 @@ impl LimitSpec for MaxSharedKeyIds {
     type Value = Quota;
     const LIMIT: &'static str = "MAX_SHARED_KEY_IDS";
     const DRIVEN: Option<Driven> = Some(Driven::Local);
-    const READ_FROM_SNAPSHOT: bool = false;
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::from_build(caps::MAX_SHARED_KEY_IDS, false);
@@ -471,7 +471,7 @@ impl LimitSpec for MaxReplyPayloadBytes {
     type Value = Quota;
     const LIMIT: &'static str = "MAX_REPLY_PAYLOAD_BYTES";
     const DRIVEN: Option<Driven> = Some(Driven::Local);
-    const READ_FROM_SNAPSHOT: bool = false;
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_REPLY_PAYLOAD_BYTES);
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
@@ -492,7 +492,7 @@ impl LimitSpec for MaxMulticastReplies {
     type Value = Quota;
     const LIMIT: &'static str = "MAX_MULTICAST_REPLIES";
     const DRIVEN: Option<Driven> = Some(Driven::Remote);
-    const READ_FROM_SNAPSHOT: bool = false;
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_MULTICAST_REPLIES);
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::at_most(caps::MAX_MULTICAST_REPLIES);
@@ -513,7 +513,7 @@ impl LimitSpec for MaxLocatorLen {
     type Value = Quota;
     const LIMIT: &'static str = "MAX_LOCATOR_LEN";
     const DRIVEN: Option<Driven> = Some(Driven::Remote);
-    const READ_FROM_SNAPSHOT: bool = false;
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = Some(caps::MAX_LOCATOR_LEN);
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::at_most(caps::MAX_LOCATOR_LEN);
@@ -533,10 +533,10 @@ impl LimitSpec for MaxStaticConnect {
     type Value = Quota;
     const LIMIT: &'static str = "MAX_STATIC_CONNECT";
     const DRIVEN: Option<Driven> = Some(Driven::Local);
-    const READ_FROM_SNAPSHOT: bool = false;
-    const CAPACITY: Option<usize> = Some(caps::MAX_STATIC_CONNECT);
+    const READ_FROM_SNAPSHOT: bool = true;
+    const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_STATIC_CONNECT);
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
-    const DEFAULT: Quota = Quota::at_most(caps::MAX_STATIC_CONNECT);
+    const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
 }
 
 const _: LimitDomain = MaxStaticConnect::DOMAIN;
@@ -576,7 +576,7 @@ impl LimitSpec for TxNoProgressWindowUs {
     type Value = usize;
     const LIMIT: &'static str = "TX_NO_PROGRESS_WINDOW_US";
     const DRIVEN: Option<Driven> = None;
-    const READ_FROM_SNAPSHOT: bool = false;
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(1, 5000000, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -598,7 +598,7 @@ impl LimitSpec for TxExpiryCloseAfter {
     type Value = Quota;
     const LIMIT: &'static str = "TX_EXPIRY_CLOSE_AFTER";
     const DRIVEN: Option<Driven> = Some(Driven::Remote);
-    const READ_FROM_SNAPSHOT: bool = false;
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_bound_within(Self::CAPACITY, 65535, Self::DEFAULT, DEFAULTS_ONLY);
@@ -621,7 +621,7 @@ impl LimitSpec for DatagramFragmentBurst {
     type Value = usize;
     const LIMIT: &'static str = "DATAGRAM_FRAGMENT_BURST";
     const DRIVEN: Option<Driven> = None;
-    const READ_FROM_SNAPSHOT: bool = false;
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(1, 4294967295, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -644,7 +644,7 @@ impl LimitSpec for DatagramFragmentGapUs {
     type Value = usize;
     const LIMIT: &'static str = "DATAGRAM_FRAGMENT_GAP_US";
     const DRIVEN: Option<Driven> = None;
-    const READ_FROM_SNAPSHOT: bool = false;
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(1, 1000000, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -666,7 +666,7 @@ impl LimitSpec for QueryParametersMaxBytes {
     type Value = Quota;
     const LIMIT: &'static str = "QUERY_PARAMETERS_MAX_BYTES";
     const DRIVEN: Option<Driven> = Some(Driven::Remote);
-    const READ_FROM_SNAPSHOT: bool = false;
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::from_build(caps::QUERY_PARAMETERS_MAX_BYTES, true);
@@ -688,7 +688,7 @@ impl LimitSpec for QueryAttachmentMaxBytes {
     type Value = Quota;
     const LIMIT: &'static str = "QUERY_ATTACHMENT_MAX_BYTES";
     const DRIVEN: Option<Driven> = Some(Driven::Remote);
-    const READ_FROM_SNAPSHOT: bool = false;
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::from_build(caps::QUERY_ATTACHMENT_MAX_BYTES, true);
@@ -711,7 +711,7 @@ impl LimitSpec for PicoTxQueueSize {
     type Value = usize;
     const LIMIT: &'static str = "PICO_TX_QUEUE_SIZE";
     const DRIVEN: Option<Driven> = None;
-    const READ_FROM_SNAPSHOT: bool = false;
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(1, 16, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -732,7 +732,7 @@ impl LimitSpec for SnapshotPeriodMs {
     type Value = usize;
     const LIMIT: &'static str = "SNAPSHOT_PERIOD_MS";
     const DRIVEN: Option<Driven> = None;
-    const READ_FROM_SNAPSHOT: bool = false;
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(1, 2147483, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -817,7 +817,7 @@ impl LimitSpec for AppLinkQueueBytes {
     type Value = Quota;
     const LIMIT: &'static str = "APP_LINK_QUEUE_BYTES";
     const DRIVEN: Option<Driven> = Some(Driven::Remote);
-    const READ_FROM_SNAPSHOT: bool = false;
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::from_build(caps::APP_LINK_QUEUE_BYTES, false);
@@ -901,7 +901,7 @@ impl LimitSpec for ReplayDepthMax {
     type Value = Quota;
     const LIMIT: &'static str = "REPLAY_DEPTH_MAX";
     const DRIVEN: Option<Driven> = Some(Driven::Local);
-    const READ_FROM_SNAPSHOT: bool = false;
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = fixed_capacity(caps::REPLAY_DEPTH_MAX);
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::at_most(caps::REPLAY_DEPTH_MAX);
@@ -988,7 +988,7 @@ impl LimitSpec for ClockMaxForwardStepMs {
     type Value = usize;
     const LIMIT: &'static str = "CLOCK_MAX_FORWARD_STEP_MS";
     const DRIVEN: Option<Driven> = None;
-    const READ_FROM_SNAPSHOT: bool = false;
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(0, 4294967295, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -1010,7 +1010,7 @@ impl LimitSpec for DeclarationSyncBurstMessages {
     type Value = usize;
     const LIMIT: &'static str = "DECLARATION_SYNC_BURST_MESSAGES";
     const DRIVEN: Option<Driven> = None;
-    const READ_FROM_SNAPSHOT: bool = false;
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(1, 4294967295, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -1033,7 +1033,7 @@ impl LimitSpec for DeclarationSyncFinalTimeoutMs {
     type Value = usize;
     const LIMIT: &'static str = "DECLARATION_SYNC_FINAL_TIMEOUT_MS";
     const DRIVEN: Option<Driven> = None;
-    const READ_FROM_SNAPSHOT: bool = false;
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(1, 4294967295, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -1055,7 +1055,7 @@ impl LimitSpec for DeclarationSyncIntervalMs {
     type Value = usize;
     const LIMIT: &'static str = "DECLARATION_SYNC_INTERVAL_MS";
     const DRIVEN: Option<Driven> = None;
-    const READ_FROM_SNAPSHOT: bool = false;
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(1, 4294967295, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -1078,7 +1078,7 @@ impl LimitSpec for DeclarationSyncRxNoProgressMs {
     type Value = usize;
     const LIMIT: &'static str = "DECLARATION_SYNC_RX_NO_PROGRESS_MS";
     const DRIVEN: Option<Driven> = None;
-    const READ_FROM_SNAPSHOT: bool = false;
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(0, 4294967295, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -1101,7 +1101,7 @@ impl LimitSpec for DeclarationSyncRetryIntervalMs {
     type Value = usize;
     const LIMIT: &'static str = "DECLARATION_SYNC_RETRY_INTERVAL_MS";
     const DRIVEN: Option<Driven> = None;
-    const READ_FROM_SNAPSHOT: bool = false;
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(0, 4294967295, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -1125,7 +1125,7 @@ impl LimitSpec for DeclarationSyncTxNoProgressMs {
     type Value = usize;
     const LIMIT: &'static str = "DECLARATION_SYNC_TX_NO_PROGRESS_MS";
     const DRIVEN: Option<Driven> = None;
-    const READ_FROM_SNAPSHOT: bool = false;
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(0, 4294967295, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -1148,7 +1148,7 @@ impl LimitSpec for PicoUnicastBatchBytes {
     type Value = usize;
     const LIMIT: &'static str = "PICO_UNICAST_BATCH_BYTES";
     const DRIVEN: Option<Driven> = None;
-    const READ_FROM_SNAPSHOT: bool = false;
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(1, 65535, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -1171,7 +1171,7 @@ impl LimitSpec for PicoMulticastBatchBytes {
     type Value = usize;
     const LIMIT: &'static str = "PICO_MULTICAST_BATCH_BYTES";
     const DRIVEN: Option<Driven> = None;
-    const READ_FROM_SNAPSHOT: bool = false;
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(1, 65535, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -1193,7 +1193,7 @@ impl LimitSpec for PicoLeaseMs {
     type Value = usize;
     const LIMIT: &'static str = "PICO_LEASE_MS";
     const DRIVEN: Option<Driven> = None;
-    const READ_FROM_SNAPSHOT: bool = false;
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(1, 4294967295, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -1215,7 +1215,7 @@ impl LimitSpec for PicoSocketTimeoutMs {
     type Value = usize;
     const LIMIT: &'static str = "PICO_SOCKET_TIMEOUT_MS";
     const DRIVEN: Option<Driven> = None;
-    const READ_FROM_SNAPSHOT: bool = false;
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(0, 4294967295, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -1237,7 +1237,7 @@ impl LimitSpec for PicoConnectTimeoutMs {
     type Value = usize;
     const LIMIT: &'static str = "PICO_CONNECT_TIMEOUT_MS";
     const DRIVEN: Option<Driven> = None;
-    const READ_FROM_SNAPSHOT: bool = false;
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(1, 4294967295, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -1259,7 +1259,7 @@ impl LimitSpec for PicoFragMaxBytes {
     type Value = Quota;
     const LIMIT: &'static str = "PICO_FRAG_MAX_BYTES";
     const DRIVEN: Option<Driven> = Some(Driven::Remote);
-    const READ_FROM_SNAPSHOT: bool = false;
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::from_build(caps::PICO_FRAG_MAX_BYTES, false);
@@ -1282,7 +1282,7 @@ impl LimitSpec for PicoAcceptTimeoutMs {
     type Value = usize;
     const LIMIT: &'static str = "PICO_ACCEPT_TIMEOUT_MS";
     const DRIVEN: Option<Driven> = None;
-    const READ_FROM_SNAPSHOT: bool = false;
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(1, 4294967295, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -1304,7 +1304,7 @@ impl LimitSpec for PicoKeepalivesPerLease {
     type Value = usize;
     const LIMIT: &'static str = "PICO_KEEPALIVES_PER_LEASE";
     const DRIVEN: Option<Driven> = None;
-    const READ_FROM_SNAPSHOT: bool = false;
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(1, 4294967295, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -1530,6 +1530,12 @@ impl SessionLimits {
         self.match_memo_slots.get()
     }
 
+    /// `MATCH_MEMO_SLOTS` as the snapshot keeps it, for a machine that keeps the value beside
+    /// its own state: in no byte where the build allows one value.
+    pub const fn match_memo_slots_held(&self) -> MatchMemoSlotsHeld {
+        self.match_memo_slots
+    }
+
     /// Selects `MATCH_MEMO_SLOTS`, when the build's domain holds `value`.
     pub fn select_match_memo_slots(&mut self, value: usize) -> Result<(), OutsideLimitDomain> {
         self.match_memo_slots = Limited::select(value)?;
@@ -1556,6 +1562,12 @@ impl SessionLimits {
     /// `DELIVERY_LANE_BYTES` as this snapshot holds it.
     pub const fn delivery_lane_bytes(&self) -> usize {
         self.delivery_lane_bytes.get()
+    }
+
+    /// `DELIVERY_LANE_BYTES` as the snapshot keeps it, for a machine that keeps the value beside
+    /// its own state: in no byte where the build allows one value.
+    pub const fn delivery_lane_bytes_held(&self) -> DeliveryLaneBytesHeld {
+        self.delivery_lane_bytes
     }
 
     /// Selects `DELIVERY_LANE_BYTES`, when the build's domain holds `value`.
@@ -1621,6 +1633,12 @@ impl SessionLimits {
     /// `LINK_NOTED_REQUESTS` as this snapshot holds it.
     pub const fn link_noted_requests(&self) -> usize {
         self.link_noted_requests.get()
+    }
+
+    /// `LINK_NOTED_REQUESTS` as the snapshot keeps it, for a machine that keeps the value beside
+    /// its own state: in no byte where the build allows one value.
+    pub const fn link_noted_requests_held(&self) -> LinkNotedRequestsHeld {
+        self.link_noted_requests
     }
 
     /// Selects `LINK_NOTED_REQUESTS`, when the build's domain holds `value`.
@@ -1890,6 +1908,12 @@ impl SessionLimits {
         self.tx_no_progress_window_us.get()
     }
 
+    /// `TX_NO_PROGRESS_WINDOW_US` as the snapshot keeps it, for a machine that keeps the value beside
+    /// its own state: in no byte where the build allows one value.
+    pub const fn tx_no_progress_window_us_held(&self) -> TxNoProgressWindowUsHeld {
+        self.tx_no_progress_window_us
+    }
+
     /// Selects `TX_NO_PROGRESS_WINDOW_US`, when the build's domain holds `value`.
     pub fn select_tx_no_progress_window_us(
         &mut self,
@@ -1921,6 +1945,12 @@ impl SessionLimits {
         self.datagram_fragment_burst.get()
     }
 
+    /// `DATAGRAM_FRAGMENT_BURST` as the snapshot keeps it, for a machine that keeps the value beside
+    /// its own state: in no byte where the build allows one value.
+    pub const fn datagram_fragment_burst_held(&self) -> DatagramFragmentBurstHeld {
+        self.datagram_fragment_burst
+    }
+
     /// Selects `DATAGRAM_FRAGMENT_BURST`, when the build's domain holds `value`.
     pub fn select_datagram_fragment_burst(
         &mut self,
@@ -1933,6 +1963,12 @@ impl SessionLimits {
     /// `DATAGRAM_FRAGMENT_GAP_US` as this snapshot holds it.
     pub const fn datagram_fragment_gap_us(&self) -> usize {
         self.datagram_fragment_gap_us.get()
+    }
+
+    /// `DATAGRAM_FRAGMENT_GAP_US` as the snapshot keeps it, for a machine that keeps the value beside
+    /// its own state: in no byte where the build allows one value.
+    pub const fn datagram_fragment_gap_us_held(&self) -> DatagramFragmentGapUsHeld {
+        self.datagram_fragment_gap_us
     }
 
     /// Selects `DATAGRAM_FRAGMENT_GAP_US`, when the build's domain holds `value`.
@@ -1987,6 +2023,12 @@ impl SessionLimits {
     /// `PICO_TX_QUEUE_SIZE` as this snapshot holds it.
     pub const fn pico_tx_queue_size(&self) -> usize {
         self.pico_tx_queue_size.get()
+    }
+
+    /// `PICO_TX_QUEUE_SIZE` as the snapshot keeps it, for a machine that keeps the value beside
+    /// its own state: in no byte where the build allows one value.
+    pub const fn pico_tx_queue_size_held(&self) -> PicoTxQueueSizeHeld {
+        self.pico_tx_queue_size
     }
 
     /// Selects `PICO_TX_QUEUE_SIZE`, when the build's domain holds `value`.
@@ -2085,6 +2127,12 @@ impl SessionLimits {
         self.declaration_sync_burst_messages.get()
     }
 
+    /// `DECLARATION_SYNC_BURST_MESSAGES` as the snapshot keeps it, for a machine that keeps the value beside
+    /// its own state: in no byte where the build allows one value.
+    pub const fn declaration_sync_burst_messages_held(&self) -> DeclarationSyncBurstMessagesHeld {
+        self.declaration_sync_burst_messages
+    }
+
     /// Selects `DECLARATION_SYNC_BURST_MESSAGES`, when the build's domain holds `value`.
     pub fn select_declaration_sync_burst_messages(
         &mut self,
@@ -2097,6 +2145,14 @@ impl SessionLimits {
     /// `DECLARATION_SYNC_FINAL_TIMEOUT_MS` as this snapshot holds it.
     pub const fn declaration_sync_final_timeout_ms(&self) -> usize {
         self.declaration_sync_final_timeout_ms.get()
+    }
+
+    /// `DECLARATION_SYNC_FINAL_TIMEOUT_MS` as the snapshot keeps it, for a machine that keeps the value beside
+    /// its own state: in no byte where the build allows one value.
+    pub const fn declaration_sync_final_timeout_ms_held(
+        &self,
+    ) -> DeclarationSyncFinalTimeoutMsHeld {
+        self.declaration_sync_final_timeout_ms
     }
 
     /// Selects `DECLARATION_SYNC_FINAL_TIMEOUT_MS`, when the build's domain holds `value`.
@@ -2113,6 +2169,12 @@ impl SessionLimits {
         self.declaration_sync_interval_ms.get()
     }
 
+    /// `DECLARATION_SYNC_INTERVAL_MS` as the snapshot keeps it, for a machine that keeps the value beside
+    /// its own state: in no byte where the build allows one value.
+    pub const fn declaration_sync_interval_ms_held(&self) -> DeclarationSyncIntervalMsHeld {
+        self.declaration_sync_interval_ms
+    }
+
     /// Selects `DECLARATION_SYNC_INTERVAL_MS`, when the build's domain holds `value`.
     pub fn select_declaration_sync_interval_ms(
         &mut self,
@@ -2125,6 +2187,14 @@ impl SessionLimits {
     /// `DECLARATION_SYNC_RX_NO_PROGRESS_MS` as this snapshot holds it.
     pub const fn declaration_sync_rx_no_progress_ms(&self) -> usize {
         self.declaration_sync_rx_no_progress_ms.get()
+    }
+
+    /// `DECLARATION_SYNC_RX_NO_PROGRESS_MS` as the snapshot keeps it, for a machine that keeps the value beside
+    /// its own state: in no byte where the build allows one value.
+    pub const fn declaration_sync_rx_no_progress_ms_held(
+        &self,
+    ) -> DeclarationSyncRxNoProgressMsHeld {
+        self.declaration_sync_rx_no_progress_ms
     }
 
     /// Selects `DECLARATION_SYNC_RX_NO_PROGRESS_MS`, when the build's domain holds `value`.
@@ -2141,6 +2211,14 @@ impl SessionLimits {
         self.declaration_sync_retry_interval_ms.get()
     }
 
+    /// `DECLARATION_SYNC_RETRY_INTERVAL_MS` as the snapshot keeps it, for a machine that keeps the value beside
+    /// its own state: in no byte where the build allows one value.
+    pub const fn declaration_sync_retry_interval_ms_held(
+        &self,
+    ) -> DeclarationSyncRetryIntervalMsHeld {
+        self.declaration_sync_retry_interval_ms
+    }
+
     /// Selects `DECLARATION_SYNC_RETRY_INTERVAL_MS`, when the build's domain holds `value`.
     pub fn select_declaration_sync_retry_interval_ms(
         &mut self,
@@ -2153,6 +2231,14 @@ impl SessionLimits {
     /// `DECLARATION_SYNC_TX_NO_PROGRESS_MS` as this snapshot holds it.
     pub const fn declaration_sync_tx_no_progress_ms(&self) -> usize {
         self.declaration_sync_tx_no_progress_ms.get()
+    }
+
+    /// `DECLARATION_SYNC_TX_NO_PROGRESS_MS` as the snapshot keeps it, for a machine that keeps the value beside
+    /// its own state: in no byte where the build allows one value.
+    pub const fn declaration_sync_tx_no_progress_ms_held(
+        &self,
+    ) -> DeclarationSyncTxNoProgressMsHeld {
+        self.declaration_sync_tx_no_progress_ms
     }
 
     /// Selects `DECLARATION_SYNC_TX_NO_PROGRESS_MS`, when the build's domain holds `value`.
@@ -2169,6 +2255,12 @@ impl SessionLimits {
         self.pico_unicast_batch_bytes.get()
     }
 
+    /// `PICO_UNICAST_BATCH_BYTES` as the snapshot keeps it, for a machine that keeps the value beside
+    /// its own state: in no byte where the build allows one value.
+    pub const fn pico_unicast_batch_bytes_held(&self) -> PicoUnicastBatchBytesHeld {
+        self.pico_unicast_batch_bytes
+    }
+
     /// Selects `PICO_UNICAST_BATCH_BYTES`, when the build's domain holds `value`.
     pub fn select_pico_unicast_batch_bytes(
         &mut self,
@@ -2181,6 +2273,12 @@ impl SessionLimits {
     /// `PICO_MULTICAST_BATCH_BYTES` as this snapshot holds it.
     pub const fn pico_multicast_batch_bytes(&self) -> usize {
         self.pico_multicast_batch_bytes.get()
+    }
+
+    /// `PICO_MULTICAST_BATCH_BYTES` as the snapshot keeps it, for a machine that keeps the value beside
+    /// its own state: in no byte where the build allows one value.
+    pub const fn pico_multicast_batch_bytes_held(&self) -> PicoMulticastBatchBytesHeld {
+        self.pico_multicast_batch_bytes
     }
 
     /// Selects `PICO_MULTICAST_BATCH_BYTES`, when the build's domain holds `value`.
@@ -2197,6 +2295,12 @@ impl SessionLimits {
         self.pico_lease_ms.get()
     }
 
+    /// `PICO_LEASE_MS` as the snapshot keeps it, for a machine that keeps the value beside
+    /// its own state: in no byte where the build allows one value.
+    pub const fn pico_lease_ms_held(&self) -> PicoLeaseMsHeld {
+        self.pico_lease_ms
+    }
+
     /// Selects `PICO_LEASE_MS`, when the build's domain holds `value`.
     pub fn select_pico_lease_ms(&mut self, value: usize) -> Result<(), OutsideLimitDomain> {
         self.pico_lease_ms = Limited::select(value)?;
@@ -2206,6 +2310,12 @@ impl SessionLimits {
     /// `PICO_SOCKET_TIMEOUT_MS` as this snapshot holds it.
     pub const fn pico_socket_timeout_ms(&self) -> usize {
         self.pico_socket_timeout_ms.get()
+    }
+
+    /// `PICO_SOCKET_TIMEOUT_MS` as the snapshot keeps it, for a machine that keeps the value beside
+    /// its own state: in no byte where the build allows one value.
+    pub const fn pico_socket_timeout_ms_held(&self) -> PicoSocketTimeoutMsHeld {
+        self.pico_socket_timeout_ms
     }
 
     /// Selects `PICO_SOCKET_TIMEOUT_MS`, when the build's domain holds `value`.
@@ -2220,6 +2330,12 @@ impl SessionLimits {
     /// `PICO_CONNECT_TIMEOUT_MS` as this snapshot holds it.
     pub const fn pico_connect_timeout_ms(&self) -> usize {
         self.pico_connect_timeout_ms.get()
+    }
+
+    /// `PICO_CONNECT_TIMEOUT_MS` as the snapshot keeps it, for a machine that keeps the value beside
+    /// its own state: in no byte where the build allows one value.
+    pub const fn pico_connect_timeout_ms_held(&self) -> PicoConnectTimeoutMsHeld {
+        self.pico_connect_timeout_ms
     }
 
     /// Selects `PICO_CONNECT_TIMEOUT_MS`, when the build's domain holds `value`.
@@ -2253,6 +2369,12 @@ impl SessionLimits {
         self.pico_accept_timeout_ms.get()
     }
 
+    /// `PICO_ACCEPT_TIMEOUT_MS` as the snapshot keeps it, for a machine that keeps the value beside
+    /// its own state: in no byte where the build allows one value.
+    pub const fn pico_accept_timeout_ms_held(&self) -> PicoAcceptTimeoutMsHeld {
+        self.pico_accept_timeout_ms
+    }
+
     /// Selects `PICO_ACCEPT_TIMEOUT_MS`, when the build's domain holds `value`.
     pub fn select_pico_accept_timeout_ms(
         &mut self,
@@ -2265,6 +2387,12 @@ impl SessionLimits {
     /// `PICO_KEEPALIVES_PER_LEASE` as this snapshot holds it.
     pub const fn pico_keepalives_per_lease(&self) -> usize {
         self.pico_keepalives_per_lease.get()
+    }
+
+    /// `PICO_KEEPALIVES_PER_LEASE` as the snapshot keeps it, for a machine that keeps the value beside
+    /// its own state: in no byte where the build allows one value.
+    pub const fn pico_keepalives_per_lease_held(&self) -> PicoKeepalivesPerLeaseHeld {
+        self.pico_keepalives_per_lease
     }
 
     /// Selects `PICO_KEEPALIVES_PER_LEASE`, when the build's domain holds `value`.
@@ -2926,6 +3054,12 @@ impl RuntimeLimits {
         self.snapshot_period_ms.get()
     }
 
+    /// `SNAPSHOT_PERIOD_MS` as the snapshot keeps it, for a machine that keeps the value beside
+    /// its own state: in no byte where the build allows one value.
+    pub const fn snapshot_period_ms_held(&self) -> SnapshotPeriodMsHeld {
+        self.snapshot_period_ms
+    }
+
     /// Selects `SNAPSHOT_PERIOD_MS`, when the build's domain holds `value`.
     pub fn select_snapshot_period_ms(&mut self, value: usize) -> Result<(), OutsideLimitDomain> {
         self.snapshot_period_ms = Limited::select(value)?;
@@ -2935,6 +3069,12 @@ impl RuntimeLimits {
     /// `SNAPSHOT_HISTOGRAM_BUCKETS` as this snapshot holds it.
     pub const fn snapshot_histogram_buckets(&self) -> usize {
         self.snapshot_histogram_buckets.get()
+    }
+
+    /// `SNAPSHOT_HISTOGRAM_BUCKETS` as the snapshot keeps it, for a machine that keeps the value beside
+    /// its own state: in no byte where the build allows one value.
+    pub const fn snapshot_histogram_buckets_held(&self) -> SnapshotHistogramBucketsHeld {
+        self.snapshot_histogram_buckets
     }
 
     /// Selects `SNAPSHOT_HISTOGRAM_BUCKETS`, when the build's domain holds `value`.
@@ -2949,6 +3089,12 @@ impl RuntimeLimits {
     /// `SUPERVISION_CHECKPOINTS` as this snapshot holds it.
     pub const fn supervision_checkpoints(&self) -> usize {
         self.supervision_checkpoints.get()
+    }
+
+    /// `SUPERVISION_CHECKPOINTS` as the snapshot keeps it, for a machine that keeps the value beside
+    /// its own state: in no byte where the build allows one value.
+    pub const fn supervision_checkpoints_held(&self) -> SupervisionCheckpointsHeld {
+        self.supervision_checkpoints
     }
 
     /// Selects `SUPERVISION_CHECKPOINTS`, when the build's domain holds `value`.
@@ -2983,6 +3129,12 @@ impl RuntimeLimits {
     /// `EVENT_RING_SLOTS` as this snapshot holds it.
     pub const fn event_ring_slots(&self) -> usize {
         self.event_ring_slots.get()
+    }
+
+    /// `EVENT_RING_SLOTS` as the snapshot keeps it, for a machine that keeps the value beside
+    /// its own state: in no byte where the build allows one value.
+    pub const fn event_ring_slots_held(&self) -> EventRingSlotsHeld {
+        self.event_ring_slots
     }
 
     /// Selects `EVENT_RING_SLOTS`, when the build's domain holds `value`.
@@ -3031,6 +3183,12 @@ impl RuntimeLimits {
     /// `CLOCK_MAX_FORWARD_STEP_MS` as this snapshot holds it.
     pub const fn clock_max_forward_step_ms(&self) -> usize {
         self.clock_max_forward_step_ms.get()
+    }
+
+    /// `CLOCK_MAX_FORWARD_STEP_MS` as the snapshot keeps it, for a machine that keeps the value beside
+    /// its own state: in no byte where the build allows one value.
+    pub const fn clock_max_forward_step_ms_held(&self) -> ClockMaxForwardStepMsHeld {
+        self.clock_max_forward_step_ms
     }
 
     /// Selects `CLOCK_MAX_FORWARD_STEP_MS`, when the build's domain holds `value`.

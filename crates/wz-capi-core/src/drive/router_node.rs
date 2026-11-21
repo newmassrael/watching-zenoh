@@ -656,14 +656,14 @@ pub(crate) fn open_router_blocking(
     // is the router it dialled, which tells a client only what the client asked for, so the hat
     // sends that face every interest and every declaration of its south and every message whose
     // source is south (`zenoh/src/net/routing/hat/client/pubsub.rs` @ `fn compute_data_route`).
-    // The node's machines read the snapshot the open resolved, as its links do. The open resolves
-    // a session's limits alone, so the node runs under the build's runtime limits.
+    // The node's machines read the snapshots the open resolved, as its links do: the clock the
+    // forwarder builds is bound by the node's runtime limits.
     let forwarder = RouterForwarder::for_node(
         role.whatami(),
         own_zid,
         timestamping,
         &session_policy,
-        &wz_session_core::limits::RuntimeLimits::BUILD,
+        &runtime_limits,
     )
     .with_limits(&session_limits);
     // The forwarder built the node's clock: a stated bound it refused fails the open here, before

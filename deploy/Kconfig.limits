@@ -269,8 +269,9 @@ config WZ_LIMIT_MAX_STATIC_CONNECT
 	int "MAX_STATIC_CONNECT"
 	default 8
 	help
-	  The locators a node is told to connect to. A list longer than this stops
-	  at the limit; a fixed deployment names a few peers.
+	  The locators a node is told to connect to. A fixed image holds this many
+	  rows and names a few peers; on the heap the list grows with no bound unless
+	  one is stated, and an open whose list is longer is refused by name.
 
 config WZ_LIMIT_MAX_PEER_NODES
 	int "MAX_PEER_NODES"

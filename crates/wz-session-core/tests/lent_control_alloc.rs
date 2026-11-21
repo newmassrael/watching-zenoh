@@ -237,7 +237,12 @@ fn every_control_writer_costs_the_heap_nothing_and_its_builder_costs_it_somethin
         wrong,
         "undeclare_subscriber_naming",
         {
-            let named = lent::NamedKeyexpr::new(7, "tail").unwrap();
+            let named = lent::NamedKeyexpr::new(
+                7,
+                "tail",
+                wz_session_core::limits::SessionLimits::BUILD.max_keyexpr_bytes_held(),
+            )
+            .unwrap();
             // The value borrows `named`, so it is encoded inside this block.
             let mut slot = [0u8; SLOT];
             let len = {
