@@ -6318,6 +6318,23 @@
         "D9's tolerance narrows when every host builds in the declared image (the same-build-environment work).",
         "The soft-job gate's hosted reading is red today by design: the Windows package rows wait for two green runs of the packager fix, and the Windows cooperative rows for this landing's fix."
       ]
+    },
+    "Round 4584": {
+      "decision_summary": "Layer B judged every source on six backends, so it failed `take_generation` (Round 4578) where SCE refuses it by name: SCE lowers a map in an algorithm on Rust and C11 only (`ALGORITHM_MAP_BACKENDS`, docs/adr/0108 D10), and cpp, kotlin, go and python exit 7 with that sentence. `scripts/verify-codegen.sh` now reads a table of the backends each stem is known to be refused on and the words of the refusal (`UNLOWERED_ON`, `UNLOWERED_BECAUSE`). A listed backend passes only when refused in exactly those words; one that emits fails and names the entry to drop, and any other failure stays a failure. The C1m guards had drifted where hosted runs never reached them, each leg failing on the one before: they take what main `c72460b30` printed (peer nodes 29, from hosted run 44895098050; lifecycle verbs 37, coop ip stack links 11 and slot declaration replay 14, from a build host). The SCE pin moves to e5289177652, whose map is built by a `const fn` and is all zero bytes when empty without an allocator; `ResetGenerations::with_seed` is `const` and gains `reseed` and `UNDRAWN_SEED`. The fixed-memory node does not take the table yet: under feature unification a graph with `alloc` on grows every SCE map on the heap, so the node's reset query allocated twice in `admin_open_query`. The SCE session accepted the diagnosis and is making a map's storage a type (`Inline` and `Heap`, the default chosen by the feature).",
+      "changes_bullets": [
+        "`scripts/verify-codegen.sh`: `UNLOWERED_ON` and `UNLOWERED_BECAUSE` (take_generation: cpp kotlin go python), status `unlowered` or `EMITS`, `unlowered=N` in the summary. `scripts/run-ci.sh`: C1m guards `mcu peer nodes` 27 to 29, `mcu lifecycle verbs` 35 to 37, `coop ip stack links` 10 to 11, `mcu slot declaration replay` 13 to 14, each with where it was printed. `vendor/sce` 8525a3e265b to e5289177652. `crates/wz-session-core/src/reset_generations.rs`: `with_seed` is a `const fn`, `reseed`, `UNDRAWN_SEED`, one more unit test."
+      ],
+      "verification_bullets": [
+        "`scripts/build-sce.sh` at e5289177652, then `bash scripts/regen-codegen.sh` stage 1 and stage 2: no file under `out/` changes. `verify-codegen.sh` over all 108 stems of `sources/codecs` and `sources/algorithms`: 108 pass; take_generation prints rust and c11 ok and the four others unlowered. `run-ci.sh --layer C1m` through bx on a build host: pass (262 s). `cargo test -p wz-session-core --lib reset_generations`: 7 passed. Clippy `-D warnings` of `wz-session-core` clean. The hook's round-fed gates: 166 ran, 0 failed. The other reds of hosted run 44895098050 are taken by the session watching-zenoh-5e, split by message."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.a-new-kind-algorithm",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.l-new-kind-bounded-collection",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "When SCE lands the map storage as a type, move the pin and put the connect manager's table on `Inline` storage (the branch `take-generation-mcu-wip` holds the change and its test, with the slot nodes drawing the seed from the session factory's entropy), then run `admin_open_query` (nothing allocated), C1m, the kit images one at a time and C1cs. Then the census rows whose only gap is U1, the U3 re-read and W9 to W11."
+      ]
     }
   },
   "inventory_entries": {
