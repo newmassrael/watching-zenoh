@@ -216,6 +216,10 @@ class Case:
     # Patterns no symbol the library leaves UNDEFINED may match (`nm -u`): a name the library
     # expects whoever loads it to define, which no C program linking it does.
     forbid_undefined: tuple[str, ...] = ()
+    # Patterns each of which some library the library names as needed (DT_NEEDED) must match: a
+    # library that names no C library leaves its calls unversioned, and the loader binds an
+    # unversioned call to the oldest version of the symbol.
+    require_needed: tuple[str, ...] = ()
     # A cargo configuration file the build reads (`--config`, a path from `crates/`), with the
     # host's own target named (`--target`), so that what the file gives the library's crates does
     # not reach the build scripts. None: the profile alone.
@@ -726,6 +730,7 @@ CASES: tuple[Case, ...] = (
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN, STD_RUNTIME, KECCAK),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
          forbid_undefined=(r"^rust_eh_personality$",),
+         require_needed=(r"^libc\.so",),
          exports=445, profile="capi-nostd", cargo_config=".cargo/capi-nostd.toml",
          note="pico-client-coop's capabilities and its 444 C exports, and `rust_eh_personality`: "
               "the prebuilt `core`'s unwind tables name it and LTO keeps the reference "
@@ -1413,6 +1418,8 @@ class Measured:
     digests: tuple[str, ...] = ()
     # The names of the symbols the library leaves undefined, as it states them (unmangled).
     undefined: tuple[str, ...] = ()
+    # The shared libraries the library names as needed (DT_NEEDED).
+    needed: tuple[str, ...] = ()
     # The build path prefixes the library still holds (build_normalization.leaked).
     leaked: tuple[str, ...] = ()
 
@@ -1555,6 +1562,13 @@ def grade(case: Case, got: Measured, stated: str | None = None) -> list[str]:
                 f"{case.id}: the library leaves {hits[0]} undefined, a name it expects whoever "
                 f"loads it to define; no C program that links it does, so the program's link fails."
             )
+    for pattern in case.require_needed:
+        if not any(re.search(pattern, n) for n in got.needed):
+            findings.append(
+                f"{case.id}: the library names no needed library matching `{pattern}` "
+                f"(it names {list(got.needed) or 'none'}): its calls into it are unversioned, "
+                f"and the loader binds them to the oldest version of each symbol."
+            )
     if case.exports is not None and got.exports != case.exports:
         findings.append(
             f"{case.id}: exports {got.exports} C symbols, pinned at {case.exports}. A symbol "
@@ -1637,10 +1651,16 @@ def build(case: Case, env: Mapping[str, str], prefixes: build_normalization.Pref
     undefined = subprocess.run(
         ["nm", "-u", str(lib)], capture_output=True, text=True, check=True
     ).stdout.splitlines()
+    dynamic_section = subprocess.run(
+        ["readelf", "-d", str(lib)], capture_output=True, text=True, check=True
+    ).stdout.splitlines()
+    needed = tuple(re.sub(r".*\[(.*)\].*", r"\1", line) for line in dynamic_section
+                   if "(NEEDED)" in line)
     data = lib.read_bytes()
     return Measured(text=text, symbols=symbols, exports=exports, digests=digests_in(data),
                     leaked=tuple(build_normalization.leaked(data, prefixes)),
-                    undefined=tuple(line.split()[-1] for line in undefined if line.split()))
+                    undefined=tuple(line.split()[-1] for line in undefined if line.split()),
+                    needed=needed)
 
 
 @dataclass(frozen=True)
@@ -2089,6 +2109,11 @@ def cmd_selftest() -> int:
            == 1)
     expect("the same name defined, or another left undefined, is not",
            grade(personality, Measured(900, ["rust_eh_personality"], 3, (), ("malloc",))) == [])
+    libc_named = Case("t", "p", "l", "", 1000, require_needed=(r"^libc\.so",))
+    expect("a library that names no C library is a finding",
+           len(grade(libc_named, Measured(900, [], 3, (), (), ()))) == 1)
+    expect("one that names it is not",
+           grade(libc_named, Measured(900, [], 3, (), (), ("libc.so.6",))) == [])
     expect("an unpinned export count is not graded",
            grade(Case("t", "p", "l", "", 1000), Measured(900, [], 99)) == [])
     # The control that keeps ABSENCE honest: every pattern a case forbids is required by some

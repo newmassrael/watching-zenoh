@@ -114,6 +114,52 @@ unsafe fn aligned_free(block: *mut c_void) {
     libc::aligned_free(block);
 }
 
+// The C library the library calls (its heap, threads, clocks and sockets), named for the linker.
+// A program with `std` has it named through `std`; the `libc` crate names none on a host outside
+// `std`'s own build (on GNU/Linux only as `std`'s dependency, on any host not with its `std`
+// feature, which this graph turns on). Unnamed, the library carries no DT_NEEDED for it and each
+// of its calls is an unversioned reference, which the loader binds to the OLDEST version of the
+// symbol: glibc's 2.2.5 compatibility `pthread_cond_*`, whose condition variable is another
+// object, so `z_condvar_init` failed and a timed wait returned at once (measured on the first
+// build). Named here, the link records the C library and the default version of every symbol.
+// `pthread` is its own library before glibc 2.34; the linker drops a library nothing needs.
+#[cfg(all(
+    feature = "os-posix",
+    not(feature = "std"),
+    target_os = "linux",
+    target_env = "gnu"
+))]
+#[link(name = "pthread")]
+#[link(name = "c")]
+extern "C" {}
+// Every other POSIX host keeps its threads in its C library.
+#[cfg(all(
+    feature = "os-posix",
+    not(feature = "std"),
+    unix,
+    not(all(target_os = "linux", target_env = "gnu"))
+))]
+#[link(name = "c")]
+extern "C" {}
+// Windows: the C runtime, the DLL's (`msvcrt`, its import library) or the static one (`libcmt`)
+// as the target's `crt-static` says, as `std` names it.
+#[cfg(all(
+    feature = "os-posix",
+    not(feature = "std"),
+    target_env = "msvc",
+    not(target_feature = "crt-static")
+))]
+#[link(name = "msvcrt")]
+extern "C" {}
+#[cfg(all(
+    feature = "os-posix",
+    not(feature = "std"),
+    target_env = "msvc",
+    target_feature = "crt-static"
+))]
+#[link(name = "libcmt")]
+extern "C" {}
+
 // The library's own memory, in a build that has no `std` to give it. A test build links `std`,
 // whose allocator and panic handler are the test's.
 #[cfg(all(feature = "os-posix", not(feature = "std"), not(test)))]
