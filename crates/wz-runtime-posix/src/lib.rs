@@ -15,6 +15,8 @@
 //!    link is written against; and, under `session-slot`, [`slot`], the stack the slot profile's
 //!    session host is given over it. [`stream`] -- TCP over the same, ([`stream::PosixTcpSocket`]),
 //!    the socket the shared stream link (`wz_runtime_coop::stream_link`) is written against.
+//!    [`group`](mod@group) -- a multicast group's two sockets as the group transport the shared
+//!    group drive loop runs on, written once over either host's sockets.
 //! 5. [`file`](mod@file) -- a file read whole into the caller's buffer, and a secret read only when its
 //!    owner alone may read it: a document provisioned to the device apart from the program.
 //! 6. [`glue`] -- the console line and the sleep, and [`posix_image_no_heap!`], the image glue
@@ -41,8 +43,9 @@
 //! counter, the system's random number generator, Winsock), and they are
 #![cfg_attr(windows, doc = "[`windows`](mod@windows),")]
 #![cfg_attr(not(windows), doc = "`windows` (a module of the Windows build),")]
-//! the clock, entropy, wall clock and sockets the pico C ABI's cooperative engine is opened over.
-//! Every item above is the POSIX half's, compiled on a POSIX host only. On another OS this crate
+//! the clock, entropy, wall clock and sockets the pico C ABI's cooperative engine is opened over,
+//! and the slot profile's stack over the same sockets. Every item above but `group` is the POSIX
+//! half's, compiled on a POSIX host only; `group` is written once over either host's sockets. On another OS this crate
 //! is empty, so a workspace-wide build there does not stop on it; a port names its own calls here.
 #![no_std]
 #![cfg(any(target_os = "linux", target_os = "android", target_os = "nto", windows))]
@@ -61,7 +64,7 @@ pub mod control;
 pub mod file;
 #[cfg(unix)]
 pub mod glue;
-#[cfg(unix)]
+// A multicast group's two sockets as the group transport, over either host's sockets.
 pub mod group;
 // Written over the runtime's heap link layer, so compiled where the runtime declares it.
 wz_runtime_coop::with_heap_link_seams! {
@@ -70,7 +73,7 @@ wz_runtime_coop::with_heap_link_seams! {
 }
 #[cfg(unix)]
 pub mod net;
-#[cfg(all(unix, feature = "session-slot"))]
+#[cfg(feature = "session-slot")]
 pub mod slot;
 #[cfg(unix)]
 pub mod stream;

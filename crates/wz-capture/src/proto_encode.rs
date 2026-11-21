@@ -71,6 +71,13 @@
 //!
 //! ## The bytes
 //!
+//! The bytes are written by the workspace's one protobuf writer
+//! (`wz_app_frame::proto_write`), the one a program's payload set field by
+//! field writes through too, so the two cannot write one message apart. This
+//! module reads the values and judges each against its field; the writer turns
+//! a judged value into bytes, holding an integer to nanopb's range
+//! (`Narrowing::NanopbIntSize`).
+//!
 //! * Fields are written in ascending field NUMBER, whatever the order in the
 //!   file or in the JSON. Each field is written once.
 //! * A proto3 singular field that is not in a oneof, not `optional` and not a
@@ -187,11 +194,11 @@ use core::fmt;
 use wz_session_core::json5::{self, Json5Value};
 use wz_session_core::json5_lex::{Json5Error, Lexer};
 
+use wz_app_frame::proto_write::{self, Narrowing, PackedRefusal, Wire};
+
 use crate::proto_nanopb::IntSize;
 use crate::proto_parse::{Label, OptionValue, ScalarKind, Syntax};
-use crate::proto_range::{
-    field_range, map_entry_range, value_range, RangeRefusal, RangeSource, ValueRange,
-};
+use crate::proto_range::{value_range, RangeRefusal, RangeSource, ValueRange};
 use crate::proto_schema::{FieldKind, Fld, Linker, MapValueKind, Msg, ProtoDiagnostic, ProtoFile};
 
 /// The most bytes a message may encode to.
@@ -339,64 +346,10 @@ fn read_values(text: &str) -> Result<Json5Value, EncodeError> {
 
 // ---- the wire ------------------------------------------------------------
 
-const WIRE_VARINT: u64 = 0;
-const WIRE_I64: u64 = 1;
-const WIRE_LEN: u64 = 2;
-const WIRE_I32: u64 = 5;
-
-/// One value as the wire carries it, before its tag.
-enum Wire {
-    Varint(u64),
-    Fixed32(u32),
-    Fixed64(u64),
-    Len(Vec<u8>),
-}
-
-impl Wire {
-    const fn wire_type(&self) -> u64 {
-        match self {
-            Self::Varint(_) => WIRE_VARINT,
-            Self::Fixed64(_) => WIRE_I64,
-            Self::Len(_) => WIRE_LEN,
-            Self::Fixed32(_) => WIRE_I32,
-        }
-    }
-
-    /// Whether this is the default of its type: zero, all bits clear, or empty.
-    /// For a float this is a test on the BITS, so `-0.0` is not the default.
-    fn is_default(&self) -> bool {
-        match self {
-            Self::Varint(v) | Self::Fixed64(v) => *v == 0,
-            Self::Fixed32(v) => *v == 0,
-            Self::Len(bytes) => bytes.is_empty(),
-        }
-    }
-
-    /// The value without its tag.
-    fn put(&self, out: &mut Vec<u8>) {
-        match self {
-            Self::Varint(v) => put_varint(out, *v),
-            Self::Fixed32(v) => out.extend_from_slice(&v.to_le_bytes()),
-            Self::Fixed64(v) => out.extend_from_slice(&v.to_le_bytes()),
-            Self::Len(bytes) => {
-                put_varint(out, bytes.len() as u64);
-                out.extend_from_slice(bytes);
-            }
-        }
-    }
-}
-
-fn put_varint(out: &mut Vec<u8>, mut v: u64) {
-    while v >= 0x80 {
-        out.push((v & 0x7f) as u8 | 0x80);
-        v >>= 7;
-    }
-    out.push(v as u8);
-}
-
-fn put_tag(out: &mut Vec<u8>, number: u64, wire_type: u64) {
-    put_varint(out, (number << 3) | wire_type);
-}
+/// The integers this writer holds a value to: nanopb's, so that a value a
+/// receiver that links nanopb would refuse is refused here, at its place in the
+/// values, and not by that receiver.
+const NARROWING: Narrowing = Narrowing::NanopbIntSize;
 
 // ---- JSON numbers --------------------------------------------------------
 
@@ -948,16 +901,16 @@ impl Encoder<'_, '_, '_> {
         out: &mut Vec<u8>,
     ) -> Result<(), EncodeError> {
         let here = child(path, member.key);
-        let (number, kind, label, oneof, name, range, file) = {
+        let (number, kind, label, presence, name, range, file) = {
             let message = self.msg(msg);
             let f = &message.fields[member.field];
             (
                 f.number,
                 f.kind,
                 f.label,
-                f.oneof,
+                proto_write::has_presence(message, f),
                 self.field_name(msg, f),
-                field_range(self.schema, message, f),
+                NARROWING.field_range(self.schema, message, f),
                 message.file,
             )
         };
@@ -982,17 +935,7 @@ impl Encoder<'_, '_, '_> {
             }
             _ => {
                 let wire = self.single(kind, member.value, &place)?;
-                // Presence: a message field, a oneof member and a labelled
-                // field have it (proto2 labels every singular field, so all of
-                // its fields do); a bare proto3 scalar does not, so its default
-                // is not written.
-                let explicit = matches!(kind, FieldKind::Message(_))
-                    || oneof.is_some()
-                    || matches!(label, Label::Optional | Label::Required);
-                if explicit || !wire.is_default() {
-                    put_tag(out, number, wire.wire_type());
-                    wire.put(out);
-                }
+                proto_write::put_singular(out, number, presence, &wire);
                 Ok(())
             }
         }
@@ -1004,13 +947,13 @@ impl Encoder<'_, '_, '_> {
         kind: FieldKind,
         value: &Json5Value,
         place: &Place<'_>,
-    ) -> Result<Wire, EncodeError> {
+    ) -> Result<Wire<'static>, EncodeError> {
         match kind {
             FieldKind::Scalar(scalar) => self.scalar(scalar, value, place),
             FieldKind::Enum(e) => self.enum_value(e, value, place),
             FieldKind::Message(inner) => {
                 let bytes = self.message(inner, value, place.path)?;
-                Ok(Wire::Len(bytes))
+                Ok(Wire::delimited(bytes))
             }
             FieldKind::Group | FieldKind::Map { .. } => Err(self.value_error(
                 place.path,
@@ -1023,46 +966,26 @@ impl Encoder<'_, '_, '_> {
 
     // ---- repeated and map ------------------------------------------------
 
-    /// Whether a repeated field of this kind may be packed.
-    fn packable(&self, kind: FieldKind) -> bool {
-        match kind {
-            FieldKind::Enum(_) => true,
-            FieldKind::Scalar(s) => !matches!(s, ScalarKind::String | ScalarKind::Bytes),
-            FieldKind::Message(_) | FieldKind::Group | FieldKind::Map { .. } => false,
-        }
-    }
-
-    /// Whether the repeated field is written packed: the file's syntax gives
-    /// the default and `[packed = ...]` overrides it.
-    fn packed(&self, msg: usize, f: &Fld, packable: bool) -> Result<bool, EncodeError> {
-        let default = self.msg(msg).syntax == Syntax::Proto3 && packable;
-        let Some(option) = Self::option(f, "packed") else {
-            return Ok(default);
-        };
+    /// Whether the repeated field is written packed, by the writer's rule; a
+    /// `packed` it cannot act on is a schema error at the option's value.
+    fn packed(&self, msg: usize, f: &Fld) -> Result<bool, EncodeError> {
         let file = self.msg(msg).file;
-        match &option.value {
-            OptionValue::Ident(word) if word == "false" => Ok(false),
-            OptionValue::Ident(word) if word == "true" => {
-                if packable {
-                    Ok(true)
-                } else {
-                    Err(self.schema_error(
-                        file,
-                        option.value_pos,
-                        format!(
-                            "`[packed = true]` can only be set on a repeated field of a numeric, \
-                             bool or enum type; `{}` is not",
-                            f.name
-                        ),
-                    ))
-                }
-            }
-            _ => Err(self.schema_error(
+        proto_write::packed(self.msg(msg), f).map_err(|refusal| match refusal {
+            PackedRefusal::NotPackable(option) => self.schema_error(
+                file,
+                option.value_pos,
+                format!(
+                    "`[packed = true]` can only be set on a repeated field of a numeric, bool \
+                     or enum type; `{}` is not",
+                    f.name
+                ),
+            ),
+            PackedRefusal::NotABool(option) => self.schema_error(
                 file,
                 option.value_pos,
                 String::from("the option `packed` takes `true` or `false`"),
-            )),
-        }
+            ),
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1084,11 +1007,8 @@ impl Encoder<'_, '_, '_> {
                 format!("expected an array, found {}", describe(value)),
             ));
         };
-        let packed = {
-            let f = &self.msg(msg).fields[field];
-            self.packed(msg, f, self.packable(kind))?
-        };
-        let mut wires: Vec<Wire> = Vec::with_capacity(items.len());
+        let packed = self.packed(msg, &self.msg(msg).fields[field])?;
+        let mut wires: Vec<Wire<'static>> = Vec::with_capacity(items.len());
         for (i, item) in items.iter().enumerate() {
             let at = format!("{}/{i}", place.path);
             if matches!(item, Json5Value::Null) {
@@ -1109,22 +1029,7 @@ impl Encoder<'_, '_, '_> {
                 },
             )?);
         }
-        if wires.is_empty() {
-            return Ok(());
-        }
-        if packed {
-            let mut run = Vec::new();
-            for w in &wires {
-                w.put(&mut run);
-            }
-            put_tag(out, number, WIRE_LEN);
-            Wire::Len(run).put(out);
-        } else {
-            for w in &wires {
-                put_tag(out, number, w.wire_type());
-                w.put(out);
-            }
-        }
+        proto_write::put_repeated(out, number, packed, &wires);
         Ok(())
     }
 
@@ -1149,11 +1054,12 @@ impl Encoder<'_, '_, '_> {
                 format!("expected an object, found {}", describe(json)),
             ));
         };
-        let key_range = map_entry_range(self.schema, file, key);
+        let key_range = NARROWING.map_entry_range(self.schema, file, key);
         let (value_kind, entry_value_range) = match value {
-            MapValueKind::Scalar(s) => {
-                (FieldKind::Scalar(s), map_entry_range(self.schema, file, s))
-            }
+            MapValueKind::Scalar(s) => (
+                FieldKind::Scalar(s),
+                NARROWING.map_entry_range(self.schema, file, s),
+            ),
             MapValueKind::Enum(e) => (FieldKind::Enum(e), Err(RangeRefusal::Enum)),
             MapValueKind::Message(m) => (FieldKind::Message(m), Err(RangeRefusal::NotAnInteger)),
         };
@@ -1180,11 +1086,7 @@ impl Encoder<'_, '_, '_> {
                 range: entry_value_range,
             };
             let value_wire = self.single(value_kind, item, &value_place)?;
-            let mut entry = Vec::new();
-            put_tag(&mut entry, 1, key_wire.wire_type());
-            key_wire.put(&mut entry);
-            put_tag(&mut entry, 2, value_wire.wire_type());
-            value_wire.put(&mut entry);
+            let entry = proto_write::map_entry(&key_wire, &value_wire);
             if sorted.insert(ordering, entry).is_some() {
                 return Err(self.value_error(
                     &at,
@@ -1195,8 +1097,7 @@ impl Encoder<'_, '_, '_> {
             }
         }
         for entry in sorted.into_values() {
-            put_tag(out, number, WIRE_LEN);
-            Wire::Len(entry).put(out);
+            proto_write::put_field(out, number, &Wire::delimited(entry));
         }
         Ok(())
     }
@@ -1207,11 +1108,11 @@ impl Encoder<'_, '_, '_> {
         kind: ScalarKind,
         text: &str,
         place: &Place<'_>,
-    ) -> Result<(MapKey, Wire), EncodeError> {
+    ) -> Result<(MapKey, Wire<'static>), EncodeError> {
         match kind {
             ScalarKind::String => Ok((
                 MapKey::Text(String::from(text)),
-                Wire::Len(text.as_bytes().to_vec()),
+                Wire::delimited(text.as_bytes().to_vec()),
             )),
             ScalarKind::Bool => match text {
                 "true" => Ok((MapKey::Number(1), Wire::Varint(1))),
@@ -1239,7 +1140,7 @@ impl Encoder<'_, '_, '_> {
                             reason,
                         )
                     })?;
-                Ok((MapKey::Number(number), Self::integer_wire(kind, number)))
+                Ok((MapKey::Number(number), Wire::integer(kind, number)))
             }
         }
     }
@@ -1377,7 +1278,7 @@ impl Encoder<'_, '_, '_> {
         kind: ScalarKind,
         value: &Json5Value,
         place: &Place<'_>,
-    ) -> Result<Wire, EncodeError> {
+    ) -> Result<Wire<'static>, EncodeError> {
         let bad = |reason: String| {
             self.value_error(
                 place.path,
@@ -1395,12 +1296,12 @@ impl Encoder<'_, '_, '_> {
                 ))),
             },
             ScalarKind::String => match value {
-                Json5Value::String(s) => Ok(Wire::Len(s.as_bytes().to_vec())),
+                Json5Value::String(s) => Ok(Wire::delimited(s.as_bytes().to_vec())),
                 other => Err(bad(format!("expected a string, found {}", describe(other)))),
             },
             ScalarKind::Bytes => match value {
                 Json5Value::String(s) => base64_decode(s)
-                    .map(Wire::Len)
+                    .map(Wire::delimited)
                     .map_err(|why| bad(format!("not valid base64: {why}"))),
                 other => Err(bad(format!(
                     "expected a base64 string, found {}",
@@ -1436,42 +1337,19 @@ impl Encoder<'_, '_, '_> {
                     .and_then(|range| {
                         Self::integer(kind, range, text, matches!(value, Json5Value::String(_)))
                     })
-                    .map(|v| Self::integer_wire(kind, v))
+                    .map(|v| Wire::integer(kind, v))
                     .map_err(bad)
             }
         }
     }
 
-    /// The wire form of an integer already known to fit `kind`.
-    fn integer_wire(kind: ScalarKind, v: i128) -> Wire {
-        match kind {
-            // Sign-extended to 64 bits: a negative int32 is ten bytes.
-            ScalarKind::Int32 | ScalarKind::Int64 => Wire::Varint(v as i64 as u64),
-            ScalarKind::Uint32 | ScalarKind::Uint64 => Wire::Varint(v as u64),
-            ScalarKind::Sint32 => {
-                let n = v as i32;
-                Wire::Varint(u64::from(((n << 1) ^ (n >> 31)) as u32))
-            }
-            ScalarKind::Sint64 => {
-                let n = v as i64;
-                Wire::Varint(((n << 1) ^ (n >> 63)) as u64)
-            }
-            ScalarKind::Fixed32 => Wire::Fixed32(v as u32),
-            ScalarKind::Sfixed32 => Wire::Fixed32(v as i32 as u32),
-            ScalarKind::Fixed64 => Wire::Fixed64(v as u64),
-            ScalarKind::Sfixed64 => Wire::Fixed64(v as i64 as u64),
-            // Not integers: the caller sends only the kinds that have a type range
-            // (`crate::proto_range::type_range`).
-            ScalarKind::Double
-            | ScalarKind::Float
-            | ScalarKind::Bool
-            | ScalarKind::String
-            | ScalarKind::Bytes => Wire::Varint(0),
-        }
-    }
-
     /// `float` or `double` from the text of a JSON number or string.
-    fn float(&self, kind: ScalarKind, text: &str, from_string: bool) -> Result<Wire, String> {
+    fn float(
+        &self,
+        kind: ScalarKind,
+        text: &str,
+        from_string: bool,
+    ) -> Result<Wire<'static>, String> {
         let single = kind == ScalarKind::Float;
         if from_string {
             let special = match text {
@@ -1514,7 +1392,7 @@ impl Encoder<'_, '_, '_> {
         e: usize,
         value: &Json5Value,
         place: &Place<'_>,
-    ) -> Result<Wire, EncodeError> {
+    ) -> Result<Wire<'static>, EncodeError> {
         let info = &self.schema.enums[e];
         let names: Vec<&str> = info.values.iter().map(|(n, _)| n.as_str()).collect();
         let expected = format!(

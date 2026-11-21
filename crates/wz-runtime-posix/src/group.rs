@@ -1,43 +1,73 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! The host profile's multicast group seam: a group session's I/O over the kernel's own sockets.
+//! The host profile's multicast group seam: a group session's I/O over the host's own sockets.
 //!
-//! [`PosixGroupTransport`] is the [`GroupTransport`] the shared group drive loop
-//! (`wz-session-mcu`'s `group_drive`) runs on, beside lwIP's and Zephyr's. It has the shape
-//! zenoh gives a multicast link (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @
+//! [`GroupSockets`] is the [`GroupTransport`] the shared group drive loop
+//! (`wz-session-mcu`'s `group_drive`) runs on, beside lwIP's and Zephyr's, over any host socket
+//! that can be a member of a group ([`MulticastSocket`]): the POSIX kernels' (`PosixGroupTransport`)
+//! and Winsock's (`windows::group::WindowsGroupTransport`). It has the shape zenoh gives a
+//! multicast link (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @
 //! `let ucast_sock = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))`): TWO sockets,
-//! a RECEIVER bound to the wildcard address on the group's port with `SO_REUSEADDR` and
-//! `SO_REUSEPORT` (so it can share the port with every other member on this host) and joined to the
-//! group, and a SENDER of its own on a port the kernel picks, so the source a peer sees names this
-//! member and no other, even when two members live on one host. One socket for both, as the
-//! Zephyr and lwIP transports have, would send every member of a host from the group's port.
+//! a RECEIVER bound to the wildcard address on the group's port so that it can share the port with
+//! every other member on this host ([`MulticastSocket::bind_shared`]) and joined to the group, and
+//! a SENDER of its own on a port the system picks, so the source a peer sees names this member and
+//! no other, even when two members live on one host. One socket for both, as the Zephyr and lwIP
+//! transports have, would send every member of a host from the group's port.
 //!
-//! Nothing allocates: the two sockets are file descriptors and the receive buffer is an array of
-//! `RX` bytes inside the value; size it to the batch the group advertises, since a datagram longer
-//! than `RX` is truncated by the kernel and read by the loop as a bad frame.
+//! Nothing allocates: the two sockets are handles and the receive buffer is an array of `RX`
+//! bytes inside the value; size it to the batch the group advertises, since a datagram longer than
+//! `RX` is truncated by the system and read by the loop as a bad frame.
 //!
-//! A member leaves the group by closing its receiver: the kernel drops the membership with the
+//! A member leaves the group by closing its receiver: the system drops the membership with the
 //! socket on this host, where Zephyr's interface holds it.
 
-use core::net::SocketAddr;
+use core::net::{IpAddr, SocketAddr};
 
 use wz_runtime_coop::group_transport::{GroupInterface, GroupTransport};
 use wz_runtime_coop::udp_link::{unspecified_like, DatagramSocket, SERVICE_WAIT_MS};
 
+#[cfg(unix)]
 use crate::net::{PosixNetError, PosixUdpSocket};
 
-/// A multicast group session's I/O over the host's sockets.
-pub struct PosixGroupTransport<const RX: usize> {
+/// A host's datagram socket that can be a member of a multicast group: what [`GroupSockets`]
+/// asks of it beyond the link's own seam. Each host answers with its own calls; the rules of the
+/// two sockets and of the join are [`GroupSockets`]'s, written once.
+pub trait MulticastSocket: DatagramSocket {
+    /// A socket bound to `at` that other sockets of this host may bind too, as every member of a
+    /// group does.
+    fn bind_shared(at: SocketAddr) -> Result<Self, Self::Error>;
+
+    /// Join `group` on `interface`, the one the system's routing picks for
+    /// [`GroupInterface::Routing`].
+    fn join_group(&self, group: IpAddr, interface: GroupInterface) -> Result<(), Self::Error>;
+
+    /// Send multicast datagrams out of `interface`; the routing's choice needs no option.
+    fn set_multicast_interface(&self, interface: GroupInterface) -> Result<(), Self::Error>;
+
+    /// The hop limit of the multicast datagrams this socket sends, in the option of its family.
+    fn set_multicast_hops(&self, hops: u8) -> Result<(), Self::Error>;
+
+    /// The error of an interface named in the other family than the group's, which is answered
+    /// before any socket is opened.
+    fn interface_family() -> Self::Error;
+}
+
+/// A multicast group session's I/O over two sockets `S` of the host.
+pub struct GroupSockets<S: MulticastSocket, const RX: usize> {
     /// The joined receiver, `None` once the session has released its link.
-    ingress: Option<PosixUdpSocket>,
+    ingress: Option<S>,
     /// The sender, on a port of its own.
-    egress: Option<PosixUdpSocket>,
+    egress: Option<S>,
     /// The group and its port, where every datagram is sent.
     group: SocketAddr,
     rx: [u8; RX],
-    rx_error: Option<PosixNetError>,
+    rx_error: Option<S::Error>,
 }
+
+/// The POSIX kernels' group transport.
+#[cfg(unix)]
+pub type PosixGroupTransport<const RX: usize> = GroupSockets<PosixUdpSocket, RX>;
 
 /// The wildcard address of `group`'s family on `port`: what a group's receiver and sender bind,
 /// as upstream zenoh binds its group socket to the unspecified address of the group's family
@@ -47,15 +77,15 @@ fn wildcard(group: &SocketAddr, port: u16) -> SocketAddr {
     SocketAddr::new(unspecified_like(group.ip()), port)
 }
 
-/// The sender of a group: a socket of its family on a port the kernel picks, sending out of
-/// `interface`, with the hop limit `hops` when one is stated and the kernel's own otherwise (no
+/// The sender of a group: a socket of its family on a port the system picks, sending out of
+/// `interface`, with the hop limit `hops` when one is stated and the system's own otherwise (no
 /// option is set then).
-fn sender(
+fn sender<S: MulticastSocket>(
     group: &SocketAddr,
     interface: GroupInterface,
     hops: Option<u8>,
-) -> Result<PosixUdpSocket, PosixNetError> {
-    let egress = PosixUdpSocket::bind(wildcard(group, 0))?;
+) -> Result<S, S::Error> {
+    let egress = S::bind(wildcard(group, 0))?;
     egress.set_multicast_interface(interface)?;
     if let Some(hops) = hops {
         egress.set_multicast_hops(hops)?;
@@ -63,29 +93,28 @@ fn sender(
     Ok(egress)
 }
 
-impl<const RX: usize> PosixGroupTransport<RX> {
+impl<S: MulticastSocket, const RX: usize> GroupSockets<S, RX> {
     /// Join `group` (an IPv4 or an IPv6 group, and its port) on `interface`, which is also the one
-    /// the node sends out of ([`GroupInterface::Routing`]: the one the kernel's routing picks for
+    /// the node sends out of ([`GroupInterface::Routing`]: the one the system's routing picks for
     /// the group). `hops` is the hop limit of what it sends when one is stated; `None` leaves the
-    /// kernel's own (1: one subnet), as zenoh sets `IP_MULTICAST_TTL` only when its endpoint
+    /// system's own (1: one subnet), as zenoh sets `IP_MULTICAST_TTL` only when its endpoint
     /// states `ttl` (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @
     /// `if let Some(ttl_str) = config.get(UDP_MULTICAST_TTL)`). A stated `ttl` is applied to an
     /// IPv6 group too (`IPV6_MULTICAST_HOPS`), where zenoh 1.10.2 only warns that it cannot, as
-    /// the AP's group socket does (`wz_host_net::multicast`). An IPv4 group is joined with IGMP
-    /// (`IP_ADD_MEMBERSHIP`), an IPv6 one with MLD (`IPV6_JOIN_GROUP`), each on sockets of the
-    /// group's family. An interface named in the other family is
-    /// [`PosixNetError::InterfaceFamily`], before a socket is opened.
+    /// the AP's group socket does (`wz_host_net::multicast`). An IPv4 group is joined with IGMP,
+    /// an IPv6 one with MLD, each on sockets of the group's family. An interface named in the other
+    /// family is [`MulticastSocket::interface_family`], before a socket is opened.
     pub fn join(
         group: SocketAddr,
         interface: GroupInterface,
         hops: Option<u8>,
-    ) -> Result<Self, PosixNetError> {
+    ) -> Result<Self, S::Error> {
         if !interface.names_for(&group) {
-            return Err(PosixNetError::InterfaceFamily);
+            return Err(S::interface_family());
         }
-        let ingress = PosixUdpSocket::bind_shared(wildcard(&group, group.port()))?;
+        let ingress = S::bind_shared(wildcard(&group, group.port()))?;
         ingress.join_group(group.ip(), interface)?;
-        let egress = sender(&group, interface, hops)?;
+        let egress = sender::<S>(&group, interface, hops)?;
         Ok(Self {
             ingress: Some(ingress),
             egress: Some(egress),
@@ -95,6 +124,43 @@ impl<const RX: usize> PosixGroupTransport<RX> {
         })
     }
 
+    /// The group and port this transport sends to and receives on.
+    pub fn group(&self) -> SocketAddr {
+        self.group
+    }
+
+    /// The port of the sender: the source every peer sees this member's datagrams from.
+    pub fn sender_port(&self) -> Option<u16> {
+        self.egress.as_ref().map(|socket| socket.local().port())
+    }
+
+    /// The most recent receive failure, if the receiver has failed: the seam the loop reads
+    /// returns a datagram or nothing, and a failed socket must not read as a quiet group.
+    pub fn rx_error(&self) -> Option<S::Error> {
+        self.rx_error
+    }
+}
+
+#[cfg(test)]
+impl<S: MulticastSocket, const RX: usize> GroupSockets<S, RX> {
+    /// A transport made as [`Self::join`] makes it but for the membership, which is the one step
+    /// that needs a multicast route on the host: what the rest of the transport does is the same
+    /// whether or not the group was joined. Its port is the one the system gave the receiver.
+    pub(crate) fn unjoined(group: SocketAddr, hops: Option<u8>) -> Result<Self, S::Error> {
+        let ingress = S::bind_shared(wildcard(&group, 0))?;
+        let egress = sender::<S>(&group, GroupInterface::Routing, hops)?;
+        Ok(Self {
+            group: SocketAddr::new(group.ip(), ingress.local().port()),
+            ingress: Some(ingress),
+            egress: Some(egress),
+            rx: [0; RX],
+            rx_error: None,
+        })
+    }
+}
+
+#[cfg(unix)]
+impl<const RX: usize> GroupSockets<PosixUdpSocket, RX> {
     /// Join `group` through the interface routing picks for it, and when routing has none (a host
     /// with one subnet route and no default route refuses the join with `ENODEV`), through the
     /// first interface of the group's family that is up, can multicast and is not a loopback
@@ -116,25 +182,34 @@ impl<const RX: usize> PosixGroupTransport<RX> {
             other => other,
         }
     }
+}
 
-    /// The group and port this transport sends to and receives on.
-    pub fn group(&self) -> SocketAddr {
-        self.group
+/// The POSIX kernels' socket as a group's member: `SO_REUSEADDR` and `SO_REUSEPORT` on the
+/// receiver, IGMP (`IP_ADD_MEMBERSHIP`) and MLD (`IPV6_JOIN_GROUP`) for the join.
+#[cfg(unix)]
+impl MulticastSocket for PosixUdpSocket {
+    fn bind_shared(at: SocketAddr) -> Result<Self, PosixNetError> {
+        PosixUdpSocket::bind_shared(at)
     }
 
-    /// The port of the sender: the source every peer sees this member's datagrams from.
-    pub fn sender_port(&self) -> Option<u16> {
-        self.egress.as_ref().map(|socket| socket.local().port())
+    fn join_group(&self, group: IpAddr, interface: GroupInterface) -> Result<(), PosixNetError> {
+        PosixUdpSocket::join_group(self, group, interface)
     }
 
-    /// The most recent receive failure, if the receiver has failed: the seam the loop reads
-    /// returns a datagram or nothing, and a failed socket must not read as a quiet group.
-    pub fn rx_error(&self) -> Option<PosixNetError> {
-        self.rx_error
+    fn set_multicast_interface(&self, interface: GroupInterface) -> Result<(), PosixNetError> {
+        PosixUdpSocket::set_multicast_interface(self, interface)
+    }
+
+    fn set_multicast_hops(&self, hops: u8) -> Result<(), PosixNetError> {
+        PosixUdpSocket::set_multicast_hops(self, hops)
+    }
+
+    fn interface_family() -> PosixNetError {
+        PosixNetError::InterfaceFamily
     }
 }
 
-impl<const RX: usize> GroupTransport for PosixGroupTransport<RX> {
+impl<S: MulticastSocket, const RX: usize> GroupTransport for GroupSockets<S, RX> {
     fn open(&mut self) -> bool {
         self.ingress.is_some() && self.egress.is_some()
     }
@@ -146,7 +221,7 @@ impl<const RX: usize> GroupTransport for PosixGroupTransport<RX> {
     }
 
     fn service(&self) {
-        // The kernel runs the stack: all this thread owes it is the wait, which a datagram cuts
+        // The system runs the stack: all this thread owes it is the wait, which a datagram cuts
         // short and which is a tick otherwise, so a node holding sessions beside this one does
         // not wait on the group for longer than it would on a stream.
         if let Some(socket) = &self.ingress {
@@ -155,7 +230,8 @@ impl<const RX: usize> GroupTransport for PosixGroupTransport<RX> {
     }
 
     /// A host has no carrier to read here; what ends a group is its receiver failing, which is
-    /// what the kernel reports of an interface that went away (`ENETDOWN`, `ENODEV`).
+    /// what the system reports of an interface that went away (`ENETDOWN`, `ENODEV` on a POSIX
+    /// kernel).
     fn carrier_up(&self) -> bool {
         self.rx_error.is_none()
     }
@@ -186,7 +262,7 @@ impl<const RX: usize> GroupTransport for PosixGroupTransport<RX> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use core::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -267,19 +343,10 @@ mod tests {
         }
     }
 
-    /// A transport made as `join` makes it but for the membership, which is the one step that
-    /// needs a multicast route on the host: what the rest of the transport does is the same
-    /// whether or not the group was joined.
+    /// The shared helper at this module's size: a transport made as `join` makes it but for the
+    /// membership.
     fn unjoined(group: SocketAddr, hops: Option<u8>) -> PosixGroupTransport<64> {
-        let ingress = PosixUdpSocket::bind_shared(wildcard(&group, 0)).expect("a receiver");
-        let egress = sender(&group, GroupInterface::Routing, hops).expect("a sender");
-        PosixGroupTransport {
-            group: SocketAddr::new(group.ip(), ingress.local().port()),
-            ingress: Some(ingress),
-            egress: Some(egress),
-            rx: [0; 64],
-            rx_error: None,
-        }
+        PosixGroupTransport::<64>::unjoined(group, hops).expect("an unjoined transport")
     }
 
     /// An IPv6 group's sockets are of its family, and its hop limit is the IPv6 option's.

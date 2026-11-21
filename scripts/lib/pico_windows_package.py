@@ -5,7 +5,7 @@
 """R4551 (no register item) -- the Windows release packages of the pico C ABI library, one for each
 width of Windows: x64 and x86.
 
-    pico_windows_package.py --build OUT --profile ID [--arch x64|x86]
+    pico_windows_package.py --build OUT --profile ID [--arch x64|x86] [--form single|split]
     pico_windows_package.py --verify DIR|ZIP
     pico_windows_package.py --test ZIP
     pico_windows_package.py --selftest
@@ -19,6 +19,15 @@ usage notes and release notes, the licence of the library and the notices of eve
 and `manifest.json`, the size and SHA-256 of every other file. For each width it writes
 `OUT/<name>/`, `OUT/<name>.zip` and `OUT/<name>.zip.sha256`, the width in `<name>` and the Rust
 target in the manifest's `target`.
+
+`--form` names the form of the library, both when it names none: `single`, the one DLL
+`wz_capi_pico.dll` the default build makes, the core and the doors of the additional features in it;
+or `split`, the same build as two DLLs, the core (`wz-capi-pico` compiled with
+`--cfg wz_additional_apart`) and the additional library `wz_capi_pico_ext.dll` (`wz-capi-pico-ext`,
+the doors' sources over the core's C ABI, importing from the core's DLL), each with its import
+library and symbols, from the profile's one feature list (docs/capi-pico-additional-library.md). A
+program links every library of its package; the split package's name says `split` and its manifest
+`form` and `libraries`.
 
 `--verify` re-hashes a package (a directory, or a zip it extracts first) against its manifest: a
 file that differs, one the manifest names that is missing, and one it does not name are each a
@@ -86,9 +95,21 @@ ARCHES = {
 }
 CRATE = "wz-capi-pico"
 LIBRARY = "wz_capi_pico"
+# The second form of the library: the core alone (`CRATE` with `APART_CFG`) and the doors of the
+# additional features as a library of their own (`EXT_CRATE`), which imports the core's DLL through C
+# (docs/capi-pico-additional-library.md).
+EXT_CRATE = "wz-capi-pico-ext"
+EXT_LIBRARY = "wz_capi_pico_ext"
+APART_CFG = "wz_additional_apart"
+# The forms of a package: its name for `--form` -> the libraries it ships, in the order a program
+# links them. A program is written the same for both and links every library of its package.
+FORMS = {
+    "single": (LIBRARY,),
+    "split": (LIBRARY, EXT_LIBRARY),
+}
 PROFILE_ID_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 FORMAT = "wz-pico-windows-package"
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
 MANIFEST = "manifest.json"
 STATEMENT = "build-statement.json"
 
@@ -158,8 +179,24 @@ def parse_env_lines(lines: list[str]) -> dict[str, str]:
     return out
 
 
-def package_name(version: str, profile: str, arch: str, commit: str) -> str:
-    return f"{CRATE}-{version}-{profile}-windows-{arch}-{commit[:10]}"
+def package_name(version: str, profile: str, arch: str, commit: str, form: str = "single") -> str:
+    """The package's name: the one library's carries no form, the split one's says `split`."""
+    shape = "" if form == "single" else f"-{form}"
+    return f"{CRATE}-{version}-{profile}-windows-{arch}{shape}-{commit[:10]}"
+
+
+def form_of(manifest: dict) -> str:
+    """The form a package's manifest states; a form no package is made in is refused."""
+    form = manifest.get("form")
+    if form not in FORMS:
+        raise Refusal(f"`{form}` is the form of no package ({', '.join(FORMS)})")
+    return form
+
+
+def ext_features(features: list[str], declared: set[str]) -> list[str]:
+    """The features of the core's list the additional library declares, in the list's order: its
+    doors and the arm of the C types they read, which the two libraries must agree on."""
+    return [feature for feature in features if feature in declared]
 
 
 def arch_of_target(target: str) -> str:
@@ -278,18 +315,22 @@ def notice_table(rows: list[dict]) -> list[str]:
 
 
 def render_notices(profile: str, target: str, linked: list[dict], compile_time: list[dict], rust: dict,
-                   pico: dict) -> str:
-    """THIRD-PARTY-NOTICES.md: what the library links and the texts that cover it."""
+                   pico: dict, libraries: tuple[str, ...] = (LIBRARY,),
+                   crates: tuple[str, ...] = (CRATE,)) -> str:
+    """THIRD-PARTY-NOTICES.md: what the libraries link and the texts that cover it."""
     textless = [row for row in linked if not row["texts"]]
+    one = len(libraries) == 1
+    named = " and ".join(f"`release/bin/{lib}.dll` and `debug/bin/{lib}.dll`" for lib in libraries)
+    graphs = " and ".join(f"`{crate}`" for crate in crates)
     out = [
         "# Third-party notices",
         "",
-        "The library of this package (`release/bin/wz_capi_pico.dll` and `debug/bin/wz_capi_pico.dll`) is",
+        f"The {'library' if one else 'libraries'} of this package ({named}) {'is' if one else 'are'}",
         "watching-zenoh, under the licence in `LICENSE` or a commercial licence (`LICENSE-COMMERCIAL.md`).",
-        "It links the packages listed below, each under its own licence.",
+        f"{'It links' if one else 'They link'} the packages listed below, each under its own licence.",
         "",
         "This list is derived from the build, not written by hand: it is the normal-dependency graph of",
-        f"`{CRATE}` built with the features of profile `{profile}` for `{target}` (`cargo tree`),",
+        f"{graphs} built with the features of profile `{profile}` for `{target}` (`cargo tree`),",
         "each package joined with its manifest (`cargo metadata`) for its licence expression and its",
         "source. The texts are the licence, copyright and notice files each package ships, copied under",
         "`licenses/`; a copy of a package carried in the watching-zenoh tree with a changed arm ships its",
@@ -452,12 +493,17 @@ def release_notes(template: str, facts: dict) -> str:
     on = [c["id"] for c in statement["capabilities"] if c["supported"]]
     limits = [f"{x['id']} = {x['value']} (default {x['default']})" for x in statement["limits"] if x["value"] != x["default"]]
     policies = [f"{p['id']} = {p['value']} (upstream {p['upstream']})" for p in statement["policies"] if p["value"] != p["upstream"]]
+    libraries = FORMS[facts.get("form", "single")]
+    form = ("one library, `" + libraries[0] + ".dll`" if len(libraries) == 1 else
+            "the core and the additional library built apart from one feature list, "
+            + ", ".join(f"`{lib}.dll`" for lib in libraries) + " (a program links both)")
     out = [
         template.rstrip("\n"),
         "",
         "## This build",
         "",
         f"- Package: `{facts['name']}`",
+        f"- Form: {form}",
         f"- Library version: {facts['version']}",
         f"- Source: commit `{facts['commit']}`" + ("" if facts["tree_clean"] else " with changes not committed"),
         f"- Toolchain: `{facts['rustc']}`, target `{facts['target']}`",
@@ -480,7 +526,10 @@ def release_notes(template: str, facts: dict) -> str:
 
 def run(cmd: list[str], cwd: pathlib.Path, env: dict[str, str] | None = None) -> str:
     print("+ " + " ".join(cmd), flush=True)
-    proc = subprocess.run(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, text=True)
+    # The tools read here (cargo, git) write UTF-8; without `encoding` Python decodes a pipe with the
+    # host's code page (cp1252 on a hosted Windows runner) and a single byte of another script ends
+    # the build (2026-11-21: `cargo metadata`, byte 0x81).
+    proc = subprocess.run(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, encoding="utf-8")
     if proc.returncode != 0:
         raise Refusal(f"`{' '.join(cmd[:3])}` failed with exit status {proc.returncode}")
     return proc.stdout
@@ -521,8 +570,31 @@ def arm_header(decl: dict, features: list[str], env: dict[str, str]) -> str:
     return header
 
 
+def build_selection(options: list[str]) -> tuple[list[str], list[str]]:
+    """The widths and forms `--build`'s options name (`--arch A`, `--form F`, each at most once):
+    every width and every form for an option not given. A word that is no option, an option given
+    twice or without its value, and a value no package is made for are refused."""
+    chosen: dict[str, str] = {}
+    rest = list(options)
+    while rest:
+        option = rest.pop(0)
+        if option not in ("--arch", "--form") or option in chosen or not rest:
+            raise Refusal(f"`{option}` is not an option of --build here (--arch A, --form F, each once)")
+        chosen[option] = rest.pop(0)
+    arches = [chosen["--arch"]] if "--arch" in chosen else list(ARCHES)
+    forms = [chosen["--form"]] if "--form" in chosen else list(FORMS)
+    for arch in arches:
+        if arch not in ARCHES:
+            raise Refusal(f"`{arch}` is not a width a package is made for ({', '.join(ARCHES)})")
+    for form in forms:
+        if form not in FORMS:
+            raise Refusal(f"`{form}` is not a form a package is made in ({', '.join(FORMS)})")
+    return arches, forms
+
+
 def git(*args: str) -> str:
-    return subprocess.run(["git", "-C", str(ROOT), *args], check=True, stdout=subprocess.PIPE, text=True).stdout.strip()
+    return subprocess.run(["git", "-C", str(ROOT), *args], check=True, stdout=subprocess.PIPE,
+                          encoding="utf-8").stdout.strip()
 
 
 def copy(src: pathlib.Path, dst: pathlib.Path) -> None:
@@ -565,12 +637,30 @@ def copy_texts(stage: pathlib.Path, rows: list[dict]) -> None:
             copy(row["dir"] / text, stage / text_dir(row) / text)
 
 
-def build(out: pathlib.Path, profile: str, arch: str) -> pathlib.Path:
+def copy_library(report: str, library: str, where: str, stage: pathlib.Path) -> None:
+    """Copy the DLL of `library` cargo's `report` names, its symbols and its import library into
+    the `where` build of the package."""
+    files = artifact_files(report, library)
+    dll = pick(files, ".dll")
+    if dll is None:
+        raise Refusal(f"cargo reported no single DLL of {library} for the {where} build: {files}")
+    # The linker writes the import library and the symbols beside the DLL, by its name, whether
+    # or not cargo lists them; `copy` refuses one that is not there.
+    implib = pick(files, ".dll.lib") or dll.parent / f"{dll.name}.lib"
+    pdb = pick(files, ".pdb") or dll.with_suffix(".pdb")
+    copy(dll, stage / where / "bin" / f"{library}.dll")
+    copy(pdb, stage / where / "bin" / f"{library}.pdb")
+    copy(implib, stage / where / "lib" / f"{library}.lib")
+
+
+def build(out: pathlib.Path, profile: str, arch: str, form: str) -> pathlib.Path:
     if sys.platform != "win32":
         raise Refusal("the package is built on a Windows host: its DLL, import library and symbols are "
                       "the MSVC toolchain's")
     if arch not in ARCHES:
         raise Refusal(f"`{arch}` is not a width a package is made for ({', '.join(ARCHES)})")
+    if form not in FORMS:
+        raise Refusal(f"`{form}` is not a form a package is made in ({', '.join(FORMS)})")
     target = ARCHES[arch][0]
     stated = stated_in_environment(dict(os.environ))
     if stated:
@@ -588,8 +678,12 @@ def build(out: pathlib.Path, profile: str, arch: str) -> pathlib.Path:
                  None)
     if crate is None:
         raise Refusal(f"{CRATE} is no package of the crates workspace")
+    ext = next((p for p in metadata["packages"]
+                if p["name"] == EXT_CRATE and p["id"] in metadata["workspace_members"]), None)
+    if form == "split" and ext is None:
+        raise Refusal(f"{EXT_CRATE} is no package of the crates workspace, and the split form is built with it")
     commit = git("rev-parse", "HEAD")
-    name = package_name(crate["version"], profile, arch, commit)
+    name = package_name(crate["version"], profile, arch, commit, form)
     stage = out / name
     if stage.exists():
         shutil.rmtree(stage)
@@ -605,20 +699,30 @@ def build(out: pathlib.Path, profile: str, arch: str) -> pathlib.Path:
     (stage / "include" / "zenoh-pico" / "config.h").write_text(header, encoding="utf-8", newline="\n")
 
     feature_args = ["--no-default-features", "--features", ",".join(features)]
+    # The additional library's own list: the profile's features it declares, over none of its
+    # defaults, so the two libraries are built from the one list of the profile.
+    ext_list = ext_features(features, set(ext["features"]) - {"default"}) if ext is not None else []
+    ext_args = ["--no-default-features"] + (["--features", ",".join(ext_list)] if ext_list else [])
+    # The split form's core is the same crate built with another cfg, so it is built in a target
+    # directory of its own and the one library's build is not overwritten by it.
+    split_dir = pathlib.Path(metadata["target_directory"]) / "pico-split"
     for where, cargo_profile in BUILDS:
+        if form == "single":
+            report = run(["cargo", "rustc", "-p", CRATE, "--lib", "--target", target, *feature_args,
+                          *cargo_profile, "--message-format=json-render-diagnostics", "--", *LINK_ARGS],
+                         CRATES, env)
+            copy_library(report, LIBRARY, where, stage)
+            continue
         report = run(["cargo", "rustc", "-p", CRATE, "--lib", "--target", target, *feature_args, *cargo_profile,
-                      "--message-format=json-render-diagnostics", "--", *LINK_ARGS], CRATES, env)
-        files = artifact_files(report, LIBRARY)
-        dll = pick(files, ".dll")
-        if dll is None:
-            raise Refusal(f"cargo reported no single DLL of {CRATE} for the {where} build: {files}")
-        # The linker writes the import library and the symbols beside the DLL, by its name, whether
-        # or not cargo lists them; `copy` refuses one that is not there.
-        implib = pick(files, ".dll.lib") or dll.parent / f"{dll.name}.lib"
-        pdb = pick(files, ".pdb") or dll.with_suffix(".pdb")
-        copy(dll, stage / where / "bin" / f"{LIBRARY}.dll")
-        copy(pdb, stage / where / "bin" / f"{LIBRARY}.pdb")
-        copy(implib, stage / where / "lib" / f"{LIBRARY}.lib")
+                      "--target-dir", str(split_dir), "--message-format=json-render-diagnostics", "--",
+                      *LINK_ARGS, "--cfg", APART_CFG], CRATES, env)
+        copy_library(report, LIBRARY, where, stage)
+        # The additional library's imports name the core's DLL themselves (`raw-dylib`), so its link
+        # needs no import library of the core.
+        report = run(["cargo", "rustc", "-p", EXT_CRATE, "--lib", "--target", target, *ext_args, *cargo_profile,
+                      "--target-dir", str(split_dir), "--message-format=json-render-diagnostics", "--",
+                      *LINK_ARGS], CRATES, env)
+        copy_library(report, EXT_LIBRARY, where, stage)
 
     for rel, src in FIXED_FILES:
         copy(src, stage / rel)
@@ -627,9 +731,15 @@ def build(out: pathlib.Path, profile: str, arch: str) -> pathlib.Path:
     copy(TRANSPORT_EXAMPLE, stage / "examples" / TRANSPORT_EXAMPLE.name)
     (stage / STATEMENT).write_text(render_json(plan["statement"]), encoding="utf-8", newline="\n")
 
-    tree_args = ["cargo", "tree", "-p", CRATE, *feature_args, "--target", target, "--prefix", "none", "--format", "{p}"]
-    linked_ids = parse_tree(run(tree_args + ["-e", "normal,no-proc-macro"], CRATES, env))
-    all_ids = parse_tree(run(tree_args + ["-e", "normal"], CRATES, env))
+    # Every library of the form links its own graph; the notices cover what any of them links.
+    graphs = [(CRATE, feature_args)] + ([(EXT_CRATE, ext_args)] if form == "split" else [])
+    linked_ids: set[tuple[str, str]] = set()
+    all_ids: set[tuple[str, str]] = set()
+    for crate_name, args in graphs:
+        tree_args = ["cargo", "tree", "-p", crate_name, *args, "--target", target, "--prefix", "none",
+                     "--format", "{p}"]
+        linked_ids |= parse_tree(run(tree_args + ["-e", "normal,no-proc-macro"], CRATES, env))
+        all_ids |= parse_tree(run(tree_args + ["-e", "normal"], CRATES, env))
     linked, problems = notice_rows(linked_ids, metadata, ROOT)
     compile_time, more = notice_rows(all_ids - linked_ids, metadata, ROOT)
     problems += more
@@ -640,13 +750,15 @@ def build(out: pathlib.Path, profile: str, arch: str) -> pathlib.Path:
     release = next((line for line in rustc.splitlines() if line.startswith("release:")), "release: unknown")
     rust = rust_notice(stage, "rustc " + release.split(":", 1)[1].strip())
     pico = pico_notice(stage)
-    (stage / "THIRD-PARTY-NOTICES.md").write_text(render_notices(profile, target, linked, compile_time, rust, pico),
-                                                  encoding="utf-8", newline="\n")
+    (stage / "THIRD-PARTY-NOTICES.md").write_text(
+        render_notices(profile, target, linked, compile_time, rust, pico, FORMS[form],
+                       tuple(crate_name for crate_name, _ in graphs)),
+        encoding="utf-8", newline="\n")
 
     tree_clean = git("status", "--porcelain", "--untracked-files=no") == ""
     facts = {"name": name, "version": crate["version"], "commit": commit, "tree_clean": tree_clean,
              "rustc": rust["release"], "target": target, "profile": profile, "features": features,
-             "statement": plan["statement"]}
+             "statement": plan["statement"], "form": form}
     template = (PACKAGE_DOCS / "RELEASE-NOTES.md").read_text(encoding="utf-8")
     (stage / "RELEASE-NOTES.md").write_text(release_notes(template, facts), encoding="utf-8", newline="\n")
 
@@ -657,6 +769,8 @@ def build(out: pathlib.Path, profile: str, arch: str) -> pathlib.Path:
         "version": crate["version"],
         "profile": profile,
         "target": target,
+        "form": form,
+        "libraries": list(FORMS[form]),
         "built_from": {"commit": commit, "tree_clean": tree_clean},
         "toolchain": {"rustc": rust["release"]},
         "statement_digest": plan["statement"]["digest"],
@@ -692,8 +806,9 @@ def vs_root() -> pathlib.Path:
         "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
     if not vswhere.is_file():
         raise Refusal("no vswhere.exe: the MSVC toolchain is not installed")
-    found = subprocess.run([str(vswhere), "-latest", "-products", "*", "-property", "installationPath"],
-                           check=True, stdout=subprocess.PIPE, text=True).stdout.strip()
+    found = subprocess.run([str(vswhere), "-utf8", "-latest", "-products", "*", "-property",
+                            "installationPath"], check=True, stdout=subprocess.PIPE,
+                           encoding="utf-8").stdout.strip()
     if not found:
         raise Refusal("vswhere names no Visual Studio installation")
     return pathlib.Path(found)
@@ -707,11 +822,13 @@ def run_cl(vs: pathlib.Path, vcvars: str, work: pathlib.Path, name: str, args: s
 
 
 def compile_program(vs: pathlib.Path, vcvars: str, package: pathlib.Path, where: str, src: pathlib.Path,
-                    work: pathlib.Path) -> pathlib.Path | None:
+                    work: pathlib.Path, libraries: tuple[str, ...]) -> pathlib.Path | None:
+    """The program compiled against the package's headers and linked against the import library of
+    every library of its form, as a program of that package is."""
     exe = work / f"{where}-{src.stem}.exe"
+    imports = " ".join(f'"{package / where / "lib" / (library + ".lib")}"' for library in libraries)
     built = run_cl(vs, vcvars, work, f"{where}-{src.stem}",
-                   f'/I"{package / "include"}" "{src}" '
-                   f'"{package / where / "lib" / (LIBRARY + ".lib")}" /Fe:"{exe}"')
+                   f'/I"{package / "include"}" "{src}" {imports} /Fe:"{exe}"')
     return exe if built and exe.is_file() else None
 
 
@@ -738,6 +855,7 @@ def test(archive: pathlib.Path) -> int:
         manifest = json.loads((package / MANIFEST).read_text(encoding="utf-8"))
         arch = arch_of_target(manifest.get("target", ""))
         vcvars = ARCHES[arch][1]
+        libraries = FORMS[form_of(manifest)]
         statement = json.loads((package / STATEMENT).read_text(encoding="utf-8"))
         programs = sorted(p for p in (package / "examples").glob("*.c"))
         if not programs:
@@ -755,7 +873,7 @@ def test(archive: pathlib.Path) -> int:
             runs = [(src, []) for src in programs]
             runs.append((CHECK_PROGRAM, [statement["digest"], str(package / CATALOG_SAMPLE)]))
             for src, args in runs:
-                exe = compile_program(vs, vcvars, package, where, src, work)
+                exe = compile_program(vs, vcvars, package, where, src, work, libraries)
                 if exe is None:
                     verdict = "did not compile or link: FAIL"
                 else:
@@ -1015,6 +1133,61 @@ def selftest() -> int:
     expect("the release notes name what is off its default, and only that",
            "L = 4 (default 2)" in notes and "M = 1" not in notes and "p = on (upstream off)" in notes)
     expect("a tree with changes says so", "with changes not committed" in notes)
+    expect("a build that states no form is the one library", "- Form: one library, `wz_capi_pico.dll`" in notes)
+    split_notes = release_notes("# Notes\n", {
+        "name": "n", "version": "0.1.0", "commit": "c" * 40, "tree_clean": True, "rustc": "rustc 1.0.0",
+        "target": "x86_64-pc-windows-msvc", "profile": "host-peer-ext", "features": ["std"],
+        "statement": statement, "form": "split"})
+    expect("the split form's notes name both libraries",
+           "`wz_capi_pico.dll`, `wz_capi_pico_ext.dll` (a program links both)" in split_notes)
+
+    expect("the one library's package keeps its name",
+           package_name("0.1.0", "p", "x64", "0123456789abc") == "wz-capi-pico-0.1.0-p-windows-x64-0123456789")
+    expect("the split package says so in its name",
+           package_name("0.1.0", "p", "x86", "0123456789abc", "split")
+           == "wz-capi-pico-0.1.0-p-windows-x86-split-0123456789")
+    expect("a manifest's form is read", form_of({"form": "split"}) == "split")
+    for manifest in ({}, {"form": "double"}):
+        try:
+            form_of(manifest)
+            expect(f"a manifest of form {manifest.get('form')} is refused", False)
+        except Refusal:
+            pass
+    expect("the additional library takes the features it declares, in the list's order",
+           ext_features(["std", "engine-tokio", "replay-cache", "unstable-api", "e2e-sender"],
+                        {"e2e-sender", "replay-cache", "std", "unstable-api"})
+           == ["std", "replay-cache", "unstable-api", "e2e-sender"])
+    expect("no option builds every width in every form",
+           build_selection([]) == (list(ARCHES), list(FORMS)))
+    expect("an option narrows its axis only",
+           build_selection(["--form", "split"]) == (list(ARCHES), ["split"])
+           and build_selection(["--form", "single", "--arch", "x86"]) == (["x86"], ["single"]))
+    for options in (["--form"], ["--form", "split", "--form", "single"], ["--arch", "arm64"],
+                    ["--form", "double"], ["--target", "x"]):
+        try:
+            build_selection(options)
+            expect(f"--build {' '.join(options)} is refused", False)
+        except Refusal:
+            pass
+    two = render_notices("p", "x86_64-pc-windows-msvc", [], [],
+                         {"release": "rustc 1.0.0", "dir": "licenses/rust-std-1.0.0",
+                          "notice": "COPYRIGHT-library.html"},
+                         {"version": "1.0", "commit": "abc", "dir": "licenses/zenoh-pico"},
+                         FORMS["split"], (CRATE, EXT_CRATE))
+    expect("the split package's notices name both libraries and both graphs",
+           "The libraries of this package (`release/bin/wz_capi_pico.dll`" in two
+           and "`release/bin/wz_capi_pico_ext.dll`" in two
+           and f"`{CRATE}` and `{EXT_CRATE}` built with" in two)
+    # A pipe read as text without a stated encoding is decoded with the host's code page, which on a
+    # Windows runner is not the UTF-8 the tools write: every read of a tool here names its encoding.
+    import ast
+    tree = ast.parse(pathlib.Path(__file__).read_text(encoding="utf-8"))
+    undecoded = [node.lineno for node in ast.walk(tree)
+                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                 and node.func.attr in ("run", "check_output", "Popen")
+                 and any(k.arg in ("text", "universal_newlines") for k in node.keywords)
+                 and not any(k.arg == "encoding" for k in node.keywords)]
+    expect(f"every pipe this script reads as text states its encoding (lines {undecoded})", not undecoded)
 
     for failure in failures:
         print(f"  pico_windows_package selftest FAIL: {failure}", file=sys.stderr)
@@ -1028,16 +1201,13 @@ def main(argv: list[str]) -> int:
     try:
         if len(argv) == 2 and argv[1] == "--selftest":
             return selftest()
-        if (len(argv) in (5, 7) and argv[1] == "--build" and argv[3] == "--profile"
-                and (len(argv) == 5 or argv[5] == "--arch")):
-            arches = [argv[6]] if len(argv) == 7 else list(ARCHES)
-            unknown = [arch for arch in arches if arch not in ARCHES]
-            if unknown:
-                raise Refusal(f"`{unknown[0]}` is not a width a package is made for ({', '.join(ARCHES)})")
+        if len(argv) >= 5 and argv[1] == "--build" and argv[3] == "--profile":
+            arches, forms = build_selection(argv[5:])
             out = pathlib.Path(argv[2]).resolve()
             out.mkdir(parents=True, exist_ok=True)
             for arch in arches:
-                build(out, argv[4], arch)
+                for form in forms:
+                    build(out, argv[4], arch, form)
             return 0
         if len(argv) == 3 and argv[1] == "--verify":
             target = pathlib.Path(argv[2])

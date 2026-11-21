@@ -176,6 +176,13 @@ ROWS: dict[str, tuple[str, tuple[tuple[str, str], ...]]] = {
             ("file", "/usr/include/google/protobuf/descriptor.proto"),
         ),
     ),
+    # The two forms of the pico library (one, and the core with its additional library) compiled
+    # by `scripts/pico-additional-forms.sh` and driven by one C scenario each: the test builds the
+    # scenario with the host's C compiler (`CC`, `cc` by default) against each form's headers.
+    "WZ_PICO_FORMS_REQUIRE": (
+        "wz-integration-tests/tests/it/files/pico_additional_split_wire.rs",
+        (("program", "cc"),),
+    ),
 }
 
 KINDS = ("file", "program", "python-module")

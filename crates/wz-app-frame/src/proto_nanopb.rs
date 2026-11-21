@@ -54,7 +54,9 @@
 //!
 //! The same merge gives the `int_size` in force for one field, which is what
 //! [`crate::proto_range`] judges a field's integer range by: one reader of the
-//! options for the size and the range, so the two cannot read a schema apart.
+//! options for the size and the range, so the two cannot read a schema apart. The
+//! options of a file are read through [`FileOptions`], so the merge is the same
+//! over the linker a schema is read with and over the schema set a payload keeps.
 //!
 //! ## What is not a number, and why it says so
 //!
@@ -79,14 +81,15 @@
 //!
 //! The arithmetic is held to numbers nanopb itself wrote: the sizes in a generated
 //! header, for the sample schemas the fixtures reproduce, and a corpus run through
-//! the generator (see the tests and the oracle lane).
+//! the generator (see the capture crate's `proto_nanopb_tests`, which read the size
+//! through its description document, and the oracle lane).
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::proto_parse::{FieldOption, Label, OptionValue, ScalarKind};
-use crate::proto_schema::{FieldKind, Fld, Linker, MapValueKind, Msg};
+use crate::proto_schema::{FieldKind, FileOptions, Fld, Linker, MapValueKind, Msg};
 
 /// Why a message has no number: the words of `max_encoded_size_reason`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -179,7 +182,7 @@ struct Merged {
 /// The C integer nanopb stores a varint field in, as the `int_size` option in force
 /// for the field chooses it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum IntSize {
+pub enum IntSize {
     /// No `int_size`, or `IS_DEFAULT`: the width of the field's own type.
     Default,
     /// `IS_8`, `IS_16`, `IS_32` or `IS_64`: the width in bits.
@@ -331,23 +334,24 @@ impl Merged {
 
 /// The options of file `file`, the outermost level and the only one a map entry's
 /// fields have.
-fn file_options(linker: &Linker<'_, '_>, file: usize) -> Merged {
+fn file_options<S: FileOptions + ?Sized>(schema: &S, file: usize) -> Merged {
     let mut merged = Merged::default();
-    merged.merge(&linker.file_options[file], Level::File);
+    merged.merge(schema.options_of_file(file), Level::File);
     merged
 }
 
 /// The options in force for a message: its file's, then its own.
-fn message_options(linker: &Linker<'_, '_>, msg: &Msg) -> Merged {
-    let mut merged = file_options(linker, msg.file);
+fn message_options<S: FileOptions + ?Sized>(schema: &S, msg: &Msg) -> Merged {
+    let mut merged = file_options(schema, msg.file);
     merged.merge(&msg.options, Level::Message);
     merged
 }
 
 /// The `int_size` in force for `field` of `msg`: the file's options, then the
-/// message's, then the field's, merged as the size is.
-pub(crate) fn field_int_size(linker: &Linker<'_, '_>, msg: &Msg, field: &Fld) -> IntSize {
-    let mut merged = message_options(linker, msg);
+/// message's, then the field's, merged as the size is. `schema` is the linked
+/// schema `msg` belongs to, read for its files' options.
+pub fn field_int_size<S: FileOptions + ?Sized>(schema: &S, msg: &Msg, field: &Fld) -> IntSize {
+    let mut merged = message_options(schema, msg);
     merged.merge(&field.options, Level::Field);
     merged.int_size()
 }
@@ -355,8 +359,8 @@ pub(crate) fn field_int_size(linker: &Linker<'_, '_>, msg: &Msg, field: &Fld) ->
 /// Whether nanopb's `type_override` is in force for `field` of `msg`, merged as
 /// [`field_int_size`] merges: the field is then encoded as a type the `.proto`
 /// does not declare.
-pub(crate) fn field_type_overridden(linker: &Linker<'_, '_>, msg: &Msg, field: &Fld) -> bool {
-    let mut merged = message_options(linker, msg);
+pub fn field_type_overridden<S: FileOptions + ?Sized>(schema: &S, msg: &Msg, field: &Fld) -> bool {
+    let mut merged = message_options(schema, msg);
     merged.merge(&field.options, Level::Field);
     merged.type_overridden
 }
@@ -364,8 +368,8 @@ pub(crate) fn field_type_overridden(linker: &Linker<'_, '_>, msg: &Msg, field: &
 /// The `int_size` in force for the key and the value of an entry of a map written
 /// in file `file`: the file's alone, because nanopb's generator gives an entry's
 /// fields no options of their own.
-pub(crate) fn map_entry_int_size(linker: &Linker<'_, '_>, file: usize) -> IntSize {
-    file_options(linker, file).int_size()
+pub fn map_entry_int_size<S: FileOptions + ?Sized>(schema: &S, file: usize) -> IntSize {
+    file_options(schema, file).int_size()
 }
 
 /// The part of an option name after the extension in parentheses, when the name
@@ -701,7 +705,7 @@ fn is_deprecated(field: &Fld) -> bool {
 
 /// The largest encoded size of each message in `which`, by index, in nanopb's
 /// arithmetic.
-pub(crate) fn encoded_sizes(
+pub fn encoded_sizes(
     linker: &Linker<'_, '_>,
     which: &[usize],
 ) -> BTreeMap<usize, Result<u64, SizeRefusal>> {

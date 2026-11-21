@@ -2179,11 +2179,11 @@ pub struct QueryableRegistry<C, P: Storage = Profile> {
     /// [`caps::QUERY_ATTACHMENT_MAX_BYTES`]). Saturating: a counter that wrapped would hide the
     /// refusals it exists to show.
     oversize_refused: u32,
-    /// Whether a query whose key does not resolve is owed a Final: the session's
-    /// `query-unanswerable-final` value, which the session states before every dispatch
-    /// ([`Self::set_unanswerable_final`]). A registry no session stated one to answers as
-    /// upstream does, with nothing.
-    answers_unresolved: bool,
+    /// The session's `query-unanswerable-final` value, which the session states before every
+    /// dispatch ([`Self::set_unanswerable_final`]): with `empty-final` a query whose key does not
+    /// resolve is owed a Final. Held in no byte where the build's domain is one value, which is
+    /// then the value; a registry no session stated one to answers by the build's default.
+    unanswerable_final: UnanswerableFinalHeld,
     /// transport-shm -- the receive side of shared memory for the VALUE of a
     /// query: the same state a push and a reply have (the negotiated capability,
     /// the resolver, the means of acknowledging the peer's slices, the drop
@@ -2202,12 +2202,19 @@ impl<C, P: Storage> Default for QueryableRegistry<C, P> {
             next_id: 1,
             requester: None,
             oversize_refused: 0,
-            answers_unresolved: false,
+            unanswerable_final: UnanswerableFinalHeld::default(),
             #[cfg(feature = "transport-shm")]
             shm: crate::extshm::ShmReceiveState::default(),
         }
     }
 }
+
+/// How a [`QueryableRegistry`] holds the `query-unanswerable-final` value of the session it
+/// dispatches for: as a snapshot holds it, in no byte where the build allows one value.
+type UnanswerableFinalHeld = crate::policy_binding::Bound<
+    crate::policy::QueryUnanswerableFinal,
+    { <crate::policy::QueryUnanswerableFinal as crate::policy_binding::PolicyValue>::HELD },
+>;
 
 impl<C, P: Storage> QueryableRegistry<C, P> {
     /// Hold the registry to the `MAX_QUERYABLES` its creator resolved: a registration that would
@@ -2232,15 +2239,23 @@ impl<C, P: Storage> QueryableRegistry<C, P> {
     /// State the `query-unanswerable-final` value of the session about to be dispatched, from
     /// the snapshot the session was handed: with `empty-final`, a query from a peer whose key
     /// does not resolve is owed an empty Final, as one that matched nobody is.
+    ///
+    /// A snapshot holds only values its build's domain allows, so a value stated from one is
+    /// always taken. A value outside the domain is one no session of this build runs by, and the
+    /// registry keeps the value it holds; where the domain is one value there is nothing to state.
     pub fn set_unanswerable_final(&mut self, value: crate::policy::QueryUnanswerableFinal) {
-        self.answers_unresolved =
-            matches!(value, crate::policy::QueryUnanswerableFinal::EmptyFinal);
+        if let Ok(held) = UnanswerableFinalHeld::select(value) {
+            self.unanswerable_final = held;
+        }
     }
 
     /// Whether a query whose key does not resolve is owed a Final
-    /// ([`Self::set_unanswerable_final`]).
+    /// ([`Self::set_unanswerable_final`]): a constant of the build where its domain is one value.
     pub fn answers_unresolved_queries(&self) -> bool {
-        self.answers_unresolved
+        matches!(
+            self.unanswerable_final.get(),
+            crate::policy::QueryUnanswerableFinal::EmptyFinal
+        )
     }
 }
 
@@ -3456,7 +3471,7 @@ impl<C: ResponderSink, P: Storage> QueryableRegistry<C, P> {
                     continue;
                 }
                 let outcome = self.dispatch_request(req, peer_keyexpr_table, pending_replies);
-                if outcome.owes_final(self.answers_unresolved) {
+                if outcome.owes_final(self.answers_unresolved_queries()) {
                     // R2595 — the terminator carries the QUERY's QoS, as every
                     // reply before it does: upstream stamps it on the final from
                     // the same `QueryInner::qos` the replies came from.
@@ -5853,42 +5868,69 @@ mod tests {
 
     /// `query-unanswerable-final = empty-final`: the same query whose mapping id the peer never
     /// declared is answered with an empty Final, and still runs no queryable. Stating `none`
-    /// again returns the registry to upstream's silence, and a non-Query body owes nothing under
-    /// either value, since it is not a query.
+    /// again returns the registry to upstream's silence. A value the build's domain leaves out is
+    /// one no snapshot of the build holds, and stating it leaves the registry as it was, so each
+    /// answer below is the domain's, whichever `WZ_POLICY_*_ALLOWS_*` the test build states.
     #[test]
     fn an_unresolvable_query_is_owed_an_empty_final_only_when_the_session_answers_it() {
         use crate::policy::QueryUnanswerableFinal;
+        use crate::policy_binding::PolicyValue;
         let mut reg = QueryableRegistry::new();
         reg.register("sensors/temp", |_q, responder| {
             responder.reply(b"21.0");
         })
         .expect("no quota is stated on this table");
-        assert!(
-            !reg.answers_unresolved_queries(),
-            "a registry no session stated a value to answers as upstream does"
+        assert_eq!(
+            reg.answers_unresolved_queries(),
+            QueryUnanswerableFinal::DEFAULT == QueryUnanswerableFinal::EmptyFinal,
+            "a registry no session stated a value to answers by the build's default"
         );
         let messages = vec![NetworkMessage::Request(Box::new(request_query(
             77, 99, None,
         )))];
 
-        reg.set_unanswerable_final(QueryUnanswerableFinal::EmptyFinal);
-        let mut replies = ReplyStage::new();
-        let mut finals = FinalStage::new();
-        reg.dispatch_messages(&messages, &HashMap::new(), &mut replies, &mut finals);
-        assert!(
-            replies.is_empty(),
-            "no queryable runs on a key it cannot read"
-        );
-        assert_eq!(
-            &finals[..],
-            &[(77, QosLevel::DEFAULT)][..],
-            "empty-final: the asker is told at once that nothing will come"
-        );
+        for value in [
+            QueryUnanswerableFinal::EmptyFinal,
+            QueryUnanswerableFinal::None,
+            QueryUnanswerableFinal::EmptyFinal,
+        ] {
+            let before = reg.answers_unresolved_queries();
+            reg.set_unanswerable_final(value);
+            let answers = if QueryUnanswerableFinal::DOMAIN.contains(value) {
+                value == QueryUnanswerableFinal::EmptyFinal
+            } else {
+                before
+            };
+            assert_eq!(reg.answers_unresolved_queries(), answers, "{}", value.id());
+            let mut replies = ReplyStage::new();
+            let mut finals = FinalStage::new();
+            reg.dispatch_messages(&messages, &HashMap::new(), &mut replies, &mut finals);
+            assert!(
+                replies.is_empty(),
+                "no queryable runs on a key it cannot read"
+            );
+            if answers {
+                assert_eq!(
+                    &finals[..],
+                    &[(77, QosLevel::DEFAULT)][..],
+                    "empty-final: the asker is told at once that nothing will come"
+                );
+            } else {
+                assert!(finals.is_empty(), "none: upstream's silence");
+            }
+        }
+    }
 
-        reg.set_unanswerable_final(QueryUnanswerableFinal::None);
-        let mut finals = FinalStage::new();
-        reg.dispatch_messages(&messages, &HashMap::new(), &mut replies, &mut finals);
-        assert!(finals.is_empty(), "none: upstream's silence again");
+    /// The registry holds the session's `query-unanswerable-final` value as a snapshot holds it:
+    /// in no byte where the build allows one value, and in one where it allows both.
+    #[test]
+    fn the_unanswerable_final_value_takes_a_byte_only_where_the_build_allows_a_choice() {
+        use crate::policy::QueryUnanswerableFinal;
+        use crate::policy_binding::PolicyValue;
+        assert_eq!(
+            core::mem::size_of::<UnanswerableFinalHeld>(),
+            usize::from(!QueryUnanswerableFinal::DOMAIN.is_singleton()),
+        );
     }
 
     /// The outcome's own rule, for every pair: a routed query always owes its Final, an

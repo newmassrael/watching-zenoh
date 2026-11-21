@@ -270,8 +270,7 @@ pub unsafe extern "C" fn z_bytes_writer_finish(
             return Z_ERR_NULL;
         }
         let collected = take_writer_handle(writer as *mut c_void).unwrap_or_default();
-        store_owned_bytes(bytes, collected);
-        Z_OK
+        store_owned_bytes(bytes, collected)
     });
 }
 
@@ -321,8 +320,7 @@ pub unsafe extern "C" fn ze_serializer_finish(
             return Z_ERR_NULL;
         }
         let collected = take_writer_handle(serializer as *mut c_void).unwrap_or_default();
-        store_owned_bytes(bytes, collected);
-        Z_OK
+        store_owned_bytes(bytes, collected)
     });
 }
 
@@ -698,8 +696,7 @@ macro_rules! impl_arithmetic {
                 if bytes.is_null() {
                     return Z_ERR_NULL;
                 }
-                store_owned_bytes(bytes, ByteBuf::from(data.to_le_bytes().as_slice()));
-                Z_OK
+                store_owned_bytes(bytes, ByteBuf::from(data.to_le_bytes().as_slice()))
             })
         }
 

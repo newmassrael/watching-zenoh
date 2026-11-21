@@ -560,7 +560,12 @@ CASES: tuple[Case, ...] = (
     # 2026-11-21 -- step 4b rounds 2 to 4, as pico-client's note of this day says: +15,600 on
     # one machine.
     Case("pico-client-coop", "wz-capi-pico", "libwz_capi_pico.so", "engine-coop,link-udp",
-         1_040_400,
+         # 2026-11-21 -- the fifth PoC set: +8,732 on one host against main b58b71c19, by symbol:
+         # a droppable publish behind a held session is dropped per face and owed to the other faces
+         # (`fan_out` 1,667, `publish` +1,558, `send_handed` 735, `for_held` +507, the owed leg's
+         # clone 761), the ABI object pools' slot release and registry (about 800); the owed queue is
+         # taken whole rather than drained, which kept 3,700 of a drain's code out.
+         1_049_200,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
@@ -626,7 +631,8 @@ CASES: tuple[Case, ...] = (
     Case("pico-client-coop-unstable", "wz-capi-pico", "libwz_capi_pico.so",
          # 2026-11-20 -- step 4b round 2a, as pico-client-coop's note says: +512 on pc2.
          # 2026-11-20 -- step 4b round 2b, as pico-client-coop's note says: +32 on pc2.
-         "engine-coop,link-udp,unstable-api", 1_151_600,
+         # 2026-11-21 -- the fifth PoC set, as pico-client-coop's note says: +8,680 on one host.
+         "engine-coop,link-udp,unstable-api", 1_160_300,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
@@ -645,7 +651,8 @@ CASES: tuple[Case, ...] = (
     Case("pico-client-coop-local", "wz-capi-pico", "libwz_capi_pico.so",
          # 2026-11-20 -- step 4b round 2a, as pico-client-coop's note says: +496 on pc2.
          # 2026-11-20 -- step 4b round 2b, as pico-client-coop's note says: +32 on pc2.
-         "engine-coop,link-udp,local-subscriber", 1_047_000,
+         # 2026-11-21 -- the fifth PoC set, as pico-client-coop's note says: +8,524 on one host.
+         "engine-coop,link-udp,local-subscriber", 1_055_600,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
@@ -663,7 +670,8 @@ CASES: tuple[Case, ...] = (
     Case("pico-client-coop-connectivity", "wz-capi-pico", "libwz_capi_pico.so",
          # 2026-11-20 -- step 4b round 2a, as pico-client-coop's note says: +644 on pc2.
          # 2026-11-20 -- step 4b round 2b, as pico-client-coop's note says: +32 on pc2.
-         "engine-coop,link-udp,unstable-api,connectivity", 1_221_500,
+         # 2026-11-21 -- the fifth PoC set, as pico-client-coop's note says: +8,572 on one host.
+         "engine-coop,link-udp,unstable-api,connectivity", 1_230_100,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, MULTICAST,
                  TOKIO_ENGINE, COOP_LISTEN),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE, CONNECTIVITY),
@@ -682,7 +690,8 @@ CASES: tuple[Case, ...] = (
     Case("pico-client-coop-admin-space", "wz-capi-pico", "libwz_capi_pico.so",
          # 2026-11-20 -- step 4b round 2a, as pico-client-coop's note says: +460 on pc2.
          # 2026-11-20 -- step 4b round 2b, as pico-client-coop's note says: +128 on pc2.
-         "engine-coop,link-udp,admin-space", 1_411_600,
+         # 2026-11-21 -- the fifth PoC set, as pico-client-coop's note says: +8,429 on one host.
+         "engine-coop,link-udp,admin-space", 1_420_100,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
@@ -717,7 +726,8 @@ CASES: tuple[Case, ...] = (
     Case("pico-client-coop-query", "wz-capi-pico", "libwz_capi_pico.so",
          # 2026-11-20 -- step 4b round 2a, as pico-client-coop's note says: +492 on pc2.
          # 2026-11-20 -- step 4b round 2b, as pico-client-coop's note says: +136 on pc2.
-         "engine-coop,link-udp,query,queryable", 1_365_800,
+         # 2026-11-21 -- the fifth PoC set, as pico-client-coop's note says: +8,868 on one host.
+         "engine-coop,link-udp,query,queryable", 1_374_700,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
@@ -742,7 +752,8 @@ CASES: tuple[Case, ...] = (
     Case("pico-client-coop-local-queryable", "wz-capi-pico", "libwz_capi_pico.so",
          # 2026-11-20 -- step 4b round 2a, as pico-client-coop's note says: +492 on pc2.
          # 2026-11-20 -- step 4b round 2b, as pico-client-coop's note says: +76 on pc2.
-         "engine-coop,link-udp,query,queryable,local-queryable", 1_382_400,
+         # 2026-11-21 -- the fifth PoC set, as pico-client-coop's note says: +8,304 on one host.
+         "engine-coop,link-udp,query,queryable,local-queryable", 1_390_800,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
@@ -764,7 +775,8 @@ CASES: tuple[Case, ...] = (
     Case("pico-client-coop-scout", "wz-capi-pico", "libwz_capi_pico.so",
          # 2026-11-20 -- step 4b round 2a, as pico-client-coop's note says: +512 on pc2.
          # 2026-11-20 -- step 4b round 2b, as pico-client-coop's note says: +32 on pc2.
-         "engine-coop,link-udp,scout", 1_124_300,
+         # 2026-11-21 -- the fifth PoC set, as pico-client-coop's note says: +8,660 on one host.
+         "engine-coop,link-udp,scout", 1_133_000,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE, COOP_SCOUT),
@@ -788,7 +800,8 @@ CASES: tuple[Case, ...] = (
     Case("pico-peer-coop", "wz-capi-pico", "libwz_capi_pico.so",
          # 2026-11-20 -- step 4b round 2a, as pico-client-coop's note says: +508 on pc2.
          # 2026-11-20 -- step 4b round 2b, as pico-client-coop's note says: +48 on pc2.
-         "engine-coop,link-udp,peer", 1_187_400,
+         # 2026-11-21 -- the fifth PoC set, as pico-client-coop's note says: +8,788 on one host.
+         "engine-coop,link-udp,peer", 1_196_200,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE, COOP_SCOUT, COOP_LISTEN),
@@ -1462,15 +1475,24 @@ def refused_switches(asked: dict[str, int], header: str) -> list[str]:
     return sorted(s for s, v in asked.items() if (s in on) != bool(v))
 
 
-def pico_reference_build(asked: dict[str, int]) -> Reference:
+def reference_key(pin: str, toolchain: str, flags: list[str]) -> str:
+    """The directory name of the reference build of `flags` at `pin` with `toolchain`: one per
+    triple, so a run that asks for the same build again reads it instead of building it, and a
+    switch, the pin or the compiler that moves gets a build of its own."""
+    return hashlib.sha256("\n".join([pin, toolchain, *flags]).encode()).hexdigest()[:16]
+
+
+def pico_reference_tree(asked: dict[str, int]) -> tuple[pathlib.Path, str, str]:
     """Build zenoh-pico with `asked` set, from an export of the pinned submodule (pico's CMake
-    writes a header into its source tree, which must not dirty the submodule), and measure it."""
+    writes a header into its source tree, which must not dirty the submodule), unless that build
+    is there already. Returns its directory (`src` the export, `build` the CMake tree), the full
+    pin and the toolchain. The host performance matrix (`scripts/host-bench/perf_matrix.py`)
+    links this same build, so the library it times is the one whose size this gate prints."""
     pin = subprocess.run(["git", "-C", str(PICO_SOURCE), "rev-parse", "HEAD"], capture_output=True,
                          text=True, check=True).stdout.strip()
     toolchain = f"{first_line(['cc', '--version'])}; {first_line(['cmake', '--version'])}"
     flags = [f"-D{s}={v}" for s, v in sorted(asked.items())]
-    key = hashlib.sha256("\n".join([pin, toolchain, *flags]).encode()).hexdigest()[:16]
-    work = PICO_BUILDS / key
+    work = PICO_BUILDS / reference_key(pin, toolchain, flags)
     lib = work / "build" / "lib" / "libzenohpico.so"
     if not lib.exists():
         archive = subprocess.run(["git", "-C", str(PICO_SOURCE), "archive", "--format=tar", "HEAD"],
@@ -1481,6 +1503,13 @@ def pico_reference_build(asked: dict[str, int]) -> Reference:
                    "-DCMAKE_BUILD_TYPE=Release", "-DBUILD_SHARED_LIBS=ON",
                    "-DBUILD_EXAMPLES=OFF", "-DBUILD_TESTING=OFF", *flags])
         run_quiet(["cmake", "--build", str(work / "build"), "--parallel", str(os.cpu_count() or 1)])
+    return work, pin, toolchain
+
+
+def pico_reference_build(asked: dict[str, int]) -> Reference:
+    """zenoh-pico built with `asked` set ([`pico_reference_tree`]), measured."""
+    work, pin, toolchain = pico_reference_tree(asked)
+    lib = work / "build" / "lib" / "libzenohpico.so"
     header = (work / "build" / "include" / "zenoh-pico" / "config.h").read_text()
     size_out = subprocess.run(["size", str(lib)], capture_output=True, text=True, check=True).stdout
     return Reference(text=int(size_out.splitlines()[1].split()[0]), pin=pin[:12],
@@ -1611,6 +1640,15 @@ def cmd_selftest() -> int:
            refused_switches(asked, "#define Z_FEATURE_MATCHING 0\n#define Z_FEATURE_INTEREST 0\n"
                                    "#define Z_FEATURE_QUERY 1\n")
            == ["Z_FEATURE_MATCHING", "Z_FEATURE_QUERY"])
+    # A reference build is found again by its key, and a key that ignored one of its three inputs
+    # would hand a run the build of another switch set, pin or compiler.
+    flags = ["-DZ_FEATURE_MATCHING=1", "-DZ_FEATURE_QUERY=0"]
+    expect("the same build is the same key, and a switch, the pin or the toolchain moves it",
+           reference_key("pin", "cc", flags) == reference_key("pin", "cc", list(flags))
+           and len({reference_key("pin", "cc", flags),
+                    reference_key("pin", "cc", ["-DZ_FEATURE_MATCHING=0", "-DZ_FEATURE_QUERY=0"]),
+                    reference_key("other", "cc", flags),
+                    reference_key("pin", "other", flags)}) == 4)
     expect("a case's features are its package's as cargo resolves them",
            {"serial-drive-own-thread", "rx-busy-poll"}
            <= case_features(next(c for c in CASES if c.id == "pico-client"))

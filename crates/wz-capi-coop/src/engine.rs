@@ -37,7 +37,7 @@ use core::cell::RefCell;
 use core::sync::atomic::{AtomicBool, Ordering};
 // A 64-bit atomic where the target has one, and a critical section where it does not (a
 // Cortex-M7 has 32-bit atomics only).
-use portable_atomic::{AtomicU64, AtomicUsize};
+use portable_atomic::AtomicU64;
 
 #[allow(unused_imports)]
 use crate::prelude::*;
@@ -74,6 +74,7 @@ use wz_session_core::limits::SessionLimits;
 #[cfg(feature = "listen")]
 use wz_session_core::link_admission::{LinkAdmission, LinkRegistry};
 use wz_session_core::locality::Locality;
+use wz_session_core::metadata::PushMetadata;
 use wz_session_core::network_message::NetworkMessage;
 #[cfg(not(feature = "shared-key-ids"))]
 use wz_session_core::policy::KeyWireForm;
@@ -81,7 +82,7 @@ use wz_session_core::policy::{SessionPolicy, SnResolution};
 use wz_session_core::publish_options::{PlainPutParams, PublishError, PublishOptions};
 use wz_session_core::pubsub::SubscriptionId;
 use wz_session_core::push_build;
-use wz_session_core::qos::CongestionControl;
+use wz_session_core::qos::{CongestionControl, Priority};
 use wz_session_core::sample::{QosLevel, Sample, SampleKind};
 use wz_session_core::send_wire_error::SendWireError;
 use wz_session_core::session_init_params::{
@@ -488,20 +489,30 @@ pub(crate) fn derived_zid(
 /// One session the program steps; see the module doc.
 pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> {
     core: Mutex<Confined<Core<L, C>>>,
-    /// The waits for room of the links that are up, asked by a publish that may be dropped while
+    /// The waits for room of the faces that are up, asked by a publish that may be dropped while
     /// another holds the session ([`Self::live_to_publish`]), how long it waits
     /// (`congestion_control/drop/wait_before_drop`), and whether the queue profile has it ask at
     /// all (`TxQueueConf::held_drop`).
     rooms: Arc<LinkRooms>,
     wait_before_drop_us: u64,
     held_drop: HeldDrop,
-    /// The publishes sending on the session now ([`Sending`]): what holds the session for a
-    /// send, which pico's profile drops a droppable publish behind, as against a read step, a
+    /// The face a publish holding the session sends on now, [`NOT_SENDING`] while none does
+    /// ([`SendingOn`]): the face pico's profile drops a droppable publish on, as against the
+    /// session's other faces, which it is still sent to, and a session held by a read step, a
     /// timer or the drive, which it waits for.
-    sending: AtomicUsize,
-    /// The droppable publishes dropped before they reached a link: behind a held session, for
-    /// want of room or by the profile's drop at once ([`Self::live_to_publish`]). Charged to the
-    /// transport's drops in [`Self::transport_stats`], where a link's session charges its own.
+    sending_on: AtomicU64,
+    /// The droppable publishes that found the session held and were dropped on the faces its
+    /// holder waits on, owed to the session's other faces ([`HandedLeg`]), in the order they
+    /// were handed.
+    handed: Mutex<VecDeque<HandedLeg>>,
+    /// How many handed legs of each priority are held at most: as many as the session's queue
+    /// holds batches of that priority (`TxQueueConf::sizes`), which is as many as a face whose
+    /// queue were its own would take before a droppable message found no room on it.
+    handed_at_most: [usize; Priority::NUM],
+    /// The droppable publishes dropped before they reached a link: on the faces a held session
+    /// waits on, for want of room or by the profile's drop at once ([`Self::live_to_publish`]),
+    /// one each whatever the number of those faces. Charged to the transport's drops in
+    /// [`Self::transport_stats`], where a link's session charges its own.
     #[cfg(feature = "transport-stats")]
     unsent_drops: AtomicU64,
     /// What the session delivered under the lock, handed out after it: the samples for its
@@ -547,81 +558,139 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
 /// The session state no other thread may touch while one does; see the module doc.
 struct Confined<T>(T);
 
-/// The waits for room of the session's links that are up, kept outside [`Core`] so that a publish
-/// that finds the session held asks them with nothing of it held. Each wait belongs to its link's
-/// [`Wire`]; this holds it weakly, so a link that has gone drops out with its wire.
+/// The waits for room of the session's faces that are up, each with its face, kept outside
+/// [`Core`] so that a publish that finds the session held asks them with nothing of it held. Each
+/// wait belongs to its link's [`Wire`] or to its group; this holds it weakly, so a face that has
+/// gone drops out with it.
 #[derive(Default)]
-pub(crate) struct LinkRooms(Mutex<Vec<Weak<dyn LinkWritability>>>);
+pub(crate) struct LinkRooms(Mutex<Vec<(FaceId, Weak<dyn LinkWritability>)>>);
 
-/// What the links that are up answered a publish that asked them for room.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What a droppable publish that found the session held is told of the faces it would be sent
+/// to. Each face is a transport of its own, as each of zenoh's is: the publish is dropped on the
+/// faces its holder waits on and still sent to the others ([`CoopEngine::live_to_publish`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Room {
-    /// Every link asked takes bytes: whoever holds the session is not waiting on one of them.
+    /// Every face asked takes bytes, or the holder is not a publish sending on one: whoever holds
+    /// the session is not waiting on a face, and lets go of it once its step is done.
     Free,
-    /// A link took none within the wait.
-    Congested,
-    /// No link that is up gives a wait to ask.
+    /// These faces took no bytes within the wait.
+    Congested(Vec<FaceId>),
+    /// No face that is up gives a wait to ask.
     Unasked,
-    /// Nothing was asked: the session is held by another publish sending on it, and the queue
+    /// Nothing was asked: this face is held by another publish sending on it, and the queue
     /// profile drops a message behind it at once and reports it to the caller, as pico's
     /// try-lock drop does.
-    Held,
+    Held(FaceId),
 }
 
-/// A publish sending on the session, counted for as long as this lives ([`CoopEngine`]'s
-/// `sending`): what tells a droppable publish that finds the session held whether a send holds
-/// it, as pico's transmit lock is held by a send, or something that is not one (a read step, a
-/// timer, the drive), which lets go once its step is done.
-struct Sending<'a>(&'a AtomicUsize);
+/// What [`CoopEngine`]'s `sending_on` holds while no publish sends: no face has the id 0, since
+/// the session numbers its faces from 1 (`Core::next_face`).
+const NOT_SENDING: FaceId = 0;
 
-impl<'a> Sending<'a> {
-    fn enter(count: &'a AtomicUsize) -> Self {
-        count.fetch_add(1, Ordering::SeqCst);
-        Self(count)
+/// A publish sending on a face, marked for as long as this lives ([`CoopEngine`]'s
+/// `sending_on`): what tells a droppable publish that finds the session held which face a send
+/// holds, as pico's transmit lock is held by a send, or that something that is not one holds the
+/// session (a read step, a timer, the drive), which lets go once its step is done. Only the holder
+/// of the session sends, so one face is marked at a time.
+struct SendingOn<'a>(&'a AtomicU64);
+
+impl<'a> SendingOn<'a> {
+    fn enter(mark: &'a AtomicU64, face: FaceId) -> Self {
+        mark.store(face, Ordering::SeqCst);
+        Self(mark)
     }
 }
 
-impl Drop for Sending<'_> {
+impl Drop for SendingOn<'_> {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
+        self.0.store(NOT_SENDING, Ordering::SeqCst);
     }
 }
 
 impl LinkRooms {
-    /// Hold `wait` while its link lives, letting go of the waits of links that have gone.
-    pub(crate) fn hold(&self, wait: &Arc<dyn LinkWritability>) {
+    /// Hold the wait of `face` while it lives, letting go of the waits of faces that have gone.
+    pub(crate) fn hold(&self, face: FaceId, wait: &Arc<dyn LinkWritability>) {
         let mut waits = lock(&self.0);
-        waits.retain(|held| held.strong_count() > 0);
-        waits.push(Arc::downgrade(wait));
+        waits.retain(|(_, held)| held.strong_count() > 0);
+        waits.push((face, Arc::downgrade(wait)));
     }
 
     /// What a droppable publish that found the session held is told, by the queue profile's
-    /// `held_drop`: zenoh's asks the links for room within `wait_us` ([`Self::within`]). Pico's
-    /// asks nothing: behind another publish `sending` on the session it is dropped at once
+    /// `held_drop`: zenoh's asks the faces for room within `wait_us` ([`Self::within`]). Pico's
+    /// asks nothing: on the face another publish is `sending_on` it is dropped at once
     /// ([`Room::Held`]), as pico's try-lock fails on a transmit lock another send holds, and
-    /// behind a holder that is not one it waits for the session ([`Room::Free`]).
-    pub(crate) fn for_held(&self, held_drop: HeldDrop, sending: bool, wait_us: u64) -> Room {
-        match held_drop {
-            HeldDrop::WaitForRoom => self.within(wait_us),
-            HeldDrop::DropAtOnce if sending => Room::Held,
-            HeldDrop::DropAtOnce => Room::Free,
+    /// behind a holder that is not a publish sending it waits for the session ([`Room::Free`]).
+    pub(crate) fn for_held(
+        &self,
+        held_drop: HeldDrop,
+        sending_on: Option<FaceId>,
+        wait_us: u64,
+    ) -> Room {
+        match (held_drop, sending_on) {
+            (HeldDrop::WaitForRoom, _) => self.within(wait_us),
+            (HeldDrop::DropAtOnce, Some(face)) => Room::Held(face),
+            (HeldDrop::DropAtOnce, None) => Room::Free,
         }
     }
 
-    /// Ask each link that is up for room, for at most `wait_us` each; one that takes none within
-    /// it ends the asking. The waits are taken out of the lock first: a wait blocks, and a link
-    /// coming up must not wait behind it.
+    /// Ask each face that is up for room, within `wait_us` in all: the first face that takes none
+    /// spends the wait, and the faces after it are asked without one, so the publish spends one
+    /// deadline whatever the number of faces. The waits are taken out of the lock first: a wait
+    /// blocks, and a face coming up must not wait behind it.
     pub(crate) fn within(&self, wait_us: u64) -> Room {
-        let waits: Vec<Arc<dyn LinkWritability>> =
-            lock(&self.0).iter().filter_map(Weak::upgrade).collect();
+        let waits: Vec<(FaceId, Arc<dyn LinkWritability>)> = lock(&self.0)
+            .iter()
+            .filter_map(|(face, wait)| Some((*face, wait.upgrade()?)))
+            .collect();
         if waits.is_empty() {
-            Room::Unasked
-        } else if waits.iter().all(|wait| wait.wait_writable(wait_us)) {
+            return Room::Unasked;
+        }
+        let mut left_us = wait_us;
+        let mut congested = Vec::new();
+        for (face, wait) in waits {
+            if !wait.wait_writable(left_us) {
+                congested.push(face);
+                left_us = 0;
+            }
+        }
+        if congested.is_empty() {
             Room::Free
         } else {
-            Room::Congested
+            Room::Congested(congested)
         }
     }
+}
+
+/// A droppable publish that found the session held, dropped on the faces its holder waits on
+/// (`dropped_on`) and owed to the session's other faces: what zenoh's transports, each with a
+/// queue of its own, would still take, where this engine has one lock for every face (D8). Owned,
+/// since its caller has returned by the time it is sent ([`CoopEngine::send_handed`]).
+struct HandedLeg {
+    keyexpr: String,
+    wire: WireKey,
+    payload: Vec<u8>,
+    opts: PublishOptions,
+    dropped_on: Vec<FaceId>,
+}
+
+/// One publish as its leg to the links sends it ([`CoopEngine::fan_out`]).
+struct Publication<'a> {
+    keyexpr: &'a str,
+    wire: &'a WireKey,
+    payload: &'a [u8],
+    opts: &'a PublishOptions,
+    meta: &'a PushMetadata,
+}
+
+/// What a publish's leg to the links finds of the session ([`CoopEngine::live_to_publish`]).
+enum ToPublish<'a, L: SessionLinks + 'static, C: ClockSource + 'static> {
+    /// The session, held for the publish.
+    Live(LiveCore<'a, L, C>),
+    /// The session is closed.
+    Closed,
+    /// The publish may be dropped, and found the session held by a send that waits on `faces`:
+    /// it is dropped on them, and the caller is told when `told` (the pico profile).
+    DroppedOn { faces: Vec<FaceId>, told: bool },
 }
 
 // SAFETY: a `Confined` is reached only through the `Mutex` that holds it in `CoopEngine`, so one
@@ -1142,7 +1211,15 @@ fn dispatch_all<C: ClockSource + 'static>(
     face: FaceId,
     actions: Rc<McuActions<C>>,
 ) -> impl FnMut(wz_session_core::driver_loop::IterationEvent<'_, '_>) + 'static {
-    move |event| registry.borrow_mut().dispatch(face, event, &*actions)
+    move |event| {
+        let mut registry = registry.borrow_mut();
+        // The application's tables serve every face: this face's session states its own answer
+        // to a query it cannot resolve before its frame is dispatched, as one with queryables does.
+        registry
+            .app
+            .set_unanswerable_final(actions.params.policy.query_unanswerable_final());
+        registry.dispatch(face, event, &*actions);
+    }
 }
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
@@ -1157,6 +1234,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     fn ups(&self) -> impl Iterator<Item = &Rc<McuActions<C>>> {
         self.faces.iter().filter_map(|face| match &face.link {
             Link::Up(wire) => Some(&wire.actions),
+            _ => None,
+        })
+    }
+
+    /// [`Self::ups`], each with the id of its face.
+    fn ups_by_id(&self) -> impl Iterator<Item = (FaceId, &Rc<McuActions<C>>)> {
+        self.faces.iter().filter_map(|face| match &face.link {
+            Link::Up(wire) => Some((face.id, &wire.actions)),
             _ => None,
         })
     }
@@ -1585,7 +1670,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         wire.admitted.grant();
         // A publish goes to the links that are up, so theirs are the rooms it asks.
         if let Some(wait) = &wire.writability {
-            self.rooms.hold(wait);
+            self.rooms.hold(self.faces[at].id, wait);
         }
         if self.begin_replay(at, &wire.actions, now_us / 1000) == TurnEnd::EndsLink {
             wire.task.abort();
@@ -1746,7 +1831,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // A droppable publish that finds the session held asks the group's socket for room as it
         // asks a link's, and its wait goes with the face.
         if let Some(wait) = face.room() {
-            self.rooms.hold(wait);
+            self.rooms.hold(id, wait);
         }
         Ok(face)
     }
@@ -2295,6 +2380,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let rooms = core.rooms.clone();
         let wait_before_drop_us = core.config.tx_queue.wait_before_drop_us;
         let held_drop = core.config.tx_queue.held_drop;
+        let handed_at_most = core.config.tx_queue.sizes;
         // The ports are bound and the groups joined before anything is dialled: a session that
         // cannot listen, or join a group, where it was told to does not open.
         core.listen_on_config()?;
@@ -2317,7 +2403,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             rooms,
             wait_before_drop_us,
             held_drop,
-            sending: AtomicUsize::new(0),
+            sending_on: AtomicU64::new(NOT_SENDING),
+            handed: Mutex::new(VecDeque::new()),
+            handed_at_most,
             #[cfg(feature = "transport-stats")]
             unsent_drops: AtomicU64::new(0),
             samples: Arc::new(Mutex::new(VecDeque::new())),
@@ -2390,6 +2478,30 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 .map(|group| group.congestion_drops(priority))
                 .sum()
         })
+    }
+
+    /// Stage `count` replies that `reply` makes on each group the session joined, as a group's
+    /// dispatch stages what a member asked for, with no step of the session between them. Compiled
+    /// where its readers are: the tests of a group's drops (`tests::group`, `transport-stats`).
+    #[cfg(all(
+        test,
+        feature = "group",
+        feature = "app-transport",
+        feature = "transport-stats"
+    ))]
+    pub(crate) fn stage_group_replies(
+        &self,
+        count: usize,
+        reply: impl Fn() -> wz_session_core::multicast_tx::MulticastTxItem,
+    ) {
+        use wz_session_core::multicast_reply_sink::MulticastReplyEnqueue;
+        if let Some(core) = self.live() {
+            for group in &core.0.groups {
+                for _ in 0..count {
+                    group.reply_stage().enqueue(reply());
+                }
+            }
+        }
     }
 
     /// The endpoints the session listens on, as bound: a port the config named as 0 is the one
@@ -2466,48 +2578,54 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// (`commons/zenoh-config/src/defaults.rs` @ `wait_before_drop: 1000,`), where its own pipeline
     /// would queue it behind the blocking one on the stage that one holds
     /// (`io/zenoh-transport/src/common/pipeline.rs` @ `let mut queue = zlock!(self.stage_in[idx]);`).
-    /// So it takes the session when it is free, and while it is held asks the links that are up
-    /// for room with nothing of the session held. No room within `wait_before_drop` is the
-    /// congestion drop, which zenoh answers the put with success; room means the holder is not
-    /// waiting on a link, and the session is tried again. A session whose links give no wait to
-    /// ask is waited for. `Ok(None)` once the session is closed, or when the publish was dropped
-    /// for want of room. Under the pico profile a held session drops the publish at once, with
-    /// nothing asked ([`LinkRooms::for_held`]), and the caller is told
-    /// ([`FanoutError::HeldConduit`]), as pico's put fails when its held transmit lock drops it.
-    fn live_to_publish(&self, droppable: bool) -> Result<Option<LiveCore<'_, L, C>>, FanoutError> {
+    /// So it takes the session when it is free, and while it is held asks the faces that are up
+    /// for room with nothing of the session held. A face with no room within `wait_before_drop`
+    /// is the congestion drop, which zenoh answers the put with success; room on every face means
+    /// the holder is not waiting on one, and the session is tried again. A session whose faces
+    /// give no wait to ask is waited for. Under the pico profile the publish is dropped at once on
+    /// the face another publish is sending on, with nothing asked ([`LinkRooms::for_held`]), and
+    /// the caller is told ([`FanoutError::HeldConduit`]), as pico's put fails when its held
+    /// transmit lock drops it. Either drop is the faces' it names alone, as each of zenoh's
+    /// transports drops on its own queue: the publish is still owed to the others
+    /// ([`ToPublish::DroppedOn`], [`Self::hand_off`]).
+    fn live_to_publish(&self, droppable: bool) -> ToPublish<'_, L, C> {
         if !droppable {
-            return Ok(self.live());
+            return self.live().map_or(ToPublish::Closed, ToPublish::Live);
         }
         loop {
             if self.closed.load(Ordering::Acquire) {
-                return Ok(None);
+                return ToPublish::Closed;
             }
             if let Some(guard) = self.core.try_lock() {
                 // A close that took the session first is seen under it, as `live` sees it.
                 if self.closed.load(Ordering::Acquire) {
-                    return Ok(None);
+                    return ToPublish::Closed;
                 }
-                return Ok(Some(guard));
+                return ToPublish::Live(guard);
             }
-            let sending = self.sending.load(Ordering::SeqCst) > 0;
-            match self
-                .rooms
-                .for_held(self.held_drop, sending, self.wait_before_drop_us)
-            {
-                Room::Free => core::hint::spin_loop(),
-                Room::Congested => {
-                    #[cfg(feature = "transport-stats")]
-                    self.unsent_drops.fetch_add(1, Ordering::Relaxed);
-                    return Ok(None);
+            let (faces, told) = match self.rooms.for_held(
+                self.held_drop,
+                self.held_face(),
+                self.wait_before_drop_us,
+            ) {
+                Room::Free => {
+                    core::hint::spin_loop();
+                    continue;
                 }
-                Room::Unasked => return Ok(self.live()),
-                Room::Held => {
-                    #[cfg(feature = "transport-stats")]
-                    self.unsent_drops.fetch_add(1, Ordering::Relaxed);
-                    return Err(FanoutError::HeldConduit);
-                }
-            }
+                Room::Unasked => return self.live().map_or(ToPublish::Closed, ToPublish::Live),
+                Room::Congested(faces) => (faces, false),
+                Room::Held(face) => (vec![face], true),
+            };
+            #[cfg(feature = "transport-stats")]
+            self.unsent_drops.fetch_add(1, Ordering::Relaxed);
+            return ToPublish::DroppedOn { faces, told };
         }
+    }
+
+    /// The face a publish holding the session sends on now, if one does ([`SendingOn`]).
+    fn held_face(&self) -> Option<FaceId> {
+        let face = self.sending_on.load(Ordering::SeqCst);
+        (face != NOT_SENDING).then_some(face)
     }
 
     /// What the session's transports counted (`transport-stats`), in the report a tokio session
@@ -2523,13 +2641,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             for actions in core.0.ups() {
                 report.absorb(&actions.stats_report());
             }
-            // A group charges what its queue dropped for congestion where the tokio engine's
-            // group charges it, the transport's dropped messages; it leaves with the group's join.
+            // A group charges what its queue dropped, for want of room or past the reply limit,
+            // where the tokio engine's group charges it, the transport's dropped messages; it
+            // leaves with the group's join.
             #[cfg(feature = "group")]
             for group in &core.0.groups {
-                report.tx.n_dropped = report.tx.n_dropped.saturating_add(
-                    usize::try_from(group.congestion_drops_total()).unwrap_or(usize::MAX),
-                );
+                report.tx.n_dropped = report
+                    .tx
+                    .n_dropped
+                    .saturating_add(usize::try_from(group.drops_total()).unwrap_or(usize::MAX));
             }
         }
         let unsent = self.unsent_drops.load(Ordering::Relaxed);
@@ -2686,8 +2806,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         }
     }
 
-    /// A publish's leg to the peer the link reaches, when its destination admits the wire. A link
-    /// that is down skips it, as a send over it would.
+    /// A publish's leg to the peers the session's faces reach, when its destination admits the
+    /// wire. A link that is down skips it, as a send over it would.
     fn publish_to_link(
         &self,
         keyexpr: &str,
@@ -2699,24 +2819,78 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             return Ok(0);
         }
         let meta = opts.push_metadata();
-        let reliable = opts.reliable_bool();
         // zenoh's `is_droppable`: a best-effort message, or one whose congestion control is `Drop`
         // (`commons/zenoh-protocol/src/network/mod.rs` @ `!self.is_reliable() || self.congestion_control() == CongestionControl::Drop`).
         // A message with no QoS of its own is sent with the default's, as the send reads it.
         let congestion = meta.qos.unwrap_or(QosLevel::DEFAULT).congestion();
-        let droppable = !reliable || congestion == CongestionControl::Drop;
-        let Some(core) = self.live_to_publish(droppable)? else {
-            return Ok(0);
+        let droppable = !opts.reliable_bool() || congestion == CongestionControl::Drop;
+        let core = match self.live_to_publish(droppable) {
+            ToPublish::Live(core) => core,
+            ToPublish::Closed => return Ok(0),
+            ToPublish::DroppedOn { faces, told } => {
+                self.hand_off(HandedLeg {
+                    keyexpr: String::from(keyexpr),
+                    wire: wire.clone(),
+                    payload: payload.to_vec(),
+                    opts: opts.clone(),
+                    dropped_on: faces,
+                });
+                return if told {
+                    Err(FanoutError::HeldConduit)
+                } else {
+                    Ok(0)
+                };
+            }
         };
-        // Declared after the session's guard, so it is let go first: a publish that then finds
-        // the session held finds a holder that is not sending, and waits for it.
-        let _sending = Sending::enter(&self.sending);
+        // What was handed to the session before this publish leaves before it, and what was
+        // handed while this publish held the session leaves after it.
+        let before = self.send_handed(&core.0);
+        let outcome = self.fan_out(
+            &core.0,
+            &Publication {
+                keyexpr,
+                wire,
+                payload,
+                opts,
+                meta: &meta,
+            },
+            &[],
+        );
+        let after = self.send_handed(&core.0);
+        drop(core);
+        // Let go of with nothing of the session held: a key a leg names may keep a declaration
+        // that is retracted as it drops, which takes the session (`WireKey`).
+        drop((before, after));
+        outcome
+    }
+
+    /// Send `put` to each face whose link is up and to each group the session joined, but the
+    /// faces in `skip`. Each face is sent the put, and one a face's link could not have carried is
+    /// the one that is reported; a face whose link is down is skipped, as a send over it would.
+    /// The face being sent to is marked as the one this publish holds ([`SendingOn`]) for as long
+    /// as its send takes.
+    fn fan_out(
+        &self,
+        core: &Core<L, C>,
+        put: &Publication<'_>,
+        skip: &[FaceId],
+    ) -> Result<usize, FanoutError> {
+        let Publication {
+            keyexpr,
+            wire,
+            payload,
+            opts,
+            meta,
+        } = *put;
+        let reliable = opts.reliable_bool();
         let express = meta.is_express();
         let priority = opts.priority_band();
-        // Each face is sent the put, and one a face's link could not have carried is the one that
-        // is reported; a face whose link is down is skipped, as a send over it would.
         let mut outcome = Ok(0);
-        for actions in core.0.ups() {
+        for (face, actions) in core.ups_by_id() {
+            if skip.contains(&face) {
+                continue;
+            }
+            let _sending = SendingOn::enter(&self.sending_on, face);
             // Each link names the key as its own key-wire form says.
             let wire = on_link(actions, keyexpr, wire);
             let suffix = wire.suffix.as_deref();
@@ -2739,16 +2913,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             } else {
                 let push = match (opts.kind, wire.mapping_id) {
                     (SampleKind::Put, 0) => {
-                        push_build::build_push_literal_with_meta(keyexpr, payload, &meta)
+                        push_build::build_push_literal_with_meta(keyexpr, payload, meta)
                     }
                     (SampleKind::Del, 0) => {
-                        push_build::build_push_del_literal_with_meta(keyexpr, &meta)
+                        push_build::build_push_del_literal_with_meta(keyexpr, meta)
                     }
                     (SampleKind::Put, mapping_id) => {
-                        push_build::build_push_aliased_with_meta(mapping_id, suffix, payload, &meta)
+                        push_build::build_push_aliased_with_meta(mapping_id, suffix, payload, meta)
                     }
                     (SampleKind::Del, mapping_id) => {
-                        push_build::build_push_del_aliased_with_meta(mapping_id, suffix, &meta)
+                        push_build::build_push_del_aliased_with_meta(mapping_id, suffix, meta)
                     }
                 };
                 match push {
@@ -2767,13 +2941,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         }
         // And each group the session joined, which its task frames and sends.
         #[cfg(feature = "group")]
-        for group in &core.0.groups {
+        for group in &core.groups {
+            if skip.contains(&group.id()) {
+                continue;
+            }
+            let _sending = SendingOn::enter(&self.sending_on, group.id());
             let sent = group.publish(GroupPut {
                 keyexpr,
                 wire,
                 payload,
                 kind: opts.kind,
-                meta: &meta,
+                meta,
                 reliable,
                 priority,
             });
@@ -2782,6 +2960,65 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             }
         }
         outcome
+    }
+
+    /// Owe `leg` to the session's faces it was not dropped on: it is sent by whoever next holds
+    /// the session for a publish or a read, ahead of what that holder sends, and here at once
+    /// when the session is free by now. Past the legs of its priority the session holds at most
+    /// it is dropped on the other faces too, as a message that finds its queue full is, and
+    /// counted as the one drop it already is.
+    fn hand_off(&self, leg: HandedLeg) {
+        let priority = leg.opts.priority_band();
+        let refused = {
+            let mut handed = lock(&self.handed);
+            let held = handed
+                .iter()
+                .filter(|owed| owed.opts.priority_band() == priority)
+                .count();
+            if held < self.handed_at_most[priority as usize] {
+                handed.push_back(leg);
+                None
+            } else {
+                Some(leg)
+            }
+        };
+        // Let go of outside the lock, as a leg that was sent is (`Self::publish_to_link`).
+        drop(refused);
+        // The holder may have let go of the session since the publish found it held, with
+        // nobody left to send what was handed.
+        if let Some(core) = self.core.try_lock() {
+            if !self.closed.load(Ordering::Acquire) {
+                let sent = self.send_handed(&core.0);
+                drop(core);
+                drop(sent);
+            }
+        }
+    }
+
+    /// Send what was handed to the session ([`Self::hand_off`]), in the order it was handed, each
+    /// leg to the faces it was not dropped on. The legs are given back to be let go of once the
+    /// session is: a key a leg names may keep a declaration that is retracted as it drops.
+    /// The queue is taken whole, not drained into another collection: the legs leave in the order
+    /// they were handed either way, and a drain links the queue's drain and drop-guard code into
+    /// every cooperative build for nothing it needs (measured 2026-11-21).
+    fn send_handed(&self, core: &Core<L, C>) -> VecDeque<HandedLeg> {
+        let legs = core::mem::take(&mut *lock(&self.handed));
+        for leg in &legs {
+            let meta = leg.opts.push_metadata();
+            // The caller was answered when the leg was handed.
+            let _ = self.fan_out(
+                core,
+                &Publication {
+                    keyexpr: &leg.keyexpr,
+                    wire: &leg.wire,
+                    payload: &leg.payload,
+                    opts: &leg.opts,
+                    meta: &meta,
+                },
+                &leg.dropped_on,
+            );
+        }
+        legs
     }
 
     /// A publish's leg to the session's own subscribers, when its destination admits them: the
@@ -4413,6 +4650,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         #[cfg(not(feature = "liveliness"))]
         let live_subs: Vec<TargetKey> = Vec::new();
         drop(guard);
+        // What publishes handed to the session and it never sent goes with it, let go of with no
+        // lock held, as a sent leg is.
+        let handed = core::mem::take(&mut *lock(&self.handed));
+        drop(handed);
         #[cfg(feature = "liveliness")]
         drop(core::mem::take(&mut *lock(&self.live_samples)));
         #[cfg(feature = "query")]
@@ -4485,10 +4726,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         wait.wait();
         // One pass of the session's task reads what its link holds, a batch at a time, and does
         // what is due: `single` asks for one message, and a pass is the least this engine reads.
-        let stepped = match self.live() {
-            Some(mut core) => self.step(&mut core.0),
-            None => false,
+        let (stepped, handed) = match self.live() {
+            Some(mut core) => {
+                let stepped = self.step(&mut core.0);
+                // What publishes handed to the session while it was held leaves on this step too,
+                // so a program that only reads its session sends it.
+                (stepped, self.send_handed(&core.0))
+            }
+            None => (false, VecDeque::new()),
         };
+        drop(handed);
         self.deliver();
         #[cfg(feature = "ticker")]
         self.run_due_tickers();

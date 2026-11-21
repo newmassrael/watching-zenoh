@@ -523,7 +523,7 @@ impl PicoSessionHandle {
 ///
 /// # Safety
 /// `zs` must be null, or a valid `z_loaned_session_t` whose `_val` slot is a live
-/// `Box::into_raw::<PicoSessionHandle>` pointer (what [`z_open`] installs).
+/// `PicoSessionHandle` handle (what [`z_open`] installs).
 pub(crate) unsafe fn session_handle<'a>(
     zs: *const z_loaned_session_t,
 ) -> Option<&'a PicoSessionHandle> {
@@ -732,7 +732,13 @@ pub unsafe extern "C" fn z_open(
         // The core runs it (a listener bound before the dial, an accept loop beside the dial
         // face), so it is not refused. Until R3090 it was, with `Z_ERR_INVALID`, and the comment
         // called it a follow-up. Its role is a peer's: `open_config` reads a listen config so.
+        // The handle's place is taken before anything opens, so a full pool refuses the open and
+        // the open leaves nothing behind.
+        let Some(slot) = crate::object_slot::Slot::take(crate::object_slot::Kind::Session) else {
+            return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
+        };
         let request = OpenRequest {
+            slot,
             connect,
             listen,
             dial_whatami,
@@ -971,6 +977,8 @@ mod open_config_tests {
 
 /// What `z_open` read off the C config and its options, for the engine that opens it.
 struct OpenRequest {
+    /// The place the session's handle is installed in, taken before anything is opened.
+    slot: crate::object_slot::Slot<PicoSessionHandle>,
     connect: Vec<String>,
     listen: Option<String>,
     dial_whatami: WhatAmI,
@@ -1018,6 +1026,7 @@ struct OpenRequest {
 #[cfg(feature = "engine-tokio")]
 unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZResult {
     let OpenRequest {
+        slot,
         connect,
         listen,
         dial_whatami,
@@ -1232,7 +1241,7 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             let ext = ext.with_transport_endpoint(transport_endpoint);
             let handle = PicoSessionHandle::new(drive, ext);
             *zs = z_owned_session_t {
-                _val: Box::into_raw(Box::new(handle)) as *mut c_void,
+                _val: slot.fill(handle) as *mut c_void,
                 _cnt: core::ptr::null_mut(),
             };
             #[cfg(feature = "admin-space")]
@@ -1377,15 +1386,22 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     // negotiated, and a node pays its batch for each link and not the largest datagram.
     let links =
         crate::coop_host::links().with_rx_capacity(wz_session_core::caps::PICO_UNICAST_BATCH_BYTES);
+    // The clock every timer of the session reads: the time base the config names, or the host's.
+    #[cfg(feature = "time-base")]
+    let clock = crate::time_base::session_clock(request.time_base);
+    #[cfg(not(feature = "time-base"))]
+    let clock = crate::coop_host::clock();
     // The `tls/` link: the secure channel over the host's streams, for the dial and the listen,
     // made from the material the config's keys named. A config whose material cannot make a
     // channel (half a listener, a key that is not its chain's) fails the open, as a malformed
     // value does at the keys, and never degrades to a session without the protection asked for.
+    // An inbound handshake is timed on the session's clock, as the session's own handshake is.
     #[cfg(feature = "tls-mbedtls")]
     let links = match wz_capi_coop::tls::HostTls::from_config(
         crate::coop_host::tcp_dial(),
         &request.tls,
         wz_session_core::caps::PICO_ACCEPT_TIMEOUT_MS as u64,
+        &clock,
     ) {
         Ok(tls) => links.with_tls(tls),
         Err(_) => return crate::result::Z_ERR_INVALID,
@@ -1394,11 +1410,6 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     // tokio engine's group sockets are.
     #[cfg(feature = "multicast-transport")]
     let links = links.with_groups(wz_capi_coop::host_group::HostGroups::of_policy(&policy));
-    // The clock every timer of the session reads: the time base the config names, or the host's.
-    #[cfg(feature = "time-base")]
-    let clock = crate::time_base::session_clock(request.time_base);
-    #[cfg(not(feature = "time-base"))]
-    let clock = crate::coop_host::clock();
     let config = wz_capi_coop::CoopConfig {
         endpoints: connect,
         whatami: dial_whatami,
@@ -1523,7 +1534,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         let _ = handle.drive.start_read_task();
     }
     *zs = z_owned_session_t {
-        _val: Box::into_raw(Box::new(handle)) as *mut c_void,
+        _val: request.slot.fill(handle) as *mut c_void,
         _cnt: core::ptr::null_mut(),
     };
     #[cfg(feature = "admin-space")]
@@ -1617,7 +1628,7 @@ pub unsafe extern "C" fn z_session_drop(obj: *mut z_moved_session_t) {
         if !val.is_null() {
             // The engine's session closes as it drops (idempotent), through the
             // drop glue its own crate holds: the drive is the engine's trait object.
-            drop(Box::from_raw(val as *mut PicoSessionHandle));
+            crate::object_slot::release(val as *mut PicoSessionHandle);
             (*obj)._this = z_owned_session_t::null_value();
         }
         Z_OK

@@ -15,8 +15,13 @@
  * 2. The configuration sample the package ships is one the library accepts: the message catalog
  *    is read by wz_ext_message_catalog_new and declares at least one message. A catalog the
  *    library refuses prints the refusal.
+ * 3. The doors of the additional features run over the core they were built with: the version of
+ *    the extension interface they need (wz_ext_additional_interface) is the core's
+ *    (wz_ext_interface_version). In a package of one library both are that library's; in a package
+ *    of two the doors are the additional library's, and the core the other's, so this holds the
+ *    pair a package ships.
  *
- * Exit status 0 means both held; the last line printed is the count either way.
+ * Exit status 0 means all three held; the last line printed is the count either way.
  */
 
 #include <stdio.h>
@@ -96,6 +101,16 @@ int main(int argc, char **argv) {
         }
         free(text);
     }
+
+    wz_ext_interface_version_t core_version;
+    core_version.struct_size = sizeof core_version;
+    CHECK(wz_ext_interface_version(&core_version) == Z_OK, "the core does not answer its interface version");
+    wz_ext_interface_version_t needed;
+    needed.struct_size = sizeof needed;
+    z_result_t bound = wz_ext_additional_interface(&needed);
+    CHECK(bound == Z_OK && needed.major == core_version.major && needed.minor <= core_version.minor,
+          "the doors need interface %u.%u and the core is %u.%u (rc %d)", (unsigned)needed.major,
+          (unsigned)needed.minor, (unsigned)core_version.major, (unsigned)core_version.minor, (int)bound);
 
     printf("package-check: %d check(s), %d failure(s)\n", checks, failures);
     return failures == 0 ? 0 : 1;

@@ -3609,6 +3609,11 @@ jobs:
         # into a lane for the first time. Both have existed since R311y568 and
         # ran only when someone remembered to type `--ignored` — the register
         # carried that as §11.9 and nothing changed it until now.
+        #
+        # Its first leg builds the two forms of wz's own pico library (the one
+        # library, and the core with the doors' library beside it) and holds them
+        # to the same messages on the wire, with WZ_PICO_FORMS_REQUIRE armed by
+        # the lane (docs/capi-pico-additional-library.md).
         run: bash scripts/run-ci.sh --layer Epico
 
       - name: Layer Ewire — the analyzer, on bytes a real zenoh-pico wrote

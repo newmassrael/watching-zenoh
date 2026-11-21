@@ -883,32 +883,6 @@ fn apply_quic_ca(cfg: DialConfig, _quic_ca: &Option<String>) -> io::Result<DialC
     Ok(cfg)
 }
 
-/// R311y428 — the default zenoh scouting group. `224.0.0.224:7446` is
-/// `Z_CONFIG_MULTICAST_LOCATOR_DEFAULT` in zenoh-pico
-/// (`include/zenoh-pico/config.h.in`) and the `scouting/multicast/address`
-/// default in zenoh (DEFAULT_CONFIG.json5), so a `--scout` demo reaches BOTH
-/// foreign implementations without being told where to look — which is the
-/// point of a discovery mode.
-///
-/// R311y845 — this is the DEFAULT now, not the only value. The doc here used to
-/// end "Not a CLI knob: an address the peers do not share discovers nothing,
-/// and zenoh exposes the override in its config, not its scouting API." That
-/// was right about where the knob belongs and wrong about the consequence: wz's
-/// config reader could not reach it either, so a network that had moved its
-/// scouting group was one a wz node could not join at all — while
-/// `McastSocketConfig` had taken the group, the interface and the TTL as
-/// PARAMETERS since R311y454. The override now arrives the way zenoh's does,
-/// from `scouting/multicast/address`, with `--scout-addr` as the argv that
-/// config expands into.
-///
-/// R311y846 — read by the RESPONDER too, which is why the cfg widened. The two
-/// directions must join the same default or a network that moved neither would
-/// still have wz asking on one group and answering on another.
-#[cfg(any(feature = "scouting-active", feature = "scouting-responder"))]
-pub(crate) const SCOUT_GROUP: std::net::Ipv4Addr = std::net::Ipv4Addr::new(224, 0, 0, 224);
-#[cfg(any(feature = "scouting-active", feature = "scouting-responder"))]
-pub(crate) const SCOUT_PORT: u16 = 7446;
-
 /// The WhatAmI bitmask the Scout asks for: `ROUTER (0x01) | PEER (0x02)`. The
 /// demo's `--scout` path becomes an Initiator, which announces
 /// [`wz::runtime_tokio::session_glue::WhatAmI::Client`] on its own InitSyn, and
@@ -973,11 +947,8 @@ pub(crate) async fn scout_for_peer_locator(
     use wz::runtime_tokio::UdpDriver;
 
     // R311y845 — the group and port the operator asked for, or zenoh's own
-    // defaults when they asked for nothing. The address was already checked to
-    // parse as a v4 socket at the argv boundary (and at the config boundary
-    // before that), so the `expect` here cannot fire on operator input; it is a
-    // restatement of that invariant, not a second validation.
-    let (group, port) = socket.group_and_port(SCOUT_GROUP, SCOUT_PORT);
+    // default when they asked for nothing, as the argv boundary read it.
+    let group = socket.socket();
     // R311y454 / R311y845 — the interface is `None` unless the operator named
     // one. Until y845 it was UNCONDITIONALLY `None`, reasoned as "a discovery
     // beacon must reach every interface a peer could answer on". That default
@@ -987,16 +958,15 @@ pub(crate) async fn scout_for_peer_locator(
     // segment was beaconing wherever the routing table chose, with no way to
     // say otherwise. `--multicast-locator` still narrows the DATA-plane group;
     // this narrows the DISCOVERY one.
-    let mut driver = UdpDriver::bind_multicast(group, port, socket.as_socket_config(policy))
-        .await
-        .map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!(
-                    "wz-ap-demo: --scout could not join the scouting group {group}:{port}: {e}"
-                ),
-            )
-        })?;
+    let mut driver =
+        UdpDriver::bind_multicast(group.ip(), group.port(), socket.as_socket_config(policy))
+            .await
+            .map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!("wz-ap-demo: --scout could not join the scouting group {group}: {e}"),
+                )
+            })?;
     // The Scout announces the identity this node will open its session with, so
     // a responder logging the scouter sees the same zid the InitSyn then
     // carries. `--zid` therefore reaches here, not only the session params.
@@ -1019,7 +989,7 @@ pub(crate) async fn scout_for_peer_locator(
         // A banner naming a group the node is not on is the same defect this
         // round exists to remove, one level down: the operator checks this line
         // to see where their config landed.
-        "wz-ap-demo: active multicast scouting on {group}:{port} \
+        "wz-ap-demo: active multicast scouting on {group} \
          (what=0x{SCOUT_WHAT:02x}, {SCOUT_CYCLE_MS}ms window, {budget_ms}ms budget)"
     );
     loop {
@@ -1076,7 +1046,7 @@ pub(crate) async fn scout_for_peer_locator(
                     return Err(io::Error::new(
                         io::ErrorKind::TimedOut,
                         format!(
-                            "wz-ap-demo: --scout found no peer on {group}:{port} \
+                            "wz-ap-demo: --scout found no peer on {group} \
                              within {budget_ms}ms ({} Scout(s) emitted, {} Hello(s) recorded)",
                             trace.scout_emit, trace.record_hello
                         ),
@@ -1140,18 +1110,18 @@ pub(crate) async fn spawn_scouting_responder(
     };
     use wz::runtime_tokio::UdpDriver;
 
-    let (group, port) = socket.group_and_port(SCOUT_GROUP, SCOUT_PORT);
-    let driver = UdpDriver::bind_multicast(group, port, socket.as_socket_config(policy))
-        .await
-        .map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!(
-                    "wz-ap-demo: --scout-listen could not join the scouting group \
-                 {group}:{port}: {e}"
-                ),
-            )
-        })?;
+    let group = socket.socket();
+    let driver =
+        UdpDriver::bind_multicast(group.ip(), group.port(), socket.as_socket_config(policy))
+            .await
+            .map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!(
+                        "wz-ap-demo: --scout-listen could not join the scouting group {group}: {e}"
+                    ),
+                )
+            })?;
     let identity =
         ResponderIdentity::try_new(whatami, zid.to_vec(), locators.clone()).map_err(|e| {
             io::Error::new(
@@ -1166,7 +1136,7 @@ pub(crate) async fn spawn_scouting_responder(
     // discovering them, and a banner naming the compiled-in default would be the
     // one place that cannot tell them.
     log::info!(
-        "wz-ap-demo: SCOUT RESPONDER listening on {group}:{port} \
+        "wz-ap-demo: SCOUT RESPONDER listening on {group} \
          as {} zid {zid_hex} advertising {:?}",
         whatami.to_str(),
         locators
@@ -1304,19 +1274,21 @@ async fn spawn_scouting_autoconnect(
     use wz::runtime_tokio::scouting_glue::{new_scouting_engine, ScoutParams, ScoutingActions};
     use wz::runtime_tokio::UdpDriver;
 
-    let (group, port) = args.socket.group_and_port(SCOUT_GROUP, SCOUT_PORT);
-    let mut driver =
-        UdpDriver::bind_multicast_tx(group, port, args.socket.as_socket_config(snapshot))
-            .await
-            .map_err(|e| {
-                io::Error::new(
-                    e.kind(),
-                    format!(
-                        "wz-ap-demo: --scout-autoconnect could not open a scouting sender \
-                 for {group}:{port}: {e}"
-                    ),
-                )
-            })?;
+    let group = args.socket.socket();
+    let mut driver = UdpDriver::bind_multicast_tx(
+        group.ip(),
+        group.port(),
+        args.socket.as_socket_config(snapshot),
+    )
+    .await
+    .map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!(
+                "wz-ap-demo: --scout-autoconnect could not open a scouting sender for {group}: {e}"
+            ),
+        )
+    })?;
 
     let policy = AutoConnect::with_strategies(Zid::from_slice(zid), args.matcher, args.strategy);
     let actions = ScoutingActions::new(ScoutParams {
@@ -1339,7 +1311,7 @@ async fn spawn_scouting_autoconnect(
     // discipline. An operator reads this line to find out what their
     // `autoconnect` / `autoconnect_strategy` resolved to for THIS node's mode.
     log::info!(
-        "wz-ap-demo: SCOUT AUTOCONNECT on {group}:{port} \
+        "wz-ap-demo: SCOUT AUTOCONNECT on {group} \
          (roles {}, strategy {}{})",
         role_names(args.matcher),
         args.strategy.to_config_str(),
@@ -2889,10 +2861,10 @@ async fn install_rescout_plan(
     let Some(plan) = rescout else {
         return Ok(());
     };
-    let (group, port) = plan.socket.group_and_port(SCOUT_GROUP, SCOUT_PORT);
+    let group = plan.socket.socket();
     let driver = wz::runtime_tokio::UdpDriver::bind_multicast(
-        group,
-        port,
+        group.ip(),
+        group.port(),
         plan.socket.as_socket_config(policy),
     )
     .await
@@ -2901,7 +2873,7 @@ async fn install_rescout_plan(
             e.kind(),
             format!(
                 "wz-ap-demo: --scout --reconnect could not hold the scouting \
-                 group {group}:{port} for re-scouting: {e}"
+                 group {group} for re-scouting: {e}"
             ),
         )
     })?;
@@ -2918,10 +2890,10 @@ async fn install_rescout_plan(
         },
         clock,
         SCOUT_TICK_MS,
-        format!("{group}:{port}"),
+        group.to_string(),
     )));
     log::info!(
-        "wz-ap-demo: reconnect plan = re-scout {group}:{port} \
+        "wz-ap-demo: reconnect plan = re-scout {group} \
          (a link loss scouts the group again, then dials every locator the \
           answering Hello advertised)"
     );
@@ -2949,11 +2921,11 @@ async fn install_rescout_plan(
     let Some(plan) = rescout else {
         return Ok(());
     };
-    // The operator's own `--scout-addr` text, NOT a resolved group: the
-    // resolver (`ScoutSocketArgs::group_and_port`) and the default constants
-    // are `scouting-active`-gated too, so this arm cannot name the group it
-    // would have joined. Reporting what was TYPED is the honest half, and it is
-    // the half that identifies the invocation to fix.
+    // The operator's own `--scout-addr`, NOT a resolved group: the resolver
+    // (`ScoutSocketArgs::socket`) is `scouting-active`-gated too, so this arm
+    // does not name the default it would have joined. Reporting what was GIVEN
+    // is the honest half, and it is the half that identifies the invocation to
+    // fix.
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         format!(
@@ -2961,7 +2933,10 @@ async fn install_rescout_plan(
              needs the `scouting-active` feature; this build cannot scout, so \
              the supervisor would silently re-dial one address instead \
              (build: cargo build -p wz-ap-demo --features scouting-active)",
-            plan.socket.address.as_deref().unwrap_or("<default group>"),
+            plan.socket.address.map_or_else(
+                || String::from("<default group>"),
+                |group| group.to_string()
+            ),
             wz::runtime_tokio::zid_hex::zid_to_zenoh_hex(&plan.zid)
         ),
     ))
@@ -6787,7 +6762,7 @@ async fn run_router_hat_until(
     // `wz_session_core::locator` parser every unicast locator uses (re-exported at
     // `wz-runtime-tokio/src/lib.rs:183`), so the tail is parsed in exactly one
     // place. This also retires the "a configurable group is a later concern" note
-    // above. The SCOUTING group (`SCOUT_GROUP`) stays unnarrowed on purpose —
+    // above. The SCOUTING group (`ScoutSocketArgs::socket`) stays unnarrowed on purpose —
     // scouting is a discovery beacon that should reach every interface a peer might
     // answer on, and zenoh likewise scopes `UDP_MULTICAST_IFACE` to a group
     // locator, not to the scout default.

@@ -71,7 +71,8 @@ alloc = ["wz-runtime-coop/alloc", "wz-session-core/alloc"]
 # The per-session slot profile of the cooperative runtime, with no allocator: what a PROGRAM turns
 # on, with the defaults off (`--no-default-features --features session-slot`). Names
 # `wz-runtime-coop`'s selector, which is the instance the session code the program links uses; it
-# also builds `net::PosixStack`, the stack the slot profile's session host is given.
+# also builds the stack the slot profile's session host is given: `slot::PosixStack` on a POSIX
+# host, `windows::slot::WindowsStack` on Windows.
 session-slot = ["wz-runtime-coop/session-slot"]
 
 [lints]

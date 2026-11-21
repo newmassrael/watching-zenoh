@@ -228,7 +228,7 @@ pub struct z_loaned_reply_err_t {
 /// tripwire is added for that, for the reason [`crate::query::QueryMarshal`]
 /// records: after the frame dies, READING a validity flag is itself the
 /// use-after-free it was meant to intercept.
-struct ReplyMarshal {
+pub(crate) struct ReplyMarshal {
     is_ok: bool,
     /// The Put/Del body, present iff [`Self::is_ok`].
     sample: SampleMarshal,
@@ -321,26 +321,30 @@ impl ReplyMarshal {
 
 // --- the OWNED reply family -------------------------------------------------
 
-/// Release a boxed [`ReplyMarshal`].
+/// Release an owned [`ReplyMarshal`].
 ///
 /// # Safety
-/// `handle` must be a live `Box::into_raw::<ReplyMarshal>` pointer.
+/// `handle` must be a live `ReplyMarshal` handle.
 unsafe fn free_reply_marshal(handle: *mut c_void) {
-    drop(Box::from_raw(handle.cast::<ReplyMarshal>()));
+    crate::object_slot::release(handle.cast::<ReplyMarshal>());
 }
 
-/// Deep-copy the marshal behind a borrowed reply onto the heap, bound at its
-/// final address.
+/// Deep-copy the marshal behind a borrowed reply into a place of its own, bound at its final
+/// address. `Z_ERR_GENERIC` for a `src` that is no reply, `_Z_ERR_SYSTEM_OUT_OF_MEMORY` when the
+/// pool of replies is full.
 ///
 /// # Safety
 /// `src` must be null or a pointer this crate handed to a reply callback.
-unsafe fn clone_reply_marshal(src: *const z_loaned_reply_t) -> *mut c_void {
+unsafe fn clone_reply_marshal(src: *const z_loaned_reply_t) -> Result<*mut c_void, ZResult> {
     let Some(marshal) = reply_marshal(src) else {
-        return std::ptr::null_mut();
+        return Err(crate::result::Z_ERR_GENERIC);
     };
-    let mut boxed = Box::new(marshal.deep_copy());
-    boxed.bind();
-    Box::into_raw(boxed).cast::<c_void>()
+    let Some(slot) = crate::object_slot::Slot::take(crate::object_slot::Kind::Reply) else {
+        return Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY);
+    };
+    let owned = slot.fill(marshal.deep_copy());
+    (*owned).bind();
+    Ok(owned.cast::<c_void>())
 }
 
 crate::abi::impl_boxed_element!(
@@ -1738,9 +1742,12 @@ pub unsafe extern "C" fn z_reply_err_clone(
         // A deep copy of the WHOLE marshal, not just the error blob: the owned
         // value has to answer `z_reply_err_payload` AND `z_reply_err_encoding`
         // after the callback frame is gone, and both read the marshal.
-        let mut boxed = Box::new(marshal.deep_copy());
-        boxed.bind();
-        (*dst).handle = Box::into_raw(boxed) as *mut c_void;
+        let Some(slot) = crate::object_slot::Slot::take(crate::object_slot::Kind::Reply) else {
+            return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
+        };
+        let owned = slot.fill(marshal.deep_copy());
+        (*owned).bind();
+        (*dst).handle = owned as *mut c_void;
         Z_OK
     })
 }
@@ -1829,7 +1836,7 @@ pub unsafe extern "C" fn z_reply_err_drop(err: *mut z_moved_reply_err_t) {
         let handle = (*err)._this.handle;
         (*err)._this = z_owned_reply_err_t::null_value();
         if !handle.is_null() {
-            drop(Box::from_raw(handle as *mut ReplyMarshal));
+            crate::object_slot::release(handle as *mut ReplyMarshal);
         }
         Z_OK
     });
@@ -1896,12 +1903,13 @@ pub unsafe extern "C" fn z_reply_clone(
         if this_.is_null() {
             return Z_ERR_NULL;
         }
-        let handle = clone_reply_marshal(this_);
-        if handle.is_null() {
-            return crate::result::Z_ERR_GENERIC;
+        match clone_reply_marshal(this_) {
+            Ok(handle) => {
+                (*dst).handle = handle;
+                Z_OK
+            }
+            Err(code) => code,
         }
-        (*dst).handle = handle;
-        Z_OK
     })
 }
 

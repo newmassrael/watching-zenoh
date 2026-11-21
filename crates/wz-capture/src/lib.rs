@@ -518,9 +518,10 @@ mod memory_matrix;
 // doc is merged with the module's own `//!` docs and their links would then be
 // resolved from this scope instead of from the module.
 //
-// The schema reader and the typed reader are `wz-app-frame`'s, so a node can
-// read a payload by its fields without linking this crate; they are re-exported
-// at the paths they have here, and the documents over them stay.
+// The schema reader, the typed reader, the nanopb options and the integer
+// ranges are `wz-app-frame`'s, so a node can read and write a payload by its
+// fields without linking this crate; they are re-exported at the paths they
+// have here, and the documents over them stay.
 pub use wz_app_frame::proto_decode;
 pub mod proto_decode_json;
 #[cfg(test)]
@@ -541,14 +542,14 @@ pub mod proto_message_list;
 pub mod proto_message_list_json;
 #[cfg(test)]
 mod proto_message_list_tests;
-pub mod proto_nanopb;
+pub use wz_app_frame::proto_nanopb;
 #[cfg(test)]
 mod proto_nanopb_tests;
 // The `.proto` parser behind the schema reader and [`proto_encode`]: the part of
 // the syntax tree the declaration and value doors need. Named here and not
 // re-exported, as the tokenizer is.
 use wz_app_frame::proto_parse;
-pub mod proto_range;
+pub use wz_app_frame::proto_range;
 #[cfg(test)]
 mod proto_range_tests;
 /// `.proto` schema text turned into DECLARATION text: the field names a

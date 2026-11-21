@@ -6,7 +6,7 @@
 //! Two invariants every `#[no_mangle] extern "C"` export upholds:
 //!
 //! 1. **No unwinding across the boundary.** A Rust panic crossing an
-//!    `extern "C"` frame is undefined behaviour. [`guard`] wraps the body in
+//!    `extern "C"` frame is undefined behaviour. [`guarded`] wraps the body in
 //!    `std::panic::catch_unwind` and converts a panic into a
 //!    [`crate::result::Z_ERR_GENERIC`] return (or the caller-chosen fallback).
 //!    Without `std` nothing unwinds: an image's panic handler stops the program
@@ -24,69 +24,10 @@ use alloc::sync::Arc;
 use wz_capi_port::os::{Condvar, Mutex};
 
 use crate::prelude::*;
-use crate::result::{ZResult, Z_ERR_GENERIC};
 
-/// Run `body`, or answer `None` when it panicked, so that no panic unwinds into the C frame that
-/// called. A body that ran to the end answers `Some`.
-#[cfg(feature = "std")]
-#[inline]
-pub(crate) fn catch<R>(body: impl FnOnce() -> R) -> Option<R> {
-    std::panic::catch_unwind(core::panic::AssertUnwindSafe(body)).ok()
-}
-
-/// Run `body`. Without `std` a panic does not unwind (the module doc), so a body that returns
-/// ran to the end.
-#[cfg(not(feature = "std"))]
-#[inline]
-pub(crate) fn catch<R>(body: impl FnOnce() -> R) -> Option<R> {
-    Some(body())
-}
-
-/// Run an export body, converting a panic into a status code instead of
-/// unwinding across the C ABI boundary. Returns `fallback` if the body
-/// panics.
-#[inline]
-pub(crate) fn guard<F>(fallback: ZResult, body: F) -> ZResult
-where
-    F: FnOnce() -> ZResult,
-{
-    catch(body).unwrap_or(fallback)
-}
-
-/// Run an export body that returns a status code, defaulting the panic
-/// fallback to [`Z_ERR_GENERIC`].
-#[inline]
-pub(crate) fn guarded<F>(body: F) -> ZResult
-where
-    F: FnOnce() -> ZResult,
-{
-    guard(Z_ERR_GENERIC, body)
-}
-
-/// Run an export body returning a value (e.g. a `usize` length); a panic
-/// yields `fallback`.
-#[inline]
-pub(crate) fn guard_val<F, T>(fallback: T, body: F) -> T
-where
-    F: FnOnce() -> T,
-{
-    catch(body).unwrap_or(fallback)
-}
-
-/// A raw C pointer the caller has asserted is safe to move across threads.
-///
-/// Used for a subscriber callback's `context`: pico's contract is that the
-/// callback and its `drop` never run concurrently, and the C side owns the
-/// pointee. Wrapping it lets the wz drive loop (a worker thread) invoke the
-/// callback. This is an FFI trust boundary — the safety obligation lives
-/// with the C caller, exactly as it does in zenoh-pico.
-#[derive(Clone, Copy)]
-pub(crate) struct SendPtr(pub(crate) *mut core::ffi::c_void);
-
-// SAFETY: the pico closure ABI contract makes the C `context` single-owner
-// and non-aliased across the call/drop lifecycle; moving the opaque pointer
-// to the drive thread is what a native pico read task already does.
-unsafe impl Send for SendPtr {}
+// The guard and the thread-crossing pointer are compiled by every library of the ABI for itself.
+mod boundary;
+pub(crate) use boundary::{catch, guard_val, guarded, SendPtr};
 
 /// A pico closure `{ context, call, drop }` adopted from the C side, generic
 /// over the plane's `call` signature.

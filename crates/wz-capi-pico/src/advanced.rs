@@ -1461,6 +1461,13 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers(
         // (`vendor/zenoh-pico/src/api/advanced_subscriber.c` @
         // `z_liveliness_declare_subscriber(&sess_rc, liveliness_subscriber, z_keyexpr_loan(&keyexpr), callback, &opt);`),
         // so it gets that call's whole-key declaration and interest on it.
+        // The subscriber's place is taken before anything is declared, so a full pool refuses
+        // the declaration and declares nothing.
+        let Some(slot) =
+            crate::object_slot::Slot::take(crate::object_slot::Kind::LivelinessSubscriber)
+        else {
+            return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
+        };
         let engine = state.engine.clone();
         let key = match crate::keyexpr::DeclaredKeyexpr::declare(&engine, &ke, None) {
             Ok(key) => key,
@@ -1476,16 +1483,16 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers(
         ) else {
             return Z_ERR_GENERIC;
         };
-        let mut boxed = Box::new(SubscriberState {
+        let placed = slot.fill(SubscriberState {
             shared: engine,
             id,
             key,
             loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
             released,
         });
-        boxed.bind();
+        (*placed).bind();
         *liveliness_subscriber = z_owned_subscriber_t {
-            handle: Box::into_raw(boxed) as *mut c_void,
+            handle: placed as *mut c_void,
             _pad: [std::ptr::null_mut(); 3],
         };
         Z_OK

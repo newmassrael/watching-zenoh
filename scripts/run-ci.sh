@@ -3501,6 +3501,8 @@ layer_c0_test_discipline() {
     # The reader of scripts/kit-size-delta.sh, which builds a kit image in a base tree and this one
     # in one run: the ceiling gate's cells and the symbol diff, held here by its selftest.
     _runci_leg kit_size_delta.selftest -- python3 scripts/lib/kit_size_delta.py --selftest
+    _runci_leg perf_matrix.selftest -- python3 scripts/host-bench/perf_matrix.py --selftest
+    _runci_leg pico_windows_package.selftest -- python3 scripts/lib/pico_windows_package.py --selftest
     # R311y879 — WHICH READER each narrow zint field gets, pinned against the
     # codec UPSTREAM reads it with. The three censuses above ask whether the
     # decode covers the wire and whether a consumer reaches it; this asks
@@ -9047,7 +9049,9 @@ layer_c1ak_cargo_test_transport_stats() {
     # 7 -> 8: `a_key_set_is_carried_by_a_payload_class_alone` (`stats/filters`). fe69f5b004 moved
     # this and four guards below; merge c4209646f0 put the old numbers back, and the pc5 run of the
     # 8e integration branch printed these.
-    _runci_guarded_test C1ak 8 cargo test -p wz-session-core --features transport-stats --lib stats:: --quiet \
+    # 8 -> 9 = what hosted run 44790303307 printed: `a_report_absorbs_another_counter_by_counter`,
+    # the report of a session on several links summed counter by counter.
+    _runci_guarded_test C1ak 9 cargo test -p wz-session-core --features transport-stats --lib stats:: --quiet \
         || return 1
     # R2930 — 8 -> 9: `a_multicast_congestion_drop_is_observed_and_not_counted_sent`.
     # 9 -> 12: the three `stats/filters` tests (the filter list, a classified payload
@@ -9094,7 +9098,9 @@ layer_c1ak_cargo_test_transport_stats() {
     # R2372 — 3 -> 6, the same R2371 arithmetic on the alloc-only arm.
     # R2843 — 6 -> 3: the three renderer tests were all this arm's `alloc` ones.
     # 3 -> 4: `a_key_set_is_carried_by_a_payload_class_alone`, ungated like the class it holds.
-    _runci_guarded_test C1ak 4 cargo test -p wz-session-core --no-default-features --features alloc --lib stats:: --quiet \
+    # 4 -> 5, counted from the source: `a_report_absorbs_another_counter_by_counter`, ungated like
+    # the report it sums.
+    _runci_guarded_test C1ak 5 cargo test -p wz-session-core --no-default-features --features alloc --lib stats:: --quiet \
         || return 1
     # R311y811 — the BARE arm: no `alloc`, no `transport-stats`. R311y810 un-gated
     # this module precisely so its report type could be named in EVERY feature
@@ -9114,7 +9120,9 @@ layer_c1ak_cargo_test_transport_stats() {
     # allocating arm's count, written to match the red tree. The feature
     # implies nothing now, and this arm reads its three again.
     # 3 -> 4: `a_key_set_is_carried_by_a_payload_class_alone`, which needs no allocator.
-    _runci_guarded_test C1ak 4 cargo test -p wz-session-core --no-default-features --lib stats --quiet \
+    # 4 -> 5, counted from the source: `a_report_absorbs_another_counter_by_counter`, which needs
+    # none either.
+    _runci_guarded_test C1ak 5 cargo test -p wz-session-core --no-default-features --lib stats --quiet \
         || return 1
     # R311y810 — adminspace-metrics AND transport-stats together: the combination
     # a deployment actually runs, which no lane composed before. The metrics leg's
@@ -14317,7 +14325,9 @@ layer_c1m_session_lwip() {
     # connection closed before it was taken, a port already listened on, a port freed for the next).
     # 17, counted from the source: an IPv6 connection and listener name their ends in their family,
     # and only a family the kernel lacks is `Unsupported`.
-    _runci_guarded_test "C1m posix tcp seam" 17 \
+    # 17 -> 19 = what hosted run 44790303307 printed: a stream the peer does not read stops being
+    # writable until it reads, and the wait for room handed out answers as the socket does.
+    _runci_guarded_test "C1m posix tcp seam" 19 \
         cargo test -p wz-runtime-posix --lib stream:: --quiet || return 1
     # The host's multicast seam (`wz_runtime_posix::group`): the receivers of one host share the group's
     # port, a group that is not one is not joined, a member sends from a port of its own with the hop
@@ -18671,6 +18681,22 @@ _pico_cli_unavailable() {
 # lane — the register recorded that as §11.9 and it stayed true. A proof that
 # only ever runs when someone remembers is a proof the tree cannot depend on.
 layer_epico_library_oracles() {
+    # The two forms of wz's own pico library (docs/capi-pico-additional-library.md): the one
+    # library, and the core with the doors' library beside it, built from one feature list by
+    # scripts/pico-additional-forms.sh, and one C scenario compiled against each form and held to
+    # the same messages on the wire
+    # (`crates/wz-integration-tests/tests/it/files/pico_additional_split_wire.rs`). It is a leg of
+    # the pico library's lane and needs no foreign library, so it runs before the oracle check
+    # below. This lane builds the forms, so for the length of the leg their absence is a failure
+    # (`WZ_PICO_FORMS_REQUIRE=1`) and not the skip the test takes in a sweep that built none. One
+    # test, so the count is exact.
+    bash scripts/pico-additional-forms.sh || return 1
+    wz_test_args wz-integration-tests pico_additional_split_wire
+    _runci_guarded_test "Epico the two forms of the pico library on the wire" 1 \
+        env WZ_PICO_FORMS_REQUIRE=1 cargo test -p wz-integration-tests \
+        "${WZ_TEST_ARGS[@]}" -- --quiet \
+        || return 1
+    echo "  Epico: the one library and the core with the doors' library put the same messages on the wire"
     if [[ ! -f "$WZ_ARTIFACTS"/target/zenoh-pico-build/lib/libzenohpico.so ]]; then
         _pico_cli_unavailable "Layer Epico" || return 1
         return 0
@@ -20884,7 +20910,7 @@ layer_p_throughput_differential() {
 # What it covers and how to read a red: docs/pico-stability-lane.md.
 #
 # Two legs over the stress executable of wz-capi-pico (`tests/stability.rs`, whose three tests are
-# `#[ignore]`d so that no default sweep runs them):
+# `#[ignore]`d so that no default sweep runs them), the memory legs and the link legs:
 #
 #   1. The three tests in a debug build. Worker threads put, get and declare while a chaos thread
 #      closes and reopens the sessions under them, over a transport the program supplies that
@@ -20918,6 +20944,25 @@ layer_s_pico_stability() {
     echo "Layer S: seed ${WZ_STABILITY_SEED} (WZ_STABILITY_SEED=${WZ_STABILITY_SEED} runs this mix again)"
     wz_test_args wz-capi-pico stability
     _runci_guarded_test S 3 cargo test -p wz-capi-pico --features "$features" \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --nocapture --test-threads=1 || return 1
+
+    # The memory legs (`tests/allocation_faults.rs`, an executable of its own for its allocator),
+    # on each engine: for z_open, the three declarations, z_put and z_get, a run with no failure
+    # counts the allocations of the call, and then every point of it fails in a run of its own (a
+    # process started from the test, `WZ_ALLOC_FAULT_JOBS` at once); and the allocations of puts
+    # and gets between open sessions are counted. A heap build is held to what every build owes
+    # (no run ends but by returning or in the allocation-failure handler, no panic, nothing left
+    # behind by a call that returned) and prints its counts; a build that takes its memory at open
+    # is held to a named error at every point and to traffic that allocates nothing. One test at a
+    # time: each sweep runs its own processes in parallel. Count-guarded: every test is `#[ignore]`.
+    wz_test_args wz-capi-pico allocation_faults
+    _runci_guarded_test "S allocation faults, tokio engine" 8 \
+        cargo test -p wz-capi-pico --features "$features" \
+        "${WZ_TEST_ARGS[@]}" -- --ignored --nocapture --test-threads=1 || return 1
+    wz_test_args wz-capi-pico allocation_faults
+    _runci_guarded_test "S allocation faults, cooperative engine" 8 \
+        cargo test -p wz-capi-pico --no-default-features \
+        --features engine-coop,app-transport,peer,query,queryable,multi-thread \
         "${WZ_TEST_ARGS[@]}" -- --ignored --nocapture --test-threads=1 || return 1
 
     # The link legs (`crates/wz-integration-tests/tests/it/files/pico_link_qos_on_wz_capi.rs`): one

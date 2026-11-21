@@ -80,7 +80,7 @@ use crate::scouting_responder::{bind_responder, Advertised, LateLocators, Respon
 /// for the role the session dials as.
 ///
 /// The two halves are the runtime's own types and the loop that runs
-/// them is [`drive_connect_phase`], the runtime's transcription of upstream's
+/// them is [`drive_connect_phase_on`], the runtime's transcription of upstream's
 /// `connect_peers` fork (`zenoh/src/net/runtime/orchestrator.rs` @
 /// `async fn connect_peers_single_link(&self, peers: &[EndPoints]) -> ZResult<()> {`).
 /// Nothing here re-derives the arithmetic, so a C open cannot drift from the

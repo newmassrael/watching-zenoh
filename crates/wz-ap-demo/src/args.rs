@@ -6129,16 +6129,12 @@ mod stock_config_tests {
     /// them. Both directions are pinned here.
     #[test]
     fn the_scouting_socket_resolves_to_what_was_named_or_to_zenohs_own_default() {
-        const DEFAULT_GROUP: std::net::Ipv4Addr = std::net::Ipv4Addr::new(224, 0, 0, 224);
-        const DEFAULT_PORT: u16 = 7446;
+        let socket = |text: &str| text.parse::<std::net::SocketAddr>().expect("a socket");
 
         // Nothing named -> zenoh's default socket, untouched.
         let bare = parse_scout_socket(&argv(&["--scout"])).unwrap();
         assert_eq!(bare, ScoutSocketArgs::default());
-        assert_eq!(
-            bare.group_and_port(DEFAULT_GROUP, DEFAULT_PORT),
-            (DEFAULT_GROUP, DEFAULT_PORT)
-        );
+        assert_eq!(bare.socket(), socket("224.0.0.224:7446"));
 
         // Named -> BOTH halves move. A resolver that took the group and kept
         // the default port would pass a group-only assertion.
@@ -6152,18 +6148,27 @@ mod stock_config_tests {
             "4",
         ]))
         .unwrap();
-        assert_eq!(
-            moved.group_and_port(DEFAULT_GROUP, DEFAULT_PORT),
-            (std::net::Ipv4Addr::new(224, 0, 0, 99), 7999)
-        );
+        assert_eq!(moved.socket(), socket("224.0.0.99:7999"));
         assert_eq!(moved.interface.as_deref(), Some("eth0"));
         assert_eq!(moved.ttl, Some(4));
+
+        // A group of the other family is read as the config reader reads the key: upstream types
+        // it as a socket address of either family.
+        let v6 = parse_scout_socket(&argv(&["--scout", "--scout-addr", "[ff05::231]:7511"]))
+            .expect("an IPv6 scouting socket");
+        assert_eq!(v6.socket(), socket("[ff05::231]:7511"));
 
         // A malformed socket is REFUSED at the argv boundary, so the resolver
         // is never handed one — the same refusal the config reader makes, in
         // the same words, because the failure it prevents is the same node that
-        // starts and joins nothing.
-        for bad in ["224.0.0.99", "not-an-address"] {
+        // starts and joins nothing. A zenoh-pico group locator is another
+        // library's key, and an unbracketed IPv6 address is no socket.
+        for bad in [
+            "224.0.0.99",
+            "not-an-address",
+            "udp/224.0.0.99:7999",
+            "ff05::231:7511",
+        ] {
             let err = parse_scout_socket(&argv(&["--scout", "--scout-addr", bad])).unwrap_err();
             assert!(err.contains("--scout-addr"), "{err}");
         }
@@ -10402,8 +10407,9 @@ pub(crate) fn parse_phase_exit_on_failure(
 /// struct having to know what that group is.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct ScoutSocketArgs {
-    /// `--scout-addr <ip>:<port>`, already known to parse as a v4 socket.
-    pub(crate) address: Option<String>,
+    /// `--scout-addr <ip>:<port>` (or `[<ipv6>]:<port>`), as the one reader of
+    /// `scouting/multicast/address` read it.
+    pub(crate) address: Option<std::net::SocketAddr>,
     /// `--scout-iface <name-or-ip>`.
     pub(crate) interface: Option<String>,
     /// `--scout-ttl <n>`.
@@ -10411,8 +10417,8 @@ pub(crate) struct ScoutSocketArgs {
 }
 
 impl ScoutSocketArgs {
-    /// The group and port to join: what the operator named, or the caller's
-    /// defaults when they named nothing.
+    /// The group and port to join: what the operator named, or upstream's
+    /// default when they named nothing.
     ///
     /// Extracted from the scouting path rather than left inline so the FALLBACK
     /// is testable. That half is the one with no other witness: a resolver that
@@ -10420,14 +10426,12 @@ impl ScoutSocketArgs {
     /// discover peers on a default-configured network, so every test that does
     /// not pin the fallback passes in a world where the key does nothing.
     ///
-    /// `address` was validated as a v4 socket at the argv boundary (and at the
-    /// config boundary before it), so the parse below cannot fail on operator
-    /// input; keeping the fallible form and defaulting on `Err` means a future
-    /// caller that skips the check degrades to the default group rather than
-    /// panicking in a discovery path.
+    /// The asking and the answering directions both resolve here, so a network
+    /// that moved neither has wz asking and answering on the one group upstream
+    /// names (`UPSTREAM_SCOUT_MULTICAST_ADDRESS`).
     ///
-    /// Gated on the UNION of its two consumers — the `scouting-active` bind in
-    /// `runner.rs` and this file's own `zenoh-config` test — rather than
+    /// Gated on the UNION of its consumers — the `scouting-active` and
+    /// `scouting-responder` binds and this file's own `zenoh-config` test — rather than
     /// silenced with `allow(dead_code)`. R311y845 shipped it ungated and the
     /// pre-push changed-crate run (DEFAULT features, where neither consumer
     /// compiles) refused it as dead code, which is the gate working: every
@@ -10438,18 +10442,9 @@ impl ScoutSocketArgs {
         feature = "scouting-responder",
         all(test, feature = "zenoh-config")
     ))]
-    pub(crate) fn group_and_port(
-        &self,
-        default_group: std::net::Ipv4Addr,
-        default_port: u16,
-    ) -> (std::net::Ipv4Addr, u16) {
-        match self.address.as_deref().and_then(|a| a.parse().ok()) {
-            Some(sock) => {
-                let sock: std::net::SocketAddrV4 = sock;
-                (*sock.ip(), sock.port())
-            }
-            None => (default_group, default_port),
-        }
+    pub(crate) fn socket(&self) -> std::net::SocketAddr {
+        self.address
+            .unwrap_or(wz::runtime_tokio::config::UPSTREAM_SCOUT_MULTICAST_ADDRESS)
     }
 
     /// R2791 — this struct as the socket-facing config, so the scouting plane
@@ -10472,7 +10467,7 @@ impl ScoutSocketArgs {
     /// Gated on the UNION of its four consumers, derived from their own
     /// attributes (`scouting-active`, `scouting-responder`, and an
     /// `all(scouting-active, routing-peer)` that the first already covers)
-    /// rather than copied from `group_and_port` above: that one also carries an
+    /// rather than copied from `socket` above: that one also carries an
     /// `all(test, zenoh-config)` arm, for a test this method has no counterpart
     /// to, and matching it would leave this dead code in exactly that build.
     ///
@@ -10504,18 +10499,18 @@ impl ScoutSocketArgs {
 pub(crate) fn parse_scout_socket(args: &[String]) -> Result<ScoutSocketArgs, String> {
     let address = match parse_pair(args, "--scout-addr") {
         None => None,
-        Some(raw) => {
-            // The same check the config reader applies, and for the same
-            // reason: zenoh types this key as a `SocketAddr`, so an address
-            // without a port is a value neither implementation accepts.
-            if raw.parse::<std::net::SocketAddrV4>().is_err() {
+        // The config reader's own reading of the key, for the same reason it
+        // refuses: zenoh types this key as a `SocketAddr`, so an address
+        // without a port is a value neither implementation accepts.
+        Some(raw) => match wz::runtime_tokio::config::scout_multicast_socket(Some(raw.as_str())) {
+            Ok(socket) => Some(socket),
+            Err(_) => {
                 return Err(format!(
                     "--scout-addr: `{raw}` is not an <ip>:<port> socket \
                      (e.g. 224.0.0.224:7446)"
-                ));
+                ))
             }
-            Some(raw)
-        }
+        },
     };
     let interface = match parse_pair(args, "--scout-iface") {
         Some(v) if v.is_empty() => {

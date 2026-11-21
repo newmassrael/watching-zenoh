@@ -17,21 +17,29 @@
 #   WZ_APP_PLANE_ORACLE_PROFILE  the lane file: the checks, each with the profile and values
 #                                documents wz's party protects and judges by (same page)
 #   WZ_APP_PLANE_ORACLE_CMAKE_ARGS  optional words added to the party project's configure (where
-#                                the deployment's checkouts are, which toolchain)
+#                                the deployment's checkouts are, which toolchain); a word that sets
+#                                one of the two bound variables below to another value is refused
 #   WZ_APP_PLANE_ORACLE_SCRATCH  optional; where the builds and transcripts go (default under the
 #                                artifact root, target/app-plane-oracle)
 #
 # The party project is configured OUT OF TREE into the scratch directory, with
 #   -DWZ_ORACLE_PICO_INCLUDE=<pico headers of the wz library's arm>;<wz extension header dir>
 #   -DWZ_ORACLE_PICO_LIBRARY=<the wz pico library it may link in place of zenoh-pico>
-# so a deployment whose glue sits on zenoh-pico's API can run its own layer over wz's drop-in.
+# so a deployment whose glue sits on zenoh-pico's API can run its own layer over wz's drop-in,
+# and, after the caller's words, with the two variables bound to the lane file:
+#   -DWZ_ORACLE_KEY_WIRE:STRING=<the key-wire form wz's party names keys in, on both sides>
+#   -DWZ_ORACLE_KEY_IDS:FILEPATH=<a {"dictionary": [...]} file of the lane file's key ids>
+# A fresh cache each run; a party that never reads either, or is configured with another value,
+# is refused before any exchange, so a key wire the two parties do not share never shows up as
+# a timeout.
 #
 # A LOCAL lane, opt-in by its variables: it needs a deployment's build, which no hosted runner
 # has, so it is not a layer of scripts/run-ci.sh (every layer there is wired into the hosted
 # workflow, scripts/lib/unwired_lane_lint.py). Linux only.
 #
 # Exit status: 0 PASS; 1 FAIL (a check disagreed, a party did not finish, or the judge's own
-# selftest failed); 2 a lane file or variable refused; 3 NOT-MEASURED (the variables are unset,
+# selftest failed); 2 a lane file, a variable or the deployment's party's configure refused;
+# 3 NOT-MEASURED (the variables are unset,
 # or a side did not build, so nothing was exchanged). A NOT-MEASURED run has shown nothing.
 
 set -u
@@ -94,6 +102,20 @@ if [ "$rc" -ne 0 ]; then
     exit 2
 fi
 
+# The caller's configure words are checked against the lane file's binding before anything is
+# built; the lane's own words go after them.
+peer_cmake_args=()
+if [ -n "${WZ_APP_PLANE_ORACLE_CMAKE_ARGS:-}" ]; then
+    read -r -a peer_cmake_args <<< "$WZ_APP_PLANE_ORACLE_CMAKE_ARGS"
+fi
+if ! "$py" "$here/oracle.py" party-words "$scratch" ${peer_cmake_args[@]+"${peer_cmake_args[@]}"}; then
+    exit 2
+fi
+bound_args=()
+while IFS= read -r line; do
+    [ -n "$line" ] && bound_args+=("$line")
+done < "$scratch/party-words"
+
 # ── wz's party, once per reply shape the checks need ─────────────────────────────────────
 
 features="e2e-sender,e2e-receiver,segment-sender,replay-cache"
@@ -140,15 +162,18 @@ if ! command -v cmake > /dev/null 2>&1; then
     not_measured "no cmake on PATH to build the deployment's party"
 fi
 peer_build="$scratch/peer-build"
-peer_cmake_args=()
-if [ -n "${WZ_APP_PLANE_ORACLE_CMAKE_ARGS:-}" ]; then
-    read -r -a peer_cmake_args <<< "$WZ_APP_PLANE_ORACLE_CMAKE_ARGS"
-fi
+# No cached word of an earlier configure survives, and CMake names every word given here that
+# the project never reads, which the read-back refuses.
+rm -f "$peer_build/CMakeCache.txt"
 if ! cmake -S "$party_dir" -B "$peer_build" \
     -DWZ_ORACLE_PICO_INCLUDE="$scratch/wz-$first_variant/pico-arm-include-wz_party;$root/crates/wz-capi-core/include" \
     -DWZ_ORACLE_PICO_LIBRARY="$scratch/wz-$first_variant/libwz_capi_pico.so" \
-    ${peer_cmake_args[@]+"${peer_cmake_args[@]}"} > "$scratch/peer-configure.log" 2>&1; then
+    ${peer_cmake_args[@]+"${peer_cmake_args[@]}"} ${bound_args[@]+"${bound_args[@]}"} \
+    > "$scratch/peer-configure.log" 2>&1; then
     not_measured "the deployment's party did not configure (see $scratch/peer-configure.log)"
+fi
+if ! "$py" "$here/oracle.py" party-readback "$scratch" "$peer_build" "$scratch/peer-configure.log"; then
+    exit 2
 fi
 if ! cmake --build "$peer_build" --parallel > "$scratch/peer-build.log" 2>&1; then
     not_measured "the deployment's party did not build (see $scratch/peer-build.log)"

@@ -1071,7 +1071,6 @@ mod tests {
         use alloc::rc::Rc;
         use std::vec::Vec;
         use wz_session_core::link::BoxedLinkDriver;
-        use wz_session_core::metadata::PushMetadata;
         use wz_session_core::qos::CongestionControl;
         use wz_session_core::qos::Priority;
         use wz_session_core::sample::QosLevel;
@@ -1184,6 +1183,12 @@ mod tests {
         /// A blocking message on a stream that takes no more bytes waits its `wait_before_close`
         /// for them and then has its session closed, as zenoh closes a transport a blocking
         /// message found no room on; nothing reached the stream.
+        ///
+        /// The session reads a message's congestion control off the message's own QoS, as
+        /// upstream does, so the Push here carries `Block` in its QoS extension. A session built
+        /// without `pubsub-qos` writes no QoS on the Pushes it publishes, every one of which is
+        /// then droppable, but it still honours the QoS of a Push that carries one; asking for
+        /// `Block` through the publish metadata would hold this test to that feature.
         #[test]
         fn a_blocking_message_on_a_full_stream_closes_the_session_after_its_wait() {
             let runtime = CoopRuntime::new(Stopped);
@@ -1191,11 +1196,21 @@ mod tests {
             let sink: Rc<dyn BoxedLinkDriver> = link.clone();
             let actions = new_session_actions(sink, params(), CoopTime::new(&runtime), Counting(0));
             link.socket.full.set(true);
-            let meta = PushMetadata {
-                qos: Some(QosLevel::DEFAULT.with_congestion(CongestionControl::Block)),
-                ..PushMetadata::default()
-            };
-            let _ = actions.send_push_with_meta_literal("home/block", b"B", true, &meta);
+            let mut push = wz_session_core::push_build::build_push_literal("home/block", b"B")
+                .expect("a literal Put encodes");
+            wz_session_core::declare_ext_qos::set_push_qos(
+                &mut push,
+                QosLevel::DEFAULT.with_congestion(CongestionControl::Block),
+            )
+            .expect("a message's extension chain takes its QoS");
+            let _ = actions.send_network_message_qos(
+                wz_session_core::network_message::NetworkMessage::Push(alloc::boxed::Box::new(
+                    push,
+                )),
+                true,
+                false,
+                Priority::DEFAULT,
+            );
             assert_eq!(
                 *link.socket.room_waits.borrow(),
                 [CLOSE_WAIT_US],

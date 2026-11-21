@@ -357,27 +357,31 @@ impl SampleMarshal {
 
 // --- the OWNED sample family ------------------------------------------------
 
-/// Release a boxed [`SampleMarshal`].
+/// Release an owned [`SampleMarshal`].
 ///
 /// # Safety
-/// `handle` must be a live `Box::into_raw::<SampleMarshal>` pointer.
+/// `handle` must be a live `SampleMarshal` handle.
 unsafe fn free_sample_marshal(handle: *mut c_void) {
-    drop(Box::from_raw(handle.cast::<SampleMarshal>()));
+    crate::object_slot::release(handle.cast::<SampleMarshal>());
 }
 
-/// Deep-copy the marshal behind a borrowed sample onto the heap, bound at its
-/// final address.
+/// Deep-copy the marshal behind a borrowed sample into a place of its own, bound at its final
+/// address. `Z_ERR_GENERIC` for a null `src`, `_Z_ERR_SYSTEM_OUT_OF_MEMORY` when the pool of
+/// samples is full.
 ///
 /// # Safety
 /// `src` must be null or a pointer this crate handed to a sample callback.
-unsafe fn clone_sample_marshal(src: *const z_loaned_sample_t) -> *mut c_void {
+unsafe fn clone_sample_marshal(src: *const z_loaned_sample_t) -> Result<*mut c_void, ZResult> {
     if src.is_null() {
-        return core::ptr::null_mut();
+        return Err(crate::result::Z_ERR_GENERIC);
     }
     let marshal = &*(src as *const SampleMarshal);
-    let mut boxed = Box::new(marshal.deep_copy());
-    boxed.bind();
-    Box::into_raw(boxed).cast::<c_void>()
+    let Some(slot) = crate::object_slot::Slot::take(crate::object_slot::Kind::Sample) else {
+        return Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY);
+    };
+    let owned = slot.fill(marshal.deep_copy());
+    (*owned).bind();
+    Ok(owned.cast::<c_void>())
 }
 
 crate::abi::impl_boxed_element!(
@@ -1547,14 +1551,14 @@ impl z_owned_subscriber_t {
 // defensive double-call is a safe no-op.
 
 /// # Safety
-/// `h` must be a live `Box::into_raw::<PublisherState>` pointer.
+/// `h` must be a live `PublisherState` handle.
 unsafe fn free_publisher(h: *mut c_void) {
-    drop(Box::from_raw(h as *mut PublisherState));
+    crate::object_slot::release(h as *mut PublisherState);
 }
 /// # Safety
-/// `h` must be a live `Box::into_raw::<SubscriberState>` pointer.
+/// `h` must be a live `SubscriberState` handle.
 unsafe fn free_subscriber(h: *mut c_void) {
-    drop(Box::from_raw(h as *mut SubscriberState));
+    crate::object_slot::release(h as *mut SubscriberState);
 }
 
 impl_handle_ownership7!(
@@ -2204,6 +2208,11 @@ pub unsafe extern "C" fn z_declare_publisher(
         let Some(ke) = keyexpr_str(keyexpr) else {
             return Z_ERR_INVALID;
         };
+        // The publisher's place is taken before it is declared, so a full pool refuses the
+        // declaration and nothing is declared.
+        let Some(slot) = crate::object_slot::Slot::take(crate::object_slot::Kind::Publisher) else {
+            return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
+        };
         let core = match PlainPublisher::declare(
             &PicoSession::of(state),
             ke,
@@ -2213,13 +2222,13 @@ pub unsafe extern "C" fn z_declare_publisher(
             Ok(core) => core,
             Err(rc) => return rc,
         };
-        let mut boxed = Box::new(PublisherState {
+        let state = slot.fill(PublisherState {
             core,
             loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
         });
-        boxed.bind();
+        (*state).bind();
         *publisher = z_owned_publisher_t {
-            handle: Box::into_raw(boxed) as *mut c_void,
+            handle: state as *mut c_void,
             _pad: [core::ptr::null_mut(); 3],
         };
         Z_OK
@@ -2268,7 +2277,7 @@ pub unsafe extern "C" fn z_undeclare_publisher(publisher: *mut z_moved_publisher
         }
         let handle = (*publisher)._this.handle;
         if !handle.is_null() {
-            drop(Box::from_raw(handle as *mut PublisherState));
+            crate::object_slot::release(handle as *mut PublisherState);
             (*publisher)._this = z_owned_publisher_t::null_value();
         }
         Z_OK
@@ -2448,6 +2457,12 @@ pub unsafe extern "C" fn z_declare_subscriber(
         if wz_session_core::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
             return Z_ERR_INVALID;
         }
+        // The subscriber's place is taken before anything is declared, so a full pool refuses
+        // the declaration and declares nothing; the closure runs its drop as on every refusal.
+        let Some(slot) = crate::object_slot::Slot::take(crate::object_slot::Kind::Subscriber)
+        else {
+            return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
+        };
 
         // Record the subscription in the session's SSOT and declare it on every
         // face that is already up. With no peer yet — a listener before its
@@ -2497,16 +2512,16 @@ pub unsafe extern "C" fn z_declare_subscriber(
         else {
             return Z_ERR_GENERIC;
         };
-        let mut boxed = Box::new(SubscriberState {
+        let state = slot.fill(SubscriberState {
             shared: engine,
             id,
             key,
             loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
             released,
         });
-        boxed.bind();
+        (*state).bind();
         *subscriber = z_owned_subscriber_t {
-            handle: Box::into_raw(boxed) as *mut c_void,
+            handle: state as *mut c_void,
             _pad: [core::ptr::null_mut(); 3],
         };
         Z_OK
@@ -2600,7 +2615,7 @@ pub unsafe extern "C" fn z_undeclare_subscriber(subscriber: *mut z_moved_subscri
         }
         let handle = (*subscriber)._this.handle;
         if !handle.is_null() {
-            drop(Box::from_raw(handle as *mut SubscriberState));
+            crate::object_slot::release(handle as *mut SubscriberState);
             (*subscriber)._this = z_owned_subscriber_t::null_value();
         }
         Z_OK
@@ -2937,12 +2952,13 @@ pub unsafe extern "C" fn z_sample_clone(
         if this_.is_null() {
             return crate::result::Z_ERR_NULL;
         }
-        let handle = clone_sample_marshal(this_);
-        if handle.is_null() {
-            return crate::result::Z_ERR_GENERIC;
+        match clone_sample_marshal(this_) {
+            Ok(handle) => {
+                (*dst).handle = handle;
+                crate::result::Z_OK
+            }
+            Err(code) => code,
         }
-        (*dst).handle = handle;
-        crate::result::Z_OK
     })
 }
 

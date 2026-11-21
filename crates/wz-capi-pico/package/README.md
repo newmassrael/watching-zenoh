@@ -59,6 +59,34 @@ cl /std:c11 /DZENOH_WINDOWS /I include my_program.c release\lib\wz_capi_pico.lib
 * A program that calls a `wz_ext_*` door includes `wz_ext.h` after `zenoh-pico.h`. A program that
   does not include it is portable to zenoh-pico.
 
+## One library or two
+
+A package is in one of two forms, which its name and the `form` of its `manifest.json` state. Both
+are built from the same sources and the same profile, and a program is written the same for both.
+
+* The one library (`form` `single`): `wz_capi_pico.dll` holds everything above, zenoh-pico's API,
+  the session engine and every `wz_ext_*` door.
+* Two libraries (`form` `split`, `-split` in the package's name): `wz_capi_pico.dll` is the core
+  (zenoh-pico's API, the engine, the doors of the core and the extension interface
+  `wz_ext_interface_*`), and `wz_capi_pico_ext.dll` holds the doors of the additional features
+  (`wz_ext_e2e_*`, `wz_ext_stream_supervisor_*`, the instance keys, the replay cache, the message
+  catalog and payloads, and `wz_ext_additional_interface`). The additional library needs the core
+  and reaches it only through its C API: `release\lib\` and `debug\lib\` hold both import libraries,
+  and a program links both, the core's first:
+
+  ```
+  cl /std:c11 /DZENOH_WINDOWS /I include my_program.c release\lib\wz_capi_pico.lib release\lib\wz_capi_pico_ext.lib
+  ```
+
+  and runs with both DLLs beside it or on its `PATH`. Across the two: a handle is opaque to the
+  library that did not make it; each library frees what it allocated (a refusal string a door of
+  the additional library writes is the core's, dropped with `z_string_drop`; storage the program
+  hands a door stays the program's); no object of a C runtime crosses between them; and
+  `wz_ext_additional_interface` says which version of the extension interface the additional
+  library needs and whether the core answers it. The additional library is not loaded at all over
+  a core of another major version of the interface, whose `wz_ext_interface_major_<n>` it does not
+  find.
+
 ## Running a program
 
 Put `wz_capi_pico.dll` beside the program's executable or on its `PATH`; keep the `.pdb` beside

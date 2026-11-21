@@ -82,8 +82,12 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-app-frame/src/message_payload_tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-app-frame/src/proto_decode.rs` | S11 | |
 | `crates/wz-app-frame/src/proto_lex.rs` | S11 | |
+| `crates/wz-app-frame/src/proto_nanopb.rs` | S11 | |
 | `crates/wz-app-frame/src/proto_parse.rs` | S11 | |
+| `crates/wz-app-frame/src/proto_range.rs` | S11 | |
 | `crates/wz-app-frame/src/proto_schema.rs` | S11 | |
+| `crates/wz-app-frame/src/proto_write.rs` | S11 | |
+| `crates/wz-app-frame/src/proto_write_tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-app-frame/src/replay_admission.rs` | S11 | |
 | `crates/wz-app-frame/src/replay_pieces.rs` | S11 | |
 | `crates/wz-app-frame/src/segment_chain.rs` | S11 | |
@@ -213,6 +217,8 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-core/src/scouting_responder.rs` | S7 | |
 | `crates/wz-capi-core/src/session_defaults.rs` | S7 | |
 | `crates/wz-capi-pico/src/abi.rs` | S7 | |
+| `crates/wz-capi-pico/src/additional.rs` | S12 | |
+| `crates/wz-capi-pico/src/additional_view_tests.rs` | excluded: test | test-only by its name: the core's tests of the doors' library's view of the core (`crates/wz-capi-pico-ext/src/core_view.rs`) |
 | `crates/wz-capi-pico/src/admin_space.rs` | S7 | |
 | `crates/wz-capi-pico/src/advanced.rs` | S7 | |
 | `crates/wz-capi-pico/src/advanced_forms.rs` | S7 | |
@@ -237,6 +243,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-pico/src/event_log.rs` | S7 | |
 | `crates/wz-capi-pico/src/ext_interface.rs` | S12 | |
 | `crates/wz-capi-pico/src/ffi.rs` | S7 | |
+| `crates/wz-capi-pico/src/ffi/boundary.rs` | S7 | |
 | `crates/wz-capi-pico/src/get.rs` | S7 | |
 | `crates/wz-capi-pico/src/get_to_peer.rs` | S7 | |
 | `crates/wz-capi-pico/src/handlers.rs` | S7 | |
@@ -252,6 +259,8 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-pico/src/matching.rs` | S7 | |
 | `crates/wz-capi-pico/src/message_catalog.rs` | S12 | |
 | `crates/wz-capi-pico/src/message_payload.rs` | S12 | |
+| `crates/wz-capi-pico/src/object_pool.rs` | S12 | |
+| `crates/wz-capi-pico/src/object_slot.rs` | S7 | |
 | `crates/wz-capi-pico/src/option_fields.rs` | S12 | |
 | `crates/wz-capi-pico/src/os/arith.rs` | S12 | |
 | `crates/wz-capi-pico/src/os/mod.rs` | S7 | |
@@ -426,6 +435,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-runtime-posix/src/links.rs` | S9 | |
 | `crates/wz-runtime-posix/src/net.rs` | S9 | |
 | `crates/wz-runtime-posix/src/slot.rs` | S9 | |
+| `crates/wz-runtime-posix/src/windows/group.rs` | S9 | |
 | `crates/wz-runtime-posix/src/stream.rs` | S9 | |
 | `crates/wz-runtime-posix/src/windows/links.rs` | S9 | |
 | `crates/wz-runtime-posix/src/windows/mod.rs` | S9 | |
