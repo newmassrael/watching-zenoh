@@ -25,10 +25,9 @@
 //!   than [`GROWN_LEAST_ROWS`] once it holds one. The storage row counts that.
 //! - **How long a key is.** A fixed table keeps a key's text in the row, at most
 //!   `MAX_KEYEXPR_BYTES` bytes, which the row's size already counts. A growable one keeps it in a
-//!   string beside the row; the bound used is `MAX_KEYEXPR_BYTES`, the longest key a fixed table
-//!   stores, as a string that doubles as it is written may reach (twice it, and at least
-//!   [`GROWN_LEAST_TEXT`]). A growable table does not refuse a longer key, so such a row is not
-//!   enforced ([`MemoryRow::enforced`]).
+//!   string beside the row; the bound used is the `MAX_KEYEXPR_BYTES` of the session's limits,
+//!   which every table that stores keys refuses past, as a string that doubles as it is written
+//!   may reach (twice it, and at least [`GROWN_LEAST_TEXT`]).
 //! - **What a callback captures.** A table keeps each entry's callback in a box. The box's own
 //!   layers are this crate's and are counted; what the closure inside captures is its maker's, and
 //!   is counted as the caller states it ([`Captures`]).
@@ -45,7 +44,6 @@ use core::ffi::CStr;
 use core::fmt;
 
 use crate::bounded::{Profile, ENFORCES_CAPACITY};
-use crate::caps;
 use crate::limit_binding::{LimitSpec, Quota};
 use crate::limits::{MaxPendingQueries, MaxSubscriptions, SessionLimits};
 use crate::pubsub::SubscriberTable;
@@ -80,7 +78,8 @@ pub struct MemoryRow {
     /// The limit, or the build's value, whose number sizes the row; empty for a part every session
     /// has once.
     pub basis: &'static CStr,
-    /// How many items the row counts; `None` when the build holds them to no bound.
+    /// How many items the row counts; `None` when the build holds them, or the bytes of one, to
+    /// no bound.
     pub count: Option<usize>,
     /// The bytes of one item.
     pub entry_bytes: usize,
@@ -169,9 +168,9 @@ impl SessionMemory {
         self.put(MemoryRow {
             part: table.parts[1],
             basis: table.basis,
-            count: table.entries,
-            entry_bytes: table.beside.0,
-            enforced: table.entries.is_some() && table.beside.1,
+            count: table.beside.and(table.entries),
+            entry_bytes: table.beside.unwrap_or(0),
+            enforced: table.entries.is_some() && table.beside.is_some(),
         });
     }
 
@@ -253,14 +252,15 @@ pub const fn grown_text(bytes: usize) -> usize {
     }
 }
 
-/// The bytes a key's text takes beside a table's row, and whether the build refuses a longer key.
-/// `MAX_KEYEXPR_BYTES` is read as the build states it, which is what every table that stores keys
-/// is sized by.
-const fn key_text() -> (usize, bool) {
+/// The bytes a key's text takes beside a table's row, `None` where `limits` hold keys to no
+/// length. A fixed table keeps the text in its row, so nothing is beside it; a growable one keeps
+/// it in a string, and every table that stores keys refuses one longer than the
+/// `MAX_KEYEXPR_BYTES` of the snapshot its creator hands it, which is `limits`.
+fn key_text(limits: &SessionLimits) -> Option<usize> {
     if ENFORCES_CAPACITY {
-        (0, true)
+        Some(0)
     } else {
-        (grown_text(caps::MAX_KEYEXPR_BYTES), false)
+        limits.max_keyexpr_bytes().most().map(grown_text)
     }
 }
 
@@ -271,8 +271,9 @@ struct Table {
     basis: &'static CStr,
     entries: Option<usize>,
     row_bytes: usize,
-    /// The heap bytes beside each entry's row, and whether the build refuses past them.
-    beside: (usize, bool),
+    /// The heap bytes beside each entry's row, which the build refuses past; `None` where they
+    /// have no bound.
+    beside: Option<usize>,
 }
 
 /// The rows of the tables a session keeps to its limits, `limits` being the snapshot it runs
@@ -283,17 +284,16 @@ struct Table {
 /// liveliness gets: each a table its creator holds to a limit of `limits`.
 pub fn session_tables(limits: &SessionLimits, captures: &Captures) -> SessionMemory {
     let mut memory = SessionMemory::new();
-    let (key, key_refused) = key_text();
+    let key = key_text(limits);
     memory.put_table(Table {
         parts: [c"subscribers", c"subscriber keys and callbacks"],
         basis: c"MAX_SUBSCRIPTIONS",
         entries: entries::<MaxSubscriptions>(limits.max_subscriptions()),
         row_bytes: <SubscriberTable<BoxedSink, Profile>>::ROW_BYTES,
-        beside: (
+        beside: key.map(|key| {
             key.saturating_add(BoxedSink::WRAPPER_BYTES)
-                .saturating_add(captures.sample),
-            key_refused,
-        ),
+                .saturating_add(captures.sample)
+        }),
     });
     #[cfg(feature = "query-queryable")]
     memory.put_table(Table {
@@ -301,14 +301,14 @@ pub fn session_tables(limits: &SessionLimits, captures: &Captures) -> SessionMem
         basis: c"MAX_QUERYABLES",
         entries: entries::<crate::limits::MaxQueryables>(limits.max_queryables()),
         row_bytes: <crate::query::QueryableRegistry<crate::query_sink::BoxedQuerySink, Profile>>::ROW_BYTES,
-        beside: (key.saturating_add(captures.query), key_refused),
+        beside: key.map(|key| key.saturating_add(captures.query)),
     });
     memory.put_table(Table {
         parts: [c"pending queries", c"pending query keys and callbacks"],
         basis: c"MAX_PENDING_QUERIES",
         entries: entries::<MaxPendingQueries>(limits.max_pending_queries()),
         row_bytes: <ReplyRegistry<ConsolidatingSink<BoxedReplySink>, Profile>>::ROW_BYTES,
-        beside: (key.saturating_add(captures.reply), key_refused),
+        beside: key.map(|key| key.saturating_add(captures.reply)),
     });
     #[cfg(feature = "liveliness-token")]
     memory.put_table(Table {
@@ -316,7 +316,7 @@ pub fn session_tables(limits: &SessionLimits, captures: &Captures) -> SessionMem
         basis: c"MAX_LOCAL_TOKENS",
         entries: entries::<crate::limits::MaxLocalTokens>(limits.max_local_tokens()),
         row_bytes: <crate::declare::local_token::LocalTokenRegistry<Profile>>::ROW_BYTES,
-        beside: (key, key_refused),
+        beside: key,
     });
     #[cfg(feature = "liveliness-subscriber")]
     memory.put_table(Table {
@@ -332,7 +332,7 @@ pub fn session_tables(limits: &SessionLimits, captures: &Captures) -> SessionMem
             crate::declare::liveliness_sample::BoxedLivelinessSampleSink,
             Profile,
         >>::ROW_BYTES,
-        beside: (key.saturating_add(captures.liveliness_sample), key_refused),
+        beside: key.map(|key| key.saturating_add(captures.liveliness_sample)),
     });
     #[cfg(feature = "liveliness-get")]
     memory.put_table(
@@ -349,7 +349,7 @@ pub fn session_tables(limits: &SessionLimits, captures: &Captures) -> SessionMem
                 BoxedReplySink,
                 Profile,
             >>::ROW_BYTES,
-            beside: (captures.reply, true),
+            beside: Some(captures.reply),
         },
     );
     memory
@@ -358,6 +358,7 @@ pub fn session_tables(limits: &SessionLimits, captures: &Captures) -> SessionMem
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::caps;
 
     /// Every table this build has held to a quota of `n`.
     fn stated(n: usize) -> SessionLimits {
@@ -429,7 +430,11 @@ mod tests {
         } else {
             let storage = (storage_rows(3) - storage_rows(2))
                 * <SubscriberTable<BoxedSink, Profile>>::ROW_BYTES;
-            let beside = grown_text(caps::MAX_KEYEXPR_BYTES) + BoxedSink::WRAPPER_BYTES;
+            let keys = two
+                .max_keyexpr_bytes()
+                .most()
+                .expect("a key's length is bounded");
+            let beside = grown_text(keys) + BoxedSink::WRAPPER_BYTES;
             assert_eq!(at_three - at_two, storage + beside);
         }
     }
@@ -464,10 +469,13 @@ mod tests {
     }
 
     /// The bytes of a stored subscription are its row type's, which holds the sink inline and, on
-    /// a fixed table, the key's text; a growable table keeps the text beside the row.
+    /// a fixed table, the key's text; a growable table keeps the text beside the row, at the
+    /// length the session's limits hold keys to. Every table refuses past its quota and a longer
+    /// key, so the report is enforced on either.
     #[test]
     fn a_stored_entry_is_sized_by_its_row_type() {
-        let memory = session_tables(&stated(3), &Captures::default());
+        let limits = stated(3);
+        let memory = session_tables(&limits, &Captures::default());
         let stored = row(&memory, c"subscribers").entry_bytes;
         assert_eq!(stored, <SubscriberTable<BoxedSink, Profile>>::ROW_BYTES);
         assert!(stored >= core::mem::size_of::<BoxedSink>());
@@ -478,17 +486,75 @@ mod tests {
                 "the key's text is in the row"
             );
             assert_eq!(beside, BoxedSink::WRAPPER_BYTES);
-            assert!(memory.is_enforced());
         } else {
-            assert_eq!(
-                beside,
-                grown_text(caps::MAX_KEYEXPR_BYTES) + BoxedSink::WRAPPER_BYTES
-            );
-            assert!(
-                !memory.is_enforced(),
-                "a growable table does not refuse a longer key"
-            );
+            let keys = limits
+                .max_keyexpr_bytes()
+                .most()
+                .expect("a key's length is bounded");
+            assert_eq!(beside, grown_text(keys) + BoxedSink::WRAPPER_BYTES);
         }
+        assert!(memory.is_enforced());
+    }
+
+    /// A key length stated lower moves what each entry of a growable table keeps beside its row
+    /// to the text of that length, and the total with it. A fixed table keeps the text in its row,
+    /// so its report does not move; a build that holds the length to its own value refuses the
+    /// statement.
+    #[test]
+    fn a_stated_key_length_moves_the_text_beside_a_growable_table() {
+        let mut limits = stated(3);
+        let at_build = session_tables(&limits, &Captures::default());
+        let lowered = 40;
+        if let Err(refused) = limits.select_max_keyexpr_bytes(Quota::at_most(lowered)) {
+            assert!(refused.domain.is_singleton(), "{refused:?}");
+            return;
+        }
+        let memory = session_tables(&limits, &Captures::default());
+        if ENFORCES_CAPACITY {
+            assert_eq!(memory, at_build);
+            return;
+        }
+        assert_eq!(
+            row(&memory, c"subscriber keys and callbacks").entry_bytes,
+            grown_text(lowered) + BoxedSink::WRAPPER_BYTES
+        );
+        assert_eq!(
+            row(&memory, c"subscribers").entry_bytes,
+            row(&at_build, c"subscribers").entry_bytes
+        );
+        assert!(
+            memory.total().expect("bounded") < at_build.total().expect("bounded"),
+            "a shorter key takes less beside each entry"
+        );
+    }
+
+    /// A table whose entries keep bytes of no bound beside their rows gives a second row with no
+    /// count, not enforced, so the report has no total; its storage row keeps its count, and the
+    /// bounded bytes are the storage's.
+    #[test]
+    fn a_table_with_no_bound_beside_its_rows_leaves_the_report_without_a_total() {
+        let mut memory = SessionMemory::new();
+        memory.put_table(Table {
+            parts: [c"rows", c"beside the rows"],
+            basis: c"MAX_SUBSCRIPTIONS",
+            entries: Some(3),
+            row_bytes: 16,
+            beside: None,
+        });
+        let [storage, beside] = memory.rows() else {
+            panic!("two rows a table");
+        };
+        assert_eq!(
+            (storage.count, storage.enforced),
+            (Some(storage_rows(3)), true)
+        );
+        assert_eq!(
+            (beside.count, beside.entry_bytes, beside.enforced),
+            (None, 0, false)
+        );
+        assert_eq!(memory.total(), None);
+        assert!(!memory.is_enforced());
+        assert_eq!(memory.bounded_bytes(), storage_rows(3) * 16);
     }
 
     /// What the caller's closures capture is counted beside each entry, and nowhere else.

@@ -2320,8 +2320,10 @@ bool wz_ext_internal_message_payload_check(
 /* ================================================ the most memory a session holds
  *
  * What a session holds at most, part by part, computed from the limits it
- * opened under: a program reads it once its session is open, to know what the
- * limits it chose cost before the session runs. Part of the unstable surface,
+ * opened under: the snapshot its open resolved from the config, the limits of
+ * a document handed to wz_ext_config_document included. A program reads it
+ * once its session is open, to know what the limits it chose cost before the
+ * session runs. Part of the unstable surface,
  * and present only in a build with the session-memory capability.
  *
  * THE ROWS. Each table the session keeps to a limit is two rows: the
@@ -2335,15 +2337,17 @@ bool wz_ext_internal_message_payload_check(
  *
  * THE BOUNDS. A fixed table counts its capacity; a growable one its quota,
  * and the storage a vector that doubles as it fills may reach (twice the
- * entries, at least four), and a key's text up to the longest key a fixed
- * table stores, written as a string that doubles. A session that only dials
- * holds one link. A row the build holds to no bound (a quota of no bound, a
- * listener that accepts links to no bound) has bounded 0, and then so has the
- * report: total_bytes is the sum of the rows that are bounded.
+ * entries, at least four), and a key's text up to the session's
+ * MAX_KEYEXPR_BYTES, written as a string that doubles. A session that only
+ * dials holds one link. A row the session holds to no bound (a quota of no
+ * bound, a listener that accepts links to no bound, a PICO_FRAG_MAX_BYTES of
+ * no bound) has bounded 0, and then so has the report: total_bytes is the
+ * sum of the rows that are bounded.
  *
  * ENFORCED. 1 when the build also refuses past every row's count and entry
- * size, so that total_bytes is a bound the session cannot pass. A build whose
- * tables grow keeps a key of any length, so its report is not enforced.
+ * size, so that total_bytes is a bound the session cannot pass. Every table
+ * refuses a key longer than the session's MAX_KEYEXPR_BYTES, whatever its
+ * storage.
  *
  * What an engine makes beside the tables (its runtime, its threads, the
  * closures' captures) is sized by no limit and is outside the rows, as are
