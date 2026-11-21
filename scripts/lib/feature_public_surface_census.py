@@ -758,9 +758,15 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "and `advanced-history` (the startup and late-publisher history), which the tokio "
         "runtime's `ext-pubsub-advanced-subscriber`, `-recovery` and `-history` turn on, and "
         "`engine-host` (the subscriber hosted on an engine's port, which the cooperative "
-        "engine's C ABI turns on)",
+        "engine's C ABI turns on). `host-sync` is the one this crate's tests do not turn on: its "
+        "one public item is `advanced_cache`, the module `std` gates, behind a cfg of either, and "
+        "what it changes is the lock beneath it, the host's own calls in place of `std`'s, for the "
+        "C library's `os-posix` form, which selects it where `advanced` builds the plane; the "
+        "note rustc gives for a compound cfg names no feature, so the axis has nothing of it to "
+        "probe",
         frozenset(
             {
+                "host-sync",
                 "transport-shm",
                 "advanced-publisher",
                 "advanced-subscriber",
@@ -783,12 +789,19 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "with, which a forwarder takes a stamp from), and `event-ring` (the node's event log, "
         "one ring the node writes events into, stamped with the node clock), and `time-base` "
         "(the time base a program supplies, which the tokio runtime's `program-time` re-exports "
-        "and the pico ABI's door makes, and which a session's timers then read and wait on)",
+        "and the pico ABI's door makes, and which a session's timers then read and wait on). "
+        "`host-sync` is the one the crate's tests do not turn on: its one public item is "
+        "`timestamp_source`, the module `std` gates, behind a cfg of either, and what it changes "
+        "is the wall clock and the lock beneath it, the host's own calls in place of `std`'s, for "
+        "the C library's `os-posix` form, which selects it where a capability brings this crate "
+        "in; the note rustc gives for a compound cfg names no feature, so the axis has nothing of "
+        "it to probe",
         frozenset(
             {
                 "clock-source",
                 "codec-push",
                 "event-ring",
+                "host-sync",
                 "pubsub-ts-stack",
                 "time-base",
                 "time-hlc",
