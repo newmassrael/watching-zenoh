@@ -104,38 +104,45 @@ stands_for!(
     view::ext_interface::wz_ext_session_facts_t => crate::ext_interface::wz_ext_session_facts_t,
 );
 
+// The types only the replay doors read, behind one gated private module: a gated macro call at
+// the top level reads to `scripts/lib/feature_public_surface_census.py` as a possible public
+// item.
 #[cfg(feature = "replay-cache")]
-stands_for!(
-    view::zid::z_id_t => crate::zid::z_id_t,
-    view::pubsub::z_loaned_publisher_t => crate::pubsub::z_loaned_publisher_t,
-    view::pubsub::z_publisher_put_options_t => crate::pubsub::z_publisher_put_options_t,
-    view::pubsub::z_loaned_sample_t => crate::pubsub::z_loaned_sample_t,
-    view::pubsub::z_owned_closure_sample_t => crate::pubsub::z_owned_closure_sample_t,
-    view::pubsub::z_moved_closure_sample_t => crate::pubsub::z_moved_closure_sample_t,
-    view::pubsub::z_owned_subscriber_t => crate::pubsub::z_owned_subscriber_t,
-    view::pubsub::z_moved_subscriber_t => crate::pubsub::z_moved_subscriber_t,
-    view::query::z_loaned_query_t => crate::query::z_loaned_query_t,
-    view::query::z_owned_closure_query_t => crate::query::z_owned_closure_query_t,
-    view::query::z_moved_closure_query_t => crate::query::z_moved_closure_query_t,
-    view::query::z_owned_queryable_t => crate::query::z_owned_queryable_t,
-    view::query::z_moved_queryable_t => crate::query::z_moved_queryable_t,
-    view::query::z_queryable_options_t => crate::query::z_queryable_options_t,
-    view::query::z_query_reply_options_t => crate::query::z_query_reply_options_t,
-    view::get::z_loaned_reply_t => crate::get::z_loaned_reply_t,
-    view::get::z_owned_closure_reply_t => crate::get::z_owned_closure_reply_t,
-    view::get::z_moved_closure_reply_t => crate::get::z_moved_closure_reply_t,
-    view::get::z_moved_encoding_t => crate::encoding::z_moved_encoding_t,
-    view::get::z_query_consolidation_t => crate::get::z_query_consolidation_t,
-    view::get::z_get_options_t => crate::get::z_get_options_t,
-    view::decl_watch::wz_ext_decl_event_t => crate::decl_watch::wz_ext_decl_event_t,
-    view::decl_watch::wz_ext_owned_decl_watch_t => crate::decl_watch::wz_ext_owned_decl_watch_t,
-);
+mod replay_types {
+    use super::{view, InCore};
 
-#[cfg(all(feature = "replay-cache", feature = "unstable-api"))]
-stands_for!(
-    view::get::z_source_info_t => crate::pubsub::z_source_info_t,
-    view::get::z_moved_cancellation_token_t => crate::cancellation::z_moved_cancellation_token_t,
-);
+    stands_for!(
+        view::zid::z_id_t => crate::zid::z_id_t,
+        view::pubsub::z_loaned_publisher_t => crate::pubsub::z_loaned_publisher_t,
+        view::pubsub::z_publisher_put_options_t => crate::pubsub::z_publisher_put_options_t,
+        view::pubsub::z_loaned_sample_t => crate::pubsub::z_loaned_sample_t,
+        view::pubsub::z_owned_closure_sample_t => crate::pubsub::z_owned_closure_sample_t,
+        view::pubsub::z_moved_closure_sample_t => crate::pubsub::z_moved_closure_sample_t,
+        view::pubsub::z_owned_subscriber_t => crate::pubsub::z_owned_subscriber_t,
+        view::pubsub::z_moved_subscriber_t => crate::pubsub::z_moved_subscriber_t,
+        view::query::z_loaned_query_t => crate::query::z_loaned_query_t,
+        view::query::z_owned_closure_query_t => crate::query::z_owned_closure_query_t,
+        view::query::z_moved_closure_query_t => crate::query::z_moved_closure_query_t,
+        view::query::z_owned_queryable_t => crate::query::z_owned_queryable_t,
+        view::query::z_moved_queryable_t => crate::query::z_moved_queryable_t,
+        view::query::z_queryable_options_t => crate::query::z_queryable_options_t,
+        view::query::z_query_reply_options_t => crate::query::z_query_reply_options_t,
+        view::get::z_loaned_reply_t => crate::get::z_loaned_reply_t,
+        view::get::z_owned_closure_reply_t => crate::get::z_owned_closure_reply_t,
+        view::get::z_moved_closure_reply_t => crate::get::z_moved_closure_reply_t,
+        view::get::z_moved_encoding_t => crate::encoding::z_moved_encoding_t,
+        view::get::z_query_consolidation_t => crate::get::z_query_consolidation_t,
+        view::get::z_get_options_t => crate::get::z_get_options_t,
+        view::decl_watch::wz_ext_decl_event_t => crate::decl_watch::wz_ext_decl_event_t,
+        view::decl_watch::wz_ext_owned_decl_watch_t => crate::decl_watch::wz_ext_owned_decl_watch_t,
+    );
+
+    #[cfg(feature = "unstable-api")]
+    stands_for!(
+        view::get::z_source_info_t => crate::pubsub::z_source_info_t,
+        view::get::z_moved_cancellation_token_t => crate::cancellation::z_moved_cancellation_token_t,
+    );
+}
 
 /// Compiles only when `view`'s type, read in the core's types, is `core`'s.
 fn same<V: InCore, C>(_view: V, _core: C)
@@ -210,8 +217,11 @@ fn every_function_the_view_imports_has_the_core_s_signature() {
     same_fn!(ext_interface::wz_ext_interface_run_in_callback(_, _));
     #[cfg(feature = "query")]
     same_fn!(ext_interface::wz_ext_interface_session_facts(_, _));
+    // A block, so the census named above reads a statement and not a possible public item.
     #[cfg(feature = "event-ring")]
-    same_fn!(event_log::wz_ext_event_emit(_, _, _, _));
+    {
+        same_fn!(event_log::wz_ext_event_emit(_, _, _, _));
+    }
 }
 
 #[cfg(feature = "replay-cache")]
@@ -320,8 +330,11 @@ fn every_value_the_replay_doors_allocate_has_the_core_s_layout() {
         attachment,
         accept_replies,
     );
+    // A block, as above.
     #[cfg(feature = "local-queryable")]
-    same_fields!(view::get::z_get_options_t, crate::get::z_get_options_t; allowed_destination);
+    {
+        same_fields!(view::get::z_get_options_t, crate::get::z_get_options_t; allowed_destination);
+    }
     #[cfg(feature = "unstable-api")]
     same_fields!(
         view::get::z_get_options_t,
