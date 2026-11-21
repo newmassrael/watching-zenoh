@@ -1207,7 +1207,10 @@ mod policy_document_tests {
                 .node
                 .selected()
                 .iter()
-                .map(|(limit, value)| (format!("wz/limits/{limit}"), value.to_string()))
+                .map(|(limit, value)| {
+                    let value = wz_session_core::limit_corpus::json5_value(*value);
+                    (format!("wz/limits/{limit}"), value)
+                })
                 .collect();
             if by_key.is_empty() {
                 continue;

@@ -79,6 +79,14 @@
 # `binding_fixed` are its binding (below) under each storage profile, `none` where that profile
 # does not read it. A capacity is decided by the open at the latest, a quota at the open or later.
 #
+# `read` says where the machines of the limit's scope read it. `snapshot`: from the snapshot of
+# the limits their creator resolved and hands them, so a value a document states reaches them.
+# `build`: still from the build's value, so a statement would be taken and never read, and a reader
+# of a document refuses it by name. Every limit a stage after the build may decide states it; a
+# capacity alone states none. A limit of a runtime is read from the snapshot only where the node
+# hands its machines the runtime's snapshot it resolved. `scripts/lib/limit_read_gate.py` holds
+# this to the code both ways, so a limit moves to `snapshot` in the change that moves its readers.
+#
 # `[limit.upstream]` names what the limit is in upstream zenoh. `zenoh` is the key of zenoh's
 # configuration that states the same number, as a path in its DEFAULT_CONFIG.json5, which
 # `wz_config.py` finds in wz-zenoh's byte copy of that file; `cite` is the upstream code that
@@ -2052,6 +2060,7 @@ storage = "both"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "build"
+read = "build"
 # `wire` is none: within the limit no byte a peer sees changes; past it, what does not fit is
 # left out.
 wire = "none"
@@ -2076,6 +2085,7 @@ storage = "both"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "build"
+read = "snapshot"
 wire = "none"
 help = '''
 The subscribers a session holds at once. Declaring one more is refused
@@ -2097,6 +2107,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "none"
+read = "build"
 wire = "none"
 help = '''
 How many distinct keys the receive match cache remembers at once: the keys
@@ -2172,6 +2183,7 @@ storage = "both"
 scope = "entity"
 binding_heap = "open"
 binding_fixed = "build"
+read = "build"
 wire = "none"
 help = '''
 How many samples the delivery lane of an offloaded subscriber holds at once:
@@ -2193,6 +2205,7 @@ storage = "quota"
 scope = "entity"
 binding_heap = "open"
 binding_fixed = "none"
+read = "build"
 wire = "none"
 help = '''
 How many bytes of copied samples a delivery lane holds at once: the key, the
@@ -2215,6 +2228,7 @@ storage = "quota"
 scope = "entity"
 binding_heap = "live"
 binding_fixed = "none"
+read = "build"
 wire = "none"
 help = '''
 How many callback invocations a delivery lane owes at once. A host that admits
@@ -2239,6 +2253,7 @@ storage = "both"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "build"
+read = "snapshot"
 wire = "none"
 help = '''
 The queryables a session holds at once. Declaring one more is refused
@@ -2261,6 +2276,7 @@ storage = "both"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "build"
+read = "snapshot"
 wire = "none"
 help = '''
 The queries (gets) a session has waiting for their replies at once.
@@ -2282,6 +2298,7 @@ storage = "quota"
 scope = "link"
 binding_heap = "open"
 binding_fixed = "open"
+read = "build"
 # `wire` is none: a reply whose request's key form was let go names its key in the link's own form,
 # which the peer reads as it reads any reply.
 wire = "none"
@@ -2308,6 +2325,7 @@ storage = "both"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "build"
+read = "snapshot"
 wire = "none"
 help = '''
 The observers an application installs on the declarations of its peers
@@ -2331,6 +2349,7 @@ storage = "both"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "build"
+read = "snapshot"
 wire = "none"
 help = '''
 The liveliness subscribers a session holds at once. Declaring one more
@@ -2353,6 +2372,7 @@ storage = "both"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "build"
+read = "snapshot"
 # `wire` is none: within the limit no byte a peer sees changes; past it, what does not fit is
 # left out.
 wire = "none"
@@ -2376,6 +2396,7 @@ storage = "both"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "build"
+read = "snapshot"
 wire = "none"
 help = '''
 The liveliness gets (snapshots of the tokens alive) a session has waiting
@@ -2399,6 +2420,7 @@ storage = "both"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "build"
+read = "snapshot"
 # `wire` is none: within the limit no byte a peer sees changes; past it, what does not fit is
 # refused.
 wire = "none"
@@ -2424,6 +2446,7 @@ storage = "both"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "build"
+read = "snapshot"
 # `wire` is none: within the limit no byte a peer sees changes; past it, what does not fit is
 # left out.
 wire = "none"
@@ -2449,6 +2472,7 @@ storage = "both"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "build"
+read = "snapshot"
 # `wire` is none: within the limit no byte a peer sees changes; past it, what does not fit is
 # dropped.
 wire = "none"
@@ -2475,6 +2499,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "none"
+read = "build"
 # `wire` is none: the limit refuses a dictionary at the open, before any byte is sent.
 wire = "none"
 help = '''
@@ -2498,6 +2523,7 @@ storage = "both"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "build"
+read = "snapshot"
 wire = "none"
 help = '''
 The declarations of one kind (subscribers, queryables, liveliness tokens)
@@ -2521,6 +2547,7 @@ storage = "both"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "build"
+read = "snapshot"
 wire = "none"
 help = '''
 The replies a session's queryables may have ready to send between two
@@ -2543,6 +2570,7 @@ storage = "both"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "build"
+read = "snapshot"
 # `wire` is none: within the limit no byte a peer sees changes; past it, what does not fit is
 # refused.
 wire = "none"
@@ -2568,6 +2596,7 @@ storage = "both"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "build"
+read = "build"
 wire = "none"
 help = '''
 The largest payload of one reply, in bytes, and the largest attachment
@@ -2650,6 +2679,7 @@ storage = "both"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "build"
+read = "build"
 wire = "none"
 help = '''
 The replies a node holds for a multicast group before it sends them, with or
@@ -2713,6 +2743,7 @@ storage = "both"
 scope = ["runtime", "link"]
 binding_heap = "open"
 binding_fixed = "build"
+read = "build"
 wire = "none"
 help = '''
 The longest locator, in bytes, a node stores: one it is told to connect
@@ -2736,6 +2767,7 @@ storage = "both"
 scope = "runtime"
 binding_heap = "open"
 binding_fixed = "build"
+read = "build"
 wire = "none"
 help = '''
 The locators a node is told to connect to. A list longer than this stops
@@ -2782,6 +2814,7 @@ storage = "quota"
 scope = "entity"
 binding_heap = "live"
 binding_fixed = "none"
+read = "snapshot"
 wire = "none"
 help = '''
 The queries one declared querier may have in flight at once; one more is
@@ -2807,6 +2840,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "live"
 binding_fixed = "open"
+read = "build"
 wire = "timing"
 help = '''
 How long, in microseconds, a blocking message may wait with no progress
@@ -2833,6 +2867,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "live"
 binding_fixed = "open"
+read = "build"
 wire = "timing"
 help = '''
 How many blocking messages in a row may find no room within their deadline
@@ -2857,6 +2892,7 @@ storage = "quota"
 scope = "link"
 binding_heap = "live"
 binding_fixed = "none"
+read = "build"
 wire = "timing"
 help = '''
 How many fragments of a message a UDP link's writer writes in a row when the
@@ -2878,6 +2914,7 @@ storage = "quota"
 scope = "link"
 binding_heap = "live"
 binding_fixed = "none"
+read = "build"
 wire = "timing"
 help = '''
 How long, in microseconds, must pass after the last fragment was written
@@ -2903,6 +2940,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "live"
 binding_fixed = "live"
+read = "build"
 wire = "none"
 help = '''
 The most bytes of selector parameters a query from a peer may carry for this
@@ -2928,6 +2966,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "live"
 binding_fixed = "live"
+read = "build"
 wire = "none"
 help = '''
 The most bytes of attachment a query from a peer may carry for this node to
@@ -2980,6 +3019,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "none"
+read = "build"
 wire = "timing"
 help = '''
 How many batches each priority's outbound queue holds for the pico C ABI, in
@@ -3008,6 +3048,7 @@ storage = "quota"
 scope = "runtime"
 binding_heap = "live"
 binding_fixed = "none"
+read = "build"
 wire = "timing"
 help = '''
 How often, in milliseconds, the node takes a snapshot of itself: what it spends
@@ -3031,6 +3072,7 @@ storage = "both"
 scope = ["runtime", "session"]
 binding_heap = "open"
 binding_fixed = "build"
+read = "build"
 # `wire` is visible: the bucket count is part of the snapshot's format.
 wire = "visible"
 help = '''
@@ -3057,6 +3099,7 @@ storage = "both"
 scope = "runtime"
 binding_heap = "open"
 binding_fixed = "build"
+read = "build"
 wire = "none"
 help = '''
 How many checkpoints the node's supervisor watches. Each is a deadline an
@@ -3078,6 +3121,7 @@ storage = "quota"
 scope = "runtime"
 binding_heap = "open"
 binding_fixed = "open"
+read = "build"
 wire = "none"
 help = '''
 How many periodic streams one reception supervisor holds. The table of streams
@@ -3100,6 +3144,7 @@ storage = "quota"
 scope = "link"
 binding_heap = "open"
 binding_fixed = "none"
+read = "build"
 # `wire` is timing: past the bound the program's bytes are refused and handed in again once the
 # session has read the queue down, so a peer receives the same bytes later.
 wire = "timing"
@@ -3127,6 +3172,7 @@ storage = "both"
 scope = "runtime"
 binding_heap = "open"
 binding_fixed = "build"
+read = "build"
 wire = "none"
 help = '''
 How many event records the node's event ring holds. When the ring is full,
@@ -3171,6 +3217,7 @@ storage = "quota"
 scope = "runtime"
 binding_heap = "open"
 binding_fixed = "none"
+read = "build"
 wire = "none"
 help = '''
 How many clock sources an application can register with the node at once, when
@@ -3197,6 +3244,7 @@ storage = "both"
 scope = "entity"
 binding_heap = "open"
 binding_fixed = "build"
+read = "build"
 wire = "none"
 help = '''
 How many senders one receiving judge of end-to-end protected frames keeps a
@@ -3224,6 +3272,7 @@ storage = "both"
 scope = "entity"
 binding_heap = "open"
 binding_fixed = "build"
+read = "build"
 wire = "none"
 help = '''
 The deepest replay a message may keep: how many of the frames it last sent, as
@@ -3249,6 +3298,7 @@ storage = "both"
 scope = "runtime"
 binding_heap = "open"
 binding_fixed = "build"
+read = "build"
 wire = "none"
 help = '''
 How many messages one message catalog declares, when the message-catalog
@@ -3273,6 +3323,7 @@ storage = "both"
 scope = "entity"
 binding_heap = "open"
 binding_fixed = "build"
+read = "build"
 wire = "none"
 help = '''
 How many fields of a payload one message's instance key names, when the
@@ -3299,6 +3350,7 @@ storage = "both"
 scope = "entity"
 binding_heap = "open"
 binding_fixed = "build"
+read = "build"
 wire = "none"
 help = '''
 How many instances one message's instance key may tell apart, when the
@@ -3322,6 +3374,7 @@ storage = "quota"
 scope = "runtime"
 binding_heap = "live"
 binding_fixed = "none"
+read = "build"
 wire = "none"
 help = '''
 How far ahead of the node's clock, in milliseconds, a timestamp from another
@@ -3349,6 +3402,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "live"
 binding_fixed = "open"
+read = "build"
 wire = "timing"
 help = '''
 How many declarations one turn of a paced declaration replay sends, when the
@@ -3370,6 +3424,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "live"
 binding_fixed = "live"
+read = "build"
 wire = "none"
 help = '''
 How long, in milliseconds, a node waits for the peer's answer to an interest it
@@ -3393,6 +3448,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "live"
 binding_fixed = "open"
+read = "build"
 wire = "timing"
 help = '''
 How long, in milliseconds, a paced declaration replay waits between two of its
@@ -3415,6 +3471,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "none"
+read = "build"
 wire = "none"
 help = '''
 How long, in milliseconds, a session waits for the next of its peer's initial
@@ -3442,6 +3499,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "open"
+read = "build"
 wire = "timing"
 help = '''
 How long, in milliseconds, a paced declaration replay waits before it tries
@@ -3468,6 +3526,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "open"
+read = "build"
 wire = "none"
 help = '''
 How long, in milliseconds, a paced declaration replay that retries refused
@@ -3496,6 +3555,7 @@ storage = "quota"
 scope = "link"
 binding_heap = "open"
 binding_fixed = "none"
+read = "build"
 wire = "negotiated"
 help = '''
 The batch size, in bytes, a session of the zenoh-pico interface advertises when
@@ -3518,6 +3578,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "none"
+read = "build"
 # `wire` is visible: the Join states it, and a member that states another size is refused.
 wire = "visible"
 help = '''
@@ -3541,6 +3602,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "none"
+read = "build"
 wire = "negotiated"
 help = '''
 The lease, in milliseconds, a session of the zenoh-pico interface advertises,
@@ -3562,6 +3624,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "none"
+read = "build"
 wire = "timing"
 help = '''
 How long, in milliseconds, one read step of the cooperative zenoh-pico session
@@ -3584,6 +3647,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "none"
+read = "build"
 wire = "timing"
 help = '''
 How long, in milliseconds, each open of an endpoint by a zenoh-pico session
@@ -3605,6 +3669,7 @@ storage = "quota"
 scope = "link"
 binding_heap = "open"
 binding_fixed = "none"
+read = "build"
 wire = "none"
 help = '''
 The largest message, in bytes, a session of the zenoh-pico interface rejoins
@@ -3628,6 +3693,7 @@ storage = "quota"
 scope = "link"
 binding_heap = "open"
 binding_fixed = "none"
+read = "build"
 wire = "timing"
 help = '''
 How long, in milliseconds, a listening session of the zenoh-pico interface gives
@@ -3651,6 +3717,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "none"
+read = "build"
 wire = "timing"
 help = '''
 How many keepalives a session of the zenoh-pico interface sends in one lease,

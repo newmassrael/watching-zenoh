@@ -26,8 +26,10 @@
 //! the layer over it. No profile states a limit. A limit is selected into the snapshot that holds
 //! it, [`SessionLimits`] or [`RuntimeLimits`], through its field's `select_*`, which refuses a
 //! value the build's domain leaves out, and a bound stated as `0`, which would admit nothing, is
-//! refused too. A limit only the build sizes (a capacity alone) is refused by name, and a limit of
-//! a runtime is refused to a creator that holds a session's limits alone ([`Base`]). The policies
+//! refused too. A limit only the build sizes (a capacity alone) is refused by name, as is a limit
+//! whose machines still read the build's value rather than the snapshot
+//! ([`LimitEntry::read_from_snapshot`]): its value would be taken and never read. A limit of a
+//! runtime is refused to a creator that holds a session's limits alone ([`Base`]). The policies
 //! and the limits are one resolution: one refusal of either refuses both.
 //!
 //! # All or nothing
@@ -434,6 +436,12 @@ pub enum Reason<'a> {
         /// The limit.
         limit: &'static str,
     },
+    /// The machines of the limit's scope read the build's value and not the snapshot their
+    /// creator hands them, so a stated value would be taken and never read.
+    LimitNotRead {
+        /// The limit.
+        limit: &'static str,
+    },
     /// The value is one the build's domain of the limit leaves out, or `0` for a bound, which
     /// would admit nothing.
     LimitOutsideDomain {
@@ -759,6 +767,11 @@ impl fmt::Display for Refusal<'_> {
                 "{layer} states the limit `{limit}`, and only the build decides `{limit}`: it \
                  sizes storage by it"
             ),
+            Reason::LimitNotRead { limit } => write!(
+                f,
+                "{layer} states the limit `{limit}`, and the machines of this build do not read \
+                 `{limit}` from a statement yet; they run with the build's value"
+            ),
             Reason::LimitOutsideDomain { limit, value, why } => {
                 write!(f, "{layer} states the limit `{limit}` = `{value}`, and ")?;
                 write_outside(f, limit, value, why)
@@ -979,6 +992,16 @@ impl FoundLimit {
             Self::Capacity(id) => id,
         }
     }
+
+    /// Whether the machines of the limit's scope read it from the snapshot. A capacity alone is
+    /// in no snapshot, so it is read from the build.
+    fn is_read(self) -> bool {
+        match self {
+            Self::Session(index) => SESSION_LIMITS[index].read_from_snapshot(),
+            Self::Runtime(index) => RUNTIME_LIMITS[index].read_from_snapshot(),
+            Self::Capacity(_) => false,
+        }
+    }
 }
 
 /// The limits `layers` state, the lowest first, over the snapshots of `base`, each refusal pushed
@@ -1026,6 +1049,8 @@ fn apply_limit<'a>(
     }
     match found {
         FoundLimit::Capacity(_) => Err(Reason::LimitBuildOnly { limit: id }),
+        // Before the scope and the value: a limit no machine reads is refused whatever is stated.
+        _ if !found.is_read() => Err(Reason::LimitNotRead { limit: id }),
         FoundLimit::Session(index) => {
             select_limit(&SESSION_LIMITS[index], &mut resolved.session, value)?;
             resolved.provenance.session[index] = origin;
@@ -1440,13 +1465,14 @@ mod from_json5 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::limit_binding::LimitSpec;
-    use crate::limits::{PicoTxQueueSize, SnapshotPeriodMs};
+    use crate::limit_binding::{LimitSpec, Quota};
+    use crate::limits::MaxSubscriptions;
     use crate::policy::{EventRingFull, KeySet, SubscriberOverload};
     use crate::policy_binding::{
         Bound, Domain, Mutability, OutsideDomain, PolicyField, PolicyValue, Scope, Wire,
     };
     use std::format;
+    use std::string::String;
     use std::vec::Vec;
 
     /// A two-value policy whose build allows only `On`, its default: a domain of one value, built
@@ -1908,18 +1934,28 @@ mod tests {
         );
     }
 
-    /// The build's value of `PICO_TX_QUEUE_SIZE`, a parameter in `1..=16`.
-    fn queue_size() -> usize {
-        SessionLimits::defaults().pico_tx_queue_size()
+    /// The build's value of `MAX_SUBSCRIPTIONS`, a bound the machines of a session read from
+    /// the snapshot.
+    fn subscriptions() -> Quota {
+        SessionLimits::defaults().max_subscriptions()
     }
 
-    /// A value of `PICO_TX_QUEUE_SIZE` inside its range other than the build's.
-    fn other_queue_size() -> usize {
-        if queue_size() == 3 {
+    /// A count of `MAX_SUBSCRIPTIONS` other than the build's, inside its domain wherever the
+    /// build allows more than its own value.
+    fn other_subscriptions() -> usize {
+        if subscriptions() == Quota::at_most(3) {
             4
         } else {
             3
         }
+    }
+
+    /// The first limit of `table` whose machines still read the build's value.
+    fn unread<S: 'static>(table: &'static [LimitEntry<S>]) -> &'static LimitEntry<S> {
+        table
+            .iter()
+            .find(|entry| !entry.read_from_snapshot())
+            .expect("a limit whose machines read the build's value")
     }
 
     /// The open's limits, and nothing else.
@@ -1954,33 +1990,82 @@ mod tests {
     /// API's; a limit it does not state keeps the build default.
     #[test]
     fn a_limit_the_open_states_is_selected_and_records_the_api() {
-        let other = other_queue_size();
+        let other = other_subscriptions();
         let stated = [LimitStatement::new(
-            "PICO_TX_QUEUE_SIZE",
+            "MAX_SUBSCRIPTIONS",
             LimitValue::Integer(other),
         )];
         let resolved = resolve_under(SessionPolicy::defaults(), limits_alone(&stated));
-        if PicoTxQueueSize::DOMAIN.is_singleton() {
+        if MaxSubscriptions::DOMAIN.is_singleton() {
             // A build that keeps its own value alone refuses another, naming its own.
             assert_eq!(
                 only(&resolved.unwrap_err()).reason,
                 Reason::LimitOutsideDomain {
-                    limit: "PICO_TX_QUEUE_SIZE",
+                    limit: "MAX_SUBSCRIPTIONS",
                     value: LimitValue::Integer(other),
                     why: Outside::Pinned {
-                        only: LimitValue::Integer(queue_size())
+                        only: subscriptions().as_value()
                     },
                 }
             );
             return;
         }
-        let resolved = resolved.expect("inside the range");
-        assert_eq!(resolved.limits.session.pico_tx_queue_size(), other);
+        let resolved = resolved.expect("inside the domain");
+        assert_eq!(
+            resolved.limits.session.max_subscriptions(),
+            Quota::at_most(other)
+        );
         let origin = |limit| resolved.limits.provenance.origin(limit);
-        assert_eq!(origin("PICO_TX_QUEUE_SIZE"), Some(Origin::Api));
-        assert_eq!(origin("MAX_SUBSCRIPTIONS"), Some(Origin::BuildDefault));
+        assert_eq!(origin("MAX_SUBSCRIPTIONS"), Some(Origin::Api));
+        assert_eq!(origin("MAX_QUERYABLES"), Some(Origin::BuildDefault));
         assert_eq!(resolved.limits.runtime, RuntimeLimits::defaults());
         assert_eq!(resolved.policy, SessionPolicy::defaults());
+    }
+
+    /// The open's statement of a limit whose machines still read the build's value is refused by
+    /// name, whatever the value and before the scope is asked, and the open selects nothing; a
+    /// limit they read from the snapshot is selected and recorded as the open's.
+    #[test]
+    fn a_limit_no_machine_reads_is_refused_to_the_open_and_a_read_one_is_selected() {
+        let session = unread(&SESSION_LIMITS).id();
+        let runtime = unread(&RUNTIME_LIMITS).id();
+        let stated = [
+            LimitStatement::new(session, LimitValue::Unbounded),
+            LimitStatement::new(runtime, LimitValue::Integer(1)),
+        ];
+        let refusals = resolve_under(SessionPolicy::defaults(), limits_alone(&stated)).unwrap_err();
+        let found: Vec<_> = refusals
+            .iter()
+            .map(|refusal| (refusal.layer, refusal.reason))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (Origin::Api, Reason::LimitNotRead { limit: session }),
+                (Origin::Api, Reason::LimitNotRead { limit: runtime }),
+            ]
+        );
+        assert_eq!(
+            format!("{}", refusals.iter().next().expect("two refusals")),
+            format!(
+                "the open's overrides states the limit `{session}`, and the machines of this \
+                 build do not read `{session}` from a statement yet; they run with the build's \
+                 value"
+            )
+        );
+        assert!(SESSION_LIMITS
+            .iter()
+            .any(|entry| entry.id() == "MAX_SUBSCRIPTIONS" && entry.read_from_snapshot()));
+        let read = [LimitStatement::new(
+            "MAX_SUBSCRIPTIONS",
+            subscriptions().as_value(),
+        )];
+        let resolved = resolve_under(SessionPolicy::defaults(), limits_alone(&read))
+            .expect("the build's own value of a limit the machines read");
+        let origin = |limit| resolved.limits.provenance.origin(limit);
+        assert_eq!(origin("MAX_SUBSCRIPTIONS"), Some(Origin::Api));
+        assert_eq!(origin(session), Some(Origin::BuildDefault));
+        assert_eq!(resolved.limits.session, SessionLimits::defaults());
     }
 
     /// Each refusal of a limit statement names the limit, and the domain's reason where the
@@ -1988,14 +2073,17 @@ mod tests {
     /// snapshot.
     #[test]
     fn each_limit_refusal_names_the_limit_and_why() {
-        let size = queue_size();
+        let session = unread(&SESSION_LIMITS).id();
+        let runtime = unread(&RUNTIME_LIMITS).id();
+        let build = subscriptions().as_value();
         let stated = [
             LimitStatement::new("NO_SUCH_LIMIT", LimitValue::Integer(4)),
             LimitStatement::new("MAX_TASKS", LimitValue::Integer(4)),
-            LimitStatement::new("QUERY_PARAMETERS_MAX_BYTES", LimitValue::Integer(0)),
-            LimitStatement::new("PICO_TX_QUEUE_SIZE", LimitValue::Unbounded),
-            LimitStatement::new("PICO_TX_QUEUE_SIZE", LimitValue::Integer(size)),
-            LimitStatement::new("SNAPSHOT_PERIOD_MS", LimitValue::Integer(500)),
+            LimitStatement::new(session, LimitValue::Integer(4)),
+            LimitStatement::new("QUERIER_MAX_PENDING_QUERIES", LimitValue::Integer(0)),
+            LimitStatement::new("MAX_SUBSCRIPTIONS", build),
+            LimitStatement::new("MAX_SUBSCRIPTIONS", build),
+            LimitStatement::new(runtime, LimitValue::Integer(500)),
         ];
         let refusals = resolve_under(SessionPolicy::defaults(), limits_alone(&stated)).unwrap_err();
         assert!(refusals.iter().all(|refusal| refusal.layer == Origin::Api));
@@ -2007,96 +2095,136 @@ mod tests {
                     limit: "NO_SUCH_LIMIT"
                 },
                 Reason::LimitBuildOnly { limit: "MAX_TASKS" },
+                Reason::LimitNotRead { limit: session },
                 Reason::LimitOutsideDomain {
-                    limit: "QUERY_PARAMETERS_MAX_BYTES",
+                    limit: "QUERIER_MAX_PENDING_QUERIES",
                     value: LimitValue::Integer(0),
                     why: Outside::Below { least: 1 },
                 },
-                Reason::LimitOutsideDomain {
-                    limit: "PICO_TX_QUEUE_SIZE",
-                    value: LimitValue::Unbounded,
-                    why: Outside::UnboundedParameter,
-                },
                 Reason::LimitStatedTwice {
-                    limit: "PICO_TX_QUEUE_SIZE"
+                    limit: "MAX_SUBSCRIPTIONS"
                 },
-                Reason::LimitWrongScope {
-                    limit: "SNAPSHOT_PERIOD_MS",
-                    scope: Scope::Runtime
-                },
+                Reason::LimitNotRead { limit: runtime },
             ]
         );
         let text: Vec<_> = refusals
             .iter()
             .map(|refusal| format!("{refusal}"))
             .collect();
+        let not_read = |limit: &str| {
+            format!(
+                "the open's overrides states the limit `{limit}`, and the machines of this build \
+                 do not read `{limit}` from a statement yet; they run with the build's value"
+            )
+        };
         assert_eq!(
             text,
             [
-                "the open's overrides states the limit `NO_SUCH_LIMIT`, and the build has no \
-                 limit `NO_SUCH_LIMIT`",
-                "the open's overrides states the limit `MAX_TASKS`, and only the build decides \
-                 `MAX_TASKS`: it sizes storage by it",
-                "the open's overrides states the limit `QUERY_PARAMETERS_MAX_BYTES` = `0`, and the \
-                 limit `QUERY_PARAMETERS_MAX_BYTES` is at least 1; `0` is less",
-                "the open's overrides states the limit `PICO_TX_QUEUE_SIZE` = `unbounded`, and the \
-                 limit `PICO_TX_QUEUE_SIZE` is a parameter, which is never `unbounded`",
-                "the open's overrides states the limit `PICO_TX_QUEUE_SIZE` again; a layer states \
-                 a limit once",
-                "the open's overrides states the limit `SNAPSHOT_PERIOD_MS`, which each runtime \
-                 holds, and this creator holds the limits of a session alone",
+                String::from(
+                    "the open's overrides states the limit `NO_SUCH_LIMIT`, and the build has no \
+                     limit `NO_SUCH_LIMIT`"
+                ),
+                String::from(
+                    "the open's overrides states the limit `MAX_TASKS`, and only the build \
+                     decides `MAX_TASKS`: it sizes storage by it"
+                ),
+                not_read(session),
+                String::from(
+                    "the open's overrides states the limit `QUERIER_MAX_PENDING_QUERIES` = `0`, \
+                     and the limit `QUERIER_MAX_PENDING_QUERIES` is at least 1; `0` is less"
+                ),
+                String::from(
+                    "the open's overrides states the limit `MAX_SUBSCRIPTIONS` again; a layer \
+                     states a limit once"
+                ),
+                not_read(runtime),
             ]
         );
     }
 
     /// A value the build's domain leaves out is refused with the domain's reason: outside the
-    /// declared range, or, where the build keeps its own value alone, another value.
+    /// declared range, or, where the build keeps its own value alone, another value; and a
+    /// parameter is never `unbounded`. The selection is asked of the limit's entry, below the
+    /// refusal of a limit no machine reads, so a parameter whose machines still read the build
+    /// shows it too.
     #[test]
     fn a_limit_value_outside_the_domain_is_refused_with_the_domains_reason() {
-        let stated = [LimitStatement::new(
-            "PICO_TX_QUEUE_SIZE",
-            LimitValue::Integer(17),
-        )];
-        let refusals = resolve_under(SessionPolicy::defaults(), limits_alone(&stated)).unwrap_err();
-        let why = if PicoTxQueueSize::DOMAIN.is_singleton() {
-            Outside::Pinned {
-                only: LimitValue::Integer(queue_size()),
-            }
+        let entry = SESSION_LIMITS
+            .iter()
+            .find(|entry| entry.id() == "PICO_TX_QUEUE_SIZE")
+            .expect("declared");
+        let build = entry.value_in(&SessionLimits::defaults());
+        let mut snapshot = SessionLimits::defaults();
+        let why = if entry.domain().is_singleton() {
+            Outside::Pinned { only: build }
         } else {
             Outside::OutsideRange { least: 1, most: 16 }
         };
         assert_eq!(
-            only(&refusals).reason,
-            Reason::LimitOutsideDomain {
+            select_limit(entry, &mut snapshot, LimitValue::Integer(17)),
+            Err(Reason::LimitOutsideDomain {
                 limit: "PICO_TX_QUEUE_SIZE",
                 value: LimitValue::Integer(17),
                 why,
-            }
+            })
+        );
+        let unbounded = Reason::LimitOutsideDomain {
+            limit: "PICO_TX_QUEUE_SIZE",
+            value: LimitValue::Unbounded,
+            why: Outside::UnboundedParameter,
+        };
+        assert_eq!(
+            select_limit(entry, &mut snapshot, LimitValue::Unbounded),
+            Err(unbounded)
+        );
+        assert_eq!(snapshot, SessionLimits::defaults());
+        let refusal = Refusal {
+            layer: Origin::Api,
+            reason: unbounded,
+        };
+        assert_eq!(
+            format!("{refusal}"),
+            "the open's overrides states the limit `PICO_TX_QUEUE_SIZE` = `unbounded`, and the \
+             limit `PICO_TX_QUEUE_SIZE` is a parameter, which is never `unbounded`"
         );
     }
 
-    /// A runtime's limit is selected into the runtime's snapshot of a node, which holds one.
+    /// A node holds a runtime's limits: it selects into the runtime's snapshot each one whose
+    /// machines read the snapshot, and refuses by name each one whose machines do not.
     #[test]
     fn a_node_selects_a_runtime_limit_into_the_runtimes_snapshot() {
-        let stated = [LimitStatement::new(
-            "SNAPSHOT_PERIOD_MS",
-            LimitValue::Integer(500),
-        )];
-        let resolved = resolve_under(Base::node(SessionPolicy::defaults()), limits_alone(&stated));
-        if SnapshotPeriodMs::DOMAIN.is_singleton() {
+        let base = Base::node(SessionPolicy::defaults());
+        let runtime = RuntimeLimits::defaults();
+        for entry in RUNTIME_LIMITS.iter() {
+            let limit = entry.id();
+            let build = entry.value_in(&runtime);
+            let stated = [LimitStatement::new(limit, build)];
+            let resolved = resolve_under(base, limits_alone(&stated));
+            if !entry.read_from_snapshot() {
+                assert_eq!(
+                    only(&resolved.unwrap_err()).reason,
+                    Reason::LimitNotRead { limit },
+                    "{limit}"
+                );
+                continue;
+            }
+            // A bound stated as `0` is refused whatever the build's value.
+            if entry.kind() == LimitKind::Bound && build == LimitValue::Integer(0) {
+                continue;
+            }
+            let resolved = resolved.unwrap_or_else(|refused| panic!("{limit}: {refused}"));
+            assert_eq!(resolved.limits.runtime, runtime, "{limit}");
             assert_eq!(
-                resolved.is_ok(),
-                RuntimeLimits::defaults().snapshot_period_ms() == 500
+                resolved.limits.session,
+                SessionLimits::defaults(),
+                "{limit}"
             );
-            return;
+            assert_eq!(
+                resolved.limits.provenance.origin(limit),
+                Some(Origin::Api),
+                "{limit}"
+            );
         }
-        let resolved = resolved.expect("inside the range");
-        assert_eq!(resolved.limits.runtime.snapshot_period_ms(), 500);
-        assert_eq!(resolved.limits.session, SessionLimits::defaults());
-        assert_eq!(
-            resolved.limits.provenance.origin("SNAPSHOT_PERIOD_MS"),
-            Some(Origin::Api)
-        );
     }
 
     /// Every capacity alone is in neither snapshot, and a layer that states one is refused by
@@ -2124,7 +2252,8 @@ mod tests {
         }
     }
 
-    /// Every limit takes the build's own value from a layer. A limit whose domain is one value (a
+    /// Every limit whose machines read the snapshot takes the build's own value from a layer, and
+    /// every other is refused by name, its build's value too. A limit whose domain is one value (a
     /// target with no operating system, or `WZ_LIMIT_DOMAINS=defaults`) refuses every other, and
     /// a refusal of a kept value names the value the build keeps.
     #[test]
@@ -2133,13 +2262,25 @@ mod tests {
         let runtime_limits = RuntimeLimits::defaults();
         let session = SESSION_LIMITS.iter().map(|entry| {
             let held = entry.value_in(&base.session_limits);
-            (entry.id(), entry.kind(), entry.domain(), held)
+            let read = entry.read_from_snapshot();
+            (entry.id(), entry.kind(), entry.domain(), held, read)
         });
         let runtime = RUNTIME_LIMITS.iter().map(|entry| {
             let held = entry.value_in(&runtime_limits);
-            (entry.id(), entry.kind(), entry.domain(), held)
+            let read = entry.read_from_snapshot();
+            (entry.id(), entry.kind(), entry.domain(), held, read)
         });
-        for (limit, kind, domain, build) in session.chain(runtime) {
+        for (limit, kind, domain, build, read) in session.chain(runtime) {
+            if !read {
+                let same = [LimitStatement::new(limit, build)];
+                let refusals = resolve_under(base, limits_alone(&same)).unwrap_err();
+                assert_eq!(
+                    only(&refusals).reason,
+                    Reason::LimitNotRead { limit },
+                    "{limit}"
+                );
+                continue;
+            }
             // A bound stated as `0` is refused whatever the build's value.
             let refused_as_zero = kind == LimitKind::Bound && build == LimitValue::Integer(0);
             if !refused_as_zero {
@@ -2182,7 +2323,6 @@ mod tests {
     mod from_a_json5_tree {
         use super::*;
         use crate::json5::parse;
-        use crate::limit_binding::Quota;
 
         #[test]
         fn a_document_with_no_wz_member_is_the_base() {
@@ -2285,28 +2425,28 @@ mod tests {
         /// resolution selects each into the snapshot that holds it, recorded as the document's.
         #[test]
         fn the_limits_the_document_states_are_read_and_selected() {
-            let other = other_queue_size();
+            let other = other_subscriptions();
             let text = format!(
-                r#"{{ wz: {{ limits: {{ PICO_TX_QUEUE_SIZE: {other}, QUERY_ATTACHMENT_MAX_BYTES: "unbounded" }} }} }}"#
+                r#"{{ wz: {{ limits: {{ MAX_SUBSCRIPTIONS: {other}, QUERIER_MAX_PENDING_QUERIES: "unbounded" }} }} }}"#
             );
             let tree = parse(&text).unwrap();
             let read = statements_from_json5(&tree).expect("well formed");
             assert_eq!(
                 read.limits,
                 [
-                    LimitStatement::new("PICO_TX_QUEUE_SIZE", LimitValue::Integer(other)),
-                    LimitStatement::new("QUERY_ATTACHMENT_MAX_BYTES", LimitValue::Unbounded),
+                    LimitStatement::new("MAX_SUBSCRIPTIONS", LimitValue::Integer(other)),
+                    LimitStatement::new("QUERIER_MAX_PENDING_QUERIES", LimitValue::Unbounded),
                 ]
             );
             let resolved = resolve_document(SessionPolicy::defaults(), &tree);
-            if PicoTxQueueSize::DOMAIN.is_singleton() {
+            if MaxSubscriptions::DOMAIN.is_singleton() {
                 // A build that keeps its own value alone refuses another, naming its own.
                 let refusals = resolved.unwrap_err();
                 let pinned = Reason::LimitOutsideDomain {
-                    limit: "PICO_TX_QUEUE_SIZE",
+                    limit: "MAX_SUBSCRIPTIONS",
                     value: LimitValue::Integer(other),
                     why: Outside::Pinned {
-                        only: LimitValue::Integer(queue_size()),
+                        only: subscriptions().as_value(),
                     },
                 };
                 assert!(
@@ -2316,15 +2456,21 @@ mod tests {
                 return;
             }
             let resolved = resolved.expect("inside the domains");
-            assert_eq!(resolved.limits.session.pico_tx_queue_size(), other);
             assert_eq!(
-                resolved.limits.session.query_attachment_max_bytes(),
+                resolved.limits.session.max_subscriptions(),
+                Quota::at_most(other)
+            );
+            assert_eq!(
+                resolved.limits.session.querier_max_pending_queries(),
                 Quota::UNBOUNDED
             );
             let origin = |limit| resolved.limits.provenance.origin(limit);
-            assert_eq!(origin("PICO_TX_QUEUE_SIZE"), Some(Origin::Document));
-            assert_eq!(origin("QUERY_ATTACHMENT_MAX_BYTES"), Some(Origin::Document));
-            assert_eq!(origin("MAX_SUBSCRIPTIONS"), Some(Origin::BuildDefault));
+            assert_eq!(origin("MAX_SUBSCRIPTIONS"), Some(Origin::Document));
+            assert_eq!(
+                origin("QUERIER_MAX_PENDING_QUERIES"),
+                Some(Origin::Document)
+            );
+            assert_eq!(origin("MAX_QUERYABLES"), Some(Origin::BuildDefault));
             assert_eq!(resolved.policy, SessionPolicy::defaults());
             assert_eq!(resolved.provenance, Provenance::build_defaults());
         }
@@ -2387,17 +2533,16 @@ mod tests {
         /// The document states a limit once, as it states a policy once.
         #[test]
         fn a_limit_the_document_states_twice_is_refused() {
-            let size = queue_size();
-            let text = format!(
-                "{{ wz: {{ limits: {{ PICO_TX_QUEUE_SIZE: {size}, PICO_TX_QUEUE_SIZE: {size} }} }} }}"
-            );
-            let tree = parse(&text).unwrap();
+            let tree = parse(
+                r#"{ wz: { limits: { QUERIER_MAX_PENDING_QUERIES: "unbounded", QUERIER_MAX_PENDING_QUERIES: "unbounded" } } }"#,
+            )
+            .unwrap();
             let refusal = only(&resolve_document(SessionPolicy::defaults(), &tree).unwrap_err());
             assert_eq!(refusal.layer, Origin::Document);
             assert_eq!(
                 refusal.reason,
                 Reason::LimitStatedTwice {
-                    limit: "PICO_TX_QUEUE_SIZE"
+                    limit: "QUERIER_MAX_PENDING_QUERIES"
                 }
             );
         }
@@ -2436,62 +2581,121 @@ mod tests {
         /// document's.
         #[test]
         fn the_overrides_limits_are_read_over_the_documents() {
-            let (document, api) = (other_queue_size(), queue_size());
+            let (document, api) = (other_subscriptions(), subscriptions());
             let text = format!(
-                r#"{{ wz: {{ limits: {{ PICO_TX_QUEUE_SIZE: {document}, QUERY_ATTACHMENT_MAX_BYTES: "unbounded" }} }} }}"#
+                r#"{{ wz: {{ limits: {{ MAX_SUBSCRIPTIONS: {document}, QUERIER_MAX_PENDING_QUERIES: "unbounded" }} }} }}"#
             );
             let tree = parse(&text).unwrap();
-            let stated = [LimitStatement::new(
-                "PICO_TX_QUEUE_SIZE",
-                LimitValue::Integer(api),
-            )];
+            let stated = [LimitStatement::new("MAX_SUBSCRIPTIONS", api.as_value())];
             let overrides = Overrides {
                 limits: &stated,
                 ..Overrides::default()
             };
             let resolved = resolve_document_under(SessionPolicy::defaults(), &tree, overrides);
-            if PicoTxQueueSize::DOMAIN.is_singleton() {
+            if MaxSubscriptions::DOMAIN.is_singleton() {
                 // The document's value is not the build's, and the build allows its own alone.
                 assert!(resolved.is_err());
                 return;
             }
             let resolved = resolved.expect("inside the domains");
-            assert_eq!(resolved.limits.session.pico_tx_queue_size(), api);
+            assert_eq!(resolved.limits.session.max_subscriptions(), api);
             let origin = |limit| resolved.limits.provenance.origin(limit);
-            assert_eq!(origin("PICO_TX_QUEUE_SIZE"), Some(Origin::Api));
-            assert_eq!(origin("QUERY_ATTACHMENT_MAX_BYTES"), Some(Origin::Document));
-            // The document alone keeps its own.
-            let alone = resolve_document(SessionPolicy::defaults(), &tree).expect("allowed");
-            assert_eq!(alone.limits.session.pico_tx_queue_size(), document);
-        }
-
-        /// A node holds a runtime's limits, so its document may state one; a creator that holds
-        /// a session's alone refuses it.
-        #[test]
-        fn a_runtime_limit_in_the_document_is_read_by_the_node_alone() {
-            let tree = parse(r#"{ wz: { limits: { SNAPSHOT_PERIOD_MS: 500 } } }"#).unwrap();
-            let refusal = only(&resolve_document(SessionPolicy::defaults(), &tree).unwrap_err());
+            assert_eq!(origin("MAX_SUBSCRIPTIONS"), Some(Origin::Api));
             assert_eq!(
-                refusal.reason,
-                Reason::LimitWrongScope {
-                    limit: "SNAPSHOT_PERIOD_MS",
-                    scope: Scope::Runtime
-                }
-            );
-            let node = resolve_document(Base::node(SessionPolicy::defaults()), &tree);
-            if SnapshotPeriodMs::DOMAIN.is_singleton() {
-                assert_eq!(
-                    node.is_ok(),
-                    RuntimeLimits::defaults().snapshot_period_ms() == 500
-                );
-                return;
-            }
-            let node = node.expect("inside the range");
-            assert_eq!(node.limits.runtime.snapshot_period_ms(), 500);
-            assert_eq!(
-                node.limits.provenance.origin("SNAPSHOT_PERIOD_MS"),
+                origin("QUERIER_MAX_PENDING_QUERIES"),
                 Some(Origin::Document)
             );
+            // The document alone keeps its own.
+            let alone = resolve_document(SessionPolicy::defaults(), &tree).expect("allowed");
+            assert_eq!(
+                alone.limits.session.max_subscriptions(),
+                Quota::at_most(document)
+            );
+        }
+
+        /// A runtime's limit in a document is refused to a creator that holds a session's limits
+        /// alone, and read by a node, where the node's machines read it from the snapshot; where
+        /// they do not, both refuse it by name before its scope is asked.
+        #[test]
+        fn a_runtime_limit_in_the_document_is_read_by_the_node_alone() {
+            let runtime = RuntimeLimits::defaults();
+            for entry in RUNTIME_LIMITS.iter() {
+                let limit = entry.id();
+                let build = entry.value_in(&runtime);
+                // A bound stated as `0` is refused whatever the build's value.
+                if entry.kind() == LimitKind::Bound && build == LimitValue::Integer(0) {
+                    continue;
+                }
+                let value = match build {
+                    LimitValue::Unbounded => format!("\"{UNBOUNDED}\""),
+                    LimitValue::Integer(value) => format!("{value}"),
+                };
+                let tree =
+                    parse(&format!("{{ wz: {{ limits: {{ {limit}: {value} }} }} }}")).unwrap();
+                let session =
+                    only(&resolve_document(SessionPolicy::defaults(), &tree).unwrap_err());
+                let node = resolve_document(Base::node(SessionPolicy::defaults()), &tree);
+                if !entry.read_from_snapshot() {
+                    assert_eq!(session.reason, Reason::LimitNotRead { limit }, "{limit}");
+                    assert_eq!(
+                        only(&node.unwrap_err()).reason,
+                        Reason::LimitNotRead { limit },
+                        "{limit}"
+                    );
+                    continue;
+                }
+                assert_eq!(
+                    session.reason,
+                    Reason::LimitWrongScope {
+                        limit,
+                        scope: Scope::Runtime
+                    },
+                    "{limit}"
+                );
+                let node = node.unwrap_or_else(|refused| panic!("{limit}: {refused}"));
+                assert_eq!(node.limits.runtime, runtime, "{limit}");
+                assert_eq!(
+                    node.limits.provenance.origin(limit),
+                    Some(Origin::Document),
+                    "{limit}"
+                );
+            }
+        }
+
+        /// The document's statement of a limit whose machines still read the build's value is
+        /// refused by name, and with it the document; a limit they read from the snapshot is
+        /// selected and recorded as the document's.
+        #[test]
+        fn a_limit_no_machine_reads_is_refused_to_the_document_and_a_read_one_is_selected() {
+            let limit = unread(&SESSION_LIMITS).id();
+            let tree = parse(&format!(
+                r#"{{ wz: {{ limits: {{ {limit}: 1, QUERIER_MAX_PENDING_QUERIES: "unbounded" }} }} }}"#
+            ))
+            .unwrap();
+            let refusal = only(&resolve_document(SessionPolicy::defaults(), &tree).unwrap_err());
+            assert_eq!(refusal.layer, Origin::Document);
+            assert_eq!(refusal.reason, Reason::LimitNotRead { limit });
+            assert_eq!(
+                format!("{refusal}"),
+                format!(
+                    "the document states the limit `{limit}`, and the machines of this build do \
+                     not read `{limit}` from a statement yet; they run with the build's value"
+                )
+            );
+            let tree = parse(r#"{ wz: { limits: { QUERIER_MAX_PENDING_QUERIES: "unbounded" } } }"#)
+                .unwrap();
+            let resolved = resolve_document(SessionPolicy::defaults(), &tree)
+                .expect("a limit the machines read, at a value its domain holds");
+            assert_eq!(
+                resolved.limits.session.querier_max_pending_queries(),
+                Quota::UNBOUNDED
+            );
+            let origin = |id| resolved.limits.provenance.origin(id);
+            assert_eq!(
+                origin("QUERIER_MAX_PENDING_QUERIES"),
+                Some(Origin::Document)
+            );
+            assert_eq!(origin(limit), Some(Origin::BuildDefault));
         }
 
         /// A build without the capability refuses `wz/key-ids` by name, whatever it holds, and
@@ -2659,7 +2863,7 @@ mod tests {
         /// A caller handed no document resolves as one handed a document with no `wz` member:
         /// `resolve_under` and the reader answer the same snapshot, the same provenance and the
         /// same refusals, for no statement, a statement, a profile, a profile the build does not
-        /// have, a limit and a limit the build does not have. Turned red by a path that composes
+        /// have, a limit, a limit the build does not have and a limit no machine reads. Turned red by a path that composes
         /// the caller's layers apart from the reader's.
         #[test]
         fn no_document_resolves_as_a_document_with_no_wz_member() {
@@ -2668,13 +2872,18 @@ mod tests {
             let ring = another::<EventRingFull>().unwrap_or(EventRingFull::DEFAULT);
             let stated = [Statement::new("event-ring-full", id_of(ring))];
             let limit = [LimitStatement::new(
-                "PICO_TX_QUEUE_SIZE",
-                LimitValue::Integer(other_queue_size()),
+                "MAX_SUBSCRIPTIONS",
+                LimitValue::Integer(other_subscriptions()),
             )];
             let no_such_limit = [LimitStatement::new("NO_SUCH_LIMIT", LimitValue::Integer(1))];
+            let not_read = [LimitStatement::new(
+                unread(&SESSION_LIMITS).id(),
+                LimitValue::Integer(1),
+            )];
             let cases = [
                 limits_alone(&limit),
                 limits_alone(&no_such_limit),
+                limits_alone(&not_read),
                 Overrides::default(),
                 Overrides {
                     profile: None,

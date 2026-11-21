@@ -37,11 +37,11 @@
 //!
 //! Each limit a stage after the build may decide has a type of its own in the generated
 //! `limits_generated.rs` (`crate::limits`) that implements [`LimitSpec`]: its id, kind, who makes
-//! it grow, its capacity in this build, its domain and the build's value. The snapshots that hold
-//! one value of each, `SessionLimits` and `RuntimeLimits`, are generated there too, and the tables
-//! `SESSION_LIMITS` and `RUNTIME_LIMITS` hold the [`LimitEntry`] a reader that names a limit by its
-//! id dispatches on. The types here are written by hand, so the generator emits only one row per
-//! limit.
+//! it grow, whether its machines read it from the snapshot, its capacity in this build, its domain
+//! and the build's value. The snapshots that hold one value of each, `SessionLimits` and
+//! `RuntimeLimits`, are generated there too, and the tables `SESSION_LIMITS` and `RUNTIME_LIMITS`
+//! hold the [`LimitEntry`] a reader that names a limit by its id dispatches on. The types here
+//! are written by hand, so the generator emits only one row per limit.
 
 use core::fmt;
 
@@ -548,6 +548,10 @@ pub trait LimitSpec: 'static {
     const LIMIT: &'static str;
     /// Who makes the table a bound limits grow; `None` for a parameter.
     const DRIVEN: Option<Driven>;
+    /// Whether the machines of the limit's scope read it from the snapshot their creator hands
+    /// them. Where they still read the build's value, a value a later stage states would be taken
+    /// and never read, so a reader of a document refuses a statement of the limit by name.
+    const READ_FROM_SNAPSHOT: bool;
     /// The capacity this build sized storage by, or `None` where it sized none by this limit.
     const CAPACITY: Option<usize>;
     /// The values the build allows a later stage to select.
@@ -657,6 +661,7 @@ pub struct LimitEntry<S: 'static> {
     id: &'static str,
     kind: LimitKind,
     driven: Option<Driven>,
+    read_from_snapshot: bool,
     capacity: Option<usize>,
     domain: LimitDomain,
     select: fn(&mut S, LimitValue) -> Result<(), OutsideLimitDomain>,
@@ -678,6 +683,7 @@ impl<S> fmt::Debug for LimitEntry<S> {
             .field("id", &self.id)
             .field("kind", &self.kind)
             .field("driven", &self.driven)
+            .field("read_from_snapshot", &self.read_from_snapshot)
             .field("capacity", &self.capacity)
             .field("domain", &self.domain)
             .finish()
@@ -691,6 +697,7 @@ impl<S> LimitEntry<S> {
             id: L::LIMIT,
             kind: <L::Value as LimitValueType>::KIND,
             driven: L::DRIVEN,
+            read_from_snapshot: L::READ_FROM_SNAPSHOT,
             capacity: L::CAPACITY,
             domain: L::DOMAIN,
             select: select_at::<S, L>,
@@ -711,6 +718,12 @@ impl<S> LimitEntry<S> {
     /// Who makes the table a bound limits grow; `None` for a parameter ([`LimitSpec::DRIVEN`]).
     pub const fn driven(&self) -> Option<Driven> {
         self.driven
+    }
+
+    /// Whether the machines of the limit's scope read it from the snapshot their creator hands
+    /// them ([`LimitSpec::READ_FROM_SNAPSHOT`]).
+    pub const fn read_from_snapshot(&self) -> bool {
+        self.read_from_snapshot
     }
 
     /// The capacity this build sized storage by ([`LimitSpec::CAPACITY`]).
@@ -768,6 +781,7 @@ mod tests {
         type Value = Quota;
         const LIMIT: &'static str = "TEST_OPEN";
         const DRIVEN: Option<Driven> = Some(Driven::Remote);
+        const READ_FROM_SNAPSHOT: bool = true;
         const CAPACITY: Option<usize> = None;
         const DOMAIN: LimitDomain = LimitDomain::bound(Self::CAPACITY);
         const DEFAULT: Quota = Quota::UNBOUNDED;
@@ -781,6 +795,7 @@ mod tests {
         type Value = Quota;
         const LIMIT: &'static str = "TEST_SIZED";
         const DRIVEN: Option<Driven> = Some(Driven::Local);
+        const READ_FROM_SNAPSHOT: bool = false;
         const CAPACITY: Option<usize> = Some(8);
         const DOMAIN: LimitDomain = LimitDomain::bound(Self::CAPACITY);
         const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
@@ -794,6 +809,7 @@ mod tests {
         type Value = usize;
         const LIMIT: &'static str = "TEST_PINNED";
         const DRIVEN: Option<Driven> = None;
+        const READ_FROM_SNAPSHOT: bool = true;
         const CAPACITY: Option<usize> = None;
         const DOMAIN: LimitDomain =
             LimitDomain::parameter(1, 64, None).keeping(LimitValue::Integer(4), true);
@@ -1029,6 +1045,9 @@ mod tests {
         let sized = LimitEntry::<Snapshot>::of::<Sized8>();
         assert_eq!(open.id(), "TEST_OPEN");
         assert_eq!(open.driven(), Some(Driven::Remote));
+        // An entry carries whether the limit's machines read the snapshot, as its type states it.
+        assert!(open.read_from_snapshot());
+        assert!(!sized.read_from_snapshot());
         assert_eq!(sized.capacity(), Some(8));
         assert_eq!(open.value_in(&snapshot), LimitValue::Unbounded);
         open.select(&mut snapshot, LimitValue::Integer(12))

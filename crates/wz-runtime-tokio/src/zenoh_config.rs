@@ -5246,10 +5246,11 @@ pub const WZ_MEMBER: &str = "wz";
 /// Whether `path` is a part of the document's [`WZ_MEMBER`] that the open reads: the member
 /// itself, `wz/profile`, `wz/policies`, `wz/policies/<id>` where `<id>` names a policy of the
 /// build, `wz/limits`, `wz/limits/<id>` where `<id>` names a limit a stage after the build may
-/// decide, of a session or of a runtime, and, in a build with the `shared-key-ids` capability,
-/// `wz/key-ids` and its two lists. Any other path below the member, a limit only the build
-/// decides among them, is one the open refuses by name ([`ConfigIngestError::PoliciesRefused`]),
-/// and is no key wz honours.
+/// decide, of a session or of a runtime, whose machines read it from the snapshot, and, in a build
+/// with the `shared-key-ids` capability, `wz/key-ids` and its two lists. Any other path below the
+/// member, a limit only the build decides and a limit whose machines still read the build's value
+/// among them, is one the open refuses by name ([`ConfigIngestError::PoliciesRefused`]), and is
+/// no key wz honours.
 pub fn wz_member_path_is_read(path: &str) -> bool {
     if names_key_ids(path) {
         return cfg!(feature = "shared-key-ids");
@@ -5269,8 +5270,12 @@ pub fn wz_member_path_is_read(path: &str) -> bool {
             .iter()
             .any(|entry| entry.id() == policy),
         Some(("limits", limit)) => {
-            SESSION_LIMITS.iter().any(|entry| entry.id() == limit)
-                || RUNTIME_LIMITS.iter().any(|entry| entry.id() == limit)
+            SESSION_LIMITS
+                .iter()
+                .any(|entry| entry.id() == limit && entry.read_from_snapshot())
+                || RUNTIME_LIMITS
+                    .iter()
+                    .any(|entry| entry.id() == limit && entry.read_from_snapshot())
         }
         Some(_) => false,
     }
@@ -15397,8 +15402,7 @@ mod wz_member_tests {
             "wz/policies/key-set",
             "wz/policies/subscriber-overload",
             "wz/limits",
-            "wz/limits/PICO_TX_QUEUE_SIZE",
-            "wz/limits/SNAPSHOT_PERIOD_MS",
+            "wz/limits/MAX_SUBSCRIPTIONS",
         ] {
             assert!(wz_member_path_is_read(path), "{path}");
             assert_eq!(
@@ -15427,6 +15431,29 @@ mod wz_member_tests {
             assert_eq!(
                 config_key_disposition(path),
                 ConfigKeyDisposition::Unknown,
+                "{path}"
+            );
+        }
+        // A limit a stage after the build may decide, of a session or of a runtime, is read where
+        // its machines read it from the snapshot, and refused by name where they read the build.
+        let limits = SESSION_LIMITS
+            .iter()
+            .map(|entry| (entry.id(), entry.read_from_snapshot()))
+            .chain(
+                RUNTIME_LIMITS
+                    .iter()
+                    .map(|entry| (entry.id(), entry.read_from_snapshot())),
+            );
+        for (limit, read) in limits {
+            let path = format!("wz/limits/{limit}");
+            assert_eq!(wz_member_path_is_read(&path), read, "{path}");
+            assert_eq!(
+                config_key_disposition(&path),
+                if read {
+                    ConfigKeyDisposition::Honoured
+                } else {
+                    ConfigKeyDisposition::Unknown
+                },
                 "{path}"
             );
         }
@@ -15703,12 +15730,11 @@ mod wz_member_tests {
             let tree = wz_session_core::json5::parse(&export).expect("the emitter writes JSON5");
             for (limit, value) in case.node.selected() {
                 let path = format!("wz/limits/{limit}");
-                assert_eq!(
-                    tree.get(&path),
-                    Some(&Json5Value::Number(value.to_string())),
-                    "{}: {export}",
-                    case.name
-                );
+                let written = match value {
+                    LimitValue::Unbounded => Json5Value::String(String::from(UNBOUNDED)),
+                    LimitValue::Integer(_) => Json5Value::Number(value.to_string()),
+                };
+                assert_eq!(tree.get(&path), Some(&written), "{}: {export}", case.name);
             }
             if case.node.selected().is_empty() {
                 assert_eq!(tree.get("wz/limits"), None, "{}: {export}", case.name);

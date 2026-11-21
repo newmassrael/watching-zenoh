@@ -1377,8 +1377,14 @@ LIMIT_ON_HEAP = ("advisory", "capacity", "quota")
 # with the narrowest word wz builds for.
 LIMIT_RANGE_MOST = 4294967295
 LIMIT_KEYS = {"id", "kconfig", "default", "help",
-              "storage", "scope", "binding_heap", "binding_fixed", "wire",
+              "storage", "scope", "binding_heap", "binding_fixed", "read", "wire",
               "kind", "driven", "range", "most", "on_heap", "zero_unbounded", "upstream"}
+# Where the machines of a limit's scope read it (deploy/wz-config.toml, "Limits"): from the
+# snapshot their creator hands them, or still from the build's value. A statement of a limit read
+# from the build would be taken and never read, so a reader of a document refuses it by name.
+LIMIT_READS = ("snapshot", "build")
+LIMIT_READ_SNAPSHOT = "snapshot"
+LIMIT_READ_BUILD = "build"
 # A limit's counterpart in upstream zenoh (`[limit.upstream]`): `zenoh`, the key of zenoh's
 # configuration that states the same number, or `none`; `cite`, the upstream code that reads the
 # key; `reason`, why no key does. The zenoh-pico counterpart is the value switch whose
@@ -1453,6 +1459,21 @@ def limit_binding_problems(lid: str, lim: dict) -> list[str]:
         out.append(f"{where}: a limit that is `both` is the capacity of the fixed profile, decided at "
                    f"'build', and a quota of the heap profile, decided at 'open' or 'live'; it says "
                    f"`binding_heap` {heap!r} and `binding_fixed` {fixed!r}")
+    return out
+
+
+def limit_read_problems(lid: str, lim: dict) -> list[str]:
+    """Where the machines of a limit's scope read it. Every limit a stage after the build may
+    decide states it; a capacity alone states none, since only the build sizes it and no snapshot
+    holds it."""
+    where = f"limit `{lid}`"
+    out: list[str] = []
+    if lim.get("storage") == "capacity":
+        if "read" in lim:
+            out.append(f"{where}: a capacity alone is read from the build only, so it states no "
+                       "`read`")
+        return out
+    stated_one_of(out, where, lim, "read", LIMIT_READS)
     return out
 
 
@@ -1686,6 +1707,7 @@ def validate_limits(limits: list[dict]) -> list[str]:
         for key in sorted(set(lim) - LIMIT_KEYS):
             out.append(f"limit `{lid}`: `{key}` is not a key a limit has")
         out += limit_binding_problems(lid, lim)
+        out += limit_read_problems(lid, lim)
         out += limit_kind_problems(lid, lim)
         out += limit_upstream_problems(lid, lim, config_paths)
         if not re.fullmatch(r"[A-Z][A-Z0-9_]*", str(lid)):
@@ -2493,11 +2515,13 @@ def limit_spec_rust(lim: dict) -> list[str]:
     bound = lim["kind"] == "bound"
     ty = "Quota" if bound else "usize"
     driven = f"Some(Driven::{camel(lim['driven'])})" if bound else "None"
+    read = "true" if lim["read"] == LIMIT_READ_SNAPSHOT else "false"
     out = rust_doc(f"`{lid}`: {first_sentence(lim['help'])}", "")
     out += ["#[derive(Clone, Copy, Debug, PartialEq, Eq)]", f"pub struct {name};", "",
             f"impl LimitSpec for {name} {{", f"    type Value = {ty};",
             f"    const LIMIT: &'static str = {rust_word(lid)};",
-            f"    const DRIVEN: Option<Driven> = {driven};"]
+            f"    const DRIVEN: Option<Driven> = {driven};",
+            f"    const READ_FROM_SNAPSHOT: bool = {read};"]
     out += rust_assoc_const("CAPACITY", "Option<usize>", limit_capacity_rust(lim))
     if bound and "most" in lim:
         domain = (f"LimitDomain::of_bound_within(Self::CAPACITY, {lim['most']}, Self::DEFAULT, "
@@ -2615,8 +2639,9 @@ def emit_rust_limit_snapshots(decl: dict) -> str:
     (`open_limits`), implementing `LimitSpec` (its kind, who makes it grow, its capacity in this
     build, its domain and the build's value), and the two snapshots that hold one value of each:
     `RuntimeLimits` for a limit whose widest scope is the runtime, `SessionLimits` for the rest.
-    No machine reads them yet; each limit's reader still reads `caps`, so nothing a build does
-    changes."""
+    Each type states whether the machines of its scope read it from the snapshot
+    (`READ_FROM_SNAPSHOT`, the limit's `read`); the build defaults are what the build runs
+    with, so nothing a build does changes."""
     lims = open_limits(decl)
     runtime = [lim for lim in lims if is_runtime_limit(lim)]
     session = [lim for lim in lims if not is_runtime_limit(lim)]
@@ -4621,6 +4646,7 @@ storage = "both"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "build"
+read = "snapshot"
 wire = "none"
 help = '''
 A table.
@@ -5633,6 +5659,8 @@ def cmd_selftest() -> int:
             text = re.sub(rf"(?m)^{key} = .*$", f"{key} = {value}", text)
         if stated.get("storage", '"both"') != '"both"':
             text = text.replace('on_heap = "advisory"\n', "")
+        if stated.get("storage") == '"capacity"':
+            text = text.replace('read = "snapshot"\n', "")
         return text
 
     def limit_refused(text: str, words: str) -> bool:
@@ -5673,6 +5701,14 @@ def cmd_selftest() -> int:
     expect("a limit neither storage profile reads is refused",
            limit_refused(limit_text(storage='"quota"', binding_heap='"none"', binding_fixed='"none"'),
                          "neither storage profile reads it"))
+    expect("a limit a later stage decides that states no `read` is refused",
+           limit_refused(SAMPLE.replace('read = "snapshot"\n', ""), "limit `MAX_A`: it states no `read`"))
+    expect("a `read` outside its set is refused",
+           limit_refused(limit_text(read='"cache"'), "`read` is 'cache', one of snapshot, build"))
+    expect("a capacity alone that states `read` is refused",
+           limit_refused(SAMPLE.replace('storage = "both"', 'storage = "capacity"')
+                         .replace('on_heap = "advisory"\n', ""),
+                         "a capacity alone is read from the build only, so it states no `read`"))
     expect("a limit held at two scopes validates",
            validate_decl(read_decl_toml(limit_text(scope='["runtime", "link"]'))) == [])
     expect("a scope array out of order is refused",
@@ -5841,6 +5877,10 @@ def cmd_selftest() -> int:
     expect("a capacity alone is named in CAPACITY_LIMITS, and a limit a later stage decides is not",
            'pub static CAPACITY_LIMITS: [&str; 1] = ["MAX_A"];' in emit_rust_limit_snapshots(cdecl)
            and "pub static CAPACITY_LIMITS: [&str; 0] = [];" in bsnap)
+    expect("a limit read from the snapshot says so in its LimitSpec, and one read from the build",
+           "    const READ_FROM_SNAPSHOT: bool = true;\n" in bsnap
+           and "    const READ_FROM_SNAPSHOT: bool = false;\n"
+           in emit_rust_limit_snapshots(decl_of(read_decl_toml(limit_text(read='"build"')))))
     expect("an advisory bound is sized only on the fixed profile and unbounded on the heap",
            "const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_A);" in bsnap
            and "const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);" in bsnap)

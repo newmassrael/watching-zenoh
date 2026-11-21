@@ -45,6 +45,7 @@ impl LimitSpec for MaxKeyexprBytes {
     type Value = Quota;
     const LIMIT: &'static str = "MAX_KEYEXPR_BYTES";
     const DRIVEN: Option<Driven> = Some(Driven::Remote);
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = Some(caps::MAX_KEYEXPR_BYTES);
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::at_most(caps::MAX_KEYEXPR_BYTES);
@@ -64,6 +65,7 @@ impl LimitSpec for MaxSubscriptions {
     type Value = Quota;
     const LIMIT: &'static str = "MAX_SUBSCRIPTIONS";
     const DRIVEN: Option<Driven> = Some(Driven::Local);
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_SUBSCRIPTIONS);
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
@@ -84,6 +86,7 @@ impl LimitSpec for MatchMemoSlots {
     type Value = usize;
     const LIMIT: &'static str = "MATCH_MEMO_SLOTS";
     const DRIVEN: Option<Driven> = None;
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(0, 4294967295, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -105,6 +108,7 @@ impl LimitSpec for DeliveryLaneEvents {
     type Value = Quota;
     const LIMIT: &'static str = "DELIVERY_LANE_EVENTS";
     const DRIVEN: Option<Driven> = Some(Driven::Remote);
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = Some(caps::DELIVERY_LANE_EVENTS);
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::at_most(caps::DELIVERY_LANE_EVENTS);
@@ -126,6 +130,7 @@ impl LimitSpec for DeliveryLaneBytes {
     type Value = usize;
     const LIMIT: &'static str = "DELIVERY_LANE_BYTES";
     const DRIVEN: Option<Driven> = None;
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(1, 4294967295, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -145,6 +150,7 @@ impl LimitSpec for DeliveryLaneCallbacks {
     type Value = Quota;
     const LIMIT: &'static str = "DELIVERY_LANE_CALLBACKS";
     const DRIVEN: Option<Driven> = Some(Driven::Remote);
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::from_build(caps::DELIVERY_LANE_CALLBACKS, false);
@@ -165,6 +171,7 @@ impl LimitSpec for MaxQueryables {
     type Value = Quota;
     const LIMIT: &'static str = "MAX_QUERYABLES";
     const DRIVEN: Option<Driven> = Some(Driven::Local);
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_QUERYABLES);
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
@@ -185,6 +192,7 @@ impl LimitSpec for MaxPendingQueries {
     type Value = Quota;
     const LIMIT: &'static str = "MAX_PENDING_QUERIES";
     const DRIVEN: Option<Driven> = Some(Driven::Local);
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_PENDING_QUERIES);
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
@@ -206,6 +214,7 @@ impl LimitSpec for LinkNotedRequests {
     type Value = usize;
     const LIMIT: &'static str = "LINK_NOTED_REQUESTS";
     const DRIVEN: Option<Driven> = None;
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(1, 4294967295, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -227,6 +236,7 @@ impl LimitSpec for MaxDeclObservers {
     type Value = Quota;
     const LIMIT: &'static str = "MAX_DECL_OBSERVERS";
     const DRIVEN: Option<Driven> = Some(Driven::Local);
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_DECL_OBSERVERS);
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
@@ -246,6 +256,7 @@ impl LimitSpec for MaxLivelinessSubscriptions {
     type Value = Quota;
     const LIMIT: &'static str = "MAX_LIVELINESS_SUBSCRIPTIONS";
     const DRIVEN: Option<Driven> = Some(Driven::Local);
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_LIVELINESS_SUBSCRIPTIONS);
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
@@ -266,6 +277,7 @@ impl LimitSpec for MaxLocalTokens {
     type Value = Quota;
     const LIMIT: &'static str = "MAX_LOCAL_TOKENS";
     const DRIVEN: Option<Driven> = Some(Driven::Local);
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_LOCAL_TOKENS);
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
@@ -286,6 +298,7 @@ impl LimitSpec for MaxPendingLivelinessGets {
     type Value = Quota;
     const LIMIT: &'static str = "MAX_PENDING_LIVELINESS_GETS";
     const DRIVEN: Option<Driven> = Some(Driven::Local);
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_PENDING_LIVELINESS_GETS);
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
@@ -308,6 +321,7 @@ impl LimitSpec for MaxPendingDeclares {
     type Value = Quota;
     const LIMIT: &'static str = "MAX_PENDING_DECLARES";
     const DRIVEN: Option<Driven> = Some(Driven::Remote);
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_PENDING_DECLARES);
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
@@ -329,6 +343,7 @@ impl LimitSpec for MaxInboundSubInterests {
     type Value = Quota;
     const LIMIT: &'static str = "MAX_INBOUND_SUB_INTERESTS";
     const DRIVEN: Option<Driven> = Some(Driven::Remote);
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_INBOUND_SUB_INTERESTS);
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
@@ -350,6 +365,7 @@ impl LimitSpec for MaxPeerKeyexprAliases {
     type Value = Quota;
     const LIMIT: &'static str = "MAX_PEER_KEYEXPR_ALIASES";
     const DRIVEN: Option<Driven> = Some(Driven::Remote);
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_PEER_KEYEXPR_ALIASES);
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
@@ -371,6 +387,7 @@ impl LimitSpec for MaxSharedKeyIds {
     type Value = Quota;
     const LIMIT: &'static str = "MAX_SHARED_KEY_IDS";
     const DRIVEN: Option<Driven> = Some(Driven::Local);
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::from_build(caps::MAX_SHARED_KEY_IDS, false);
@@ -391,6 +408,7 @@ impl LimitSpec for MaxRemoteDecls {
     type Value = Quota;
     const LIMIT: &'static str = "MAX_REMOTE_DECLS";
     const DRIVEN: Option<Driven> = Some(Driven::Remote);
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_REMOTE_DECLS);
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
@@ -411,6 +429,7 @@ impl LimitSpec for MaxPendingReplies {
     type Value = Quota;
     const LIMIT: &'static str = "MAX_PENDING_REPLIES";
     const DRIVEN: Option<Driven> = Some(Driven::Remote);
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_PENDING_REPLIES);
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
@@ -431,6 +450,7 @@ impl LimitSpec for MaxPendingFinals {
     type Value = Quota;
     const LIMIT: &'static str = "MAX_PENDING_FINALS";
     const DRIVEN: Option<Driven> = Some(Driven::Remote);
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_PENDING_FINALS);
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
@@ -451,6 +471,7 @@ impl LimitSpec for MaxReplyPayloadBytes {
     type Value = Quota;
     const LIMIT: &'static str = "MAX_REPLY_PAYLOAD_BYTES";
     const DRIVEN: Option<Driven> = Some(Driven::Local);
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_REPLY_PAYLOAD_BYTES);
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
@@ -471,6 +492,7 @@ impl LimitSpec for MaxMulticastReplies {
     type Value = Quota;
     const LIMIT: &'static str = "MAX_MULTICAST_REPLIES";
     const DRIVEN: Option<Driven> = Some(Driven::Remote);
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_MULTICAST_REPLIES);
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::at_most(caps::MAX_MULTICAST_REPLIES);
@@ -491,6 +513,7 @@ impl LimitSpec for MaxLocatorLen {
     type Value = Quota;
     const LIMIT: &'static str = "MAX_LOCATOR_LEN";
     const DRIVEN: Option<Driven> = Some(Driven::Remote);
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = Some(caps::MAX_LOCATOR_LEN);
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::at_most(caps::MAX_LOCATOR_LEN);
@@ -510,6 +533,7 @@ impl LimitSpec for MaxStaticConnect {
     type Value = Quota;
     const LIMIT: &'static str = "MAX_STATIC_CONNECT";
     const DRIVEN: Option<Driven> = Some(Driven::Local);
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = Some(caps::MAX_STATIC_CONNECT);
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::at_most(caps::MAX_STATIC_CONNECT);
@@ -530,6 +554,7 @@ impl LimitSpec for QuerierMaxPendingQueries {
     type Value = Quota;
     const LIMIT: &'static str = "QUERIER_MAX_PENDING_QUERIES";
     const DRIVEN: Option<Driven> = Some(Driven::Local);
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::from_build(caps::QUERIER_MAX_PENDING_QUERIES, true);
@@ -551,6 +576,7 @@ impl LimitSpec for TxNoProgressWindowUs {
     type Value = usize;
     const LIMIT: &'static str = "TX_NO_PROGRESS_WINDOW_US";
     const DRIVEN: Option<Driven> = None;
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(1, 5000000, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -572,6 +598,7 @@ impl LimitSpec for TxExpiryCloseAfter {
     type Value = Quota;
     const LIMIT: &'static str = "TX_EXPIRY_CLOSE_AFTER";
     const DRIVEN: Option<Driven> = Some(Driven::Remote);
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_bound_within(Self::CAPACITY, 65535, Self::DEFAULT, DEFAULTS_ONLY);
@@ -594,6 +621,7 @@ impl LimitSpec for DatagramFragmentBurst {
     type Value = usize;
     const LIMIT: &'static str = "DATAGRAM_FRAGMENT_BURST";
     const DRIVEN: Option<Driven> = None;
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(1, 4294967295, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -616,6 +644,7 @@ impl LimitSpec for DatagramFragmentGapUs {
     type Value = usize;
     const LIMIT: &'static str = "DATAGRAM_FRAGMENT_GAP_US";
     const DRIVEN: Option<Driven> = None;
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(1, 1000000, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -637,6 +666,7 @@ impl LimitSpec for QueryParametersMaxBytes {
     type Value = Quota;
     const LIMIT: &'static str = "QUERY_PARAMETERS_MAX_BYTES";
     const DRIVEN: Option<Driven> = Some(Driven::Remote);
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::from_build(caps::QUERY_PARAMETERS_MAX_BYTES, true);
@@ -658,6 +688,7 @@ impl LimitSpec for QueryAttachmentMaxBytes {
     type Value = Quota;
     const LIMIT: &'static str = "QUERY_ATTACHMENT_MAX_BYTES";
     const DRIVEN: Option<Driven> = Some(Driven::Remote);
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::from_build(caps::QUERY_ATTACHMENT_MAX_BYTES, true);
@@ -680,6 +711,7 @@ impl LimitSpec for PicoTxQueueSize {
     type Value = usize;
     const LIMIT: &'static str = "PICO_TX_QUEUE_SIZE";
     const DRIVEN: Option<Driven> = None;
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(1, 16, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -700,6 +732,7 @@ impl LimitSpec for SnapshotPeriodMs {
     type Value = usize;
     const LIMIT: &'static str = "SNAPSHOT_PERIOD_MS";
     const DRIVEN: Option<Driven> = None;
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(1, 2147483, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -720,6 +753,7 @@ impl LimitSpec for SnapshotHistogramBuckets {
     type Value = usize;
     const LIMIT: &'static str = "SNAPSHOT_HISTOGRAM_BUCKETS";
     const DRIVEN: Option<Driven> = None;
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = Some(caps::SNAPSHOT_HISTOGRAM_BUCKETS);
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(1, 32, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -740,6 +774,7 @@ impl LimitSpec for SupervisionCheckpoints {
     type Value = usize;
     const LIMIT: &'static str = "SUPERVISION_CHECKPOINTS";
     const DRIVEN: Option<Driven> = None;
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = Some(caps::SUPERVISION_CHECKPOINTS);
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(1, 64, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -760,6 +795,7 @@ impl LimitSpec for E2eSupervisedStreams {
     type Value = Quota;
     const LIMIT: &'static str = "E2E_SUPERVISED_STREAMS";
     const DRIVEN: Option<Driven> = Some(Driven::Local);
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::from_build(caps::E2E_SUPERVISED_STREAMS, false);
@@ -781,6 +817,7 @@ impl LimitSpec for AppLinkQueueBytes {
     type Value = Quota;
     const LIMIT: &'static str = "APP_LINK_QUEUE_BYTES";
     const DRIVEN: Option<Driven> = Some(Driven::Remote);
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::from_build(caps::APP_LINK_QUEUE_BYTES, false);
@@ -800,6 +837,7 @@ impl LimitSpec for EventRingSlots {
     type Value = usize;
     const LIMIT: &'static str = "EVENT_RING_SLOTS";
     const DRIVEN: Option<Driven> = None;
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = Some(caps::EVENT_RING_SLOTS);
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(1, 1073741823, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -820,6 +858,7 @@ impl LimitSpec for ClockSources {
     type Value = Quota;
     const LIMIT: &'static str = "CLOCK_SOURCES";
     const DRIVEN: Option<Driven> = Some(Driven::Local);
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::from_build(caps::CLOCK_SOURCES, false);
@@ -840,6 +879,7 @@ impl LimitSpec for E2eSenderSlots {
     type Value = Quota;
     const LIMIT: &'static str = "E2E_SENDER_SLOTS";
     const DRIVEN: Option<Driven> = Some(Driven::Remote);
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = fixed_capacity(caps::E2E_SENDER_SLOTS);
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::at_most(caps::E2E_SENDER_SLOTS);
@@ -861,6 +901,7 @@ impl LimitSpec for ReplayDepthMax {
     type Value = Quota;
     const LIMIT: &'static str = "REPLAY_DEPTH_MAX";
     const DRIVEN: Option<Driven> = Some(Driven::Local);
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = fixed_capacity(caps::REPLAY_DEPTH_MAX);
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::at_most(caps::REPLAY_DEPTH_MAX);
@@ -881,6 +922,7 @@ impl LimitSpec for MessageCatalogEntries {
     type Value = Quota;
     const LIMIT: &'static str = "MESSAGE_CATALOG_ENTRIES";
     const DRIVEN: Option<Driven> = Some(Driven::Local);
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = fixed_capacity(caps::MESSAGE_CATALOG_ENTRIES);
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::at_most(caps::MESSAGE_CATALOG_ENTRIES);
@@ -902,6 +944,7 @@ impl LimitSpec for InstanceKeyFields {
     type Value = Quota;
     const LIMIT: &'static str = "INSTANCE_KEY_FIELDS";
     const DRIVEN: Option<Driven> = Some(Driven::Local);
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = fixed_capacity(caps::INSTANCE_KEY_FIELDS);
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::at_most(caps::INSTANCE_KEY_FIELDS);
@@ -923,6 +966,7 @@ impl LimitSpec for InstancesPerMessage {
     type Value = Quota;
     const LIMIT: &'static str = "INSTANCES_PER_MESSAGE";
     const DRIVEN: Option<Driven> = Some(Driven::Local);
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = fixed_capacity(caps::INSTANCES_PER_MESSAGE);
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::at_most(caps::INSTANCES_PER_MESSAGE);
@@ -944,6 +988,7 @@ impl LimitSpec for ClockMaxForwardStepMs {
     type Value = usize;
     const LIMIT: &'static str = "CLOCK_MAX_FORWARD_STEP_MS";
     const DRIVEN: Option<Driven> = None;
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(0, 4294967295, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -965,6 +1010,7 @@ impl LimitSpec for DeclarationSyncBurstMessages {
     type Value = usize;
     const LIMIT: &'static str = "DECLARATION_SYNC_BURST_MESSAGES";
     const DRIVEN: Option<Driven> = None;
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(1, 4294967295, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -987,6 +1033,7 @@ impl LimitSpec for DeclarationSyncFinalTimeoutMs {
     type Value = usize;
     const LIMIT: &'static str = "DECLARATION_SYNC_FINAL_TIMEOUT_MS";
     const DRIVEN: Option<Driven> = None;
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(1, 4294967295, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -1008,6 +1055,7 @@ impl LimitSpec for DeclarationSyncIntervalMs {
     type Value = usize;
     const LIMIT: &'static str = "DECLARATION_SYNC_INTERVAL_MS";
     const DRIVEN: Option<Driven> = None;
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(1, 4294967295, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -1030,6 +1078,7 @@ impl LimitSpec for DeclarationSyncRxNoProgressMs {
     type Value = usize;
     const LIMIT: &'static str = "DECLARATION_SYNC_RX_NO_PROGRESS_MS";
     const DRIVEN: Option<Driven> = None;
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(0, 4294967295, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -1052,6 +1101,7 @@ impl LimitSpec for DeclarationSyncRetryIntervalMs {
     type Value = usize;
     const LIMIT: &'static str = "DECLARATION_SYNC_RETRY_INTERVAL_MS";
     const DRIVEN: Option<Driven> = None;
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(0, 4294967295, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -1075,6 +1125,7 @@ impl LimitSpec for DeclarationSyncTxNoProgressMs {
     type Value = usize;
     const LIMIT: &'static str = "DECLARATION_SYNC_TX_NO_PROGRESS_MS";
     const DRIVEN: Option<Driven> = None;
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(0, 4294967295, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -1097,6 +1148,7 @@ impl LimitSpec for PicoUnicastBatchBytes {
     type Value = usize;
     const LIMIT: &'static str = "PICO_UNICAST_BATCH_BYTES";
     const DRIVEN: Option<Driven> = None;
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(1, 65535, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -1119,6 +1171,7 @@ impl LimitSpec for PicoMulticastBatchBytes {
     type Value = usize;
     const LIMIT: &'static str = "PICO_MULTICAST_BATCH_BYTES";
     const DRIVEN: Option<Driven> = None;
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(1, 65535, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -1140,6 +1193,7 @@ impl LimitSpec for PicoLeaseMs {
     type Value = usize;
     const LIMIT: &'static str = "PICO_LEASE_MS";
     const DRIVEN: Option<Driven> = None;
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(1, 4294967295, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -1161,6 +1215,7 @@ impl LimitSpec for PicoSocketTimeoutMs {
     type Value = usize;
     const LIMIT: &'static str = "PICO_SOCKET_TIMEOUT_MS";
     const DRIVEN: Option<Driven> = None;
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(0, 4294967295, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -1182,6 +1237,7 @@ impl LimitSpec for PicoConnectTimeoutMs {
     type Value = usize;
     const LIMIT: &'static str = "PICO_CONNECT_TIMEOUT_MS";
     const DRIVEN: Option<Driven> = None;
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(1, 4294967295, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -1203,6 +1259,7 @@ impl LimitSpec for PicoFragMaxBytes {
     type Value = Quota;
     const LIMIT: &'static str = "PICO_FRAG_MAX_BYTES";
     const DRIVEN: Option<Driven> = Some(Driven::Remote);
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::from_build(caps::PICO_FRAG_MAX_BYTES, false);
@@ -1225,6 +1282,7 @@ impl LimitSpec for PicoAcceptTimeoutMs {
     type Value = usize;
     const LIMIT: &'static str = "PICO_ACCEPT_TIMEOUT_MS";
     const DRIVEN: Option<Driven> = None;
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(1, 4294967295, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -1246,6 +1304,7 @@ impl LimitSpec for PicoKeepalivesPerLease {
     type Value = usize;
     const LIMIT: &'static str = "PICO_KEEPALIVES_PER_LEASE";
     const DRIVEN: Option<Driven> = None;
+    const READ_FROM_SNAPSHOT: bool = false;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(1, 4294967295, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);

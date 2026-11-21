@@ -18,7 +18,10 @@
 //! A snapshot is resolved once by a creator, starting from the build defaults, and handed to the
 //! machines it creates, as a [`crate::policy::SessionPolicy`] is. Until each limit's reader moves
 //! to its snapshot, the readers still read [`crate::caps`]; the build defaults are what the build
-//! runs with today, so a snapshot that holds them changes nothing.
+//! runs with today, so a snapshot that holds them changes nothing. Which limits' readers have moved
+//! is declared once, by each limit's `read` in the declaration
+//! ([`crate::limit_binding::LimitSpec::READ_FROM_SNAPSHOT`]), and a document that states a limit
+//! whose readers still read the build is refused by name.
 
 #[path = "limits_generated.rs"]
 mod generated;
