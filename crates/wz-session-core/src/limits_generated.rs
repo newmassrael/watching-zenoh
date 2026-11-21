@@ -121,8 +121,9 @@ const _: LimitDomain = DeliveryLaneEvents::DOMAIN;
 pub type DeliveryLaneEventsHeld = Limited<DeliveryLaneEvents, { DeliveryLaneEvents::HELD }>;
 
 /// `DELIVERY_LANE_BYTES`: How many bytes of copied samples a delivery lane holds at once:
-/// the key, the payload, the attachment and the encoding schema of each waiting sample, and
-/// the end of the byte area a sample skipped to stay in one piece.
+/// the key, the payload, the attachment and the encoding schema of each waiting sample, the
+/// ids of the subscribers a sample written once for several of them is for, and the end of
+/// the byte area a sample skipped to stay in one piece.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DeliveryLaneBytes;
 
