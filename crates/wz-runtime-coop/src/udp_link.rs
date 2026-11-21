@@ -29,6 +29,10 @@ use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 // The heap profile's forms (`Vec`, `HeapTx`) exist only in the heap profile: under `session-slot`
 // the crate does not link `alloc` at all, which `lib.rs` keeps so that a use creeping back into the
 // slot profile is a compile error and not a silent allocation.
+#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+use alloc::collections::VecDeque;
+#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+use alloc::rc::Rc;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use alloc::vec;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
@@ -40,6 +44,8 @@ use core::marker::PhantomData;
 use wz_session_core::byte_cells::ByteBuf;
 #[cfg(feature = "session-slot")]
 use wz_session_core::byte_cells::ByteSource;
+#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+use wz_session_core::datagram_peer::is_init_syn;
 use wz_session_core::datagram_peer::{ForeignCounts, PeerBinding};
 #[cfg(feature = "alloc")]
 use wz_session_core::link::RxFrame;
@@ -138,6 +144,14 @@ pub trait DatagramSocket: Sized {
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
         None
+    }
+
+    /// Whether a datagram for this socket's link was taken off the stack already, by another
+    /// reader of a socket the link shares (a listener's, `PortPeer`), and waits to be read: the
+    /// link's owner then steps it at once, where a wait on the stack would not end for it. The
+    /// provided answer is no, for a socket that is its link's alone.
+    fn holds_datagram(&self) -> bool {
+        false
     }
 
     /// Whether the platform opens datagram sockets at all. A stack asks before it claims any
@@ -647,7 +661,7 @@ impl<S: DatagramSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static
     }
 
     fn holds_input(&self) -> bool {
-        self.stash.get().is_some()
+        self.stash.get().is_some() || self.socket.holds_datagram()
     }
 
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
@@ -677,6 +691,253 @@ impl<S: DatagramSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static
                 false
             }
         }
+    }
+}
+
+/// How many datagrams one peer of a listener may have waiting for its link to read them: past it
+/// a datagram is dropped and counted ([`UdpPort::overflows`]), as a socket whose receive buffer
+/// is full drops one, so a peer that sends faster than its session reads cannot take the
+/// listener's memory.
+#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+pub const PORT_PEER_BACKLOG: usize = 64;
+
+/// The one socket a `udp/` listener is bound to, shared by the link of every peer it took.
+///
+/// UDP has no connections: every peer that opens a session sends its `InitSyn` to the one port,
+/// so the node reads them all from one socket and tells the peers apart by the address each
+/// datagram came from, as upstream's UDP listener keeps a link per source address
+/// (`io/zenoh-links/zenoh-link-udp/src/unicast.rs` @ `A new peers has sent data to this socket`)
+/// and as the lwIP listener of the slot profile does (`wz_session_lwip::listener`). Whoever reads
+/// first (the listener looking for a new peer, or any peer's link) takes everything the socket
+/// holds and sorts it: a datagram from a peer that has a link waits for that link
+/// ([`PortPeer`]); an `InitSyn` from a source with none opens one, which the listener hands out
+/// ([`UdpPort::take_fresh`]); anything else is a stray, dropped and counted, which costs no link.
+/// A link that is let go of frees its source, whose next `InitSyn` opens a new link.
+///
+/// Every link of the port is driven by the one thread that drives the session, so the port is
+/// shared by `Rc` and its tables are cells.
+#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+pub struct UdpPort<S: DatagramSocket> {
+    socket: S,
+    /// The peers that have a link, each with the datagrams taken for it and not yet read.
+    peers: RefCell<Vec<PeerInbox>>,
+    /// The sources whose `InitSyn` opened a link the listener has not handed out yet.
+    fresh: RefCell<VecDeque<SocketAddr>>,
+    /// What one datagram is read into before it is sorted.
+    buf: RefCell<Vec<u8>>,
+    strays: Cell<u32>,
+    overflows: Cell<u32>,
+}
+
+/// One peer of a [`UdpPort`] and what was taken for it.
+#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+struct PeerInbox {
+    peer: SocketAddr,
+    datagrams: VecDeque<Vec<u8>>,
+}
+
+#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+impl<S: DatagramSocket> UdpPort<S> {
+    /// The port of `socket`, which reads each datagram into `rx_capacity` bytes before it sorts
+    /// it: the largest datagram a link of the port receives whole.
+    pub fn new(socket: S, rx_capacity: usize) -> Self {
+        Self {
+            socket,
+            peers: RefCell::new(Vec::new()),
+            fresh: RefCell::new(VecDeque::new()),
+            buf: RefCell::new(vec![0u8; rx_capacity]),
+            strays: Cell::new(0),
+            overflows: Cell::new(0),
+        }
+    }
+
+    /// The address and port the socket is bound to.
+    pub fn local(&self) -> SocketAddr {
+        self.socket.local()
+    }
+
+    /// A wait for the socket that another thread can make, when the platform gives one.
+    pub fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
+        self.socket.readiness()
+    }
+
+    /// Datagrams from a source with no link that were not an `InitSyn`.
+    pub fn strays(&self) -> u32 {
+        self.strays.get()
+    }
+
+    /// Datagrams dropped because their peer had [`PORT_PEER_BACKLOG`] waiting already.
+    pub fn overflows(&self) -> u32 {
+        self.overflows.get()
+    }
+
+    /// The share of the port of the next source whose `InitSyn` opened a link, after the socket
+    /// was read: what a listener takes. `Ok(None)` when no new source waits; the socket's error
+    /// when the read failed and no new source waits either.
+    pub fn take_fresh(port: &Rc<Self>) -> Result<Option<PortPeer<S>>, S::Error> {
+        let pumped = port.pump();
+        let next = port.fresh.borrow_mut().pop_front();
+        match next {
+            Some(peer) => Ok(Some(PortPeer {
+                port: Rc::clone(port),
+                peer,
+            })),
+            None => pumped.map(|()| None),
+        }
+    }
+
+    /// Take everything the socket holds and sort it. A read that is already sorting (a link read
+    /// from inside another's receive) leaves the socket to it.
+    fn pump(&self) -> Result<(), S::Error> {
+        let Ok(mut buf) = self.buf.try_borrow_mut() else {
+            return Ok(());
+        };
+        while let Some((len, from)) = self.socket.try_recv(&mut buf)? {
+            self.sort(from, &buf[..len]);
+        }
+        Ok(())
+    }
+
+    /// Hand `datagram`, taken from `from`, to the link of its peer, open a link for the source of
+    /// an `InitSyn` that has none, and drop and count anything else.
+    fn sort(&self, from: SocketAddr, datagram: &[u8]) {
+        let mut peers = self.peers.borrow_mut();
+        if let Some(inbox) = peers.iter_mut().find(|inbox| inbox.peer == from) {
+            if inbox.datagrams.len() < PORT_PEER_BACKLOG {
+                inbox.datagrams.push_back(datagram.to_vec());
+            } else {
+                self.overflows.set(self.overflows.get().saturating_add(1));
+            }
+            return;
+        }
+        if !is_init_syn(datagram) {
+            self.strays.set(self.strays.get().saturating_add(1));
+            return;
+        }
+        let mut datagrams = VecDeque::new();
+        datagrams.push_back(datagram.to_vec());
+        peers.push(PeerInbox {
+            peer: from,
+            datagrams,
+        });
+        self.fresh.borrow_mut().push_back(from);
+    }
+
+    /// The next datagram taken for `peer`.
+    fn take_for(&self, peer: SocketAddr) -> Option<Vec<u8>> {
+        self.peers
+            .borrow_mut()
+            .iter_mut()
+            .find(|inbox| inbox.peer == peer)
+            .and_then(|inbox| inbox.datagrams.pop_front())
+    }
+
+    /// Whether a datagram taken for `peer` waits to be read.
+    fn holds_for(&self, peer: SocketAddr) -> bool {
+        self.peers
+            .borrow()
+            .iter()
+            .any(|inbox| inbox.peer == peer && !inbox.datagrams.is_empty())
+    }
+
+    /// `peer`'s link is gone: what was taken for it goes, and its next `InitSyn` opens a link.
+    fn forget(&self, peer: SocketAddr) {
+        self.peers.borrow_mut().retain(|inbox| inbox.peer != peer);
+        self.fresh.borrow_mut().retain(|fresh| *fresh != peer);
+    }
+}
+
+/// Why a [`PortPeer`] failed: the port's socket said so, or the share was asked to bind, which
+/// only a port does.
+#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PortPeerError<E> {
+    /// The port's socket failed.
+    Socket(E),
+    /// A share of a port is made by its listener and never bound.
+    Unbound,
+}
+
+/// One peer's share of a [`UdpPort`]: the socket of the link a listener took for that peer. It
+/// reads the datagrams that peer sent, whoever took them off the socket, and sends through the
+/// port's socket; dropping it frees the peer's source on the port.
+#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+pub struct PortPeer<S: DatagramSocket> {
+    port: Rc<UdpPort<S>>,
+    peer: SocketAddr,
+}
+
+#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+impl<S: DatagramSocket> PortPeer<S> {
+    /// The peer this share reads and sends for.
+    pub fn peer(&self) -> SocketAddr {
+        self.peer
+    }
+}
+
+#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+impl<S: DatagramSocket> Drop for PortPeer<S> {
+    fn drop(&mut self) {
+        self.port.forget(self.peer);
+    }
+}
+
+#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+impl<S: DatagramSocket> DatagramSocket for PortPeer<S> {
+    type Error = PortPeerError<S::Error>;
+
+    const CARRIED: bool = S::CARRIED;
+
+    const IPV6: bool = S::IPV6;
+
+    fn bind(_at: SocketAddr) -> Result<Self, Self::Error> {
+        Err(PortPeerError::Unbound)
+    }
+
+    fn local(&self) -> SocketAddr {
+        self.port.local()
+    }
+
+    fn send_to(&self, to: SocketAddr, bytes: &[u8]) -> Result<(), Self::Error> {
+        self.port
+            .socket
+            .send_to(to, bytes)
+            .map_err(PortPeerError::Socket)
+    }
+
+    fn wait_readable(&self, timeout_ms: c_int) {
+        if !self.holds_datagram() {
+            self.port.socket.wait_readable(timeout_ms);
+        }
+    }
+
+    // A blocking read would take another peer's datagram as well as this one's: the link waits
+    // and then reads what was sorted for it.
+    fn times_out(&self) -> bool {
+        false
+    }
+
+    fn recv_waiting(&self, buf: &mut [u8]) -> Result<Option<Received>, Self::Error> {
+        self.try_recv(buf)
+    }
+
+    fn try_recv(&self, buf: &mut [u8]) -> Result<Option<Received>, Self::Error> {
+        let pumped = self.port.pump();
+        if let Some(datagram) = self.port.take_for(self.peer) {
+            // Cut to the buffer, as the stack cuts a datagram longer than the read.
+            let len = datagram.len().min(buf.len());
+            buf[..len].copy_from_slice(&datagram[..len]);
+            return Ok(Some((len, self.peer)));
+        }
+        pumped.map(|()| None).map_err(PortPeerError::Socket)
+    }
+
+    fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
+        self.port.readiness()
+    }
+
+    fn holds_datagram(&self) -> bool {
+        self.port.holds_for(self.peer)
     }
 }
 

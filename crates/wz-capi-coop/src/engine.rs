@@ -221,11 +221,11 @@ pub struct CoopConfig {
     /// with nothing of the session held, on a link whose network stack lets its owner wait
     /// (`SessionDatagramLink::readiness`); a link whose stack does not waits in its own loop.
     pub idle_wait_ms: u32,
-    /// The endpoints to listen on (`tcp/a.b.c.d:port`; port 0 has the stack choose one, read back
-    /// with `CoopEngine::listening`), which the session takes inbound links from for as long as
-    /// it lives, each as a face of its own. A session that lists none and dials at least one is
-    /// the dial role alone; one that lists some and dials none is only a listener, and is open as
-    /// soon as it is bound (`listen`).
+    /// The endpoints to listen on (`tcp/a.b.c.d:port` or `udp/a.b.c.d:port`; port 0 has the stack
+    /// choose one, read back with `CoopEngine::listening`), which the session takes inbound links
+    /// from for as long as it lives, each as a face of its own. A session that lists none and
+    /// dials at least one is the dial role alone; one that lists some and dials none is only a
+    /// listener, and is open as soon as it is bound (`listen`).
     pub listen: Vec<String>,
     /// How many inbound links may be in their handshake at once; one that arrives past it is
     /// closed unread. `transport/unicast/accept_pending` of zenoh, [`DEFAULT_ACCEPT_PENDING`]

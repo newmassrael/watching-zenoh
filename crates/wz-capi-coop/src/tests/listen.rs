@@ -306,3 +306,92 @@ fn a_connection_that_never_speaks_is_let_go_when_the_bound_passes() {
     let _client = client(&endpoint, 0xc1);
     eventually("a client to be taken after it", || listener.faces_up() == 1);
 }
+
+/// A session that listens on a `udp/` port takes each client that dials it as a face of its own,
+/// over the port's one socket: it hears what each publishes, and when one goes it keeps the other's
+/// face. The CONTROL is the listener before any client: bound to the port it states, holding no
+/// face.
+#[test]
+fn a_udp_listener_takes_each_client_as_a_face_of_its_own() {
+    let (listener, endpoint) =
+        listening(|config| config.listen = vec!["udp/127.0.0.1:0".to_owned()]);
+    assert!(
+        endpoint.starts_with("udp/127.0.0.1:") && !endpoint.ends_with(":0"),
+        "the endpoint states the port the kernel picked, not the 0 asked for: {endpoint}"
+    );
+    assert_eq!(
+        listener.faces_up(),
+        0,
+        "CONTROL: a listener holds no face until a peer comes"
+    );
+
+    let heard = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+    let into = heard.clone();
+    listener.declare_subscriber_on_wire(
+        "demo/u/**".to_owned(),
+        WireKey::literal(),
+        Locality::Any,
+        None,
+        Arc::new(move || {
+            let into = into.clone();
+            Box::new(move |sample: &dyn SampleView| {
+                into.lock().unwrap().push(sample.payload().to_vec());
+            })
+        }),
+    );
+
+    let first = client(&endpoint, 0xc1);
+    let second = client(&endpoint, 0xc2);
+    eventually("the listener to hold both faces", || {
+        listener.faces_up() == 2
+    });
+    for (peer, text) in [(&first, &b"u-first"[..]), (&second, &b"u-second"[..])] {
+        peer.publish_on_wire_all(
+            "demo/u/x",
+            &WireKey::literal(),
+            text,
+            &PublishOptions::put().with_locality(Locality::Remote),
+        )
+        .expect("a put the link carries");
+    }
+    eventually("the listener to hear both", || {
+        heard.lock().unwrap().len() == 2
+    });
+    let mut payloads = heard.lock().unwrap().clone();
+    payloads.sort();
+    assert_eq!(payloads, [b"u-first".to_vec(), b"u-second".to_vec()]);
+
+    // A client that goes takes its face and its source on the port with it, and nothing else.
+    drop(first);
+    eventually("the lost client's face to go", || listener.faces_up() == 1);
+    second
+        .publish_on_wire_all(
+            "demo/u/y",
+            &WireKey::literal(),
+            b"u-still-here",
+            &PublishOptions::put().with_locality(Locality::Remote),
+        )
+        .expect("a put the link carries");
+    eventually("the listener to hear the client that is left", || {
+        heard.lock().unwrap().len() == 3
+    });
+}
+
+/// A datagram that opens no session, sent to a `udp/` port, takes no face, and the port takes a
+/// client that dials after it. The CONTROL is that client.
+#[test]
+fn a_stray_datagram_on_a_udp_port_takes_no_face() {
+    let (listener, endpoint) =
+        listening(|config| config.listen = vec!["udp/127.0.0.1:0".to_owned()]);
+    let port = endpoint.rsplit(':').next().unwrap().to_owned();
+    let stray = std::net::UdpSocket::bind("127.0.0.1:0").expect("a socket of the test's");
+    stray
+        .send_to(&[0x05, 0x00], format!("127.0.0.1:{port}"))
+        .expect("the datagram is sent");
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(listener.faces_up(), 0, "a stray opens no face");
+    let _client = client(&endpoint, 0xc1);
+    eventually("CONTROL: a client to be taken after it", || {
+        listener.faces_up() == 1
+    });
+}

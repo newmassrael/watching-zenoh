@@ -66,6 +66,8 @@ use crate::udp_link::UdpStack;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::udp_link::{bind_refused, dial_bind, UDP_RX_CAPACITY};
 use crate::udp_link::{DatagramSocket, UdpDriver};
+#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+use crate::udp_link::{PortPeer, UdpPort};
 
 /// The link of one session over a platform's datagram sockets `U`, its plain streams `T` and its
 /// secure-channel streams `L`: a datagram, a stream or a secure stream link, as its dial named.
@@ -86,6 +88,9 @@ pub enum IpDriver<
     Tcp(StreamDriver<T, B, X>),
     /// A `tls/` link: the stream link over a secure channel.
     Tls(StreamDriver<L, B, X>),
+    /// A `udp/` link a listener took: its peer's share of the listener's one socket.
+    #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+    UdpListened(UdpDriver<PortPeer<U>, B, X>),
 }
 
 /// The heap profile's [`IpDriver`]: each link allocates its buffers when it opens.
@@ -99,6 +104,8 @@ macro_rules! either {
             IpDriver::Udp($link) => $body,
             IpDriver::Tcp($link) => $body,
             IpDriver::Tls($link) => $body,
+            #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+            IpDriver::UdpListened($link) => $body,
         }
     };
 }
@@ -176,6 +183,8 @@ where
             IpDriver::Udp(_) => &UDP,
             IpDriver::Tcp(_) => &TCP,
             IpDriver::Tls(_) => &TLS,
+            #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+            IpDriver::UdpListened(_) => &UDP,
         })
     }
 
@@ -495,15 +504,24 @@ where
         })
     }
 
-    /// A `tcp/` listener over the stack's stream dial, or a `tls/` one over its secure channel's
+    /// A `tcp/` listener over the stack's stream dial, a `tls/` one over its secure channel's
     /// (the channel's own listening half, which completes each handshake before the link sees the
-    /// connection). A `udp/` locator is not listened on yet (a UDP port is one peer, and a face
-    /// for each needs the datagrams told apart by their source address).
+    /// connection), or, with `udp-listen`, a `udp/` one over one datagram socket, whose peers are
+    /// told apart by the address each datagram came from (`UdpPort`).
     fn open_listener(
         &self,
         at: Locator,
     ) -> Result<Box<dyn LinkListener<Self::Pump>>, LinkOpenError> {
         match at.proto {
+            #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+            LinkProto::Udp if U::CARRIED => {
+                let socket = U::bind(at.at).map_err(bind_refused::<U>)?;
+                Ok(Box::new(IpUdpListener::<U, D::Stream, L::Stream> {
+                    port: Rc::new(UdpPort::new(socket, self.shape.datagram_rx)),
+                    shape: self.shape,
+                    stack: core::marker::PhantomData,
+                }))
+            }
             LinkProto::Tcp if D::CARRIED => {
                 let listener = self.dial.listen(at.at)?;
                 Ok(Box::new(IpListener::<U, D::Stream, L::Stream> {
@@ -528,6 +546,54 @@ where
     /// ([`IpLinks::with_groups`]); links given none refuse it as unsupported.
     fn open_group(&self, endpoint: &str) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
         self.groups.join(endpoint)
+    }
+}
+
+/// The accepting end of the `udp/` port a stack listens on: the one socket every peer that opens
+/// a session sends to ([`UdpPort`]), which yields a link for each source whose `InitSyn` it takes,
+/// shaped as the stack's links are and run as an acceptor's. The link's socket is the peer's share
+/// of the port, so the session reads that peer's datagrams alone and its replies leave by the port
+/// the peer sent to.
+#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+struct IpUdpListener<U: DatagramSocket, S, T> {
+    port: Rc<UdpPort<U>>,
+    shape: LinkShape,
+    stack: core::marker::PhantomData<fn() -> (S, T)>,
+}
+
+#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+impl<U, S, T> LinkListener<Rc<HeapIpDriver<U, S, T>>> for IpUdpListener<U, S, T>
+where
+    U: DatagramSocket + 'static,
+    S: StreamSocket + 'static,
+    T: StreamSocket + 'static,
+{
+    fn local(&self) -> Locator {
+        Locator::udp(self.port.local())
+    }
+
+    /// A socket that failed to read is looked at again on the next call, as a stack with no
+    /// buffer for a connection is: UDP has no connection to lose, and a datagram the next read
+    /// takes is sorted as any other.
+    fn accept(&self) -> Result<Option<OpenedLink<Rc<HeapIpDriver<U, S, T>>>>, LinkOpenError> {
+        let Some(share) = UdpPort::take_fresh(&self.port).map_err(|_| LinkOpenError::Exhausted)?
+        else {
+            return Ok(None);
+        };
+        // The port told this source apart from the others, so the link's remote end is known from
+        // the start, as a dialled link's is; the session over it still runs as the acceptor.
+        let peer = share.peer();
+        let driver = Rc::new(IpDriver::UdpListened(self.shape.datagram(
+            UdpDriver::initiator_with_buffers(share, peer, self.shape.datagram_rx, self.shape.tx()),
+        )));
+        Ok(Some(OpenedLink {
+            sink: driver.clone(),
+            pump: driver,
+        }))
+    }
+
+    fn readiness(&self) -> Option<Box<dyn LinkReadiness>> {
+        self.port.readiness()
     }
 }
 
@@ -1665,5 +1731,211 @@ mod tests {
             accepting.link_endpoints().is_none(),
             "no peer until an InitSyn names one"
         );
+    }
+
+    /// The `udp/` listener of the heap profile against a socket whose datagrams the test queues.
+    #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+    mod udp_listener {
+        use super::*;
+        use alloc::collections::VecDeque;
+        use alloc::vec;
+        use alloc::vec::Vec;
+        use core::cell::RefCell;
+
+        type Queue = Rc<RefCell<VecDeque<(Vec<u8>, SocketAddr)>>>;
+        type Sent = Rc<RefCell<Vec<(SocketAddr, Vec<u8>)>>>;
+
+        /// A socket that hands out what the test queued, in order, and keeps what it sends.
+        struct Inbox {
+            queued: Queue,
+            sent: Sent,
+        }
+
+        impl DatagramSocket for Inbox {
+            type Error = ();
+            fn bind(_at: SocketAddr) -> Result<Self, ()> {
+                Ok(Self {
+                    queued: Queue::default(),
+                    sent: Sent::default(),
+                })
+            }
+            fn local(&self) -> SocketAddr {
+                LISTENING
+            }
+            fn send_to(&self, to: SocketAddr, bytes: &[u8]) -> Result<(), ()> {
+                self.sent.borrow_mut().push((to, bytes.to_vec()));
+                Ok(())
+            }
+            fn wait_readable(&self, _timeout_ms: c_int) {}
+            fn times_out(&self) -> bool {
+                false
+            }
+            fn recv_waiting(&self, buf: &mut [u8]) -> Result<Option<Received>, ()> {
+                self.try_recv(buf)
+            }
+            fn try_recv(&self, buf: &mut [u8]) -> Result<Option<Received>, ()> {
+                Ok(self.queued.borrow_mut().pop_front().map(|(bytes, from)| {
+                    buf[..bytes.len()].copy_from_slice(&bytes);
+                    (bytes.len(), from)
+                }))
+            }
+        }
+
+        const LISTENING: SocketAddr = SocketAddr::new(NODE, 7447);
+        const PEER_A: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 7)), 50_001);
+        const PEER_B: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 8)), 50_002);
+        /// An `InitSyn` header and a byte: what opens a session.
+        const SYN: &[u8] = &[0x01, 0x09];
+
+        /// A listener over a fresh [`Inbox`], with the queue the test fills and what was sent.
+        fn listener() -> (IpUdpListener<Inbox, Stream, Stream>, Queue, Sent) {
+            let queued = Queue::default();
+            let sent = Sent::default();
+            let socket = Inbox {
+                queued: Rc::clone(&queued),
+                sent: Rc::clone(&sent),
+            };
+            let listener = IpUdpListener {
+                port: Rc::new(UdpPort::new(socket, 2048)),
+                shape: LinkShape::default(),
+                stack: core::marker::PhantomData,
+            };
+            (listener, queued, sent)
+        }
+
+        /// Everything `link` reads now, a datagram at a time.
+        fn read_all(link: &OpenedLink<Rc<HeapIpDriver<Inbox, Stream, Stream>>>) -> Vec<Vec<u8>> {
+            let mut got = Vec::new();
+            while link.pump.recv_with(&mut |bytes| got.push(bytes.to_vec())) {}
+            got
+        }
+
+        /// Each source whose `InitSyn` reaches the port is given a link of its own, which reads that
+        /// source's datagrams alone, in the order they came, whoever took them off the socket; a
+        /// datagram read for another link waits as input its owner steps at once; and a link's
+        /// sends leave by the port, to its peer.
+        #[test]
+        fn each_source_that_opens_a_session_gets_a_link_of_its_own() {
+            let (listener, queued, sent) = listener();
+            assert_eq!(listener.local(), Locator::udp(LISTENING));
+            assert!(listener.accept().expect("a readable port").is_none());
+            for (bytes, from) in [
+                (SYN, PEER_A),
+                (SYN, PEER_B),
+                (&[0x05, 0xa1][..], PEER_A),
+                (&[0x05, 0xb1][..], PEER_B),
+            ] {
+                queued.borrow_mut().push_back((bytes.to_vec(), from));
+            }
+            let a = listener
+                .accept()
+                .expect("a readable port")
+                .expect("A's link");
+            let b = listener
+                .accept()
+                .expect("a readable port")
+                .expect("B's link");
+            assert!(
+                listener.accept().expect("a readable port").is_none(),
+                "two sources, two links"
+            );
+            assert!(matches!(*a.pump, IpDriver::UdpListened(_)));
+            assert!(
+                b.pump.holds_input(),
+                "what the listener took for B waits as B's input"
+            );
+
+            assert_eq!(read_all(&a), [SYN.to_vec(), vec![0x05, 0xa1]]);
+            assert_eq!(read_all(&b), [SYN.to_vec(), vec![0x05, 0xb1]]);
+            assert!(!b.pump.holds_input());
+
+            queued.borrow_mut().push_back((vec![0x05, 0xb2], PEER_B));
+            assert!(
+                read_all(&a).is_empty(),
+                "A's read takes B's datagram off the socket and does not read it"
+            );
+            assert_eq!(read_all(&b), [vec![0x05, 0xb2]]);
+
+            assert!(matches!(
+                b.sink.send_blocking(b"to-b", Reliability::BestEffort),
+                LinkSendOutcome::Sent
+            ));
+            assert_eq!(*sent.borrow(), [(PEER_B, b"to-b".to_vec())]);
+        }
+
+        /// A datagram from a source with no link that opens no session is dropped and counted, and
+        /// a link that is let go of frees its source: what it sends next is a stray until its next
+        /// `InitSyn`, which opens a new link.
+        #[test]
+        fn a_stray_opens_no_link_and_a_link_let_go_of_frees_its_source() {
+            let (listener, queued, _sent) = listener();
+            queued.borrow_mut().push_back((vec![0x05, 0xc1], PEER_A));
+            assert!(listener.accept().expect("a readable port").is_none());
+            assert_eq!(listener.port.strays(), 1);
+
+            queued.borrow_mut().push_back((SYN.to_vec(), PEER_A));
+            let a = listener
+                .accept()
+                .expect("a readable port")
+                .expect("A's link");
+            drop(a);
+            queued.borrow_mut().push_back((vec![0x05, 0xa2], PEER_A));
+            assert!(listener.accept().expect("a readable port").is_none());
+            assert_eq!(
+                listener.port.strays(),
+                2,
+                "the source of a link let go of is no peer of the port"
+            );
+
+            queued.borrow_mut().push_back((SYN.to_vec(), PEER_A));
+            let again = listener
+                .accept()
+                .expect("a readable port")
+                .expect("A's new link");
+            assert_eq!(read_all(&again), [SYN.to_vec()]);
+        }
+
+        /// A peer that sends more than its link reads has the excess dropped and counted, and the
+        /// datagrams kept are the first ones.
+        #[test]
+        fn a_peer_past_its_backlog_has_the_excess_dropped() {
+            let (listener, queued, _sent) = listener();
+            queued.borrow_mut().push_back((SYN.to_vec(), PEER_A));
+            let a = listener
+                .accept()
+                .expect("a readable port")
+                .expect("A's link");
+            for n in 0..crate::udp_link::PORT_PEER_BACKLOG {
+                queued.borrow_mut().push_back((vec![0x05, n as u8], PEER_A));
+            }
+            assert!(listener.accept().expect("a readable port").is_none());
+            assert_eq!(
+                listener.port.overflows(),
+                1,
+                "the InitSyn and the backlog fill it"
+            );
+            let read = read_all(&a);
+            assert_eq!(read.len(), crate::udp_link::PORT_PEER_BACKLOG);
+            assert_eq!(read[0], SYN.to_vec());
+        }
+
+        /// A stack listens on `udp/` where its datagram socket binds, at the port the socket chose,
+        /// and a stack that carries no datagram refuses it as unsupported.
+        #[test]
+        fn a_stack_listens_on_udp_where_it_carries_datagrams() {
+            let links = IpLinks::<Datagrams<true>, Dial>::new(NODE, Dial);
+            let listener = links
+                .open_listener(Locator::udp(SocketAddr::new(NODE, 0)))
+                .unwrap_or_else(|_| panic!("a datagram socket binds"));
+            assert_eq!(
+                listener.local(),
+                Locator::udp(SocketAddr::new(NODE, 40_001))
+            );
+            let none = IpLinks::<crate::udp_link::NoDatagram, Dial>::new(NODE, Dial);
+            assert!(matches!(
+                none.open_listener(Locator::udp(SocketAddr::new(NODE, 0))),
+                Err(LinkOpenError::Unsupported)
+            ));
+        }
     }
 }

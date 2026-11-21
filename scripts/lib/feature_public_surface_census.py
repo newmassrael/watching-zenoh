@@ -823,6 +823,10 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # (`pub mod app_link`: the stream, datagram and group sockets and `AppLinks`), selected
         # by the pico ABI's `app-transport` through `wz-capi-coop`, which is where a consumer
         # reaches it; the shape `host-lock`'s site has.
+        # `udp-listen` joins: the heap profile's `udp/` listener (`udp_link::UdpPort`,
+        # `PortPeer`, `PortPeerError`, `PORT_PEER_BACKLOG` in `pub mod udp_link`), selected by
+        # `wz-capi-coop`'s `listen`, which is where a consumer reaches it; sites inside a `pub mod`,
+        # the shape `app-link`'s have.
         frozenset(
             {
                 "alloc",
@@ -835,6 +839,7 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "session-slot",
                 "session-unicast",
                 "switchboard",
+                "udp-listen",
             }
         ),
     ),

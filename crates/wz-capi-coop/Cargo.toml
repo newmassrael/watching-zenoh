@@ -164,8 +164,10 @@ local-subscriber = []
 # unsupported. Off, which is pico's client build, the engine is the dial role alone and its text
 # has no acceptor, no table of ports and no wait on one (the capability-cost gate measures it).
 # The session machine compiles its accepting role only under `session-unicast-accept`, so the
-# feature asks the runtime for it: without that an acceptor would start on no event.
-listen = ["wz-runtime-coop/session-unicast-accept"]
+# feature asks the runtime for it: without that an acceptor would start on no event. It asks the
+# runtime's `udp-listen` too, which gives the host's links a `udp/` listener, one socket whose
+# peers each take a face of their own.
+listen = ["wz-runtime-coop/session-unicast-accept", "wz-runtime-coop/udp-listen"]
 # A transport the program supplies: the session shell's links over the program's own network
 # stack (`wz_runtime_coop::app_link`), re-exported for the ABI that opens the engine over them.
 app-transport = ["wz-runtime-coop/app-link"]

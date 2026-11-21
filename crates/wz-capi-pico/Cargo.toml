@@ -127,7 +127,7 @@ os-zephyr = ["dep:wz-capi-coop", "dep:wz-runtime-zephyr", "wz-session-core/no_st
 # combined listen and connect and a second connect locator.
 #
 # Both engines take the roles, so it selects neither: the tokio engine accepts every link the
-# runtime has, and the cooperative engine the `tcp/` ones its stack listens on
+# runtime has, and the cooperative engine the `tcp/` and `udp/` ones its stack listens on
 # (`wz-capi-coop`'s `listen`, `docs/capi-pico-on-coop-engine.md` step L4). What only the tokio
 # engine has (a group, the secure and the other links, gossip) selects it by its own feature.
 peer = ["scout", "wz-capi-core?/peer", "wz-capi-coop?/listen"]
