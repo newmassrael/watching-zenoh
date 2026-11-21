@@ -24,7 +24,7 @@ WZ_APP_PLANE_ORACLE_PROFILE=<the lane file> \
 |---|---|
 | `WZ_APP_PLANE_ORACLE_DIR` | the CMake source directory of the deployment's party (below) |
 | `WZ_APP_PLANE_ORACLE_PROFILE` | the lane file: the checks and wz's documents for them (below) |
-| `WZ_APP_PLANE_ORACLE_CMAKE_ARGS` | optional words added to the party project's configure, such as where the deployment's checkouts are |
+| `WZ_APP_PLANE_ORACLE_CMAKE_ARGS` | optional words added to the party project's configure, such as where the deployment's checkouts are; a word that sets `WZ_ORACLE_KEY_WIRE` or `WZ_ORACLE_KEY_IDS` to another value than the lane's binding, or `--no-warn-unused-cli`, is refused (below) |
 | `WZ_APP_PLANE_ORACLE_SCRATCH` | optional; where builds and transcripts go, by default `target/app-plane-oracle` under the artifact root |
 
 `bash scripts/app-plane-oracle.sh --selftest` runs the judge on synthetic transcripts and
@@ -34,7 +34,7 @@ nothing else; the lane runs the same selftest before anything it measures.
 |---|---|
 | 0 | PASS: every aspect of every check agreed |
 | 1 | FAIL: an aspect disagreed, a party did not finish, or the judge failed its selftest |
-| 2 | a variable or the lane file was refused (the judge says which field and why) |
+| 2 | a variable, the lane file or the deployment's party's configure was refused (the judge says which field or variable and why) |
 | 3 | NOT-MEASURED: the two variables are not both set, or one side did not build, so nothing was exchanged |
 
 A NOT-MEASURED run has shown nothing, and the lane never passes in its place.
@@ -53,8 +53,8 @@ runs. It runs on Linux.
    `replay-reply-shape` policy is a build default, so a check with a segment profile gets a
    build with `segmented`. Each build's library is copied beside its party, and the party runs
    against that copy.
-4. The deployment's party project is configured out of tree into the scratch directory and
-   built (below).
+4. The deployment's party project is configured out of tree into the scratch directory, its
+   key wire and dictionary bound to the lane file's and read back, and built (below).
 5. Each check runs twice: wz sends and the deployment receives (`wz-sends`), then the other way
    round (`peer-sends`). Each run gets its own copy of the check directory.
 6. `oracle.py judge` reads the four transcripts of each check and prints one line per aspect.
@@ -97,7 +97,7 @@ A JSON object. The values below are SYNTHETIC; a deployment states its own.
 | `wz.build_env` | `WZ_POLICY_*` and `WZ_LIMIT_*` values wz's build states, as a deployment's node would be built; `WZ_POLICY_REPLAY_REPLY_SHAPE` is refused, the lane states it per check |
 | `session.connect_mode` | the mode of the side that dials: `client` (default) or `peer` |
 | `key_ids.dictionary` | optional: the key ids every node of the deployment shares, `[{id, key}]`; each id 1 to 65535 and named once, each key a canonical key expression named once. wz's party hands it to `wz_ext_config_key_ids` before it opens, in every role, so its session reads a key named by one of these ids though nobody declared it. It needs `shared-key-ids` in `wz.features`, and is refused without it |
-| `key_ids.forms` | optional: the key-wire form (`declared`, `shared` or `literal`) of the `listen` side's endpoint and of the `connect` side's, which wz's party states with `wz_ext_config_key_wire_form_for`; a side not named takes the session's form, the `key-wire-form` policy, which `wz.build_env` may state |
+| `key_ids.forms` | optional: the key-wire form (`declared`, `shared` or `literal`) of the `listen` side's endpoint and of the `connect` side's, which wz's party states with `wz_ext_config_key_wire_form_for`; a side not named takes the session's form, the `key-wire-form` policy, which `wz.build_env` may state, or else the build declaration's default. The deployment's party is built with one form and plays both sides, so a lane file whose two sides come out in two forms is refused, and so is one whose form is `shared` with no dictionary |
 | `name` | lower-case letters, digits and dashes; the check directory's name |
 | `kind` | `e2e` (protected frames on a key) or `replay` (a replay cache and the subscriber that asks it) |
 | `key` | the key expression the frames travel on |
@@ -216,18 +216,50 @@ the same bytes.
 The deployment writes, outside this repository, a CMake project whose build directory holds a
 program named `app-plane-oracle-peer` that speaks the contract above over the deployment's own
 layer: its protection, its counter rules, its replay cache and its pieces, as its nodes build
-them. The lane configures the project with two cache variables:
+them. The lane configures the project with these cache variables:
 
 | Variable | Value |
 |---|---|
 | `WZ_ORACLE_PICO_INCLUDE` | the pico headers of the wz library's arm and wz's extension header directory, a CMake list |
 | `WZ_ORACLE_PICO_LIBRARY` | the wz pico library built for the lane |
+| `WZ_ORACLE_KEY_WIRE` | the key-wire form the party's nodes name keys in: `declared`, `shared` or `literal`, the words of the `key-wire-form` policy |
+| `WZ_ORACLE_KEY_IDS` | a JSON file `{"dictionary": [{"id": <1..65535>, "key": "<key expression>"}, ...]}`, the lane file's `key_ids.dictionary`, written by the lane into the scratch directory; its list is empty when the lane file states no dictionary |
 
 so a deployment whose glue is written against zenoh-pico's API can link its own layer to wz's
 pico C ABI in place of zenoh-pico, and the oracle is that layer over wz talking to wz's
 application plane. A deployment whose layer sits on its own session layer builds that instead
-and leaves the two variables unread. Either way the program's frames, verdicts and answers are
-the deployment's own code's.
+and leaves the two pico variables unread. Either way the program's frames, verdicts and answers
+are the deployment's own code's.
+
+### The key wire and the dictionary
+
+A party that names keys in another form than wz's, or by another dictionary, drops what it
+cannot resolve, and the check would end only in a party that gave up waiting. So the lane owns
+both, and the party project reads both:
+
+- `WZ_ORACLE_KEY_WIRE`: the party's nodes name keys in this form on every endpoint, as a
+  deployment's nodes built that way do. A party that cannot build a form stops its configure
+  with a message saying so, and the run is NOT-MEASURED.
+- `WZ_ORACLE_KEY_IDS`: the party compiles in the dictionary of this file and no other, in
+  every form. The lane writes the file from the lane file, so wz's party and the deployment's
+  hold the same dictionary.
+- Neither is forced (`set(... CACHE ... FORCE)`) or overridden by the project.
+
+The lane derives the form from the lane file, as `key_ids.forms` says above: the one form wz's
+party names keys in on both sides. It adds the two words itself, after the caller's
+`WZ_APP_PLANE_ORACLE_CMAKE_ARGS`:
+
+```
+-DWZ_ORACLE_KEY_WIRE:STRING=<form>
+-DWZ_ORACLE_KEY_IDS:FILEPATH=<scratch>/party-key-ids.json
+```
+
+and refuses, before anything is built, a caller word that sets either to another value, or
+`--no-warn-unused-cli`. It configures with a fresh cache each run, so no word of an earlier
+configure survives and CMake names any word the project never reads. After the configure, and
+before the party is built, it reads the project back and refuses the run, naming both values,
+when CMake says the project never read either variable, or the cache holds another value
+than the lane's.
 
 The lane file then states, for each check, wz's profile and values documents describing the
 same message the deployment's party sends, and `peer` carries whatever that party needs to pick
