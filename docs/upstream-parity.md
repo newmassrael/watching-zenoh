@@ -373,6 +373,16 @@ derived from the declaration and never chosen by hand:
      side built otherwise is refused.
   5. **The matrix stays the record of what only a boot measures** (stack used, heap peak,
      turnaround). The gate's cells are read on every run of Layer Qzk and are not committed.
+  6. **The WIN was taken back (2026-11-21).** The ceiling first read the fixed client as a LOSS
+     (text 1,764 bytes over the reference after the second round of work on it). Four rounds of
+     commits took the bytes back, and the first run of Layer Qzk on their tree reads every cell
+     WIN: text 144,820 against 147,912 (3,092 under), flash 3,188 under, static RAM 9,333 under
+     for the fixed client and 6,341 for the heap client, stack objects 3,456 under, and the heap
+     client's storage block 7,712 against the reference's heap peak of 9,280. The image's own
+     rows moved with it in the same commit (`deploy/text_budget.json`: the fixed client 155,796
+     to 143,720, the commits and the symbols in its `measured`). No boot of the matrix was run
+     again: its boot cells (stack used, heap peak, turnaround) are those of run 20261031T063515,
+     and the caveat of that run in `deploy/upstream_parity.json` says so.
 
 ## 5. Steps
 
