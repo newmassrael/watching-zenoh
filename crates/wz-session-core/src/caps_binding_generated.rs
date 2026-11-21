@@ -226,6 +226,66 @@ pub const MAX_DECLARED_KEYEXPRS: LimitBinding = LimitBinding {
     wire: Wire::None,
 };
 
+/// Where [`super::HELD_SESSIONS`] is bound.
+pub const HELD_SESSIONS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
+    storage: Storage::Capacity,
+    scope: &[Scope::Runtime],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
+/// Where [`super::HELD_SAMPLES`] is bound.
+pub const HELD_SAMPLES: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
+    storage: Storage::Capacity,
+    scope: &[Scope::Runtime],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
+/// Where [`super::HELD_REPLIES`] is bound.
+pub const HELD_REPLIES: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
+    storage: Storage::Capacity,
+    scope: &[Scope::Runtime],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
+/// Where [`super::HELD_QUERIES`] is bound.
+pub const HELD_QUERIES: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
+    storage: Storage::Capacity,
+    scope: &[Scope::Runtime],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
+/// Where [`super::HELD_PAYLOADS`] is bound.
+pub const HELD_PAYLOADS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
+    storage: Storage::Capacity,
+    scope: &[Scope::Runtime],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
 /// Where [`super::MAX_PENDING_LIVELINESS_GETS`] is bound.
 pub const MAX_PENDING_LIVELINESS_GETS: LimitBinding = LimitBinding {
     kind: LimitKind::Bound,

@@ -168,6 +168,50 @@ config WZ_LIMIT_MAX_DECLARED_KEYEXPRS
 	  the entities that name it and by the program's declarations. Declaring
 	  one more distinct key is refused while the table is full.
 
+config WZ_LIMIT_HELD_SESSIONS
+	int "HELD_SESSIONS"
+	default 4
+	help
+	  The sessions a program of the pico C ABI holds open at once: the slots of
+	  the pool of sessions the library reserves at its first object when the
+	  program reserved none (object-pool). One more is refused at its open.
+
+config WZ_LIMIT_HELD_SAMPLES
+	int "HELD_SAMPLES"
+	default 16
+	help
+	  The owned samples a program of the pico C ABI holds at once (taken out of
+	  a callback, cloned, or held in a channel): the slots of the pool of samples
+	  the library reserves at its first object when the program reserved none
+	  (object-pool). One more is refused, its source untouched.
+
+config WZ_LIMIT_HELD_REPLIES
+	int "HELD_REPLIES"
+	default 16
+	help
+	  The owned replies and reply errors a program of the pico C ABI holds at
+	  once: the slots of the pool of replies the library reserves at its first
+	  object when the program reserved none (object-pool). One more is refused,
+	  its source untouched.
+
+config WZ_LIMIT_HELD_QUERIES
+	int "HELD_QUERIES"
+	default 8
+	help
+	  The owned queries a program of the pico C ABI holds at once, each keeping
+	  its query's answer open: the slots of the pool of queries the library
+	  reserves at its first object when the program reserved none (object-pool).
+	  One more is refused, its source untouched.
+
+config WZ_LIMIT_HELD_PAYLOADS
+	int "HELD_PAYLOADS"
+	default 32
+	help
+	  The owned payloads (z_owned_bytes_t) a program of the pico C ABI holds at
+	  once: the slots of the pool of payloads the library reserves at its first
+	  object when the program reserved none (object-pool). A constructor past it
+	  answers out of memory and leaves its payload null.
+
 config WZ_LIMIT_MAX_PENDING_LIVELINESS_GETS
 	int "MAX_PENDING_LIVELINESS_GETS"
 	default 8
