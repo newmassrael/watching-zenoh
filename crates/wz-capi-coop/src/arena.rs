@@ -19,8 +19,9 @@
 //! - the buffers of each link the session may hold: a receive buffer of the batch the session
 //!   advertises, a streamed batch's length counted inside it, and [`LINK_TX_SLOTS`] slots of that
 //!   length to encode its frames into, each table with the flags that say which buffers are lent
-//!   (`SessionArena::lend_links`). The batch is the config's, under the build's
-//!   `PICO_UNICAST_BATCH_BYTES`; these are the rows lent when the session opens, first;
+//!   (`SessionArena::lend_links`). The batch is the config's, held to the session's
+//!   `PICO_UNICAST_BATCH_BYTES` under the build's; these are the rows lent when the session opens,
+//!   first;
 //! - the engine's own record of each declaration it announces and announces again over a new
 //!   link ([`EntityRows`]): its subscribers, queryables, tokens and liveliness subscribers under
 //!   the limits of the application's tables, the key expressions it declares
@@ -211,14 +212,9 @@ impl ArenaPlan {
     /// is over the build's value or the arena is past the address space.
     pub fn of(config: &CoopConfig, limits: &SessionLimits) -> Result<Self, ArenaRefused> {
         let links = links_of(config).ok_or(ArenaRefused::TooLarge)?;
-        let batch = lent(
-            "PICO_UNICAST_BATCH_BYTES",
-            Quota::at_most(usize::from(config.batch_size)),
-            caps::PICO_UNICAST_BATCH_BYTES,
-        )?;
         // A buffer and a slot of the batch hold a whole batch of either link: a stream link's
         // length is counted inside the batch it negotiates (`STREAM_BATCH_LENGTH_BYTES`).
-        let link_bytes = batch;
+        let link_bytes = link_batch(config, limits)?;
         let mut plan = Self {
             rows: [NO_ROW; ARENA_ROWS],
             len: 0,
@@ -257,22 +253,14 @@ impl ArenaPlan {
         plan.put(
             "subscribers",
             "MAX_SUBSCRIPTIONS",
-            lent(
-                "MAX_SUBSCRIPTIONS",
-                limits.max_subscriptions(),
-                caps::MAX_SUBSCRIPTIONS,
-            )?,
+            lent::<{ caps::MAX_SUBSCRIPTIONS }>("MAX_SUBSCRIPTIONS", limits.max_subscriptions())?,
             SubscriberTable::<BoxedSink, Lent>::ROW_BYTES,
         );
         #[cfg(feature = "queryable")]
         plan.put(
             "queryables",
             "MAX_QUERYABLES",
-            lent(
-                "MAX_QUERYABLES",
-                limits.max_queryables(),
-                caps::MAX_QUERYABLES,
-            )?,
+            lent::<{ caps::MAX_QUERYABLES }>("MAX_QUERYABLES", limits.max_queryables())?,
             wz_session_core::query::QueryableRegistry::<
                 wz_session_core::query_sink::BoxedQuerySink,
                 Lent,
@@ -283,20 +271,15 @@ impl ArenaPlan {
             plan.put(
                 "liveliness tokens",
                 "MAX_LOCAL_TOKENS",
-                lent(
-                    "MAX_LOCAL_TOKENS",
-                    limits.max_local_tokens(),
-                    caps::MAX_LOCAL_TOKENS,
-                )?,
+                lent::<{ caps::MAX_LOCAL_TOKENS }>("MAX_LOCAL_TOKENS", limits.max_local_tokens())?,
                 wz_session_core::declare::local_token::LocalTokenRegistry::<Lent>::ROW_BYTES,
             );
             plan.put(
                 "liveliness subscribers",
                 "MAX_LIVELINESS_SUBSCRIPTIONS",
-                lent(
+                lent::<{ caps::MAX_LIVELINESS_SUBSCRIPTIONS }>(
                     "MAX_LIVELINESS_SUBSCRIPTIONS",
                     limits.max_liveliness_subscriptions(),
-                    caps::MAX_LIVELINESS_SUBSCRIPTIONS,
                 )?,
                 wz_session_core::declare::liveliness_subscriber::LivelinessSubscriberTable::<
                     wz_session_core::declare::liveliness_sample::BoxedLivelinessSampleSink,
@@ -306,16 +289,14 @@ impl ArenaPlan {
         }
         plan.gets = GetTables {
             rows: RequesterRows {
-                queries: lent(
+                queries: lent::<{ caps::MAX_PENDING_QUERIES }>(
                     "MAX_PENDING_QUERIES",
                     limits.max_pending_queries(),
-                    caps::MAX_PENDING_QUERIES,
                 )?,
                 liveliness_gets: if cfg!(feature = "liveliness-get") {
-                    lent(
+                    lent::<{ caps::MAX_PENDING_LIVELINESS_GETS }>(
                         "MAX_PENDING_LIVELINESS_GETS",
                         limits.max_pending_liveliness_gets(),
-                        caps::MAX_PENDING_LIVELINESS_GETS,
                     )?
                 } else {
                     0
@@ -333,11 +314,7 @@ impl ArenaPlan {
             FaceGets::arena_bytes(plan.gets.rows).ok_or(ArenaRefused::TooLarge)?,
         );
         plan.held_queries = if cfg!(feature = "queryable") {
-            lent(
-                "MAX_PENDING_FINALS",
-                limits.max_pending_finals(),
-                caps::MAX_PENDING_FINALS,
-            )?
+            lent::<{ caps::MAX_PENDING_FINALS }>("MAX_PENDING_FINALS", limits.max_pending_finals())?
         } else {
             0
         };
@@ -447,63 +424,72 @@ impl ArenaPlan {
     }
 }
 
-/// The rows a table of the limit `limit` is lent: `value`, the open's, under `build`, the build's.
-fn lent(limit: &'static str, value: Quota, build: usize) -> Result<usize, ArenaRefused> {
+/// The rows a table of the limit `limit` is lent: `value`, the one the session's creator resolved
+/// into its limits at the open, under `CEILING`, the build's value of the limit, which is the
+/// capacity the build gives the table's type (a `BoundedVec<T, CEILING, Lent>` is lent at most
+/// that many rows): the build sizes the storage and the snapshot chooses within it.
+fn lent<const CEILING: usize>(limit: &'static str, value: Quota) -> Result<usize, ArenaRefused> {
     value
-        .lent_under(Quota::at_most(build))
+        .lent_under(Quota::at_most(CEILING))
         .map_err(|why| ArenaRefused::Limit { limit, why })
+}
+
+/// The length of each link's receive buffer and of each of its slots: the batch `config`
+/// advertises, which is the most a peer sends once the two have negotiated, held to the batch the
+/// session's `limits` state (`PICO_UNICAST_BATCH_BYTES`) under the build's. A batch over either
+/// is refused, as a stage after the build only lowers the memory the build fixes.
+fn link_batch(config: &CoopConfig, limits: &SessionLimits) -> Result<usize, ArenaRefused> {
+    let ceiling = lent::<{ caps::PICO_UNICAST_BATCH_BYTES }>(
+        "PICO_UNICAST_BATCH_BYTES",
+        Quota::at_most(limits.pico_unicast_batch_bytes()),
+    )?;
+    let advertised = usize::from(config.batch_size);
+    if advertised > ceiling {
+        return Err(ArenaRefused::Limit {
+            limit: "PICO_UNICAST_BATCH_BYTES",
+            why: UnlentRows::OverCeiling {
+                value: advertised,
+                ceiling,
+            },
+        });
+    }
+    Ok(advertised)
 }
 
 /// The rows of each table of the engine's record of the session's declarations, under `limits`.
 fn entity_rows(limits: &SessionLimits) -> Result<EntityRows, ArenaRefused> {
     Ok(EntityRows {
-        subscribers: lent(
+        subscribers: lent::<{ caps::MAX_SUBSCRIPTIONS }>(
             "MAX_SUBSCRIPTIONS",
             limits.max_subscriptions(),
-            caps::MAX_SUBSCRIPTIONS,
         )?,
         queryables: if cfg!(feature = "queryable") {
-            lent(
-                "MAX_QUERYABLES",
-                limits.max_queryables(),
-                caps::MAX_QUERYABLES,
-            )?
+            lent::<{ caps::MAX_QUERYABLES }>("MAX_QUERYABLES", limits.max_queryables())?
         } else {
             0
         },
         tokens: if cfg!(feature = "liveliness") {
-            lent(
-                "MAX_LOCAL_TOKENS",
-                limits.max_local_tokens(),
-                caps::MAX_LOCAL_TOKENS,
-            )?
+            lent::<{ caps::MAX_LOCAL_TOKENS }>("MAX_LOCAL_TOKENS", limits.max_local_tokens())?
         } else {
             0
         },
         liveliness_subscribers: if cfg!(feature = "liveliness") {
-            lent(
+            lent::<{ caps::MAX_LIVELINESS_SUBSCRIPTIONS }>(
                 "MAX_LIVELINESS_SUBSCRIPTIONS",
                 limits.max_liveliness_subscriptions(),
-                caps::MAX_LIVELINESS_SUBSCRIPTIONS,
             )?
         } else {
             0
         },
-        keyexprs: lent(
+        keyexprs: lent::<{ caps::MAX_DECLARED_KEYEXPRS }>(
             "MAX_DECLARED_KEYEXPRS",
             limits.max_declared_keyexprs(),
-            caps::MAX_DECLARED_KEYEXPRS,
         )?,
-        publishers: lent(
-            "MAX_PUBLISHERS",
-            limits.max_publishers(),
-            caps::MAX_PUBLISHERS,
-        )?,
-        queriers: lent("MAX_QUERIERS", limits.max_queriers(), caps::MAX_QUERIERS)?,
-        matching_listeners: lent(
+        publishers: lent::<{ caps::MAX_PUBLISHERS }>("MAX_PUBLISHERS", limits.max_publishers())?,
+        queriers: lent::<{ caps::MAX_QUERIERS }>("MAX_QUERIERS", limits.max_queriers())?,
+        matching_listeners: lent::<{ caps::MAX_MATCHING_LISTENERS }>(
             "MAX_MATCHING_LISTENERS",
             limits.max_matching_listeners(),
-            caps::MAX_MATCHING_LISTENERS,
         )?,
     })
 }

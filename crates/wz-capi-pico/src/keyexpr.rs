@@ -30,11 +30,17 @@ use crate::result::{
 use crate::session::{engine_of, engine_ref, session_handle, z_loaned_session_t, Engine};
 use crate::write_filter::PicoSession;
 
-/// Whether `key` is no longer than the longest key a session stores
-/// (`MAX_KEYEXPR_BYTES`): a key past it is a value this build cannot take, refused with
-/// `Z_EINVAL`, never cut short.
+/// Whether `key` is no longer than the longest key a row of a session's tables stores: the
+/// capacity the build gives the row (`MAX_KEYEXPR_BYTES`), which no session's limits raise. A key
+/// past it is a value this build cannot take, refused with `Z_EINVAL`, never cut short; a session
+/// that states a lower bound refuses the key again when it is declared on it.
 fn fits(key: &str) -> bool {
-    key.len() <= wz_session_core::caps::MAX_KEYEXPR_BYTES
+    key.len() <= row_capacity::<{ wz_session_core::caps::MAX_KEYEXPR_BYTES }>()
+}
+
+/// The bytes a key row of `N` bytes holds.
+const fn row_capacity<const N: usize>() -> usize {
+    N
 }
 
 /// Resolve a loaned keyexpr to its borrowed UTF-8 string, or `None` if null /

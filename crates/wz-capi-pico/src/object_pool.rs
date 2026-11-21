@@ -522,19 +522,17 @@ pub(crate) fn take<T>(kind: Kind) -> Option<NonNull<u8>> {
 /// space.
 fn built_counts() -> Result<wz_ext_object_pool_counts_t, Unplanned> {
     let limits = session_limits();
-    let each = |value: Quota, build: usize| value.lent_under(Quota::at_most(build)).ok();
     let bounds = Bounds {
-        subscribers: each(limits.max_subscriptions(), caps::MAX_SUBSCRIPTIONS),
-        queryables: each(limits.max_queryables(), caps::MAX_QUERYABLES),
-        liveliness_tokens: each(limits.max_local_tokens(), caps::MAX_LOCAL_TOKENS),
-        liveliness_subscribers: each(
+        subscribers: each::<{ caps::MAX_SUBSCRIPTIONS }>(limits.max_subscriptions()),
+        queryables: each::<{ caps::MAX_QUERYABLES }>(limits.max_queryables()),
+        liveliness_tokens: each::<{ caps::MAX_LOCAL_TOKENS }>(limits.max_local_tokens()),
+        liveliness_subscribers: each::<{ caps::MAX_LIVELINESS_SUBSCRIPTIONS }>(
             limits.max_liveliness_subscriptions(),
-            caps::MAX_LIVELINESS_SUBSCRIPTIONS,
         ),
     };
     let built = wz_ext_object_pool_counts_t {
         sessions: caps::HELD_SESSIONS,
-        publishers: each(limits.max_publishers(), caps::MAX_PUBLISHERS).unwrap_or(0),
+        publishers: each::<{ caps::MAX_PUBLISHERS }>(limits.max_publishers()).unwrap_or(0),
         // Each of these at the bound of its limit, which a count left at zero takes.
         subscribers: 0,
         queryables: 0,
@@ -546,6 +544,13 @@ fn built_counts() -> Result<wz_ext_object_pool_counts_t, Unplanned> {
         bytes: caps::HELD_PAYLOADS,
     };
     resolve(&built, &bounds)
+}
+
+/// How many of an entity one session holds: `value`, the limit the library opens a session under,
+/// within `CEILING`, the build's value of it, which sizes the pool; `None` where the limit holds no
+/// bound.
+fn each<const CEILING: usize>(value: Quota) -> Option<usize> {
+    value.lent_under(Quota::at_most(CEILING)).ok()
 }
 
 /// The build's pools ([`built_counts`]) from the heap in one allocation: what the first object a

@@ -221,6 +221,128 @@ fn a_limit_lowered_at_open_lowers_its_row() {
     assert!(at_two.reserved_bytes() < built.reserved_bytes());
 }
 
+/// The limits of the engine's record of its declarations are the snapshot's, under the build's
+/// value: with nothing stated each table is lent the build's value, one stated lowers it, and one
+/// over the build's refuses the plan naming the limit and both values.
+#[test]
+fn each_declaration_limit_is_the_snapshots_under_the_builds_value() {
+    type Select = fn(
+        &mut SessionLimits,
+        Quota,
+    ) -> Result<(), wz_session_core::limit_binding::OutsideLimitDomain>;
+    type Count = fn(&ArenaPlan) -> usize;
+    let cases: [(&str, usize, Select, Count); 4] = [
+        (
+            "MAX_PUBLISHERS",
+            caps::MAX_PUBLISHERS,
+            SessionLimits::select_max_publishers,
+            |plan| plan.entities().publishers,
+        ),
+        (
+            "MAX_QUERIERS",
+            caps::MAX_QUERIERS,
+            SessionLimits::select_max_queriers,
+            |plan| plan.entities().queriers,
+        ),
+        (
+            "MAX_MATCHING_LISTENERS",
+            caps::MAX_MATCHING_LISTENERS,
+            SessionLimits::select_max_matching_listeners,
+            |plan| plan.entities().matching_listeners,
+        ),
+        (
+            "MAX_DECLARED_KEYEXPRS",
+            caps::MAX_DECLARED_KEYEXPRS,
+            SessionLimits::select_max_declared_keyexprs,
+            |plan| plan.entities().keyexprs,
+        ),
+    ];
+    let built =
+        ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
+    for (limit, build, select, count) in cases {
+        assert_eq!(count(&built), build, "{limit} with nothing stated");
+        let mut one = SessionLimits::defaults();
+        if build >= 1 && select(&mut one, Quota::at_most(1)).is_ok() {
+            let plan = ArenaPlan::of(&client_config(), &one).expect("lays an arena out");
+            assert_eq!(count(&plan), 1, "{limit} stated as one");
+        }
+        let mut over = SessionLimits::defaults();
+        // A build that sizes the table by the limit has no value over it in its domain.
+        if select(&mut over, Quota::at_most(build + 1)).is_ok() {
+            assert_eq!(
+                ArenaPlan::of(&client_config(), &over),
+                Err(ArenaRefused::Limit {
+                    limit,
+                    why: UnlentRows::OverCeiling {
+                        value: build + 1,
+                        ceiling: build,
+                    },
+                }),
+                "{limit} over the build's value"
+            );
+        }
+    }
+}
+
+/// The links' buffers are the batch the config advertises, held to the batch the session's limits
+/// state: a lowered batch the config fits lays the buffers out at the config's, and a config
+/// batch over the stated one refuses the plan, naming the limit and both values.
+#[test]
+fn the_links_batch_is_held_to_the_snapshots() {
+    let mut lowered = SessionLimits::defaults();
+    if lowered.select_pico_unicast_batch_bytes(512).is_err() {
+        // A build that keeps the batch to its own value has no other.
+        return;
+    }
+    let fits = ArenaPlan::of(
+        &CoopConfig {
+            batch_size: 512,
+            ..client_config()
+        },
+        &lowered,
+    )
+    .expect("a batch the snapshot holds lays an arena out");
+    assert_eq!(row(&fits, "link receive buffers").entry_bytes, 512);
+    assert_eq!(
+        ArenaPlan::of(
+            &CoopConfig {
+                batch_size: 513,
+                ..client_config()
+            },
+            &lowered,
+        ),
+        Err(ArenaRefused::Limit {
+            limit: "PICO_UNICAST_BATCH_BYTES",
+            why: UnlentRows::OverCeiling {
+                value: 513,
+                ceiling: 512,
+            },
+        })
+    );
+}
+
+/// A batch the session's limits state over the build's refuses the plan whatever the config
+/// advertises: the build fixes the most a link's buffers take.
+#[test]
+fn a_snapshot_batch_over_the_builds_refuses_the_plan() {
+    let over = caps::PICO_UNICAST_BATCH_BYTES + 1;
+    let mut raised = SessionLimits::defaults();
+    if raised.select_pico_unicast_batch_bytes(over).is_err() {
+        // A build whose domain stops at its own batch has no value over it.
+        return;
+    }
+    assert_eq!(
+        ArenaPlan::of(&client_config(), &raised),
+        Err(ArenaRefused::Limit {
+            limit: "PICO_UNICAST_BATCH_BYTES",
+            why: UnlentRows::OverCeiling {
+                value: over,
+                ceiling: caps::PICO_UNICAST_BATCH_BYTES,
+            },
+        })
+    );
+}
+
 /// A listener lays out the gets and the link of a face for the dial role, each face it admits and
 /// each handshake it holds; the application's tables are the session's, once, however many faces
 /// it holds.

@@ -911,11 +911,15 @@ fn row_key(keyexpr: &str) -> Option<RowKey> {
     Some(key)
 }
 
-/// The bound of the write filters' table: a publisher's and a querier's each.
-const FILTER_ROWS: usize = caps::MAX_PUBLISHERS + caps::MAX_QUERIERS;
+/// The write filters' table, sized by the build: a publisher's and a querier's each.
+type FilterRows = Rows<FilterEntry, { caps::MAX_PUBLISHERS + caps::MAX_QUERIERS }>;
 
-/// The bound of the Interests' table: one for each write filter and matching listener at most.
-const INTEREST_ROWS: usize = FILTER_ROWS + caps::MAX_MATCHING_LISTENERS;
+/// The Interests' table, sized by the build: one for each write filter and matching listener at
+/// most.
+type InterestRows = Rows<
+    InterestHold,
+    { caps::MAX_PUBLISHERS + caps::MAX_QUERIERS + caps::MAX_MATCHING_LISTENERS },
+>;
 
 struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     local: CoopLocalSet<C>,
@@ -975,9 +979,9 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// the ids the links hand out (`local-queryable`).
     #[cfg(feature = "local-queryable")]
     next_local_request: wz_session_core::wire_id::RequestId,
-    filters: Rows<FilterEntry, { FILTER_ROWS }>,
+    filters: FilterRows,
     next_filter: FilterId,
-    interests: Rows<InterestHold, { INTEREST_ROWS }>,
+    interests: InterestRows,
     /// The buffer a read's wait names its links' readiness in: lent to each wait
     /// ([`Self::idle_wait`]) and handed back after it ([`Self::give_back_waits`]), so a turn of
     /// the read allocates nothing once the buffer holds as many waits as the session has had.
