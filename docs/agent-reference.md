@@ -192,6 +192,27 @@ called `wz_artifact_root_init`, `artifact("<rel>")` in a gate or a test helper.
 Layer Ero runs Ewire and its pico oracle build in a read-only mount of the
 checkout to measure it.
 
+### Attributing a kit image's size change
+
+To say what moved an image's text, flash, static RAM, stack objects or
+symbols between two commits (a Qzk text gate or pico ceiling red, a row to
+move in `deploy/text_budget.json`), build both trees in ONE run:
+
+```
+bx --label kit-size-delta -- bash scripts/kit-size-delta.sh --base origin/main zephyr-client-heap
+```
+
+It checks the base out in a temporary worktree (its submodules from this
+checkout's repositories, no network), builds each image there and here with
+each tree's own `scripts/kit-lane.sh build`, and prints the pico ceiling
+gate's cells for base, head and the delta, the owners that moved and the
+symbols that changed, largest first (`scripts/lib/kit_size_delta.py`). Both
+builds are of one machine by construction, so do not pin `--host` and do not
+compare two separate runs. `--variant plain` builds the gated image instead
+of the ceiling's compare build; `--symbols N` prints more movers. Fetch first:
+`origin/main` is the ref the run was sent with. It exits 1 only on a build
+failure; a growth is printed, not judged.
+
 ## Stale MCP server and the tool pin
 
 **If the Mnemosyne concept resources are unreachable, the MCP server is STALE,

@@ -445,3 +445,14 @@ reference in the same run (`scripts/lib/pico_ceiling_gate.py`) and refuses an im
 flash, static RAM or stack objects are not under the reference's. Moving a row is still how a
 measured change is recorded; a move past the ceiling fails the layer anyway, and is answered by
 taking the bytes back or by the owner's decision, not by the row.
+
+## Attributing a change between two trees
+
+What moved a row is read by building the image before and after the change on one machine:
+`bx --label kit-size-delta -- bash scripts/kit-size-delta.sh --base origin/main KEY...`. The run
+checks the base out beside this tree, builds the image in both with each tree's own kit lane, and
+prints the ceiling gate's cells (text, flash, static RAM, stack objects, the storage block) for
+both and their delta, the owners of this file whose bytes moved, and the changed symbols of code
+and of data, largest movers first, with a growth that vanished callees explain tagged ABSORBED
+(`scripts/lib/footprint_attribution.py`'s matcher). The two builds share a toolchain because they
+share a run; two runs pinned to one host with `--host` are what it replaces.
