@@ -50,23 +50,49 @@ A pico case is also measured against zenoh-pico built as the SAME build: the pin
 Release and shared, with every switch `deploy/wz-config.toml` answers set from that answer for
 the case's features (`wz_config.pico_reference`). The gate builds it on the host it builds wz on,
 reads back the header pico generated to find any switch pico built otherwise than asked, and
-prints the ratio. The ratio is printed, not graded: the text budget already holds wz's size, and
-what this adds is that a size claim against pico is a number this gate printed, with its
-toolchain beside it, and never one copied from elsewhere. Rounds 3393 to 3395 divided by a
+prints the ratio, so a size claim against pico is a number this gate printed, with its toolchain
+beside it, and never one copied from elsewhere. Rounds 3393 to 3395 divided by a
 libzenohpico of unrecorded build; round 3472 corrected them with a reference whose switches were
 chosen by hand, and three of them (interest, matching, the receive cache) were set otherwise
 than the declaration says wz has them.
 
+## The ceiling (docs/upstream-parity.md D9)
+
+The text budget holds a case to its OWN figure, and a budget moves with the growth it records, so
+a case can fall behind zenoh-pico a budget move at a time with no finding: the MCU kit's build
+cells did exactly that (D8). Each pico case is therefore also held to the ratio of its text to
+the reference's, by its row in `deploy/pico_host_ceiling.json`:
+
+- WHY A RATIO. Both libraries are built on the same host in the same run, so what a host moves
+  alike on both sides (its linker, its libc, its section layout) cancels, and the ratio of one
+  tree is comparable across hosts within `RATIO_TOLERANCE`, where its bytes are not (the notes
+  of `CASES` record hosted CI reading a tree thousands of bytes off a build host). The reference
+  is built with the host's C compiler, so a failing row names the toolchain it was read with
+  beside this run's.
+- WHY A RATCHET. A case that is no WIN is an open-debt item (D5), paid largest ratio first, and
+  meanwhile may not get worse than its committed reading: `ratio_at_most` is that reading's ratio
+  rounded up, and a reading over it by more than the tolerance fails. A reading under it by more
+  than the tolerance passes and prints the tighter row to commit, so the bound follows every
+  gain down. A case that reads WIN fails until its row is locked (the gate prints the row), and a
+  locked case reads WIN or fails (D1): no budget or row move clears a LOSS once won.
+- POPULATION. Every pico case has exactly one row and every row a pico case, so a case cannot
+  join outside the ceiling. A row with `ratio_at_most` null is unfilled: it fails `--check`
+  with the row this run reads, and `--measure` prints the rows of every case it builds.
+
 Usage:
     capability_cost_gate.py --check [ID...]    build every case (or the named ones), grade it
-    capability_cost_gate.py --measure [ID...]  build the same and print what was measured
+    capability_cost_gate.py --measure [ID...]  build the same and print what was measured,
+                                               with each pico case's ceiling row to commit
     capability_cost_gate.py --selftest     grade the grader on synthetic input
 """
 
 from __future__ import annotations
 
+import datetime
 import hashlib
 import io
+import json
+import math
 import os
 import pathlib
 import re
@@ -74,10 +100,12 @@ import subprocess
 import sys
 import tarfile
 from dataclasses import dataclass, field
+from fractions import Fraction
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import wz_config  # noqa: E402  (the one declaration, and its resolver)
 from artifact_root import artifact  # noqa: E402  (a sibling: where products are)
+from kit_compare import verdict_size  # noqa: E402  (decision D1's size verdict, one copy)
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 CRATES = ROOT / "crates"
@@ -1464,14 +1492,14 @@ def pico_reference_build(asked: dict[str, int]) -> Reference:
                      toolchain=toolchain, refused=tuple(refused_switches(asked, header)))
 
 
-def report_reference(case: Case, got: Measured) -> None:
-    """Print the case's size against zenoh-pico built as the same build. Only the pico ABI's
-    cases have one here: zenoh-c's original is a Rust build of its own the lanes that install the
-    oracle provision, and this lane does not."""
+def report_reference(case: Case, got: Measured) -> Reference | None:
+    """Print the case's size against zenoh-pico built as the same build, and return that build.
+    Only the pico ABI's cases have one here: zenoh-c's original is a Rust build of its own the
+    lanes that install the oracle provision, and this lane does not."""
     if case.package != "wz-capi-pico":
         print(f"  capability-cost: {case.id}: no same-build reference in this lane (zenoh-c's is "
               f"provisioned only where the oracle is installed)")
-        return
+        return None
     asked = wz_config.pico_reference(wz_config.load_decl(), case_features(case))
     ref = pico_reference_build(asked)
     print(f"  capability-cost: {case.id}: zenoh-pico {ref.pin} as the same build: text "
@@ -1479,6 +1507,207 @@ def report_reference(case: Case, got: Measured) -> None:
     if ref.refused:
         print(f"  capability-cost: {case.id}: pico built {', '.join(ref.refused)} otherwise than "
               f"asked, so the two builds differ there")
+    return ref
+
+
+# ── the pico ceiling of the host libraries (docs/upstream-parity.md D9) ────────────────────────
+
+# The committed table: per pico case, the ratio it may not exceed, or its lock at WIN.
+HOST_CEILING = ROOT / "deploy" / "pico_host_ceiling.json"
+HOST_CEILING_SCHEMA = 1
+# How far over its ratchet a ratio may read before the case fails, relative to the ratchet. Two
+# readings of one tree on one host are equal (both builds are deterministic), so this is only the
+# spread between hosts. The largest this file's notes record for wz is hosted CI reading
+# `pico-default` 3,600 bytes over a build host (0.08 percent) and the pico client images 1,264
+# over another (0.07 percent); allowing the reference as much again in the other direction gives
+# 0.16 percent, and 0.2 percent is that rounded up. It bounds only what the ratio forgives: the
+# case's byte budget still holds it to its own figure and margin.
+RATIO_TOLERANCE = 0.002
+# A ratchet is the reading's ratio rounded UP to four places, so the bound never sits under the
+# reading it was set from.
+RATIO_PLACES = 10_000
+DEBT_ID = re.compile(r"open-debt item [0-9]+")
+DEBT_PLACEHOLDER = "open-debt item TBD"
+READING_KEYS = ("date", "wz_text", "pico_text", "pico_pin", "toolchain")
+ROW_KEYS = frozenset(("verdict", "ratio_at_most", "debt", "reading"))
+CEILING_NO_BUDGET = ("no budget or row move clears it: take the bytes back, or the owner "
+                     "decides (docs/upstream-parity.md D9)")
+
+
+def ceiling_cases() -> list[str]:
+    """The cases the ceiling holds: every pico case, the ones `report_reference` builds a
+    reference for."""
+    return [c.id for c in CASES if c.package == "wz-capi-pico"]
+
+
+def load_ceiling(path: pathlib.Path = HOST_CEILING) -> dict | None:
+    if not path.is_file():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def ceiling_rows(table: dict | None) -> dict:
+    rows = table.get("cases") if isinstance(table, dict) else None
+    return rows if isinstance(rows, dict) else {}
+
+
+def ceil_ratio(wz_text: int, pico_text: int) -> float:
+    """wz text over pico text, rounded up to four places in exact arithmetic."""
+    return math.ceil(Fraction(wz_text * RATIO_PLACES, pico_text)) / RATIO_PLACES
+
+
+def ceiling_reading(wz_text: int, pico_text: int, pin: str, toolchain: str, date: str) -> dict:
+    return {"date": date, "wz_text": wz_text, "pico_text": pico_text, "pico_pin": pin,
+            "toolchain": toolchain}
+
+
+def ceiling_row(reading: dict, debt: str | None) -> dict:
+    """The row a reading sets: locked when it is a WIN (D1), a ratchet at its ratio otherwise,
+    under the debt item the case is registered with (a placeholder while it has none)."""
+    row: dict = {}
+    if verdict_size(reading["wz_text"], reading["pico_text"]) == "WIN":
+        row["verdict"] = "win"
+        if debt and DEBT_ID.fullmatch(debt):
+            row["debt"] = debt
+    else:
+        row["ratio_at_most"] = ceil_ratio(reading["wz_text"], reading["pico_text"])
+        row["debt"] = debt if debt and DEBT_ID.fullmatch(debt) else DEBT_PLACEHOLDER
+    row["reading"] = reading
+    return row
+
+
+def format_row(case_id: str, row: dict) -> str:
+    return f"{json.dumps(case_id)}: {json.dumps(row)}"
+
+
+def reading_findings(case_id: str, reading: object) -> list[str]:
+    if not isinstance(reading, dict) or set(reading) != set(READING_KEYS):
+        return [f"{case_id}: its reading must state exactly {', '.join(READING_KEYS)}"]
+    out: list[str] = []
+    for key in ("wz_text", "pico_text"):
+        if type(reading[key]) is not int or reading[key] <= 0:
+            out.append(f"{case_id}: its reading's {key} is not a positive byte count")
+    for key in ("date", "pico_pin", "toolchain"):
+        if not isinstance(reading[key], str) or not reading[key]:
+            out.append(f"{case_id}: its reading's {key} is empty")
+    return out
+
+
+def row_findings(case_id: str, row: object) -> list[str]:
+    """What makes a row of the table no row of the ceiling. A row whose `ratio_at_most` is null
+    is well formed here (the unfilled form) and refused by `grade_ceiling`."""
+    if not isinstance(row, dict):
+        return [f"{case_id}: its row is not an object"]
+    out = [f"{case_id}: its row has the unknown key {key!r}" for key in sorted(set(row) - ROW_KEYS)]
+    locked = "verdict" in row
+    if locked == ("ratio_at_most" in row):
+        return out + [f"{case_id}: its row must state either `verdict` (locked) or "
+                      f"`ratio_at_most` (ratchet), and states {'both' if locked else 'neither'}"]
+    if locked:
+        if row["verdict"] != "win":
+            out.append(f"{case_id}: a locked row's verdict is \"win\" and nothing else (D1: only "
+                       f"WIN counts), not {row['verdict']!r}")
+        found = reading_findings(case_id, row.get("reading"))
+        out += found
+        if not found and verdict_size(row["reading"]["wz_text"], row["reading"]["pico_text"]) != "WIN":
+            out.append(f"{case_id}: the row is locked at WIN on a reading that is no WIN")
+        if "debt" in row and not (isinstance(row["debt"], str) and DEBT_ID.fullmatch(row["debt"])):
+            out.append(f"{case_id}: a locked row's debt, when stated, is the item its WIN closed "
+                       f"(`open-debt item <n>`)")
+        return out
+    if not isinstance(row.get("debt"), str):
+        out.append(f"{case_id}: a ratchet row states the debt item it is registered under")
+    at_most = row["ratio_at_most"]
+    if at_most is None:
+        if row.get("reading") is not None:
+            out.append(f"{case_id}: an unfilled row (`ratio_at_most` null) states no reading")
+        return out
+    if isinstance(at_most, bool) or not isinstance(at_most, (int, float)) or at_most <= 0:
+        return out + [f"{case_id}: its ratio_at_most is not a positive number"]
+    found = reading_findings(case_id, row.get("reading"))
+    if found:
+        return out + found
+    reading = row["reading"]
+    if at_most != ceil_ratio(reading["wz_text"], reading["pico_text"]):
+        out.append(f"{case_id}: its ratio_at_most {at_most} is not its reading's ratio rounded up "
+                   f"to four places ({ceil_ratio(reading['wz_text'], reading['pico_text'])}): the "
+                   f"ratchet is set from a stated reading and from nothing else")
+    if verdict_size(reading["wz_text"], reading["pico_text"]) == "WIN":
+        out.append(f"{case_id}: a ratchet row set from a WIN; lock it: "
+                   f"{format_row(case_id, ceiling_row(reading, row.get('debt')))}")
+    return out
+
+
+def table_findings(table: dict | None, case_ids: list[str]) -> list[str]:
+    """What keeps the table from holding each of `case_ids` with one well-formed row. Static: it
+    needs no build, so a run of some cases still grades the whole table."""
+    where = HOST_CEILING.relative_to(ROOT)
+    if table is None:
+        return [f"{where} is missing: every pico case is held under zenoh-pico by its row there"]
+    if not isinstance(table, dict) or table.get("schema") != HOST_CEILING_SCHEMA:
+        return [f"{where} is not schema {HOST_CEILING_SCHEMA}"]
+    rows = table.get("cases")
+    if not isinstance(rows, dict):
+        return [f"{where} has no `cases` object"]
+    out: list[str] = []
+    for case_id in case_ids:
+        if case_id not in rows:
+            out.append(f"{case_id}: no row in {where}: a pico case is held under zenoh-pico from "
+                       f"the commit that adds it, so the population cannot grow past the ceiling; "
+                       f"`--measure {case_id}` prints its row")
+    for case_id, row in rows.items():
+        if case_id not in case_ids:
+            out.append(f"{case_id}: a row in {where} for no pico case of CASES")
+        else:
+            out += row_findings(case_id, row)
+    return out
+
+
+def grade_ceiling(case_id: str, row: dict, reading: dict) -> tuple[list[str], list[str]]:
+    """The findings and the notes for one case's reading against its well-formed row. Pure, so
+    the selftest can drive it."""
+    wz_text, pico_text = reading["wz_text"], reading["pico_text"]
+    ratio = wz_text / pico_text
+    verdict = verdict_size(wz_text, pico_text)
+    said = (f"{case_id}: wz text {wz_text} against zenoh-pico {pico_text} as the same build, "
+            f"ratio {ratio:.4f}, {verdict}")
+    if "verdict" in row:
+        if verdict != "WIN":
+            return [f"{said}. The case is locked at WIN (since {row['reading']['date']}); "
+                    f"{CEILING_NO_BUDGET}"], []
+        return [], []
+    debt = row.get("debt")
+    at_most = row["ratio_at_most"]
+    if at_most is None:
+        return [f"{said}. Its row in {HOST_CEILING.relative_to(ROOT)} states no ratio_at_most, so "
+                f"the case is held to nothing. Fill it from the host that grades it: paste "
+                f"{format_row(case_id, ceiling_row(reading, debt))} over the row, with `debt` the "
+                f"open-debt item the case is registered under (D5); "
+                f"`python3 scripts/lib/capability_cost_gate.py --measure {case_id}` prints the "
+                f"same row"], []
+    findings: list[str] = []
+    notes: list[str] = []
+    if not (isinstance(debt, str) and DEBT_ID.fullmatch(debt)):
+        findings.append(f"{case_id}: its row names no registered debt ({debt!r}): a case that is no "
+                        f"WIN is an open-debt item, paid largest ratio first (D5), and its row "
+                        f"says which (`open-debt item <n>`)")
+    if verdict == "WIN":
+        findings.append(f"{said}. A case that reached WIN is locked at WIN from now on: replace its "
+                        f"row with {format_row(case_id, ceiling_row(reading, debt))} and close "
+                        f"{debt}")
+        return findings, notes
+    limit = at_most * (1 + RATIO_TOLERANCE)
+    if ratio > limit:
+        then = row["reading"]
+        host = ("" if then["toolchain"] == reading["toolchain"] else
+                f"; the row was read with {then['toolchain']}, this run with {reading['toolchain']}")
+        findings.append(f"{said}, over its ratchet {at_most} (with the {RATIO_TOLERANCE:.1%} "
+                        f"tolerance, {limit:.4f}; set {then['date']} from {then['wz_text']} against "
+                        f"{then['pico_text']}){host}. A ratchet only moves down: {CEILING_NO_BUDGET}")
+    elif ratio * (1 + RATIO_TOLERANCE) < at_most:
+        notes.append(f"{case_id}: ratio {ratio:.4f} is under its ratchet {at_most} by more than the "
+                     f"tolerance; commit the tighter row: {format_row(case_id, ceiling_row(reading, debt))}")
+    return findings, notes
 
 
 def cmd_check(measure_only: bool, only: list[str]) -> int:
@@ -1487,6 +1716,15 @@ def cmd_check(measure_only: bool, only: list[str]) -> int:
         print(f"  capability-cost: no such case: {unknown}", file=sys.stderr)
         return 2
     rc = 0
+    table = load_ceiling()
+    rows = ceiling_rows(table)
+    if not measure_only:
+        for finding in table_findings(table, ceiling_cases()):
+            print(f"  capability-cost FAIL: {finding}", file=sys.stderr)
+            rc = 1
+    today = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+    measured_rows: dict[str, dict] = {}
+    ceilinged = 0
     for case in CASES:
         if only and case.id not in only:
             continue
@@ -1495,10 +1733,31 @@ def cmd_check(measure_only: bool, only: list[str]) -> int:
         print(f"  capability-cost: {case.id}: text {got.text} of {case.max_text} "
               f"({100 * got.text // case.max_text}%), {got.exports} exports, conformance digest "
               f"{', '.join(got.digests) or 'none'} (statement {stated})")
-        report_reference(case, got)
+        ref = report_reference(case, got)
+        reading = None
+        row = rows.get(case.id)
+        if ref is not None:
+            reading = ceiling_reading(got.text, ref.text, ref.pin, ref.toolchain, today)
+            debt = row.get("debt") if isinstance(row, dict) else None
+            measured_rows[case.id] = ceiling_row(reading, debt if isinstance(debt, str) else None)
         if measure_only:
             continue
         for finding in grade(case, got, stated):
+            print(f"  capability-cost FAIL: {finding}", file=sys.stderr)
+            rc = 1
+        if reading is None:
+            continue
+        if row is None:
+            print(f"  capability-cost: {case.id}: the row to add: "
+                  f"{format_row(case.id, measured_rows[case.id])}")
+            continue
+        if row_findings(case.id, row):
+            continue  # named by table_findings above
+        ceilinged += 1
+        findings, notes = grade_ceiling(case.id, row, reading)
+        for note in notes:
+            print(f"  capability-cost: {note}")
+        for finding in findings:
             print(f"  capability-cost FAIL: {finding}", file=sys.stderr)
             rc = 1
     statements = 0
@@ -1519,10 +1778,17 @@ def cmd_check(measure_only: bool, only: list[str]) -> int:
             print(f"  capability-cost FAIL: {finding}", file=sys.stderr)
             rc = 1
     sized = sum(1 for c in CASES if not only or c.id in only)
+    if measured_rows:
+        print(f"  capability-cost: the rows this run reads for {HOST_CEILING.relative_to(ROOT)} "
+              f"`cases` (each replaces the row of its case; a ratchet's `debt` is the open-debt "
+              f"item the case is registered under):")
+        for n, (case_id, row) in enumerate(measured_rows.items(), 1):
+            print(f"    {format_row(case_id, row)}{',' if n < len(measured_rows) else ''}")
     if rc == 0 and not measure_only:
         print(f"  capability-cost: {sized} case(s) within budget, absent where absent, present "
-              f"where present, each carrying its statement's digest; {statements} build(s) with "
-              f"stated limits, policies or arm carrying theirs")
+              f"where present, each carrying its statement's digest; {ceilinged} pico case(s) "
+              f"under their zenoh-pico ceiling; {statements} build(s) with stated limits, "
+              f"policies or arm carrying theirs")
     return rc
 
 
@@ -1659,6 +1925,83 @@ def cmd_selftest() -> int:
     expect("every case's profile is one crates/Cargo.toml defines",
            {c.profile for c in CASES} <= {"release"} | set(
                re.findall(r"^\[profile\.([\w-]+)\]", (CRATES / "Cargo.toml").read_text(), re.M)))
+    # THE PICO CEILING (D9): synthetic readings against each kind of row, and the committed table.
+    def rd(wz: int, pico: int, date: str = "2026-11-21", tc: str = "cc 1") -> dict:
+        return ceiling_reading(wz, pico, "e1ab223a28aa", tc, date)
+
+    debt = "open-debt item 1"
+    set_from = rd(2_520_000, 1_000_000, "2026-11-20")
+    ratchet = ceiling_row(set_from, debt)
+    expect("a reading that is no WIN sets a ratchet at its ratio, rounded up, under its debt",
+           ratchet == {"ratio_at_most": 2.52, "debt": debt, "reading": set_from}
+           and ceiling_row(rd(1_016_594, 403_086), debt)["ratio_at_most"] == 2.5221
+           and ceil_ratio(3, 1) == 3.0 and ceil_ratio(1, 3) == 0.3334)
+    expect("a reading with no registered debt sets the placeholder, which a grade refuses",
+           ceiling_row(set_from, None)["debt"] == DEBT_PLACEHOLDER
+           and ceiling_row(set_from, DEBT_PLACEHOLDER)["debt"] == DEBT_PLACEHOLDER
+           and any("registered debt" in f
+                   for f in grade_ceiling("t", ceiling_row(set_from, None), set_from)[0]))
+    win = rd(990, 1000)
+    locked = ceiling_row(win, debt)
+    expect("a WIN reading sets a locked row",
+           locked == {"verdict": "win", "debt": debt, "reading": win}
+           and ceiling_row(win, DEBT_PLACEHOLDER) == {"verdict": "win", "reading": win})
+    expect("a locked case that reads WIN passes", grade_ceiling("t", locked, rd(999, 1000)) == ([], []))
+    expect("a locked case that reads LOSS or TIE fails, and no budget clears it",
+           all(len(f) == 1 and "locked at WIN" in f[0] and n == []
+               for f, n in (grade_ceiling("t", locked, rd(1001, 1000)),
+                            grade_ceiling("t", locked, rd(1000, 1000)))))
+    expect("a ratchet case at its ratio passes, and so does one inside the tolerance",
+           grade_ceiling("t", ratchet, rd(2_520_000, 1_000_000)) == ([], [])
+           and grade_ceiling("t", ratchet, rd(2_525_000, 1_000_000)) == ([], []))
+    over, _ = grade_ceiling("t", ratchet, rd(2_526_000, 1_000_000))
+    expect("a ratchet case over the tolerance fails, naming the reading it was set from",
+           len(over) == 1 and "over its ratchet 2.52" in over[0] and "2026-11-20" in over[0]
+           and "read with" not in over[0])
+    expect("a ratchet failure on another toolchain names both",
+           "the row was read with cc 1, this run with cc 2"
+           in grade_ceiling("t", ratchet, rd(2_600_000, 1_000_000, tc="cc 2"))[0][0])
+    expect("the tolerance is relative to the ratchet and is 0.2 percent",
+           RATIO_TOLERANCE == 0.002
+           and grade_ceiling("t", ceiling_row(rd(10_000, 10_000), debt), rd(10_019, 10_000))[0] == []
+           and grade_ceiling("t", ceiling_row(rd(10_000, 10_000), debt), rd(10_021, 10_000))[0] != [])
+    lower, tighter = grade_ceiling("t", ratchet, rd(2_400_000, 1_000_000))
+    expect("a ratchet case well under its ratio passes and prints the tighter row to commit",
+           lower == [] and len(tighter) == 1 and '"ratio_at_most": 2.4' in tighter[0])
+    won, _ = grade_ceiling("t", ratchet, rd(999_999, 1_000_000))
+    expect("a ratchet case that reads WIN fails and prints the locked row to commit",
+           len(won) == 1 and '"verdict": "win"' in won[0] and "close " + debt in won[0])
+    unfilled = {"ratio_at_most": None, "debt": DEBT_PLACEHOLDER, "reading": None}
+    blank, _ = grade_ceiling("t", unfilled, set_from)
+    expect("an unfilled row fails, saying how to fill it with this run's row",
+           len(blank) == 1 and "--measure t" in blank[0] and '"ratio_at_most": 2.52' in blank[0])
+    # The table's shape, static: the population, the two row forms and their readings.
+    good = {"schema": HOST_CEILING_SCHEMA, "cases": {"a": ratchet, "b": locked, "c": unfilled}}
+    expect("a table with one well-formed row per case passes",
+           table_findings(good, ["a", "b", "c"]) == [])
+    expect("a case with no row, and a row for no case, are findings",
+           len(table_findings(good, ["a", "b", "c", "d"])) == 1
+           and len(table_findings(good, ["a", "b"])) == 1
+           and len(table_findings(None, ["a"])) == 1
+           and len(table_findings({"schema": 0, "cases": {}}, [])) == 1)
+    bad_rows = (
+        {**ratchet, "verdict": "win"},  # both forms
+        {"debt": debt, "reading": set_from},  # neither
+        {**ratchet, "ratio_at_mots": 2.52},  # an unknown key
+        {**ratchet, "ratio_at_most": 2.6},  # a bound no reading set
+        {**locked, "verdict": "tie"},  # a lock on anything but WIN
+        {**locked, "reading": set_from},  # a lock on a reading that is no WIN
+        {**ratchet, "reading": {**set_from, "wz_text": "2520000"}},  # a reading that is no count
+        {**unfilled, "reading": set_from},  # an unfilled row that states a reading
+        {"ratio_at_most": 1.0, "debt": debt, "reading": rd(999_999, 1_000_000)},  # a WIN ratchet
+    )
+    expect("each malformed row is a finding",
+           all(row_findings("t", r) for r in bad_rows))
+    committed = load_ceiling()
+    expect("the committed table holds every pico case of CASES, one well-formed row each",
+           table_findings(committed, ceiling_cases()) == []
+           and set(ceiling_rows(committed)) == {c.id for c in CASES if c.package == "wz-capi-pico"}
+           and len(ceiling_cases()) >= 1)
     print(f"  capability-cost selftest: {ok}/{ok + bad} arm(s) pass")
     return 0 if bad == 0 else 1
 
