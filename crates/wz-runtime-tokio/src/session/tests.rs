@@ -13959,6 +13959,7 @@ fn tapped_qos_group_session_under(
         join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
         max_sessions: None,
         policy,
+        limits: wz_session_core::limits::SessionLimits::BUILD,
     };
     let (producer, tap) = crate::multicast_pipeline::MulticastTxTap::attach(&params);
     let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));

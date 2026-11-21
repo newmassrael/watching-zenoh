@@ -150,6 +150,7 @@ fn group_member(zid_byte: u8) -> (impl std::future::Future<Output = ()>, Multica
             join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
             max_sessions: None,
             policy: wz_session_core::policy::SessionPolicy::defaults(),
+            limits: wz_session_core::limits::SessionLimits::BUILD,
         };
         let clock = TokioTime::new();
         let outcome = drive_multicast_session(

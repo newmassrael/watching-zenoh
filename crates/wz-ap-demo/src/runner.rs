@@ -6908,6 +6908,7 @@ async fn run_router_hat_until(
                 // expands to.
                 max_sessions: multicast_max_sessions,
                 policy: params.policy,
+                limits: params.limits,
             },
             mcast_opts.clone(),
             node_stats.clone(),

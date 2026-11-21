@@ -107,6 +107,7 @@ fn group_params(zid_byte: u8) -> MulticastParams {
         join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
         max_sessions: None,
         policy: wz_session_core::policy::SessionPolicy::defaults(),
+        limits: wz_session_core::limits::SessionLimits::BUILD,
     }
 }
 

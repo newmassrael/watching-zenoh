@@ -174,6 +174,9 @@ impl GroupTiming {
 /// `policy`, the node's snapshot: the parameters carry it to the group's drive loop, and the
 /// queue its session is made with is made from it.
 fn group_params(zid: &[u8], timing: &GroupTiming, policy: &SessionPolicy) -> MulticastParams {
+    // The node's image resolves no limits snapshot of its own: the build's limits are the ones
+    // its group runs with, named here, and its queue and machines read them from the parameters.
+    let limits = wz_session_core::limits::SessionLimits::BUILD;
     MulticastParams {
         whatami: WhatAmI::Peer,
         zid: zid_vec(zid),
@@ -184,9 +187,7 @@ fn group_params(zid: &[u8], timing: &GroupTiming, policy: &SessionPolicy) -> Mul
         batch_size: GROUP_BATCH_BYTES,
         is_qos: false,
         compression: false,
-        // The node's image resolves no limits snapshot of its own: the build's window is the one
-        // its group runs with, named here.
-        tx_queue: TxQueueConf::of_snapshot(policy, &wz_session_core::limits::SessionLimits::BUILD),
+        tx_queue: TxQueueConf::of_snapshot(policy, &limits),
         link_rx: LinkRxConf::default(),
         // The MCU session is zenoh-pico's.
         join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
@@ -194,6 +195,7 @@ fn group_params(zid: &[u8], timing: &GroupTiming, policy: &SessionPolicy) -> Mul
         // (`MEMBERS`) is the bound.
         max_sessions: None,
         policy: *policy,
+        limits,
     }
 }
 

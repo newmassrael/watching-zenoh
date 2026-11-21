@@ -1786,6 +1786,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             self.config.tx_queue,
             self.config.link_rx,
             self.policy,
+            resolve_limits(&self.config),
         );
         // A member's query is held, and answered, under the group's own generation, as a link's
         // is under its; each join of the group is a generation of its own.

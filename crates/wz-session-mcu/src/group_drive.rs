@@ -2471,6 +2471,7 @@ mod tests {
             join_rule: GroupJoinRule::Pico,
             max_sessions: None,
             policy: SessionPolicy::defaults(),
+            limits: wz_session_core::limits::SessionLimits::BUILD,
         }
     }
 

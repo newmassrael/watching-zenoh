@@ -101,6 +101,7 @@ fn router_profile(zid: Vec<u8>) -> wz_runtime_tokio::multicast_glue::RouterGroup
         join_rule: wz_runtime_tokio::multicast_glue::GroupJoinRule::Pico,
         max_sessions: None,
         policy: wz_session_core::policy::SessionPolicy::defaults(),
+        limits: wz_session_core::limits::SessionLimits::BUILD,
     }
 }
 
@@ -133,6 +134,7 @@ fn mc_params(zid_byte: u8) -> MulticastParams {
         join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
         max_sessions: None,
         policy: wz_session_core::policy::SessionPolicy::defaults(),
+        limits: wz_session_core::limits::SessionLimits::BUILD,
     }
 }
 

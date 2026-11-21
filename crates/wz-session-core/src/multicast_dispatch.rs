@@ -5481,6 +5481,7 @@ mod tests {
             join_rule: crate::multicast_params::GroupJoinRule::Pico,
             max_sessions: Some(9),
             policy,
+            limits: crate::limits::SessionLimits::BUILD,
         };
         for scope in [false, true] {
             let config = MulticastConfig::of_group(&params, scope);

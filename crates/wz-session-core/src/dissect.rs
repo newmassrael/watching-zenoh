@@ -9202,6 +9202,7 @@ mod tests {
             join_rule: crate::multicast_params::GroupJoinRule::Pico,
             max_sessions: None,
             policy: crate::policy::SessionPolicy::defaults(),
+            limits: crate::limits::SessionLimits::BUILD,
         };
 
         // BOTH configurations, because the extension is `is_qos`-gated and a

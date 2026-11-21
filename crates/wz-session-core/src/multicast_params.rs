@@ -210,6 +210,12 @@ pub struct MulticastParams {
     /// here and never from the build. A target with no operating system that widens no domain
     /// holds the snapshot in no byte, so a slot that holds these parameters does not grow.
     pub policy: crate::policy::SessionPolicy,
+    /// The value of every limit the group's machines read: the snapshot of limits the group's
+    /// creator resolved with [`Self::policy`], as
+    /// [`SessionInitParams::limits`](crate::session_init_params::SessionInitParams::limits) is a
+    /// unicast session's. The group's queue ([`Self::tx_queue`]) is made from it. A build that
+    /// allows each limit one value holds it in no byte.
+    pub limits: crate::limits::SessionLimits,
 }
 
 /// Whose rule a node judges the Join of a group member by. Both upstreams admit an unknown

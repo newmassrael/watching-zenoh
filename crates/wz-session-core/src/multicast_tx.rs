@@ -407,13 +407,12 @@ pub fn multicast_tx_emit(
     let reliable = multicast_tx_reliable(&item);
     let mut collect = UnboundedCollect(Vec::new());
     // Always room, so never `Congested` and the waits are never spent; the queue is the one the
-    // group's snapshot makes, as every queue a machine builds is. The group's parameters carry no
-    // limits snapshot, and the window is a wait this push never spends, so the build's is named.
+    // group's snapshots make, as every queue a machine builds is.
     let _ = multicast_tx_push(
         item,
         tx_sn,
         params,
-        &TxQueueConf::of_snapshot(&params.policy, &crate::limits::SessionLimits::BUILD),
+        &TxQueueConf::of_snapshot(&params.policy, &params.limits),
         &mut collect,
     );
     MulticastTxFrames {
@@ -1833,6 +1832,7 @@ mod qos_emit_tests {
             join_rule: crate::multicast_params::GroupJoinRule::Pico,
             max_sessions: None,
             policy: crate::policy::SessionPolicy::defaults(),
+            limits: crate::limits::SessionLimits::BUILD,
         }
     }
 
@@ -1933,6 +1933,7 @@ mod push_tests {
             join_rule: crate::multicast_params::GroupJoinRule::Pico,
             max_sessions: None,
             policy: crate::policy::SessionPolicy::defaults(),
+            limits: crate::limits::SessionLimits::BUILD,
         }
     }
 
@@ -2574,6 +2575,7 @@ mod lend_tests {
             join_rule: crate::multicast_params::GroupJoinRule::Pico,
             max_sessions: None,
             policy: crate::policy::SessionPolicy::defaults(),
+            limits: crate::limits::SessionLimits::BUILD,
         }
     }
 
@@ -2798,6 +2800,7 @@ mod lent_emit_tests {
             join_rule: crate::multicast_params::GroupJoinRule::Pico,
             max_sessions: None,
             policy: crate::policy::SessionPolicy::defaults(),
+            limits: crate::limits::SessionLimits::BUILD,
         }
     }
 

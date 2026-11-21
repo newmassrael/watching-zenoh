@@ -1668,6 +1668,7 @@ fn router_group_params(
         join_rule,
         max_sessions,
         policy,
+        limits,
     } = profile;
     wz_session_core::multicast_params::MulticastParams {
         whatami: wz_session_core::WhatAmI::Router,
@@ -1684,6 +1685,7 @@ fn router_group_params(
         join_rule,
         max_sessions,
         policy,
+        limits,
     }
 }
 
@@ -1747,6 +1749,9 @@ pub struct RouterGroupProfile {
     /// The node's snapshot of its policies, which the face's drive loop, its writer and its
     /// session read ([`MulticastParams::policy`]).
     pub policy: wz_session_core::policy::SessionPolicy,
+    /// The node's snapshot of its limits, which the face's machines read and its queue is made
+    /// from ([`MulticastParams::limits`]).
+    pub limits: wz_session_core::limits::SessionLimits,
 }
 
 /// The future a group face's bind returns, borrowing the face's options.
@@ -2871,6 +2876,7 @@ mod tests {
             join_rule: GroupJoinRule::Pico,
             max_sessions: None,
             policy: wz_session_core::policy::SessionPolicy::defaults(),
+            limits: wz_session_core::limits::SessionLimits::BUILD,
         }
     }
 
@@ -3086,6 +3092,7 @@ mod tests {
             join_rule: GroupJoinRule::Pico,
             max_sessions: None,
             policy: wz_session_core::policy::SessionPolicy::defaults(),
+            limits: wz_session_core::limits::SessionLimits::BUILD,
         });
         assert_eq!(group.tx_queue, operator);
         assert!(group.is_qos);
@@ -3120,6 +3127,7 @@ mod tests {
             join_rule: GroupJoinRule::Zenoh,
             max_sessions: Some(9),
             policy: wz_session_core::policy::SessionPolicy::defaults(),
+            limits: wz_session_core::limits::SessionLimits::BUILD,
         });
         assert_eq!(group.join_rule, GroupJoinRule::Zenoh);
         assert_eq!(group.max_sessions, Some(9), "the node's member cap");
@@ -3167,6 +3175,7 @@ mod tests {
                 join_rule: GroupJoinRule::Pico,
                 max_sessions: None,
                 policy,
+                limits: wz_session_core::limits::SessionLimits::BUILD,
             });
             assert_eq!(group.policy, policy, "{value:?}");
             assert_eq!(group.policy.multicast_loopback(), value);

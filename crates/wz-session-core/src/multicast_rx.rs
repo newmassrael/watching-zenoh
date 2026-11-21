@@ -1102,6 +1102,7 @@ mod batch_walk_tests {
             join_rule: GroupJoinRule::Pico,
             max_sessions: None,
             policy: crate::policy::SessionPolicy::defaults(),
+            limits: crate::limits::SessionLimits::BUILD,
         }
     }
 
