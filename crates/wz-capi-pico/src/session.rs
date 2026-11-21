@@ -688,7 +688,7 @@ pub unsafe extern "C" fn z_open(
         // The key-wire form, judged for the engine the session opens on, and the key ids every
         // node shares that the config states (`crate::key_ids`).
         #[cfg(feature = "shared-key-ids")]
-        let key_ids = match crate::key_ids::admit_at_open(&cfg, &policy) {
+        let key_ids = match crate::key_ids::admit_at_open(&cfg, &policy, &limits) {
             Ok(key_ids) => key_ids,
             Err(code) => return code,
         };

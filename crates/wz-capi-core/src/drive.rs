@@ -4744,11 +4744,13 @@ pub fn open_blocking(
     refuse_a_refused_clock(&node_hlc)?;
     // The key ids every node shares and the form of each face, from the endpoints in the order
     // the faces are numbered by. A form the session cannot honour (`shared` with no dictionary,
-    // an endpoint stated twice) fails the open before any thread or socket exists.
+    // an endpoint stated twice), or a dictionary past the session's limit, fails the open before
+    // any thread or socket exists.
     #[cfg(feature = "shared-key-ids")]
     let key_ids = match crate::faces::KeyIdPlan::new(
         &session_defaults.key_ids,
         session_policy.key_wire_form(),
+        &session_limits,
         &connect,
         &listen,
     ) {

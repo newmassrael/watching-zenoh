@@ -1506,13 +1506,14 @@ const char *wz_ext_conformance_digest(void);
  *
  * Z_OK; Z_ERR_NULL for a NULL config, a NULL array with entries, or a NULL
  * key; Z_ERR_INVALID for a key that is not UTF-8 or not a canonical key
- * expression, an id of 0, and an id or a key named twice; Z_ERR_OVERFLOW for
- * more entries than the build's MAX_SHARED_KEY_IDS. A refused call leaves
- * the config as it was.
+ * expression, an id of 0, and an id or a key named twice. A refused call
+ * leaves the config as it was.
  *
  * z_open then refuses with Z_ERR_INVALID a session whose key-wire form, or
  * the form stated for one of its endpoints, is shared and whose config
- * states no dictionary. */
+ * states no dictionary, and with Z_ERR_OVERFLOW a dictionary of more entries
+ * than the session's MAX_SHARED_KEY_IDS: the build's, or the value the
+ * config's document states under wz/limits. */
 z_result_t wz_ext_config_key_ids(z_loaned_config_t *config,
                                  const uint16_t *ids,
                                  const char *const *keys, size_t count);

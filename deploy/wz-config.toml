@@ -2325,7 +2325,7 @@ storage = "quota"
 scope = "link"
 binding_heap = "open"
 binding_fixed = "open"
-read = "build"
+read = "snapshot"
 # `wire` is none: a reply whose request's key form was let go names its key in the link's own form,
 # which the peer reads as it reads any reply.
 wire = "none"
@@ -2526,7 +2526,7 @@ storage = "quota"
 scope = "session"
 binding_heap = "open"
 binding_fixed = "none"
-read = "build"
+read = "snapshot"
 # `wire` is none: the limit refuses a dictionary at the open, before any byte is sent.
 wire = "none"
 help = '''

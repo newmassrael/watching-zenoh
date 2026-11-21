@@ -144,6 +144,115 @@ mod enforcement {
         assert_eq!(held(&observer), 2);
     }
 
+    /// The key ids `1..=count`, each naming a key of its own, as an open is handed them.
+    #[cfg(feature = "shared-key-ids")]
+    fn key_ids(count: usize) -> crate::shared_key_ids::KeyIdsAtOpen {
+        let keys: std::vec::Vec<std::string::String> =
+            (1..=count).map(|id| std::format!("bound/k{id}")).collect();
+        let entries = keys.iter().enumerate().map(|(at, key)| {
+            let id = u16::try_from(at + 1).expect("a test count of ids");
+            (id, key.as_str())
+        });
+        crate::shared_key_ids::KeyIdsAtOpen {
+            ids: Some(std::sync::Arc::new(
+                crate::shared_key_ids::KeyIds::new(entries).expect("a valid dictionary"),
+            )),
+            links: std::vec::Vec::new(),
+        }
+    }
+
+    /// `MAX_SHARED_KEY_IDS` with nothing stated: an open is handed as many entries as the build
+    /// states and refused one more.
+    #[cfg(feature = "shared-key-ids")]
+    #[test]
+    fn max_shared_key_ids_with_nothing_stated_admits_what_the_build_admitted() {
+        let build = caps::MAX_SHARED_KEY_IDS;
+        if build >= usize::from(u16::MAX) {
+            // Every id a wireexpr has fits: no dictionary of distinct ids is past the build's.
+            return;
+        }
+        let limits = SessionLimits::defaults();
+        assert_eq!(key_ids(build).check_limits(&limits), Ok(()));
+        assert_eq!(
+            key_ids(build + 1).check_limits(&limits),
+            Err(crate::shared_key_ids::KeyIdsRefused::TooMany {
+                stated: build + 1,
+                limit: build
+            })
+        );
+    }
+
+    /// `MAX_SHARED_KEY_IDS` stated as two: a dictionary of three is refused when it is handed
+    /// over, and the dictionary it was is left as it was; one of two is held.
+    #[cfg(feature = "shared-key-ids")]
+    #[test]
+    fn max_shared_key_ids_stated_refuses_the_next() {
+        held_to_two(
+            SessionLimits::select_max_shared_key_ids,
+            MaxSharedKeyIds::DOMAIN.is_singleton(),
+            |limits| {
+                let three = key_ids(3);
+                assert_eq!(
+                    three.check_limits(limits),
+                    Err(crate::shared_key_ids::KeyIdsRefused::TooMany {
+                        stated: 3,
+                        limit: 2
+                    })
+                );
+                assert_eq!(three, key_ids(3), "a refusal changes no dictionary");
+                assert_eq!(key_ids(2).check_limits(limits), Ok(()));
+            },
+        );
+    }
+
+    /// The queries of ids `0..count` a link made from `limits` still remembers the key form of
+    /// after it noted each, in order, as a session's creator makes the link.
+    #[cfg(feature = "shared-key-ids")]
+    fn noted_after(limits: &SessionLimits, count: u32) -> std::vec::Vec<u32> {
+        use crate::shared_key_ids::{KeyIds, LinkKeys, ReplyKey};
+        let ids = std::sync::Arc::new(KeyIds::new([(41, "bound/rig")]).expect("valid"));
+        let mut keys = LinkKeys::new(
+            Some(ids),
+            crate::policy::KeyWireForm::Shared,
+            limits.link_noted_requests(),
+        );
+        for rid in 0..count {
+            keys.note_request(rid, 41, None, true, false);
+        }
+        (0..count)
+            .filter(|rid| keys.reply_key(*rid, "bound/rig") != ReplyKey::Literal)
+            .collect()
+    }
+
+    /// `LINK_NOTED_REQUESTS` with nothing stated: a link remembers the build's number of queries,
+    /// the oldest giving way to the next.
+    #[cfg(feature = "shared-key-ids")]
+    #[test]
+    fn link_noted_requests_with_nothing_stated_holds_the_builds_value() {
+        let build = caps::LINK_NOTED_REQUESTS;
+        let Ok(count) = u32::try_from(build + 1) else {
+            return;
+        };
+        let kept = noted_after(&SessionLimits::defaults(), count);
+        assert_eq!(kept.len(), build);
+        assert_eq!(kept.first(), Some(&1), "the oldest gave way");
+    }
+
+    /// `LINK_NOTED_REQUESTS` stated as two: a link remembers the last two queries it noted.
+    #[cfg(feature = "shared-key-ids")]
+    #[test]
+    fn link_noted_requests_stated_is_the_value_the_link_uses() {
+        let mut limits = SessionLimits::defaults();
+        let stated = limits.select_link_noted_requests(2);
+        if LinkNotedRequests::DOMAIN.is_singleton() {
+            // A build that keeps the build's value alone refuses the statement itself.
+            assert!(stated.is_err());
+            return;
+        }
+        stated.expect("two is inside the domain");
+        assert_eq!(noted_after(&limits, 5), [3, 4]);
+    }
+
     #[cfg(feature = "query-queryable")]
     fn queryable(
         observer: &mut ApplicationLayerObserver,

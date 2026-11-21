@@ -2489,17 +2489,22 @@ pub struct KeyIdPlan {
 
 #[cfg(feature = "shared-key-ids")]
 impl KeyIdPlan {
-    /// The plan of a session whose own form is `session` and which dials `connect` and listens
-    /// on `listen`, from what its open was handed: refused as the forms of `at_open` are.
+    /// The plan of a session whose own form is `session`, whose limits are `limits`, and which
+    /// dials `connect` and listens on `listen`, from what its open was handed: refused as the
+    /// forms of `at_open` are, and when its dictionary has more entries than the session's
+    /// `MAX_SHARED_KEY_IDS` admits.
     pub fn new(
         at_open: &wz_session_core::shared_key_ids::KeyIdsAtOpen,
         session: wz_session_core::policy::KeyWireForm,
+        limits: &SessionLimits,
         connect: &[String],
         listen: &[String],
     ) -> Result<Self, wz_session_core::shared_key_ids::KeyIdsRefused> {
+        let forms = at_open.forms(session)?;
+        at_open.check_limits(limits)?;
         Ok(Self {
             ids: at_open.ids.clone(),
-            forms: at_open.forms(session)?,
+            forms,
             connect: connect.to_vec(),
             listen: listen.to_vec(),
         })
@@ -2529,11 +2534,18 @@ impl KeyIdPlan {
         endpoint.map(String::as_str)
     }
 
-    /// What the link of face `id` knows of the key ids: the dictionary and its own form.
-    fn link_keys(&self, id: u64) -> wz_session_core::shared_key_ids::LinkKeys {
+    /// What the link of face `id` knows of the key ids: the dictionary, its own form, and how
+    /// many queries it remembers the key form of, the session's `LINK_NOTED_REQUESTS` in
+    /// `limits`.
+    fn link_keys(
+        &self,
+        id: u64,
+        limits: &SessionLimits,
+    ) -> wz_session_core::shared_key_ids::LinkKeys {
         wz_session_core::shared_key_ids::LinkKeys::new(
             self.ids.clone(),
             self.forms.form_of(self.endpoint_of(id)),
+            limits.link_noted_requests(),
         )
     }
 
@@ -3296,7 +3308,7 @@ impl SharedSession {
         // the face carries anything: what its peer names by an id of the dictionary is read, and
         // what is sent over it names its keys in that form.
         #[cfg(feature = "shared-key-ids")]
-        session.install_link_keys(self.key_ids.link_keys(id));
+        session.install_link_keys(self.key_ids.link_keys(id, &self.session_limits));
         // This face's events are dispatched through the face session's own subscriber
         // registry (`Self::dispatch`) and nothing here filters or forwards the owned
         // messages of a frame, so the drive loop may report a frame of plain Puts as the

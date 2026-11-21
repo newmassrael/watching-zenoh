@@ -333,6 +333,14 @@ pub enum OpenError {
     ZidDerivation(wz_session_core::zid_derivation::ZidDerivationError),
     /// The session's `key-wire-form` cannot be honoured: see [`KeyWireFormRefused`].
     KeyWireForm(KeyWireFormRefused),
+    /// The key ids the open was handed are more entries than the session's `MAX_SHARED_KEY_IDS`
+    /// admits (`shared-key-ids`).
+    KeyIdsOverLimit {
+        /// How many entries the dictionary has.
+        stated: usize,
+        /// How many the session's limit admits.
+        limit: usize,
+    },
 }
 
 /// Why the `key-wire-form` a session was opened under cannot be honoured.
@@ -381,17 +389,27 @@ impl OpenKeyIds {
     }
 
     /// The forms of the session's links under `policy`'s key-wire form: `shared`, for the
-    /// session or an endpoint, needs a dictionary, and an endpoint is stated once.
+    /// session or an endpoint, needs a dictionary, and an endpoint is stated once. The dictionary
+    /// is then held to the session's `MAX_SHARED_KEY_IDS` in `limits`.
     #[cfg(feature = "shared-key-ids")]
-    fn admit(&self, policy: &SessionPolicy) -> Result<LinkKeyForms, OpenError> {
-        self.at_open
+    fn admit(
+        &self,
+        policy: &SessionPolicy,
+        limits: &SessionLimits,
+    ) -> Result<LinkKeyForms, OpenError> {
+        let forms = self
+            .at_open
             .forms(policy.key_wire_form())
             .map_err(|refused| {
                 OpenError::KeyWireForm(match refused {
                     KeyIdsRefused::DuplicateLink { .. } => KeyWireFormRefused::LinkStatedTwice,
                     _ => KeyWireFormRefused::NoDictionary,
                 })
-            })
+            })?;
+        if let Err(KeyIdsRefused::TooMany { stated, limit }) = self.at_open.check_limits(limits) {
+            return Err(OpenError::KeyIdsOverLimit { stated, limit });
+        }
+        Ok(forms)
     }
 
     /// Whether a session may open under `policy`'s key-wire form: only `declared`, which names a
@@ -1372,6 +1390,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             actions.install_link_keys(wz_session_core::shared_key_ids::LinkKeys::new(
                 self.key_ids.clone(),
                 self.key_forms.form_of(endpoint),
+                resolve_limits(&self.config).link_noted_requests(),
             ));
             if let Some(ids) = &self.key_ids {
                 self.registry
@@ -2291,7 +2310,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// names, the session declares no key expression under one of its ids, and a key goes on the
     /// wire as the policy's `key-wire-form` says. The form is judged first, so a session that
     /// cannot honour it dials and binds nothing: `shared` with no dictionary, or any form but
-    /// `declared` in a build without the feature, is [`OpenError::KeyWireForm`].
+    /// `declared` in a build without the feature, is [`OpenError::KeyWireForm`], and a
+    /// dictionary of more entries than the config's limits admit is
+    /// [`OpenError::KeyIdsOverLimit`].
     pub fn open_with_key_ids(
         links: L,
         clock: C,
@@ -2301,7 +2322,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         key_ids: OpenKeyIds,
     ) -> Result<Arc<Self>, OpenError> {
         #[cfg(feature = "shared-key-ids")]
-        let key_forms = key_ids.admit(&policy)?;
+        let key_forms = key_ids.admit(&policy, &resolve_limits(&config))?;
         #[cfg(not(feature = "shared-key-ids"))]
         key_ids.admit(&policy)?;
         let mut entropy = SharedEntropy::new(entropy);
