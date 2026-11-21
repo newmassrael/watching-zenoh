@@ -46,7 +46,7 @@ pub(super) type LivelinessQueue = Arc<Mutex<VecDeque<(SubId, OwnedLivelinessSamp
 /// over a new link; holding the key also keeps alive what it holds.
 pub(super) struct TokenEntry {
     pub(super) id: TokenId,
-    pub(super) keyexpr: String,
+    pub(super) keyexpr: super::RowKey,
     pub(super) wire: WireKey,
     pub(super) retraction: Option<RetractionKey>,
 }
@@ -78,7 +78,7 @@ impl TokenEntry {
 pub(super) struct LiveSubEntry {
     /// Its id, which is also its Interest's, as zenoh-pico's subscription id is.
     pub(super) id: SubId,
-    pub(super) keyexpr: String,
+    pub(super) keyexpr: super::RowKey,
     pub(super) wire: WireKey,
     pub(super) history: bool,
 }

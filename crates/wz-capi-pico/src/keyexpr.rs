@@ -30,6 +30,13 @@ use crate::result::{
 use crate::session::{engine_of, engine_ref, session_handle, z_loaned_session_t, Engine};
 use crate::write_filter::PicoSession;
 
+/// Whether `key` is no longer than the longest key a session stores
+/// (`MAX_KEYEXPR_BYTES`): a key past it is a value this build cannot take, refused with
+/// `Z_EINVAL`, never cut short.
+fn fits(key: &str) -> bool {
+    key.len() <= wz_session_core::caps::MAX_KEYEXPR_BYTES
+}
+
 /// Resolve a loaned keyexpr to its borrowed UTF-8 string, or `None` if null /
 /// not valid UTF-8.
 ///
@@ -311,6 +318,10 @@ impl DeclaredKeyexpr {
         existing: Option<&DeclaredKeyexpr>,
         prefix_len: usize,
     ) -> Result<Self, ZResult> {
+        // A key the session's tables cannot hold is refused before anything is declared.
+        if !fits(literal) {
+            return Err(Z_EINVAL);
+        }
         // Already optimized on THIS session to exactly this prefix: share it
         // (pico's `_z_declared_keyexpr_is_fully_optimized` /
         // `_is_non_wild_prefix_optimized` arm).
@@ -830,6 +841,9 @@ pub unsafe extern "C" fn z_keyexpr_from_substr(
         if !is_pico_canon(&text) {
             return Z_ERR_INVALID;
         }
+        if !fits(&text) {
+            return Z_EINVAL;
+        }
         store_owned_keyexpr(keyexpr, DeclaredKeyexpr::literal_only(text));
         Z_OK
     })
@@ -855,6 +869,7 @@ pub unsafe extern "C" fn z_keyexpr_from_str_autocanonize(
             return Z_ERR_NULL;
         };
         match wz_session_core::keyexpr_canon::canonize_keyexpr(&text) {
+            Ok(canon) if !fits(canon.as_str()) => Z_EINVAL,
             Ok(canon) => {
                 store_owned_keyexpr(
                     keyexpr,
@@ -892,6 +907,7 @@ pub unsafe extern "C" fn z_keyexpr_from_substr_autocanonize(
             return Z_ERR_NULL;
         };
         match wz_session_core::keyexpr_canon::canonize_keyexpr(&text) {
+            Ok(canon) if !fits(canon.as_str()) => Z_EINVAL,
             Ok(canon) => {
                 *len = canon.as_str().len();
                 store_owned_keyexpr(
@@ -1025,6 +1041,8 @@ pub unsafe extern "C" fn z_keyexpr_concat(
         };
         let joined = format!("{head}{tail}");
         match wz_session_core::keyexpr_canon::canonize_keyexpr(&joined) {
+            // Canonizing only shortens a key, so one still past the bound is past it.
+            Ok(canon) if !fits(canon.as_str()) => Z_EINVAL,
             Ok(canon) => {
                 store_owned_keyexpr(key, extended_from(left, canon.as_str()));
                 Z_OK
@@ -1068,6 +1086,7 @@ pub unsafe extern "C" fn z_keyexpr_join(
         };
         let joined = format!("{l}/{r}");
         match wz_session_core::keyexpr_canon::canonize_keyexpr(&joined) {
+            Ok(canon) if !fits(canon.as_str()) => Z_EINVAL,
             Ok(canon) => {
                 store_owned_keyexpr(key, extended_from(left, canon.as_str()));
                 Z_OK
@@ -1438,5 +1457,97 @@ mod tests {
             0,
             "another session's id is not ours"
         );
+    }
+}
+
+#[cfg(test)]
+mod bound_tests {
+    //! The longest key a session's tables hold bounds every key this ABI makes: one past it is a
+    //! value the build cannot take, refused with `Z_EINVAL` and nothing left behind.
+    use super::*;
+    use wz_session_core::caps::MAX_KEYEXPR_BYTES;
+
+    /// A canon key of exactly `len` bytes: chunks of `a` under `/`, never ending in one.
+    fn key_of(len: usize) -> String {
+        let mut key = String::with_capacity(len);
+        while key.len() < len {
+            key.push(if key.len() % 8 == 7 && key.len() + 1 < len {
+                '/'
+            } else {
+                'a'
+            });
+        }
+        key
+    }
+
+    /// An owned key made from `text`, and the code its constructor answered.
+    unsafe fn owned(text: &str) -> (ZResult, z_owned_keyexpr_t) {
+        let mut key = z_owned_keyexpr_t::null_value();
+        let rc = z_keyexpr_from_substr(&mut key, text.as_ptr() as *const c_char, text.len());
+        (rc, key)
+    }
+
+    /// A key of the bound itself is taken; one byte past it is refused and the destination is
+    /// left null.
+    #[test]
+    fn a_key_one_byte_past_the_bound_is_refused() {
+        unsafe {
+            let (at, mut key) = owned(&key_of(MAX_KEYEXPR_BYTES));
+            assert_eq!(at, Z_OK, "a key of the bound itself is taken");
+            z_keyexpr_drop(z_keyexpr_move(&mut key));
+            let (past, refused) = owned(&key_of(MAX_KEYEXPR_BYTES + 1));
+            assert_eq!(past, Z_EINVAL);
+            assert!(
+                !z_internal_keyexpr_check(&refused),
+                "nothing is left behind"
+            );
+        }
+    }
+
+    /// A join that lands on the bound is made; one byte more is refused, as is a concatenation
+    /// that would pass it, each leaving its destination null.
+    #[test]
+    fn a_join_that_would_pass_the_bound_is_refused() {
+        let half = MAX_KEYEXPR_BYTES / 2;
+        unsafe {
+            let (rc_left, mut left) = owned(&key_of(half));
+            let (rc_right, mut right) = owned(&key_of(MAX_KEYEXPR_BYTES - half - 1));
+            let (rc_wider, mut wider) = owned(&key_of(MAX_KEYEXPR_BYTES - half));
+            assert_eq!((rc_left, rc_right, rc_wider), (Z_OK, Z_OK, Z_OK));
+
+            let mut joined = z_owned_keyexpr_t::null_value();
+            assert_eq!(
+                z_keyexpr_join(&mut joined, z_keyexpr_loan(&left), z_keyexpr_loan(&right)),
+                Z_OK,
+                "left, the separator and right are the bound exactly"
+            );
+            z_keyexpr_drop(z_keyexpr_move(&mut joined));
+
+            let mut past = z_owned_keyexpr_t::null_value();
+            assert_eq!(
+                z_keyexpr_join(&mut past, z_keyexpr_loan(&left), z_keyexpr_loan(&wider)),
+                Z_EINVAL
+            );
+            assert!(!z_internal_keyexpr_check(&past), "nothing is left behind");
+
+            let (rc_full, mut full) = owned(&key_of(MAX_KEYEXPR_BYTES));
+            assert_eq!(rc_full, Z_OK);
+            let tail = "/b";
+            let mut concat = z_owned_keyexpr_t::null_value();
+            assert_eq!(
+                z_keyexpr_concat(
+                    &mut concat,
+                    z_keyexpr_loan(&full),
+                    tail.as_ptr() as *const c_char,
+                    tail.len(),
+                ),
+                Z_EINVAL
+            );
+            assert!(!z_internal_keyexpr_check(&concat), "nothing is left behind");
+
+            for key in [&mut left, &mut right, &mut wider, &mut full] {
+                z_keyexpr_drop(z_keyexpr_move(key));
+            }
+        }
     }
 }

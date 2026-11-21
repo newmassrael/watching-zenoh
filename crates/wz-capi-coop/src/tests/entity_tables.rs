@@ -427,3 +427,32 @@ fn a_liveliness_subscriber_past_its_table_is_refused_and_asks_nothing() {
         "the row given back takes it"
     );
 }
+
+/// A key longer than a row holds (`MAX_KEYEXPR_BYTES`) is refused, before an id is taken, a
+/// callback minted or anything sent; the key of the bound itself is taken.
+#[test]
+fn a_key_past_its_row_is_refused_and_sends_nothing() {
+    use wz_session_core::caps::MAX_KEYEXPR_BYTES;
+
+    let router = Router::start(CatchAll::None);
+    let engine = open_under(&router, SessionLimits::defaults());
+    let minted = Arc::new(AtomicUsize::new(0));
+    let past = "k".repeat(MAX_KEYEXPR_BYTES + 1);
+    let before = router.seen(|s| s.declares);
+    assert_eq!(declare_subscriber(&engine, &past, &minted), None);
+    assert_eq!(engine.acquire_keyexpr(past.clone()), None);
+    assert_eq!(filter(&engine, FilterPlane::Subscribers, &past), None);
+    settle(&engine);
+    assert_eq!(
+        minted.load(Ordering::SeqCst),
+        0,
+        "no callback for a refusal"
+    );
+    assert_eq!(router.seen(|s| s.declares), before, "nothing was sent");
+
+    let at = "k".repeat(MAX_KEYEXPR_BYTES);
+    assert!(
+        declare_subscriber(&engine, &at, &minted).is_some(),
+        "a key of the bound itself is taken"
+    );
+}
