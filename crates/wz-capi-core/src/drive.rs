@@ -4391,7 +4391,7 @@ pub struct OpenStance {
     /// default, which applies nothing.
     pub session_defaults: crate::session_defaults::SessionDefaults,
     /// The snapshot of the policies the session runs under, resolved once by the open that
-    /// created it (`open_plan::resolve_policy` for a plan, the ABI's own open otherwise). Every
+    /// created it (`open_plan::resolve_snapshot` for a plan, the ABI's own open otherwise). Every
     /// session, link and face the open makes is handed it; none reads the build.
     pub session_policy: SessionPolicy,
     /// The snapshot of the session limits, resolved by the same open and handed to the same

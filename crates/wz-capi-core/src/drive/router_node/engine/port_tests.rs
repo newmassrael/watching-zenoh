@@ -195,7 +195,7 @@ fn a_node_holds_the_snapshot_its_open_hands_it() {
             )],
         },
         Some(r#"{ mode: "router", scouting: { multicast: { enabled: false } } }"#),
-        |_| handed,
+        |_| wz_session_core::policy_document::Resolved::unchanged(handed),
     )
     .expect("a document a router opens on");
     let node = plan

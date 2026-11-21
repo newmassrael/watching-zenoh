@@ -146,7 +146,9 @@ impl Config {
 impl Config {
     /// The policies an open of the configuration runs under: the build defaults, then the profile
     /// the open's caller names or else the one the `wz` member names, then the member's
-    /// `wz/policies`, then what the caller states, each value with the layer that set it. A
+    /// `wz/policies`, then what the caller states, each value with the layer that set it. The
+    /// limits the member's `wz/limits` states are resolved with them, over the build defaults of
+    /// a session's limits; a session holds no runtime's limits, so a runtime's limit is refused. A
     /// refusal of any of them refuses the open, with every refusal named.
     pub(crate) fn resolve_policies(&self) -> ZResult<wz_session_core::policy_document::Resolved> {
         self.1.resolve()
@@ -984,6 +986,43 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("unknown field `colour`"), "{error}");
+    }
+
+    /// The member's `wz/limits`, read whole or inserted, resolves as the reader of a document
+    /// resolves it for a creator that holds a session's limits, for each member of the corpus
+    /// every door is held to: the limits it selects, or the refusals it meets, each named.
+    #[cfg(feature = "engine-tokio")]
+    #[test]
+    fn the_members_limits_resolve_as_the_corpus_states_for_a_session() {
+        use wz_session_core::limit_corpus::{cases, Expected};
+
+        for case in cases() {
+            let read = Config::from_json5(&case.document())
+                .unwrap_or_else(|error| panic!("{}: {error}", case.name));
+            let mut inserted = Config::default();
+            inserted
+                .insert_json5("wz/limits", &case.limits)
+                .unwrap_or_else(|error| panic!("{}: {error}", case.name));
+            for config in [read, inserted] {
+                match (&case.session, config.resolve_policies()) {
+                    (Expected::Selected(_), Ok(resolved)) => {
+                        if let Err(why) = case.session.check_session(&resolved.limits.session) {
+                            panic!("{}: {why}", case.name);
+                        }
+                    }
+                    (Expected::Refused(_), Err(error)) => {
+                        let error = error.to_string();
+                        for text in case.session.refusal_texts() {
+                            assert!(error.contains(&text), "{}: {error}", case.name);
+                        }
+                    }
+                    (Expected::Selected(_), Err(error)) => panic!("{}: {error}", case.name),
+                    (Expected::Refused(reasons), Ok(_)) => {
+                        panic!("{}: taken, and the case expects {reasons:?}", case.name)
+                    }
+                }
+            }
+        }
     }
 
     /// Each top-level member is kept, a second one included, and a `null` states nothing.
