@@ -1605,15 +1605,21 @@ mod enforcement {
         );
     }
 
+    /// A query from a peer as [`sized_queries`] writes it: its request id, its selector parameters
+    /// and its attachment, a field left out where it is `None`.
+    #[cfg(all(
+        feature = "query-queryable",
+        any(feature = "query-selector-parameters", feature = "query-attachment")
+    ))]
+    type SizedQuery<'a> = (u32, Option<&'a [u8]>, Option<&'a [u8]>);
+
     /// One frame from a peer of one query on `bound/reply` for each `(rid, parameters,
     /// attachment)`, a field left out where it is `None`.
     #[cfg(all(
         feature = "query-queryable",
         any(feature = "query-selector-parameters", feature = "query-attachment")
     ))]
-    fn sized_queries(
-        asked: &[(u32, Option<&[u8]>, Option<&[u8]>)],
-    ) -> crate::driver_loop::DriverLoopOutcome {
+    fn sized_queries(asked: &[SizedQuery<'_>]) -> crate::driver_loop::DriverLoopOutcome {
         let messages = asked
             .iter()
             .map(|&(rid, parameters, attachment)| {

@@ -365,30 +365,74 @@ pub const OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(O
 /// `tokio::time::timeout(self.config.unicast.open_timeout, async {`), and has no shorter
 /// window for a step of the handshake; the handshake inside is held to the same bound
 /// ([`DialConfig::handshake_timeouts`]), so this is the clock that ends it.
-pub async fn open_within<T, F>(open_timeout: std::time::Duration, open: F) -> Result<T, OpenError>
+///
+/// The wall clock's wait, as a session with no clock of its own is timed. A named future
+/// ([`OpenWithin`]), as [`crate::runtime_impl::timeout_on`] is, so the open is held once.
+pub fn open_within<T, F>(
+    open_timeout: std::time::Duration,
+    open: F,
+) -> OpenWithin<F, tokio::time::Sleep>
 where
     F: core::future::Future<Output = Result<T, OpenError>>,
 {
-    open_within_on(&TokioTime::new(), open_timeout, open).await
+    let wait = std::time::Duration::from_millis(crate::runtime_impl::whole_ms(open_timeout));
+    OpenWithin {
+        timed: crate::runtime_impl::TimeoutOn::new(open, tokio::time::sleep(wait)),
+        open_timeout,
+    }
 }
 
 /// [`open_within`] on `clock`, the clock of the session the open is for: a session timed by a
 /// time base the program supplies holds its open to the program's time, as it holds the
 /// handshake inside it.
-pub async fn open_within_on<C, T, F>(
-    clock: &C,
+pub fn open_within_on<'c, C, T, F>(
+    clock: &'c C,
     open_timeout: std::time::Duration,
     open: F,
-) -> Result<T, OpenError>
+) -> OpenWithin<F, impl core::future::Future<Output = ()> + 'c>
 where
     C: TimeSource,
     F: core::future::Future<Output = Result<T, OpenError>>,
 {
-    match crate::runtime_impl::timeout_on(clock, crate::runtime_impl::whole_ms(open_timeout), open)
-        .await
-    {
-        Ok(opened) => opened,
-        Err(_) => Err(OpenError::OpenTimeout(open_timeout)),
+    OpenWithin {
+        timed: crate::runtime_impl::timeout_on(
+            clock,
+            crate::runtime_impl::whole_ms(open_timeout),
+            open,
+        ),
+        open_timeout,
+    }
+}
+
+/// An open raced against its bound: the open's own answer when it ends first, and
+/// [`OpenError::OpenTimeout`] when the bound passes first ([`open_within`], [`open_within_on`]).
+#[must_use = "futures do nothing unless polled"]
+pub struct OpenWithin<F, S> {
+    timed: crate::runtime_impl::TimeoutOn<F, S>,
+    open_timeout: std::time::Duration,
+}
+
+impl<T, F, S> core::future::Future for OpenWithin<F, S>
+where
+    F: core::future::Future<Output = Result<T, OpenError>>,
+    S: core::future::Future<Output = ()>,
+{
+    type Output = Result<T, OpenError>;
+
+    fn poll(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Self::Output> {
+        // SAFETY: `timed` is pinned structurally: it is never moved out of a pinned
+        // `OpenWithin`, which has no `Drop` of its own; `open_timeout` is `Copy` and only read.
+        let this = unsafe { self.get_unchecked_mut() };
+        let open_timeout = this.open_timeout;
+        // SAFETY: as above.
+        let timed = unsafe { core::pin::Pin::new_unchecked(&mut this.timed) };
+        timed.poll(cx).map(|timed| match timed {
+            Ok(opened) => opened,
+            Err(_) => Err(OpenError::OpenTimeout(open_timeout)),
+        })
     }
 }
 

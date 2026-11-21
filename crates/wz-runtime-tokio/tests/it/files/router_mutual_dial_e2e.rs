@@ -170,6 +170,15 @@ async fn round(a_zid: u8, b_zid: u8) -> (Held, Held) {
         recorder(&b_held),
         &b_router,
     );
+    // What each node holds, taken out of its record: the faces, the events and the log.
+    let take = |held: &Arc<StdMutex<Held>>| {
+        let mut held = held.lock().expect("held faces");
+        Held {
+            faces: std::mem::take(&mut held.faces),
+            events: held.events,
+            log: std::mem::take(&mut held.log),
+        }
+    };
     let controller = {
         let (a_held, b_held) = (Arc::clone(&a_held), Arc::clone(&b_held));
         async move {
@@ -191,31 +200,29 @@ async fn round(a_zid: u8, b_zid: u8) -> (Held, Held) {
                     since = Instant::now();
                 }
                 if a_faces == 1 && b_faces == 1 && since.elapsed() >= SETTLE {
+                    // The settled state is what the round is judged on, so it is taken before the
+                    // nodes are told to stop: a node that stops first closes the link, and the
+                    // other then takes its face down before it reads its own signal to stop.
+                    let settled = (take(&a_held), take(&b_held));
                     let _ = shut_tx.send(true);
-                    return;
+                    return settled;
                 }
             }
         }
     };
     let joined = tokio::time::timeout(ROUND_BUDGET, async { tokio::join!(a, b, controller) }).await;
-    if joined.is_err() {
-        let a = a_held.lock().expect("a faces");
-        let b = b_held.lock().expect("b faces");
-        panic!(
-            "the nodes never settled on one face each within {ROUND_BUDGET:?}: a holds {:?} \
-             (events {:?}), b holds {:?} (events {:?})",
-            a.faces, a.log, b.faces, b.log
-        );
-    }
-    let take = |held: &Arc<StdMutex<Held>>| {
-        let mut held = held.lock().expect("held faces");
-        Held {
-            faces: std::mem::take(&mut held.faces),
-            events: held.events,
-            log: std::mem::take(&mut held.log),
+    match joined {
+        Ok((_, _, settled)) => settled,
+        Err(_) => {
+            let a = a_held.lock().expect("a faces");
+            let b = b_held.lock().expect("b faces");
+            panic!(
+                "the nodes never settled on one face each within {ROUND_BUDGET:?}: a holds {:?} \
+                 (events {:?}), b holds {:?} (events {:?})",
+                a.faces, a.log, b.faces, b.log
+            );
         }
-    };
-    (take(&a_held), take(&b_held))
+    }
 }
 
 /// Two nodes that dial each other keep one link, the same at both ends, and bring up one face.
