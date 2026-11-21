@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! `wz_ext_config_policy`, `wz_ext_config_profile` and `wz_ext_config_document`: the policies a
-//! config states for the session [`z_open`](crate::session::z_open) opens from it.
+//! `wz_ext_config_policy`, `wz_ext_config_profile` and `wz_ext_config_document`: the policies
+//! and the limits a config states for the session [`z_open`](crate::session::z_open) opens from
+//! it.
 //!
 //! pico's config is a set of numbered keys and has none for wz's policies, so these are doors wz
 //! has and zenoh-pico does not: `wz_ext_*`, declared in `wz_ext.h`. The first two are in every
@@ -20,6 +21,10 @@
 //! 3. the `wz/policies` of the document `wz_ext_config_document` was handed
 //!    ([`policy_document::Origin::Document`]);
 //! 4. the statements of `wz_ext_config_policy` ([`policy_document::Origin::Api`]).
+//!
+//! The `wz/limits` of the document are resolved in the same resolution, over the build defaults
+//! of a session's limits: a pico session holds no runtime's limits, so a runtime's limit the
+//! document states is refused, as a limit the build does not have is.
 //!
 //! Each door checks its change the way the open will compose it, so a change the build would
 //! refuse is refused when it is made, with `Z_ERR_CONFIG_INVALID_VALUE`, and leaves the config as
@@ -59,10 +64,12 @@ pub(crate) struct PolicyStatements {
 }
 
 impl PolicyStatements {
-    /// `base` with the layers over it, or `Z_ERR_CONFIG_INVALID_VALUE` when any statement of any
-    /// layer is refused, a document whose shape is refused and a profile the build does not have
-    /// among them.
+    /// `base` with the layers over it, and the limits the document states over the build defaults
+    /// of a session's limits ([`policy_document::Base::session`]), or `Z_ERR_CONFIG_INVALID_VALUE`
+    /// when any statement of any layer is refused, a document whose shape is refused, a profile
+    /// the build does not have and a limit of a runtime among them.
     pub(crate) fn compose(&self, base: SessionPolicy) -> Result<Resolved, ZResult> {
+        let base = policy_document::Base::session(base);
         let api: Vec<Statement<'_>> = self
             .api
             .iter()
@@ -222,15 +229,17 @@ pub unsafe extern "C" fn wz_ext_config_profile(
 }
 
 /// Hands `config` a zenoh JSON5 document, of which the `wz` member is read: the profile it names,
-/// its `wz/policies` and, in a build with the `shared-key-ids` capability, its `wz/key-ids`, the
-/// key ids every node shares, under what `wz_ext_config_key_ids` and
-/// `wz_ext_config_key_wire_form_for` state. The rest of the document is not read, so the document
-/// a zenoh-c program opens with configures these sessions alike. A second call replaces the first.
-/// Text that is no JSON5 object, a `wz` member whose shape is refused (one that is not an object,
-/// a value that is not a string, a member wz does not read, `wz/limits`, `wz/key-ids` in a build
-/// without the capability, a member stated twice), a profile the build does not have, a statement
-/// the build refuses and a refused part of `wz/key-ids` are refused with
-/// `Z_ERR_CONFIG_INVALID_VALUE`, and the config is left as it was.
+/// its `wz/policies`, its `wz/limits`, the limits of a session it states, and, in a build with
+/// the `shared-key-ids` capability, its `wz/key-ids`, the key ids every node shares, under what
+/// `wz_ext_config_key_ids` and `wz_ext_config_key_wire_form_for` state. The rest of the document
+/// is not read, so the document a zenoh-c program opens with configures these sessions alike. A
+/// second call replaces the first. Text that is no JSON5 object, a `wz` member whose shape is
+/// refused (one that is not an object, a value that is not a string, a limit's value that is
+/// neither a whole number nor `unbounded`, a member wz does not read, `wz/key-ids` in a build
+/// without the capability, a member stated twice), a profile or a limit the build does not have,
+/// a limit only the build decides, a limit of a runtime, a statement the build refuses and a
+/// refused part of `wz/key-ids` are refused with `Z_ERR_CONFIG_INVALID_VALUE`, and the config is
+/// left as it was.
 ///
 /// In a build with the `config-document` capability alone: the door links a JSON5 reader that a
 /// build stating its policies through [`wz_ext_config_policy`] and [`wz_ext_config_profile`] does
@@ -518,7 +527,8 @@ mod tests {
             String::from("{ wz: \"upstream\" }"),
             String::from("{ wz: { policies: [\"a\", \"b\"] } }"),
             String::from("{ wz: { profile: 1 } }"),
-            String::from("{ wz: { limits: { MAX_A: 4 } } }"),
+            String::from("{ wz: { limits: { NO_SUCH_LIMIT: 4 } } }"),
+            String::from("{ wz: { limits: [4] } }"),
             String::from("{ wz: { colour: \"blue\" } }"),
             String::from("{ wz: { profile: \"no-such-profile\" } }"),
             String::from("{ wz: {}, wz: {} }"),
@@ -661,6 +671,55 @@ mod tests {
             let zenoh = wz_capi_core::runtime::zenoh_config::ZenohNodeConfig::from_json5(&text)
                 .expect("the zenoh reader takes the document");
             assert_eq!(zenoh.config.policies, through_door);
+        }
+    }
+
+    /// The document door reads each member of the corpus every door is held to as the reader of a
+    /// document does for a creator that holds a session's limits: the open composes the limits a
+    /// taken member selects, and a refused member is refused with the doors' code and leaves the
+    /// config as it was.
+    #[cfg(feature = "config-document")]
+    #[test]
+    fn the_document_door_reads_each_limits_member_of_the_corpus_as_a_session_does() {
+        use wz_session_core::limit_corpus::{cases, Expected};
+
+        for case in cases() {
+            let text = format!("{{ mode: \"peer\", wz: {} }}", case.wz_member());
+            let mut config = Config::new();
+            let code = config.document(&text);
+            match &case.session {
+                Expected::Selected(selected) => {
+                    assert_eq!(code, Z_OK, "{}", case.name);
+                    let resolved = config.resolved();
+                    if let Err(why) = case.session.check_session(&resolved.limits.session) {
+                        panic!("{}: {why}", case.name);
+                    }
+                    for (limit, _) in selected {
+                        assert_eq!(
+                            resolved.limits.provenance.origin(limit),
+                            Some(Origin::Document),
+                            "{}: {limit}",
+                            case.name
+                        );
+                    }
+                    let tree = json5::parse(&text).expect("JSON5");
+                    assert_eq!(
+                        Ok(resolved),
+                        policy_document::resolve_document(SessionPolicy::defaults(), &tree),
+                        "{}",
+                        case.name
+                    );
+                }
+                Expected::Refused(_) => {
+                    assert_eq!(code, Z_ERR_CONFIG_INVALID_VALUE, "{}", case.name);
+                    assert_eq!(
+                        config.resolved(),
+                        Resolved::unchanged(SessionPolicy::defaults()),
+                        "{}",
+                        case.name
+                    );
+                }
+            }
         }
     }
 

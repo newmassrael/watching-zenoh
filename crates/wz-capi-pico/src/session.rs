@@ -679,10 +679,10 @@ pub unsafe extern "C" fn z_open(
         // lost its link dials the locators found here again. pico re-runs the whole open,
         // scouting included (`_z_client_reopen_task_fn` calls `_z_open`), so a router that
         // comes back on another locator is found there and not here. The scout runs under the
-        // snapshot of the open it finds a node for, and a config whose policies the build refuses
-        // opens nothing and scouts for nothing.
-        let policy = match resolve_policy(&cfg.policies) {
-            Ok(resolved) => resolved.policy,
+        // snapshot of the open it finds a node for, and a config whose policies or limits the
+        // build refuses opens nothing and scouts for nothing.
+        let (policy, limits) = match resolve_policy(&cfg.policies) {
+            Ok(resolved) => (resolved.policy, resolved.limits.session),
             Err(code) => return code,
         };
         // The key-wire form, judged for the engine the session opens on, and the key ids every
@@ -743,6 +743,7 @@ pub unsafe extern "C" fn z_open(
             #[cfg(any(feature = "engine-tokio", feature = "tls-mbedtls"))]
             tls,
             policy,
+            limits,
             #[cfg(feature = "app-transport")]
             app_transport,
             #[cfg(any(not(feature = "engine-tokio"), feature = "shared-key-ids"))]
@@ -991,6 +992,9 @@ struct OpenRequest {
     /// The policies the session runs under ([`resolve_policy`]), handed to the engine and kept
     /// with the session's handle.
     policy: SessionPolicy,
+    /// The session limits the session runs under, resolved with [`Self::policy`]: the engine's
+    /// tables are held to them, whichever engine the session opens on.
+    limits: wz_session_core::limits::SessionLimits,
     /// The transport the program supplies, when the config carries one: every link goes over it.
     #[cfg(feature = "app-transport")]
     app_transport: Option<alloc::sync::Arc<wz_session_core::app_transport::AppTransport>>,
@@ -1022,6 +1026,7 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
         start_admin_space,
         tls,
         policy,
+        limits,
         #[cfg(feature = "app-transport")]
         app_transport,
         #[cfg(feature = "shared-key-ids")]
@@ -1187,9 +1192,7 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             #[cfg(not(any(feature = "shared-key-ids", feature = "time-base")))]
             session_defaults: wz_capi_core::session_defaults::SessionDefaults::default(),
             session_policy: policy,
-            // pico's config states no session limit this ABI reads yet, so its session runs
-            // under the build's.
-            session_limits: wz_session_core::limits::SessionLimits::defaults(),
+            session_limits: limits,
             #[cfg(feature = "app-transport")]
             app_transport,
         },
@@ -1440,6 +1443,8 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         clock_moves: crate::time_base::clock_moves(&clock),
         #[cfg(not(feature = "time-base"))]
         clock_moves: None,
+        // The session limits the config states, which the engine's tables are held to.
+        limits: request.limits,
     };
     // A config that carries the program's transport opens the engine over its links, and over no
     // socket of the host's; `z_open` has refused a locator the transport does not carry. Either
