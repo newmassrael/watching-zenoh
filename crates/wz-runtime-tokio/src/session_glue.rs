@@ -6247,18 +6247,25 @@ mod link_congestion_tests {
         );
     }
 
-    /// A session over `link` under the `tx-expiry-keeps-session` policy whose snapshot states
-    /// `close_after` for `TX_EXPIRY_CLOSE_AFTER`, or `None` where the build's domain of the
-    /// limit leaves that value out, so no creator could hand it.
+    /// `check` run on a session over `link` under the `tx-expiry-keeps-session` policy whose
+    /// snapshot states `close_after` for `TX_EXPIRY_CLOSE_AFTER`. A build whose domain of the
+    /// limit is one value refuses any other, so no creator could hand it, and that refusal is what
+    /// such a build is checked for.
     fn kept_session(
         link: Arc<CongestibleLink>,
         close_after: wz_session_core::limit_binding::Quota,
-    ) -> Option<Arc<super::SessionLinkActions>> {
+        check: impl FnOnce(Arc<super::SessionLinkActions>),
+    ) {
         let mut params = wz_runtime_tokio_test_support::fixture_session_init_params();
-        params
-            .limits
-            .select_tx_expiry_close_after(close_after)
-            .ok()?;
+        if let Err(refused) = params.limits.select_tx_expiry_close_after(close_after) {
+            assert!(
+                refused.domain.is_singleton(),
+                "{} refused {}",
+                refused.limit,
+                refused.value
+            );
+            return;
+        }
         params.initial_sn = 7;
         params.tx_queue = super::TxQueueConf {
             expiry_keeps_session: true,
@@ -6267,11 +6274,11 @@ mod link_congestion_tests {
                 &wz_session_core::limits::SessionLimits::BUILD,
             )
         };
-        Some(super::new_session_actions(
+        check(super::new_session_actions(
             link,
             params,
             crate::runtime_impl::TokioTime::new(),
-        ))
+        ));
     }
 
     /// `TX_EXPIRY_CLOSE_AFTER` with nothing stated: the session keeps itself through as many
@@ -6316,26 +6323,25 @@ mod link_congestion_tests {
     fn tx_expiry_close_after_stated_as_two_refuses_the_next() {
         use wz_session_core::send_wire_error::SendWireError;
         let link = CongestibleLink::new();
-        let Some(actions) = kept_session(
+        kept_session(
             link.clone(),
             wz_session_core::limit_binding::Quota::at_most(2),
-        ) else {
-            // A build of one value refuses two: there is no other snapshot to hand.
-            return;
-        };
-        link.set_room(LinkRoom::Congested);
-        assert_eq!(
-            blocking_push(&actions),
-            Ok(SendWireError::TransportUnavailable)
+            |actions| {
+                link.set_room(LinkRoom::Congested);
+                assert_eq!(
+                    blocking_push(&actions),
+                    Ok(SendWireError::TransportUnavailable)
+                );
+                assert!(!actions.take_congestion_close(), "the first is kept");
+                assert_eq!(
+                    blocking_push(&actions),
+                    Ok(SendWireError::TransportUnavailable),
+                    "the second is refused to its sender all the same"
+                );
+                assert!(link.frames().is_empty(), "nothing reached the link");
+                assert!(actions.take_congestion_close(), "the second closes it");
+            },
         );
-        assert!(!actions.take_congestion_close(), "the first is kept");
-        assert_eq!(
-            blocking_push(&actions),
-            Ok(SendWireError::TransportUnavailable),
-            "the second is refused to its sender all the same"
-        );
-        assert!(link.frames().is_empty(), "nothing reached the link");
-        assert!(actions.take_congestion_close(), "the second closes it");
     }
 
     /// `TX_EXPIRY_CLOSE_AFTER`: a link that stays blocked is kept for the first expiries and
@@ -6345,28 +6351,28 @@ mod link_congestion_tests {
     fn a_link_that_stays_blocked_is_closed_at_the_count_the_limit_states() {
         use wz_session_core::send_wire_error::SendWireError;
         let link = CongestibleLink::new();
-        let Some(actions) = kept_session(
+        kept_session(
             link.clone(),
             wz_session_core::limit_binding::Quota::at_most(3),
-        ) else {
-            return;
-        };
-        link.set_room(LinkRoom::Congested);
-        for _ in 0..2 {
-            assert_eq!(
-                blocking_push(&actions),
-                Ok(SendWireError::TransportUnavailable)
-            );
-            assert!(!actions.take_congestion_close(), "kept, the run is short");
-        }
-        assert_eq!(
-            blocking_push(&actions),
-            Ok(SendWireError::TransportUnavailable),
-            "the message that completes the run was dropped, and its sender is told"
-        );
-        assert!(
-            actions.take_congestion_close(),
-            "the third in a row closes the session"
+            |actions| {
+                link.set_room(LinkRoom::Congested);
+                for _ in 0..2 {
+                    assert_eq!(
+                        blocking_push(&actions),
+                        Ok(SendWireError::TransportUnavailable)
+                    );
+                    assert!(!actions.take_congestion_close(), "kept, the run is short");
+                }
+                assert_eq!(
+                    blocking_push(&actions),
+                    Ok(SendWireError::TransportUnavailable),
+                    "the message that completes the run was dropped, and its sender is told"
+                );
+                assert!(
+                    actions.take_congestion_close(),
+                    "the third in a row closes the session"
+                );
+            },
         );
     }
 
@@ -6374,23 +6380,23 @@ mod link_congestion_tests {
     #[test]
     fn a_push_that_finds_room_ends_the_run_of_expiries() {
         let link = CongestibleLink::new();
-        let Some(actions) = kept_session(
+        kept_session(
             link.clone(),
             wz_session_core::limit_binding::Quota::at_most(2),
-        ) else {
-            return;
-        };
-        for _ in 0..4 {
-            link.set_room(LinkRoom::Congested);
-            assert!(blocking_push(&actions).is_ok(), "refused, not sent");
-            link.set_room(LinkRoom::Free);
-            actions
-                .send_push_literal_qos("home/a", b"A", true, Priority::DEFAULT)
-                .expect("room again");
-        }
-        assert!(
-            !actions.take_congestion_close(),
-            "four single expiries, each ended by a push, are four runs of one"
+            |actions| {
+                for _ in 0..4 {
+                    link.set_room(LinkRoom::Congested);
+                    assert!(blocking_push(&actions).is_ok(), "refused, not sent");
+                    link.set_room(LinkRoom::Free);
+                    actions
+                        .send_push_literal_qos("home/a", b"A", true, Priority::DEFAULT)
+                        .expect("room again");
+                }
+                assert!(
+                    !actions.take_congestion_close(),
+                    "four single expiries, each ended by a push, are four runs of one"
+                );
+            },
         );
     }
 
@@ -6398,17 +6404,17 @@ mod link_congestion_tests {
     #[test]
     fn with_no_count_stated_no_run_of_expiries_closes_the_session() {
         let link = CongestibleLink::new();
-        let Some(actions) = kept_session(
+        kept_session(
             link.clone(),
             wz_session_core::limit_binding::Quota::UNBOUNDED,
-        ) else {
-            return;
-        };
-        link.set_room(LinkRoom::Congested);
-        for _ in 0..50 {
-            assert!(blocking_push(&actions).is_ok());
-        }
-        assert!(!actions.take_congestion_close());
+            |actions| {
+                link.set_room(LinkRoom::Congested);
+                for _ in 0..50 {
+                    assert!(blocking_push(&actions).is_ok());
+                }
+                assert!(!actions.take_congestion_close());
+            },
+        );
     }
 
     /// The control: upstream's behaviour, the policy off. The put succeeds from the caller's

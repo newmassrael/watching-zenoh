@@ -2510,15 +2510,16 @@ mod build_numbers {
         }
     }
 
-    /// The build's snapshot with one limit stated through `select`, or `None` where the build
-    /// keeps the build's value alone and refuses the statement itself, which leaves the snapshot
-    /// as it was.
+    /// `check` run on the build's snapshot with one limit stated through `select`. A build that
+    /// keeps the build's value alone refuses the statement itself and leaves the snapshot as it
+    /// was, and that refusal is what such a build is checked for.
     fn stated(
         select: impl FnOnce(&mut SessionLimits) -> Result<(), OutsideLimitDomain>,
-    ) -> Option<SessionLimits> {
+        check: impl FnOnce(SessionLimits),
+    ) {
         let mut limits = SessionLimits::defaults();
         match select(&mut limits) {
-            Ok(()) => Some(limits),
+            Ok(()) => check(limits),
             Err(refused) => {
                 assert!(
                     refused.domain.is_singleton(),
@@ -2527,7 +2528,6 @@ mod build_numbers {
                     refused.value
                 );
                 assert_eq!(limits, SessionLimits::defaults());
-                None
             }
         }
     }
@@ -2546,10 +2546,12 @@ mod build_numbers {
     #[test]
     fn pico_unicast_batch_bytes_stated_is_the_batch_an_open_advertises() {
         let value = another(caps::PICO_UNICAST_BATCH_BYTES);
-        let Some(limits) = stated(|limits| limits.select_pico_unicast_batch_bytes(value)) else {
-            return;
-        };
-        assert_eq!(usize::from(pico_unicast_batch(&limits)), value);
+        stated(
+            |limits| limits.select_pico_unicast_batch_bytes(value),
+            |limits| {
+                assert_eq!(usize::from(pico_unicast_batch(&limits)), value);
+            },
+        );
     }
 
     /// `PICO_MULTICAST_BATCH_BYTES` with nothing stated: a group's Join states the build's batch
@@ -2570,16 +2572,18 @@ mod build_numbers {
     #[test]
     fn pico_multicast_batch_bytes_stated_is_the_batch_the_join_states() {
         let value = another(caps::PICO_MULTICAST_BATCH_BYTES);
-        let Some(limits) = stated(|limits| limits.select_pico_multicast_batch_bytes(value)) else {
-            return;
-        };
-        assert_eq!(
-            usize::from(pico_group(SnResolution::Bits32, &limits).batch_size),
-            value
-        );
-        assert_eq!(
-            usize::from(pico_unicast_batch(&limits)),
-            caps::PICO_UNICAST_BATCH_BYTES
+        stated(
+            |limits| limits.select_pico_multicast_batch_bytes(value),
+            |limits| {
+                assert_eq!(
+                    usize::from(pico_group(SnResolution::Bits32, &limits).batch_size),
+                    value
+                );
+                assert_eq!(
+                    usize::from(pico_unicast_batch(&limits)),
+                    caps::PICO_UNICAST_BATCH_BYTES
+                );
+            },
         );
     }
 
@@ -2601,14 +2605,16 @@ mod build_numbers {
     #[test]
     fn pico_lease_ms_stated_is_the_lease_an_open_advertises() {
         let value = another(caps::PICO_LEASE_MS);
-        let Some(limits) = stated(|limits| limits.select_pico_lease_ms(value)) else {
-            return;
-        };
-        assert_eq!(pico_lease_ms(&limits), value as u64);
-        #[cfg(feature = "multicast-transport")]
-        assert_eq!(
-            pico_group(SnResolution::Bits32, &limits).lease_ms,
-            value as u64
+        stated(
+            |limits| limits.select_pico_lease_ms(value),
+            |limits| {
+                assert_eq!(pico_lease_ms(&limits), value as u64);
+                #[cfg(feature = "multicast-transport")]
+                assert_eq!(
+                    pico_group(SnResolution::Bits32, &limits).lease_ms,
+                    value as u64
+                );
+            },
         );
     }
 
@@ -2629,10 +2635,12 @@ mod build_numbers {
     #[test]
     fn pico_socket_timeout_ms_stated_is_the_wait_of_a_read_step() {
         let value = another(caps::PICO_SOCKET_TIMEOUT_MS);
-        let Some(limits) = stated(|limits| limits.select_pico_socket_timeout_ms(value)) else {
-            return;
-        };
-        assert_eq!(pico_socket_timeout(&limits) as usize, value);
+        stated(
+            |limits| limits.select_pico_socket_timeout_ms(value),
+            |limits| {
+                assert_eq!(pico_socket_timeout(&limits) as usize, value);
+            },
+        );
     }
 
     /// `PICO_CONNECT_TIMEOUT_MS` with nothing stated: each open of an endpoint, and the
@@ -2655,16 +2663,18 @@ mod build_numbers {
     #[test]
     fn pico_connect_timeout_ms_stated_is_the_bound_of_an_open() {
         let value = another(caps::PICO_CONNECT_TIMEOUT_MS);
-        let Some(limits) = stated(|limits| limits.select_pico_connect_timeout_ms(value)) else {
-            return;
-        };
-        #[cfg(feature = "engine-tokio")]
-        assert_eq!(
-            pico_dial_phase(&limits).open_timeout,
-            core::time::Duration::from_millis(value as u64)
+        stated(
+            |limits| limits.select_pico_connect_timeout_ms(value),
+            |limits| {
+                #[cfg(feature = "engine-tokio")]
+                assert_eq!(
+                    pico_dial_phase(&limits).open_timeout,
+                    core::time::Duration::from_millis(value as u64)
+                );
+                #[cfg(not(feature = "engine-tokio"))]
+                assert_eq!(pico_session_timeouts(&limits).opening_ms, value as u64);
+            },
         );
-        #[cfg(not(feature = "engine-tokio"))]
-        assert_eq!(pico_session_timeouts(&limits).opening_ms, value as u64);
     }
 
     /// `PICO_ACCEPT_TIMEOUT_MS` with nothing stated: a listening session gives an inbound link the
@@ -2687,22 +2697,24 @@ mod build_numbers {
     #[test]
     fn pico_accept_timeout_ms_stated_is_the_time_an_inbound_link_is_given() {
         let value = another(caps::PICO_ACCEPT_TIMEOUT_MS);
-        let Some(limits) = stated(|limits| limits.select_pico_accept_timeout_ms(value)) else {
-            return;
-        };
-        #[cfg(feature = "engine-tokio")]
-        {
-            let accept = pico_accept(&limits);
-            assert_eq!(accept.timeout_ms, value as u64);
-            assert_eq!(
-                accept.pending,
-                wz_capi_core::runtime::config::ACCEPT_PENDING
-            );
-        }
-        #[cfg(not(feature = "engine-tokio"))]
-        assert_eq!(
-            pico_session_timeouts(&limits).accepting_inactivity_ms,
-            value as u64
+        stated(
+            |limits| limits.select_pico_accept_timeout_ms(value),
+            |limits| {
+                #[cfg(feature = "engine-tokio")]
+                {
+                    let accept = pico_accept(&limits);
+                    assert_eq!(accept.timeout_ms, value as u64);
+                    assert_eq!(
+                        accept.pending,
+                        wz_capi_core::runtime::config::ACCEPT_PENDING
+                    );
+                }
+                #[cfg(not(feature = "engine-tokio"))]
+                assert_eq!(
+                    pico_session_timeouts(&limits).accepting_inactivity_ms,
+                    value as u64
+                );
+            },
         );
     }
 
@@ -2722,13 +2734,15 @@ mod build_numbers {
     #[test]
     fn pico_keepalives_per_lease_stated_is_the_factor_the_keepalive_divides_by() {
         let value = another(caps::PICO_KEEPALIVES_PER_LEASE);
-        let Some(limits) = stated(|limits| limits.select_pico_keepalives_per_lease(value)) else {
-            return;
-        };
-        let (own, adopted) = (10_000u64, 6_000u64);
-        assert_eq!(
-            pico_keep_alive(&limits).interval_ms(own, adopted),
-            adopted / value as u64
+        stated(
+            |limits| limits.select_pico_keepalives_per_lease(value),
+            |limits| {
+                let (own, adopted) = (10_000u64, 6_000u64);
+                assert_eq!(
+                    pico_keep_alive(&limits).interval_ms(own, adopted),
+                    adopted / value as u64
+                );
+            },
         );
     }
 
@@ -2747,18 +2761,19 @@ mod build_numbers {
     /// what the links are told is unchanged.
     #[test]
     fn pico_frag_max_bytes_stated_as_two_refuses_the_next() {
-        let Some(limits) = stated(|limits| limits.select_pico_frag_max_bytes(Quota::at_most(2)))
-        else {
-            return;
-        };
-        let link_rx = pico_link_rx(&limits);
-        assert_eq!(link_rx.max_message_size, 2);
-        assert_eq!(
-            LinkRxConf {
-                max_message_size: caps::PICO_FRAG_MAX_BYTES,
-                ..link_rx
+        stated(
+            |limits| limits.select_pico_frag_max_bytes(Quota::at_most(2)),
+            |limits| {
+                let link_rx = pico_link_rx(&limits);
+                assert_eq!(link_rx.max_message_size, 2);
+                assert_eq!(
+                    LinkRxConf {
+                        max_message_size: caps::PICO_FRAG_MAX_BYTES,
+                        ..link_rx
+                    },
+                    pico_link_rx(&SessionLimits::defaults())
+                );
             },
-            pico_link_rx(&SessionLimits::defaults())
         );
     }
 

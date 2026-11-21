@@ -2093,24 +2093,34 @@ mod tests {
         };
 
         let held = app();
-        let declared = declared::<3>();
+        let stated_declared = declared::<3>();
         assert_eq!(
-            install_entities(held, stated, &[], &entities, declared).err(),
+            install_entities(held, stated, &[], &entities, stated_declared).err(),
             Some(InstallRefused::Subscriptions)
         );
         let observer = held
             .get()
             .expect("the observer was built before the refusal");
         assert_eq!(observer.borrow_mut().subscribers.len(), 2);
-        assert_eq!(declared.all().len(), 2, "the refused one is not declared");
+        assert_eq!(
+            stated_declared.all().len(),
+            2,
+            "the refused one is not declared"
+        );
 
         // CONTROL: the build's limits take the subscription the stated ones refused.
         let control = app();
-        let declared = declared::<3>();
-        let observer = install_entities(control, SessionLimits::BUILD, &[], &entities, declared)
-            .expect("the build's limits take it");
+        let control_declared = declared::<3>();
+        let observer = install_entities(
+            control,
+            SessionLimits::BUILD,
+            &[],
+            &entities,
+            control_declared,
+        )
+        .expect("the build's limits take it");
         assert_eq!(observer.borrow_mut().subscribers.len(), 3);
-        assert_eq!(declared.all().len(), 3);
+        assert_eq!(control_declared.all().len(), 3);
     }
 
     #[test]

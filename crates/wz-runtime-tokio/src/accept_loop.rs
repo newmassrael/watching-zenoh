@@ -8007,7 +8007,10 @@ mod tests {
                 _ => {}
             }
         };
-        let acceptor = accept_loop(
+        // Each future is boxed, as the tests that hold their initiators in a `join_all` do: the
+        // acceptor and three sessions held by value in this test's own future make its poll
+        // frames larger than a test thread's stack in a debug build of every feature.
+        let acceptor = Box::pin(accept_loop(
             listener,
             acceptor_params(),
             TokioTime::new(),
@@ -8015,13 +8018,13 @@ mod tests {
             shutdown_on(shut_rx.clone()),
             on_event,
             &NoOpForwarder,
-        );
+        ));
 
         // The early peer releases (closes) once all N are up; the two holders
         // stay up until shutdown, so the eviction happens under live concurrency.
-        let early = idle_initiator(addr, 0x01, early_rx.clone());
-        let hold1 = idle_initiator(addr, 0x02, shut_rx.clone());
-        let hold2 = idle_initiator(addr, 0x03, shut_rx.clone());
+        let early = Box::pin(idle_initiator(addr, 0x01, early_rx.clone()));
+        let hold1 = Box::pin(idle_initiator(addr, 0x02, shut_rx.clone()));
+        let hold2 = Box::pin(idle_initiator(addr, 0x03, shut_rx.clone()));
 
         let summary = tokio::time::timeout(Duration::from_secs(20), async {
             let (summary, _, _, _) = tokio::join!(acceptor, early, hold1, hold2);

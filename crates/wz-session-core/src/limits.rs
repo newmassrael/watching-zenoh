@@ -1789,21 +1789,27 @@ mod enforcement {
         );
     }
 
-    /// The pace a session's replay reads from a snapshot with `declaration-sync-pacing` on and
-    /// `limits`, as every host of a paced replay makes it; `None` where the build keeps the policy
-    /// off, so no snapshot paces a replay.
-    fn pace_of(limits: &SessionLimits) -> Option<crate::replay_pacing::ReplayPacing> {
+    /// `check` run on the pace a session's replay reads from a snapshot with
+    /// `declaration-sync-pacing` on and `limits`, as every host of a paced replay makes it. A
+    /// build that keeps the policy off refuses it, and is checked for what that means: no snapshot
+    /// paces a replay.
+    fn paced(limits: &SessionLimits, check: impl FnOnce(crate::replay_pacing::ReplayPacing)) {
         use crate::policy::{DeclarationSyncPacing, SessionPolicy};
+        use crate::replay_pacing::ReplayPacing;
         let mut policy = SessionPolicy::defaults();
-        policy
+        if policy
             .select_declaration_sync_pacing(DeclarationSyncPacing::On)
-            .ok()?;
-        let pace = crate::replay_pacing::ReplayPacing::of_snapshot(&policy, limits);
-        assert!(
-            pace.is_some(),
-            "a snapshot's burst and interval make a pace"
-        );
-        pace
+            .is_err()
+        {
+            assert!(
+                ReplayPacing::of_snapshot(&policy, limits).is_none(),
+                "a build that keeps the policy off paces no replay"
+            );
+            return;
+        }
+        let pace = ReplayPacing::of_snapshot(&policy, limits)
+            .expect("a snapshot's burst and interval make a pace");
+        check(pace);
     }
 
     /// A parameter's statement in a snapshot.
@@ -1833,9 +1839,9 @@ mod enforcement {
     /// burst a turn.
     #[test]
     fn declaration_sync_burst_messages_with_nothing_stated_is_the_builds_burst() {
-        if let Some(pace) = pace_of(&SessionLimits::defaults()) {
+        paced(&SessionLimits::defaults(), |pace| {
             assert_eq!(pace.burst(), caps::DECLARATION_SYNC_BURST_MESSAGES);
-        }
+        });
     }
 
     /// `DECLARATION_SYNC_BURST_MESSAGES` stated as three: a paced replay sends three a turn.
@@ -1846,9 +1852,9 @@ mod enforcement {
             3,
             DeclarationSyncBurstMessages::DOMAIN.is_singleton(),
             |limits| {
-                if let Some(pace) = pace_of(limits) {
+                paced(limits, |pace| {
                     assert_eq!(pace.burst(), 3);
-                }
+                });
             },
         );
     }
@@ -1857,12 +1863,12 @@ mod enforcement {
     /// interval between turns.
     #[test]
     fn declaration_sync_interval_ms_with_nothing_stated_is_the_builds_interval() {
-        if let Some(pace) = pace_of(&SessionLimits::defaults()) {
+        paced(&SessionLimits::defaults(), |pace| {
             assert_eq!(
                 pace.interval_ms(),
                 caps::DECLARATION_SYNC_INTERVAL_MS as u64
             );
-        }
+        });
     }
 
     /// `DECLARATION_SYNC_INTERVAL_MS` stated as 25: a paced replay waits 25 ms between turns.
@@ -1873,9 +1879,9 @@ mod enforcement {
             25,
             DeclarationSyncIntervalMs::DOMAIN.is_singleton(),
             |limits| {
-                if let Some(pace) = pace_of(limits) {
+                paced(limits, |pace| {
                     assert_eq!(pace.interval_ms(), 25);
-                }
+                });
             },
         );
     }
@@ -1884,12 +1890,12 @@ mod enforcement {
     /// the build's retry interval says.
     #[test]
     fn declaration_sync_retry_interval_ms_with_nothing_stated_is_the_builds_retry_interval() {
-        if let Some(pace) = pace_of(&SessionLimits::defaults()) {
+        paced(&SessionLimits::defaults(), |pace| {
             assert_eq!(
                 pace.retry_interval_ms(),
                 caps::DECLARATION_SYNC_RETRY_INTERVAL_MS as u64
             );
-        }
+        });
     }
 
     /// `DECLARATION_SYNC_RETRY_INTERVAL_MS` stated as 7: a refused turn is tried again 7 ms on,
@@ -1901,7 +1907,7 @@ mod enforcement {
             7,
             DeclarationSyncRetryIntervalMs::DOMAIN.is_singleton(),
             |limits| {
-                if let Some(pace) = pace_of(limits) {
+                paced(limits, |pace| {
                     assert_eq!(pace.retry_interval_ms(), 7);
                     assert_eq!(
                         pace.interval_ms(),
@@ -1911,7 +1917,7 @@ mod enforcement {
                         pace.after_refusal(0, 0),
                         crate::replay_pacing::RefusalStep::RetryIn(7)
                     );
-                }
+                });
             },
         );
     }
@@ -1920,12 +1926,12 @@ mod enforcement {
     /// the build's bound says.
     #[test]
     fn declaration_sync_tx_no_progress_ms_with_nothing_stated_is_the_builds_bound() {
-        if let Some(pace) = pace_of(&SessionLimits::defaults()) {
+        paced(&SessionLimits::defaults(), |pace| {
             assert_eq!(
                 pace.no_progress_ms(),
                 caps::DECLARATION_SYNC_TX_NO_PROGRESS_MS as u64
             );
-        }
+        });
     }
 
     /// `DECLARATION_SYNC_TX_NO_PROGRESS_MS` stated as 40: a retrying replay gives up once 40 ms
@@ -1937,23 +1943,33 @@ mod enforcement {
             40,
             DeclarationSyncTxNoProgressMs::DOMAIN.is_singleton(),
             |limits| {
-                if let Some(pace) = pace_of(limits) {
+                paced(limits, |pace| {
                     assert_eq!(pace.no_progress_ms(), 40);
-                }
+                });
             },
         );
     }
 
-    /// A snapshot with `tx-no-progress-deadline` on, or `None` where the build keeps it off, so
-    /// no queue holds a window.
+    /// `check` run on a snapshot with `tx-no-progress-deadline` on. A build that keeps the policy
+    /// off refuses it, and is checked for what that means: no queue its creator builds holds a
+    /// window.
     #[cfg(feature = "storage-profile")]
-    fn no_progress_deadline_on() -> Option<crate::policy::SessionPolicy> {
+    fn no_progress_deadline_on(check: impl FnOnce(crate::policy::SessionPolicy)) {
         use crate::policy::{SessionPolicy, TxNoProgressDeadline};
+        use crate::session_init_params::TxQueueConf;
         let mut policy = SessionPolicy::defaults();
-        policy
+        if policy
             .select_tx_no_progress_deadline(TxNoProgressDeadline::On)
-            .ok()?;
-        Some(policy)
+            .is_err()
+        {
+            assert_eq!(
+                TxQueueConf::of_snapshot(&policy, &SessionLimits::defaults()).no_progress_us,
+                None,
+                "a build that keeps the policy off holds no window"
+            );
+            return;
+        }
+        check(policy);
     }
 
     /// `TX_NO_PROGRESS_WINDOW_US` with nothing stated: the queue a creator builds from the
@@ -1964,18 +1980,17 @@ mod enforcement {
         use crate::link::RoomWait;
         use crate::session_init_params::TxQueueConf;
         use crate::tx_deadline::PushDeadline;
-        let Some(on) = no_progress_deadline_on() else {
-            return;
-        };
-        let queue = TxQueueConf::of_snapshot(&on, &SessionLimits::defaults());
-        let window = caps::TX_NO_PROGRESS_WINDOW_US as u64;
-        assert_eq!(queue.no_progress_us, Some(window));
-        assert_eq!(
-            PushDeadline::new(false, &queue).ask(),
-            RoomWait::Block {
-                wait_us: window.min(queue.wait_before_close_us)
-            }
-        );
+        no_progress_deadline_on(|on| {
+            let queue = TxQueueConf::of_snapshot(&on, &SessionLimits::defaults());
+            let window = caps::TX_NO_PROGRESS_WINDOW_US as u64;
+            assert_eq!(queue.no_progress_us, Some(window));
+            assert_eq!(
+                PushDeadline::new(false, &queue).ask(),
+                RoomWait::Block {
+                    wait_us: window.min(queue.wait_before_close_us)
+                }
+            );
+        });
     }
 
     /// `TX_NO_PROGRESS_WINDOW_US` stated as 250: the queue of either transmit model holds a
@@ -1992,20 +2007,19 @@ mod enforcement {
             250,
             TxNoProgressWindowUs::DOMAIN.is_singleton(),
             |limits| {
-                let Some(on) = no_progress_deadline_on() else {
-                    return;
-                };
-                for queue in [
-                    TxQueueConf::of_snapshot(&on, limits),
-                    TxQueueConf::pico_of_snapshot(&on, limits),
-                ] {
-                    assert_eq!(queue.no_progress_us, Some(250));
-                    assert_eq!(queue.wait_before_close_us, WAIT_BEFORE_CLOSE_US);
-                    assert_eq!(
-                        PushDeadline::new(false, &queue).ask(),
-                        RoomWait::Block { wait_us: 250 }
-                    );
-                }
+                no_progress_deadline_on(|on| {
+                    for queue in [
+                        TxQueueConf::of_snapshot(&on, limits),
+                        TxQueueConf::pico_of_snapshot(&on, limits),
+                    ] {
+                        assert_eq!(queue.no_progress_us, Some(250));
+                        assert_eq!(queue.wait_before_close_us, WAIT_BEFORE_CLOSE_US);
+                        assert_eq!(
+                            PushDeadline::new(false, &queue).ask(),
+                            RoomWait::Block { wait_us: 250 }
+                        );
+                    }
+                });
             },
         );
     }
