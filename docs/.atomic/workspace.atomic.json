@@ -6364,6 +6364,29 @@
         "C1cc a_longer_batching_time_limit_writes_a_contended_burst_in_fewer_batches_on_wz_and_libzenohc: wz writes about 4,500 batches under 0 ms and 100 ms alike while libzenohc goes 825 to 58; taken by watching-zenoh-43 next.",
         "Layer Q's multicast-e2e figure is a hosted reading; the build hosts read it 780 B higher, so a local Layer Q is not its verdict."
       ]
+    },
+    "Round 4586": {
+      "decision_summary": "A tokio link's writer now backs off for the batching time limit only when its idle flush found a sender holding an open frame, which is upstream's rule: its writer pulls the open batch when it can take the batch's lock and backs off when a producer holds it (`io/zenoh-transport/src/common/pipeline.rs` @ `if let Ok(mut g) = self.current.try_lock() {`), and while backing off it pulls once no new bytes were written since its last look or once the threshold has passed since the batch's first write (`io/zenoh-transport/src/common/pipeline.rs` @ `if diff >= self.backoff.threshold {`). wz's writer read whether producers were still adding from the staged count over a few microseconds of spinning, and a producer that lost its CPU makes no progress in that window and read as one that had stopped, so on a runner with few cores the writer flushed at once whatever the limit: C1cc's time limit leg failed on every hosted run that reached it (wz about 4,500 batches at 0 and at 100 ms, libzenohc 825 against 58), passed on a build host with every core, and failed there with two or four cores. The session's idle flush already skipped a conduit whose lock a sender held; it now answers that (`IdleFlush::SenderHeld`), the writer enters the backoff on it, waits for what is left of the limit or for a whole frame, and past the limit leaves a held frame to the sender's own wake, so a writer never spins on a lock.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/link.rs: `IdleFlush` (`Drained`, `SenderHeld`), the hook of `set_idle_flush` answers it.",
+        "crates/wz-session-core/src/session_actions.rs: `flush_staged` answers `SenderHeld` when `try_flush_open_batch` left a conduit a sender held; `flush_open_batch_nowait` folded into it.",
+        "crates/wz-runtime-tokio/src/writer_queue.rs: `Backoff` and `hold_back` replace the microsecond probes; `first_staged_ns` is the open frames' first write; a whole frame ends a backoff; three tests (backs off for the bound and no longer, a zero bound never backs off, a drained flush leaves at once under a long bound) replace the probe test.",
+        "session_glue.rs, stream_link.rs, quic_pipeline.rs: the hook's type; S4 row 90 names the backoff; reason pins of session-close-ingress moved after re-reading its claims; an acknowledgement row for run 44895098050."
+      ],
+      "verification_bullets": [
+        "C1cc's time limit leg on one build host with `taskset` to two and four cores and with every core: wz decides H1 in 8 steps on all three, libzenohc in 8, 12 and 8; on main before the change wz failed with two (Unordered) and four (undecided after 40 steps).",
+        "wz-runtime-tokio tests 1080 passed (writer_queue 73 of 73), wz-session-core lib 1152 passed, clippy -D warnings of both crates with all targets, cargo check of wz-session-core without default features and of wz-session-mcu.",
+        "Layer C1cc on a build host reached 69 of 76 legs and failed at the batching switch leg, which fails the same way on main before the change (two runs each): not this change's, and carried.",
+        "upstream_citation_anchor_gate.py --check --resolve, the pre-push hook's round-fed gates (reason pins and self-report lint after their fixes)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "C1cc a_session_without_batching_writes_each_put_in_a_batch_of_its_own_on_wz_and_libzenohc: with batching on wz writes 4003 batches of one put where libzenohc writes 93 to 306, on main as well; no hosted run has reached the leg; taken by watching-zenoh-43 next.",
+        "The writer's backoff changes how a stream link coalesces under contention; hosted throughput and latency lanes are the first wide reading of it."
+      ]
     }
   },
   "inventory_entries": {
