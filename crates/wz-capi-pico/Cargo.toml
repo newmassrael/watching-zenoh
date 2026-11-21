@@ -389,9 +389,9 @@ e2e-receiver = [
 # part of the unstable surface. The ring and the round are `wz-session-core`'s and the admission of
 # a reply to the judge is `wz-app-frame`'s. A publisher answers with a queryable and a subscriber
 # asks with a get, hears its publishers through the declaration watch and judges with the receiving
-# judge, so it selects all four; it touches neither engine itself and forwards weakly.
+# judge, so it selects all four; it touches neither engine itself and forwards weakly. Its state is
+# under the doors' lock and its deadlines on the library's clock, so it selects no `std`.
 replay-cache = [
-    "std",
     "unstable-api",
     "query",
     "queryable",

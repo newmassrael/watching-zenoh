@@ -50,10 +50,19 @@
 //! is called for one sample at a time in the order the judge saw them, and must not call a door of
 //! its own subscriber. The sample and the frame it points to are valid only for the call.
 
+use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::String;
+use alloc::sync::Arc;
+use alloc::vec;
+use alloc::vec::Vec;
 use core::ffi::{c_char, c_void};
 use core::mem::ManuallyDrop;
-use std::sync::{Arc, Mutex};
+// The library's clock for the replay's deadlines: `std`'s, or the host's monotonic one without it.
+#[cfg(feature = "std")]
 use std::time::Instant;
+#[cfg(not(feature = "std"))]
+use wz_host_sync::Instant;
 
 use wz_app_frame::e2e_receiver::Receiver;
 use wz_app_frame::replay_admission::{admit, Admission};
@@ -70,7 +79,9 @@ use crate::decl_watch::{
     wz_ext_decl_event_t, wz_ext_decl_watch_declare, wz_ext_decl_watch_drop,
     wz_ext_owned_decl_watch_t, WZ_EXT_DECL_DECLARED, WZ_EXT_DECL_QUERYABLE, WZ_EXT_DECL_UNDECLARED,
 };
-use crate::e2e::{bytes_arg, keyexpr_text, locked, session_facts, utf8_arg, ReplayPolicies};
+use crate::e2e::{
+    bytes_arg, keyexpr_text, locked, session_facts, unlocked, utf8_arg, Mutex, ReplayPolicies,
+};
 use crate::e2e_receiver::{to_c, wz_ext_e2e_verdict_t, wz_ext_moved_e2e_receiver_t};
 use crate::ext_interface::{wz_ext_interface_bytes_view, wz_ext_interface_run_in_callback};
 use crate::ffi::{catch, guard_val, guarded, SendPtr};
@@ -769,10 +780,7 @@ unsafe fn take_receiver(receiver: *mut wz_ext_moved_e2e_receiver_t) -> Option<Re
         return None;
     }
     let held: Mutex<Receiver> = *Box::from_raw(raw.cast::<Mutex<Receiver>>());
-    Some(
-        held.into_inner()
-            .unwrap_or_else(std::sync::PoisonError::into_inner),
-    )
+    Some(unlocked(held))
 }
 
 /// Fill in the default subscriber options: no storage, a depth of 1, the querier's bound, stream

@@ -33,8 +33,13 @@
 //! after it is let go, and the held sends go out once the last answer is over, before any later
 //! send.
 
+use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::ToString;
+use alloc::sync::Arc;
+use alloc::vec;
+use alloc::vec::Vec;
 use core::ffi::{c_char, c_void};
-use std::sync::{Arc, Mutex};
 
 use wz_app_frame::segment_sender::{Rollover, SegmentSender, SplitError};
 use wz_session_core::policy::ReplayReplyShape;
@@ -47,7 +52,7 @@ use crate::abi::{
 };
 use crate::bytes::{z_bytes_copy_from_buf, z_bytes_move};
 use crate::e2e::{
-    bytes_arg, clear_refusal, keyexpr_text, locked, session_facts, utf8_arg, write_refusal,
+    bytes_arg, clear_refusal, keyexpr_text, locked, session_facts, utf8_arg, write_refusal, Mutex,
     ReplayPolicies,
 };
 use crate::ffi::{guard_val, guarded};
