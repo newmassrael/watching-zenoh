@@ -270,6 +270,16 @@ payloads).
 - Exhausted: as the event's congestion control says (decision Q4 of the record): for reliable,
   blocking traffic the engine stops reading the link until the lane drains, so the transport's
   flow control holds the sender; drop-policy and best-effort traffic is dropped and counted.
+- Where it stands: the subscribers' samples are in the lane (`crates/wz-capi-coop/src/lane.rs`,
+  a span of the arena, `DELIVERY_LANE_BYTES` under the build's), and each link is read only while
+  the lane can take a whole batch of it (`LaneGate`); the matching changes are a fixed table of one
+  row per listener. A sample that holds its sender and still finds no room (a batch whose samples
+  take more than its own length: a key resolved longer than it travelled, a sample many
+  subscribers take) is counted apart (`LaneCounts::held_over`). Still queued on the heap: the
+  liveliness samples, the held queries, the get events and the handed publish legs, which take
+  their own records of the same lane next. Until the reassembly of 4.9 is bounded, a sample longer
+  than `DELIVERY_LANE_BYTES` that a link rejoins is refused at the lane; the pico preset states a
+  lane at least as long as the longest message its links rejoin.
 
 ### 4.11 Runtime: tasks, timers, wakers
 
@@ -483,7 +493,21 @@ The order: U0 and U1 lay the ground; U2 to U4 are the traffic path, where the al
 message are and where a performance gain is expected; U5 to U8 the declarations and queries; U9 and
 U10 the ABI's own objects; U11 to U15 the rest; U16 closes the phase.
 
-## 7. The decisions this design rests on
+## 7. The heap the C ABI build still links
+
+What a cooperative C library still instantiates with the `Heap` policy, or on the heap, after the
+units on the track so far (U0, U1, U2, U4 in part, U5, U8, U9), read from the source and to be
+confirmed by the symbol diff of the library, and the unit that takes each away:
+
+| what | where | taken away by |
+|------|-------|---------------|
+| the peer-written tables of each face (`PeerTables`: a peer's subscribers, interests, tokens, staged replies and Finals, pending declares) | `wz-capi-coop` `engine/registry.rs` (`PeerTables::new`), dispatched as `PeerTables<Profile>` by `slot_observer.rs` | the unit of section 4.5: `Lent` tables of each face's part of the arena, the dispatch generic over the peer's policy |
+| the declaration watchers inside the lent observer (`remote_subscribers`, `remote_queryables`, `liveliness`) | `wz-session-core` `slot_observer.rs` (`SlotObserverOf::lent`) | U5's remainder: their lists lent at open, at most `MAX_DECL_OBSERVERS` each |
+| the keys canonized for the ABI's own key expressions (`canonize_keyexpr`, a `Heap` string) | `wz-capi-pico` `keyexpr.rs` | U6 |
+| the liveliness samples, held queries, get events and handed publish legs (`VecDeque`, owned keys and payloads) | `wz-capi-coop` `engine.rs`, `engine/query.rs`, `engine/get.rs`, `engine/liveliness.rs` | U4's remainder |
+| the faces' list, the sample marshal's key and payload copies, the closures | `engine/registry.rs` (`Vec<FaceTables>`), `wz-capi-pico` `pubsub.rs` (`SampleMarshal`), the port's sink factories | 4.6, U9's borrowed marshal, U7 |
+
+## 8. The decisions this design rests on
 
 The product decisions this design needed are Q1 to Q4 of `docs/c-abi-engine-and-memory.md`
 section 7, decided by the owner on 2026-11-21: the objects made before any session live in
