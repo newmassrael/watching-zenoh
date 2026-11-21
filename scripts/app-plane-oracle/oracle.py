@@ -11,14 +11,20 @@ docs/app-plane-oracle.md's; nothing here knows any deployment's layout, constant
 
     oracle.py prepare <lane-file> <scratch>   the check directories and the lane's own lists
     oracle.py judge <scratch>                 one line per check aspect, then the verdict
+    oracle.py party-words <scratch> [<word>...]
+                                              the configure words the lane adds to the
+                                              deployment's party, after the caller's words
+    oracle.py party-readback <scratch> <build> <configure log>
+                                              the party's configure read back against them
     oracle.py --selftest                      the plans, the refusals and the judge, on
                                               synthetic transcripts
 
-Exit status: 0 PASS (or prepared), 1 FAIL, 2 a lane file refused.
+Exit status: 0 PASS (or prepared), 1 FAIL, 2 a lane file or the party's configure refused.
 """
 
 from __future__ import annotations
 
+import functools
 import json
 import re
 import shutil
@@ -33,6 +39,15 @@ MAX_FRAMES = 256
 DIRECTIONS = ("wz-sends", "peer-sends")
 # The policy a replay check's shape is: the lane states it per build, never the lane file.
 SHAPE_POLICY = "WZ_POLICY_REPLAY_REPLY_SHAPE"
+# The policy that names the session's key-wire form in wz's build.
+KEY_WIRE_POLICY = "WZ_POLICY_KEY_WIRE_FORM"
+# The deployment's party's cache variables the lane binds to the lane file: the key-wire form
+# the party is built with, and the file holding the dictionary it compiles in.
+PARTY_KEY_WIRE = "WZ_ORACLE_KEY_WIRE"
+PARTY_KEY_IDS = "WZ_ORACLE_KEY_IDS"
+# A configure word that would hide from the lane a bound variable the party never reads.
+NO_UNUSED_WARNING = "--no-warn-unused-cli"
+LIB = Path(__file__).resolve().parents[2] / "scripts" / "lib"
 
 
 class Refused(Exception):
@@ -287,6 +302,7 @@ def prepare(lane_path: Path, scratch: Path) -> list[str]:
     forms: dict[str, str] = {}
     if "key_ids" in lane:
         dictionary, forms = read_key_ids(lane["key_ids"], lane.get("wz", {}).get("features", ""))
+    party_form = party_key_wire(lane, dictionary, forms)
     for check in lane["checks"]:
         name = check["name"]
         out = checks_dir / name
@@ -348,7 +364,154 @@ def prepare(lane_path: Path, scratch: Path) -> list[str]:
                                           encoding="utf-8")
     mode = lane.get("session", {}).get("connect_mode", "client")
     (scratch / "connect-mode").write_text(mode + "\n", encoding="utf-8")
+    (scratch / "party-key-wire").write_text(party_form + "\n", encoding="utf-8")
+    entries = [{"id": i, "key": k} for i, k in dictionary]
+    (scratch / "party-key-ids.json").write_text(json.dumps({"dictionary": entries}, indent=1) + "\n",
+                                                encoding="utf-8")
     return rows
+
+
+# ── the deployment's party build ────────────────────────────────────────────
+
+
+@functools.cache
+def key_wire_declared() -> tuple[tuple[str, ...], str]:
+    """The key-wire-form policy's values and default, as the build declaration states them;
+    the default is the form wz's build takes when nothing states one."""
+    if str(LIB) not in sys.path:
+        sys.path.insert(0, str(LIB))
+    import wz_config  # scripts/lib: the one reader of the build declaration
+
+    for policy in wz_config.load_decl()["policies"]:
+        if policy.get("kconfig") == KEY_WIRE_POLICY:
+            return tuple(policy["choices"]), policy["default"]
+    raise Refused(f"the build declaration states no policy {KEY_WIRE_POLICY}")
+
+
+def party_key_wire(lane: dict, dictionary: list[tuple[int, str]], forms: dict[str, str]) -> str:
+    """The key-wire form the deployment's party is built with.
+
+    The party is one build, and it listens in one direction of a check and dials in the
+    other, so it takes the form wz's party names keys in on both sides: a side's form from
+    key_ids.forms, else the session's from wz.build_env, else the declaration's default.
+    """
+    values, default = key_wire_declared()
+    session = lane.get("wz", {}).get("build_env", {}).get(KEY_WIRE_POLICY, default)
+    if session not in values:
+        raise Refused(f"wz.build_env {KEY_WIRE_POLICY} = {session!r} is not one of {', '.join(values)}")
+    listen = forms.get("listen", session)
+    connect = forms.get("connect", session)
+    if listen != connect:
+        raise Refused(f"wz's party names keys {listen} on the listen side and {connect} on the "
+                      f"connect side, but the deployment's party is one build ({PARTY_KEY_WIRE}) "
+                      "that plays both sides, so the lane file states one form for both")
+    if listen == "shared" and not dictionary:
+        raise Refused("the key-wire form is shared, but key_ids states no dictionary for the "
+                      "two parties to hold")
+    return listen
+
+
+def party_binding(scratch: Path) -> dict[str, str]:
+    """The values the lane binds the party's variables to, as prepare wrote them."""
+    return {PARTY_KEY_WIRE: (scratch / "party-key-wire").read_text(encoding="utf-8").strip(),
+            PARTY_KEY_IDS: str((scratch / "party-key-ids.json").resolve())}
+
+
+def _bound(name: str, value: str) -> str:
+    """A bound variable's value as compared: a dictionary path resolved, a form as written."""
+    if name == PARTY_KEY_IDS and value:
+        return str(Path(value).resolve())
+    return value
+
+
+def cache_definitions(words: list[str]) -> list[tuple[str, str]]:
+    """(name, value) of every cache definition among configure words: `-DNAME[:TYPE]=VALUE`,
+    or `-D` followed by that as the next word."""
+    out: list[tuple[str, str]] = []
+    after_d = False
+    for word in words:
+        if after_d:
+            body = word
+            after_d = False
+        elif word == "-D":
+            after_d = True
+            continue
+        elif word.startswith("-D"):
+            body = word[2:]
+        else:
+            continue
+        name, sep, value = body.partition("=")
+        if sep:
+            out.append((name.split(":", 1)[0], value))
+    return out
+
+
+def party_words(binding: dict[str, str], caller: list[str]) -> list[str]:
+    """The configure words the lane adds after the caller's; refused when a caller word binds
+    a bound variable to another value, or would hide one the party never reads."""
+    if NO_UNUSED_WARNING in caller:
+        raise Refused(f"WZ_APP_PLANE_ORACLE_CMAKE_ARGS holds {NO_UNUSED_WARNING}, which would hide "
+                      "a bound variable the deployment's party never reads")
+    for name, value in cache_definitions(caller):
+        if name in binding and _bound(name, value) != _bound(name, binding[name]):
+            raise Refused(f"WZ_APP_PLANE_ORACLE_CMAKE_ARGS sets {name}={value}, but the lane file "
+                          f"binds it to {binding[name]}")
+    return [f"-D{PARTY_KEY_WIRE}:STRING={binding[PARTY_KEY_WIRE]}",
+            f"-D{PARTY_KEY_IDS}:FILEPATH={binding[PARTY_KEY_IDS]}"]
+
+
+CACHE_ENTRY = re.compile(r'^"?([A-Za-z0-9_.+/-]+)"?:([A-Z]+)=(.*)$')
+UNUSED_HEAD = "Manually-specified variables were not used by the project"
+VARIABLE = re.compile(r"^[A-Za-z0-9_.+/-]+$")
+
+
+def cmake_cache(text: str) -> dict[str, str]:
+    """A CMakeCache.txt's entries, name to value."""
+    out: dict[str, str] = {}
+    for line in text.splitlines():
+        m = CACHE_ENTRY.match(line)
+        if m:
+            out[m.group(1)] = m.group(3)
+    return out
+
+
+def unused_variables(log: str) -> set[str]:
+    """The variables a configure log says were given on the command line and never read."""
+    out: set[str] = set()
+    lines = log.splitlines()
+    for n, line in enumerate(lines):
+        if UNUSED_HEAD not in line:
+            continue
+        named = False
+        for following in lines[n + 1:]:
+            word = following.strip()
+            if not word:
+                if named:
+                    break
+                continue
+            if not VARIABLE.match(word):
+                break
+            out.add(word)
+            named = True
+    return out
+
+
+def readback_problem(binding: dict[str, str], cache: str, log: str) -> str | None:
+    """Why the party as configured differs from the binding; None when it does not."""
+    unused = unused_variables(log)
+    unread = [name for name in binding if name in unused]
+    if unread:
+        return (f"the deployment's party project never read {', '.join(unread)}, so it is not "
+                "built with the lane file's " + ", ".join(f"{n}={binding[n]}" for n in unread))
+    entries = cmake_cache(cache)
+    for name, want in binding.items():
+        got = entries.get(name)
+        if got is None:
+            return f"the deployment's party cache holds no {name}, the lane file binds it to {want}"
+        if _bound(name, got) != _bound(name, want):
+            return (f"the deployment's party is configured with {name}={got}, the lane file binds "
+                    f"it to {want}")
+    return None
 
 
 # ── judge ───────────────────────────────────────────────────────────────────
@@ -654,17 +817,23 @@ def selftest() -> int:
         refused(_keyed(dict(KEY_IDS, forms="shared")), "forms that is not an object")
         for good in ("a/b", "a/*/c", "a/**", "*/**", "a$*b/c", "**"):
             expect(f"the canonical key {good!r} is read", key_problem(good) is None)
+        refused(_keyed(dict(KEY_IDS, forms={"listen": "shared", "connect": "literal"})),
+                "the two sides in two forms, for a party that is one build")
+        refused(_lane(wz={"build_env": {KEY_WIRE_POLICY: "compact"}}), "a session form the policy has no value of")
+        refused(_lane(wz={"build_env": {KEY_WIRE_POLICY: "shared"}}), "the shared form with no dictionary")
         refused(_lane(wz={"features": "a b"}), "features not a comma list")
         refused(_lane(session={"connect_mode": "router"}), "an unknown connect mode")
 
         lane_file.write_text(json.dumps(_lane(wz={"features": "message-catalog,shared-key-ids",
-                                                    "build_env": {"WZ_POLICY_X": "on"}},
+                                                    "build_env": {"WZ_POLICY_X": "on",
+                                                                  KEY_WIRE_POLICY: "shared"}},
                                               key_ids=KEY_IDS)))
         scratch = root / "s"
         rows = prepare(lane_file, scratch)
         expect("three checks prepared", rows == ["small\te2e\tframe", "answers\treplay\tsegmented",
                                                  "pieced\te2e\tsegmented"])
-        expect("the build env is written", (scratch / "wz-build-env").read_text() == "WZ_POLICY_X=on\n")
+        expect("the build env is written", (scratch / "wz-build-env").read_text()
+               == f"{KEY_WIRE_POLICY}=shared\nWZ_POLICY_X=on\n")
         params = _params(scratch / "checks" / "answers")
         expect("the replay params", params.get("segmented") == "1" and params.get("chunk_bytes") == "2"
                and params.get("suffix") == "/ask" and params.get("expect") == "3")
@@ -683,6 +852,66 @@ def selftest() -> int:
         lane_file.write_text(json.dumps(_lane()))
         prepare(lane_file, root / "plain")
         expect("no dictionary, no key-ids file", not (root / "plain" / "checks" / "small" / "key-ids").exists())
+
+        # The deployment's party: its key wire and dictionary bound to the lane file's.
+        values, default = key_wire_declared()
+        expect("the lane's forms are the policy's values", values == KEY_FORMS)
+        expect("nothing stated: the party takes the declaration's default",
+               (root / "plain" / "party-key-wire").read_text() == default + "\n")
+        expect("no dictionary: the party is handed an empty one",
+               json.loads((root / "plain" / "party-key-ids.json").read_text()) == {"dictionary": []})
+        expect("a side not stated takes the session's form, and both govern the party",
+               (scratch / "party-key-wire").read_text() == "shared\n")
+        expect("the party's dictionary is the lane file's",
+               json.loads((scratch / "party-key-ids.json").read_text()) == {"dictionary": KEY_IDS["dictionary"]})
+        expect("the sides' form over the session's", party_key_wire(
+            _lane(wz={"build_env": {KEY_WIRE_POLICY: "shared"}}), [(7, "lane/small")],
+            {"listen": "literal", "connect": "literal"}) == "literal")
+
+        binding = party_binding(scratch)
+        ids_path = str((scratch / "party-key-ids.json").resolve())
+        expect("the lane's configure words", party_words(binding, []) == [
+            f"-D{PARTY_KEY_WIRE}:STRING=shared", f"-D{PARTY_KEY_IDS}:FILEPATH={ids_path}"])
+        expect("caller words that agree or bind nothing pass", len(party_words(
+            binding, ["-DOTHER=1", f"-D{PARTY_KEY_WIRE}=shared", "-G", "Ninja"])) == 2)
+
+        def words_refused(caller: list[str], why: str, *named: str) -> None:
+            try:
+                party_words(binding, caller)
+            except Refused as err:
+                if not all(n in str(err) for n in named):
+                    failures.append(f"refused without naming {named}: {why}")
+                return
+            failures.append(f"not refused: {why}")
+
+        words_refused([f"-D{PARTY_KEY_WIRE}=literal"], "a caller key wire against the lane file's",
+                      "literal", "shared")
+        words_refused(["-D", f"{PARTY_KEY_WIRE}:STRING=literal"], "the same as two words", "literal", "shared")
+        words_refused([f"-D{PARTY_KEY_IDS}=/elsewhere/ids.json"], "a caller dictionary",
+                      "/elsewhere/ids.json", ids_path)
+        words_refused([NO_UNUSED_WARNING], "a word that hides an unread variable", NO_UNUSED_WARNING)
+
+        cache = (f"// a comment\n{PARTY_KEY_WIRE}:STRING=shared\n{PARTY_KEY_IDS}:FILEPATH={ids_path}\n"
+                 "CMAKE_BUILD_TYPE:STRING=\n")
+        log = "-- Configuring done\n-- Generating done\n"
+        unused = ("CMake Warning:\n  Manually-specified variables were not used by the project:\n\n"
+                  f"    {PARTY_KEY_IDS}\n\n\n-- Generating done\n")
+        expect("a party configured as bound is read back", readback_problem(binding, cache, log) is None)
+        expect("an unread variable outside the binding is not the lane's",
+               readback_problem(binding, cache, unused.replace(PARTY_KEY_IDS, "SOME_OTHER")) is None)
+
+        def misread(label: str, cache_text: str, log_text: str, *named: str) -> None:
+            problem = readback_problem(binding, cache_text, log_text)
+            if problem is None or not all(n in problem for n in named):
+                failures.append(f"not refused naming {named}: {label}")
+
+        misread("a party configured literal", cache.replace("STRING=shared", "STRING=literal"), log,
+                "literal", "shared")
+        misread("a party holding another dictionary", cache.replace(ids_path, "/elsewhere/ids.json"), log,
+                "/elsewhere/ids.json", ids_path)
+        misread("no key wire in the cache", cache.replace(f"{PARTY_KEY_WIRE}:STRING=shared\n", ""), log,
+                PARTY_KEY_WIRE, "shared")
+        misread("a party that never reads the dictionary", cache, unused, PARTY_KEY_IDS, ids_path)
 
         _perfect(scratch)
         expect("a pair that agrees passes", judge(scratch) == 0)
@@ -744,6 +973,28 @@ def main(argv: list[str]) -> int:
         return 0
     if len(argv) == 3 and argv[1] == "judge":
         return judge(Path(argv[2]))
+    if len(argv) >= 3 and argv[1] == "party-words":
+        scratch = Path(argv[2])
+        try:
+            words = party_words(party_binding(scratch), argv[3:])
+        except Refused as err:
+            print(f"app-plane-oracle: the deployment's party's configure is refused: {err}")
+            return 2
+        (scratch / "party-words").write_text("".join(w + "\n" for w in words), encoding="utf-8")
+        return 0
+    if len(argv) == 5 and argv[1] == "party-readback":
+        scratch, cache, log = Path(argv[2]), Path(argv[3]) / "CMakeCache.txt", Path(argv[4])
+        binding = party_binding(scratch)
+        problem = readback_problem(
+            binding,
+            cache.read_text(encoding="utf-8", errors="replace") if cache.is_file() else "",
+            log.read_text(encoding="utf-8", errors="replace") if log.is_file() else "")
+        if problem is not None:
+            print(f"app-plane-oracle: the deployment's party is refused before any exchange: {problem}")
+            return 2
+        print(f"app-plane-oracle: the deployment's party is configured with {PARTY_KEY_WIRE}="
+              f"{binding[PARTY_KEY_WIRE]} and the lane file's dictionary")
+        return 0
     print(__doc__, file=sys.stderr)
     return 2
 
