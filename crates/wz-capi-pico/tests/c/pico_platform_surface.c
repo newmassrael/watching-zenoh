@@ -23,6 +23,14 @@
 
 #include <zenoh-pico.h>
 
+/* A program of pico's multi-threaded arm: the mutex, condition variable and task exports it
+ * calls are the library's only in a build with `multi-thread` (pico's Z_FEATURE_MULTI_THREAD),
+ * whichever engine and form the library is. A header of the other arm is refused here, by name,
+ * rather than at the link by the exports that arm does not have. */
+#if Z_FEATURE_MULTI_THREAD != 1
+#error "pico_platform_surface.c is a program of the multi-threaded arm: build the library with multi-thread"
+#endif
+
 static int checks = 0;
 static int failures = 0;
 

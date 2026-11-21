@@ -15,7 +15,8 @@
 //!
 //! A panic ends the process, as a failed assertion in zenoh-pico does: a library without `std`
 //! does not unwind (docs/c-abi-engine-and-memory.md, section 3), and what is left to panic is a
-//! defect, since memory and the wire are refused by code.
+//! defect, since memory and the wire are refused by code. So the personality routine the
+//! toolchain's prebuilt `core` names is answered here too, and it aborts.
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::ffi::c_void;
@@ -122,6 +123,29 @@ static HEAP: CHeap = CHeap;
 #[cfg(all(feature = "os-posix", not(feature = "std"), not(test)))]
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
+    // SAFETY: ends the process; nothing returns.
+    unsafe { libc::abort() }
+}
+
+// The toolchain's `core` and `alloc` are prebuilt to unwind, and their unwind tables name the
+// personality routine `std`'s unwinder defines (`DW.ref.rust_eh_personality`); linking the library
+// as one program does not take that reference out (measured: an undefined `rust_eh_personality`
+// in the fat-LTO build, which no C program linking the library resolves). Nothing unwinds here:
+// the library is built `panic = "abort"` and its panic handler aborts, so no unwind ever starts
+// and the routine is never called. It is the name answered, and if it were ever reached, the
+// answer is the panic handler's. Rebuilding `core` without unwinding (`-Z build-std` with
+// `panic_abort`) would take the reference out at its source, but needs a nightly toolchain, and the
+// pin is the stable one (`rust-toolchain.toml`). An MSVC build's tables name the C runtime's
+// `__CxxFrameHandler3` and not this routine, so it defines none. The same answer as the host
+// program glue's (`wz_runtime_posix::posix_image_no_heap!`).
+#[cfg(all(
+    feature = "os-posix",
+    not(feature = "std"),
+    not(test),
+    not(target_env = "msvc")
+))]
+#[no_mangle]
+extern "C" fn rust_eh_personality() -> ! {
     // SAFETY: ends the process; nothing returns.
     unsafe { libc::abort() }
 }

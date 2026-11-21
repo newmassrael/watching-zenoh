@@ -213,6 +213,9 @@ class Case:
     # The cargo profile (`crates/Cargo.toml`). It is not a capability, so it leaves the pico
     # reference alone: that is derived from the features only.
     profile: str = "release"
+    # Patterns no symbol the library leaves UNDEFINED may match (`nm -u`): a name the library
+    # expects whoever loads it to define, which no C program linking it does.
+    forbid_undefined: tuple[str, ...] = ()
     # A cargo configuration file the build reads (`--config`, a path from `crates/`), with the
     # host's own target named (`--target`), so that what the file gives the library's crates does
     # not reach the build scripts. None: the profile alone.
@@ -722,10 +725,14 @@ CASES: tuple[Case, ...] = (
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN, STD_RUNTIME, KECCAK),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
-         exports=444, profile="capi-nostd", cargo_config=".cargo/capi-nostd.toml",
-         note="pico-client-coop's capabilities and its 444 exports: the form adds no C symbol "
-              "(no `critical-section` implementation, the locks being the host's own calls "
-              "through `wz-host-sync`, and no personality routine, nothing unwinding)"),
+         forbid_undefined=(r"^rust_eh_personality$",),
+         exports=445, profile="capi-nostd", cargo_config=".cargo/capi-nostd.toml",
+         note="pico-client-coop's capabilities and its 444 C exports, and `rust_eh_personality`: "
+              "the prebuilt `core`'s unwind tables name it and LTO keeps the reference "
+              "(measured: undefined in the first build, so no C program linked), so the library "
+              "defines it, as an abort that nothing reaches (`src/os/no_std_host.rs`), and a "
+              "`#[no_mangle]` item of a cdylib is exported. No `critical-section` "
+              "implementation: the locks are the host's own calls through `wz-host-sync`"),
     # The cooperative client with the unstable API, which the reference pico of the test lanes is
     # built with (`-DZ_FEATURE_UNSTABLE_API`): entity global ids, source info, cancellation
     # tokens. Nothing of it is the engine's, so it costs the ABI's own code and no engine's.
@@ -1404,6 +1411,8 @@ class Measured:
     # Every distinct NUL-terminated `sha256:<64 hex>` string in the binary: the conformance
     # digest is one, and a binary that holds none or two cannot say which build it is.
     digests: tuple[str, ...] = ()
+    # The names of the symbols the library leaves undefined, as it states them (unmangled).
+    undefined: tuple[str, ...] = ()
     # The build path prefixes the library still holds (build_normalization.leaked).
     leaked: tuple[str, ...] = ()
 
@@ -1539,6 +1548,13 @@ def grade(case: Case, got: Measured, stated: str | None = None) -> list[str]:
                 f"build lost the capability or the pattern can no longer match, and an absence "
                 f"check built on it grades nothing."
             )
+    for pattern in case.forbid_undefined:
+        hits = [s for s in got.undefined if re.search(pattern, s)]
+        if hits:
+            findings.append(
+                f"{case.id}: the library leaves {hits[0]} undefined, a name it expects whoever "
+                f"loads it to define; no C program that links it does, so the program's link fails."
+            )
     if case.exports is not None and got.exports != case.exports:
         findings.append(
             f"{case.id}: exports {got.exports} C symbols, pinned at {case.exports}. A symbol "
@@ -1618,9 +1634,13 @@ def build(case: Case, env: Mapping[str, str], prefixes: build_normalization.Pref
         ["nm", "-D", "--defined-only", str(lib)], capture_output=True, text=True, check=True
     ).stdout.splitlines()
     exports = sum(1 for line in dynamic if len(line.split()) == 3 and line.split()[1] == "T")
+    undefined = subprocess.run(
+        ["nm", "-u", str(lib)], capture_output=True, text=True, check=True
+    ).stdout.splitlines()
     data = lib.read_bytes()
     return Measured(text=text, symbols=symbols, exports=exports, digests=digests_in(data),
-                    leaked=tuple(build_normalization.leaked(data, prefixes)))
+                    leaked=tuple(build_normalization.leaked(data, prefixes)),
+                    undefined=tuple(line.split()[-1] for line in undefined if line.split()))
 
 
 @dataclass(frozen=True)
@@ -2063,6 +2083,12 @@ def cmd_selftest() -> int:
     lost = Measured(900, ["wz::other"], 3)
     expect("a required plane that is absent is a finding", len(grade(case, lost)) == 1)
     expect("a wrong export count is a finding", len(grade(case, Measured(900, clean.symbols, 4))) == 1)
+    personality = Case("t", "p", "l", "", 1000, forbid_undefined=(r"^rust_eh_personality$",))
+    expect("a forbidden undefined symbol is a finding",
+           len(grade(personality, Measured(900, [], 3, (), ("malloc", "rust_eh_personality"))))
+           == 1)
+    expect("the same name defined, or another left undefined, is not",
+           grade(personality, Measured(900, ["rust_eh_personality"], 3, (), ("malloc",))) == [])
     expect("an unpinned export count is not graded",
            grade(Case("t", "p", "l", "", 1000), Measured(900, [], 99)) == [])
     # The control that keeps ABSENCE honest: every pattern a case forbids is required by some
