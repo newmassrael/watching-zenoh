@@ -51,8 +51,15 @@ pub fn with<R>(f: impl FnOnce(CriticalSection<'_>) -> R) -> R {
     }
 }
 
+// The host's section has two makings, each a module of its own name, and the build names the one it
+// has `host`: `std`'s, or the host's own calls' (`host-lock-sys`).
 #[cfg(all(feature = "host-lock", not(feature = "host-lock-sys")))]
-mod host {
+use host_std as host;
+#[cfg(feature = "host-lock-sys")]
+use host_sys as host;
+
+#[cfg(all(feature = "host-lock", not(feature = "host-lock-sys")))]
+mod host_std {
     extern crate std;
 
     use core::cell::{Cell, RefCell, UnsafeCell};
@@ -225,7 +232,7 @@ mod host {
 /// thread's number in place of a thread-local depth, and a value's lock is let go by the guard
 /// that took it in place of a stack of guards.
 #[cfg(feature = "host-lock-sys")]
-mod host {
+mod host_sys {
     use core::cell::UnsafeCell;
     use core::sync::atomic::{AtomicUsize, Ordering};
 
