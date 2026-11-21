@@ -235,6 +235,34 @@ fn periodic_requests_reask_each_source_once() {
     );
 }
 
+/// Two machines that met the same sources in the same order ask for them in the same order: the
+/// source tables hash with a fixed seed, so a run is reproducible and a build without `std`
+/// needs no entropy for them. The order is the hash's and not the key's, so the test compares two
+/// runs with each other and not with a sorted list.
+#[cfg(feature = "advanced-recovery")]
+#[test]
+fn periodic_requests_come_in_the_same_order_in_every_run() {
+    let ask = || {
+        let mut state = silent(true);
+        for eid in 0..32u8 {
+            let key = (vec![0x01, eid], u32::from(eid));
+            state.sequenced.insert(key, source_at(Some(0)));
+        }
+        state
+            .periodic_requests()
+            .into_iter()
+            .map(|r| (r.zid, r.eid))
+            .collect::<Vec<_>>()
+    };
+    let first = ask();
+    assert_eq!(first.len(), 32);
+    assert_eq!(
+        first,
+        ask(),
+        "a second machine with the same sources asks in the same order"
+    );
+}
+
 /// R311y84 heartbeat-trigger unit (no session): a beacon ahead of
 /// `last_delivered` requests a BOUNDED `_sn=last+1..hb` GET once; a beacon
 /// at-or-behind `last_delivered`, or one while a GET is in flight, is a

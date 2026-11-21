@@ -3637,6 +3637,8 @@ dependencies = [
 name = "wz-ext-pubsub"
 version = "0.1.0"
 dependencies = [
+ "foldhash 0.1.5",
+ "hashbrown 0.15.5",
  "log",
  "wz-capi-port",
  "wz-node-time",

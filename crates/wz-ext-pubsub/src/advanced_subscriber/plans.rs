@@ -10,8 +10,6 @@
 //! again.
 
 #[cfg(feature = "advanced-recovery")]
-use alloc::collections::BTreeSet;
-#[cfg(feature = "advanced-recovery")]
 use core::time::Duration;
 
 #[cfg(feature = "advanced-recovery")]
@@ -21,6 +19,8 @@ use wz_session_core::sample::{EncodingHint, Sample};
 #[cfg(feature = "advanced-recovery")]
 use wz_session_core::zid_hex::zenoh_hex_to_zid;
 
+#[cfg(feature = "advanced-recovery")]
+use super::HashSet;
 #[cfg(feature = "advanced-recovery")]
 use crate::prelude::*;
 #[cfg(feature = "advanced-recovery")]
@@ -197,9 +197,9 @@ pub struct PendingGets {
 #[derive(Default)]
 struct InFlight {
     /// Issued, not yet terminal — the set a teardown must cancel.
-    live: BTreeSet<wz_session_core::wire_id::RequestId>,
+    live: HashSet<wz_session_core::wire_id::RequestId>,
     /// Terminal before `record` saw them (the synchronous-loopback ordering).
-    finished_early: BTreeSet<wz_session_core::wire_id::RequestId>,
+    finished_early: HashSet<wz_session_core::wire_id::RequestId>,
 }
 
 #[cfg(feature = "advanced-recovery")]

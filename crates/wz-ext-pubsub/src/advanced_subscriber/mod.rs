@@ -18,6 +18,13 @@
 //! because a file named `advanced_subscriber.rs` is also the tokio host's, and a bare mention of
 //! that name in a record would then name two files.
 
+/// The subscriber's keyed tables. Iteration follows the hash and not the key; the seed is fixed,
+/// so it is the same in every run and a build without `std` needs no entropy for it.
+type HashMap<K, V> = hashbrown::HashMap<K, V, foldhash::fast::FixedState>;
+/// The set twin of `HashMap`.
+#[cfg(feature = "advanced-recovery")]
+type HashSet<T> = hashbrown::HashSet<T, foldhash::fast::FixedState>;
+
 #[cfg(feature = "engine-host")]
 pub mod host;
 pub mod options;

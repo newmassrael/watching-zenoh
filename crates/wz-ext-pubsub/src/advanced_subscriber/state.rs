@@ -18,6 +18,7 @@ use core::time::Duration;
 use wz_session_core::sample::{EntityGlobalId, Sample};
 use wz_session_core::sink::SampleView;
 
+use super::HashMap;
 use crate::prelude::*;
 use crate::sync::{lock_or_panic, Mutex};
 
@@ -84,7 +85,7 @@ impl Miss {
 #[derive(Default)]
 pub struct MissHandlers {
     next_id: usize,
-    handlers: alloc::collections::BTreeMap<usize, Box<dyn FnMut(Miss) + Send>>,
+    handlers: BTreeMap<usize, Box<dyn FnMut(Miss) + Send>>,
 }
 
 impl MissHandlers {
@@ -444,7 +445,7 @@ pub struct RecoveryRequest {
 /// the host's `issue_recovery_get`) for exactly this reason.
 pub struct State {
     /// `(zid, eid)` -> per-source ordering state.
-    sequenced: BTreeMap<(Vec<u8>, u32), SourceState>,
+    sequenced: HashMap<(Vec<u8>, u32), SourceState>,
     /// R2522 — TIMESTAMP-mode ordering: the newest instant delivered per
     /// timestamp-id, which is the second of upstream's three `handle_sample`
     /// arms (`zenoh-ext/src/advanced_subscriber.rs` @ `} else if let Some(timestamp) = sample.timestamp() {`).
@@ -497,7 +498,7 @@ pub struct State {
     /// gate) now pulls `pubsub-timestamp`, so a `#[cfg]` here would be
     /// vacuously true — a condition that can never be false reads as coverage
     /// while grading nothing.
-    timestamped: BTreeMap<Vec<u8>, TimestampedState>,
+    timestamped: HashMap<Vec<u8>, TimestampedState>,
     on_sample: Box<dyn FnMut(Sample) + Send>,
     /// R2814 — every declared sample-miss listener; see [`MissHandlers`].
     miss_handlers: MissHandlers,
@@ -549,8 +550,8 @@ impl State {
     /// flight. [`Self::with_retransmission`] and [`Self::with_history`] configure the rest.
     pub fn new(on_sample: Box<dyn FnMut(Sample) + Send>, miss_handlers: MissHandlers) -> Self {
         Self {
-            sequenced: BTreeMap::new(),
-            timestamped: BTreeMap::new(),
+            sequenced: HashMap::default(),
+            timestamped: HashMap::default(),
             on_sample,
             miss_handlers,
             #[cfg(feature = "advanced-recovery")]
@@ -1064,21 +1065,18 @@ impl State {
     /// ⚠ A FULL SCAN WHERE UPSTREAM POPS AN LRU, and the cost is stated rather
     /// than hidden: upstream holds an `LruCache` and walks from the
     /// least-recently-accessed end, stopping at the first entry young enough,
-    /// so it touches only what it reclaims. wz holds plain `BTreeMap`s, so this
+    /// so it touches only what it reclaims. wz holds plain hash maps, so this
     /// is O(sources) per tick. That is a deliberate trade — an LRU here would
     /// be a second index to keep coherent with two maps that are otherwise
     /// keyed lookups — and it is bounded by the same retention period, which is
     /// hours by default rather than milliseconds.
     pub fn reclaim_expired_sources(&mut self, now_ms: u64, retention_period: Duration) -> usize {
         fn sweep<K, V>(
-            map: &mut BTreeMap<K, V>,
+            map: &mut HashMap<K, V>,
             now_ms: u64,
             retention_period_ms: u64,
             retention_of: impl Fn(&mut V) -> &mut Retention,
-        ) -> usize
-        where
-            K: Ord,
-        {
+        ) -> usize {
             let before = map.len();
             map.retain(|_, state| {
                 let retention = retention_of(state);

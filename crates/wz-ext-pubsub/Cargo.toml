@@ -61,7 +61,7 @@ advanced-publisher = [
 # `_sn` gets, the heartbeat and periodic triggers, the retention sweep) and `advanced-history` the
 # startup and late-publisher history. The tokio runtime's `ext-pubsub-advanced-subscriber`,
 # `-recovery` and `-history` forward here, and a build that leaves them off carries none of it.
-advanced-subscriber = []
+advanced-subscriber = ["dep:hashbrown", "dep:foldhash"]
 advanced-recovery = ["advanced-subscriber"]
 advanced-history = ["advanced-recovery"]
 # The subscriber hosted on an engine's port (`advanced_subscriber::host`): its declarations, its
@@ -111,6 +111,11 @@ wz-node-time = { path = "../wz-node-time", optional = true, default-features = f
 wz-host-sync = { path = "../wz-host-sync", optional = true }
 # A reply the cache could not stage is warned about and the answer goes on, as upstream's does.
 log = "0.4"
+# The subscriber's per-source tables and its set of gets in flight (`advanced-subscriber`). The
+# table is the one the session core links already, so its code is shared; the hasher is foldhash's
+# fixed-seed one, which needs no entropy without `std` and walks a table the same way every run.
+hashbrown = { version = "0.15", default-features = false, optional = true }
+foldhash = { version = "0.1", default-features = false, optional = true }
 
 [dev-dependencies]
 # The responder a test drives the cache's answer through (`QueryResponder`, which stages replies
