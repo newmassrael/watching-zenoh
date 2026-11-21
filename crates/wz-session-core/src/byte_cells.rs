@@ -109,8 +109,9 @@ impl<const SIZE: usize, const N: usize> ByteSource for ByteCells<SIZE, N> {
 ///
 /// A handle: a copy names the same table, which is how the stack that opens a session's links
 /// holds it while the arena that owns the memory stays with the session. The memory outlives every
-/// claim and every copy (the contract of [`Self::over`]), and the table keeps the profile's rule
-/// of [`ByteCells`]: one task claims and releases, so a claim is a plain load and store.
+/// claim and every copy (the contract of `LentByteCells::over`), and the table keeps the
+/// profile's rule of [`ByteCells`]: one task claims and releases, so a claim is a plain load and
+/// store.
 #[derive(Clone, Copy, Debug)]
 pub struct LentByteCells {
     taken: NonNull<Cell<bool>>,
