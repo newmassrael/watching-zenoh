@@ -689,7 +689,12 @@ config WZ_LIMIT_PICO_UNICAST_BATCH_BYTES
 	  The batch size, in bytes, a session of the zenoh-pico interface advertises when
 	  it opens a unicast session, as zenoh-pico's BATCH_UNICAST_SIZE. The two sides
 	  send frames no larger than the smaller of the two sizes. At least 1 and at most
-	  65535: a batch of no byte carries no frame.
+	  65535: a batch of no byte carries no frame. A build's value is bounded by its
+	  delivery lane: DELIVERY_LANE_BYTES holds the larger of this and
+	  PICO_FRAG_MAX_BYTES, with MAX_KEYEXPR_BYTES, 16 bytes of a timestamp's clock id
+	  and 4 bytes for each of the larger of MAX_SUBSCRIPTIONS and
+	  MAX_LIVELINESS_SUBSCRIPTIONS, as the cooperative engine's build asserts; a build
+	  that raises this raises DELIVERY_LANE_BYTES with it.
 
 config WZ_LIMIT_PICO_MULTICAST_BATCH_BYTES
 	int "PICO_MULTICAST_BATCH_BYTES"
