@@ -847,6 +847,13 @@ def cmd_selftest() -> int:
     expect("only a cell the host disturbed is run again",
            second_pass([{"status": "lost", "disturbed": True}, {"status": "lost"}, {"status": "measured"},
                         {"status": "not-applicable"}]) == [0])
+    # The reference is the cost gate's own build, called by name from `cmd_reference`: a merge that
+    # took the gate's file from one side dropped `pico_reference_tree` once, and every run after it
+    # ended NOT-MEASURED with no static check saying why (2026-11-21, merge 32aae4911).
+    import capability_cost_gate as cost
+    expect("the cost gate still builds the reference this matrix links",
+           all(callable(getattr(cost, name, None))
+               for name in ("pico_reference_tree", "refused_switches")))
     print(f"  perf-matrix selftest: {ok}/{ok + bad} arm(s) pass")
     return 0 if bad == 0 else 1
 
