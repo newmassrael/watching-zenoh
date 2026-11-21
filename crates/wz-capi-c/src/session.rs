@@ -119,6 +119,17 @@ impl SessionHandle {
         }
     }
 
+    /// The limits the session runs under, as its open resolved them: the registry's or the
+    /// node's. An entity declared on the session takes its own limits from here.
+    #[cfg(feature = "rx-callback-offload")]
+    pub(crate) fn session_limits(&self) -> &wz_session_core::limits::SessionLimits {
+        match self {
+            Self::Registry(state) => state.shared.session_limits(),
+            #[cfg(feature = "router-node")]
+            Self::Node(node) => node.session_limits(),
+        }
+    }
+
     /// What the session applies itself above its links, as its open compiled it from the
     /// configuration: the registry's or the node's, read the same way.
     pub(crate) fn session_defaults(&self) -> &wz_capi_core::session_defaults::SessionDefaults {

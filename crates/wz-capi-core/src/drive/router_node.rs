@@ -93,6 +93,9 @@ pub struct RouterState {
     /// The policies the node runs under, as the open resolved them
     /// ([`OpenStance::session_policy`]).
     session_policy: SessionPolicy,
+    /// The limits the node's own session runs under, as the open resolved them
+    /// ([`OpenStance::session_limits`]).
+    session_limits: wz_session_core::limits::SessionLimits,
 }
 
 impl RouterState {
@@ -107,6 +110,13 @@ impl RouterState {
     /// [`SharedSession::session_policy`](crate::faces::SharedSession::session_policy).
     pub fn session_policy(&self) -> &SessionPolicy {
         &self.session_policy
+    }
+
+    /// The limits the node's own session runs under, which an entity the program declares on the
+    /// node takes its own limits from, as it does on a registry by
+    /// [`SharedSession::session_limits`](crate::faces::SharedSession::session_limits).
+    pub fn session_limits(&self) -> &wz_session_core::limits::SessionLimits {
+        &self.session_limits
     }
 
     /// Attach this ABI's per-node state. Once: a second call is refused and returns the value it
@@ -856,6 +866,7 @@ pub(crate) fn open_router_blocking(
                 abi_extension: std::sync::OnceLock::new(),
                 session_defaults,
                 session_policy,
+                session_limits,
             })
         }
         Ok(Err(cause)) => {

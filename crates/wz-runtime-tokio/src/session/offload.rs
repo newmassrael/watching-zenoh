@@ -54,6 +54,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 use wz_session_core::caps;
 use wz_session_core::delivery_lane::{DeliveryLane, Next, Overload, Refusal, Stats};
+use wz_session_core::limits::SessionLimits;
 use wz_session_core::policy::SubscriberOverload;
 use wz_session_core::reliability::Reliability;
 use wz_session_core::sample::{EncodingHint, QosLevel, SourceInfo, TimestampHint};
@@ -64,8 +65,9 @@ use super::buffered::{BufferedDrain, BufferedWork, RegisteredDrain};
 use super::*;
 use crate::sync::PlainMutex;
 
-/// How many samples a lane holds: the limit `DELIVERY_LANE_EVENTS`.
-const EVENTS: usize = caps::DELIVERY_LANE_EVENTS;
+/// The bookkeeping of one lane: as many event slots as the build sizes, of which it admits the
+/// `DELIVERY_LANE_EVENTS` the limits it is built with state.
+type Lane = DeliveryLane<{ caps::DELIVERY_LANE_EVENTS }>;
 
 /// What a lane keeps of a sample besides its bytes: the lengths that cut the bytes back into their
 /// four parts, and the fields of the view that are not bytes.
@@ -90,7 +92,7 @@ struct Held {
 }
 
 struct State {
-    lane: DeliveryLane<EVENTS>,
+    lane: Lane,
     /// The bytes of the waiting samples, the lane's ring.
     area: Vec<u8>,
     /// The record of each waiting sample, at the event slot the lane gave it.
@@ -253,12 +255,16 @@ impl State {
 }
 
 impl OffloadLane {
-    fn new() -> Self {
+    /// A lane held to the delivery-lane limits of `limits`, the snapshot of the session (or of
+    /// the sessions) that feed it.
+    fn new(limits: &SessionLimits) -> Self {
+        let lane = Lane::with_limits(limits);
+        let bytes = lane.stats().byte_capacity;
         Self {
             state: PlainMutex::new(State {
-                lane: DeliveryLane::new(caps::DELIVERY_LANE_BYTES, caps::DELIVERY_LANE_CALLBACKS),
-                area: vec![0; caps::DELIVERY_LANE_BYTES],
-                meta: (0..EVENTS).map(|_| None).collect(),
+                lane,
+                area: vec![0; bytes],
+                meta: (0..Lane::SLOTS).map(|_| None).collect(),
                 held: VecDeque::new(),
                 dropped_best_effort: 0,
                 dropped_reliable: 0,
@@ -638,16 +644,18 @@ impl OffloadFeed {
 
 impl DetachedOffload {
     /// Start the consumer of a new lane on `runtime`; `callback` runs there for each admitted
-    /// sample, in order, with no lock of a session held.
+    /// sample, in order, with no lock of a session held. The lane is held to the delivery-lane
+    /// limits of `limits`, the snapshot of the session the subscription is declared on.
     pub fn spawn(
         runtime: &tokio::runtime::Handle,
+        limits: &SessionLimits,
         overload: SubscriberOverload,
         callback: impl FnMut(&dyn SampleView) + Send + 'static,
     ) -> Result<Self, DetachedOffloadError> {
         if overload == SubscriberOverload::Block {
             return Err(DetachedOffloadError::BlockHasNoDrain);
         }
-        let lane = Arc::new(OffloadLane::new());
+        let lane = Arc::new(OffloadLane::new(limits));
         let cell = Arc::new(CallbackCell::new(callback));
         runtime.spawn(crate::runtime_pool::in_caller_span(consume(
             lane.clone(),
@@ -690,8 +698,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// Declare a subscriber whose callback runs OFF the drive loop (the receive delivery lane).
     ///
     /// Each matching sample is copied into a lane of at most `DELIVERY_LANE_EVENTS` samples and
-    /// `DELIVERY_LANE_BYTES` bytes, and the callback runs on a task of its own, in order, with no
-    /// lock of the session held, so it may declare, undeclare, publish or query.
+    /// `DELIVERY_LANE_BYTES` bytes, as the limits this session was opened with state them, and the
+    /// callback runs on a task of its own, in order, with no lock of the session held, so it may
+    /// declare, undeclare, publish or query.
     ///
     /// What a full lane does is `options`' [`SubscribeOptions::overload`]: under `reject` the sample
     /// is refused, counted by reason in [`OffloadedSubscriber::stats`] and lost, and the receive
@@ -715,7 +724,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         <R as SessionRuntime>::IterationWork: BufferedWork,
     {
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| OffloadError::NoRuntime)?;
-        let lane = Arc::new(OffloadLane::new());
+        let lane = Arc::new(OffloadLane::new(&self.actions().params.limits));
         let cell = Arc::new(CallbackCell::new(callback));
         let overload = options.overload_by(self.policy());
         let sink_lane = lane.clone();
@@ -750,8 +759,12 @@ mod detached_tests {
     use std::sync::mpsc;
     use std::thread::ThreadId;
     use std::time::{Duration, Instant};
+    use wz_session_core::limit_binding::Quota;
 
     type Seen = Arc<Mutex<Vec<(u16, ThreadId)>>>;
+
+    /// What a lane holds under the build's limits: a sample in each of its slots.
+    const EVENTS: usize = Lane::SLOTS;
 
     /// A reliable sample on key `k` whose payload is `n`, little-endian.
     fn sample_bytes(n: u16) -> ([u8; 3], Meta) {
@@ -797,12 +810,21 @@ mod detached_tests {
         rt: &tokio::runtime::Runtime,
         overload: SubscriberOverload,
     ) -> (DetachedOffload, Gate) {
+        gated_lane_under(rt, &SessionLimits::defaults(), overload)
+    }
+
+    /// `gated_lane`, with a lane held to `limits`.
+    fn gated_lane_under(
+        rt: &tokio::runtime::Runtime,
+        limits: &SessionLimits,
+        overload: SubscriberOverload,
+    ) -> (DetachedOffload, Gate) {
         let seen: Seen = Arc::default();
         let (entered_tx, entered) = mpsc::channel();
         let (release, release_rx) = mpsc::channel::<()>();
         let record = seen.clone();
         let mut first = true;
-        let offload = DetachedOffload::spawn(rt.handle(), overload, move |view| {
+        let offload = DetachedOffload::spawn(rt.handle(), limits, overload, move |view| {
             let payload = view.payload();
             let n = u16::from_le_bytes([payload[0], payload[1]]);
             record
@@ -851,9 +873,14 @@ mod detached_tests {
         let rt = runtime();
         let dropped = Arc::new(AtomicBool::new(false));
         let flag = DropFlag(dropped.clone());
-        let refused = DetachedOffload::spawn(rt.handle(), SubscriberOverload::Block, move |_| {
-            let _ = &flag;
-        });
+        let refused = DetachedOffload::spawn(
+            rt.handle(),
+            &SessionLimits::defaults(),
+            SubscriberOverload::Block,
+            move |_| {
+                let _ = &flag;
+            },
+        );
         assert_eq!(refused.err(), Some(DetachedOffloadError::BlockHasNoDrain));
         assert!(
             dropped.load(Ordering::SeqCst),
@@ -924,11 +951,77 @@ mod detached_tests {
     #[test]
     fn a_feed_that_outlives_its_lane_is_refused_as_stopping() {
         let rt = runtime();
-        let offload = DetachedOffload::spawn(rt.handle(), SubscriberOverload::Reject, |_| {})
-            .expect("starts");
+        let offload = DetachedOffload::spawn(
+            rt.handle(),
+            &SessionLimits::defaults(),
+            SubscriberOverload::Reject,
+            |_| {},
+        )
+        .expect("starts");
         let feed = offload.feed();
         drop(offload);
         admit_n(&feed, 7);
         assert_eq!(feed.lane.stats().lane.refused.stopping, 1);
+    }
+
+    /// The lane is held to the limits it is handed: the events, bytes and callback budget a
+    /// snapshot states where the build lets a snapshot state them, and the build's values where it
+    /// keeps its own.
+    #[test]
+    fn a_detached_lane_takes_the_delivery_lane_limits_it_is_handed() {
+        let rt = runtime();
+        let mut limits = SessionLimits::defaults();
+        let events = limits
+            .select_delivery_lane_events(Quota::at_most(2))
+            .is_ok();
+        let bytes = limits.select_delivery_lane_bytes(16).is_ok();
+        let callbacks = limits
+            .select_delivery_lane_callbacks(Quota::at_most(3))
+            .is_ok();
+        let offload =
+            DetachedOffload::spawn(rt.handle(), &limits, SubscriberOverload::Reject, |_| {})
+                .expect("starts");
+        let lane = offload.stats().lane;
+        let held_events = if events { 2 } else { EVENTS };
+        assert_eq!(lane.event_capacity, held_events);
+        let held_bytes = if bytes { 16 } else { caps::DELIVERY_LANE_BYTES };
+        assert_eq!(lane.byte_capacity, held_bytes);
+        let held_callbacks = if callbacks {
+            3
+        } else {
+            caps::DELIVERY_LANE_CALLBACKS
+        };
+        assert_eq!(lane.callback_budget, held_callbacks);
+    }
+
+    /// A lane held to two events refuses the third sample while the first is being delivered, and
+    /// the refusal leaves the two it holds in place.
+    #[test]
+    fn a_detached_lane_held_to_two_events_refuses_the_third() {
+        let rt = runtime();
+        let mut limits = SessionLimits::defaults();
+        if limits
+            .select_delivery_lane_events(Quota::at_most(2))
+            .is_err()
+        {
+            // A build that keeps the build's value alone refuses the statement itself.
+            return;
+        }
+        let (offload, gate) = gated_lane_under(&rt, &limits, SubscriberOverload::Reject);
+        let feed = offload.feed();
+        admit_n(&feed, 0);
+        gate.entered
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the consumer took the first sample");
+        admit_n(&feed, 1);
+        admit_n(&feed, 2);
+        let full = offload.stats();
+        assert_eq!(full.lane.queued_events, 2);
+        assert_eq!(full.lane.refused.events_full, 1);
+        assert_eq!(full.dropped_reliable, 1);
+        gate.release.send(()).unwrap();
+        let seen = wait_for(&gate.seen, 2);
+        let order: Vec<u16> = seen.iter().map(|(n, _)| *n).collect();
+        assert_eq!(order, vec![0, 1]);
     }
 }

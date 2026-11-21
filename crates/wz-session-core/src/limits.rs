@@ -1183,6 +1183,141 @@ mod enforcement {
             },
         );
     }
+    /// The lane of an entity on a session whose limits are `limits`, as the host builds it.
+    type Lane = crate::delivery_lane::DeliveryLane<{ caps::DELIVERY_LANE_EVENTS }>;
+
+    /// A lane of four slots, so a test of the bytes or the callbacks does not depend on the
+    /// build's event count.
+    type SmallLane = crate::delivery_lane::DeliveryLane<4>;
+
+    /// `DELIVERY_LANE_EVENTS` with nothing stated: the lane admits a sample into each slot the
+    /// build sized, and refuses the next as a full lane.
+    #[test]
+    fn delivery_lane_events_with_nothing_stated_admits_what_the_build_admitted() {
+        let mut lane = Lane::with_limits(&SessionLimits::defaults());
+        for _ in 0..caps::DELIVERY_LANE_EVENTS {
+            assert!(lane.reserve(0).is_ok(), "no quota is stated");
+        }
+        assert_eq!(
+            lane.reserve(0),
+            Err(crate::delivery_lane::Refusal::EventsFull)
+        );
+        let stats = lane.stats();
+        assert_eq!(stats.queued_events, caps::DELIVERY_LANE_EVENTS);
+        assert_eq!(stats.event_capacity, caps::DELIVERY_LANE_EVENTS);
+    }
+
+    /// `DELIVERY_LANE_EVENTS` stated as two: the third sample is refused as a full lane and
+    /// takes no slot, and a slot let go is taken again.
+    #[test]
+    fn delivery_lane_events_stated_as_two_refuses_the_next() {
+        held_to_two(
+            SessionLimits::select_delivery_lane_events,
+            DeliveryLaneEvents::DOMAIN.is_singleton(),
+            |limits| {
+                let mut lane = Lane::with_limits(limits);
+                assert_eq!(lane.stats().event_capacity, 2);
+                let first = lane.reserve(0).expect("under the quota");
+                let _second = lane.reserve(0).expect("under the quota");
+                assert_eq!(
+                    lane.reserve(0),
+                    Err(crate::delivery_lane::Refusal::EventsFull)
+                );
+                let stats = lane.stats();
+                assert_eq!(stats.queued_events, 2, "a refusal takes no slot");
+                assert_eq!(stats.refused.events_full, 1);
+                lane.cancel(first);
+                assert_eq!(lane.front(), crate::delivery_lane::Next::Waiting);
+                assert!(lane.reserve(0).is_ok(), "a slot is free under the quota");
+                assert_eq!(lane.stats().queued_events, 2);
+            },
+        );
+    }
+
+    /// `DELIVERY_LANE_BYTES` with nothing stated: the lane's byte area is the build's size.
+    #[test]
+    fn delivery_lane_bytes_with_nothing_stated_holds_the_builds_value() {
+        let lane = SmallLane::with_limits(&SessionLimits::defaults());
+        assert_eq!(lane.stats().byte_capacity, caps::DELIVERY_LANE_BYTES);
+        assert!(lane.can_ever_fit(caps::DELIVERY_LANE_BYTES));
+        assert!(!lane.can_ever_fit(caps::DELIVERY_LANE_BYTES + 1));
+    }
+
+    /// `DELIVERY_LANE_BYTES` stated as sixteen: the lane's byte area is sixteen bytes, a sample
+    /// of sixteen is admitted and one of seventeen is refused without taking a slot.
+    #[test]
+    fn delivery_lane_bytes_stated_is_the_value_the_lane_uses() {
+        let mut limits = SessionLimits::defaults();
+        let stated = limits.select_delivery_lane_bytes(16);
+        if DeliveryLaneBytes::DOMAIN.is_singleton() {
+            // A build that keeps the build's value alone refuses the statement itself.
+            assert!(stated.is_err(), "a build of one value refuses sixteen");
+            return;
+        }
+        stated.expect("sixteen is inside the domain");
+        let mut lane = SmallLane::with_limits(&limits);
+        assert_eq!(lane.stats().byte_capacity, 16);
+        assert!(!lane.can_ever_fit(17));
+        assert_eq!(
+            lane.reserve(17),
+            Err(crate::delivery_lane::Refusal::BytesFull)
+        );
+        assert_eq!(lane.stats().queued_events, 0, "a refusal takes no slot");
+        assert!(lane.reserve(16).is_ok(), "the whole area is free");
+        assert_eq!(lane.stats().pending_bytes, 16);
+    }
+
+    /// `DELIVERY_LANE_CALLBACKS` with nothing stated: two samples owe the build's budget between
+    /// them, and a third that owes one more is refused.
+    #[test]
+    fn delivery_lane_callbacks_with_nothing_stated_admits_what_the_build_admitted() {
+        let mut lane = SmallLane::with_limits(&SessionLimits::defaults());
+        let budget = caps::DELIVERY_LANE_CALLBACKS;
+        assert_eq!(lane.stats().callback_budget, budget);
+        let first = lane.reserve(0).expect("a slot is free");
+        lane.publish(first, budget - 1)
+            .expect("under the build's budget");
+        let second = lane.reserve(0).expect("a slot is free");
+        lane.publish(second, 1).expect("at the build's budget");
+        assert_eq!(lane.stats().pending_callbacks, budget);
+        let third = lane.reserve(0).expect("a slot is free");
+        assert_eq!(
+            lane.publish(third, 1),
+            Err(crate::delivery_lane::Refusal::CallbacksFull)
+        );
+    }
+
+    /// `DELIVERY_LANE_CALLBACKS` stated as two: a third callback owed is refused and charges
+    /// nothing, and a callback given back is taken again.
+    #[test]
+    fn delivery_lane_callbacks_stated_as_two_refuses_the_next() {
+        held_to_two(
+            SessionLimits::select_delivery_lane_callbacks,
+            DeliveryLaneCallbacks::DOMAIN.is_singleton(),
+            |limits| {
+                let mut lane = SmallLane::with_limits(limits);
+                assert_eq!(lane.stats().callback_budget, 2);
+                for _ in 0..2 {
+                    let reserved = lane.reserve(0).expect("a slot is free");
+                    lane.publish(reserved, 1).expect("under the quota");
+                }
+                let third = lane.reserve(0).expect("a slot is free");
+                assert_eq!(
+                    lane.publish(third, 1),
+                    Err(crate::delivery_lane::Refusal::CallbacksFull)
+                );
+                let stats = lane.stats();
+                assert_eq!(stats.pending_callbacks, 2, "a refusal charges nothing");
+                assert_eq!(stats.refused.callbacks_full, 1);
+                assert!(matches!(lane.front(), crate::delivery_lane::Next::Ready(_)));
+                assert!(lane.complete());
+                let fourth = lane.reserve(0).expect("a slot is free");
+                lane.publish(fourth, 1)
+                    .expect("a callback is free under the quota");
+                assert_eq!(lane.stats().pending_callbacks, 2);
+            },
+        );
+    }
 }
 
 #[cfg(test)]

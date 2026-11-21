@@ -555,6 +555,7 @@ pub(crate) unsafe fn declare_subscriber_delivered(
             Delivery::Offloaded(overload) => {
                 let Ok(lane) = wz_runtime_tokio::session::DetachedOffload::spawn(
                     wz_runtime_tokio::runtime_pool::WzRuntime::Application.handle(),
+                    held.session_limits(),
                     overload,
                     make_subscriber_callback(closure),
                 ) else {

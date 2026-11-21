@@ -16,11 +16,18 @@
 //!
 //! # Three bounds at once
 //!
-//! A sample is admitted only when all three hold: an event slot is free (`EVENTS`, the const
-//! parameter), its bytes fit the byte area, and the callbacks it will make fit the callback budget.
-//! The first two are charged when the sample is reserved and the third when it is published,
-//! because how many callbacks a sample owes is known only after the host has looked up who
-//! subscribes to its key.
+//! A sample is admitted only when all three hold: an event slot is free under the event quota, its
+//! bytes fit the byte area, and the callbacks it will make fit the callback budget. The first two
+//! are charged when the sample is reserved and the third when it is published, because how many
+//! callbacks a sample owes is known only after the host has looked up who subscribes to its key.
+//!
+//! # Where the bounds come from
+//!
+//! `EVENTS`, the const parameter, sizes the event slots, which only the build can size. A host
+//! builds the lane of an entity with [`crate::delivery_lane::DeliveryLane::with_limits`], from the
+//! limits of the session that declares it: `DELIVERY_LANE_EVENTS` is how many of those slots the
+//! lane admits, `DELIVERY_LANE_BYTES` the size of its byte area and `DELIVERY_LANE_CALLBACKS` its
+//! callback budget.
 //!
 //! # The rules it states once
 //!
@@ -40,6 +47,8 @@
 //! * A lane that is stopping admits nothing; it is stopped when every sample it admitted has been
 //!   delivered or skipped.
 
+use crate::limit_binding::Quota;
+use crate::limits::SessionLimits;
 use crate::reliability::Reliability;
 
 /// Why the lane did not admit a sample.
@@ -159,7 +168,8 @@ pub struct Refused {
 pub struct Stats {
     /// Event slots in use, reserved ones included.
     pub queued_events: usize,
-    /// Event slots the lane has.
+    /// The most samples the lane admits at once: its event slots, or fewer where its event quota
+    /// states fewer.
     pub event_capacity: usize,
     /// Of those, the ones reserved and not yet published.
     pub reserved_events: usize,
@@ -225,6 +235,8 @@ pub struct DeliveryLane<const EVENTS: usize> {
     entries: [Entry; EVENTS],
     head: usize,
     len: usize,
+    /// The most samples the lane admits at once, never more than `EVENTS`.
+    event_quota: Quota,
     byte_capacity: usize,
     byte_head: usize,
     byte_tail: usize,
@@ -238,9 +250,13 @@ pub struct DeliveryLane<const EVENTS: usize> {
 }
 
 impl<const EVENTS: usize> DeliveryLane<EVENTS> {
+    /// The event slots the lane is built with. A host that keeps a record beside each sample sizes
+    /// its records by this: every [`Reservation::index`] is below it.
+    pub const SLOTS: usize = EVENTS;
+
     /// A lane over a byte area of `byte_capacity` bytes that admits callbacks up to
-    /// `callback_budget` at once. A bound of zero is a lane nothing can enter, so it is refused
-    /// where it is built.
+    /// `callback_budget` at once, and a sample into each of its `EVENTS` slots. A bound of zero is
+    /// a lane nothing can enter, so it is refused where it is built.
     pub const fn new(byte_capacity: usize, callback_budget: usize) -> Self {
         assert!(EVENTS > 0, "a lane with no event slot admits nothing");
         assert!(byte_capacity > 0, "a lane with no byte area admits nothing");
@@ -248,10 +264,34 @@ impl<const EVENTS: usize> DeliveryLane<EVENTS> {
             callback_budget > 0,
             "a lane with no callback budget admits nothing"
         );
+        Self::bounded(Quota::at_most(EVENTS), byte_capacity, callback_budget)
+    }
+
+    /// The lane of an entity declared on a session whose limits are `limits`: it admits
+    /// `DELIVERY_LANE_EVENTS` samples, no more than its `EVENTS` slots, over a byte area of
+    /// `DELIVERY_LANE_BYTES` bytes, with a callback budget of `DELIVERY_LANE_CALLBACKS`. A quota
+    /// of `0` admits nothing, and a callback budget of no bound admits every callback.
+    pub const fn with_limits(limits: &SessionLimits) -> Self {
+        assert!(EVENTS > 0, "a lane with no event slot admits nothing");
+        let byte_capacity = limits.delivery_lane_bytes();
+        assert!(byte_capacity > 0, "a lane with no byte area admits nothing");
+        let callback_budget = match limits.delivery_lane_callbacks().most() {
+            Some(most) => most,
+            None => usize::MAX,
+        };
+        Self::bounded(
+            limits.delivery_lane_events(),
+            byte_capacity,
+            callback_budget,
+        )
+    }
+
+    const fn bounded(event_quota: Quota, byte_capacity: usize, callback_budget: usize) -> Self {
         Self {
             entries: [Entry::FREE; EVENTS],
             head: 0,
             len: 0,
+            event_quota: event_quota.tighter(Quota::at_most(EVENTS)),
             byte_capacity,
             byte_head: 0,
             byte_tail: 0,
@@ -321,7 +361,7 @@ impl<const EVENTS: usize> DeliveryLane<EVENTS> {
     pub fn fits(&self, bytes: usize) -> Result<(), Refusal> {
         if self.stopping {
             Err(Refusal::Stopping)
-        } else if self.len == EVENTS {
+        } else if !self.event_quota.admits(self.len + 1) {
             Err(Refusal::EventsFull)
         } else if self.place(bytes).is_none() {
             Err(Refusal::BytesFull)
@@ -344,7 +384,7 @@ impl<const EVENTS: usize> DeliveryLane<EVENTS> {
         if self.stopping {
             return Err(self.count(Refusal::Stopping));
         }
-        if self.len == EVENTS {
+        if !self.event_quota.admits(self.len + 1) {
             return Err(self.count(Refusal::EventsFull));
         }
         let Some((offset, charge)) = self.place(bytes) else {
@@ -374,7 +414,7 @@ impl<const EVENTS: usize> DeliveryLane<EVENTS> {
     ///
     /// A sample that owes none is not a refusal: nobody subscribes to its key, so it is skipped
     /// quietly. A sample that owes more than the whole budget is admitted only when it is the only
-    /// one in the lane.
+    /// one in the lane. A budget of `0`, which only a stated quota gives, admits no callback.
     pub fn publish(&mut self, reservation: Reservation, callbacks: usize) -> Result<(), Refusal> {
         let at = reservation.index;
         debug_assert_eq!(self.entries[at].phase, Phase::Reserved);
@@ -389,7 +429,7 @@ impl<const EVENTS: usize> DeliveryLane<EVENTS> {
         }
         let budget = self.callback_budget;
         let pending = self.pending_callbacks;
-        let oversized = callbacks > budget;
+        let oversized = budget > 0 && callbacks > budget;
         let fits = if oversized {
             self.len == 1
         } else {
@@ -530,7 +570,10 @@ impl<const EVENTS: usize> DeliveryLane<EVENTS> {
     pub const fn stats(&self) -> Stats {
         Stats {
             queued_events: self.len,
-            event_capacity: EVENTS,
+            event_capacity: match self.event_quota.most() {
+                Some(most) => most,
+                None => EVENTS,
+            },
             reserved_events: self.reserved,
             pending_callbacks: self.pending_callbacks,
             callback_budget: self.callback_budget,
