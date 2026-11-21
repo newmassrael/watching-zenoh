@@ -859,12 +859,13 @@ jobs:
       # and that the ones the host-layer program does not call answer as pico's backend for
       # the host does. It builds the library with the default features, as the two steps
       # above do, so it costs no second build; it is placed before the step below, which
-      # builds another. Observed, not yet gated, as that step is, until two consecutive
-      # hosted runs read it green on both hosts.
-      - name: a zenoh-pico C program over every platform export (observed)
+      # builds another. A GATE since two consecutive hosted runs read it green on both
+      # hosts (Platform runs 44891883427 and 44895098014, from the job logs); a red here
+      # now fails the run: an export stopped linking or answering as pico's backend for
+      # the host does.
+      - name: a zenoh-pico C program over every platform export (gated)
         if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
         timeout-minutes: 25
-        continue-on-error: true
         shell: bash
         run: bash scripts/pico-c-program.sh crates/wz-capi-pico/tests/c/pico_platform_surface.c "a pico C program over every platform export"
 
@@ -874,14 +875,14 @@ jobs:
       # sends and would-blocks, a datagram pair and a two-member group, each carrying a
       # put and a query. It is the Windows DLL's evidence that a host program can hand the
       # library its own network stack. The cdylib is built with the app-transport
-      # capability for it, which the script takes as its third argument. Observed, not yet
-      # gated: `continue-on-error` reports success whatever it did, so the script's own
-      # verdict line in the job summary is the reading, until two consecutive hosted runs
-      # read it green on both hosts and it is made a gate as the steps above were.
-      - name: a zenoh-pico C program over a transport it supplies (observed)
+      # capability for it, which the script takes as its third argument. A GATE since two
+      # consecutive hosted runs read it green on both hosts (Platform runs 44891883427
+      # and 44895098014, from the job logs); a red here now fails the run: a session over
+      # a transport the program supplies no longer carries a put or a query on a host it
+      # had been shown to.
+      - name: a zenoh-pico C program over a transport it supplies (gated)
         if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
         timeout-minutes: 25
-        continue-on-error: true
         shell: bash
         run: bash scripts/pico-c-program.sh crates/wz-capi-pico/tests/c/pico_app_transport.c "a pico C program over a transport it supplies" app-transport
 
@@ -1010,15 +1011,16 @@ jobs:
   # built once; the profile example's second run builds it again under the other profile's
   # policy default, last, because that build replaces the first.
   #
-  # Observed, not yet gated, as each new program has started: every step is
-  # `continue-on-error` and so is the job, so a red or a timeout here does not fail the
-  # run; each script's verdict line in the job summary is the reading. A step becomes a
-  # gate once two consecutive hosted runs read it green on both hosts.
+  # Each step started as an observation, as every new program of this workflow does, and is
+  # a GATE since two consecutive hosted runs read every step green on both hosts (Platform
+  # runs 44891883427 and 44895098014, from the job logs). A red here now fails the run: an
+  # example stopped building or stopped holding its own checks on a host it had been shown
+  # to. Each step still runs after an earlier one failed (`!cancelled()`), so one red does
+  # not hide the rest.
   capi-examples:
     name: C ABI examples (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
-    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
@@ -1090,91 +1092,79 @@ jobs:
           echo "group interface: ${iface:-none}"
           echo "WZ_EXAMPLE_GROUP_IFACE=${iface}" >> "$GITHUB_ENV"
 
-      - name: example, pub/sub and query under the upstream profile (observed)
+      - name: example, pub/sub and query under the upstream profile (gated)
         if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
         timeout-minutes: 50
-        continue-on-error: true
         shell: bash
         run: bash scripts/pico-c-program.sh crates/wz-capi-pico/examples/c/profiles.c "example of pub/sub and query under the upstream profile" "$WZ_EXAMPLE_FEATURES"
 
-      - name: example, tcp, udp and a group over the system's sockets (observed)
+      - name: example, tcp, udp and a group over the system's sockets (gated)
         if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
         timeout-minutes: 15
-        continue-on-error: true
         shell: bash
         run: bash scripts/pico-c-program.sh crates/wz-capi-pico/examples/c/transports.c "example of tcp, udp and a group over the system's sockets" "$WZ_EXAMPLE_FEATURES"
 
-      - name: example, tcp, udp and a group over a transport the program supplies (observed)
+      - name: example, tcp, udp and a group over a transport the program supplies (gated)
         if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
         timeout-minutes: 15
-        continue-on-error: true
         shell: bash
         run: bash scripts/pico-c-program.sh crates/wz-capi-pico/tests/c/pico_app_transport.c "example of tcp, udp and a group over a transport the program supplies" "$WZ_EXAMPLE_FEATURES"
 
-      - name: example, tcp, udp and a group over a network stack of the program's own (observed)
+      - name: example, tcp, udp and a group over a network stack of the program's own (gated)
         if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
         timeout-minutes: 15
-        continue-on-error: true
         shell: bash
         run: bash scripts/pico-c-program.sh crates/wz-capi-pico/examples/c/own_transport.c "example of tcp, udp and a group over a network stack of the program's own" "$WZ_EXAMPLE_FEATURES"
 
-      - name: example, batching on and off with a flush (observed)
+      - name: example, batching on and off with a flush (gated)
         if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
         timeout-minutes: 15
-        continue-on-error: true
         shell: bash
         run: bash scripts/pico-c-program.sh crates/wz-capi-pico/examples/c/batching.c "example of batching on and off with a flush" "$WZ_EXAMPLE_FEATURES"
 
-      - name: example, end-to-end protection across a session (observed)
+      - name: example, end-to-end protection across a session (gated)
         if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
         timeout-minutes: 15
-        continue-on-error: true
         shell: bash
         run: bash scripts/pico-c-program.sh crates/wz-capi-pico/examples/c/e2e.c "example of end-to-end protection across a session" "$WZ_EXAMPLE_FEATURES"
 
-      - name: example, supervision of a periodic stream (observed)
+      - name: example, supervision of a periodic stream (gated)
         if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
         timeout-minutes: 15
-        continue-on-error: true
         shell: bash
         run: bash scripts/pico-c-program.sh crates/wz-capi-pico/examples/c/supervision.c "example of supervision of a periodic stream" "$WZ_EXAMPLE_FEATURES"
 
-      - name: example, a program's own periodic task (observed)
+      - name: example, a program's own periodic task (gated)
         if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
         timeout-minutes: 15
-        continue-on-error: true
         shell: bash
         run: bash scripts/pico-c-program.sh crates/wz-capi-pico/examples/c/periodic.c "example of a program's own periodic task" "$WZ_EXAMPLE_FEATURES"
 
-      - name: example, a keyed topic with a last value per instance (observed)
+      - name: example, a keyed topic with a last value per instance (gated)
         if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
         timeout-minutes: 15
-        continue-on-error: true
         shell: bash
         run: bash scripts/pico-c-program.sh crates/wz-capi-pico/examples/c/keyed.c "example of a keyed topic with a last value per instance" "$WZ_EXAMPLE_FEATURES"
 
-      - name: example, history for a late subscriber then live samples (observed)
+      - name: example, history for a late subscriber then live samples (gated)
         if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
         timeout-minutes: 15
-        continue-on-error: true
         shell: bash
         run: bash scripts/pico-c-program.sh crates/wz-capi-pico/examples/c/history.c "example of history for a late subscriber then live samples" "$WZ_EXAMPLE_FEATURES"
 
       # The platform exports the periodic task stands on (its timer, lock, task and event
       # wait), on the Linux row too, which the `capi` job does not run.
-      - name: every platform export (observed)
+      - name: every platform export (gated)
         if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
         timeout-minutes: 15
-        continue-on-error: true
         shell: bash
         run: bash scripts/pico-c-program.sh crates/wz-capi-pico/tests/c/pico_platform_surface.c "every platform export" "$WZ_EXAMPLE_FEATURES"
 
       # Last: the policy's build default rebuilds the library, and every later step would
       # run against this profile instead of the upstream one.
-      - name: example, pub/sub and query under the entity-timestamp-opt-in profile (observed)
+      - name: example, pub/sub and query under the entity-timestamp-opt-in profile (gated)
         if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
         timeout-minutes: 40
-        continue-on-error: true
         shell: bash
         env:
           WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN: "on"
@@ -1204,16 +1194,17 @@ jobs:
   # and the check program are the same for both, so each form passing them is the two forms doing
   # what one program asks of them alike.
   #
-  # Observed, not yet gated, as every new program of this workflow has started: the job is
-  # `continue-on-error`, so a red here does not fail the run, and the test's verdict lines in the
-  # job summary are the reading. It becomes a gate once two consecutive hosted runs read it green.
+  # A GATE since two consecutive hosted runs read every row green, each with every verdict line
+  # of its test PASS (Platform runs 44891883427 and 44895098014, from the job logs). It started
+  # as an observation, as every new program of this workflow does; a red here now fails the run:
+  # a package no longer builds, or a program compiled against it no longer holds its checks.
+  #
   # No Rust cache: the package is built with full debug information in both profiles, which no
   # entry of the cached workspace was built with.
   package-windows:
     name: pico library package ${{ matrix.arch }} ${{ matrix.form }} (windows-latest)
     runs-on: windows-latest
     timeout-minutes: 120
-    continue-on-error: true
     if: ${{ inputs.host == '' || inputs.host == 'both' || inputs.host == 'windows' }}
     strategy:
       fail-fast: false
