@@ -7,19 +7,29 @@
 
 use std::net::UdpSocket;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use wz_capi_port::{SessionEngine, WireKey};
+use wz_runtime_coop::session_drive::SessionDatagramLink;
+use wz_runtime_coop::udp_link::{DatagramSocket, UdpDriver};
 use wz_runtime_posix::links::PosixLinks;
+use wz_runtime_posix::net::PosixUdpSocket;
 use wz_runtime_posix::stream::PosixTcpDial;
 use wz_runtime_posix::{PosixClock, PosixEntropy};
 use wz_session_core::bounded::{BoundedVec, Lent};
 use wz_session_core::caps;
 use wz_session_core::limit_binding::{Quota, UnlentRows};
 use wz_session_core::limits::SessionLimits;
+use wz_session_core::locality::Locality;
 use wz_session_core::policy::SessionPolicy;
+use wz_session_core::publish_options::PublishOptions;
 
-use super::{client_config, open, CatchAll, Engine, Router, LOOPBACK};
-use crate::arena::{AllocatorMemory, ArenaMemory, ArenaPlan, ArenaRefused, SessionArena};
+use super::{
+    client_config, config, open, open_with, until, CatchAll, Command, Engine, Router, LOOPBACK,
+};
+use crate::arena::{
+    AllocatorMemory, ArenaMemory, ArenaPlan, ArenaRefused, SessionArena, LINK_TX_SLOTS,
+};
 use crate::{CoopConfig, OpenError, OpenKeyIds};
 
 /// A memory with none to give, whatever it is asked.
@@ -210,13 +220,19 @@ fn a_limit_lowered_at_open_lowers_its_row() {
     assert!(at_two.reserved_bytes() < built.reserved_bytes());
 }
 
-/// A listener lays out the gets of a face for the dial role, each face it admits and each
-/// handshake it holds; the application's tables are the session's, once, however many faces it
-/// holds.
+/// A listener lays out the gets and the link of a face for the dial role, each face it admits and
+/// each handshake it holds; the application's tables are the session's, once, however many faces
+/// it holds.
 #[test]
 fn a_listener_lays_out_the_gets_of_each_face_it_admits() {
-    let dial =
-        ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
+    let dial = ArenaPlan::of(
+        &CoopConfig {
+            max_faces: 0,
+            ..client_config()
+        },
+        &SessionLimits::defaults(),
+    )
+    .expect("lays an arena out");
     let listening = ArenaPlan::of(
         &CoopConfig {
             listen: vec!["tcp/127.0.0.1:0".to_owned()],
@@ -237,6 +253,8 @@ fn a_listener_lays_out_the_gets_of_each_face_it_admits() {
         row(&listening, "pending queries").count,
         (1 + 3 + 2 + own) * caps::MAX_PENDING_QUERIES
     );
+    assert_eq!(row(&dial, "link receive buffers").count, 1);
+    assert_eq!(row(&listening, "link receive buffers").count, 1 + 3 + 2);
     assert_eq!(
         row(&listening, "subscribers"),
         row(&dial, "subscribers"),
@@ -256,4 +274,170 @@ fn an_arena_past_the_address_space_is_refused() {
         &SessionLimits::defaults(),
     );
     assert_eq!(refused, Err(ArenaRefused::TooLarge));
+}
+
+/// The links' rows are what the open lends first: their tables take exactly the rows' spans, a
+/// receive buffer of the batch and [`LINK_TX_SLOTS`] slots of it for each link the config admits,
+/// and the rest of the plan fills the arena to its size, so the reservation is still the plan.
+#[test]
+fn the_links_rows_are_lent_first_and_the_reservation_is_still_the_plan() {
+    let config = CoopConfig {
+        max_faces: 2,
+        ..client_config()
+    };
+    let batch = usize::from(config.batch_size);
+    let plan = ArenaPlan::of(&config, &SessionLimits::defaults()).expect("lays an arena out");
+    assert_eq!(row(&plan, "link receive buffers").count, 3);
+    assert_eq!(row(&plan, "link receive buffers").entry_bytes, batch);
+    assert_eq!(
+        row(&plan, "link transmit slots").entry_bytes,
+        LINK_TX_SLOTS * batch
+    );
+    let links: usize = plan
+        .rows()
+        .iter()
+        .filter(|row| row.part.starts_with("link "))
+        .map(|row| row.span().expect("within the address space"))
+        .sum();
+    let mut session =
+        SessionArena::reserve(&plan, &AllocatorMemory).expect("the host has the memory");
+    let tables = session
+        .lend_links(&plan)
+        .expect("the plan lays the links out");
+    assert_eq!(session.arena_mut().high_water(), links);
+    for row in plan
+        .rows()
+        .iter()
+        .filter(|row| !row.part.starts_with("link "))
+    {
+        let bytes = row.bytes().expect("within the address space");
+        let _span: BoundedVec<u8, { usize::MAX }, Lent> = session
+            .arena_mut()
+            .lend(bytes)
+            .expect("the arena is laid out for every row");
+    }
+    assert_eq!(
+        Some(session.arena_mut().high_water()),
+        plan.reserved_bytes(),
+        "the links' rows and the others take the whole arena and no more"
+    );
+    let held: Vec<_> = (0..3)
+        .map(|_| tables.claim().expect("a link's buffers"))
+        .collect();
+    assert!(tables.claim().is_none(), "a fourth link has none");
+    drop(held);
+    assert_eq!(tables.in_use(), 0);
+}
+
+/// A link over the buffers its session's arena lent reads a datagram where the arena holds its
+/// receive buffer, and nowhere else.
+#[test]
+fn a_link_reads_into_the_buffer_its_sessions_arena_lent() {
+    let config = CoopConfig {
+        max_faces: 0,
+        ..client_config()
+    };
+    let plan = ArenaPlan::of(&config, &SessionLimits::defaults()).expect("lays an arena out");
+    let mut session =
+        SessionArena::reserve(&plan, &AllocatorMemory).expect("the host has the memory");
+    let tables = session
+        .lend_links(&plan)
+        .expect("the plan lays the links out");
+    let (rx, tx) = tables.claim().expect("the link's buffers");
+    let peer = UdpSocket::bind("127.0.0.1:0").expect("a free port");
+    let socket = PosixUdpSocket::bind("127.0.0.1:0".parse().expect("an address"))
+        .expect("a socket of the link");
+    let at = socket.local();
+    let link = UdpDriver::initiator_in(socket, peer.local_addr().expect("bound"), rx, tx);
+    peer.send_to(b"a batch", at).expect("sent to the link");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut read = None;
+    while read.is_none() {
+        assert!(Instant::now() < deadline, "the datagram never arrived");
+        link.service();
+        link.recv_with(&mut |bytes| read = Some((bytes.as_ptr(), bytes.to_vec())));
+    }
+    let (held_at, bytes) = read.expect("read above");
+    assert_eq!(bytes, b"a batch");
+    assert!(
+        session.holds(held_at),
+        "the link read the datagram where the arena holds its buffer"
+    );
+    drop(link);
+    assert_eq!(
+        tables.in_use(),
+        0,
+        "the buffers are back once the link goes"
+    );
+}
+
+/// A put leaves in a slot its link took from the session's arena: the session stages its batch
+/// frame there and none on the heap.
+#[test]
+fn a_put_is_encoded_into_a_slot_the_arena_lent() {
+    let router = Router::start(CatchAll::Held);
+    let engine = open(&router);
+    until(&engine, "the link to be up", || engine.faces_up() == 1);
+    engine
+        .publish_on_wire_all(
+            "demo/lent",
+            &WireKey::literal(),
+            b"v",
+            &PublishOptions::put().with_locality(Locality::Remote),
+        )
+        .expect("a put the link carries");
+    until(&engine, "the router to receive the put", || {
+        router.seen(|s| s.samples.iter().any(|(k, _)| k == "demo/lent"))
+    });
+    let counts = engine.batch_lend_counts().expect("the link is up");
+    assert!(counts.slot_frames >= 1, "{counts:?}");
+    assert_eq!(
+        (counts.heap_no_slot, counts.heap_short_slot),
+        (0, 0),
+        "no frame was staged on the heap: {counts:?}"
+    );
+}
+
+/// A session whose arena holds one link dials again, after its link is lost, over the buffers the
+/// lost link held: the lost link lets them go before the next is opened.
+#[test]
+fn a_redial_takes_the_buffers_the_lost_link_held() {
+    let router = Router::start(CatchAll::None);
+    let port = router.port;
+    let engine = open_with(CoopConfig {
+        redial_ms: Some(50),
+        open_timeout_ms: 300,
+        max_faces: 0,
+        ..config(&router)
+    });
+    until(&engine, "the first link", || engine.faces_up() == 1);
+    router.send(Command::Close);
+    drop(router);
+    until(&engine, "the link to be lost", || engine.faces_up() == 0);
+    let router = Router::start_on(port, CatchAll::None);
+    until(&engine, "a link over the buffers the lost one held", || {
+        engine.faces_up() == 1
+    });
+    drop(router);
+}
+
+/// A session whose config admits no face besides the dial role's attaches none, as its arena holds
+/// the buffers of one link; the CONTROL is the plan of the same config.
+#[test]
+fn a_face_past_max_faces_is_not_attached() {
+    let router = Router::start(CatchAll::None);
+    let second = Router::start_as(0xc4, CatchAll::None);
+    let one = CoopConfig {
+        max_faces: 0,
+        ..config(&router)
+    };
+    let plan = ArenaPlan::of(&one, &SessionLimits::defaults()).expect("lays an arena out");
+    assert_eq!(row(&plan, "link receive buffers").count, 1);
+    let engine = open_with(one);
+    until(&engine, "the dial role's link", || engine.faces_up() == 1);
+    assert!(matches!(
+        engine.attach_face(&second.endpoint()),
+        Err(OpenError::Unreachable(_))
+    ));
+    assert_eq!(engine.faces_up(), 1);
 }

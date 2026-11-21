@@ -1397,6 +1397,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     fn dial_endpoint(&mut self, face: FaceId, endpoint: &str) -> Result<Wire<C>, OpenError> {
         let to = parse_locator(endpoint)
             .map_err(|refused| OpenError::Unreachable(format!("{endpoint}: {refused:?}")))?;
+        // The face's last link holds its buffers in the session's arena until the last thing that
+        // holds the link lets it go, and that is the id space the face's tables keep until a link
+        // replaces it: let go of here, so the next link finds the buffers the last one held.
+        self.registry.borrow_mut().forget_own_mapping_space(face);
         let opened = self
             .links
             .open_initiator(to)
@@ -2440,9 +2444,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// [`Self::open_with_key_ids`], the session's arena reserved from `memory`. The arena is
     /// reserved once the key-wire form is judged and before anything else, as the limits the open
     /// resolved lay it out ([`ArenaPlan`]): a session whose memory cannot be given binds no port,
-    /// joins no group and dials no endpoint, and is [`OpenError::Arena`].
+    /// joins no group and dials no endpoint, and is [`OpenError::Arena`]. The links' buffers are
+    /// lent from it to `links` before anything is bound or dialled
+    /// (`SessionLinks::lend_buffers`), so a link the session opens reads and encodes in the arena.
     pub fn open_in(
-        links: L,
+        mut links: L,
         clock: C,
         entropy: impl EntropySource + Send + 'static,
         config: CoopConfig,
@@ -2455,7 +2461,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         #[cfg(not(feature = "shared-key-ids"))]
         key_ids.admit(&policy)?;
         let plan = ArenaPlan::of(&config, &resolve_limits(&config)).map_err(OpenError::Arena)?;
-        let arena = SessionArena::reserve(&plan, memory).map_err(OpenError::Arena)?;
+        let mut arena = SessionArena::reserve(&plan, memory).map_err(OpenError::Arena)?;
+        links.lend_buffers(arena.lend_links(&plan).map_err(OpenError::Arena)?);
         let mut entropy = SharedEntropy::new(entropy);
         let wire = match (&config.zid, policy.zid_derivation()) {
             (Some(zid), _) => wire_zid(zid)?,
@@ -2620,8 +2627,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// session steps it as it does the first face's), what is declared after goes to it too, a
     /// publish and a get reach its peer, and what its peer declares counts with the others'. It
     /// is dialled once: a link that is lost or never completes takes the face with it, where the
-    /// dial role's face is dialled again. [`OpenError::Unreachable`] when the session is closed
-    /// or the endpoint is not reached.
+    /// dial role's face is dialled again. [`OpenError::Unreachable`] when the session is closed,
+    /// holds as many faces as `max_faces` admits, or the endpoint is not reached.
     pub fn attach_face(&self, endpoint: &str) -> Result<u64, OpenError> {
         let Some(mut guard) = self.live() else {
             return Err(OpenError::Unreachable(String::from(
@@ -2629,6 +2636,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             )));
         };
         let core = &mut guard.0;
+        // A face past `max_faces` would have no buffers: the arena holds the links of as many
+        // faces as the config admits, and an accepted link past them is closed unread.
+        if core.faces.len() > core.config.max_faces {
+            return Err(OpenError::Unreachable(String::from(
+                "the session holds as many faces as max_faces admits",
+            )));
+        }
         let id = core.next_face;
         // The tables first: the link's task dispatches to them from its first step.
         core.registry.borrow_mut().add_face(id);
@@ -2709,6 +2723,20 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 .ups()
                 .filter(|actions| actions.is_established())
                 .count()
+        })
+    }
+
+    /// Where the batch frames of the session's first link that is up were staged: in a slot its
+    /// link lent, or on the heap and why. Compiled where its readers are (`tests::arena`).
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn batch_lend_counts(
+        &self,
+    ) -> Option<wz_session_core::session_actions::BatchLendCounts> {
+        self.live().and_then(|core| {
+            core.0
+                .ups()
+                .next()
+                .map(|actions| actions.batch_lend_counts())
         })
     }
 

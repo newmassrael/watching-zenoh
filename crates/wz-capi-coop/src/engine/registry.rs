@@ -225,6 +225,15 @@ impl Registry {
         }
     }
 
+    /// Let go of the id space the tables of face `id` hold, the link it was the space of being gone:
+    /// until the next link of the face installs its own, the peer's ids of the session's
+    /// declarations resolve to nothing, as before the first link.
+    pub(super) fn forget_own_mapping_space(&mut self, id: FaceId) {
+        if let Some(face) = self.faces.iter_mut().find(|face| face.id == id) {
+            face.peer.subscribers.clear_own_mapping_space();
+        }
+    }
+
     /// Hand the tables of face `id` the key ids every node of the deployment shares: an id the
     /// peer never declared, and that no declaration of this session holds, is read in them on
     /// every plane. The dictionary is the session's, so each link the face is opened over

@@ -1449,6 +1449,14 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     // reads into one of its `BATCH_UNICAST_SIZE`: no peer's batch is larger once the two have
     // negotiated, and a node pays its batch for each link and not the largest datagram.
     let links = crate::coop_host::links().with_rx_capacity(limits.pico_unicast_batch_bytes());
+    // A session that listens on nothing holds the one link it dials, as pico's client holds its
+    // one transport, so its arena lays out the buffers and the gets of no other face; one that
+    // listens holds as many as upstream admits.
+    let max_faces = if listen.is_empty() {
+        0
+    } else {
+        wz_capi_coop::DEFAULT_MAX_FACES
+    };
     // The clock every timer of the session reads: the time base the config names, or the host's.
     #[cfg(feature = "time-base")]
     let clock = crate::time_base::session_clock(request.time_base);
@@ -1503,7 +1511,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         // (`pico_accept`): pico bounds no count of pending accepts or of sessions.
         listen,
         accept_pending: wz_capi_coop::DEFAULT_ACCEPT_PENDING,
-        max_faces: wz_capi_coop::DEFAULT_MAX_FACES,
+        max_faces,
         // The group the listen endpoint names, when it names one.
         groups,
         // A session on a time base waits for the program's word that its time moved on as well
@@ -1626,9 +1634,9 @@ fn coop_open_refusal(refused: &wz_capi_coop::OpenError) -> ZResult {
         // judges it again with the same rule.
         OpenError::KeyWireForm(_) => crate::result::Z_ERR_INVALID,
         OpenError::Arena(ArenaRefused::Limit { .. }) => crate::result::Z_ERR_CONFIG_INVALID_VALUE,
-        OpenError::Arena(ArenaRefused::TooLarge | ArenaRefused::NoMemory { .. }) => {
-            crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY
-        }
+        OpenError::Arena(
+            ArenaRefused::TooLarge | ArenaRefused::NoMemory { .. } | ArenaRefused::Unlent(_),
+        ) => crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY,
         _ => crate::result::Z_ERR_TRANSPORT_OPEN_FAILED,
     }
 }
@@ -1653,6 +1661,15 @@ mod coop_open_refusal_tests {
         );
         assert_eq!(
             coop_open_refusal(&OpenError::Arena(ArenaRefused::TooLarge)),
+            Z_ERR_SYSTEM_OUT_OF_MEMORY
+        );
+        assert_eq!(
+            coop_open_refusal(&OpenError::Arena(ArenaRefused::Unlent(
+                wz_session_core::bounded::LendRefused::Exhausted {
+                    asked: Some(4096),
+                    left: 0,
+                }
+            ))),
             Z_ERR_SYSTEM_OUT_OF_MEMORY
         );
     }

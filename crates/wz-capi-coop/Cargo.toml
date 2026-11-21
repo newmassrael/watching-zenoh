@@ -45,8 +45,13 @@ wz-capi-port = { path = "../wz-capi-port", default-features = false }
 # default build delivers nothing locally (`Z_FEATURE_LOCAL_SUBSCRIBER` 0).
 # The KeepAlive and Close codecs are named here because nothing below brings them, and without
 # them the session's keep-alive and close are sent as nothing and a router's Close is not read.
+# `transport-tx-lend` is the seam by which a frame is encoded into a slot its link lends: the
+# engine lends every link its slots from the session's arena (`arena`), so a send builds no frame
+# on the heap while a slot is free. A link that lends none still sends: the session builds its
+# frame itself and counts why, unless the build selects `tx-lend-only` below.
 wz-session-core = { path = "../wz-session-core", default-features = false, features = [
     "alloc",
+    "transport-tx-lend",
     "codec-keep-alive",
     "codec-close",
     "codec-push",
@@ -261,6 +266,13 @@ transport-stats = ["wz-session-core/transport-stats"]
 # the observers, the queue and the settling after each frame are not in the text.
 remote-declaration-watch = []
 declarations-synced-event = []
+# The lend-only send (`wz-session-core`'s `tx-lend-only`): every frame is encoded into a slot the
+# link lends from the session's arena, and a send that finds every slot out is refused and counted
+# (`SessionLinkActions::tx_refusals`), never built on the heap. A SELECTOR, off by default, named by
+# the C library's final build (`--features wz-capi-coop/tx-lend-only` beside `engine-coop`) and by
+# no dependency line: unified into a build that holds the tokio engine it would make that engine's
+# sessions refuse where they fall back, which `wz-runtime-tokio` refuses to build.
+tx-lend-only = ["wz-session-core/tx-lend-only"]
 # A clock the program moves (a time base it supplies, `wz-capi-pico`'s `time-base`): the word that
 # tells a read the clock moved on (`CoopConfig::clock_moves`), which ends the read's wait beside
 # its links. Off, which is pico's build, no program moves the clock, the config's field holds no

@@ -14,21 +14,27 @@
 //!   (`MAX_LOCAL_TOKENS`) and its liveliness subscribers (`MAX_LIVELINESS_SUBSCRIPTIONS`);
 //! - the gets pending on each face (`MAX_PENDING_QUERIES`, and with `liveliness-get`
 //!   `MAX_PENDING_LIVELINESS_GETS`), and with `local-queryable` those pending on the session's
-//!   own queryables, which no face holds.
+//!   own queryables, which no face holds;
+//! - the buffers of each link the session may hold: a receive buffer of the batch the session
+//!   advertises, a streamed batch's length counted inside it, and [`LINK_TX_SLOTS`] slots of that
+//!   length to encode its frames into, each table with the flags that say which buffers are lent
+//!   (`SessionArena::lend_links`). The batch is the config's, under the build's
+//!   `PICO_UNICAST_BATCH_BYTES`; these are the rows lent when the session opens, first.
 //!
 //! A table's entry is the registry's own `ROW_BYTES` as the lent policy lays the row out
 //! ([`Lent`]), and its count the value of its limit the open resolved, under the build's value
 //! ([`Quota::lent_under`]): a stage after the build chooses within the memory the build fixes and
 //! never adds to it, so a value over the build's refuses the open.
 //!
-//! A session holds the dial role's face and a face for each group it joins; one that listens
-//! holds besides them as many faces as `max_faces` and `accept_pending` admit. These are the tables
-//! whose limits bind at the open (`binding_fixed = "open"`). A link's batches and reassembly, what
-//! a face's peer writes and what a group's members rejoin join the plan with the units that lend
-//! them from the arena and bound them by limits of their own (`docs/c-abi-no-heap-pools.md`,
-//! units U2 and U12 and section 4.5): reserved before then, they would be memory nothing uses, and
-//! a link's reassembly is sized by `max_message_size`, which upstream's default leaves at a
-//! gibibyte.
+//! A session holds the dial role's face, a face for each group it joins and as many faces besides
+//! as `max_faces` admits, each a link it attaches or accepts; one that listens holds as many again
+//! in their handshake as `accept_pending` admits. A group's face is no link of the session's: it
+//! has a row of gets and no buffers. These are the tables whose limits bind at the open
+//! (`binding_fixed = "open"`). A link's reassembly, what a face's peer writes and what a group's
+//! members rejoin join the plan with the units that lend them from the arena and bound them by
+//! limits of their own (`docs/c-abi-no-heap-pools.md`, sections 4.5, 4.9 and 4.14): reserved
+//! before then, they would be memory nothing uses, and a link's reassembly is sized by
+//! `max_message_size`, which upstream's default leaves at a gibibyte.
 //!
 //! # The reservation is the report
 //!
@@ -46,7 +52,9 @@
 use core::alloc::Layout;
 use core::ptr::NonNull;
 
-use wz_session_core::bounded::{Arena, Lent, ARENA_ALIGN};
+use wz_runtime_coop::link_storage::LinkTables;
+use wz_session_core::bounded::{Arena, LendRefused, Lent, ARENA_ALIGN};
+use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::caps;
 use wz_session_core::limit_binding::{Quota, UnlentRows};
 use wz_session_core::limits::SessionLimits;
@@ -86,7 +94,11 @@ impl ArenaRow {
 }
 
 /// The most rows a plan holds: every row of the build with every feature.
-pub const ARENA_ROWS: usize = 6;
+pub const ARENA_ROWS: usize = 10;
+
+/// The slots each link is lent to encode its frames into: a batching session holds a batch open in
+/// one slot while it encodes the next message, which does not join it, into another.
+pub const LINK_TX_SLOTS: usize = 2;
 
 /// A row of a plan that has none yet.
 const NO_ROW: ArenaRow = ArenaRow {
@@ -114,6 +126,9 @@ pub enum ArenaRefused {
         /// The bytes asked for.
         bytes: usize,
     },
+    /// The arena reserved by the plan had no room for a part of it: the plan and what is lent by
+    /// it disagree.
+    Unlent(LendRefused),
 }
 
 /// What a session's arena holds, row by row, in the order the rows are lent from it.
@@ -121,17 +136,57 @@ pub enum ArenaRefused {
 pub struct ArenaPlan {
     rows: [ArenaRow; ARENA_ROWS],
     len: usize,
+    /// The links whose buffers the arena holds.
+    links: usize,
+    /// The length of a link's receive buffer and of each of its slots.
+    link_bytes: usize,
 }
 
 impl ArenaPlan {
     /// The rows of a session `config` opens under `limits` (see the module). Refused when a limit
     /// is over the build's value or the arena is past the address space.
     pub fn of(config: &CoopConfig, limits: &SessionLimits) -> Result<Self, ArenaRefused> {
+        let links = links_of(config).ok_or(ArenaRefused::TooLarge)?;
+        let batch = lent(
+            "PICO_UNICAST_BATCH_BYTES",
+            Quota::at_most(usize::from(config.batch_size)),
+            caps::PICO_UNICAST_BATCH_BYTES,
+        )?;
+        // A buffer and a slot of the batch hold a whole batch of either link: a stream link's
+        // length is counted inside the batch it negotiates (`STREAM_BATCH_LENGTH_BYTES`).
+        let link_bytes = batch;
         let mut plan = Self {
             rows: [NO_ROW; ARENA_ROWS],
             len: 0,
+            links,
+            link_bytes,
         };
         let faces = faces_of(config).ok_or(ArenaRefused::TooLarge)?;
+        // The links' rows are lent when the session opens, in this order (`SessionArena::lend_links`).
+        plan.put(
+            "link receive flags",
+            "PICO_UNICAST_BATCH_BYTES",
+            links,
+            LentByteCells::FLAG_BYTES,
+        );
+        plan.put(
+            "link receive buffers",
+            "PICO_UNICAST_BATCH_BYTES",
+            links,
+            link_bytes,
+        );
+        plan.put(
+            "link transmit flags",
+            "PICO_UNICAST_BATCH_BYTES",
+            links,
+            LentByteCells::FLAG_BYTES,
+        );
+        plan.put(
+            "link transmit slots",
+            "PICO_UNICAST_BATCH_BYTES",
+            links,
+            times(LINK_TX_SLOTS, link_bytes)?,
+        );
         plan.put(
             "subscribers",
             "MAX_SUBSCRIPTIONS",
@@ -255,18 +310,24 @@ fn times(each: usize, count: usize) -> Result<usize, ArenaRefused> {
     each.checked_mul(count).ok_or(ArenaRefused::TooLarge)
 }
 
-/// The faces a session `config` opens may hold at once: the dial role's, one for each group it
-/// joins, and for a listener as many as it admits and as many in their handshake. `None` past
-/// the address space.
+/// The faces a session `config` opens may hold at once: its links ([`links_of`]) and one for each
+/// group it joins. `None` past the address space.
 fn faces_of(config: &CoopConfig) -> Option<usize> {
-    let listening = if config.listen.is_empty() {
+    links_of(config)?.checked_add(config.groups.len())
+}
+
+/// The links a session `config` opens may hold at once: the dial role's, as many besides as
+/// `max_faces` admits (each a link it attaches or accepts), and for a listener as many in their
+/// handshake as `accept_pending` admits. `None` past the address space.
+fn links_of(config: &CoopConfig) -> Option<usize> {
+    let handshakes = if config.listen.is_empty() {
         0
     } else {
-        config.max_faces.checked_add(config.accept_pending)?
+        config.accept_pending
     };
     1usize
-        .checked_add(config.groups.len())?
-        .checked_add(listening)
+        .checked_add(config.max_faces)?
+        .checked_add(handshakes)
 }
 
 /// Where a session's arena is reserved from.
@@ -340,10 +401,33 @@ impl SessionArena {
         self.arena.bytes()
     }
 
+    /// Lend the tables of the links' buffers `plan` lays out, its first rows: a receive buffer and
+    /// [`LINK_TX_SLOTS`] slots for each link the session may hold, which the session's links claim
+    /// as they open and give back as they go. Refused only by an arena reserved by another plan.
+    pub(crate) fn lend_links(&mut self, plan: &ArenaPlan) -> Result<LinkTables, ArenaRefused> {
+        let slots = times(LINK_TX_SLOTS, plan.link_bytes)?;
+        let rx = self
+            .arena
+            .lend_byte_cells(plan.link_bytes, plan.links)
+            .map_err(ArenaRefused::Unlent)?;
+        let tx = self
+            .arena
+            .lend_byte_cells(slots, plan.links)
+            .map_err(ArenaRefused::Unlent)?;
+        Ok(LinkTables::new(rx, tx, plan.link_bytes))
+    }
+
     /// The arena, to lend from.
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn arena_mut(&mut self) -> &mut Arena {
         &mut self.arena
+    }
+
+    /// Whether `at` is a byte of the arena's memory.
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn holds(&self, at: *const u8) -> bool {
+        let base = self.base.as_ptr() as usize;
+        (base..base + self.bytes()).contains(&(at as usize))
     }
 }
 
