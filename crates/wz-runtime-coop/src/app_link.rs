@@ -83,122 +83,208 @@ pub enum AppLinkError {
     NotCarried,
 }
 
-/// Waiting on a link: parking the host's thread (`wait_parked`), or looking for a bounded number
-/// of turns on an image (`wait_turns`). The build names one of them `wait`.
-#[cfg(all(feature = "host-lock", not(feature = "host-lock-sys")))]
+/// Waiting on a link: parking the waiting thread until the link's wake comes (`wait_parked`),
+/// or looking for a bounded number of turns on an image (`wait_turns`). The build names one of
+/// them `wait`.
+#[cfg(feature = "host-lock")]
 use wait_parked as wait;
-#[cfg(feature = "host-lock-sys")]
-use wait_parked_sys as wait;
 #[cfg(not(feature = "host-lock"))]
 use wait_turns as wait;
 
-#[cfg(all(feature = "host-lock", not(feature = "host-lock-sys")))]
+/// The wait of a host: each link owns one wake, made with the link, and every wait on it hands the
+/// program's calls that wake's one waker. A wait therefore allocates nothing, however often a
+/// session's read waits on its link (once a turn), and every thread that waits on the link (its
+/// read, a publisher waiting for room) is woken and looks again. The lock and the condition
+/// variable are `std`'s, or the host's own calls' in a library without `std` (`host-lock-sys`).
+#[cfg(feature = "host-lock")]
 mod wait_parked {
+    #[cfg(not(feature = "host-lock-sys"))]
     extern crate std;
 
     use alloc::sync::Arc;
-    use core::task::{Context, Waker};
-    use std::task::Wake;
-    use std::thread::Thread;
-    use std::time::{Duration, Instant};
-
-    struct Unpark(Thread);
-
-    impl Wake for Unpark {
-        fn wake(self: Arc<Self>) {
-            self.0.unpark();
-        }
-
-        fn wake_by_ref(self: &Arc<Self>) {
-            self.0.unpark();
-        }
-    }
-
-    /// Wait up to `timeout_ms` while `pending` answers `true`, handing it the waker the
-    /// program's calls wake this thread by.
-    pub(super) fn wait_while(timeout_ms: u64, mut pending: impl FnMut(Option<&Waker>) -> bool) {
-        let waker = Waker::from(Arc::new(Unpark(std::thread::current())));
-        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-        while pending(Some(&waker)) {
-            let now = Instant::now();
-            if now >= deadline {
-                return;
-            }
-            std::thread::park_timeout(deadline - now);
-        }
-    }
-
-    /// Wait while `pending` answers `true` and `bound`, a sleep of the session's clock, has not
-    /// ended: the thread parks until the program's calls or the clock's move wake it, both by the
-    /// one waker, and the wall clock bounds nothing.
-    pub(super) fn wait_while_bound(
-        mut bound: super::BoundSleep,
-        mut pending: impl FnMut(Option<&Waker>) -> bool,
-    ) {
-        let waker = Waker::from(Arc::new(Unpark(std::thread::current())));
-        let mut cx = Context::from_waker(&waker);
-        while pending(Some(&waker)) {
-            if bound.as_mut().poll(&mut cx).is_ready() {
-                return;
-            }
-            std::thread::park();
-        }
-    }
-}
-
-/// `wait_parked` in a host library without `std` (`host-lock-sys`): the thread waits on a
-/// parker of its own (`wz-host-sync`), which the waker wakes, and the deadline is on the host's
-/// monotonic clock, as `std`'s park and `Instant` are.
-#[cfg(feature = "host-lock-sys")]
-mod wait_parked_sys {
-    use alloc::sync::Arc;
     use alloc::task::Wake;
     use core::task::{Context, Waker};
+    use core::time::Duration;
 
-    use wz_host_sync::{monotonic_ns, Parker};
+    #[cfg(not(feature = "host-lock-sys"))]
+    use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
+    #[cfg(feature = "host-lock-sys")]
+    use wz_host_sync::{Condvar, Mutex, MutexGuard};
 
-    struct Unpark(Parker);
+    /// The count of the wakes a link has had, and the condition variable its waiters wait on.
+    struct LinkWake {
+        wakes: Mutex<u64>,
+        changed: Condvar,
+    }
 
-    impl Wake for Unpark {
+    impl Wake for LinkWake {
         fn wake(self: Arc<Self>) {
-            self.0.unpark();
+            self.wake_by_ref();
         }
 
         fn wake_by_ref(self: &Arc<Self>) {
-            self.0.unpark();
+            let mut wakes = lock(&self.wakes);
+            *wakes = wakes.wrapping_add(1);
+            drop(wakes);
+            self.changed.notify_all();
         }
     }
 
-    /// Wait up to `timeout_ms` while `pending` answers `true`, handing it the waker the
-    /// program's calls wake this thread by.
-    pub(super) fn wait_while(timeout_ms: u64, mut pending: impl FnMut(Option<&Waker>) -> bool) {
-        let unpark = Arc::new(Unpark(Parker::new()));
-        let waker = Waker::from(Arc::clone(&unpark));
-        let deadline = monotonic_ns().saturating_add(timeout_ms.saturating_mul(1_000_000));
-        while pending(Some(&waker)) {
-            let now = monotonic_ns();
-            if now >= deadline {
-                return;
-            }
-            unpark.0.park_timeout_ns(deadline - now);
+    /// The lock, a poisoned one taken as it is: a count has no state a panic can leave half made.
+    fn lock(wakes: &Mutex<u64>) -> MutexGuard<'_, u64> {
+        #[cfg(not(feature = "host-lock-sys"))]
+        {
+            wakes.lock().unwrap_or_else(PoisonError::into_inner)
+        }
+        #[cfg(feature = "host-lock-sys")]
+        {
+            wakes.lock()
         }
     }
 
-    /// Wait while `pending` answers `true` and `bound`, a sleep of the session's clock, has not
-    /// ended: the thread waits until the program's calls or the clock's move wake it, both by the
-    /// one waker, and the wall clock bounds nothing.
-    pub(super) fn wait_while_bound(
-        mut bound: super::BoundSleep,
-        mut pending: impl FnMut(Option<&Waker>) -> bool,
-    ) {
-        let unpark = Arc::new(Unpark(Parker::new()));
-        let waker = Waker::from(Arc::clone(&unpark));
-        let mut cx = Context::from_waker(&waker);
-        while pending(Some(&waker)) {
-            if bound.as_mut().poll(&mut cx).is_ready() {
-                return;
+    /// Wait, with `guard` held, until the count is no longer `seen`, or `left` has passed when
+    /// it is given.
+    fn wait_past(changed: &Condvar, guard: MutexGuard<'_, u64>, seen: u64, left: Option<Duration>) {
+        #[cfg(not(feature = "host-lock-sys"))]
+        {
+            match left {
+                Some(left) => drop(
+                    changed
+                        .wait_timeout_while(guard, left, |wakes| *wakes == seen)
+                        .unwrap_or_else(PoisonError::into_inner),
+                ),
+                None => drop(
+                    changed
+                        .wait_while(guard, |wakes| *wakes == seen)
+                        .unwrap_or_else(PoisonError::into_inner),
+                ),
             }
-            unpark.0.park();
+        }
+        #[cfg(feature = "host-lock-sys")]
+        {
+            match left {
+                Some(left) => drop(changed.wait_timeout_while(guard, left, |wakes| *wakes == seen)),
+                None => {
+                    let mut guard = guard;
+                    while *guard == seen {
+                        guard = changed.wait(guard);
+                    }
+                }
+            }
+        }
+    }
+
+    /// When a wait of `timeout_ms` ends, on the host's monotonic clock: `std`'s `Instant`, or the
+    /// host's own reading of it.
+    struct Deadline {
+        #[cfg(not(feature = "host-lock-sys"))]
+        at: Option<std::time::Instant>,
+        #[cfg(feature = "host-lock-sys")]
+        at_ns: u64,
+    }
+
+    impl Deadline {
+        fn after_ms(timeout_ms: u64) -> Self {
+            #[cfg(not(feature = "host-lock-sys"))]
+            {
+                Self {
+                    at: std::time::Instant::now().checked_add(Duration::from_millis(timeout_ms)),
+                }
+            }
+            #[cfg(feature = "host-lock-sys")]
+            {
+                Self {
+                    at_ns: wz_host_sync::monotonic_ns()
+                        .saturating_add(timeout_ms.saturating_mul(1_000_000)),
+                }
+            }
+        }
+
+        /// What is left of the wait, `None` once it has passed. A deadline past what the clock
+        /// counts leaves the longest wait there is.
+        fn left(&self) -> Option<Duration> {
+            #[cfg(not(feature = "host-lock-sys"))]
+            {
+                let left = match self.at {
+                    Some(at) => at.checked_duration_since(std::time::Instant::now()),
+                    None => Some(Duration::MAX),
+                };
+                left.filter(|left| !left.is_zero())
+            }
+            #[cfg(feature = "host-lock-sys")]
+            {
+                let now = wz_host_sync::monotonic_ns();
+                (now < self.at_ns).then(|| Duration::from_nanos(self.at_ns - now))
+            }
+        }
+    }
+
+    /// The waits of one link: its wake and the waker made of it, once, when the link is opened.
+    /// A clone is a second reference to the same wake, for a wait on the link made from outside
+    /// the loop that owns it.
+    #[derive(Clone)]
+    pub(super) struct Waits {
+        wake: Arc<LinkWake>,
+        waker: Waker,
+    }
+
+    impl Default for Waits {
+        fn default() -> Self {
+            let wake = Arc::new(LinkWake {
+                wakes: Mutex::new(0),
+                changed: Condvar::new(),
+            });
+            let waker = Waker::from(Arc::clone(&wake));
+            Self { wake, waker }
+        }
+    }
+
+    impl Waits {
+        /// How many wakes the link has had: read before `pending` is asked, so a wake that comes
+        /// between the answer and the wait ends the wait at once.
+        fn seen(&self) -> u64 {
+            *lock(&self.wake.wakes)
+        }
+
+        /// Wait up to `timeout_ms` while `pending` answers `true`, handing it the waker the
+        /// program's calls wake the link's waiters by.
+        pub(super) fn wait_while(
+            &self,
+            timeout_ms: u64,
+            mut pending: impl FnMut(Option<&Waker>) -> bool,
+        ) {
+            let deadline = Deadline::after_ms(timeout_ms);
+            loop {
+                let seen = self.seen();
+                if !pending(Some(&self.waker)) {
+                    return;
+                }
+                let Some(left) = deadline.left() else {
+                    return;
+                };
+                wait_past(&self.wake.changed, lock(&self.wake.wakes), seen, Some(left));
+            }
+        }
+
+        /// Wait while `pending` answers `true` and `bound`, a sleep of the session's clock, has
+        /// not ended: the program's calls and the clock's move both wake the link's waker, and the
+        /// wall clock bounds nothing.
+        pub(super) fn wait_while_bound(
+            &self,
+            mut bound: super::BoundSleep,
+            mut pending: impl FnMut(Option<&Waker>) -> bool,
+        ) {
+            let mut cx = Context::from_waker(&self.waker);
+            loop {
+                let seen = self.seen();
+                if !pending(Some(&self.waker)) {
+                    return;
+                }
+                if bound.as_mut().poll(&mut cx).is_ready() {
+                    return;
+                }
+                wait_past(&self.wake.changed, lock(&self.wake.wakes), seen, None);
+            }
         }
     }
 }
@@ -210,25 +296,36 @@ mod wait_turns {
     /// How many times a wait looks at the table before it returns to the engine's loop.
     const TURNS: u32 = 1 << 12;
 
-    /// Look while `pending` answers `true`, for a bounded number of turns: an image has no thread
-    /// to park, and its loop comes back.
-    pub(super) fn wait_while(_timeout_ms: u64, mut pending: impl FnMut(Option<&Waker>) -> bool) {
-        for _ in 0..TURNS {
-            if !pending(None) {
-                return;
-            }
-            core::hint::spin_loop();
-        }
-    }
+    /// The waits of one link on an image, which has no thread to park: nothing to hold.
+    #[derive(Clone, Default)]
+    pub(super) struct Waits;
 
-    /// [`wait_while`] whatever the clock: the turns bound an image's look, and the open's own
-    /// deadline on the session's clock is the engine's.
-    pub(super) fn wait_while_bound(
-        bound: super::BoundSleep,
-        pending: impl FnMut(Option<&Waker>) -> bool,
-    ) {
-        drop(bound);
-        wait_while(0, pending);
+    impl Waits {
+        /// Look while `pending` answers `true`, for a bounded number of turns: an image's loop
+        /// comes back.
+        pub(super) fn wait_while(
+            &self,
+            _timeout_ms: u64,
+            mut pending: impl FnMut(Option<&Waker>) -> bool,
+        ) {
+            for _ in 0..TURNS {
+                if !pending(None) {
+                    return;
+                }
+                core::hint::spin_loop();
+            }
+        }
+
+        /// [`Self::wait_while`] whatever the clock: the turns bound an image's look, and the
+        /// open's own deadline on the session's clock is the engine's.
+        pub(super) fn wait_while_bound(
+            &self,
+            bound: super::BoundSleep,
+            pending: impl FnMut(Option<&Waker>) -> bool,
+        ) {
+            drop(bound);
+            self.wait_while(0, pending);
+        }
     }
 }
 
@@ -262,20 +359,26 @@ fn open_link(
     kind: AppLinkKind,
     locator: &str,
     bound: Option<&OpenBound>,
-) -> Result<LinkHandle, LinkOpenError> {
+) -> Result<Held, LinkOpenError> {
     let transport = &session.transport;
     let handle = session.begin_open(kind, locator);
+    // The link's waits are made with it, so the open's wait and every one after share its wake.
+    let waits = wait::Waits::default();
     let mut progress = OpenProgress::Opening;
     let opening = |waker: Option<&core::task::Waker>| {
         progress = transport.with(|table| table.poll_open(handle, waker));
         progress == OpenProgress::Opening
     };
     match bound {
-        Some(bound) => wait::wait_while_bound(bound(OPEN_WAIT_MS), opening),
-        None => wait::wait_while(OPEN_WAIT_MS, opening),
+        Some(bound) => waits.wait_while_bound(bound(OPEN_WAIT_MS), opening),
+        None => waits.wait_while(OPEN_WAIT_MS, opening),
     }
     match progress {
-        OpenProgress::Open => Ok(handle),
+        OpenProgress::Open => Ok(Held {
+            transport: Arc::clone(transport),
+            handle,
+            waits,
+        }),
         // Not up in time, or refused: the link is let go, and the dial is one the other end did
         // not take, which the engine tries again later.
         OpenProgress::Opening | OpenProgress::Closed => {
@@ -289,9 +392,21 @@ fn open_link(
 struct Held {
     transport: Arc<AppTransport>,
     handle: LinkHandle,
+    /// The link's wake, which every wait on it hands the program's calls.
+    waits: wait::Waits,
 }
 
 impl Held {
+    /// A link the program opened on its own (a stream or a source it accepted on a listener),
+    /// held with a wake of its own.
+    fn accepted(transport: &Arc<AppTransport>, handle: LinkHandle) -> Self {
+        Self {
+            transport: Arc::clone(transport),
+            handle,
+            waits: wait::Waits::default(),
+        }
+    }
+
     /// Offer the program `bytes` once, as far as it takes them now: how many it took, 0 when it
     /// would block (or the link is not writable yet).
     fn send_once(&self, bytes: &[u8]) -> Result<usize, AppLinkError> {
@@ -362,7 +477,7 @@ impl Held {
     fn wait_readable(&self, timeout_ms: c_int) {
         let _ = self.flush();
         let timeout_ms = u64::try_from(timeout_ms).unwrap_or(0);
-        wait::wait_while(timeout_ms, |waker| {
+        self.waits.wait_while(timeout_ms, |waker| {
             !self
                 .transport
                 .with(|table| table.poll_readable(self.handle, waker))
@@ -373,9 +488,15 @@ impl Held {
     /// way: `true` once the link is open and holds nothing for the program (or has ended, which
     /// the send that follows reports).
     fn wait_writable(&self, timeout_ms: u64) -> bool {
-        until_writable(&self.transport, self.handle, timeout_ms, || {
-            let _ = self.flush();
-        })
+        until_writable(
+            &self.transport,
+            self.handle,
+            &self.waits,
+            timeout_ms,
+            || {
+                let _ = self.flush();
+            },
+        )
     }
 
     /// What a read just made let the program know of: the links it refused that are read down.
@@ -397,11 +518,12 @@ impl Drop for Held {
 fn until_writable(
     transport: &AppTransport,
     handle: LinkHandle,
+    waits: &wait::Waits,
     timeout_ms: u64,
     mut offer: impl FnMut(),
 ) -> bool {
     let mut writable = false;
-    wait::wait_while(timeout_ms, |waker| {
+    waits.wait_while(timeout_ms, |waker| {
         offer();
         writable = transport.with(|table| table.poll_writable(handle, waker));
         !writable
@@ -415,6 +537,7 @@ fn until_writable(
 struct GroupRoom {
     transport: Arc<AppTransport>,
     handle: LinkHandle,
+    waits: wait::Waits,
 }
 
 impl LinkWritability for GroupRoom {
@@ -422,6 +545,7 @@ impl LinkWritability for GroupRoom {
         until_writable(
             &self.transport,
             self.handle,
+            &self.waits,
             timeout_us.div_ceil(1_000),
             || {},
         )
@@ -435,11 +559,12 @@ impl LinkWritability for GroupRoom {
 struct GroupInput {
     transport: Arc<AppTransport>,
     handle: LinkHandle,
+    waits: wait::Waits,
 }
 
 impl LinkReadiness for GroupInput {
     fn wait_readable(&self, timeout_ms: u32) {
-        wait::wait_while(u64::from(timeout_ms), |waker| {
+        self.waits.wait_while(u64::from(timeout_ms), |waker| {
             !self
                 .transport
                 .with(|table| table.poll_readable(self.handle, waker))
@@ -513,17 +638,14 @@ impl StreamDial for AppStreamDial {
 
     fn dial(&self, to: SocketAddr) -> Result<AppStreamSocket, LinkOpenError> {
         let locator = Locator::tcp(to).to_string();
-        let handle = open_link(
+        let held = open_link(
             &self.transport,
             AppLinkKind::StreamDial,
             &locator,
             self.open_bound.as_ref(),
         )?;
         Ok(AppStreamSocket {
-            held: Held {
-                transport: Arc::clone(&self.transport.transport),
-                handle,
-            },
+            held,
             local: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
             peer: to,
         })
@@ -534,19 +656,13 @@ impl StreamDial for AppStreamDial {
         at: SocketAddr,
     ) -> Result<Box<dyn StreamListen<Stream = AppStreamSocket>>, LinkOpenError> {
         let locator = Locator::tcp(at).to_string();
-        let handle = open_link(
+        let held = open_link(
             &self.transport,
             AppLinkKind::StreamListen,
             &locator,
             self.open_bound.as_ref(),
         )?;
-        Ok(Box::new(AppStreamListener {
-            held: Held {
-                transport: Arc::clone(&self.transport.transport),
-                handle,
-            },
-            at,
-        }))
+        Ok(Box::new(AppStreamListener { held, at }))
     }
 }
 
@@ -570,10 +686,7 @@ impl StreamListen for AppStreamListener {
             .with(|table| table.next_accepted(self.held.handle, None));
         match next {
             AcceptRead::Accepted(handle, remote) => Ok(Some(AppStreamSocket {
-                held: Held {
-                    transport: Arc::clone(&self.held.transport),
-                    handle,
-                },
+                held: Held::accepted(&self.held.transport, handle),
                 local: self.at,
                 peer: socket_of(&remote),
             })),
@@ -608,12 +721,9 @@ impl AppDatagramSocket {
         bound: Option<&OpenBound>,
     ) -> Result<Self, LinkOpenError> {
         let locator = Locator::udp(to).to_string();
-        let handle = open_link(transport, AppLinkKind::Datagram, &locator, bound)?;
+        let held = open_link(transport, AppLinkKind::Datagram, &locator, bound)?;
         Ok(Self {
-            held: Held {
-                transport: Arc::clone(&transport.transport),
-                handle,
-            },
+            held,
             peer: to,
             reads_sources: true,
         })
@@ -623,10 +733,7 @@ impl AppDatagramSocket {
     /// naming it `remote`.
     fn accepted(transport: &Arc<AppTransport>, handle: LinkHandle, remote: &str) -> Self {
         Self {
-            held: Held {
-                transport: Arc::clone(transport),
-                handle,
-            },
+            held: Held::accepted(transport, handle),
             peer: socket_of(remote),
             reads_sources: false,
         }
@@ -714,12 +821,8 @@ impl AppGroupTransport {
         locator: &str,
         bound: Option<&OpenBound>,
     ) -> Result<Self, LinkOpenError> {
-        let handle = open_link(transport, AppLinkKind::Group, locator, bound)?;
         Ok(Self {
-            held: Some(Held {
-                transport: Arc::clone(&transport.transport),
-                handle,
-            }),
+            held: Some(open_link(transport, AppLinkKind::Group, locator, bound)?),
         })
     }
 }
@@ -795,6 +898,7 @@ impl GroupTransport for AppGroupTransport {
         Some(Box::new(GroupRoom {
             transport: Arc::clone(&held.transport),
             handle: held.handle,
+            waits: held.waits.clone(),
         }))
     }
 
@@ -805,6 +909,7 @@ impl GroupTransport for AppGroupTransport {
         Some(Box::new(GroupInput {
             transport: Arc::clone(&held.transport),
             handle: held.handle,
+            waits: held.waits.clone(),
         }))
     }
 
@@ -921,17 +1026,14 @@ impl SessionLinks for AppLinks {
             })),
             LinkProto::Udp => {
                 let locator = Locator::udp(at.at).to_string();
-                let handle = open_link(
+                let held = open_link(
                     &self.transport,
                     AppLinkKind::DatagramListen,
                     &locator,
                     self.open_bound.as_ref(),
                 )?;
                 Ok(Box::new(AppDatagramListener {
-                    held: Held {
-                        transport: Arc::clone(&self.transport.transport),
-                        handle,
-                    },
+                    held,
                     at: at.at,
                     datagram_rx: self.datagram_rx,
                 }))
@@ -1663,5 +1765,48 @@ mod tests {
                 "listen={listen}: the open waited out the wall clock's bound ({took:?})"
             );
         }
+    }
+
+    /// One wake of a link's waits ends every wait on the link, its read's and a publisher's for
+    /// room alike: the waits share the one wake the link was opened with, and the waker the table
+    /// holds is that wake's, whichever wait handed it over.
+    #[cfg(feature = "host-lock")]
+    #[test]
+    fn one_wake_of_a_link_ends_every_wait_on_it() {
+        use core::task::Waker;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let waits = wait::Waits::default();
+        let ready = AtomicBool::new(false);
+        let held: Mutex<Option<Waker>> = Mutex::new(None);
+        let started = std::time::Instant::now();
+        std::thread::scope(|scope| {
+            let wait_on_link = || {
+                waits.wait_while(10_000, |waker| {
+                    if let Some(waker) = waker {
+                        *held.lock().unwrap() = Some(waker.clone());
+                    }
+                    !ready.load(Ordering::SeqCst)
+                });
+            };
+            // The read's wait and a publisher's wait for room, on two threads.
+            let read = scope.spawn(wait_on_link);
+            let room = scope.spawn(wait_on_link);
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            ready.store(true, Ordering::SeqCst);
+            let waker = held
+                .lock()
+                .unwrap()
+                .take()
+                .expect("a wait handed its waker over");
+            waker.wake();
+            read.join().expect("the read's wait ran");
+            room.join().expect("the wait for room ran");
+        });
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "a wait on the link outlived the wake ({:?})",
+            started.elapsed()
+        );
     }
 }
