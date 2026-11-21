@@ -24,13 +24,13 @@ use crate::CoopConfig;
 
 /// The build's limits with `select` applied, or `None` on a build whose domain of the limit is its
 /// own value alone, which a test cannot lower.
-fn lowered(select: impl FnOnce(&mut SessionLimits) -> bool) -> Option<SessionLimits> {
+pub(super) fn lowered(select: impl FnOnce(&mut SessionLimits) -> bool) -> Option<SessionLimits> {
     let mut limits = SessionLimits::defaults();
     select(&mut limits).then_some(limits)
 }
 
 /// A session open to `router` under `limits`.
-fn open_under(router: &Router, limits: SessionLimits) -> Arc<Engine> {
+pub(super) fn open_under(router: &Router, limits: SessionLimits) -> Arc<Engine> {
     open_with(CoopConfig {
         limits,
         ..config(router)
