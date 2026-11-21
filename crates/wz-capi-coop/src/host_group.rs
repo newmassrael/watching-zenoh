@@ -24,7 +24,6 @@ use core::marker::PhantomData;
 
 use wz_runtime_coop::group_transport::{GroupJoiner, GroupTransport};
 use wz_runtime_coop::session_drive::LinkOpenError;
-use wz_runtime_coop::udp_link::DatagramSocket;
 use wz_runtime_posix::group::MulticastSocket;
 use wz_runtime_posix::multicast::{
     bind_joined, bind_sender, mark_traffic_class, HostGroupTransport, Loopback, MulticastError,

@@ -24,7 +24,7 @@ use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 use core::str::FromStr;
 
 use wz_runtime_coop::group_transport::{GroupInterface, GroupSend, GroupTransport};
-use wz_runtime_coop::udp_link::{unspecified_like, DatagramSocket, UDP_RX_CAPACITY};
+use wz_runtime_coop::udp_link::{unspecified_like, UDP_RX_CAPACITY};
 
 use crate::group::MulticastSocket;
 use crate::interfaces::{self, IfaceResolveError};
@@ -827,6 +827,9 @@ mod tests {
     use core::ffi::c_int;
     use std::time::{Duration, Instant};
     use wz_runtime_coop::session_drive::LinkReadiness;
+    // The tests open concrete sockets, whose datagram methods are the trait's; the code above
+    // reaches them through the `MulticastSocket` bound alone.
+    use wz_runtime_coop::udp_link::DatagramSocket;
 
     const GROUP: Ipv4Addr = Ipv4Addr::new(239, 255, 77, 9);
     const GROUP_V6: Ipv6Addr = Ipv6Addr::new(0xff05, 0, 0, 0, 0, 0, 0x7a, 0x7709);
