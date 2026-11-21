@@ -453,7 +453,7 @@
               "x-wz-storage": "both",
               "x-wz-scope": "session",
               "x-wz-binding-heap": "open",
-              "x-wz-binding-fixed": "build",
+              "x-wz-binding-fixed": "open",
               "x-wz-wire": "none"
             },
             "MATCH_MEMO_SLOTS": {
@@ -536,7 +536,7 @@
               "x-wz-storage": "both",
               "x-wz-scope": "session",
               "x-wz-binding-heap": "open",
-              "x-wz-binding-fixed": "build",
+              "x-wz-binding-fixed": "open",
               "x-wz-wire": "none"
             },
             "MAX_PENDING_QUERIES": {
@@ -555,7 +555,7 @@
               "x-wz-storage": "both",
               "x-wz-scope": "session",
               "x-wz-binding-heap": "open",
-              "x-wz-binding-fixed": "build",
+              "x-wz-binding-fixed": "open",
               "x-wz-wire": "none"
             },
             "LINK_NOTED_REQUESTS": {
@@ -606,7 +606,7 @@
               "x-wz-storage": "both",
               "x-wz-scope": "session",
               "x-wz-binding-heap": "open",
-              "x-wz-binding-fixed": "build",
+              "x-wz-binding-fixed": "open",
               "x-wz-wire": "none"
             },
             "MAX_LOCAL_TOKENS": {
@@ -625,7 +625,7 @@
               "x-wz-storage": "both",
               "x-wz-scope": "session",
               "x-wz-binding-heap": "open",
-              "x-wz-binding-fixed": "build",
+              "x-wz-binding-fixed": "open",
               "x-wz-wire": "none"
             },
             "MAX_PENDING_LIVELINESS_GETS": {
@@ -644,7 +644,7 @@
               "x-wz-storage": "both",
               "x-wz-scope": "session",
               "x-wz-binding-heap": "open",
-              "x-wz-binding-fixed": "build",
+              "x-wz-binding-fixed": "open",
               "x-wz-wire": "none"
             },
             "MAX_PENDING_DECLARES": {

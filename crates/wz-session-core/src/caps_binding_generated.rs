@@ -30,7 +30,7 @@ pub const MAX_SUBSCRIPTIONS: LimitBinding = LimitBinding {
     storage: Storage::Both,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
-    binding_fixed: Some(Binding::Build),
+    binding_fixed: Some(Binding::Open),
     wire: Wire::None,
 };
 
@@ -114,7 +114,7 @@ pub const MAX_QUERYABLES: LimitBinding = LimitBinding {
     storage: Storage::Both,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
-    binding_fixed: Some(Binding::Build),
+    binding_fixed: Some(Binding::Open),
     wire: Wire::None,
 };
 
@@ -126,7 +126,7 @@ pub const MAX_PENDING_QUERIES: LimitBinding = LimitBinding {
     storage: Storage::Both,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
-    binding_fixed: Some(Binding::Build),
+    binding_fixed: Some(Binding::Open),
     wire: Wire::None,
 };
 
@@ -162,7 +162,7 @@ pub const MAX_LIVELINESS_SUBSCRIPTIONS: LimitBinding = LimitBinding {
     storage: Storage::Both,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
-    binding_fixed: Some(Binding::Build),
+    binding_fixed: Some(Binding::Open),
     wire: Wire::None,
 };
 
@@ -174,7 +174,7 @@ pub const MAX_LOCAL_TOKENS: LimitBinding = LimitBinding {
     storage: Storage::Both,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
-    binding_fixed: Some(Binding::Build),
+    binding_fixed: Some(Binding::Open),
     wire: Wire::None,
 };
 
@@ -186,7 +186,7 @@ pub const MAX_PENDING_LIVELINESS_GETS: LimitBinding = LimitBinding {
     storage: Storage::Both,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
-    binding_fixed: Some(Binding::Build),
+    binding_fixed: Some(Binding::Open),
     wire: Wire::None,
 };
 
