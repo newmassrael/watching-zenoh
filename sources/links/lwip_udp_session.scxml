@@ -48,6 +48,10 @@
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
        sce:kind="link" name="lwip_udp_session" version="1.0">
+  <!-- The framer and the outbound event's codec are read from their
+       documents: a link's event decode and encode are generated from
+       the codec it imports under the name its framer and encode give. -->
+  <sce:import as="frame" kind="codec" src="../codecs/frame.scxml"/>
 
   <sce:link-class>udp</sce:link-class>
 
