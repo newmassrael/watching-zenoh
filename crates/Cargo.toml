@@ -260,6 +260,11 @@ members = [
     # over a POSIX libc (a clock, entropy, the date, a UDP socket), for the shared MCU session
     # code run as a Linux process.
     "wz-runtime-posix",
+    # A host's lock, condition variable and threads over its own calls (pthreads, Win32), for a host
+    # library built without `std`: what the cooperative runtime's critical section and the engine
+    # port's `os` are made of there, in place of `std::sync` and of a `critical-section`
+    # implementation a C library would export.
+    "wz-host-sync",
     # The fixed-memory profile's secure channel (decision D9): TLS 1.3 with mutual
     # authentication over the pinned Mbed TLS, as a stream over the cooperative runtime's
     # stream port.

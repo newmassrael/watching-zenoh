@@ -4019,6 +4019,7 @@ name = "wz-capi-port"
 version = "0.1.0"
 dependencies = [
  "critical-section",
+ "wz-host-sync",
  "wz-node-time",
  "wz-session-core",
 ]
@@ -4225,6 +4226,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-host-sync"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "wz-integration-tests"
 version = "0.1.0"
 dependencies = [
@@ -4400,6 +4409,7 @@ dependencies = [
  "critical-section",
  "portable-atomic",
  "portable-atomic-util",
+ "wz-host-sync",
  "wz-runtime-core",
  "wz-session-core",
 ]

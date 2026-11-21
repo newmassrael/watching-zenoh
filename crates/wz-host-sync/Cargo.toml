@@ -1,0 +1,48 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-host-sync -- a host's lock, condition variable and threads over its own system calls, for a
+# build without `std`.
+#
+# The pico C ABI's host library is the MCU build plus an OS layer (docs/c-abi-engine-and-memory.md,
+# E4 and phase P4): no `std`, so the locks the cooperative runtime and the engine port hold across
+# threads cannot be `std::sync`'s, and the `critical-section` implementation an MCU image links
+# cannot be either, because a C library that defines one exports it beside its C ABI. This crate
+# is the one place those locks are made from the host's calls: pthreads on a POSIX host, the Win32
+# slim reader/writer lock and condition variable on Windows.
+#
+# Every lock and condition variable here is one word, made in a `const` context and movable while
+# no thread holds it, so a value that is one can live in a `static` and in a value that moves; a
+# thread that must wait parks on one process-wide place, the only object that holds the system's
+# own lock. No allocation, no `std`, and nothing exported.
+
+[package]
+name = "wz-host-sync"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "A host's lock, condition variable and threads over its own system calls (pthreads, Win32), for a build without std."
+publish = false
+
+[lib]
+name = "wz_host_sync"
+path = "src/lib.rs"
+
+# The POSIX hosts' calls: the pthread mutex and condition variable the parking place is, the
+# threads, and `nanosleep`. No `std` feature: `libc` is the C library's own names.
+[target.'cfg(unix)'.dependencies]
+libc = { version = "0.2", default-features = false }
+
+# The Windows host's: the slim reader/writer lock and condition variable, the threads and `Sleep`
+# (`System_Threading`), the handle a thread is (`Foundation`) and the attributes `CreateThread`
+# is declared with (`Security`). Already in this workspace's graph at this version.
+[target.'cfg(windows)'.dependencies.windows-sys]
+version = "0.61"
+features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading"]
+
+[lints]
+workspace = true

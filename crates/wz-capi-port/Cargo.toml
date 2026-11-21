@@ -59,6 +59,11 @@ shared-key-ids = ["wz-session-core/shared-key-ids"]
 # A time base the program supplies (`time_base`): the time base of `wz-node-time` made from the C
 # calls a door of either C ABI is handed. wz's own, so off by default as the reference builds are.
 time-base = ["std", "dep:wz-node-time", "wz-node-time/time-base"]
+# The port's `os` and its lock made of the host's own calls (`wz-host-sync`: pthreads, or Win32's
+# slim lock) in place of `std`'s and of the critical section an image links, for a host library
+# built without `std`, which runs threads and must export nothing but its C ABI. Beside `std` it
+# changes nothing: `std` answers the same names.
+os-sys = ["dep:wz-host-sync"]
 
 [dependencies]
 # The lock of a build without `std` (src/sync.rs): the image links the implementation, as it does
@@ -79,6 +84,8 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
 # The node's clock registry and event ring, which the observation plane's doors act on, and the
 # time base a program supplies. Optional: only `clock-source`, `event-ring` and `time-base` name it.
 wz-node-time = { path = "../wz-node-time", optional = true }
+# The host's lock, condition variable and threads without `std` (`os-sys`).
+wz-host-sync = { path = "../wz-host-sync", optional = true }
 
 [lints]
 workspace = true

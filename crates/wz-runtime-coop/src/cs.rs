@@ -10,7 +10,8 @@
 //! - on an MCU, interrupts masked, by the `critical-section` implementation the image links (the
 //!   default here: [`with`] is `critical_section::with`);
 //! - on a host (`host-lock`), a lock of the process, reentrant on its thread, which this module
-//!   takes itself. A host program then links no `critical-section` implementation at all, and a
+//!   takes itself: `std`'s, or the host's own calls' in a library built without `std`
+//!   (`host-lock-sys`). A host program then links no `critical-section` implementation at all, and a
 //!   C library built over this runtime exports no `_critical_section_1_0_*` symbol beside its C
 //!   ABI, where another library's implementation could interpose it
 //!   (`docs/capi-pico-on-coop-engine.md`, section 5).
@@ -50,7 +51,7 @@ pub fn with<R>(f: impl FnOnce(CriticalSection<'_>) -> R) -> R {
     }
 }
 
-#[cfg(feature = "host-lock")]
+#[cfg(all(feature = "host-lock", not(feature = "host-lock-sys")))]
 mod host {
     extern crate std;
 
@@ -194,6 +195,139 @@ mod host {
             let _held = Held::enter(&self.lock);
             // SAFETY: this thread holds `lock` until `_held` drops, after `f` returns or
             // unwinds, so no other thread has the value meanwhile.
+            f(unsafe { &mut *self.value.get() })
+        }
+
+        /// [`Self::with`] that does not wait: `None` when another thread holds the lock now,
+        /// and `f` has not run.
+        pub fn try_with<U>(&self, f: impl FnOnce(&mut T) -> U) -> Option<U> {
+            let _held = Held::try_enter(&self.lock)?;
+            // SAFETY: as in `with`: this thread holds `lock` until `_held` drops.
+            Some(f(unsafe { &mut *self.value.get() }))
+        }
+    }
+
+    pub(super) fn with<R>(f: impl FnOnce(CriticalSection<'_>) -> R) -> R {
+        let section = Section::enter();
+        // SAFETY: this thread holds `LOCK`, taken at its outermost section, and keeps it until
+        // that section ends; every critical section of this crate is entered through `with`, so
+        // no other thread holds a token while this one does.
+        let token = unsafe { CriticalSection::new() };
+        let result = f(token);
+        drop(section);
+        result
+    }
+}
+
+/// The host's, over its own calls (`host-lock-sys`): the same section and the same lock of each
+/// value as the module above, made of `wz-host-sync`'s one-word lock, for a library built without
+/// `std`, which has neither `std::sync` nor thread-locals. The section knows its owner by the
+/// thread's number in place of a thread-local depth, and a value's lock is let go by the guard
+/// that took it in place of a stack of guards.
+#[cfg(feature = "host-lock-sys")]
+mod host {
+    use core::cell::UnsafeCell;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    use wz_host_sync::{current_thread, RawLock};
+
+    use super::CriticalSection;
+
+    /// The process's critical section.
+    static LOCK: RawLock = RawLock::new();
+    /// The thread inside the section, 0 when none is (no thread's number is 0). A thread writes
+    /// its own number here only while it holds `LOCK` and clears it before letting go, so a thread
+    /// that reads its own number back is the one inside, in a nested section.
+    static OWNER: AtomicUsize = AtomicUsize::new(0);
+    /// How deep the owner is in sections. Only the thread that holds `LOCK` reads or writes it, and
+    /// the lock orders one owner's writes before the next one's reads.
+    static DEPTH: AtomicUsize = AtomicUsize::new(0);
+
+    /// One level of this thread's critical sections, from [`Section::enter`] to drop. Entered and
+    /// left out of line, for the reason the module above gives.
+    struct Section;
+
+    impl Section {
+        #[inline(never)]
+        fn enter() -> Self {
+            let me = current_thread();
+            if OWNER.load(Ordering::Relaxed) != me {
+                LOCK.lock();
+                OWNER.store(me, Ordering::Relaxed);
+            }
+            DEPTH.store(DEPTH.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
+            Self
+        }
+    }
+
+    impl Drop for Section {
+        #[inline(never)]
+        fn drop(&mut self) {
+            let depth = DEPTH.load(Ordering::Relaxed) - 1;
+            DEPTH.store(depth, Ordering::Relaxed);
+            if depth == 0 {
+                // The outermost section ends: the lock goes, its owner cleared first.
+                OWNER.store(0, Ordering::Relaxed);
+                // SAFETY: this thread took `LOCK` at its outermost section, which ends here.
+                unsafe { LOCK.unlock() };
+            }
+        }
+    }
+
+    /// A lock of its own around one value, for what the runtime hands the session
+    /// ([`crate::sync::Mutex`]), for the reason the module above gives. Not reentrant.
+    pub struct HostMutex<T> {
+        lock: RawLock,
+        value: UnsafeCell<T>,
+    }
+
+    // SAFETY: the value is reached only inside `with` and `try_with`, with `lock` held, so one
+    // thread at a time has it, which is what `Sync` asks of a value that is `Send`.
+    unsafe impl<T: Send> Sync for HostMutex<T> {}
+
+    /// One value's lock held by this thread, from [`Held::enter`] to drop. Entered and left out of
+    /// line, for the reason [`Section`] is.
+    struct Held<'a>(&'a RawLock);
+
+    impl<'a> Held<'a> {
+        #[inline(never)]
+        fn enter(lock: &'a RawLock) -> Self {
+            lock.lock();
+            Self(lock)
+        }
+
+        /// [`Self::enter`] that does not wait: `None` when another thread holds `lock` now (or
+        /// this one does: the lock is not reentrant).
+        #[inline(never)]
+        fn try_enter(lock: &'a RawLock) -> Option<Self> {
+            if lock.try_lock() {
+                Some(Self(lock))
+            } else {
+                None
+            }
+        }
+    }
+
+    impl Drop for Held<'_> {
+        #[inline(never)]
+        fn drop(&mut self) {
+            // SAFETY: this `Held` took the lock it lets go.
+            unsafe { self.0.unlock() };
+        }
+    }
+
+    impl<T> HostMutex<T> {
+        pub const fn new(value: T) -> Self {
+            Self {
+                lock: RawLock::new(),
+                value: UnsafeCell::new(value),
+            }
+        }
+
+        /// Run `f` on the value with its lock held.
+        pub fn with<U>(&self, f: impl FnOnce(&mut T) -> U) -> U {
+            let _held = Held::enter(&self.lock);
+            // SAFETY: this thread holds `lock` until `_held` drops, after `f` returns.
             f(unsafe { &mut *self.value.get() })
         }
 

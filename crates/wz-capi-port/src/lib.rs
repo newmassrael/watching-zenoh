@@ -46,7 +46,7 @@
 //! runtime and the MCU slot host implement, and thin artefact crates binding the two). The `std`
 //! feature, on by default, gives the port's lock to the process ([`sync`]) and adds the
 //! cancellation token, whose cancel blocks; without it the lock is a critical section the image
-//! links.
+//! links, or in a host library built without `std` the host's own lock (`os-sys`).
 
 #![cfg_attr(not(feature = "std"), no_std)]
 

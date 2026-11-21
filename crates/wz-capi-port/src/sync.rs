@@ -9,7 +9,9 @@
 //! (`std::sync::Mutex`). An MCU image has no `std`; there the lock is a critical section, which the
 //! image provides by linking a `critical-section` implementation, as the cooperative runtime's
 //! cells do (`wz-runtime-coop`'s `cs`). Which one is chosen is the `std` feature: it adds the host
-//! lock, and without it the critical section is the lock.
+//! lock, and without it the critical section is the lock. A host library built without `std`
+//! (`os-sys`) links no `critical-section` implementation, which a C library would export: its
+//! lock is the host's own, the port's [`crate::os::Mutex`].
 //!
 //! The API is a closure ([`Lock::with`]) and not a guard, because a critical section cannot hand
 //! out a guard that outlives the call that entered it. The closure form also says at every call
@@ -24,7 +26,9 @@
 pub struct Lock<T> {
     #[cfg(feature = "std")]
     inner: std::sync::Mutex<T>,
-    #[cfg(not(feature = "std"))]
+    #[cfg(all(not(feature = "std"), feature = "os-sys"))]
+    inner: crate::os::Mutex<T>,
+    #[cfg(all(not(feature = "std"), not(feature = "os-sys")))]
     inner: critical_section::Mutex<core::cell::RefCell<T>>,
 }
 
@@ -34,7 +38,9 @@ impl<T> Lock<T> {
         Self {
             #[cfg(feature = "std")]
             inner: std::sync::Mutex::new(value),
-            #[cfg(not(feature = "std"))]
+            #[cfg(all(not(feature = "std"), feature = "os-sys"))]
+            inner: crate::os::Mutex::new(value),
+            #[cfg(all(not(feature = "std"), not(feature = "os-sys")))]
             inner: critical_section::Mutex::new(core::cell::RefCell::new(value)),
         }
     }
@@ -50,7 +56,11 @@ impl<T> Lock<T> {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             f(&mut guard)
         }
-        #[cfg(not(feature = "std"))]
+        #[cfg(all(not(feature = "std"), feature = "os-sys"))]
+        {
+            f(&mut self.inner.lock())
+        }
+        #[cfg(all(not(feature = "std"), not(feature = "os-sys")))]
         {
             critical_section::with(|cs| f(&mut self.inner.borrow_ref_mut(cs)))
         }

@@ -270,9 +270,16 @@ app-link = ["session-unicast", "alloc", "wz-session-core/app-link"]
 # The runtime's critical sections on a HOST: a lock of the process, reentrant on its thread,
 # which `cs::with` takes itself, in place of the `critical-section` implementation an image links
 # (src/cs.rs). A host program built with it links no such implementation, and a C library built
-# over the runtime exports no `_critical_section_1_0_*` symbol beside its C ABI. It needs `std`,
-# which a host has and an MCU image does not, so no MCU build selects it.
+# over the runtime exports no `_critical_section_1_0_*` symbol beside its C ABI. It is made of
+# `std`'s lock and thread-locals, which a host has and an MCU image does not, so no MCU build
+# selects it.
 host-lock = []
+# `host-lock` made of the host's own calls in place of `std`'s (`wz-host-sync`: pthreads, or
+# Win32's slim lock), for a host library built without `std`: the same lock of the process,
+# reentrant on its thread, and the same lock of each value the runtime lends the session. It
+# selects `host-lock`, whose doors it answers, and where both are named it is the one built, so
+# a build that names it links no `std` through this crate.
+host-lock-sys = ["host-lock", "dep:wz-host-sync"]
 
 # The runtime's critical sections take no lock: `cs::with` hands out the token without masking
 # interrupts. An image selects it when it states, and holds to, the contract the lock exists for
@@ -325,6 +332,8 @@ wz-runtime-core = { path = "../wz-runtime-core", default-features = false, optio
 # registries bound to CoopRuntime), more capabilities flow across this
 # same edge.
 wz-session-core = { path = "../wz-session-core", default-features = false, optional = true }
+# The host's lock of one word and its thread numbers (`host-lock-sys`), over its own calls.
+wz-host-sync = { path = "../wz-host-sync", optional = true }
 
 [dev-dependencies]
 # critical-section's `std` feature provides a software-emulated impl

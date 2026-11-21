@@ -9,7 +9,8 @@
 //! An engine that the program steps still has a lock and may have a thread: the session is shared
 //! between the C session handle and every entity on it and is called from any thread, and
 //! zenoh-pico's multi-threaded arm runs a read task beside the program (`docs/upstream-parity.md`
-//! section 5a, E1). On a host these are `std`'s. On an MCU they are the kernel's, reached through
+//! section 5a, E1). On a host these are `std`'s, or in a host library built without `std` the
+//! host's own calls' (`os-sys`, `wz-host-sync`). On an MCU they are the kernel's, reached through
 //! the functions below, which the image links (a Zephyr image's are in
 //! `deploy/zephyr-common/wz_os_zephyr.c`), as it links a `critical-section` implementation for
 //! [`crate::sync::Lock`].
@@ -45,7 +46,15 @@
 #[cfg(feature = "std")]
 pub use host::*;
 #[cfg(not(feature = "std"))]
-pub use kernel::*;
+pub use system::*;
+
+// Without `std` the same names are a kernel's, through the functions an image links, or a host's
+// own calls' in a host library built without `std` (`os-sys`): the feature chooses how the names
+// are answered, not which names there are.
+#[cfg(all(not(feature = "std"), not(feature = "os-sys")))]
+use kernel as system;
+#[cfg(all(not(feature = "std"), feature = "os-sys"))]
+use sys as system;
 
 /// The host's: `std`.
 #[cfg(feature = "std")]
@@ -157,7 +166,7 @@ mod host {
 }
 
 /// A kernel's, through the functions the image links (the module doc).
-#[cfg(not(feature = "std"))]
+#[cfg(all(not(feature = "std"), not(feature = "os-sys")))]
 mod kernel {
     use alloc::boxed::Box;
     use core::cell::UnsafeCell;
@@ -387,6 +396,285 @@ mod kernel {
         fn drop(&mut self) {
             // SAFETY: a thread waiting on it borrows it, so none waits once it drops; freed once.
             unsafe { wz_os_condvar_free(self.raw.as_ptr()) }
+        }
+    }
+}
+
+/// A host's, over its own calls (`os-sys`): for a host library built without `std`, which runs on
+/// a system with threads but has no `std::thread` or `std::sync` to reach them by. The lock and
+/// the condition variable are `wz-host-sync`'s one word each; a thread is the system's, and its end
+/// is a flag its body sets, since the system answers that only by joining it.
+#[cfg(any(
+    all(not(feature = "std"), feature = "os-sys"),
+    all(test, feature = "os-sys")
+))]
+// A test build with `std` compiles this module for its own tests, which do not reach every item.
+#[cfg_attr(all(test, feature = "std"), allow(dead_code))]
+mod sys {
+    use alloc::boxed::Box;
+    use alloc::sync::Arc;
+    use core::cell::UnsafeCell;
+    use core::ops::{Deref, DerefMut};
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    use wz_host_sync::{RawCondvar, RawLock, ThreadStart};
+
+    /// The identity of a thread, comparable with another's: the system's number of it.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct ThreadId(usize);
+
+    /// The calling thread's identity.
+    pub fn current() -> ThreadId {
+        ThreadId(wz_host_sync::current_thread())
+    }
+
+    /// A thread [`spawn`] started, until it is joined.
+    pub struct JoinHandle {
+        thread: wz_host_sync::Thread,
+        finished: Arc<AtomicBool>,
+    }
+
+    impl JoinHandle {
+        /// Wait until the thread has ended.
+        pub fn join(self) {
+            self.thread.join();
+        }
+
+        /// Whether the thread has ended, without waiting for it.
+        pub fn is_finished(&self) -> bool {
+            self.finished.load(Ordering::Acquire)
+        }
+    }
+
+    type Body = Box<dyn FnOnce() + Send + 'static>;
+
+    /// What a spawned thread is handed: the system's start record first, so the thread reaches the
+    /// rest from it.
+    #[repr(C)]
+    struct Start {
+        head: ThreadStart,
+        body: Body,
+        finished: Arc<AtomicBool>,
+    }
+
+    /// # Safety
+    /// `head` is the first field of the `Start` that [`spawn`] leaked for this thread.
+    unsafe fn run(head: *mut ThreadStart) {
+        let start = Box::from_raw(head.cast::<Start>());
+        let Start { body, finished, .. } = *start;
+        body();
+        finished.store(true, Ordering::Release);
+    }
+
+    /// Run `body` on a thread of its own: its handle and its identity, or `None` when the system
+    /// gave no thread.
+    pub fn spawn(body: impl FnOnce() + Send + 'static) -> Option<(JoinHandle, ThreadId)> {
+        let finished = Arc::new(AtomicBool::new(false));
+        let start = Box::into_raw(Box::new(Start {
+            head: ThreadStart { run },
+            body: Box::new(body),
+            finished: Arc::clone(&finished),
+        }));
+        // SAFETY: `run` takes the record back exactly once, on the new thread; on a refusal no
+        // thread runs and it is taken back here instead.
+        match unsafe { wz_host_sync::spawn(start.cast::<ThreadStart>()) } {
+            Some(thread) => {
+                let id = ThreadId(thread.id());
+                Some((JoinHandle { thread, finished }, id))
+            }
+            None => {
+                // SAFETY: as above: no thread took it.
+                drop(unsafe { Box::from_raw(start) });
+                None
+            }
+        }
+    }
+
+    /// Sleep the calling thread for `ms` milliseconds.
+    pub fn sleep_ms(ms: u64) {
+        wz_host_sync::sleep_ms(ms);
+    }
+
+    /// The host's lock around a value.
+    pub struct Mutex<T> {
+        raw: RawLock,
+        value: UnsafeCell<T>,
+    }
+
+    // SAFETY: the value is reached only through a guard, and the lock lets one thread hold a guard
+    // at a time.
+    unsafe impl<T: Send> Sync for Mutex<T> {}
+
+    impl<T> Mutex<T> {
+        /// `value`, behind a new mutex.
+        pub const fn new(value: T) -> Self {
+            Self {
+                raw: RawLock::new(),
+                value: UnsafeCell::new(value),
+            }
+        }
+
+        /// Wait until the mutex is this thread's.
+        pub fn lock(&self) -> MutexGuard<'_, T> {
+            self.raw.lock();
+            MutexGuard { mutex: self }
+        }
+
+        /// The mutex, when no thread holds it: `None` without waiting when one does (this one
+        /// included: the lock is not reentrant).
+        pub fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
+            if self.raw.try_lock() {
+                Some(MutexGuard { mutex: self })
+            } else {
+                None
+            }
+        }
+
+        /// The value, through the only reference there is.
+        pub fn get_mut(&mut self) -> &mut T {
+            self.value.get_mut()
+        }
+    }
+
+    impl<T: Default> Default for Mutex<T> {
+        fn default() -> Self {
+            Self::new(T::default())
+        }
+    }
+
+    /// What [`Mutex::lock`] hands back; the mutex is released when it is dropped.
+    pub struct MutexGuard<'a, T> {
+        mutex: &'a Mutex<T>,
+    }
+
+    impl<T> Deref for MutexGuard<'_, T> {
+        type Target = T;
+        fn deref(&self) -> &T {
+            // SAFETY: the guard holds the mutex, so no other reference to the value is live.
+            unsafe { &*self.mutex.value.get() }
+        }
+    }
+
+    impl<T> DerefMut for MutexGuard<'_, T> {
+        fn deref_mut(&mut self) -> &mut T {
+            // SAFETY: as for `deref`, and `&mut self` makes this the only one.
+            unsafe { &mut *self.mutex.value.get() }
+        }
+    }
+
+    impl<T> Drop for MutexGuard<'_, T> {
+        fn drop(&mut self) {
+            // SAFETY: this guard holds the mutex it unlocks.
+            unsafe { self.mutex.raw.unlock() }
+        }
+    }
+
+    /// The host's condition variable, waited on with a [`Mutex`]'s guard.
+    #[derive(Default)]
+    pub struct Condvar {
+        raw: RawCondvar,
+    }
+
+    impl Condvar {
+        /// A condition variable no thread waits on.
+        pub fn new() -> Self {
+            Self {
+                raw: RawCondvar::new(),
+            }
+        }
+
+        /// Release the guard's mutex, sleep until notified, and take the mutex again. A wake may
+        /// come without a notification, so the caller waits in a loop on its own condition.
+        pub fn wait<'a, T>(&self, guard: MutexGuard<'a, T>) -> MutexGuard<'a, T> {
+            // SAFETY: the guard holds its mutex, which the wait releases and takes again before it
+            // returns, so the guard still holds it after.
+            unsafe { self.raw.wait(&guard.mutex.raw) };
+            guard
+        }
+
+        /// Wake one waiting thread, if one waits.
+        pub fn notify_one(&self) {
+            self.raw.notify_one();
+        }
+
+        /// Wake every waiting thread.
+        pub fn notify_all(&self) {
+            self.raw.notify_all();
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        extern crate std;
+
+        use super::*;
+
+        /// A spawned thread runs under an identity of its own, which is the one its spawn gave; it
+        /// reads as running until its body has returned, and as finished after.
+        #[test]
+        fn a_spawned_thread_has_its_own_identity_and_reports_its_end() {
+            let here = current();
+            let go = Arc::new(AtomicBool::new(false));
+            let seen = Arc::new(Mutex::new(None));
+            let (handle, there) = {
+                let go = Arc::clone(&go);
+                let seen = Arc::clone(&seen);
+                spawn(move || {
+                    while !go.load(Ordering::Acquire) {
+                        sleep_ms(1);
+                    }
+                    *seen.lock() = Some(current());
+                })
+                .expect("a host gives a thread")
+            };
+            assert_ne!(here, there, "the spawned thread has an identity of its own");
+            assert!(!handle.is_finished(), "the body has not returned");
+            go.store(true, Ordering::Release);
+            let started = std::time::Instant::now();
+            while !handle.is_finished() {
+                assert!(
+                    started.elapsed() < std::time::Duration::from_secs(5),
+                    "the thread never ended"
+                );
+                sleep_ms(1);
+            }
+            handle.join();
+            assert_eq!(
+                *seen.lock(),
+                Some(there),
+                "the thread is the one its spawn named"
+            );
+            assert_eq!(current(), here);
+        }
+
+        #[test]
+        fn a_waiter_on_the_condvar_sees_what_the_notifier_wrote_under_the_mutex() {
+            let shared = Arc::new((Mutex::new(false), Condvar::new()));
+            let notifier = Arc::clone(&shared);
+            let (handle, _) = spawn(move || {
+                sleep_ms(20);
+                *notifier.0.lock() = true;
+                notifier.1.notify_one();
+            })
+            .expect("a host gives a thread");
+            let mut ready = shared.0.lock();
+            while !*ready {
+                ready = shared.1.wait(ready);
+            }
+            drop(ready);
+            handle.join();
+        }
+
+        /// A held mutex is not given to a try, by this thread or another, and is once let go;
+        /// `get_mut` reaches the value with no lock.
+        #[test]
+        fn a_held_mutex_is_tried_without_waiting() {
+            let mut mutex = Mutex::new(5);
+            *mutex.get_mut() = 6;
+            let guard = mutex.lock();
+            assert!(mutex.try_lock().is_none(), "a held mutex is not given");
+            drop(guard);
+            assert_eq!(mutex.try_lock().map(|value| *value), Some(6));
         }
     }
 }
