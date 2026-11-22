@@ -528,14 +528,6 @@ struct Published {
 }
 
 impl Published {
-    const fn new() -> Self {
-        Self {
-            entries: [(0, 0); caps::DELIVERY_LANE_EVENTS],
-            head: 0,
-            len: 0,
-        }
-    }
-
     /// The sample at event slot `index`, its bytes at `offset`, was published.
     fn push(&mut self, index: usize, offset: usize) {
         debug_assert!(
@@ -615,7 +607,7 @@ impl SampleLane {
     ///
     /// # Safety
     /// As [`Self::over_in`]'s.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "std"))]
     pub(crate) unsafe fn over(
         area: NonNull<u8>,
         area_bytes: usize,
