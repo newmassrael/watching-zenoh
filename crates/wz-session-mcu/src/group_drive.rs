@@ -176,11 +176,13 @@ use wz_session_core::policy::SessionPolicy;
 // drops Fragment tails (pico's "fragmentation deactivated") and calls the bare
 // classify + sweep. transport-fragmentation implies reassembly, so a
 // fragmenting-TX node auto-reassembles inbound.
+#[cfg(feature = "reassembly")]
+use wz_session_core::driver_loop::EventSink;
 #[cfg(not(feature = "reassembly"))]
 use wz_session_core::multicast_rx::{dispatch_multicast_inbound, MulticastRxNext};
 #[cfg(feature = "reassembly")]
 use wz_session_core::multicast_rx::{
-    dispatch_multicast_inbound_reassembling, sweep_multicast_reassembling,
+    dispatch_multicast_inbound_kept, sweep_multicast_reassembling, GroupResume,
 };
 // R311ly/R311lz — the shared TX emit SSOT (the AP loop calls the same).
 // `MulticastTxOffer` is the unconditional pull-seam item type of the build's
@@ -1127,6 +1129,14 @@ pub struct MulticastPump<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS:
     // built when `reassembly` is on; otherwise the Fragment arm is a drop.
     #[cfg(feature = "reassembly")]
     reasm: CoopReassembly,
+    // Where the walk of the datagram the transport keeps stopped, read on from at the next step;
+    // `None` while no datagram is kept.
+    #[cfg(feature = "reassembly")]
+    resume: Option<GroupResume>,
+    // Whether the holder has room for what the group delivers; `None` for one that is always
+    // handed what arrives.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    input_gate: Option<GroupInputGate>,
 }
 
 impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
@@ -1176,6 +1186,15 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
     ))]
     pub fn attach_tx_stage(&mut self, stage: GroupTxStage) {
         self.staged = Some(stage::StageWriter::new(stage));
+    }
+
+    /// Hand the session what the group delivers only while `gate` has room for it: before each
+    /// datagram, and, for a transport that keeps its datagram ([`GroupTransport::keeps_input`]),
+    /// before each further message and record of one, the walk stopping where it has none and
+    /// going on from there at a later step.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    pub fn attach_input_gate(&mut self, gate: GroupInputGate) {
+        self.input_gate = Some(gate);
     }
 
     #[cfg_attr(not(feature = "reassembly"), allow(unused_variables))]
@@ -1242,6 +1261,10 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
                 reasm.set_max_message_bytes(params.link_rx.max_message_size);
                 reasm
             },
+            #[cfg(feature = "reassembly")]
+            resume: None,
+            #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+            input_gate: None,
         }
     }
 
@@ -1256,6 +1279,12 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
     /// the socket what it refused; a group with neither has nothing to do on the tick. A host that
     /// waits for the group's input waits no longer than this.
     pub fn next_due_us(&self) -> u64 {
+        // The datagram the transport keeps is read on at the next step, and no wait on the
+        // group's socket would see it.
+        #[cfg(feature = "reassembly")]
+        if self.resume.is_some() {
+            return self.runtime.clock().now_us();
+        }
         let ticks = self.dispatcher.active_peers() > 0 || self.tx_held();
         let due_ms = if ticks {
             self.next_join_ms.min(self.next_sweep_ms)
@@ -1336,6 +1365,10 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
         let iter = &mut self.iter;
         #[cfg(feature = "reassembly")]
         let reasm = &mut self.reasm;
+        #[cfg(feature = "reassembly")]
+        let resume = &mut self.resume;
+        #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+        let gate = self.input_gate.as_ref();
 
         if !dispatcher.is_running() {
             return Some(MulticastOutcome::Stopped);
@@ -1540,43 +1573,69 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
         }
 
         // Inbound datagram? Classify + dispatch, then loop promptly for the
-        // next (the busy-poll equivalent of the AP loop's RX select arm).
-        let received = transport.recv_with(&mut |bytes, src| {
-            // R311lv/R311mf/R311mh — the shared RX dispatch SSOTs: JOIN admit /
-            // Frame admit-and-fan / KeepAlive refresh PLUS the reassembly-
-            // divergent tail (out-of-order-chain abort + Fragment reassembly +
-            // per-peer chain death at Close) all live in `wz_session_core`, so
-            // the AP + MCU loops share one home and own only the IO + clock
-            // structure. A reassembly build drives the reassembly-aware dispatch
-            // (the Router is the loop's); without it the loop calls the bare
-            // classify and acts only on Close (FrameOutOfOrder / Fragment are
-            // no-ops without a Router — pico's fragmentation-off behaviour).
-            #[cfg(feature = "reassembly")]
-            dispatch_multicast_inbound_reassembling(
-                dispatcher,
-                reasm,
-                params,
-                bytes,
-                src,
-                now,
-                on_event,
-                // R2848 — `transport-stats` is never on an MCU lane, so this
-                // loop keeps no counts to record into.
-                &(),
-            );
-            #[cfg(not(feature = "reassembly"))]
-            if let MulticastRxNext::Close =
-                dispatch_multicast_inbound(dispatcher, params, bytes, src, now, on_event, &())
-            {
-                // R311y784 — the MCU twin of the AP loop's announced departure.
-                // Both loops fire the identical event so an application's
-                // membership view does not depend on which profile it runs on;
-                // that is the same argument the shared RX/TX SSOTs already make.
-                dispatcher.close_by_src_with(src, |lost| {
-                    on_event(IterationEvent::MulticastPeerLost(lost));
-                });
-            }
-        });
+        // next (the busy-poll equivalent of the AP loop's RX select arm). A holder with no room
+        // for what the group delivers is handed nothing: the datagram waits in the transport.
+        #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+        let held_back = gate.is_some_and(|gate| !gate.takes());
+        #[cfg(not(all(feature = "alloc", not(feature = "session-slot"))))]
+        let held_back = false;
+        // A transport that keeps its datagram lets the walk stop where the holder has no room,
+        // and lends the same datagram again at the next step.
+        #[cfg(feature = "reassembly")]
+        let may_stop = transport.keeps_input();
+        #[cfg(feature = "reassembly")]
+        let mut stopped = None;
+        let received = !held_back
+            && transport.recv_with(&mut |bytes, src| {
+                // R311lv/R311mf/R311mh — the shared RX dispatch SSOTs: JOIN admit /
+                // Frame admit-and-fan / KeepAlive refresh PLUS the reassembly-
+                // divergent tail (out-of-order-chain abort + Fragment reassembly +
+                // per-peer chain death at Close) all live in `wz_session_core`, so
+                // the AP + MCU loops share one home and own only the IO + clock
+                // structure. A reassembly build drives the reassembly-aware dispatch
+                // (the Router is the loop's); without it the loop calls the bare
+                // classify and acts only on Close (FrameOutOfOrder / Fragment are
+                // no-ops without a Router — pico's fragmentation-off behaviour).
+                #[cfg(feature = "reassembly")]
+                {
+                    let mut sink = GatedEvents {
+                        on_event: &mut *on_event,
+                        #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+                        gate,
+                    };
+                    stopped = dispatch_multicast_inbound_kept(
+                        dispatcher,
+                        reasm,
+                        params,
+                        bytes,
+                        src,
+                        now,
+                        resume.take(),
+                        may_stop,
+                        &mut sink,
+                        // R2848 — `transport-stats` is never on an MCU lane, so this
+                        // loop keeps no counts to record into.
+                        &(),
+                    );
+                }
+                #[cfg(not(feature = "reassembly"))]
+                if let MulticastRxNext::Close =
+                    dispatch_multicast_inbound(dispatcher, params, bytes, src, now, on_event, &())
+                {
+                    // R311y784 — the MCU twin of the AP loop's announced departure.
+                    // Both loops fire the identical event so an application's
+                    // membership view does not depend on which profile it runs on;
+                    // that is the same argument the shared RX/TX SSOTs already make.
+                    dispatcher.close_by_src_with(src, |lost| {
+                        on_event(IterationEvent::MulticastPeerLost(lost));
+                    });
+                }
+            });
+        #[cfg(feature = "reassembly")]
+        if let Some(stopped) = stopped {
+            transport.keep();
+            *resume = Some(stopped);
+        }
         if received {
             return None;
         }
@@ -1695,6 +1754,8 @@ struct GroupHolding {
     tx_stage: Option<GroupTxStage>,
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     due: Option<GroupDue>,
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    input_gate: Option<GroupInputGate>,
 }
 
 /// The loop of a multicast session task over a dispatcher it is lent: the part of
@@ -1732,6 +1793,8 @@ where
         tx_stage,
         #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
         due,
+        #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+        input_gate,
     } = holding;
     let mut pump = MulticastPump::new(
         dispatcher,
@@ -1751,6 +1814,10 @@ where
     ))]
     if let Some(stage) = tx_stage {
         pump.attach_tx_stage(stage);
+    }
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    if let Some(gate) = input_gate {
+        pump.attach_input_gate(gate);
     }
     loop {
         // A JOIN the session's holder asked for is sent at this step.
@@ -1835,6 +1902,14 @@ impl<T: GroupTransport, const MAX_PEERS: usize> MulticastSessionSeed<T, MAX_PEER
         self
     }
 
+    /// The session is handed what the group delivers only while `gate` has room for it
+    /// ([`MulticastPump::attach_input_gate`]).
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    pub fn with_input_gate(mut self, gate: GroupInputGate) -> Self {
+        self.holding.input_gate = Some(gate);
+        self
+    }
+
     /// The session writes from `stage`, which the holder's producers push onto framed and
     /// numbered, and advertises what it wrote ([`MulticastPump::attach_tx_stage`]): the holder
     /// keeps a clone of `stage` and pushes through it.
@@ -1846,6 +1921,52 @@ impl<T: GroupTransport, const MAX_PEERS: usize> MulticastSessionSeed<T, MAX_PEER
     pub fn with_tx_stage(mut self, stage: GroupTxStage) -> Self {
         self.holding.tx_stage = Some(stage);
         self
+    }
+}
+
+/// Whether the holder of a group session has room for what the group delivers now: the group
+/// twin of a unicast link's input gate. While it answers `false` the session takes no datagram,
+/// what the members send waits in the group's socket, and the walk of a datagram the transport
+/// keeps stops before its next message or record ([`MulticastPump::attach_input_gate`]). One
+/// clone is the holder's and one the session's.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+#[derive(Clone)]
+pub struct GroupInputGate(alloc::rc::Rc<dyn Fn() -> bool>);
+
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+impl GroupInputGate {
+    /// The gate `takes` answers.
+    pub fn new(takes: impl Fn() -> bool + 'static) -> Self {
+        Self(alloc::rc::Rc::new(takes))
+    }
+
+    /// Whether the holder has room for what the group delivers now.
+    pub fn takes(&self) -> bool {
+        (self.0)()
+    }
+}
+
+/// The session's `on_event` as the walk of a datagram sees it: every event goes to it, and
+/// whether the session takes another message or record is the holder's gate's to say.
+#[cfg(feature = "reassembly")]
+struct GatedEvents<'a, F: ?Sized> {
+    on_event: &'a mut F,
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    gate: Option<&'a GroupInputGate>,
+}
+
+#[cfg(feature = "reassembly")]
+impl<F: FnMut(IterationEvent<'_, '_>) + ?Sized> EventSink for GatedEvents<'_, F> {
+    fn event(&mut self, event: IterationEvent<'_, '_>) {
+        (self.on_event)(event);
+    }
+
+    fn takes_another(&mut self) -> bool {
+        #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+        if let Some(gate) = self.gate {
+            return gate.takes();
+        }
+        true
     }
 }
 

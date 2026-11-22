@@ -709,6 +709,11 @@ pub struct HostGroupTransport<S: MulticastSocket> {
     /// The group and its port, where every datagram is sent.
     group: SocketAddr,
     rx: Vec<u8>,
+    /// The length and source of the datagram the last receive lent, which lies in `rx` until the
+    /// next receive reads into it.
+    lent: Option<(usize, SocketAddr)>,
+    /// The datagram asked to be kept ([`GroupTransport::keep`]), lent again by the next receive.
+    kept: Option<(usize, SocketAddr)>,
     /// Whether the joined socket failed a receive: what the host reports of an interface that went
     /// away, and the end of the group's link.
     failed: bool,
@@ -724,6 +729,8 @@ impl<S: MulticastSocket> HostGroupTransport<S> {
             write: Some(write),
             group,
             rx: alloc::vec![0; UDP_RX_CAPACITY],
+            lent: None,
+            kept: None,
             failed: false,
         }
     }
@@ -735,6 +742,16 @@ impl<S: MulticastSocket> HostGroupTransport<S> {
 }
 
 impl<S: MulticastSocket> GroupTransport for HostGroupTransport<S> {
+    // The datagram lies in the transport's own receive buffer, which nothing writes until the next
+    // receive: a datagram kept is lent again from where it lies, and costs no copy.
+    fn keeps_input(&self) -> bool {
+        true
+    }
+
+    fn keep(&mut self) {
+        self.kept = self.lent.take();
+    }
+
     fn open(&mut self) -> bool {
         self.read.is_some() && self.write.is_some()
     }
@@ -743,6 +760,8 @@ impl<S: MulticastSocket> GroupTransport for HostGroupTransport<S> {
         // Closing the joined socket is leaving the group: the host drops its memberships with it.
         self.read = None;
         self.write = None;
+        self.lent = None;
+        self.kept = None;
     }
 
     // The engine waits, on its links and its groups at once, and steps a group at its tick: there
@@ -800,12 +819,19 @@ impl<S: MulticastSocket> GroupTransport for HostGroupTransport<S> {
     }
 
     fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
+        // A datagram kept lies in the receive buffer still: it is lent again from there.
+        if let Some((len, from)) = self.kept.take() {
+            f(&self.rx[..len], from);
+            self.lent = Some((len, from));
+            return true;
+        }
         let Some(socket) = &self.read else {
             return false;
         };
         match socket.try_recv(&mut self.rx) {
             Ok(Some((len, from))) => {
                 f(&self.rx[..len], from);
+                self.lent = Some((len, from));
                 true
             }
             // Nothing queued, or a signal cut the read short: the next step reads again.
@@ -1180,6 +1206,8 @@ mod tests {
                 write: Some(write),
                 group: peer.local(),
                 rx: Vec::new(),
+                lent: None,
+                kept: None,
                 failed: false,
             };
             let outside = transport.writability().expect("a wait from outside");
@@ -1225,6 +1253,8 @@ mod tests {
                 write: None,
                 group: to,
                 rx: alloc::vec![0; 64],
+                lent: None,
+                kept: None,
                 failed: false,
             };
             let ready = transport.readiness().expect("a wait from outside");
@@ -1252,6 +1282,12 @@ mod tests {
             let mut seen = None;
             assert!(transport.recv_with(&mut |bytes, from| seen = Some((bytes.to_vec(), from))));
             assert_eq!(seen, Some((b"member".to_vec(), peer.local())));
+            // A datagram kept lies in the receive buffer still, and is lent again from there.
+            assert!(transport.keeps_input());
+            transport.keep();
+            let mut again = None;
+            assert!(transport.recv_with(&mut |bytes, from| again = Some((bytes.to_vec(), from))));
+            assert_eq!(again, seen, "the kept datagram, whole and from its member");
             assert!(!transport.recv_with(&mut |_, _| panic!("one datagram was sent")));
 
             transport.close();

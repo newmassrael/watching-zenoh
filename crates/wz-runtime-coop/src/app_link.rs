@@ -805,6 +805,11 @@ impl DatagramSocket for AppDatagramSocket {
 /// group is closing the link.
 pub struct AppGroupTransport {
     held: Option<Held>,
+    /// The datagram the last receive lent and the source it came from, which the transport
+    /// keeps until its next receive so that a datagram asked to be kept is lent again whole.
+    lent: Option<(alloc::vec::Vec<u8>, SocketAddr)>,
+    /// Whether the next receive lends `lent` again ([`GroupTransport::keep`]).
+    kept: bool,
 }
 
 impl AppGroupTransport {
@@ -823,6 +828,8 @@ impl AppGroupTransport {
     ) -> Result<Self, LinkOpenError> {
         Ok(Self {
             held: Some(open_link(transport, AppLinkKind::Group, locator, bound)?),
+            lent: None,
+            kept: false,
         })
     }
 }
@@ -845,6 +852,8 @@ impl GroupTransport for AppGroupTransport {
     fn close(&mut self) {
         // Dropping the link closes it on the program, which is the leave.
         self.held = None;
+        self.lent = None;
+        self.kept = false;
     }
 
     fn service(&self) {}
@@ -914,6 +923,13 @@ impl GroupTransport for AppGroupTransport {
     }
 
     fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
+        // A datagram kept is lent again before the program's next one is read.
+        if core::mem::take(&mut self.kept) {
+            if let Some((bytes, source)) = &self.lent {
+                f(bytes, *source);
+                return true;
+            }
+        }
         let Some(held) = &self.held else {
             return false;
         };
@@ -929,10 +945,21 @@ impl GroupTransport for AppGroupTransport {
                     socket_of,
                 );
                 f(&datagram.bytes, source);
+                // Moved, not copied: the table handed the datagram over whole.
+                self.lent = Some((datagram.bytes, source));
                 true
             }
             DatagramRead::Empty | DatagramRead::End => false,
         }
+    }
+
+    // The datagram the table handed over is the transport's until the next receive.
+    fn keeps_input(&self) -> bool {
+        true
+    }
+
+    fn keep(&mut self) {
+        self.kept = self.lent.is_some();
     }
 }
 
@@ -1377,6 +1404,45 @@ mod tests {
             "the leave"
         );
         assert!(!group.open(), "a group left is not opened again");
+    }
+
+    /// A datagram the group asks to keep is lent again, whole and from its member, before the
+    /// program's next one; one not kept is not, and a group that was left keeps nothing.
+    #[test]
+    fn a_kept_group_datagram_is_lent_again_before_the_next() {
+        let (_script, transport) = transport();
+        let mut group =
+            AppGroupTransport::join(&session(&transport, 64), "udp/239.7.7.7:7447#iface=lan7")
+                .expect("joined");
+        assert!(group.keeps_input());
+        let handle = group.held.as_ref().unwrap().handle;
+        for bytes in [b"one".as_slice(), b"two".as_slice()] {
+            transport
+                .received(handle, bytes, Some("udp/198.51.100.20:7447"))
+                .unwrap();
+        }
+        let member = SocketAddr::from(([198, 51, 100, 20], 7447));
+        let mut seen = Vec::new();
+        assert!(group.recv_with(&mut |bytes, src| seen.push((bytes.to_vec(), src))));
+        group.keep();
+        assert!(group.recv_with(&mut |bytes, src| seen.push((bytes.to_vec(), src))));
+        assert!(group.recv_with(&mut |bytes, src| seen.push((bytes.to_vec(), src))));
+        assert_eq!(
+            seen,
+            [
+                (b"one".to_vec(), member),
+                (b"one".to_vec(), member),
+                (b"two".to_vec(), member)
+            ],
+            "the kept datagram once more, then the next, and the next is not lent twice"
+        );
+        assert!(!group.recv_with(&mut |_, _| {}));
+        group.keep();
+        group.close();
+        assert!(
+            !group.recv_with(&mut |_, _| {}),
+            "a group that was left lends nothing it kept"
+        );
     }
 
     /// A group's datagram the program cannot take now is full and not sent, and the link has no

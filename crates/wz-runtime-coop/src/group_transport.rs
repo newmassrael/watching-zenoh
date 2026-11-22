@@ -151,6 +151,20 @@ pub trait GroupTransport {
     /// only requirement is that one peer's datagrams always carry the same one.
     /// `f` must not call back into the transport.
     fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool;
+
+    /// Whether the transport can keep the datagram it last lent ([`Self::keep`]) and lend the same
+    /// bytes again: one that holds what it read until it reads the next datagram. A session whose
+    /// host has no room for all of a datagram then stops part-way and goes on from there on a later
+    /// step, as a unicast link that keeps its datagram lets it, and nothing is copied to wait. The
+    /// provided form answers `false`, and the session reads every datagram whole.
+    fn keeps_input(&self) -> bool {
+        false
+    }
+
+    /// Keep the datagram the last [`Self::recv_with`] lent: the next `recv_with` lends the same
+    /// bytes, from the same source, before any other datagram. Called after the lend returned.
+    /// Does nothing on a transport that does not keep ([`Self::keeps_input`]).
+    fn keep(&mut self) {}
 }
 
 /// What a group's socket did with a datagram it was offered ([`GroupTransport::try_send_to_group`]).
@@ -208,6 +222,14 @@ impl<T: GroupTransport + ?Sized> GroupTransport for alloc::boxed::Box<T> {
 
     fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
         (**self).recv_with(f)
+    }
+
+    fn keeps_input(&self) -> bool {
+        (**self).keeps_input()
+    }
+
+    fn keep(&mut self) {
+        (**self).keep()
     }
 }
 
