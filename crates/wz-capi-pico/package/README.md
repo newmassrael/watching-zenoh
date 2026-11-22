@@ -146,8 +146,8 @@ this build are listed in `RELEASE-NOTES.md` and `build-statement.json`. Its exte
 | replay-cache | `wz_ext_replay_publisher_*`, `wz_ext_replay_subscriber_*` | what each publisher last sent, replayed to a subscriber that arrives later |
 | replay-cache | `wz_ext_decl_watch_*` | the declarations a session's peers make and retract, told to the program |
 | shared-key-ids | `wz_ext_config_key_ids`, `wz_ext_config_key_wire_form_for` | key ids every node of a deployment shares, used with no declaration first |
-| (every build) | `wz_ext_conformance_digest` | the digest of this build's configuration, equal to `build-statement.json`'s `digest` |
-| (every build) | `wz_ext_config_policy`, `wz_ext_config_profile` | one policy, or the profile, of the sessions a config opens, stated from code |
+| conformance-digest | `wz_ext_conformance_digest` | the digest of this build's configuration, equal to `build-statement.json`'s `digest` |
+| config-policy | `wz_ext_config_policy`, `wz_ext_config_profile` | one policy, or the profile, of the sessions a config opens, stated from code |
 | (every build) | `wz_ext_config_device_requires`, `wz_ext_redeclare`, `wz_ext_get_to_peer` | what an open asks of the system; declarations re-sent; a get addressed to one node |
 
 Each door returns zenoh-pico's result codes, and wz's own two outside their range:

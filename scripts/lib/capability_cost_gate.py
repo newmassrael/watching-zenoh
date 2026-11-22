@@ -681,11 +681,13 @@ CASES: tuple[Case, ...] = (
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN, KECCAK),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE, STD_RUNTIME),
-         exports=444,
-         note="444 exports with the config doors of the open's policies "
-              "(`wz_ext_config_policy`, `wz_ext_config_profile`, in every build); "
-              "442 with the conformance digest's door (`wz_ext_conformance_digest`, "
-              "decision C15, in every build), 441 before. "
+         exports=441,
+         note="441 exports: the config doors of the open's policies "
+              "(`wz_ext_config_policy`, `wz_ext_config_profile`) and the conformance digest's "
+              "door (`wz_ext_conformance_digest`, decision C15) are the `config-policy` and "
+              "`conformance-digest` capabilities, which this case's features leave out as the "
+              "zenoh-pico preset does (444 with all three, which a build that names nothing and "
+              "the host-peer-ext preset have). "
               "The single-threaded client of pico-client-udp on the cooperative engine: "
               "888,223 measured, 2.20 times the same pico, against pico-client-udp's 4.63. It "
               "grew from 867,811 by what pico's client has by default and it lacked: the "
@@ -748,8 +750,8 @@ CASES: tuple[Case, ...] = (
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
          forbid_undefined=(r"^rust_eh_personality$",),
          require_needed=(r"^libc\.so",),
-         exports=445, profile="capi-nostd", cargo_config=".cargo/capi-nostd.toml",
-         note="pico-client-coop's capabilities and its 444 C exports, and `rust_eh_personality`: "
+         exports=442, profile="capi-nostd", cargo_config=".cargo/capi-nostd.toml",
+         note="pico-client-coop's capabilities and its 441 C exports, and `rust_eh_personality`: "
               "the prebuilt `core`'s unwind tables name it and LTO keeps the reference "
               "(measured: undefined in the first build, so no C program linked), so the library "
               "defines it, as an abort that nothing reaches (`src/os/no_std_host.rs`), and a "

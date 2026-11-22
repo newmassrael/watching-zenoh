@@ -13877,6 +13877,86 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         Some(Ok(()))
     }
 
+    /// A Put or a Del with the metadata its publisher gave it, written from the caller's own key,
+    /// bytes and metadata into the slot its link lends ([`crate::lent_push::write_publication`]):
+    /// the wire of [`crate::push_build::build_push_literal_with_meta`] and its aliased and Del
+    /// twins, with none of the owned message, its copies and the `Box` it travels in. The send is
+    /// [`Self::send_plain_put_qos`]'s, and the slot's length is the writer's own count
+    /// ([`crate::tx_buf::encoded_len`]), so the writer is compiled once.
+    ///
+    /// `None`, with nothing sent, where the owned message is what goes out
+    /// ([`crate::lent_push::LENT_PUBLICATION_MAY_DECLINE`]): a session that rewrites the keys it
+    /// originates, a build whose network counters classify a message by its owned form, and
+    /// metadata that starts a timestamp stack.
+    #[cfg(all(
+        feature = "codec-push",
+        feature = "alloc",
+        feature = "transport-tx-lend"
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_publication_qos(
+        &self,
+        mapping_id: crate::wire_id::ExprId,
+        suffix: Option<&str>,
+        kind: crate::sample::SampleKind,
+        value: &[u8],
+        meta: &crate::metadata::PushMetadata,
+        reliable: bool,
+        express: bool,
+        priority: Priority,
+    ) -> Option<Result<(), SendWireError>> {
+        #[cfg(feature = "transport-stats")]
+        {
+            let _ = (
+                mapping_id, suffix, kind, value, meta, reliable, express, priority,
+            );
+            None
+        }
+        #[cfg(not(feature = "transport-stats"))]
+        {
+            if self.rewrites_originated_keys() {
+                return None;
+            }
+            #[cfg(feature = "pubsub-ts-stack")]
+            if meta.ts_stack.is_some() {
+                return None;
+            }
+            #[cfg(feature = "pubsub-qos")]
+            let qos = meta.qos.unwrap_or(crate::sample::QosLevel::DEFAULT);
+            #[cfg(not(feature = "pubsub-qos"))]
+            let qos = crate::sample::QosLevel::DEFAULT;
+            let encode: &dyn Fn(
+                &mut crate::tx_buf::TxSink<'_>,
+            ) -> Result<(), sce_forge_runtime::codec::CodecError> = &|sink| {
+                crate::lent_push::write_publication(sink, mapping_id, suffix, kind, value, meta)
+            };
+            // A publication the writer refuses counts as zero, and the dispatch's own run of the
+            // writer refuses it with the same error, which it reports.
+            let size = crate::tx_buf::encoded_len(encode);
+            let sent = self
+                .dispatch_network_message_at(
+                    DispatchStage::Fresh,
+                    priority,
+                    reliable,
+                    qos,
+                    size,
+                    crate::stats::NetworkStatsClass::unread(),
+                    encode,
+                )
+                .map(|_| ());
+            if let Err(error) = sent {
+                return Some(Err(error));
+            }
+            #[cfg(feature = "transport-batching")]
+            if express {
+                self.flush_express(priority);
+            }
+            #[cfg(not(feature = "transport-batching"))]
+            let _ = express;
+            Some(Ok(()))
+        }
+    }
+
     /// R311y215 — the express (priority-carrying) twin of
     /// [`Self::send_push_literal`]: dispatch a `Put` Push on the given QoS
     /// `priority` conduit. On a session that negotiated QoS ([`Self::is_qos`]) a

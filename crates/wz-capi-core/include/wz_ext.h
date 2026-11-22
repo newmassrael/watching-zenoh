@@ -38,7 +38,9 @@ z_result_t wz_ext_config_device_requires(const z_loaned_config_t *config,
  * code. The open composes them, lowest first: the build defaults, the
  * profile (wz_ext_config_profile's, else the document's), the document's
  * wz/policies, then wz_ext_config_policy's statements. The first two doors
- * are in every build, wz_ext_config_document in a build with the
+ * are in a build with the config-policy capability (on in a build that
+ * names nothing, off in the zenoh-pico preset, whose sessions run under the
+ * build's policies and limits), wz_ext_config_document in a build with the
  * config-document capability (it links a JSON5 reader); a build whose
  * domain of a policy holds one value refuses every other value of it.
  *
@@ -1509,7 +1511,8 @@ z_result_t wz_ext_redeclare(const z_loaned_session_t *session);
  * of the configuration the library was built with (every capability of the
  * ABI and whether the build has it, every limit and policy value), so a
  * tester holding a statement can tell whether this library is that build.
- * Present in every build. */
+ * In a build with the conformance-digest capability (on in a build that
+ * names nothing, off in the zenoh-pico preset). */
 const char *wz_ext_conformance_digest(void);
 
 /* ---- Key ids every node of a deployment shares (shared-key-ids) ---- */

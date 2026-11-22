@@ -1735,6 +1735,9 @@ unsafe fn publisher_put_options(
     if let Some(ts) = timestamp {
         opts = opts.with_timestamp(ts);
     }
+    // A source info is read only where the option field exists, and the setter it reaches is
+    // linked only there: without the unstable API the field is pico's absent value.
+    #[cfg(feature = "unstable-api")]
     if let Some(si) = source_info {
         opts = opts.with_source_info(si);
     }
@@ -1794,6 +1797,65 @@ mod put_options_tests {
             assert_eq!(carried.timestamp.as_ref().map(|ts| ts.time), Some(42));
         }
     }
+
+    /// With the unstable API a put's source info option is carried into the options it is sent
+    /// with, and pico's all-zero value is carried as none.
+    #[cfg(feature = "unstable-api")]
+    #[test]
+    fn a_source_info_option_is_carried_with_the_unstable_api() {
+        use super::z_source_info_t;
+        let mut info = z_source_info_t {
+            _source_id: crate::entity::z_entity_global_id_t {
+                zid: crate::zid::z_id_t {
+                    id: [0xa1; crate::zid::Z_ID_SIZE],
+                },
+                eid: 0x5150,
+            },
+            _source_sn: 9001,
+        };
+        // SAFETY: each pointer handed over points at a live value of its type, which outlives
+        // the call.
+        unsafe {
+            let mut options = core::mem::MaybeUninit::<z_publisher_put_options_t>::uninit();
+            z_publisher_put_options_default(options.as_mut_ptr());
+            let mut options = options.assume_init();
+            options.source_info = &mut info;
+            let carried = publisher_put_options(&options).expect("a source info is carried");
+            let source = carried.source_info.expect("the source info");
+            assert_eq!((source.eid, source.sn), (0x5150, 9001));
+            assert_eq!(source.zid, [0xa1; 16]);
+            let mut unset = z_source_info_t::empty();
+            options.source_info = &mut unset;
+            assert!(
+                publisher_put_options(&options).is_none(),
+                "pico's null source info is no source info"
+            );
+        }
+    }
+
+    /// Without the unstable API the option structs have no source info field, and the options
+    /// a session's put and delete are sent with carry none.
+    #[cfg(not(feature = "unstable-api"))]
+    #[test]
+    fn without_the_unstable_api_no_put_or_delete_carries_a_source_info() {
+        use super::{
+            session_delete_options, session_put_options, z_delete_options_default,
+            z_delete_options_t, z_put_options_default, z_put_options_t,
+        };
+        // SAFETY: each pointer handed over is null or points at a live value of its type, which
+        // outlives the call.
+        unsafe {
+            let mut put = core::mem::MaybeUninit::<z_put_options_t>::uninit();
+            z_put_options_default(put.as_mut_ptr());
+            let put = put.assume_init();
+            assert!(session_put_options(&put).source_info.is_none());
+            assert!(session_put_options(core::ptr::null()).source_info.is_none());
+            let mut delete = core::mem::MaybeUninit::<z_delete_options_t>::uninit();
+            z_delete_options_default(delete.as_mut_ptr());
+            let delete = delete.assume_init();
+            assert!(session_delete_options(&delete).source_info.is_none());
+        }
+    }
 }
 
 // --- z_put -----------------------------------------------------------------
@@ -1833,9 +1895,10 @@ pub struct z_put_options_t {
 
 crate::locality::locality_option_field!(z_put_options_t, allowed_destination, "local-subscriber");
 
+// `source_info` has no accessor here: a session's put reads it only with `unstable-api`, where the
+// field exists and is read as itself.
 unstable_option_fields!(z_put_options_t {
     reliability: z_reliability_t = Z_RELIABILITY_RELIABLE,
-    source_info: *mut z_source_info_t = core::ptr::null_mut(),
 });
 
 /// pico `z_delete_options_t` (`api/types.h:413-425`).
@@ -1862,9 +1925,9 @@ crate::locality::locality_option_field!(
     "local-subscriber"
 );
 
+// `source_info` is read only with `unstable-api`, as the put's is.
 unstable_option_fields!(z_delete_options_t {
     reliability: z_reliability_t = Z_RELIABILITY_RELIABLE,
-    source_info: *mut z_source_info_t = core::ptr::null_mut(),
 });
 
 /// pico `z_publisher_delete_options_t` (`api/types.h:454-459`).
@@ -1874,10 +1937,6 @@ pub struct z_publisher_delete_options_t {
     #[cfg(feature = "unstable-api")]
     pub source_info: *mut z_source_info_t,
 }
-
-unstable_option_fields!(z_publisher_delete_options_t {
-    source_info: *mut z_source_info_t = core::ptr::null_mut(),
-});
 
 /// Fill default put options (pico `z_put_options_default`).
 ///
@@ -2081,7 +2140,8 @@ unsafe fn session_put_options(options: *const z_put_options_t) -> PublishOptions
     if let Some(ts) = timestamp_hint_of((*options).timestamp) {
         opts = opts.with_timestamp(ts);
     }
-    if let Some(si) = source_info_hint_of((*options).source_info()) {
+    #[cfg(feature = "unstable-api")]
+    if let Some(si) = source_info_hint_of((*options).source_info) {
         opts = opts.with_source_info(si);
     }
     opts
@@ -2107,7 +2167,8 @@ unsafe fn session_delete_options(options: *const z_delete_options_t) -> PublishO
     if let Some(ts) = timestamp_hint_of((*options).timestamp) {
         opts = opts.with_timestamp(ts);
     }
-    if let Some(si) = source_info_hint_of((*options).source_info()) {
+    #[cfg(feature = "unstable-api")]
+    if let Some(si) = source_info_hint_of((*options).source_info) {
         opts = opts.with_source_info(si);
     }
     opts
@@ -2221,7 +2282,8 @@ pub unsafe extern "C" fn z_publisher_delete(
             if let Some(ts) = timestamp_hint_of((*options).timestamp) {
                 opts = opts.with_timestamp(ts);
             }
-            if let Some(si) = source_info_hint_of((*options).source_info()) {
+            #[cfg(feature = "unstable-api")]
+            if let Some(si) = source_info_hint_of((*options).source_info) {
                 opts = opts.with_source_info(si);
             }
         }

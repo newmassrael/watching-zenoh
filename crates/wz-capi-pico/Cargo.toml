@@ -83,6 +83,8 @@ default = [
     "multi-thread",
     "unstable-api",
     "connectivity",
+    "config-policy",
+    "conformance-digest",
 ]
 # `std`: the library runs on a host, whose standard library gives the engine port's mutex,
 # condition variable, threads and sleep (`wz-capi-port`'s `os`) and the host layer under the
@@ -602,14 +604,28 @@ local-queryable = ["wz-capi-core?/local-queryable", "wz-capi-coop?/local-queryab
 # which are then the smaller structs pico's default header declares. None of it is an engine's:
 # it selects neither (`wz-capi-core`'s is a marker its own code reads). Its modules are `core` and
 # `alloc`, so it selects no `std`: the cancellation token is in a build with `query` too, which
-# brings the token's wait.
-unstable-api = ["wz-capi-core?/unstable-api"]
+# brings the token's wait. A put's and a delete's source info are written and a sample's decoded
+# only here (`wz-session-core/pubsub-source-info`): without it the option field is absent and
+# `z_sample_source_info` is not exported, so no program could set or read one.
+unstable-api = ["wz-capi-core?/unstable-api", "wz-session-core/pubsub-source-info"]
+# `config-policy`: `wz_ext_config_policy` and `wz_ext_config_profile`, the doors that state the
+# policies and the profile of the sessions a config opens, and the open's resolution of what they
+# state over the build's defaults (`src/config_policy.rs`). wz's own, which zenoh-pico has not: on
+# in a build that names nothing, and off in the zenoh-pico preset (`configs/zenoh-pico_defconfig`),
+# whose sessions run under the build's policies and limits and whose open links no resolver of a
+# statement. Both engines take the policies the open hands them, so it selects neither.
+config-policy = ["wz-capi-core?/config-policy"]
+# `conformance-digest`: `wz_ext_conformance_digest`, the digest of the configuration the library
+# was built with (`src/conformance.rs`). wz's own: on in a build that names nothing and in a
+# package that ships a build statement (the host-peer-ext preset), off in the zenoh-pico preset.
+conformance-digest = ["wz-capi-core?/conformance-digest"]
 # `config-document`: `wz_ext_config_document`, the door that hands a config the zenoh JSON5 document
 # the zenoh-c ABI reads, so one document states both ABIs' policies. Off by default: zenoh-pico's
 # config is a set of numbered keys and reads no document, and the door links a JSON5 reader a
 # build that states its policies through `wz_ext_config_policy` and `wz_ext_config_profile` does
-# not need.
-config-document = ["wz-capi-core?/config-document"]
+# not need. The open resolves the document's statements as it resolves the doors', so it implies
+# `config-policy`.
+config-document = ["config-policy", "wz-capi-core?/config-document"]
 # `connectivity` (`Z_FEATURE_CONNECTIVITY`): the transport and link snapshots and the event
 # listeners of pico's connectivity plane. Upstream declares it only with the unstable API. Both
 # engines report their faces through the port, so it selects neither. Its doors are `core` and

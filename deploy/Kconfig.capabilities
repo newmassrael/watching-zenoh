@@ -460,9 +460,24 @@ config WZ_CAP_SWITCH_DOORS
 	  The statements of a call beyond the zenoh-c options: the links an entity may use, a publish's retry and all-or-none form, a query's target node (the wz_capi_c_*_ext doors, wz-own, refused while the policy that admits the statement is off).
 	  Exported by: c.
 
+config WZ_CAP_CONFIG_POLICY
+	bool "config-policy"
+	default y
+	help
+	  wz_ext_config_policy and wz_ext_config_profile: a pico config states the policies and the profile of the sessions it opens, which the open resolves over the build's defaults (wz-own). Off, a session runs under the build's policies and limits and the open resolves none.
+	  Exported by: pico.
+
+config WZ_CAP_CONFORMANCE_DIGEST
+	bool "conformance-digest"
+	default y
+	help
+	  wz_ext_conformance_digest: the digest of the configuration this library was built with, which equals the digest of the build statement that describes it (wz-own).
+	  Exported by: pico.
+
 config WZ_CAP_CONFIG_DOCUMENT
 	bool "config-document"
 	default n
+	select WZ_CAP_CONFIG_POLICY
 	help
 	  wz_ext_config_document: a pico config is handed the zenoh JSON5 document the zenoh-c ABI reads, and its wz member states the session's profile and policies (wz-own).
 	  Exported by: pico.

@@ -78,6 +78,8 @@ pub const CAPABILITIES: &[(&str, &[&str])] = &[
     ("shared-key-ids", &["core", "pico", "c"]),
     ("rx-callback-offload", &["core", "c"]),
     ("switch-doors", &["core", "c"]),
+    ("config-policy", &["core", "pico"]),
+    ("conformance-digest", &["core", "pico"]),
     ("config-document", &["core", "pico"]),
     ("transport_compression", &["core", "c"]),
     ("auth_usrpwd", &["core", "c"]),
