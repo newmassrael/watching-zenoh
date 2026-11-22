@@ -60,6 +60,9 @@ struct LendingLink {
     doors: Mutex<Vec<(bool, Vec<u8>)>>,
     grants: AtomicUsize,
     aborts: AtomicUsize,
+    /// Times the session asked where a slot's memory is (`tx_slot_storage`).
+    #[cfg(feature = "transport-batching")]
+    storage_asks: AtomicUsize,
     /// Grants left before the link stops lending (a pool that runs dry part
     /// way through a send); `usize::MAX` for a link that never does.
     grants_left: AtomicUsize,
@@ -80,6 +83,8 @@ impl LendingLink {
             doors: Mutex::new(Vec::new()),
             grants: AtomicUsize::new(0),
             aborts: AtomicUsize::new(0),
+            #[cfg(feature = "transport-batching")]
+            storage_asks: AtomicUsize::new(0),
         })
     }
 
@@ -157,6 +162,8 @@ impl BoxedLinkDriver for LendingLink {
     }
 
     fn tx_slot_storage(&self, slot: TxSlot) -> (*mut u8, usize) {
+        #[cfg(feature = "transport-batching")]
+        self.storage_asks.fetch_add(1, Ordering::SeqCst);
         let mem = &self.slots[slot.0 as usize];
         // SAFETY: the slot was granted and neither sent nor aborted, so no one
         // else is touching it; the pointer and length are of the boxed slice.
@@ -760,6 +767,37 @@ fn a_window_leaves_as_one_lent_slot_and_its_flush_copies_nothing() {
             slot_frames: 1,
             ..Default::default()
         }
+    );
+    link.assert_every_slot_home();
+}
+
+/// An open frame is filled without asking its link where the slot is: the grant asks once, and
+/// each message after the first is appended to the slot the conduit keeps, with no lock of the
+/// link's taken. CONTROL: a window of one message asks once too, so the count is one a frame and
+/// not one a message.
+#[cfg(feature = "transport-batching")]
+#[test]
+fn a_window_asks_its_link_where_the_slot_is_once_whatever_its_messages() {
+    let link = LendingLink::new(true, 2, BATCH_SLOT, HEADROOM);
+    run_window(&batching_session(link.clone()), &[b"one"]);
+    assert_eq!(
+        link.storage_asks.load(Ordering::SeqCst),
+        1,
+        "CONTROL: one frame, one question"
+    );
+
+    let link = LendingLink::new(true, 2, BATCH_SLOT, HEADROOM);
+    let payloads: [&[u8]; 8] = [b"a", b"b", b"c", b"d", b"e", b"f", b"g", b"h"];
+    run_window(&batching_session(link.clone()), &payloads);
+    assert_eq!(
+        link.lent().len(),
+        1,
+        "CONTROL: the window left as one frame"
+    );
+    assert_eq!(
+        link.storage_asks.load(Ordering::SeqCst),
+        1,
+        "seven appends and the flush asked nothing"
     );
     link.assert_every_slot_home();
 }
