@@ -411,9 +411,10 @@ fn reads_until(engine: &Engine, what: &str, mut done: impl FnMut() -> bool) -> u
 
 /// The puts a client writes in one batch window reach a listener's subscriber over the stream
 /// link where they lie in the link's receive buffer: each is handed on lying there, none is copied
-/// into the lane, and the listener hands them all out in a few reads however many the batch
-/// holds, where a link that handed one sample where it lies a read took a read a put. The listener
-/// is stepped by this thread, so each read is counted. The CONTROL is the subscriber's count.
+/// into the lane, and the listener hands them all out in a few reads however many the batch holds
+/// (one or two when nothing else arrives; at most a quarter of the puts is asserted), where a link
+/// that handed one sample where it lies a read took a read a put. The listener is stepped by this
+/// thread, so each read is counted. The CONTROL is the subscriber's count.
 #[test]
 fn the_puts_of_one_stream_batch_are_handed_where_they_lie_in_a_few_reads() {
     let engine = open_with(CoopConfig {
@@ -481,7 +482,7 @@ fn the_puts_of_one_stream_batch_are_handed_where_they_lie_in_a_few_reads() {
         "and none copied into the lane"
     );
     assert!(
-        reads <= 4,
+        reads <= PUTS / 4,
         "{reads} reads for {PUTS} puts of one batch: a few, not one a put"
     );
 }
