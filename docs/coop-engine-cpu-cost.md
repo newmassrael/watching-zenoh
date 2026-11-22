@@ -92,10 +92,41 @@ by string per message on receive (the registry's match memo, `fire_into_memoized
   it clear takes no lock for the queue; a read step still looks under the lock, so a leg a publish
   passed over on a stale reading leaves on the next step (row 6). Test:
   `tests::a_publish_with_nothing_handed_takes_the_session_once_and_not_the_handed_queue`.
-* A read step reads the clock and takes the first due job under one take of the session's lock, and
-  puts a job that ran back and takes the next under one more (part of row 4). Test:
-  `tests::ticker::a_read_with_no_job_due_takes_the_session_once_for_its_jobs`.
-* Both tests count the takes through a test seam (`CoopEngine::takes`, `#[cfg(test)]`).
+* A read step reads the clock once, after its tasks ran, and moves every face, sweeps the gets and
+  looks for a due job by that one reading, under the step's own take of the session's lock; its
+  wait reads the clock only when a deadline asks, once for all of them. A read with no job due
+  takes the lock twice, for its wait and its step; one that runs a job takes it once to take the
+  job and once more to put it back and take the next (row 4). Tests:
+  `tests::a_read_step_reads_the_clock_once_and_takes_the_session_for_its_wait_and_its_step`,
+  `tests::ticker::a_read_with_no_job_due_takes_the_session_for_its_wait_and_its_step_alone`.
+  The wait's buffer of readiness handles is the session's, lent and handed back, so the idle read
+  allocates nothing; an `Arc` of each waited link's readiness is still taken, since the wait is
+  made with the session let go of.
+* A delivery keeps the callbacks it found for the subscribers of the sample it handed last, by
+  their place in the sample's list (four places), and hands the samples behind it the same
+  callbacks with no lock of the table of callbacks, no search of it and no count taken on the
+  callback, while nothing has been taken out of the table since: each removal is counted under the
+  table's lock, and a delivery that reads a new count looks again (row 5). A run of samples a step
+  read pays one look; a round trip, one sample a step, still pays one look a sample. Tests:
+  `tests::the_samples_one_delivery_hands_a_subscriber_find_its_callback_once`,
+  `tests::a_subscriber_undeclared_inside_its_callback_is_handed_nothing_more`.
+* A plain put is written once: the size the link lends a slot of is worked out from the parts
+  (`lent_push::plain_put_len`), where the writer ran once into a sink that only counted and once
+  more into the slot (row 3). The writer and the slot are what they were, so the bytes are, batched
+  or not. Tests: `lent_push::tests::the_worked_out_length_is_the_counted_one` (every key form,
+  QoS byte and payload width against the counted length, and a refused Put),
+  `lent_push::tests::working_out_a_puts_length_runs_its_writer_no_times`.
+* Under the pico profile a droppable publish that finds the session held by what is not a publish
+  (a read step, a timer, the drive) waits for it blocked on the lock, where it spun on `try_lock`
+  for the length of the step: that holder holds no send, so the publish is no congestion drop, as
+  pico's put is not stopped by a read task that is not sending. A publish marks itself the holder
+  for its whole hold, so a droppable publish behind one between its sends still tries again and is
+  dropped once that one marks a face (row 7). Tests:
+  `tests::a_droppable_publish_behind_a_read_step_waits_without_spinning_and_is_sent`,
+  `tests::congestion::under_the_pico_profile_a_held_session_drops_without_asking`.
+* The tests count the takes, the clock readings, the looks in the table of callbacks and the spins
+  through test seams (`CoopEngine::takes`, `CoopEngine::clock_reads`, `#[cfg(test)]`), and the
+  writer's runs through a thread-local count in `lent_push`.
 * A put on a group is written by the thread that puts it, before the put returns (row 1). The group's
   transport is shared by its task and its face (`GroupLink`, `crates/wz-session-mcu/src/group_drive/stage.rs`);
   the stage keeps what was written (the datagram a full socket refused, the conduits as written,
@@ -105,9 +136,12 @@ by string per message on receive (the registry's match memo, `fire_into_memoized
   calling thread. Tests: `tests::group::woken::a_put_on_the_group_is_written_by_the_putting_thread_before_it_returns`,
   `tests::group::woken::inside_a_batch_window_a_put_on_the_group_is_written_at_the_flush`.
 
-Rows 2 and 3 cross into `wz-session-core` and are left for their own items. Row 2 needs a
-borrowed form of a put with its metadata and aliased key for the group's push, and lanes that hold
-datagrams in slots the session lends rather than in vectors of their own.
+Row 2 crosses into `wz-session-core` and is left for its own item: it needs a borrowed form of a
+put with its metadata and aliased key for the group's push, and lanes that hold datagrams in slots
+the session lends rather than in vectors of their own. What is left of row 4 is `deliver` with
+nothing to hand, which still takes each queue's lock once to find it empty, and the zenoh profile's
+droppable publish behind a held session, which asks the faces for room in a loop (a vector of
+their waits built each turn) while every face has some.
 
 ## 6. Measuring this engine
 
