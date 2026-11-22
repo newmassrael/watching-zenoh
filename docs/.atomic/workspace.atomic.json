@@ -6724,6 +6724,22 @@
         "Test debug frames left by the initiators' futures: session_open's dial_locator (80,824), open/drive futures held by value in the accept_loop tests (idle initiators 132,712); FaceLoop-independent.",
         "From Round 4596: the MAPS_PROBE settle of the shared-memory differential, and recording upstream 1.10.2's blocking z_obtain_shm_provider defect."
       ]
+    },
+    "Round 4602": {
+      "decision_summary": "The hosted run at main `85330b9e0` read every zenoh-c ABI build about 4.6 KB larger than the run before it, growth no budget note named (capic-default's note of the day records main reading over its earlier budget before the router changes it measured). Measured on one host with only `crates/wz-capi-c/src/events.rs` swapped, the census W9 fix (Round 4595) was that growth: capic-client 2,342,925 bytes of text without it and 2,347,533 with it, +4,608. Most of it was the hold of the watch's transitions written inside the generic `EventClosure<T>`, compiled once per closure type. The hold now is a non-generic type (`HeldTransitions`) that every listener kind shares, with the same behaviour: transitions told while the history is reported are held and reported after it in order, and the hold ends only when it is found empty under its lock. capic-client reads 2,346,245, so the fix costs 3,320 bytes. No budget moves; the change only shrinks.",
+      "changes_bullets": [
+        "crates/wz-capi-c/src/events.rs: the hold moves from `EventClosure<T>` into the non-generic `HeldTransitions` (`hold`, `release_next`); `deliver_or_hold` and `finish_history` call it."
+      ],
+      "verification_bullets": [
+        "On build host pc2, with `capability_cost_gate.py --measure capic-client`: 2,342,925 without the W9 fix, 2,347,533 with it, 2,346,245 with the hold moved out.",
+        "On build hosts: wz-capi-c library tests 221 passed (the hold test among them), listener integration tests `transport_events_roundtrip` 4 passed and `node_connectivity` 1 passed; clippy -D warnings with all targets for wz-capi-c; rustfmt --check; the pre-push hook's round-fed gates 170 of 170."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "The other reds of hosted run 44996720658 (C1g and C1bnl `session_memory` test, C1bnl and C1ay `router_forward`, C1cc shared-memory threshold, C1bzr shard 2 at 94% of its budget) belong to the sessions that landed those changes; C1cs was moved by them after that run."
+      ]
     }
   },
   "inventory_entries": {
