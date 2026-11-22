@@ -264,6 +264,41 @@ static void sleep_ms(unsigned ms) {
 
 #endif
 
+// PERF_PROBE_TRACE=1 asks for one stderr line before and after each step of the teardown, on the clock the
+// round trips are timed by, so a role that stops between its result line and its last line says which call
+// it stopped in. Off, it costs one look at the environment.
+static int tracing = -1;
+static const char *trace_role = "?";
+
+static int trace_asked(void) {
+#ifdef _WIN32
+    char value[8];
+    const DWORD n = GetEnvironmentVariableA("PERF_PROBE_TRACE", value, sizeof value);
+    return n == 1 && value[0] == '1';
+#else
+    const char *value = getenv("PERF_PROBE_TRACE");
+    return value != NULL && strcmp(value, "1") == 0;
+#endif
+}
+
+static void trace(const char *step) {
+    if (tracing < 0) tracing = trace_asked();
+    if (!tracing) return;
+    fprintf(stderr, "perf_probe trace %s t_ns=%llu %s\n", trace_role, (unsigned long long)now_ns(), step);
+    fflush(stderr);
+}
+
+static void trace_rc(const char *step, int rc) {
+    if (tracing < 0) tracing = trace_asked();
+    if (!tracing) return;
+    fprintf(stderr, "perf_probe trace %s t_ns=%llu %s rc=%d\n", trace_role, (unsigned long long)now_ns(), step, rc);
+    fflush(stderr);
+}
+
+// The last line a traced process writes: the C runtime runs it once main has returned, before the process
+// lets go of the libraries it loaded.
+static void trace_exit(void) { trace("exit"); }
+
 static void drop_nothing(void *context) { (void)context; }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -877,7 +912,9 @@ static int run_ping(const z_loaned_session_t *session, const struct options *o) 
     for (int i = 0; i < 3; i++) {
         z_owned_bytes_t payload;
         z_bytes_copy_from_buf(&payload, buf, SEQ_BYTES);
-        z_publisher_put(stop, z_bytes_move(&payload), NULL);
+        trace("stop put begin");
+        z_result_t put = z_publisher_put(stop, z_bytes_move(&payload), NULL);
+        trace_rc("stop put end", (int)put);
         sleep_ms(20);
     }
     free(rtt);
@@ -1075,6 +1112,8 @@ int main(int argc, char **argv) {
     const int ping = strcmp(o.role, "ping") == 0, pong = strcmp(o.role, "pong") == 0;
     const int pub = strcmp(o.role, "pub") == 0, sub = strcmp(o.role, "sub") == 0;
     if (!ping && !pong && !pub && !sub) return usage();
+    trace_role = o.role;
+    atexit(trace_exit);
     if ((ping || pub) && o.size < SEQ_BYTES) {
         fprintf(stderr, "perf_probe: a payload is at least %d bytes (the sequence number)\n", SEQ_BYTES);
         return 2;
@@ -1124,10 +1163,19 @@ int main(int argc, char **argv) {
     }
     const z_loaned_session_t *loaned = z_session_loan(&session);
     int rc = ping ? run_ping(loaned, &o) : pong ? run_pong(loaned, &o) : pub ? run_pub(loaned, &o) : run_sub(loaned, &o);
+    trace("role done");
     // Closed first, so no callback runs while its publisher is dropped.
-    z_close(z_session_loan_mut(&session), NULL);
-    for (int i = 0; i < publisher_count; i++) z_publisher_drop(z_publisher_move(&publishers[i]));
+    trace("z_close begin");
+    z_result_t closed = z_close(z_session_loan_mut(&session), NULL);
+    trace_rc("z_close end", (int)closed);
+    for (int i = 0; i < publisher_count; i++) {
+        trace("z_publisher_drop begin");
+        z_publisher_drop(z_publisher_move(&publishers[i]));
+        trace("z_publisher_drop end");
+    }
+    trace("z_session_drop begin");
     z_session_drop(z_session_move(&session));
+    trace("z_session_drop end");
 #ifdef PERF_PROGRAM_TRANSPORT
     if (o.transport_name != NULL) wz_ext_transport_drop(wz_ext_transport_move(&pt.transport));
 #endif
