@@ -109,15 +109,16 @@ DECLARED: dict[tuple[str, str], tuple[str, str]] = {
         "staged",
         "the time-hlc legs, the config-file legs, then the negative twin without time-hlc",
     ),
-    ("layer_g_cross_compile_cortex_m", "wz"): (
+    # Layer G's steps, in the function the lane runs once per target triple.
+    ("_layer_g_target", "wz"): (
         "compiles",
         "cross builds for bare-metal targets; the host runs none of them",
     ),
-    ("layer_g_cross_compile_cortex_m", "wz-runtime-coop"): (
+    ("_layer_g_target", "wz-runtime-coop"): (
         "compiles",
         "cross builds for bare-metal targets; the host runs none of them",
     ),
-    ("layer_g_cross_compile_cortex_m", "wz-session-core"): (
+    ("_layer_g_target", "wz-session-core"): (
         "compiles",
         "cross builds for bare-metal targets; the host runs none of them",
     ),

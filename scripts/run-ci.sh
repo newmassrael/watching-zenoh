@@ -273,6 +273,10 @@
 #                  thumbv8m.main-none-eabi    (Cortex-M33/M55 soft-float)
 #                  thumbv8m.main-none-eabihf  (Cortex-M33/M55 hard-float)
 #                  riscv32imac-unknown-none-elf (RISC-V 32-bit IMAC)
+#              The targets build at the same time, each in a target
+#              directory of its own, as many at once as there are cores
+#              (BX_GRANT_CORES, else nproc); their lines print in the
+#              order above once all have finished.
 #              Per-target SKIP if the rustup target is not installed
 #              (no auto-install — keeps a developer machine without
 #              cross-compile interest free of the lane). Promoted to
@@ -19914,11 +19918,13 @@ layer_f_codec_footprint() {
 # verdict is two measurements; each arm now prints its own. The value is what
 # the loaded library reports (`bindgen::clang_version()` in lwip-sys's build
 # script, which keeps it in the build's `output` file, so a warm build that
-# does not rerun the script still has it). A record, not a verdict.
+# does not rerun the script still has it). A record, not a verdict. Read from
+# the target directory the triple was built in (`_g6_libclang_record <triple>
+# <target dir>`): Layer G gives each triple a directory of its own.
 _g6_libclang_record() {
-    local t="$1" outputs=() seen
+    local t="$1" dir="$2" outputs=() seen
     shopt -s nullglob
-    outputs=("$WZ_ARTIFACTS"/crates/target/"$t"/debug/build/lwip-sys-*/output)
+    outputs=("$dir"/"$t"/debug/build/lwip-sys-*/output)
     shopt -u nullglob
     seen="$(sed -n 's/^wz-libclang: //p' "${outputs[@]}" /dev/null | sort -u | paste -sd';' -)"
     echo "  G.6 libclang $t: ${seen:-not recorded (no lwip-sys build output for $t names one)}"
@@ -19937,11 +19943,457 @@ _g6_libclang_record() {
 # the default lanes. Promoted to default once the wz-runtime-coop
 # caller lands and the cross-compile path has a real consumer
 # (concrete-impls-land-alongside-real-callers, R63 lesson).
+#
+# THE TRIPLES BUILD AT ONCE. One after another they took about 400 s with
+# 20 cores granted and 1.5 of them busy on average: every step is a small
+# cargo build that mostly waits on one crate at a time. Seven lanes, one
+# per triple, cost more than they saved (2084 s warm in the fleet), since
+# each lane repeated the sce-codegen build and the host-side builds. So
+# this one lane runs the triples concurrently on its machine:
+#   * each triple builds into a target directory of its own under the
+#     artifact root, because two cargo processes on one target directory
+#     wait on its lock and would run one after another again;
+#   * as many triples at a time as there are cores (`BX_GRANT_CORES`, the
+#     cores bx granted the run, else `nproc`), each given an equal share
+#     of them as `CARGO_BUILD_JOBS`;
+#   * a triple's lines are kept in a file and printed in the triple order
+#     once every triple has finished, so the log reads as the loop did;
+#   * a red triple fails the lane, and the lane names every red triple.
+# The cost of the per-triple directories: the host-side builds (build
+# scripts, proc macros and their libraries) repeat in each. A shared
+# compiler cache (sccache) serves the libraries among them; the build
+# scripts and proc macros, which it cannot cache, are compiled and linked
+# once per triple, at the same time as the other triples' builds.
+
+# Every step of Layer G (G.1 ... G.17) for one target triple, with the
+# triple's verdict as the return code. A step runs whatever an earlier step
+# found (`fail=1`), so one red step does not hide the rest of the triple.
+# The caller sets `CARGO_TARGET_DIR` to the triple's own directory.
+_layer_g_target() {
+    local t="$1" fail=0 _c _riscv_cc _rv_libc
+    local -a _cc_env=()
+    # G.1 (R311ak) wz-runtime-core — §5.P trait skeleton.
+    if (cd crates && cargo build -p wz-runtime-core \
+        --target "$t" --no-default-features --quiet); then
+        echo "  G.1 wz-runtime-core $t OK"
+    else
+        echo "  G.1 wz-runtime-core $t FAIL" >&2
+        fail=1
+    fi
+    # G.2 (R311am) wz facade — no_std cfg_attr toggle when
+    # runtime-tokio is not active in the feature set.
+    if (cd crates && cargo build -p wz \
+        --target "$t" --no-default-features --quiet); then
+        echo "  G.2 wz facade $t OK"
+    else
+        echo "  G.2 wz facade $t FAIL" >&2
+        fail=1
+    fi
+    # G.3 (R311aq) wz-codecs — no_std + alloc; codec wire
+    # encode/decode MCU-readiness. Default features kept on so
+    # the full codec catalog exercises the alloc-prelude shim
+    # end-to-end (R40 carry resolved).
+    if (cd crates && cargo build -p wz-codecs \
+        --target "$t" --quiet); then
+        echo "  G.3 wz-codecs $t OK"
+    else
+        echo "  G.3 wz-codecs $t FAIL" >&2
+        fail=1
+    fi
+    # G.4 (R311au scope C) wz-runtime-coop — Phase W MCU profile
+    # sync primitive aliases (critical_section::Mutex<RefCell<T>>
+    # binding). #![no_std] sync surface, no alloc; covers every
+    # Phase W rustup target including Cortex-M0+ (thumbv6m).
+    if (cd crates && cargo build -p wz-runtime-coop \
+        --target "$t" --quiet); then
+        echo "  G.4 wz-runtime-coop $t OK"
+    else
+        echo "  G.4 wz-runtime-coop $t FAIL" >&2
+        fail=1
+    fi
+    # G.4-alloc (R311av + R311bb) wz-runtime-coop --features alloc.
+    # CoopRuntime self-rolled cooperative task pool + impl Runtime
+    # + CoopTime impl TimeSource. R311bb closed the M0+ gap via
+    # portable-atomic{,-util}: thumbv6m no longer SKIPs because
+    # the crate::atomic alias module substitutes
+    # portable_atomic_util::Arc + portable_atomic::Atomic* on
+    # targets without native CAS. The polyfill rides on the same
+    # critical_section impl the deploy crate supplies for
+    # sync::Mutex, so no extra runtime mechanism is layered on.
+    if (cd crates && cargo build -p wz-runtime-coop \
+        --target "$t" --features alloc --quiet); then
+        echo "  G.4-alloc wz-runtime-coop $t OK"
+    else
+        echo "  G.4-alloc wz-runtime-coop $t FAIL" >&2
+        fail=1
+    fi
+    # G.5 (R311ax + R311bb) wz facade --features runtime-coop.
+    # Composes wz-runtime-coop via the public facade surface so a
+    # consumer enabling `runtime-coop` finds `wz::runtime_coop::*`
+    # cross-compiled on every Phase W target. R311bb removed the
+    # M0+ SKIP that inherited from G.4-alloc.
+    if (cd crates && cargo build -p wz \
+        --target "$t" --no-default-features \
+        --features runtime-coop --quiet); then
+        echo "  G.5 wz facade runtime-coop $t OK"
+    else
+        echo "  G.5 wz facade runtime-coop $t FAIL" >&2
+        fail=1
+    fi
+    # G.6 (R311az-3c) WZ_LWIP_PORT cross-real lane — verifies the
+    # `lwip_real_build` cfg path end-to-end:
+    #   1. lwip-sys cross-compiles the real lwIP NO_SYS source set
+    #      against the deploy-supplied port (cross-test in-tree).
+    #   2. bindgen with --target=$t emits real FFI bindings into
+    #      the no_std lwip-sys crate.
+    #   3. wz-link-lwip's lwip_real_build cfg flips on, exposing
+    #      LwipLink + LwipUdpSocket against the real FFI symbols.
+    #   4. wz facade re-exports the `wz::link_lwip` namespace.
+    # SKIPs riscv32imac because the matching `riscv32-unknown-elf-
+    # gcc` cross C toolchain is not installed on the developer
+    # machine — the deploy is responsible for that toolchain, not
+    # the lwip-sys consumer. The check still proves the cross-real
+    # path on the entire ARM lineup, which is the mechanical gate
+    # preset-cortex-m4-default catalog truthfulness depends on.
+    # R311y757 — ASK, do not assume. This skipped riscv32imac unconditionally
+    # while SAYING `riscv32-unknown-elf-gcc not installed on this host`, so
+    # the sentence was a claim about a machine nobody had asked. The moment a
+    # host has the toolchain the message becomes false and the lane still
+    # skips — a gate that cannot be satisfied is not a gate.
+    #
+    # AND THE NAME WAS WRONG FOR EVERY DISTRO THAT SHIPS ONE: Ubuntu offers
+    # `gcc-riscv64-unknown-elf`, whose binary is `riscv64-unknown-elf-gcc`
+    # and which emits 32-bit code under `-march=rv32imac`. There is no
+    # `riscv32-unknown-elf-gcc` to install, so the original name could only
+    # ever be absent. Both spellings are accepted, in that order.
+    _riscv_cc=""
+    _cc_env=()
+    if [[ "$t" == "riscv32imac-unknown-none-elf" ]]; then
+        for _c in riscv32-unknown-elf-gcc riscv64-unknown-elf-gcc; do
+            command -v "$_c" >/dev/null 2>&1 && { _riscv_cc="$_c"; break; }
+        done
+        # SCOPED TO THIS TARGET. The probe and the export both live inside
+        # the riscv arm on purpose: `_riscv_cc` would be set for every
+        # triple otherwise, and an unconditional `TARGET_CC` would hand a
+        # RISC-V compiler to the ARM builds — a wrong fix that would have
+        # looked like a working one until the whole lineup broke.
+        # AND THE C LIBRARY'S HEADERS, which the ARM lineup never needed.
+        # `gcc-arm-none-eabi` bundles newlib inside its own sysroot, so a
+        # bare `-march=` is enough there. The riscv package does not: it
+        # advertises an `rv32imac/ilp32` multilib and ships picolibc as a
+        # SEPARATE tree, so the compiler runs and then cannot find
+        # `string.h`. MEASURED, after the compiler was already being invoked
+        # correctly — `fatal error: string.h: No such file or directory`.
+        # One path, so a test rather than a loop (shellcheck SC2043 caught
+        # the loop-over-one this was first written as).
+        _rv_libc=""
+        [[ -d /usr/lib/picolibc/riscv64-unknown-elf/include ]] \
+            && _rv_libc=/usr/lib/picolibc/riscv64-unknown-elf/include
+        [[ -n "$_riscv_cc" ]] && _cc_env=(
+            "TARGET_CC=$_riscv_cc"
+            "CFLAGS=-march=rv32imac -mabi=ilp32${_rv_libc:+ -isystem $_rv_libc} -ffreestanding"
+        )
+    fi
+    # R311y757 — THE C HALF IS SOLVED; THE BINDGEN HALF IS NOT, and the skip
+    # now says which. `lwip-sys` is two stages: `cc` compiles lwIP, then
+    # BINDGEN parses the headers through libclang. With the toolchain and
+    # picolibc named above, stage 1 compiles for rv32imac — measured — and
+    # stage 2 stops at `unknown target triple
+    # 'riscv32imac-unknown-none-elf'`, which libclang does not know. That is
+    # a bindgen target-mapping job, not a package to install, so the lane
+    # skips with the reason it actually has instead of a guess about a
+    # missing compiler.
+    if [[ "$t" == "riscv32imac-unknown-none-elf" ]]; then
+        if [[ -z "$_riscv_cc" ]]; then
+            echo "  G.6 cross-real lwip-sys $t SKIP (no riscv bare-metal C toolchain: tried riscv32-unknown-elf-gcc, riscv64-unknown-elf-gcc)"
+        else
+            echo "  G.6 cross-real lwip-sys $t SKIP (C stage builds with $_riscv_cc; bindgen/libclang rejects the triple)"
+        fi
+    # R311y757 — HAND THE COMPILER TO THE LANE THAT NEEDS IT. Finding it is
+    # not the same as it being used: the `cc` crate looks for
+    # `CC_riscv32imac_unknown_none_elf` and finds nothing, because the binary
+    # this distro installs is named `riscv64-unknown-elf-gcc` and emits
+    # 32-bit code under `-march=rv32imac`. MEASURED: with the toolchain
+    # present but unnamed, G.6 failed with `CC_riscv32imac_unknown_none_elf =
+    # None`. `TARGET_CC` is set only for the riscv target, so the ARM lineup
+    # keeps resolving its own compiler exactly as before.
+    elif (cd crates && \
+            WZ_LWIP_PORT="$(realpath lwip-sys/port/cross-test)" \
+            env "${_cc_env[@]}" \
+            cargo build -p wz-link-lwip \
+                --target "$t" --quiet) && \
+         (cd crates && \
+            WZ_LWIP_PORT="$(realpath lwip-sys/port/cross-test)" \
+            env "${_cc_env[@]}" \
+            cargo build -p wz \
+                --target "$t" --no-default-features \
+                --features runtime-coop --quiet); then
+        echo "  G.6 cross-real lwip-sys $t OK"
+        _g6_libclang_record "$t" "$CARGO_TARGET_DIR"
+    else
+        echo "  G.6 cross-real lwip-sys $t FAIL" >&2
+        _g6_libclang_record "$t" "$CARGO_TARGET_DIR"
+        fail=1
+    fi
+    # G.7 (R311ih) static-scouting synth on the MCU profile. Proves
+    # the scout_static bounded-seam synth composes no-alloc on every
+    # Phase W target (the §2.4.3 reason #2 claim — static mode is for
+    # tiny static-only deploys), and that the facade -> wz-runtime-coop
+    # -> wz-session-core funnel cross-compiles with scouting-static on.
+    # No-alloc: the synth builds onto BoundedVec/BoundedString, so it
+    # rides every target including thumbv6m (Cortex-M0+). (Since R311ja
+    # the session-unicast subset rides thumbv6m too — G.10 — so this is
+    # no longer the only session-core path that clears ARMv6-M.)
+    if (cd crates && cargo build -p wz-session-core \
+        --target "$t" --no-default-features --features scouting-static --quiet) \
+       && (cd crates && cargo build -p wz \
+        --target "$t" --no-default-features \
+        --features runtime-coop,scouting-static --quiet); then
+        echo "  G.7 scouting-static MCU synth $t OK"
+    else
+        echo "  G.7 scouting-static MCU synth $t FAIL" >&2
+        fail=1
+    fi
+    # G.8 (R311im) reassembly slot FSM + dispatcher on the MCU profile.
+    # Proves the Tier B reassembly module cross-compiles no_std on every
+    # Phase W target via the `no_std` profile feature
+    # (`sce-rust-runtime?/no_std` — the heapless engine variant). R311im
+    # dropped the `sce-rust-runtime/no_std` force from the `reassembly`
+    # capability feature, so the no_std runtime is now selected by this
+    # PROFILE feature, not forced by the capability — which is what lets
+    # the AP build (std runtime) host the same module (Layer C1l). The
+    # one --no-std codegen emit serves both profiles (SCE pin 1474091c2
+    # SceBytes<N> alias).
+    if (cd crates && cargo build -p wz-session-core \
+        --target "$t" --no-default-features --features reassembly,no_std --quiet); then
+        echo "  G.8 reassembly MCU $t OK"
+    else
+        echo "  G.8 reassembly MCU $t FAIL" >&2
+        fail=1
+    fi
+    # G.9 (R311in carry[3]) wz-runtime-coop reassembly seam on the MCU
+    # profile. Proves the live MCU reassembly consumer (reassembly_rx:
+    # CoopReassembly + mcu_reassembly() over the SCE buffer-pool SSOT
+    # reassembly_pool_mcu.scxml) cross-compiles no_std + no-alloc on
+    # every Phase W target. The bottom-up MCU consumer of the
+    # ReassemblyDispatcher that G.8 only build-checked at the
+    # session-core layer; the ~22 KiB no_std dispatcher (vendor/sce
+    # 4ec1aa642 metadata elision + fragment.chunk payload-field
+    # removal) is SRAM-resident. No alloc: the seam stages into inline
+    # BoundedVec, so it rides every target including thumbv6m (M0+).
+    if (cd crates && cargo build -p wz-runtime-coop \
+        --target "$t" --features reassembly --quiet); then
+        echo "  G.9 reassembly seam MCU $t OK"
+    else
+        echo "  G.9 reassembly seam MCU $t FAIL" >&2
+        fail=1
+    fi
+    # G.10 (Stage 4a) wz-runtime-coop --features session-unicast.
+    # Proves the session-tier `impl SessionRuntime for CoopRuntime`
+    # link-sink binding + the `SessionLinkActions<CoopRuntime<C>,
+    # CoopTime<C>>` type-check (the precondition the MCU sync drive
+    # loop consumer depends on) cross-compile on the alloc-capable
+    # MCU targets — INCLUDING thumbv6m (Cortex-M0/M0+) since R311ja. The
+    # session_actions bundle handle was lifted from a hard-coded
+    # `alloc::sync::Arc` to the per-profile `SessionRuntime::ActionsHandle`
+    # GAT: tokio binds `Arc` (multi-thread), the lwIP MCU profile binds
+    # `Rc` (single-task drive loop). `Rc` lowers to plain loads / stores,
+    # so session-unicast no longer needs `target_has_atomic = "ptr"` and
+    # cross-compiles on ARMv6-M. This IS the no-alloc M0 session reach the
+    # prior rounds deferred; M3/M4/M7/M33 + RISC-V IMAC keep building too.
+    if (cd crates && cargo build -p wz-runtime-coop \
+        --target "$t" --features alloc,wz-session-core/alloc,session-unicast --quiet); then
+        echo "  G.10 session-unicast MCU $t OK"
+    else
+        echo "  G.10 session-unicast MCU $t FAIL" >&2
+        fail=1
+    fi
+    # G.11 (Stage 4b) wz-session-lwip + facade session-lwip cross-real.
+    # The tier-clean MCU session shell — run_session sync drive loop +
+    # LwipUdpDriver (BoxedLinkDriver over LwipUdpSocket) — over the real
+    # lwIP build. Like wz-link-lwip the crate is #![cfg(lwip_real_build)]
+    # (empty without WZ_LWIP_PORT), so this mirrors G.6's cross-real
+    # setup: builds the crate with `reassembly` on (exercises the
+    # reassembly drive path) AND the facade `session-lwip` re-export.
+    # SKIPs riscv32imac (no riscv32-unknown-elf-gcc for the lwIP C
+    # cross build, same as G.6). thumbv6m (M0+) NO LONGER SKIPs since
+    # R311ja: the `Rc` ActionsHandle (see G.10) lets the whole MCU
+    # session shell — handshake + reassembly consumer + facade — cross-
+    # compile on ARMv6-M, the no-alloc M0 session reach end to end.
+    # R311mc: two more facade builds pin the multicast forward — proving
+    # wz's wz-session-lwip?/ weak-forwards cfg-in the MCU multicast drive
+    # loop + MulticastReplyQueue THROUGH the facade (not just at the
+    # wz-session-lwip crate boundary, C1m). Build 3 is the Arc-free subset
+    # (transport-multicast + TX codecs + query-queryable) on EVERY target:
+    # the queryable observer-staging ResponseSink is Rc<RefCell<VecDeque>>-
+    # backed, so it rides thumbv6m. Build 4 ADDS liveliness-token, which
+    # now ALSO rides thumbv6m (R311me): the MCU multicast liveliness reply
+    # stages through the same Rc-backed MulticastReplyQueue (the inline-
+    # fire path), and collapsing the deferred_fire module gate to
+    # `deferred-fire` alone stopped liveliness-token from spuriously
+    # compiling that Arc-bearing module. So the full TX-codec +
+    # liveliness-token subset cross-builds on EVERY non-riscv target —
+    # the M0 liveliness inline-fire reach the prior rounds carried.
+    # R311mf/R311mg: a final facade build pins the multicast Fragment RX/TX
+    # path THROUGH the facade (session-lwip,transport-multicast,
+    # transport-fragmentation,codec-push) — proving wz's
+    # wz-session-lwip?/transport-fragmentation forward (R311mg) reaches the
+    # MCU reassembly Router + TX splitter, which cross-compile on every
+    # non-riscv target including thumbv6m (Vec-backed, no Arc), the M0
+    # fragment reach. Built via the facade (not -p wz-session-lwip direct)
+    # so the public composition surface is what is tested, like Build 3/4.
+    # R311y757 — probed, not assumed; see G.6 above for why the old name
+    # could never have been present on a distro that ships one.
+    _riscv_cc=""
+    for _c in riscv32-unknown-elf-gcc riscv64-unknown-elf-gcc; do
+        command -v "$_c" >/dev/null 2>&1 && { _riscv_cc="$_c"; break; }
+    done
+    # R311y757 — same two stages, same wall; see G.6 for the measurement.
+    if [[ "$t" == "riscv32imac-unknown-none-elf" ]]; then
+        if [[ -z "$_riscv_cc" ]]; then
+            echo "  G.11 session-lwip cross-real $t SKIP (no riscv bare-metal C toolchain: tried riscv32-unknown-elf-gcc, riscv64-unknown-elf-gcc)"
+        else
+            echo "  G.11 session-lwip cross-real $t SKIP (C stage builds with $_riscv_cc; bindgen/libclang rejects the triple)"
+        fi
+    elif (cd crates && \
+            WZ_LWIP_PORT="$(realpath lwip-sys/port/cross-test)" \
+            cargo build -p wz-session-lwip \
+                --target "$t" --features reassembly --quiet) && \
+         (cd crates && \
+            WZ_LWIP_PORT="$(realpath lwip-sys/port/cross-test)" \
+            cargo build -p wz \
+                --target "$t" --no-default-features \
+                --features session-lwip --quiet) && \
+         (cd crates && \
+            WZ_LWIP_PORT="$(realpath lwip-sys/port/cross-test)" \
+            cargo build -p wz \
+                --target "$t" --no-default-features \
+                --features session-lwip,transport-multicast,codec-push,codec-response,codec-response-final,query-queryable \
+                --quiet) && \
+         (cd crates && \
+            WZ_LWIP_PORT="$(realpath lwip-sys/port/cross-test)" \
+            cargo build -p wz \
+                --target "$t" --no-default-features \
+                --features session-lwip,transport-multicast,codec-push,codec-response,codec-response-final,liveliness-token,query-queryable \
+                --quiet) && \
+         (cd crates && \
+            WZ_LWIP_PORT="$(realpath lwip-sys/port/cross-test)" \
+            cargo build -p wz \
+                --target "$t" --no-default-features \
+                --features session-lwip,transport-multicast,transport-fragmentation,codec-push \
+                --quiet); then
+        echo "  G.11 session-lwip cross-real $t OK"
+    else
+        echo "  G.11 session-lwip cross-real $t FAIL" >&2
+        fail=1
+    fi
+    # G.12 (Round A) multicast session FSM + per-peer FSM + dispatcher
+    # on the MCU profile. Proves the handshake-free multicast cluster
+    # (session_fsm_multicast.scxml + multicast_peer.scxml + the
+    # multicast_dispatch Router) cross-compiles no_std + no-alloc on
+    # every Phase W target via the `no_std` profile feature
+    # (`sce-rust-runtime?/no_std` + portable-atomic, same as G.8
+    # reassembly). The Router is allocation-free (inline `[PeerSlot;
+    # MAX_PEERS]` pool, fixed ZID buffers), so it rides every target
+    # including thumbv6m (M0+, CAS-less via the critical-section
+    # backend). The lwIP consumer + the real multicast socket land in
+    # the transport-multicast round; this build-checks the session-core
+    # layer, mirroring how G.8 build-checks reassembly.
+    if (cd crates && cargo build -p wz-session-core \
+        --target "$t" --no-default-features --features session-multicast,no_std --quiet); then
+        echo "  G.12 multicast MCU $t OK"
+    else
+        echo "  G.12 multicast MCU $t FAIL" >&2
+        fail=1
+    fi
+    # G.13 (R311ki) session-reconnect MCU composition. Proves the
+    # reconnect module - the declaration cache, reset/replay, and the
+    # LocalSwappableLink single-task swap seam (the RefCell-backed,
+    # no-Send twin of SwappableLink the lwIP Rc sink requires) -
+    # cross-compiles on every Phase W target. session-reconnect pulls
+    # alloc; session-unicast is the reconnect module's gate; the
+    # declare-keyexpr + declare-undeclare pair keeps the subset
+    # COHERENT (the cache append/prune hooks live in those send
+    # paths - a reconnect build with no declare emits has a dead
+    # cache and fails deny-warnings, by design). The MCU reconnect
+    # SUPERVISOR (re-dial loop) awaits the MCU session-open runtime;
+    # this build-checks the seam layer, as G.12 does for multicast.
+    if (cd crates && cargo build -p wz-session-core \
+        --target "$t" --no-default-features \
+        --features session-reconnect,session-unicast,declare-keyexpr,declare-undeclare,no_std --quiet); then
+        echo "  G.13 session-reconnect MCU $t OK"
+    else
+        echo "  G.13 session-reconnect MCU $t FAIL" >&2
+        fail=1
+    fi
+    # G.14 (R311y25) freertos-sys cross-real — compiles the vendored
+    # FreeRTOS-Kernel ARM_CM3 port + core + heap_4 against the
+    # cooperative-profile reference config, flipping freertos-sys's
+    # `freertos_real_build` path on (= the LAYER-2 RTOS foundation). Runs
+    # ONLY on thumbv7m-none-eabi: the vendored ARM_CM3 port is ARMv7-M /
+    # Cortex-M3-specific (thumbv6m=ARMv6-M needs ARM_CM0, thumbv8m needs
+    # ARM_CM23/33, riscv has no port), and port/cross-test is the mps2-an385
+    # (M3) reference config. Other triples get their own port + config in a
+    # later round. Mirrors G.6's WZ_LWIP_PORT cross-real pattern but with
+    # WZ_FREERTOS_CONFIG supplying the consumer config (the -sys crate bakes
+    # no default — symmetry with lwip-sys).
+    if [[ "$t" == "thumbv7m-none-eabi" ]]; then
+        if (cd crates && \
+            WZ_FREERTOS_CONFIG="$(realpath freertos-sys/port/cross-test)" \
+            cargo build -p freertos-sys --target "$t" --quiet); then
+            echo "  G.14 cross-real freertos-sys $t OK"
+        else
+            echo "  G.14 cross-real freertos-sys $t FAIL" >&2
+            fail=1
+        fi
+        # G.15 (R311y26) wz-runtime-freertos — the FreeRTOS cooperative
+        # single-task PROFILE: FreertosClock (ClockSource over
+        # xTaskGetTickCount) + FreertosAllocator (heap_4 GlobalAlloc) +
+        # FreertosRuntime = CoopRuntime<FreertosClock> (reuses the
+        # wz-runtime-coop executor SSOT). Cross-compiles against the real
+        # freertos-sys kernel build (WZ_FREERTOS_CONFIG supplied). thumbv7m
+        # only — same ARM_CM3 constraint as G.14.
+        if (cd crates && \
+            WZ_FREERTOS_CONFIG="$(realpath freertos-sys/port/cross-test)" \
+            cargo build -p wz-runtime-freertos --target "$t" --quiet); then
+            echo "  G.15 wz-runtime-freertos $t OK"
+        else
+            echo "  G.15 wz-runtime-freertos $t FAIL" >&2
+            fail=1
+        fi
+    fi
+    # G.16 (R311y29) zephyr-sys — the Zephyr cooperative profile's hand-FFI
+    # crate. PURE extern declarations (no build.rs, no vendored kernel, NO
+    # bindgen); the symbols resolve at the Z2 deploy's Zephyr image link, so
+    # a standalone cross build is a clean lib-check. Runs on EVERY Phase W
+    # triple (unlike G.14/G.15's thumbv7m-only ARM_CM3 kernel build) because
+    # it compiles no C — proving the FFI crate is no_std-portable.
+    if (cd crates && cargo build -p zephyr-sys --target "$t" --quiet); then
+        echo "  G.16 zephyr-sys $t OK"
+    else
+        echo "  G.16 zephyr-sys $t FAIL" >&2
+        fail=1
+    fi
+    # G.17 (R311y29) wz-runtime-zephyr — the Zephyr cooperative single-task
+    # PROFILE: ZephyrClock (ClockSource over sys_clock_tick_get) +
+    # ZephyrAllocator (k_malloc/k_free GlobalAlloc) + ZephyrRuntime =
+    # CoopRuntime<ZephyrClock> (reuses the wz-runtime-coop executor SSOT,
+    # exactly like wz-runtime-freertos). Pure-cargo cross-build on every
+    # Phase W triple; the kernel-symbol link is the Z2 deploy's job.
+    if (cd crates && cargo build -p wz-runtime-zephyr --target "$t" --quiet); then
+        echo "  G.17 wz-runtime-zephyr $t OK"
+    else
+        echo "  G.17 wz-runtime-zephyr $t FAIL" >&2
+        fail=1
+    fi
+    return "$fail"
+}
+
 layer_g_cross_compile_cortex_m() {
     # Default gate (R311pt — opt-in axis retired; the wz-runtime-coop
     # caller landed in R311av+, satisfying the "promote to default once a
-    # real cross-compile consumer exists" condition stated below). The
-    # per-target + no-targets-installed graceful SKIPs further down keep a
+    # real cross-compile consumer exists" condition stated above). The
+    # per-target + no-targets-installed graceful SKIPs below keep a
     # host-only machine from being forced to install the toolchain.
     local targets=(
         thumbv7em-none-eabihf
@@ -19952,436 +20404,98 @@ layer_g_cross_compile_cortex_m() {
         thumbv8m.main-none-eabihf
         riscv32imac-unknown-none-elf
     )
-    local installed
+    local installed t
     installed="$(rustup target list --installed 2>/dev/null)"
-    local any_ran=0
-    local fail=0
+    local -a runnable=()
     for t in "${targets[@]}"; do
-        if ! grep -q "^$t$" <<< "$installed"; then
-            echo "  $t SKIP (rustup target not installed; add: rustup target add $t)"
-            continue
-        fi
-        any_ran=1
-        # G.1 (R311ak) wz-runtime-core — §5.P trait skeleton.
-        if (cd crates && cargo build -p wz-runtime-core \
-            --target "$t" --no-default-features --quiet); then
-            echo "  G.1 wz-runtime-core $t OK"
-        else
-            echo "  G.1 wz-runtime-core $t FAIL" >&2
-            fail=1
-        fi
-        # G.2 (R311am) wz facade — no_std cfg_attr toggle when
-        # runtime-tokio is not active in the feature set.
-        if (cd crates && cargo build -p wz \
-            --target "$t" --no-default-features --quiet); then
-            echo "  G.2 wz facade $t OK"
-        else
-            echo "  G.2 wz facade $t FAIL" >&2
-            fail=1
-        fi
-        # G.3 (R311aq) wz-codecs — no_std + alloc; codec wire
-        # encode/decode MCU-readiness. Default features kept on so
-        # the full codec catalog exercises the alloc-prelude shim
-        # end-to-end (R40 carry resolved).
-        if (cd crates && cargo build -p wz-codecs \
-            --target "$t" --quiet); then
-            echo "  G.3 wz-codecs $t OK"
-        else
-            echo "  G.3 wz-codecs $t FAIL" >&2
-            fail=1
-        fi
-        # G.4 (R311au scope C) wz-runtime-coop — Phase W MCU profile
-        # sync primitive aliases (critical_section::Mutex<RefCell<T>>
-        # binding). #![no_std] sync surface, no alloc; covers every
-        # Phase W rustup target including Cortex-M0+ (thumbv6m).
-        if (cd crates && cargo build -p wz-runtime-coop \
-            --target "$t" --quiet); then
-            echo "  G.4 wz-runtime-coop $t OK"
-        else
-            echo "  G.4 wz-runtime-coop $t FAIL" >&2
-            fail=1
-        fi
-        # G.4-alloc (R311av + R311bb) wz-runtime-coop --features alloc.
-        # CoopRuntime self-rolled cooperative task pool + impl Runtime
-        # + CoopTime impl TimeSource. R311bb closed the M0+ gap via
-        # portable-atomic{,-util}: thumbv6m no longer SKIPs because
-        # the crate::atomic alias module substitutes
-        # portable_atomic_util::Arc + portable_atomic::Atomic* on
-        # targets without native CAS. The polyfill rides on the same
-        # critical_section impl the deploy crate supplies for
-        # sync::Mutex, so no extra runtime mechanism is layered on.
-        if (cd crates && cargo build -p wz-runtime-coop \
-            --target "$t" --features alloc --quiet); then
-            echo "  G.4-alloc wz-runtime-coop $t OK"
-        else
-            echo "  G.4-alloc wz-runtime-coop $t FAIL" >&2
-            fail=1
-        fi
-        # G.5 (R311ax + R311bb) wz facade --features runtime-coop.
-        # Composes wz-runtime-coop via the public facade surface so a
-        # consumer enabling `runtime-coop` finds `wz::runtime_coop::*`
-        # cross-compiled on every Phase W target. R311bb removed the
-        # M0+ SKIP that inherited from G.4-alloc.
-        if (cd crates && cargo build -p wz \
-            --target "$t" --no-default-features \
-            --features runtime-coop --quiet); then
-            echo "  G.5 wz facade runtime-coop $t OK"
-        else
-            echo "  G.5 wz facade runtime-coop $t FAIL" >&2
-            fail=1
-        fi
-        # G.6 (R311az-3c) WZ_LWIP_PORT cross-real lane — verifies the
-        # `lwip_real_build` cfg path end-to-end:
-        #   1. lwip-sys cross-compiles the real lwIP NO_SYS source set
-        #      against the deploy-supplied port (cross-test in-tree).
-        #   2. bindgen with --target=$t emits real FFI bindings into
-        #      the no_std lwip-sys crate.
-        #   3. wz-link-lwip's lwip_real_build cfg flips on, exposing
-        #      LwipLink + LwipUdpSocket against the real FFI symbols.
-        #   4. wz facade re-exports the `wz::link_lwip` namespace.
-        # SKIPs riscv32imac because the matching `riscv32-unknown-elf-
-        # gcc` cross C toolchain is not installed on the developer
-        # machine — the deploy is responsible for that toolchain, not
-        # the lwip-sys consumer. The check still proves the cross-real
-        # path on the entire ARM lineup, which is the mechanical gate
-        # preset-cortex-m4-default catalog truthfulness depends on.
-        # R311y757 — ASK, do not assume. This skipped riscv32imac unconditionally
-        # while SAYING `riscv32-unknown-elf-gcc not installed on this host`, so
-        # the sentence was a claim about a machine nobody had asked. The moment a
-        # host has the toolchain the message becomes false and the lane still
-        # skips — a gate that cannot be satisfied is not a gate.
-        #
-        # AND THE NAME WAS WRONG FOR EVERY DISTRO THAT SHIPS ONE: Ubuntu offers
-        # `gcc-riscv64-unknown-elf`, whose binary is `riscv64-unknown-elf-gcc`
-        # and which emits 32-bit code under `-march=rv32imac`. There is no
-        # `riscv32-unknown-elf-gcc` to install, so the original name could only
-        # ever be absent. Both spellings are accepted, in that order.
-        _riscv_cc=""
-        _cc_env=()
-        if [[ "$t" == "riscv32imac-unknown-none-elf" ]]; then
-            for _c in riscv32-unknown-elf-gcc riscv64-unknown-elf-gcc; do
-                command -v "$_c" >/dev/null 2>&1 && { _riscv_cc="$_c"; break; }
-            done
-            # SCOPED TO THIS TARGET. The probe and the export both live inside
-            # the riscv arm on purpose: `_riscv_cc` is set on every pass of this
-            # loop otherwise, and an unconditional `TARGET_CC` would hand a
-            # RISC-V compiler to the ARM builds — a wrong fix that would have
-            # looked like a working one until the whole lineup broke.
-            # AND THE C LIBRARY'S HEADERS, which the ARM lineup never needed.
-            # `gcc-arm-none-eabi` bundles newlib inside its own sysroot, so a
-            # bare `-march=` is enough there. The riscv package does not: it
-            # advertises an `rv32imac/ilp32` multilib and ships picolibc as a
-            # SEPARATE tree, so the compiler runs and then cannot find
-            # `string.h`. MEASURED, after the compiler was already being invoked
-            # correctly — `fatal error: string.h: No such file or directory`.
-            # One path, so a test rather than a loop (shellcheck SC2043 caught
-            # the loop-over-one this was first written as).
-            _rv_libc=""
-            [[ -d /usr/lib/picolibc/riscv64-unknown-elf/include ]] \
-                && _rv_libc=/usr/lib/picolibc/riscv64-unknown-elf/include
-            [[ -n "$_riscv_cc" ]] && _cc_env=(
-                "TARGET_CC=$_riscv_cc"
-                "CFLAGS=-march=rv32imac -mabi=ilp32${_rv_libc:+ -isystem $_rv_libc} -ffreestanding"
-            )
-        fi
-        # R311y757 — THE C HALF IS SOLVED; THE BINDGEN HALF IS NOT, and the skip
-        # now says which. `lwip-sys` is two stages: `cc` compiles lwIP, then
-        # BINDGEN parses the headers through libclang. With the toolchain and
-        # picolibc named above, stage 1 compiles for rv32imac — measured — and
-        # stage 2 stops at `unknown target triple
-        # 'riscv32imac-unknown-none-elf'`, which libclang does not know. That is
-        # a bindgen target-mapping job, not a package to install, so the lane
-        # skips with the reason it actually has instead of a guess about a
-        # missing compiler.
-        if [[ "$t" == "riscv32imac-unknown-none-elf" ]]; then
-            if [[ -z "$_riscv_cc" ]]; then
-                echo "  G.6 cross-real lwip-sys $t SKIP (no riscv bare-metal C toolchain: tried riscv32-unknown-elf-gcc, riscv64-unknown-elf-gcc)"
-            else
-                echo "  G.6 cross-real lwip-sys $t SKIP (C stage builds with $_riscv_cc; bindgen/libclang rejects the triple)"
-            fi
-        # R311y757 — HAND THE COMPILER TO THE LANE THAT NEEDS IT. Finding it is
-        # not the same as it being used: the `cc` crate looks for
-        # `CC_riscv32imac_unknown_none_elf` and finds nothing, because the binary
-        # this distro installs is named `riscv64-unknown-elf-gcc` and emits
-        # 32-bit code under `-march=rv32imac`. MEASURED: with the toolchain
-        # present but unnamed, G.6 failed with `CC_riscv32imac_unknown_none_elf =
-        # None`. `TARGET_CC` is set only for the riscv target, so the ARM lineup
-        # keeps resolving its own compiler exactly as before.
-        elif (cd crates && \
-                WZ_LWIP_PORT="$(realpath lwip-sys/port/cross-test)" \
-                env "${_cc_env[@]}" \
-                cargo build -p wz-link-lwip \
-                    --target "$t" --quiet) && \
-             (cd crates && \
-                WZ_LWIP_PORT="$(realpath lwip-sys/port/cross-test)" \
-                env "${_cc_env[@]}" \
-                cargo build -p wz \
-                    --target "$t" --no-default-features \
-                    --features runtime-coop --quiet); then
-            echo "  G.6 cross-real lwip-sys $t OK"
-            _g6_libclang_record "$t"
-        else
-            echo "  G.6 cross-real lwip-sys $t FAIL" >&2
-            _g6_libclang_record "$t"
-            fail=1
-        fi
-        # G.7 (R311ih) static-scouting synth on the MCU profile. Proves
-        # the scout_static bounded-seam synth composes no-alloc on every
-        # Phase W target (the §2.4.3 reason #2 claim — static mode is for
-        # tiny static-only deploys), and that the facade -> wz-runtime-coop
-        # -> wz-session-core funnel cross-compiles with scouting-static on.
-        # No-alloc: the synth builds onto BoundedVec/BoundedString, so it
-        # rides every target including thumbv6m (Cortex-M0+). (Since R311ja
-        # the session-unicast subset rides thumbv6m too — G.10 — so this is
-        # no longer the only session-core path that clears ARMv6-M.)
-        if (cd crates && cargo build -p wz-session-core \
-            --target "$t" --no-default-features --features scouting-static --quiet) \
-           && (cd crates && cargo build -p wz \
-            --target "$t" --no-default-features \
-            --features runtime-coop,scouting-static --quiet); then
-            echo "  G.7 scouting-static MCU synth $t OK"
-        else
-            echo "  G.7 scouting-static MCU synth $t FAIL" >&2
-            fail=1
-        fi
-        # G.8 (R311im) reassembly slot FSM + dispatcher on the MCU profile.
-        # Proves the Tier B reassembly module cross-compiles no_std on every
-        # Phase W target via the `no_std` profile feature
-        # (`sce-rust-runtime?/no_std` — the heapless engine variant). R311im
-        # dropped the `sce-rust-runtime/no_std` force from the `reassembly`
-        # capability feature, so the no_std runtime is now selected by this
-        # PROFILE feature, not forced by the capability — which is what lets
-        # the AP build (std runtime) host the same module (Layer C1l). The
-        # one --no-std codegen emit serves both profiles (SCE pin 1474091c2
-        # SceBytes<N> alias).
-        if (cd crates && cargo build -p wz-session-core \
-            --target "$t" --no-default-features --features reassembly,no_std --quiet); then
-            echo "  G.8 reassembly MCU $t OK"
-        else
-            echo "  G.8 reassembly MCU $t FAIL" >&2
-            fail=1
-        fi
-        # G.9 (R311in carry[3]) wz-runtime-coop reassembly seam on the MCU
-        # profile. Proves the live MCU reassembly consumer (reassembly_rx:
-        # CoopReassembly + mcu_reassembly() over the SCE buffer-pool SSOT
-        # reassembly_pool_mcu.scxml) cross-compiles no_std + no-alloc on
-        # every Phase W target. The bottom-up MCU consumer of the
-        # ReassemblyDispatcher that G.8 only build-checked at the
-        # session-core layer; the ~22 KiB no_std dispatcher (vendor/sce
-        # 4ec1aa642 metadata elision + fragment.chunk payload-field
-        # removal) is SRAM-resident. No alloc: the seam stages into inline
-        # BoundedVec, so it rides every target including thumbv6m (M0+).
-        if (cd crates && cargo build -p wz-runtime-coop \
-            --target "$t" --features reassembly --quiet); then
-            echo "  G.9 reassembly seam MCU $t OK"
-        else
-            echo "  G.9 reassembly seam MCU $t FAIL" >&2
-            fail=1
-        fi
-        # G.10 (Stage 4a) wz-runtime-coop --features session-unicast.
-        # Proves the session-tier `impl SessionRuntime for CoopRuntime`
-        # link-sink binding + the `SessionLinkActions<CoopRuntime<C>,
-        # CoopTime<C>>` type-check (the precondition the MCU sync drive
-        # loop consumer depends on) cross-compile on the alloc-capable
-        # MCU targets — INCLUDING thumbv6m (Cortex-M0/M0+) since R311ja. The
-        # session_actions bundle handle was lifted from a hard-coded
-        # `alloc::sync::Arc` to the per-profile `SessionRuntime::ActionsHandle`
-        # GAT: tokio binds `Arc` (multi-thread), the lwIP MCU profile binds
-        # `Rc` (single-task drive loop). `Rc` lowers to plain loads / stores,
-        # so session-unicast no longer needs `target_has_atomic = "ptr"` and
-        # cross-compiles on ARMv6-M. This IS the no-alloc M0 session reach the
-        # prior rounds deferred; M3/M4/M7/M33 + RISC-V IMAC keep building too.
-        if (cd crates && cargo build -p wz-runtime-coop \
-            --target "$t" --features alloc,wz-session-core/alloc,session-unicast --quiet); then
-            echo "  G.10 session-unicast MCU $t OK"
-        else
-            echo "  G.10 session-unicast MCU $t FAIL" >&2
-            fail=1
-        fi
-        # G.11 (Stage 4b) wz-session-lwip + facade session-lwip cross-real.
-        # The tier-clean MCU session shell — run_session sync drive loop +
-        # LwipUdpDriver (BoxedLinkDriver over LwipUdpSocket) — over the real
-        # lwIP build. Like wz-link-lwip the crate is #![cfg(lwip_real_build)]
-        # (empty without WZ_LWIP_PORT), so this mirrors G.6's cross-real
-        # setup: builds the crate with `reassembly` on (exercises the
-        # reassembly drive path) AND the facade `session-lwip` re-export.
-        # SKIPs riscv32imac (no riscv32-unknown-elf-gcc for the lwIP C
-        # cross build, same as G.6). thumbv6m (M0+) NO LONGER SKIPs since
-        # R311ja: the `Rc` ActionsHandle (see G.10) lets the whole MCU
-        # session shell — handshake + reassembly consumer + facade — cross-
-        # compile on ARMv6-M, the no-alloc M0 session reach end to end.
-        # R311mc: two more facade builds pin the multicast forward — proving
-        # wz's wz-session-lwip?/ weak-forwards cfg-in the MCU multicast drive
-        # loop + MulticastReplyQueue THROUGH the facade (not just at the
-        # wz-session-lwip crate boundary, C1m). Build 3 is the Arc-free subset
-        # (transport-multicast + TX codecs + query-queryable) on EVERY target:
-        # the queryable observer-staging ResponseSink is Rc<RefCell<VecDeque>>-
-        # backed, so it rides thumbv6m. Build 4 ADDS liveliness-token, which
-        # now ALSO rides thumbv6m (R311me): the MCU multicast liveliness reply
-        # stages through the same Rc-backed MulticastReplyQueue (the inline-
-        # fire path), and collapsing the deferred_fire module gate to
-        # `deferred-fire` alone stopped liveliness-token from spuriously
-        # compiling that Arc-bearing module. So the full TX-codec +
-        # liveliness-token subset cross-builds on EVERY non-riscv target —
-        # the M0 liveliness inline-fire reach the prior rounds carried.
-        # R311mf/R311mg: a final facade build pins the multicast Fragment RX/TX
-        # path THROUGH the facade (session-lwip,transport-multicast,
-        # transport-fragmentation,codec-push) — proving wz's
-        # wz-session-lwip?/transport-fragmentation forward (R311mg) reaches the
-        # MCU reassembly Router + TX splitter, which cross-compile on every
-        # non-riscv target including thumbv6m (Vec-backed, no Arc), the M0
-        # fragment reach. Built via the facade (not -p wz-session-lwip direct)
-        # so the public composition surface is what is tested, like Build 3/4.
-        # R311y757 — probed, not assumed; see G.6 above for why the old name
-        # could never have been present on a distro that ships one.
-        _riscv_cc=""
-        for _c in riscv32-unknown-elf-gcc riscv64-unknown-elf-gcc; do
-            command -v "$_c" >/dev/null 2>&1 && { _riscv_cc="$_c"; break; }
-        done
-        # R311y757 — same two stages, same wall; see G.6 for the measurement.
-        if [[ "$t" == "riscv32imac-unknown-none-elf" ]]; then
-            if [[ -z "$_riscv_cc" ]]; then
-                echo "  G.11 session-lwip cross-real $t SKIP (no riscv bare-metal C toolchain: tried riscv32-unknown-elf-gcc, riscv64-unknown-elf-gcc)"
-            else
-                echo "  G.11 session-lwip cross-real $t SKIP (C stage builds with $_riscv_cc; bindgen/libclang rejects the triple)"
-            fi
-        elif (cd crates && \
-                WZ_LWIP_PORT="$(realpath lwip-sys/port/cross-test)" \
-                cargo build -p wz-session-lwip \
-                    --target "$t" --features reassembly --quiet) && \
-             (cd crates && \
-                WZ_LWIP_PORT="$(realpath lwip-sys/port/cross-test)" \
-                cargo build -p wz \
-                    --target "$t" --no-default-features \
-                    --features session-lwip --quiet) && \
-             (cd crates && \
-                WZ_LWIP_PORT="$(realpath lwip-sys/port/cross-test)" \
-                cargo build -p wz \
-                    --target "$t" --no-default-features \
-                    --features session-lwip,transport-multicast,codec-push,codec-response,codec-response-final,query-queryable \
-                    --quiet) && \
-             (cd crates && \
-                WZ_LWIP_PORT="$(realpath lwip-sys/port/cross-test)" \
-                cargo build -p wz \
-                    --target "$t" --no-default-features \
-                    --features session-lwip,transport-multicast,codec-push,codec-response,codec-response-final,liveliness-token,query-queryable \
-                    --quiet) && \
-             (cd crates && \
-                WZ_LWIP_PORT="$(realpath lwip-sys/port/cross-test)" \
-                cargo build -p wz \
-                    --target "$t" --no-default-features \
-                    --features session-lwip,transport-multicast,transport-fragmentation,codec-push \
-                    --quiet); then
-            echo "  G.11 session-lwip cross-real $t OK"
-        else
-            echo "  G.11 session-lwip cross-real $t FAIL" >&2
-            fail=1
-        fi
-        # G.12 (Round A) multicast session FSM + per-peer FSM + dispatcher
-        # on the MCU profile. Proves the handshake-free multicast cluster
-        # (session_fsm_multicast.scxml + multicast_peer.scxml + the
-        # multicast_dispatch Router) cross-compiles no_std + no-alloc on
-        # every Phase W target via the `no_std` profile feature
-        # (`sce-rust-runtime?/no_std` + portable-atomic, same as G.8
-        # reassembly). The Router is allocation-free (inline `[PeerSlot;
-        # MAX_PEERS]` pool, fixed ZID buffers), so it rides every target
-        # including thumbv6m (M0+, CAS-less via the critical-section
-        # backend). The lwIP consumer + the real multicast socket land in
-        # the transport-multicast round; this build-checks the session-core
-        # layer, mirroring how G.8 build-checks reassembly.
-        if (cd crates && cargo build -p wz-session-core \
-            --target "$t" --no-default-features --features session-multicast,no_std --quiet); then
-            echo "  G.12 multicast MCU $t OK"
-        else
-            echo "  G.12 multicast MCU $t FAIL" >&2
-            fail=1
-        fi
-        # G.13 (R311ki) session-reconnect MCU composition. Proves the
-        # reconnect module - the declaration cache, reset/replay, and the
-        # LocalSwappableLink single-task swap seam (the RefCell-backed,
-        # no-Send twin of SwappableLink the lwIP Rc sink requires) -
-        # cross-compiles on every Phase W target. session-reconnect pulls
-        # alloc; session-unicast is the reconnect module's gate; the
-        # declare-keyexpr + declare-undeclare pair keeps the subset
-        # COHERENT (the cache append/prune hooks live in those send
-        # paths - a reconnect build with no declare emits has a dead
-        # cache and fails deny-warnings, by design). The MCU reconnect
-        # SUPERVISOR (re-dial loop) awaits the MCU session-open runtime;
-        # this build-checks the seam layer, as G.12 does for multicast.
-        if (cd crates && cargo build -p wz-session-core \
-            --target "$t" --no-default-features \
-            --features session-reconnect,session-unicast,declare-keyexpr,declare-undeclare,no_std --quiet); then
-            echo "  G.13 session-reconnect MCU $t OK"
-        else
-            echo "  G.13 session-reconnect MCU $t FAIL" >&2
-            fail=1
-        fi
-        # G.14 (R311y25) freertos-sys cross-real — compiles the vendored
-        # FreeRTOS-Kernel ARM_CM3 port + core + heap_4 against the
-        # cooperative-profile reference config, flipping freertos-sys's
-        # `freertos_real_build` path on (= the LAYER-2 RTOS foundation). Runs
-        # ONLY on thumbv7m-none-eabi: the vendored ARM_CM3 port is ARMv7-M /
-        # Cortex-M3-specific (thumbv6m=ARMv6-M needs ARM_CM0, thumbv8m needs
-        # ARM_CM23/33, riscv has no port), and port/cross-test is the mps2-an385
-        # (M3) reference config. Other triples get their own port + config in a
-        # later round. Mirrors G.6's WZ_LWIP_PORT cross-real pattern but with
-        # WZ_FREERTOS_CONFIG supplying the consumer config (the -sys crate bakes
-        # no default — symmetry with lwip-sys).
-        if [[ "$t" == "thumbv7m-none-eabi" ]]; then
-            if (cd crates && \
-                WZ_FREERTOS_CONFIG="$(realpath freertos-sys/port/cross-test)" \
-                cargo build -p freertos-sys --target "$t" --quiet); then
-                echo "  G.14 cross-real freertos-sys $t OK"
-            else
-                echo "  G.14 cross-real freertos-sys $t FAIL" >&2
-                fail=1
-            fi
-            # G.15 (R311y26) wz-runtime-freertos — the FreeRTOS cooperative
-            # single-task PROFILE: FreertosClock (ClockSource over
-            # xTaskGetTickCount) + FreertosAllocator (heap_4 GlobalAlloc) +
-            # FreertosRuntime = CoopRuntime<FreertosClock> (reuses the
-            # wz-runtime-coop executor SSOT). Cross-compiles against the real
-            # freertos-sys kernel build (WZ_FREERTOS_CONFIG supplied). thumbv7m
-            # only — same ARM_CM3 constraint as G.14.
-            if (cd crates && \
-                WZ_FREERTOS_CONFIG="$(realpath freertos-sys/port/cross-test)" \
-                cargo build -p wz-runtime-freertos --target "$t" --quiet); then
-                echo "  G.15 wz-runtime-freertos $t OK"
-            else
-                echo "  G.15 wz-runtime-freertos $t FAIL" >&2
-                fail=1
-            fi
-        fi
-        # G.16 (R311y29) zephyr-sys — the Zephyr cooperative profile's hand-FFI
-        # crate. PURE extern declarations (no build.rs, no vendored kernel, NO
-        # bindgen); the symbols resolve at the Z2 deploy's Zephyr image link, so
-        # a standalone cross build is a clean lib-check. Runs on EVERY Phase W
-        # triple (unlike G.14/G.15's thumbv7m-only ARM_CM3 kernel build) because
-        # it compiles no C — proving the FFI crate is no_std-portable.
-        if (cd crates && cargo build -p zephyr-sys --target "$t" --quiet); then
-            echo "  G.16 zephyr-sys $t OK"
-        else
-            echo "  G.16 zephyr-sys $t FAIL" >&2
-            fail=1
-        fi
-        # G.17 (R311y29) wz-runtime-zephyr — the Zephyr cooperative single-task
-        # PROFILE: ZephyrClock (ClockSource over sys_clock_tick_get) +
-        # ZephyrAllocator (k_malloc/k_free GlobalAlloc) + ZephyrRuntime =
-        # CoopRuntime<ZephyrClock> (reuses the wz-runtime-coop executor SSOT,
-        # exactly like wz-runtime-freertos). Pure-cargo cross-build on every
-        # Phase W triple; the kernel-symbol link is the Z2 deploy's job.
-        if (cd crates && cargo build -p wz-runtime-zephyr --target "$t" --quiet); then
-            echo "  G.17 wz-runtime-zephyr $t OK"
-        else
-            echo "  G.17 wz-runtime-zephyr $t FAIL" >&2
-            fail=1
-        fi
+        grep -qxF "$t" <<< "$installed" && runnable+=("$t")
     done
-    if [[ $any_ran -eq 0 ]]; then
+    if (( ${#runnable[@]} == 0 )); then
+        for t in "${targets[@]}"; do
+            echo "  $t SKIP (rustup target not installed; add: rustup target add $t)"
+        done
         echo "Layer G SKIP (no Phase W rustup targets installed)"
         return 0
     fi
-    return "$fail"
+
+    # The width: one triple per core up to all of them, and each triple's
+    # cargo an equal share of the cores, so the lane asks for no more than
+    # it was granted.
+    local cores="${BX_GRANT_CORES:-}"
+    [[ "$cores" =~ ^[1-9][0-9]*$ ]] || cores="$(nproc 2>/dev/null)"
+    [[ "$cores" =~ ^[1-9][0-9]*$ ]] || cores=1
+    local width=${#runnable[@]}
+    (( cores < width )) && width=$cores
+    local jobs=$(( (cores + width - 1) / width ))
+
+    local logs
+    logs="$(mktemp -d)" || return 1
+    local -a active=() kept=()
+    local -A triple_of=()
+    local next=0 finished=0 done_pid="" p
+    while (( next < ${#runnable[@]} || ${#active[@]} > 0 )); do
+        if (( next < ${#runnable[@]} && ${#active[@]} < width )); then
+            t="${runnable[next]}"
+            next=$((next + 1))
+            # A subshell of its own: the target directory and the job share
+            # reach this triple's cargo and no other, and the triple's verdict
+            # is the file it writes last, so a run cut short leaves none.
+            (
+                CARGO_TARGET_DIR="$WZ_ARTIFACTS/crates/target/layer-g/$t" \
+                    CARGO_BUILD_JOBS="$jobs" _layer_g_target "$t"
+                echo "$?" >"$logs/$t.rc"
+            ) >"$logs/$t.log" 2>&1 &
+            p=$!
+            active+=("$p")
+            triple_of[$p]="$t"
+            continue
+        fi
+        # By id, never a bare `wait -n`: that would also answer for a child
+        # this lane did not start, the run's own log tee among them.
+        done_pid=""
+        wait -n -p done_pid "${active[@]}"
+        if [[ -z "$done_pid" ]]; then
+            # No id came back (a signal, or a bash older than 5.1 without
+            # `-p`): wait for every running triple, which always ends.
+            wait "${active[@]}"
+            for p in "${active[@]}"; do
+                finished=$((finished + 1))
+                echo "  Layer G: ${triple_of[$p]} finished ($finished of ${#runnable[@]})"
+            done
+            active=()
+            continue
+        fi
+        finished=$((finished + 1))
+        echo "  Layer G: ${triple_of[$done_pid]} finished ($finished of ${#runnable[@]})"
+        kept=()
+        for p in "${active[@]}"; do
+            [[ "$p" == "$done_pid" ]] || kept+=("$p")
+        done
+        active=("${kept[@]}")
+    done
+
+    # Every triple's lines, in the triple order, then the verdict.
+    local -a red=()
+    local rc
+    for t in "${targets[@]}"; do
+        if ! grep -qxF "$t" <<< "$installed"; then
+            echo "  $t SKIP (rustup target not installed; add: rustup target add $t)"
+            continue
+        fi
+        cat "$logs/$t.log"
+        rc="$(cat "$logs/$t.rc" 2>/dev/null)"
+        if [[ -z "$rc" ]]; then
+            echo "  Layer G: $t left no verdict (its run was cut short)" >&2
+        fi
+        [[ "$rc" == "0" ]] || red+=("$t")
+    done
+    rm -rf -- "$logs"
+    if (( ${#red[@]} > 0 )); then
+        echo "  Layer G FAIL: ${#red[@]} of ${#runnable[@]} triple(s) red: ${red[*]}" >&2
+        return 1
+    fi
+    echo "  Layer G: ${#runnable[@]} triple(s) built, $width at a time, CARGO_BUILD_JOBS=$jobs each"
+    return 0
 }
 
 # ─── Layer Q — QEMU mps2 multi-machine UDP loopback e2e demo run ───
