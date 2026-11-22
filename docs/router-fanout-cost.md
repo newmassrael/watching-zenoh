@@ -112,7 +112,7 @@ taken in this round. Each row says how to confirm it.
 | # | Cost, per subscriber unless said | Evidence | Upstream | Estimated share of the fan-out gap | Textbook fix |
 |---|---|---|---|---|---|
 | 1 | The routing thread writes each subscriber's frame to its socket itself. Once one Put takes the routing thread longer than 8 us, every subscriber's link has been quiet that long by the next Put, so each Put to each subscriber is a write system call on the one thread, with no batch | `flush_inline` and its thresholds (section 2); the TCP link installs the inline write (`crates/wz-runtime-tokio/src/link_pipeline.rs:837`) | the producer only notifies; the face's task writes, in batches | largest, if confirmed: a write call costs microseconds where upstream's per-face cost is an encode into memory; the feedback (slower Put, more inline writes) fits a gap that grows with N | the routing thread never does a destination's I/O: a send made on behalf of a fan-out stages and wakes, and the inline write is kept for a sender's own lone message. Confirm first: count write calls per thread on the router (`perf trace -s`) against Puts routed |
-| 2 | The carrier was copied, boxed, measured and encoded for every subscriber: 3 of the 5 allocations and about 382 of the 444 bytes a subscriber added, two walks of the message | `crates/wz-runtime-tokio/tests/router_hot_path_cost.rs:263`; the steps of section 2 | a stack `Push` and a reference count | second; all of the per-subscriber allocation a forward makes but the frame | encode once, share the bytes: **done in this round** for a Put the credit stage sends (section 5) |
+| 2 | The carrier was copied, boxed, measured and encoded for every subscriber: 4 of the 5 allocations and 400 of the 444 bytes a subscriber added (measured after the change, section 5), two walks of the message | `crates/wz-runtime-tokio/tests/router_hot_path_cost.rs:263`; the steps of section 2 | a stack `Push` and a reference count | second; all of the per-subscriber allocation a forward made but one | encode once, share the bytes: **done in this round** for a Put the credit stage sends (section 5) |
 | 3 | Locks and atomics per subscriber: the egress chain's read lock, the held queue's mutex, the chain mark (`SeqCst`), the conduit's mutex, the staged counter and the flush flag | section 2 | the stage's one mutex and one notify | small to moderate; each is uncontended, and cache lines move between the routing thread and the writers | read the egress chain once per fan-out; read the held queue's emptiness from an atomic beside it; `Acquire` where no total order is read |
 | 4 | Per Put, not per subscriber: the tables taken per message rather than per frame, the key resolved to an owned `String`, the carrier deep-copied, the memo read by hashing key text | section 2; 5 of the 10 allocations of a forward to one subscriber | one read lock, a mapping-id lookup, a cached `Arc` route | most of the 1-subscriber and 8 B gap (3.3 and 3.2 times), little of the 16-subscriber one | take the tables once per frame; key the client memo by the inbound face's mapping id; forward a literal Put's received bytes when nothing in it changes |
 | 5 | A frame buffer allocated per frame on a path that lends no slot (the immediate path, `crates/wz-session-core/src/session_actions.rs:11059` for the staged one) | the fifth per-subscriber allocation of the record | batches reused through a refill ring | small; zero where the link lends slots (`transport-tx-lend`) | a pool of batch buffers per link, which the lending links already have: confirm the router's links take that path under fan-out |
@@ -143,6 +143,18 @@ a waiting send of encoded bytes beside the probe, and is the next step of this r
 The count of carriers encoded is `RouterForwarder::client_carrier_encodes`; the tests that hold it
 are `a_fan_out_to_many_clients_encodes_its_carrier_once` and
 `a_fan_out_outside_the_credit_stage_encodes_no_shared_carrier` in
-`crates/wz-runtime-tokio/src/router_forward.rs`. The allocation budget of
-`crates/wz-runtime-tokio/tests/router_hot_path_cost.rs` records the blocking cases' new figures in
-the round that measures them.
+`crates/wz-runtime-tokio/src/router_forward.rs`.
+
+What the change measured, in the allocation budget of the uncongested forward
+(`crates/wz-runtime-tokio/tests/router_hot_path_cost.rs:263`, a build without `time-hlc`):
+
+| Case | Before: allocations, bytes a forward | After | Per subscriber past the first, before; after |
+|---|---|---|---|
+| blocking Put, 1 subscriber | 10, 602 | 7, 233 | |
+| blocking Put, 16 subscribers | 85, 7,262 | 22, 893 | 5 and 444 B; 1 and 44 B |
+| droppable Put, 1 and 16 subscribers | 8, 472; 68, 6,142 | unchanged | 4 and 378 B; unchanged (row 2's next step) |
+
+A blocking forward to sixteen subscribers allocates 74 % fewer times and asks for 88 % fewer bytes.
+The one allocation a subscriber still costs is its frame (row 5); the one a fan-out adds is the shared
+encoding. The `time-hlc` record is measured on its own and is not written here. No throughput figure
+of the D13 cells was taken after the change; that is the next run of `ap_matrix.py`.
