@@ -1,0 +1,15 @@
+impact = ["watching-zenoh/local-ci-gates"]
+decision = '''
+Hosted run 44996720658 at main `85330b9e0` was red on lanes whose causes this round reads and repays. (1) `session_memory::tests::captures_move_only_the_rows_beside_the_storage` (C1g and three C1bnl shards) asserted the total moved by three entries a table, which holds on a growable table, whose count is the quota; with `bounded-heapless` a table's count is the capacity its storage is laid out for (`entries` and `storage_rows` in `crates/wz-session-core/src/session_memory.rs`), so that build read 1216 where 264 was asserted. The per-row deltas were right in both builds; the total now sums each changed row's own count of entries. (2) The count guards a static read cannot resolve were measured with `guarded_count_gate.py` over the range since they were last set: nine `router_forward` guards under C1ay read fifteen more tests than they declare and the router route-cache guard one more, all from the router changes of the day, and the C1sb `wz-switchboard-codegen` guard two more, the `generate_spec_value` tests of Round 4598. Each guard moves to the number its command printed, with a note naming why.
+'''
+changes = '''
+- crates/wz-session-core/src/session_memory.rs: the captures test sums each changed row's own count of entries.
+- scripts/run-ci.sh: nine C1AY router_forward guards (+15), C1X route cache router (+1) and C1sb wz-switchboard-codegen (+2), each with a note.
+'''
+verification = '''
+- On build hosts: `cargo test -p wz-session-core --lib session_memory` 9 passed both with the C1g feature set (bounded-heapless, the hosted failure 1216 != 264 the control) and with default features; clippy -D warnings with all targets for wz-session-core.
+- `guarded_count_gate.py --range a5a22d875..HEAD` on a build host: 164 reached guards measured, the eleven that differed are the eleven moved; `bash -n scripts/run-ci.sh`; the pre-push hook's round-fed gates 170 of 170.
+'''
+carry = '''
+- C1cc `the_message_size_threshold_decides_which_puts_travel_as_shared_memory_on_wz_and_libzenohc` fails on its oracle (libzenohc's sender sent a 4096-byte put with no threshold stated without shared memory); C1bzr shard 2 used 94% of its budget; both are for the sessions that own those lanes.
+'''
