@@ -236,10 +236,14 @@ Not done in this round:
   arrived in: a decoded message keeps no span of the wire.
 - A literal Put's client legs are still found by the hash of its key in the memo all faces share.
 
-What the allocation budget of the uncongested forward should show
-(`crates/wz-runtime-tokio/tests/router_hot_path_cost.rs`, a literal Put of `demo/x` from a client,
-one Put a frame), not yet measured: every case of both records falls by the same amount a forward,
-since what was removed is paid once a Put. The key's `String` (one allocation, 6 bytes) and the
-carrier's copy (the allocations a `PushOwned` clone makes, its key text among them) go. Taking the tables once a frame and the legs kept for an
-alias move none of the four cases, which send one literal Put a frame.
+Measured on a build host after the change (allocations, bytes per forward):
+
+| Case | Plain: before -> after | `time-hlc`: before -> after |
+|---|---|---|
+| drop_k1 | 8, 472 -> 5, 442 | 14, 526 -> 10, 492 |
+| block_k1 | 7, 233 -> 3, 139 | 13, 361 -> 8, 263 |
+| drop_k16 | 68, 6,142 -> 65, 6,112 | 89, 6,466 -> 85, 6,432 |
+| block_k16 | 22, 893 -> 18, 799 | 28, 1,231 -> 23, 1,133 |
+
+The falls are about the same at 1 and 16 subscribers because what was removed was paid once per Put (the key's `String` and the carrier's copy). The frame-level read and the per-alias routes do not move these cases, which send one literal Put per frame.
 
