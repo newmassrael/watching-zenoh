@@ -226,7 +226,11 @@ fn a_session_opens_over_tcp_between_a_dialling_node_and_an_accepting_one() {
     let router = Locator::tcp(std::net::SocketAddr::from(([127, 0, 0, 1], PORT)));
     let dialled = dialler
         .dial(
-            || dialler.stack().bind_initiator(router),
+            |out| {
+                dialler.stack().bind_initiator(router).map(|driver| {
+                    out.write(driver);
+                })
+            },
             None,
             Counting(0xb0),
             || params(0xb0),

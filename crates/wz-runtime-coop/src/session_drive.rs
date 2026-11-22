@@ -1869,6 +1869,15 @@ pub trait Bind<D> {
     /// The driver of a link that dials `to`; a protocol the stack has no link for
     /// is [`LinkOpenError::Unsupported`].
     fn bind(&mut self, to: Locator) -> Result<D, LinkOpenError>;
+
+    /// [`Self::bind`], written into `out`, the place the driver is kept (a session's slot):
+    /// `out` is written exactly when `Ok` is answered. A stack that builds its driver there
+    /// leaves no copy of it in the frames of the claim that asks for it, which a stream link's
+    /// handshake runs beneath; this form moves the returned driver in.
+    fn bind_in(&mut self, to: Locator, out: &mut MaybeUninit<D>) -> Result<(), LinkOpenError> {
+        out.write(self.bind(to)?);
+        Ok(())
+    }
 }
 
 /// How a stack takes the link of a session the other end opened: the listening half of [`Bind`].

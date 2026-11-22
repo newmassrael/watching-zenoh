@@ -330,31 +330,50 @@ where
         Ok(self.occupy(cell, driver, entropy))
     }
 
-    /// [`Self::claim`] for a link that is made by `make`, which is the call of this function and
-    /// not an argument of it: the driver (176 bytes on the fixed client's UDP link) is written into
-    /// the slot from here, and the caller's frame never holds it. Passed by value it was a copy in
-    /// each frame it went through, the dial's among them.
+    /// [`Self::claim`] for a link that `make` writes into the place it hands it, which is the
+    /// free slot's driver: the driver (176 bytes on the fixed client's UDP link, several hundred on
+    /// a stream link) is built where it is kept, and neither the caller's frame nor this one holds
+    /// it. Returned by value it was a copy in this frame, under the dial's handshake, as many times
+    /// as it was moved on its way into the slot. `make` writes its place exactly when it answers
+    /// `Ok`.
     ///
     /// `make` runs whether or not a slot is free, and first: a link that cannot be made is
     /// refused as such before the table is touched or counted, and a table with no slot counts
     /// its refusal after the link was made and gives it back (drops it), as `claim` does with the
     /// values it is handed.
-    ///
-    /// Never inlined: the driver `make` returns is a value of this frame while it is moved into
-    /// the slot, and is gone when this returns.
     #[inline(never)]
     pub fn claim_with<Err>(
         &'static self,
-        make: impl FnOnce() -> Result<D, Err>,
+        make: impl FnOnce(&mut MaybeUninit<D>) -> Result<(), Err>,
         entropy: E,
     ) -> Result<SlotClaim<R, T, D, E>, ClaimRefused<Err>> {
-        let cell = self.free_cell();
-        let driver = make().map_err(ClaimRefused::Link)?;
-        let Some(cell) = cell else {
-            self.refused.set(self.refused.get().saturating_add(1));
-            return Err(ClaimRefused::Full);
+        let Some(cell) = self.free_cell() else {
+            return Err(self.refuse_made(make));
         };
-        Ok(self.occupy(cell, driver, entropy))
+        // SAFETY: the slot is free, so nothing refers into its driver, and it is `Claimed` only
+        // once `make` wrote it.
+        make(unsafe { &mut *cell.driver.get() }).map_err(ClaimRefused::Link)?;
+        Ok(self.occupy_driven(cell, entropy))
+    }
+
+    /// The claim of a table with no slot free: the link is made all the same, and first, so a
+    /// link that cannot be made is answered as such; once made it is dropped and the refusal
+    /// counted. Out of line, so the place this makes it in is no part of the frame of a claim
+    /// that found a slot.
+    #[cold]
+    #[inline(never)]
+    fn refuse_made<Err>(
+        &self,
+        make: impl FnOnce(&mut MaybeUninit<D>) -> Result<(), Err>,
+    ) -> ClaimRefused<Err> {
+        let mut spare = MaybeUninit::uninit();
+        if let Err(why) = make(&mut spare) {
+            return ClaimRefused::Link(why);
+        }
+        // SAFETY: `make` answered `Ok`, so it wrote `spare`, which is dropped once.
+        unsafe { spare.assume_init_drop() };
+        self.refused.set(self.refused.get().saturating_add(1));
+        ClaimRefused::Full
     }
 
     /// The first slot that is free, if there is one.
@@ -371,12 +390,20 @@ where
         driver: D,
         entropy: E,
     ) -> SlotClaim<R, T, D, E> {
-        // SAFETY: the slot is free, so nothing refers into it, and each part is
-        // written once; the state below says so to `release_cell`.
-        unsafe {
-            (*cell.driver.get()).write(driver);
-            (*cell.entropy.get()).write(entropy);
-        }
+        // SAFETY: the slot is free, so nothing refers into it, and the driver is written once.
+        unsafe { (*cell.driver.get()).write(driver) };
+        self.occupy_driven(cell, entropy)
+    }
+
+    /// Move `entropy` into the free `cell`, whose driver is written, and mark it claimed.
+    fn occupy_driven(
+        &self,
+        cell: &'static SlotCell<R, T, D, E>,
+        entropy: E,
+    ) -> SlotClaim<R, T, D, E> {
+        // SAFETY: the slot is free, so nothing refers into it, and the entropy source is written
+        // once; the state below says so to `release_cell`.
+        unsafe { (*cell.entropy.get()).write(entropy) };
         cell.state.set(CellState::Claimed);
         cell.head.refs.set(1);
         cell.head.release.set(Some(release_cell::<R, T, D, E>));

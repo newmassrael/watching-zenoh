@@ -906,21 +906,39 @@ where
         &self,
         to: Locator,
     ) -> Result<IpDriver<U, D::Stream, L::Stream>, LinkOpenError> {
+        let mut out = core::mem::MaybeUninit::uninit();
+        self.bind_initiator_in(to, &mut out)?;
+        // SAFETY: `bind_initiator_in` answered `Ok`, so it wrote `out`.
+        Ok(unsafe { out.assume_init() })
+    }
+
+    /// [`Self::bind_initiator`], written into `out`, the place the driver is kept: `out` is
+    /// written exactly when `Ok` is answered, and the driver is built there, so a stream link's
+    /// (its buffers' handles and the frames it owes its stream) is no value of the caller's
+    /// frame, beneath which a `tls/` dial runs its handshake.
+    pub fn bind_initiator_in(
+        &self,
+        to: Locator,
+        out: &mut core::mem::MaybeUninit<IpDriver<U, D::Stream, L::Stream>>,
+    ) -> Result<(), LinkOpenError> {
         match to.proto {
-            LinkProto::Udp if !U::CARRIED => Err(LinkOpenError::Unsupported),
-            LinkProto::Udp => self.udp.bind_initiator(to.at).map(IpDriver::Udp),
+            LinkProto::Udp if !U::CARRIED => return Err(LinkOpenError::Unsupported),
+            LinkProto::Udp => {
+                out.write(IpDriver::Udp(self.udp.bind_initiator(to.at)?));
+            }
             LinkProto::Tcp => {
                 let (rx, tx) = self.claim()?;
                 let socket = self.dial.dial(to.at)?;
-                Ok(IpDriver::Tcp(StreamDriver::over(socket, rx, tx)))
+                out.write(IpDriver::Tcp(StreamDriver::over(socket, rx, tx)));
             }
-            LinkProto::Tls if !L::CARRIED => Err(LinkOpenError::Unsupported),
+            LinkProto::Tls if !L::CARRIED => return Err(LinkOpenError::Unsupported),
             LinkProto::Tls => {
                 let (rx, tx) = self.claim()?;
                 let channel = self.tls.dial(to.at)?;
-                Ok(IpDriver::Tls(StreamDriver::over(channel, rx, tx)))
+                out.write(IpDriver::Tls(StreamDriver::over(channel, rx, tx)));
             }
         }
+        Ok(())
     }
 
     /// A stream link's receive buffer and frame buffer from the image's tables.
@@ -944,6 +962,14 @@ where
 
     fn bind(&mut self, to: Locator) -> Result<IpDriver<U, D::Stream, L::Stream>, LinkOpenError> {
         self.bind_initiator(to)
+    }
+
+    fn bind_in(
+        &mut self,
+        to: Locator,
+        out: &mut core::mem::MaybeUninit<IpDriver<U, D::Stream, L::Stream>>,
+    ) -> Result<(), LinkOpenError> {
+        self.bind_initiator_in(to, out)
     }
 }
 
@@ -1349,6 +1375,43 @@ mod tests {
             None,
             "a plain connection proves nobody"
         );
+    }
+
+    #[cfg(feature = "session-slot")]
+    static IN_PLACE_RX: ByteCells<66, 1> = ByteCells::new();
+    #[cfg(feature = "session-slot")]
+    static IN_PLACE_TX: ByteCells<34, 1> = ByteCells::new();
+
+    /// A dial written into the place it is kept is the link a returned dial is; one the tables
+    /// refuse leaves the place unwritten, and the place is written once the buffers come back.
+    #[cfg(feature = "session-slot")]
+    #[test]
+    fn a_dial_written_in_place_is_the_link_a_returned_dial_is() {
+        let mut stack = IpStack::<Datagrams, Dial>::new(NODE, &IN_PLACE_RX, &IN_PLACE_TX, Dial)
+            .with_tls(ChannelDial);
+        let mut place = core::mem::MaybeUninit::uninit();
+        stack
+            .bind_in(Locator::tls(ROUTER), &mut place)
+            .expect("a secure stream link");
+        // SAFETY: `bind_in` answered `Ok`, so it wrote the place.
+        let tls = unsafe { place.assume_init() };
+        assert!(matches!(tls, IpDriver::Tls(_)));
+        assert_eq!(tls.peer_credential_zid(), Some(PROVEN));
+        let mut next = core::mem::MaybeUninit::uninit();
+        assert!(
+            matches!(
+                stack.bind_in(Locator::tcp(ROUTER), &mut next),
+                Err(LinkOpenError::Exhausted)
+            ),
+            "the one receive buffer is the secure link's"
+        );
+        drop(tls);
+        stack
+            .bind_in(Locator::tcp(ROUTER), &mut next)
+            .expect("the buffers came back with the link");
+        // SAFETY: as above.
+        let tcp = unsafe { next.assume_init() };
+        assert!(matches!(tcp, IpDriver::Tcp(_)));
     }
 
     #[cfg(feature = "session-slot")]

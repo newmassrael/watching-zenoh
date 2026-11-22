@@ -299,7 +299,7 @@ where
         let opened = self
             .host
             .dial(
-                || bind.bind(to),
+                |out| bind.bind_in(to, out),
                 // `None` for a configured endpoint, which names no node, as upstream's
                 // `connect/endpoints` does not; the node's zid for a dial made for one, so that
                 // the session closes at the InitAck if another node answers (decision D4).

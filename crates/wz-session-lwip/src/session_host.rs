@@ -190,7 +190,11 @@ where
     {
         let DialTarget { peer, expected_zid } = target;
         self.host.dial(
-            || links.bind_driver(0, peer),
+            |out| {
+                links.bind_driver(0, peer).map(|driver| {
+                    out.write(driver);
+                })
+            },
             expected_zid,
             entropy,
             params,

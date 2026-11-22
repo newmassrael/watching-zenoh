@@ -224,7 +224,8 @@ where
     }
 
     /// Dial: `bind` opens the socket of the link (a cell of the pool the image declared, a port
-    /// the stack picks), then the session is opened over it. The socket is bound before any
+    /// the stack picks) and writes its driver into the place it is handed, the claimed slot's
+    /// (`Bind::bind_in`), then the session is opened over it. The socket is bound before any
     /// table is claimed and is given back when one refuses; the `InitSyn` leaves only once the
     /// session's task first runs. A pool with no socket is [`DialRefused::Link`].
     ///
@@ -234,7 +235,7 @@ where
     /// task's first run, which is before the `InitSyn` leaves.
     pub fn dial<F>(
         &self,
-        bind: impl FnOnce() -> Result<T::Driver, LinkOpenError>,
+        bind: impl FnOnce(&mut core::mem::MaybeUninit<T::Driver>) -> Result<(), LinkOpenError>,
         expected_zid: Option<[u8; CREDENTIAL_ZID_BYTES]>,
         entropy: E,
         params: impl FnOnce() -> SessionInitParams,
@@ -244,8 +245,8 @@ where
     where
         F: EventSink + 'static,
     {
-        // The link is made by the claim, in the slot's own call: a driver bound here and handed
-        // on by value was a copy of it in this frame and in each one it went through.
+        // The link is made by the claim, into the slot itself: a driver bound here and handed on
+        // by value was a copy of it in this frame and in each one it went through.
         let claim = match self.sessions.claim_with(bind, entropy) {
             Ok(claim) => claim,
             Err(ClaimRefused::Link(why)) => return Err(DialRefused::Link(why)),
