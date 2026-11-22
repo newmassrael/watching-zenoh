@@ -2579,11 +2579,12 @@ layer_c0_test_discipline() {
     # the matrix, the stack reader and the rule, over synthetic outputs. The ELF half is Layer Qzk's.
     _runci_leg pico_ceiling_gate.selftest -- python3 scripts/lib/pico_ceiling_gate.py --selftest
     # The gate of the pico ABI performance matrix (docs/pico-perf-matrix.md section 5, upstream-parity D10):
-    # its reading and its rules over synthetic runs, and the committed table of W over P held to the rows of
-    # the default matrix, so a cell cannot join or leave it unseen. The runs it judges are a quiet host's
+    # its reading and its rules over synthetic runs, and the committed tables of W over P (of Linux, of Windows)
+    # held to the rows of the default matrix, so a cell cannot join or leave either unseen. The runs it judges are a quiet host's
     # (`scripts/pico-compare.sh perf` judges each of its own); no hosted runner pins two sides of four CPUs.
     _runci_leg perf_matrix.selftest -- python3 scripts/host-bench/perf_matrix.py --selftest
     _runci_leg perf_matrix.table --after perf_matrix.selftest -- python3 scripts/host-bench/perf_matrix.py --check-table deploy/pico_perf_ceiling.json
+    _runci_leg perf_matrix.table_windows --after perf_matrix.selftest -- python3 scripts/host-bench/perf_matrix.py --check-table deploy/pico_perf_ceiling_windows.json
     # The AP superiority matrix (docs/ap-superiority-matrix.md, upstream-parity D13): its rules over
     # synthetic readings, and the committed table held to the matrix's rows with a debt on each row that
     # is not locked; a filled completeness row is held to the figure the tree states. The measuring run

@@ -28,14 +28,24 @@ committed rows.
                        [--reference-record FILE] [--external-record FILE]
         the matrix; DIR (--bin-dir) holds perf_probe_P, perf_probe_W and perf_probe_Wapp, and perf_probe_X
         when the external record says arm X was built
-    perf_matrix.py --gate RESULT --table TABLE [--external-table FILE] [--without-external]
-        the gate over a run's perf.json: every cell of W over P held to its row of TABLE (the committed
-        deploy/pico_perf_ceiling.json), and W over X to the rows of the table outside the repository
+    perf_matrix.py --gate RESULT [--table TABLE] [--external-table FILE] [--without-external]
+        the gate over a run's perf.json: every cell of W over P held to its row of TABLE (by default the
+        committed table of the run's platform, PLATFORMS: deploy/pico_perf_ceiling.json for a run on
+        Linux, deploy/pico_perf_ceiling_windows.json for one on Windows, and a table of another platform
+        is refused), and W over X to the rows of the table outside the repository
         (--external-table, by default WZ_PERF_EXTERNAL_TABLE) when the run measured arm X. Exit 0 every
         row held, 1 a row failed, 2 an input refused, 3 nothing failed but a row or arm X was not
         measured (--without-external: a run without arm X is not that)
     perf_matrix.py --check-table TABLE
         the committed table's shape, and that its rows are the population of the default matrix
+    perf_matrix.py windows-plan PACKAGE OUT
+        the plan of a run on Windows (scripts/host-bench/windows/perf_matrix.ps1), written to OUT: arm W is
+        the library of the Windows package PACKAGE (the zip pico_windows_package.py builds), verified
+        against its manifest, and arm P zenoh-pico built as the same build, its switches derived from the
+        package's features as `reference` derives them from the bench's build; with the figures, the
+        reasons a cell is not applicable and the rules of a cell the runner applies, so the runner states
+        none of its own. A package built from a commit whose inputs of that derivation differ from this
+        tree's is refused
     perf_matrix.py idle-cpus [SECONDS] [PER_SIDE]
         each CPU's busy share over SECONDS (default 5) and its physical core, and a pinning of two sides of
         at least PER_SIDE (default 4) CPUs of whole cores, the least busy first, printed as the words
@@ -126,6 +136,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import zipfile
 from dataclasses import dataclass
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -656,7 +667,7 @@ def host_record(args: argparse.Namespace) -> dict:
         "cc": first_line(["cc", "--version"]), "rustc": first_line(["rustc", "-V"], ROOT / "crates"),
         "client_cpus": args.client_cpus, "server_cpus": args.server_cpus, "reps": args.reps,
         "sizes": args.sizes, "pings": args.pings, "warmup_ms": args.warmup_ms, "window_s": args.window_s,
-        "timeout_ms": args.timeout_ms, "foreign_limit": FOREIGN_LIMIT,
+        "timeout_ms": args.timeout_ms, "foreign_limit": FOREIGN_LIMIT, "platform": DEFAULT_PLATFORM,
     }
     if args.reference_record:
         record["builds"] = json.loads(pathlib.Path(args.reference_record).read_text(encoding="utf-8"))
@@ -842,8 +853,15 @@ def cmd_external_record(out: pathlib.Path, why: str) -> int:
 
 # -- the gate -------------------------------------------------------------------------------------------------
 
-#: The committed table of W over P.
+#: The committed tables of W over P: of runs on Linux, and of runs on Windows. A platform's rows are filled
+#: from its own runs and judge only those: the two hosts differ in their sockets, scheduler and clocks, so a
+#: ratio read on one says nothing of the other.
 CEILING = ROOT / "deploy" / "pico_perf_ceiling.json"
+CEILING_WINDOWS = ROOT / "deploy" / "pico_perf_ceiling_windows.json"
+#: The platforms a run is made on (`record.platform`, a table's `platform`), each with its committed table. A
+#: run or a table that names none is Linux's, as every one was before the field.
+PLATFORMS = {"linux": CEILING, "windows-x64": CEILING_WINDOWS}
+DEFAULT_PLATFORM = "linux"
 TABLE_SCHEMA = "wz-pico-perf-ceiling/1"
 #: The engines arm W is built on, as `wz_config.PICO_ENGINES` names them: a run records the one it measured
 #: and a table the one its rows were filled from, and the gate refuses a run against another engine's rows.
@@ -1111,15 +1129,35 @@ def table_engine(text: str) -> str | None:
     return engine
 
 
-def load_table(path: pathlib.Path, pair: str) -> tuple[dict, float, str | None]:
-    """The rows, the tolerance and the engine of the table at `path`."""
+def platform_named(doc: object, what: str) -> str:
+    """The platform a run's record or a table names, Linux when it names none; one that is no platform of
+    PLATFORMS is refused."""
+    platform = doc.get("platform") if isinstance(doc, dict) else None
+    if platform is None:
+        return DEFAULT_PLATFORM
+    if platform not in PLATFORMS:
+        raise Refused(f"{what} names the platform {platform!r}, and a run is made on one of {', '.join(PLATFORMS)}")
+    return platform
+
+
+def table_platform(text: str) -> str:
+    """The platform a table's rows were filled on."""
+    try:
+        doc = json.loads(text)
+    except ValueError as error:
+        raise Refused(f"not JSON: {error}") from None
+    return platform_named(doc, "the table")
+
+
+def load_table(path: pathlib.Path, pair: str) -> tuple[dict, float, str | None, str]:
+    """The rows, the tolerance, the engine and the platform of the table at `path`."""
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as error:
         raise Refused(f"{path} cannot be read: {error}") from None
     try:
         rows, tolerance = parse_table(text, pair)
-        return rows, tolerance, table_engine(text)
+        return rows, tolerance, table_engine(text), table_platform(text)
     except Refused as why:
         raise Refused(f"{path}: {why}") from None
 
@@ -1139,9 +1177,9 @@ def repository_roots() -> list[pathlib.Path]:
     return roots
 
 
-def table_document(pair: str, rows: dict, tolerance: float, engine: str) -> str:
-    return json.dumps({"schema": TABLE_SCHEMA, "pair": pair, "engine": engine, "tolerance": tolerance,
-                       "rows": rows}, indent=1)
+def table_document(pair: str, rows: dict, tolerance: float, engine: str, platform: str) -> str:
+    return json.dumps({"schema": TABLE_SCHEMA, "pair": pair, "engine": engine, "platform": platform,
+                       "tolerance": tolerance, "rows": rows}, indent=1)
 
 
 def print_pair(pair: str, table: str, tolerance: float | None, judged: list[Judged]) -> str:
@@ -1169,10 +1207,11 @@ def print_pair(pair: str, table: str, tolerance: float | None, judged: list[Judg
 
 
 def gate_pair(ref: str, cells: list[dict], table: pathlib.Path | None, roots: list[pathlib.Path],
-              engine: str) -> str:
-    """Judge the pair of W and `ref`, arm W measured on `engine`. A table of W over X inside the repository is
-    refused; one that is not named, or does not exist yet, fails with the whole table to write printed. A table
-    whose rows were filled from another engine is refused, and so is a table of W over P that does not say."""
+              engine: str, platform: str) -> str:
+    """Judge the pair of W and `ref`, arm W measured on `engine` in a run on `platform`. A table of W over X
+    inside the repository is refused; one that is not named, or does not exist yet, fails with the whole table to
+    write printed. A table whose rows were filled from another engine, or on another platform, is refused, and
+    so is a table of W over P that does not say its engine."""
     pair = PAIR_NAMES[ref]
     found = readings(cells, ref)
     if ref == "X":
@@ -1185,12 +1224,15 @@ def gate_pair(ref: str, cells: list[dict], table: pathlib.Path | None, roots: li
             rows = {key: fill_row(found[key]) for key in sorted(found, key=key_order)}
             print(f"perf-gate {pair}: arm X was measured and no table judges it ({where}); the table this run "
                   f"writes, to be kept outside the repository:", flush=True)
-            print(table_document(pair, rows, DEFAULT_TOLERANCE, engine), flush=True)
+            print(table_document(pair, rows, DEFAULT_TOLERANCE, engine, platform), flush=True)
             print(f"perf-gate {pair}: FAIL", flush=True)
             return "FAIL"
     if table is None:
         raise Refused(f"no table of {pair} was named")
-    rows, tolerance, filled_from = load_table(table, pair)
+    rows, tolerance, filled_from, filled_on = load_table(table, pair)
+    if filled_on != platform:
+        raise Refused(f"{table} holds rows of runs on {filled_on}, and this run was made on {platform}: judge "
+                      f"it against the table of its own platform ({PLATFORMS[platform].relative_to(ROOT)})")
     if filled_from is None and ref == "P":
         raise Refused(f"{table} does not say which engine its rows were filled from (`engine`)")
     if filled_from is not None and filled_from != engine:
@@ -1210,13 +1252,19 @@ def cmd_gate(args: argparse.Namespace) -> int:
         engine = doc.get("record", {}).get("engine")
         if engine not in ENGINES:
             raise Refused(f"{args.result} does not say which engine arm W was built on")
+        platform = platform_named(doc.get("record"), f"the record of {args.result}")
         external = doc.get("record", {}).get("external") or {
             "status": "not-measured", "why": "the run's record says nothing of arm X"}
-        outcomes = [gate_pair("P", cells, pathlib.Path(args.table), [], engine)]
+        # A transport the run left out says why in its record (a group the host's network does not carry);
+        # its rows are then not measured, and the reason is printed beside them.
+        for transport, why in sorted((doc.get("record", {}).get("not_measured") or {}).items()):
+            print(f"perf-gate: the run did not measure {transport}: {why}", flush=True)
+        table = pathlib.Path(args.table) if args.table else PLATFORMS[platform]
+        outcomes = [gate_pair("P", cells, table, [], engine, platform)]
         if external.get("status") == "built":
             named = args.external_table or os.environ.get(EXTERNAL_TABLE, "")
             outcomes.append(gate_pair("X", cells, pathlib.Path(named) if named else None, repository_roots(),
-                                      engine))
+                                      engine, platform))
         elif args.without_external:
             print(f"perf-gate W/X: not asked (--without-external); arm X NOT-MEASURED, {external.get('why')}",
                   flush=True)
@@ -1230,12 +1278,18 @@ def cmd_gate(args: argparse.Namespace) -> int:
 
 
 def check_table(path: pathlib.Path) -> int:
-    """The committed table's shape, and its rows exactly the population of the default matrix of W over P."""
+    """A committed table's shape, and its rows exactly the population of the default matrix of W over P. A table
+    is the one its platform's runs are judged by (PLATFORMS), so the table of one platform cannot stand where the
+    other's is read."""
     try:
-        rows, tolerance, engine = load_table(path, PAIR_NAMES["P"])
+        rows, tolerance, engine, platform = load_table(path, PAIR_NAMES["P"])
     except Refused as why:
         print(f"perf-gate table: refused: {why}", file=sys.stderr)
         return 2
+    if path.resolve() != PLATFORMS[platform].resolve():
+        print(f"  perf-gate table FAIL: {path} holds rows of runs on {platform}, whose table is "
+              f"{PLATFORMS[platform].relative_to(ROOT)}", file=sys.stderr)
+        return 1
     if engine is None:
         print(f"  perf-gate table FAIL: {path} does not say which engine its rows were filled from (`engine`)",
               file=sys.stderr)
@@ -1251,7 +1305,126 @@ def check_table(path: pathlib.Path) -> int:
         return 1
     filled = sum(value is not None for value in rows.values())
     print(f"  perf-gate table: {len(rows)} row(s), the population of the default matrix; {filled} filled, "
-          f"{len(rows) - filled} not yet (tolerance {tolerance}), filled from the {engine} engine")
+          f"{len(rows) - filled} not yet (tolerance {tolerance}), filled from the {engine} engine on {platform}")
+    return 0
+
+
+# -- a run on Windows ----------------------------------------------------------------------------------------
+
+#: What `windows-plan` writes and scripts/host-bench/windows/perf_matrix.ps1 reads.
+WINDOWS_PLAN_SCHEMA = "wz-pico-perf-windows-plan/1"
+WINDOWS_PLATFORM = "windows-x64"
+#: The width of Windows a plan is made for, by the package's name for it (pico_windows_package.ARCHES).
+WINDOWS_ARCH = "x64"
+#: The files the reference's switches are derived from besides the package's feature list: the declaration,
+#: the feature table of the crate, the pinned pico and the derivation itself. A package built from a commit
+#: where one of them differs from this tree's would be paired with another build of pico than its own.
+PLAN_INPUTS = ("deploy/wz-config.toml", "crates/wz-capi-pico/Cargo.toml", "vendor/zenoh-pico",
+               "scripts/lib/wz_config.py")
+#: Why a transport is not run on Windows at all. The program transport's stream in perf_probe.c is an AF_UNIX
+#: socket in Linux's abstract namespace, read with poll and woken through pipe2, none of which Windows has.
+WINDOWS_NOT_RUN = {
+    "program": "the program transport of perf_probe.c is an AF_UNIX stream in Linux's abstract namespace, "
+               "read with poll and woken through pipe2, and is not built on Windows",
+}
+
+
+def windows_plan(manifest: dict, statement: dict, table: dict, decl: dict, target: str) -> dict:
+    """What a run on Windows measures, from a package's manifest and build statement: arm W is the package's
+    library, built for `target` with the features its manifest lists on the engine its statement states, and
+    arm P zenoh-pico built as the same build, every switch the declaration answers set from those features
+    (`wz_config.pico_reference`), as `reference` derives the Linux arm from the bench's build. `table` is the
+    feature table of wz-capi-pico, `decl` the declaration. A package of another width, one that names a feature
+    the crate lacks, and one whose statement's engine is not the one its features run are refused."""
+    import wz_config
+
+    if manifest.get("target") != target:
+        raise Refused(f"the package is built for {manifest.get('target')!r}, and a run on {WINDOWS_PLATFORM} "
+                      f"links one built for {target}")
+    features = manifest.get("features")
+    if not isinstance(features, list) or not features or not all(isinstance(f, str) for f in features):
+        raise Refused("the package's manifest lists no features of the build")
+    try:
+        enabled = wz_config.enabled_features(table, features)
+    except KeyError as error:
+        raise Refused(f"the package names a feature this tree's wz-capi-pico does not have: {error}") from None
+    engine = statement.get("engine")
+    if engine not in ENGINES:
+        raise Refused(f"the package's build statement names no engine of the pico ABI ({engine!r})")
+    runs_on = wz_config.statement_engine("pico", enabled)
+    if runs_on != engine:
+        raise Refused(f"the package's statement says the {engine} engine, and its features run the {runs_on} one")
+    return {"wz_features": sorted(features), "wz_engine": engine,
+            "reference_switches": wz_config.pico_reference(decl, enabled)}
+
+
+def plan_input_drift(commit: str) -> list[str]:
+    """The inputs of the reference's derivation (PLAN_INPUTS) that differ between `commit`, the package's,
+    and this tree as it is; a commit git does not know is refused."""
+    if not commit:
+        raise Refused("the package's manifest names no commit it was built from")
+    known = subprocess.run(["git", "-C", str(ROOT), "cat-file", "-e", f"{commit}^{{commit}}"], capture_output=True)
+    if known.returncode != 0:
+        raise Refused(f"this repository does not have the package's commit {commit[:12]}; fetch it first")
+    drift = []
+    for path in PLAN_INPUTS:
+        same = subprocess.run(["git", "-C", str(ROOT), "diff", "--quiet", commit, "--", path], capture_output=True)
+        if same.returncode != 0:
+            drift.append(path)
+    return drift
+
+
+def cmd_windows_plan(package: pathlib.Path, out: pathlib.Path) -> int:
+    """The plan of a run on Windows, from the package zip `package`, written to `out`."""
+    import pico_windows_package as pwp
+    import wz_config
+
+    try:
+        with tempfile.TemporaryDirectory() as scratch:
+            top = pwp.extract_zip(package, pathlib.Path(scratch))
+            findings = pwp.verify_findings(top)
+            if findings:
+                raise Refused(f"{package.name} does not match its manifest: {'; '.join(findings)}")
+            manifest = json.loads((top / pwp.MANIFEST).read_text(encoding="utf-8"))
+            statement = json.loads((top / pwp.STATEMENT).read_text(encoding="utf-8"))
+            name = top.name
+        commit = (manifest.get("built_from") or {}).get("commit", "")
+        drift = plan_input_drift(commit)
+        if drift:
+            raise Refused(f"the package was built from {commit[:12]}, and this tree differs from it in "
+                          f"{', '.join(drift)}, from which arm P's switches are derived: make the plan in a "
+                          f"checkout of that commit")
+        table = wz_config.manifest_features(wz_config.MANIFESTS["pico"])
+        plan = windows_plan(manifest, statement, table, wz_config.load_decl(), pwp.ARCHES[WINDOWS_ARCH][0])
+    except (OSError, ValueError, KeyError, zipfile.BadZipFile, pwp.Refusal, Refused) as why:
+        print(f"perf-matrix: windows-plan refused: {why}", file=sys.stderr, flush=True)
+        return 2
+    status = subprocess.run(["git", "-C", str(ROOT), "status", "--porcelain", "--untracked-files=no"],
+                            capture_output=True, text=True)
+    doc = {
+        "schema": WINDOWS_PLAN_SCHEMA, "platform": WINDOWS_PLATFORM,
+        "tree": first_line(["git", "-C", str(ROOT), "rev-parse", "HEAD"]),
+        "tree_dirty": bool(status.stdout.strip()) if status.returncode == 0 else None,
+        "package": {"name": name, "zip": package.name, "sha256": sha256_of(package), "commit": commit,
+                    "form": manifest.get("form"), "libraries": manifest.get("libraries"),
+                    "target": manifest.get("target"), "rustc": (manifest.get("toolchain") or {}).get("rustc"),
+                    "statement_digest": manifest.get("statement_digest")},
+        "reference_pin": first_line(["git", "-C", str(ROOT / "vendor" / "zenoh-pico"), "rev-parse", "HEAD"]),
+        **plan,
+        # What the runner applies and records, stated once here so the two runners cannot drift apart.
+        "metrics": METRICS,
+        "transports": list(TRANSPORTS), "workloads": list(WORKLOADS), "arms": ["P", "W"],
+        "not_applicable": {f"{arm}/{transport}": why for (arm, transport), why in NOT_APPLICABLE.items()},
+        "not_run": WINDOWS_NOT_RUN,
+        "line_keys": {"ping": list(PING_KEYS), "pong": list(PONG_KEYS), "pub": list(PUB_KEYS),
+                      "sub": list(SUB_KEYS), "sub_end": list(SUB_END_KEYS)},
+        "foreign_limit": FOREIGN_LIMIT, "max_runs": MAX_RUNS, "settle_s": SETTLE_S, "pub_tail_s": PUB_TAIL_S,
+        "ready_s": READY_S, "group": GROUP, "schema_of_result": SCHEMA,
+    }
+    out.write_text(json.dumps(doc, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+    print(f"perf-matrix: the plan of a run on Windows: arm W {name} on the {plan['wz_engine']} engine, arm P "
+          f"zenoh-pico {doc['reference_pin'][:12]} with {len(plan['reference_switches'])} switches set; {out}",
+          flush=True)
     return 0
 
 
@@ -1529,10 +1702,12 @@ def cmd_selftest() -> int:
            and exit_status(["PASS", "PASS"]) == 0 and outcome_of([]) == "NOT-MEASURED")
     expect("a value rounds up to three decimals for its ratchet", ceil3(0.9301) == 0.931 and ceil3(0.93) == 0.93)
 
-    def table(rows, pair="W/P", tolerance=0.05, schema=TABLE_SCHEMA, engine="tokio"):
+    def table(rows, pair="W/P", tolerance=0.05, schema=TABLE_SCHEMA, engine="tokio", platform=None):
         doc = {"schema": schema, "pair": pair, "tolerance": tolerance, "rows": rows}
         if engine is not None:
             doc["engine"] = engine
+        if platform is not None:
+            doc["platform"] = platform
         return json.dumps(doc)
 
     def refused(text, pair="W/P"):
@@ -1574,14 +1749,15 @@ def cmd_selftest() -> int:
     locked = {key: {"locked": True} for key in keys}
 
     def gate(cells, record, table_rows, external_table="", without=False, x_rows=None, schema=SCHEMA,
-             table_engine_="tokio"):
+             table_engine_="tokio", table_platform_=None):
         with tempfile.TemporaryDirectory() as scratch:
             base = pathlib.Path(scratch)
             (base / "perf.json").write_text(json.dumps({"schema": schema, "record": record, "cells": cells}),
                                             encoding="utf-8")
             if external_table == "absent":
                 external_table = str(base / "no-such-table.json")
-            (base / "table.json").write_text(table(table_rows, engine=table_engine_), encoding="utf-8")
+            (base / "table.json").write_text(table(table_rows, engine=table_engine_, platform=table_platform_),
+                                             encoding="utf-8")
             if x_rows is not None:
                 where = base / "x.json"
                 where.write_text(table(x_rows, pair="W/X"), encoding="utf-8")
@@ -1632,6 +1808,69 @@ def cmd_selftest() -> int:
     expect("a run's engine is the one its build's record states, and nothing else",
            run_engine({"wz_engine": "coop"}) == "coop" and run_engine({}) is None
            and run_engine({"wz_engine": "fast"}) is None)
+    # The platform: a run states the one it was made on and a table the one its rows were filled on, and a run
+    # is judged only against rows of its own platform; one that names none is Linux's.
+    on_windows = dict(no_x, engine="coop", platform=WINDOWS_PLATFORM)
+    expect("a run on Windows is judged against a table of Windows",
+           gate(run_cells, on_windows, locked, without=True, table_engine_="coop",
+                table_platform_=WINDOWS_PLATFORM) == 0)
+    expect("a run on Windows against a table of Linux is refused, and a run on Linux against one of Windows",
+           gate(run_cells, on_windows, locked, without=True, table_engine_="coop") == 2
+           and gate(run_cells, no_x, locked, without=True, table_platform_=WINDOWS_PLATFORM) == 2
+           and gate(run_cells, dict(no_x, platform="linux"), locked, without=True,
+                    table_platform_=WINDOWS_PLATFORM) == 2)
+    expect("a run on Linux that names its platform is judged as one that names none",
+           gate(run_cells, dict(no_x, platform="linux"), locked, without=True) == 0
+           and gate(run_cells, no_x, locked, without=True, table_platform_="linux") == 0)
+    expect("a run or a table that names no platform of the matrix is refused",
+           gate(run_cells, dict(no_x, platform="windows-arm64"), locked, without=True) == 2
+           and gate(run_cells, no_x, locked, without=True, table_platform_="plan9") == 2)
+    expect("each platform's runs are judged by default against its own committed table",
+           PLATFORMS[DEFAULT_PLATFORM] == CEILING and PLATFORMS[WINDOWS_PLATFORM] == CEILING_WINDOWS
+           and set(PLATFORMS) == {DEFAULT_PLATFORM, WINDOWS_PLATFORM})
+
+    # -- the plan of a run on Windows ------------------------------------------------------------------------
+    feature_table = {"default": ["engine-tokio"], "engine-tokio": [], "engine-coop": [], "advanced": [],
+                     "app-transport": ["advanced"]}
+    switch_rows = {"switches": [
+        {"original": "zenoh-pico", "switch": "Z_FEATURE_ADVANCED_PUBLICATION", "class": "maps",
+         "anchor": "wz-capi-pico/advanced"},
+        {"original": "zenoh-pico", "switch": "Z_FEATURE_MATCHING", "class": "always"},
+        {"original": "zenoh-pico", "switch": "Z_FEATURE_RAWETH_TRANSPORT", "class": "never"},
+        {"original": "zenoh-pico", "switch": "BATCH_UNICAST_SIZE", "class": "maps", "anchor": "wz-capi-pico/x"},
+        {"original": "zenoh-c", "switch": "Z_FEATURE_SHARED_MEMORY", "class": "always"}]}
+    x64 = "x86_64-pc-windows-msvc"
+    package_manifest = {"target": x64, "features": ["engine-coop", "app-transport"]}
+    planned = windows_plan(package_manifest, {"engine": "coop"}, feature_table, switch_rows, x64)
+    expect("a plan pairs the package's library with pico built with the switches its features answer",
+           planned["reference_switches"] == {"Z_FEATURE_ADVANCED_PUBLICATION": 1, "Z_FEATURE_MATCHING": 1,
+                                             "Z_FEATURE_RAWETH_TRANSPORT": 0}
+           and planned["wz_engine"] == "coop" and planned["wz_features"] == ["app-transport", "engine-coop"])
+
+    def plan_refused(manifest, statement):
+        try:
+            windows_plan(manifest, statement, feature_table, switch_rows, x64)
+        except Refused:
+            return True
+        return False
+
+    expect("a package of another width, or one that lists no features, is refused",
+           plan_refused(dict(package_manifest, target="i686-pc-windows-msvc"), {"engine": "coop"})
+           and plan_refused(dict(package_manifest, features=[]), {"engine": "coop"}))
+    expect("a package that names a feature the crate does not have is refused",
+           plan_refused(dict(package_manifest, features=["engine-coop", "gone"]), {"engine": "coop"}))
+    expect("a statement whose engine is not the one the package's features run is refused",
+           plan_refused(package_manifest, {"engine": "tokio"})
+           and plan_refused(dict(package_manifest, features=["engine-tokio"]), {"engine": "coop"})
+           and plan_refused(package_manifest, {}))
+    expect("a run on Windows leaves out only the transport perf_probe.c does not build there",
+           set(WINDOWS_NOT_RUN) == {"program"})
+    # The plan reads the package by the packager's own names, called from `cmd_windows_plan` alone, so a
+    # rename there would surface only when a plan is made.
+    import pico_windows_package as pwp
+    expect("the packager still names the width, the files and the readers a plan is made from",
+           pwp.ARCHES[WINDOWS_ARCH][0] == x64 and isinstance(pwp.MANIFEST, str) and isinstance(pwp.STATEMENT, str)
+           and callable(getattr(pwp, "extract_zip", None)) and callable(getattr(pwp, "verify_findings", None)))
     import wz_config
     expect("the engines a table names are the ones a bench builds on", ENGINES == wz_config.PICO_ENGINES)
     print(f"  perf-matrix selftest: {ok}/{ok + bad} arm(s) pass")
@@ -1655,12 +1894,14 @@ def main(argv: list[str]) -> int:
     if len(argv) >= 2 and argv[1] == "--gate":
         gate = argparse.ArgumentParser(prog="perf_matrix.py --gate")
         gate.add_argument("result")
-        gate.add_argument("--table", default=str(CEILING))
+        gate.add_argument("--table", default="")
         gate.add_argument("--external-table", default="")
         gate.add_argument("--without-external", action="store_true")
         return cmd_gate(gate.parse_args(argv[2:]))
     if len(argv) in (3, 4) and argv[1] == "external-record":
         return cmd_external_record(pathlib.Path(argv[2]), argv[3] if len(argv) == 4 else "")
+    if len(argv) == 4 and argv[1] == "windows-plan":
+        return cmd_windows_plan(pathlib.Path(argv[2]), pathlib.Path(argv[3]))
     if len(argv) == 3 and argv[1] == "pico-sys-include":
         try:
             print(pico_sys_include(pathlib.Path(argv[2]).read_text(encoding="utf-8").splitlines()))

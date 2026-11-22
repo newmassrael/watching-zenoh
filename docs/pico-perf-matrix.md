@@ -347,6 +347,9 @@ the default matrix (every transport arm P has, both batchings, both workloads, s
 Layer C0 holds (`perf_matrix.py --check-table`) with the gate's selftest, on every hosted run. Its rows
 are null until a run on a quiet host fills them, as above.
 
+**One table per platform.** A run on Windows is judged against a table of its own, never this one (section 6):
+the reading and the table each state their platform, and the gate refuses a pair that differ.
+
 **W over X.** The table holds the external library's figures, so it lives outside the repository: the gate
 reads it from `--external-table` or `WZ_PERF_EXTERNAL_TABLE`, and refuses one inside this checkout or the
 main checkout of a worktree. A run that measured arm X is judged against it; with no table named, or the
@@ -377,3 +380,87 @@ committed table's population on every hosted run. The matrix itself is not a lay
 and a hosted runner can neither pin two sides of four CPUs that share no core nor keep them free of other
 work, which section 4's validity check requires. The host that runs it is one nothing else is admitted to
 while it lasts.
+
+## 6. On Windows
+
+The library a Windows program links is the Windows package of the pico C ABI
+(`scripts/lib/pico_windows_package.py`, the zip the release attaches), so the matrix is also run on a Windows
+host against that package. The runner there is `scripts/host-bench/windows/perf_matrix.ps1` (Windows
+PowerShell 5.1 and the MSVC toolchain; no Python on the host). The plan of the run is made on Linux, and the
+reading is judged on Linux.
+
+**What is the same.** The program (`perf_probe.c`, whose Windows branches are under `_WIN32` and leave the
+Linux build as it was), the cells and their order, the alternation of the arms, the figures, the repetitions,
+warm-up, window, round trips and timeout, the validity rule and its second pass, the reading's shape
+(`wz-pico-perf/1`) and the gate's rule. The plan carries the figures, the reasons a cell is not applicable and
+the rules of a cell from `perf_matrix.py` itself, so the runner states none of its own.
+
+**What differs, and why.**
+
+| | Linux | Windows |
+|---|---|---|
+| arm W | `wz-capi-pico` built by the run, the bench's default build on the engine | the package's release DLL as shipped; its features are its manifest's and its engine its build statement's |
+| arm P | pico as the same build as the bench's build | pico as the same build as the package: its switches derived from the package's features by the same rule (`windows-plan`), built by CMake's Visual Studio generator, x64, Release, shared, without examples and tests |
+| what pico was built as | `reference.json` | `record.builds`: the switches asked, any pico built otherwise, and the CMake cache entries of pico's own options and of the build's type, generator and flags (`reference_cache`) |
+| build rule | `build_normalization.py` | none: its words are GCC's |
+| probe | `cc -std=gnu11 -O2` | `cl /std:c11 /experimental:c11atomics /O2 /MD` |
+| pinning | `taskset` | started suspended, `SetProcessAffinityMask`, resumed |
+| clocks | `CLOCK_MONOTONIC`, `CLOCK_PROCESS_CPUTIME_ID` | `QueryPerformanceCounter`, `GetProcessTimes` |
+| stopping a side | `SIGTERM` | the named event `Local\perf_probe_stop_<pid>` the program waits on |
+| a process's CPU and peak memory | `getrusage` of the reaped child | `GetProcessTimes` of the ended process; the peak working set the program prints as its last line |
+| validity | `/proc/stat`: user, nice, system, steal | per-CPU times (`NtQuerySystemInformation`): kernel less idle, interrupts and DPCs, plus user |
+| transports | tcp, udp, multicast on `lo`, the program transport | tcp, udp, multicast on the adapter of the default route; the program transport is not built (its stream in the probe is an AF_UNIX socket in Linux's abstract namespace) and `record.not_measured` says so |
+| arm X | when the environment names it | not run |
+
+**Multicast.** The loopback adapter of Windows carries no group, so the group is joined on the adapter of the
+default route, named by its GUID (`#iface={...}`, the form both libraries read on Windows); `-GroupInterface`
+names another. Before the matrix each arm makes a short round trip on the group. When neither forms it, the host
+does not carry a group to its own members there (its adapter, or a firewall that drops the datagrams): multicast
+is left out of the run, `record.not_measured.multicast` says why with what each arm printed, and the gate
+prints that reason beside the rows it reports not measured. The runner reads and changes no firewall rule.
+
+**The table.** `deploy/pico_perf_ceiling_windows.json`: the rows of the default matrix, as the Linux table,
+with `platform` `windows-x64` and the engine `coop`, every row null until a run fills it. A reading states
+the platform it was made on (`record.platform`; a reading that states none is Linux's, as every one before the
+field was) and a table the platform its rows were filled on (`platform`, Linux when absent). The gate judges a
+reading only against a table of its own platform and refuses any other (exit 2); without `--table` it reads the
+committed table of the reading's platform. Layer C0 holds the population of both committed tables.
+
+**A run.** On Linux, in a checkout of the commit the package was built from: `windows-plan` derives arm P's
+switches from this tree's declaration, feature table and pinned pico, and refuses a package whose commit differs
+from the tree in any of them. The package is the `package-windows` artifact of that commit's Platform run (x64,
+the single library).
+
+```sh
+out=target/perf-win; mkdir -p "$out"
+gh run download <platform run id> -n pico-windows-package-x64-single -D "$out"
+zip="$(ls "$out"/wz-capi-pico-*-windows-x64-*.zip)"
+python3 scripts/host-bench/perf_matrix.py windows-plan "$zip" "$out/plan.json"
+git -C vendor/zenoh-pico archive --format=zip --prefix=zenoh-pico/ -o "$PWD/$out/zenoh-pico.zip" HEAD
+ssh pc3-win "if not exist C:\wzperf mkdir C:\wzperf"
+scp "$out/plan.json" "$out/zenoh-pico.zip" "$zip" scripts/host-bench/perf_probe.c \
+    scripts/host-bench/windows/perf_matrix.ps1 pc3-win:C:/wzperf/
+```
+
+On the Windows host, over ssh (its shell is `cmd`): the idle CPUs first, then the build and the run with the
+pinning it printed. `-Mode build` and `-Mode run` do the two halves apart.
+
+```sh
+ssh pc3-win "powershell -NoProfile -ExecutionPolicy Bypass -File C:\wzperf\perf_matrix.ps1 -Mode idle-cpus"
+ssh pc3-win "powershell -NoProfile -ExecutionPolicy Bypass -File C:\wzperf\perf_matrix.ps1 -Mode all -Plan C:\wzperf\plan.json -PicoSource C:\wzperf\zenoh-pico.zip -Package C:\wzperf\<the zip's name> -Probe C:\wzperf\perf_probe.c -Work C:\wzperf\work -ClientCpus <...> -ServerCpus <...> > C:\wzperf\run.log 2>&1"
+```
+
+The run is left in `C:\wzperf\work\runs\windows-<UTC time>` with the files of section 4 (`perf.json`,
+`report.txt`, `cells.jsonl`, each program's output, and `preflight-*` for the group's round trips); the build's
+logs and `reference.json` are in `C:\wzperf\work`. Fetch the run and judge it:
+
+```sh
+ssh pc3-win "dir /b C:\wzperf\work\runs"
+scp -r pc3-win:C:/wzperf/work/runs/<run> pc3-win:C:/wzperf/run.log "$out/"
+python3 scripts/host-bench/perf_matrix.py --gate "$out/<run>/perf.json" --without-external
+```
+
+A full run is 3 repetitions of tcp, udp and multicast, both batchings, both workloads and three sizes: 216 cells,
+of which the 36 of arm P on udp are not applicable, about 180 measured, at some 8 s a round-trip cell and 14 s a
+throughput cell, so about 35 minutes with the build, more when cells are disturbed. Filling the table is as in
+section 5, with `deploy/pico_perf_ceiling_windows.json` in place of the Linux table.
