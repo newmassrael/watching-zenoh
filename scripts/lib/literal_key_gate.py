@@ -150,7 +150,7 @@ EXEMPT: dict[str, int] = {
     # the wire-interop fixtures pin the negotiation inputs, and a per-process
     # key would make them unreproducible. Not published; see the header for
     # the edge that stops this being a derived class.
-    "crates/wz-runtime-tokio-test-support/src/lib.rs": 2,
+    "crates/wz-runtime-tokio-test-support/src/sessions.rs": 2,
 }
 
 # Cheap prefilters. Masking is a character walk, and running it over ~450

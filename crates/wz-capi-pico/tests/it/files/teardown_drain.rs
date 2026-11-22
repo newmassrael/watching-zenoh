@@ -57,7 +57,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use wz_runtime_tokio::writer_queue::WRITER_STALL_MS;
+use wz_capi_core::runtime::writer_queue::WRITER_STALL_MS;
 
 use wz_capi_pico::{
     z_bytes_copy_from_buf, z_bytes_to_slice, z_close, z_closure_sample, z_config_default,

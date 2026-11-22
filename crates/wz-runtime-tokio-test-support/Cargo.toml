@@ -67,8 +67,10 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", default-features = false, fea
     "codec-open-body",
     "codec-close",
     "keyexpr-canon",
-] }
-sce-rust-runtime = { path = "../../vendor/sce/backends/rust/runtime" }
+], optional = true }
+# The SCE runtime whose `Hal` `TestHal` implements, with the session fixtures behind
+# `sessions`.
+sce-rust-runtime = { path = "../../vendor/sce/backends/rust/runtime", optional = true }
 # R2778 (open-debt item 806) — `refusing_port` binds a TCP socket WITHOUT
 # listening on it, which std cannot express (`TcpListener::bind` always
 # listens). Already in the lock at this version through tokio, and already a
@@ -115,13 +117,19 @@ libc = "0.2"
 tokio = { version = "1", default-features = false, features = ["rt", "macros"] }
 
 [features]
+default = ["sessions"]
+# The fixtures of a session on the tokio engine (`src/sessions.rs`). A test build that must
+# not link that engine takes this crate with `default-features = false` for the port pickers
+# and the TLS fixtures alone: the pico C ABI on its cooperative engine, whose selectors
+# `wz-runtime-tokio` refuses to be built beside.
+sessions = ["dep:wz-runtime-tokio", "dep:sce-rust-runtime"]
 # Pulls the rustls-based loopback cert fixture; enabled by wz-runtime-tokio's
 # dev-dep so its TLS e2e tests share one cert-generation SSOT.
 tls-fixtures = ["dep:rcgen", "dep:tokio-rustls"]
 # The in-memory multicast group (`multicast_bus`) a group session's tests run over instead of
 # a socket. It forwards the runtime's multicast transport, which only a crate that drives a
 # group already selects.
-multicast = ["wz-runtime-tokio/transport-multicast", "dep:tokio"]
+multicast = ["sessions", "wz-runtime-tokio/transport-multicast", "dep:tokio"]
 
 [lints]
 workspace = true

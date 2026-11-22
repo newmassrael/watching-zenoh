@@ -400,14 +400,19 @@ impl Watch {
                 let _ = writeln!(text, "  pipe: {}", pipe.summary());
             }
         }
-        for (name, step, since) in wz_runtime_tokio::liveness::loops_now() {
-            let _ = writeln!(text, "  loop {name}: {step}, turned {since:?} ago");
+        // The probe of loops and threads is the tokio engine's runtime's; a build on the
+        // cooperative engine has no such probe.
+        #[cfg(feature = "engine-tokio")]
+        {
+            for (name, step, since) in wz_capi_core::runtime::liveness::loops_now() {
+                let _ = writeln!(text, "  loop {name}: {step}, turned {since:?} ago");
+            }
+            let _ = writeln!(
+                text,
+                "  threads: {}",
+                wz_capi_core::runtime::liveness::threads_now()
+            );
         }
-        let _ = writeln!(
-            text,
-            "  threads: {}",
-            wz_runtime_tokio::liveness::threads_now()
-        );
         let (panics, panic_text) = panics_so_far();
         let _ = writeln!(text, "  panics so far: {panics}");
         for line in panic_text {

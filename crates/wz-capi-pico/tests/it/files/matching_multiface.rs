@@ -563,18 +563,18 @@ fn vanishing_subscriber_peer(
     ready_tx: std::sync::mpsc::Sender<()>,
     die: Arc<tokio::sync::Notify>,
 ) {
-    use wz_runtime_tokio::observer::ApplicationLayerObserver;
-    use wz_runtime_tokio::runtime_impl::TokioTime;
-    use wz_runtime_tokio::session::{SubscribeOptions, TokioSession};
-    use wz_runtime_tokio::session_glue::{
+    use wz_capi_core::runtime::observer::ApplicationLayerObserver;
+    use wz_capi_core::runtime::runtime_impl::TokioTime;
+    use wz_capi_core::runtime::session::{SubscribeOptions, TokioSession};
+    use wz_capi_core::runtime::session_glue::{
         drive_session_until_terminal, IterationEvent, SessionInitParams, SessionTimeouts,
         SigningKey, WhatAmI,
     };
-    use wz_runtime_tokio::session_open::{
+    use wz_capi_core::runtime::session_open::{
         dial_endpoint, initiate_and_open_session, DialConfig, OpenedSessionParts,
         DEFAULT_OPEN_TICK_MS,
     };
-    use wz_runtime_tokio::sync::PlainMutex as WzMutex;
+    use wz_capi_core::runtime::sync::PlainMutex as WzMutex;
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -597,14 +597,14 @@ fn vanishing_subscriber_peer(
                 req_id_res: 2,
                 batch_size: 65535,
                 lease_ms: 10_000,
-                keep_alive: wz_runtime_tokio::session_glue::KeepAliveConf::default(),
+                keep_alive: wz_capi_core::runtime::session_glue::KeepAliveConf::default(),
                 initial_sn: 0,
                 cookie: Vec::new(),
-                tx_queue: wz_runtime_tokio::session_glue::TxQueueConf::of_snapshot(
+                tx_queue: wz_capi_core::runtime::session_glue::TxQueueConf::of_snapshot(
                     &wz_session_core::policy::SessionPolicy::defaults(),
                     &wz_session_core::limits::SessionLimits::BUILD,
                 ),
-                link_rx: wz_runtime_tokio::session_glue::LinkRxConf::default(),
+                link_rx: wz_capi_core::runtime::session_glue::LinkRxConf::default(),
                 policy: wz_session_core::policy::SessionPolicy::defaults(),
                 limits: wz_session_core::limits::SessionLimits::BUILD,
                 cookie_signing_key: SigningKey::new(vec![0xAB; 32]).expect("32-byte key"),

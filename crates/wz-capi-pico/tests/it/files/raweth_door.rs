@@ -24,7 +24,7 @@ const TRANSPORT_OPEN_FAILED: i8 = -102;
 
 /// Whether this process may open a raw packet socket on `lo`.
 fn may_open_a_raw_socket() -> bool {
-    wz_runtime_tokio::raweth_socket::AfPacketSocket::open("lo").is_ok()
+    wz_capi_core::runtime::raweth_socket::AfPacketSocket::open("lo").is_ok()
 }
 
 #[test]

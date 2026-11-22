@@ -907,19 +907,19 @@ default-features = false
 features = ["rt-multi-thread", "sync", "macros"]
 optional = true
 
-# R311y406 — the sibling fixture crate (DEV-only), for the quic-listen cert
-# discriminator's self-signed `localhost` cert. Never enters a `cargo build` (only
-# `cargo test` unifies it); no cycle (test-support -> wz-runtime-tokio, not -> pico).
 [dev-dependencies]
 # The `tls/` link on the cooperative engine (`tests/tls_coop_roundtrip.rs`) states its certificate
 # keys inline, as the stock examples do: the test encodes the PEM of the fixture's certificate.
 base64 = "0.22"
-wz-runtime-tokio-test-support = { path = "../wz-runtime-tokio-test-support", features = [
+# The port pickers (`free_port`) and the self-signed `localhost` certificate of the TLS and QUIC
+# tests, without the default `sessions`: those fixtures build on the tokio engine, and a test build
+# of the cooperative engine must not link it (`wz-runtime-tokio` refuses to be built beside the
+# lent-only selectors `engine-coop` names). The tests that drive the runtime's own sessions beside
+# the C ABI's (a wz peer, a router) reach it as the library does, through the engine they are
+# gated on (`wz_capi_core::runtime`, behind `engine-tokio`), so the runtime has no edge here.
+wz-runtime-tokio-test-support = { path = "../wz-runtime-tokio-test-support", default-features = false, features = [
     "tls-fixtures",
 ] }
-# The tests drive the runtime's own sessions beside the C ABI's (a wz peer, a router); the
-# library itself reaches the runtime only through its engine, `wz_capi_core::runtime`.
-wz-runtime-tokio = { path = "../wz-runtime-tokio", default-features = false }
 # The synthetic segment profile and its hand-laid piece builder (`segment_profile::synthetic`,
 # behind `fixtures`): the oracle the segment sender's door tests hold every piece to, which lays
 # each field by hand and computes the CRC from the model's parameters, not from a parsed profile.
