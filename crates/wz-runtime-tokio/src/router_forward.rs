@@ -390,6 +390,7 @@ use wz_session_core::push_routing_context::{
 };
 use wz_session_core::qos::Priority;
 use wz_session_core::query::QueryResponder;
+use wz_session_core::wire_id::peer_key;
 use wz_session_core::wireexpr_resolve::{
     id_and_suffix, resolve_wireexpr, resolve_wireexpr_into, wireexpr_is_empty,
     wireexpr_names_a_declaration, KeyexprBuf, KeyexprPastBound, MappingSpaces,
@@ -410,14 +411,14 @@ use crate::interceptor::{
 };
 use crate::linkstate_forward::{
     absorb_keyexpr_into, all_query_directions, bring_client_routes, bring_mesh_routes,
-    build_declare_queryable_with_info, client_query_route, client_route, complete_query_directions,
-    compute_push_forward, compute_self_publish_forward, declare_queryable_wireexpr,
-    declare_subscriber_wireexpr, emit_current_interest_replies, is_tree_forward_target,
-    peer_acl_username, peer_whatami_routing, peer_zid_routing, query_candidates,
-    re_advertise_interest_into, resolve_governed_keyexpr, resolve_source_in, resolve_source_zid_in,
-    select_best_matching, stamped, synthesize_drained_fan_finals, synthesize_expired_query_returns,
-    Cached, ClientQablStore, ClientQueryRoutes, ClientQueryable, ClientRoutes, ClientSubStore,
-    DataRoutes, QueryCandidate, QueryRoutes,
+    build_declare_queryable_with_info, client_inputs, client_query_route, client_route,
+    complete_query_directions, compute_push_forward, compute_self_publish_forward,
+    declare_queryable_wireexpr, declare_subscriber_wireexpr, emit_current_interest_replies,
+    is_tree_forward_target, peer_acl_username, peer_whatami_routing, peer_zid_routing,
+    query_candidates, re_advertise_interest_into, resolve_governed_keyexpr, resolve_source_in,
+    resolve_source_zid_in, select_best_matching, stamped, synthesize_drained_fan_finals,
+    synthesize_expired_query_returns, Cached, ClientQablStore, ClientQueryRoutes, ClientQueryable,
+    ClientRoutes, ClientSubStore, DataRoutes, QueryCandidate, QueryRoutes,
 };
 use crate::node_clock::ForwardStamp;
 #[cfg(feature = "routing-token-tables")]
@@ -468,7 +469,7 @@ mod face_table;
 mod fanout_io_tests;
 use face_table::FaceTable;
 mod held_route;
-use held_route::{HeldFace, HeldFaceContext, LiteralPush, SharedCarrier};
+use held_route::{AliasRoutes, HeldFace, HeldFaceContext, LiteralPush, SharedCarrier};
 
 /// The client leg's routes of a broker hat, each naming its faces as the router holds them while
 /// they are up.
@@ -1964,6 +1965,10 @@ struct RouterFaceState {
     /// the link came up is held when the program can declare anything
     /// ([`RouterForwarder::initial_declares_pending`]). Set by the arrival, never by a timer.
     initial_final: bool,
+    /// The client legs of the routes of this face's Puts that named one of its aliases with no
+    /// suffix, by the alias ([`AliasRoutes`]). Shared by every version of the tables that holds
+    /// these aliases, and given anew when they change ([`OnTables::absorb_keyexpr_declaration`]).
+    alias_routes: Arc<AliasRoutes>,
 }
 
 impl RouterFaceState {
@@ -2113,6 +2118,26 @@ fn classify_inbound(faces: &FaceTable, inbound: FaceId) -> InboundFace<'_> {
     match faces.get(&inbound) {
         Some(s) => InboundFace::Held(s),
         None => InboundFace::Gone,
+    }
+}
+
+/// The legs a face keeps for its aliases ([`AliasRoutes`]), and the alias a Put named, by the key
+/// the face's alias table holds it under.
+type AliasOf<'a> = (&'a AliasRoutes, u64);
+
+/// The key a Put is routed by: its text, and, for a Put that named one of the aliases of the face
+/// it came from with no suffix, the legs that face keeps for the alias, by which the client legs of
+/// the Put's route are found without its text being looked up ([`AliasRoutes`]).
+#[derive(Clone, Copy)]
+struct RoutedKey<'a> {
+    text: &'a str,
+    alias: Option<AliasOf<'a>>,
+}
+
+impl<'a> RoutedKey<'a> {
+    /// A key known by its text alone.
+    fn of_text(text: &'a str) -> Self {
+        Self { text, alias: None }
     }
 }
 
@@ -3387,6 +3412,13 @@ pub struct RouterForwarder {
     /// Count of the client carriers encoded to shared bytes: one for each fan-out that sent at
     /// least one face the bytes, however many faces it sent them to.
     client_carrier_encodes: Counter,
+    /// The client legs served from those a face keeps for its aliases, and those read by their key
+    /// and kept there (`OnTables::client_leg_for`). Counted in test builds only, where the tests
+    /// read them, so that a Put pays nothing for them.
+    #[cfg(test)]
+    alias_legs_served: Counter,
+    #[cfg(test)]
+    alias_legs_kept: Counter,
     /// Count of the client carriers made by copying the Put routed: one for each fan-out of a Put
     /// that had to be re-keyed or have its source reset, none for a literal that names no source,
     /// which is lent as it came ([`client_carrier`]).
@@ -5331,6 +5363,10 @@ impl RouterForwarder {
             held_route_closed_skips: Counter::new(),
             client_carrier_encodes: Counter::new(),
             client_carrier_copies: Counter::new(),
+            #[cfg(test)]
+            alias_legs_served: Counter::new(),
+            #[cfg(test)]
+            alias_legs_kept: Counter::new(),
             frame_table_reads: Counter::new(),
             recomputes: Counter::new(),
             trees_delay: Self::DEFAULT_TREES_DELAY,
@@ -5936,6 +5972,13 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// The client carriers made by copying the Put routed (see the field).
     pub fn client_carrier_copies(&self) -> usize {
         self.client_carrier_copies.get()
+    }
+
+    /// The client legs served from those the faces keep for their aliases, and those kept there
+    /// (see the fields).
+    #[cfg(test)]
+    fn alias_legs(&self) -> (usize, usize) {
+        (self.alias_legs_served.get(), self.alias_legs_kept.get())
     }
 
     /// The reads of the tables the faces' frames took for their reading messages (see the field).
@@ -6570,6 +6613,37 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             wire,
             |id| faces.get(&id).map(|state| HeldFace::of(id, state)),
         )
+    }
+
+    /// [`Self::client_leg`] for a Put routed by `key`, in the client region `region` that `hat`
+    /// serves. A Put that named one of its face's aliases with no suffix is served the leg the
+    /// face keeps for that alias ([`AliasRoutes`]) when it was read from the memo these tables
+    /// hold, as upstream serves a Put the route cached on the resource its mapping names
+    /// (`zenoh/src/net/routing/dispatcher/pubsub.rs` @ `fn get_data_route(`). Any other Put, and
+    /// that one when no leg is served, is routed by its key's text, and a leg read so for an alias
+    /// is kept on the face for the next Put that names it. A memo that is not at these tables'
+    /// inputs (a writer's draft) serves and keeps nothing for an alias.
+    fn client_leg_for(
+        &self,
+        region: Region,
+        hat: &BrokerHat,
+        key: RoutedKey<'_>,
+        wire: bool,
+    ) -> Arc<[HeldFace]> {
+        let memo = &hat.client_routes;
+        let Some((legs, id)) = key.alias.filter(|_| memo.is_at(client_inputs(&hat.subs))) else {
+            return self.client_leg(hat, key.text, wire);
+        };
+        if let Some(route) = legs.get(id, region, memo) {
+            #[cfg(test)]
+            self.alias_legs_served.bump();
+            return route;
+        }
+        let route = self.client_leg(hat, key.text, wire);
+        legs.keep(id, region, memo, &route);
+        #[cfg(test)]
+        self.alias_legs_kept.bump();
+        route
     }
 
     /// Whether any client face holds a subscription at all. The node's own session is not a
@@ -7250,6 +7324,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             return;
         };
         absorb_keyexpr_into(&mut state.keyexpr_table, declare);
+        // A leg kept for an alias was routed by the key the alias named when it was kept.
+        state.alias_routes = Arc::default();
     }
 
     /// R2876 (step 3e) — resolve a declaration on `inbound` against the hat
@@ -8931,7 +9007,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             return;
         };
         let mut composed = KeyexprBuf::new();
-        let Some(keyexpr) = self.resolve_inbound_keyexpr(inbound, push, &mut composed) else {
+        let Some((keyexpr, alias)) = self.resolve_inbound_keyexpr(inbound, push, &mut composed)
+        else {
             return;
         };
         // The §5.18 forward-path stamp, taken ONCE, by the first block below whose
@@ -9036,7 +9113,10 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 express: false,
             },
             &stamp,
-            &keyexpr,
+            RoutedKey {
+                text: &keyexpr,
+                alias,
+            },
             defer,
         );
         // Block 3b (R2393) — local HOST delivery: a subscriber this router itself
@@ -9351,25 +9431,37 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// (`zenoh/src/net/routing/dispatcher/pubsub.rs` @
     /// `.get_mapping(src_face, &msg.wire_expr.scope, msg.wire_expr.mapping)`).
     /// `None` = the face is gone or the alias id is unknown (drop the Push).
+    ///
+    /// With the key, the legs the inbound face keeps for the alias the Put named, when it named one
+    /// of the face's aliases with no suffix ([`RoutedKey`]).
     fn resolve_inbound_keyexpr<'k>(
         &'k self,
         inbound: FaceId,
         push: &'k PushOwned,
         composed: &'k mut KeyexprBuf,
-    ) -> Option<Cow<'k, str>> {
+    ) -> Option<(Cow<'k, str>, Option<AliasOf<'k>>)> {
         let faces = &self.tables.faces;
         // R2734 — this is the ONE site that recognised the sentinel before the
         // classifier existed, and it is why Push worked at all while every other
         // kind died at its lookup. It now asks the same question the other eleven
         // ask, so the special case is the enum's rather than this function's.
         match classify_inbound(faces, inbound) {
-            InboundFace::Held(s) => lent_keyexpr(push, &s.keyexpr_table, composed),
+            InboundFace::Held(s) => {
+                let text = lent_keyexpr(push, &s.keyexpr_table, composed)?;
+                // A key that resolved from an id with no suffix is the face's alias for that id,
+                // whose legs the face keeps.
+                let alias = match id_and_suffix(&push.keyexpr.body) {
+                    (id, None) if id != 0 => Some((&*s.alias_routes, peer_key(id))),
+                    _ => None,
+                };
+                Some((text, alias))
+            }
             // A source-only face carries no per-peer alias table, so a literal
             // (id==0) push yields its suffix and an aliased id-only push yields
             // None and is dropped. wz resolves a group peer's aliases UPSTREAM of
             // here, per peer by source address, in `apply_declared_aliases`.
             InboundFace::SourceOnly => match id_and_suffix(&push.keyexpr.body) {
-                (0, suffix) => suffix.map(Cow::Borrowed),
+                (0, suffix) => suffix.map(|text| (Cow::Borrowed(text), None)),
                 _ => None,
             },
             InboundFace::Gone => None,
@@ -9643,7 +9735,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         inbound_tier: Region,
         egress: Egress,
         stamp: &ForwardStamp<'_>,
-        keyexpr: &str,
+        key: RoutedKey<'_>,
         defer: bool,
     ) {
         let Egress {
@@ -9651,6 +9743,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             priority,
             express,
         } = egress;
+        let keyexpr = key.text;
         // Deliver to each Client-tier face subscribing a keyexpr that INTERSECTS
         // the published K, excluding the inbound face (never echo a client's own
         // Push back to it). Wildcard-aware via the SAME `keyexpr_intersects`
@@ -9679,7 +9772,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 // them away, so a Put one of them subscribes takes the stamp.
                 let routed = self
                     .client_regions()
-                    .any(|(_, hat)| !self.client_leg(hat, keyexpr, wire).is_empty());
+                    .any(|(region, hat)| !self.client_leg_for(region, hat, key, wire).is_empty());
                 if routed {
                     let _ = stamp.for_egress();
                 }
@@ -9724,7 +9817,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // R2873 (step 3d) — one fan-out per broker hat, each scoped to the
         // region that hat owns and reading that hat's own table.
         for (region, hat) in self.client_regions() {
-            let clients = self.client_leg(hat, keyexpr, wire);
+            let clients = self.client_leg_for(region, hat, key, wire);
             if clients.is_empty() {
                 continue;
             }
@@ -12236,7 +12329,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 Region::Local,
                 egress,
                 &settled,
-                keyexpr,
+                RoutedKey::of_text(keyexpr),
                 false,
             );
         }
@@ -14340,6 +14433,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 link: added.map(|(link, _, _)| link),
                 keyexpr_table: hashbrown::HashMap::new(),
                 initial_final: false,
+                alias_routes: Arc::default(),
             }),
         );
         // A face held under the same id before is gone, as a face that left is: a route that
@@ -21417,6 +21511,77 @@ mod tests {
         for sink in &sinks {
             assert_eq!(sink.frame_count(), 3, "every subscriber is sent every Put");
         }
+    }
+
+    /// A Put that names its face's alias with no suffix is routed by the leg the face keeps for the
+    /// alias from its second Put on, and the leg follows the tables: a subscriber that comes, and
+    /// the alias naming another key, have the leg read again by the key. Turned red by a leg served
+    /// after the subscribers it was read for changed or after its alias named another key, or by an
+    /// aliased Put whose leg is looked up by its key every time.
+    #[test]
+    fn an_aliased_put_is_routed_by_the_leg_its_face_keeps_for_the_alias() {
+        let (fwd, sinks, publisher) = clients_subscribed_to("demo/fan", 2);
+        let alias = |keyexpr: &str| {
+            NetworkMessage::Declare(Box::new(
+                wz_session_core::declare_build::build_declare_kexpr(5, keyexpr).expect("kexpr"),
+            ))
+        };
+        let aliased_put = || {
+            NetworkMessage::Push(Box::new(
+                wz_session_core::push_build::build_push_aliased(5, None, FAN_PAYLOAD)
+                    .expect("aliased push"),
+            ))
+        };
+        let legs = || fwd.on_tables().alias_legs();
+        forward_one(&fwd, publisher, alias("demo/fan"));
+        let (served, kept) = legs();
+        forward_one(&fwd, publisher, aliased_put());
+        assert_eq!(
+            legs(),
+            (served, kept + 1),
+            "the first Put reads the leg by its key and keeps it"
+        );
+        forward_one(&fwd, publisher, aliased_put());
+        forward_one(&fwd, publisher, aliased_put());
+        assert_eq!(
+            legs(),
+            (served + 2, kept + 1),
+            "the next two are served the leg kept"
+        );
+        for sink in &sinks {
+            assert_eq!(sink.frame_count(), 3, "every subscriber is sent every Put");
+        }
+
+        // A subscriber that comes moves the memo the leg was read from: the leg is read again,
+        // and reaches it.
+        let (late, late_sink) = face(Zid::from_slice(&0x3000_00ff_u32.to_be_bytes()), WIRE_CLIENT);
+        fwd.register(FaceId(40), &late);
+        forward_one(&fwd, FaceId(40), declare_sub("demo/fan"));
+        late_sink.reset();
+        forward_one(&fwd, publisher, aliased_put());
+        assert_eq!(
+            legs(),
+            (served + 2, kept + 2),
+            "a subscriber that came has the leg read again"
+        );
+        assert_eq!(late_sink.frame_count(), 1, "and the Put reaches it");
+
+        // The alias names a key nobody subscribes: the leg kept for the key before is not served.
+        forward_one(&fwd, publisher, alias("demo/other"));
+        for sink in &sinks {
+            sink.reset();
+        }
+        late_sink.reset();
+        forward_one(&fwd, publisher, aliased_put());
+        assert_eq!(
+            legs(),
+            (served + 2, kept + 3),
+            "an alias that names another key has its leg read again"
+        );
+        assert!(
+            sinks.iter().all(|sink| sink.frame_count() == 0) && late_sink.frame_count() == 0,
+            "no subscriber of the key the alias named before is sent the Put"
+        );
     }
 
     /// R2879 (open-debt item 751, step 5) — a CLIENT-sourced Push leaves its one

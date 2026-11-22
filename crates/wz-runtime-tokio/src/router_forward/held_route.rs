@@ -19,6 +19,7 @@
 //! read off the message and no alias table is asked ([`HeldFaceContext`]).
 
 use std::cell::OnceCell;
+use std::sync::Weak;
 
 use super::face_runtime::{FaceRuntime, SendFace};
 use super::*;
@@ -147,6 +148,71 @@ impl<'a> SharedCarrier<'a> {
     }
 }
 
+/// The client legs a face's Puts that named one of its aliases with no suffix were routed by, kept
+/// on the face by the alias's id: a Put that names the alias again is routed by them without its
+/// key being looked up by its text, as upstream reaches the route of a Put through the resource
+/// its mapping names (`zenoh/src/net/routing/dispatcher/face.rs` @
+/// `Mapping::Sender => self.remote_mappings.get(prefixid),`). The face is given an empty one
+/// whenever its aliases change, so a leg is only ever kept for the key its alias names now.
+///
+/// A leg is kept with the memo of the client routes it was read from, and served only while the
+/// tables hold that same memo: every change that can move the leg (a subscriber of the region
+/// declared or withdrawn, a face that leaves) gives the tables another memo
+/// ([`bring_client_routes`](crate::linkstate_forward::bring_client_routes)). The memo is held
+/// weakly, so a leg keeps none of its routes alive, and its address cannot be another memo's
+/// while the leg is kept.
+///
+/// Only the face's own thread routes its Puts, so the lock is not contended.
+#[derive(Default)]
+pub(super) struct AliasRoutes {
+    legs: PlainMutex<hashbrown::HashMap<u64, Vec<AliasLeg>>>,
+}
+
+/// The leg of one client region kept for an alias ([`AliasRoutes`]).
+struct AliasLeg {
+    region: Region,
+    memo: Weak<HeldClientRoutes>,
+    route: Arc<[HeldFace]>,
+}
+
+impl AliasRoutes {
+    /// The leg of `region` kept for the alias `id`, when it was read from `memo`.
+    pub(super) fn get(
+        &self,
+        id: u64,
+        region: Region,
+        memo: &Arc<HeldClientRoutes>,
+    ) -> Option<Arc<[HeldFace]>> {
+        let legs = self.legs.guard();
+        legs.get(&id)?
+            .iter()
+            .find(|leg| leg.region == region && std::ptr::eq(leg.memo.as_ptr(), Arc::as_ptr(memo)))
+            .map(|leg| Arc::clone(&leg.route))
+    }
+
+    /// Keep `route`, read from `memo`, as the leg of `region` for the alias `id`, in place of the
+    /// one it held for that region.
+    pub(super) fn keep(
+        &self,
+        id: u64,
+        region: Region,
+        memo: &Arc<HeldClientRoutes>,
+        route: &Arc<[HeldFace]>,
+    ) {
+        let leg = AliasLeg {
+            region,
+            memo: Arc::downgrade(memo),
+            route: Arc::clone(route),
+        };
+        let mut legs = self.legs.guard();
+        let legs = legs.entry(id).or_default();
+        match legs.iter_mut().find(|held| held.region == region) {
+            Some(held) => *held = leg,
+            None => legs.push(leg),
+        }
+    }
+}
+
 /// The egress interceptors' view of a face reached through a held route: its fixed facts, and the
 /// key of the message read off the message itself, which a held route only sends as a literal.
 pub(super) struct HeldFaceContext<'a> {
@@ -242,6 +308,44 @@ mod tests {
         assert!(!owned.is_lent());
         let aliased = build_push_aliased(5, None, b"x").expect("build aliased push");
         assert!(LiteralPush::lent(&aliased).is_none());
+    }
+
+    /// A leg kept for an alias is served for that alias and region only while it is asked with the
+    /// memo it was read from, and a leg kept again for the region takes the place of the one
+    /// before. Turned red by a leg served from another memo, region or alias.
+    #[test]
+    fn an_alias_leg_is_served_only_with_the_memo_it_was_read_from() {
+        let routes = AliasRoutes::default();
+        let memo = Arc::new(HeldClientRoutes::indexed());
+        let other = Arc::new(HeldClientRoutes::indexed());
+        let first: Arc<[HeldFace]> = Arc::from([]);
+        let second: Arc<[HeldFace]> = Arc::from([]);
+        assert!(
+            routes.get(5, Region::Local, &memo).is_none(),
+            "nothing kept"
+        );
+        routes.keep(5, Region::Local, &memo, &first);
+        let served = routes.get(5, Region::Local, &memo).expect("the leg kept");
+        assert!(Arc::ptr_eq(&served, &first));
+        assert!(
+            routes.get(5, Region::Local, &other).is_none(),
+            "another memo"
+        );
+        assert!(
+            routes.get(5, NORTH_REGION, &memo).is_none(),
+            "another region"
+        );
+        assert!(
+            routes.get(6, Region::Local, &memo).is_none(),
+            "another alias"
+        );
+        routes.keep(5, Region::Local, &other, &second);
+        assert!(
+            routes.get(5, Region::Local, &memo).is_none(),
+            "the leg read from the memo before was replaced"
+        );
+        let served = routes.get(5, Region::Local, &other).expect("the leg kept");
+        assert!(Arc::ptr_eq(&served, &second));
     }
 
     /// The carrier is encoded on the first ask and on no other, and what every ask is handed is

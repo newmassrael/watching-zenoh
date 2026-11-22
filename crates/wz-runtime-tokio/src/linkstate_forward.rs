@@ -599,7 +599,7 @@ fn mesh_inputs<V>(net: &LinkstateNetwork, table: &LinkstatepeerInterest<V>) -> R
 }
 
 /// The inputs of a client leg's routes: the store alone, as no graph enters them.
-fn client_inputs<V: Held>(store: &ClientStore<V>) -> RouteInputs {
+pub(crate) fn client_inputs<V: Held>(store: &ClientStore<V>) -> RouteInputs {
     RouteInputs {
         net: 0,
         table: store.version(),
