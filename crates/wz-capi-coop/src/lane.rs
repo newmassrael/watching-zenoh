@@ -1560,7 +1560,7 @@ impl LentSample {
 
     /// One more subscriber is this sample's.
     fn join(&mut self, subscriber: SubId) {
-        if self.subscribers.iter().any(|held| *held == subscriber) {
+        if self.subscribers.contains(&subscriber) {
             return;
         }
         let kept = self.subscribers.push(subscriber);
