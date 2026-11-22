@@ -75,6 +75,17 @@
 // stream connected to it. Each link has one thread that reads it and hands the bytes in, and reports a link
 // whose send would block writable again; a send never blocks.
 //
+// On Windows (_WIN32) the same source is built with MSVC against either library by
+// scripts/host-bench/windows/perf_matrix.ps1, which runs the matrix there. What differs is only what the
+// host gives: the clocks are QueryPerformanceCounter (one clock every process of the host reads alike, as
+// CLOCK_MONOTONIC is on Linux) and GetProcessTimes, the options are read by a getopt of this file's own, a
+// role is asked to stop by the named event Local\perf_probe_stop_<pid> where Linux's runner sends SIGTERM,
+// and the program's last line is
+//
+//   perf_probe usage peak_rss_kib=<the peak working set of the process>
+//
+// since a Windows parent reads no rusage of a child. -T, the program transport, is Linux's alone.
+//
 // Exit status: 0 when the role ran, 1 when the session or an entity could not be made, 2 for a usage error or
 // an option the build does not have.
 
@@ -87,11 +98,25 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 
 #include "zenoh-pico.h"
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+// After windows.h, which it reads.
+#include <psapi.h>
+#endif
+
 #ifdef PERF_PROGRAM_TRANSPORT
+#ifdef _WIN32
+#error "the program transport of perf_probe is an AF_UNIX stream in Linux's abstract namespace; it is not built on Windows"
+#endif
 #include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
@@ -115,6 +140,105 @@
 
 static volatile sig_atomic_t terminated = 0;
 
+#ifdef _WIN32
+
+static uint64_t now_ns(void) {
+    static LARGE_INTEGER frequency;
+    LARGE_INTEGER count;
+    if (frequency.QuadPart == 0) QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&count);
+    const uint64_t f = (uint64_t)frequency.QuadPart, c = (uint64_t)count.QuadPart;
+    // Split so that the product stays inside 64 bits for any uptime.
+    return c / f * 1000000000ULL + c % f * 1000000000ULL / f;
+}
+
+// The CPU of every thread of the process, user and kernel, as CLOCK_PROCESS_CPUTIME_ID gives it on Linux.
+static uint64_t cpu_ns(void) {
+    FILETIME created, exited, kernel, user;
+    if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user)) return 0;
+    const uint64_t k = ((uint64_t)kernel.dwHighDateTime << 32) | kernel.dwLowDateTime;
+    const uint64_t u = ((uint64_t)user.dwHighDateTime << 32) | user.dwLowDateTime;
+    return (k + u) * 100ULL;
+}
+
+static void sleep_ms(unsigned ms) { Sleep(ms); }
+
+// The options as POSIX getopt reads them (a letter, its value in the same word or the next, letters
+// grouped in one word), which MSVC's C library does not have.
+static char *optarg;
+static int optind = 1;
+
+static int getopt(int argc, char *const argv[], const char *spec) {
+    static int at = 1;
+    if (optind >= argc || argv[optind][0] != '-' || argv[optind][1] == '\0') return -1;
+    if (at == 1 && strcmp(argv[optind], "--") == 0) {
+        optind++;
+        return -1;
+    }
+    const char letter = argv[optind][at];
+    const char *known = letter == ':' ? NULL : strchr(spec, letter);
+    if (known != NULL && known[1] == ':') {
+        if (argv[optind][at + 1] != '\0') {
+            optarg = &argv[optind][at + 1];
+        } else if (optind + 1 < argc) {
+            optarg = argv[++optind];
+        } else {
+            known = NULL;
+        }
+        optind++;
+        at = 1;
+        return known != NULL ? letter : '?';
+    }
+    if (argv[optind][++at] == '\0') {
+        optind++;
+        at = 1;
+    }
+    return known != NULL ? letter : '?';
+}
+
+static DWORD WINAPI wait_for_stop(LPVOID event) {
+    if (WaitForSingleObject((HANDLE)event, INFINITE) == WAIT_OBJECT_0) terminated = 1;
+    return 0;
+}
+
+static BOOL WINAPI on_console(DWORD kind) {
+    (void)kind;
+    terminated = 1;
+    return TRUE;
+}
+
+// Windows has no signal one process sends another, so the runner sets the named event
+// Local\perf_probe_stop_<pid> where Linux's runner sends SIGTERM, and a thread that waits for it raises
+// the flag the roles poll; Ctrl+C at a console does what SIGINT does. 0, or -1 when the event or its
+// thread could not be made.
+static int watch_for_stop(void) {
+    char name[64];
+    snprintf(name, sizeof name, "Local\\perf_probe_stop_%lu", (unsigned long)GetCurrentProcessId());
+    HANDLE event = CreateEventA(NULL, TRUE, FALSE, name);
+    if (event == NULL) return -1;
+    HANDLE thread = CreateThread(NULL, 0, wait_for_stop, event, 0, NULL);
+    if (thread == NULL) return -1;
+    CloseHandle(thread);
+    SetConsoleCtrlHandler(on_console, TRUE);
+    return 0;
+}
+
+// The peak working set of the process, the last line it prints: Linux's runner reads the peak resident set
+// of a reaped child from getrusage, and a Windows parent has no such reading.
+static void print_usage(void) {
+    PROCESS_MEMORY_COUNTERS counters;
+    memset(&counters, 0, sizeof counters);
+    counters.cb = sizeof counters;
+    unsigned long long kib = 0;
+    if (GetProcessMemoryInfo(GetCurrentProcess(), &counters, sizeof counters)) {
+        kib = (unsigned long long)(counters.PeakWorkingSetSize / 1024U);
+    }
+    printf("perf_probe usage peak_rss_kib=%llu\n", kib);
+    fflush(stdout);
+}
+
+#else
+
 static void on_terminate(int signo) {
     (void)signo;
     terminated = 1;
@@ -137,6 +261,8 @@ static void sleep_ms(unsigned ms) {
     while (nanosleep(&nap, &nap) != 0 && errno == EINTR && !terminated) {
     }
 }
+
+#endif
 
 static void drop_nothing(void *context) { (void)context; }
 
@@ -893,6 +1019,11 @@ static int run_pub(const z_loaned_session_t *session, const struct options *o) {
 // ---------------------------------------------------------------------------------------------------------
 
 int main(int argc, char **argv) {
+#ifdef _WIN32
+    // Unbuffered: MSVC's C library has no line buffering, and Linux's runner line-buffers each program
+    // (stdbuf -oL), so what a process printed is in its file even when it is stopped hard.
+    setvbuf(stdout, NULL, _IONBF, 0);
+#endif
     if (argc < 2) return usage();
     struct options o = {argv[1], 8, 20000, 3000, 100, 5, 0, 0, 0, NULL};
     z_owned_config_t config;
@@ -972,11 +1103,18 @@ int main(int argc, char **argv) {
 #endif
     }
 
+#ifdef _WIN32
+    if (watch_for_stop() != 0) {
+        printf("perf_probe %s: unable to watch for the stop event\n", o.role);
+        return 1;
+    }
+#else
     struct sigaction action;
     memset(&action, 0, sizeof action);
     action.sa_handler = on_terminate;
     sigaction(SIGTERM, &action, NULL);
     sigaction(SIGINT, &action, NULL);
+#endif
 
     z_owned_session_t session;
     z_result_t opened = z_open(&session, z_config_move(&config), NULL);
@@ -992,6 +1130,9 @@ int main(int argc, char **argv) {
     z_session_drop(z_session_move(&session));
 #ifdef PERF_PROGRAM_TRANSPORT
     if (o.transport_name != NULL) wz_ext_transport_drop(wz_ext_transport_move(&pt.transport));
+#endif
+#ifdef _WIN32
+    print_usage();
 #endif
     return rc;
 }
