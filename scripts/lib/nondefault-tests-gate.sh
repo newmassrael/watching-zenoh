@@ -689,6 +689,10 @@ transport-link-unixpipe,transport-link-ws|"
     # The same with the lent-only receive the C library's final build selects (`rx-lent-only`): what
     # the engine's links carry is delivered lent, with no owned projection to fall back on.
     "wz-capi-coop|hook|query,rx-lent-only|tests::in_place::"
+    # The crate's whole suite in the C library's final receive and send (`rx-lent-only` with
+    # `tx-lend-only`): the router stand-in lends its links send slots, so a lend-only session
+    # answers it; 130 passed on a build host (2026-11-23).
+    "wz-capi-coop|hook|rx-lent-only,tx-lend-only|"
     # What a hosted OS tells a node about its network, and the multicast sockets built from it,
     # which the tokio runtime and the cooperative host both open. The `#iface=` honor (the v4 and
     # v6 interface selectors and the tests that read them off the loopback) is compiled only with
