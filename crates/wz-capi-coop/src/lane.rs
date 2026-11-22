@@ -43,7 +43,8 @@
 //! a count.
 
 use alloc::sync::Arc;
-use core::ptr::NonNull;
+use core::mem::MaybeUninit;
+use core::ptr::{self, addr_of_mut, NonNull};
 
 use wz_capi_port::os::Mutex;
 use wz_capi_port::{MatchId, SubId};
@@ -487,31 +488,111 @@ pub(crate) struct SampleLane {
 unsafe impl Send for SampleLane {}
 
 impl SampleLane {
-    /// A lane over the `area_bytes` bytes at `area`, held to `limits`.
+    /// [`Self::over_in`] as a value, for the tests that hold a lane of their own.
     ///
     /// # Safety
-    /// `area` points at `area_bytes` bytes valid for reads and writes, used by nothing else, for
-    /// as long as the lane is used; `area_bytes` is `limits`' `DELIVERY_LANE_BYTES`.
+    /// As [`Self::over_in`]'s.
+    #[cfg(test)]
     pub(crate) unsafe fn over(
         area: NonNull<u8>,
         area_bytes: usize,
         limits: &SessionLimits,
     ) -> Self {
-        debug_assert_eq!(area_bytes, limits.delivery_lane_bytes());
-        Self {
-            lane: DeliveryLane::with_limits(limits),
-            records: [const { None }; caps::DELIVERY_LANE_EVENTS],
-            area,
-            open: None,
-            handing: false,
-            #[cfg(debug_assertions)]
-            gated: false,
-            #[cfg(feature = "liveliness")]
-            rehearsal: None,
-            #[cfg(feature = "local-subscriber")]
-            capturing: None,
-            counts: LaneCounts::default(),
+        let mut place = MaybeUninit::uninit();
+        // SAFETY: the caller's, which are `over_in`'s; `over_in` wrote every field into `place`.
+        unsafe {
+            Self::over_in(&mut place, area, area_bytes, limits);
+            place.assume_init()
         }
+    }
+
+    /// The session's lane over the `area_bytes` bytes at `area`, held to `limits`, built where the
+    /// lock it is shared behind keeps it: the lane is kilobytes (an event record for each slot),
+    /// and built as a value and moved into its lock and the lock into its allocation it lay in the
+    /// frame of the session's open once for each move.
+    ///
+    /// # Safety
+    /// As [`Self::over_in`]'s.
+    #[inline(never)]
+    pub(crate) unsafe fn shared_over(
+        area: NonNull<u8>,
+        area_bytes: usize,
+        limits: &SessionLimits,
+    ) -> Arc<Mutex<Self>> {
+        // `Arc::new_uninit` is newer than this crate's minimum Rust; an uninitialised value put in
+        // an `Arc` is the same allocation, and the optimiser writes nothing into it.
+        let mut shared = Arc::new(MaybeUninit::<Mutex<Self>>::uninit());
+        let place = Arc::get_mut(&mut shared).expect("a new allocation has one handle");
+        // SAFETY: the caller's, which are `over_in`'s.
+        Mutex::new_in(place, |lane| unsafe {
+            Self::over_in(lane, area, area_bytes, limits)
+        });
+        // SAFETY: `new_in` wrote the whole mutex into the allocation, and a `MaybeUninit<T>` has
+        // the size and alignment of `T`, which is what `Arc::from_raw` asks of the pointer's type.
+        unsafe { Arc::from_raw(Arc::into_raw(shared).cast::<Mutex<Self>>()) }
+    }
+
+    /// A lane over the `area_bytes` bytes at `area`, held to `limits`, written field by field into
+    /// `place`, which is overwritten without dropping what it held: each event slot is written
+    /// empty where it lies, so the slots are never an array of their own on a stack. Not inlined:
+    /// the largest value its frame holds is the lane's bookkeeping.
+    ///
+    /// # Safety
+    /// `area` points at `area_bytes` bytes valid for reads and writes, used by nothing else, for
+    /// as long as the lane is used; `area_bytes` is `limits`' `DELIVERY_LANE_BYTES`.
+    #[inline(never)]
+    pub(crate) unsafe fn over_in(
+        place: &mut MaybeUninit<Self>,
+        area: NonNull<u8>,
+        area_bytes: usize,
+        limits: &SessionLimits,
+    ) -> &mut Self {
+        debug_assert_eq!(area_bytes, limits.delivery_lane_bytes());
+        let at = place.as_mut_ptr();
+        // Each gated statement opens with the path `ptr::write(`, not with the `addr_of_mut!`
+        // macro, as `SlotObserverOf::init_in_place` says why.
+        // SAFETY: `at` is valid for writes of a `Self`, and each field is written once through a
+        // pointer to it, the event slots one by one (an array's first element is at its address);
+        // `every_field_is_written` names every field, so the lane is whole when it is lent.
+        unsafe {
+            ptr::write(addr_of_mut!((*at).lane), DeliveryLane::with_limits(limits));
+            let records = addr_of_mut!((*at).records).cast::<Option<Event>>();
+            for slot in 0..caps::DELIVERY_LANE_EVENTS {
+                ptr::write(records.add(slot), None);
+            }
+            ptr::write(addr_of_mut!((*at).area), area);
+            ptr::write(addr_of_mut!((*at).open), None);
+            ptr::write(addr_of_mut!((*at).handing), false);
+            #[cfg(debug_assertions)]
+            ptr::write(addr_of_mut!((*at).gated), false);
+            #[cfg(feature = "liveliness")]
+            ptr::write(addr_of_mut!((*at).rehearsal), None);
+            #[cfg(feature = "local-subscriber")]
+            ptr::write(addr_of_mut!((*at).capturing), None);
+            ptr::write(addr_of_mut!((*at).counts), LaneCounts::default());
+            &mut *at
+        }
+    }
+
+    /// A field added to [`SampleLane`] and not written by [`Self::over_in`] would be read
+    /// uninitialised. This destructures the lane with no `..`, so adding a field without naming it
+    /// here (and so without writing it there) does not compile.
+    #[allow(dead_code)]
+    fn every_field_is_written(lane: Self) {
+        let Self {
+            lane: _,
+            records: _,
+            area: _,
+            open: _,
+            handing: _,
+            #[cfg(debug_assertions)]
+                gated: _,
+            #[cfg(feature = "liveliness")]
+                rehearsal: _,
+            #[cfg(feature = "local-subscriber")]
+                capturing: _,
+            counts: _,
+        } = lane;
     }
 
     /// Queue `sample` for the callback of `subscriber`, or count it when the lane has no room
@@ -712,7 +793,7 @@ impl SampleLane {
             .checked_add(bytes.len())
             .is_some_and(|end| self.lane.can_ever_fit(end));
         assert!(inside, "a sample's bytes lie inside the lane's area");
-        // SAFETY: inside the area (asserted above), which is this lane's alone (`Self::over`);
+        // SAFETY: inside the area (asserted above), which is this lane's alone (`Self::over_in`);
         // `bytes` are the sample's and not the area's.
         unsafe {
             core::ptr::copy_nonoverlapping(bytes.as_ptr(), self.area.as_ptr().add(at), bytes.len())
