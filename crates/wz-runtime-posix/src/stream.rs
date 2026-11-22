@@ -26,6 +26,7 @@ wz_runtime_coop::with_heap_link_seams! {
     use wz_runtime_coop::session_drive::{LinkReadiness, LinkWritability};
 }
 use wz_runtime_coop::stream_link::{StreamDial, StreamListen, StreamSocket};
+use wz_runtime_coop::ClockSource;
 
 use crate::net::{
     errno, family_of, name_of, poll_writable, set_close_on_exec, set_flag, set_nonblocking,
@@ -411,6 +412,13 @@ impl StreamSocket for PosixTcpSocket {
         poll_writable(self.fd, timeout_us)
     }
 
+    // Timed on the host's monotonic clock, as the session's timers are.
+    fn wait_writable_timed(&self, timeout_us: u64) -> (bool, u64) {
+        let started = crate::PosixClock.now_us();
+        let room = poll_writable(self.fd, timeout_us);
+        (room, crate::PosixClock.now_us().saturating_sub(started))
+    }
+
     fn try_read(&self, buf: &mut [u8]) -> Result<Option<usize>, PosixNetError> {
         // SAFETY: `buf` is live and writable for its length.
         let got = unsafe {
@@ -598,6 +606,26 @@ mod tests {
             );
         }
         assert!(written > 0, "the stream took bytes before it filled");
+    }
+
+    /// A timed wait for room measures its time on the host's clock: room on an empty stream is
+    /// found well inside the wait, and a stream the peer does not read is waited on for about the
+    /// whole of it.
+    #[test]
+    fn a_timed_wait_for_room_reports_the_time_it_took() {
+        let (near, _far) = pair();
+        let (room, took_us) = near.wait_writable_timed(2_000_000);
+        assert!(room, "an empty stream takes bytes");
+        assert!(took_us < 1_000_000, "found at once, not after {took_us} us");
+        let chunk = [0x5au8; 1024];
+        while let Some(Ok(taken)) = near.send_parts_now(&[&chunk]) {
+            if taken == 0 {
+                break;
+            }
+        }
+        let (room, took_us) = near.wait_writable_timed(50_000);
+        assert!(!room, "a stream whose peer reads nothing has no room");
+        assert!(took_us >= 40_000, "the wait took its time: {took_us} us");
     }
 
     wz_runtime_coop::with_heap_link_seams! {

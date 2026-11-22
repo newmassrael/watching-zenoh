@@ -24,6 +24,7 @@ use core::net::SocketAddr;
 use windows_sys::Win32::Networking::WinSock as ws;
 use wz_runtime_coop::session_drive::LinkOpenError;
 use wz_runtime_coop::stream_link::{StreamDial, StreamListen, StreamSocket};
+use wz_runtime_coop::ClockSource;
 
 wz_runtime_coop::with_heap_link_seams! {
     #[cfg(feature = "alloc")]
@@ -445,6 +446,13 @@ impl StreamSocket for WindowsTcpSocket {
             self.socket,
             i32::try_from(timeout_us.div_ceil(1_000)).unwrap_or(i32::MAX),
         )
+    }
+
+    // Timed on the host's monotonic clock, as the session's timers are.
+    fn wait_writable_timed(&self, timeout_us: u64) -> (bool, u64) {
+        let started = super::WindowsClock.now_us();
+        let room = self.wait_writable(timeout_us);
+        (room, super::WindowsClock.now_us().saturating_sub(started))
     }
 
     fn try_read(&self, buf: &mut [u8]) -> Result<Option<usize>, WindowsNetError> {

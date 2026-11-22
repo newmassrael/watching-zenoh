@@ -98,6 +98,15 @@ pub trait StreamSocket: Sized {
         true
     }
 
+    /// [`Self::wait_writable`], with how long the wait took in microseconds: what a question of
+    /// the link's room reports it spent, so a sender that keeps one deadline across several
+    /// questions keeps the right one. A stream with a clock overrides it; the provided form has
+    /// none, and counts room found as found at once and none as the whole wait.
+    fn wait_writable_timed(&self, timeout_us: u64) -> (bool, u64) {
+        let room = self.wait_writable(timeout_us);
+        (room, if room { 0 } else { timeout_us })
+    }
+
     /// Write what the stack takes of `parts` now, in order, without waiting: `Some(Ok(n))` for the
     /// `n` bytes it took (`0` when it would take none, and fewer than all when it took some), the
     /// failure, or `None` from a stream that cannot write without waiting (the default).
@@ -817,9 +826,10 @@ impl<S: StreamSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static> 
     // will not take more bytes within the wait has none, as zenoh's queue has no batch for a
     // message by its deadline (`io/zenoh-transport/src/common/pipeline.rs` @
     // `// Wait for an available batch until deadline`). A droppable message is then dropped and a
-    // blocking one closes the session, which is the session's decision and not the link's. A
-    // stream that took more within the wait is counted as having answered at once: the stream
-    // tells no time. A link that has ended answers room, so the send that follows reports the end.
+    // blocking one closes the session, which is the session's decision and not the link's. The
+    // answer carries the time the stream's wait measured (`StreamSocket::wait_writable_timed`),
+    // so a sender that keeps one deadline across several questions spends what was spent. A link
+    // that has ended answers room, so the send that follows reports the end.
     // A stream that took the last write whole without waiting is not asked: the next write is
     // tried first, and one it does not take whole makes the frame after it ask again
     // (`send_slot`). A link that still owes the stream part of a frame has room once that is
@@ -831,24 +841,25 @@ impl<S: StreamSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static> 
             return RoomAnswer::at_once(LinkRoom::Free);
         }
         if !owed_written {
-            if self.socket.wait_writable(wait_us) && self.write_owed() {
-                return RoomAnswer::at_once(LinkRoom::Free);
-            }
-            return RoomAnswer {
-                room: LinkRoom::Congested,
-                waited_us: wait_us,
+            let (room, waited_us) = self.socket.wait_writable_timed(wait_us);
+            let room = if room && self.write_owed() {
+                LinkRoom::Free
+            } else {
+                LinkRoom::Congested
             };
+            return RoomAnswer { room, waited_us };
         }
         if self.room_known.get() {
             return RoomAnswer::at_once(LinkRoom::Free);
         }
-        if self.socket.wait_writable(wait_us) {
-            RoomAnswer::at_once(LinkRoom::Free)
-        } else {
-            RoomAnswer {
-                room: LinkRoom::Congested,
-                waited_us: wait_us,
-            }
+        let (room, waited_us) = self.socket.wait_writable_timed(wait_us);
+        RoomAnswer {
+            room: if room {
+                LinkRoom::Free
+            } else {
+                LinkRoom::Congested
+            },
+            waited_us,
         }
     }
 
@@ -1044,6 +1055,9 @@ mod tests {
         takes: Cell<Option<usize>>,
         /// The writes made by waiting (`send_parts`).
         waited_writes: Cell<u32>,
+        /// How long a wait for room says it took, in microseconds; `None` answers as a stream
+        /// with no clock does.
+        room_took_us: Cell<Option<u64>>,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1098,6 +1112,15 @@ mod tests {
         fn wait_writable(&self, timeout_us: u64) -> bool {
             self.room_waits.borrow_mut().push(timeout_us);
             !self.full.get() && self.takes.get() != Some(0)
+        }
+
+        fn wait_writable_timed(&self, timeout_us: u64) -> (bool, u64) {
+            let room = self.wait_writable(timeout_us);
+            let took = self
+                .room_took_us
+                .get()
+                .unwrap_or(if room { 0 } else { timeout_us });
+            (room, took)
         }
 
         fn try_read(&self, buf: &mut [u8]) -> Result<Option<usize>, Broken> {
@@ -1527,6 +1550,33 @@ mod tests {
             link.socket.room_waits.borrow().len(),
             3,
             "an ended link waits for nothing"
+        );
+    }
+
+    /// The time a question of room reports is the time the stream's wait measured, room or none:
+    /// a sender that keeps one deadline across several questions spends what was spent, not the
+    /// whole wait nor none of it.
+    #[test]
+    fn a_question_of_room_reports_the_wait_the_stream_measured() {
+        let link = link();
+        link.socket.room_took_us.set(Some(370));
+        assert_eq!(
+            link.wait_for_room(Priority::DEFAULT, RoomWait::Drop { wait_us: 1_000 }),
+            RoomAnswer {
+                room: LinkRoom::Free,
+                waited_us: 370
+            },
+            "room found after 370 us"
+        );
+        link.socket.full.set(true);
+        link.socket.room_took_us.set(Some(990));
+        assert_eq!(
+            link.wait_for_room(Priority::DEFAULT, RoomWait::Block { wait_us: 1_000 }),
+            RoomAnswer {
+                room: LinkRoom::Congested,
+                waited_us: 990
+            },
+            "none, after the 990 us the wait measured"
         );
     }
 
