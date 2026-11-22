@@ -14628,7 +14628,9 @@ layer_c1m_session_lwip() {
     # `alloc` without `session-slot`, so not here).
     # 10 -> 11, printed: main at `c72460b30` printed 11 on a build host; no hosted run reached this
     # leg, an earlier one failing first.
-    _runci_guarded_test "C1m coop ip stack links" 11 \
+    # 11 -> 12, printed on a build host (2026-11-23): a dial whose driver is written in its slot
+    # is the link a returned dial is (`a_dial_written_in_place_is_the_link_a_returned_dial_is`).
+    _runci_guarded_test "C1m coop ip stack links" 12 \
         cargo test -p wz-runtime-coop --features session-slot \
         --lib ip_stack:: --quiet || return 1
     # The host's TCP seam (`wz_runtime_posix::stream`): the connection a dial makes and the port a
