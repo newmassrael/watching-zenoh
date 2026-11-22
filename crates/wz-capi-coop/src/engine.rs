@@ -34,6 +34,7 @@ use alloc::rc::Rc;
 use alloc::sync::{Arc, Weak};
 use core::any::Any;
 use core::cell::{Cell, RefCell};
+use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, Ordering};
 // A 64-bit atomic where the target has one, and a critical section where it does not (a
 // Cortex-M7 has 32-bit atomics only).
@@ -851,37 +852,6 @@ impl<C: ClockSource + 'static> OwnMappingSpace for LinkOwnSpace<C> {
 unsafe impl<C: ClockSource + 'static> Send for LinkOwnSpace<C> {}
 unsafe impl<C: ClockSource + 'static> Sync for LinkOwnSpace<C> {}
 
-/// A head a delivery took from the session's lane, given back when the delivery is done with it:
-/// with the next head taken under the same take of the lane's lock once its callbacks returned
-/// ([`Self::complete_and_take`]), or alone when one unwinds.
-struct Handed<'a> {
-    lane: &'a SharedLane,
-    given_back: bool,
-}
-
-impl<'a> Handed<'a> {
-    fn new(lane: &'a SharedLane) -> Self {
-        Self {
-            lane,
-            given_back: false,
-        }
-    }
-
-    /// Give the head back and take the next one, under one take of the lane's lock.
-    fn complete_and_take(mut self) -> Option<LaneItem> {
-        self.given_back = true;
-        self.lane.lock().complete_and_take_front()
-    }
-}
-
-impl Drop for Handed<'_> {
-    fn drop(&mut self) {
-        if !self.given_back {
-            self.lane.lock().complete();
-        }
-    }
-}
-
 /// What a subscriber's sink mints: the callback a sample is handed to.
 type SubscriberCallbackFn = Box<dyn FnMut(&dyn SampleView) + Send + 'static>;
 
@@ -931,8 +901,35 @@ impl Resolved {
 #[cfg(feature = "queryable")]
 type QueryableCallback = Arc<Mutex<QueryCallback>>;
 
-/// The session's state, held: what [`CoopEngine::live`] hands a caller that may act on it.
-type LiveCore<'a, L, C> = MutexGuard<'a, Confined<Core<L, C>>>;
+/// The session's state, held: what [`CoopEngine::live`] hands a caller that may act on it. As it
+/// lets go, the sample the delivery lane holds open for more subscribers is published and what the
+/// lane published is handed on to the deliveries (`SharedLane`), so nothing the session wrote
+/// under its lock waits for another hold to be handed out.
+struct LiveCore<'a, L: SessionLinks + 'static, C: ClockSource + 'static> {
+    core: MutexGuard<'a, Confined<Core<L, C>>>,
+    lane: &'a SharedLane,
+}
+
+impl<L: SessionLinks + 'static, C: ClockSource + 'static> Deref for LiveCore<'_, L, C> {
+    type Target = Confined<Core<L, C>>;
+
+    fn deref(&self) -> &Confined<Core<L, C>> {
+        &self.core
+    }
+}
+
+impl<L: SessionLinks + 'static, C: ClockSource + 'static> DerefMut for LiveCore<'_, L, C> {
+    fn deref_mut(&mut self) -> &mut Confined<Core<L, C>> {
+        &mut self.core
+    }
+}
+
+impl<L: SessionLinks + 'static, C: ClockSource + 'static> Drop for LiveCore<'_, L, C> {
+    fn drop(&mut self) {
+        // SAFETY: the session's lock is held: `core` is let go after this body.
+        unsafe { self.lane.held() }.seal();
+    }
+}
 
 /// Where a delivery goes.
 enum Target {
@@ -1774,14 +1771,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             &resolve_limits(&self.config),
         );
         #[cfg(feature = "listen")]
-        let link: Rc<dyn SessionDatagramLink> = Rc::new(LaneGate::new(
-            AdmissionGate::new(pump, actions.clone(), admitted.clone()),
-            self.lane.clone(),
-            room,
-        ));
+        // SAFETY: a link is made under the session's lock, and its gate asked by the step alone.
+        let link: Rc<dyn SessionDatagramLink> = Rc::new(unsafe {
+            LaneGate::new(
+                AdmissionGate::new(pump, actions.clone(), admitted.clone()),
+                self.lane.clone(),
+                room,
+            )
+        });
         #[cfg(not(feature = "listen"))]
+        // SAFETY: a link is made under the session's lock, and its gate asked by the step alone.
         let link: Rc<dyn SessionDatagramLink> =
-            Rc::new(LaneGate::new(pump, self.lane.clone(), room));
+            Rc::new(unsafe { LaneGate::new(pump, self.lane.clone(), room) });
         #[cfg(feature = "queryable")]
         let generation = self.plane.generation.fetch_add(1, Ordering::AcqRel) + 1;
         #[cfg(feature = "queryable")]
@@ -2309,9 +2310,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             usize::from(params.batch_size),
             &resolve_limits(&self.config),
         );
-        let input_gate = wz_session_mcu::group_drive::GroupInputGate::new(
-            crate::lane::takes_a_group_read(self.lane.clone(), room),
-        );
+        // SAFETY: a group's transport is driven by the session's step alone, under its lock.
+        let input_gate = wz_session_mcu::group_drive::GroupInputGate::new(unsafe {
+            crate::lane::takes_a_group_read(self.lane.clone(), room)
+        });
         let face = GroupFace::join(
             &self.local,
             GroupJoining {
@@ -3147,7 +3149,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// The samples the session's delivery lane did not hand a subscriber, by why
     /// (`crate::lane`).
     pub fn lane_counts(&self) -> LaneCounts {
-        self.samples.lock().counts()
+        let _session = lock(&self.core);
+        // SAFETY: the session's lock is held (`_session`).
+        unsafe { self.samples.held() }.counts()
     }
 
     /// Dial `endpoint` as a face of its own, beside the dial role's, and return the id it is
@@ -3308,11 +3312,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         lock(&self.core).0.clock_reads.get()
     }
 
-    /// How often the session's delivery lane was taken since the open: what a test of the cost of
-    /// one received sample counts.
+    /// How many samples the session's delivery lane handed on to the deliveries since the open:
+    /// what a test of the cost of one received sample counts.
     #[cfg(all(test, feature = "std"))]
-    pub(crate) fn lane_takes(&self) -> usize {
-        self.samples.takes()
+    pub(crate) fn lane_handed(&self) -> usize {
+        self.samples.handed_on()
     }
 
     /// How often the list of the threads delivering beside the first was taken since the open
@@ -3352,7 +3356,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         if self.closed.load(Ordering::Acquire) {
             return None;
         }
-        Some(guard)
+        Some(LiveCore {
+            core: guard,
+            lane: self.samples.as_ref(),
+        })
     }
 
     /// The session's state for a publish's leg to its links. A publish that may not be dropped
@@ -3389,7 +3396,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 if self.closed.load(Ordering::Acquire) {
                     return ToPublish::Closed;
                 }
-                return ToPublish::Live(guard);
+                return ToPublish::Live(LiveCore {
+                    core: guard,
+                    lane: self.samples.as_ref(),
+                });
             }
             let room = self
                 .rooms
@@ -3568,88 +3578,96 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         handed || asked
     }
 
-    /// Hand what the session's lane holds to the callbacks it is for, the head first. Whether
-    /// anything was handed. Each head is taken under the take of the lane's lock that gives the
-    /// one before it back ([`Handed::complete_and_take`]), so a pass takes the lock once for each
-    /// head and once more to find the lane empty, and never holds it while a callback runs: a
-    /// callback that steps the session again would wait on it.
+    /// Hand what the session's lane holds to the callbacks it is for, the oldest first. Whether
+    /// anything was handed. The samples come from the lane's queue with no lock (`SharedLane`),
+    /// each given back to the session when its callbacks have returned, or one unwinds; no lock of
+    /// the library is held while a callback runs. Another delivery that holds the lane's side
+    /// hands out what this one finds, before it lets go: a delivery that finds the side held
+    /// leaves it, and one that lets go looks again for what was handed on meanwhile.
     fn hand_out_lane(&self) -> bool {
-        // The callbacks found for the samples' subscribers, kept from one sample to the next and from
-        // one delivery to the next: the engine's, unless another delivery holds them now, which
-        // leaves this one a set of its own for this pass.
-        let mut kept = self.resolved.try_lock();
-        let mut own = None;
-        let resolved: &mut Resolved = match kept.as_deref_mut() {
-            Some(held) => held,
-            None => own.insert(Resolved::new()),
-        };
-        let mut next = self.samples.lock().take_front();
-        let handed = next.is_some();
-        while let Some(item) = next.take() {
-            // The head goes back to the lane when the last callback returns, or one unwinds.
-            let held = Handed::new(&self.samples);
-            match item {
-                LaneItem::Sample(sample) => {
-                    let hand = |id: SubId, callback: &SubscriberCallback| {
-                        #[cfg(feature = "local-subscriber")]
-                        let _running = self.deliveries.run(TargetKey::Subscriber(id));
-                        #[cfg(not(feature = "local-subscriber"))]
-                        let _ = id;
-                        (lock(callback))(&sample);
-                    };
-                    // A subscriber undeclared since the sample was queued has no callback left,
-                    // and is passed over.
-                    for (at, id) in sample.subscribers().enumerate() {
-                        if at < RESOLVED_SUBSCRIBERS {
-                            if let Some(callback) =
-                                self.resolved_subscriber_callback(resolved, at, id)
-                            {
-                                hand(id, callback);
+        let mut handed = false;
+        while self.samples.owes_a_delivery() {
+            let Some(delivery) = self.samples.deliver() else {
+                break;
+            };
+            // The callbacks found for the samples' subscribers, kept from one sample to the next and
+            // from one delivery to the next: the engine's, unless another delivery holds them now,
+            // which leaves this one a set of its own for this pass.
+            let mut kept = self.resolved.try_lock();
+            let mut own = None;
+            let resolved: &mut Resolved = match kept.as_deref_mut() {
+                Some(held) => held,
+                None => own.insert(Resolved::new()),
+            };
+            while let Some((item, head)) = delivery.take() {
+                handed = true;
+                match item {
+                    LaneItem::Sample(sample) => {
+                        let hand = |id: SubId, callback: &SubscriberCallback| {
+                            #[cfg(feature = "local-subscriber")]
+                            let _running = self.deliveries.run(TargetKey::Subscriber(id));
+                            #[cfg(not(feature = "local-subscriber"))]
+                            let _ = id;
+                            (lock(callback))(&sample);
+                        };
+                        // A subscriber undeclared since the sample was queued has no callback
+                        // left, and is passed over.
+                        for (at, id) in sample.subscribers().enumerate() {
+                            if at < RESOLVED_SUBSCRIBERS {
+                                if let Some(callback) =
+                                    self.resolved_subscriber_callback(resolved, at, id)
+                                {
+                                    hand(id, callback);
+                                }
+                            } else if let Some(callback) = self.subscriber_callback(id) {
+                                hand(id, &callback);
                             }
-                        } else if let Some(callback) = self.subscriber_callback(id) {
-                            hand(id, &callback);
                         }
                     }
-                }
-                #[cfg(feature = "query")]
-                LaneItem::Reply(reply) => {
-                    let leg = reply.leg();
-                    let callback =
-                        lock(&self.targets)
-                            .iter()
-                            .find_map(|(t, target)| match target {
-                                Target::Reply(cb) if *t == TargetKey::Reply(leg) => {
-                                    Some(cb.clone())
-                                }
-                                _ => None,
-                            });
-                    if let Some(callback) = callback {
-                        (lock(&callback))(&reply);
-                    }
-                }
-                #[cfg(feature = "liveliness")]
-                LaneItem::Liveliness(sample) => {
-                    for id in sample.subscribers() {
+                    #[cfg(feature = "query")]
+                    LaneItem::Reply(reply) => {
+                        let leg = reply.leg();
                         let callback =
                             lock(&self.targets)
                                 .iter()
                                 .find_map(|(t, target)| match target {
-                                    Target::Liveliness(cb) if *t == TargetKey::Liveliness(id) => {
+                                    Target::Reply(cb) if *t == TargetKey::Reply(leg) => {
                                         Some(cb.clone())
                                     }
                                     _ => None,
                                 });
                         if let Some(callback) = callback {
-                            let _running = self.deliveries.run(TargetKey::Liveliness(id));
-                            (lock(&callback))(sample.as_sample());
+                            (lock(&callback))(&reply);
+                        }
+                    }
+                    #[cfg(feature = "liveliness")]
+                    LaneItem::Liveliness(sample) => {
+                        for id in sample.subscribers() {
+                            let callback =
+                                lock(&self.targets)
+                                    .iter()
+                                    .find_map(|(t, target)| match target {
+                                        Target::Liveliness(cb)
+                                            if *t == TargetKey::Liveliness(id) =>
+                                        {
+                                            Some(cb.clone())
+                                        }
+                                        _ => None,
+                                    });
+                            if let Some(callback) = callback {
+                                let _running = self.deliveries.run(TargetKey::Liveliness(id));
+                                (lock(&callback))(sample.as_sample());
+                            }
                         }
                     }
                 }
+                // The sample goes back to the session now its callbacks have returned.
+                drop(head);
             }
-            next = held.complete_and_take();
+            self.let_go_of_resolved(kept);
+            drop(own);
+            drop(delivery);
         }
-        self.let_go_of_resolved(kept);
-        drop(own);
         handed
     }
 
@@ -3998,15 +4016,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             return Ok(0);
         };
         let sample = opts.loopback_sample(keyexpr, payload);
-        self.samples.lock().capture();
+        // SAFETY (each hold of the lane below): the session's lock is held (`core`).
+        unsafe { self.samples.held() }.capture();
         core.0
             .registry
             .borrow_mut()
             .app
             .subscribers
             .local_publish(&sample);
-        let reached = self.samples.lock().captured();
-        drop(core);
+        let reached = unsafe { self.samples.held() }.captured();
         let inside = |id: &SubId| self.deliveries.runs_here(TargetKey::Subscriber(*id));
         let mut later: BoundedVec<
             SubId,
@@ -4017,13 +4035,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             let kept = later.push(*id);
             debug_assert!(kept.is_ok(), "no more subscribers than were reached");
         }
+        // What waits for a callback running on this thread is queued while the session is held,
+        // as every writer of the lane queues.
         if !later.is_empty() {
-            let mut lane = self.samples.lock();
+            let mut lane = unsafe { self.samples.held() };
             if !lane.takes_sample(&sample, later.len()) {
                 return Err(FanoutError::LocalNoRoom);
             }
             lane.offer_to(&later, &sample);
         }
+        drop(core);
         {
             // A callback that steps the session from inside the put hands out nothing itself, as
             // one inside a delivery does: what the lane holds may be for a callback running here.
@@ -4752,7 +4773,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let registration = core.registry.borrow_mut().app.subscribers.register_sink(
             &keyexpr,
             allowed_origin,
-            BoxedSink::new(move |sample: &dyn SampleView| lane.lock().offer(id, sample)),
+            // SAFETY: the registry hands its sinks a sample under the session's lock.
+            BoxedSink::new(move |sample: &dyn SampleView| unsafe { lane.held() }.offer(id, sample)),
         );
         // A registration the observer refuses is a refused declaration, told as one: an id
         // answered for it would name a subscriber that hears nothing and was never announced.
@@ -5881,14 +5903,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // They are rehearsed first: the declaration is refused when the lane cannot hold every one
         // of them until they are handed, at the end of this call or, declared from inside a
         // callback, once that callback returns.
-        self.samples.lock().rehearse();
+        // SAFETY (both holds): the session's lock is held (`core`).
+        unsafe { self.samples.held() }.rehearse();
         let registered = core.registry.borrow_mut().register_liveliness_subscriber(
             u64::from(id),
             &keyexpr,
             history,
             liveliness::sample_sink(id, &self.samples),
         );
-        let held = self.samples.lock().rehearsed();
+        let held = unsafe { self.samples.held() }.rehearsed();
         if registered.is_ok() && !held {
             core.registry
                 .borrow_mut()

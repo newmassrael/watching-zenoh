@@ -565,6 +565,19 @@ impl Codegen {
         self.emit_unit(stem, resource_dir, out_dir);
     }
 
+    /// Codegen one `sce:kind="codec"` document into `$OUT_DIR/{stem}.rs`, stripping inner
+    /// attributes. A queue names its element's codec as `super::{stem}`, so the codec is emitted
+    /// beside the queue.
+    pub fn emit_codec(&self, stem: &str, resource_dir: &Path, out_dir: &Path) {
+        self.emit_unit(stem, resource_dir, out_dir);
+    }
+
+    /// Codegen one `sce:kind="queue"` document into `$OUT_DIR/{stem}.rs`, stripping inner
+    /// attributes: the queue type the selection table gives its contract, over its element codec.
+    pub fn emit_queue(&self, stem: &str, resource_dir: &Path, out_dir: &Path) {
+        self.emit_unit(stem, resource_dir, out_dir);
+    }
+
     /// The emit of a unit that is one `{stem}.rs` and names its siblings as `super::<stem>`:
     /// an algorithm, an event schema, an enum or a union.
     fn emit_unit(&self, stem: &str, resource_dir: &Path, out_dir: &Path) {

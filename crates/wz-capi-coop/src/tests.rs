@@ -945,14 +945,13 @@ fn the_samples_one_delivery_hands_a_subscriber_find_its_callback_once() {
     );
 }
 
-/// The samples of a read are handed out with one take of the delivery lane's lock each to queue
-/// them, one each to take them from the lane (each under the take that gives the one before it
-/// back), and one more a read that delivered to find the lane empty: a read that finds nothing
-/// takes it not at all, the link's gate and every queue a delivery looks at reading words instead.
-/// One thread delivers, so the list of the threads delivering beside it is never taken. The
-/// CONTROL is the count of the samples handed, which the count of takes is read against.
+/// The samples of a read are handed from the session to its deliveries with no lock of the lane:
+/// each is handed on once, through the lane's queue, when the session lets go of its lock, and
+/// given back once its callback has returned. A read that finds nothing hands nothing on. One
+/// thread delivers, so the list of the threads delivering beside it is never taken. The CONTROL
+/// is the count of the samples handed to the subscriber.
 #[test]
-fn a_received_sample_takes_the_lane_twice_and_an_empty_read_not_at_all() {
+fn a_received_sample_is_handed_on_once_and_an_empty_read_hands_nothing() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     let received = Arc::new(AtomicUsize::new(0));
@@ -976,14 +975,14 @@ fn a_received_sample_takes_the_lane_twice_and_an_empty_read_not_at_all() {
     until(&engine, "the declarations to be told", || {
         engine.declarations_synced()
     });
-    let (lane, list) = (engine.lane_takes(), engine.delivery_list_takes());
+    let (handed, list) = (engine.lane_handed(), engine.delivery_list_takes());
     for _ in 0..4 {
         let _ = SessionDrive::read(&*engine, false);
     }
     assert_eq!(
-        engine.lane_takes(),
-        lane,
-        "a read with nothing to read or hand out took the lane's lock"
+        engine.lane_handed(),
+        handed,
+        "a read with nothing to read handed something on"
     );
     const SAMPLES: usize = 8;
     for _ in 0..SAMPLES {
@@ -993,18 +992,10 @@ fn a_received_sample_takes_the_lane_twice_and_an_empty_read_not_at_all() {
     until(&engine, "the pushes", || {
         received.load(Ordering::SeqCst) == SAMPLES
     });
-    let taken = engine.lane_takes() - lane;
-    // Two takes a sample, and one a read that handed any, which is one read at least and one a
-    // sample at most.
-    assert!(
-        (2 * SAMPLES + 1..=3 * SAMPLES).contains(&taken),
-        "{taken} takes of the lane for {SAMPLES} samples"
-    );
-    let _ = SessionDrive::read(&*engine, false);
     assert_eq!(
-        engine.lane_takes() - lane,
-        taken,
-        "the read after them took the lane's lock"
+        engine.lane_handed() - handed,
+        SAMPLES,
+        "each sample handed on once"
     );
     assert_eq!(
         engine.delivery_list_takes(),

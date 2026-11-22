@@ -102,6 +102,7 @@ impl LiveSubEntry {
 pub(super) fn sample_sink(id: SubId, lane: &Arc<SharedLane>) -> BoxedLivelinessSampleSink {
     let lane = Arc::clone(lane);
     BoxedLivelinessSampleSink::new(move |sample: LivelinessSample<'_>| {
-        lane.lock().offer_liveliness(id, &sample);
+        // SAFETY: the registry hands its sinks a token under the session's lock.
+        unsafe { lane.held() }.offer_liveliness(id, &sample);
     })
 }

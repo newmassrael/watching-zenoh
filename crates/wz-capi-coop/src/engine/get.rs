@@ -158,7 +158,8 @@ pub(super) fn reply_sink(
     };
     BoxedReplySink::new(
         move |view: &dyn ReplyView| {
-            lane.lock().offer_reply(leg, view);
+            // SAFETY: the registry hands its sinks a reply under the session's lock.
+            unsafe { lane.held() }.offer_reply(leg, view);
         },
         move |_rid| {
             // Owned by this closure so it is dropped with the sink.

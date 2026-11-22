@@ -3936,6 +3936,7 @@ dependencies = [
  "portable-atomic",
  "rcgen",
  "rustls",
+ "sce-forge-runtime",
  "wz-capi-port",
  "wz-ext-pubsub",
  "wz-runtime-coop",
