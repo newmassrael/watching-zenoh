@@ -679,13 +679,27 @@ pub unsafe extern "C" fn z_scout_options_default(options: *mut z_scout_options_t
     }
 }
 
-/// A fresh random scouting identity, from the same OS entropy source the session plane mints its
+/// A fresh random scouting identity, from the same entropy source the session plane mints its
 /// per-session zid with, or `None` when there is none to draw (a profile that cannot open a
 /// session either), which asks as nobody.
 fn fresh_scout_zid() -> Option<SessionZid> {
     let mut zid = [0u8; 16];
-    getrandom::getrandom(&mut zid).ok()?;
+    draw_zid_bytes(&mut zid)?;
     SessionZid::new(&zid).ok()
+}
+
+/// The tokio engine's sessions draw from the host's generator, which the `getrandom` crate reads.
+#[cfg(feature = "engine-tokio")]
+fn draw_zid_bytes(zid: &mut [u8; 16]) -> Option<()> {
+    getrandom::getrandom(zid).ok()
+}
+
+/// The cooperative engine's sessions draw from the random source the build's host hands the engine
+/// (`crate::coop_host`): the host's kernel, or a Zephyr image's board, which has no `getrandom`.
+#[cfg(not(feature = "engine-tokio"))]
+fn draw_zid_bytes(zid: &mut [u8; 16]) -> Option<()> {
+    use wz_session_core::entropy::EntropySource;
+    crate::coop_host::entropy().try_fill_bytes(zid).ok()
 }
 
 /// What a scout reads from a pico config: each key's value, or pico's default for it.
@@ -1131,6 +1145,16 @@ mod tests {
     /// return value on the stack would pass a same-statement read and dangle
     /// the moment the caller stored it — this holds the pointer across a
     /// second call before reading through it.
+    /// A scout that names no id asks as a fresh one, drawn from the source the build's sessions
+    /// mint theirs from: two draws are two ids, and neither is the all-zero id no node has.
+    #[test]
+    fn a_scout_without_an_id_draws_a_fresh_one_each_time() {
+        let first = fresh_scout_zid().expect("the build's random source gave no id");
+        let second = fresh_scout_zid().expect("the build's random source gave no second id");
+        assert_eq!(first.as_slice().len(), 16);
+        assert!(first != second, "two draws gave one id");
+    }
+
     #[test]
     fn hello_lends_a_locator_array_that_outlives_the_call() {
         let state = HelloState::new(
