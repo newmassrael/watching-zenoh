@@ -303,6 +303,21 @@ fn reply_key_of(
     (id, rest.map(str::to_owned), sender)
 }
 
+/// The slots the router stand-in's link lends its session. The stand-in is built with the session
+/// core the engine under test is built with, so a lend-only build (`tx-lend-only`) gives it the
+/// send that has no heap frame to fall back on: a link that lends no slot carries none of its
+/// frames, the InitAck included, and every open of an engine against it waits for an answer that
+/// never comes. Two, because the stand-in's session batches and holds one slot open while it
+/// encodes into another.
+const ROUTER_TX_SLOTS: usize = 2;
+
+/// The host's links the router stand-in accepts on: each lends its session [`ROUTER_TX_SLOTS`]
+/// slots of the stand-in's batch, `batch_size` bytes, in every build of the crate.
+fn router_links(batch_size: u16) -> PosixLinks {
+    PosixLinks::new(LOOPBACK, PosixTcpDial)
+        .with_tx_buffers(ROUTER_TX_SLOTS, usize::from(batch_size))
+}
+
 fn run_router(
     port: u16,
     (zid, whatami): (u8, WhatAmI),
@@ -311,18 +326,14 @@ fn run_router(
     seen: Arc<Mutex<Seen>>,
     ready: std::sync::mpsc::Sender<()>,
 ) {
-    let links = PosixLinks::new(LOOPBACK, PosixTcpDial);
+    let init = params(whatami, zid);
+    let links = router_links(init.batch_size);
     let OpenedLink { sink, pump } = links.open_acceptor(port).expect("bind the router's end");
     let _ = ready.send(());
     let runtime = CoopRuntime::new(PosixClock);
     let local = CoopLocalSet::new(&runtime);
     // An acceptor mints a cookie per InitAck, from the entropy it is handed.
-    let actions = new_session_actions(
-        sink,
-        params(whatami, zid),
-        CoopTime::new(&runtime),
-        PosixEntropy,
-    );
+    let actions = new_session_actions(sink, init, CoopTime::new(&runtime), PosixEntropy);
     let observer = std::rc::Rc::new(std::cell::RefCell::new(ApplicationLayerObserver::new()));
     if catch_all == CatchAll::Held {
         let samples = seen.clone();
@@ -770,6 +781,38 @@ fn until(engine: &Engine, what: &str, mut done: impl FnMut() -> bool) {
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
         let _ = SessionDrive::read(engine, false);
     }
+}
+
+/// The router stand-in's link lends its session a slot of the stand-in's whole batch, which a
+/// lend-only session needs for each frame it sends. The CONTROL is the host's links as they come,
+/// which lend none, so the test tells a stand-in that lends from one that does not.
+#[test]
+fn the_router_stand_ins_link_lends_its_session_a_slot_of_its_batch() {
+    use wz_session_core::qos::Priority;
+    let batch = params(WhatAmI::Router, ROUTER_ZID).batch_size;
+    let OpenedLink { sink, .. } = router_links(batch)
+        .open_acceptor(0)
+        .expect("bind the router's end");
+    let grant = sink
+        .tx_slot_acquire(usize::from(batch), Priority::DEFAULT)
+        .expect("the stand-in's link lends its session a slot");
+    let (base, len) = sink.tx_slot_storage(grant.slot);
+    assert!(!base.is_null(), "the slot is memory");
+    assert!(
+        len >= grant.headroom + usize::from(batch),
+        "a slot of {len} bytes holds a batch of {batch} after its headroom"
+    );
+    sink.tx_slot_abort(grant.slot);
+
+    let OpenedLink { sink: plain, .. } = PosixLinks::new(LOOPBACK, PosixTcpDial)
+        .open_acceptor(0)
+        .expect("bind a plain end");
+    assert!(
+        plain
+            .tx_slot_acquire(usize::from(batch), Priority::DEFAULT)
+            .is_none(),
+        "CONTROL: the host's links as they come lend nothing"
+    );
 }
 
 /// A session opens to the router, knows it as a router, declares a subscriber the router sees,
