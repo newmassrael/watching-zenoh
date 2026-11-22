@@ -206,8 +206,8 @@ fn policy_value(env_name: &str, stated: Option<&str>, values: &[&str], upstream:
 ///
 /// # Panics
 ///
-/// On an ABI the declaration does not name, and on a limit or policy value the code would refuse
-/// to compile with.
+/// On an ABI the declaration does not name, on a limit or policy value the code would refuse
+/// to compile with, and on a pico build that names the tokio engine beside a cooperative one.
 pub fn of_build(
     abi: &'static str,
     has_feature: impl Fn(&str) -> bool,
@@ -219,13 +219,16 @@ pub fn of_build(
             .any(|(_, abis)| abis.contains(&abi)),
         "{abi:?} is not an ABI of the declaration"
     );
-    // The pico crate's own rule: the tokio engine whenever it is in the build, else the
-    // cooperative one when a feature selects it. The other ABIs have only the tokio engine.
+    // The pico crate's own rule: one engine, the cooperative one when a feature selects it and
+    // the tokio engine otherwise; a build that names both is refused, as the crate refuses it.
+    // The other ABIs have only the tokio engine.
     let coop = abi == "pico"
-        && !has_feature("engine-tokio")
         && items::COOP_ENGINE_FEATURES
             .iter()
             .any(|&feature| has_feature(feature));
+    if coop && has_feature("engine-tokio") {
+        panic!("a pico build names one engine: `engine-tokio` beside a cooperative one is refused");
+    }
     let platform = if abi == "pico" {
         items::PLATFORM_FEATURES
             .iter()
@@ -408,17 +411,20 @@ mod tests {
             coop.digest(),
             "the platform alone moves the digest"
         );
-        let both = of_build(
+        let c = of_build("c", |id| id == "engine-coop" || id == "os-zephyr", |_| None);
+        assert_eq!((c.engine, c.platform), ("tokio", "host"));
+    }
+
+    /// A pico build names one engine: the tokio engine beside a cooperative one is refused, and no
+    /// statement is made for it.
+    #[test]
+    #[should_panic(expected = "a pico build names one engine")]
+    fn a_pico_build_that_names_both_engines_is_refused() {
+        let _ = of_build(
             "pico",
             |id| id == "engine-tokio" || id == "engine-coop",
             |_| None,
         );
-        assert_eq!(
-            both.engine, "tokio",
-            "the tokio engine wins when it is in the build"
-        );
-        let c = of_build("c", |id| id == "engine-coop" || id == "os-zephyr", |_| None);
-        assert_eq!((c.engine, c.platform), ("tokio", "host"));
     }
 
     /// Every build `wz_config.py --emit statement-vectors` states has, read the way a build script
@@ -450,6 +456,18 @@ mod tests {
             let env = v["env"]
                 .as_object()
                 .expect("a vector states its environment");
+            // A build the declaration refuses has no statement: reading it refuses too.
+            if v["refused"].as_bool() == Some(true) {
+                let read = std::panic::catch_unwind(|| {
+                    of_build(abi, |id| features.contains(&id), |_| None).digest()
+                });
+                if read.is_ok() {
+                    wrong.push(format!(
+                        "{abi} {case}: stated, where wz_config.py refuses it"
+                    ));
+                }
+                continue;
+            }
             let asked = RefCell::new(Vec::new());
             let statement = of_build(
                 abi,

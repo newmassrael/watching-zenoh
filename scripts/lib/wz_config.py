@@ -2201,9 +2201,10 @@ def resolved_features(decl: dict, abi: str, kconf) -> list[str]:
 def coop_features(feats: list[str], table: dict) -> list[str]:
     """`feats` (a pico arm's list) for the cooperative engine, `table` the crate's feature table.
 
-    A pico build runs its sessions on the tokio engine whenever that engine is in it, so the
-    cooperative build must name no feature that selects it: one that lists `engine-tokio`, or
-    lists a feature that does (the drive threads, the raw Ethernet group, gossip). What is
+    A pico library has one engine, and the crate refuses `engine-tokio` beside a cooperative
+    one, so the cooperative build must name no feature that selects it: one that lists
+    `engine-tokio`, or lists a feature that does (the drive threads, the raw Ethernet group,
+    gossip). What is
     left is what the engines share, which the crate forwards weakly (`wz-capi-core?/...`) and so
     selects neither, and `engine-coop` is named in the place `engine-tokio` was. The table is
     READ, not listed here, so a feature that later selects the tokio engine leaves the list by
@@ -3077,6 +3078,16 @@ def statement_vectors(decl: dict) -> list[dict]:
         digest = env_statement(decl, abi, features, env, {})["digest"]
         out.append({"case": case, "abi": abi, "features": features, "env": env, "digest": digest})
 
+    def refuse(case: str, abi: str, features: list[str]) -> None:
+        """A build the declaration refuses: it has no digest, and both readers refuse it."""
+        try:
+            env_statement(decl, abi, features, {}, {})
+        except PresetError:
+            out.append({"case": case, "abi": abi, "features": features, "env": {},
+                        "refused": True})
+            return
+        raise PresetError(f"{abi} {case}: the build is stated where it should be refused")
+
     def names(abi: str) -> list[str]:
         return arm_switches(decl, abi) + [cid for cid in decl["order"]
                                           if abi in decl["caps"][cid]["abis"]]
@@ -3095,7 +3106,7 @@ def statement_vectors(decl: dict) -> list[dict]:
     # sides (`statement_engine`, `statement_platform`).
     add("the cooperative engine", "pico", ["engine-coop"], {})
     add("the zephyr platform", "pico", ["os-zephyr"], {})
-    add("the tokio engine beside a cooperative feature", "pico", ["engine-tokio", "engine-coop"], {})
+    refuse("the tokio engine beside a cooperative feature", "pico", ["engine-tokio", "engine-coop"])
     for i, lim in enumerate(decl["limits"]):
         if lim["kind"] == "parameter" and lim["default"] == lim["range"][1]:
             add(f"{lim['id']} one below its default", ABIS[i % len(ABIS)], [],
@@ -4234,10 +4245,14 @@ STATEMENT_PLATFORM_FEATURES = (("os-zephyr", "zephyr"),)
 
 def statement_engine(abi: str, have: set[str]) -> str:
     """The engine a build of `abi` with the features `have` runs its sessions on: the pico
-    crate's rule, the tokio engine whenever it is in the build, else the cooperative one when a
-    feature selects it."""
-    if (abi == "pico" and "engine-tokio" not in have
-            and any(f in have for f in STATEMENT_COOP_FEATURES)):
+    crate's rule, one engine, the cooperative one when a feature selects it and the tokio engine
+    otherwise. A pico build that names the tokio engine beside a cooperative one is refused, as
+    the crate refuses it (docs/c-abi-engine-and-memory.md, E1 and E3)."""
+    if abi == "pico" and any(f in have for f in STATEMENT_COOP_FEATURES):
+        if "engine-tokio" in have:
+            raise PresetError("a pico build names one engine: engine-tokio beside "
+                              f"{', '.join(f for f in STATEMENT_COOP_FEATURES if f in have)} "
+                              "is refused")
         return "coop"
     return "tokio"
 
