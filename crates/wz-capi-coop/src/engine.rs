@@ -595,6 +595,10 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     /// a subscriber's callback while the count was what it reads now hands that callback the next
     /// sample without looking it up again ([`Resolved`]).
     removed: AtomicU64,
+    /// The callbacks kept from one delivery to the next ([`Resolved`]), only ever tried: a
+    /// delivery that finds them held by another keeps a set of its own for its pass, and a removal
+    /// that finds them held leaves them to the delivery that holds them.
+    resolved: Mutex<Resolved>,
     /// The queries waiting for their callbacks and the Finals held for them (`query`).
     #[cfg(feature = "queryable")]
     plane: Arc<QueryPlane>,
@@ -945,12 +949,13 @@ type SubscriberCallback = Arc<Mutex<SubscriberCallbackFn>>;
 /// for more is handed to the ones past these by a look in the table each.
 const RESOLVED_SUBSCRIBERS: usize = 4;
 
-/// The callbacks one delivery found for the subscribers of the sample it handed last, by their
+/// The callbacks the deliveries found for the subscribers of the sample handed last, by their
 /// place in the sample's list, and the count of removals from the table of callbacks they were
-/// found at ([`CoopEngine::removed`]). The samples behind it in the lane are almost always for the
-/// same subscribers: they are handed the same callbacks with no lock of the table, no search of
-/// it and no count taken on the callback, while nothing has been taken out of the table since.
-/// The callbacks are let go of with the delivery, or as soon as a removal is seen.
+/// found at ([`CoopEngine::removed`]). The next sample, in this delivery or the next step's, is
+/// almost always for the same subscribers: it is handed the same callbacks with no lock of the
+/// table, no search of it and no count taken on the callback, while nothing has been taken out of
+/// the table since. What was kept from before a removal is let go of by the removal, or, when a
+/// delivery holds the set then, by that delivery as it ends.
 struct Resolved {
     removed: u64,
     callbacks: [Option<(SubId, SubscriberCallback)>; RESOLVED_SUBSCRIBERS],
@@ -962,6 +967,19 @@ impl Resolved {
             removed: 0,
             callbacks: [const { None }; RESOLVED_SUBSCRIBERS],
         }
+    }
+
+    /// What this kept from before the removals counted up to `removed`, taken out for the caller
+    /// to let go of with no lock held; nothing when it kept nothing older.
+    fn take_stale(
+        &mut self,
+        removed: u64,
+    ) -> [Option<(SubId, SubscriberCallback)>; RESOLVED_SUBSCRIBERS] {
+        if self.removed == removed {
+            return [const { None }; RESOLVED_SUBSCRIBERS];
+        }
+        self.removed = removed;
+        core::mem::replace(&mut self.callbacks, [const { None }; RESOLVED_SUBSCRIBERS])
     }
 }
 
@@ -3003,6 +3021,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             matching: Arc::new(Mutex::new(MatchFlips::new())),
             targets: Mutex::new(Vec::new()),
             removed: AtomicU64::new(0),
+            resolved: Mutex::new(Resolved::new()),
             #[cfg(feature = "queryable")]
             plane,
             #[cfg(feature = "query")]
@@ -3394,9 +3413,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// [`Self::deliver`] entered. Whether anything was handed out.
     fn hand_out(&self) -> bool {
         let mut handed = false;
-        // The callbacks found for the samples' subscribers, kept from one sample to the next and let
-        // go of once the lane is passed over.
-        let mut resolved = Resolved::new();
+        // The callbacks found for the samples' subscribers, kept from one sample to the next and from
+        // one delivery to the next: the engine's, unless another delivery holds them now, which
+        // leaves this one a set of its own for this pass.
+        let mut kept = self.resolved.try_lock();
+        let mut own = None;
+        let resolved: &mut Resolved = match kept.as_deref_mut() {
+            Some(held) => held,
+            None => own.insert(Resolved::new()),
+        };
         // Each popped under its queue's lock alone, which is released before the callback runs:
         // the pop is its own statement, since a guard in a `while let` condition would live
         // through the body and a callback that steps the session again would wait on it.
@@ -3422,7 +3447,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                     for (at, id) in sample.subscribers().enumerate() {
                         if at < RESOLVED_SUBSCRIBERS {
                             if let Some(callback) =
-                                self.resolved_subscriber_callback(&mut resolved, at, id)
+                                self.resolved_subscriber_callback(resolved, at, id)
                             {
                                 hand(id, callback);
                             }
@@ -3467,7 +3492,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 }
             }
         }
-        drop(resolved);
+        self.let_go_of_resolved(kept);
+        drop(own);
         // A face that came up or went down, told to each watcher as it stands now: the list is
         // cloned out of its lock, so a sink that undeclares a watcher does not wait on it.
         #[cfg(feature = "connectivity")]
@@ -3821,11 +3847,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         at: usize,
         id: SubId,
     ) -> Option<&'r SubscriberCallback> {
-        let removed = self.removed.load(Ordering::Acquire);
-        if resolved.removed != removed {
-            resolved.removed = removed;
-            resolved.callbacks = [const { None }; RESOLVED_SUBSCRIBERS];
-        }
+        drop(resolved.take_stale(self.removed.load(Ordering::SeqCst)));
         let kept = &mut resolved.callbacks[at];
         if !matches!(kept, Some((held, _)) if *held == id) {
             *kept = self.subscriber_callback(id).map(|callback| (id, callback));
@@ -3991,10 +4013,42 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 
     /// Take the callback `key` names out of the targets; the caller drops it with no lock held.
     fn take_target(&self, key: TargetKey) -> Option<Target> {
-        let mut targets = lock(&self.targets);
-        let at = targets.iter().position(|(t, _)| *t == key)?;
-        self.removed.fetch_add(1, Ordering::Release);
-        Some(targets.remove(at).1)
+        let taken = {
+            let mut targets = lock(&self.targets);
+            let at = targets.iter().position(|(t, _)| *t == key)?;
+            self.removed.fetch_add(1, Ordering::SeqCst);
+            targets.remove(at).1
+        };
+        // What the deliveries kept goes first, so the caller's drop of the callback is its last.
+        self.forget_resolved();
+        Some(taken)
+    }
+
+    /// Let go of the callbacks the deliveries kept from before the last removal from the table,
+    /// when no delivery holds them now; one that does lets go of them as it ends
+    /// ([`Self::let_go_of_resolved`]).
+    fn forget_resolved(&self) {
+        let Some(mut kept) = self.resolved.try_lock() else {
+            return;
+        };
+        let stale = kept.take_stale(self.removed.load(Ordering::SeqCst));
+        drop(kept);
+        drop(stale);
+    }
+
+    /// End a delivery's hold on the kept callbacks: what it kept from before a removal is let go
+    /// of, with no lock held, and a removal counted after that, which found them held, is seen to.
+    fn let_go_of_resolved(&self, kept: Option<MutexGuard<'_, Resolved>>) {
+        let Some(mut kept) = kept else {
+            return;
+        };
+        let stale = kept.take_stale(self.removed.load(Ordering::SeqCst));
+        let seen = kept.removed;
+        drop(kept);
+        drop(stale);
+        if self.removed.load(Ordering::SeqCst) != seen {
+            self.forget_resolved();
+        }
     }
 
     /// Step the session until it has nothing more to do, move its link on, and notice a session

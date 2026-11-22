@@ -102,12 +102,14 @@ by string per message on receive (the registry's match memo, `fire_into_memoized
   The wait's buffer of readiness handles is the session's, lent and handed back, so the idle read
   allocates nothing; an `Arc` of each waited link's readiness is still taken, since the wait is
   made with the session let go of.
-* A delivery keeps the callbacks it found for the subscribers of the sample it handed last, by
-  their place in the sample's list (four places), and hands the samples behind it the same
-  callbacks with no lock of the table of callbacks, no search of it and no count taken on the
-  callback, while nothing has been taken out of the table since: each removal is counted under the
-  table's lock, and a delivery that reads a new count looks again (row 5). A run of samples a step
-  read pays one look; a round trip, one sample a step, still pays one look a sample. Tests:
+* The deliveries keep the callbacks they found for the subscribers of the sample handed last, by
+  their place in the sample's list (four places), from one sample and one step to the next, and
+  hand the next samples the same callbacks with no lock of the table of callbacks, no search of it
+  and no count taken on the callback, while nothing has been taken out of the table since: each
+  removal is counted under the table's lock and lets go of what was kept, and a delivery that reads
+  a new count looks again (row 5). The set is only ever tried, so a second delivery at once keeps
+  one of its own for its pass. A round trip, one sample a step, pays one look for its subscriber
+  and then none. Tests:
   `tests::the_samples_one_delivery_hands_a_subscriber_find_its_callback_once`,
   `tests::a_subscriber_undeclared_inside_its_callback_is_handed_nothing_more`.
 * A plain put is written once: the size the link lends a slot of is worked out from the parts
