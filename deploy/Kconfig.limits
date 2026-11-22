@@ -496,7 +496,8 @@ config WZ_LIMIT_SUPERVISION_CHECKPOINTS
 	help
 	  How many checkpoints the node's supervisor watches. Each is a deadline an
 	  application feeds, and the node is healthy only while every checkpoint that is
-	  supervised has been fed in time. At least 1 and at most 64.
+	  supervised has been fed in time. At least 1 and at most 64. The build's value
+	  sizes the supervisor; a run-time document may only lower it.
 
 config WZ_LIMIT_E2E_SUPERVISED_STREAMS
 	int "E2E_SUPERVISED_STREAMS"
@@ -505,7 +506,8 @@ config WZ_LIMIT_E2E_SUPERVISED_STREAMS
 	  How many periodic streams one reception supervisor holds. The table of streams
 	  is storage the application gives the supervisor when it makes it, one fixed row
 	  per stream, so this bounds how many rows of it are used and sizes nothing; a
-	  stream added past it is refused. At least 1.
+	  stream added past it is refused. At least 1. A run-time document may only lower
+	  the build's value.
 
 config WZ_LIMIT_APP_LINK_QUEUE_BYTES
 	int "APP_LINK_QUEUE_BYTES"
@@ -574,6 +576,7 @@ config WZ_LIMIT_MESSAGE_CATALOG_ENTRIES
 	  How many messages one message catalog declares, when the message-catalog
 	  capability is on. A catalog that declares more is refused when it is read, and
 	  the generator of a fixed-memory image refuses to write its tables. At least 1.
+	  A run-time document may only lower the build's value.
 
 config WZ_LIMIT_INSTANCE_KEY_FIELDS
 	int "INSTANCE_KEY_FIELDS"

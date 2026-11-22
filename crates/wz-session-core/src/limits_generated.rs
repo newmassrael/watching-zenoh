@@ -859,7 +859,7 @@ impl LimitSpec for SupervisionCheckpoints {
     type Value = usize;
     const LIMIT: &'static str = "SUPERVISION_CHECKPOINTS";
     const DRIVEN: Option<Driven> = None;
-    const READ_FROM_SNAPSHOT: bool = false;
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = Some(caps::SUPERVISION_CHECKPOINTS);
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(1, 64, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
@@ -880,7 +880,7 @@ impl LimitSpec for E2eSupervisedStreams {
     type Value = Quota;
     const LIMIT: &'static str = "E2E_SUPERVISED_STREAMS";
     const DRIVEN: Option<Driven> = Some(Driven::Local);
-    const READ_FROM_SNAPSHOT: bool = false;
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::from_build(caps::E2E_SUPERVISED_STREAMS, false);
@@ -1007,7 +1007,7 @@ impl LimitSpec for MessageCatalogEntries {
     type Value = Quota;
     const LIMIT: &'static str = "MESSAGE_CATALOG_ENTRIES";
     const DRIVEN: Option<Driven> = Some(Driven::Local);
-    const READ_FROM_SNAPSHOT: bool = false;
+    const READ_FROM_SNAPSHOT: bool = true;
     const CAPACITY: Option<usize> = fixed_capacity(caps::MESSAGE_CATALOG_ENTRIES);
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: Quota = Quota::at_most(caps::MESSAGE_CATALOG_ENTRIES);
