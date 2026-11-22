@@ -632,6 +632,7 @@ fn a_gated_record_that_finds_no_room_is_a_defect() {
         return;
     };
     lane.offer(1, &best_effort(8));
+    #[cfg(debug_assertions)]
     lane.offering_gated(true);
     lane.offer(
         2,

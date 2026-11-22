@@ -466,6 +466,9 @@ pub(crate) struct SampleLane {
     /// A delivery holds the head: another thread that delivers finds nothing until it completes.
     handing: bool,
     /// What is offered now is a record a link's gate let through ([`Self::offering_gated`]).
+    /// Read only by a debug build's check of the gate's bound, so a release build neither keeps
+    /// nor sets it, and a link's dispatch does not take the lane's lock twice a record for it.
+    #[cfg(debug_assertions)]
     gated: bool,
     /// The tokens offered now are rehearsed on a copy of the bookkeeping and not queued
     /// ([`Self::rehearse`]).
@@ -501,6 +504,7 @@ impl SampleLane {
             area,
             open: None,
             handing: false,
+            #[cfg(debug_assertions)]
             gated: false,
             #[cfg(feature = "liveliness")]
             rehearsal: None,
@@ -804,6 +808,7 @@ impl SampleLane {
     /// so one that holds its sender and finds no room is a defect of that bound, and a debug build
     /// stops there; what did not wait is counted.
     fn count_refused(&mut self, holds_sender: bool) {
+        #[cfg(debug_assertions)]
         debug_assert!(
             !(holds_sender && self.gated),
             "a record the gate let through found no room in the delivery lane"
@@ -870,7 +875,8 @@ impl SampleLane {
     /// waited for the room one record can take ([`LaneGate`]), or anything else (`false`, the
     /// lane's state when made): the session's own puts, the tokens a liveliness subscriber is
     /// handed when it is declared, a group's records. Only the first is a defect when it holds
-    /// its sender and finds no room.
+    /// its sender and finds no room. A debug build's alone (`gated`).
+    #[cfg(debug_assertions)]
     pub(crate) fn offering_gated(&mut self, gated: bool) {
         self.gated = gated;
     }
@@ -1233,8 +1239,8 @@ impl MatchFlips {
 /// The group twin of [`LaneGate`]: whether the lane has the room one record of a group can take
 /// (`room`, decision Q4), asked before each datagram of the group and before each further message
 /// and record of one its transport keeps. While it has not, what the members send waits in the
-/// group's socket. A group's record does not claim that room as a link's does
-/// ([`SampleLane::offering_gated`]): the room of a group's batch is not one the lane is lengthened
+/// group's socket. A group's record does not claim that room as a link's does (a debug build's
+/// `SampleLane::offering_gated`): the room of a group's batch is not one the lane is lengthened
 /// to hold.
 #[cfg(feature = "group")]
 pub(crate) fn takes_a_group_read(
