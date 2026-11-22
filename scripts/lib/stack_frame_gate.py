@@ -748,7 +748,13 @@ IMAGES = (
         # `fixed_admin::start` 4,448 to 4,456, read alike on origin 07a955b26 (the fixed client's row).
         # 10,552 bytes on 2026-11-21, read by Layer Qzk on a build host at the tree
         # that recovers the kit's text (which frame fell was not attributed).
-        peak=10552,
+        # 11,144 bytes over 26 frames on 2026-11-23, read by Layer Qzk on a build host at the
+        # no-heap integration tree: `wz_app_main` 2,248, `fixed_admin::start` 4,104, the
+        # dial's claim of a slot (`SessionSlots::claim_with`) 1,552 above the channel's
+        # handshake. The claim holds the stream driver it makes, which grew by the ring of frames
+        # a stream link owes its stream (the fixed client over the channel's row); the rest of
+        # the 592 was not attributed.
+        peak=11144,
     ),
     # The pico C ABI on the cooperative engine for Zephyr, arm W of the MCU speed matrix
     # (`deploy/zephyr-mcu-speed`, `scripts/mcu-speed.sh`, which runs this row on each image of the
