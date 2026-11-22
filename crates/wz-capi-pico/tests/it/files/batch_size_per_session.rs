@@ -17,10 +17,15 @@
 //! it, and its InitSyn advertised that size. The two sides take the smaller of their two
 //! advertisements, so both sides of a pair state the same document.
 //!
-//! A document stating a size past the build's ceiling (the domain's largest value: 65535, the
-//! two bytes the InitSyn carries it in, or the build's own value in a build that keeps its
-//! defaults) is refused by the document door, the reader it judges with names the limit, and a
-//! config handed it opens as if it had not been: its InitSyn advertises the build's value.
+//! One library serves every batch up to its build's ceiling, the largest value the limit's domain
+//! holds, and no more: a document may lower a build limit, never raise it past that. The ceiling is
+//! 65535 (the two bytes the InitSyn carries it in) where the engine sizes a link's buffers from the
+//! session's value, the build's own value where the engine lends them from the session's arena
+//! under it (the cooperative engine, `limits-lent-at-open`), and the build's value alone in a build
+//! that keeps its defaults. A batch at or below the ceiling opens on both sides and frames its link
+//! to that size; one above it is refused by the document door before any open, the reader it
+//! judges with names the limit, and a config handed it opens as if it had not been: its InitSyn
+//! advertises the build's value.
 //!
 //! zenoh-pico's half of the comparison, a library built once per size, is
 //! `scripts/pico-compare.sh batch`, which measures both on the wire the same way.
@@ -90,6 +95,14 @@ fn document(batch: usize) -> String {
 fn admits(batch: usize) -> bool {
     let mut limits = SessionLimits::defaults();
     limits.select_pico_unicast_batch_bytes(batch).is_ok()
+}
+
+/// The largest batch a document may state in this build: the top of the limit's domain.
+fn ceiling() -> usize {
+    PicoUnicastBatchBytes::DOMAIN
+        .integers()
+        .expect("the batch size is a parameter with whole values")
+        .1
 }
 
 /// The batch size an InitSyn advertises, or `None` for a batch that is not an InitSyn. The
@@ -458,31 +471,42 @@ impl Pair {
 
 #[test]
 fn each_session_frames_its_link_to_the_batch_its_document_states() {
-    if !admits(SMALL) || !admits(LARGE) {
-        // A build that keeps its defaults refuses both documents at the door, and its sessions
-        // run on the build's value; that refusal is what such a build is checked for.
-        for batch in [SMALL, LARGE].into_iter().filter(|&batch| !admits(batch)) {
-            unsafe {
-                let mut cfg: z_owned_config_t = std::mem::zeroed();
-                assert_eq!(z_config_default(&mut cfg), Z_OK);
-                let text = CString::new(document(batch)).unwrap();
-                assert_eq!(
-                    wz_ext_config_document(z_config_loan_mut(&mut cfg), text.as_ptr()),
-                    Z_ERR_CONFIG_INVALID_VALUE
-                );
-                wz_capi_pico::z_config_drop(z_config_move(&mut cfg));
-            }
+    let ceiling = ceiling();
+    let singleton = PicoUnicastBatchBytes::DOMAIN.is_singleton();
+    let (taken, refused): (Vec<usize>, Vec<usize>) =
+        [SMALL, LARGE].into_iter().partition(|&batch| admits(batch));
+    // Where a session may choose, what it may choose is every batch up to the ceiling.
+    if !singleton {
+        for batch in [SMALL, LARGE] {
+            assert_eq!(
+                admits(batch),
+                batch <= ceiling,
+                "a batch of {batch} against a ceiling of {ceiling}"
+            );
         }
-        return;
+    }
+    // A batch the build does not admit is refused by the document door, before any open.
+    for batch in refused {
+        unsafe {
+            let mut cfg: z_owned_config_t = std::mem::zeroed();
+            assert_eq!(z_config_default(&mut cfg), Z_OK);
+            let text = CString::new(document(batch)).unwrap();
+            assert_eq!(
+                wz_ext_config_document(z_config_loan_mut(&mut cfg), text.as_ptr()),
+                Z_ERR_CONFIG_INVALID_VALUE,
+                "the document door refuses a batch of {batch} against a ceiling of {ceiling}"
+            );
+            wz_capi_pico::z_config_drop(z_config_move(&mut cfg));
+        }
     }
     unsafe {
         // Every pair is open before the first burst, so each size is a session's and not the
-        // process's.
-        let pairs = [
-            Pair::open(Some(SMALL)),
-            Pair::open(Some(LARGE)),
-            Pair::open(None),
-        ];
+        // process's. The pair that states nothing runs at the build's value, which is the ceiling
+        // where the engine lends the buffers under it.
+        let mut pairs = Vec::new();
+        for stated in taken.into_iter().map(Some).chain([None]) {
+            pairs.push(Pair::open(stated));
+        }
         for pair in &pairs {
             pair.burst();
         }
@@ -497,9 +521,7 @@ fn each_session_frames_its_link_to_the_batch_its_document_states() {
 
 #[test]
 fn a_document_stating_a_batch_past_the_builds_ceiling_is_refused_by_name() {
-    let (_, ceiling) = PicoUnicastBatchBytes::DOMAIN
-        .integers()
-        .expect("the batch size is a parameter with whole values");
+    let ceiling = ceiling();
     let text = document(ceiling + 1);
 
     // The reader the document door judges with names the limit it refuses.
