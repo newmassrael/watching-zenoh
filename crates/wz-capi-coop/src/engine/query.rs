@@ -41,6 +41,7 @@ use wz_capi_port::sync::Lock;
 use wz_capi_port::{HeldQuery, QblId, QueryHolder};
 use wz_runtime_coop::session_drive::SessionLinks;
 use wz_runtime_coop::ClockSource;
+use wz_session_core::limits::{MaxPendingFinalsHeld, SessionLimits};
 use wz_session_core::query::QueryResponder;
 use wz_session_core::query_sink::{QueryView, ReplyOut};
 use wz_session_core::reply_acceptance::ReplyKeyExpr;
@@ -140,38 +141,86 @@ struct FinalHold {
     due: Option<QosLevel>,
 }
 
-/// The Finals held open, by the link generation and request id they answer.
-#[derive(Default)]
-pub(super) struct FinalHolds(Vec<FinalHold>);
+/// The Finals held open, by the link generation and request id they answer: one row per
+/// request, held to the session's `MAX_PENDING_FINALS` (the deploy `limits` key
+/// `pending_finals`), as the Finals a dispatch owes are. A request that would need a row the
+/// table has no room for is REFUSED before its callback runs: it is not copied out, nothing
+/// answers it and no Final is sent for it, as zenoh-pico refuses a query it cannot build
+/// (`vendor/zenoh-pico/src/session/queryable.c` @ `z_result_t _z_trigger_queryables(`, which
+/// returns before any callback and sends no Final) and as the session's own stage refuses a
+/// request it cannot owe a Final for (`wz_session_core::caps::MAX_PENDING_FINALS`).
+pub(super) struct FinalHolds {
+    rows: Vec<FinalHold>,
+    /// The requests refused for want of a row in the dispatch now running, whose Final that
+    /// dispatch owes and must not send. A request that reached a queryable owes its Final in the
+    /// same dispatch, so [`Self::owe`] takes each out before the dispatch ends.
+    refused: Vec<(u64, wz_session_core::wire_id::RequestId)>,
+    quota: MaxPendingFinalsHeld,
+}
 
 impl FinalHolds {
-    /// One hold more on the Final of `rid` on link `generation`.
-    pub(super) fn take(&mut self, generation: u64, rid: wz_session_core::wire_id::RequestId) {
-        match self
-            .0
-            .iter_mut()
-            .find(|h| h.generation == generation && h.rid == rid)
-        {
-            Some(hold) => hold.holds += 1,
-            None => self.0.push(FinalHold {
-                generation,
-                rid,
-                holds: 1,
-                due: None,
-            }),
+    /// An empty table held to the `MAX_PENDING_FINALS` the session's open resolved.
+    pub(super) fn held_to(limits: &SessionLimits) -> Self {
+        Self {
+            rows: Vec::new(),
+            refused: Vec::new(),
+            quota: limits.max_pending_finals_held(),
         }
     }
 
+    /// One hold more on the Final of `rid` on link `generation`: `false` when the request
+    /// has no row and the table no room for one, or was refused already, so nothing may answer
+    /// it.
+    pub(super) fn take(
+        &mut self,
+        generation: u64,
+        rid: wz_session_core::wire_id::RequestId,
+    ) -> bool {
+        if let Some(hold) = self
+            .rows
+            .iter_mut()
+            .find(|h| h.generation == generation && h.rid == rid)
+        {
+            hold.holds += 1;
+            return true;
+        }
+        // A request refused once stays refused for the rest of its dispatch, so a second
+        // queryable it matches does not answer what the first could not.
+        if self.refused.contains(&(generation, rid)) {
+            return false;
+        }
+        if !self.quota.admits(self.rows.len() + 1) {
+            self.refused.push((generation, rid));
+            return false;
+        }
+        self.rows.push(FinalHold {
+            generation,
+            rid,
+            holds: 1,
+            due: None,
+        });
+        true
+    }
+
     /// The dispatch owes the Final of `rid`: `true` when nothing holds it, so it goes out now,
-    /// `false` when it waits for the last hold.
+    /// `false` when it waits for the last hold or the request was refused, whose Final is never
+    /// sent.
     pub(super) fn owe(
         &mut self,
         generation: u64,
         rid: wz_session_core::wire_id::RequestId,
         qos: QosLevel,
     ) -> bool {
+        if let Some(at) = self
+            .refused
+            .iter()
+            .position(|&refused| refused == (generation, rid))
+        {
+            self.refused.swap_remove(at);
+            return false;
+        }
         match self
-            .0
+            .rows
             .iter_mut()
             .find(|h| h.generation == generation && h.rid == rid)
         {
@@ -190,15 +239,15 @@ impl FinalHolds {
         rid: wz_session_core::wire_id::RequestId,
     ) -> Option<QosLevel> {
         let at = self
-            .0
+            .rows
             .iter()
             .position(|h| h.generation == generation && h.rid == rid)?;
-        let hold = &mut self.0[at];
+        let hold = &mut self.rows[at];
         hold.holds = hold.holds.saturating_sub(1);
         if hold.holds > 0 {
             return None;
         }
-        self.0.swap_remove(at).due
+        self.rows.swap_remove(at).due
     }
 }
 
@@ -210,7 +259,6 @@ pub(super) const LOCAL_QUERY: u64 = 0;
 
 /// What the queryable plane shares between the session's state, its dispatch, the observer's
 /// queryables and the queries a C program keeps.
-#[derive(Default)]
 pub(super) struct QueryPlane {
     /// The generation of the link dialled last: each link is given the next.
     pub(super) generation: AtomicU64,
@@ -229,10 +277,25 @@ pub(super) struct QueryPlane {
 }
 
 impl QueryPlane {
-    /// What the observer's queryable `id` does with a query: copy it out and hold its Final.
+    /// A plane with no link dialled yet and its Finals held to the session's `limits`.
+    pub(super) fn held_to(limits: &SessionLimits) -> Self {
+        Self {
+            generation: AtomicU64::new(0),
+            arriving: AtomicU64::new(0),
+            #[cfg(feature = "local-queryable")]
+            asking: AtomicBool::new(false),
+            holds: Mutex::new(FinalHolds::held_to(limits)),
+            queries: Mutex::new(VecDeque::new()),
+        }
+    }
+
+    /// What the observer's queryable `id` does with a query: copy it out and hold its Final, or,
+    /// with no row left for its Final, refuse it ([`FinalHolds`]).
     pub(super) fn arrive(&self, id: QblId, view: &dyn QueryView) {
         let generation = self.arriving_on();
-        lock(&self.holds).take(generation, view.rid());
+        if !lock(&self.holds).take(generation, view.rid()) {
+            return;
+        }
         lock(&self.queries).push_back((id, OwnedQuery::of(view), generation));
     }
 
@@ -319,8 +382,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> QueryHolder fo
             if at != Arc::as_ptr(&engine) as usize || rid != view.rid() {
                 return None;
             }
-            lock(&engine.plane.holds).take(generation, rid);
-            Some((generation, rid))
+            lock(&engine.plane.holds)
+                .take(generation, rid)
+                .then_some((generation, rid))
         });
         Box::new(CoopHeld {
             engine: self.engine.clone(),
