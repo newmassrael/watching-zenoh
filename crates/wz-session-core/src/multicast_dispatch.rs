@@ -970,7 +970,7 @@ pub struct MulticastDispatcher<const MAX_PEERS: usize, Grow: TableGrowth = Fixed
     /// The undeclarations of what departed members held, until the host takes them
     /// ([`Self::take_member_retractions`]).
     #[cfg(all(feature = "alloc", feature = "codec-declare"))]
-    member_retractions: alloc::vec::Vec<crate::network_message::NetworkMessage>,
+    member_retractions: alloc::vec::Vec<crate::multicast_member_scope::Retraction>,
 }
 
 /// The predicate a host installs on a [`MulticastDispatcher`] to admit or drop each inbound
@@ -1129,7 +1129,11 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
         Some(crate::driver_loop::DriverLoopOutcome::FramePayload {
             reliable: true,
             sn: 0,
-            messages: core::mem::take(&mut self.member_retractions),
+            messages: self
+                .member_retractions
+                .drain(..)
+                .map(crate::multicast_member_scope::Retraction::owned)
+                .collect(),
             has_ext: false,
             extensions: alloc::vec::Vec::new(),
             priority: crate::qos::Priority::DEFAULT,
@@ -1141,7 +1145,56 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
     #[cfg(all(feature = "alloc", feature = "codec-declare"))]
     fn retire_member(&mut self, idx: usize) {
         if let Some(member) = self.peers[idx].member.take() {
-            self.member_retractions.extend(member.retractions());
+            self.member_retractions.extend(member.retracted());
+        }
+    }
+
+    /// The declarations of the member at `src`, by which a lent Declare it sent is scoped
+    /// (`MemberRecords`): `None` on a dispatcher that does not keep its members apart, or for an
+    /// address no member holds.
+    #[cfg(all(
+        feature = "alloc",
+        feature = "codec-declare",
+        feature = "session-unicast",
+        feature = "rx-lent-control",
+        not(feature = "transport-stats"),
+        not(feature = "routing-namespace"),
+        not(feature = "multicast-declarations"),
+        not(feature = "multicast-ingress-gate")
+    ))]
+    pub(crate) fn member_scope(
+        &mut self,
+        src: SocketAddr,
+    ) -> Option<&mut crate::multicast_member_scope::MemberDeclarations> {
+        let idx = self.find_by_src(src)?;
+        self.peers[idx].member.as_mut()
+    }
+
+    /// Hand `sink` the undeclarations of what the members that left since the last call held,
+    /// each lent as the Declare a frame read in place carries: the form a build whose group lends
+    /// its records hands them in, where [`Self::take_member_retractions`] makes one owned batch.
+    #[cfg(all(
+        feature = "alloc",
+        feature = "codec-declare",
+        feature = "session-unicast",
+        feature = "rx-lent-control",
+        not(feature = "transport-stats"),
+        not(feature = "routing-namespace"),
+        not(feature = "multicast-declarations"),
+        not(feature = "multicast-ingress-gate")
+    ))]
+    pub(crate) fn hand_member_retractions<E>(&mut self, sink: &mut E)
+    where
+        E: crate::driver_loop::EventSink + ?Sized,
+    {
+        for retraction in self.member_retractions.drain(..) {
+            let declare = retraction.lent();
+            sink.record(crate::driver_loop::InPlaceRecord::declare_of_frame(
+                &declare,
+                true,
+                0,
+                crate::qos::Priority::DEFAULT,
+            ));
         }
     }
 
@@ -2195,7 +2248,7 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
             on_evict(idx);
             #[cfg(all(feature = "alloc", feature = "codec-declare"))]
             if let Some(member) = slot.member.take() {
-                self.member_retractions.extend(member.retractions());
+                self.member_retractions.extend(member.retracted());
             }
             // The address is read before the eviction clears it.
             if let Some(src) = slot.src {
@@ -2532,27 +2585,38 @@ pub(crate) fn ingest_multicast_fragment_counted<
     }
 }
 
-/// [`ingest_multicast_fragment_counted`] for a build with no allocator: the same
+/// [`ingest_multicast_fragment_counted`] for a build that lends a group's records: one with no
+/// allocator, and a heap build whose every record is lent (`rx-lent-control`). The same
 /// pipeline (the per-peer, per-channel SN gate, the abort of the channel's chain on an
 /// out-of-order fragment, the chain staged under the slot-index key with the peer's
 /// negotiated markers armed), with the completed chain READ IN THE SLOT its fragments
 /// were staged into and handed over record by record, as a `Frame`'s payload is:
 /// ARCHITECTURE section 9.3, the one copy a reassembled message costs is the staging
-/// of its fragments. The heap form decodes the chain into an owned batch and fans it
+/// of its fragments. The owned form decodes the chain into an owned batch and fans it
 /// as one `FramePayload`; this form has no owned batch to build, so each Push, Request
 /// and Response record is lent as
 /// [`IterationEvent::InPlace`](crate::driver_loop::IterationEvent::InPlace), the
-/// control kinds likewise, and a chain that carries no record is reported as an empty
-/// frame, as an empty `Frame` is.
+/// control kinds likewise (a member's declarations scoped by the member, [`MemberRecords`]),
+/// and a chain that carries no record is reported as an empty frame, as an empty `Frame` is.
 ///
 /// A completed chain whose records do not decode is dropped after the records before
 /// it were handed over, as the frame walk drops a payload (a multicast peer has no
 /// session to tell: the datagram stays unanswered). Nothing is counted per network
-/// message (the owned messages `transport-stats` counts by are the heap profile's).
+/// message (the owned messages `transport-stats` counts by are the owned form's).
 #[cfg(all(
     feature = "reassembly",
     feature = "storage-profile",
-    not(feature = "alloc")
+    any(
+        not(feature = "alloc"),
+        all(
+            feature = "session-unicast",
+            feature = "rx-lent-control",
+            not(feature = "transport-stats"),
+            not(feature = "routing-namespace"),
+            not(feature = "multicast-declarations"),
+            not(feature = "multicast-ingress-gate")
+        )
+    )
 ))]
 #[allow(clippy::too_many_arguments)] // the decoded fragment's wire fields ride flat, as above
 pub(crate) fn ingest_multicast_fragment_in_place<
@@ -2576,8 +2640,9 @@ pub(crate) fn ingest_multicast_fragment_in_place<
     on_event: &mut F,
 ) where
     S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
-    F: FnMut(IterationEvent<'_, '_>),
+    F: crate::driver_loop::EventSink + ?Sized,
 {
+    use crate::driver_loop::EventSink;
     let (peer_idx, sn_mask) =
         match dispatcher.ingest_fragment_by_src_qos(src, priority, reliable, sn, now_ms) {
             FragmentIngest::Admitted { peer_idx, sn_mask } => (peer_idx, sn_mask),
@@ -2591,10 +2656,11 @@ pub(crate) fn ingest_multicast_fragment_in_place<
     reasm.set_fragmentation_markers(dispatcher.peer_honours_fragment_markers(peer_idx));
     // The member the chain is from, copied out of the peer table before the ingest
     // takes the Router: it is named to the observer ahead of the records, as the
-    // heap form names it ahead of its `Poll`.
+    // owned form names it ahead of its `Poll`.
     let member = dispatcher
         .peer_zid_by_src(src)
         .map(MulticastPeerId::from_wire);
+    let mut records = MemberRecords::of(dispatcher, src, on_event);
     let ingest_outcome = reasm.ingest(
         ReassemblyFragment {
             peer_key: &key,
@@ -2609,22 +2675,193 @@ pub(crate) fn ingest_multicast_fragment_in_place<
         now_ms,
         |chain| {
             if let Some(member) = member {
-                on_event(IterationEvent::MulticastSource(member));
+                records.event(IterationEvent::MulticastSource(member));
             }
             // A completed chain that does not decode ends its walk where it fails,
-            // and nothing more is owed to the sender of a datagram on a group.
-            let _ = crate::driver_loop::walk_lent_payload(chain, reliable, sn, priority, on_event);
+            // and nothing more is owed to the sender of a datagram on a group. A chain is
+            // read whole: what its fragments were staged into is not kept for a later step.
+            let _ = crate::driver_loop::walk_lent_payload(
+                chain,
+                reliable,
+                sn,
+                priority,
+                false,
+                &mut records,
+            );
         },
     );
     // The chain this fragment ended besides its own, which the records lent
     // above have already walked past.
     if let Some(displaced) = reasm.displaced_by_last_ingest() {
-        on_event(IterationEvent::ReassemblyDropped(
+        records.event(IterationEvent::ReassemblyDropped(
             ReassemblyDropReason::from_displaced(displaced),
         ));
     }
     if let Some(reason) = ReassemblyDropReason::from_ingest(ingest_outcome) {
-        on_event(IterationEvent::ReassemblyDropped(reason));
+        records.event(IterationEvent::ReassemblyDropped(reason));
+    }
+}
+
+/// What a group's records are handed to as a walk lends them where their datagram lies:
+/// `inner`, with each Declare of the member that sent them scoped by that member on a
+/// dispatcher that keeps its members apart (`MulticastDispatcher::scope_member_declarations`),
+/// as the owned form scopes a batch (`MulticastDispatcher::apply_member_scope`). A build with
+/// no allocator keeps no member apart, and hands every record on as it is.
+#[cfg(all(
+    feature = "storage-profile",
+    any(
+        not(feature = "alloc"),
+        all(
+            feature = "session-unicast",
+            feature = "rx-lent-control",
+            not(feature = "transport-stats"),
+            not(feature = "routing-namespace"),
+            not(feature = "multicast-declarations"),
+            not(feature = "multicast-ingress-gate")
+        )
+    ),
+    any(
+        feature = "reassembly",
+        all(
+            feature = "codec-join",
+            feature = "codec-frame",
+            feature = "codec-close"
+        )
+    )
+))]
+pub(crate) struct MemberRecords<'s, E: ?Sized> {
+    inner: &'s mut E,
+    #[cfg(all(
+        feature = "alloc",
+        feature = "codec-declare",
+        feature = "session-unicast",
+        feature = "rx-lent-control",
+        not(feature = "transport-stats"),
+        not(feature = "routing-namespace"),
+        not(feature = "multicast-declarations"),
+        not(feature = "multicast-ingress-gate")
+    ))]
+    member: Option<&'s mut crate::multicast_member_scope::MemberDeclarations>,
+}
+
+#[cfg(all(
+    feature = "storage-profile",
+    any(
+        not(feature = "alloc"),
+        all(
+            feature = "session-unicast",
+            feature = "rx-lent-control",
+            not(feature = "transport-stats"),
+            not(feature = "routing-namespace"),
+            not(feature = "multicast-declarations"),
+            not(feature = "multicast-ingress-gate")
+        )
+    ),
+    any(
+        feature = "reassembly",
+        all(
+            feature = "codec-join",
+            feature = "codec-frame",
+            feature = "codec-close"
+        )
+    )
+))]
+impl<'s, E: crate::driver_loop::EventSink + ?Sized> MemberRecords<'s, E> {
+    /// The records the member at `src` of `dispatcher` sent, handed to `inner`.
+    pub(crate) fn of<const MAX_PEERS: usize, Grow: TableGrowth>(
+        dispatcher: &'s mut MulticastDispatcher<MAX_PEERS, Grow>,
+        src: SocketAddr,
+        inner: &'s mut E,
+    ) -> Self {
+        #[cfg(not(all(
+            feature = "alloc",
+            feature = "codec-declare",
+            feature = "session-unicast",
+            feature = "rx-lent-control",
+            not(feature = "transport-stats"),
+            not(feature = "routing-namespace"),
+            not(feature = "multicast-declarations"),
+            not(feature = "multicast-ingress-gate")
+        )))]
+        let _ = (dispatcher, src);
+        Self {
+            inner,
+            #[cfg(all(
+                feature = "alloc",
+                feature = "codec-declare",
+                feature = "session-unicast",
+                feature = "rx-lent-control",
+                not(feature = "transport-stats"),
+                not(feature = "routing-namespace"),
+                not(feature = "multicast-declarations"),
+                not(feature = "multicast-ingress-gate")
+            ))]
+            member: dispatcher.member_scope(src),
+        }
+    }
+}
+
+#[cfg(all(
+    feature = "storage-profile",
+    any(
+        not(feature = "alloc"),
+        all(
+            feature = "session-unicast",
+            feature = "rx-lent-control",
+            not(feature = "transport-stats"),
+            not(feature = "routing-namespace"),
+            not(feature = "multicast-declarations"),
+            not(feature = "multicast-ingress-gate")
+        )
+    ),
+    any(
+        feature = "reassembly",
+        all(
+            feature = "codec-join",
+            feature = "codec-frame",
+            feature = "codec-close"
+        )
+    )
+))]
+impl<E: crate::driver_loop::EventSink + ?Sized> crate::driver_loop::EventSink
+    for MemberRecords<'_, E>
+{
+    fn event(&mut self, event: crate::driver_loop::IterationEvent<'_, '_>) {
+        self.inner.event(event);
+    }
+
+    fn record(&mut self, record: crate::driver_loop::InPlaceRecord<'_, '_>) {
+        #[cfg(all(
+            feature = "alloc",
+            feature = "codec-declare",
+            feature = "session-unicast",
+            feature = "rx-lent-control",
+            not(feature = "transport-stats"),
+            not(feature = "routing-namespace"),
+            not(feature = "multicast-declarations"),
+            not(feature = "multicast-ingress-gate")
+        ))]
+        if let (Some(member), Some(declare)) = (self.member.as_deref_mut(), record.declare()) {
+            if let Some(scoped) = member.scope_lent(declare) {
+                self.inner
+                    .record(crate::driver_loop::InPlaceRecord::declare_of_frame(
+                        &scoped,
+                        record.reliable(),
+                        record.sn(),
+                        record.priority(),
+                    ));
+                return;
+            }
+        }
+        self.inner.record(record);
+    }
+
+    fn takes_another(&mut self) -> bool {
+        self.inner.takes_another()
+    }
+
+    fn holds_datagram(&self) -> bool {
+        self.inner.holds_datagram()
     }
 }
 

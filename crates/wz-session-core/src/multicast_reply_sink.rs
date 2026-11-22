@@ -221,6 +221,8 @@ pub fn asks_for_declarations(event: &crate::driver_loop::IterationEvent<'_, '_>)
         IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => messages
             .iter()
             .any(|message| matches!(message, NetworkMessage::Interest(interest) if interest.c())),
+        // An interest lent where its frame lies, by a build that lends its group's records.
+        IterationEvent::InPlace(record) => record.interest().is_some_and(|interest| interest.c()),
         _ => false,
     }
 }
@@ -281,49 +283,85 @@ impl GroupKeyexprAnswers {
         self.declared.remove(&mapping_id);
     }
 
-    /// Note each interest in `event` that asks for keyexprs now; whether any answer is owed
-    /// after it.
+    /// Note each interest in `event` that asks for keyexprs now, owned in a batch or lent where its
+    /// frame lies; whether any answer is owed after it.
     pub fn asked(&mut self, event: &crate::driver_loop::IterationEvent<'_, '_>) -> bool {
         use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
         use crate::network_message::NetworkMessage;
-        use wz_codecs::wireexpr::WireexprOwnedVariant;
-        let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event else {
-            return !self.owed.is_empty();
-        };
-        for message in messages.iter() {
-            let NetworkMessage::Interest(interest) = message else {
-                continue;
-            };
-            let Some(body) = crate::interest_build::interest_body(&interest.header_c_or_f) else {
-                continue;
-            };
-            if !interest.c() || !body.ke() {
-                continue;
-            }
-            // A key the dispatch could not make literal names a declaration the member never
-            // made: zenoh-pico answers such an interest with nothing, not even its final
-            // (`vendor/zenoh-pico/src/session/interest.c` @
-            // `_Z_RETURN_IF_ERR(_z_get_keyexpr_from_wireexpr(zn, &restr_key, wireexpr, peer, true));`),
-            // and the session's other answers to it drop it alike.
-            let restriction = match body.keyexpr.as_ref().map(|wire| &wire.body) {
-                None => None,
-                Some(WireexprOwnedVariant::WireexprLocal(local)) if local.id == 0 => {
-                    match local.suffix.as_ref() {
-                        Some(suffix) => {
-                            Some(alloc::string::String::from(suffix.as_text().into_inner()))
-                        }
-                        None => continue,
+        match event {
+            IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
+                for message in messages.iter() {
+                    if let NetworkMessage::Interest(interest) = message {
+                        self.asked_owned(interest);
                     }
                 }
-                Some(_) => continue,
-            };
-            self.owed.push(OwedKeyexprs {
-                interest_id: interest.interest_id,
-                restriction,
-                ends: !(body.su() || body.qu() || body.to()),
-            });
+            }
+            IterationEvent::InPlace(record) => {
+                if let Some(interest) = record.interest() {
+                    self.asked_lent(interest);
+                }
+            }
+            _ => {}
         }
         !self.owed.is_empty()
+    }
+
+    /// [`Self::asked`] for one owned interest.
+    fn asked_owned(&mut self, interest: &crate::transport_profile::owned::InterestOwned) {
+        use wz_codecs::wireexpr::WireexprOwnedVariant;
+        let Some(body) = crate::interest_build::interest_body(&interest.header_c_or_f) else {
+            return;
+        };
+        if !interest.c() || !body.ke() {
+            return;
+        }
+        // A key the dispatch could not make literal names a declaration the member never
+        // made: zenoh-pico answers such an interest with nothing, not even its final
+        // (`vendor/zenoh-pico/src/session/interest.c` @
+        // `_Z_RETURN_IF_ERR(_z_get_keyexpr_from_wireexpr(zn, &restr_key, wireexpr, peer, true));`),
+        // and the session's other answers to it drop it alike.
+        let restriction = match body.keyexpr.as_ref().map(|wire| &wire.body) {
+            None => None,
+            Some(WireexprOwnedVariant::WireexprLocal(local)) if local.id == 0 => {
+                match local.suffix.as_ref() {
+                    Some(suffix) => {
+                        Some(alloc::string::String::from(suffix.as_text().into_inner()))
+                    }
+                    None => return,
+                }
+            }
+            Some(_) => return,
+        };
+        self.owed.push(OwedKeyexprs {
+            interest_id: interest.interest_id,
+            restriction,
+            ends: !(body.su() || body.qu() || body.to()),
+        });
+    }
+
+    /// [`Self::asked`] for one interest lent where its frame lies, by the rule of the owned one.
+    fn asked_lent(&mut self, interest: &wz_codecs::lent::Interest<'_>) {
+        let Some(body) = crate::interest_build::interest_body(&interest.header_c_or_f) else {
+            return;
+        };
+        if !interest.c() || !body.ke() {
+            return;
+        }
+        let restriction = match body.keyexpr.as_ref().map(|wire| &wire.body) {
+            None => None,
+            Some(wz_codecs::lent::WireexprVariant::WireexprLocal(local)) if local.id == 0 => {
+                match local.suffix {
+                    Some(suffix) => Some(alloc::string::String::from(suffix.into_inner())),
+                    None => return,
+                }
+            }
+            Some(_) => return,
+        };
+        self.owed.push(OwedKeyexprs {
+            interest_id: interest.interest_id,
+            restriction,
+            ends: !(body.su() || body.qu() || body.to()),
+        });
     }
 
     /// Every owed answer, in the order it is sent, and none owed after: each declared keyexpr

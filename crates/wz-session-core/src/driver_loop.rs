@@ -1332,33 +1332,62 @@ pub(crate) fn report_lent_record(
 /// payload with no record is reported as one empty frame
 /// ([`DriverLoopOutcome::EmptyFrame`]), as the unicast walk reports it.
 ///
+/// With `may_stop`, the walk ends before a record once `on_event` takes no other
+/// ([`EventSink::takes_another`]), asked after each record it was handed, as the unicast walk of
+/// a datagram its link keeps asks: answered with how far into `payload` it read and whether it
+/// stopped so, with records still unread, which a later walk reads from there.
+///
 /// An error from a record ends the walk after the records before it were handed over.
 /// The walk takes no session and holds one record at a time, so it allocates nothing
 /// whatever the peer put in the payload.
 ///
-/// The multicast receive path of a build with no allocator; the heap profile decodes a
-/// batch owned (`multicast_rx`).
+/// The multicast receive path of a build with no allocator, and of a heap build whose every
+/// record is lent (`rx-lent-control`) and that reads a unicast frame where it lies, whose readers
+/// this walk shares; any other heap build decodes a batch owned (`multicast_rx`).
 #[cfg(all(
     feature = "codec-frame",
-    feature = "session-slot",
     feature = "session-multicast",
-    not(feature = "alloc")
+    any(
+        all(feature = "session-slot", not(feature = "alloc")),
+        all(
+            feature = "session-unicast",
+            feature = "alloc",
+            feature = "rx-lent-control",
+            not(feature = "transport-stats"),
+            not(feature = "routing-namespace"),
+            not(feature = "multicast-declarations"),
+            not(feature = "multicast-ingress-gate")
+        )
+    )
 ))]
 pub(crate) fn walk_lent_payload(
     payload: &[u8],
     reliable: bool,
     sn: u64,
     priority: crate::qos::Priority,
+    may_stop: bool,
     on_event: &mut dyn EventSink,
-) -> Result<(), crate::parse_error::InboundParseError> {
-    use crate::network_message::{new_record_buf, try_for_each_record, RecordForm};
+) -> Result<(usize, bool), crate::parse_error::InboundParseError> {
+    use crate::network_message::{new_record_buf, try_for_each_record_while, RecordForm};
     let mut record = new_record_buf();
     let mut dispatched = false;
-    try_for_each_record(payload, &mut record, RecordForm::LentControl, |one| {
-        report_lent_record(one, reliable, sn, priority, &mut *on_event);
-        dispatched = true;
-        Ok(())
-    })?;
+    // Set once the host has no room for another record; the walk then ends before the next.
+    let stopping = core::cell::Cell::new(false);
+    let go_on = || !stopping.get();
+    let walked = try_for_each_record_while(
+        payload,
+        &mut record,
+        RecordForm::LentControl,
+        &go_on,
+        |one| {
+            report_lent_record(one, reliable, sn, priority, &mut *on_event);
+            dispatched = true;
+            if may_stop && !on_event.takes_another() {
+                stopping.set(true);
+            }
+            Ok(())
+        },
+    )?;
     if !dispatched {
         #[cfg(feature = "alloc")]
         on_event.event(IterationEvent::Poll(&DriverLoopOutcome::FramePayload {
@@ -1376,7 +1405,7 @@ pub(crate) fn walk_lent_payload(
             priority,
         }));
     }
-    Ok(())
+    Ok(walked)
 }
 
 /// Build the [`DriverLoopOutcome`] a completed reassembly chain re-enters
