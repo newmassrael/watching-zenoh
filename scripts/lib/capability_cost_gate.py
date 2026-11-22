@@ -58,10 +58,18 @@ host performance matrix asks `pico_reference_tree` for its reference in the envi
 `build_env` too, so the library it times is the one this gate measures, from the same directory.
 
 The rustc flags reach cargo through the variable the rule adds them to, after any flags the
-caller exported; no case sets rustc flags of its own, and the only configuration-file flags of
-the workspace are for windows-msvc. What the rule does not remove is the toolchain: a host with
-another C compiler or linker builds other bytes from the same tree, and its reading is comparable
-only to readings made with that toolchain.
+caller exported. A case that names configuration files of its own (`Case.cargo_configs`, the
+named link choices under `crates/.cargo`) has their flags for the host's target read here and
+added to that variable after the rule's (`config_rustflags`), and is built for that target named
+(`--target`), so they reach the library's crates and not the build scripts. They are not handed
+to cargo with `--config`: cargo joins every configured table that matches the target, the
+caller's own configuration among them, so a linker chosen there (`-fuse-ld=`) would link such a
+case with another linker than the cases beside it, while the variable replaces every configured
+table. The workspace's own configuration has flags for windows-msvc only. What the rule does not
+remove is the toolchain: a host with another C compiler or linker builds other bytes from the
+same tree, and its reading is comparable only to readings made with that toolchain, so each pico
+case prints the linker of both of its libraries as each library's `.comment` names it
+(`linker_of`).
 
 ## The denominator
 
@@ -148,6 +156,10 @@ PICO_BASE = ",".join(
     wz_config.read_decl_toml(wz_config.DECL.read_text(encoding="utf-8"))["base"]["pico"]
 )
 
+# The configuration of the library without `std` (`crates/.cargo/capi-nostd.toml`), which a case
+# composes with the profile of the same name.
+NOSTD_CONFIG = ".cargo/capi-nostd.toml"
+
 # Planes a build without the capability must not carry, as demangled-symbol patterns. The same
 # patterns are REQUIRED of a build that has the capability.
 ACCEPT = r"accept_loop::(accept_any|accept_loop_|AcceptEvent|SpawnedFaces|next_spawned)"
@@ -220,10 +232,10 @@ class Case:
     # library that names no C library leaves its calls unversioned, and the loader binds an
     # unversioned call to the oldest version of the symbol.
     require_needed: tuple[str, ...] = ()
-    # A cargo configuration file the build reads (`--config`, a path from `crates/`), with the
-    # host's own target named (`--target`), so that what the file gives the library's crates does
-    # not reach the build scripts. None: the profile alone.
-    cargo_config: str | None = None
+    # The cargo configuration files whose flags the build takes (paths from `crates/`, read by
+    # `config_rustflags`), with the host's own target named (`--target`), so that what a file
+    # gives the library's crates does not reach the build scripts. Empty: the profile alone.
+    cargo_configs: tuple[str, ...] = ()
     note: str = field(default="", compare=False)
 
 
@@ -748,7 +760,7 @@ CASES: tuple[Case, ...] = (
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
          forbid_undefined=(r"^rust_eh_personality$",),
          require_needed=(r"^libc\.so",),
-         exports=445, profile="capi-nostd", cargo_config=".cargo/capi-nostd.toml",
+         exports=445, profile="capi-nostd", cargo_configs=(NOSTD_CONFIG,),
          note="pico-client-coop's capabilities and its 444 C exports, and `rust_eh_personality`: "
               "the prebuilt `core`'s unwind tables name it and LTO keeps the reference "
               "(measured: undefined in the first build, so no C program linked), so the library "
@@ -1495,6 +1507,8 @@ class Measured:
     needed: tuple[str, ...] = ()
     # The build path prefixes the library still holds (build_normalization.leaked).
     leaked: tuple[str, ...] = ()
+    # The linker that wrote the library, as its `.comment` names it (`linker_of`).
+    linker: str = ""
 
 
 # The conformance digest as the library stores it: a C string, so the NUL is part of the match and
@@ -1681,29 +1695,168 @@ def host_triple() -> str:
     raise RuntimeError("rustc -vV names no host target")
 
 
-def configured_rustflags(env: Mapping[str, str], triple: str) -> tuple[dict[str, str], list[str]]:
-    """`env` without its rustc flags, and the cargo arguments that state them as the rustflags of
-    `triple`'s table: for a case built with a configuration file of its own (`Case.cargo_config`).
-    cargo takes the flags of the environment in place of every configured `rustflags` table, so
-    the normalized environment would drop the file's; the tables that match one target are joined,
-    so the environment's flags (the caller's and the normalization's) move into the triple's table
-    and the file's still apply."""
+# A table header of a configuration file a case names: `[target.<triple>]` or
+# `[target.'cfg(...)']`, and the one line of flags each holds.
+CONFIG_TABLE = re.compile(r"\[target\.(?:'([^']+)'|([A-Za-z0-9_.-]+))\]")
+CONFIG_FLAGS = re.compile(r"rustflags\s*=\s*(\[.*\])")
+# The words of a `cfg(...)` predicate: a name, a string, or one of `( ) , =`.
+CFG_TOKEN = re.compile(r'\s*(?:([A-Za-z_][A-Za-z0-9_]*)|("[^"\\]*")|([(),=]))')
+
+
+def read_config_rustflags(text: str) -> list[tuple[str, list[str]]]:
+    """The `rustflags` of each `[target.<key>]` table of a cargo configuration file, in file
+    order. The files a case names hold those tables and nothing else; any other line is refused by
+    number rather than skipped, so a setting this gate would not pass on cannot sit in one
+    unnoticed."""
+    tables: list[tuple[str, list[str]]] = []
+    key: str | None = None
+    for number, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        header = CONFIG_TABLE.fullmatch(line)
+        if header:
+            key = header.group(1) or header.group(2)
+            continue
+        flags = CONFIG_FLAGS.fullmatch(line)
+        if key is None or not flags:
+            raise ValueError(f"line {number}: not a `[target.<key>]` header or the one-line "
+                             f"`rustflags` array of one: {line!r}")
+        try:
+            value = json.loads(flags.group(1))
+        except ValueError:
+            value = None
+        if not isinstance(value, list) or not all(isinstance(f, str) for f in value):
+            raise ValueError(f"line {number}: `rustflags` is not a one-line array of strings")
+        tables.append((key, value))
+        key = None
+    return tables
+
+
+def cfg_matches(expr: str, cfg: set[str]) -> bool:
+    """Whether the predicate `expr` of a `cfg(...)` table key holds for a target whose
+    `rustc --print cfg` lines are `cfg`: a name, `key = "value"`, and `all`, `any` and `not`
+    of predicates. A predicate of another shape is refused, never read as false."""
+    tokens: list[str] = []
+    pos = 0
+    expr = expr.strip()
+    while pos < len(expr):
+        m = CFG_TOKEN.match(expr, pos)
+        if not m:
+            raise ValueError(f"`cfg({expr})` is not a predicate this gate reads")
+        tokens.append(m.group(1) or m.group(2) or m.group(3))
+        pos = m.end()
+
+    def at(i: int) -> str:
+        if i >= len(tokens):
+            raise ValueError(f"`cfg({expr})` ends inside a predicate")
+        return tokens[i]
+
+    def predicate(i: int) -> tuple[bool, int]:
+        name = at(i)
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            raise ValueError(f"`cfg({expr})` has {name!r} where a name belongs")
+        follows = tokens[i + 1] if i + 1 < len(tokens) else None
+        if follows == "=":
+            value = at(i + 2)
+            if not value.startswith('"'):
+                raise ValueError(f"`cfg({expr})` gives `{name}` a value that is not a string")
+            return f"{name}={value}" in cfg, i + 3
+        if follows == "(":
+            if name not in ("all", "any", "not"):
+                raise ValueError(f"`cfg({expr})` names `{name}(...)`, which is no predicate")
+            values: list[bool] = []
+            i += 2
+            while at(i) != ")":
+                value, i = predicate(i)
+                values.append(value)
+                if at(i) == ",":
+                    i += 1
+                elif at(i) != ")":
+                    raise ValueError(f"`cfg({expr})` has {at(i)!r} between two predicates")
+            if name == "not":
+                if len(values) != 1:
+                    raise ValueError(f"`cfg({expr})`: `not` takes one predicate")
+                return not values[0], i + 1
+            return (all(values) if name == "all" else any(values)), i + 1
+        return name in cfg, i + 1
+
+    held, end = predicate(0)
+    if end != len(tokens):
+        raise ValueError(f"`cfg({expr})` goes on after its predicate")
+    return held
+
+
+def config_rustflags(text: str, triple: str, cfg: set[str]) -> list[str]:
+    """The flags a cargo configuration file gives the crates of a build for `triple`, whose
+    `rustc --print cfg` lines are `cfg`: its `[target.<triple>]` table's, then those of each
+    `[target.'cfg(...)']` table that holds, joined as cargo joins them."""
+    tables = read_config_rustflags(text)
+    flags = [f for key, table in tables if key == triple for f in table]
+    for key, table in tables:
+        if key.startswith("cfg(") and key.endswith(")") and cfg_matches(key[4:-1], cfg):
+            flags += table
+    return flags
+
+
+def target_cfg(triple: str) -> set[str]:
+    """The `rustc --print cfg` lines of `triple`: `unix`, `target_os="linux"`, ..."""
+    out = subprocess.run(["rustc", "--print", "cfg", "--target", triple], cwd=CRATES,
+                         capture_output=True, text=True, check=True).stdout
+    return {line.strip() for line in out.splitlines() if line.strip()}
+
+
+def case_config_flags(case: Case, triple: str, cfg: set[str]) -> list[str]:
+    """The flags the case's configuration files give its library's crates, in the order it names
+    the files."""
+    flags: list[str] = []
+    for path in case.cargo_configs:
+        try:
+            flags += config_rustflags((CRATES / path).read_text(encoding="utf-8"), triple, cfg)
+        except ValueError as e:
+            raise ValueError(f"crates/{path}: {e}") from e
+    return flags
+
+
+def with_rustflags(env: Mapping[str, str], extra: list[str]) -> dict[str, str]:
+    """`env` with `extra` after the rustc flags it gives (the caller's and the normalization's),
+    in the encoded variable: cargo reads it first, it keeps a flag's spaces, and it replaces every
+    configured `rustflags` table, the caller's own cargo configuration among them."""
     env = dict(env)
     encoded = env.pop(build_normalization.ENCODED_RUSTFLAGS, None)
     plain = env.pop(build_normalization.RUSTFLAGS, "")
     # cargo reads the encoded form when it is set and the plain one, split on whitespace, if not.
     flags = [f for f in encoded.split("\x1f") if f] if encoded is not None else plain.split()
-    return env, ["--config", f"target.{triple}.rustflags={json.dumps(flags)}"]
+    env[build_normalization.ENCODED_RUSTFLAGS] = "\x1f".join(flags + extra)
+    return env
+
+
+def linker_of(lib: pathlib.Path) -> str:
+    """The linker that wrote `lib`, as its `.comment` names it. lld and mold write their name
+    there and GNU ld writes none, so a library that names no linker was linked by GNU ld or by
+    another linker that names itself nowhere."""
+    out = subprocess.run(["readelf", "-p", ".comment", str(lib)], capture_output=True, text=True,
+                         check=False).stdout
+    return comment_linker(out)
+
+
+def comment_linker(dump: str) -> str:
+    """The linker a `readelf -p .comment` dump names (`linker_of`)."""
+    for line in dump.splitlines():
+        words = line.split("]", 1)[1].strip() if "]" in line else ""
+        if re.search(r"\b(LLD|lld|mold|gold)\b", words):
+            return words.split(" (", 1)[0]
+    return "no linker named in .comment (GNU ld names none)"
 
 
 def build(case: Case, env: Mapping[str, str], prefixes: build_normalization.Prefixes) -> Measured:
     cmd = ["cargo", "build", "--profile", case.profile, "-p", case.package, "--quiet",
            "--target-dir", str(TARGET)]
     lib_dir = TARGET / case.profile
-    if case.cargo_config is not None:
+    if case.cargo_configs:
         triple = host_triple()
-        env, flags = configured_rustflags(env, triple)
-        cmd += ["--config", case.cargo_config, *flags, "--target", triple]
+        env = with_rustflags(env, case_config_flags(case, triple, target_cfg(triple)))
+        cmd += ["--target", triple]
         lib_dir = TARGET / triple / case.profile
     if case.features is not None:
         cmd += ["--no-default-features"]
@@ -1733,7 +1886,7 @@ def build(case: Case, env: Mapping[str, str], prefixes: build_normalization.Pref
     return Measured(text=text, symbols=symbols, exports=exports, digests=digests_in(data),
                     leaked=tuple(build_normalization.leaked(data, prefixes)),
                     undefined=tuple(line.split()[-1] for line in undefined if line.split()),
-                    needed=needed)
+                    needed=needed, linker=linker_of(lib))
 
 
 @dataclass(frozen=True)
@@ -1746,6 +1899,8 @@ class Reference:
     toolchain: str
     refused: tuple[str, ...]
     leaked: tuple[str, ...] = ()
+    # The linker that wrote the reference, as its `.comment` names it (`linker_of`).
+    linker: str = ""
 
 
 def case_features(case: Case) -> set[str]:
@@ -1824,7 +1979,8 @@ def pico_reference_build(asked: dict[str, int], env: Mapping[str, str],
     size_out = subprocess.run(["size", str(lib)], capture_output=True, text=True, check=True).stdout
     return Reference(text=int(size_out.splitlines()[1].split()[0]), pin=pin[:12],
                      toolchain=toolchain, refused=tuple(refused_switches(asked, header)),
-                     leaked=tuple(build_normalization.leaked(lib.read_bytes(), prefixes)))
+                     leaked=tuple(build_normalization.leaked(lib.read_bytes(), prefixes)),
+                     linker=linker_of(lib))
 
 
 def report_reference(case: Case, got: Measured, env: Mapping[str, str],
@@ -1841,6 +1997,7 @@ def report_reference(case: Case, got: Measured, env: Mapping[str, str],
     ref = pico_reference_build(asked, env, prefixes)
     print(f"  capability-cost: {case.id}: zenoh-pico {ref.pin} as the same build: text "
           f"{ref.text}; wz is {got.text / ref.text:.2f} times it ({ref.toolchain})")
+    print(f"  capability-cost: {case.id}: wz linked by {got.linker}, zenoh-pico by {ref.linker}")
     if ref.refused:
         print(f"  capability-cost: {case.id}: pico built {', '.join(ref.refused)} otherwise than "
               f"asked, so the two builds differ there")
@@ -2187,17 +2344,69 @@ def cmd_selftest() -> int:
            len(grade(libc_named, Measured(900, [], 3, (), (), ()))) == 1)
     expect("one that names it is not",
            grade(libc_named, Measured(900, [], 3, (), (), ("libc.so.6",))) == [])
-    moved_env, moved = configured_rustflags(
-        {"RUSTFLAGS": "-C a=b --remap-path-prefix=/x=/wz", "HOME": "/h"}, "x86_64-unknown-linux-gnu")
-    expect("a configured case's environment flags move into its triple's table",
-           moved == ["--config", 'target.x86_64-unknown-linux-gnu.rustflags='
-                     '["-C", "a=b", "--remap-path-prefix=/x=/wz"]']
-           and "RUSTFLAGS" not in moved_env and moved_env.get("HOME") == "/h")
-    encoded_env, encoded = configured_rustflags(
-        {"CARGO_ENCODED_RUSTFLAGS": "-C\x1fa b", "RUSTFLAGS": "-C c"}, "t")
-    expect("the encoded flags, which cargo reads first, are the ones moved, spaces kept",
-           encoded == ["--config", 'target.t.rustflags=["-C", "a b"]']
-           and not {"RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS"} & encoded_env.keys())
+    moved = with_rustflags({"RUSTFLAGS": "-C a=b --remap-path-prefix=/x=/wz", "HOME": "/h"},
+                           ["-C", "force-unwind-tables=no"])
+    expect("a configured case's flags follow the environment's, in the encoded variable",
+           moved == {"HOME": "/h", "CARGO_ENCODED_RUSTFLAGS":
+                     "-C\x1fa=b\x1f--remap-path-prefix=/x=/wz\x1f-C\x1fforce-unwind-tables=no"})
+    encoded = with_rustflags({"CARGO_ENCODED_RUSTFLAGS": "-C\x1fa b", "RUSTFLAGS": "-C c"}, ["x"])
+    expect("the encoded flags, which cargo reads first, are the ones kept, spaces and all",
+           encoded == {"CARGO_ENCODED_RUSTFLAGS": "-C\x1fa b\x1fx"})
+    # The configuration files a case names: the tables that hold for the target, joined, and
+    # every other shape refused rather than skipped.
+    linux_gnu = {"unix", 'target_family="unix"', 'target_os="linux"', 'target_env="gnu"'}
+    linux_musl = {"unix", 'target_family="unix"', 'target_os="linux"', 'target_env="musl"'}
+    windows_msvc = {"windows", 'target_family="windows"', 'target_os="windows"',
+                    'target_env="msvc"'}
+    expect("a name, a key and value, and all, any and not of them are read",
+           cfg_matches("unix", linux_gnu) and not cfg_matches("windows", linux_gnu)
+           and cfg_matches('all(target_os = "linux", target_env = "gnu")', linux_gnu)
+           and not cfg_matches('all(target_os = "linux", target_env = "gnu")', linux_musl)
+           and cfg_matches('any(windows, target_env="musl")', linux_musl)
+           and cfg_matches("not(windows)", linux_gnu) and not cfg_matches("not(unix)", linux_gnu)
+           and cfg_matches("all()", linux_gnu) and not cfg_matches("any()", linux_gnu))
+    for shape in ("unix windows", "all(unix", "not(unix, windows)", 'target_os = linux',
+                  "feature(x)", "unix)", "", "all(unix,,windows)"):
+        try:
+            cfg_matches(shape, linux_gnu)
+            expect(f"the predicate {shape!r} is refused", False)
+        except ValueError:
+            expect(f"the predicate {shape!r} is refused", True)
+    sample = ("# a comment\n[target.x86_64-unknown-linux-gnu]\nrustflags = [\"-C\", \"t\"]\n\n"
+              "[target.'cfg(windows)']\nrustflags = [\"w\"]\n"
+              "[target.'cfg(unix)']\nrustflags = [\"u\"]\n")
+    expect("the triple's table, then each cfg table that holds",
+           config_rustflags(sample, "x86_64-unknown-linux-gnu", linux_gnu) == ["-C", "t", "u"]
+           and config_rustflags(sample, "x86_64-pc-windows-msvc", windows_msvc) == ["w"])
+    for shape in ("[build]\nrustflags = [\"x\"]\n", "[target.'cfg(unix)']\nlinker = \"cc\"\n",
+                  "rustflags = [\"x\"]\n", "[target.'cfg(unix)']\nrustflags = \"-C x\"\n",
+                  "[target.'cfg(unix)']\nrustflags = [\"x\"]\nrustflags = [\"y\"]\n"):
+        try:
+            read_config_rustflags(shape)
+            expect(f"the configuration {shape!r} is refused", False)
+        except ValueError:
+            expect(f"the configuration {shape!r} is refused", True)
+    nostd = (CRATES / NOSTD_CONFIG).read_text(encoding="utf-8")
+    expect("the configuration without std drops the unwind tables on a POSIX host only",
+           config_rustflags(nostd, "x86_64-unknown-linux-gnu", linux_gnu)
+           == ["-C", "force-unwind-tables=no"]
+           and config_rustflags(nostd, "x86_64-pc-windows-msvc", windows_msvc) == [])
+
+    def readable(path: str) -> bool:
+        try:
+            read_config_rustflags((CRATES / path).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        return True
+
+    expect("every configuration file a case names is one this gate reads",
+           all(readable(p) for c in CASES for p in c.cargo_configs))
+    expect("the linker a library's .comment names is the one printed",
+           comment_linker("String dump of section '.comment':\n  [     0]  rustc version 1.97.0\n"
+                          "  [    2d]  Linker: LLD 22.1.6 (/checkout/src/llvm 08c84e)\n")
+           == "Linker: LLD 22.1.6"
+           and comment_linker("  [     0]  mold 2.30.0 (compatible with GNU ld)\n") == "mold 2.30.0"
+           and comment_linker("  [     0]  GCC: (Ubuntu 13.3.0) 13.3.0\n").startswith("no linker"))
     expect("an unpinned export count is not graded",
            grade(Case("t", "p", "l", "", 1000), Measured(900, [], 99)) == [])
     # The control that keeps ABSENCE honest: every pattern a case forbids is required by some
