@@ -1372,7 +1372,7 @@ fn park_wake_ends(
 
 /// The hooks a caller lends the drive loop for one decision: its observer, its extra deadline
 /// and its ingress decorator, each as a trait object. Lent per call and never held across a
-/// wait, so the decisions ([`SessionDrive`]) are compiled once for every caller, and the
+/// wait, so the loop's decisions are compiled once for every caller, and the
 /// loop's future keeps whatever `Send` the caller's hooks have.
 pub struct DriveHooks<'h> {
     on_event: &'h mut dyn FnMut(IterationEvent<'_, '_>),
