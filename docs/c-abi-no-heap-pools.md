@@ -626,22 +626,24 @@ little longer (`arm_w.conf` keeps 4,608) lets one pass hand on the small samples
 
 ### 9.2 The heap each cell is expected to peak at
 
-Estimates for a 32-bit core from the rows of section 9, a row of the engine's record about 300
-bytes (a key of 256 bytes and its length inline, heapless 0.8) and a row of an application table
+Estimates for a 32-bit core from the rows of section 9, a row of the engine's record about 52
+bytes (its key's place in the key arena, 12 bytes, where the key of 256 bytes and its length were
+inline before section 9.4) and a row of an application table
 or a face's tables about 280; not a measurement. `arm_w.conf` states every limit the preset
 sets, so for the speed image as committed the preset changes nothing: its own limits are smaller
 still. The preset is what an image of the pico C ABI that states no limit gets.
 
 | part of the arena | build's defaults | pico preset alone | `arm_w.conf` |
 |-------------------|------------------:|------------------:|---------------:|
-| a receive buffer and two transmit slots of the batch | 6,144 | 6,144 | 6,144 |
+| a receive buffer and one transmit slot of the batch (two slots before section 9.4) | 4,096 | 4,096 | 4,096 |
 | the delivery lane | 65,536 | 4,380 | 4,608 |
 | two reassembly chains of the largest rejoined message | 8,192 | 8,192 | 8,192 |
 | the application's tables (48, 10 and 4 rows) | about 13,800 | about 2,900 | about 400 |
 | the pending gets | about 4,600 | about 600 | about 200 |
 | the face's peer tables (its interests, declares, replies, finals) | about 23,900 | about 8,200 | about 700 |
-| the engine's record of declarations (224, 34 and 16 rows) | about 67,000 | about 10,200 | about 1,800 |
-| **the arena** | **about 189,000** | **about 40,600** | **about 22,000** |
+| the engine's record of declarations (224, 34 and 16 rows), each row holding its key's place (about 52 bytes a row) | about 11,700 | about 1,800 | about 900 |
+| the key arena those rows keep their keys in (`KEY_ARENA_BYTES`: 59,136, 2,048 and the 512 `arm_w.conf` states, and its state) | about 59,200 | about 2,100 | about 550 |
+| **the arena** | **about 190,900** | **about 32,200** | **about 19,600** |
 
 Outside the arena the open takes the registry's rows of what the peer declares and its aliases,
 the engine with its lane's event records, the kernel objects and the handle (section 9's rows), and
@@ -651,8 +653,8 @@ under `arm_w.conf`, whose peer tables hold four rows of 64-byte keys.
 
 | cell (threads, sizes) | zenoh-pico, measured | arm W, build's defaults, measured | arm W, pico preset alone | arm W, `arm_w.conf` |
 |------------------------|---------------------:|----------------------------------:|-------------------------:|----------------------:|
-| st, 8 and 64 bytes | 8,360 to 9,960 | 218,768 to 219,464 | about 63,000 to 71,000 | about 28,000 to 30,000 |
-| st, 1,024 bytes | 8,360 to 9,960 | 218,768 to 219,464 | the same, and a copied payload of about 1,100 in the rtt cell | about 29,000 to 31,000 |
+| st, 8 and 64 bytes | 8,360 to 9,960 | 218,768 to 219,464 | about 55,000 to 63,000 | about 25,600 to 27,600 |
+| st, 1,024 bytes | 8,360 to 9,960 | 218,768 to 219,464 | the same, and a copied payload of about 1,100 in the rtt cell | about 26,600 to 28,600 |
 | mt, every size | 8,360 to 9,960 | 218,768 to 219,464 | st's, and about 250 for the read task's thread (its stack is the static pool `arm_w_mt.conf` places) | st's, and about 250 |
 
 ### 9.3 What the reservation still holds that zenoh-pico's heap does not
@@ -660,7 +662,8 @@ under `arm_w.conf`, whose peer tables hold four rows of 64-byte keys.
 Of the floor above, the receive buffer and one transmit slot are what zenoh-pico's client holds too.
 The rest, and what each form of section 9 would take:
 
-- **A second transmit slot, 2,048 bytes a link: kept.** Every cooperative build batches
+- **A second transmit slot, 2,048 bytes a link: taken (section 9.4); what follows is why it was
+  kept.** Every cooperative build batches
   (`transport-batching` is in `wz-capi-coop`'s base), and the session core holds a batch frame open
   in a slot its link lent across the window's calls, one for each conduit with a frame open
   (`open_lent_batch` in `crates/wz-session-core/src/session_actions.rs`). A transport message sent
@@ -684,7 +687,8 @@ The rest, and what each form of section 9 would take:
   the chain of one reliability while the other's is open, which zenoh-pico rejoins. The difference
   left is only when: zenoh-pico's are taken when a fragment comes, the arena's at the open (decision
   E3); the two stage any two chains of the link, where zenoh-pico's are one of each reliability.
-- **Key text in every row, about 22,000 bytes at the preset: kept, at a stated cost.** The lent
+- **Key text in every row, about 22,000 bytes at the preset: taken for the engine's record
+  (section 9.4), kept for the session core's tables; what follows is the cost as it stood.** The lent
   policy holds a key inline in the row that owns it (`Lent`'s text is `heapless::String` of
   `MAX_KEYEXPR_BYTES`), so every row that keeps a key pays 260 bytes whatever the key's length. At
   the preset that is the engine's 34 rows, the application's 10, a face's 22 and the registry's 32
@@ -696,3 +700,57 @@ The rest, and what each form of section 9 would take:
   (`crates/wz-capi-coop/src/engine.rs`) and of the session core's registries to hold a span of it
   instead of a string. It is the largest item left after the preset, and a decision for the record
   of `docs/c-abi-engine-and-memory.md`.
+
+### 9.4 The key arena and the one transmit slot
+
+**One key arena (`KEY_ARENA_BYTES`).** The rows of the engine's record of the session's own
+declarations (`crates/wz-capi-coop/src/engine.rs`: its subscribers, queryables, tokens,
+liveliness subscribers, declared keys, write filters, matching listeners and Interests) hold their
+key as a `KeyRef` (`crates/wz-session-core/src/key_arena.rs`): the place of a block in one key
+arena the open lends from the session's arena after the record, and the key's length, 12 bytes on
+a 32-bit core where the row held 260. A block is a header of 8 bytes (its length and how many rows
+hold it) and the key's bytes, rounded up to 4. A key takes the free block of the lowest address
+that holds it, the rest of a longer block staying free, or else the next bytes above every block; a
+block given back is merged with a free neighbour on either side, and one that ends where the
+untouched bytes start is given back to them, so no two free blocks lie side by side and keys of the
+lengths a program declares and undeclares reuse the same bytes. A clone shares the block. A key
+the arena has no room for is refused as a full table refuses a row: the declaration is refused
+before an id is taken or anything is sent, and the C program reads `Z_ERR_SYSTEM_OUT_OF_MEMORY`
+(`crates/wz-capi-pico/src/pubsub.rs`), the refusal zenoh-pico returns for a declaration its heap has
+no room for. The arena's state is cells reached under the session's
+one lock, as the rest of the engine's state is.
+
+The limit's default holds every row of the record at the build's defaults (224) with a key of
+`MAX_KEYEXPR_BYTES` in a block of 264 bytes, 59,136, so a build that states nothing refuses no
+key it took before. The pico preset is 2,048: each of the record's 34 rows at the preset's other
+values with a key of up to 52 bytes, about twice the longest key of zenoh-pico's examples
+(`vendor/zenoh-pico/examples/unix/c11/z_pub.c` @ `char *keyexpr = "demo/example/zenoh-pico-pub";`).
+`arm_w.conf` states 512 for its 16 rows of keys of nine bytes. The session core's own tables (the
+application's, a face's peer tables and the registry's rows of what the peer declares) still hold
+their key inline: they are generic over the storage policy, and moving them onto the arena is the
+same change made through the policy, a key space the arena lends each table beside its rows.
+
+**One transmit slot (`LINK_TX_SLOTS`, `crates/wz-capi-coop/src/arena.rs`).** A link is lent one
+slot of the batch, as zenoh-pico keeps one write buffer. The batch a session holds open is sent
+before anything else takes the slot: a transport message drains it first (`send_close_with_reason`
+and `send_keep_alive` in `crates/wz-session-core/src/session_actions.rs`, as zenoh-pico's
+`vendor/zenoh-pico/src/transport/common/tx.c` @
+`static z_result_t _z_transport_tx_send_t_msg_inner(_z_transport_common_t *ztc, const _z_transport_message_t *t_msg,`
+does), and a frame of the other reliability closes it. A datagram link has the slot back as soon as
+it is sent. A stream link keeps it while the stream owes part of the frame: the next frame asks the
+link for room within its message's wait, which writes what is owed (`wait_for_room` in
+`crates/wz-runtime-coop/src/stream_link.rs`), each fragment of a chain does the same, and a message
+that asks for a slot meanwhile writes what is owed first, as far as the stream takes it without
+waiting (`tx_slot_acquire`); one the stream frees nothing for is refused and counted
+(`LinkDropCause::NoTxSlot`), as a droppable message is dropped by the congestion policy. A build
+that negotiates more than one conduit (`transport-qos`, which the C library does not select) would
+hold a batch open on each, and one slot would refuse the second; it is not a build of this ABI.
+
+**What each cell is expected to peak at.** With both, section 9.2's estimates: the pico preset's
+arena about 32,200 bytes and its cells about 55,000 to 63,000, `arm_w.conf`'s arena about 19,600
+and its cells about 25,600 to 28,600, against zenoh-pico's 8,360 to 9,960. At the build's defaults
+the arena is about 1,900 bytes larger than before (the key arena's headers and the rows' places
+outweigh the second slot), which no host measures as a peak. What is left above zenoh-pico's peak
+at `arm_w.conf` is the reservation of the worst case (decision E3: two reassembly buffers, 8,192,
+and the lane, 4,608), the session core's inline keys (section 9.3) and the objects of the open
+outside the arena (section 9, about 6,000).

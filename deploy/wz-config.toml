@@ -2137,7 +2137,7 @@ kconfig = "WZ_LIMIT_KEY_ARENA_BYTES"
 kind = "parameter"
 range = [1, 4294967291]
 on_heap = "quota"
-default = 65536
+default = 59136
 storage = "both"
 scope = "session"
 binding_heap = "open"
@@ -2155,7 +2155,7 @@ be at least 1.
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds it: a zenoh session keeps each key it holds in an allocation of its own length. The default holds every row of the engine's record at the build's defaults (224) with a key of MAX_KEYEXPR_BYTES (256), 59,136 bytes, so a build that states nothing refuses no key it took before."
+reason = "No key of upstream's configuration bounds it: a zenoh session keeps each key it holds in an allocation of its own length. The default holds every row of the engine's record at the build's defaults (224) with a key of MAX_KEYEXPR_BYTES (256) in a block of 264 bytes, 59,136 bytes, so a build that states nothing refuses no key it took before."
 
 [limit.pico_preset]
 value = 2048

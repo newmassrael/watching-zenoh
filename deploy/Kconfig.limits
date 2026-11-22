@@ -30,7 +30,7 @@ config WZ_LIMIT_KEY_ARENA_BYTES
 	int "KEY_ARENA_BYTES"
 	range 1 4294967291
 	default 2048 if WZ_LIMITS_ZENOH_PICO
-	default 65536
+	default 59136
 	help
 	  How many bytes of key text the rows of a session's own declarations hold at
 	  once, in one arena each row keeps its key in: each key takes 8 bytes and its
