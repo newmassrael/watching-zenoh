@@ -1325,7 +1325,10 @@ CASES: tuple[Case, ...] = (
     # 2026-11-22 -- the fan-out's shared carrier, as `capic-router-node`'s note of this day takes
     # apart: 11,483,973 at main `087427170` -> 11,491,513 on hkl002 (+7,540). Chosen for the
     # same reason; the budget moves by that growth and keeps its headroom.
-    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 11_495_640,
+    # 2026-11-22 -- the face loop made once on the heap for its node (one `Box::pin` of the loop's
+    # state machine and its drop): 11,495,965 at main `85330b9e0` -> 11,496,805 on this machine
+    # (+840), both trees built on the one machine; the budget moves by that growth.
+    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 11_496_480,
          require=(ROUTER_NODE, ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED,
                   MULTICAST, ACCEPT_HANDSHAKE, CONFIG_VERDICT),
          exports=837,
