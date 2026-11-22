@@ -6880,6 +6880,34 @@
         "drive_multicast_session_running (about 26 KB in pico-default) is a loop of its own, not on the shared drive.",
         "From Round 4596: the MAPS_PROBE settle of the shared-memory differential, and recording upstream 1.10.2's blocking z_obtain_shm_provider defect."
       ]
+    },
+    "Round 4610": {
+      "decision_summary": "- The cooperative C library is one engine with one form: engine-coop, os-posix and os-zephyr select the lent-only receive and send; a build naming the tokio engine beside it is refused by name.\n- A session reserves its memory at open from its limits; a document may only lower a limit the build lends at open; process runtime limits come from the snapshot.\n- A received sample is handed on through an SCE queue (one producer under the session lock, one consumer by an owner word) and, when it lies in a lent datagram or stream batch, to its callback where it lies.\n- Dials are begun and polled, never waited for under the session lock (tcp/, tls/, program links, lwIP tcp/); a redial waits from the end of the failed dial.\n- Tables, lanes and drivers large enough to matter on a microcontroller's stack are built in their place.",
+      "changes_bullets": [
+        "No-heap engine: lent tables, arena rows, delivery lane, in-place unicast and group receive, owned dispatch compiled out under rx-lent-only; process runtime limits; coop CPU rows (one-pass put length, clock once per step, callback cache, wait instead of spin).",
+        "Receive path: lane on an SCE queue (delivery_lane_queue, delivery_lane_handle), deliveries and queued words, lent Push to the subscriber plane, encodings held in their marshals (two leaks fixed), lent records counted for transport stats without a second decode.",
+        "Send path: send gate and congestion latch as atomics, a lent batch frame kept in its conduit, a stream write tried first with the rest owed and the owner woken on room, host lock guards owned by Held.",
+        "Dial paths: non-blocking tcp/, tls/ handshake one step per ask, program links begun, lwIP tcp/ polled.",
+        "Group: answers written by the answering thread, a batch window flushed at JOIN and Close; Windows multicast round trip measured completing.",
+        "MCU stack: Registry/FaceTables, PeerTables, SharedLane and a dialled link's driver built in place (a 55 KB frame overflowed the 16 KB main stack); stack frame gate rows for the coop pico image.",
+        "Size: lent records walked through one dispatch body, encoder counted once, peers' queryables only with a query plane, keyexpr join without the formatter, typed open refusals.",
+        "Program transport: links waited on by their owner, so a get between two open sessions no longer waits for the read task's lock.",
+        "Gate rows: census, reason pins, policy and limit reads, released ports, size budgets, session slot record, stack and text owner figures."
+      ],
+      "verification_bullets": [
+        "Fleet preflight lanes 0, C0, C1cf, C1cs, C1p32, C1nh, C1m, Q, Qzk (five kit images, pico ceiling WIN in every cell), S pass on the landing branch.",
+        "Crate tests and per-crate clippy of session-core, runtime-coop, runtime-posix, runtime-tokio, capi-coop (default, full, listen, group), capi-pico, capi-port, session-mcu, session-lwip, tls-mbedtls pass.",
+        "pico-client-coop text 1,008,731 = 2.50x pico; no_std 533,036 = 1.32x (one host, same linker as before).",
+        "QEMU mps2-an385: the pico C API image boots and runs every cell (it crashed at open before the in-place builds); Windows pc3-win: multicast round trip completes, 5000/5000."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "Land next: receive batch as one record, blocking owner read, key arena and one tx slot, pico preset limits, size round 3, link-level size flags (same linker, packed relocations, unwind tables on both arms).",
+        "D9 size: no_std 1.45x and std 2.38x with the link flags on both arms; D10: Windows TCP batched throughput 1.40x and TCP round trip 1.44x behind; D12: MCU heap 4.4-5.2x of pico's.",
+        "Tests that hang under rx-lent-only with tx-lend-only (46 fail on the base too) need their own round."
+      ]
     }
   },
   "inventory_entries": {
