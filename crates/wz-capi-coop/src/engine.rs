@@ -3169,6 +3169,31 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let Some(_delivering) = Delivering::enter(&self.delivering) else {
             return;
         };
+        // A queryable's answer to the session's own get is queued in the lane behind what the
+        // pass that asked it had already handed: one more pass hands it, so a get its own
+        // queryables answer inside the call ends there.
+        while self.hand_out() {}
+        // The legs that are over, after every reply queued before their ends: each callback is
+        // dropped here, with no lock held, which is how the C program learns it (the reply
+        // closure's `drop(context)`). A lane another delivery still hands out may hold a reply
+        // of one of them: that delivery tells the ends once it is through.
+        #[cfg(feature = "query")]
+        while lock(&self.samples).is_idle() {
+            let next = lock(&self.gets.ended).take();
+            let Some(leg) = next else {
+                break;
+            };
+            if let Some(mut core) = self.live() {
+                core.0.pending_gets.retain(|pending| pending.leg != leg);
+            }
+            drop(self.take_target(TargetKey::Reply(leg)));
+        }
+    }
+
+    /// One pass over what the session queued for the program's callbacks, under the delivery
+    /// [`Self::deliver`] entered. Whether a queryable was handed a query: its answers to the
+    /// session's own get wait in the lane for the next pass.
+    fn hand_out(&self) -> bool {
         // Each popped under its queue's lock alone, which is released before the callback runs:
         // the pop is its own statement, since a guard in a `while let` condition would live
         // through the body and a callback that steps the session again would wait on it.
@@ -3258,12 +3283,20 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 sink(matching);
             }
         }
-        #[cfg(feature = "queryable")]
+        self.hand_queries()
+    }
+
+    /// Hand each query the session queued to its queryable's callback, and send what it answered.
+    /// Whether one was handed.
+    #[cfg(feature = "queryable")]
+    fn hand_queries(&self) -> bool {
+        let mut handed = false;
         loop {
             let next = lock(&self.plane.queries).pop_front();
             let Some((id, query, generation)) = next else {
                 break;
             };
+            handed = true;
             let callback = lock(&self.targets)
                 .iter()
                 .find_map(|(t, target)| match target {
@@ -3281,21 +3314,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             // undeclared before its query was delivered lets go of the hold all the same.
             self.answer(generation, query.rid(), replies, true);
         }
-        // The legs that are over, after every reply queued before their ends: each callback is
-        // dropped here, with no lock held, which is how the C program learns it (the reply
-        // closure's `drop(context)`). A lane another delivery still hands out may hold a reply
-        // of one of them: that delivery tells the ends once it is through.
-        #[cfg(feature = "query")]
-        while lock(&self.samples).is_idle() {
-            let next = lock(&self.gets.ended).take();
-            let Some(leg) = next else {
-                break;
-            };
-            if let Some(mut core) = self.live() {
-                core.0.pending_gets.retain(|pending| pending.leg != leg);
-            }
-            drop(self.take_target(TargetKey::Reply(leg)));
-        }
+        handed
+    }
+
+    /// A build with no queryable is handed no query.
+    #[cfg(not(feature = "queryable"))]
+    fn hand_queries(&self) -> bool {
+        false
     }
 
     /// A publish's leg to the peers the session's faces reach, when its destination admits the
