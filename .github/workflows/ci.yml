@@ -466,7 +466,8 @@ jobs:
         run: bash scripts/run-ci.sh --layer C1b
 
       # The seven wz-session-core lanes that sat here, Layers C1c, C1d, C1e, C1f,
-      # C1g, C1own and C1h, run in the `session-planes` job below. They were 412s
+      # C1g, C1own and C1h, run in the `session-planes` job below (C1g since
+      # 2026-11-22 in `session-observer`, peeled off it for its budget). They were 412s
       # of this job's 1666s on run 38226033377 and they share nothing with the
       # lanes left here except third-party dependency builds: see the comment
       # above that job for the measurement and for what the move costs.
@@ -1495,7 +1496,7 @@ jobs:
   # shellcheck or actionlint, and no disk prune: the lanes build one small crate
   # under a handful of feature sets, which is not what overflowed the `ci` disk.
   session-planes:
-    name: session-core feature planes (Layers C1c, C1d, C1e, C1f, C1g, C1own, C1h)
+    name: session-core feature planes (Layers C1c, C1d, C1e, C1f, C1own, C1h)
     runs-on: ubuntu-22.04
     outputs:
       cache_spec: ${{ steps.cache-series.outputs.spec }}
@@ -1604,18 +1605,6 @@ jobs:
         # so coverage cannot silently drop if those defaults change.
         run: bash scripts/run-ci.sh --layer C1f
 
-      - name: Layer C1g — cargo test -p wz-session-core (observer dispatch plane)
-        # R311dz — same shape as C1f. The migrated ApplicationLayerObserver
-        # test module gates on the full fan-out union (codec-push +
-        # codec-declare + query-queryable + liveliness-token +
-        # liveliness-subscriber + declare-subscriber + declare-queryable +
-        # codec-response-final + pubsub-put/delete). The lane also adds a
-        # composability build of the codec-declare-on / query-queryable-off
-        # subset, which composes the observer with the queryable slot
-        # elided — the arbitrary-subset class the maximal-preset C1c-f
-        # tests never exercise.
-        run: bash scripts/run-ci.sh --layer C1g
-
       - name: Layer C1own — the own-space (M=0) witness lane (R311y740)
         # R311y744 — wired here, one round LATE. R311y740 registered the lane
         # in run-ci.sh and did not add it to this file, so it ran only in a
@@ -1653,6 +1642,112 @@ jobs:
         # MEASURED on the first hosted run of this job: 335s of 1800s (18%, under
         # the floor), against the 700-900s predicted above, so the budget is 1200s:
         # 28% warm, and the predicted cold range still fits under it.
+        if: always()
+        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1200 90 20 '${{ job.status }}'
+
+  # Layer C1g peeled off `session-planes` for that job's budget (2026-11-22).
+  #
+  # WHAT FIRED. Run 45030244784 (634d1b7ba) ended `job-budget-margin: elapsed 1158s of
+  # 1200s budget (96%)` on `session-planes` with every lane in it green. Its layers, from
+  # that run's own log: C1g 534s, C1c 70s, C1d 130s, C1e 39s, C1f 52s, C1own 44s, C1h 130s,
+  # C1sb 31s, and about 130s of setup. C1g read 199s when `session-planes` was made: its
+  # guarded legs have grown since, nearly all of it compiling wz-session-core under each
+  # leg's feature set (the tests themselves take seconds).
+  #
+  # WHY SPLIT RATHER THAN RAISE `timeout-minutes`: the reason the R2163 note below gives.
+  # The growth is monotonic in legs, and a larger number re-arms the same failure; this
+  # job charges C1g's growth to its own budget. Predicted: `session-planes` about 630s
+  # (52%) and this job about 670s (56%), each of 1200s, both above the floor of 20.
+  #
+  # WHAT THIS JOB NEEDS is what `session-planes` needs, for the same reason: it builds only
+  # wz-session-core, so its apt list is that job's baseline pair.
+  session-observer:
+    name: session-core observer plane (Layer C1g)
+    runs-on: ubuntu-22.04
+    outputs:
+      cache_spec: ${{ steps.cache-series.outputs.spec }}
+    timeout-minutes: 20
+    steps:
+      - name: Budget stamp — start this job's own clock
+        run: date +%s > "$RUNNER_TEMP/wz_job_start"
+
+      - name: Checkout (with submodules)
+        # `submodules: recursive` is load-bearing: wz-session-core resolves
+        # sce-forge-runtime and its siblings through vendor/sce path deps.
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Restore apt archives (R311y882 — keep the mirror off the path)
+        # Keyed per JOB, on ci.yml's hash; see the `verdict-legs` copy for why
+        # RESTORE and SAVE are separate steps and why the save is `always()`.
+        id: apt-archives
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}
+          restore-keys: |
+            apt-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('.github/apt-packages/ci/{0}.list', github.job)) }}-
+
+      - name: Name the cache series this job saves
+        # Handed to `evict-superseded` as this job's `cache_spec` output: the
+        # series of every class .github/cache-classes.json says this job saves,
+        # by the pruner's own definition, so that job deletes exactly what the
+        # pruner's superseded pass would, without running this repository's code.
+        id: cache-series
+        run: python3 scripts/lib/cache_prune.py --saver-spec "ci.yml:${GITHUB_JOB}" >> "$GITHUB_OUTPUT"
+
+      - name: Install system dependencies
+        # The baseline pair and pkg-config, which `scripts/lib/apt_package_census.py`
+        # holds the README's prerequisite block to as what every building job
+        # installs. NOT `verdict-legs`'s full list and not `ci`'s: `cargo tree -p
+        # wz-session-core --all-features -e normal,build,dev -i bindgen` matches no
+        # package, so this job NEEDS none of bindgen's consumers (RocksDB, lwip,
+        # zenoh-pico, io-uring) and therefore no cmake and no compression
+        # libraries, and the crate's manifest names no TLS dependency, so no perl.
+        # The pair is carried as the baseline, not because a lane here needs it.
+        run: |
+          bash scripts/lib/apt-install.sh --list ".github/apt-packages/ci/${GITHUB_JOB}.list"
+
+      - name: Save apt archives
+        if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        run: bash scripts/lib/rust-toolchain-pinned.sh
+
+      - name: Cache Cargo registry + build artifacts
+        # A READER of the `rust-ci` class (.github/cache-classes.json): `ci` is
+        # its only saver, so one manifest change writes one entry and not one
+        # per job. `save-if: false` is the same arrangement `nondefault`,
+        # `defaults-off` and `dissect` use.
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+          add-job-id-key: "false"
+          save-if: "false"
+          workspaces: |
+            crates -> target
+            vendor/sce -> target
+
+      - name: Layer C1g — cargo test -p wz-session-core (observer dispatch plane)
+        # R311dz — same shape as C1f. The migrated ApplicationLayerObserver
+        # test module gates on the full fan-out union (codec-push +
+        # codec-declare + query-queryable + liveliness-token +
+        # liveliness-subscriber + declare-subscriber + declare-queryable +
+        # codec-response-final + pubsub-put/delete). The lane also adds a
+        # composability build of the codec-declare-on / query-queryable-off
+        # subset, which composes the observer with the queryable slot
+        # elided — the arbitrary-subset class the maximal-preset C1c-f
+        # tests never exercise.
+        run: bash scripts/run-ci.sh --layer C1g
+
+      - name: Budget margin — this job's own clock
+        # The guard and the floor `session-planes` uses: a job peeled down this far should be
+        # told to give its budget back, not to grow.
         if: always()
         run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1200 90 20 '${{ job.status }}'
 
@@ -8324,6 +8419,7 @@ jobs:
       - codegen-verify
       - verdict-legs
       - session-planes
+      - session-observer
       - nondefault
       - nondefault-builds
       - defaults-off
