@@ -2640,7 +2640,7 @@ impl<C, P: Storage> QueryableRegistry<C, P> {
         let mut declared = 0usize;
         let mut merged: Option<(u64, bool)> = None;
         for queryable in self.queryables.iter() {
-            if !queryable.allowed_origin.allows_remote() || !reaches(&*queryable.pattern) {
+            if !queryable.allowed_origin.allows_remote() || !reaches(&queryable.pattern) {
                 continue;
             }
             if aggregate {
