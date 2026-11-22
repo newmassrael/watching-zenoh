@@ -40,6 +40,8 @@ use wz_session_core::slot_observer::{
 use wz_session_core::wireexpr_resolve::SharedOwnMappingSpace;
 
 use crate::arena::{FacePeers, GetTables};
+use wz_capi_port::FilterPlane;
+use wz_session_core::locality::Locality;
 use wz_session_core::slot_observer::RequesterRows;
 
 use wz_session_core::declare::matching::BoxedMatchingSink;
@@ -194,6 +196,14 @@ pub(super) struct Registry {
         feature = "declarations-synced-event"
     ))]
     pub(super) decl_watches: alloc::sync::Arc<DeclWatches>,
+    /// Moves each time a face's peer tables are handed out to be written and each time a face
+    /// comes or goes: an answer read off what the peers declared ([`Self::peers_declare`]) holds
+    /// for as long as this reads what it read when the answer was taken.
+    faces_written: u64,
+    /// How often what the peers declared was searched ([`Self::peers_declare`]): what a test of
+    /// the cost of a filtered put counts.
+    #[cfg(test)]
+    peer_looks: core::cell::Cell<usize>,
 }
 
 /// The application's part, one face's tables and the other faces', apart so each can be used as
@@ -239,7 +249,47 @@ impl Registry {
                 feature = "declarations-synced-event"
             ))]
             decl_watches: alloc::sync::Arc::default(),
+            faces_written: 0,
+            #[cfg(test)]
+            peer_looks: core::cell::Cell::new(0),
         })
+    }
+
+    /// The count [`Self::peers_declare`]'s answers are good for: one taken while this read the
+    /// same still holds.
+    pub(super) fn faces_written(&self) -> u64 {
+        self.faces_written
+    }
+
+    /// A face's peer tables may be written from here on, or a face came or went.
+    fn writing(&mut self) {
+        self.faces_written = self.faces_written.wrapping_add(1);
+    }
+
+    /// Whether any face's peer declared what `plane` counts on `keyexpr`: a subscriber, or a
+    /// queryable (a complete one where the plane requires it).
+    pub(super) fn peers_declare(&self, plane: FilterPlane, keyexpr: &str) -> bool {
+        #[cfg(test)]
+        self.peer_looks.set(self.peer_looks.get() + 1);
+        match plane {
+            FilterPlane::Subscribers => {
+                let subscribers = PublisherCriterion::new(keyexpr, Locality::Remote);
+                self.faces()
+                    .any(|face| face.peer.remote_subscribers.has_matching_for(&subscribers))
+            }
+            FilterPlane::Queryables { complete_required } => {
+                let queryables =
+                    QuerierCriterion::new(keyexpr, Locality::Remote, complete_required);
+                self.faces()
+                    .any(|face| face.peer.remote_queryables.has_matching_for(&queryables))
+            }
+        }
+    }
+
+    /// How often [`Self::peers_declare`] searched what the peers declared.
+    #[cfg(test)]
+    pub(super) fn peer_looks(&self) -> usize {
+        self.peer_looks.get()
     }
 
     /// The tables of every face, the dial role's first.
@@ -279,6 +329,7 @@ impl Registry {
     /// Tables for a face that has come: empty, as its peer has said nothing yet, in a spare set
     /// the arena lent, or of no rows when every set is held.
     pub(super) fn add_face(&mut self, id: FaceId) {
+        self.writing();
         let (rows, origin) = match self.spare.pop() {
             Some(rows) => (rows, RowsOrigin::Spare),
             None => (FaceRows::rowless(&self.limits), RowsOrigin::Unlent),
@@ -292,6 +343,7 @@ impl Registry {
             return;
         }
         if let Some(at) = self.faces.iter().position(|face| face.id == id) {
+            self.writing();
             let face = self.faces.remove(at);
             self.give_back(face);
         }
@@ -299,6 +351,7 @@ impl Registry {
 
     /// The tables of every face but the dial role's, gone with their faces.
     pub(super) fn remove_accepted_faces(&mut self) {
+        self.writing();
         while self.faces.len() > 1 {
             if let Some(face) = self.faces.pop() {
                 self.give_back(face);
@@ -327,6 +380,7 @@ impl Registry {
     /// The tables of face `id`, while the session holds it.
     #[cfg(any(feature = "query", feature = "queryable"))]
     pub(super) fn face_mut(&mut self, id: FaceId) -> Option<&mut FaceTables> {
+        self.writing();
         self.faces.iter_mut().find(|face| face.id == id)
     }
 
@@ -337,6 +391,7 @@ impl Registry {
     /// the link's, so each link the face is opened over installs its own, and the dial role's
     /// face, which is opened again after a loss, replaces the lost link's.
     pub(super) fn install_own_mapping_space(&mut self, id: FaceId, space: SharedOwnMappingSpace) {
+        self.writing();
         if let Some(face) = self.faces.iter_mut().find(|face| face.id == id) {
             face.peer.subscribers.set_own_mapping_space(space);
         }
@@ -346,6 +401,7 @@ impl Registry {
     /// until the next link of the face installs its own, the peer's ids of the session's
     /// declarations resolve to nothing, as before the first link.
     pub(super) fn forget_own_mapping_space(&mut self, id: FaceId) {
+        self.writing();
         if let Some(face) = self.faces.iter_mut().find(|face| face.id == id) {
             face.peer.subscribers.clear_own_mapping_space();
         }
@@ -361,6 +417,7 @@ impl Registry {
         id: FaceId,
         ids: wz_session_core::shared_key_ids::SharedKeyIds,
     ) {
+        self.writing();
         if let Some(face) = self.faces.iter_mut().find(|face| face.id == id) {
             face.peer.subscribers.set_shared_key_ids(ids);
         }
@@ -369,6 +426,7 @@ impl Registry {
     /// The application's part, the tables of face `id` and those of the others, apart so each can
     /// be used as its call needs: what every dispatch and drain takes.
     fn split(&mut self, id: FaceId) -> Option<Split<'_>> {
+        self.writing();
         let Self { app, faces, .. } = self;
         let at = faces.iter().position(|face| face.id == id)?;
         let (before, rest) = faces.split_at_mut(at);

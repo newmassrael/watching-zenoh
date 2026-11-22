@@ -1694,11 +1694,13 @@ pub(crate) unsafe fn take_moved_bytes(payload: *mut z_moved_bytes_t) -> Option<B
     Some(buf)
 }
 
-/// Fold a caller's `z_publisher_put_options_t` into wz's [`PublishOptions`].
+/// Fold a caller's `z_publisher_put_options_t` into wz's [`PublishOptions`], or
+/// `None` when it carries nothing: a NULL `options`, which is the plain default
+/// as it is in pico, or one whose every field is empty. The put then sends from
+/// what its publisher was declared with, and no options are built for it.
 ///
 /// Consumes the moved `encoding` and `attachment` on EVERY path — pico's
-/// ownership transfer is unconditional once the call is made — and a NULL
-/// `options` is the plain default, which is what pico does too.
+/// ownership transfer is unconditional once the call is made.
 ///
 /// R311y561 — `source_info` is READ now (see [`source_info_hint_of`]). It was
 /// read-and-dropped with a stated reason: no exported constructor for a
@@ -1709,33 +1711,33 @@ pub(crate) unsafe fn take_moved_bytes(payload: *mut z_moved_bytes_t) -> Option<B
 /// `options` must be null or a valid put-options struct.
 unsafe fn publisher_put_options(
     options: *const z_publisher_put_options_t,
-) -> (PublishOptions, bool) {
-    let mut opts = put_options();
+) -> Option<PublishOptions> {
     if options.is_null() {
-        return (opts, false);
+        return None;
     }
     // The moved values are consumed FIRST, before any early return could skip
     // them — the same consume-on-all-paths discipline `z_get` follows.
     let attachment = take_moved_bytes((*options).attachment);
     let encoding = crate::encoding::take_moved_encoding((*options).encoding);
-    let mut carried = false;
+    let timestamp = timestamp_hint_of((*options).timestamp);
+    let source_info = source_info_hint_of((*options).source_info());
+    if attachment.is_none() && encoding.is_none() && timestamp.is_none() && source_info.is_none() {
+        return None;
+    }
+    let mut opts = put_options();
     if let Some(attachment) = attachment {
         opts = opts.with_attachment(attachment.to_vec());
-        carried = true;
     }
     if let Some(hint) = encoding {
         opts = opts.with_encoding(hint);
-        carried = true;
     }
-    if let Some(ts) = timestamp_hint_of((*options).timestamp) {
+    if let Some(ts) = timestamp {
         opts = opts.with_timestamp(ts);
-        carried = true;
     }
-    if let Some(si) = source_info_hint_of((*options).source_info()) {
+    if let Some(si) = source_info {
         opts = opts.with_source_info(si);
-        carried = true;
     }
-    (opts, carried)
+    Some(opts)
 }
 
 /// The options a put starts from: reliable, and the destination
@@ -1754,6 +1756,43 @@ fn put_options() -> PublishOptions {
         .with_locality(crate::locality::default_locality!("local-subscriber"));
     opts.kind = SampleKind::Put;
     opts
+}
+
+#[cfg(test)]
+mod put_options_tests {
+    use super::{
+        publisher_put_options, z_publisher_put_options_default, z_publisher_put_options_t,
+        z_timestamp_t,
+    };
+
+    /// A publisher's put whose options carry nothing has no options built for it, NULL ones and
+    /// default ones alike, and is sent from what its publisher was declared with; one whose
+    /// options carry a timestamp has them built, the timestamp in them.
+    #[test]
+    fn put_options_that_carry_nothing_fold_to_none() {
+        // SAFETY: each pointer handed over is null or points at a live value of its type, which
+        // outlives the call.
+        unsafe {
+            assert!(publisher_put_options(core::ptr::null()).is_none());
+            let mut options = core::mem::MaybeUninit::<z_publisher_put_options_t>::uninit();
+            z_publisher_put_options_default(options.as_mut_ptr());
+            let mut options = options.assume_init();
+            assert!(
+                publisher_put_options(&options).is_none(),
+                "default options carry nothing"
+            );
+            let mut stamp = z_timestamp_t {
+                valid: true,
+                id: crate::zid::z_id_t {
+                    id: [7; crate::zid::Z_ID_SIZE],
+                },
+                time: 42,
+            };
+            options.timestamp = &mut stamp;
+            let carried = publisher_put_options(&options).expect("a timestamp is carried");
+            assert_eq!(carried.timestamp.as_ref().map(|ts| ts.time), Some(42));
+        }
+    }
 }
 
 // --- z_put -----------------------------------------------------------------
@@ -2329,11 +2368,9 @@ pub unsafe extern "C" fn z_publisher_put(
         // subscriber reported `encoding: zenoh/bytes` with no attachment and no
         // timestamp, because all three were being thrown away here. A link is
         // not a pass, and this is what the difference looked like.
-        let (opts, carried) = publisher_put_options(options);
-        if carried {
-            state.publish(&buf, &opts)
-        } else {
-            state.publish_plain(&buf)
+        match publisher_put_options(options) {
+            Some(opts) => state.publish(&buf, &opts),
+            None => state.publish_plain(&buf),
         }
     })
 }

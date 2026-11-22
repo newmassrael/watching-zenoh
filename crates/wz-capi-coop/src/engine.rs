@@ -33,7 +33,7 @@ use alloc::collections::VecDeque;
 use alloc::rc::Rc;
 use alloc::sync::{Arc, Weak};
 use core::any::Any;
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 use core::sync::atomic::{AtomicBool, Ordering};
 // A 64-bit atomic where the target has one, and a critical section where it does not (a
 // Cortex-M7 has 32-bit atomics only).
@@ -1410,6 +1410,12 @@ struct FilterEntry {
     asked: bool,
     /// Whether the session's own entities count toward the filter (`local-subscriber`).
     count_local: bool,
+    /// What the peers' declarations answered for the filter, with the registry's count of writes
+    /// it was read at (`Registry::faces_written`): kept for the puts after it until a face's
+    /// tables are written, as zenoh-pico's filter keeps its state between the declarations that
+    /// move it (`vendor/zenoh-pico/include/zenoh-pico/net/filtering.h` @
+    /// `return ctx->state == WRITE_FILTER_ACTIVE;`).
+    peers: Cell<Option<(u64, bool)>>,
 }
 
 /// One Interest the session holds open, and how many hold it.
@@ -4192,21 +4198,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 
     /// Whether a peer declared what `plane` counts on `keyexpr`.
     fn peer_matches(core: &Core<L, C>, plane: FilterPlane, keyexpr: &str) -> bool {
-        let registry = core.registry.borrow();
-        let subscribers = PublisherCriterion::new(keyexpr, Locality::Remote);
         // Any face's peer: a write filter holds a write back only when none of them wants it.
-        let matched = registry.faces().any(|face| match plane {
-            FilterPlane::Subscribers => face.peer.remote_subscribers.has_matching_for(&subscribers),
-            FilterPlane::Queryables { complete_required } => face
-                .peer
-                .remote_queryables
-                .has_matching_for(&QuerierCriterion::new(
-                    keyexpr,
-                    Locality::Remote,
-                    complete_required,
-                )),
-        });
-        matched
+        core.registry.borrow().peers_declare(plane, keyexpr)
     }
 
     /// Whether the session's own entities of `plane`'s kind match `keyexpr`: a subscriber of its
@@ -4310,16 +4303,61 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         core.registry.borrow_mut().reevaluate_querier_watches();
     }
 
-    /// What a write filter or a matching listener on `plane` reads: a peer's declaration, or with
-    /// `count_local` one of the session's own.
-    fn plane_matches(
-        core: &Core<L, C>,
-        plane: FilterPlane,
-        keyexpr: &str,
-        count_local: bool,
-    ) -> bool {
-        Self::peer_matches(core, plane, keyexpr)
-            || (count_local && Self::local_matches(core, plane, keyexpr))
+    /// Whether write filter `id` holds what it filters back: a filter is created suppressing,
+    /// until a peer declares what it counts, or the session itself does when it counts its own
+    /// (`vendor/zenoh-pico/src/net/filtering.c` @ `ctx->state = WRITE_FILTER_ACTIVE`). A filter
+    /// the session does not hold holds nothing back.
+    fn filter_active_in(core: &Core<L, C>, id: FilterId) -> bool {
+        core.filters
+            .iter()
+            .find(|f| f.id == id)
+            .is_some_and(|f| !Self::filter_matches(core, f))
+    }
+
+    /// [`Self::filter_active_in`], except on a session that holds a group the filter does not
+    /// ask: such a group is sent a write whatever the filter says, as the tokio engine sends one
+    /// (`GroupDeclarations::asks_for_filters`), since on it zenoh-pico sends what its filter would
+    /// hold back. Without a group no write must reach anyone regardless.
+    fn holds_back_in(core: &Core<L, C>, id: FilterId) -> bool {
+        #[cfg(feature = "group")]
+        if core
+            .groups
+            .iter()
+            .any(|group| !group.declarations().asks_for_filters())
+        {
+            return false;
+        }
+        Self::filter_active_in(core, id)
+    }
+
+    /// What write filter `entry` reads: a peer's declaration, or with `count_local` one of the
+    /// session's own. The peers' half is the one kept ([`Self::peers_match_kept`]); the session's
+    /// own subscribers change by no face and are asked each time.
+    fn filter_matches(core: &Core<L, C>, entry: &FilterEntry) -> bool {
+        Self::peers_match_kept(core, entry)
+            || (entry.count_local && Self::local_matches(core, entry.plane, &entry.keyexpr))
+    }
+
+    /// Whether a peer declared what filter `entry` counts: the answer it keeps while no face's
+    /// tables were written since it was read, else read again and kept.
+    fn peers_match_kept(core: &Core<L, C>, entry: &FilterEntry) -> bool {
+        let registry = core.registry.borrow();
+        let written = registry.faces_written();
+        if let Some((read_at, matched)) = entry.peers.get() {
+            if read_at == written {
+                return matched;
+            }
+        }
+        let matched = registry.peers_declare(entry.plane, &entry.keyexpr);
+        entry.peers.set(Some((written, matched)));
+        matched
+    }
+
+    /// How often what the peers declared was searched since the open: what a test of the cost of
+    /// a filtered put counts. Read under the lock, uncounted as a take.
+    #[cfg(test)]
+    pub(crate) fn peer_looks(&self) -> usize {
+        lock(&self.core).0.registry.borrow().peer_looks()
     }
 
     /// Tell every matching listener on the subscribers' plane that counts the session's own
@@ -4849,7 +4887,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let queue = self.matching.clone();
         let report = BoxedMatchingSink::new(move |matching| lock(&queue).flip(id, matching));
         // The watch is in the registry of what `plane` counts, with the criterion its write
-        // filter reads ([`Self::plane_matches`]), so the listener and the filter cannot differ.
+        // filter reads ([`Self::filter_matches`]), so the listener and the filter cannot differ.
         let watch = {
             let mut registry = core.registry.borrow_mut();
             match plane {
@@ -4994,6 +5032,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 keyexpr: key,
                 asked: ask.is_some(),
                 count_local,
+                peers: Cell::new(None),
             },
         );
         Some(id)
@@ -5003,31 +5042,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let Some(core) = self.live() else {
             return false;
         };
-        let core = &core.0;
-        // A filter is created suppressing, until a peer declares what it counts, or the session
-        // itself does when it counts its own (`vendor/zenoh-pico/src/net/filtering.c` @
-        // `ctx->state = WRITE_FILTER_ACTIVE`).
-        core.filters
-            .iter()
-            .find(|f| f.id == id)
-            .is_some_and(|f| !Self::plane_matches(core, f.plane, &f.keyexpr, f.count_local))
+        Self::filter_active_in(&core.0, id)
     }
 
     fn write_filter_holds_back(&self, id: FilterId) -> bool {
-        // A group the filter does not ask is sent a write whatever the filter says, as the tokio
-        // engine sends one (`GroupDeclarations::asks_for_filters`): on such a group zenoh-pico
-        // sends what its filter would hold back. Without a group no write must reach anyone
-        // regardless.
-        #[cfg(feature = "group")]
-        if self.live().is_some_and(|core| {
-            core.0
-                .groups
-                .iter()
-                .any(|group| !group.declarations().asks_for_filters())
-        }) {
+        let Some(core) = self.live() else {
             return false;
-        }
-        self.write_filter_active(id)
+        };
+        Self::holds_back_in(&core.0, id)
     }
 
     fn undeclare_write_filter(&self, id: FilterId) {
@@ -5057,50 +5079,47 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         payload: &[u8],
         params: &PlainPutParams,
     ) -> FilteredPut {
-        if self.write_filter_holds_back(filter) {
+        // One take of the session for the whole put, its filter's answer and its sends:
+        // zenoh-pico's put reads its filter's state and takes only its transmit lock
+        // (`vendor/zenoh-pico/src/api/api.c` @ `!_z_write_filter_active(&pub->_filter)`).
+        let Some(core) = self.live() else {
+            return FilteredPut::Sent(Ok(0));
+        };
+        let core = &core.0;
+        if Self::holds_back_in(core, filter) {
             return FilteredPut::Suppressed;
         }
         // A put one of the session's own subscribers wants is not plain: the general publish
         // sends it and delivers it there.
         #[cfg(feature = "local-subscriber")]
-        if params.destination.allows_local() {
-            let wanted = self.live().is_some_and(|core| {
-                core.0
-                    .registry
-                    .borrow()
-                    .app
-                    .subscribers
-                    .has_local_matching(keyexpr)
-            });
-            if wanted {
-                return FilteredPut::NotPlain;
-            }
+        if params.destination.allows_local()
+            && core
+                .registry
+                .borrow()
+                .app
+                .subscribers
+                .has_local_matching(keyexpr)
+        {
+            return FilteredPut::NotPlain;
         }
         if !params.destination.allows_remote() {
             return FilteredPut::Sent(Ok(0));
         }
-        let Some(core) = self.live() else {
-            return FilteredPut::Sent(Ok(0));
-        };
         // A group is sent a put by the general publish, which pushes it onto the group's stage.
         #[cfg(feature = "group")]
-        if !core.0.groups.is_empty() {
+        if !core.groups.is_empty() {
             return FilteredPut::NotPlain;
         }
         // Asked of every link before any is sent to, so the put goes plain to all of them or to
         // none: a link that rewrites what it originates (a routing namespace) takes the general
         // publish for the whole of it. Its namespace is installed before the session sends
         // anything, so no link answers otherwise below.
-        if core
-            .0
-            .ups()
-            .any(|actions| actions.rewrites_originated_keys())
-        {
+        if core.ups().any(|actions| actions.rewrites_originated_keys()) {
             return FilteredPut::NotPlain;
         }
         let suffix = (mapping_id == 0).then_some(keyexpr);
         let mut outcome = Ok(0);
-        for actions in core.0.ups() {
+        for actions in core.ups() {
             let sent = leg(actions
                 .send_plain_put_qos(
                     mapping_id,
