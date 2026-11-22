@@ -47,8 +47,8 @@ and sockets (Layer Qza). QEMU runs with `-icount shift=0,align=off,sleep=on`:
   the host's, its cycle counter is the host's clock, and its network is the host's through a TAP device. It
   measures the host, not an MCU.
 - **Why not the kit.** The kit lane's board is real silicon with a cycle counter, and a lab day measures it
-  (`scripts/kit-lane.sh compare` already does for the GET turnaround). The matrix wants every push held, so it runs
-  where a hosted runner can run it; the kit stays the witness of what the emulator cannot see (below).
+  (`scripts/kit-lane.sh compare` already does for the GET turnaround). The matrix is meant to hold every push, so it
+  runs where a hosted runner can run it; the kit stays the witness of what the emulator cannot see (below).
 
 So an instruction count is exact and repeatable, and a time is the guest's own work at one instruction a
 nanosecond plus the real time the host side took: the same router, the same probe and the same emulated
@@ -110,13 +110,7 @@ into the same one. Read it beside `put_msgs_per_s` before calling a rate a gain.
 ## 3. Running it
 
 On a machine with the Zephyr toolchain (the one the Qz lanes use), QEMU, cmake, a C compiler and a zenohd,
-through `bx` so it is placed on one that has them:
-
-```sh
-bx --checks ci -- python3 scripts/lib/runci_plan.py --only Qzs
-```
-
-which runs the lane as a hosted job runs it (section 6), or the matrix itself with its own arguments:
+through `bx`, on a host chosen at that moment that has them:
 
 ```sh
 bx -- bash scripts/mcu-speed.sh --board mps2/an385 --qemu-machine mps2-an385 --reps 3
@@ -132,7 +126,6 @@ bx -- bash scripts/mcu-speed.sh --board mps2/an385 --qemu-machine mps2-an385 --r
 | after `--` | | more options of `mcu_speed.py run` (`--threads`, `--workloads`, `--puts`, `--window-ms`, `--round-trips`, ...) |
 | `WZ_ZEPHYR_VENV`, `WZ_ZEPHYR_BASE` | under ~/zephyrproject | the Zephyr workspace |
 | `WZ_ZENOHD_BIN` | the oracle under the artifact root | the router |
-| `WZ_QZS_REPS` | 3 | the lane's repetitions |
 
 The script builds everything it runs under target/mcu-speed of the artifact root: the host probe (zenoh-pico
 from a copy of the submodule, so the submodule is only read), then the four images (`west build -p always`);
@@ -148,7 +141,7 @@ image a minute or two; the first arm W image the longest, its staticlib built wi
 second a rebuild of the crate whose feature moved. A run of the default matrix is 2 arms x 2 threading arms
 x 3 workloads x 3 sizes x 3 repetitions = 108 boots: a put or round-trip cell a few seconds, a throughput
 cell longer, since its window is 2 s of the guest's clock and a guest kept busy by the probe runs slower
-than that in real time. The hosted job that runs the lane allows two hours for it and Qza together.
+than that in real time.
 
 ## 4. Reading a run
 
@@ -202,18 +195,19 @@ Every rule is the host matrix's (docs/pico-perf-matrix.md section 5), from the s
 - **Exit:** 0 every row held, 1 a row failed (worse than its ratchet, a lock not WIN, a null or missing
   row, a repetition wz lost), 2 an input refused, 3 nothing failed but a row was not measured.
 
-**Filling the table.** The rows are null until a run fills them, and a null row fails, so the lane fails
-until then. Run the matrix with the defaults, paste the rows the gate prints into the table, run the gate
+**Filling the table.** The rows are null until a run fills them, and a null row fails, so no lane runs
+the matrix until then (section 6). Run the matrix with the defaults, paste the rows the gate prints into the table, run the gate
 again over the same result to see it pass, and commit the table with the run's record.
 
 ## 6. Where it runs
 
-Layer Qzs of scripts/run-ci.sh, on the hosted `zephyr-admin` job after Qza, which provisions the Zephyr
-toolchain, QEMU and zenohd; `WZ_QZ_REQUIRE` and `WZ_QA_REQUIRE` make a missing one a failure there. Unlike the
-host matrix it can be a hosted lane: what it holds tightest are instruction counts and memory, which a
-neighbour on the runner does not move. In the fleet, `runci_plan.py` asks QEMU, cmake and a C compiler of the
-machine that takes the unit, and the Zephyr tools of bx.toml (their `needed_by` names the Qz lanes) place it
-on a machine with the SDK and the workspace.
+By hand, through `bx` (section 3), until the table is filled from a first good run; Layer C0 holds the
+gate's selftest and the table's population on every hosted run meanwhile. Once the table is filled the
+matrix can become a hosted lane, unlike the host matrix: what it holds tightest are instruction counts and
+memory, which a neighbour on the runner does not move. The job that would carry it is the one that already
+provisions the Zephyr toolchain, QEMU and a zenohd for Layer Qza; the lane would ask cmake and a C compiler
+besides, and add a row of deploy/zephyr-boards.json for the image, which the board table's gate holds to a
+lane that boots its machine.
 
 ## 7. What a run is not
 

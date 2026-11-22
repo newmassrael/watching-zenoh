@@ -242,8 +242,6 @@ JOB_ARMED_COMMANDS: dict[str, list[str]] = {"C1cc": ["valgrind"], "C1p32": ["cc"
 #         `_qa_zenohd_prereqs` asks qemu-system-arm
 #   Qz, Qza: `_qz_toolchain ... qemu` -> "qemu-system-arm not on PATH" (Qzb and Qzk build images
 #         and boot none, so they ask the Zephyr SDK of `[tools.zephyr-sdk]` and no qemu)
-#   Qzs:  the same, and "cmake not on PATH (the host probe's build)", "cc not on PATH (the host
-#         probe's build)"; the Zephyr SDK is `[tools.zephyr-sdk]`'s, whose `needed_by` "Qz" begins it
 #   C1st: `facility_trace.py` refuses a machine without strace or bwrap (`missing_tools`)
 #   C1ob: "bwrap is not on PATH; the offline build is measured in a bwrap sandbox", and
 #         "the declared tool 'cc' (...) has no 'as' on PATH" for each command of the tools
@@ -260,7 +258,6 @@ LANE_COMMANDS: dict[str, list[str]] = {
     "Qa": ["arm-none-eabi-ar", "arm-none-eabi-gcc", "as", "cc", "ld", "qemu-system-arm"],
     "Qz": ["qemu-system-arm"],
     "Qza": ["qemu-system-arm"],
-    "Qzs": ["cc", "cmake", "qemu-system-arm"],
     "C1st": ["bwrap", "strace"],
     "C1ob": ["ar", "as", "bwrap", "c++", "cc", "ld"],
     "Cmut": ["cargo-mutants"],

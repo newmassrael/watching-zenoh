@@ -2586,7 +2586,7 @@ layer_c0_test_discipline() {
     _runci_leg perf_matrix.table --after perf_matrix.selftest -- python3 scripts/host-bench/perf_matrix.py --check-table deploy/pico_perf_ceiling.json
     # The MCU speed matrix's gate (docs/mcu-speed-matrix.md): its readers and rules over synthetic consoles
     # and runs, and the committed table held to the rows of the default matrix on its platform. The runs it
-    # judges are Layer Qzs's.
+    # judges are scripts/mcu-speed.sh's, which no lane makes until the table is filled from a first run.
     _runci_leg mcu_speed.selftest -- python3 scripts/host-bench/mcu_speed.py --selftest
     _runci_leg mcu_speed.table --after mcu_speed.selftest -- python3 scripts/host-bench/mcu_speed.py --check-table deploy/pico_perf_ceiling_mcu.json
     # The AP superiority matrix (docs/ap-superiority-matrix.md, upstream-parity D13): its rules over
@@ -29298,55 +29298,6 @@ _qzk_pico_ceiling() {
     return "$fail"
 }
 
-# ─── Layer Qzs — the MCU speed matrix against zenoh-pico, under QEMU ───
-#
-# Layer Qzk holds the kit images under zenoh-pico's in every cell a build decides (text, flash, RAM, the
-# stacks, the storage block); nothing held their speed. This lane does (docs/mcu-speed-matrix.md): one
-# program of the pico API (deploy/zephyr-mcu-speed) built against zenoh-pico and linked to wz's pico C
-# ABI on the same board, kernel and network stack, in pico's two threading arms, booted cell by cell on
-# QEMU's mps2-an385 against a host probe and a zenohd router, and held by the gate of
-# scripts/host-bench/mcu_speed.py to deploy/pico_perf_ceiling_mcu.json, row by row, as decision D10 of
-# docs/upstream-parity.md holds the host matrix.
-#
-# A hosted runner can run it where it cannot run the host matrix: QEMU counts instructions (-icount), so
-# the instruction figures and the stack and heap are the emulator's and do not move with the runner's
-# load. The times (the round trip, the rates) carry the host side's real time, the same router and
-# probe for both arms, and the bootstrap interval over the repetitions is what reads them.
-#
-# The prerequisites are Qza's (the Zephyr toolchain and QEMU, WZ_QZ_REQUIRE; a zenohd, WZ_QA_REQUIRE) and
-# cmake and cc for the host probe. WZ_QZS_REPS sets the repetitions (3, the least the gate reads). The
-# lane's verdict is the gate's exit: every row held passes, and a row not filled is a failure that
-# prints the row the run writes.
-layer_qzs_mcu_speed_matrix() {
-    local rc tool zenohd="${WZ_ZENOHD_BIN:-$WZ_ARTIFACTS/target/zenohd/zenohd}" last measured
-    _qz_toolchain thumbv7m-none-eabi qemu && rc=0 || rc=$?
-    [[ "$rc" -eq 10 ]] && return 0
-    [[ "$rc" -ne 0 ]] && return 1
-    for tool in cmake cc; do
-        command -v "$tool" >/dev/null 2>&1 || {
-            _qz_unavailable "$tool not on PATH (the host probe's build)"
-            return $?
-        }
-    done
-    [[ -x "$zenohd" ]] || {
-        _qa_unavailable Qzs "zenohd not at $zenohd"
-        return $?
-    }
-    python3 scripts/host-bench/mcu_speed.py --selftest || return 1
-    WZ_ZEPHYR_VENV="$_QZ_VENV" WZ_ZEPHYR_BASE="$_QZ_BASE" WZ_ZENOHD_BIN="$zenohd" \
-        bash scripts/mcu-speed.sh --board mps2/an385 --qemu-machine mps2-an385 --reps "${WZ_QZS_REPS:-3}" \
-        && rc=0 || rc=$?
-    if [[ "$rc" -ne 0 ]]; then
-        echo "  Qzs FAIL — the MCU speed matrix exited $rc (0 every row held, 1 a row failed, 2 refused," \
-             "3 a row not measured; the gate's lines above say which)" >&2
-        return 1
-    fi
-    last="$(cat "$WZ_ARTIFACTS/target/mcu-speed/last-run")" \
-        || { echo "  Qzs FAIL — the matrix left no record of its run" >&2; return 1; }
-    measured="$(grep -c '"status": "measured"' "$last/cells.jsonl")"
-    _runci_lane_did Qzs "$measured" "cells of the MCU speed matrix measured, every row held"
-}
-
 # ─── Layer Fz — the fuzz targets' seeds and reproducers, once each ──
 # The C ABI doors of wz-capi-dissect and wz-capi-replay take bytes a consumer
 # was handed from outside (capture files, live packets, schemas, E2E headers,
@@ -29559,7 +29510,6 @@ run_layer Qz layer_qz_zephyr_boot || overall=1
 run_layer Qza layer_qza_zephyr_admin_node_vs_zenohd || overall=1
 run_layer Qzb layer_qzb_zephyr_board_matrix || overall=1
 run_layer Qzk layer_qzk_client_images_build || overall=1
-run_layer Qzs layer_qzs_mcu_speed_matrix || overall=1
 run_layer M layer_m_scouting_multicast || overall=1
 run_layer Z layer_z_zenohd_interop || overall=1
 # R311y841 — beside Z rather than beside E5: its oracle is the zenoh core
