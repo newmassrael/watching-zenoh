@@ -1821,26 +1821,36 @@ mod tests {
                     }) as BoundSleep
                 })
             };
+            // The links stay on the thread that opens them, as a session's links stay behind its
+            // engine's lock: the buffers a session lends them are not `Send`. The clock is moved
+            // from another thread, as a program's time base moves it.
             let links = AppLinks::new(session(&transport, 64)).with_open_bound(bound);
-            let opening = std::thread::spawn(move || {
-                let started = std::time::Instant::now();
-                let refused = if listen {
-                    links.open_listener(Locator::udp(PEER)).is_err()
-                } else {
-                    links.open_group("udp/239.7.7.7:7447#iface=lan7").is_err()
-                };
-                (refused, started.elapsed())
-            });
-            std::thread::sleep(std::time::Duration::from_millis(200));
+            let ended = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let clock = {
+                let (passed, waker, ended) =
+                    (Arc::clone(&passed), Arc::clone(&waker), Arc::clone(&ended));
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    let ended_early = ended.load(std::sync::atomic::Ordering::SeqCst);
+                    passed.store(true, std::sync::atomic::Ordering::SeqCst);
+                    if let Some(waker) = waker.lock().unwrap().take() {
+                        waker.wake();
+                    }
+                    ended_early
+                })
+            };
+            let started = std::time::Instant::now();
+            let refused = if listen {
+                links.open_listener(Locator::udp(PEER)).is_err()
+            } else {
+                links.open_group("udp/239.7.7.7:7447#iface=lan7").is_err()
+            };
+            let took = started.elapsed();
+            ended.store(true, std::sync::atomic::Ordering::SeqCst);
             assert!(
-                !opening.is_finished(),
+                !clock.join().expect("the clock's thread"),
                 "listen={listen}: the open ended while the session's clock stood still"
             );
-            passed.store(true, std::sync::atomic::Ordering::SeqCst);
-            if let Some(waker) = waker.lock().unwrap().take() {
-                waker.wake();
-            }
-            let (refused, took) = opening.join().expect("the opening thread");
             assert!(
                 refused,
                 "listen={listen}: an open never reported up is refused"
