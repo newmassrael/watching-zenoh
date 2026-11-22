@@ -369,6 +369,18 @@ fn the_builds_lane_holds_the_builds_largest_message() {
     );
 }
 
+/// The speed image's lane (`deploy/zephyr-mcu-speed/arm_w.conf`) is the room of one record at the
+/// limits that image states: its batch of 2,048 bytes, its largest rejoined message of 4,096, its
+/// keys of 64 bytes and one subscriber, 4,180 bytes; a lane one byte shorter holds no read.
+#[test]
+fn the_speed_images_lane_is_the_room_of_one_record() {
+    use crate::lane::{holds_a_read, read_bytes};
+
+    assert_eq!(read_bytes(2048, 4096, 64, 1), 4180);
+    assert!(holds_a_read::<4180, 2048, 4096, 64, 1, 1>());
+    assert!(!holds_a_read::<4179, 2048, 4096, 64, 1, 1>());
+}
+
 /// A lane stated shorter than what one record can hand it is lengthened to hold it, from the
 /// session's own (lowered) message length and batch and not the build's, the larger of the two;
 /// a lane stated longer is kept.
