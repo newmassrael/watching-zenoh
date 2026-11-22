@@ -94,9 +94,9 @@ pub const Z_CONFIG_SCOUTING_WHAT_KEY: u8 = 0x48;
 // `window` module below.
 
 /// The scouting window of the engine this build runs its sessions on, by the same rule `z_open`
-/// picks the engine with: the tokio engine whenever it is in the build, the cooperative one
-/// otherwise. A scout needs no session, so the window is a plane beside the engine and not one of
-/// its methods; each engine's is the host that pumps the session's window rules over its sockets.
+/// picks the engine with: a build has one engine, the tokio engine or the cooperative one. A scout
+/// needs no session, so the window is a plane beside the engine and not one of its methods; each
+/// engine's is the host that pumps the session's window rules over its sockets.
 ///
 /// Each window is handed the two snapshots of the scout's config. The tokio engine opens its
 /// sockets under its policies; the cooperative engine's sockets read no policy of it, and its

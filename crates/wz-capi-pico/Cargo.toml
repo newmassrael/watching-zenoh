@@ -38,6 +38,16 @@ repository.workspace = true
 readme.workspace = true
 description = "zenoh-pico-compatible C ABI (cdylib) wrapping the wz AP tokio Session — a binary drop-in for zenoh-pico C programs (§5.27 api-compat-pico R1)."
 
+# The two configurations the crate can hold at once, which Layers C1bf and C1bz build in place of
+# `--all-features` (`scripts/lib/doc_feature_sets.py`): the library has one engine, so the
+# tokio engine's set gives up the cooperative forms and the cooperative set gives up the tokio
+# engine, and with it every capability only that engine runs.
+[package.metadata.wz-docs]
+feature-sets = [
+    { name = "tokio", except = ["engine-coop", "os-posix", "os-zephyr"] },
+    { name = "coop", except = ["engine-tokio"] },
+]
+
 [lib]
 name = "wz_capi_pico"
 path = "src/lib.rs"
@@ -93,10 +103,13 @@ std = ["wz-capi-port/std", "wz-capi-coop?/std", "wz-ext-pubsub?/std", "wz-node-t
 # stepping it. It has the client's pub/sub surface (`z_open` dialling `tcp/` or `udp/`, the
 # publisher, the subscriber, key expressions, write filters, batching) over the host's sockets.
 #
-# A build runs its sessions on the tokio engine whenever that engine is in it, and on the
-# cooperative one otherwise: a build that names `engine-coop` and no capability the cooperative
-# engine lacks is the cooperative client. The selection reads features, not a config key, because
-# what an engine does not have is not linked. A build that names neither engine is refused.
+# A library has one engine (`docs/c-abi-engine-and-memory.md`, E1 and E3): a build that names
+# `engine-tokio`, or a capability only the tokio engine runs, beside `engine-coop`, `os-posix` or
+# `os-zephyr` is refused by name (`src/lib.rs`), and so is a build that names neither. The
+# cooperative forms read and send only what the session lends (the lent-only selectors of
+# `wz-capi-coop`, `rx-lent-only` and `tx-lend-only`), so the C library has no heap-backed form
+# beside the no-heap one, and `wz-runtime-tokio` refuses to be built beside those selectors. The
+# selection reads features, not a config key, because what an engine does not have is not linked.
 #
 # Both are a host's: `engine-coop` is the cooperative engine over the host's sockets
 # (`wz-runtime-posix`: Linux, Android, QNX Neutrino, and Winsock on Windows), so each selects `std`.
@@ -112,6 +125,8 @@ engine-coop = [
     "std",
     "dep:wz-capi-coop",
     "dep:wz-runtime-posix",
+    "wz-capi-coop/rx-lent-only",
+    "wz-capi-coop/tx-lend-only",
     "wz-session-core/initial-sn-compact",
 ]
 # `os-zephyr`: the library in a Zephyr image, without `std`: the cooperative engine over Zephyr's
@@ -123,7 +138,13 @@ engine-coop = [
 # this crate for the bare core; a build that also names a host engine keeps its host's layer and
 # links. The session core is asked for its `no_std` atomics, which a core without 64-bit atomics
 # (a Cortex-M7) needs. A capability that selects `std` is refused beside it (`src/lib.rs`).
-os-zephyr = ["dep:wz-capi-coop", "dep:wz-runtime-zephyr", "wz-session-core/no_std"]
+os-zephyr = [
+    "dep:wz-capi-coop",
+    "dep:wz-runtime-zephyr",
+    "wz-capi-coop/rx-lent-only",
+    "wz-capi-coop/tx-lend-only",
+    "wz-session-core/no_std",
+]
 # `os-posix`: the library on a host without `std`, the MCU build plus an OS layer
 # (`docs/c-abi-engine-and-memory.md`, E4 and phase P4). The cooperative engine over the host's
 # sockets, clock and random source as `engine-coop` runs it (`wz-runtime-posix`: Linux, Android,
@@ -140,6 +161,8 @@ os-posix = [
     "dep:wz-host-sync",
     "dep:wz-runtime-posix",
     "wz-capi-coop/host-sys",
+    "wz-capi-coop/rx-lent-only",
+    "wz-capi-coop/tx-lend-only",
     "wz-capi-port/os-sys",
     "wz-session-core/initial-sn-compact",
     # The advanced plane's lock and the node clock's wall clock, where `advanced` builds them.
@@ -609,11 +632,9 @@ transport-link-tls = ["engine-tokio", "dep:wz-tls-pem", "wz-capi-core/transport-
 # same twelve `Z_CONFIG_TLS_*` keys as `transport-link-tls`, resolved once to PEM bytes, run over
 # the Mbed TLS channel the cooperative engine's stack is given (`wz-capi-coop`'s `tls::HostTls`),
 # for the dial and the listen. It selects the cooperative engine, as `transport-link-tls` selects
-# the tokio one (rustls): a build names the secure channel it wants. Features add, and the engines
-# do as well (`engine-tokio` on is the tokio engine whatever else is on, as `engine-coop` beside it
-# has always been), so a build that has the tokio engine on runs its sessions there, where a
-# `tls/` endpoint is that engine's (`transport-link-tls`, or `Unsupported` without it). A build for
-# the cooperative engine says so with `--no-default-features`.
+# the tokio one (rustls): a build names the secure channel it wants, and with it the one engine
+# the library has. The default features name the tokio engine, so a build of this one says
+# `--no-default-features`; beside the tokio engine it is refused.
 tls-mbedtls =["engine-coop", "dep:wz-tls-pem", "wz-capi-coop/tls-mbedtls"]
 # The `ws/` link, dial and accept: zenoh-pico's `Z_FEATURE_LINK_WS` (default 0; upstream builds
 # it only for emscripten, while this ABI runs on a host runtime). With it a `ws/` endpoint under

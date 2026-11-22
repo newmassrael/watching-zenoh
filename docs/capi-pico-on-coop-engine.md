@@ -108,7 +108,12 @@ it behaves as pico behaves in both of pico's threading arms.
 - **Superseded in part (owner, 2026-11-21).** `docs/c-abi-engine-and-memory.md` makes the
   cooperative engine the only engine of the C ABIs, the zenoh-c ABI included, and takes the heap
   out of them (pools: `docs/c-abi-no-heap-pools.md`). D3's heap profile and the last sentence of
-  D4 (the zenoh-c ABI keeps the tokio engine) give way to it.
+  D4 (the zenoh-c ABI keeps the tokio engine) give way to it. D4's build selection gives way
+  too: a library has one engine, and `wz-capi-pico` refuses `engine-tokio`, or a capability
+  only the tokio engine runs, beside `engine-coop`, `os-posix` or `os-zephyr`, where it used
+  to run such a build on the tokio engine. The cooperative forms select `wz-capi-coop`'s
+  lent-only receive and send (`rx-lent-only`, `tx-lend-only`), which the tokio engine refuses
+  to be built beside, so the C library has one form (E3).
 
 ## 4. Steps
 
