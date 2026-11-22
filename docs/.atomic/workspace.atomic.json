@@ -6622,6 +6622,26 @@
         "The MAPS_PROBE of the same differential still settles 500 ms after the open before reading /proc/self/maps; whether an `init` open maps its segment synchronously on both libraries is to be read and the wait replaced by that fact.",
         "Upstream 1.10.2's blocking `z_obtain_shm_provider` leaves the transport's provider initializing; to be recorded where wz states its departures from upstream defects."
       ]
+    },
+    "Round 4597": {
+      "decision_summary": "- A router fan-out encodes a blocking client Put once and hands every face the same bytes; a face that must hold, chain or rewrite it still takes its own copy.\n- The router C ABI budgets move by the measured growth of that path.",
+      "changes_bullets": [
+        "EncodedPush and try_send_encoded_push_qos in session_actions; SharedCarrier per fan-out in router_forward.",
+        "docs/router-fanout-cost.md: the per-subscriber costs of a fan-out, by file, with the textbook fix of each.",
+        "Hot-path budgets: block_k16 85 alloc/7,262 B to 22/893 B (time-hlc 107/7,650 to 28/1,231)."
+      ],
+      "verification_bullets": [
+        "router_forward lib tests 345 pass; router_hot_path_cost plain and time-hlc pass; clippy of both crates clean.",
+        "capic-router-node 6,425,764 to 6,433,468 and capic-default 11,483,973 to 11,491,513 on one host, attributed by symbol diff.",
+        "Fleet lanes 0, C0, C1cs pass on the landing branch."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-5-preset-ap-full"
+      ],
+      "carry_forward_bullets": [
+        "Re-measure the D13 router fan-out and throughput cells; the inline write on the routing thread (row 1 of the cost page) is still a hypothesis.",
+        "A droppable Put still takes a copy per face."
+      ]
     }
   },
   "inventory_entries": {
