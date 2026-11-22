@@ -284,6 +284,41 @@ impl<'a> DeclarationBody<'a> for DeclFinal<'a> {
     }
 }
 
+#[cfg(feature = "codec-declare")]
+impl<'a> DeclarationBody<'a> for DeclKexpr<'a> {
+    fn arm(&self) -> LentArm<'_, 'a> {
+        DeclareVariantSource::CodecZenohDeclKexpr(self)
+    }
+}
+
+#[cfg(feature = "codec-declare")]
+impl<'a> DeclarationBody<'a> for UndeclKexpr<'a> {
+    fn arm(&self) -> LentArm<'_, 'a> {
+        DeclareVariantSource::CodecZenohUndeclKexpr(self)
+    }
+}
+
+#[cfg(feature = "codec-declare")]
+impl<'a> DeclarationBody<'a> for UndeclSubscriber<'a> {
+    fn arm(&self) -> LentArm<'_, 'a> {
+        DeclareVariantSource::CodecZenohUndeclSubscriber(self)
+    }
+}
+
+#[cfg(feature = "codec-declare")]
+impl<'a> DeclarationBody<'a> for UndeclQueryable<'a> {
+    fn arm(&self) -> LentArm<'_, 'a> {
+        DeclareVariantSource::CodecZenohUndeclQueryable(self)
+    }
+}
+
+#[cfg(feature = "codec-declare")]
+impl<'a> DeclarationBody<'a> for UndeclToken<'a> {
+    fn arm(&self) -> LentArm<'_, 'a> {
+        DeclareVariantSource::CodecZenohUndeclToken(self)
+    }
+}
+
 /// A `Declare` whose body is of the one kind `B`, as the codec's writer reads it
 /// (`wz_codecs::declare::DeclareWire`): the envelope `envelope` makes, around a body
 /// of that kind.
@@ -407,19 +442,38 @@ pub fn declare_kexpr(
     mapping_id: crate::wire_id::ExprId,
     suffix: &str,
 ) -> Result<Declare<'_>, CodecError> {
+    Ok(envelope(
+        None,
+        DeclareVariant::CodecZenohDeclKexpr(kexpr_body(mapping_id, suffix)?),
+    ))
+}
+
+/// [`declare_kexpr`] as a declaration of that one kind ([`DeclarationOf`]); panics on a zero
+/// mapping id as it does.
+#[cfg(feature = "codec-declare")]
+pub fn kexpr_declaration(
+    mapping_id: crate::wire_id::ExprId,
+    suffix: &str,
+) -> Result<DeclarationOf<'_, DeclKexpr<'_>>, CodecError> {
+    Ok(DeclarationOf::new(None, kexpr_body(mapping_id, suffix)?))
+}
+
+/// The body of [`declare_kexpr`].
+#[cfg(feature = "codec-declare")]
+fn kexpr_body(
+    mapping_id: crate::wire_id::ExprId,
+    suffix: &str,
+) -> Result<DeclKexpr<'_>, CodecError> {
     assert!(
         mapping_id != 0,
         "declare_kexpr requires a non-zero mapping id; id=0 is the literal-keyexpr sentinel",
     );
-    Ok(envelope(
-        None,
-        DeclareVariant::CodecZenohDeclKexpr(DeclKexpr {
-            header: wire_const::D_MID_KEXPR | wire_const::FLAG_D_N,
-            id: u64::from(mapping_id),
-            keyexpr: local(0, Some(suffix))?,
-            extensions: None,
-        }),
-    ))
+    Ok(DeclKexpr {
+        header: wire_const::D_MID_KEXPR | wire_const::FLAG_D_N,
+        id: u64::from(mapping_id),
+        keyexpr: local(0, Some(suffix))?,
+        extensions: None,
+    })
 }
 
 /// `Declare(DeclSubscriber)` on `(keyexpr_mapping_id, keyexpr_suffix)`.
@@ -750,6 +804,109 @@ pub fn undeclare_token_naming(token_id: u64, key: &NamedKeyexpr) -> Declare<'_> 
     )
 }
 
+/// The `ext_keyexpr` entry over `body`, the bytes `declare_ext_keyexpr::ext_wireexpr_body`
+/// makes; `None` for a body past the u32 length the extension's `ZBuf` carries.
+#[cfg(feature = "codec-declare")]
+fn keyexpr_entry(body: &[u8]) -> Option<ExtEntry<'_>> {
+    Some(ExtEntry {
+        header: crate::declare_ext_keyexpr::KEYEXPR_EXT_HEADER,
+        body: ExtEntryVariant::CodecZenohExtZbuf(ExtZbuf {
+            value_len: body.len() as u64,
+            value: Bounded::new(body)?,
+        }),
+    })
+}
+
+/// [`undeclare_kexpr`] as a declaration of that one kind ([`DeclarationOf`]).
+#[cfg(feature = "codec-declare")]
+pub fn undeclare_kexpr_declaration<'a>(
+    mapping_id: crate::wire_id::ExprId,
+) -> DeclarationOf<'a, UndeclKexpr<'a>> {
+    DeclarationOf::new(
+        None,
+        UndeclKexpr {
+            header: wire_const::D_MID_UNDECL_KEXPR,
+            id: u64::from(mapping_id),
+            extensions: None,
+        },
+    )
+}
+
+/// The retraction of subscriber `subscriber_id` as a declaration of that one kind
+/// ([`DeclarationOf`]): [`crate::declare_build::build_undeclare_subscriber`] without `key`, and
+/// with an `ext_keyexpr` body [`crate::declare_build::build_undeclare_subscriber_on_wire`], whose
+/// id-only fallback it shares.
+#[cfg(feature = "codec-declare")]
+pub fn undeclare_subscriber_declaration(
+    subscriber_id: u64,
+    key: Option<&[u8]>,
+) -> DeclarationOf<'_, UndeclSubscriber<'_>> {
+    // Named when the extension can carry the key, by the id alone otherwise.
+    let (header, extensions) = match key.and_then(keyexpr_entry) {
+        Some(entry) => (
+            with_z(wire_const::D_MID_UNDECL_SUBSCRIBER),
+            Some(chain_of(entry)),
+        ),
+        None => (wire_const::D_MID_UNDECL_SUBSCRIBER, None),
+    };
+    DeclarationOf::new(
+        None,
+        UndeclSubscriber {
+            header,
+            id: subscriber_id,
+            extensions,
+        },
+    )
+}
+
+/// [`undeclare_subscriber_declaration`] for a queryable.
+#[cfg(feature = "codec-declare")]
+pub fn undeclare_queryable_declaration(
+    queryable_id: u64,
+    key: Option<&[u8]>,
+) -> DeclarationOf<'_, UndeclQueryable<'_>> {
+    // Named when the extension can carry the key, by the id alone otherwise.
+    let (header, extensions) = match key.and_then(keyexpr_entry) {
+        Some(entry) => (
+            with_z(wire_const::D_MID_UNDECL_QUERYABLE),
+            Some(chain_of(entry)),
+        ),
+        None => (wire_const::D_MID_UNDECL_QUERYABLE, None),
+    };
+    DeclarationOf::new(
+        None,
+        UndeclQueryable {
+            header,
+            id: queryable_id,
+            extensions,
+        },
+    )
+}
+
+/// [`undeclare_subscriber_declaration`] for a liveliness token.
+#[cfg(feature = "codec-declare")]
+pub fn undeclare_token_declaration(
+    token_id: u64,
+    key: Option<&[u8]>,
+) -> DeclarationOf<'_, UndeclToken<'_>> {
+    // Named when the extension can carry the key, by the id alone otherwise.
+    let (header, extensions) = match key.and_then(keyexpr_entry) {
+        Some(entry) => (
+            with_z(wire_const::D_MID_UNDECL_TOKEN),
+            Some(chain_of(entry)),
+        ),
+        None => (wire_const::D_MID_UNDECL_TOKEN, None),
+    };
+    DeclarationOf::new(
+        None,
+        UndeclToken {
+            header,
+            id: token_id,
+            extensions,
+        },
+    )
+}
+
 /// `Declare(DeclFinal)`, the terminator of a declaration burst.
 /// [`crate::declare_build::build_declare_final`], written in place.
 #[cfg(feature = "declare-final")]
@@ -865,6 +1022,20 @@ pub fn declare_queryable_reply_with_id(
     Ok(answering(
         declare_queryable(queryable_id, 0, Some(keyexpr), info)?,
         interest_id,
+    ))
+}
+
+/// [`declare_queryable_reply_with_id`] as a declaration of that one kind ([`DeclarationOf`]).
+#[cfg(feature = "codec-declare")]
+pub fn queryable_reply_declaration(
+    interest_id: u64,
+    queryable_id: u64,
+    keyexpr: &str,
+    info: crate::queryable_info::QueryableInfo,
+) -> Result<DeclarationOf<'_, DeclQueryable<'_>>, CodecError> {
+    Ok(DeclarationOf::new(
+        Some(interest_id),
+        queryable_body(queryable_id, 0, Some(keyexpr), info)?,
     ))
 }
 
@@ -1175,6 +1346,127 @@ mod tests {
         );
         assert_eq!(
             subscriber_reply_declaration(1, 1, &past).err(),
+            Some(CodecError::LengthOutOfRange)
+        );
+    }
+
+    /// The kinds a lend-only session writes from its parts beside the four above, each as a
+    /// declaration of that one kind: the key expression and its retraction, the retraction of a
+    /// subscriber, a queryable and a token by its id alone and naming its key, and a queryable's
+    /// answer to an interest. Each is the bytes of the owned builder a heap session sends, and
+    /// presents that builder's arm.
+    #[test]
+    fn the_lend_only_kinds_are_written_as_their_owned_builders_write_them() {
+        use wz_codecs::declare::DeclareWire;
+        let owned_of =
+            |declare: &DeclareOwned| (owned_declare(declare), DeclareWire::tag_of(declare));
+        let named: [(crate::wire_id::ExprId, &str); 5] = [
+            (0, "a/b"),
+            (5, ""),
+            (7, "x/y/**"),
+            (300, "k"),
+            (crate::wire_id::ExprId::MAX, "a/very/long/keyexpr/chunk"),
+        ];
+        let mut compared = 0usize;
+        for (mapping, suffix) in named {
+            if mapping != 0 {
+                assert_eq!(
+                    one_kind(&kexpr_declaration(mapping, suffix).unwrap()),
+                    owned_of(&owned::build_declare_kexpr(mapping, suffix).unwrap()),
+                    "keyexpr {mapping} {suffix:?}"
+                );
+                compared += 1;
+            }
+            assert_eq!(
+                one_kind(&undeclare_kexpr_declaration(mapping)),
+                owned_of(&owned::build_undeclare_kexpr(mapping)),
+                "keyexpr retraction {mapping}"
+            );
+            compared += 1;
+        }
+        for id in IDS {
+            assert_eq!(
+                one_kind(&undeclare_subscriber_declaration(id, None)),
+                owned_of(&owned::build_undeclare_subscriber(id)),
+                "subscriber retraction {id}"
+            );
+            assert_eq!(
+                one_kind(&undeclare_queryable_declaration(id, None)),
+                owned_of(&owned::build_undeclare_queryable(id)),
+                "queryable retraction {id}"
+            );
+            assert_eq!(
+                one_kind(&undeclare_token_declaration(id, None)),
+                owned_of(&owned::build_undeclare_token(id)),
+                "token retraction {id}"
+            );
+            compared += 3;
+            for (mapping, suffix) in named {
+                let body = crate::declare_ext_keyexpr::ext_wireexpr_body(mapping, suffix);
+                assert_eq!(
+                    one_kind(&undeclare_subscriber_declaration(id, Some(&body))),
+                    owned_of(
+                        &owned::build_undeclare_subscriber_on_wire(id, mapping, suffix).unwrap()
+                    ),
+                    "subscriber retraction {id} naming {mapping} {suffix:?}"
+                );
+                assert_eq!(
+                    one_kind(&undeclare_queryable_declaration(id, Some(&body))),
+                    owned_of(
+                        &owned::build_undeclare_queryable_on_wire(id, mapping, suffix).unwrap()
+                    ),
+                    "queryable retraction {id} naming {mapping} {suffix:?}"
+                );
+                assert_eq!(
+                    one_kind(&undeclare_token_declaration(id, Some(&body))),
+                    owned_of(&owned::build_undeclare_token_on_wire(id, mapping, suffix).unwrap()),
+                    "token retraction {id} naming {mapping} {suffix:?}"
+                );
+                compared += 3;
+            }
+            for keyexpr in ["a/b", "x/y/**"] {
+                for info in infos() {
+                    assert_eq!(
+                        one_kind(&queryable_reply_declaration(9, id, keyexpr, info).unwrap()),
+                        owned_of(
+                            &owned::build_declare_queryable_reply_with_id(9, id, keyexpr, info)
+                                .unwrap()
+                        ),
+                        "queryable reply {id} {keyexpr:?} {info:?}"
+                    );
+                    compared += 1;
+                }
+            }
+        }
+        assert_eq!(
+            compared,
+            4 + 5 + IDS.len() * (3 + 3 * 5 + 2 * infos().len())
+        );
+    }
+
+    /// A retraction that names its key carries the `Z` flag and the extension; one by its id
+    /// alone carries neither, and a key suffix past the protocol's `u16` length is refused by
+    /// the key expression's declaration as by its builder.
+    #[test]
+    fn a_lend_only_kind_refuses_and_names_as_its_builder_does() {
+        let body = crate::declare_ext_keyexpr::ext_wireexpr_body(0, "a/b");
+        let (named, _) = one_kind(&undeclare_subscriber_declaration(1, Some(&body)));
+        let (bare, _) = one_kind(&undeclare_subscriber_declaration(1, None));
+        assert!(
+            named.len() > bare.len(),
+            "the named retraction carries the key"
+        );
+        assert!(
+            named.windows(body.len()).any(|w| w == body.as_slice()),
+            "the extension's body is the key's"
+        );
+        let past = "k".repeat(usize::from(u16::MAX) + 1);
+        assert_eq!(
+            kexpr_declaration(1, &past).err(),
+            Some(CodecError::LengthOutOfRange)
+        );
+        assert_eq!(
+            queryable_reply_declaration(1, 1, &past, QueryableInfo::DEFAULT).err(),
             Some(CodecError::LengthOutOfRange)
         );
     }

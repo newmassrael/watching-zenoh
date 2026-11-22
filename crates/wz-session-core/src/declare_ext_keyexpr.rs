@@ -98,6 +98,22 @@ pub fn build_ext_wireexpr(
     mapping_id: crate::wire_id::ExprId,
     suffix: &str,
 ) -> Result<ExtEntryOwned, CodecError> {
+    let body = ext_wireexpr_body(mapping_id, suffix);
+    let value_len = body.len() as u64;
+    // alloc carrier: `owned_bytes` is the unbounded `SceBytes` Vec (R311nq), so
+    // no length cap; the `?` covers only the profile-generic signature.
+    let value = crate::codec_owned::owned_bytes(&body)?;
+    Ok(ExtEntryOwned {
+        header: KEYEXPR_EXT_HEADER,
+        body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned { value_len, value }),
+    })
+}
+
+/// The `ZBuf` body of the extension [`build_ext_wireexpr`] makes, `[inner header | VLE(id) |
+/// suffix]`: what a retraction written from its parts (`crate::lent_control`) borrows, so its bytes
+/// and the owned entry's are made in one place.
+#[cfg(feature = "alloc")]
+pub fn ext_wireexpr_body(mapping_id: crate::wire_id::ExprId, suffix: &str) -> Vec<u8> {
     let mut body: Vec<u8> = Vec::with_capacity(2 + suffix.len());
     let has_suffix = if suffix.is_empty() {
         0
@@ -107,14 +123,7 @@ pub fn build_ext_wireexpr(
     body.push(INNER_IS_LOCAL | has_suffix);
     crate::vle::encode_vle_u64_into(&mut body, u64::from(mapping_id));
     body.extend_from_slice(suffix.as_bytes());
-    let value_len = body.len() as u64;
-    // alloc carrier: `owned_bytes` is the unbounded `SceBytes` Vec (R311nq), so
-    // no length cap; the `?` covers only the profile-generic signature.
-    let value = crate::codec_owned::owned_bytes(&body)?;
-    Ok(ExtEntryOwned {
-        header: KEYEXPR_EXT_HEADER,
-        body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned { value_len, value }),
-    })
+    body
 }
 
 /// Parse the FIRST `ext_keyexpr` entry in `exts` into its raw inner fields —
