@@ -61,7 +61,12 @@ fn a_subscriber_sees_the_timestamp_as_the_sessions_policy_says() {
             Arc::new(move || {
                 let into = into.clone();
                 Box::new(move |sample: &dyn SampleView| {
-                    into.lock().unwrap().push(sample.timestamp().is_some());
+                    // Read as the pico ABI reads it (`wz-capi-pico`'s `with_metadata`): where the
+                    // view holds it first, since a sample of the delivery lane carries its
+                    // timestamp as parts and no hint.
+                    let stamped =
+                        sample.timestamp_parts().is_some() || sample.timestamp().is_some();
+                    into.lock().unwrap().push(stamped);
                 })
             }),
         );
