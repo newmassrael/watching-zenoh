@@ -3303,7 +3303,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 
     /// How often the session's read path read its clock since the open ([`Core::now_us`]): what a
     /// test of the cost of one read step counts. Read under the lock, uncounted as a take.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "std"))]
     pub(crate) fn clock_reads(&self) -> usize {
         lock(&self.core).0.clock_reads.get()
     }
@@ -3424,7 +3424,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 
     /// Run `held` while holding the session as a read step holds it: what a test of a publish that
     /// finds the session held by what is not a publish runs beside one.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "std"))]
     pub(crate) fn holding_as_a_step(&self, held: impl FnOnce()) {
         let _core = self.live();
         held();
@@ -4463,7 +4463,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 
     /// How often what the peers declared was searched since the open: what a test of the cost of
     /// a filtered put counts. Read under the lock, uncounted as a take.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "std"))]
     pub(crate) fn peer_looks(&self) -> usize {
         lock(&self.core).0.registry.borrow().peer_looks()
     }

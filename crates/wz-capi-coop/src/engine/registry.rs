@@ -295,7 +295,7 @@ impl Registry {
     }
 
     /// How often [`Self::peers_declare`] searched what the peers declared.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "std"))]
     pub(super) fn peer_looks(&self) -> usize {
         self.peer_looks.get()
     }
