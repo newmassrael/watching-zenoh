@@ -789,6 +789,16 @@ pub struct TxConduits<R: SessionRuntime> {
 
 /// A sender inside its conduit, marked for as long as this lives: set when the sender has taken
 /// the conduit's lock, cleared when it lets go, also when its staging unwinds.
+///
+/// Both stores and the one load are `Relaxed`. The flag carries no data: its one reader, a
+/// droppable send whose try of the conduit's lock just failed, reads nothing else through it, and
+/// what it does next (drop the message, or try the lock again) reads the conduit only under the
+/// lock, whose own acquire and release order that. The flag's place in the holding is kept by the
+/// lock too: the mark is made after the lock is taken and the clear before it is let go, so the
+/// lock's acquire keeps the mark after the previous holder's clear, and its release keeps the
+/// clear before the next holder's mark. A reader that sees the flag late spins once more, or drops
+/// the message as zenoh-pico's try-lock does when it loses to a sender that is just leaving, and
+/// a stronger ordering would change neither: no ordering makes a store visible sooner.
 #[cfg(any(
     feature = "codec-push",
     feature = "codec-request",
@@ -817,7 +827,7 @@ struct SenderInside<'a>(&'a core::sync::atomic::AtomicBool);
 ))]
 impl<'a> SenderInside<'a> {
     fn mark(flag: &'a core::sync::atomic::AtomicBool) -> Self {
-        flag.store(true, core::sync::atomic::Ordering::SeqCst);
+        flag.store(true, core::sync::atomic::Ordering::Relaxed);
         Self(flag)
     }
 }
@@ -836,7 +846,7 @@ impl<'a> SenderInside<'a> {
 ))]
 impl Drop for SenderInside<'_> {
     fn drop(&mut self) {
-        self.0.store(false, core::sync::atomic::Ordering::SeqCst);
+        self.0.store(false, core::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -11411,7 +11421,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     if self
                         .tx_conduits
                         .sender_flag(priority)
-                        .load(core::sync::atomic::Ordering::SeqCst)
+                        .load(core::sync::atomic::Ordering::Relaxed)
                     {
                         held_dropped = true;
                         break Ok(UnicastPush::Congested);
@@ -18319,5 +18329,51 @@ mod duty_realization_tests {
             "every duty body performs in this build, with the accepting role or without it: \
              the machine of a build without `session-unicast-accept` holds no accept duty"
         );
+    }
+}
+
+#[cfg(all(
+    test,
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    )
+))]
+mod sender_inside_tests {
+    use super::SenderInside;
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    /// The flag is raised for exactly as long as the sender is inside: what a droppable send that
+    /// finds the conduit held reads to tell a sender from the writer's flush.
+    #[test]
+    fn the_flag_is_raised_while_a_sender_is_inside_and_lowered_when_it_leaves() {
+        let flag = AtomicBool::new(false);
+        {
+            let _inside = SenderInside::mark(&flag);
+            assert!(flag.load(Ordering::Relaxed), "raised inside");
+        }
+        assert!(!flag.load(Ordering::Relaxed), "lowered once it leaves");
+    }
+
+    /// A staging that unwinds lowers the flag too: a sender that panicked inside its conduit does
+    /// not leave every later droppable send dropped behind a sender that is gone.
+    #[test]
+    fn a_sender_that_unwinds_lowers_the_flag() {
+        let flag = AtomicBool::new(false);
+        let unwound = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| {
+            let _inside = SenderInside::mark(&flag);
+            assert!(flag.load(Ordering::Relaxed));
+            panic!("the staging unwinds");
+        }));
+        assert!(unwound.is_err(), "CONTROL: the staging did unwind");
+        assert!(!flag.load(Ordering::Relaxed), "lowered on the unwind");
     }
 }
