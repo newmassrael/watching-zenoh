@@ -80,7 +80,7 @@ pub(crate) struct PolicyStatements;
 #[cfg(not(feature = "config-policy"))]
 impl PolicyStatements {
     /// A config that stated nothing: what a scout opens under, and the tests.
-    #[cfg(any(test, feature = "scout"))]
+    #[cfg(any(test, feature = "scout", feature = "scout-mcu"))]
     pub(crate) const fn none() -> Self {
         Self
     }
@@ -130,7 +130,7 @@ pub(crate) struct PolicyStatements {
 #[cfg(feature = "config-policy")]
 impl PolicyStatements {
     /// A config that stated nothing: what a scout opens under, and the tests.
-    #[cfg(any(test, feature = "scout"))]
+    #[cfg(any(test, feature = "scout", feature = "scout-mcu"))]
     pub(crate) fn none() -> Self {
         Self::default()
     }
