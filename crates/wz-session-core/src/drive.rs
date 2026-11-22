@@ -2278,7 +2278,7 @@ where
 ///
 /// A compressed batch is the one unit that is copied: it is inflated into a buffer of its own,
 /// read by the copying path ([`dispatch_link_event`]), and what follows its first message is
-/// parked for the driver ([`dispatch_parked_in_place`]).
+/// parked for the driver (`dispatch_parked_in_place`).
 #[cfg(feature = "codec-frame")]
 // Out of line: it is the path of a handshake, a KeepAlive and a Close and of the units that are not
 // read as a Frame, which is not the path of the traffic. Inlined into the dispatch of a unit, the
@@ -4125,7 +4125,7 @@ where
 }
 
 /// [`report_outcome_reassembling`] for a receive in place ([`dispatch_datagram_reassembling`],
-/// and what it parked, [`dispatch_parked_in_place`]): the outcome reported, and a channel-gate
+/// and what it parked, `dispatch_parked_in_place`): the outcome reported, and a channel-gate
 /// rejection clears that channel's chain. Such a receive stages every fragment where its datagram
 /// lies, so no outcome of it carries a `Fragment`, but one read out of a compressed batch, which
 /// the copying path inflated: only a build that compresses drives the pool from an outcome here,
