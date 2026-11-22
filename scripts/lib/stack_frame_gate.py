@@ -716,7 +716,7 @@ IMAGES = (
         # no-heap integration tree: the dial's claim of a slot (`SessionSlots::claim_with`,
         # 1,648 bytes, the largest frame of the image) above the channel's handshake. Which
         # frames grew was not attributed.
-        peak=5240,
+        peak=5040,
     ),
     # The fixed-memory ADMIN node over Zephyr's sockets and the secure channel on the T2G kit
     # (`overlays/t2g_admin_fixed_tls.conf`, decision D14 of docs/session-lifecycle-intent.md): it listens,
@@ -754,7 +754,7 @@ IMAGES = (
         # handshake. The claim holds the stream driver it makes, which grew by the ring of frames
         # a stream link owes its stream (the fixed client over the channel's row); the rest of
         # the 592 was not attributed.
-        peak=11144,
+        peak=11000,
     ),
     # The pico C ABI on the cooperative engine for Zephyr, arm W of the MCU speed matrix
     # (`deploy/zephyr-mcu-speed`, `scripts/mcu-speed.sh`, which runs this row on each image of the

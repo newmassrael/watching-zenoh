@@ -184,7 +184,7 @@
       "text_tolerance_bytes": 1024,
       "owner_tolerance_bytes": 1024,
       "owners": {
-        "wz_session_core": 62854,
+        "wz_session_core": 61138,
         "c:mbedtls": 54968,
         "c:net_": 25114,
         "wz_session_mcu": 25166,
