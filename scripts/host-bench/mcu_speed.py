@@ -9,13 +9,16 @@ deploy/pico_perf_ceiling_mcu.json.
 
 `scripts/mcu-speed.sh` builds the images and the host peer and runs this; the subcommands are its steps.
 
-    mcu_speed.py run --images DIR --peer FILE --zenohd FILE --run DIR [--board mps2/an385]
+    mcu_speed.py run --images DIR --peer FILE --pacer FILE --zenohd FILE --run DIR [--board mps2/an385]
                      [--qemu-machine MACHINE] [--qemu qemu-system-arm] [--reps 3] [--sizes 8,64,1024]
                      [--threads st,mt] [--workloads put,sub,rtt] [--puts 2000] [--window-ms 2000]
-                     [--warmup-ms 500] [--round-trips 500] [--warmup-round-trips 50] [--timeout-ms 200]
+                     [--warmup-ms 500] [--offer-rate 1000] [--round-trips 500] [--warmup-round-trips 50]
+                     [--timeout-ms 200] [--router-log FILTER]
         the matrix; DIR (--images) holds <arm>-<threads>.elf for each arm and threading arm asked, --peer the
-        host probe (scripts/host-bench/perf_probe.c built against zenoh-pico on the host), --zenohd the
-        router both images dial. --qemu-machine, when given, must be the board's own machine.
+        host probe (scripts/host-bench/perf_probe.c built against zenoh-pico on the host), --pacer the host
+        publisher that offers a stated rate (scripts/host-bench/paced_pub.c, built the same way), --zenohd the
+        router both images dial. --qemu-machine, when given, must be the board's own machine. --router-log
+        hands the router a log filter (its RUST_LOG), to read what it was sent and what it answered.
     mcu_speed.py --gate RESULT [--table TABLE]
         the gate over a run's mcu-speed.json: every cell of W over P held to its row of TABLE (by default the
         committed deploy/pico_perf_ceiling_mcu.json). Exit 0 every row held, 1 a row failed, 2 an input
@@ -43,9 +46,12 @@ QEMU's user network and runs the workload against the host probe, which is a pee
   * put  the probe subscribes (perf/thr), the image puts --puts samples as fast as the session takes them
          once its publisher matches; figures: instructions per put (every thread but the idle thread, over
          the loop and the network stack's tail), puts a second over the loop, and the share the probe got.
-  * sub  the image subscribes, the probe puts as fast as its session takes them; from the image's first
-         sample it waits --warmup-ms, then counts over a --window-ms window: instructions per sample and
-         samples a second.
+  * sub  the image subscribes, the pacer puts --offer-rate samples a second once it matches; from the
+         image's first sample it waits --warmup-ms, then counts over a --window-ms window: instructions
+         per sample, samples a second of the window, and samples a second of busy time (the most the core
+         could take if receiving were all it did). The offer is paced because a publisher that puts as fast
+         as its session takes them floods QEMU's user network: it drops what the guest cannot take, the
+         guest's session starves and the router ends it, and nothing is delivered to either arm.
   * rtt  the probe answers perf/ping on perf/pong; the image times --round-trips after
          --warmup-round-trips, each waited for up to --timeout-ms: the percentiles in microseconds and the
          instructions per round trip.
@@ -119,6 +125,7 @@ GUEST_MAC = "52:54:00:12:34:56"
 METRICS = {
     "instr_per_put": "lower", "put_msgs_per_s": "higher", "put_failed": "lower", "delivered_share": "higher",
     "instr_per_sample": "lower", "sub_msgs_per_s": "higher", "sub_bytes_per_s": "higher",
+    "sub_msgs_per_busy_s": "higher",
     "rtt_p50_us": "lower", "rtt_p90_us": "lower", "rtt_p99_us": "lower", "rtt_mean_us": "lower",
     "rtt_min_us": "lower", "rtt_max_us": "lower", "instr_per_rtt": "lower", "lost": "lower",
     "stack_bytes": "lower", "heap_peak_bytes": "lower",
@@ -127,7 +134,7 @@ METRICS = {
 #: datagram the emulator's network drops is the network's, and both arms send into the same one.
 GATED = {
     "put": ("instr_per_put", "put_msgs_per_s", "stack_bytes", "heap_peak_bytes"),
-    "sub": ("instr_per_sample", "sub_msgs_per_s", "stack_bytes", "heap_peak_bytes"),
+    "sub": ("instr_per_sample", "sub_msgs_per_busy_s", "stack_bytes", "heap_peak_bytes"),
     "rtt": ("rtt_p50_us", "rtt_p99_us", "instr_per_rtt", "stack_bytes", "heap_peak_bytes"),
 }
 
@@ -271,6 +278,7 @@ def sub_figures(result: dict[str, int], memory: dict[str, int] | None, shift: in
         "instr_per_sample": instructions(result["busy_cycles"], hz, shift) / received,
         "sub_msgs_per_s": received * hz / result["window_cycles"],
         "sub_bytes_per_s": result["bytes"] * hz / result["window_cycles"],
+        "sub_msgs_per_busy_s": received * hz / result["busy_cycles"] if result["busy_cycles"] > 0 else None,
     }
     figures.update(memory_figures(memory))
     return figures
@@ -400,6 +408,8 @@ class Plan:
     qemu: str
     board: str
     peer: str
+    pacer: str
+    offer_rate: int
     endpoint: str  # the host probe's way to the router
     locator: str  # the image's way to the router
     shift: int
@@ -437,7 +447,9 @@ def probe_argv(plan: Plan, role: str, size: int) -> list[str]:
     if role == "sub":
         return base + ["-w", "0", "-t", "3600"]
     if role == "pub":
-        return base + ["-s", str(size), "-t", "3600", "-M"]
+        # The pacer reads its options from the first word, and waits for its publisher to match.
+        return [plan.pacer, "-m", "peer", "-e", plan.endpoint, "-k", "perf/thr", "-s", str(size),
+                "-r", str(plan.offer_rate), "-t", "3600", "-w"]
     return base
 
 
@@ -475,11 +487,12 @@ def run_cell(plan: Plan, image: pathlib.Path, workload: str, size: int, stem: pa
     return cell_figures(workload, console_text, probe_text, plan.shift)
 
 
-def start_router(zenohd: str, udp: int, tcp: int, log: pathlib.Path) -> subprocess.Popen:
+def start_router(zenohd: str, udp: int, tcp: int, log: pathlib.Path, log_filter: str = "") -> subprocess.Popen:
     fh = log.open("w", encoding="utf-8")
+    env = dict(os.environ, RUST_LOG=log_filter) if log_filter else None
     proc = subprocess.Popen([zenohd, "--no-multicast-scouting", "-l", f"udp/127.0.0.1:{udp}",
                              "-l", f"tcp/127.0.0.1:{tcp}"], stdin=subprocess.DEVNULL, stdout=fh,
-                            stderr=subprocess.STDOUT)
+                            stderr=subprocess.STDOUT, env=env)
     until = time.monotonic() + ROUTER_S
     while time.monotonic() < until:
         if proc.poll() is not None:
@@ -577,7 +590,10 @@ def cmd_run(args: argparse.Namespace) -> int:
     if missing:
         print(f"mcu-speed: refused: {images} holds no {', '.join(missing)}", file=sys.stderr)
         return 2
-    for tool in (args.peer, args.zenohd):
+    if args.offer_rate < 1:
+        print("mcu-speed: refused: --offer-rate is at least one sample a second", file=sys.stderr)
+        return 2
+    for tool in (args.peer, args.pacer, args.zenohd):
         if not os.access(tool, os.X_OK):
             print(f"mcu-speed: refused: {tool} is not an executable", file=sys.stderr)
             return 2
@@ -585,7 +601,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     run = pathlib.Path(args.run)
     run.mkdir(parents=True, exist_ok=True)
     udp, tcp = free_port(socket.SOCK_DGRAM), free_port(socket.SOCK_STREAM)
-    plan = Plan(qemu=args.qemu, board=board, peer=args.peer, endpoint=f"tcp/127.0.0.1:{tcp}",
+    plan = Plan(qemu=args.qemu, board=board, peer=args.peer, pacer=args.pacer, offer_rate=args.offer_rate,
+                endpoint=f"tcp/127.0.0.1:{tcp}",
                 locator=f"udp/{GUEST_HOST}:{udp}", shift=ICOUNT_SHIFT, puts=args.puts, window_ms=args.window_ms,
                 warmup_ms=args.warmup_ms, round_trips=args.round_trips,
                 warmup_round_trips=args.warmup_round_trips, timeout_ms=args.timeout_ms)
@@ -596,11 +613,12 @@ def cmd_run(args: argparse.Namespace) -> int:
         "qemu": first_line([args.qemu, "--version"]), "zenohd": first_line([args.zenohd, "--version"]),
         "host": socket.gethostname(), "sizes": sizes, "threads": threads, "workloads": workloads,
         "reps": args.reps, "puts": args.puts, "window_ms": args.window_ms, "warmup_ms": args.warmup_ms,
+        "offer_rate": args.offer_rate, "router_log": args.router_log,
         "round_trips": args.round_trips, "warmup_round_trips": args.warmup_round_trips,
         "timeout_ms": args.timeout_ms, "start": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     try:
-        router = start_router(args.zenohd, udp, tcp, run / "zenohd.log")
+        router = start_router(args.zenohd, udp, tcp, run / "zenohd.log", args.router_log)
     except Lost as why:
         print(f"mcu-speed: refused: {why}", file=sys.stderr)
         return 2
@@ -894,6 +912,8 @@ def cmd_selftest() -> int:
     figs = cell_figures("sub", sub, "", 0)
     expect("instructions per sample", math.isclose(figs["instr_per_sample"], 2000000.0))
     expect("samples a second over the window", math.isclose(figs["sub_msgs_per_s"], 250.0))
+    expect("samples a second of busy time are the core's capacity",
+           math.isclose(figs["sub_msgs_per_busy_s"], 500.0))
     rtt = _console("rtt", "round_trips=100 lost=0 attempts=100 p50_cycles=2500 p90_cycles=5000 p99_cycles=25000 "
                           "min_cycles=2000 max_cycles=30000 mean_cycles=3000 busy_cycles=250000 hz=25000000")
     figs = cell_figures("rtt", rtt, "", 0)
@@ -915,7 +935,8 @@ def cmd_selftest() -> int:
         "put", put.replace("MCU-SPEED MEMORY", "MCU-SPEED SOMETHING"), "", 0)))
 
     # The command lines of a cell.
-    plan = Plan(qemu="qemu-system-arm", board=DEFAULT_BOARD, peer="/p", endpoint="tcp/127.0.0.1:2",
+    plan = Plan(qemu="qemu-system-arm", board=DEFAULT_BOARD, peer="/p", pacer="/q", offer_rate=1000,
+                endpoint="tcp/127.0.0.1:2",
                 locator="udp/10.0.2.2:1", shift=0, puts=2000, window_ms=2000, warmup_ms=500, round_trips=500,
                 warmup_round_trips=50, timeout_ms=200)
     argv = qemu_argv(plan, pathlib.Path("/i.elf"), cell_args(plan, "rtt", 64))
@@ -926,7 +947,9 @@ def cmd_selftest() -> int:
            "enable=on,target=native,arg=mcu-speed,arg=udp/10.0.2.2:1,arg=rtt,arg=64,arg=500,arg=50,arg=200")
     expect("a put cell carries its puts", cell_args(plan, "put", 8)[4:] == ["2000", "0", "0"])
     expect("a sub cell carries its window and warm-up", cell_args(plan, "sub", 8)[4:] == ["2000", "500", "0"])
-    expect("the probe's publisher waits for the image's subscriber", probe_argv(plan, "pub", 64)[-1] == "-M")
+    pacer = probe_argv(plan, "pub", 64)
+    expect("the sub cell's publisher is the pacer, at the offered rate, on the probe's key",
+           pacer[0] == "/q" and pacer[pacer.index("-r") + 1] == "1000" and pacer[pacer.index("-k") + 1] == "perf/thr")
     expect("the probe is a peer of the router",
            probe_argv(plan, "pong", 64)[2:6] == ["-m", "peer", "-e", "tcp/127.0.0.1:2"])
 
@@ -1024,6 +1047,7 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="mcu_speed.py run")
     parser.add_argument("--images", required=True)
     parser.add_argument("--peer", required=True)
+    parser.add_argument("--pacer", required=True)
     parser.add_argument("--zenohd", required=True)
     parser.add_argument("--run", required=True)
     parser.add_argument("--board", default=DEFAULT_BOARD)
@@ -1036,6 +1060,8 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--puts", type=int, default=2000)
     parser.add_argument("--window-ms", type=int, default=2000)
     parser.add_argument("--warmup-ms", type=int, default=500)
+    parser.add_argument("--offer-rate", type=int, default=1000)
+    parser.add_argument("--router-log", default="")
     parser.add_argument("--round-trips", type=int, default=500)
     parser.add_argument("--warmup-round-trips", type=int, default=50)
     parser.add_argument("--timeout-ms", type=int, default=200)

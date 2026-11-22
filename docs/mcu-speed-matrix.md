@@ -68,8 +68,13 @@ perf/thr, a sequence number in the first eight bytes):
   subscriber (below), then puts 2,000 samples as fast as the session takes them, congestion control BLOCK. The busy
   instructions are counted over the loop and the 200 ms after it, in which the network stack sends what
   the loop left it.
-- **sub.** The image subscribes; once it says READY the probe puts as fast as its session takes them, after
-  its publisher matches. From the image's first sample it waits 500 ms, then counts over a 2,000 ms window.
+- **sub.** The image subscribes; once it says READY a host publisher of the same zenoh-pico build
+  (scripts/host-bench/paced_pub.c) offers 1,000 samples a second. From the image's first sample it waits
+  500 ms, then counts over a 2,000 ms window. The offer is paced: a publisher that puts as fast as its
+  session takes them floods QEMU's user network, which drops what the guest cannot take (the emulator says
+  "Slirp: Failed to send packet"), the guest's session starves, the router ends it, and neither arm is
+  delivered anything. So the receiving side's throughput is read as the core's capacity, the samples a
+  second of its busy time, and not as what a flooded link happened to deliver.
 - **rtt.** The probe answers perf/ping on perf/pong. The image times 500 round trips after 50, each waited
   for up to 200 ms; in the multi-threaded arm the program sleeps on a semaphore the answer gives, in the
   single-threaded arm it steps the session until the answer comes. A run that loses more than a tenth of
@@ -94,7 +99,8 @@ After its workload every image reports every thread's stack high-water mark (Zep
 | `delivered_share` | put | what the probe was handed, over the puts | higher | no |
 | `put_failed` | put | puts that returned an error | lower | no |
 | `instr_per_sample` | sub | busy instructions over the window, per sample delivered in it | lower | yes |
-| `sub_msgs_per_s`, `sub_bytes_per_s` | sub | samples and payload bytes delivered per second of the window | higher | samples |
+| `sub_msgs_per_busy_s` | sub | samples delivered in the window per second of busy time: the most the core could take if receiving were all it did | higher | yes |
+| `sub_msgs_per_s`, `sub_bytes_per_s` | sub | samples and payload bytes delivered per second of the window, which is at most the offered rate | higher | no |
 | `rtt_p50_us`, `rtt_p99_us` | rtt | percentiles of the counted round trips, by nearest rank, microseconds of the guest's clock | lower | yes |
 | `rtt_p90_us`, `rtt_mean_us`, `rtt_min_us`, `rtt_max_us` | rtt | the same | lower | no |
 | `instr_per_rtt` | rtt | busy instructions over the counted round trips, per round trip attempted | lower | yes |
@@ -123,7 +129,7 @@ bx -- bash scripts/mcu-speed.sh --board mps2/an385 --qemu-machine mps2-an385 --r
 | `--reps` | 3 | repetitions, the least the gate reads |
 | `--sizes` | 8,64,1024 | payload sizes, 8 to 1,024 bytes |
 | `--no-build` | builds | run the images and probe already under target/mcu-speed |
-| after `--` | | more options of `mcu_speed.py run` (`--threads`, `--workloads`, `--puts`, `--window-ms`, `--round-trips`, ...) |
+| after `--` | | more options of `mcu_speed.py run` (`--threads`, `--workloads`, `--puts`, `--window-ms`, `--offer-rate`, `--round-trips`, `--router-log`, ...) |
 | `WZ_ZEPHYR_VENV`, `WZ_ZEPHYR_BASE` | under ~/zephyrproject | the Zephyr workspace |
 | `WZ_ZENOHD_BIN` | the oracle under the artifact root | the router |
 

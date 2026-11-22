@@ -78,6 +78,7 @@ zenohd="${WZ_ZENOHD_BIN:-$WZ_ARTIFACTS/target/zenohd/zenohd}"
 out="$WZ_ARTIFACTS/target/mcu-speed"
 images="$out/images"
 peer="$out/bin/perf_probe"
+pacer="$out/bin/paced_pub"
 logs="$out/logs"
 
 for tool in qemu-system-arm python3; do
@@ -133,7 +134,14 @@ build_peer() {
         tail -n 40 "$log" >&2
         refuse "the host probe did not build (see $log)"
     fi
-    echo "mcu-speed: built the host probe against zenoh-pico"
+    # The publisher of a throughput cell offers a stated rate: one that puts as fast as its session
+    # takes them floods the emulator's user network until the guest's session is ended.
+    if ! cc -std=gnu11 -O2 "$ROOT/scripts/host-bench/paced_pub.c" -DZENOH_LINUX -I"$src/include" \
+        -I"$build/include" -o "$pacer" "$lib" -lpthread -lm >>"$log" 2>&1; then
+        tail -n 40 "$log" >&2
+        refuse "the host pacer did not build (see $log)"
+    fi
+    echo "mcu-speed: built the host probe and pacer against zenoh-pico"
 }
 
 if ((build)); then
@@ -151,7 +159,7 @@ if ((build)); then
 fi
 
 run="$out/runs/$(date -u +%Y%m%dT%H%M%S)"
-args=(run --images "$images" --peer "$peer" --zenohd "$zenohd" --run "$run" --board "$board"
+args=(run --images "$images" --peer "$peer" --pacer "$pacer" --zenohd "$zenohd" --run "$run" --board "$board"
     --reps "$reps" --sizes "$sizes")
 [[ -n "$machine" ]] && args+=(--qemu-machine "$machine")
 if ! python3 "$ROOT/scripts/host-bench/mcu_speed.py" "${args[@]}" ${extra[@]+"${extra[@]}"}; then
