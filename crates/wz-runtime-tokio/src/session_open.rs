@@ -2442,7 +2442,20 @@ pub const NOT_COMPILED_IN_MARKER: &str = "requires the transport-link-";
 /// [`LinkSocket::resolve`] INSIDE the arm, after its feature gate and its cert
 /// check, so a scheme this build cannot dial still answers `Unsupported` before
 /// any `#bind=` lookup or `iface`-with-`bind` refusal is reached.
-pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<DialedLink> {
+///
+/// The dial is made on the heap and its type erased: a dial is the link layer's one door, called
+/// from every role of a node (the face loop's dials, the C ABI's, a reconnect), and behind the box
+/// it is one compiled body that no caller inlines a copy of. One allocation a dial, beside the
+/// connection it makes.
+pub fn dial_locator(
+    locator: AnyLocator,
+    cfg: &DialConfig,
+) -> std::pin::Pin<Box<dyn core::future::Future<Output = io::Result<DialedLink>> + Send + '_>> {
+    Box::pin(dial_locator_on(locator, cfg))
+}
+
+/// The body of [`dial_locator`].
+async fn dial_locator_on(locator: AnyLocator, cfg: &DialConfig) -> io::Result<DialedLink> {
     // R2592 — `cfg` is read by every IP arm now (its per-link-kind defaults),
     // so the discard that silenced it on a build without tls or quic is gone.
     match locator {
@@ -6101,7 +6114,32 @@ pub async fn initiate_and_open_session_with_namespace(
 /// `timeouts` are the handshake deadlines: a caller that holds its node's
 /// open bound passes [`DialConfig::handshake_timeouts`], so the handshake is
 /// not ended sooner than that bound.
-pub(crate) async fn initiator_open(
+///
+/// Made on the heap and its type erased, as [`dial_locator`] is: every open of a node, a first
+/// one or a reconnect's, runs one compiled handshake.
+pub(crate) fn initiator_open(
+    inbound: InboundLink,
+    actions: Arc<SessionLinkActions>,
+    writer_handle: WriterHandle,
+    clock: TokioTime,
+    max_iters: Option<usize>,
+    tick_interval_ms: u64,
+    timeouts: SessionTimeouts,
+) -> std::pin::Pin<Box<dyn core::future::Future<Output = Result<OpenedSession, OpenError>> + Send>>
+{
+    Box::pin(initiator_open_on(
+        inbound,
+        actions,
+        writer_handle,
+        clock,
+        max_iters,
+        tick_interval_ms,
+        timeouts,
+    ))
+}
+
+/// The body of [`initiator_open`].
+async fn initiator_open_on(
     inbound: InboundLink,
     actions: Arc<SessionLinkActions>,
     writer_handle: WriterHandle,
