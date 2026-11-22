@@ -63,8 +63,8 @@ mod host_std {
     extern crate std;
 
     use core::cell::{Cell, RefCell, UnsafeCell};
+    use core::mem::ManuallyDrop;
     use std::sync::{Mutex, MutexGuard, PoisonError};
-    use std::vec::Vec;
 
     use super::CriticalSection;
 
@@ -138,54 +138,47 @@ mod host_std {
     // has it, which is what `Sync` asks of a value that is `Send`.
     unsafe impl<T: Send> Sync for HostMutex<T> {}
 
-    std::thread_local! {
-        /// The cell locks this thread holds, innermost last. A cell's `with` nests in another's
-        /// the way calls do, so a lock is released in the reverse of the order it was taken.
-        static CELLS: RefCell<Vec<MutexGuard<'static, ()>>> = const { RefCell::new(Vec::new()) };
-    }
-
     /// One cell's lock held by this thread, from [`Held::enter`] to drop, on return and on unwind
-    /// alike. Like [`Section`] it holds nothing and enters and leaves out of line, because `with`
-    /// is instantiated for every value and closure of the session's code and a guard held in each
-    /// would carry the lock's release (and its poison check) into every one of them.
-    struct Held;
+    /// alike. It owns the lock's guard, as the `host-lock-sys` form's owns its lock: a cell's lock
+    /// is not reentrant, so nothing needs to know which locks a thread holds, and each is let go
+    /// by the `Held` that took it, in the reverse of the order they were taken because `with`
+    /// nests the way calls do. Entered and left out of line, and the guard dropped only inside the
+    /// out-of-line drop (`ManuallyDrop`), because `with` is instantiated for every value and
+    /// closure of the session's code and a guard dropped in each would carry the lock's release
+    /// (and its poison check) into every one of them.
+    struct Held<'a>(ManuallyDrop<MutexGuard<'a, ()>>);
 
-    impl Held {
+    impl<'a> Held<'a> {
         #[inline(never)]
-        fn enter(lock: &std::sync::Mutex<()>) -> Self {
+        fn enter(lock: &'a std::sync::Mutex<()>) -> Self {
             // A panic inside a cell leaves the value as the closure left it, which is all a
             // later `with` can ask of it (the value is not a lock's invariant), so a poisoned
             // lock is taken as it is, as the critical section above does.
-            let guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
-            // SAFETY: the guard is dropped by this thread's `Held` before `with` returns, and
-            // `with` borrows the cell, so the lock outlives the guard.
-            let guard: MutexGuard<'static, ()> = unsafe { core::mem::transmute(guard) };
-            CELLS.with(|held| held.borrow_mut().push(guard));
-            Self
+            Self(ManuallyDrop::new(
+                lock.lock().unwrap_or_else(PoisonError::into_inner),
+            ))
         }
 
         /// [`Self::enter`] that does not wait: `None` when another thread holds `lock` now (or
         /// this one does: the lock is not reentrant).
         #[inline(never)]
-        fn try_enter(lock: &std::sync::Mutex<()>) -> Option<Self> {
+        fn try_enter(lock: &'a std::sync::Mutex<()>) -> Option<Self> {
             let guard = match lock.try_lock() {
                 Ok(guard) => guard,
                 // Poisoned, as `enter` takes it.
                 Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
                 Err(std::sync::TryLockError::WouldBlock) => return None,
             };
-            // SAFETY: as in `enter`: the guard is dropped by this thread's `Held` before
-            // `try_with` returns, and `try_with` borrows the cell, so the lock outlives the guard.
-            let guard: MutexGuard<'static, ()> = unsafe { core::mem::transmute(guard) };
-            CELLS.with(|held| held.borrow_mut().push(guard));
-            Some(Self)
+            Some(Self(ManuallyDrop::new(guard)))
         }
     }
 
-    impl Drop for Held {
+    impl Drop for Held<'_> {
         #[inline(never)]
         fn drop(&mut self) {
-            drop(CELLS.with(|held| held.borrow_mut().pop()));
+            // SAFETY: the guard is dropped here and only here, once, and `self` is not used
+            // after its drop.
+            unsafe { ManuallyDrop::drop(&mut self.0) };
         }
     }
 
@@ -497,5 +490,52 @@ mod tests {
             None,
             "a cell this thread holds is held"
         );
+    }
+
+    /// A cell's lock is let go when the closure inside it unwinds, as when it returns: a try on
+    /// this thread finds it free, with what the closure wrote before it unwound, and another
+    /// thread takes it after. The lock is poisoned by the unwind, and taken as it is.
+    #[test]
+    fn a_cell_is_let_go_when_its_closure_unwinds() {
+        let cell = Arc::new(HostMutex::new(0u32));
+        let unwound = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| {
+            cell.with(|value| {
+                *value = 1;
+                panic!("inside the cell");
+            })
+        }));
+        assert!(unwound.is_err(), "CONTROL: the closure did unwind");
+        assert_eq!(
+            cell.try_with(|value| *value),
+            Some(1),
+            "the cell is free again, with what the closure wrote"
+        );
+        let other = {
+            let cell = cell.clone();
+            std::thread::spawn(move || {
+                cell.with(|value| {
+                    *value += 1;
+                    *value
+                })
+            })
+        };
+        assert_eq!(other.join().expect("the other thread ran"), 2);
+    }
+
+    /// Cells nested on one thread are held together and let go in turn: inside the inner cell the
+    /// outer one is still held, and once both closures return both are free.
+    #[test]
+    fn nested_cells_are_held_together_and_let_go_in_turn() {
+        let outer = HostMutex::new(1u32);
+        let inner = HostMutex::new(2u32);
+        let sum = outer.with(|o| {
+            inner.with(|i| {
+                assert_eq!(outer.try_with(|_| ()), None, "the outer cell is held");
+                *o + *i
+            })
+        });
+        assert_eq!(sum, 3);
+        assert_eq!(outer.try_with(|value| *value), Some(1), "the outer is free");
+        assert_eq!(inner.try_with(|value| *value), Some(2), "the inner is free");
     }
 }
