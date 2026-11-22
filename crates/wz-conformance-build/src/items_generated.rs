@@ -96,7 +96,7 @@ pub const ARM: &[(&str, &[&str])] = &[
 /// Each limit, the environment name a build states it by, and its default.
 pub const LIMITS: &[(&str, &str, u64)] = &[
     ("MAX_KEYEXPR_BYTES", "WZ_LIMIT_MAX_KEYEXPR_BYTES", 256),
-    ("KEY_ARENA_BYTES", "WZ_LIMIT_KEY_ARENA_BYTES", 59136),
+    ("KEY_ARENA_BYTES", "WZ_LIMIT_KEY_ARENA_BYTES", 97152),
     ("MAX_SUBSCRIPTIONS", "WZ_LIMIT_MAX_SUBSCRIPTIONS", 16),
     ("MATCH_MEMO_SLOTS", "WZ_LIMIT_MATCH_MEMO_SLOTS", 8),
     (

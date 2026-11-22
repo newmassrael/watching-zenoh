@@ -438,11 +438,11 @@
               "x-wz-wire": "none"
             },
             "KEY_ARENA_BYTES": {
-              "description": "How many bytes of key text the rows of a session's own declarations hold at once, in one arena each row keeps its key in: each key takes 8 bytes and its length, rounded up to 4.",
+              "description": "How many bytes of key text the rows of a session's tables hold at once, in one arena each row keeps its key in: the session's own declarations, the application's tables, its pending gets and what each peer declares to it.",
               "type": "integer",
               "minimum": 1,
               "maximum": 4294967291,
-              "default": 59136,
+              "default": 97152,
               "x-wz-kind": "parameter",
               "x-wz-storage": "both",
               "x-wz-scope": "session",

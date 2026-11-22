@@ -69,9 +69,9 @@ const _: LimitDomain = MaxKeyexprBytes::DOMAIN;
 /// A table the bound limits keeps it so, and asks it [`Limited::admits`].
 pub type MaxKeyexprBytesHeld = Limited<MaxKeyexprBytes, { MaxKeyexprBytes::HELD }>;
 
-/// `KEY_ARENA_BYTES`: How many bytes of key text the rows of a session's own declarations
-/// hold at once, in one arena each row keeps its key in: each key takes 8 bytes and its
-/// length, rounded up to 4.
+/// `KEY_ARENA_BYTES`: How many bytes of key text the rows of a session's tables hold at
+/// once, in one arena each row keeps its key in: the session's own declarations, the
+/// application's tables, its pending gets and what each peer declares to it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct KeyArenaBytes;
 

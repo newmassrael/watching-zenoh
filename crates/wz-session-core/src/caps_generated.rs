@@ -11,7 +11,7 @@
 use super::limit;
 
 pub(super) const MAX_KEYEXPR_BYTES: usize = limit(option_env!("WZ_LIMIT_MAX_KEYEXPR_BYTES"), 256);
-pub(super) const KEY_ARENA_BYTES: usize = limit(option_env!("WZ_LIMIT_KEY_ARENA_BYTES"), 59136);
+pub(super) const KEY_ARENA_BYTES: usize = limit(option_env!("WZ_LIMIT_KEY_ARENA_BYTES"), 97152);
 pub(super) const MAX_SUBSCRIPTIONS: usize = limit(option_env!("WZ_LIMIT_MAX_SUBSCRIPTIONS"), 16);
 pub(super) const MATCH_MEMO_SLOTS: usize = limit(option_env!("WZ_LIMIT_MATCH_MEMO_SLOTS"), 8);
 pub(super) const MATCH_MEMO_FIXED_SLOTS: usize =
