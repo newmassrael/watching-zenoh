@@ -565,6 +565,12 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     /// holder waits on, owed to the session's other faces ([`HandedLeg`]), in the order they
     /// were handed.
     handed: Mutex<VecDeque<HandedLeg>>,
+    /// Whether `handed` holds a leg, written under its lock: a publish that reads it clear takes
+    /// no lock for the queue, which is otherwise two lock round trips on every put of a stream for
+    /// what is almost always nothing. A publish that reads it stale leaves the leg to the next
+    /// holder, as one that took the queue a moment before the leg was handed does; a read step
+    /// always looks under the lock ([`Self::send_handed_now`]).
+    owed: AtomicBool,
     /// How many handed legs of each priority are held at most: as many as the session's queue
     /// holds batches of that priority (`TxQueueConf::sizes`), which is as many as a face whose
     /// queue were its own would take before a droppable message found no room on it.
@@ -627,7 +633,19 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     running: Lock<Vec<(ThreadId, TargetKey)>>,
     /// The bytes the open reserved for the session's arena ([`Self::arena_bytes`]).
     arena_bytes: usize,
+    /// The takes of the session's locks on a message's paths, which the tests count.
+    #[cfg(test)]
+    pub(crate) takes: Takes,
     this: Weak<Self>,
+}
+
+/// How often the session's lock ([`CoopEngine::live`], and a droppable publish's try of it) and its
+/// queue of handed legs were taken: what a test of the cost of one message counts.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct Takes {
+    pub(crate) core: core::sync::atomic::AtomicUsize,
+    pub(crate) handed: core::sync::atomic::AtomicUsize,
 }
 
 /// The session state no other thread may touch while one does; see the module doc.
@@ -2867,6 +2885,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             reply_bounds,
             sending_on: AtomicU64::new(NOT_SENDING),
             handed: Mutex::new(VecDeque::new()),
+            owed: AtomicBool::new(false),
             handed_at_most,
             #[cfg(feature = "transport-stats")]
             unsent_drops: AtomicU64::new(0),
@@ -2898,6 +2917,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             ))]
             running: Lock::new(Vec::new()),
             arena_bytes,
+            #[cfg(test)]
+            takes: Takes::default(),
             this: this.clone(),
         }))
     }
@@ -3074,6 +3095,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             return None;
         }
         let guard = lock(&self.core);
+        #[cfg(test)]
+        self.takes.core.fetch_add(1, Ordering::Relaxed);
         if self.closed.load(Ordering::Acquire) {
             return None;
         }
@@ -3106,6 +3129,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 return ToPublish::Closed;
             }
             if let Some(guard) = self.core.try_lock() {
+                #[cfg(test)]
+                self.takes.core.fetch_add(1, Ordering::Relaxed);
                 // A close that took the session first is seen under it, as `live` sees it.
                 if self.closed.load(Ordering::Acquire) {
                     return ToPublish::Closed;
@@ -3543,13 +3568,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     fn hand_off(&self, leg: HandedLeg) {
         let priority = leg.opts.priority_band();
         let refused = {
-            let mut handed = lock(&self.handed);
+            let mut handed = self.handed();
             let held = handed
                 .iter()
                 .filter(|owed| owed.opts.priority_band() == priority)
                 .count();
             if held < self.handed_at_most[priority as usize] {
                 handed.push_back(leg);
+                self.owed.store(true, Ordering::SeqCst);
                 None
             } else {
                 Some(leg)
@@ -3575,7 +3601,20 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// they were handed either way, and a drain links the queue's drain and drop-guard code into
     /// every cooperative build for nothing it needs (measured 2026-11-21).
     fn send_handed(&self, core: &Core<L, C>) -> VecDeque<HandedLeg> {
-        let legs = core::mem::take(&mut *lock(&self.handed));
+        if !self.owed.load(Ordering::SeqCst) {
+            return VecDeque::new();
+        }
+        self.send_handed_now(core)
+    }
+
+    /// [`Self::send_handed`], looking at the queue under its lock whatever `owed` says: what a
+    /// read step sends, so a leg a publish passed over on a stale reading leaves on the next step.
+    fn send_handed_now(&self, core: &Core<L, C>) -> VecDeque<HandedLeg> {
+        let legs = {
+            let mut handed = self.handed();
+            self.owed.store(false, Ordering::SeqCst);
+            core::mem::take(&mut *handed)
+        };
         for leg in &legs {
             let meta = leg.opts.push_metadata();
             // The caller was answered when the leg was handed.
@@ -3592,6 +3631,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             );
         }
         legs
+    }
+
+    /// The queue of handed legs, held.
+    fn handed(&self) -> MutexGuard<'_, VecDeque<HandedLeg>> {
+        #[cfg(test)]
+        self.takes.handed.fetch_add(1, Ordering::Relaxed);
+        lock(&self.handed)
     }
 
     /// The callback of subscriber `id`, while the subscriber is declared.
@@ -5559,7 +5605,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         drop(watches);
         // What publishes handed to the session and it never sent goes with it, let go of with no
         // lock held, as a sent leg is.
-        let handed = core::mem::take(&mut *lock(&self.handed));
+        let handed = {
+            let mut handed = self.handed();
+            self.owed.store(false, Ordering::SeqCst);
+            core::mem::take(&mut *handed)
+        };
         drop(handed);
         #[cfg(feature = "query")]
         lock(&self.gets.ended).clear();
@@ -5611,7 +5661,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
                 let stepped = self.step(&mut core.0);
                 // What publishes handed to the session while it was held leaves on this step too,
                 // so a program that only reads its session sends it.
-                (stepped, self.send_handed(&core.0))
+                (stepped, self.send_handed_now(&core.0))
             }
             None => (false, VecDeque::new()),
         };

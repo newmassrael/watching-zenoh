@@ -838,6 +838,45 @@ fn a_stepped_client_session_declares_receives_and_publishes() {
     });
 }
 
+/// A publish that finds nothing handed to the session takes the session's lock once and the queue
+/// of handed legs not at all, so a stream of puts pays no lock for what no other publish left
+/// behind. The CONTROL is a read step, which looks at the queue under its lock every time.
+#[test]
+fn a_publish_with_nothing_handed_takes_the_session_once_and_not_the_handed_queue() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let takes = |engine: &Engine| {
+        (
+            engine.takes.core.load(Ordering::SeqCst),
+            engine.takes.handed.load(Ordering::SeqCst),
+        )
+    };
+    let (core_before, handed_before) = takes(&engine);
+    for _ in 0..10 {
+        engine
+            .publish_on_wire_all(
+                "demo/b",
+                &WireKey::literal(),
+                b"x",
+                &PublishOptions::put().with_locality(Locality::Remote),
+            )
+            .expect("a put the link carries");
+    }
+    let (core_after, handed_after) = takes(&engine);
+    assert_eq!(
+        core_after - core_before,
+        10,
+        "one take of the session a put"
+    );
+    assert_eq!(handed_after, handed_before, "no take of the handed queue");
+    let _ = SessionDrive::read(&*engine, false);
+    assert_eq!(
+        takes(&engine).1,
+        handed_after + 1,
+        "CONTROL: a read step looks under the queue's lock"
+    );
+}
+
 /// A write filter asks the router who subscribes and suppresses until a subscriber is declared,
 /// then lets a put through; a session that is closed answers every step as closed. The router
 /// holds no subscriber of its own until the test declares one, so what opens the filter is that
