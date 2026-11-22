@@ -261,6 +261,10 @@ where
         either!(self, link => link.keep())
     }
 
+    fn lends_until_next_receive(&self) -> bool {
+        either!(self, link => link.lends_until_next_receive())
+    }
+
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
         either!(self, link => link.readiness())

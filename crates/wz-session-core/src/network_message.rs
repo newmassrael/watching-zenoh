@@ -699,12 +699,7 @@ fn judge_put_chain<S: wz_codecs::msg_put::MsgPutStorage>(
     any(
         all(
             feature = "alloc",
-            any(
-                test,
-                not(feature = "rx-lent-control"),
-                feature = "transport-stats",
-                feature = "routing-namespace"
-            )
+            any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
         ),
         feature = "rx-push"
     ),
@@ -871,12 +866,7 @@ fn request_view_admission(
     any(
         all(
             feature = "alloc",
-            any(
-                test,
-                not(feature = "rx-lent-control"),
-                feature = "transport-stats",
-                feature = "routing-namespace"
-            )
+            any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
         ),
         feature = "rx-response"
     ),
@@ -1219,18 +1209,24 @@ impl<const N: usize> RecordOut for heapless::Vec<NetworkMessage, N> {
 ))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RecordForm {
-    /// Every record is decoded into its owned message. Absent from a build that
-    /// lends its control records (`rx-lent-control`) unless it keeps an owned
-    /// reader for its counters (`transport-stats`), its namespace strip
-    /// (`routing-namespace`) or its tests: there no record of a frame read in
-    /// place is ever an owned message, and the owned walk is not linked.
+    /// Every record is decoded into its owned message: the form of a build that has no record to
+    /// lend (no `rx-lent-control` and no lendable codec), of a message rejoined from fragments
+    /// whose namespace is stripped off its owned outcome (`reassembly` with
+    /// `routing-namespace`), and of the tests. Any other build lends what it can, and has no use
+    /// for it.
     #[cfg(all(
         feature = "alloc",
         any(
             test,
-            not(feature = "rx-lent-control"),
-            feature = "transport-stats",
-            feature = "routing-namespace"
+            all(
+                not(feature = "rx-lent-control"),
+                not(any(
+                    feature = "codec-push",
+                    feature = "codec-request",
+                    feature = "codec-response"
+                ))
+            ),
+            all(feature = "reassembly", feature = "routing-namespace")
         )
     ))]
     Owned,
@@ -1239,12 +1235,7 @@ pub(crate) enum RecordForm {
     #[cfg(all(
         all(
             feature = "alloc",
-            any(
-                test,
-                not(feature = "rx-lent-control"),
-                feature = "transport-stats",
-                feature = "routing-namespace"
-            )
+            any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
         ),
         any(
             feature = "codec-push",
@@ -1302,12 +1293,7 @@ pub(crate) enum WalkedRecord<'r, 'f> {
     /// The record's owned message, the one entry of the buffer.
     #[cfg(all(
         feature = "alloc",
-        any(
-            test,
-            not(feature = "rx-lent-control"),
-            feature = "transport-stats",
-            feature = "routing-namespace"
-        )
+        any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
     ))]
     Owned(&'r mut RecordBuf),
     /// A Push decoded where the payload lies, valid for the call.
@@ -1316,12 +1302,7 @@ pub(crate) enum WalkedRecord<'r, 'f> {
         any(
             all(
                 feature = "alloc",
-                any(
-                    test,
-                    not(feature = "rx-lent-control"),
-                    feature = "transport-stats",
-                    feature = "routing-namespace"
-                )
+                any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
             ),
             feature = "rx-push"
         )
@@ -1337,12 +1318,7 @@ pub(crate) enum WalkedRecord<'r, 'f> {
         any(
             all(
                 feature = "alloc",
-                any(
-                    test,
-                    not(feature = "rx-lent-control"),
-                    feature = "transport-stats",
-                    feature = "routing-namespace"
-                )
+                any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
             ),
             feature = "rx-response"
         )
@@ -1368,12 +1344,22 @@ pub(crate) enum WalkedRecord<'r, 'f> {
     /// ([`RecordForm::LentControl`]).
     #[cfg(all(feature = "rx-lent-control", feature = "rx-control"))]
     Interest(&'r wz_codecs::lent::Interest<'f>),
-    /// A record the walk read and judged and no consumer reads further: an Oam, or
-    /// the tail of a payload that opens with a MID this build has no decoder for
-    /// (the walk ends there, as the owned walk's `Unknown` ends it)
-    /// ([`RecordForm::LentControl`]). It carries nothing: the point of handing it
-    /// over is that the walk counts it as a record, as it counts the owned
-    /// `Oam` and `Unknown` it replaces.
+    /// An Oam decoded where the payload lies, valid for the call
+    /// ([`RecordForm::LentControl`]), in a build with the transport counters: no consumer reads
+    /// it further, and it is handed over as itself so the counters read the band it carries, as
+    /// they read the owned Oam's. A build without them hands it over as [`Self::Skipped`].
+    #[cfg(all(
+        feature = "rx-lent-control",
+        feature = "rx-control",
+        feature = "transport-stats",
+        feature = "alloc"
+    ))]
+    Oam(&'r wz_codecs::lent::Oam<'f>),
+    /// A record the walk read and no consumer reads further: the tail of a payload
+    /// that opens with a MID this build has no decoder for (the walk ends there, as
+    /// the owned walk's `Unknown` ends it) ([`RecordForm::LentControl`]). It carries
+    /// nothing: the point of handing it over is that the walk counts it as a record,
+    /// as it counts the owned `Unknown` it replaces.
     #[cfg(feature = "rx-lent-control")]
     Skipped,
 }
@@ -1445,12 +1431,27 @@ pub(crate) fn try_for_each_record<'f>(
     form: RecordForm,
     each: impl FnMut(WalkedRecord<'_, 'f>) -> Result<(), crate::parse_error::InboundParseError>,
 ) -> Result<usize, crate::parse_error::InboundParseError> {
-    try_for_each_record_while(payload, record, form, &|| true, each).map(|(read, _)| read)
+    try_for_each_record_while(
+        payload,
+        record,
+        form,
+        &|| true,
+        each,
+        #[cfg(all(feature = "transport-stats", feature = "alloc"))]
+        &mut |_: &RecordClass<'_>| {},
+    )
+    .map(|(read, _)| read)
 }
 
 /// [`try_for_each_record`] that ends the walk before a record when `go_on` answers `false`:
 /// how far the walk read, and whether it ended so, with records of the payload still unread.
 /// What a receive path asks whose consumer may have no room for another record.
+///
+/// A build with the transport counters (`transport-stats`) hands `counted` each record it lends,
+/// as the owned message the same bytes decode to: the counters classify a message by reading the
+/// owned form, and so a lent record is counted as the same record walked owned is, and how a
+/// record is received does not depend on whether the build counts it. An owned record is not
+/// handed to `counted`: its consumer counts it from the owned message it is handed.
 #[cfg(all(
     feature = "codec-frame",
     any(
@@ -1465,7 +1466,19 @@ pub(crate) fn try_for_each_record_while<'f>(
     form: RecordForm,
     go_on: &dyn Fn() -> bool,
     mut each: impl FnMut(WalkedRecord<'_, 'f>) -> Result<(), crate::parse_error::InboundParseError>,
+    #[cfg(all(feature = "transport-stats", feature = "alloc"))] counted: &mut dyn FnMut(
+        &RecordClass<'_>,
+    ),
 ) -> Result<(usize, bool), crate::parse_error::InboundParseError> {
+    // A record the walk lends is counted by its class, read off the record as it was decoded; an
+    // owned record is counted by the consumer it is handed to.
+    #[cfg(all(feature = "transport-stats", feature = "alloc"))]
+    let mut each = |one: WalkedRecord<'_, 'f>| {
+        if let Some(class) = RecordClass::of_lent(&one) {
+            counted(&class);
+        }
+        each(one)
+    };
     walk_records(payload, record, form, go_on, &mut each)
 }
 
@@ -1496,12 +1509,7 @@ fn walk_records<'f>(
         all(
             all(
                 feature = "alloc",
-                any(
-                    test,
-                    not(feature = "rx-lent-control"),
-                    feature = "transport-stats",
-                    feature = "routing-namespace"
-                )
+                any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
             ),
             any(
                 feature = "codec-push",
@@ -1535,12 +1543,7 @@ fn walk_records<'f>(
             feature = "rx-lent-control",
             all(
                 feature = "alloc",
-                any(
-                    test,
-                    not(feature = "rx-lent-control"),
-                    feature = "transport-stats",
-                    feature = "routing-namespace"
-                )
+                any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
             )
         ))]
         if form == RecordForm::LentControl {
@@ -1553,12 +1556,7 @@ fn walk_records<'f>(
         // owned reader kept) has the one form: this is the whole walk.
         #[cfg(not(all(
             feature = "alloc",
-            any(
-                test,
-                not(feature = "rx-lent-control"),
-                feature = "transport-stats",
-                feature = "routing-namespace"
-            )
+            any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
         )))]
         {
             let RecordForm::LentControl = form;
@@ -1569,12 +1567,7 @@ fn walk_records<'f>(
         }
         #[cfg(all(
             feature = "alloc",
-            any(
-                test,
-                not(feature = "rx-lent-control"),
-                feature = "transport-stats",
-                feature = "routing-namespace"
-            )
+            any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
         ))]
         {
             use crate::parse_error::InboundParseError;
@@ -1632,12 +1625,7 @@ fn walk_records<'f>(
 #[cfg(all(
     all(
         feature = "alloc",
-        any(
-            test,
-            not(feature = "rx-lent-control"),
-            feature = "transport-stats",
-            feature = "routing-namespace"
-        )
+        any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
     ),
     feature = "codec-frame",
     any(
@@ -1662,12 +1650,7 @@ fn lend_record<'f>(
             any(
                 all(
                     feature = "alloc",
-                    any(
-                        test,
-                        not(feature = "rx-lent-control"),
-                        feature = "transport-stats",
-                        feature = "routing-namespace"
-                    )
+                    any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
                 ),
                 feature = "rx-push"
             )
@@ -1689,12 +1672,7 @@ fn lend_record<'f>(
             any(
                 all(
                     feature = "alloc",
-                    any(
-                        test,
-                        not(feature = "rx-lent-control"),
-                        feature = "transport-stats",
-                        feature = "routing-namespace"
-                    )
+                    any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
                 ),
                 feature = "rx-response"
             )
@@ -1712,12 +1690,7 @@ fn lend_record<'f>(
     any(
         all(
             feature = "alloc",
-            any(
-                test,
-                not(feature = "rx-lent-control"),
-                feature = "transport-stats",
-                feature = "routing-namespace"
-            )
+            any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
         ),
         feature = "rx-push"
     ),
@@ -1771,12 +1744,7 @@ fn admit_lent(
     any(
         all(
             feature = "alloc",
-            any(
-                test,
-                not(feature = "rx-lent-control"),
-                feature = "transport-stats",
-                feature = "routing-namespace"
-            )
+            any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
         ),
         feature = "rx-push"
     ),
@@ -1838,12 +1806,7 @@ fn lend_request<'f>(
     any(
         all(
             feature = "alloc",
-            any(
-                test,
-                not(feature = "rx-lent-control"),
-                feature = "transport-stats",
-                feature = "routing-namespace"
-            )
+            any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
         ),
         feature = "rx-response"
     ),
@@ -1893,8 +1856,8 @@ enum Walk {
 /// hand it over, whatever kind it is.
 ///
 /// The kinds this build has a decoder for are lent as their own variant of
-/// [`WalkedRecord`]; an Oam is judged and handed over as
-/// [`WalkedRecord::Skipped`] (nothing reads an Oam's body); and a MID this build
+/// [`WalkedRecord`], an Oam among them (nothing reads its body, and the counters read its
+/// band); and a MID this build
 /// has no decoder for, whose length is unknowable, takes the rest of the payload
 /// as one skipped record and ends the walk, as the owned walk's `Unknown` does.
 /// A kind whose codec is not selected is that last case, as it is in the owned
@@ -2041,7 +2004,12 @@ fn lend_oam<'f>(
     wz_codecs::lent::Oam::decode_into(cursor, &mut oam)
         .map_err(crate::parse_error::InboundParseError::Codec)?;
     admit_lent(oam_view_admission(&oam))?;
-    each(WalkedRecord::Skipped)
+    // The counters read its band (`RecordClass`); nothing else reads it.
+    #[cfg(all(feature = "transport-stats", feature = "alloc"))]
+    let walked = WalkedRecord::Oam(&oam);
+    #[cfg(not(all(feature = "transport-stats", feature = "alloc")))]
+    let walked = WalkedRecord::Skipped;
+    each(walked)
 }
 
 /// The tail of a payload that opens with a MID this build has no decoder for: its
@@ -3032,7 +3000,9 @@ fn zbuf_ext_len<E: crate::ext_view::ExtEntryView>(extensions: Option<&[E]>, eid:
         feature = "codec-response"
     )
 ))]
-fn put_payload_size(put: &crate::wire::parts::MsgPutOwned) -> usize {
+fn put_payload_size<S: wz_codecs::msg_put::MsgPutStorage>(
+    put: &wz_codecs::msg_put::MsgPutOwned<S>,
+) -> usize {
     crate::put_payload::payload_len(put)
         + zbuf_ext_len(
             Some(crate::put_payload::chain(put)),
@@ -3065,11 +3035,11 @@ fn del_payload_size(extensions: Option<&[crate::wire::parts::ExtEntryOwned]>) ->
         feature = "codec-response"
     )
 ))]
-fn put_stats_class(
+fn put_stats_class<S: wz_codecs::msg_put::MsgPutStorage>(
     kind: crate::stats::MessageLabel,
     message: crate::stats::StatMessage,
     space: crate::stats::StatSpace,
-    put: &crate::wire::parts::MsgPutOwned,
+    put: &wz_codecs::msg_put::MsgPutOwned<S>,
 ) -> crate::stats::NetworkStatsClass {
     let class = stats_data_class(
         kind,
@@ -3225,6 +3195,775 @@ where
             b.payload_len as usize,
             b.extensions.entries(),
         ),
+    }
+}
+
+/// What the transport counters read of one received record: its class, the band it carries and
+/// the key it names. A record the walk lends is read here, off the record as the walk decoded it
+/// ([`Self::of_lent`]); an owned record is read off its message ([`stats_class`],
+/// [`network_message_priority`], [`stats_keyexpr`]) by the same rules, so a record counts the
+/// same whichever form the build received it in, and counting a lent record decodes nothing
+/// again and allocates nothing.
+#[cfg(all(
+    feature = "transport-stats",
+    feature = "alloc",
+    all(
+        feature = "codec-frame",
+        any(
+            test,
+            feature = "session-unicast",
+            all(feature = "session-multicast", not(feature = "alloc"))
+        )
+    )
+))]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RecordClass<'k> {
+    pub(crate) class: crate::stats::NetworkStatsClass,
+    pub(crate) priority: crate::qos::Priority,
+    /// The key's mapping id and suffix, for a data record; `None` for a control record.
+    key: Option<(crate::wire_id::ExprId, Option<&'k str>)>,
+}
+
+#[cfg(all(
+    feature = "transport-stats",
+    feature = "alloc",
+    all(
+        feature = "codec-frame",
+        any(
+            test,
+            feature = "session-unicast",
+            all(feature = "session-multicast", not(feature = "alloc"))
+        )
+    )
+))]
+impl<'k> RecordClass<'k> {
+    /// The key expression the record addresses, an alias resolved through no space, as
+    /// [`stats_keyexpr`] resolves the owned message's: what the session's `stats/filters` are
+    /// matched against.
+    pub(crate) fn keyexpr(&self) -> Option<alloc::string::String> {
+        let (id, suffix) = self.key?;
+        stats_keyexpr_of_key(id, suffix, &|_id| None)
+    }
+
+    /// A control record of `label`, its band read off its chain.
+    #[cfg(any(
+        all(feature = "rx-lent-control", feature = "rx-control"),
+        all(
+            feature = "rx-lent-control",
+            feature = "codec-response-final",
+            feature = "rx-response"
+        )
+    ))]
+    fn control<E: crate::ext_view::ExtEntryView>(
+        label: crate::stats::MessageLabel,
+        extensions: impl IntoIterator<Item = E>,
+    ) -> Self {
+        Self {
+            class: crate::stats::NetworkStatsClass::control(label),
+            priority: crate::declare_ext_qos::read_qos_of(extensions).priority(),
+            key: None,
+        }
+    }
+
+    /// The class of a record the walk lent, `None` for one it hands owned.
+    pub(crate) fn of_lent(one: &WalkedRecord<'_, 'k>) -> Option<Self> {
+        match one {
+            WalkedRecord::Never(never, _) => match *never {},
+            #[cfg(all(
+                feature = "alloc",
+                any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
+            ))]
+            WalkedRecord::Owned(_) => None,
+            #[cfg(all(
+                feature = "codec-push",
+                any(
+                    all(
+                        feature = "alloc",
+                        any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
+                    ),
+                    feature = "rx-push"
+                )
+            ))]
+            WalkedRecord::Push(push) => Some(lent_push_class(push)),
+            #[cfg(feature = "codec-request")]
+            WalkedRecord::Request(request) => Some(lent_request_class(request)),
+            #[cfg(all(
+                feature = "codec-response",
+                any(
+                    all(
+                        feature = "alloc",
+                        any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
+                    ),
+                    feature = "rx-response"
+                )
+            ))]
+            WalkedRecord::Response(response) => Some(lent_response_class(response)),
+            #[cfg(all(
+                feature = "rx-lent-control",
+                feature = "codec-declare",
+                feature = "rx-control"
+            ))]
+            WalkedRecord::Declare(declare) => Some(Self::control(
+                crate::stats::MessageLabel::Declare,
+                declare
+                    .extensions
+                    .as_ref()
+                    .map_or(&[][..], |chain| {
+                        sce_forge_runtime::codec::SceList::as_slice(chain.inner())
+                    })
+                    .iter(),
+            )),
+            #[cfg(all(
+                feature = "rx-lent-control",
+                feature = "codec-response-final",
+                feature = "rx-response"
+            ))]
+            WalkedRecord::ResponseFinal(response_final) => Some(Self::control(
+                crate::stats::MessageLabel::ResponseFinal,
+                response_final
+                    .extensions
+                    .as_ref()
+                    .map_or(&[][..], |chain| {
+                        sce_forge_runtime::codec::SceList::as_slice(chain.inner())
+                    })
+                    .iter(),
+            )),
+            #[cfg(all(feature = "rx-lent-control", feature = "rx-control"))]
+            WalkedRecord::Interest(interest) => Some(Self::control(
+                crate::stats::MessageLabel::Interest,
+                interest
+                    .extensions
+                    .as_ref()
+                    .map_or(&[][..], |chain| {
+                        sce_forge_runtime::codec::SceList::as_slice(chain.inner())
+                    })
+                    .iter(),
+            )),
+            #[cfg(all(
+                feature = "rx-lent-control",
+                feature = "rx-control",
+                feature = "transport-stats",
+                feature = "alloc"
+            ))]
+            WalkedRecord::Oam(oam) => Some(Self::control(
+                crate::stats::MessageLabel::Oam,
+                oam.extensions
+                    .as_ref()
+                    .map_or(&[][..], |chain| {
+                        sce_forge_runtime::codec::SceList::as_slice(chain.inner())
+                    })
+                    .iter(),
+            )),
+            // A MID this build has no decoder for: the owned walk's `Unknown`, which carries no
+            // extension to read a band off.
+            #[cfg(feature = "rx-lent-control")]
+            WalkedRecord::Skipped => Some(Self {
+                class: crate::stats::NetworkStatsClass::undecoded(),
+                priority: crate::qos::Priority::DEFAULT,
+                key: None,
+            }),
+        }
+    }
+}
+
+/// The length of the plain ZBuf body of the first entry of `extensions` whose identity is `eid`,
+/// or `0`: [`zbuf_ext_len`] over the entries a chain yields.
+#[cfg(any(
+    all(
+        feature = "transport-stats",
+        feature = "alloc",
+        all(
+            feature = "codec-frame",
+            any(
+                test,
+                feature = "session-unicast",
+                all(feature = "session-multicast", not(feature = "alloc"))
+            )
+        ),
+        all(
+            feature = "codec-push",
+            any(
+                all(
+                    feature = "alloc",
+                    any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
+                ),
+                feature = "rx-push"
+            )
+        )
+    ),
+    all(
+        feature = "transport-stats",
+        feature = "alloc",
+        all(
+            feature = "codec-frame",
+            any(
+                test,
+                feature = "session-unicast",
+                all(feature = "session-multicast", not(feature = "alloc"))
+            )
+        ),
+        feature = "codec-request"
+    ),
+    all(
+        feature = "transport-stats",
+        feature = "alloc",
+        all(
+            feature = "codec-frame",
+            any(
+                test,
+                feature = "session-unicast",
+                all(feature = "session-multicast", not(feature = "alloc"))
+            )
+        ),
+        all(
+            feature = "codec-response",
+            any(
+                all(
+                    feature = "alloc",
+                    any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
+                ),
+                feature = "rx-response"
+            )
+        )
+    )
+))]
+fn zbuf_ext_len_in<E: crate::ext_view::ExtEntryView>(
+    extensions: impl IntoIterator<Item = E>,
+    eid: u8,
+) -> usize {
+    extensions
+        .into_iter()
+        .find(|ext| ext.eid() == eid)
+        .and_then(|ext| ext.plain_zbuf().map(<[u8]>::len))
+        .unwrap_or(0)
+}
+
+/// [`stats_class_marked`] over the entries a chain yields: the `shm` medium when one of them is
+/// the marker `marker` names.
+#[cfg(any(
+    all(
+        feature = "transport-stats",
+        feature = "alloc",
+        all(
+            feature = "codec-frame",
+            any(
+                test,
+                feature = "session-unicast",
+                all(feature = "session-multicast", not(feature = "alloc"))
+            )
+        ),
+        all(
+            feature = "codec-push",
+            any(
+                all(
+                    feature = "alloc",
+                    any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
+                ),
+                feature = "rx-push"
+            )
+        )
+    ),
+    all(
+        feature = "transport-stats",
+        feature = "alloc",
+        all(
+            feature = "codec-frame",
+            any(
+                test,
+                feature = "session-unicast",
+                all(feature = "session-multicast", not(feature = "alloc"))
+            )
+        ),
+        feature = "codec-request"
+    ),
+    all(
+        feature = "transport-stats",
+        feature = "alloc",
+        all(
+            feature = "codec-frame",
+            any(
+                test,
+                feature = "session-unicast",
+                all(feature = "session-multicast", not(feature = "alloc"))
+            )
+        ),
+        all(
+            feature = "codec-response",
+            any(
+                all(
+                    feature = "alloc",
+                    any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
+                ),
+                feature = "rx-response"
+            )
+        )
+    )
+))]
+fn stats_class_marked_in<E: crate::ext_view::ExtEntryView>(
+    kind: crate::stats::MessageLabel,
+    message: crate::stats::StatMessage,
+    space: crate::stats::StatSpace,
+    pl_bytes: usize,
+    _extensions: impl IntoIterator<Item = E>,
+    _marker: u8,
+) -> crate::stats::NetworkStatsClass {
+    let class = crate::stats::NetworkStatsClass::net(kind, message, space, pl_bytes);
+    #[cfg(feature = "transport-shm")]
+    {
+        let want = crate::ext_header::ext_eid(_marker);
+        if _extensions
+            .into_iter()
+            .any(|ext| crate::ext_header::ext_eid(ext.header()) == want)
+        {
+            return class.on_shm();
+        }
+    }
+    class
+}
+
+/// The marker a Put's and a Del's chain carries before a shared-memory body.
+#[cfg(any(
+    all(
+        feature = "transport-stats",
+        feature = "alloc",
+        all(
+            feature = "codec-frame",
+            any(
+                test,
+                feature = "session-unicast",
+                all(feature = "session-multicast", not(feature = "alloc"))
+            )
+        ),
+        all(
+            feature = "codec-push",
+            any(
+                all(
+                    feature = "alloc",
+                    any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
+                ),
+                feature = "rx-push"
+            )
+        )
+    ),
+    any(
+        all(
+            feature = "transport-stats",
+            feature = "alloc",
+            all(
+                feature = "codec-frame",
+                any(
+                    test,
+                    feature = "session-unicast",
+                    all(feature = "session-multicast", not(feature = "alloc"))
+                )
+            ),
+            all(
+                feature = "codec-response",
+                any(
+                    all(
+                        feature = "alloc",
+                        any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
+                    ),
+                    feature = "rx-response"
+                )
+            )
+        ),
+        all(
+            all(
+                feature = "transport-stats",
+                feature = "alloc",
+                all(
+                    feature = "codec-frame",
+                    any(
+                        test,
+                        feature = "session-unicast",
+                        all(feature = "session-multicast", not(feature = "alloc"))
+                    )
+                ),
+                feature = "codec-request"
+            ),
+            feature = "request-put-del"
+        )
+    )
+))]
+const DATA_SHM_MARKER: u8 = crate::ext_header::body_ext_id::SHM | crate::ext_header::EXT_FLAG_M;
+
+/// The class of a lent Push: [`push_stats_class`]'s rules, read off the record where it lies.
+#[cfg(all(
+    feature = "transport-stats",
+    feature = "alloc",
+    all(
+        feature = "codec-frame",
+        any(
+            test,
+            feature = "session-unicast",
+            all(feature = "session-multicast", not(feature = "alloc"))
+        )
+    ),
+    all(
+        feature = "codec-push",
+        any(
+            all(
+                feature = "alloc",
+                any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
+            ),
+            feature = "rx-push"
+        )
+    )
+))]
+fn lent_push_class<'f>(push: &wz_codecs::lent::Push<'f>) -> RecordClass<'f> {
+    use crate::stats::{MessageLabel, StatMessage};
+    use wz_codecs::push::PushOwnedVariant as V;
+    let (id, suffix) = crate::wireexpr_resolve::id_and_suffix_view(&push.keyexpr.body);
+    let space = stats_space_of_key(id, suffix, &|_id| None);
+    let class = match &push.body {
+        V::CodecZenohMsgPut(put) | V::Default { body: put, .. } => {
+            put_stats_class(MessageLabel::Put, StatMessage::Put, space, put)
+        }
+        V::CodecZenohMsgDel(del) => {
+            let entries = || {
+                del.extensions
+                    .as_ref()
+                    .map_or(&[][..], |chain| {
+                        sce_forge_runtime::codec::SceList::as_slice(chain.inner())
+                    })
+                    .iter()
+            };
+            stats_class_marked_in(
+                MessageLabel::Del,
+                StatMessage::Del,
+                space,
+                zbuf_ext_len_in(entries(), crate::ext_header::body_eid::DEL_ATTACHMENT),
+                entries(),
+                DATA_SHM_MARKER,
+            )
+        }
+    };
+    RecordClass {
+        class,
+        priority: crate::declare_ext_qos::read_qos_of(
+            push.extensions
+                .as_ref()
+                .map_or(&[][..], |chain| {
+                    sce_forge_runtime::codec::SceList::as_slice(chain.inner())
+                })
+                .iter(),
+        )
+        .priority(),
+        key: Some((id, suffix)),
+    }
+}
+
+/// The class of a Put read as its view: [`put_stats_class`]'s rules, the payload inline or as its
+/// slices, and the attachment beside it.
+#[cfg(any(
+    all(
+        feature = "transport-stats",
+        feature = "alloc",
+        all(
+            feature = "codec-frame",
+            any(
+                test,
+                feature = "session-unicast",
+                all(feature = "session-multicast", not(feature = "alloc"))
+            )
+        ),
+        all(
+            feature = "codec-response",
+            any(
+                all(
+                    feature = "alloc",
+                    any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
+                ),
+                feature = "rx-response"
+            )
+        )
+    ),
+    all(
+        all(
+            feature = "transport-stats",
+            feature = "alloc",
+            all(
+                feature = "codec-frame",
+                any(
+                    test,
+                    feature = "session-unicast",
+                    all(feature = "session-multicast", not(feature = "alloc"))
+                )
+            ),
+            feature = "codec-request"
+        ),
+        feature = "request-put-del"
+    )
+))]
+fn put_view_class(
+    kind: crate::stats::MessageLabel,
+    message: crate::stats::StatMessage,
+    space: crate::stats::StatSpace,
+    put: &wz_codecs::msg_put::MsgPutView<'_>,
+) -> crate::stats::NetworkStatsClass {
+    use wz_codecs::msg_put::MsgPutExtensionsHas0x12 as Layout;
+    let (payload, sliced) = match &put.extensions_has_0x12 {
+        Layout::NotHas0x12 { payload, .. } => (payload.into_inner().len(), false),
+        Layout::Has0x12 { slices, .. } => (
+            slices
+                .inner()
+                .iter()
+                .map(|slice| crate::put_payload::slice_len(&slice))
+                .sum(),
+            true,
+        ),
+    };
+    let entries = || {
+        crate::put_payload::view_chain(put)
+            .map(|(rest, _)| sce_forge_runtime::codec::Entries::entries(rest))
+            .into_iter()
+            .flatten()
+    };
+    let class = stats_class_marked_in(
+        kind,
+        message,
+        space,
+        payload + zbuf_ext_len_in(entries(), crate::ext_header::body_eid::PUT_ATTACHMENT),
+        entries(),
+        DATA_SHM_MARKER,
+    );
+    #[cfg(feature = "transport-shm")]
+    if sliced {
+        return class.on_shm();
+    }
+    let _ = sliced;
+    class
+}
+
+/// The class of a Del read as its view: its attachment is its size.
+#[cfg(any(
+    all(
+        feature = "transport-stats",
+        feature = "alloc",
+        all(
+            feature = "codec-frame",
+            any(
+                test,
+                feature = "session-unicast",
+                all(feature = "session-multicast", not(feature = "alloc"))
+            )
+        ),
+        all(
+            feature = "codec-response",
+            any(
+                all(
+                    feature = "alloc",
+                    any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
+                ),
+                feature = "rx-response"
+            )
+        )
+    ),
+    all(
+        all(
+            feature = "transport-stats",
+            feature = "alloc",
+            all(
+                feature = "codec-frame",
+                any(
+                    test,
+                    feature = "session-unicast",
+                    all(feature = "session-multicast", not(feature = "alloc"))
+                )
+            ),
+            feature = "codec-request"
+        ),
+        feature = "request-put-del"
+    )
+))]
+fn del_view_class(
+    kind: crate::stats::MessageLabel,
+    message: crate::stats::StatMessage,
+    space: crate::stats::StatSpace,
+    del: &wz_codecs::msg_del::MsgDelView<'_>,
+) -> crate::stats::NetworkStatsClass {
+    let entries = || crate::ext_view::walked(del.extensions.as_ref());
+    stats_class_marked_in(
+        kind,
+        message,
+        space,
+        zbuf_ext_len_in(entries(), crate::ext_header::body_eid::DEL_ATTACHMENT),
+        entries(),
+        DATA_SHM_MARKER,
+    )
+}
+
+/// The class of a lent Request: [`request_stats_class`]'s rules, read off its view.
+#[cfg(all(
+    feature = "transport-stats",
+    feature = "alloc",
+    all(
+        feature = "codec-frame",
+        any(
+            test,
+            feature = "session-unicast",
+            all(feature = "session-multicast", not(feature = "alloc"))
+        )
+    ),
+    feature = "codec-request"
+))]
+fn lent_request_class<'f>(request: &wz_codecs::request::RequestView<'f>) -> RecordClass<'f> {
+    let (id, suffix, _) =
+        crate::wireexpr_resolve::id_suffix_and_space_viewed(&request.keyexpr.body);
+    let space = stats_space_of_key(id, suffix, &|_id| None);
+    RecordClass {
+        class: request_body_class(&request.body, space),
+        priority: crate::declare_ext_qos::read_qos_of(crate::ext_view::walked(
+            request.extensions.as_ref(),
+        ))
+        .priority(),
+        key: Some((id, suffix)),
+    }
+}
+
+/// The class of a Request's body read as its view. Every Request is a `query` to the registry,
+/// whatever its body, as [`request_stats_class`] files it.
+#[cfg(all(
+    feature = "transport-stats",
+    feature = "alloc",
+    all(
+        feature = "codec-frame",
+        any(
+            test,
+            feature = "session-unicast",
+            all(feature = "session-multicast", not(feature = "alloc"))
+        )
+    ),
+    feature = "codec-request"
+))]
+fn request_body_class(
+    body: &wz_codecs::request::RequestViewVariant<'_>,
+    space: crate::stats::StatSpace,
+) -> crate::stats::NetworkStatsClass {
+    use wz_codecs::request::RequestViewVariant as V;
+    if let V::CodecZenohQuery(query) | V::Default { body: query, .. } = body {
+        return query_view_class(space, query);
+    }
+    #[cfg(feature = "request-put-del")]
+    {
+        use crate::stats::{MessageLabel, StatMessage};
+        if let V::CodecZenohMsgPut(put) = body {
+            return put_view_class(MessageLabel::Query, StatMessage::Put, space, put);
+        }
+        if let V::CodecZenohMsgDel(del) = body {
+            return del_view_class(MessageLabel::Query, StatMessage::Del, space, del);
+        }
+    }
+    crate::stats::NetworkStatsClass::undecoded()
+}
+
+/// The class of a Query read as its view: its value without the encoding in front of it, inline
+/// or as its slices, and its attachment, as [`query_payload_size`] sizes the owned one.
+#[cfg(all(
+    feature = "transport-stats",
+    feature = "alloc",
+    all(
+        feature = "codec-frame",
+        any(
+            test,
+            feature = "session-unicast",
+            all(feature = "session-multicast", not(feature = "alloc"))
+        )
+    ),
+    feature = "codec-request"
+))]
+fn query_view_class(
+    space: crate::stats::StatSpace,
+    query: &wz_codecs::query::QueryView<'_>,
+) -> crate::stats::NetworkStatsClass {
+    use crate::stats::{MessageLabel, StatMessage};
+    use wz_codecs::query_ext_entry::QueryExtEntryViewVariant;
+    use wz_codecs::query_value_zbuf::QueryValueZbufAfterShm;
+    let entries = || crate::ext_view::walked(query.extensions.as_deref());
+    let value = entries()
+        .find(|ext| {
+            crate::ext_view::ExtEntryView::eid(ext) == crate::ext_header::body_eid::QUERY_VALUE
+        })
+        .map_or(0, |ext| match &ext.body {
+            QueryExtEntryViewVariant::CodecZenohQueryValueZbuf(zbuf) => match &zbuf.after_shm {
+                QueryValueZbufAfterShm::NotAfterShm { value } => {
+                    crate::encoding::split_value_body(value.into_inner())
+                        .map_or(0, |(_, payload)| payload.len())
+                }
+                QueryValueZbufAfterShm::AfterShm { slices, .. } => slices
+                    .inner()
+                    .iter()
+                    .map(|slice| crate::put_payload::slice_len(&slice))
+                    .sum(),
+            },
+            _ => 0,
+        });
+    stats_class_marked_in(
+        MessageLabel::Query,
+        StatMessage::Query,
+        space,
+        value + zbuf_ext_len_in(entries(), crate::ext_header::body_eid::QUERY_ATTACHMENT),
+        entries(),
+        crate::ext_header::body_ext_id::QUERY_SHM,
+    )
+}
+
+/// The class of a lent Response: [`response_stats_class`]'s rules, read off its view.
+#[cfg(all(
+    feature = "transport-stats",
+    feature = "alloc",
+    all(
+        feature = "codec-frame",
+        any(
+            test,
+            feature = "session-unicast",
+            all(feature = "session-multicast", not(feature = "alloc"))
+        )
+    ),
+    all(
+        feature = "codec-response",
+        any(
+            all(
+                feature = "alloc",
+                any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
+            ),
+            feature = "rx-response"
+        )
+    )
+))]
+fn lent_response_class<'f>(response: &wz_codecs::response::ResponseView<'f>) -> RecordClass<'f> {
+    use crate::stats::{MessageLabel, StatMessage};
+    use wz_codecs::reply::ReplyViewVariant as RV;
+    use wz_codecs::response::ResponseViewVariant as V;
+    let (id, suffix, _) =
+        crate::wireexpr_resolve::id_suffix_and_space_viewed(&response.keyexpr.body);
+    let space = stats_space_of_key(id, suffix, &|_id| None);
+    let class = match &response.body {
+        V::CodecZenohReply(reply) | V::Default { body: reply, .. } => match &reply.body {
+            RV::CodecZenohMsgPut(put) | RV::Default { body: put, .. } => {
+                put_view_class(MessageLabel::Reply, StatMessage::Reply, space, put)
+            }
+            RV::CodecZenohMsgDel(del) => {
+                del_view_class(MessageLabel::Reply, StatMessage::Reply, space, del)
+            }
+        },
+        V::CodecZenohErr(err) => stats_class_marked_in(
+            MessageLabel::ReplyErr,
+            StatMessage::Reply,
+            space,
+            err.payload_len as usize,
+            crate::ext_view::walked(err.extensions.as_ref()),
+            DATA_SHM_MARKER,
+        ),
+    };
+    RecordClass {
+        class,
+        priority: crate::declare_ext_qos::read_qos_of(crate::ext_view::walked(
+            response.extensions.as_ref(),
+        ))
+        .priority(),
+        key: Some((id, suffix)),
     }
 }
 
@@ -3432,6 +4171,113 @@ mod record_walk_tests {
         assert_eq!(owned, 3);
     }
 
+    /// A build with the transport counters counts each record the walk lends by its class, read off
+    /// the record as the walk decoded it, and the class is the one the owned message of the same
+    /// bytes is counted by: the class, the band and the key read the same for one batch walked lent
+    /// and walked owned, so the counters do not depend on the form the build receives in. The
+    /// batch holds two Pushes and an Oam, and with their codecs a Query on a band of its own, a
+    /// Reply with an attachment and an Err.
+    #[cfg(all(feature = "transport-stats", feature = "codec-push"))]
+    #[test]
+    fn a_lent_record_is_counted_as_the_same_record_walked_owned() {
+        type Counted = (
+            crate::stats::NetworkStatsClass,
+            crate::qos::Priority,
+            Option<alloc::string::String>,
+        );
+        let mut records = vec![push_record("a/1"), oam_record(2), push_record("a/3")];
+        #[cfg(feature = "codec-request")]
+        records.push(
+            crate::request_build::RequestQueryBuilder::new(12, 0, Some("q/1"))
+                .request_qos(0x0D)
+                .build()
+                .expect("build")
+                .try_as_borrowed()
+                .expect("a view")
+                .encode_to_vec(),
+        );
+        #[cfg(feature = "codec-response")]
+        {
+            records.push(
+                crate::response_build::ResponseReplyBuilder::new(9, 0, Some("r/1"), b"reply")
+                    .attachment(b"att")
+                    .build()
+                    .expect("build")
+                    .try_as_borrowed()
+                    .expect("a view")
+                    .encode_to_vec(),
+            );
+            records.push(
+                crate::response_build::ResponseErrBuilder::new(9, 0, Some("r/2"), b"oops")
+                    .build()
+                    .expect("build")
+                    .try_as_borrowed()
+                    .expect("a view")
+                    .encode_to_vec(),
+            );
+        }
+        let payload = records.concat();
+        let counted = |form: RecordForm| -> (Vec<Counted>, usize) {
+            let seen = core::cell::RefCell::new(Vec::new());
+            let lent = core::cell::Cell::new(0);
+            let mut record = new_record_buf();
+            let result = try_for_each_record_while(
+                &payload,
+                &mut record,
+                form,
+                &|| true,
+                |one| {
+                    if let WalkedRecord::Owned(owned) = one {
+                        for message in owned.iter() {
+                            seen.borrow_mut().push((
+                                stats_class(message, |_id| None),
+                                network_message_priority(message),
+                                stats_keyexpr(message, |_id| None),
+                            ));
+                        }
+                    }
+                    Ok(())
+                },
+                &mut |class: &RecordClass<'_>| {
+                    lent.set(lent.get() + 1);
+                    seen.borrow_mut()
+                        .push((class.class, class.priority, class.keyexpr()));
+                },
+            );
+            assert!(result.is_ok());
+            (seen.into_inner(), lent.get())
+        };
+        let (owned, none_lent) = counted(RecordForm::Owned);
+        assert_eq!(
+            owned.len(),
+            records.len(),
+            "the owned walk counts every record it owns"
+        );
+        assert_eq!(none_lent, 0, "an owned walk lends nothing to count");
+        let (lent, lent_count) = counted(RecordForm::Lent);
+        assert_eq!(
+            lent_count,
+            records.len() - 1,
+            "every record but the Oam was lent and counted by its class"
+        );
+        assert_eq!(
+            lent, owned,
+            "a lent batch counts as the same batch walked owned"
+        );
+        // The form that lends every kind lends the Oam too, and counts its band as the owned walk.
+        #[cfg(all(
+            feature = "rx-lent-control",
+            feature = "rx-control",
+            feature = "rx-push",
+            feature = "rx-response"
+        ))]
+        {
+            let (all_lent, every) = counted(RecordForm::LentControl);
+            assert_eq!(every, records.len(), "every record was lent");
+            assert_eq!(all_lent, owned, "and counts as the batch walked owned");
+        }
+    }
+
     /// The slot profile's walk ([`RecordForm::LentControl`]): every kind this
     /// build decodes is lent where the payload lies, and what no consumer reads is
     /// skipped, so the walk builds no owned message at all.
@@ -3490,6 +4336,8 @@ mod record_walk_tests {
                 WalkedRecord::Interest(i) => ('i', i.interest_id),
                 WalkedRecord::ResponseFinal(r) => ('r', u64::from(r.request_id)),
                 WalkedRecord::Skipped => ('-', 0),
+                #[cfg(all(feature = "rx-control", feature = "transport-stats", feature = "alloc"))]
+                WalkedRecord::Oam(_) => ('-', 0),
                 WalkedRecord::Owned(_) => panic!("the control walk owns nothing"),
                 #[allow(unreachable_patterns)]
                 _ => panic!("a kind this test did not encode"),

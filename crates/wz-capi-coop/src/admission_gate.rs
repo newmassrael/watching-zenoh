@@ -124,6 +124,10 @@ impl<P: SessionDatagramLink, C: ClockSource + 'static> SessionDatagramLink for A
         self.pump.keep()
     }
 
+    fn lends_until_next_receive(&self) -> bool {
+        self.pump.lends_until_next_receive()
+    }
+
     fn readiness(&self) -> Option<Box<dyn LinkReadiness>> {
         self.pump.readiness()
     }

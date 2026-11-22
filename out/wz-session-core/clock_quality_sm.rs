@@ -1,5 +1,5 @@
 // SCE-GENERATED — DO NOT EDIT
-// source-hash: 1a3f42b2872d5a2cdf69f1aeceace486e71a6cc626c0670c159515048ea4c8ad
+// source-hash: 371f055b6110e2268c001482da22d62c7ca3ad9a91ae3c57aeed939e983c2fc5
 // source: clock_quality.scxml
 
 
@@ -885,6 +885,8 @@ compile_error!("feature `session-multicast` requires `rx-response`, which this b
 compile_error!("feature `session-reconnect` requires `alloc`, which this build leaves out (feature model `wz-session-core`)");
 #[cfg(all(feature = "session-slot", not(feature = "bounded-heapless")))]
 compile_error!("feature `session-slot` requires `bounded-heapless`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "session-slot", not(feature = "rx-lent-control")))]
+compile_error!("feature `session-slot` requires `rx-lent-control`, which this build leaves out (feature model `wz-session-core`)");
 #[cfg(all(feature = "session-slot", not(feature = "storage-profile")))]
 compile_error!("feature `session-slot` requires `storage-profile`, which this build leaves out (feature model `wz-session-core`)");
 #[cfg(all(feature = "session-slot", not(feature = "tx-lend-only")))]

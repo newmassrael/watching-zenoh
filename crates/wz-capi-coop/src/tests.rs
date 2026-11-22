@@ -945,6 +945,126 @@ fn the_samples_one_delivery_hands_a_subscriber_find_its_callback_once() {
     );
 }
 
+/// The samples a read takes from a link that leaves its datagram where it lies are handed to the
+/// subscriber's callback where they lie: none is written into the delivery lane, which has no
+/// lock, and each holds the link back only until its callback returns, the next read going on
+/// from the record after it. A read that finds nothing hands nothing out. One thread delivers, so
+/// the list of the threads delivering beside it is never taken. The CONTROL is the count of the
+/// samples handed to the subscriber.
+#[test]
+fn a_received_sample_is_handed_where_it_lies_and_an_empty_read_hands_nothing() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let received = Arc::new(AtomicUsize::new(0));
+    let count = received.clone();
+    let declares_before = router.seen(|s| s.declares);
+    engine.declare_subscriber_on_wire(
+        "demo/**".to_owned(),
+        WireKey::literal(),
+        Locality::Any,
+        None,
+        Arc::new(move || {
+            let count = count.clone();
+            Box::new(move |_sample: &dyn SampleView| {
+                count.fetch_add(1, Ordering::SeqCst);
+            })
+        }),
+    );
+    until(&engine, "the router to see the subscriber", || {
+        router.seen(|s| s.declares) > declares_before
+    });
+    until(&engine, "the declarations to be told", || {
+        engine.declarations_synced()
+    });
+    let (handed, lent, list) = (
+        engine.lane_handed(),
+        engine.lane_lent(),
+        engine.delivery_list_takes(),
+    );
+    for _ in 0..4 {
+        let _ = SessionDrive::read(&*engine, false);
+    }
+    assert_eq!(
+        (engine.lane_handed(), engine.lane_lent()),
+        (handed, lent),
+        "a read with nothing to read handed something out"
+    );
+    const SAMPLES: usize = 8;
+    for _ in 0..SAMPLES {
+        router.send(Command::Push("demo/a", b"x"));
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    until(&engine, "the pushes", || {
+        received.load(Ordering::SeqCst) == SAMPLES
+    });
+    assert_eq!(
+        engine.lane_lent() - lent,
+        SAMPLES,
+        "each sample handed where its datagram lies"
+    );
+    assert_eq!(
+        engine.lane_handed() - handed,
+        0,
+        "and none written into the lane"
+    );
+    assert_eq!(
+        engine.delivery_list_takes(),
+        list,
+        "one thread delivered, and took the list of the others"
+    );
+}
+
+/// A Push the link lends is handed to the subscribers' plane alone, and what follows it (the
+/// subscribers' tables reconciled, the drains, the Finals owed) is done under the one lookup of
+/// its face its dispatch made: the fan over every plane is handed none of them. The CONTROL is
+/// the subscriber's count of the samples it was handed.
+#[test]
+fn a_received_push_is_handed_to_the_subscribers_alone_under_one_lookup() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let received = Arc::new(AtomicUsize::new(0));
+    let count = received.clone();
+    let declares_before = router.seen(|s| s.declares);
+    engine.declare_subscriber_on_wire(
+        "demo/**".to_owned(),
+        WireKey::literal(),
+        Locality::Any,
+        None,
+        Arc::new(move || {
+            let count = count.clone();
+            Box::new(move |_sample: &dyn SampleView| {
+                count.fetch_add(1, Ordering::SeqCst);
+            })
+        }),
+    );
+    until(&engine, "the router to see the subscriber", || {
+        router.seen(|s| s.declares) > declares_before
+    });
+    let (alone, lookups, fanned) = engine.push_dispatches();
+    const SAMPLES: usize = 8;
+    for _ in 0..SAMPLES {
+        router.send(Command::Push("demo/a", b"x"));
+    }
+    until(&engine, "the pushes", || {
+        received.load(Ordering::SeqCst) == SAMPLES
+    });
+    let (alone_after, lookups_after, fanned_after) = engine.push_dispatches();
+    assert_eq!(
+        alone_after - alone,
+        SAMPLES,
+        "each Push to the subscribers' plane alone"
+    );
+    assert_eq!(
+        lookups_after - lookups,
+        SAMPLES,
+        "one lookup of the face a Push, its drains included"
+    );
+    assert_eq!(
+        fanned_after, fanned,
+        "the fan over every plane was handed a Push"
+    );
+}
+
 /// A subscriber that undeclares itself from inside its callback is handed nothing more, though the
 /// delivery kept its callback and the lane still holds samples for it: the removal from the table
 /// ends what the delivery kept, as a look in the table for each sample would have found nothing.

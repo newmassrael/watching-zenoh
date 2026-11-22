@@ -43,10 +43,12 @@
 //! a count.
 
 use alloc::sync::Arc;
+use core::cell::UnsafeCell;
 use core::mem::MaybeUninit;
+use core::ops::{Deref, DerefMut};
 use core::ptr::{self, addr_of_mut, NonNull};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
-use wz_capi_port::os::Mutex;
 use wz_capi_port::{MatchId, SubId};
 use wz_runtime_coop::session_drive::{LinkReadiness, LinkWritability, SessionDatagramLink};
 use wz_session_core::bounded::{BoundedVec, Static};
@@ -65,6 +67,45 @@ use wz_session_core::sample::{QosLevel, SampleKind, SourceInfo};
 use wz_session_core::sink::SampleView;
 
 use crate::prelude::*;
+
+/// The handle the lane's queues carry: the event slot a sample holds and where its bytes start,
+/// generated from `sources/session/delivery_lane_handle.scxml`.
+#[allow(
+    dead_code,
+    unused_imports,
+    unused_variables,
+    unused_mut,
+    unexpected_cfgs,
+    non_snake_case,
+    clippy::all
+)]
+mod delivery_lane_handle {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-capi-coop/delivery_lane_handle.rs"
+    ));
+}
+
+/// The queue between the session and its deliveries ([`SharedLane`]), generated from
+/// `sources/session/delivery_lane_queue.scxml`.
+#[allow(
+    dead_code,
+    unused_imports,
+    unused_variables,
+    unused_mut,
+    unexpected_cfgs,
+    non_snake_case,
+    clippy::all
+)]
+mod delivery_lane_queue {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-capi-coop/delivery_lane_queue.rs"
+    ));
+}
+
+use delivery_lane_handle::DeliveryLaneHandle;
+use delivery_lane_queue::DeliveryLaneQueue;
 
 /// The longest id of the clock that stamped a sample's timestamp the wire carries.
 const TIMESTAMP_ID_BYTES: usize = 16;
@@ -444,6 +485,82 @@ impl Rehearsal {
     }
 }
 
+/// What waits at each event slot of the lane besides its bytes, a cell for each slot, reached
+/// through a pointer as the area is: the lane's holder writes a slot while it writes the sample
+/// there, and the one delivery a sample is handed to takes it ([`SharedLane`]), so a hold of the
+/// lane is not a hold of a slot a delivery reads.
+struct Records(NonNull<UnsafeCell<Option<Event>>>);
+
+impl Records {
+    fn new() -> Self {
+        let cells: Box<[UnsafeCell<Option<Event>>]> = (0..caps::DELIVERY_LANE_EVENTS)
+            .map(|_| UnsafeCell::new(None))
+            .collect();
+        let first = Box::into_raw(cells).cast::<UnsafeCell<Option<Event>>>();
+        // SAFETY: the pointer of a box is never null.
+        Self(unsafe { NonNull::new_unchecked(first) })
+    }
+
+    /// The cell of event slot `index`.
+    fn cell(&self, index: usize) -> &UnsafeCell<Option<Event>> {
+        assert!(index < caps::DELIVERY_LANE_EVENTS, "a slot of the lane");
+        // SAFETY: the cells are `DELIVERY_LANE_EVENTS`, this one's until it drops.
+        unsafe { &*self.0.as_ptr().add(index) }
+    }
+}
+
+impl Drop for Records {
+    fn drop(&mut self) {
+        let cells =
+            core::ptr::slice_from_raw_parts_mut(self.0.as_ptr(), caps::DELIVERY_LANE_EVENTS);
+        // SAFETY: the box `Records::new` made, of `DELIVERY_LANE_EVENTS` cells, given back once.
+        drop(unsafe { Box::from_raw(cells) });
+    }
+}
+
+/// The samples a lane published and has not handed on to its deliveries, oldest first: the event
+/// slot of each and where its bytes start. Published in the order their slots were taken, so the
+/// front is the oldest of the lane's heads not handed on.
+struct Published {
+    entries: [(u16, u32); caps::DELIVERY_LANE_EVENTS],
+    head: usize,
+    len: usize,
+}
+
+impl Published {
+    const fn new() -> Self {
+        Self {
+            entries: [(0, 0); caps::DELIVERY_LANE_EVENTS],
+            head: 0,
+            len: 0,
+        }
+    }
+
+    /// The sample at event slot `index`, its bytes at `offset`, was published.
+    fn push(&mut self, index: usize, offset: usize) {
+        debug_assert!(
+            self.len < caps::DELIVERY_LANE_EVENTS,
+            "a published sample holds a slot of the lane"
+        );
+        let at = (self.head + self.len) % caps::DELIVERY_LANE_EVENTS;
+        self.entries[at] = (index as u16, offset as u32);
+        self.len += 1;
+    }
+
+    /// The oldest sample published and not handed on.
+    fn front(&self) -> Option<(u16, u32)> {
+        (self.len > 0).then(|| self.entries[self.head])
+    }
+
+    /// The oldest was handed on.
+    fn pop(&mut self) {
+        if self.len > 0 {
+            self.head = (self.head + 1) % caps::DELIVERY_LANE_EVENTS;
+            self.len -= 1;
+        }
+    }
+}
+
 /// What the lane did not hand a subscriber, by why.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LaneCounts {
@@ -459,16 +576,22 @@ pub struct LaneCounts {
 /// session's arena lent it.
 pub(crate) struct SampleLane {
     lane: DeliveryLane<{ caps::DELIVERY_LANE_EVENTS }>,
-    records: [Option<Event>; caps::DELIVERY_LANE_EVENTS],
+    records: Records,
+    /// The samples published and not handed on to the deliveries yet ([`SharedLane`]).
+    published: Published,
     area: NonNull<u8>,
     /// The sample written last, its reservation held so that the other subscribers it reaches join
     /// it: published, and so handed out, once anything else reaches the lane.
     open: Option<Reservation>,
-    /// A delivery holds the head: another thread that delivers finds nothing until it completes.
+    /// The lane's own hand-out ([`Self::take_front`]) holds the head.
+    #[cfg(all(test, feature = "std"))]
     handing: bool,
+    /// The room the session's links ask for before each record ([`LaneGate`]), once a link was
+    /// opened: what the lane's holder publishes for the gates as it lets go ([`SharedLane`]).
+    link_room: Option<ReadRoom>,
     /// What is offered now is a record a link's gate let through ([`Self::offering_gated`]).
     /// Read only by a debug build's check of the gate's bound, so a release build neither keeps
-    /// nor sets it, and a link's dispatch does not take the lane's lock twice a record for it.
+    /// nor sets it; [`SharedLane`] tells it each time the lane is taken.
     #[cfg(debug_assertions)]
     gated: bool,
     /// The tokens offered now are rehearsed on a copy of the bookkeeping and not queued
@@ -482,9 +605,9 @@ pub(crate) struct SampleLane {
     counts: LaneCounts,
 }
 
-// SAFETY: the area is the session's arena's, lent to this lane alone for the life of the session,
-// and reached only through the lock the lane is held behind, or by the one delivery that holds the
-// head (`handing`), which reads the bytes of the head alone, which nothing writes until it completes.
+// SAFETY: the area and the records are the lane's alone for the life of the session, reached by the
+// lane's holder, or by the one delivery a sample is handed to (`SharedLane`), which reads that
+// sample's bytes and takes its record alone, which nothing writes until the sample is given back.
 unsafe impl Send for SampleLane {}
 
 impl SampleLane {
@@ -506,36 +629,11 @@ impl SampleLane {
         }
     }
 
-    /// The session's lane over the `area_bytes` bytes at `area`, held to `limits`, built where the
-    /// lock it is shared behind keeps it: the lane is kilobytes (an event record for each slot),
-    /// and built as a value, moved into its lock and the lock into its allocation, it lay in the
-    /// frame of the session's open once for each move.
-    ///
-    /// # Safety
-    /// As [`Self::over_in`]'s.
-    #[inline(never)]
-    pub(crate) unsafe fn shared_over(
-        area: NonNull<u8>,
-        area_bytes: usize,
-        limits: &SessionLimits,
-    ) -> Arc<Mutex<Self>> {
-        // `Arc::new_uninit` is newer than this crate's minimum Rust; an uninitialised value put in
-        // an `Arc` is the same allocation, and the optimiser writes nothing into it.
-        let mut shared = Arc::new(MaybeUninit::<Mutex<Self>>::uninit());
-        let place = Arc::get_mut(&mut shared).expect("a new allocation has one handle");
-        // SAFETY: the caller's, which are `over_in`'s.
-        Mutex::new_in(place, |lane| unsafe {
-            Self::over_in(lane, area, area_bytes, limits)
-        });
-        // SAFETY: `new_in` wrote the whole mutex into the allocation, and a `MaybeUninit<T>` has
-        // the size and alignment of `T`, which is what `Arc::from_raw` asks of the pointer's type.
-        unsafe { Arc::from_raw(Arc::into_raw(shared).cast::<Mutex<Self>>()) }
-    }
-
     /// A lane over the `area_bytes` bytes at `area`, held to `limits`, written field by field into
-    /// `place`, which is overwritten without dropping what it held: each event slot is written
-    /// empty where it lies, so the slots are never an array of their own on a stack. Not inlined:
-    /// the largest value its frame holds is the lane's bookkeeping.
+    /// `place`, which is overwritten without dropping what it held: the records are cells on the
+    /// heap, each written empty where it lies (`Records::new`), and the published list is written
+    /// entry by entry, so neither is ever an array of its own on a stack. Not inlined: the largest
+    /// value its frame holds is the lane's bookkeeping.
     ///
     /// # Safety
     /// `area` points at `area_bytes` bytes valid for reads and writes, used by nothing else, for
@@ -552,17 +650,26 @@ impl SampleLane {
         // Each gated statement opens with the path `ptr::write(`, not with the `addr_of_mut!`
         // macro, as `SlotObserverOf::init_in_place` says why.
         // SAFETY: `at` is valid for writes of a `Self`, and each field is written once through a
-        // pointer to it, the event slots one by one (an array's first element is at its address);
+        // pointer to it, the published entries one by one (an array's first element is at its
+        // address);
         // `every_field_is_written` names every field, so the lane is whole when it is lent.
         unsafe {
             ptr::write(addr_of_mut!((*at).lane), DeliveryLane::with_limits(limits));
-            let records = addr_of_mut!((*at).records).cast::<Option<Event>>();
+            // The records are cells on the heap, each written empty where it lies
+            // (`Records::new`); the published list is written entry by entry.
+            ptr::write(addr_of_mut!((*at).records), Records::new());
+            let published = addr_of_mut!((*at).published);
+            let entries = addr_of_mut!((*published).entries).cast::<(u16, u32)>();
             for slot in 0..caps::DELIVERY_LANE_EVENTS {
-                ptr::write(records.add(slot), None);
+                ptr::write(entries.add(slot), (0, 0));
             }
+            ptr::write(addr_of_mut!((*published).head), 0);
+            ptr::write(addr_of_mut!((*published).len), 0);
             ptr::write(addr_of_mut!((*at).area), area);
             ptr::write(addr_of_mut!((*at).open), None);
+            #[cfg(all(test, feature = "std"))]
             ptr::write(addr_of_mut!((*at).handing), false);
+            ptr::write(addr_of_mut!((*at).link_room), None);
             #[cfg(debug_assertions)]
             ptr::write(addr_of_mut!((*at).gated), false);
             #[cfg(feature = "liveliness")]
@@ -582,9 +689,12 @@ impl SampleLane {
         let Self {
             lane: _,
             records: _,
+            published: _,
             area: _,
             open: _,
-            handing: _,
+            #[cfg(all(test, feature = "std"))]
+                handing: _,
+            link_room: _,
             #[cfg(debug_assertions)]
                 gated: _,
             #[cfg(feature = "liveliness")]
@@ -646,10 +756,13 @@ impl SampleLane {
             self.put(at, &subscriber.to_ne_bytes());
             at += SUBSCRIBER_ID_BYTES;
         }
-        self.records[reservation.index()] = Some(Event::Sample {
-            record,
-            subscribers: subscribers.len(),
-        });
+        self.set_record(
+            reservation.index(),
+            Some(Event::Sample {
+                record,
+                subscribers: subscribers.len(),
+            }),
+        );
         self.open = Some(reservation);
     }
 
@@ -723,7 +836,7 @@ impl SampleLane {
         holds_sender: bool,
     ) -> bool {
         let index = open.index();
-        let subscribers = match &self.records[index] {
+        let subscribers = match self.record(index) {
             Some(event) if same(event) => event.subscribers(),
             _ => return false,
         };
@@ -760,29 +873,30 @@ impl SampleLane {
             return false;
         }
         self.put(at, &id);
-        if let Some(event) = &mut self.records[index] {
+        if let Some(event) = self.record_mut(index) {
             event.joined();
         }
         true
     }
 
     /// Publish the sample held open, so a delivery hands it out: no subscriber joins it after.
-    fn seal(&mut self) {
+    pub(crate) fn seal(&mut self) {
         let Some(open) = self.open.take() else {
             return;
         };
-        let index = open.index();
-        let (subscribers, holds_sender) =
-            self.records[index].as_ref().map_or((0, false), |event| {
-                (event.subscribers(), event.holds_sender())
-            });
+        let (index, offset) = (open.index(), open.offset());
+        let (subscribers, holds_sender) = self.record(index).map_or((0, false), |event| {
+            (event.subscribers(), event.holds_sender())
+        });
         // Its callbacks were admitted one by one as it was written, so only a lane that stops
         // refuses it, and then every subscriber it was for goes without.
         if self.lane.publish(open, subscribers).is_err() {
-            self.records[index] = None;
+            self.set_record(index, None);
             for _ in 0..subscribers {
                 self.count_refused(holds_sender);
             }
+        } else if subscribers > 0 {
+            self.published.push(index, offset);
         }
     }
 
@@ -833,12 +947,15 @@ impl SampleLane {
         };
         self.put(reservation.offset(), key);
         self.put(reservation.offset() + key.len(), &subscriber.to_ne_bytes());
-        self.records[reservation.index()] = Some(Event::Liveliness {
-            kind: sample.kind,
-            key: key.len(),
-            token_id: sample.token_id,
-            subscribers: 1,
-        });
+        self.set_record(
+            reservation.index(),
+            Some(Event::Liveliness {
+                kind: sample.kind,
+                key: key.len(),
+                token_id: sample.token_id,
+                subscribers: 1,
+            }),
+        );
         self.open = Some(reservation);
     }
 
@@ -864,17 +981,20 @@ impl SampleLane {
             self.put(at, part);
             at += part.len();
         }
-        let index = reservation.index();
-        self.records[index] = Some(Event::Reply(record));
+        let (index, offset) = (reservation.index(), reservation.offset());
+        self.set_record(index, Some(Event::Reply(record)));
         if self.lane.publish(reservation, 1).is_err() {
-            self.records[index] = None;
+            self.set_record(index, None);
             self.count_refused(true);
+        } else {
+            self.published.push(index, offset);
         }
     }
 
-    /// Whether the lane holds nothing and no delivery holds its head: what a leg's end waits for,
-    /// so that it is told after every reply queued before it.
-    #[cfg(feature = "query")]
+    /// Whether the lane holds nothing and no delivery holds its head: what a lane a thread writes
+    /// and delivers alone is idle by; a session's lane says it without a hold
+    /// ([`SharedLane::is_idle`]).
+    #[cfg(all(test, feature = "std", feature = "query"))]
     pub(crate) fn is_idle(&self) -> bool {
         !self.handing && self.lane.stats().queued_events == 0
     }
@@ -943,13 +1063,31 @@ impl SampleLane {
         let open = self
             .open
             .as_ref()
-            .and_then(|open| self.records[open.index()].as_ref())
+            .and_then(|open| self.record(open.index()))
             .map_or(0, Event::subscribers);
         let owed = stats
             .pending_callbacks
             .saturating_add(open)
             .saturating_add(room.callbacks);
         bytes && (empty || owed <= stats.callback_budget)
+    }
+
+    /// The session's links ask for `room` before each record ([`LaneGate`]). Every link of a
+    /// session asks for the same room; were two to differ, the larger is asked for all, which holds
+    /// a link back sooner and never lets a record through that its own room would not.
+    pub(crate) fn gate_links(&mut self, room: ReadRoom) {
+        self.link_room = Some(match self.link_room {
+            Some(held) => ReadRoom {
+                bytes: held.bytes.max(room.bytes),
+                callbacks: held.callbacks.max(room.callbacks),
+            },
+            None => room,
+        });
+    }
+
+    /// Whether the lane has the room the links ask for now: `true` before a link asked.
+    fn takes_a_link_read(&self) -> bool {
+        self.link_room.map_or(true, |room| self.takes_a_read(room))
     }
 
     /// Whether what is offered from here on is a record a link's gate let through (`true`), which
@@ -964,6 +1102,9 @@ impl SampleLane {
 
     /// What is at the head of the lane, with the subscribers it is for: held by this delivery
     /// until [`Self::complete`]. `None` when the lane is empty or another delivery holds the head.
+    /// The lane's own hand-out, for a lane a thread writes and delivers alone; a session's lane
+    /// hands its samples on through [`SharedLane`].
+    #[cfg(all(test, feature = "std"))]
     pub(crate) fn take_front(&mut self) -> Option<LaneItem> {
         self.seal();
         if self.handing {
@@ -973,7 +1114,8 @@ impl SampleLane {
             let Next::Ready(delivery) = self.lane.front() else {
                 return None;
             };
-            let Some(event) = self.records[delivery.index].clone() else {
+            self.published.pop();
+            let Some(event) = self.record(delivery.index).cloned() else {
                 // A published slot always has its record; one without is passed over.
                 self.lane.complete();
                 continue;
@@ -981,46 +1123,706 @@ impl SampleLane {
             self.handing = true;
             // SAFETY: the head's bytes are inside the area (`DeliveryLane::front`).
             let base = unsafe { self.area.as_ptr().add(delivery.offset) };
-            return Some(match event {
-                Event::Sample {
-                    record,
-                    subscribers,
-                } => LaneItem::Sample(LaneSample {
-                    record,
-                    subscribers,
-                    base,
-                }),
-                #[cfg(feature = "liveliness")]
-                Event::Liveliness {
-                    kind,
-                    key,
-                    token_id,
-                    subscribers,
-                } => LaneItem::Liveliness(LaneLiveliness {
-                    kind,
-                    key,
-                    token_id,
-                    subscribers,
-                    base,
-                }),
-                #[cfg(feature = "query")]
-                Event::Reply(record) => LaneItem::Reply(LaneReply { record, base }),
-            });
+            return Some(LaneItem::of(event, base));
         }
     }
 
     /// The callbacks of the head returned, each of them: its slot and its bytes come back.
     pub(crate) fn complete(&mut self) {
         if let Next::Ready(delivery) = self.lane.front() {
-            self.records[delivery.index] = None;
+            self.set_record(delivery.index, None);
             self.lane.complete();
         }
-        self.handing = false;
+        #[cfg(all(test, feature = "std"))]
+        {
+            self.handing = false;
+        }
+    }
+
+    /// The record at event slot `index`, a slot the lane holds: one it has not handed on, or
+    /// one handed and given back.
+    fn record(&self, index: usize) -> Option<&Event> {
+        // SAFETY: a slot the lane holds is reached by the lane's holder alone (`SharedLane`), and
+        // nothing writes it while this borrow of the lane lives.
+        unsafe { (*self.records.cell(index).get()).as_ref() }
+    }
+
+    /// [`Self::record`], to change.
+    fn record_mut(&mut self, index: usize) -> Option<&mut Event> {
+        // SAFETY: as `Self::record`, with the lane held mutably.
+        unsafe { (*self.records.cell(index).get()).as_mut() }
+    }
+
+    /// Write the record at event slot `index`, a slot the lane holds.
+    fn set_record(&mut self, index: usize, event: Option<Event>) {
+        // SAFETY: as `Self::record`, with the lane held mutably.
+        unsafe { *self.records.cell(index).get() = event };
     }
 
     /// What the lane did not hand a subscriber.
     pub(crate) fn counts(&self) -> LaneCounts {
         self.counts
+    }
+}
+
+/// The session's lane, handed between the session and its deliveries with no lock: the session
+/// writes it under its own lock ([`Self::held`]), and each sample it publishes is handed to the
+/// deliveries through a queue of the sample's handles (`handed`), the event slot it holds and
+/// where its bytes start, and comes back through a second queue once its callbacks have returned
+/// (`returned`), for the session to give its slot and bytes back to the lane at its next hold.
+///
+/// Both queues are the SCE document `sources/session/delivery_lane_queue.scxml`: one producer and
+/// one consumer each, a Lamport ring that is wait-free on both sides. Each side is single by a
+/// serialisation the lane does not have to make: every writer of the lane, which is the producer
+/// of `handed` and the consumer of `returned`, holds the session's lock, and every delivery,
+/// which is the consumer of `handed` and the producer of `returned`, holds the lane's delivery
+/// word (`delivering`, taken by a compare-exchange). The ring publishes an element with a
+/// Release store of its index and reads it after an Acquire load of it, so what a side wrote
+/// before a push (a sample's record and bytes, or the end of its callbacks) happens-before the
+/// other side's use after the pop.
+///
+/// What a sample is besides its bytes (its record) cannot ride in the queue: the queue holds the
+/// element type its document names, a record of scalars, and a record holds a source info and a
+/// variant per kind. So the element is the handle, and the record waits in its event slot, a cell
+/// of its own ([`Records`]) that the handle's push hands to the delivery and its return hands back.
+pub(crate) struct SharedLane {
+    lane: UnsafeCell<SampleLane>,
+    handed: DeliveryLaneQueue,
+    returned: DeliveryLaneQueue,
+    /// The lane's records and area, as the deliveries read them: the pointers the lane holds.
+    records: NonNull<UnsafeCell<Option<Event>>>,
+    area: NonNull<u8>,
+    /// Whether a delivery holds the deliveries' side of the lane ([`Self::deliver`]).
+    delivering: portable_atomic::AtomicBool,
+    /// How many samples were handed on, taken by a delivery, and done with: each written by its
+    /// one side, read by the other without the lock.
+    handed_count: AtomicUsize,
+    taken_count: AtomicUsize,
+    #[cfg(feature = "query")]
+    done_count: AtomicUsize,
+    /// Whether the lane has the room the links ask for (`SampleLane::takes_a_link_read`), as the
+    /// lane's last holder left it.
+    reads: AtomicBool,
+    /// What a link's dispatch tells the lane while it runs, which a debug build's check of the
+    /// gate's bound reads ([`SampleLane::offering_gated`]): told to the lane at each hold.
+    #[cfg(debug_assertions)]
+    gated: AtomicBool,
+    /// Where the datagram lies that a link lends the session's step now, when the link leaves it
+    /// where it lies until it is next asked to receive (`LaneGate::recv_with`): its first byte's
+    /// address and its length. Written under the session's lock.
+    lending: UnsafeCell<Option<(usize, usize)>>,
+    /// The sample handed to its callbacks where its datagram lies ([`LentSample`]), and where it
+    /// is in its life (`LENT_*`): opened and written by the lane's holder, published at the end of
+    /// the hold, taken and given back by a delivery. While it is not free the links are held back,
+    /// so the datagram stays where it lies.
+    lent: UnsafeCell<Option<LentSample>>,
+    lent_state: AtomicU8,
+    /// How many samples were handed where their datagram lies, which the tests count.
+    #[cfg(all(test, feature = "std"))]
+    lent_count: AtomicUsize,
+}
+
+/// No sample is lent where its datagram lies.
+const LENT_FREE: u8 = 0;
+/// The lane's holder writes the lent sample; the subscribers it reaches join it.
+const LENT_OPEN: u8 = 1;
+/// The lent sample is published for a delivery.
+const LENT_READY: u8 = 2;
+/// A delivery runs the lent sample's callbacks.
+const LENT_DELIVERING: u8 = 3;
+
+// SAFETY: the lane is reached by the holder of the session's lock alone (`Self::held`), the
+// deliveries' side by the holder of `delivering` alone, and a slot's record and bytes by the one
+// side the queues have handed them to; every other field is an atomic.
+unsafe impl Send for SharedLane {}
+// SAFETY: as `Send`.
+unsafe impl Sync for SharedLane {}
+
+// The queues hold a handle for every event slot the lane can have out at once, and a handle names
+// any slot and any offset of the area.
+const _: () = assert!(
+    delivery_lane_queue::CAPACITY >= caps::DELIVERY_LANE_EVENTS,
+    "the delivery lane's queue holds every event slot of the lane: raise its document's capacity"
+);
+const _: () = assert!(
+    caps::DELIVERY_LANE_EVENTS <= u16::MAX as usize
+        && caps::DELIVERY_LANE_BYTES <= u32::MAX as usize,
+    "a delivery lane handle names every event slot and every offset of the area"
+);
+
+impl SharedLane {
+    /// A lane of a lane a test holds, moved in by value.
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn new(lane: SampleLane) -> Self {
+        let reads = lane.takes_a_link_read();
+        let records = lane.records.0;
+        let area = lane.area;
+        Self {
+            lane: UnsafeCell::new(lane),
+            handed: DeliveryLaneQueue::new(),
+            returned: DeliveryLaneQueue::new(),
+            records,
+            area,
+            delivering: portable_atomic::AtomicBool::new(false),
+            handed_count: AtomicUsize::new(0),
+            taken_count: AtomicUsize::new(0),
+            #[cfg(feature = "query")]
+            done_count: AtomicUsize::new(0),
+            reads: AtomicBool::new(reads),
+            #[cfg(debug_assertions)]
+            gated: AtomicBool::new(false),
+            lending: UnsafeCell::new(None),
+            lent: UnsafeCell::new(None),
+            lent_state: AtomicU8::new(LENT_FREE),
+            #[cfg(all(test, feature = "std"))]
+            lent_count: AtomicUsize::new(0),
+        }
+    }
+
+    /// The session's lane over the `area_bytes` bytes at `area`, held to `limits`, built where the
+    /// allocation that shares it keeps it: the lane and its two queues are kilobytes, and built as
+    /// a value and moved into the allocation, they lay in the frame of the session's open once for
+    /// each move.
+    ///
+    /// # Safety
+    /// As [`SampleLane::over_in`]'s.
+    #[inline(never)]
+    pub(crate) unsafe fn shared_over(
+        area: NonNull<u8>,
+        area_bytes: usize,
+        limits: &SessionLimits,
+    ) -> Arc<Self> {
+        // `Arc::new_uninit` is newer than this crate's minimum Rust; an uninitialised value put in
+        // an `Arc` is the same allocation, and the optimiser writes nothing into it.
+        let mut shared = Arc::new(MaybeUninit::<Self>::uninit());
+        let place = Arc::get_mut(&mut shared).expect("a new allocation has one handle");
+        // SAFETY: the caller's, which are `SampleLane::over_in`'s.
+        unsafe { Self::new_in(place, area, area_bytes, limits) };
+        // SAFETY: `new_in` wrote every field into the allocation, and a `MaybeUninit<T>` has the
+        // size and alignment of `T`, which is what `Arc::from_raw` asks of the pointer's type.
+        unsafe { Arc::from_raw(Arc::into_raw(shared).cast::<Self>()) }
+    }
+
+    /// The lane written field by field into `place`, the lane itself where its cell keeps it
+    /// ([`SampleLane::over_in`]), so neither is ever a value of its own on a stack.
+    ///
+    /// # Safety
+    /// As [`SampleLane::over_in`]'s.
+    #[inline(never)]
+    unsafe fn new_in(
+        place: &mut MaybeUninit<Self>,
+        area: NonNull<u8>,
+        area_bytes: usize,
+        limits: &SessionLimits,
+    ) {
+        let at = place.as_mut_ptr();
+        // SAFETY: `at` is valid for writes of a `Self`, and each field is written once through a
+        // pointer to it; an `UnsafeCell<T>` and a `MaybeUninit<T>` are each laid out as the `T`
+        // they hold, so the lane's cell is the place of a lane. `every_field_is_written` names
+        // every field, so the lane is whole when it is shared.
+        unsafe {
+            let cell = addr_of_mut!((*at).lane).cast::<MaybeUninit<SampleLane>>();
+            let lane = SampleLane::over_in(&mut *cell, area, area_bytes, limits);
+            let reads = lane.takes_a_link_read();
+            let records = lane.records.0;
+            ptr::write(addr_of_mut!((*at).handed), DeliveryLaneQueue::new());
+            ptr::write(addr_of_mut!((*at).returned), DeliveryLaneQueue::new());
+            ptr::write(addr_of_mut!((*at).records), records);
+            ptr::write(addr_of_mut!((*at).area), area);
+            ptr::write(
+                addr_of_mut!((*at).delivering),
+                portable_atomic::AtomicBool::new(false),
+            );
+            ptr::write(addr_of_mut!((*at).handed_count), AtomicUsize::new(0));
+            ptr::write(addr_of_mut!((*at).taken_count), AtomicUsize::new(0));
+            #[cfg(feature = "query")]
+            ptr::write(addr_of_mut!((*at).done_count), AtomicUsize::new(0));
+            ptr::write(addr_of_mut!((*at).reads), AtomicBool::new(reads));
+            #[cfg(debug_assertions)]
+            ptr::write(addr_of_mut!((*at).gated), AtomicBool::new(false));
+            ptr::write(addr_of_mut!((*at).lending), UnsafeCell::new(None));
+            ptr::write(addr_of_mut!((*at).lent), UnsafeCell::new(None));
+            ptr::write(addr_of_mut!((*at).lent_state), AtomicU8::new(LENT_FREE));
+            #[cfg(all(test, feature = "std"))]
+            ptr::write(addr_of_mut!((*at).lent_count), AtomicUsize::new(0));
+        }
+    }
+
+    /// A field added to [`SharedLane`] and not written by [`Self::new_in`] would be read
+    /// uninitialised. This destructures the lane with no `..`, so adding a field without naming it
+    /// here (and so without writing it there) does not compile.
+    #[allow(dead_code)]
+    fn every_field_is_written(shared: Self) {
+        let Self {
+            lane: _,
+            handed: _,
+            returned: _,
+            records: _,
+            area: _,
+            delivering: _,
+            handed_count: _,
+            taken_count: _,
+            #[cfg(feature = "query")]
+                done_count: _,
+            reads: _,
+            #[cfg(debug_assertions)]
+                gated: _,
+            lending: _,
+            lent: _,
+            lent_state: _,
+            #[cfg(all(test, feature = "std"))]
+                lent_count: _,
+        } = shared;
+    }
+
+    /// The datagram a link lends the session's step now, which a sample may be handed to its
+    /// callbacks where it lies; `None` once the link takes it back.
+    ///
+    /// # Safety
+    /// The caller holds the session's lock, and the link leaves the bytes where they lie until it
+    /// is next asked to receive or to be serviced
+    /// (`SessionDatagramLink::lends_until_next_receive`).
+    pub(crate) unsafe fn set_lending(&self, datagram: Option<&[u8]>) {
+        let range = datagram.map(|bytes| (bytes.as_ptr() as usize, bytes.len()));
+        // SAFETY: the caller's contract: written under the session's lock alone.
+        unsafe { *self.lending.get() = range };
+    }
+
+    /// Whether a sample handed where its datagram lies holds the links back: no link is read or
+    /// serviced until its callbacks have returned.
+    pub(crate) fn lends_a_datagram(&self) -> bool {
+        self.lent_state.load(Ordering::Acquire) != LENT_FREE
+    }
+
+    /// How many samples were handed where their datagram lies since the lane was made, which the
+    /// tests of the cost of one sample count.
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn lent_count(&self) -> usize {
+        self.lent_count.load(Ordering::SeqCst)
+    }
+
+    /// The lane, to write: the samples the deliveries are done with are given back to it first,
+    /// and what it published is handed on to them when the hold ends.
+    ///
+    /// # Safety
+    /// The caller holds the session's lock, under which every hold of the lane is made, and holds
+    /// no other [`LaneHeld`] of it.
+    pub(crate) unsafe fn held(&self) -> LaneHeld<'_> {
+        let mut held = LaneHeld { shared: self };
+        #[cfg(debug_assertions)]
+        held.offering_gated(self.gated.load(Ordering::Acquire));
+        held.take_back();
+        held
+    }
+
+    /// The deliveries' side of the lane, or `None` while another delivery holds it, which hands out
+    /// what is handed on meanwhile before it lets go ([`LaneDelivery`]).
+    pub(crate) fn deliver(&self) -> Option<LaneDelivery<'_>> {
+        self.delivering
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::Relaxed)
+            .ok()
+            .map(|_| LaneDelivery { shared: self })
+    }
+
+    /// Whether the lane has the room the links ask for before each record, as its last holder
+    /// left it, read without a hold.
+    pub(crate) fn takes_a_link_read(&self) -> bool {
+        self.reads.load(Ordering::Acquire)
+    }
+
+    /// Whether a sample was handed on that no delivery has taken yet. Read with the order the
+    /// delivery word is let go with, so a delivery that lets go and reads it clear, and a hold that
+    /// hands a sample on and then finds the word held, cannot both miss the sample.
+    pub(crate) fn owes_a_delivery(&self) -> bool {
+        self.lent_state.load(Ordering::SeqCst) == LENT_READY
+            || self.handed_count.load(Ordering::SeqCst) != self.taken_count.load(Ordering::SeqCst)
+    }
+
+    /// Whether every sample handed on is done with: what a leg's end waits for, so that it is told
+    /// after every reply queued before it.
+    #[cfg(feature = "query")]
+    pub(crate) fn is_idle(&self) -> bool {
+        self.handed_count.load(Ordering::SeqCst) == self.done_count.load(Ordering::SeqCst)
+    }
+
+    /// Whether what is offered from here on is a record a link's gate let through
+    /// ([`SampleLane::offering_gated`]), told without a hold.
+    #[cfg(debug_assertions)]
+    pub(crate) fn offering_gated(&self, gated: bool) {
+        self.gated.store(gated, Ordering::Release);
+    }
+
+    /// How many samples were handed on since the lane was made, which the tests of the cost of
+    /// one sample count.
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn handed_on(&self) -> usize {
+        self.handed_count.load(Ordering::SeqCst)
+    }
+
+    /// The cell of event slot `index`.
+    fn record_cell(&self, index: usize) -> &UnsafeCell<Option<Event>> {
+        assert!(index < caps::DELIVERY_LANE_EVENTS, "a slot of the lane");
+        // SAFETY: the lane's records are `DELIVERY_LANE_EVENTS` cells, which live as long as the
+        // lane, and so as long as `self`.
+        unsafe { &*self.records.as_ptr().add(index) }
+    }
+}
+
+/// The lane held by the session ([`SharedLane::held`]). As it lets go it hands on what was
+/// published under it and leaves the room the links ask for in the word the gates read.
+pub(crate) struct LaneHeld<'a> {
+    shared: &'a SharedLane,
+}
+
+impl Deref for LaneHeld<'_> {
+    type Target = SampleLane;
+
+    fn deref(&self) -> &SampleLane {
+        // SAFETY: this is the lane's one hold (`SharedLane::held`).
+        unsafe { &*self.shared.lane.get() }
+    }
+}
+
+impl DerefMut for LaneHeld<'_> {
+    fn deref_mut(&mut self) -> &mut SampleLane {
+        // SAFETY: as `deref`.
+        unsafe { &mut *self.shared.lane.get() }
+    }
+}
+
+impl LaneHeld<'_> {
+    /// Give back to the lane the slots and bytes of the samples the deliveries are done with, in
+    /// the order they were handed on, which is the order of the lane's heads.
+    fn take_back(&mut self) {
+        let shared = self.shared;
+        // SAFETY: the session's lock is held (`SharedLane::held`), under which every consumer of
+        // `returned` takes it, the one before it having let go of the lock.
+        let mut back = unsafe { shared.returned.consumer() };
+        while back.try_pop().is_some() {
+            self.complete();
+        }
+    }
+}
+
+impl LaneHeld<'_> {
+    /// Queue `sample` for the callback of `subscriber`, or hand it to the callback where it lies:
+    /// when every part of it but its key lies in the datagram a link lends the step now
+    /// ([`SharedLane::set_lending`]), no delivery runs and nothing older waits, the sample is lent
+    /// where it lies ([`LentSample`]), its key copied beside it, and the links are held back until
+    /// a delivery has handed it to its callbacks and given it back. Any other sample, and every
+    /// sample offered while one is lent, is written into the lane ([`SampleLane::offer`]).
+    pub(crate) fn offer_sample(&mut self, subscriber: SubId, sample: &dyn SampleView) {
+        let shared = self.shared;
+        if shared.lent_state.load(Ordering::Relaxed) == LENT_OPEN {
+            // SAFETY: an open lent sample is the lane's holder's until it is sealed.
+            if let Some(lent) = unsafe { &mut *shared.lent.get() } {
+                if lent.is(sample) {
+                    lent.join(subscriber);
+                    return;
+                }
+            }
+            self.seal_lent();
+        }
+        if let Some(lent) = self.lends(subscriber, sample) {
+            // SAFETY: the slot is free (`Self::lends`), and the lane's holder writes it.
+            unsafe { *shared.lent.get() = Some(lent) };
+            shared.lent_state.store(LENT_OPEN, Ordering::Relaxed);
+            #[cfg(all(test, feature = "std"))]
+            shared.lent_count.fetch_add(1, Ordering::SeqCst);
+            return;
+        }
+        self.offer(subscriber, sample);
+    }
+
+    /// `sample` lent where it lies, for `subscriber`, when it may be (`Self::offer_sample`).
+    fn lends(&self, subscriber: SubId, sample: &dyn SampleView) -> Option<LentSample> {
+        let shared = self.shared;
+        // SAFETY: written under the session's lock, under which this hold is.
+        let (start, length) = unsafe { *shared.lending.get() }?;
+        // A delivery running now may be the one this sample's own step runs inside of; what waits
+        // in the lane is older and is handed first.
+        if shared.lent_state.load(Ordering::Acquire) != LENT_FREE
+            || shared.delivering.load(Ordering::SeqCst)
+            || shared.owes_a_delivery()
+            || self.open.is_some()
+            || self.published.front().is_some()
+        {
+            return None;
+        }
+        #[cfg(feature = "local-subscriber")]
+        if self.capturing.is_some() {
+            return None;
+        }
+        let inside = |part: &[u8]| {
+            let at = part.as_ptr() as usize;
+            part.is_empty()
+                || (at >= start && at - start <= length && part.len() <= length - (at - start))
+        };
+        let (record, [key, payload, attachment, schema, zid]) = Record::of(sample);
+        if key.len() > caps::MAX_KEYEXPR_BYTES
+            || ![payload, attachment, schema, zid].into_iter().all(inside)
+        {
+            return None;
+        }
+        let mut lent = LentSample {
+            record,
+            key: [0; caps::MAX_KEYEXPR_BYTES],
+            key_len: key.len(),
+            parts: [payload, attachment, schema, zid].map(|part| (part.as_ptr(), part.len())),
+            subscribers: BoundedVec::new_static(),
+        };
+        lent.key[..key.len()].copy_from_slice(key);
+        lent.join(subscriber);
+        Some(lent)
+    }
+
+    /// Publish the sample lent where it lies, if one is open: no subscriber joins it after.
+    fn seal_lent(&mut self) {
+        let shared = self.shared;
+        if shared.lent_state.load(Ordering::Relaxed) == LENT_OPEN {
+            shared.lent_state.store(LENT_READY, Ordering::SeqCst);
+        }
+    }
+
+    /// Publish what this hold leaves open: the sample lent where its datagram lies, and the sample
+    /// the lane holds open for more subscribers. What every hold of the session's lock ends with.
+    pub(crate) fn seal_all(&mut self) {
+        self.seal_lent();
+        self.seal();
+    }
+}
+
+impl Drop for LaneHeld<'_> {
+    fn drop(&mut self) {
+        let shared = self.shared;
+        // SAFETY: as `take_back`, for the producer of `handed`.
+        let mut on = unsafe { shared.handed.producer() };
+        while let Some((slot, offset)) = self.published.front() {
+            let pushed = on.try_push(DeliveryLaneHandle { slot, offset });
+            debug_assert!(
+                pushed.is_ok(),
+                "the delivery lane's queue holds every event slot of the lane"
+            );
+            if pushed.is_err() {
+                break;
+            }
+            self.published.pop();
+            let handed = shared.handed_count.load(Ordering::Relaxed).wrapping_add(1);
+            shared.handed_count.store(handed, Ordering::SeqCst);
+        }
+        let reads = self.takes_a_link_read();
+        shared.reads.store(reads, Ordering::Release);
+    }
+}
+
+/// The deliveries' side of the lane, held by one delivery at a time ([`SharedLane::deliver`]).
+pub(crate) struct LaneDelivery<'a> {
+    shared: &'a SharedLane,
+}
+
+impl LaneDelivery<'_> {
+    /// The oldest sample handed on, where its bytes lie, and the hold on it that gives it back
+    /// when it drops; `None` when none waits.
+    pub(crate) fn take(&self) -> Option<(LaneItem, HeldHead<'_>)> {
+        loop {
+            // SAFETY: this delivery holds `delivering`, so it is the one consumer of `handed`,
+            // and the delivery before it let go of the word before this one's exchange took it.
+            let handle = unsafe { self.shared.handed.consumer() }.try_pop()?;
+            let taken = self
+                .shared
+                .taken_count
+                .load(Ordering::Relaxed)
+                .wrapping_add(1);
+            self.shared.taken_count.store(taken, Ordering::SeqCst);
+            let (slot, offset) = (usize::from(handle.slot), handle.offset as usize);
+            let head = HeldHead {
+                delivery: self,
+                handle: Some(handle),
+            };
+            // SAFETY: the record was written before its handle was pushed, which the pop read in
+            // the push's order, and the lane writes the slot again only once the handle is back.
+            let Some(event) = (unsafe { (*self.shared.record_cell(slot).get()).take() }) else {
+                // A handed slot always has its record; one without is given back at once.
+                continue;
+            };
+            // SAFETY: the sample's bytes lie at `offset` inside the area (`DeliveryLane::reserve`).
+            let base = unsafe { self.shared.area.as_ptr().add(offset) };
+            return Some((LaneItem::of(event, base), head));
+        }
+    }
+
+    /// The sample lent where its datagram lies, when one waits: handed first, as it is older than
+    /// whatever was written into the lane while it waited.
+    pub(crate) fn take_lent(&self) -> Option<LentHeld<'_>> {
+        if self.shared.lent_state.load(Ordering::Acquire) != LENT_READY {
+            return None;
+        }
+        self.shared
+            .lent_state
+            .store(LENT_DELIVERING, Ordering::Relaxed);
+        // SAFETY: a published lent sample is the deliveries', and this delivery holds their side.
+        let Some(lent) = (unsafe { (*self.shared.lent.get()).take() }) else {
+            self.shared.lent_state.store(LENT_FREE, Ordering::Release);
+            return None;
+        };
+        Some(LentHeld {
+            shared: self.shared,
+            lent,
+        })
+    }
+
+    /// The callbacks of the sample of `handle` returned: it goes back to the session.
+    fn give_back(&self, handle: DeliveryLaneHandle) {
+        // SAFETY: this delivery holds `delivering`, so it is the one producer of `returned`.
+        let back = unsafe { self.shared.returned.producer() }.try_push(handle);
+        debug_assert!(
+            back.is_ok(),
+            "the delivery lane's queue holds every event slot of the lane"
+        );
+        #[cfg(feature = "query")]
+        {
+            let done = self
+                .shared
+                .done_count
+                .load(Ordering::Relaxed)
+                .wrapping_add(1);
+            self.shared.done_count.store(done, Ordering::SeqCst);
+        }
+    }
+}
+
+impl Drop for LaneDelivery<'_> {
+    fn drop(&mut self) {
+        self.shared.delivering.store(false, Ordering::SeqCst);
+    }
+}
+
+/// A sample handed to its subscribers' callbacks where the datagram it arrived in lies: its parts
+/// are pointers into the datagram, which the link leaves where it lies while the sample is lent
+/// (`SharedLane::lends_a_datagram`), and its key is copied beside them, since a key resolved from
+/// an alias lies in a frame of the session's dispatch that is gone when the callbacks run.
+pub(crate) struct LentSample {
+    record: Record,
+    key: [u8; caps::MAX_KEYEXPR_BYTES],
+    key_len: usize,
+    /// The payload, the attachment, the encoding's schema and the timestamp's id, where the
+    /// datagram holds them.
+    parts: [(*const u8, usize); 4],
+    subscribers: BoundedVec<SubId, { caps::MAX_SUBSCRIPTIONS }, Static>,
+}
+
+impl LentSample {
+    /// Whether `sample` is this one, offered for another subscriber: the same payload where it
+    /// lies, on the same key.
+    fn is(&self, sample: &dyn SampleView) -> bool {
+        let payload = sample.payload();
+        payload.as_ptr() == self.parts[0].0
+            && payload.len() == self.parts[0].1
+            && sample.keyexpr().as_bytes() == &self.key[..self.key_len]
+    }
+
+    /// One more subscriber is this sample's.
+    fn join(&mut self, subscriber: SubId) {
+        if self.subscribers.contains(&subscriber) {
+            return;
+        }
+        let kept = self.subscribers.push(subscriber);
+        debug_assert!(
+            kept.is_ok(),
+            "a session's subscribers fit the table of them"
+        );
+    }
+
+    /// The `at`th of its parts.
+    fn part(&self, at: usize) -> &[u8] {
+        let (start, length) = self.parts[at];
+        if length == 0 {
+            return &[];
+        }
+        // SAFETY: the part lies in the lent datagram, which the link leaves where it lies while
+        // the sample is lent, and that outlasts every borrow of the sample.
+        unsafe { core::slice::from_raw_parts(start, length) }
+    }
+
+    /// The subscribers whose callbacks it is for, in the order the session offered it to them.
+    pub(crate) fn subscribers(&self) -> impl Iterator<Item = SubId> + '_ {
+        self.subscribers.iter().copied()
+    }
+}
+
+impl SampleView for LentSample {
+    fn keyexpr(&self) -> &str {
+        // SAFETY: the bytes were a `&str`'s (`SampleView::keyexpr`), so they are UTF-8.
+        unsafe { core::str::from_utf8_unchecked(&self.key[..self.key_len]) }
+    }
+
+    fn payload(&self) -> &[u8] {
+        self.part(0)
+    }
+
+    fn kind(&self) -> SampleKind {
+        self.record.kind
+    }
+
+    fn reliability(&self) -> Reliability {
+        self.record.reliability
+    }
+
+    fn qos(&self) -> Option<QosLevel> {
+        self.record.qos
+    }
+
+    fn attachment(&self) -> Option<&[u8]> {
+        self.record.attachment.map(|_| self.part(1))
+    }
+
+    fn source_info(&self) -> Option<&SourceInfo> {
+        self.record.source_info.as_ref()
+    }
+
+    fn timestamp_parts(&self) -> Option<(u64, &[u8])> {
+        self.record.timestamp.map(|(time, _)| (time, self.part(3)))
+    }
+
+    fn encoding_parts(&self) -> Option<(u32, Option<&[u8]>)> {
+        self.record
+            .encoding
+            .map(|(id, schema)| (id, schema.map(|_| self.part(2))))
+    }
+}
+
+/// The sample lent where its datagram lies, held by the delivery that took it
+/// ([`LaneDelivery::take_lent`]); the links are let read again when it drops.
+pub(crate) struct LentHeld<'a> {
+    shared: &'a SharedLane,
+    lent: LentSample,
+}
+
+impl LentHeld<'_> {
+    /// The sample.
+    pub(crate) fn sample(&self) -> &LentSample {
+        &self.lent
+    }
+}
+
+impl Drop for LentHeld<'_> {
+    fn drop(&mut self) {
+        self.shared.lent_state.store(LENT_FREE, Ordering::Release);
+    }
+}
+
+/// A sample a delivery took ([`LaneDelivery::take`]), given back when its callbacks have
+/// returned, or one unwinds.
+pub(crate) struct HeldHead<'d> {
+    delivery: &'d LaneDelivery<'d>,
+    handle: Option<DeliveryLaneHandle>,
+}
+
+impl Drop for HeldHead<'_> {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            self.delivery.give_back(handle);
+        }
     }
 }
 
@@ -1053,6 +1855,37 @@ pub(crate) enum LaneItem {
     /// A reply, for the callback of the leg it answers.
     #[cfg(feature = "query")]
     Reply(LaneReply),
+}
+
+impl LaneItem {
+    /// What `event` is for its callbacks, its bytes at `base`.
+    fn of(event: Event, base: *const u8) -> Self {
+        match event {
+            Event::Sample {
+                record,
+                subscribers,
+            } => Self::Sample(LaneSample {
+                record,
+                subscribers,
+                base,
+            }),
+            #[cfg(feature = "liveliness")]
+            Event::Liveliness {
+                kind,
+                key,
+                token_id,
+                subscribers,
+            } => Self::Liveliness(LaneLiveliness {
+                kind,
+                key,
+                token_id,
+                subscribers,
+                base,
+            }),
+            #[cfg(feature = "query")]
+            Event::Reply(record) => Self::Reply(LaneReply { record, base }),
+        }
+    }
 }
 
 /// A reply at the head of the lane, where its bytes lie: what its leg's callback is handed. Valid
@@ -1315,6 +2148,11 @@ impl MatchFlips {
     pub(crate) fn forget(&mut self, listener: MatchId) {
         self.flips.retain(|(id, _)| *id != listener);
     }
+
+    /// Whether no change is owed.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.flips.is_empty()
+    }
 }
 
 /// The group twin of [`LaneGate`]: whether the lane has the room one record of a group can take
@@ -1323,42 +2161,70 @@ impl MatchFlips {
 /// group's socket. A group's record does not claim that room as a link's does (a debug build's
 /// `SampleLane::offering_gated`): the room of a group's batch is not one the lane is lengthened
 /// to hold.
+///
+/// # Safety
+/// The gate it answers is asked by the session's step alone, under the session's lock, as the
+/// group's transport is driven.
 #[cfg(feature = "group")]
-pub(crate) fn takes_a_group_read(
-    lane: Arc<Mutex<SampleLane>>,
+pub(crate) unsafe fn takes_a_group_read(
+    lane: Arc<SharedLane>,
     room: ReadRoom,
 ) -> impl Fn() -> bool + 'static {
-    move || lane.lock().takes_a_read(room)
+    // SAFETY: the caller's contract: the session's lock is held whenever this is asked.
+    move || unsafe { lane.held() }.takes_a_read(room)
 }
 
 /// `pump`, which gives the session nothing while the lane has not the room one record can take
 /// (`room`, decision Q4): not the next datagram, and not the next record of one the link keeps.
 /// What the peer sends meanwhile waits in the link, and the transport's flow control carries the
-/// wait back to it.
+/// wait back to it. The gate is asked before every datagram and every further record, so it reads
+/// the room from the word the lane's holder leaves ([`SharedLane::takes_a_link_read`]) and takes
+/// no lock; only when the word says no room does it hold the lane, to take back what the
+/// deliveries have given back since, which it may: it is asked under the session's lock.
 pub(crate) struct LaneGate<P> {
     pump: P,
-    lane: Arc<Mutex<SampleLane>>,
-    room: ReadRoom,
+    lane: Arc<SharedLane>,
 }
 
 impl<P> LaneGate<P> {
-    pub(crate) fn new(pump: P, lane: Arc<Mutex<SampleLane>>, room: ReadRoom) -> Self {
-        Self { pump, lane, room }
+    /// `pump`, gated by `lane` for the room `room` of one of its records, which the lane is told
+    /// once here.
+    ///
+    /// # Safety
+    /// Made under the session's lock, and asked by the session's step alone, which holds it.
+    pub(crate) unsafe fn new(pump: P, lane: Arc<SharedLane>, room: ReadRoom) -> Self {
+        // SAFETY: the caller's contract: the session's lock is held.
+        unsafe { lane.held() }.gate_links(room);
+        Self { pump, lane }
     }
 
-    /// Whether the link's input is held back: the lane has not the room of a record.
+    /// Whether the link's input is held back: the lane has not the room of a record, once what
+    /// the deliveries gave back is taken back.
     fn shut(&self) -> bool {
-        !self.lane.lock().takes_a_read(self.room)
+        if self.lane.lends_a_datagram() {
+            return true;
+        }
+        if self.lane.takes_a_link_read() {
+            return false;
+        }
+        // SAFETY: asked by the session's step alone, under the session's lock (`Self::new`).
+        !unsafe { self.lane.held() }.takes_a_link_read()
     }
 }
 
 impl<P: SessionDatagramLink> SessionDatagramLink for LaneGate<P> {
+    /// A link whose datagram a sample is lent from is not serviced: its stack may read the next
+    /// datagram into the buffer the sample lies in.
     fn service(&self) {
-        self.pump.service()
+        if !self.lane.lends_a_datagram() {
+            self.pump.service()
+        }
     }
 
     fn service_within(&self, max_wait_ms: u64) {
-        self.pump.service_within(max_wait_ms)
+        if !self.lane.lends_a_datagram() {
+            self.pump.service_within(max_wait_ms)
+        }
     }
 
     fn uses_wake_budget(&self) -> bool {
@@ -1372,11 +2238,25 @@ impl<P: SessionDatagramLink> SessionDatagramLink for LaneGate<P> {
         self.pump.try_recv()
     }
 
+    /// The datagram is lent to the session's step; a link that leaves it where it lies until it
+    /// is next asked to receive tells the lane where it lies while it is lent, so a sample of it
+    /// may be handed to its callback there (`LaneHeld::offer_sample`).
     fn recv_with(&self, f: &mut dyn FnMut(&[u8])) -> bool {
         if self.shut() {
             return false;
         }
-        self.pump.recv_with(f)
+        if !self.pump.lends_until_next_receive() {
+            return self.pump.recv_with(f);
+        }
+        self.pump.recv_with(&mut |datagram: &[u8]| {
+            // SAFETY: a link's gate is asked by the session's step alone, under the session's
+            // lock (`Self::new`), and the link leaves the bytes where they lie until it is next
+            // asked to receive or to be serviced, which it is not while a sample is lent.
+            unsafe { self.lane.set_lending(Some(datagram)) };
+            f(datagram);
+            // SAFETY: as above.
+            unsafe { self.lane.set_lending(None) };
+        })
     }
 
     /// A link that ended is told to the session after what it queued before the end was read, and

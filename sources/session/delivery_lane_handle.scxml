@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  What a session's delivery lane (wz-capi-coop `lane`) hands from the step that writes a sample
+  to the delivery that runs its callbacks, and back again once they have returned: the element of
+  `delivery_lane_queue.scxml`.
+
+  slot   - the event slot the sample holds, below the build's DELIVERY_LANE_EVENTS; the lane keeps
+           the sample's record (its kind, reliability, QoS, source, part lengths) at that slot.
+  offset - where the sample's bytes start in the lane's byte area, below DELIVERY_LANE_BYTES.
+
+  The record itself does not ride in the queue: it holds a source info and a variant per kind,
+  which a queue element of scalars cannot, so the handle names where it waits and the queue's
+  hand-off hands the slot over with it. The consumer checks both widths against the build's limits
+  at compile time.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="codec" sce:default-endian="little" name="delivery_lane_handle">
+  <datamodel>
+    <data id="slot" sce:type="uint16" sce:byte="0" sce:bit-size="16"/>
+    <data id="offset" sce:type="uint32" sce:byte="2" sce:bit-size="32"/>
+  </datamodel>
+</scxml>

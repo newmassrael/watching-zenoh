@@ -100,6 +100,9 @@ wz-runtime-coop = { path = "../wz-runtime-coop", default-features = false, featu
 # 64-bit atomic, a critical section where it has not (a Cortex-M7 has 32-bit atomics only). The
 # same features as wz-runtime-coop's, so the two resolve to one build of it.
 portable-atomic = { version = "1", default-features = false, features = ["fallback", "critical-section"] }
+# The queues of the delivery lane (`lane::SharedLane`), generated from their SCE document into
+# `out/wz-capi-coop/`, name the runtime's queue and codec types.
+sce-forge-runtime = { path = "../../vendor/sce/backends/rust/forge-runtime", default-features = false }
 # The dialler's endpoint reader and the application layer's dispatch.
 wz-session-mcu = { path = "../wz-session-mcu", default-features = false, features = [
     "alloc",

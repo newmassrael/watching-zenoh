@@ -69,6 +69,16 @@ mod host {
         std::thread::current().id()
     }
 
+    /// The calling thread's identity as a word, never 0, which no other thread has while this one
+    /// runs: what an atomic can hold where [`ThreadId`] cannot. The address of a thread-local of
+    /// this thread's, as `std` gives a thread's id no number.
+    pub fn current_word() -> usize {
+        std::thread_local! {
+            static WORD: u8 = const { 0 };
+        }
+        WORD.with(|word| core::ptr::from_ref(word) as usize)
+    }
+
     /// A thread [`spawn`] started, until it is joined.
     pub struct JoinHandle(std::thread::JoinHandle<()>);
 
@@ -226,6 +236,12 @@ mod kernel {
     pub fn current() -> ThreadId {
         // SAFETY: the image's contract (module doc): no argument, any thread.
         ThreadId(unsafe { wz_os_thread_current() })
+    }
+
+    /// The calling thread's identity as a word, never 0, which no other thread has while this one
+    /// runs: the kernel's handle of it.
+    pub fn current_word() -> usize {
+        current().0
     }
 
     /// A thread [`spawn`] started, until it is joined.
@@ -482,6 +498,12 @@ mod sys {
     /// The calling thread's identity.
     pub fn current() -> ThreadId {
         ThreadId(wz_host_sync::current_thread())
+    }
+
+    /// The calling thread's identity as a word, never 0, which no other thread has while this one
+    /// runs: the system's number of it.
+    pub fn current_word() -> usize {
+        current().0
     }
 
     /// A thread [`spawn`] started, until it is joined.
@@ -787,6 +809,27 @@ mod tests {
         handle.join();
         assert_ne!(here, there, "the spawned thread has an identity of its own");
         assert_eq!(current(), here);
+    }
+
+    /// A thread's word is the same each time it asks, is never 0, and is not a word another
+    /// thread running beside it has.
+    #[test]
+    fn a_threads_word_is_its_own_while_it_runs() {
+        let here = current_word();
+        assert_ne!(here, 0);
+        assert_eq!(current_word(), here, "the same thread, the same word");
+        let (tell, told) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let beside = std::thread::spawn(move || {
+            tell.send(current_word()).expect("the test waits");
+            // Kept running while the test compares, so its word is a live thread's.
+            let _ = released.recv_timeout(std::time::Duration::from_secs(3));
+        });
+        let there = told.recv().expect("the thread's word");
+        assert_ne!(there, 0);
+        assert_ne!(there, here, "a thread running beside has a word of its own");
+        release.send(()).expect("the thread waits");
+        beside.join().expect("the thread");
     }
 
     #[test]

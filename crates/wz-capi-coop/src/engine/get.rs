@@ -25,14 +25,13 @@
 
 use alloc::sync::Arc;
 
-use wz_capi_port::os::Mutex;
 use wz_session_core::bounded::{BoundedVec, Lent};
 
 use wz_session_core::reply_sink::{BoxedReplySink, ReplyView};
 
-use crate::lane::SampleLane;
+use crate::lane::SharedLane;
 
-use super::lock;
+use super::queued::{Pending, Queued};
 use super::registry::{FaceId, Registry};
 
 /// The legs whose entries went and whose callbacks are still to be dropped, a row for each get the
@@ -72,18 +71,24 @@ impl EndedLegs {
     }
 }
 
+impl Pending for EndedLegs {
+    fn is_pending(&self) -> bool {
+        !self.legs.is_empty()
+    }
+}
+
 /// What the get plane shares between the session's state, the observer's reply sinks and the
 /// deliveries.
 pub(super) struct GetPlane {
     /// The legs that ended, handed out after the replies queued before them.
-    pub(super) ended: Mutex<EndedLegs>,
+    pub(super) ended: Queued<EndedLegs>,
 }
 
 impl GetPlane {
     /// A plane with nothing ended, its ends waiting in `ended`.
     pub(super) fn new(ended: EndedLegs) -> Self {
         Self {
-            ended: Mutex::new(ended),
+            ended: Queued::new(ended),
         }
     }
 }
@@ -134,7 +139,7 @@ struct LegEnd {
 
 impl Drop for LegEnd {
     fn drop(&mut self) {
-        lock(&self.plane.ended).note(self.leg);
+        self.plane.ended.lock().note(self.leg);
     }
 }
 
@@ -144,7 +149,7 @@ impl Drop for LegEnd {
 pub(super) fn reply_sink(
     leg: u64,
     plane: &Arc<GetPlane>,
-    lane: &Arc<Mutex<SampleLane>>,
+    lane: &Arc<SharedLane>,
 ) -> BoxedReplySink {
     let lane = Arc::clone(lane);
     let end = LegEnd {
@@ -153,7 +158,8 @@ pub(super) fn reply_sink(
     };
     BoxedReplySink::new(
         move |view: &dyn ReplyView| {
-            lock(&lane).offer_reply(leg, view);
+            // SAFETY: the registry hands its sinks a reply under the session's lock.
+            unsafe { lane.held() }.offer_reply(leg, view);
         },
         move |_rid| {
             // Owned by this closure so it is dropped with the sink.

@@ -283,8 +283,10 @@ pub(crate) struct QueryMarshal {
     source_info: Option<crate::pubsub::z_source_info_t>,
     /// The query's ENCODING, if it carried one. Unlike the payload this stays
     /// an `Option`, because `z_query_encoding` hands back a POINTER and pico
-    /// distinguishes "no encoding" from "the default encoding".
-    encoding: Option<crate::encoding::z_owned_encoding_t>,
+    /// distinguishes "no encoding" from "the default encoding". Held in the
+    /// marshal and pointed at by `loaned_encoding` once [`Self::bind`] runs, so
+    /// it is let go of with the marshal and costs no allocation of its own.
+    encoding: Option<crate::encoding::EncodingState>,
     /// The query's value payload, EMPTY when the query carried no value ext.
     ///
     /// There is deliberately no `has_payload` companion. pico's
@@ -301,6 +303,7 @@ pub(crate) struct QueryMarshal {
     loaned_keyexpr: z_loaned_keyexpr_t,
     loaned_payload: z_loaned_bytes_t,
     loaned_attachment: z_loaned_bytes_t,
+    loaned_encoding: crate::encoding::z_loaned_encoding_t,
     /// The request id this query answers — the correlator a DEFERRED reply and
     /// the terminator both need, and the one piece of the query that is not
     /// reachable through any accessor.
@@ -375,12 +378,9 @@ impl QueryMarshal {
             // R311y529 — owned, for the same reason the payload is: the view's
             // borrow ends when the dispatch returns and the C callback holds
             // its borrowed query for the whole call.
-            encoding: view.encoding().map(|hint| {
-                let mut owned = crate::encoding::z_owned_encoding_t::null_value();
-                // SAFETY: `owned` is a live slot this call fills.
-                unsafe { crate::encoding::store_encoding(&mut owned, hint.clone()) };
-                owned
-            }),
+            encoding: view
+                .encoding()
+                .map(|hint| crate::encoding::EncodingState { hint: hint.clone() }),
             // R311y559 — carried through the SAME projection the sample plane
             // uses, so a `(zid, eid, sn)` read off a query and one read off a
             // sample cannot render differently.
@@ -394,6 +394,7 @@ impl QueryMarshal {
                 handle: core::ptr::null_mut(),
                 _pad: [core::ptr::null_mut(); 3],
             },
+            loaned_encoding: crate::encoding::z_loaned_encoding_t::unbound(),
             rid: view.rid(),
             qos: view.qos(),
             holder: None,
@@ -436,8 +437,9 @@ impl QueryMarshal {
             encoding: self
                 .encoding
                 .as_ref()
-                // SAFETY: `encoding` is an owned encoding this crate stored.
-                .map(|owned| unsafe { crate::encoding::clone_owned_encoding(owned) }),
+                .map(|state| crate::encoding::EncodingState {
+                    hint: state.hint.clone(),
+                }),
             source_info: self.source_info,
             payload: self.payload.clone(),
             attachment: self.attachment.clone(),
@@ -450,6 +452,7 @@ impl QueryMarshal {
                 handle: core::ptr::null_mut(),
                 _pad: [core::ptr::null_mut(); 3],
             },
+            loaned_encoding: crate::encoding::z_loaned_encoding_t::unbound(),
             rid: self.rid,
             qos: self.qos,
             // The COPY is the escaped end of the chain: it carries the held query,
@@ -490,6 +493,10 @@ impl QueryMarshal {
         self.loaned_payload.handle = &self.payload as *const crate::bytes::ByteBuf as *mut c_void;
         self.loaned_attachment.handle =
             &self.attachment as *const crate::bytes::ByteBuf as *mut c_void;
+        if let Some(encoding) = self.encoding.as_ref() {
+            self.loaned_encoding.handle =
+                encoding as *const crate::encoding::EncodingState as *mut c_void;
+        }
     }
 
     /// Append a reply the C callback asked for.
@@ -1692,10 +1699,10 @@ pub unsafe extern "C" fn z_query_encoding(
         return core::ptr::null();
     }
     let marshal = &*(query as *const QueryMarshal);
-    match marshal.encoding.as_ref() {
-        Some(encoding) => encoding as *const _ as *const crate::encoding::z_loaned_encoding_t,
-        None => core::ptr::null(),
+    if marshal.encoding.is_none() {
+        return core::ptr::null();
     }
+    &marshal.loaned_encoding as *const crate::encoding::z_loaned_encoding_t
 }
 
 /// The `(zid, eid)` identity behind a loaned queryable, for
@@ -2164,5 +2171,101 @@ mod tests {
             ],
             "a reply made with is_express set is express, and one made with no options is not"
         );
+    }
+
+    /// A query whose value carries an encoding with a schema.
+    struct EncodedQuery {
+        encoding: wz_session_core::sample::EncodingHint,
+    }
+
+    impl QueryView for EncodedQuery {
+        fn keyexpr(&self) -> &str {
+            "demo/encoded"
+        }
+        fn parameters(&self) -> Option<&[u8]> {
+            None
+        }
+        fn attachment(&self) -> Option<&[u8]> {
+            None
+        }
+        fn payload(&self) -> Option<&[u8]> {
+            Some(b"x")
+        }
+        fn encoding(&self) -> Option<&wz_session_core::sample::EncodingHint> {
+            Some(&self.encoding)
+        }
+        fn rid(&self) -> wz_session_core::wire_id::RequestId {
+            7
+        }
+        fn qos(&self) -> wz_session_core::sample::QosLevel {
+            wz_session_core::sample::QosLevel::DEFAULT
+        }
+    }
+
+    /// A hold that answers nothing: the kept copy below is never replied on.
+    struct NoHold;
+
+    impl HeldQuery for NoHold {
+        fn reply(&self, _answer: &mut dyn FnMut(&mut dyn ReplyOut)) {}
+    }
+
+    /// The encoding a query carried is held in its marshal: the loaned encoding
+    /// `z_query_encoding` hands out points inside the marshal, so the query's encoding took no
+    /// allocation of its own and goes with the marshal, and it reads what the view carried. A
+    /// query kept past its callback holds an encoding of its own, which reads the same once the
+    /// marshal it was copied from is gone; a query that carried none hands out none.
+    #[test]
+    fn a_querys_encoding_is_held_in_its_marshal() {
+        let view = EncodedQuery {
+            encoding: wz_session_core::sample::EncodingHint {
+                packed_id: 7,
+                schema: Some(b"utf8".to_vec()),
+            },
+        };
+        let mut marshal = QueryMarshal::new(&view);
+        marshal.bind();
+        let query = &marshal as *const QueryMarshal as *const z_loaned_query_t;
+        // SAFETY: a query this crate marshalled and bound.
+        let loaned = unsafe { z_query_encoding(query) };
+        assert!(!loaned.is_null(), "the query carried an encoding");
+        // SAFETY: the loaned encoding the accessor handed out, of the live marshal.
+        let handle = unsafe { (*loaned).handle } as usize;
+        let start = &marshal as *const QueryMarshal as usize;
+        assert!(
+            (start..start + core::mem::size_of::<QueryMarshal>()).contains(&handle),
+            "the encoding lies in the marshal, not in a box of its own"
+        );
+        // SAFETY: as above.
+        let hint = unsafe { crate::encoding::encoding_hint(loaned) }.expect("bound");
+        assert_eq!(
+            (hint.packed_id, hint.schema.as_deref()),
+            (7, Some(&b"utf8"[..]))
+        );
+
+        let held: Box<dyn HeldQuery> = Box::new(NoHold);
+        let mut kept = marshal.deep_copy_deferred(held);
+        drop(marshal);
+        kept.bind();
+        let kept_query = &kept as *const QueryMarshal as *const z_loaned_query_t;
+        // SAFETY: the kept copy, bound at its final address.
+        let kept_loaned = unsafe { z_query_encoding(kept_query) };
+        // SAFETY: the loaned encoding of the live copy.
+        let kept_hint = unsafe { crate::encoding::encoding_hint(kept_loaned) }.expect("kept");
+        assert_eq!(
+            (kept_hint.packed_id, kept_hint.schema.as_deref()),
+            (7, Some(&b"utf8"[..]))
+        );
+
+        let plain = FakeQuery {
+            keyexpr: "demo/plain".to_owned(),
+            payload: Vec::new(),
+            attachment: Vec::new(),
+        };
+        let mut none = QueryMarshal::new(&plain);
+        none.bind();
+        let none_query = &none as *const QueryMarshal as *const z_loaned_query_t;
+        // SAFETY: a query this crate marshalled and bound.
+        let carried = unsafe { z_query_encoding(none_query) };
+        assert!(carried.is_null(), "no encoding carried, none handed out");
     }
 }

@@ -824,6 +824,7 @@ name = "wz-capi-coop"
 version = "0.1.0"
 dependencies = [
  "portable-atomic",
+ "sce-forge-runtime",
  "wz-capi-port",
  "wz-runtime-coop",
  "wz-session-core",
