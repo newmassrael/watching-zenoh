@@ -70,7 +70,7 @@ use wz_runtime_coop::session_drive::LinkListener;
 use wz_runtime_coop::session_drive::LinkOpenError;
 use wz_runtime_coop::session_drive::{
     spawn_session_with_router, wait_any, AndRoom, LinkReadiness, LinkWritability, OpenedLink,
-    PendingDial, SessionDatagramLink, SessionDriveConfig, SessionLinks, SessionRole,
+    PendingDial, RxLease, SessionDatagramLink, SessionDriveConfig, SessionLinks, SessionRole,
 };
 use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTime};
 use wz_session_core::byte_cells::LentByteCells;
@@ -308,6 +308,9 @@ fn ended_by_clock_moves(wait: IdleWait, moves: Option<&ClockMovesWord>) -> IdleW
             waits.push(moves.moved());
             IdleWait::Input(waits, ms)
         }
+        // Made only for a session whose clock moves by itself (`Core::lend_rx_of`): a read the
+        // link waits in cannot be ended by the word.
+        read @ IdleWait::Read(..) => read,
     }
 }
 
@@ -741,6 +744,24 @@ pub(crate) struct Takes {
     pub(crate) callbacks: core::sync::atomic::AtomicUsize,
     /// The turns a droppable publish spun on a held session before it tried the session again.
     pub(crate) spins: core::sync::atomic::AtomicUsize,
+    /// The reads whose wait was a wait on the readiness of the session's links and ports, which
+    /// the step's read follows.
+    pub(crate) polls: core::sync::atomic::AtomicUsize,
+    /// The reads whose wait was made in the read of the one link's buffer ([`IdleWait::Read`]).
+    pub(crate) owner_reads: core::sync::atomic::AtomicUsize,
+}
+
+#[cfg(test)]
+impl Takes {
+    /// Count the wait a read is about to make.
+    fn wait(&self, wait: &IdleWait) {
+        let counter = match wait {
+            IdleWait::Input(..) => &self.polls,
+            IdleWait::Read(..) => &self.owner_reads,
+            IdleWait::None | IdleWait::Sleep(_) => return,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// The session state no other thread may touch while one does; see the module doc.
@@ -758,8 +779,9 @@ pub(crate) struct LinkRooms(Mutex<Vec<(FaceId, Weak<dyn LinkWritability>)>>);
 /// faces its holder waits on and still sent to the others ([`CoopEngine::live_to_publish`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Room {
-    /// Every face asked takes bytes, or the holder is a publish between its sends: whoever holds
-    /// the session is not waiting on a face, and the session is tried again.
+    /// Every face asked takes bytes, or the holder is a publish between its sends or a read
+    /// working out its wait: whoever holds the session is not waiting on a face, and the session
+    /// is tried again.
     Free,
     /// Nothing was asked: what holds the session is not a publish (a read step, a timer, the
     /// drive), which lets go of it once its step is done, and the queue profile drops a message
@@ -785,6 +807,10 @@ const NOT_SENDING: FaceId = 0;
 /// faces up from 1 one at a time.
 const PUBLISHING: FaceId = FaceId::MAX;
 
+/// What [`CoopEngine`]'s `sending_on` holds while a read holds the session to work out its wait
+/// (and lend its one link's buffer to it): no face has the id either.
+const WAITING: FaceId = FaceId::MAX - 1;
+
 /// Who holds the session, as a droppable publish that finds it held reads it ([`SendingOn`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Holder {
@@ -792,6 +818,8 @@ pub(crate) enum Holder {
     Step,
     /// A publish, between its sends.
     Publish,
+    /// A read working out its wait: it holds no send, and lets go within its take.
+    Waiting,
     /// A send on this face, a publish's or what a read step sends of the legs handed to it.
     Sending(FaceId),
 }
@@ -834,9 +862,13 @@ impl LinkRooms {
     /// asks nothing: on the face a send holds it is dropped at once ([`Room::Held`]), as pico's
     /// try-lock fails on a transmit lock another send holds; behind a publish between its sends it
     /// tries the session again ([`Room::Free`]); and behind a holder that is not a publish it waits
-    /// for the session ([`Room::Stepping`]).
+    /// for the session ([`Room::Stepping`]). Behind a read working out its wait both profiles try
+    /// the session again, asking nothing.
     pub(crate) fn for_held(&self, held_drop: HeldDrop, holder: Holder, wait_us: u64) -> Room {
         match (held_drop, holder) {
+            // Under either profile: a read working out its wait waits on no face and lets go in a
+            // moment, so no link is asked for room and nothing blocks on the session's lock.
+            (_, Holder::Waiting) => Room::Free,
             (HeldDrop::WaitForRoom, _) => self.within(wait_us),
             (HeldDrop::DropAtOnce, Holder::Sending(face)) => Room::Held(face),
             (HeldDrop::DropAtOnce, Holder::Publish) => Room::Free,
@@ -1327,6 +1359,10 @@ struct Wire<C: ClockSource + 'static> {
     actions: Rc<McuActions<C>>,
     task: CoopLocalJoinHandle<DriverOutcome>,
     link: Rc<dyn SessionDatagramLink>,
+    /// The same link under its gates, which lends a read's wait its receive buffer
+    /// ([`SessionDatagramLink::lend_rx`]): the gates hold back what the session is handed, and a
+    /// read into the buffer hands the session nothing; the step that follows reads through them.
+    ungated: Rc<dyn SessionDatagramLink>,
     readiness: Option<Arc<dyn LinkReadiness>>,
     /// The wait for room on the link, held for as long as the wire is: the session's
     /// [`LinkRooms`] holds it weakly once the face is up.
@@ -1349,25 +1385,55 @@ enum IdleWait {
     /// at most this many milliseconds. Each wait is held for as long as the wait is, so the
     /// descriptor it names stays the link's.
     Input(Vec<Arc<dyn LinkReadiness>>, u32),
+    /// The next input of the one link waited on, read into that link's own buffer by a read that
+    /// waits in itself for at most this many milliseconds: the link of this face lent the buffer
+    /// ([`SessionDatagramLink::lend_rx`]), and takes it back with what the read brought before the
+    /// step reads it ([`Core::waited`]). One call where a wait and the read after it are two, as
+    /// zenoh-pico's read task waits in its socket's `recv`
+    /// (`vendor/zenoh-pico/src/transport/unicast/read.c` @ `_z_unicast_client_read`).
+    Read(FaceId, RxLease, u32),
     /// Nothing to wait on: the next dial, or the next look at a port that gives no wait, for at
     /// most this many milliseconds.
     Sleep(u32),
 }
 
+/// What a read's wait leaves the step after it ([`Core::waited`]): the buffer of an `Input` wait,
+/// emptied, for the session to keep, and the lease a `Read` wait was made in, with what its read
+/// brought, for its link to take back.
+struct Waited {
+    spare: Vec<Arc<dyn LinkReadiness>>,
+    read: Option<(FaceId, RxLease)>,
+}
+
 impl IdleWait {
-    /// Wait, and hand back the buffer of an `Input` wait emptied, for the session to keep
-    /// ([`Core::give_back_waits`]); none for a wait that had none.
-    fn wait(self) -> Vec<Arc<dyn LinkReadiness>> {
+    /// Wait, and hand back what the wait leaves ([`Waited`]).
+    fn wait(self) -> Waited {
         match self {
-            IdleWait::None => Vec::new(),
+            IdleWait::None => Waited {
+                spare: Vec::new(),
+                read: None,
+            },
             IdleWait::Input(mut waits, ms) => {
                 wait_any(&waits, ms);
                 waits.clear();
-                waits
+                Waited {
+                    spare: waits,
+                    read: None,
+                }
+            }
+            IdleWait::Read(face, mut lease, ms) => {
+                lease.read(ms);
+                Waited {
+                    spare: Vec::new(),
+                    read: Some((face, lease)),
+                }
             }
             IdleWait::Sleep(ms) => {
                 os::sleep_ms(ms.into());
-                Vec::new()
+                Waited {
+                    spare: Vec::new(),
+                    read: None,
+                }
             }
         }
     }
@@ -1937,6 +2003,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let _ = endpoint;
         let readiness = pump.readiness().map(Arc::from);
         let writability = pump.writability().map(Arc::from);
+        // Kept beside its gates, for a read's wait to be lent its buffer by.
+        let pump = Rc::new(pump);
+        let ungated: Rc<dyn SessionDatagramLink> = pump.clone();
         // The link gives the session nothing between its handshake and the face table's decision
         // (`admit`), so a link that is refused has put nothing in the tables.
         #[cfg(feature = "listen")]
@@ -2007,6 +2076,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             actions,
             task,
             link,
+            ungated,
             readiness,
             writability,
             #[cfg(feature = "listen")]
@@ -2915,17 +2985,21 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // own loop, beside links that do not, and a port that gives no wait.
         let mut own_loop = false;
         let mut dial_left_ms = None;
+        // A link waited on for its input alone, which its owner may read in place of the wait
+        // when it is the one thing waited on.
+        let mut read_face = None;
         for face in &self.faces {
             match &face.link {
                 Link::Up(wire) | Link::Opening { wire, .. } => {
                     if wire.link.holds_input() {
                         holds = true;
                     } else if let Some(ready) = &wire.readiness {
-                        waits.push(if wire.link.owes_write() {
-                            AndRoom::of(ready.clone())
+                        if wire.link.owes_write() {
+                            waits.push(AndRoom::of(ready.clone()));
                         } else {
-                            ready.clone()
-                        });
+                            waits.push(ready.clone());
+                            read_face = Some(face.id);
+                        }
                     } else {
                         own_loop = true;
                     }
@@ -2977,14 +3051,22 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 _ => IdleWait::None,
             },
             // The links that give a wait are waited on together, for no longer than a look when
-            // something beside them cannot be waited on.
+            // something beside them cannot be waited on. One link waited on for its input, with
+            // nothing beside it, is read in place of the wait where it lends its buffer.
             (false, _) if most > 0 => {
+                let lent = match (read_face, waits.len(), own_loop || look_again) {
+                    (Some(face), 1, false) => self.lend_rx_of(face),
+                    _ => None,
+                };
                 let most = if own_loop || look_again {
                     most.min(1)
                 } else {
                     most
                 };
-                IdleWait::Input(core::mem::take(&mut waits), most)
+                match lent {
+                    Some((face, lease)) => IdleWait::Read(face, lease, most),
+                    None => IdleWait::Input(core::mem::take(&mut waits), most),
+                }
             }
             _ => IdleWait::None,
         };
@@ -3001,6 +3083,44 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     fn give_back_waits(&mut self, spare: Vec<Arc<dyn LinkReadiness>>) {
         if spare.capacity() > self.waits.capacity() {
             self.waits = spare;
+        }
+    }
+
+    /// Take back what a read's wait left ([`Waited`]): the buffer of its waits, and the lease its
+    /// read was made in, landed on the link of the face that lent it, so the step that follows
+    /// reads what it brought. A lease whose face has gone, or holds another link by now, is let go
+    /// of: the link that lent it went with its buffer, and another link takes nothing of it.
+    fn waited(&mut self, waited: Waited) {
+        self.give_back_waits(waited.spare);
+        let Some((face, lease)) = waited.read else {
+            return;
+        };
+        if let Some(Link::Up(wire) | Link::Opening { wire, .. }) = self
+            .faces
+            .iter()
+            .find(|held| held.id == face)
+            .map(|held| &held.link)
+        {
+            wire.ungated.land_rx(lease);
+        }
+    }
+
+    /// The lease of the receive buffer of face `face`'s link, for a read's wait to be made in the
+    /// read of that link ([`IdleWait::Read`]); `None` from a link that gives none. None either
+    /// while a sample lies in a datagram a link lent (`SharedLane::lends_a_datagram`): the lend
+    /// moves what the buffer holds, which the lane's gate holds every link back from until the
+    /// sample's callbacks are done. Nor for a session whose clock the program moves, whose word
+    /// must end the wait and cannot end a read.
+    fn lend_rx_of(&self, face: FaceId) -> Option<(FaceId, RxLease)> {
+        if self.config.clock_moves.is_some() || self.lane.lends_a_datagram() {
+            return None;
+        }
+        let held = self.faces.iter().find(|held| held.id == face)?;
+        match &held.link {
+            Link::Up(wire) | Link::Opening { wire, .. } => {
+                wire.ungated.lend_rx().map(|lease| (face, lease))
+            }
+            _ => None,
         }
     }
 
@@ -3393,8 +3513,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             // Open once the dial's link is up, or once the node it reached is held by a face that
             // came first (a peer that listens and dials its own listener's peer).
             while !core.dial_settled() {
-                let spare = core.idle_wait().wait();
-                core.give_back_waits(spare);
+                let waited = core.idle_wait().wait();
+                core.waited(waited);
                 core.local.run_until_idle();
                 let now_us = core.now_us();
                 core.poll_links(None, now_us)?;
@@ -3700,6 +3820,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         match self.sending_on.load(Ordering::SeqCst) {
             NOT_SENDING => Holder::Step,
             PUBLISHING => Holder::Publish,
+            WAITING => Holder::Waiting,
             face => Holder::Sending(face),
         }
     }
@@ -3709,6 +3830,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn holding_as_a_step(&self, held: impl FnOnce()) {
         let _core = self.live();
+        held();
+    }
+
+    /// Run `held` while holding the session as a read working out its wait holds it.
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn holding_as_a_read_wait(&self, held: impl FnOnce()) {
+        let _core = self.live();
+        let _waiting = SendingOn::enter(&self.sending_on, WAITING);
         held();
     }
 
@@ -6390,17 +6519,24 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         let wait = if self.input_held.swap(false, Ordering::Relaxed) {
             IdleWait::None
         } else {
-            self.live()
-                .map_or(IdleWait::None, |mut core| core.0.idle_wait())
+            // Marked as a holder that holds no send, so a droppable publish that finds the session
+            // held for the wait tries it again at once (`LinkRooms::for_held`): the mark is let go
+            // before the session is.
+            self.live().map_or(IdleWait::None, |mut core| {
+                let _waiting = SendingOn::enter(&self.sending_on, WAITING);
+                core.0.idle_wait()
+            })
         };
-        let spare = wait.wait();
+        #[cfg(test)]
+        self.takes.wait(&wait);
+        let waited = wait.wait();
         // One pass of the session's task reads what its link holds, a batch at a time, and does
         // what is due: `single` asks for one message, and a pass is the least this engine reads.
         // One take of the session for the step: its links, what publishes handed to it, and
         // whether a periodic job is due by the clock reading the step made.
         let (stepped, handed, jobs_due_ms) = match self.live() {
             Some(mut core) => {
-                core.0.give_back_waits(spare);
+                core.0.waited(waited);
                 let stepped = self.step(&mut core.0);
                 self.input_held
                     .store(stepped.is_some() && core.0.holds_input(), Ordering::Relaxed);
