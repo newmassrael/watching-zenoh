@@ -1304,7 +1304,7 @@ type OpenResult = (FaceId, AcceptedPeer, Result<OpenedSession, OpenError>);
 /// A boxed face-open future — the `opening` set's element type. Boxed `dyn
 /// Future` because the open SOURCES, [`dial_face`] (dial), an accept the intake
 /// has finished (`intake`, which runs [`open_face`]) and a parked link
-/// ([`admit_parked`]), are distinct future types that must share one
+/// ([`FaceLoop::admit_parked`]), are distinct future types that must share one
 /// [`FuturesUnordered`]; one heap alloc per open is negligible beside the
 /// handshake it wraps. No `Send` bound — the loop itself is single-task `!Send`
 /// (see the module doc).
@@ -1319,25 +1319,6 @@ struct ParkedOpen {
     peer: AcceptedPeer,
     opened: OpenedSession,
     accepted: bool,
-}
-
-/// Admit a parked link now that the face it replaces has left, through the door a new link comes
-/// in by: it is the same open, completed, and meets the checks of any other (the bounds, the
-/// region rules, the peer's machine) at the moment it is admitted and not at the moment it was
-/// parked.
-fn admit_parked(
-    parked: ParkedOpen,
-    opening: &mut FuturesUnordered<OpenFuture>,
-    accepted_ids: &mut std::collections::BTreeSet<FaceId>,
-) {
-    if parked.accepted {
-        accepted_ids.insert(parked.id);
-    }
-    opening.push(Box::pin(std::future::ready((
-        parked.id,
-        parked.peer,
-        Ok(parked.opened),
-    ))));
 }
 
 /// R311y205 (transport-multilink) — the `driving` set's boxed element type in an
@@ -1980,72 +1961,6 @@ impl RetainedLink {
 #[cfg(feature = "transport-multilink")]
 type LinkRedialKey = (MeshDialKey, FaceId);
 
-/// R311y212 (transport-multilink) — schedule a re-dial + re-JOIN of a dropped
-/// aggregated link this node DIALED (its own substrate, NOT gated on the loop's
-/// peers, `routing-peer`). Unlike a configured endpoint, which the loop's
-/// peers hold by its connection machine ([`crate::loop_peers`]), every retained
-/// multilink link is permanently wanted while its session lives. R311y786 — its
-/// waits come from a [`RedialSchedule`] keyed by LINK ([`RetainedLink::redial_key`]),
-/// so of N links to one address each grows and resets its own wait. Re-keys the
-/// retained link to a fresh [`FaceId`] BEFORE
-/// the backoff (so the re-add is tracked across the drop->redial gap and the Err
-/// arm can retry it), carrying the DEAD link's QoS-priority band and its link
-/// identity so the re-added link restores its priority band (a fresh-id band
-/// would flip on parity and collapse the segregation) and its own wait. `announce`
-/// controls the log level: the first re-add after a drop logs at `info` (an
-/// operator-visible link flap), retries at `debug`. The re-dial completes into the
-/// SAME `opening` -> [`Step::Opened`] JOIN path, so it aggregates onto the
-/// surviving shared core with SN continuity.
-#[cfg(feature = "transport-multilink")]
-#[allow(clippy::too_many_arguments)]
-fn schedule_multilink_redial(
-    retained: RetainedLink,
-    dial_config: &Arc<DialConfig>,
-    offer: SessionOffer,
-    // R2233 — the retained endpoint is the LOCATOR now, not a bare address: this
-    // substrate has no `desired` map to look the dial plan up in (every retained
-    // multilink endpoint is permanently wanted), so the plan has to travel with
-    // the retention.
-    ml_dial_endpoints: &mut BTreeMap<FaceId, RetainedLink>,
-    redial: &mut RedialSchedule<LinkRedialKey>,
-    opening: &mut FuturesUnordered<OpenFuture>,
-    next_id: &mut u64,
-    announce: bool,
-    params: &FaceTemplate,
-    clock: TokioTime,
-    tick_interval_ms: u64,
-) {
-    let id = FaceId::mint(next_id);
-    let addr = retained.target.key.clone();
-    let backoff_ms = redial.next_ms(&retained.redial_key(), retained.target.retry());
-    let (target, band) = (retained.target.clone(), retained.band);
-    // Re-key the retained link to the fresh id BEFORE the backoff, so the
-    // re-add is tracked (a failed re-dial's Err arm finds it and retries).
-    ml_dial_endpoints.insert(id, retained);
-    if announce {
-        log::info!(
-            "multilink: re-adding dropped link to {addr} in {backoff_ms}ms (face {})",
-            id.0
-        );
-    } else {
-        log::debug!(
-            "multilink: retrying re-add to {addr} in {backoff_ms}ms (face {})",
-            id.0
-        );
-    }
-    opening.push(Box::pin(dial_face_multilink_after(
-        id,
-        target,
-        Arc::clone(dial_config),
-        backoff_ms,
-        offer,
-        band,
-        params.clone(),
-        clock,
-        tick_interval_ms,
-    )) as OpenFuture);
-}
-
 /// Drive one Established face to terminal, then drain it. The per-iteration
 /// observer threads each inbound event to `forwarder.forward(face.id, …)` — the
 /// data-plane seam: the hold-only [`NoOpForwarder`] discards it (this atom just
@@ -2433,102 +2348,6 @@ type PeerRetryDue = std::convert::Infallible;
 /// Decision D5 — the retry timers of the peers the loop holds: each yields its
 /// peer when it fires. Empty in a build without the loop's peers.
 type PeerRetries = FuturesUnordered<Pin<Box<dyn Future<Output = PeerRetryDue>>>>;
-
-/// Decision D5 — the parts of the face loop the actions of its peers
-/// ([`crate::loop_peers`]) are taken on, borrowed for one batch of them.
-#[cfg(feature = "routing-peer")]
-struct PeerHost<'a> {
-    opening: &'a mut FuturesUnordered<OpenFuture>,
-    retries: &'a mut PeerRetries,
-    /// The sessions of the faces a peer is held by, which a `close` may drop.
-    #[cfg(feature = "session-close-ingress")]
-    sessions: &'a BTreeMap<FaceId, Arc<SessionLinkActions>>,
-    #[cfg(feature = "transport-multilink")]
-    max_links: usize,
-    #[cfg(feature = "transport-multilink")]
-    ml_dial_endpoints: &'a mut BTreeMap<FaceId, RetainedLink>,
-    dial_config: &'a Arc<DialConfig>,
-    params: &'a FaceTemplate,
-    offer: SessionOffer,
-    clock: TokioTime,
-    tick_interval_ms: u64,
-}
-
-#[cfg(feature = "routing-peer")]
-impl PeerHost<'_> {
-    /// Take what the loop's peers asked for: dial a peer's target as a fresh
-    /// face, arm a peer's retry timer, or close a session its peer no longer
-    /// wants. Returns how many dials it opened.
-    ///
-    /// A configured endpoint's dial aggregates (`transport-multilink`,
-    /// `max_links > 1`) as every dial of an aggregating node does, and its link
-    /// is retained for the per-link re-add; a node's dial is held by one face.
-    fn take(self, actions: Vec<crate::loop_peers::PeerAction>) -> usize {
-        use crate::loop_peers::PeerAction;
-        #[cfg(feature = "transport-multilink")]
-        use crate::loop_peers::PeerKey;
-        let mut dials = 0;
-        for action in actions {
-            match action {
-                PeerAction::Dial { id, key, target } => {
-                    dials += 1;
-                    #[cfg(feature = "transport-multilink")]
-                    if self.max_links > 1 && matches!(key, PeerKey::Endpoint(_)) {
-                        self.ml_dial_endpoints
-                            .insert(id, RetainedLink::first(id, target.clone()));
-                        self.opening.push(Box::pin(dial_face_multilink(
-                            id,
-                            target,
-                            Arc::clone(self.dial_config),
-                            self.offer,
-                            multilink_priority_range(id),
-                            self.params.clone(),
-                            self.clock,
-                            self.tick_interval_ms,
-                        )) as OpenFuture);
-                        continue;
-                    }
-                    // Only an aggregating build reads which peer a dial is for.
-                    #[cfg(not(feature = "transport-multilink"))]
-                    let _ = key;
-                    self.opening.push(Box::pin(dial_face(
-                        id,
-                        target,
-                        Arc::clone(self.dial_config),
-                        self.params.clone(),
-                        self.offer,
-                        self.clock,
-                        self.tick_interval_ms,
-                    )));
-                }
-                PeerAction::Retry {
-                    key,
-                    generation,
-                    after_ms,
-                    ..
-                } => {
-                    // On the session's clock, as the peer's other deadlines are.
-                    let clock = self.clock;
-                    self.retries.push(Box::pin(async move {
-                        clock.sleep(after_ms).await;
-                        (key, generation)
-                    }))
-                }
-                // Only a peer's machine being stopped asks for it, and an AP loop stops
-                // a peer only for a lifecycle `close`, which is that seam's.
-                PeerAction::Close { id } => {
-                    #[cfg(feature = "session-close-ingress")]
-                    if let Some(actions) = self.sessions.get(&id) {
-                        actions.request_close();
-                    }
-                    #[cfg(not(feature = "session-close-ingress"))]
-                    let _ = id;
-                }
-            }
-        }
-        dials
-    }
-}
 
 /// Await the forwarder's periodic tick, or park forever when no timer is armed
 /// (the forwarder declared no periodic obligation via
@@ -3292,15 +3111,15 @@ async fn face_drive_loop_core(
     on_event: &mut dyn FnMut(&AcceptEvent),
     driving: FaceDriving<'_>,
 ) -> AcceptLoopSummary {
-    FaceLoop::new(sources, params, clock, tick_interval_ms, driving)
+    FaceLoopIo::new(sources, params, clock, tick_interval_ms, driving)
         .run(shutdown, on_event)
         .await
 }
 
-/// A face `FaceLoop::on_opened` holds by a drive inside the loop's own task, handed to the set
-/// of drives `FaceLoop::run` races. Only `run` can make the drive: without
-/// `transport-multilink` that set holds the unboxed future of `drive_face`, whose type has no
-/// name a field could be declared with.
+/// A face the loop holds by a drive inside its own task or, for a node whose forwarder is
+/// `Send + Sync`, by a task of its own ([`FaceLoopIo::drive`]). Only the shell's `run` can make a
+/// drive it holds itself: without `transport-multilink` that set holds the unboxed future of
+/// `drive_face`, whose type has no name a field could be declared with.
 struct HeldDrive {
     face: Face,
     opened: OpenedSession,
@@ -3320,30 +3139,163 @@ enum DriveShape {
     Rejected,
 }
 
-/// What `face_drive_loop_core` keeps from one pass of its loop to the next: the sources it
-/// races, the faces it holds and the tables it keeps of them. Each step a pass takes is handled
-/// by a method of its own, so what a step needs while it is handled lives in that method's frame
-/// and not in the loop's future, whose poll every face of the node waits on.
-struct FaceLoop<'a> {
+/// What a step of the face loop asks of the world, done by the loop's shell ([`FaceLoopIo`]) in
+/// the order asked. The loop's state ([`FaceLoop`]) makes no future, spawns no task and calls no
+/// observer: a step is a function of the state, what arrived and when, and what it does outside
+/// the state is this list. That is the sans-I/O form of a protocol machine: the decisions can be
+/// taken, and tested, with nothing to wait on, and the poll every face of the node waits on holds
+/// the race of the sources and nothing of a step.
+enum Effect {
+    /// Open a face by a dial; how it ends comes back as [`Step::Opened`].
+    Dial(Box<DialOrder>),
+    /// An open that has already ended, taken through [`Step::Opened`] on a later pass as every
+    /// open is: a parked link admitted, or an accept whose handshake the intake finished.
+    Settle(Box<Settled>),
+    /// Decision D5 — wait out a peer's retry; the wait's end comes back as [`Step::PeerRetry`].
+    #[cfg(feature = "routing-peer")]
+    PeerRetry { due: PeerRetryDue, after_ms: u64 },
+    /// Drive a face the loop holds.
+    Drive(Box<HeldDrive>),
+    /// Tell the loop's observer.
+    Report(AcceptEvent),
+}
+
+/// A dial a step asks for: the face it opens as, where, after what wait and, for a link of an
+/// aggregating node, its priority band.
+struct DialOrder {
+    id: FaceId,
+    target: MeshDialTarget,
+    /// The wait before the dial: a found node dialled again, or a dropped link re-added.
+    after_ms: Option<u64>,
+    /// The band of an aggregating dial ([`dial_face_multilink`]); `None` dials a face of its own.
+    #[cfg(feature = "transport-multilink")]
+    band: Option<(Priority, Priority)>,
+}
+
+impl DialOrder {
+    /// A single-link dial of `target` as face `id`, made at once.
+    fn now(id: FaceId, target: MeshDialTarget) -> Self {
+        Self {
+            id,
+            target,
+            after_ms: None,
+            #[cfg(feature = "transport-multilink")]
+            band: None,
+        }
+    }
+
+    /// The same dial, made after `after_ms`.
+    fn after(mut self, after_ms: u64) -> Self {
+        self.after_ms = Some(after_ms);
+        self
+    }
+
+    /// The same dial as a link of an aggregated session, in `band`.
+    #[cfg(feature = "transport-multilink")]
+    fn aggregating(mut self, band: (Priority, Priority)) -> Self {
+        self.band = Some(band);
+        self
+    }
+}
+
+/// An open that has ended, and, for an accept, its place against `accept_pending`, given back when
+/// the loop takes the open.
+struct Settled {
+    opened: OpenResult,
+    pending: Option<intake::PendingAccept>,
+}
+
+/// What every dial of the loop is made from, by the shell: the node's dial settings, its
+/// session-init template and offer, and the session clock its waits are on.
+struct FaceOpener {
     dial_config: Arc<DialConfig>,
-    dial_intents: Option<DialIntentReceiver>,
-    mcast_ingress: Option<tokio::sync::mpsc::UnboundedReceiver<McastIngressItem>>,
-    mcast_members: Option<tokio::sync::mpsc::UnboundedReceiver<Vec<Vec<u8>>>>,
-    mcast_group_subs: Option<tokio::sync::mpsc::UnboundedReceiver<Vec<String>>>,
-    reconcile: Option<ReconcileReceiver>,
+    params: FaceTemplate,
+    offer: SessionOffer,
+    clock: TokioTime,
+    tick_interval_ms: u64,
+}
+
+impl FaceOpener {
+    /// The future of `order`'s dial, made in this frame and boxed ([`boxed`]).
+    fn dial(&self, order: DialOrder) -> OpenFuture {
+        let DialOrder {
+            id,
+            target,
+            after_ms,
+            #[cfg(feature = "transport-multilink")]
+            band,
+        } = order;
+        // R311y205 (transport-multilink) — a link of an aggregating node dials with the
+        // 0x4-negotiating variant, in its band.
+        #[cfg(feature = "transport-multilink")]
+        if let Some(band) = band {
+            return match after_ms {
+                Some(backoff_ms) => boxed(|| {
+                    dial_face_multilink_after(
+                        id,
+                        target,
+                        Arc::clone(&self.dial_config),
+                        backoff_ms,
+                        self.offer,
+                        band,
+                        self.params.clone(),
+                        self.clock,
+                        self.tick_interval_ms,
+                    )
+                }) as OpenFuture,
+                None => boxed(|| {
+                    dial_face_multilink(
+                        id,
+                        target,
+                        Arc::clone(&self.dial_config),
+                        self.offer,
+                        band,
+                        self.params.clone(),
+                        self.clock,
+                        self.tick_interval_ms,
+                    )
+                }) as OpenFuture,
+            };
+        }
+        match after_ms {
+            Some(backoff_ms) => boxed(|| {
+                dial_face_after(
+                    id,
+                    target,
+                    Arc::clone(&self.dial_config),
+                    backoff_ms,
+                    self.params.clone(),
+                    self.offer,
+                    self.clock,
+                    self.tick_interval_ms,
+                )
+            }) as OpenFuture,
+            None => boxed(|| {
+                dial_face(
+                    id,
+                    target,
+                    Arc::clone(&self.dial_config),
+                    self.params.clone(),
+                    self.offer,
+                    self.clock,
+                    self.tick_interval_ms,
+                )
+            }) as OpenFuture,
+        }
+    }
+}
+
+/// The face loop's state: the faces it holds and the tables it keeps of them, from one step to the
+/// next. A step is handed to [`FaceLoop::step`], and what it asks of the world is left as
+/// [`Effect`]s for the shell ([`FaceLoopIo`]); the state holds no source, future or task.
+struct FaceLoop<'a> {
     #[cfg(feature = "transport-multilink")]
     max_links: usize,
     max_sessions: usize,
     ceiling: Option<SessionCeiling>,
     #[cfg(all(feature = "routing-peer", feature = "session-close-ingress"))]
     peer_board: Option<crate::peer_board::PeerBoard>,
-    offer: SessionOffer,
     stats: Option<crate::node_stats::NodeStats>,
-    params: FaceTemplate,
-    clock: TokioTime,
-    tick_interval_ms: u64,
-    intake: intake::Intake,
-    heartbeat: crate::liveness::Heartbeat,
     // The live faces, each mapped to its peer zid (`None` if the handshake never
     // surfaced one). The value is READ — `holds_zid` scans it for the
     // gossip-autoconnect dial-intent dedup and, for a zid-keying forwarder, the
@@ -3412,7 +3364,6 @@ struct FaceLoop<'a> {
     #[cfg(feature = "transport-multilink")]
     ml_dial_endpoints: BTreeMap<FaceId, RetainedLink>,
     summary: AcceptLoopSummary,
-    opening: FuturesUnordered<OpenFuture>,
     // Decision D5 — the peers the loop is told to hold, each by its connection
     // machine: the configured endpoints (`connect/endpoints`, and each reconcile
     // of them) and the nodes a lifecycle `open` names. The planner, the sessions
@@ -3425,6 +3376,29 @@ struct FaceLoop<'a> {
     // face: what a passive intent holds, at accept or when the intent comes later.
     #[cfg(all(feature = "routing-peer", feature = "session-close-ingress"))]
     proven_inbound: BTreeMap<FaceId, (DirectoryZid, Arc<SessionLinkActions>)>,
+    // The time the step being taken arrived at, on the session's clock: read by the shell as it
+    // hands the step over, so a step is a function of the state, what arrived and when.
+    now_ms: u64,
+    // What the steps taken since the shell last looked ask of the world, in the order asked.
+    outbox: Vec<Effect>,
+    forwarder: &'a dyn FaceForwarder,
+}
+
+/// The face loop's shell: the sources it races, the opens and drives it runs and the observer it
+/// tells, around the state ([`FaceLoop`]) each step is handed to. Each pass does what the state
+/// asked, waits for one step and hands it over; the step itself is taken in the state's own frames,
+/// so the loop's future, whose poll every face of the node waits on, holds the race and no step.
+struct FaceLoopIo<'a> {
+    state: FaceLoop<'a>,
+    opener: FaceOpener,
+    dial_intents: Option<DialIntentReceiver>,
+    mcast_ingress: Option<tokio::sync::mpsc::UnboundedReceiver<McastIngressItem>>,
+    mcast_members: Option<tokio::sync::mpsc::UnboundedReceiver<Vec<Vec<u8>>>>,
+    mcast_group_subs: Option<tokio::sync::mpsc::UnboundedReceiver<Vec<String>>>,
+    reconcile: Option<ReconcileReceiver>,
+    intake: intake::Intake,
+    heartbeat: crate::liveness::Heartbeat,
+    opening: FuturesUnordered<OpenFuture>,
     peer_retries: PeerRetries,
     // The drives of faces SPAWNED on the runtime (`spawned` is `Some`), and the face each
     // task drives, by task id, for the one whose task ends without a result. Empty in a
@@ -3434,10 +3408,9 @@ struct FaceLoop<'a> {
     tick_timer: Option<tokio::time::Interval>,
     wake_signal: Option<Arc<tokio::sync::Notify>>,
     spawned: Option<SpawnedFaces>,
-    forwarder: &'a dyn FaceForwarder,
 }
 
-impl<'a> FaceLoop<'a> {
+impl<'a> FaceLoopIo<'a> {
     /// The loop before its first pass, from the arguments of `face_drive_loop_core`: its
     /// heartbeat registered, its intake started on the listeners and the configured targets
     /// seeded. Made on the loop's first poll, inside the runtime the intake and the timers need.
@@ -3570,28 +3543,15 @@ impl<'a> FaceLoop<'a> {
         // the link has room, and sends them then and not at the next tick.
         let wake_signal = forwarder.wake_signal();
 
-        let mut this = Self {
+        let mut state = FaceLoop {
             forwarder,
-            spawned,
-            dial_config,
-            dial_intents,
-            mcast_ingress,
-            mcast_members,
-            mcast_group_subs,
-            reconcile,
             #[cfg(feature = "transport-multilink")]
             max_links,
             max_sessions,
             ceiling,
             #[cfg(all(feature = "routing-peer", feature = "session-close-ingress"))]
             peer_board,
-            offer,
             stats,
-            heartbeat,
-            params,
-            clock,
-            tick_interval_ms,
-            intake,
             faces: BTreeMap::new(),
             collisions: LinkCollisions::default(),
             accepted_ids: std::collections::BTreeSet::new(),
@@ -3610,120 +3570,86 @@ impl<'a> FaceLoop<'a> {
             #[cfg(feature = "transport-multilink")]
             ml_dial_endpoints: BTreeMap::new(),
             summary: AcceptLoopSummary::default(),
-            opening: FuturesUnordered::new(),
             #[cfg(feature = "routing-peer")]
             peers: crate::loop_peers::LoopPeers::new(retry),
             #[cfg(all(feature = "routing-peer", feature = "session-close-ingress"))]
             peer_sessions: BTreeMap::new(),
             #[cfg(all(feature = "routing-peer", feature = "session-close-ingress"))]
             proven_inbound: BTreeMap::new(),
+            now_ms: clock.now_monotonic_ms(),
+            outbox: Vec::new(),
+        };
+        state.seed_dials(dial_targets);
+        Self {
+            state,
+            opener: FaceOpener {
+                dial_config,
+                params,
+                offer,
+                clock,
+                tick_interval_ms,
+            },
+            dial_intents,
+            mcast_ingress,
+            mcast_members,
+            mcast_group_subs,
+            reconcile,
+            intake,
+            heartbeat,
+            opening: FuturesUnordered::new(),
             peer_retries: FuturesUnordered::new(),
             spawned_drives: tokio::task::JoinSet::new(),
             spawned_faces: BTreeMap::new(),
             tick_timer,
             wake_signal,
-        };
-        this.seed_dials(dial_targets);
-        this
-    }
-
-    /// The configured targets, dialled once the loop exists.
-    fn seed_dials(&mut self, dial_targets: Vec<MeshDialTarget>) {
-        // Seed the outbound dial faces (peer-mesh mode). Each configured target is
-        // dialed concurrently and, once Established, held in the SAME face set as
-        // accepted peers — the dial-out face source, symmetric to the accept arm
-        // below. Boxed into the shared `opening` set because `dial_face` and
-        // `open_face` are distinct future types (see [`OpenFuture`]). Empty for a
-        // pure acceptor, so [`accept_loop`] seeds nothing here.
-        //
-        // Decision D5 — the configured targets are the loop's endpoints, each held by
-        // its connection machine, which dials it until it answers and again whenever
-        // its session is lost, until a reconcile forgets it. Every loop that dials a
-        // configured list holds it so, as upstream retries a configured endpoint for
-        // every mode (`zenoh/src/net/runtime/orchestrator.rs` @
-        // `async fn peer_connector_retry(`); the reconcile only changes the list.
-        #[cfg(feature = "routing-peer")]
-        {
-            let actions = self.plan_peers(|peers, cx, next_id| {
-                peers.set_endpoints(dial_targets, false, cx, next_id)
-            });
-            let dials = self.take_peer_actions(actions);
-            self.summary.dialed += dials;
-        }
-        #[cfg(not(feature = "routing-peer"))]
-        for target in dial_targets {
-            let id = FaceId::mint(&mut self.next_id);
-            self.summary.dialed += 1;
-            // R311y205 (transport-multilink) — a `max_links > 1` node dials with the
-            // 0x4-negotiating variant so its outbound links aggregate (the pref tags
-            // this link's traffic class); the `#[cfg(not)]` arm is the byte-identical
-            // single-link seed.
-            #[cfg(not(feature = "transport-multilink"))]
-            self.opening.push(boxed(|| {
-                dial_face(
-                    id,
-                    target,
-                    Arc::clone(&self.dial_config),
-                    self.params.clone(),
-                    self.offer,
-                    self.clock,
-                    self.tick_interval_ms,
-                )
-            }));
-            #[cfg(feature = "transport-multilink")]
-            self.opening.push(if self.max_links > 1 {
-                // R311y212 — retain the dial endpoint so a partial-loss re-add can
-                // re-dial this link (aggregating dials only; a single-link seed is not
-                // re-added through this substrate). R311y219 — retain the priority
-                // band so a re-add restores it (a fresh-id band would flip on
-                // parity). R2233 — retained BEFORE the dial consumes the plan, and
-                // it is the plan (scheme included) that is retained now.
-                self.ml_dial_endpoints
-                    .insert(id, RetainedLink::first(id, target.clone()));
-                boxed(|| {
-                    dial_face_multilink(
-                        id,
-                        target,
-                        Arc::clone(&self.dial_config),
-                        self.offer,
-                        multilink_priority_range(id),
-                        self.params.clone(),
-                        self.clock,
-                        self.tick_interval_ms,
-                    )
-                }) as OpenFuture
-            } else {
-                boxed(|| {
-                    dial_face(
-                        id,
-                        target,
-                        Arc::clone(&self.dial_config),
-                        self.params.clone(),
-                        self.offer,
-                        self.clock,
-                        self.tick_interval_ms,
-                    )
-                }) as OpenFuture
-            });
+            spawned,
         }
     }
 
-    /// Race the loop's sources until `shutdown` resolves, handling each step as it comes, then
-    /// close the intake and the drives and return what the loop counted.
+    /// Race the loop's sources until `shutdown` resolves, handing each step to the state and doing
+    /// what it asks, then close the intake and the drives and return what the loop counted.
     async fn run(
         mut self,
         mut shutdown: Pin<&mut dyn Future<Output = ()>>,
         on_event: &mut dyn FnMut(&AcceptEvent),
     ) -> AcceptLoopSummary {
-        let forwarder = self.forwarder;
+        let forwarder = self.state.forwarder;
         // R311y205 (transport-multilink) — an aggregating loop drives three distinct
         // future shapes (face / joined / rejected), so `driving` holds boxed futures;
-        // a non-multilink loop keeps the unboxed single-shape set, byte-identical.
+        // a non-multilink loop keeps the unboxed single-shape set.
         #[cfg(not(feature = "transport-multilink"))]
         let mut driving = FuturesUnordered::new();
         #[cfg(feature = "transport-multilink")]
         let mut driving: FuturesUnordered<DriveFuture<'_>> = FuturesUnordered::new();
         loop {
+            // What the state asked for, when it was made or at the step before, is done before the
+            // sources are raced again, so an open or a drive it asked for is in the race.
+            self.apply(on_event, &mut |held| {
+                let HeldDrive {
+                    face,
+                    opened,
+                    #[cfg(feature = "transport-multilink")]
+                    shape,
+                } = held;
+                // R311y205 (transport-multilink) — box the drive future in
+                // an aggregating build so it shares `driving` with the
+                // joined / rejected drives; unboxed otherwise.
+                #[cfg(not(feature = "transport-multilink"))]
+                push_made(&mut driving, || drive_face(face, opened, forwarder));
+                #[cfg(feature = "transport-multilink")]
+                driving.push(match shape {
+                    DriveShape::Face => {
+                        boxed(|| drive_face(face, opened, forwarder)) as DriveFuture<'_>
+                    }
+                    DriveShape::Joined(joined) => {
+                        boxed(|| drive_joined_face(face, opened, joined, forwarder))
+                            as DriveFuture<'_>
+                    }
+                    DriveShape::Rejected => {
+                        boxed(|| drain_rejected_face(face, opened)) as DriveFuture<'_>
+                    }
+                });
+            });
             // Busy while the sources are polled, resting while they are all pending: a poll that does
             // not return is what the heartbeat reports, a quiet node is not. In a block, so that what
             // the sources lend the `select!` is given back before the step is handled.
@@ -3770,153 +3696,308 @@ impl<'a> FaceLoop<'a> {
                 heartbeat.polled(0, next.as_mut()).await
             };
             self.heartbeat.turn(step.liveness_step());
-
-            match step {
-                Step::Shutdown => break,
-
-                Step::Opened(opened) => self.on_opened(opened, on_event, &mut |held| {
-                    let HeldDrive {
-                        face,
-                        opened,
-                        #[cfg(feature = "transport-multilink")]
-                        shape,
-                    } = held;
-                    // R311y205 (transport-multilink) — box the drive future in
-                    // an aggregating build so it shares `driving` with the
-                    // joined / rejected drives; unboxed + byte-identical
-                    // otherwise.
-                    #[cfg(not(feature = "transport-multilink"))]
-                    push_made(&mut driving, || drive_face(face, opened, forwarder));
-                    #[cfg(feature = "transport-multilink")]
-                    driving.push(match shape {
-                        DriveShape::Face => {
-                            boxed(|| drive_face(face, opened, forwarder)) as DriveFuture<'_>
-                        }
-                        DriveShape::Joined(joined) => {
-                            boxed(|| drive_joined_face(face, opened, joined, forwarder))
-                                as DriveFuture<'_>
-                        }
-                        DriveShape::Rejected => {
-                            boxed(|| drain_rejected_face(face, opened)) as DriveFuture<'_>
-                        }
-                    });
-                }),
-
-                Step::Driven((face, outcome)) => self.on_driven(face, outcome, on_event),
-
-                Step::Dial(intent) => self.on_dial(intent),
-
-                // A Push arrived on the multicast INGRESS group (the deferred
-                // `mcast_faces` plane, I1) — route it into the forwarder as a
-                // mcast-sourced Push (delivered to unicast subscribers, echo-guarded
-                // off the groups). Folded here, on the loop's single task, so the
-                // `!Send` forwarder is touched only from its own task. A no-ingress
-                // loop never reaches here (the arm parks on a `None` channel). The
-                // route call is `codec-push`-gated (the trait method takes `PushOwned`);
-                // without `codec-push` the channel is always `None` so this is dead.
-                Step::McastIngress(_item) => {
-                    // R2734 — the fold now carries a Query as well as a Push, so the
-                    // kind is decided HERE rather than by the fold dropping everything
-                    // that is not a Push. Each arm is a different routing entry point
-                    // on the forwarder; both enter through the same source-only
-                    // ingress face.
-                    #[cfg(feature = "codec-push")]
-                    match &_item.body {
-                        McastIngressBody::Push(push) => {
-                            self.forwarder.route_mcast_ingress(
-                                _item.priority,
-                                _item.reliable,
-                                push,
-                                _item.from.as_ref(),
-                            );
-                        }
-                        McastIngressBody::Request(request) => {
-                            self.forwarder.route_mcast_ingress_request(
-                                _item.reliable,
-                                request,
-                                _item.from.as_ref(),
-                            );
-                        }
-                    }
-                }
-
-                // The on-group ROUTER set changed — refresh the forwarder's DR
-                // election candidates (I3b). No-op default for non-router forwarders;
-                // the arm parks when there is no membership channel.
-                Step::McastMembers(members) => {
-                    self.forwarder.set_mcast_group_members(&members);
-                }
-
-                // The on-group SUBSCRIBER aggregate changed — advertise/withdraw the
-                // group's interest into the unicast mesh (sub plane, S2). No-op default
-                // for non-router forwarders; the arm parks when there is no sub channel.
-                Step::McastGroupSubs(subs) => {
-                    self.forwarder.set_mcast_group_subs(&subs);
-                }
-
-                // A runtime connect-list reconcile arrived (`router-connect-reconcile`):
-                // the loop's endpoints change, and each newly-listed one is dialled by
-                // its connection machine (decision D5). ADD-ONLY, as upstream's
-                // close-time re-read of the connect list is: a removed endpoint is
-                // forgotten, NOT torn down, because closing a live federation face on
-                // a list edit would blackhole the mesh (see [`ReconcileSender`]).
-                // An endpoint is named by its ADDRESS (a config endpoint carries
-                // no zid until the handshake, so the gossip `holds_zid` zid dedup
-                // cannot apply), and one already held or being reached is unchanged.
-                // The arm parks when `reconcile` is `None`, so a non-router /
-                // feature-off loop never reaches here; the body is `#[cfg]`-gated so a
-                // feature-off build compiles none of the reconcile dial logic.
-                Step::Reconcile(_desired_set) => {
-                    #[cfg(feature = "router-connect-reconcile")]
-                    self.on_reconcile(_desired_set);
-                }
-
-                Step::PeerRetry(_due) => {
-                    #[cfg(feature = "routing-peer")]
-                    self.on_peer_retry(_due);
-                    #[cfg(not(feature = "routing-peer"))]
-                    match _due {}
-                }
-
-                Step::Intake(intake::IntakeEvent::Handshaken(ended)) => self.on_handshaken(ended),
-
-                Step::Intake(intake::IntakeEvent::AcceptError(e)) => {
-                    on_event(&AcceptEvent::AcceptError(e));
-                }
-
-                // The forwarder's periodic cadence elapsed — let it do its
-                // time-driven control-plane work (the linkstate peer floods its own
-                // link-state). A no-timer forwarder never reaches here.
-                Step::Tick => self.forwarder.tick(),
-
-                // The forwarder was told a link it holds messages for has room.
-                Step::Woken => self.forwarder.woken(),
+            if matches!(step, Step::Shutdown) {
+                break;
             }
+            self.state.now_ms = self.opener.clock.now_monotonic_ms();
+            self.state.step(step);
         }
 
         // Stop accepting; drop in-flight opens + drives (sockets close, writer tasks
         // drain). Faces table cleared — the summary already captured the high-water
         // mark.
         self.intake.close().await;
-        self.summary.accepted = self.intake.accepted();
-        self.summary.refused_over_pending = self.intake.refused_over_pending();
+        self.state.summary.accepted = self.intake.accepted();
+        self.state.summary.refused_over_pending = self.intake.refused_over_pending();
         drop(self.opening);
         drop(driving);
         // Spawned drives are cancelled AND awaited: a task mid-poll finishes that poll on its
         // worker, so without the wait a callback could still be running after this returns.
         self.spawned_drives.shutdown().await;
-        self.faces.clear();
-        self.summary
+        self.state.faces.clear();
+        self.state.summary
+    }
+
+    /// Do what the state asked, in the order it asked: a dial or a settled open into the opens
+    /// raced, a peer's wait into the retries raced, a face's drive held or spawned, an event to the
+    /// observer.
+    fn apply(&mut self, on_event: &mut dyn FnMut(&AcceptEvent), hold: &mut dyn FnMut(HeldDrive)) {
+        let mut effects = std::mem::take(&mut self.state.outbox);
+        for effect in effects.drain(..) {
+            match effect {
+                Effect::Dial(order) => self.opening.push(self.opener.dial(*order)),
+                // Taken through the arm every open ends in. An accept stays counted against
+                // `accept_pending` until then, as upstream counts it until its transport is up.
+                Effect::Settle(settled) => {
+                    let Settled { opened, pending } = *settled;
+                    self.opening.push(boxed(|| async move {
+                        drop(pending);
+                        opened
+                    }));
+                }
+                #[cfg(feature = "routing-peer")]
+                Effect::PeerRetry { due, after_ms } => {
+                    // On the session's clock, as the peer's other deadlines are.
+                    let clock = self.opener.clock;
+                    self.peer_retries.push(Box::pin(async move {
+                        clock.sleep(after_ms).await;
+                        due
+                    }));
+                }
+                Effect::Drive(held) => self.drive(*held, hold),
+                Effect::Report(event) => on_event(&event),
+            }
+        }
+        // The list is empty and keeps its room for the next step.
+        self.state.outbox = effects;
+    }
+
+    /// Drive a face the state holds: a face of its own, of a node whose forwarder is `Send +
+    /// Sync`, by a task of its own, wrapped as its executor wants it polled; any other inside the
+    /// loop's task, by `hold`.
+    fn drive(&mut self, held: HeldDrive, hold: &mut dyn FnMut(HeldDrive)) {
+        #[cfg(feature = "transport-multilink")]
+        let own_face = matches!(held.shape, DriveShape::Face);
+        #[cfg(not(feature = "transport-multilink"))]
+        let own_face = true;
+        match &self.spawned {
+            Some(spawn) if own_face => {
+                let HeldDrive { face, opened, .. } = held;
+                let drive = spawn.executor.wrap(boxed(|| {
+                    drive_face_shared(face.clone(), opened, Arc::clone(&spawn.forwarder))
+                }));
+                let drive = crate::runtime_pool::in_caller_span(drive);
+                let task = match spawn.on {
+                    SpawnOn::Workers => self.spawned_drives.spawn(drive),
+                    SpawnOn::LocalSet => self.spawned_drives.spawn_local(drive),
+                };
+                self.spawned_faces.insert(task.id(), face);
+            }
+            _ => hold(held),
+        }
+    }
+}
+
+impl<'a> FaceLoop<'a> {
+    /// The configured targets, dialled once the loop exists.
+    fn seed_dials(&mut self, dial_targets: Vec<MeshDialTarget>) {
+        // Seed the outbound dial faces (peer-mesh mode). Each configured target is
+        // dialed concurrently and, once Established, held in the SAME face set as
+        // accepted peers — the dial-out face source, symmetric to the accept arm
+        // below. Boxed into the shared `opening` set because `dial_face` and
+        // `open_face` are distinct future types (see [`OpenFuture`]). Empty for a
+        // pure acceptor, so [`accept_loop`] seeds nothing here.
+        //
+        // Decision D5 — the configured targets are the loop's endpoints, each held by
+        // its connection machine, which dials it until it answers and again whenever
+        // its session is lost, until a reconcile forgets it. Every loop that dials a
+        // configured list holds it so, as upstream retries a configured endpoint for
+        // every mode (`zenoh/src/net/runtime/orchestrator.rs` @
+        // `async fn peer_connector_retry(`); the reconcile only changes the list.
+        #[cfg(feature = "routing-peer")]
+        {
+            let actions = self.plan_peers(|peers, cx, next_id| {
+                peers.set_endpoints(dial_targets, false, cx, next_id)
+            });
+            let dials = self.take_peer_actions(actions);
+            self.summary.dialed += dials;
+        }
+        #[cfg(not(feature = "routing-peer"))]
+        for target in dial_targets {
+            let id = FaceId::mint(&mut self.next_id);
+            self.summary.dialed += 1;
+            // R311y205 (transport-multilink) — a `max_links > 1` node dials with the
+            // 0x4-negotiating variant so its outbound links aggregate (the pref tags
+            // this link's traffic class); otherwise the single-link seed.
+            #[cfg(feature = "transport-multilink")]
+            if self.max_links > 1 {
+                // R311y212 — retain the dial endpoint so a partial-loss re-add can
+                // re-dial this link (aggregating dials only; a single-link seed is not
+                // re-added through this substrate). R311y219 — retain the priority
+                // band so a re-add restores it (a fresh-id band would flip on
+                // parity). R2233 — retained BEFORE the dial consumes the plan, and
+                // it is the plan (scheme included) that is retained now.
+                let retained = RetainedLink::first(id, target.clone());
+                let band = retained.band;
+                self.ml_dial_endpoints.insert(id, retained);
+                self.dial(DialOrder::now(id, target).aggregating(band));
+                continue;
+            }
+            self.dial(DialOrder::now(id, target));
+        }
+    }
+
+    /// Take one step: what arrived, handled against the state. What the step asks of the world
+    /// is left in `outbox` for the shell.
+    fn step(&mut self, step: Step) {
+        match step {
+            // The shell stops at it; the state has nothing to do for it.
+            Step::Shutdown => {}
+
+            Step::Opened(opened) => self.on_opened(opened),
+
+            Step::Driven((face, outcome)) => self.on_driven(face, outcome),
+
+            Step::Dial(intent) => self.on_dial(intent),
+
+            // A Push arrived on the multicast INGRESS group (the deferred
+            // `mcast_faces` plane, I1) — route it into the forwarder as a
+            // mcast-sourced Push (delivered to unicast subscribers, echo-guarded
+            // off the groups). Folded here, on the loop's single task, so the
+            // `!Send` forwarder is touched only from its own task. A no-ingress
+            // loop never reaches here (the arm parks on a `None` channel). The
+            // route call is `codec-push`-gated (the trait method takes `PushOwned`);
+            // without `codec-push` the channel is always `None` so this is dead.
+            Step::McastIngress(_item) => {
+                // R2734 — the fold now carries a Query as well as a Push, so the
+                // kind is decided HERE rather than by the fold dropping everything
+                // that is not a Push. Each arm is a different routing entry point
+                // on the forwarder; both enter through the same source-only
+                // ingress face.
+                #[cfg(feature = "codec-push")]
+                match &_item.body {
+                    McastIngressBody::Push(push) => {
+                        self.forwarder.route_mcast_ingress(
+                            _item.priority,
+                            _item.reliable,
+                            push,
+                            _item.from.as_ref(),
+                        );
+                    }
+                    McastIngressBody::Request(request) => {
+                        self.forwarder.route_mcast_ingress_request(
+                            _item.reliable,
+                            request,
+                            _item.from.as_ref(),
+                        );
+                    }
+                }
+            }
+
+            // The on-group ROUTER set changed — refresh the forwarder's DR
+            // election candidates (I3b). No-op default for non-router forwarders;
+            // the arm parks when there is no membership channel.
+            Step::McastMembers(members) => {
+                self.forwarder.set_mcast_group_members(&members);
+            }
+
+            // The on-group SUBSCRIBER aggregate changed — advertise/withdraw the
+            // group's interest into the unicast mesh (sub plane, S2). No-op default
+            // for non-router forwarders; the arm parks when there is no sub channel.
+            Step::McastGroupSubs(subs) => {
+                self.forwarder.set_mcast_group_subs(&subs);
+            }
+
+            // A runtime connect-list reconcile arrived (`router-connect-reconcile`):
+            // the loop's endpoints change, and each newly-listed one is dialled by
+            // its connection machine (decision D5). ADD-ONLY, as upstream's
+            // close-time re-read of the connect list is: a removed endpoint is
+            // forgotten, NOT torn down, because closing a live federation face on
+            // a list edit would blackhole the mesh (see [`ReconcileSender`]).
+            // An endpoint is named by its ADDRESS (a config endpoint carries
+            // no zid until the handshake, so the gossip `holds_zid` zid dedup
+            // cannot apply), and one already held or being reached is unchanged.
+            // The arm parks when `reconcile` is `None`, so a non-router /
+            // feature-off loop never reaches here; the body is `#[cfg]`-gated so a
+            // feature-off build compiles none of the reconcile dial logic.
+            Step::Reconcile(_desired_set) => {
+                #[cfg(feature = "router-connect-reconcile")]
+                self.on_reconcile(_desired_set);
+            }
+
+            Step::PeerRetry(_due) => {
+                #[cfg(feature = "routing-peer")]
+                self.on_peer_retry(_due);
+                #[cfg(not(feature = "routing-peer"))]
+                match _due {}
+            }
+
+            Step::Intake(intake::IntakeEvent::Handshaken(ended)) => self.on_handshaken(ended),
+
+            Step::Intake(intake::IntakeEvent::AcceptError(e)) => {
+                self.report(AcceptEvent::AcceptError(e));
+            }
+
+            // The forwarder's periodic cadence elapsed — let it do its
+            // time-driven control-plane work (the linkstate peer floods its own
+            // link-state). A no-timer forwarder never reaches here.
+            Step::Tick => self.forwarder.tick(),
+
+            // The forwarder was told a link it holds messages for has room.
+            Step::Woken => self.forwarder.woken(),
+        }
+    }
+
+    /// Ask the shell to tell the loop's observer `event`.
+    fn report(&mut self, event: AcceptEvent) {
+        self.outbox.push(Effect::Report(event));
+    }
+
+    /// Ask the shell to make `order`'s dial.
+    fn dial(&mut self, order: DialOrder) {
+        self.outbox.push(Effect::Dial(Box::new(order)));
+    }
+
+    /// Admit a parked link now that the face it replaces has left, through the door a new link
+    /// comes in by: it is the same open, completed, and meets the checks of any other (the bounds,
+    /// the region rules, the peer's machine) at the moment it is admitted and not at the moment it
+    /// was parked.
+    fn admit_parked(&mut self, parked: ParkedOpen) {
+        if parked.accepted {
+            self.accepted_ids.insert(parked.id);
+        }
+        self.outbox.push(Effect::Settle(Box::new(Settled {
+            opened: (parked.id, parked.peer, Ok(parked.opened)),
+            pending: None,
+        })));
+    }
+
+    /// R311y212 (transport-multilink) — re-dial and re-JOIN a dropped aggregated link this node
+    /// DIALED (its own substrate, NOT gated on the loop's peers, `routing-peer`). Unlike a
+    /// configured endpoint, which the loop's peers hold by its connection machine
+    /// ([`crate::loop_peers`]), every retained multilink link is permanently wanted while its
+    /// session lives. R311y786 — its waits come from a [`RedialSchedule`] keyed by LINK
+    /// ([`RetainedLink::redial_key`]), so of N links to one address each grows and resets its own
+    /// wait. Re-keys the retained link to a fresh [`FaceId`] BEFORE the backoff (so the re-add is
+    /// tracked across the drop->redial gap and the Err arm can retry it), carrying the DEAD link's
+    /// QoS-priority band and its link identity so the re-added link restores its priority band (a
+    /// fresh-id band would flip on parity and collapse the segregation) and its own wait.
+    /// `announce` controls the log level: the first re-add after a drop logs at `info` (an
+    /// operator-visible link flap), retries at `debug`. The re-dial completes into the SAME
+    /// [`Step::Opened`] JOIN path, so it aggregates onto the surviving shared core with SN
+    /// continuity.
+    #[cfg(feature = "transport-multilink")]
+    fn redial_link(&mut self, retained: RetainedLink, announce: bool) {
+        let id = FaceId::mint(&mut self.next_id);
+        let addr = retained.target.key.clone();
+        let backoff_ms = self
+            .redial
+            .next_ms(&retained.redial_key(), retained.target.retry());
+        let (target, band) = (retained.target.clone(), retained.band);
+        // Re-key the retained link to the fresh id BEFORE the backoff, so the
+        // re-add is tracked (a failed re-dial's Err arm finds it and retries).
+        self.ml_dial_endpoints.insert(id, retained);
+        if announce {
+            log::info!(
+                "multilink: re-adding dropped link to {addr} in {backoff_ms}ms (face {})",
+                id.0
+            );
+        } else {
+            log::debug!(
+                "multilink: retrying re-add to {addr} in {backoff_ms}ms (face {})",
+                id.0
+            );
+        }
+        self.dial(
+            DialOrder::now(id, target)
+                .after(backoff_ms)
+                .aggregating(band),
+        );
     }
 
     /// An open ended, a dial or an accept: held as a face, joined to a session, parked behind
     /// the face it replaces, or refused or failed and reported so.
-    fn on_opened(
-        &mut self,
-        opened: Box<OpenResult>,
-        on_event: &mut dyn FnMut(&AcceptEvent),
-        hold: &mut dyn FnMut(HeldDrive),
-    ) {
+    fn on_opened(&mut self, opened: Box<OpenResult>) {
         let (id, peer, result) = *opened;
         // Decision D5 — whether this is a dial the loop's peers asked for:
         // its end is reported to its peer's machine at whichever arm below
@@ -3939,10 +4020,9 @@ impl<'a> FaceLoop<'a> {
                     peer_dial,
                     #[cfg(feature = "transport-multilink")]
                     node_dial,
-                    on_event,
                 );
                 if let Some(held) = held {
-                    hold(held);
+                    self.outbox.push(Effect::Drive(Box::new(held)));
                 }
             }
             Err(cause) => self.on_open_failed(
@@ -3951,7 +4031,6 @@ impl<'a> FaceLoop<'a> {
                 cause,
                 #[cfg(feature = "routing-peer")]
                 peer_dial,
-                on_event,
             ),
         }
     }
@@ -3965,7 +4044,6 @@ impl<'a> FaceLoop<'a> {
         opened: OpenedSession,
         #[cfg(feature = "routing-peer")] peer_dial: bool,
         #[cfg(feature = "transport-multilink")] node_dial: bool,
-        on_event: &mut dyn FnMut(&AcceptEvent),
     ) -> Option<HeldDrive> {
         // A node a discovery plane found is linked: its wait starts from the
         // beginning the next time it is down.
@@ -4026,7 +4104,6 @@ impl<'a> FaceLoop<'a> {
             node_dial,
             #[cfg(feature = "routing-peer")]
             peer_dial,
-            on_event,
         ) {
             return Some(HeldDrive {
                 face,
@@ -4172,7 +4249,7 @@ impl<'a> FaceLoop<'a> {
                     .refused_over_max_sessions
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
-            on_event(&AcceptEvent::FaceRefused {
+            self.report(AcceptEvent::FaceRefused {
                 id,
                 peer_zid: face.peer_zid.clone(),
                 held: self.faces.len(),
@@ -4201,7 +4278,7 @@ impl<'a> FaceLoop<'a> {
                         .refused_over_capacity
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
-                on_event(&AcceptEvent::FaceRefused {
+                self.report(AcceptEvent::FaceRefused {
                     id,
                     peer_zid: face.peer_zid.clone(),
                     held: self.faces.len(),
@@ -4218,7 +4295,7 @@ impl<'a> FaceLoop<'a> {
             if peer_dial {
                 self.peer_dial_ended(id, crate::loop_peers::DialEnd::Failed);
             }
-            on_event(&AcceptEvent::FaceRefused {
+            self.report(AcceptEvent::FaceRefused {
                 id,
                 peer_zid: face.peer_zid.clone(),
                 held: self.faces.len(),
@@ -4241,7 +4318,7 @@ impl<'a> FaceLoop<'a> {
             if peer_dial {
                 self.peer_dial_ended(id, crate::loop_peers::DialEnd::Failed);
             }
-            on_event(&AcceptEvent::FaceRefused {
+            self.report(AcceptEvent::FaceRefused {
                 id,
                 peer_zid: face.peer_zid.clone(),
                 held: self.faces.len(),
@@ -4303,29 +4380,15 @@ impl<'a> FaceLoop<'a> {
         // `Face` is no longer `Copy` (it owns the zid), so clone
         // it for the borrowed FaceUp event; the original moves
         // into the drive future.
-        on_event(&AcceptEvent::FaceUp(face.clone()));
-        // A node whose forwarder is `Send + Sync` has the drive spawned
-        // on the runtime instead, wrapped as its executor wants it
-        // polled: this face is then driven by a task of its own.
-        if let Some(spawn) = &self.spawned {
-            let drive = spawn.executor.wrap(boxed(|| {
-                drive_face_shared(face.clone(), opened, Arc::clone(&spawn.forwarder))
-            }));
-            let drive = crate::runtime_pool::in_caller_span(drive);
-            let task = match spawn.on {
-                SpawnOn::Workers => self.spawned_drives.spawn(drive),
-                SpawnOn::LocalSet => self.spawned_drives.spawn_local(drive),
-            };
-            self.spawned_faces.insert(task.id(), face);
-            None
-        } else {
-            Some(HeldDrive {
-                face,
-                opened,
-                #[cfg(feature = "transport-multilink")]
-                shape: DriveShape::Face,
-            })
-        }
+        self.report(AcceptEvent::FaceUp(face.clone()));
+        // Held by a drive inside the loop's task, or by a task of its own when the node's
+        // forwarder is `Send + Sync`: the shell's to say ([`FaceLoopIo::drive`]).
+        Some(HeldDrive {
+            face,
+            opened,
+            #[cfg(feature = "transport-multilink")]
+            shape: DriveShape::Face,
+        })
     }
 
     /// A link to a node whose aggregated session the loop holds, joined onto that session or
@@ -4340,7 +4403,6 @@ impl<'a> FaceLoop<'a> {
         opened: &OpenedSession,
         node_dial: bool,
         #[cfg(feature = "routing-peer")] peer_dial: bool,
-        on_event: &mut dyn FnMut(&AcceptEvent),
     ) -> Option<DriveShape> {
         if self.max_links <= 1 || node_dial {
             return None;
@@ -4372,7 +4434,7 @@ impl<'a> FaceLoop<'a> {
                     // reaches the FaceUp emit below (the arm
                     // `continue`s), so this is the ONLY
                     // on_event a caller sees for the join.
-                    on_event(&AcceptEvent::LinkAggregated {
+                    self.report(AcceptEvent::LinkAggregated {
                         peer_zid: peer_zid.clone(),
                         live_links,
                     });
@@ -4476,7 +4538,6 @@ impl<'a> FaceLoop<'a> {
         peer: AcceptedPeer,
         cause: OpenError,
         #[cfg(feature = "routing-peer")] peer_dial: bool,
-        on_event: &mut dyn FnMut(&AcceptEvent),
     ) {
         // R2951 — an accept that never opened leaves no mark behind.
         let was_accept = self.accepted_ids.remove(&id);
@@ -4502,12 +4563,7 @@ impl<'a> FaceLoop<'a> {
             let target = if holds_zid(&self.faces, &dial.zid) {
                 None
             } else {
-                node_dial_target(
-                    &self.directory,
-                    &dial.zid,
-                    self.clock.now_monotonic_ms(),
-                    attempt,
-                )
+                node_dial_target(&self.directory, &dial.zid, self.now_ms, attempt)
             };
             match target {
                 Some(target) => {
@@ -4527,18 +4583,7 @@ impl<'a> FaceLoop<'a> {
                             attempt,
                         },
                     );
-                    self.opening.push(boxed(|| {
-                        dial_face_after(
-                            again,
-                            target,
-                            Arc::clone(&self.dial_config),
-                            backoff_ms,
-                            self.params.clone(),
-                            self.offer,
-                            self.clock,
-                            self.tick_interval_ms,
-                        )
-                    }) as OpenFuture);
+                    self.dial(DialOrder::now(again, target).after(backoff_ms));
                 }
                 None => {
                     self.node_redial.forget(&dial.zid);
@@ -4572,31 +4617,14 @@ impl<'a> FaceLoop<'a> {
         #[cfg(feature = "transport-multilink")]
         if self.max_links > 1 {
             if let Some(retained) = self.ml_dial_endpoints.remove(&id) {
-                schedule_multilink_redial(
-                    retained,
-                    &self.dial_config,
-                    self.offer,
-                    &mut self.ml_dial_endpoints,
-                    &mut self.redial,
-                    &mut self.opening,
-                    &mut self.next_id,
-                    false,
-                    &self.params,
-                    self.clock,
-                    self.tick_interval_ms,
-                );
+                self.redial_link(retained, false);
             }
         }
-        on_event(&AcceptEvent::FaceFailed { id, peer, cause });
+        self.report(AcceptEvent::FaceFailed { id, peer, cause });
     }
 
     /// A drive that ended: the face, or one link of an aggregated session, has left.
-    fn on_driven(
-        &mut self,
-        face: Face,
-        outcome: DriverOutcome,
-        on_event: &mut dyn FnMut(&AcceptEvent),
-    ) {
+    fn on_driven(&mut self, face: Face, outcome: DriverOutcome) {
         // R311y205 (transport-multilink) — aggregation teardown. A rejected
         // (MAX_LINKS/INVALID) link finished draining its close: drop it
         // silently (it never entered `faces` nor the forwarder). Otherwise,
@@ -4639,7 +4667,7 @@ impl<'a> FaceLoop<'a> {
                         // nothing waits behind it; a link that did would be admitted as
                         // any other is, and its direction is forgotten all the same.
                         if let Some(parked) = self.collisions.departed(primary_id) {
-                            admit_parked(parked, &mut self.opening, &mut self.accepted_ids);
+                            self.admit_parked(parked);
                         }
                         // Decision D5 — the session is gone: the peers its
                         // primary face held back off and dial again.
@@ -4649,7 +4677,7 @@ impl<'a> FaceLoop<'a> {
                         if let Some(stats) = &self.stats {
                             stats.transport_closed(primary_id.0);
                         }
-                        on_event(&AcceptEvent::FaceDown(primary_face, outcome));
+                        self.report(AcceptEvent::FaceDown(primary_face, outcome));
                     }
                 } else if handle.transport_deleted() {
                     // The peer deleted the transport: the links that remain
@@ -4677,19 +4705,7 @@ impl<'a> FaceLoop<'a> {
                         peer_zid,
                         remaining
                     );
-                    schedule_multilink_redial(
-                        retained,
-                        &self.dial_config,
-                        self.offer,
-                        &mut self.ml_dial_endpoints,
-                        &mut self.redial,
-                        &mut self.opening,
-                        &mut self.next_id,
-                        true,
-                        &self.params,
-                        self.clock,
-                        self.tick_interval_ms,
-                    );
+                    self.redial_link(retained, true);
                 } else {
                     // A dropped link this node ACCEPTED (no retained
                     // endpoint) — the peer owns its re-dial; just note the
@@ -4730,12 +4746,12 @@ impl<'a> FaceLoop<'a> {
         if let Some(stats) = &self.stats {
             stats.transport_closed(face.id.0);
         }
-        on_event(&AcceptEvent::FaceDown(face, outcome));
+        self.report(AcceptEvent::FaceDown(face, outcome));
         // The face has left the loop, the forwarder and the observers, which is what a
         // link parked behind it waited for: the node is held by no face now, and the
         // link that replaces it is admitted as any other.
         if let Some(parked) = self.collisions.departed(departed) {
-            admit_parked(parked, &mut self.opening, &mut self.accepted_ids);
+            self.admit_parked(parked);
         }
     }
 
@@ -4748,7 +4764,7 @@ impl<'a> FaceLoop<'a> {
         // no locator is TCP-dialable. A dialed face flows through the SAME
         // `opening` -> `Step::Opened` path as a static dial, so it is
         // registered + held + zid-tracked identically.
-        let learned = learn_intent(&mut self.directory, &intent, self.clock.now_monotonic_ms());
+        let learned = learn_intent(&mut self.directory, &intent, self.now_ms);
         // A node that was opened before any hint could be dialled for it waits
         // in `NoLocator` (decision D15): this discovery is the hint it waited for. The
         // machines are the loop's peers, which exist with `routing-peer`, as the macros
@@ -4761,12 +4777,7 @@ impl<'a> FaceLoop<'a> {
         }
         #[cfg(not(all(feature = "routing-peer", feature = "session-close-ingress")))]
         let _ = learned;
-        match dial_decision(
-            &self.faces,
-            &intent,
-            &self.directory,
-            self.clock.now_monotonic_ms(),
-        ) {
+        match dial_decision(&self.faces, &intent, &self.directory, self.now_ms) {
             DialDecision::Dial(target) => {
                 let id = FaceId::mint(&mut self.next_id);
                 self.summary.dialed += 1;
@@ -4817,9 +4828,7 @@ impl<'a> FaceLoop<'a> {
                 if self.max_links > 1 {
                     let candidates = target
                         .expected_zid
-                        .map(|zid| {
-                            candidate_locators(&self.directory, &zid, self.clock.now_monotonic_ms())
-                        })
+                        .map(|zid| candidate_locators(&self.directory, &zid, self.now_ms))
                         .unwrap_or_default();
                     let links = discovered_links::discovered_peer_links(
                         target,
@@ -4836,44 +4845,13 @@ impl<'a> FaceLoop<'a> {
                         let retained = RetainedLink::first(id, target.clone());
                         let band = retained.band;
                         self.ml_dial_endpoints.insert(id, retained);
-                        self.opening.push(boxed(|| {
-                            dial_face_multilink(
-                                id,
-                                target,
-                                Arc::clone(&self.dial_config),
-                                self.offer,
-                                band,
-                                self.params.clone(),
-                                self.clock,
-                                self.tick_interval_ms,
-                            )
-                        }) as OpenFuture);
+                        self.dial(DialOrder::now(id, target).aggregating(band));
                     }
                 } else {
-                    self.opening.push(boxed(|| {
-                        dial_face(
-                            id,
-                            target,
-                            Arc::clone(&self.dial_config),
-                            self.params.clone(),
-                            self.offer,
-                            self.clock,
-                            self.tick_interval_ms,
-                        )
-                    }) as OpenFuture);
+                    self.dial(DialOrder::now(id, target));
                 }
                 #[cfg(not(feature = "transport-multilink"))]
-                self.opening.push(boxed(|| {
-                    dial_face(
-                        id,
-                        target,
-                        Arc::clone(&self.dial_config),
-                        self.params.clone(),
-                        self.offer,
-                        self.clock,
-                        self.tick_interval_ms,
-                    )
-                }));
+                self.dial(DialOrder::now(id, target));
             }
             DialDecision::AlreadyHeld => {
                 // An aggregating node too: its links to a node are the ones the
@@ -4936,7 +4914,7 @@ impl<'a> FaceLoop<'a> {
                     &zid,
                     &locators,
                     LocatorSource::Linkstate,
-                    self.clock.now_monotonic_ms(),
+                    self.now_ms,
                 );
                 let actions =
                     self.plan_peers(|peers, cx, next_id| peers.open_node(zid, cx, next_id));
@@ -5029,11 +5007,10 @@ impl<'a> FaceLoop<'a> {
         // Taken through the arm every open ends in. The accept stays counted
         // against `accept_pending` until then, as upstream counts it until
         // its transport is up.
-        self.opening.push(boxed(|| async move {
-            let opened = (id, peer, result);
-            drop(pending);
-            opened
-        }));
+        self.outbox.push(Effect::Settle(Box::new(Settled {
+            opened: (id, peer, result),
+            pending: Some(pending),
+        })));
     }
 
     /// One call into the planner, with the loop's id counter.
@@ -5049,7 +5026,7 @@ impl<'a> FaceLoop<'a> {
         // The planner's view of the loop at this moment.
         let cx = crate::loop_peers::PeerContext {
             directory: &self.directory,
-            now_ms: self.clock.now_monotonic_ms(),
+            now_ms: self.now_ms,
         };
         plan(&mut self.peers, &cx, &mut self.next_id)
     }
@@ -5058,23 +5035,55 @@ impl<'a> FaceLoop<'a> {
     // Every call into the planner ends here, so this is where its machines, as
     // they now are, are published for the status query (decision D6).
     #[cfg(feature = "routing-peer")]
+    //
+    // A peer's dial is a fresh face. A configured endpoint's dial aggregates
+    // (`transport-multilink`, `max_links > 1`) as every dial of an aggregating node
+    // does, and its link is retained for the per-link re-add; a node's dial is held
+    // by one face. A retry is a wait the shell arms, and a session its peer no longer
+    // wants is asked to close.
     fn take_peer_actions(&mut self, actions: Vec<crate::loop_peers::PeerAction>) -> usize {
-        let dials = PeerHost {
-            opening: &mut self.opening,
-            retries: &mut self.peer_retries,
-            #[cfg(feature = "session-close-ingress")]
-            sessions: &self.peer_sessions,
-            #[cfg(feature = "transport-multilink")]
-            max_links: self.max_links,
-            #[cfg(feature = "transport-multilink")]
-            ml_dial_endpoints: &mut self.ml_dial_endpoints,
-            dial_config: &self.dial_config,
-            params: &self.params,
-            offer: self.offer,
-            clock: self.clock,
-            tick_interval_ms: self.tick_interval_ms,
+        use crate::loop_peers::PeerAction;
+        #[cfg(feature = "transport-multilink")]
+        use crate::loop_peers::PeerKey;
+        let mut dials = 0;
+        for action in actions {
+            match action {
+                PeerAction::Dial { id, key, target } => {
+                    dials += 1;
+                    #[cfg(feature = "transport-multilink")]
+                    if self.max_links > 1 && matches!(key, PeerKey::Endpoint(_)) {
+                        let retained = RetainedLink::first(id, target.clone());
+                        let band = retained.band;
+                        self.ml_dial_endpoints.insert(id, retained);
+                        self.dial(DialOrder::now(id, target).aggregating(band));
+                        continue;
+                    }
+                    // Only an aggregating build reads which peer a dial is for.
+                    #[cfg(not(feature = "transport-multilink"))]
+                    let _ = key;
+                    self.dial(DialOrder::now(id, target));
+                }
+                PeerAction::Retry {
+                    key,
+                    generation,
+                    after_ms,
+                    ..
+                } => self.outbox.push(Effect::PeerRetry {
+                    due: (key, generation),
+                    after_ms,
+                }),
+                // Only a peer's machine being stopped asks for it, and an AP loop stops
+                // a peer only for a lifecycle `close`, which is that seam's.
+                PeerAction::Close { id } => {
+                    #[cfg(feature = "session-close-ingress")]
+                    if let Some(actions) = self.peer_sessions.get(&id) {
+                        actions.request_close();
+                    }
+                    #[cfg(not(feature = "session-close-ingress"))]
+                    let _ = id;
+                }
+            }
         }
-        .take(actions);
         #[cfg(feature = "session-close-ingress")]
         if let Some(board) = &self.peer_board {
             board.publish(self.peers.board_rows());
