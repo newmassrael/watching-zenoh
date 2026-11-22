@@ -1195,7 +1195,15 @@ CASES: tuple[Case, ...] = (
     # at `cd240d4b4` and +30,148 since.
     # 2026-11-21 -- step 4b rounds 2 to 4, as pico-client's note of this day says: +20,420 on
     # one machine.
-    Case("capic-router-node", "wz-capi-c", "libwz_capi_c.so", "router-node", 6_439_804,
+    Case("capic-router-node", "wz-capi-c", "libwz_capi_c.so", "router-node", 6_447_588,
+         # 2026-11-22, latest -- the router stops writing a face's frames on the routing thread
+         # and routes a frame's Puts under one table read, lending the key and the literal Put, with
+         # a route kept per face alias (`docs/router-fanout-cost.md` rows 1 and 4): 6,437,908 at
+         # main `85330b9e0` -> 6,445,692 on hkl002 (+7,784). By symbol: the alias route table
+         # (`AliasRoutes` keep +1,181, get +482, its hashbrown rehash +1,570, Arc and drop glue
+         # +731), `deliver_to_client_subscribers` +755, `register` +302, `client_leg_for` +296,
+         # `client_carrier` +212; the writer queue's inline write paths shrank (-345). Chosen: the
+         # forward of one literal Put to one client fell from 7 allocations and 233 B to 3 and 139.
          # 2026-11-22 -- the step 4b carry and run 44895098050's reading:
          # 6,407,956 hosted, +20,566 on one machine.
          # 2026-11-22, later -- a fan-out to the client faces encodes its carrier once and frames
@@ -1325,7 +1333,10 @@ CASES: tuple[Case, ...] = (
     # 2026-11-22 -- the fan-out's shared carrier, as `capic-router-node`'s note of this day takes
     # apart: 11,483,973 at main `087427170` -> 11,491,513 on hkl002 (+7,540). Chosen for the
     # same reason; the budget moves by that growth and keeps its headroom.
-    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 11_495_640,
+    # 2026-11-22, latest -- the router changes `capic-router-node`'s note of this day names:
+    # 11,495,937 at main `85330b9e0` -> 11,503,677 on hkl002 (+7,740). Main itself already read
+    # 297 over the earlier budget on that host; the budget keeps 4,127 over the new reading.
+    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 11_507_804,
          require=(ROUTER_NODE, ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED,
                   MULTICAST, ACCEPT_HANDSHAKE, CONFIG_VERDICT),
          exports=837,
