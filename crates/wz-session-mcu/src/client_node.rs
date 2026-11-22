@@ -368,6 +368,20 @@ mod tests {
                         }
                     }
                 }
+                // A record the router's session reads where its frame lies, counted as its owned
+                // form is: a Response on every in-place receive, a Declare and a ResponseFinal
+                // where the build lends its control records.
+                if let IterationEvent::InPlace(record) = event {
+                    if record.declare().is_some() {
+                        router_sees.declares.set(router_sees.declares.get() + 1)
+                    }
+                    if record.response().is_some() {
+                        router_sees.responses.set(router_sees.responses.get() + 1)
+                    }
+                    if record.response_final().is_some() {
+                        router_sees.finals.set(router_sees.finals.get() + 1)
+                    }
+                }
             },
         );
 

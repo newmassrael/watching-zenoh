@@ -441,6 +441,12 @@ mod tests {
                         .count();
                     seen.set(seen.get() + n);
                 }
+                // A Declare lent where its frame lies, on a build that lends its control records.
+                if let IterationEvent::InPlace(record) = event {
+                    if record.declare().is_some() {
+                        seen.set(seen.get() + 1);
+                    }
+                }
             },
         );
 

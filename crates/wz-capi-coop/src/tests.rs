@@ -447,6 +447,64 @@ fn run_router(
                     return;
                 }
             }
+            // The records the router's session reads where their frame lies: a Push, a Request and a
+            // Response on every in-place receive, and the control records where the build lends them.
+            // Counted as their owned forms are, and dropped on the same rules.
+            if let IterationEvent::InPlace(record) = event {
+                let mut seen = counted.lock().unwrap();
+                if record.declare().is_some() {
+                    seen.declares += 1;
+                }
+                if let Some(_interest) = record.interest() {
+                    seen.interests += 1;
+                    #[cfg(all(
+                        feature = "shared-key-ids",
+                        feature = "listen",
+                        feature = "query",
+                        feature = "queryable"
+                    ))]
+                    if let Some(keyexpr) =
+                        wz_session_core::interest_build::interest_body(&_interest.header_c_or_f)
+                            .and_then(|body| body.keyexpr.as_ref())
+                    {
+                        let (id, rest) =
+                            wz_session_core::wireexpr_resolve::id_and_suffix_view(&keyexpr.body);
+                        seen.interest_keys.push((id, rest.map(str::to_owned)));
+                    }
+                }
+                if record.push().is_some() {
+                    seen.pushes += 1;
+                }
+                #[cfg(feature = "queryable")]
+                if let Some(_response) = record.response() {
+                    seen.answers.push("reply");
+                    #[cfg(feature = "shared-key-ids")]
+                    {
+                        let (id, rest, sender) =
+                            wz_session_core::wireexpr_resolve::id_suffix_and_space_viewed(
+                                &_response.keyexpr.body,
+                            );
+                        seen.reply_keys.push((id, rest.map(str::to_owned), sender));
+                    }
+                }
+                #[cfg(feature = "queryable")]
+                if record.response_final().is_some() {
+                    seen.answers.push("final");
+                }
+                #[cfg(feature = "query")]
+                if record.request().is_some() {
+                    seen.queries += 1;
+                }
+                drop(seen);
+                #[cfg(feature = "query")]
+                if silenced.get() && record.request().is_some() {
+                    return;
+                }
+                #[cfg(feature = "liveliness-get")]
+                if muted.get() && record.interest().is_some() {
+                    return;
+                }
+            }
             dispatch(event);
         },
     );

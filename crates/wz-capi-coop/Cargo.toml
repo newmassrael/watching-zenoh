@@ -49,9 +49,13 @@ wz-capi-port = { path = "../wz-capi-port", default-features = false }
 # engine lends every link its slots from the session's arena (`arena`), so a send builds no frame
 # on the heap while a slot is free. A link that lends none still sends: the session builds its
 # frame itself and counts why, unless the build selects `tx-lend-only` below.
+# `rx-lent-control`: every record of a frame the engine reads in place is lent to the session's
+# tables, the declarations, interests and response finals too, so the build links no owned decode
+# of a frame's records (the receive is in place, below; `transport-stats` keeps its counters').
 wz-session-core = { path = "../wz-session-core", default-features = false, features = [
     "alloc",
     "transport-tx-lend",
+    "rx-lent-control",
     "codec-keep-alive",
     "codec-close",
     "codec-push",
