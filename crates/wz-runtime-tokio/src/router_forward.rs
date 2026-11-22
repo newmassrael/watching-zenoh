@@ -343,6 +343,7 @@
 //!   re-advertise and the query Request/Response sends all pass the §5.16
 //!   egress chain.
 
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -388,7 +389,8 @@ use wz_session_core::push_routing_context::{read_push_source, set_push_source};
 use wz_session_core::qos::Priority;
 use wz_session_core::query::QueryResponder;
 use wz_session_core::wireexpr_resolve::{
-    resolve_wireexpr, wireexpr_is_empty, wireexpr_names_a_declaration,
+    id_and_suffix, resolve_wireexpr, resolve_wireexpr_into, wireexpr_is_empty,
+    wireexpr_names_a_declaration, KeyexprBuf, KeyexprPastBound, MappingSpaces,
 };
 
 use crate::accept_loop::{
@@ -2101,6 +2103,26 @@ fn classify_inbound(faces: &FaceTable, inbound: FaceId) -> InboundFace<'_> {
     match faces.get(&inbound) {
         Some(s) => InboundFace::Held(s),
         None => InboundFace::Gone,
+    }
+}
+
+/// The key `push` names against `aliases`, the alias table of the face it came from, lent where
+/// one string already is it: the message's own suffix for a literal, the face's alias for an alias
+/// with no suffix. Only an alias with a suffix is composed, in `composed`, which on the growable
+/// backing is the one allocation of a resolution, where every resolution copied the key before;
+/// one past what the fixed backing composes is composed as the growable one does.
+fn lent_keyexpr<'k>(
+    push: &'k PushOwned,
+    aliases: &'k hashbrown::HashMap<u64, String>,
+    composed: &'k mut KeyexprBuf,
+) -> Option<Cow<'k, str>> {
+    match resolve_wireexpr_into(
+        &push.keyexpr.body,
+        MappingSpaces::peer_only(aliases),
+        composed,
+    ) {
+        Ok(key) => key.map(Cow::Borrowed),
+        Err(KeyexprPastBound) => resolve_wireexpr(&push.keyexpr.body, aliases).map(Cow::Owned),
     }
 }
 
@@ -8887,7 +8909,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let Some(_held) = self.open_shm_relay_pass(inbound, push) else {
             return;
         };
-        let Some(keyexpr) = self.resolve_inbound_keyexpr(inbound, push) else {
+        let mut composed = KeyexprBuf::new();
+        let Some(keyexpr) = self.resolve_inbound_keyexpr(inbound, push, &mut composed) else {
             return;
         };
         // The §5.18 forward-path stamp, taken ONCE, by the first block below whose
@@ -8944,7 +8967,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // so a relayed Put keeps its priority end-to-end. The mcast-group egress
         // (broadcast_to_mcast_groups) is the one remaining DEFAULT wire egress — the
         // 2-channel mcast plane has no per-priority conduit (residual, not inert).
-        self.forward_push_tier(inbound, tier, reliable, priority, &stamp);
+        self.forward_push_tier(inbound, tier, reliable, priority, &stamp, &keyexpr);
         // Blocks 1 & 2 — the filtered cross-mesh bridge (a received-frame transit
         // re-injected into the other mesh; preserves the band).
         let origin = (src_zid.as_ref(), fwd_zid.as_ref());
@@ -9300,28 +9323,34 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         false
     }
 
-    /// Resolve a `Push`'s wire keyexpr against the inbound face's alias table —
-    /// the scoped-borrow head [`route_push`](Self::route_push) runs ONCE to elect
-    /// the master and feed the client-delivery / bridge / publish legs the literal
-    /// keyexpr. (The within-tier [`forward_push_tier`](Self::forward_push_tier)
-    /// resolves again in its own borrow, since it also needs the inbound zid/link
-    /// there; `resolve_wireexpr` is pure, so the two resolutions are identical.)
+    /// Resolve a `Push`'s wire keyexpr against the inbound face's alias table — the scoped-borrow
+    /// head [`route_push`](Self::route_push) runs ONCE for every leg of the route, the within-tier
+    /// one included. The key is lent where one string already is it ([`lent_keyexpr`]), as
+    /// upstream finds a Put's key by its mapping and composes no text
+    /// (`zenoh/src/net/routing/dispatcher/pubsub.rs` @
+    /// `.get_mapping(src_face, &msg.wire_expr.scope, msg.wire_expr.mapping)`).
     /// `None` = the face is gone or the alias id is unknown (drop the Push).
-    fn resolve_inbound_keyexpr(&self, inbound: FaceId, push: &PushOwned) -> Option<String> {
+    fn resolve_inbound_keyexpr<'k>(
+        &'k self,
+        inbound: FaceId,
+        push: &'k PushOwned,
+        composed: &'k mut KeyexprBuf,
+    ) -> Option<Cow<'k, str>> {
         let faces = &self.tables.faces;
         // R2734 — this is the ONE site that recognised the sentinel before the
         // classifier existed, and it is why Push worked at all while every other
         // kind died at its lookup. It now asks the same question the other eleven
         // ask, so the special case is the enum's rather than this function's.
         match classify_inbound(faces, inbound) {
-            InboundFace::Held(s) => resolve_wireexpr(&push.keyexpr.body, &s.keyexpr_table),
+            InboundFace::Held(s) => lent_keyexpr(push, &s.keyexpr_table, composed),
             // A source-only face carries no per-peer alias table, so a literal
             // (id==0) push yields its suffix and an aliased id-only push yields
             // None and is dropped. wz resolves a group peer's aliases UPSTREAM of
             // here, per peer by source address, in `apply_declared_aliases`.
-            InboundFace::SourceOnly => {
-                resolve_wireexpr(&push.keyexpr.body, &hashbrown::HashMap::new())
-            }
+            InboundFace::SourceOnly => match id_and_suffix(&push.keyexpr.body) {
+                (0, suffix) => suffix.map(Cow::Borrowed),
+                _ => None,
+            },
             InboundFace::Gone => None,
         }
     }
@@ -9501,6 +9530,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         reliable: bool,
         priority: Priority,
         stamp: &ForwardStamp<'_>,
+        keyexpr: &str,
     ) {
         let push = stamp.received();
         // R2889 (open-debt item 751, step 8b) — not within a region the pin's
@@ -9515,9 +9545,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let Some(hat) = self.mesh_hat(tier) else {
             return; // Client tier: no mesh -> within-tier routes nowhere (C2/C3).
         };
-        // Resolve the keyexpr against the inbound face's alias table + read its
-        // zid / link in one scoped borrow (an unresolvable alias drops the Push).
-        let (inbound_zid, inbound_link, keyexpr) = {
+        // The inbound face's zid and link, in one scoped borrow; its key is the one the
+        // [`route_push`](Self::route_push) head resolved against the same face's aliases.
+        let (inbound_zid, inbound_link) = {
             let faces = &self.tables.faces;
             // R2734 — SourceOnly declines, and this one is a REAL routing
             // decision rather than a formality: the within-tier mesh transit of a
@@ -9531,10 +9561,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 InboundFace::Held(s) => s,
                 InboundFace::SourceOnly | InboundFace::Gone => return,
             };
-            let Some(keyexpr) = resolve_wireexpr(&push.keyexpr.body, &s.keyexpr_table) else {
-                return;
-            };
-            (s.peer_zid, s.link, keyexpr)
+            (s.peer_zid, s.link)
         };
         let names = |k: &str| self.names_a_resource(k);
         let Some((carrier, children)) = compute_push_forward(
@@ -9547,7 +9574,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             inbound_zid,
             inbound_link,
             push,
-            &keyexpr,
+            keyexpr,
             || stamp.for_egress(),
         ) else {
             return;
@@ -21099,6 +21126,55 @@ mod tests {
             .expect("literal push");
         let carrier = client_carrier(&literal, "demo/own").expect("a carrier");
         assert_eq!(carrier.keyexpr(), "demo/own");
+    }
+
+    /// A Put's key is lent from the message for a literal and from the face's aliases for an alias
+    /// with no suffix, and composed only for an alias with a suffix; an alias the face did not
+    /// declare resolves to nothing. Turned red by a resolution that copies a key one string
+    /// already is.
+    #[test]
+    fn a_puts_key_is_lent_unless_a_suffix_must_be_composed() {
+        use wz_session_core::push_build::{build_push_aliased, build_push_literal};
+        let aliases: hashbrown::HashMap<u64, String> =
+            [(5, "demo/a".to_owned())].into_iter().collect();
+        let literal = build_push_literal("demo/x", b"x").expect("literal push");
+        let alias = build_push_aliased(5, None, b"x").expect("aliased push");
+        let suffixed = build_push_aliased(5, Some("/b"), b"x").expect("aliased push");
+        let unknown = build_push_aliased(6, None, b"x").expect("aliased push");
+
+        let mut composed = KeyexprBuf::new();
+        let key = lent_keyexpr(&literal, &aliases, &mut composed).expect("a literal resolves");
+        assert_eq!(&*key, "demo/x");
+        let (_, suffix) = id_and_suffix(&literal.keyexpr.body);
+        assert_eq!(
+            key.as_ptr(),
+            suffix.expect("a literal names its key").as_ptr(),
+            "lent from the message"
+        );
+
+        let mut composed = KeyexprBuf::new();
+        let key = lent_keyexpr(&alias, &aliases, &mut composed).expect("a declared alias resolves");
+        assert_eq!(&*key, "demo/a");
+        assert_eq!(
+            key.as_ptr(),
+            aliases[&5].as_ptr(),
+            "lent from the face's aliases"
+        );
+
+        let mut composed = KeyexprBuf::new();
+        let key =
+            lent_keyexpr(&suffixed, &aliases, &mut composed).expect("an alias and its suffix");
+        assert_eq!(&*key, "demo/a/b");
+        let at = key.as_ptr();
+        drop(key);
+        assert_eq!(
+            at,
+            composed.as_str().as_ptr(),
+            "composed in the caller's buffer"
+        );
+
+        let mut composed = KeyexprBuf::new();
+        assert!(lent_keyexpr(&unknown, &aliases, &mut composed).is_none());
     }
 
     /// The payload the fan-out tests publish.
