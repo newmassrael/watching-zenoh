@@ -6829,6 +6829,26 @@
       "carry_forward_bullets": [
         "The aliased fan-out copy test under pubsub-ts-stack and the capic-default budget of the same hosted run are repaired by another session's round, as agreed between the two sessions."
       ]
+    },
+    "Round 4608": {
+      "decision_summary": "- Layer C1g leaves the session-planes job for a job of its own, session-observer, with the same setup and its own 1200 s budget: run 45030244784 ended session-planes at 1158 s of 1200 s (96%) with every lane green, and C1g was 534 s of it (it read 199 s when session-planes was made).\n- Split rather than a larger timeout, for the reason the R2163 note gives: the growth is monotonic in legs, and a job of its own charges it to its own budget.",
+      "changes_bullets": [
+        ".github/workflows/ci.yml: new job session-observer (Layer C1g and the budget margin guard), C1g removed from session-planes and its name, session-observer added to evict-superseded's needs.",
+        ".github/cache-classes.json: session-observer is an owner of apt-archives and a reader of rust-ci, as session-planes is.",
+        "scripts/lib/apt_package_census.py and .github/apt-packages/ci/session-observer.list: the job takes session-planes' baseline list."
+      ],
+      "verification_bullets": [
+        "The 170 round-fed gates of .githooks/pre-push: 170 passed.",
+        "Every gate under scripts/lib that reads ci.yml: passed (decline_arming_gate --check OK; crossimpl_audit needs the CI inventory file and was not run).",
+        "actionlint .github/workflows/ci.yml: clean; the workflow parses with session-observer in evict-superseded's needs.",
+        "Predicted from run 45030244784's own layer times: session-planes about 630 s (52%) and session-observer about 670 s (56%) of 1200 s."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The first hosted run after this landing reads both jobs' margins; a prediction is not a measurement."
+      ]
     }
   },
   "inventory_entries": {
