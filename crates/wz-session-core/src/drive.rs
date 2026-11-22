@@ -3935,7 +3935,7 @@ pub fn check_keepalive_deadline<R: SessionRuntime, T: TimeSource>(
     now_ms: u64,
 ) -> crate::lease::KeepAliveCheckOutcome {
     use crate::lease::KeepAliveCheckOutcome as K;
-    if !R::with_mutex_mut(&actions.link.transport_available, |g| *g) {
+    if !actions.link.transport_available.is_open() {
         return K::Inactive;
     }
     // `None`: the worker is not running, never started or stopped by the

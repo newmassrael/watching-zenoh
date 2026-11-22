@@ -1414,8 +1414,8 @@ mod tests {
         let JoinOutcome::Joined(datagram_link) = join_link(&stream, &datagram, 2) else {
             panic!("the datagram link joins the shared core");
         };
-        TokioRuntime::with_mutex_mut(&stream.link.transport_available, |g| *g = true);
-        TokioRuntime::with_mutex_mut(&datagram_link.link.transport_available, |g| *g = true);
+        stream.link.transport_available.open();
+        datagram_link.link.transport_available.open();
 
         let authenticator = PosixShmAuthenticator::new().expect("create an authenticator");
         let segment = Arc::clone(&authenticator.segment);

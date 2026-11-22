@@ -569,6 +569,14 @@ impl BatchLendCounts {
 /// the AP profile and a cooperative task on the MCU one.
 pub struct OutOfBand<R: SessionRuntime> {
     state: R::Mutex<OutOfBandState>,
+    /// A close for congestion has been ORDERED of this session, ever: the sticky half of
+    /// `tx_congested`, which the drive loop clears when it raises the event. zenoh 1.10.2 marks
+    /// the transport's pipelines disabled at the moment it decides to close an unresponsive
+    /// transport, so that every later push fails at once instead of waiting another
+    /// `wait_before_close` (`io/zenoh-transport/src/unicast/universal/tx.rs` @
+    /// `tl.pipeline.mark_disabled();`); this is what the send gate reads for it. Outside
+    /// `state`, because every data send reads it and none needs the requests with it.
+    congestion_close_ordered: crate::send_gate::Latch,
 }
 
 /// The requests an [`OutOfBand`] can hold, and the waker of the loop parked on
@@ -590,13 +598,6 @@ pub struct OutOfBandState {
     /// (`tx.congestion.exhaust`), as zenoh's `handle_push_result` deletes its
     /// transport, without a Close frame since 1.10.2.
     pub tx_congested: bool,
-    /// A close for congestion has been ORDERED of this session, ever: the sticky half of
-    /// `tx_congested`, which the drive loop clears when it raises the event. zenoh 1.10.2 marks
-    /// the transport's pipelines disabled at the moment it decides to close an unresponsive
-    /// transport, so that every later push fails at once instead of waiting another
-    /// `wait_before_close` (`io/zenoh-transport/src/unicast/universal/tx.rs` @
-    /// `tl.pipeline.mark_disabled();`); this is what the send gate reads for it.
-    pub congestion_close_ordered: bool,
     /// The run of blocking messages that found no room, one after another: what the
     /// `TX_EXPIRY_CLOSE_AFTER` limit of `tx-expiry-keeps-session` counts. It is state of this
     /// lock and not a request, so it wakes no one and `Self::any` does not read it.
@@ -663,6 +664,7 @@ impl<R: SessionRuntime> OutOfBand<R> {
     fn new() -> Self {
         Self {
             state: R::new_mutex(OutOfBandState::default()),
+            congestion_close_ordered: crate::send_gate::Latch::new(),
         }
     }
 
@@ -2576,7 +2578,10 @@ pub struct LinkState<R: SessionRuntime> {
     /// on the dead transport's mutex/NULL
     /// (`_Z_ERR_TRANSPORT_NOT_AVAILABLE`); the handshake / CLOSE
     /// transport messages bypass the chokepoint and stay ungated.
-    pub transport_available: R::Mutex<bool>,
+    ///
+    /// A [`crate::send_gate::SendGate`] and not a lock: every data send reads it, and nothing
+    /// reads and writes it in one step.
+    pub transport_available: crate::send_gate::SendGate,
     /// Whether this link's keepalive worker runs: set by the FSM's
     /// `start_keepalive_worker` on `Established` entry and cleared by
     /// `stop_keepalive_worker` on its exit (and by
@@ -4096,7 +4101,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 datagram_resume: R::new_mutex(None::<DatagramResume>),
                 established_at: R::new_mutex(None::<u64>),
                 last_outbound_at: R::new_mutex(None::<u64>),
-                transport_available: R::new_mutex(true),
+                transport_available: crate::send_gate::SendGate::new(true),
                 #[cfg(feature = "transport-keepalive")]
                 keepalive_armed: R::new_mutex(false),
                 lease_armed: R::new_mutex(false),
@@ -5853,7 +5858,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // surviving link (`session_send_available` ORs the set) instead
                 // of emitting into a dead one.
                 crate::link::LinkDropCause::WriterGone => {
-                    R::with_mutex_mut(&link.transport_available, |g| *g = false);
+                    link.transport_available.close();
                 }
                 // NOT terminal, and deliberately not gated: one frame exceeded
                 // what this link can put in a single write. The link is healthy
@@ -7709,7 +7714,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(feature = "transport-qos")]
         let mut full: Option<(&R::Shared<LinkState<R>>, usize)> = None;
         for l in links.iter() {
-            if !R::with_mutex_mut(&l.transport_available, |g| *g) {
+            if !l.transport_available.is_open() {
                 continue;
             }
             if first_alive.is_none() {
@@ -7851,7 +7856,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             .lock()
             .expect("multilink set mutex")
             .iter()
-            .filter(|l| R::with_mutex_mut(&l.transport_available, |g| *g))
+            .filter(|l| l.transport_available.is_open())
             .count()
     }
 
@@ -7882,7 +7887,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         if self.link_count() > 0 {
             return self.live_link_count() > 0;
         }
-        R::with_mutex_mut(&self.link.transport_available, |g| *g)
+        self.link.transport_available.is_open()
     }
 
     /// Non-multilink builds have no aggregation set — the send gate is always this
@@ -7904,7 +7909,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ))]
     #[inline]
     fn session_send_available(&self) -> bool {
-        R::with_mutex_mut(&self.link.transport_available, |g| *g)
+        self.link.transport_available.is_open()
     }
 
     /// The number of 0x4 Z_EXT_MULTILINK entries staged across this session's four
@@ -10160,17 +10165,17 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// ([`Self::close_for_capacity`]). Staged, not raised, for the reason
     /// `request_close` gives: the sender is not the loop.
     pub fn request_congestion_close(&self) {
-        self.core.out_of_band.raise(|s| {
-            s.tx_congested = true;
-            s.congestion_close_ordered = true;
-        });
+        // Ordered before the request is staged, so a send made after the drive loop takes the
+        // request is refused too.
+        self.core.out_of_band.congestion_close_ordered.raise();
+        self.core.out_of_band.raise(|s| s.tx_congested = true);
     }
 
     /// Whether a close for congestion has been ordered of this session: from that moment a send
     /// to it is refused at once ([`SendWireError::TransportUnavailable`]), where it would have
     /// waited out `wait_before_close` again on a link already known not to take it.
     pub fn congestion_close_ordered(&self) -> bool {
-        self.core.out_of_band.take(|s| s.congestion_close_ordered)
+        self.core.out_of_band.congestion_close_ordered.is_raised()
     }
 
     /// A blocking message found no room in its deadline: settle what that costs, by the
@@ -16544,7 +16549,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // re-handshake window (release_link already closed it when the
             // FSM saw the loss; this also covers a reset without a prior
             // terminal). record_established_at re-opens it.
-            R::with_mutex_mut(&self.link.transport_available, |g| *g = false);
+            self.link.transport_available.close();
             // The next peer has been asked for nothing: the answers owed by the last are not
             // owed to it, and the replay asks again, noting each interest as it does.
             R::with_mutex_mut(&self.declaration_sync, |sync| sync.clear());
@@ -17809,7 +17814,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         // F2 — the link is going away: close the data-send gate so a
         // straggling send rejects typed instead of racing the teardown.
         // R311y205 (IMPL-2a) — the gate is per-link (`self.link()`).
-        R::with_mutex_mut(&self.link().transport_available, |g| *g = false);
+        self.link().transport_available.close();
         // R311y205 (slice-1 MF-C) — remove THIS link's `LinkState` from the
         // shared aggregation set so `link_count()` reflects the LIVE topology
         // and a `max_links` slot recovers after a link dies (the join room check
@@ -17848,7 +17853,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         a.release_handshake_answer();
         // F2 — Established (re-)entry re-opens the data-send gate (the
         // supervisor replays cached declarations right after this fires).
-        R::with_mutex_mut(&self.link().transport_available, |g| *g = true);
+        self.link().transport_available.open();
         // R2924 — the link's outbound queue takes the established session's
         // shape: its configured sizes, one queue per priority if it negotiated
         // QoS and one queue otherwise, as zenoh builds a link's pipeline when
