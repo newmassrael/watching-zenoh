@@ -494,8 +494,18 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             "session-slot",
         )
     },
-    # Each of its non-default features gates a public path, probed off the module tree.
-    "wz-app-frame": {},
+    # Its other non-default features gate a public path, probed off the module tree.
+    # `sce-generated-codec` gates one test arm: the conformance corpus run through the codecs SCE
+    # generates (`fixed_records_tests::generated_codec_matches_the_corpus`), which fails naming
+    # each layout until a build links its codec, so no lane turns it on and nothing public waits
+    # on it.
+    "wz-app-frame": {
+        "sce-generated-codec": (
+            "no `#[cfg]` in this package attaches this feature to a publicly visible item; "
+            "it gates one test arm (`fixed_records_tests`), which fails until each layout's "
+            "generated codec is listed, and the default build runs the corpus"
+        ),
+    },
 }
 
 # package -> feature -> why it is not probed YET, though it does gate a public

@@ -47,22 +47,17 @@ wz-capi-c	wz-capi-c/src/string_array.rs	1	error: unresolved link to `crate::scou
 wz-capi-c	wz-capi-c/src/sub.rs	1	error: public documentation for `z_subscriber_id` links to private item `crate::entity::z_entity_global_id_t::for_entity`: this item is private
 wz-capi-core	wz-capi-core/src/drive.rs	1	error: unresolved link to `Self::with_shm_clients`: the struct `OpenStance` has no field or associated item named `with_shm_clients`
 wz-capi-core	wz-capi-core/src/drive.rs	1	error: unresolved link to `SessionResources::gossip`: the struct `SessionResources` has no field or associated item named `gossip`
-wz-capi-core	wz-capi-core/src/drive.rs	1	error: unresolved link to `drive_bind_phase`: no item named `drive_bind_phase` in scope
 wz-capi-core	wz-capi-core/src/faces.rs	1	error: unresolved link to `CApiForwarder::forward`: no item named `CApiForwarder` in scope
 wz-capi-core	wz-capi-core/src/faces.rs	1	error: unresolved link to `CApiForwarder::next_extra_deadline_ms`: no item named `CApiForwarder` in scope
 wz-capi-core	wz-capi-core/src/scouting_node.rs	1	error: unresolved link to `crate::scouting_responder`: no item named `scouting_responder` in module `wz_capi_core`
 wz-capi-pico	wz-capi-pico/src/cancellation.rs	1	error: unresolved link to `crate::sync`: no item named `sync` in module `wz_capi_pico`
 wz-capi-pico	wz-capi-pico/src/get.rs	1	error: unresolved link to `crate::query`: no item named `query` in module `wz_capi_pico`
+wz-capi-pico	wz-capi-pico/src/lib.rs	1	refused: wz-capi-pico: `os-posix` and `os-zephyr` each name the system the library is for; a build names one
 wz-capi-pico	wz-capi-pico/src/lib.rs	1	refused: wz-capi-pico: the tokio engine scouts on the host's sockets: a build with it names `scout`, and `scout-mcu` is the cooperative engine's window over one datagram socket
 wz-capi-pico	wz-capi-pico/src/matching.rs	1	error: unresolved link to `wz_capi_core::faces::SharedSession::declare_matching_listener`: no item named `wz_capi_core` in scope
 wz-capi-pico	wz-capi-pico/src/pubsub.rs	1	error: unresolved link to `crate::advanced::ze_advanced_publisher_options_t`: no item named `advanced` in module `wz_capi_pico`
 wz-capi-pico	wz-capi-pico/src/query.rs	1	error: unresolved link to `crate::pubsub::z_sample_source_info`: no item named `z_sample_source_info` in module `pubsub`
 wz-capi-pico	wz-capi-pico/src/session.rs	1	error: unresolved link to `SessionState`: no item named `SessionState` in scope
-wz-capi-port	wz-capi-port/src/cancellation.rs	1	error: unresolved link to `CancellationToken::cancel`: no item named `CancellationToken` in scope
-wz-capi-port	wz-capi-port/src/cancellation.rs	1	error: unresolved link to `CancellationToken::is_cancelled`: no item named `CancellationToken` in scope
-wz-capi-port	wz-capi-port/src/cancellation.rs	1	error: unresolved link to `CancellationToken::register`: no item named `CancellationToken` in scope
-wz-capi-port	wz-capi-port/src/cancellation.rs	2	error: unresolved link to `Registration`: no item named `Registration` in scope
-wz-capi-port	wz-capi-port/src/cancellation.rs	1	error: unresolved link to `register_fan`: no item named `register_fan` in scope
 wz-codecs	wz-codecs/src/lib.rs	1	error: unresolved link to `FLAG_D_N`: no item named `FLAG_D_N` in scope
 wz-codecs-test-support	wz-codecs-test-support/src/lib.rs	1	error: unresolved link to `with_empty_inline_put`: no item named `with_empty_inline_put` in scope
 wz-ext-pubsub	wz-ext-pubsub/src/advanced_publisher.rs	1	error: unresolved link to `AdvancedPublisherOn::emit_heartbeat_once`: the struct `AdvancedPublisherOn` has no field or associated item named `emit_heartbeat_once`

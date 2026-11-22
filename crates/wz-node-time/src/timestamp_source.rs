@@ -11,7 +11,7 @@
 //! and the source INJECTION point
 //! (`wz_storage::storage_state::StorageState::apply_sample`
 //! takes the stamp as a `FnOnce`); only the concrete source IMPLEMENTATION
-//! lives here, std-side, where its physical clock ([`std::time::SystemTime`])
+//! lives here, std-side, where its physical clock (`std::time::SystemTime`)
 //! and its consumers (the storage service of the tokio runtime, the advanced
 //! publisher) live. (`wz-runtime-core`'s
 //! `TimeSource` trait is the no_std MONOTONIC clock for timeouts/scheduling and
