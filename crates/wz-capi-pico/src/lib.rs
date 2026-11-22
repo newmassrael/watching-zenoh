@@ -186,8 +186,10 @@ compile_error!(
      drop it from the cooperative library, or build the tokio engine's without the cooperative \
      feature"
 );
+// The unixpipe link is built on a Unix host alone, so elsewhere the feature names nothing to refuse.
 #[cfg(all(
     feature = "transport-link-unixpipe",
+    unix,
     any(feature = "engine-coop", feature = "os-posix", feature = "os-zephyr")
 ))]
 compile_error!(
