@@ -870,3 +870,40 @@ fn the_pico_preset_stages_an_answer_to_every_entity_it_admits() {
     let tokens = preset_of(&presets, "MAX_LOCAL_TOKENS").expect("the preset states it");
     assert!(declares > subscribers && declares > tokens);
 }
+
+/// The pico preset's delivery lane is the least lane the build accepts at the preset's other
+/// values: one record of the larger of the batch and the largest message the session rejoins, with
+/// the most a sample adds to it, so a read always finds room for the record it takes next.
+#[test]
+fn the_pico_presets_lane_holds_one_record() {
+    let presets = pico_preset();
+    let lane = preset_of(&presets, "DELIVERY_LANE_BYTES").expect("the preset states the lane");
+    let Some(limits) = pico_preset_limits() else {
+        // A build that keeps each limit to its own value has no preset to lower it to.
+        return;
+    };
+    let frag = limits
+        .pico_frag_max_bytes()
+        .lent_under(Quota::at_most(caps::PICO_FRAG_MAX_BYTES))
+        .expect("the preset's rejoined message is under the build's");
+    let key = limits
+        .max_keyexpr_bytes()
+        .lent_under(Quota::at_most(caps::MAX_KEYEXPR_BYTES))
+        .expect("the preset's key is under the build's");
+    let subscribers = preset_of(&presets, "MAX_SUBSCRIPTIONS").expect("the preset states it");
+    let liveliness =
+        preset_of(&presets, "MAX_LIVELINESS_SUBSCRIPTIONS").expect("the preset states it");
+    let most = if cfg!(feature = "liveliness") {
+        subscribers.max(liveliness)
+    } else {
+        subscribers
+    };
+    assert_eq!(
+        lane,
+        crate::lane::read_bytes(limits.pico_unicast_batch_bytes(), frag, key, most),
+        "the preset's lane is one record's room"
+    );
+    let plan = ArenaPlan::of(&client_config(), &limits).expect("the preset is under the build");
+    assert_eq!(row(&plan, "delivery lane").entry_bytes, lane);
+    assert!(lane < SessionLimits::defaults().delivery_lane_bytes());
+}
