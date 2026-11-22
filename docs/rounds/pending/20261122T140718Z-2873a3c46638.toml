@@ -1,0 +1,18 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"]
+decision = '''
+- The cooperative C library is one engine with one form: engine-coop, os-posix and os-zephyr select the lent-only receive and send; a build naming the tokio engine beside it is refused by name.
+- A session reserves its memory at open from its limits; a document may only lower a limit the build lends at open (batch and lane capacity are the build value).
+'''
+changes = '''
+- Lent tables, arena rows, delivery lane, in-place unicast and group receive, owned dispatch compiled out under rx-lent-only.
+- Group put written on the calling thread with batch windows; own get and put synchronous; liveliness and reply lanes.
+- Fixes found on the way: a self-deadlock in the own-get Final hold, udp/ listener buffers from the session tables, test-support split so a coop test build links no tokio engine.
+'''
+verification = '''
+- pico-client-coop text 1,022,766 = 2.54x pico (main 2.5569x); wz-capi-coop 188 lib tests, wz-capi-pico coop all targets, session-core 1235.
+- Fleet lanes 0, C0, C1cf, C1cs, C1p32, C1nh, C1m, Q, S pass on the landing branch.
+'''
+carry = '''
+- Land the process runtime limits (nh-limits) and the coop CPU rows 3, 4, 5, 7 (coop-cpu) on top; re-measure D10 on Linux, Windows and the MCU matrix.
+- A tls/ and lwIP/Zephyr connect still dial blocking.
+'''
