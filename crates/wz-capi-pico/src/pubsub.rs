@@ -196,7 +196,11 @@ pub(crate) struct SampleMarshal {
     /// the pointer sees the difference.
     attachment: Option<ByteBuf>,
     timestamp: Option<z_timestamp_t>,
-    encoding: Option<crate::encoding::z_owned_encoding_t>,
+    /// The encoding the sample carried, held in the marshal rather than boxed apart from it: the
+    /// owned encoding `z_sample_encoding` hands out is `loaned_encoding`, whose handle
+    /// [`Self::bind`] points here, so a sample's encoding costs no allocation of its own and is
+    /// let go of with the marshal.
+    encoding: Option<crate::encoding::EncodingState>,
     /// R311y559 — the sample's QoS byte, `None` when the message carried no
     /// QoS ext. The three `z_sample_{priority,express,congestion_control}`
     /// accessors decode it rather than each carrying its own field, because
@@ -213,6 +217,15 @@ pub(crate) struct SampleMarshal {
     loaned_keyexpr: z_loaned_keyexpr_t,
     loaned_payload: z_loaned_bytes_t,
     loaned_attachment: z_loaned_bytes_t,
+    loaned_encoding: crate::encoding::z_loaned_encoding_t,
+}
+
+/// A loaned encoding view not yet pointed at anything ([`SampleMarshal::bind`] points it).
+fn unbound_encoding() -> crate::encoding::z_loaned_encoding_t {
+    crate::encoding::z_loaned_encoding_t {
+        handle: core::ptr::null_mut(),
+        _pad: [core::ptr::null_mut(); 4],
+    }
 }
 
 /// Where a marshal's key lies.
@@ -290,6 +303,7 @@ impl SampleMarshal {
                 handle: core::ptr::null_mut(),
                 _pad: [core::ptr::null_mut(); 3],
             },
+            loaned_encoding: unbound_encoding(),
         }
     }
 
@@ -311,7 +325,7 @@ impl SampleMarshal {
                 },
             )
             .or_else(|| view.encoding().cloned())
-            .map(own_encoding);
+            .map(|hint| crate::encoding::EncodingState { hint });
         // R311y559 — the three fields the census found unreachable from C. All
         // three were already on the seam; nothing decoded them into the ABI.
         self.qos = view.qos();
@@ -339,11 +353,11 @@ impl SampleMarshal {
     ) -> Self {
         self.attachment = attachment.map(ByteBuf::from);
         self.timestamp = timestamp.map(|(time, zid)| timestamp_from(time, zid));
-        self.encoding = encoding.map(|(packed_id, schema)| {
-            own_encoding(wz_session_core::sample::EncodingHint {
+        self.encoding = encoding.map(|(packed_id, schema)| crate::encoding::EncodingState {
+            hint: wz_session_core::sample::EncodingHint {
                 packed_id,
                 schema: schema.map(<[u8]>::to_vec),
-            })
+            },
         });
         // R311y562 — the FOURTH field, and it went missing for the same reason
         // the other three once did: this function is the reply plane's separate
@@ -373,6 +387,10 @@ impl SampleMarshal {
         self.pico_payload = z_owned_bytes_t::borrowed(&self.payload as *const ByteBuf as *const _);
         if let Some(attachment) = self.attachment.as_ref() {
             self.loaned_attachment.handle = attachment as *const ByteBuf as *mut c_void;
+        }
+        if let Some(encoding) = self.encoding.as_ref() {
+            self.loaned_encoding.handle =
+                encoding as *const crate::encoding::EncodingState as *mut c_void;
         }
     }
 
@@ -409,8 +427,9 @@ impl SampleMarshal {
             encoding: self
                 .encoding
                 .as_ref()
-                // SAFETY: `encoding` is an owned encoding this crate stored.
-                .map(|owned| unsafe { crate::encoding::clone_owned_encoding(owned) }),
+                .map(|state| crate::encoding::EncodingState {
+                    hint: state.hint.clone(),
+                }),
             loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
             loaned_payload: z_loaned_bytes_t {
                 handle: core::ptr::null_mut(),
@@ -420,6 +439,7 @@ impl SampleMarshal {
                 handle: core::ptr::null_mut(),
                 _pad: [core::ptr::null_mut(); 3],
             },
+            loaned_encoding: unbound_encoding(),
         }
     }
 }
@@ -483,16 +503,6 @@ fn timestamp_from(time: u64, zid: &[u8]) -> z_timestamp_t {
         id: crate::zid::z_id_t::from_wire(zid),
         time,
     }
-}
-
-/// Box an [`EncodingHint`] into an owned encoding slot.
-fn own_encoding(
-    hint: wz_session_core::sample::EncodingHint,
-) -> crate::encoding::z_owned_encoding_t {
-    let mut owned = crate::encoding::z_owned_encoding_t::null_value();
-    // SAFETY: `owned` is a live slot this call fills.
-    unsafe { crate::encoding::store_encoding(&mut owned, hint) };
-    owned
 }
 
 /// pico `z_sample_kind_t` (`api/constants.h:164-168`): how the sample was
@@ -710,13 +720,10 @@ pub unsafe extern "C" fn z_sample_encoding(
         return core::ptr::null();
     }
     let marshal = &*(sample as *const SampleMarshal);
-    match marshal.encoding.as_ref() {
-        Some(encoding) => encoding as *const _ as *const crate::encoding::z_loaned_encoding_t,
-        // A sample that carried no encoding reports the DEFAULT one, which the
-        // marshal materialises lazily on first use so the borrow it hands back
-        // outlives this call.
-        None => core::ptr::null(),
+    if marshal.encoding.is_none() {
+        return core::ptr::null();
     }
+    &marshal.loaned_encoding as *const crate::encoding::z_loaned_encoding_t
 }
 
 /// The sample's TIMESTAMP, or NULL when it carried none (pico
@@ -3220,5 +3227,80 @@ mod tests {
         assert_ne!(attachment.as_slice().as_ptr(), view.attachment.as_ptr());
         assert_eq!(clone.as_slice(), b"payload");
         assert_ne!(clone.as_slice().as_ptr(), view.payload.as_ptr());
+    }
+
+    /// A view whose sample carries an encoding with a schema, where the view holds it.
+    struct EncodedView<'a> {
+        schema: &'a [u8],
+    }
+
+    impl SampleView for EncodedView<'_> {
+        fn keyexpr(&self) -> &str {
+            "demo/encoded"
+        }
+        fn payload(&self) -> &[u8] {
+            b"x"
+        }
+        fn kind(&self) -> SampleKind {
+            SampleKind::Put
+        }
+        fn reliability(&self) -> Reliability {
+            Reliability::Reliable
+        }
+        fn encoding_parts(&self) -> Option<(u32, Option<&[u8]>)> {
+            Some((7, Some(self.schema)))
+        }
+    }
+
+    /// The encoding a sample carried is held in its marshal: the owned encoding
+    /// `z_sample_encoding` hands out points inside the marshal, so the sample's encoding took no
+    /// allocation of its own, and it reads what the view carried. A sample kept past its callback
+    /// holds an encoding of its own, which reads the same once the marshal it was copied from is
+    /// gone; a sample that carried none hands out none.
+    #[test]
+    fn a_samples_encoding_is_held_in_its_marshal() {
+        let view = EncodedView { schema: b"utf8" };
+        // SAFETY: the marshal is dropped before `view`.
+        let mut marshal = unsafe { SampleMarshal::lent(&view) };
+        marshal.bind();
+        // SAFETY: a sample this crate marshalled and bound.
+        let loaned = unsafe { z_sample_encoding(marshal.as_loaned()) };
+        assert!(!loaned.is_null(), "the sample carried an encoding");
+        // SAFETY: the loaned encoding the accessor handed out, of the live marshal.
+        let handle = unsafe { (*loaned).handle } as usize;
+        let start = &marshal as *const SampleMarshal as usize;
+        assert!(
+            (start..start + core::mem::size_of::<SampleMarshal>()).contains(&handle),
+            "the encoding lies in the marshal, not in a box of its own"
+        );
+        // SAFETY: as above.
+        let hint = unsafe { crate::encoding::encoding_hint(loaned) }.expect("bound");
+        assert_eq!(
+            (hint.packed_id, hint.schema.as_deref()),
+            (7, Some(&b"utf8"[..]))
+        );
+        let mut kept = marshal.deep_copy();
+        drop(marshal);
+        kept.bind();
+        // SAFETY: the kept copy, bound at its final address.
+        let kept_loaned = unsafe { z_sample_encoding(kept.as_loaned()) };
+        // SAFETY: the loaned encoding of the live copy.
+        let kept_hint = unsafe { crate::encoding::encoding_hint(kept_loaned) }.expect("kept");
+        assert_eq!(
+            (kept_hint.packed_id, kept_hint.schema.as_deref()),
+            (7, Some(&b"utf8"[..]))
+        );
+
+        let plain = HeldView {
+            key: "demo/plain",
+            payload: b"x",
+            attachment: b"",
+        };
+        // SAFETY: the marshal is dropped before `plain`.
+        let mut none = unsafe { SampleMarshal::lent(&plain) };
+        none.bind();
+        // SAFETY: a sample this crate marshalled and bound.
+        let carried = unsafe { z_sample_encoding(none.as_loaned()) };
+        assert!(carried.is_null(), "no encoding carried, none handed out");
     }
 }
