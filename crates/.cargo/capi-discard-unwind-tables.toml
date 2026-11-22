@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# The library without `std` on Linux with no unwind tables at all: the prebuilt `core` and
+# `alloc` keep theirs after `.cargo/capi-nostd.toml` drops those of the crates this build
+# compiles, so the link discards them (`wz-capi-pico/link/discard-unwind-tables.ld`). Named on the
+# command line after the configuration of that form, with the host's own target, from `crates/`:
+#
+#   cargo build -p wz-capi-pico --no-default-features --features os-posix,link-udp \
+#       --profile capi-nostd --config .cargo/capi-nostd.toml \
+#       --config .cargo/capi-discard-unwind-tables.toml --target x86_64-unknown-linux-gnu
+#
+# For that form only: a library with `std` unwinds a panic to the door that catches it, through
+# these tables, and its build script refuses this file (`wz-capi-pico/build.rs`). The script's path
+# is from `crates/`, the directory cargo runs the compiler and so the linker in for a member of
+# this workspace. The form is linked by GNU ld, named here (`-fuse-ld=bfd`, after any linker a
+# caller's own configuration names, so it is the one the C compiler takes): GNU ld honours the
+# script's discard, while the toolchain's default linker, lld, keeps `.eh_frame` under it
+# (measured with LLD 22.1.6) and mold refuses the script. What it costs and why nothing needs the
+# tables: docs/c-abi-size-diet.md T7.
+[target.'cfg(target_os = "linux")']
+rustflags = ["-C", "link-arg=-fuse-ld=bfd", "-C", "link-arg=-Wl,-T,wz-capi-pico/link/discard-unwind-tables.ld"]

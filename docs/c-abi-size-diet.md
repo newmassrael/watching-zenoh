@@ -49,8 +49,8 @@ the open and dial paths and in the doors (section 2, T2 and T3), and `Locator`'s
 | T3 | open and dial refusals formatted into a `String` | both | -1.5K to -3K | landed here |
 | T4 | `Locator` text through `core::fmt` and `SocketAddr`'s `Display` | both | -3K to -5K | landed before round 2 (see T4) |
 | T5 | `expect` / panic locations on reachable paths | both | -1K to -2K | candidate |
-| T6 | 1,590 relative relocations (`.rela.dyn`) | both | about -36K no_std | owner decision |
-| T7 | unwind tables of the prebuilt `core` / `alloc` | no_std | about -30K | owner decision |
+| T6 | relative relocations (`.rela.dyn`) packed (DT_RELR) | both | std -52.5K, no_std -37.7K | landed as a named Linux link choice |
+| T7 | unwind tables of the prebuilt `core` / `alloc` | no_std | -32.8K | landed on the stable toolchain (Linux link script) |
 | T8 | owned records in a build that lends every one | both | -0.3K to -3K | record buffer landed in round 2; outcome list R3-d (section 6) |
 | T9 | per-limit generic selectors (`limit_binding`, `policy_binding`) | both | -3K to -4K | domain check landed here |
 | T10 | observer planes kept out of line for the stack | both | at most -0.5K | not worth a change alone |
@@ -115,24 +115,189 @@ the right form is a code path that cannot panic (a `match` that returns, or an i
 that cannot be out of range), not a cheaper panic. Gating `Debug` derives behind
 `debug_assertions` gains nothing: an impl nothing calls is not linked.
 
-### T6: relative relocations (owner decision)
+### T6: relative relocations (landed as a named Linux link choice, owner decision 2026-11-23)
 
 The no_std form carries 1,590 `R_X86_64_RELATIVE` entries, 24 bytes each: vtables and function
 pointers (486 into `.text`), string slices (254), panic locations, and GOT entries for calls into
-the prebuilt `core` (418). Linking with `-z pack-relative-relocs` (DT_RELR) packs them into a
-bitmap of about 1K. That would be a rustflag in `.cargo/capi-nostd.toml`. It requires a loader
-that knows DT_RELR (glibc 2.36 or later, Android API 28 or later) and a linker that writes it
-(GNU ld 2.38, lld 15, mold). On an older loader the library fails to load with a
-`GLIBC_ABI_DT_RELR` version error. That is a statement about which hosts the library
-supports, so it is the owner's.
+the prebuilt `core` (418). The std form carries 2,215. Linking with `-z pack-relative-relocs`
+(DT_RELR) writes them as a bitmap in `.relr.dyn`.
 
-### T7: unwind tables of the prebuilt standard crates (owner decision)
+**What was done** (`build(capi-pico): Pack the Linux C ABI library's relative relocations`).
+`crates/.cargo/capi-packed-relocs.toml` gives `-C link-arg=-Wl,-z,pack-relative-relocs` to a
+build for `cfg(all(target_os = "linux", target_env = "gnu"))` and to nothing else, named with
+`--config` and the host's target (`--target`), so the build scripts, which run on the build
+host, are linked as before. The two forms of the Linux library:
 
-`force-unwind-tables=no` reaches only the crates this build compiles, so `core` and `alloc`
-keep theirs (about 29K plus 3.8K of header). Nothing unwinds (`panic = "abort"`, and an
-`extern "C"` door aborts on a foreign unwind). Dropping them needs a linker script that
-discards `.eh_frame` or a toolchain that builds `core` (`-Z build-std`, nightly), and a
-debugger then has no unwind tables for those frames. zenoh-pico itself carries 72K of them.
+| form | build | loader | linker |
+|------|-------|--------|--------|
+| packed | `--config .cargo/capi-packed-relocs.toml --target x86_64-unknown-linux-gnu` (after `.cargo/capi-nostd.toml` for the no_std form) | glibc 2.36 or later; an older one refuses the library by the version need `GLIBC_ABI_DT_RELR` | GNU ld 2.38, lld 15 or later |
+| compatible | the same build without that file | any the library's other symbol versions allow | any |
+
+The size cases `pico-client-coop` and `pico-client-coop-nostd` name the file
+(`Case.cargo_configs` in `scripts/lib/capability_cost_gate.py`). No Linux release package of
+the pico library exists to carry the choice: `release.yml` attaches the Windows packages only
+(`pico_windows_package.py`, PE, where the choice does not arise), and the Linux entry of the
+target-build contract (`wz_package.py`, platform `linux-x86_64-glibc`) builds with plain
+`--release`, the compatible form. A Linux package that ships the packed form names it as such
+beside the compatible one, and its manifest's glibc floor reads 2.36 for it: `elf_facts.glibc_floor`
+counts `GLIBC_ABI_DT_RELR` as glibc 2.36 (`fix(scripts): Read a DT_RELR version need as glibc
+2.36`). Windows (PE) and the MCU images (static) have no such relocations.
+
+**Refused by name, not dropped.** An older GNU ld ignores `-z pack-relative-relocs` with a
+warning, and a linker that wrote DT_RELR without the version need would leave a library that an
+older loader runs unrelocated. So the gate holds every library linked with the flag, and its
+reference, to a dynamic section with DT_RELR and a version need on `GLIBC_ABI_DT_RELR`
+(`link_findings`); either missing fails the run in `--measure` too, and no ceiling reading is
+taken from the pair.
+
+**Fairness.** The reference is zenoh-pico "as the same build", so it is linked with the same
+packed-relocations argument as its case (`reference_build`, given to CMake as
+`-DCMAKE_SHARED_LINKER_FLAGS`, part of the reference's cache key). Both sides move; the cut is
+nonetheless wz's, because the read reference
+has 58 relative relocations (its calls go through 888 PLT slots, which DT_RELR does not touch).
+The gate prints the linker of each library from its `.comment`. Read on 2026-11-23: the wz
+libraries are linked by the toolchain's own lld (`Linker: LLD 22.1.6`, the default linker of
+`x86_64-unknown-linux-gnu` on the pinned toolchain) and the reference by the C compiler's, GNU ld
+(2.42 on the coordinating host; hosted C1cs runs on ubuntu-22.04, GNU ld 2.38 and glibc 2.35,
+which builds and reads the packed form but could not load it). The coordinating host's own cargo
+configuration links its host target with mold (`-fuse-ld=mold`, mold 2.30.0). cargo joins that
+table with a file named by `--config`, so the gate's no_std case, built that way, was linked by
+mold on that host (the no_std library read here names mold 2.30.0, the std one lld), while the
+flags of the environment, which every other case was built with, replace it. The gate now reads
+a case's configuration files itself and passes their flags in the environment
+(`fix(gate): Build configured size cases apart from the caller's config`), so every case is
+linked by the toolchain's linker unless the caller exports another.
+
+**One linker for both arms (decided 2026-11-23).** The wz arm was linked by the toolchain's lld
+and the reference by GNU ld. Every library the gate builds is now linked by GNU ld through the C
+compiler (`-C linker=cc -C link-arg=-fuse-ld=bfd`, `GATE_RUSTFLAGS`), and every reference with
+`-fuse-ld=bfd` too (`fix(gate): Link both arms of every case with GNU ld`). GNU ld is chosen
+because it comes with the C compiler on every host that builds here, hosted ubuntu-22.04
+included, where a system lld is not certain and the toolchain's own lld is reached by no C build
+without naming the toolchain's directory; it is also the linker that honours T7's discard (below).
+Before anything is built the gate asks `cc -fuse-ld=bfd -Wl,--version` for GNU ld and refuses the
+host by name without it, prints the version, and refuses a library whose `.comment` names
+another linker (lld and mold write their name there, GNU ld none). This applies to every size
+case, the zenoh-c ones too: one set of rustc flags for all of them keeps cargo from rebuilding the
+shared target directory between cases, and it moves every case's reading by the difference
+between the two linkers, which the first run after it states.
+
+Read by the main session on hkl002 at the first four commits (wz linked by lld, the reference by
+GNU ld, both packed): `pico-client-coop` 959,273 against 401,760, 2.39 (1,008,731 and 2.50
+before); `pico-client-coop-nostd` 461,898, 1.15 (533,036 and 1.32 before, linked by mold then),
+with its `.eh_frame` kept (T7).
+
+**What the gate's number moves by.** The gate reads Berkeley `size` text, which counts every
+allocated read-only section: `.rela.dyn`, `.relr.dyn`, `.eh_frame` and `.eh_frame_hdr` are in
+it (`.data.rel.ro` and the GOT are writable, so they are data). From the relocation offsets of
+the read libraries, packed with the standard encoding (an address word, then 63-entry bitmaps):
+
+| library | relative relocations | `.rela.dyn` removed | `.relr.dyn` | text moves by |
+|---------|---------------------:|--------------------:|------------:|--------------:|
+| std (`pico-client-coop`) | 2,215 | 53,160 | 632 | about -52,500 |
+| no_std (`pico-client-coop-nostd`) | 1,590 | 38,160 | 440 | about -37,700 |
+| zenoh-pico reference | 58 | 1,392 | 32 | about -1,360 |
+
+The version need adds about 34 bytes to each. Ratios against the committed ceiling readings:
+no_std 565,295 / 403,086 = 1.4025 to about 527,600 / 401,760 = 1.313; std 1,030,646 / 403,086
+= 2.5569 to about 978,150 / 401,760 = 2.435. These are estimates from the read libraries; the
+no_std one was linked by mold, and lld may place a few relocations differently.
+
+### T7: unwind tables of the prebuilt standard crates (landed on the stable toolchain, owner decision 2026-11-23)
+
+`force-unwind-tables=no` (`.cargo/capi-nostd.toml`) reaches only the crates this build compiles,
+so the prebuilt `core` and `alloc` keep theirs. Read in the no_std form: `.eh_frame` 28,960 and
+`.eh_frame_hdr` 3,828 (32,788 together), and `.gcc_except_table` 72.
+
+**What was done** (`build(capi-pico): Discard the prebuilt unwind tables of the no_std form`).
+`crates/.cargo/capi-discard-unwind-tables.toml` links a Linux build by GNU ld (`-fuse-ld=bfd`,
+named in the file: `fix(capi-pico): Link the form without unwind tables with GNU ld`) with
+`crates/wz-capi-pico/link/discard-unwind-tables.ld`, an `INSERT AFTER .text` script: the linker
+keeps its own script, and the inserted `/DISCARD/` statement precedes that script's `.eh_frame`
+statement, so it takes every `.eh_frame` input section first. With none left the linker writes no
+`.eh_frame_hdr` and no `PT_GNU_EH_FRAME`. The script's path is from `crates/`, the directory
+cargo runs the compiler, and so the linker, in for a member of the workspace. The no_std size case
+names the file after `capi-nostd.toml` and `capi-packed-relocs.toml`; the gate holds the library
+to having no `.eh_frame` (`link_findings`), and `wz-capi-pico`'s build script refuses the
+script in any build that is not `os-posix`, since a build with `std` unwinds a panic to the door
+that catches it (`ffi::guarded`). The form without the file keeps the tables, for a host without
+GNU ld and for a user who wants them for a debugger or a profiler.
+
+**Why nothing needs them.** What reads `.eh_frame` at run time, and why the no_std library has
+none of it:
+
+1. A Rust panic unwinding: the library is built `panic = "abort"` and its panic handler aborts
+   (`src/os/no_std_host.rs`), so no unwind starts. `rust_eh_personality` is defined there only
+   because the prebuilt tables name it; it stays defined and exported (the pinned 445 exports).
+2. A foreign exception crossing the library, such as a C++ exception thrown from a callback the
+   program registered: the frames between the callback and the program's own are the library's,
+   built without tables since `capi-nostd.toml`, so the unwinder already finds no frame
+   description there and terminates. Discarding the standard crates' tables changes nothing for
+   it, and an unwind out of an `extern "C"` Rust function is not one the library supports.
+3. A backtrace (glibc's `backtrace`, a profiler's DWARF unwinding, a debugger walking frames
+   without debug information): the no_std form links no backtrace code. An external tool loses the
+   frames of `core` and `alloc` as it already loses the library's own; the release profiles carry
+   no debug information, so a debugger falls back to its heuristics there. That is the cost, and
+   the reason the choice is a named file and not the form.
+4. C code: the library compiles none (its build script builds no C), and the C runtime's
+   `crtbeginS.o` registers no frame tables on this target (`nm`: no `__register_frame_info`;
+   `crtendS.o` adds only the four-byte terminator `__FRAME_END__`, which nothing references).
+
+**Ways not taken.** `objcopy --remove-section .eh_frame` after the link removes the section
+headers but not the bytes of the loaded segment, and leaves `PT_GNU_EH_FRAME` pointing at them:
+`size` would read less while the library maps the same bytes, a number moved without the thing
+it measures. `--no-ld-generated-unwind-info` covers only the tables the linker writes for its PLT,
+and `--gc-sections` keeps the frame description of every function it keeps. `RUSTC_BOOTSTRAP=1`
+unlocks `-Z build-std` on the stable compiler: the nightly surface under the stable name, so it is
+the toolchain switch the owner ruled out, not a stable way.
+
+**The nightly way, for the owner (not done).** Compiling `core` and `alloc` with this build's
+flags takes their tables out at the source:
+
+```
+cargo +nightly-<date> build -p wz-capi-pico --no-default-features --features os-posix,link-udp \
+  --profile capi-nostd --config .cargo/capi-nostd.toml --target x86_64-unknown-linux-gnu \
+  -Z build-std=core,alloc -Z build-std-features=panic_immediate_abort
+```
+
+(newer nightlies spell the immediate abort as a panic strategy, `-Zunstable-options
+-Cpanic=immediate-abort`; the spelling is the chosen nightly's to check). Beyond T7's 32.8K it
+would take the panic machinery out (`core::panicking`, the message formatting the read no_std
+form reaches, about 10.6K, and the 24-byte panic locations of T5 with their relocations), and the
+`rust_eh_personality` stub with it (444 exports). The cost: a second toolchain, pinned beside
+`rust-toolchain.toml` for this one form, with the `rust-src` component, on every CI image and
+build host that builds it; `core` and `alloc` compiled in every build of the form (tens of
+seconds, then fat LTO over them); and `-Z` flags that change between nightlies, as this one did.
+
+**Fairness (decided 2026-11-23, as T6: both arms the same build).** zenoh-pico's Release build
+carries 72,096 bytes of tables (`.eh_frame` 59,252, `.eh_frame_hdr` 12,844, read), GCC's
+default asynchronous unwind tables on x86_64. So the no_std case's reference is built the way
+the case is (`reference_build`, `fix(gate): Build the no_std case's pico reference without
+unwind tables`): its C is compiled with `-fno-asynchronous-unwind-tables -fno-unwind-tables`
+(added to the rule's `CFLAGS`, which the reference's cache key holds), the C counterpart of
+`-C force-unwind-tables=no`, and it is linked with the same discard script, by its absolute path
+since CMake links in its own tree, for what the C runtime's objects still bring (`crtendS.o`'s
+terminator). The gate holds the reference to having no `.eh_frame` either, and prints the C
+flags beside the linker arguments of each side. The std cases' references are unchanged: their
+wz arm keeps its tables. After T6 and T7 the no_std ratio reads about 494,800 / 329,700 = 1.50,
+not the 1.23 a reference with tables would give.
+
+**What the gate's number moves by.** Both sections are allocated and read-only, so Berkeley text
+counts them: about -32,788 in `pico-client-coop-nostd`, and up to 72 more if the linker also
+drops the now unreferenced `.gcc_except_table`. With T6: about 527,600 to 494,800. The reference,
+built without tables too, moves by about -72,000 (401,760 to about 329,700, the C compiled
+without tables may also change a little code), so the ratio reads about 1.50. The std case is
+not touched.
+
+**Compatibility.** Linux only (the file's table is `cfg(target_os = "linux")`); Windows keeps
+its tables, which its exception handling reads (`capi-nostd.toml`). Only GNU ld honours the
+discard: the main session's first reading on hkl002, linked by the toolchain's lld (LLD 22.1.6),
+kept `.eh_frame` and the gate refused it by name (lld builds `.eh_frame` from its input
+sections apart from the script's matching), and mold refuses a `SECTIONS` script. So the file
+names GNU ld itself; its `-fuse-ld=bfd` comes after a linker the caller's own configuration names
+for the target (cargo joins the target's table before the `cfg` tables), so the C compiler takes
+it. The gate links every case with GNU ld in any event (`fix(gate): Link both arms of every case
+with GNU ld`) and keeps refusing a library that still has `.eh_frame`.
 
 ### T8: owned records in a build that lends every one (record buffer landed in round 2)
 
