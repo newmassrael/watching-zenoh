@@ -358,3 +358,45 @@ fn one_set_of_roots_is_made_for_each_distinct_pem() {
         b.listen_roots().unwrap()
     ));
 }
+
+/// A dial begun without waiting (`StreamDial::dial_started`, the way the cooperative engine dials)
+/// is the provider's channel too: it completes its handshake with the listener while the two are
+/// asked in turn on one thread, neither waiting on the other, and carries bytes once made; a
+/// provider with no roots refuses a begun dial as it refuses a waiting one.
+#[test]
+fn a_begun_dial_meets_the_listener_on_one_thread_and_no_roots_refuse_it() {
+    let _library = library();
+    let authority = Authority::new();
+    let server = authority.issue(ExtendedKeyUsagePurpose::ServerAuth);
+    let (_server, listener, port) = bind(&listen_config(&server, None));
+    let client = provider(&dial_config(&authority, None, false));
+    let mut dialled = client.dial_started(at(port)).expect("the dial begins");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut made = false;
+    let mut accepted = None;
+    while !made || accepted.is_none() {
+        assert!(Instant::now() < deadline, "the two ends never met");
+        if !made {
+            made = dialled.connected().expect("the listener's chain verifies");
+        }
+        if accepted.is_none() {
+            accepted = listener.accept().expect("the listener is sound");
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    let accepted = accepted.expect("the connection the listener took");
+    dialled
+        .send_parts(&[b"ping".as_slice()])
+        .expect("the stream takes bytes");
+    assert_eq!(
+        read_within(&accepted, 4, Duration::from_secs(5)),
+        Some(b"ping".to_vec())
+    );
+
+    let no_roots = provider(&listen_config(&server, None));
+    assert!(matches!(
+        no_roots.dial_started(at(port)),
+        Err(LinkOpenError::Unsupported)
+    ));
+}

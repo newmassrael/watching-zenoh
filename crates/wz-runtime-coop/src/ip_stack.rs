@@ -535,27 +535,43 @@ where
         self.shape.lent = Some(tables);
     }
 
-    /// A `tcp/` dial begins its connection and is asked for it later (`PendingStream`); a
-    /// datagram link has no connection to wait for, and a `tls/` one is dialled as before, its
-    /// channel's handshake run in its dial. The `tcp/` link's buffers are claimed as a dial's are,
-    /// before the connection is begun, and held by the dial until its link is made: a refused or
-    /// abandoned dial gives them back.
+    /// A `tcp/` dial begins its connection and a `tls/` one its channel's (the connection under
+    /// it, then its handshake), and each is asked for its stream later (`PendingStream`); a
+    /// datagram link has no connection to wait for. A stream link's buffers are claimed as a
+    /// dial's are, before the connection is begun, and held by the dial until its link is made: a
+    /// refused or abandoned dial gives them back.
     fn begin_initiator(
         &self,
         to: Locator,
     ) -> Result<Box<dyn PendingDial<Self::Pump>>, LinkOpenError> {
-        if to.proto == LinkProto::Tcp && D::CARRIED {
-            let buffers = self.shape.buffers(STREAM_RX_CAPACITY)?;
-            let socket = self.dial.dial_started(to.at)?;
-            return Ok(Box::new(PendingStream::<U, D::Stream, L::Stream> {
-                socket: Some(socket),
-                buffers: Some(buffers),
-                shape: self.shape,
-                stack: core::marker::PhantomData,
-            }));
+        match to.proto {
+            LinkProto::Tcp if D::CARRIED => {
+                let buffers = self.shape.buffers(STREAM_RX_CAPACITY)?;
+                let socket = self.dial.dial_started(to.at)?;
+                let made: MakeLink<U, D::Stream, L::Stream, D::Stream> = IpDriver::Tcp;
+                Ok(Box::new(PendingStream {
+                    socket: Some(socket),
+                    buffers: Some(buffers),
+                    shape: self.shape,
+                    made,
+                }))
+            }
+            LinkProto::Tls if L::CARRIED => {
+                let buffers = self.shape.buffers(STREAM_RX_CAPACITY)?;
+                let channel = self.tls.dial_started(to.at)?;
+                let made: MakeLink<U, D::Stream, L::Stream, L::Stream> = IpDriver::Tls;
+                Ok(Box::new(PendingStream {
+                    socket: Some(channel),
+                    buffers: Some(buffers),
+                    shape: self.shape,
+                    made,
+                }))
+            }
+            _ => {
+                let opened = self.open_initiator(to)?;
+                Ok(Box::new(Dialled::new(opened)))
+            }
         }
-        let opened = self.open_initiator(to)?;
-        Ok(Box::new(Dialled::new(opened)))
     }
 
     /// A `tcp/` listener over the stack's stream dial, a `tls/` one over its secure channel's
@@ -603,27 +619,41 @@ where
     }
 }
 
-/// A `tcp/` dial whose connection is being made: the link is made over the stream and the buffers
-/// claimed for it once the stream says its connection is, shaped as the stack's links are.
+/// A stream dial whose stream `P` is being made (a `tcp/` connection, or a `tls/` channel's
+/// connection and handshake): the link is made over the stream and the buffers claimed for it once
+/// the stream says it is, shaped as the stack's links are, and `made` names which of the stack's
+/// links it is.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-struct PendingStream<U, S: StreamSocket, T> {
-    socket: Option<S>,
-    buffers: Option<(RxBuffer, TxBuffer)>,
-    shape: LinkShape,
-    stack: core::marker::PhantomData<fn() -> (U, T)>,
-}
-
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-impl<U, S, T> PendingDial<Rc<HeapIpDriver<U, S, T>>> for PendingStream<U, S, T>
+struct PendingStream<U, S, T, P>
 where
     U: DatagramSocket + 'static,
     S: StreamSocket + 'static,
     T: StreamSocket + 'static,
+    P: StreamSocket + 'static,
+{
+    socket: Option<P>,
+    buffers: Option<(RxBuffer, TxBuffer)>,
+    shape: LinkShape,
+    made: MakeLink<U, S, T, P>,
+}
+
+/// How a stream once made becomes one of a stack's links: `IpDriver::Tcp` or `IpDriver::Tls`.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+type MakeLink<U, S, T, P> = fn(StreamDriver<P, RxBuffer, TxBuffer>) -> HeapIpDriver<U, S, T>;
+
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+impl<U, S, T, P> PendingDial<Rc<HeapIpDriver<U, S, T>>> for PendingStream<U, S, T, P>
+where
+    U: DatagramSocket + 'static,
+    S: StreamSocket + 'static,
+    T: StreamSocket + 'static,
+    P: StreamSocket + 'static,
 {
     fn poll(&mut self) -> Option<Result<OpenedLink<Rc<HeapIpDriver<U, S, T>>>, LinkOpenError>> {
         match self.socket.as_mut()?.connected() {
             Ok(false) => None,
-            // The stack's own answer to the connect: the other end did not take it.
+            // The stack's own answer to the connect, or the channel's to its handshake: the other
+            // end did not take the link.
             Err(_) => {
                 self.socket = None;
                 self.buffers = None;
@@ -632,7 +662,7 @@ where
             Ok(true) => {
                 let socket = self.socket.take()?;
                 let (rx, tx) = self.buffers.take()?;
-                let driver = Rc::new(IpDriver::Tcp(
+                let driver = Rc::new((self.made)(
                     self.shape.stream(StreamDriver::over(socket, rx, tx)),
                 ));
                 Some(Ok(OpenedLink {
@@ -1782,6 +1812,139 @@ mod tests {
             Some("tls/10.0.0.1:7447")
         );
         assert_eq!(tls.peer_credential_zid(), Some(PROVEN));
+    }
+
+    /// A `tls/` dial is begun and asked, never waited for: while the channel is still opening the
+    /// begun dial answers nothing however often it is asked, and holds the link's buffers; once
+    /// the channel is made it answers the secure stream link, once; a channel whose opening fails
+    /// is refused and gives its buffers back. The channel's waiting dial is never called.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[test]
+    fn a_heap_tls_dial_is_begun_and_asked_never_waited_for() {
+        use core::cell::Cell;
+        use wz_session_core::bounded::{Arena, ARENA_ALIGN};
+
+        /// A secure channel whose opening the test answers: still opening while `answer` is
+        /// `None`, made at `Some(true)`, failed at `Some(false)`.
+        struct Handshaking {
+            channel: Channel,
+            answer: Rc<Cell<Option<bool>>>,
+        }
+
+        impl StreamSocket for Handshaking {
+            type Error = ();
+            const PROTO: LinkProto = LinkProto::Tls;
+            fn local(&self) -> SocketAddr {
+                self.channel.local()
+            }
+            fn peer(&self) -> SocketAddr {
+                self.channel.peer()
+            }
+            fn send_parts(&self, parts: &[&[u8]]) -> Result<(), ()> {
+                self.channel.send_parts(parts)
+            }
+            fn wait_readable(&self, timeout_ms: c_int) {
+                self.channel.wait_readable(timeout_ms)
+            }
+            fn try_read(&self, buf: &mut [u8]) -> Result<Option<usize>, ()> {
+                self.channel.try_read(buf)
+            }
+            fn connected(&mut self) -> Result<bool, ()> {
+                match self.answer.get() {
+                    None => Ok(false),
+                    Some(true) => Ok(true),
+                    Some(false) => Err(()),
+                }
+            }
+            fn shutdown(&self) {
+                self.channel.shutdown()
+            }
+            fn peer_credential_zid(&self) -> Option<[u8; 16]> {
+                self.channel.peer_credential_zid()
+            }
+        }
+
+        /// The dial of [`Handshaking`] channels; its waiting dial counts each call.
+        struct HandshakingDial {
+            answer: Rc<Cell<Option<bool>>>,
+            waited: Rc<Cell<usize>>,
+        }
+
+        impl StreamDial for HandshakingDial {
+            type Stream = Handshaking;
+            fn dial(&self, to: SocketAddr) -> Result<Handshaking, LinkOpenError> {
+                self.waited.set(self.waited.get() + 1);
+                self.dial_started(to)
+            }
+            fn dial_started(&self, to: SocketAddr) -> Result<Handshaking, LinkOpenError> {
+                ChannelDial.dial(to).map(|channel| Handshaking {
+                    channel,
+                    answer: self.answer.clone(),
+                })
+            }
+        }
+
+        #[derive(Clone, Copy)]
+        #[repr(C, align(16))]
+        struct Block([u8; ARENA_ALIGN]);
+
+        let (rx_len, slot_len) = (66, 34);
+        let bytes = Arena::byte_cells_bytes(rx_len, 1)
+            .and_then(|rx| Arena::byte_cells_bytes(2 * slot_len, 1).map(|tx| rx + tx))
+            .expect("within the address space");
+        let region: &'static mut [Block] =
+            alloc::vec![Block([0; ARENA_ALIGN]); bytes.div_ceil(ARENA_ALIGN)].leak();
+        // SAFETY: the region is aligned to `ARENA_ALIGN`, holds at least `bytes` bytes, and is
+        // leaked, so nothing else uses it and it outlives every link that claims from it.
+        let mut arena =
+            unsafe { Arena::over(core::ptr::NonNull::from(region).cast::<u8>(), bytes) };
+        let tables = LinkTables::new(
+            arena.lend_byte_cells(rx_len, 1).expect("the receive table"),
+            arena
+                .lend_byte_cells(2 * slot_len, 1)
+                .expect("the outbound table"),
+            slot_len,
+        );
+
+        let answer = Rc::new(Cell::new(None));
+        let waited = Rc::new(Cell::new(0));
+        let mut links = IpLinks::<Datagrams, Dial>::new(NODE, Dial).with_tls(HandshakingDial {
+            answer: answer.clone(),
+            waited: waited.clone(),
+        });
+        links.lend_buffers(tables);
+
+        let mut pending = links
+            .begin_initiator(Locator::tls(ROUTER))
+            .expect("the dial begins");
+        for _ in 0..3 {
+            assert!(pending.poll().is_none(), "the channel is still opening");
+        }
+        assert_eq!(tables.in_use(), 1, "the dial holds its link's buffers");
+        answer.set(Some(true));
+        let tls = pending
+            .poll()
+            .expect("the dial answered")
+            .expect("the channel is made")
+            .pump;
+        assert!(matches!(*tls, IpDriver::Tls(_)));
+        assert_eq!(
+            tls.link_endpoints().map(|ends| ends.dst.as_str()),
+            Some("tls/10.0.0.1:7447")
+        );
+        assert_eq!(tls.peer_credential_zid(), Some(PROVEN));
+        assert!(pending.poll().is_none(), "a dial answers once");
+        drop(tls);
+        assert_eq!(tables.in_use(), 0);
+
+        answer.set(Some(false));
+        let mut failing = links
+            .begin_initiator(Locator::tls(ROUTER))
+            .expect("the dial begins");
+        assert_eq!(tables.in_use(), 1);
+        assert!(matches!(failing.poll(), Some(Err(LinkOpenError::Refused))));
+        assert_eq!(tables.in_use(), 0, "a refused dial gives its buffers back");
+        assert_eq!(waited.get(), 0, "no dial waited for its channel");
     }
 
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]

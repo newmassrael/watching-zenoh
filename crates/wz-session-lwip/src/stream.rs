@@ -129,6 +129,21 @@ where
         self.socket.borrow_mut().try_read(buf)
     }
 
+    /// A connection begun without waiting ([`StreamDial::dial_started`]) is made as lwIP is
+    /// polled, so each ask polls it once and reads the connection's state: no ask waits for the
+    /// handshake, and whoever asks gives the dial up.
+    fn connected(&mut self) -> Result<bool, TcpError> {
+        pump(&self.link, self.service);
+        match self.socket.get_mut().state() {
+            TcpState::Open => Ok(true),
+            TcpState::Connecting => Ok(false),
+            // Ended before it began: the peer closed it as it was made.
+            TcpState::PeerClosed => Err(TcpError::NotOpen),
+            // Refused (reset), or given up by lwIP's own retransmission.
+            TcpState::Failed(why) => Err(TcpError::Failed(why)),
+        }
+    }
+
     fn shutdown(&self) {
         self.socket.borrow_mut().shutdown();
         // The FIN goes out with the next poll.
@@ -184,6 +199,27 @@ where
         self.service = Some(service);
         self
     }
+
+    /// A connection to `to` begun: its SYN handed to lwIP and the stream returned before the
+    /// handshake completes, with nothing polled.
+    fn begin(&self, to: SocketAddr) -> Result<LwipTcpStream<L, RX>, LinkOpenError> {
+        // The port's lwIP has no IPv6: a locator of that family is not this stack's to dial.
+        let SocketAddr::V4(to) = to else {
+            return Err(LinkOpenError::Unsupported);
+        };
+        let (addr, port) = (to.ip().octets(), to.port());
+        #[cfg(not(feature = "static-link-storage"))]
+        let socket = LwipTcpSocket::<RX>::connect(&self.link, addr, port);
+        #[cfg(feature = "static-link-storage")]
+        let socket = LwipTcpSocket::<RX>::connect_in(&self.link, addr, port, self.pool);
+        let socket = socket.map_err(open_error)?;
+        Ok(LwipTcpStream {
+            socket: RefCell::new(socket),
+            link: self.link.clone(),
+            service: self.service,
+            peer: to,
+        })
+    }
 }
 
 /// What a failed connect means to the stack: a table without room is worth a retry, a receive
@@ -207,21 +243,12 @@ where
     const IPV6: bool = false;
 
     fn dial(&self, to: SocketAddr) -> Result<Self::Stream, LinkOpenError> {
-        // The port's lwIP has no IPv6: a locator of that family is not this stack's to dial.
-        let SocketAddr::V4(to) = to else {
-            return Err(LinkOpenError::Unsupported);
-        };
-        let (addr, port) = (to.ip().octets(), to.port());
-        #[cfg(not(feature = "static-link-storage"))]
-        let socket = LwipTcpSocket::<RX>::connect(&self.link, addr, port);
-        #[cfg(feature = "static-link-storage")]
-        let socket = LwipTcpSocket::<RX>::connect_in(&self.link, addr, port, self.pool);
-        let socket = socket.map_err(open_error)?;
-
+        let stream = self.begin(to)?;
         // The handshake completes as lwIP is polled.
         let started = self.link.now_ms();
         loop {
-            match socket.state() {
+            let state = stream.socket.borrow().state();
+            match state {
                 TcpState::Open => break,
                 TcpState::Connecting => {}
                 // Refused (reset), or ended before it began: the socket drops and frees its cell.
@@ -232,12 +259,14 @@ where
             }
             pump(&self.link, self.service);
         }
-        Ok(LwipTcpStream {
-            socket: RefCell::new(socket),
-            link: self.link.clone(),
-            service: self.service,
-            peer: to,
-        })
+        Ok(stream)
+    }
+
+    /// The connect handed to lwIP and the stream returned at once; its
+    /// [`StreamSocket::connected`] polls lwIP once for each ask, so a session that asks between its
+    /// steps is not held for the handshake, as it is for [`DIAL_TIMEOUT_MS`] by [`Self::dial`].
+    fn dial_started(&self, to: SocketAddr) -> Result<Self::Stream, LinkOpenError> {
+        self.begin(to)
     }
 }
 
@@ -491,6 +520,73 @@ mod tests {
         let (_gate, link) = lwip_test_link();
         let refused = dial(&link).dial(SocketAddr::from(([127, 0, 0, 1], 47_399)));
         assert!(matches!(refused, Err(LinkOpenError::Refused)));
+    }
+
+    /// A dial begun without waiting returns before the handshake with nothing polled, and each ask
+    /// polls lwIP exactly once: no ask waits for the SYN-ACK, as the waiting dial's loop does, and
+    /// the stream once made carries bytes as a dialled one does.
+    #[cfg(not(feature = "static-link-storage"))]
+    #[test]
+    fn a_begun_dial_polls_lwip_once_for_each_ask_and_never_waits() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static RAN: AtomicUsize = AtomicUsize::new(0);
+        fn count() {
+            RAN.fetch_add(1, Ordering::SeqCst);
+        }
+
+        let (_gate, link) = lwip_test_link();
+        server(47_305);
+        let to = SocketAddr::from(([127, 0, 0, 1], 47_305));
+        let mut stream = dial(&link)
+            .with_service(count)
+            .dial_started(to)
+            .expect("the connect is begun");
+        assert_eq!(RAN.load(Ordering::SeqCst), 0, "beginning polled nothing");
+        let mut asks = 0;
+        while !stream.connected().expect("the server takes it") {
+            asks += 1;
+            assert!(asks < 4_000, "the handshake never completed");
+        }
+        assert_eq!(
+            RAN.load(Ordering::SeqCst),
+            asks + 1,
+            "one poll for each ask, the one that found it made included"
+        );
+        assert_eq!(stream.peer(), to);
+
+        stream.send_parts(&[b"hi"]).unwrap();
+        stream.wait_readable(2_000);
+        let mut got = [0u8; 4];
+        assert_eq!(stream.try_read(&mut got), Ok(Some(2)));
+        assert_eq!(&got[..2], b"hi");
+    }
+
+    /// A begun dial to a port nobody listens on is not refused when it begins, which would need
+    /// the stack polled: the refusal is the answer of a later ask, and comes without a wait.
+    #[test]
+    fn a_begun_dial_to_a_port_nobody_listens_on_is_refused_by_a_later_ask() {
+        let (_gate, link) = lwip_test_link();
+        let mut stream = dial(&link)
+            .dial_started(SocketAddr::from(([127, 0, 0, 1], 47_398)))
+            .expect("the connect is begun");
+        let mut asks = 0;
+        let refused = loop {
+            match stream.connected() {
+                Ok(false) => {}
+                Ok(true) => panic!("nobody listens on the port"),
+                Err(why) => break why,
+            }
+            asks += 1;
+            assert!(asks < 4_000, "the refusal never came");
+        };
+        assert!(
+            matches!(refused, TcpError::Failed(_) | TcpError::NotOpen),
+            "{refused:?}"
+        );
+        assert!(matches!(
+            dial(&link).dial_started(SocketAddr::from((core::net::Ipv6Addr::LOCALHOST, 47_398))),
+            Err(LinkOpenError::Unsupported)
+        ));
     }
 
     /// The stream link over lwIP, end to end: the driver length-prefixes a batch, the echo sends

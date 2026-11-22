@@ -284,6 +284,14 @@ where
         dialer.dial(to)
     }
 
+    // The roots are told the time when the dial begins, as for a waiting dial: the chain is
+    // verified in a handshake step of the same dial, moments later.
+    fn dial_started(&self, to: SocketAddr) -> Result<Self::Stream, LinkOpenError> {
+        let dialer = self.dialer.as_ref().ok_or(LinkOpenError::Unsupported)?;
+        state_the_time(self.dial_roots);
+        dialer.dial_started(to)
+    }
+
     fn listen(
         &self,
         at: SocketAddr,

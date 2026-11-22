@@ -54,10 +54,10 @@ use wz_session_core::app_transport::{AppTransport, SessionTransport};
 
 use crate::group_transport::{GroupSend, GroupTransport};
 use crate::ip_stack::{HeapIpDriver, IpDriver};
-use crate::link_storage::{heap_link_buffers, LinkTables};
+use crate::link_storage::{heap_link_buffers, LinkTables, RxBuffer, TxBuffer};
 use crate::session_drive::{
     LinkListener, LinkOpenError, LinkProto, LinkReadiness, LinkWritability, Locator, OpenedLink,
-    SessionLinks,
+    PendingDial, SessionLinks,
 };
 use crate::stream_link::{
     StreamDial, StreamDriver, StreamListen, StreamSocket, STREAM_RX_CAPACITY,
@@ -228,8 +228,9 @@ mod wait_parked {
         waker: Waker,
     }
 
-    impl Default for Waits {
-        fn default() -> Self {
+    impl Waits {
+        /// The waits of a new link, sharing one wake.
+        pub(super) fn new() -> Self {
             let wake = Arc::new(LinkWake {
                 wakes: Mutex::new(0),
                 changed: Condvar::new(),
@@ -297,10 +298,15 @@ mod wait_turns {
     const TURNS: u32 = 1 << 12;
 
     /// The waits of one link on an image, which has no thread to park: nothing to hold.
-    #[derive(Clone, Default)]
+    #[derive(Clone)]
     pub(super) struct Waits;
 
     impl Waits {
+        /// The waits of a new link: nothing to make.
+        pub(super) const fn new() -> Self {
+            Self
+        }
+
         /// Look while `pending` answers `true`, for a bounded number of turns: an image's loop
         /// comes back.
         pub(super) fn wait_while(
@@ -363,7 +369,7 @@ fn open_link(
     let transport = &session.transport;
     let handle = session.begin_open(kind, locator);
     // The link's waits are made with it, so the open's wait and every one after share its wake.
-    let waits = wait::Waits::default();
+    let waits = wait::Waits::new();
     let mut progress = OpenProgress::Opening;
     let opening = |waker: Option<&core::task::Waker>| {
         progress = transport.with(|table| table.poll_open(handle, waker));
@@ -403,7 +409,7 @@ impl Held {
         Self {
             transport: Arc::clone(transport),
             handle,
-            waits: wait::Waits::default(),
+            waits: wait::Waits::new(),
         }
     }
 
@@ -663,6 +669,64 @@ impl StreamDial for AppStreamDial {
             self.open_bound.as_ref(),
         )?;
         Ok(Box::new(AppStreamListener { held, at }))
+    }
+}
+
+/// A link the program was asked to open and has not reported up ([`AppLinks`]'s begun dial):
+/// asked without waiting whether it is up. Dropped before it is, it releases the link, which the
+/// program is told to close.
+struct PendingAppLink {
+    held: Option<Held>,
+    buffers: Option<(RxBuffer, TxBuffer)>,
+    to: SocketAddr,
+    /// A `udp/` link once up, else a `tcp/` one.
+    datagram: bool,
+}
+
+impl PendingDial<Rc<AppDriver>> for PendingAppLink {
+    fn poll(&mut self) -> Option<Result<OpenedLink<Rc<AppDriver>>, LinkOpenError>> {
+        let held = self.held.as_ref()?;
+        let handle = held.handle;
+        match held.transport.with(|table| table.poll_open(handle, None)) {
+            OpenProgress::Opening => None,
+            // Refused by the program, or closed before it was up: as a waiting open that ends so.
+            OpenProgress::Closed => {
+                self.held = None;
+                self.buffers = None;
+                Some(Err(LinkOpenError::Refused))
+            }
+            OpenProgress::Open => {
+                let held = self.held.take()?;
+                let (rx, tx) = self.buffers.take()?;
+                let driver: AppDriver = if self.datagram {
+                    IpDriver::Udp(UdpDriver::initiator_in(
+                        AppDatagramSocket {
+                            held,
+                            peer: self.to,
+                            reads_sources: true,
+                        },
+                        self.to,
+                        rx,
+                        tx,
+                    ))
+                } else {
+                    IpDriver::Tcp(StreamDriver::over(
+                        AppStreamSocket {
+                            held,
+                            local: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+                            peer: self.to,
+                        },
+                        rx,
+                        tx,
+                    ))
+                };
+                let driver = Rc::new(driver);
+                Some(Ok(OpenedLink {
+                    sink: driver.clone(),
+                    pump: driver,
+                }))
+            }
+        }
     }
 }
 
@@ -1053,6 +1117,35 @@ impl SessionLinks for AppLinks {
             sink: driver.clone(),
             pump: driver,
         })
+    }
+
+    /// The program is asked for the link and the dial returned before it reports the link up
+    /// (`PendingAppLink`), so an open the program finishes late does not hold whoever holds the
+    /// session: the engine asks between its steps and gives the open up at its own open deadline,
+    /// on the session's clock, in place of the `OPEN_WAIT_MS` a waiting open is held to. The
+    /// buffers are claimed before the program is asked, as a waiting open's are, and go back with
+    /// an open that is refused or given up.
+    fn begin_initiator(
+        &self,
+        to: Locator,
+    ) -> Result<Box<dyn PendingDial<Self::Pump>>, LinkOpenError> {
+        let (kind, rx, datagram) = match to.proto {
+            LinkProto::Udp => (AppLinkKind::Datagram, self.datagram_rx, true),
+            LinkProto::Tcp => (AppLinkKind::StreamDial, STREAM_RX_CAPACITY, false),
+            LinkProto::Tls => return Err(LinkOpenError::Unsupported),
+        };
+        let buffers = heap_link_buffers(self.lent.as_ref(), rx, 0, 0)?;
+        let handle = self.transport.begin_open(kind, &to.to_string());
+        Ok(Box::new(PendingAppLink {
+            held: Some(Held {
+                transport: Arc::clone(&self.transport.transport),
+                handle,
+                waits: wait::Waits::new(),
+            }),
+            buffers: Some(buffers),
+            to: to.at,
+            datagram,
+        }))
     }
 
     fn open_listener(
@@ -1568,6 +1661,102 @@ mod tests {
         ));
     }
 
+    /// A program whose opens stay under way until the test reports them, recording each open and
+    /// each close as [`Script`] does.
+    struct Deferred(Arc<Script>);
+
+    impl AppPort for Deferred {
+        fn open(&self, link: LinkHandle, kind: AppLinkKind, locator: &str) -> ProgramOpen {
+            self.0
+                .opens
+                .lock()
+                .unwrap()
+                .push((link, kind, String::from(locator)));
+            ProgramOpen::Pending
+        }
+
+        fn send(&self, _link: LinkHandle, bytes: &[u8]) -> ProgramSend {
+            ProgramSend::Wrote(bytes.len())
+        }
+
+        fn close(&self, link: LinkHandle) {
+            self.0.closes.lock().unwrap().push(link);
+        }
+    }
+
+    fn deferred() -> (Arc<Script>, Arc<AppTransport>) {
+        let script = Arc::new(Script::default());
+        let transport = Arc::new(AppTransport::new(
+            Box::new(HostLock(Mutex::new(AppLinkTable::new()))),
+            Box::new(Deferred(Arc::clone(&script))),
+        ));
+        (script, transport)
+    }
+
+    /// A begun dial asks the program for its link and waits for nothing: asked while the program
+    /// has not reported the link up it answers nothing, however often, and once the program
+    /// reports it up it answers the link, once.
+    #[test]
+    fn a_begun_dial_waits_for_no_open_and_is_made_once_the_program_reports_it_up() {
+        let (script, transport) = deferred();
+        let links = AppLinks::new(session(&transport, 64));
+        let mut pending = links
+            .begin_initiator(Locator::tcp(PEER))
+            .expect("the program is asked");
+        let (handle, kind, locator) = script.opens.lock().unwrap()[0].clone();
+        assert_eq!(
+            (kind, locator.as_str()),
+            (AppLinkKind::StreamDial, "tcp/192.0.2.9:7447")
+        );
+        for _ in 0..3 {
+            assert!(pending.poll().is_none(), "not reported up yet");
+        }
+        transport.event(handle, ProgramEvent::Connected).unwrap();
+        let opened = pending
+            .poll()
+            .expect("the dial answered")
+            .expect("the link is up");
+        assert!(wz_session_core::link::BoxedLinkDriver::batch_length_prefixed(&*opened.sink));
+        assert!(pending.poll().is_none(), "a dial answers once");
+        assert!(script.closes.lock().unwrap().is_empty());
+    }
+
+    /// A begun datagram dial the program closes before it is up is refused; one the session gives
+    /// up while it is under way is released, and the program is told to close it; a `tls/` dial
+    /// is not the program's to open.
+    #[test]
+    fn a_begun_dial_the_program_closes_is_refused_and_one_given_up_is_closed() {
+        let (script, transport) = deferred();
+        let links = AppLinks::new(session(&transport, 64));
+        let mut refused = links
+            .begin_initiator(Locator::udp(PEER))
+            .expect("the program is asked");
+        let (first, kind, _) = script.opens.lock().unwrap()[0].clone();
+        assert_eq!(kind, AppLinkKind::Datagram);
+        transport.event(first, ProgramEvent::Closed).unwrap();
+        assert!(matches!(refused.poll(), Some(Err(LinkOpenError::Refused))));
+
+        let given_up = links
+            .begin_initiator(Locator::tcp(PEER))
+            .expect("the program is asked");
+        let second = script.opens.lock().unwrap()[1].0;
+        drop(given_up);
+        assert!(
+            script.closes.lock().unwrap().contains(&second),
+            "the program is told to close the link the session gave up"
+        );
+
+        assert!(matches!(
+            links.begin_initiator(Locator::tls(PEER)),
+            Err(LinkOpenError::Unsupported)
+        ));
+        assert_eq!(
+            script.opens.lock().unwrap().len(),
+            2,
+            "a tls/ dial asks the program for nothing"
+        );
+    }
+
     #[test]
     fn a_listener_hands_out_the_streams_the_program_accepts() {
         let (_script, transport) = transport();
@@ -1871,7 +2060,7 @@ mod tests {
         use core::task::Waker;
         use std::sync::atomic::{AtomicBool, Ordering};
 
-        let waits = wait::Waits::default();
+        let waits = wait::Waits::new();
         let ready = AtomicBool::new(false);
         let held: Mutex<Option<Waker>> = Mutex::new(None);
         let started = std::time::Instant::now();
