@@ -377,11 +377,19 @@ def imported_symbols(data: bytes) -> list[str]:
     return sorted(names)
 
 
+# The version need a linker writes beside packed relative relocations (DT_RELR) when the file asks
+# libc.so.6 for a GLIBC_2 version. Only glibc 2.36 and later define it, so a file that asks for it
+# loads on no older one, whatever its other versions say.
+DT_RELR_NEED = "GLIBC_ABI_DT_RELR"
+DT_RELR_GLIBC = "GLIBC_2.36"
+
+
 def glibc_floor(tags: list[str]) -> str | None:
-    """The highest `GLIBC_x.y[.z]` tag, compared as numbers, or None when there is none."""
+    """The oldest glibc that loads the file: its highest `GLIBC_x.y[.z]` tag, compared as numbers,
+    with `DT_RELR_NEED` read as glibc 2.36; None when there is none."""
     best: tuple[int, ...] | None = None
     best_tag = None
-    for tag in tags:
+    for tag in (DT_RELR_GLIBC if t == DT_RELR_NEED else t for t in tags):
         if not tag.startswith("GLIBC_"):
             continue
         try:
@@ -598,6 +606,11 @@ def _selftest() -> int:
            header_facts(build_test_elf(machine=9999))["machine"] == "unknown-9999")
     expect("bionic tags have no glibc floor", glibc_floor(["LIBC", "LIBC_N"]) is None)
     expect("a tag that is not a number is skipped", glibc_floor(["GLIBC_x", "GLIBC_2.3"]) == "GLIBC_2.3")
+    expect("packed relative relocations raise the floor to glibc 2.36",
+           glibc_floor(["GLIBC_2.34", "GLIBC_ABI_DT_RELR", "GLIBC_2.5"]) == "GLIBC_2.36"
+           and glibc_floor(["GLIBC_ABI_DT_RELR"]) == "GLIBC_2.36")
+    expect("and no further than a newer version the file asks for",
+           glibc_floor(["GLIBC_ABI_DT_RELR", "GLIBC_2.38"]) == "GLIBC_2.38")
     for what, broken in [
         ("two facts notes", build_test_elf(notes_=[(FACTS_SECTION, "wz", 2, facts)] * 2)),
         ("a facts note in the wrong section", build_test_elf(notes_=[("other", "wz", 2, facts)])),
