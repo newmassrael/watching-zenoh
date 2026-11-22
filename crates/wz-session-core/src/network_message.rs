@@ -2868,9 +2868,28 @@ pub fn push_stats_class<F>(
 where
     F: Fn(crate::wire_id::ExprId) -> Option<alloc::string::String>,
 {
+    push_body_stats_class(push, stats_space_of(&push.keyexpr, &resolve_alias))
+}
+
+/// [`push_stats_class`] for `push` sent under the literal key `keyexpr` in place of the key it
+/// names: the class of the Put a router delivers to a leaf, read off the Put it received, whose key
+/// named an alias of the face it came from that no session it is sent on holds.
+#[cfg(all(feature = "transport-stats", feature = "codec-push"))]
+pub fn push_stats_class_under(
+    push: &crate::wire::PushOwned,
+    keyexpr: &str,
+) -> crate::stats::NetworkStatsClass {
+    push_body_stats_class(push, crate::stats::StatSpace::of_keyexpr(keyexpr))
+}
+
+/// The class of `push`'s body, its key expression read into `space`.
+#[cfg(all(feature = "transport-stats", feature = "codec-push"))]
+fn push_body_stats_class(
+    push: &crate::wire::PushOwned,
+    space: crate::stats::StatSpace,
+) -> crate::stats::NetworkStatsClass {
     use crate::stats::{MessageLabel, StatMessage};
     use wz_codecs::push::PushOwnedVariant as V;
-    let space = stats_space_of(&push.keyexpr, &resolve_alias);
     match &push.body {
         V::CodecZenohMsgPut(b) | V::Default { body: b, .. } => {
             put_stats_class(MessageLabel::Put, StatMessage::Put, space, b)

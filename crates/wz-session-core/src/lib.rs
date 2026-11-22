@@ -1195,6 +1195,12 @@ pub mod initial_sn;
 #[cfg(all(feature = "alloc", feature = "codec-push"))]
 pub mod push_build;
 
+/// A Push a router received, encoded once for its fan-out to leaf sessions: the extensions and
+/// body every session shares, behind the key expression of the form each is sent. Owned `Vec`
+/// output (alloc-gated) and `codec-push` gated, as [`push_build`] is.
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
+pub mod encoded_push;
+
 /// A literal-keyexpr `Put` as the codec's BORROWED `Push` over the caller's own text
 /// and bytes: what a send with no allocator encodes where the heap profile builds
 /// [`push_build::build_push_literal`]'s owned message. One composition for the unicast
