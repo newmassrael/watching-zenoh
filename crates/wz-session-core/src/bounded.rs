@@ -1261,6 +1261,32 @@ impl Arena {
         Ok(BoundedVec { inner })
     }
 
+    /// Lend a key arena of `bytes` bytes of blocks: the next span of the arena, its state first,
+    /// which the rows of the session's tables keep their keys in
+    /// ([`KeySpace`](crate::key_arena::KeySpace)). Refused, taking nothing, past what is left or past
+    /// the most a key arena addresses.
+    ///
+    /// The key arena's memory is this arena's: whoever owns the arena gives it back only once every
+    /// key made from it is gone, as it does for a lent table.
+    pub fn lend_keys(&mut self, bytes: usize) -> Result<crate::key_arena::KeySpace, LendRefused> {
+        let left = self.bytes - self.lent;
+        let span = match crate::key_arena::KeySpace::span_bytes(bytes) {
+            Some(span) if span <= left => span,
+            asked => return Err(LendRefused::Exhausted { asked, left }),
+        };
+        // SAFETY: the span starts `lent` bytes into the arena, a multiple of `ARENA_ALIGN` from a
+        // base aligned to it; it lies inside the arena, and nothing was lent it before, as `lent`
+        // only grows; `span_bytes` answered, so `bytes` is within what a key arena addresses.
+        let keys = unsafe {
+            crate::key_arena::KeySpace::over(
+                NonNull::new_unchecked(self.base.as_ptr().add(self.lent)),
+                bytes,
+            )
+        };
+        self.lent += span;
+        Ok(keys)
+    }
+
     /// The bytes a table of `count` buffers of `size` bytes takes in an arena
     /// ([`Self::lend_byte_cells`]): a span of their flags and a span of their bytes. `None` past
     /// the address space.

@@ -2132,6 +2132,36 @@ zenoh = "none"
 reason = "No key of upstream's configuration bounds the length of a key expression; wz bounds it to size the rows of the tables that store keys."
 
 [[limit]]
+id = "KEY_ARENA_BYTES"
+kconfig = "WZ_LIMIT_KEY_ARENA_BYTES"
+kind = "parameter"
+range = [1, 4294967291]
+on_heap = "quota"
+default = 65536
+storage = "both"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "open"
+read = "snapshot"
+# `wire` is none: a key that finds no room is refused before anything is sent.
+wire = "none"
+help = '''
+How many bytes of key text the rows of a session's own declarations hold at
+once, in one arena each row keeps its key in: each key takes 8 bytes and its
+length, rounded up to 4. A declaration whose key finds no room is refused, as
+one that finds its table full is, and a key given back is taken again. It must
+be at least 1.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds it: a zenoh session keeps each key it holds in an allocation of its own length. The default holds every row of the engine's record at the build's defaults (224) with a key of MAX_KEYEXPR_BYTES (256), 59,136 bytes, so a build that states nothing refuses no key it took before."
+
+[limit.pico_preset]
+value = 2048
+reason = "zenoh-pico keeps each key in an allocation of its own length, bounded by no count; the longest key of its examples is 27 bytes (`vendor/zenoh-pico/examples/unix/c11/z_pub.c` @ `char *keyexpr = \"demo/example/zenoh-pico-pub\";`). The preset holds each of the 34 rows of the engine's record at the preset's other values with a key of up to 52 bytes, about twice that, 60 bytes a block."
+
+[[limit]]
 id = "MAX_SUBSCRIPTIONS"
 kconfig = "WZ_LIMIT_MAX_SUBSCRIPTIONS"
 kind = "bound"
