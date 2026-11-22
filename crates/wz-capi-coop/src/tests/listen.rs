@@ -9,6 +9,7 @@
 use std::io::Read;
 use std::net::TcpStream;
 use std::ops::Deref;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -394,4 +395,93 @@ fn a_stray_datagram_on_a_udp_port_takes_no_face() {
     eventually("CONTROL: a client to be taken after it", || {
         listener.faces_up() == 1
     });
+}
+
+/// Step `engine` on this thread until `done`, for at most five seconds: how many reads it took.
+fn reads_until(engine: &Engine, what: &str, mut done: impl FnMut() -> bool) -> usize {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut reads = 0;
+    while !done() {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        let _ = SessionDrive::read(engine, false);
+        reads += 1;
+    }
+    reads
+}
+
+/// The puts a client writes in one batch window reach a listener's subscriber over the stream
+/// link where they lie in the link's receive buffer: each is handed on lying there, none is copied
+/// into the lane, and the listener hands them all out in a few reads however many the batch
+/// holds, where a link that handed one sample where it lies a read took a read a put. The listener
+/// is stepped by this thread, so each read is counted. The CONTROL is the subscriber's count.
+#[test]
+fn the_puts_of_one_stream_batch_are_handed_where_they_lie_in_a_few_reads() {
+    let engine = open_with(CoopConfig {
+        whatami: WhatAmI::Peer,
+        zid: Some(vec![0xa1; 4]),
+        listen: vec!["tcp/127.0.0.1:0".to_owned()],
+        ..client_config()
+    });
+    let endpoint = engine.listening().pop().expect("one port is bound");
+    let received = Arc::new(AtomicUsize::new(0));
+    let count = received.clone();
+    engine.declare_subscriber_on_wire(
+        "demo/s/**".to_owned(),
+        WireKey::literal(),
+        Locality::Any,
+        None,
+        Arc::new(move || {
+            let count = count.clone();
+            Box::new(move |_sample: &dyn SampleView| {
+                count.fetch_add(1, Ordering::SeqCst);
+            })
+        }),
+    );
+    let peer = client(&endpoint, 0xc1);
+    reads_until(&engine, "the client's face", || engine.faces_up() == 1);
+    // What the handshake and the declarations left on the link is read before the batch is sent.
+    std::thread::sleep(Duration::from_millis(100));
+    for _ in 0..4 {
+        let _ = SessionDrive::read(&*engine, false);
+    }
+
+    const PUTS: usize = 32;
+    assert_eq!(
+        peer.batch_start_all(),
+        1,
+        "the client's link opens a window"
+    );
+    for _ in 0..PUTS {
+        peer.publish_on_wire_all(
+            "demo/s/x",
+            &WireKey::literal(),
+            b"x",
+            &PublishOptions::put().with_locality(Locality::Remote),
+        )
+        .expect("a put the window holds");
+    }
+    assert_eq!(
+        peer.batch_stop_all(),
+        1,
+        "the window is written as it closes"
+    );
+    std::thread::sleep(Duration::from_millis(100));
+    let (handed, lent) = (engine.lane_handed(), engine.lane_lent());
+    let reads = reads_until(&engine, "the puts", || {
+        received.load(Ordering::SeqCst) == PUTS
+    });
+    assert_eq!(
+        engine.lane_lent() - lent,
+        PUTS,
+        "each put handed where it lies in the stream link's buffer"
+    );
+    assert_eq!(
+        engine.lane_handed() - handed,
+        PUTS,
+        "and none copied into the lane"
+    );
+    assert!(
+        reads <= 4,
+        "{reads} reads for {PUTS} puts of one batch: a few, not one a put"
+    );
 }

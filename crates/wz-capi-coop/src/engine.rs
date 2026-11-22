@@ -3851,14 +3851,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 Some(held) => held,
                 None => own.insert(Resolved::new()),
             };
-            // A sample handed where its datagram lies is older than anything written into the lane
-            // while it waited, so it goes first; the link it lies in is read again once it is back.
-            if let Some(lent) = delivery.take_lent() {
-                handed = true;
-                let sample = lent.sample();
-                self.hand_sample(resolved, sample, sample.subscribers());
-                drop(lent);
-            }
             while let Some((item, head)) = delivery.take() {
                 handed = true;
                 match item {
