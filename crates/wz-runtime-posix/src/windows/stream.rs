@@ -13,8 +13,8 @@
 //! ([`StreamSocket::send_parts_now`]: one `WSASend`, and `WSAEWOULDBLOCK` is nothing taken),
 //! which Winsock has no per-call flag for. The write that waits ([`StreamSocket::send_parts`])
 //! waits in `WSAPoll` for room and writes on, so it returns once Winsock has taken every byte (a
-//! length and its batch go out in one `WSASend`), as the POSIX half's does; a read takes only what
-//! `WSAPoll` reported, the loop's wait being the poll of [`StreamSocket::wait_readable`]. `TCP_NODELAY` is set, as zenoh and zenoh-pico set it on every
+//! length and its batch go out in one `WSASend`), as the POSIX half's does; a read is one `recv`
+//! that does not wait, the loop's wait being the poll of [`StreamSocket::wait_readable`]. `TCP_NODELAY` is set, as zenoh and zenoh-pico set it on every
 //! TCP link (`vendor/zenoh-pico/src/link/transport/tcp/tcp_windows.c` @
 //! `IPPROTO_TCP, TCP_NODELAY`).
 
@@ -280,7 +280,7 @@ impl StreamListen for WindowsTcpListener {
         // A connection reset between the accept and these calls is one that gave up: nothing to
         // take, and the close above is the answer its peer already has. An accepted socket
         // inherits the listener's non-blocking mode on Windows, which is the mode a dialled one
-        // is given too: its reads take only what the poll reported, and a write is tried first.
+        // is given too: its reads do not wait, and a write is tried first.
         if !keep_from_children(socket)
             || set_nonblocking(socket, true).is_err()
             || set_flag(socket, ws::IPPROTO_TCP, ws::TCP_NODELAY).is_err()
@@ -455,13 +455,13 @@ impl StreamSocket for WindowsTcpSocket {
         (room, super::WindowsClock.now_us().saturating_sub(started))
     }
 
+    // The socket does not block (it is made so at its connect and its accept), so the read is
+    // asked at once and a stream with nothing queued answers `WSAEWOULDBLOCK`: one call, as the
+    // POSIX half's `MSG_DONTWAIT` read is, where a poll first made a read of what is queued two.
     fn try_read(&self, buf: &mut [u8]) -> Result<Option<usize>, WindowsNetError> {
-        if !poll_readable(self.socket, 0) {
-            return Ok(None);
-        }
         let room = i32::try_from(buf.len()).unwrap_or(i32::MAX);
-        // SAFETY: `buf` is live and writable for the length passed. The poll reported input (bytes,
-        // the end of the stream, or an error), so the read does not wait.
+        // SAFETY: `buf` is live and writable for the length passed; the socket does not block, so
+        // the read does not wait.
         let got = unsafe { ws::recv(self.socket, buf.as_mut_ptr(), room, 0) };
         if got == ws::SOCKET_ERROR {
             return match last_error() {
@@ -782,6 +782,44 @@ mod tests {
         far.write_all(b"hello").expect("a write");
         assert_eq!(read_exactly(&near, 5), b"hello");
         assert_eq!(near.try_read(&mut buf), Ok(None), "and then nothing");
+    }
+
+    /// A read asks the stream once, with no poll before it: the socket does not block, so a read
+    /// of nothing is the stream's own answer and a read of what is queued takes it in the one
+    /// call. Two reads and a wait here make one poll, the wait's, where a poll before each read
+    /// made three. The CONTROL is the wait, which polls.
+    #[test]
+    fn a_read_asks_the_stream_with_no_poll_before_it() {
+        let (near, mut far) = pair();
+        let mut buf = [0u8; 16];
+        let polls = super::super::readable_polls();
+        assert_eq!(near.try_read(&mut buf), Ok(None), "nothing queued yet");
+        assert_eq!(
+            super::super::readable_polls(),
+            polls,
+            "a read of nothing polls nothing"
+        );
+        far.write_all(b"hello").expect("a write");
+        near.wait_readable(1000);
+        assert_eq!(
+            super::super::readable_polls(),
+            polls + 1,
+            "CONTROL: the wait polls"
+        );
+        let got = near
+            .try_read(&mut buf)
+            .expect("no error")
+            .expect("the wait said bytes are queued");
+        assert!(
+            got > 0 && buf[..got] == b"hello"[..got],
+            "{:?}",
+            &buf[..got]
+        );
+        assert_eq!(
+            super::super::readable_polls(),
+            polls + 1,
+            "the read of what is queued polls nothing"
+        );
     }
 
     #[test]
