@@ -881,6 +881,9 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
     ) where
         S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
     {
+        if peers.finals.is_empty() && !stages_replies(peers, requesters) {
+            return;
+        }
         // One burst: the replies and the `Final` that ends them leave as one frame, where each
         // would be a datagram of its own (see `ResponseSink::begin_burst`).
         let burst = actions.begin_burst();
@@ -907,6 +910,9 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
     ) where
         S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
     {
+        if !stages_replies(peers, requesters) {
+            return;
+        }
         let burst = actions.begin_burst();
         self.drain_query_replies(peers, actions);
         self.drain_declare_replies(peers, actions);
@@ -1150,6 +1156,37 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
     }
 }
 
+/// Whether a drain of what the dispatches staged has anything to send
+/// ([`SlotObserverOf::flush_pending_replies`]): a reply a queryable staged, an answer to one of
+/// the peer's interests, a terminated get's prune. Asked first, so a drain with nothing to send
+/// opens no burst: closing one takes the lock of every conduit to send what it gathered, which
+/// every received Push, drained after as every record is, would pay each time.
+fn stages_replies<R: ReplySink, G: ReplySink, Q: Storage, T: Storage>(
+    peers: &PeerTables<T>,
+    requesters: &Requesters<R, G, Q>,
+) -> bool {
+    #[allow(unused_mut)]
+    let mut staged = false;
+    #[cfg(feature = "query-queryable")]
+    {
+        staged |= !peers.replies.is_empty();
+    }
+    #[cfg(feature = "declare-subscriber")]
+    {
+        staged |= peers.subscribers.has_staged_sub_interest_replies();
+    }
+    #[cfg(feature = "liveliness-token")]
+    {
+        staged |= !peers.pending_declares.is_empty();
+    }
+    #[cfg(feature = "liveliness-get")]
+    {
+        staged |= requesters.liveliness_gets.has_finalized();
+    }
+    let _ = (peers, requesters);
+    staged
+}
+
 #[cfg(all(
     test,
     feature = "codec-push",
@@ -1326,6 +1363,96 @@ mod tests {
             "an M=0 alias must refuse with no own space, never fall back to the peer's table"
         );
         assert!(f.declared.lock().unwrap().is_empty());
+    }
+
+    /// A sink that counts the bursts a drain opens and sends nothing.
+    #[derive(Default)]
+    struct Bursts(core::cell::Cell<usize>);
+
+    impl ResponseSink for Bursts {
+        #[cfg(all(feature = "codec-response", feature = "alloc"))]
+        fn send_response(&self, _response: crate::wire::ResponseOwned) {}
+
+        #[cfg(all(
+            feature = "codec-response",
+            feature = "storage-profile",
+            not(feature = "alloc")
+        ))]
+        fn send_reply_parts(&self, _parts: crate::reply_stage::ReplyParts<'_>) {}
+
+        #[cfg(feature = "codec-response-final")]
+        fn send_response_final(
+            &self,
+            _request_id: crate::wire_id::RequestId,
+            _qos: crate::sample::QosLevel,
+        ) {
+        }
+
+        fn begin_burst(&self) -> bool {
+            self.0.set(self.0.get() + 1);
+            true
+        }
+    }
+
+    impl DeclareReplySink for Bursts {
+        #[cfg(feature = "liveliness-token")]
+        fn send_declare_token_reply(&self, _token_id: u64, _keyexpr: &str, _interest_id: u64) {}
+
+        fn send_declare_final_reply(&self, _interest_id: u64) {}
+
+        fn send_declare_subscriber_reply(
+            &self,
+            _subscriber_id: u64,
+            _keyexpr: &str,
+            _interest_id: u64,
+        ) {
+        }
+
+        #[cfg(feature = "declare-undeclare")]
+        fn send_undeclare_subscriber_reply(&self, _subscriber_id: u64) {}
+    }
+
+    impl LivelinessGetPrune for Bursts {
+        #[cfg(feature = "liveliness-get")]
+        fn prune_liveliness_get_interest(&self, _interest_id: u64) {}
+    }
+
+    /// A drain with nothing staged opens no burst, whose close takes the lock of every conduit to
+    /// send what it gathered: what follows every received Push, eight here, each burst-free. The
+    /// CONTROL is a drain with an answer to the peer's interest staged, which opens one.
+    #[test]
+    fn a_drain_with_nothing_staged_opens_no_burst() {
+        let mut f = fixture(false);
+        let bursts = Bursts::default();
+        for _ in 0..8 {
+            f.observer
+                .flush_pending_replies(&mut f.peers, &mut f.requesters, &bursts);
+            f.observer
+                .flush_pending(&mut f.peers, &mut f.requesters, &bursts);
+        }
+        assert_eq!(bursts.0.get(), 0, "sixteen drains of nothing, no burst");
+        let staged = f
+            .observer
+            .subscribers
+            .respond_to_subscriber_interest_borrowed(
+                &mut f.peers.subscribers,
+                9,
+                Some("ours/x"),
+                false,
+                true,
+                false,
+            );
+        assert!(staged > 0, "a subscription answers the interest");
+        f.observer
+            .flush_pending_replies(&mut f.peers, &mut f.requesters, &bursts);
+        assert_eq!(
+            bursts.0.get(),
+            1,
+            "CONTROL: a staged answer opens one burst"
+        );
+        f.observer
+            .flush_pending_replies(&mut f.peers, &mut f.requesters, &bursts);
+        assert_eq!(bursts.0.get(), 1, "and the drain took it");
     }
 }
 

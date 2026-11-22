@@ -3628,6 +3628,12 @@ impl<P: Storage> SubscriberPeer<P> {
         taken
     }
 
+    /// Whether an interest-response chain is staged for the drain
+    /// ([`Self::take_staged_sub_interest_replies`]), asked without taking it.
+    pub fn has_staged_sub_interest_replies(&self) -> bool {
+        !self.interests.staged.is_empty()
+    }
+
     /// R2292 (open-debt item 627) — record that the drain actually put a
     /// `DeclSubscriber` for this interest's AGGREGATE declaration on the wire.
     ///
