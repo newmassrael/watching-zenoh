@@ -47,8 +47,9 @@ use crate::arena::{
     AllocatorMemory, ArenaMemory, ArenaPlan, ArenaRefused, EntityRows, SessionArena,
 };
 use crate::lane::{LaneCounts, LaneGate, LaneItem, MatchFlips, SharedLane};
-use wz_session_core::bounded::{BoundedString, BoundedVec, Lent};
+use wz_session_core::bounded::{BoundedVec, Lent};
 use wz_session_core::caps;
+use wz_session_core::key_arena::{KeyRef, KeySpace};
 use wz_session_core::slot_observer::ObserverRows;
 
 // The operating system the engine runs on: its mutex, its threads and its sleep are `std`'s on a
@@ -1138,16 +1139,19 @@ fn keep<T, const N: usize>(table: &mut Rows<T, N>, row: T) {
     debug_assert!(kept, "the table had the row its declaration found free");
 }
 
-/// A key as a row of the session's own declarations keeps it: inline, at most
-/// `MAX_KEYEXPR_BYTES`, so the row is the key's only storage.
-pub(super) type RowKey = BoundedString<{ caps::MAX_KEYEXPR_BYTES }, Lent>;
+/// A key as a row of the session's own declarations keeps it: a block of the session's key arena
+/// (`KEY_ARENA_BYTES`) as long as the key, which the row holds by its place, and which is given
+/// back when the row goes.
+pub(super) type RowKey = KeyRef;
 
-/// `keyexpr` as a row keeps it, or `None` past `MAX_KEYEXPR_BYTES`: a key the row has no room
-/// for is refused, never cut short.
-fn row_key(keyexpr: &str) -> Option<RowKey> {
-    let mut key = RowKey::default();
-    key.push_str(keyexpr).ok()?;
-    Some(key)
+/// `keyexpr` as a row keeps it, in `keys`; `None` past `MAX_KEYEXPR_BYTES`, or when the key arena
+/// has no room for it: a key the session cannot hold is refused, never cut short, and the
+/// declaration with it, before an id is taken or anything is sent.
+fn row_key(keys: &KeySpace, keyexpr: &str) -> Option<RowKey> {
+    if keyexpr.len() > caps::MAX_KEYEXPR_BYTES {
+        return None;
+    }
+    keys.key(keyexpr).ok()
 }
 
 /// The write filters' table, sized by the build: a publisher's and a querier's each.
@@ -1205,6 +1209,8 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// How many rows each table of the session's own declarations was lent: what a write filter
     /// of each plane is held to, the filters sharing one table.
     entities: EntityRows,
+    /// The key arena the rows of those tables keep their keys in, lent from `arena` with them.
+    keys: KeySpace,
     subscribers: Rows<SubEntry, { caps::MAX_SUBSCRIPTIONS }>,
     keyexprs: Rows<KexprEntry, { caps::MAX_DECLARED_KEYEXPRS }>,
     next_mapping: ExprId,
@@ -3195,6 +3201,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let live_subs = arena
             .lend(entities.liveliness_subscribers)
             .map_err(OpenError::Arena)?;
+        let keys = arena.lend_keys(&plan).map_err(OpenError::Arena)?;
         // The application's tables, lent from the rows the plan counts for them.
         let registry = Registry::new(
             &resolve_limits(&config),
@@ -3258,6 +3265,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             )),
             wire_zid: wire,
             entities,
+            keys,
             subscribers,
             keyexprs,
             next_mapping: 1,
@@ -4537,7 +4545,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         }
         // zenoh-pico's Interest takes the session's next entity id
         // (`vendor/zenoh-pico/src/net/primitives.c` @ `intr._id = _z_get_entity_id(zn);`).
-        let Some(key) = row_key(keyexpr) else {
+        let Some(key) = row_key(&core.keys, keyexpr) else {
             return false;
         };
         let Some(interest_id) = self.next_entity_id() else {
@@ -5041,7 +5049,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return None;
         }
         // So does a key longer than its row holds.
-        let key = row_key(&keyexpr)?;
+        let key = row_key(&core.keys, &keyexpr)?;
         let id = self.next_entity_id()?;
         let lane = self.samples.clone();
         let registration = core.registry.borrow_mut().app.subscribers.register_sink(
@@ -5172,7 +5180,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         if core.keyexprs.free_slots() == 0 {
             return None;
         }
-        let key = row_key(&keyexpr)?;
+        let key = row_key(&core.keys, &keyexpr)?;
         // The id space is the wire's `ExprId`; once it is spent the counter rests at 0, the
         // literal's id, and every further declaration is refused rather than re-issuing a live
         // id.
@@ -5272,7 +5280,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return 0;
         }
         // So does a key longer than its row holds.
-        let Some(key) = row_key(&keyexpr) else {
+        let Some(key) = row_key(&core.keys, &keyexpr) else {
             return 0;
         };
         // A listener whose Interest the session has no id left for is not declared, as a closed
@@ -5398,7 +5406,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return None;
         }
         // So is a key longer than its row holds.
-        let key = row_key(&keyexpr)?;
+        let key = row_key(&core.keys, &keyexpr)?;
         // The id this filter spent of its own, when it spent one: its Interest's, when it is the
         // first to hold it, or the one taken for a filter that sends none.
         let mut spent = None;
@@ -5641,7 +5649,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return None;
         }
         // So does a key longer than its row holds.
-        let key = row_key(&keyexpr)?;
+        let key = row_key(&core.keys, &keyexpr)?;
         let id = self.next_entity_id()?;
         // The registry's queryable only copies a query out and holds its Final; the callback
         // `sink` mints runs when the deliveries are handed out (`query`).
@@ -6108,7 +6116,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return None;
         }
         // So does a key longer than its row holds.
-        let key = row_key(&keyexpr)?;
+        let key = row_key(&core.keys, &keyexpr)?;
         let id = self.next_entity_id()?;
         core.registry
             .borrow_mut()
@@ -6181,7 +6189,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return None;
         }
         // So does a key longer than its row holds.
-        let key = row_key(&keyexpr)?;
+        let key = row_key(&core.keys, &keyexpr)?;
         let id = self.next_entity_id()?;
         lock(&self.targets).push((
             TargetKey::Liveliness(id),

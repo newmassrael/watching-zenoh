@@ -377,6 +377,50 @@ fn the_plan_lays_out_the_delivery_lane_the_limits_state() {
     }
 }
 
+/// The key arena is the `KEY_ARENA_BYTES` the session's limits state, one area with its state: a
+/// lowered value lowers it, and one over the build's refuses the plan, naming the limit and both
+/// values.
+#[test]
+fn the_plan_lays_out_the_key_arena_the_limits_state() {
+    use wz_session_core::key_arena::KeySpace;
+
+    let built =
+        ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
+    assert_eq!(
+        built.key_bytes(),
+        SessionLimits::defaults().key_arena_bytes()
+    );
+    assert_eq!(row(&built, "key arena").count, 1);
+    assert_eq!(
+        Some(row(&built, "key arena").entry_bytes),
+        KeySpace::span_bytes(built.key_bytes())
+    );
+    let mut lowered = SessionLimits::defaults();
+    if lowered.select_key_arena_bytes(512).is_ok() {
+        let plan = ArenaPlan::of(&client_config(), &lowered).expect("lays an arena out");
+        assert_eq!(plan.key_bytes(), 512);
+        assert_eq!(
+            Some(row(&plan, "key arena").entry_bytes),
+            KeySpace::span_bytes(512)
+        );
+        assert!(plan.reserved_bytes() < built.reserved_bytes());
+    }
+    let over = caps::KEY_ARENA_BYTES + 1;
+    let mut raised = SessionLimits::defaults();
+    if raised.select_key_arena_bytes(over).is_ok() {
+        assert_eq!(
+            ArenaPlan::of(&client_config(), &raised),
+            Err(ArenaRefused::Limit {
+                limit: "KEY_ARENA_BYTES",
+                why: UnlentRows::OverCeiling {
+                    value: over,
+                    ceiling: caps::KEY_ARENA_BYTES,
+                },
+            })
+        );
+    }
+}
+
 /// A listener lays out the gets and the link of a face for the dial role, each face it admits and
 /// each handshake it holds; the application's tables are the session's, once, however many faces
 /// it holds.
@@ -822,8 +866,9 @@ fn the_pico_presets_arena_lends_the_presets_rows() {
     let preset = |id: &str| preset_of(&presets, id).expect("the preset states it");
     let mut held = 0;
     for row in plan.rows() {
-        // The lane's row is one buffer of the limit's bytes, not a row of each.
-        if row.basis == "DELIVERY_LANE_BYTES" {
+        // The lane's row is one buffer of the limit's bytes, and the key arena's one area of
+        // them, not a row of each.
+        if row.basis == "DELIVERY_LANE_BYTES" || row.basis == "KEY_ARENA_BYTES" {
             continue;
         }
         if let Some(value) = preset_of(&presets, row.basis) {
@@ -846,6 +891,7 @@ fn the_pico_presets_arena_lends_the_presets_rows() {
         plan.peers().rows.pending_declares,
         preset("MAX_PENDING_DECLARES")
     );
+    assert_eq!(plan.key_bytes(), preset("KEY_ARENA_BYTES"));
     let reserved = plan.reserved_bytes().expect("within the address space");
     assert_eq!(
         Some(reserved),

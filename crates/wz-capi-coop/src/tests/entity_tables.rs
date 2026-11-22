@@ -465,6 +465,48 @@ fn a_key_past_its_row_is_refused_and_sends_nothing() {
     );
 }
 
+/// The rows of the session's own declarations keep their keys in one key arena of
+/// `KEY_ARENA_BYTES`: a key that finds no room there is refused as a full table refuses, before an
+/// id is taken, a callback minted or anything sent, and the key an undeclaration gives back is
+/// taken by the next declaration.
+#[test]
+fn a_key_past_the_key_arena_is_refused_and_a_key_given_back_is_taken_again() {
+    use wz_session_core::key_arena::block_bytes;
+
+    // Room for exactly two keys of eight bytes.
+    let room = 2 * block_bytes("demo/k/1".len()).expect("a short key");
+    let Some(limits) = lowered(|l| l.select_key_arena_bytes(room).is_ok()) else {
+        return;
+    };
+    let plan = ArenaPlan::of(&client_config(), &limits).expect("lays an arena out");
+    assert_eq!(plan.key_bytes(), room);
+    let router = Router::start(CatchAll::None);
+    let engine = open_under(&router, limits);
+    let minted = Arc::new(AtomicUsize::new(0));
+    let before = router.seen(|s| s.declares);
+    let first = declare_subscriber(&engine, "demo/k/1", &minted).expect("room for a key");
+    declare_subscriber(&engine, "demo/k/2", &minted).expect("room for the second key");
+    until(&engine, "the router to see both subscribers", || {
+        router.seen(|s| s.declares) >= before + 2
+    });
+    let seen = router.seen(|s| s.declares);
+
+    assert_eq!(declare_subscriber(&engine, "demo/k/3", &minted), None);
+    settle(&engine);
+    assert_eq!(
+        minted.load(Ordering::SeqCst),
+        2,
+        "no callback for a refusal"
+    );
+    assert_eq!(router.seen(|s| s.declares), seen, "nothing was sent");
+
+    engine.undeclare_subscriber(first);
+    assert!(
+        declare_subscriber(&engine, "demo/k/3", &minted).is_some(),
+        "the key given back takes it"
+    );
+}
+
 /// A wild key reaches the router as any other: the tables lent at open canonize it in a working
 /// buffer of their own, and a declaration the observer refused would answer `None`, not an id
 /// that was never announced.
