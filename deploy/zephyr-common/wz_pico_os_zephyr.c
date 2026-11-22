@@ -10,12 +10,18 @@
  * half calls directly, and this file pins every size and constant it states for those calls
  * against the headers this image compiles: a kernel or a C library that lays them out otherwise
  * fails this build instead of letting a C program's storage be written past.
+ *
+ * struct timeval is <sys/time.h>'s, which <time.h> does not complete; pico's own backend includes it
+ * for the same type:
+ *
+ * `vendor/zenoh-pico/src/system/zephyr/system.c` @ `#include <sys/time.h>`
  */
 
 #include <errno.h>
 #include <pthread.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <sys/time.h>
 #include <time.h>
 
 #include <zephyr/kernel.h>
