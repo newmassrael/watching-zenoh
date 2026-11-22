@@ -245,6 +245,61 @@ the lane's event slots: each sample lying in the batch takes one, so a read hand
 take the per-read and per-hold work that profile showed; a record for a whole batch's samples, one
 slot and one handle a batch, is the next step and the one that removes the record's moves.
 
+## One record of the lane a lent batch (`rx-batch`)
+
+The samples of a datagram, a stream's batch, whose parts lie in it are one record of the delivery
+lane (`crates/wz-capi-coop/src/lane.rs`, `BatchRecord`): one event slot, one handle through the
+SCE queue and back, one hold of the link. Its bytes are an entry a sample (`EntryHead`: kind,
+reliability, QoS, where the key and the payload lie in the datagram, how many subscribers; an
+`EntryRest` after it only for a sample that carries an attachment, an encoding, a timestamp or a
+source), the key when it lies outside the datagram, and the subscribers' ids. The delivery walks
+the entries and calls each subscriber's callback with a view built on its stack from the entry
+(`BatchSample`), in the order the samples came, as zenoh-pico calls each callback as it decodes
+(`vendor/zenoh-pico/src/session/subscription.c` @ `z_result_t _z_trigger_subscriptions_impl(`),
+and gives the batch back once, after the last callback.
+
+For N samples of one lent batch, one subscriber, a key named by an alias (so resolved outside the
+datagram), read while no delivery runs:
+
+| Per batch of N | Before (`rx-stream`) | After |
+|---|---|---|
+| Lane records (event slots, handles pushed and popped, `take`, `HeldHead`, give-backs, `complete`) | N | 1 |
+| The ~180-byte `Record` built, compared with the one held open, moved into its slot and out at the take | N | 0 (an entry's head written and read back unaligned, the batch's counts rewritten in place) |
+| Key copies | N | 1 (the first sample; the ones after it on the same key compare and share it) |
+| Holds of the link (`lends_a_datagram`) | 1 | 1 |
+| Samples a read hands out | at most 63 (`DELIVERY_LANE_EVENTS` 64, a slot each) | bounded by the lane's bytes and callbacks owed (`DELIVERY_LANE_CALLBACKS`, 256 by default), not its slots |
+| Callbacks | N, in order | N, in order |
+
+The tests that count it, in `wz-capi-coop`: `tests::lane::the_samples_of_a_lent_datagram_are_one_record_handed_where_they_lie`
+(three samples, one record handed on, three lent, one take, the key at one address in the lane for
+the three; CONTROLS a sample offered while a delivery runs and one whose payload lies elsewhere,
+written whole, a record each), `the_samples_of_a_lent_datagram_are_handed_on_by_one_hold` (one
+hold, one record, three callbacks in order), `a_lent_batch_takes_one_event_slot_however_many_samples_it_holds`
+(ten samples through a lane of two event slots; CONTROL two samples written whole fill it),
+`a_lent_sample_for_several_subscribers_is_one_entry_of_its_batch`,
+`a_lent_sample_with_a_part_elsewhere_is_written_whole_in_order`,
+`a_key_that_lies_in_the_lent_datagram_is_read_there` (no key copy),
+`a_lent_sample_with_every_part_is_handed_from_its_batch_as_it_was_offered`; at the engine,
+`tests::listen::the_puts_of_one_stream_batch_are_handed_where_they_lie_in_a_few_reads` (32 puts of
+one TCP batch: one record, 32 lent) and `tests::a_received_sample_is_handed_where_it_lies_and_an_empty_read_hands_nothing`.
+
+What is kept: a sample offered while a delivery runs (a callback that reads its session) is written
+whole as a record of its own, and holds no link back; a sample with a part outside the datagram is
+written whole after the batch before it is published, and the samples after it open a batch of
+their own, so each subscriber's order is the order the samples came. The gate's room is the room
+of one record, as before; a batch grows by at most one entry a record, which `read_bytes` counts
+(a message shorter than an entry is counted as long as one), and the event slot the gate asks for
+is the one a record written whole would take.
+
+Not done, and why: a key named by an alias is still copied once a batch. The text lies in the
+peer's alias table, which a later record of the same datagram (an undeclaration, a redeclaration)
+or the end of the face's lease may change while the batch waits for its delivery, and the
+delivery runs without the session's lock, so it cannot read the table there; matching the key to
+the subscribers is done in the step for the same reason, under the session's lock, where the
+records before it in the datagram have been applied. A key that lies in the datagram (a literal
+key) is not copied at all. Not measured: the instruction counts and the Windows probe after the
+change are the test of the estimates above.
+
 ## What is next, in order of expected gain
 
 0. Done on `rx-cost-3`: item 7 for a link that leaves its datagram in place (58fc0293c); on
