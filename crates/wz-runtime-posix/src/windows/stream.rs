@@ -9,10 +9,12 @@
 //! connections on, yielding the same socket. Nothing here allocates: the socket is a handle and
 //! its two ends.
 //!
-//! The socket blocks on a write and never on a read, as the POSIX half's does: a write returns
-//! once Winsock has taken every byte (a length and its batch go out in one `WSASend`), and a read
-//! takes only what `WSAPoll` reported, the loop's wait being the poll of
-//! [`StreamSocket::wait_readable`]. `TCP_NODELAY` is set, as zenoh and zenoh-pico set it on every
+//! The socket is non-blocking from its connect on, so a write can be tried without waiting
+//! ([`StreamSocket::send_parts_now`]: one `WSASend`, and `WSAEWOULDBLOCK` is nothing taken),
+//! which Winsock has no per-call flag for. The write that waits ([`StreamSocket::send_parts`])
+//! waits in `WSAPoll` for room and writes on, so it returns once Winsock has taken every byte (a
+//! length and its batch go out in one `WSASend`), as the POSIX half's does; a read takes only what
+//! `WSAPoll` reported, the loop's wait being the poll of [`StreamSocket::wait_readable`]. `TCP_NODELAY` is set, as zenoh and zenoh-pico set it on every
 //! TCP link (`vendor/zenoh-pico/src/link/transport/tcp/tcp_windows.c` @
 //! `IPPROTO_TCP, TCP_NODELAY`).
 
@@ -71,6 +73,7 @@ impl WindowsTcpSocket {
         if unsafe { ws::connect(socket, peer.as_ptr(), peer.size()) } != 0 {
             return Err(WindowsNetError::Connect(last_error()));
         }
+        set_nonblocking(socket, true).map_err(WindowsNetError::NonBlocking)?;
         this.local = name_of(socket, ws::getsockname).map_err(WindowsNetError::SockName)?;
         this.peer = name_of(socket, ws::getpeername).map_err(WindowsNetError::PeerName)?;
         Ok(this)
@@ -79,8 +82,9 @@ impl WindowsTcpSocket {
 
 impl WindowsTcpSocket {
     /// Begin a connection to `to` and return without waiting for it: the socket is non-blocking
-    /// until [`StreamSocket::connected`] finds the connection made, and blocking from then on, as
-    /// a socket [`Self::connect`] made is. A refusal Winsock knows at once is the error here.
+    /// from here on, as a socket [`Self::connect`] made is once connected, and
+    /// [`StreamSocket::connected`] tells when the connection is made. A refusal Winsock knows at
+    /// once is the error here.
     pub fn connect_started(to: SocketAddr) -> Result<Self, WindowsNetError> {
         let socket = open_socket(&to, ws::SOCK_STREAM, ws::IPPROTO_TCP)?;
         // Owned from here, so an early return closes it.
@@ -274,11 +278,10 @@ impl StreamListen for WindowsTcpListener {
         };
         // A connection reset between the accept and these calls is one that gave up: nothing to
         // take, and the close above is the answer its peer already has. An accepted socket
-        // inherits the listener's non-blocking mode on Windows, so it is made blocking here, as a
-        // dialled one is: its reads take only what the poll reported and its writes wait for
-        // Winsock.
+        // inherits the listener's non-blocking mode on Windows, which is the mode a dialled one
+        // is given too: its reads take only what the poll reported, and a write is tried first.
         if !keep_from_children(socket)
-            || set_nonblocking(socket, false).is_err()
+            || set_nonblocking(socket, true).is_err()
             || set_flag(socket, ws::IPPROTO_TCP, ws::TCP_NODELAY).is_err()
         {
             return Ok(None);
@@ -301,6 +304,27 @@ impl Drop for WindowsTcpListener {
     }
 }
 
+/// The buffers of `parts`, empty ones left out, and how many there are; more than `MAX_PARTS`, or
+/// a part longer than a `u32`, is refused as `WSAEMSGSIZE`.
+fn wsabufs(parts: &[&[u8]]) -> Result<([ws::WSABUF; MAX_PARTS], usize), WindowsNetError> {
+    let mut bufs = [ws::WSABUF {
+        len: 0,
+        buf: core::ptr::null_mut(),
+    }; MAX_PARTS];
+    let mut count = 0;
+    for part in parts.iter().filter(|part| !part.is_empty()) {
+        let (true, Ok(len)) = (count < MAX_PARTS, u32::try_from(part.len())) else {
+            return Err(WindowsNetError::Write(ws::WSAEMSGSIZE));
+        };
+        bufs[count] = ws::WSABUF {
+            len,
+            buf: part.as_ptr().cast_mut(),
+        };
+        count += 1;
+    }
+    Ok((bufs, count))
+}
+
 impl StreamSocket for WindowsTcpSocket {
     type Error = WindowsNetError;
 
@@ -314,27 +338,13 @@ impl StreamSocket for WindowsTcpSocket {
 
     fn send_parts(&self, parts: &[&[u8]]) -> Result<(), WindowsNetError> {
         // The parts the stack has still to take; a short write moves the front forward.
-        let mut bufs = [ws::WSABUF {
-            len: 0,
-            buf: core::ptr::null_mut(),
-        }; MAX_PARTS];
-        let mut count = 0;
-        for part in parts.iter().filter(|part| !part.is_empty()) {
-            let (true, Ok(len)) = (count < MAX_PARTS, u32::try_from(part.len())) else {
-                return Err(WindowsNetError::Write(ws::WSAEMSGSIZE));
-            };
-            bufs[count] = ws::WSABUF {
-                len,
-                buf: part.as_ptr().cast_mut(),
-            };
-            count += 1;
-        }
+        let (mut bufs, count) = wsabufs(parts)?;
         let mut first = 0;
         while first < count {
             let mut sent: u32 = 0;
             // SAFETY: every buffer names a live slice of `parts` for its length, and the count
-            // passed is the number of them from `first`. No overlapped structure: the call
-            // blocks until Winsock has taken the bytes.
+            // passed is the number of them from `first`. No overlapped structure: the call takes
+            // what Winsock has room for now, the socket being non-blocking.
             let rc = unsafe {
                 ws::WSASend(
                     self.socket,
@@ -349,6 +359,11 @@ impl StreamSocket for WindowsTcpSocket {
             if rc != 0 {
                 match last_error() {
                     ws::WSAEINTR => continue,
+                    // No room now: this is the write that waits, so it waits for some.
+                    ws::WSAEWOULDBLOCK => {
+                        poll_writable(self.socket, -1);
+                        continue;
+                    }
                     other => return Err(WindowsNetError::Write(other)),
                 }
             }
@@ -366,6 +381,40 @@ impl StreamSocket for WindowsTcpSocket {
         Ok(())
     }
 
+    // One `WSASend` on the non-blocking socket: Winsock takes what it has room for now, and
+    // `WSAEWOULDBLOCK` is nothing taken.
+    fn send_parts_now(&self, parts: &[&[u8]]) -> Option<Result<usize, WindowsNetError>> {
+        let (bufs, count) = match wsabufs(parts) {
+            Ok(built) => built,
+            Err(refused) => return Some(Err(refused)),
+        };
+        loop {
+            let mut sent: u32 = 0;
+            // SAFETY: every buffer names a live slice of `parts` for its length, and `count` is
+            // the number of them. No overlapped structure, and the socket is non-blocking, so the
+            // call returns at once.
+            let rc = unsafe {
+                ws::WSASend(
+                    self.socket,
+                    bufs[..count].as_ptr(),
+                    count as u32,
+                    &mut sent,
+                    0,
+                    core::ptr::null_mut(),
+                    None,
+                )
+            };
+            if rc == 0 {
+                return Some(Ok(sent as usize));
+            }
+            match last_error() {
+                ws::WSAEINTR => continue,
+                ws::WSAEWOULDBLOCK => return Some(Ok(0)),
+                other => return Some(Err(WindowsNetError::Write(other))),
+            }
+        }
+    }
+
     fn connected(&mut self) -> Result<bool, WindowsNetError> {
         match self.connect_ended() {
             (_, true) => {
@@ -378,7 +427,6 @@ impl StreamSocket for WindowsTcpSocket {
             }
             (false, false) => Ok(false),
             (true, false) => {
-                set_nonblocking(self.socket, false).map_err(WindowsNetError::NonBlocking)?;
                 self.local =
                     name_of(self.socket, ws::getsockname).map_err(WindowsNetError::SockName)?;
                 self.peer =
@@ -687,6 +735,37 @@ mod tests {
         assert_eq!(reader.join().expect("the reader"), big.len());
     }
 
+    /// A write that does not wait takes what the stream has room for and says how much: all of a
+    /// write to a stream with room, in order, and nothing once the peer has stopped reading and
+    /// the stacks hold all they will (`WSAEWOULDBLOCK`), which it answers at once where the write
+    /// that waits would wait for the peer.
+    #[test]
+    fn a_write_that_does_not_wait_takes_what_the_stream_has_room_for() {
+        let (near, mut far) = pair();
+        assert_eq!(
+            near.send_parts_now(&[&b"he"[..], &b"llo"[..]]),
+            Some(Ok(5)),
+            "a stream with room takes it all"
+        );
+        let mut got = [0u8; 5];
+        far.read_exact(&mut got).expect("the far end reads");
+        assert_eq!(&got, b"hello");
+        let chunk = [0x5au8; 1024];
+        let mut written = 0usize;
+        loop {
+            match near.send_parts_now(&[&chunk]) {
+                Some(Ok(0)) => break,
+                Some(Ok(n)) => written += n,
+                other => panic!("a write to a sound stream: {other:?}"),
+            }
+            assert!(
+                written < 256 << 20,
+                "the stream took {written} bytes and never filled"
+            );
+        }
+        assert!(written > 0, "the stream took bytes before it filled");
+    }
+
     #[test]
     fn a_read_takes_what_is_queued_and_says_nothing_yet_without_blocking() {
         let (near, mut far) = pair();
@@ -722,8 +801,9 @@ mod tests {
         }
     }
 
-    /// An accepted socket inherits the listener's non-blocking mode on Windows; it is made
-    /// blocking, and its reads still do not wait.
+    /// An accepted socket inherits the listener's non-blocking mode on Windows and keeps it: its
+    /// reads do not wait, and the write that waits still writes a MiB whole, waiting for room as
+    /// the far end reads.
     #[test]
     fn an_accepted_connection_is_a_stream_in_both_directions_and_its_reads_do_not_block() {
         let (listener, port) = listening();
@@ -743,7 +823,7 @@ mod tests {
             got
         });
         near.send_parts(&[&big[..]])
-            .expect("a blocking send of one MiB");
+            .expect("a send of one MiB that waits for room");
         assert_eq!(reader.join().expect("the reader"), big);
     }
 
