@@ -167,6 +167,12 @@ impl<'a> DeliveryScope<'a> {
         });
     }
 
+    /// Whether the span holds a call it owes. A frame's run of reads ends on one, so that the call
+    /// is made before the next message of the frame is routed (`RouterForwarder::forward_frame`).
+    pub(super) fn owes(&self) -> bool {
+        DELIVERIES.with(|owed| owed.borrow().as_ref().is_some_and(|owed| !owed.is_empty()))
+    }
+
     /// Close the span and make the calls it owes. The span is closed first, so that a callback
     /// that publishes opens one of its own.
     pub(super) fn finish(mut self) {

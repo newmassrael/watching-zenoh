@@ -3355,6 +3355,10 @@ pub struct RouterForwarder {
     /// Count of the client carriers encoded to shared bytes: one for each fan-out that sent at
     /// least one face the bytes, however many faces it sent them to.
     client_carrier_encodes: Counter,
+    /// Count of the reads of the tables the frames of the faces took for their reading messages:
+    /// one for each run of them ([`TABLE_READS_PER_GUARD`]), where a read for each message counts
+    /// one a message.
+    frame_table_reads: Counter,
     /// Total spanning-tree recomputes flushed across both nets — the D2c
     /// coalescing witness (rises once per flushed net per tick window).
     recomputes: Counter,
@@ -3550,6 +3554,14 @@ const TABLES_WRITER_FIRST_AFTER: Duration = Duration::from_millis(10);
 /// The bound keeps a frame from holding the tables against the other faces for longer than this
 /// many declarations take: a frame of the batch size carries a few thousand of them.
 const TABLE_WRITES_PER_GUARD: usize = 64;
+
+/// How many table-reading messages of one frame are routed under one read of the tables
+/// ([`RouterForwarder::forward_frame`]). Upstream's data path takes its read lock once for a Put
+/// (`zenoh/src/net/routing/dispatcher/pubsub.rs` @ `let rtables = zread!(tables_ref.tables);`);
+/// a read taken for each message of a frame cost each Put a read of the tables' cell besides. The
+/// bound keeps one frame from holding a read for longer than a writer that has waited
+/// [`TABLES_WRITER_FIRST_AFTER`] should wait behind it.
+const TABLE_READS_PER_GUARD: usize = 64;
 
 /// How a log line names the remote node of a face: its zid as zenoh prints it, or `-` for a face
 /// whose peer has not told one (a client that never surfaced an id).
@@ -4199,9 +4211,9 @@ impl RouterForwarder {
 
     /// [`Self::on_tables`] for a face's own frame, taken behind a writer that has waited
     /// [`TABLES_WRITER_FIRST_AFTER`] ([`TablesCell::read_behind_a_writer_waiting`]): every face's
-    /// thread takes the tables once per message, and with the recursive read alone their guards
-    /// overlap without end, so that a face coming up, a declaration or a face leaving waits for as
-    /// long as the faces route. Only where the thread holds no guard of the tables, which is the
+    /// thread takes the tables once for each run of a frame's messages, and with the recursive read
+    /// alone their guards overlap without end, so that a face coming up, a declaration or a face
+    /// leaving waits for as long as the faces route. Only where the thread holds no guard of the tables, which is the
     /// top of [`Self::forward_frame`]: a face's drive calls it with nothing held. Under the
     /// `snapshot` value no reader keeps a writer out, and this is [`Self::on_tables`].
     #[cfg_attr(debug_assertions, track_caller)]
@@ -4506,6 +4518,7 @@ router_entry_points! { on_tables:
     fn fan_out_face_visits(&self) -> usize;
     fn held_route_closed_skips(&self) -> usize;
     fn client_carrier_encodes(&self) -> usize;
+    fn frame_table_reads(&self) -> usize;
     #[cfg(feature = "router-multicast-faces")]
     fn mcast_ingress_federated(&self) -> usize;
     #[cfg(feature = "router-multicast-faces")]
@@ -5280,6 +5293,7 @@ impl RouterForwarder {
             interceptor_dropped: Counter::new(),
             held_route_closed_skips: Counter::new(),
             client_carrier_encodes: Counter::new(),
+            frame_table_reads: Counter::new(),
             recomputes: Counter::new(),
             trees_delay: Self::DEFAULT_TREES_DELAY,
             clock,
@@ -5879,6 +5893,11 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// carrier encoded for each face would count one a face.
     pub fn client_carrier_encodes(&self) -> usize {
         self.client_carrier_encodes.get()
+    }
+
+    /// The reads of the tables the faces' frames took for their reading messages (see the field).
+    pub fn frame_table_reads(&self) -> usize {
+        self.frame_table_reads.get()
     }
 
     /// I3c — count of mcast-ingress Pushes this router FEDERATED into the mesh as
@@ -14842,9 +14861,34 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     }
 }
 
+/// The reading messages of one frame that share one read of the tables
+/// ([`TABLE_READS_PER_GUARD`]). The fields drop in their order, so the tables are let go before
+/// the calls the run owes the node's own session are made.
+struct ReadRun<'a> {
+    on: OnTables<'a, TablesRead<'a>>,
+    deliveries: local_publish::DeliveryScope<'a>,
+    /// The messages routed under `on` so far.
+    held: usize,
+}
+
+impl<'a> ReadRun<'a> {
+    /// A run of the frame of a face: the span its calls are owed in is opened before the tables
+    /// are taken ([`RouterForwarder::on_tables_for_a_frame`]), so that it ends after they are let
+    /// go.
+    fn begin(fwd: &'a RouterForwarder) -> Self {
+        let deliveries = local_publish::DeliveryScope::enter(fwd);
+        fwd.frame_table_reads.bump();
+        Self {
+            on: fwd.on_tables_for_a_frame(),
+            deliveries,
+            held: 0,
+        }
+    }
+}
+
 impl RouterForwarder {
-    /// One frame from face `id`, a message at a time, each taking the tables for the kind of work
-    /// it is (`docs/router-task-per-face.md`, phase 3e): the data and query planes read them, so
+    /// One frame from face `id`, a message at a time, under the tables taken for the kind of work
+    /// each is (`docs/router-task-per-face.md`, phase 3e): the data and query planes read them, so
     /// that frames of different faces route at once, and a declaration, a topology message or an
     /// interest writes them, alone.
     ///
@@ -14853,6 +14897,10 @@ impl RouterForwarder {
     /// as the ones before it left them, in the frame's order, which is what one write each did.
     /// A message that reads ends the write first, so that it is routed by every declaration the
     /// frame carried before it, and the data between declarations is not held behind them.
+    ///
+    /// Consecutive reading messages share one read, up to [`TABLE_READS_PER_GUARD`] of them
+    /// ([`ReadRun`]). A message that writes ends the read first, and so does a message whose
+    /// route owes the node's own session a call, which is made before the next message is routed.
     fn forward_frame(&self, id: FaceId, event: IterationEvent<'_, '_>) {
         let IterationEvent::Poll(DriverLoopOutcome::FramePayload {
             messages,
@@ -14899,6 +14947,7 @@ impl RouterForwarder {
         // is published while they stand, as one ended inside the loop is.
         let mut writing: Option<OnTables<'_, WrittenTables<'_>>> = None;
         let mut writes_held = 0usize;
+        let mut reading: Option<ReadRun<'_>> = None;
         for message in messages {
             // A topology message, a declaration and an interest write the tables; every other
             // kind reads them.
@@ -14906,6 +14955,11 @@ impl RouterForwarder {
                 message,
                 NetworkMessage::Oam(_) | NetworkMessage::Declare(_) | NetworkMessage::Interest(_)
             );
+            // A writer may not take the tables while this thread reads them, and the calls the
+            // reads owe are made before the write.
+            if writes {
+                reading = None;
+            }
             // A reader may not take the tables while this thread holds them for writing, and is
             // owed the writes before it published; a full run lets the other faces in.
             if !writes || writes_held == TABLE_WRITES_PER_GUARD {
@@ -15004,10 +15058,18 @@ impl RouterForwarder {
             } else {
                 // The subscribers and the queryables of the node's own session are the program's
                 // callbacks, which may use the session and so write the tables: they are handed
-                // what this message brings once the guard below is let go. Declared before it, so
-                // it ends after it.
-                let deliveries = local_publish::DeliveryScope::enter(self);
-                let on = self.on_tables_for_a_frame();
+                // what a message brings once the read is let go, and a message that owes them a
+                // call ends the run below, so that the next message is routed by what the call
+                // changed. A full run lets the writers in.
+                if reading
+                    .as_ref()
+                    .is_some_and(|run| run.held == TABLE_READS_PER_GUARD)
+                {
+                    reading = None;
+                }
+                let run = reading.get_or_insert_with(|| ReadRun::begin(self));
+                run.held += 1;
+                let (on, deliveries) = (&run.on, &run.deliveries);
                 if !on.admits_ingress(id, message) {
                     continue;
                 }
@@ -15040,7 +15102,7 @@ impl RouterForwarder {
                     // BestMatching region by region, C5b).
                     NetworkMessage::Request(request) => {
                         self.queries_seen.bump();
-                        on.route_request(id, tier, *reliable, request, None, &deliveries);
+                        on.route_request(id, tier, *reliable, request, None, deliveries);
                     }
                     // A queryable's reply: route it BACK toward the querier via the
                     // pending table (C5c) — peek on a Response (more replies may
@@ -15053,6 +15115,9 @@ impl RouterForwarder {
                         on.forward_response_final(id, *reliable, response_final);
                     }
                     _ => {}
+                }
+                if deliveries.owes() {
+                    reading = None;
                 }
             }
         }
