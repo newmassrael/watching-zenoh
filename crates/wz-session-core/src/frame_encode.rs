@@ -368,9 +368,21 @@ pub(crate) fn push_body(
 /// multicast group send (`multicast_tx_push`, behind `session-multicast`) and a router's leaf
 /// encoding (`encoded_push::LeafPush::encode`), which frames the Push it receives with this send's
 /// own writer.
+///
+/// In the lend-only build (`tx-lend-only`) the count is [`push_body`]'s own run into a buffer that
+/// keeps nothing ([`crate::tx_buf::encoded_len`]), so the Push's encoder is compiled once, over the
+/// sink the send writes its slot through: `measure` is the same field walk compiled a second time
+/// over a sink of its own, which a build that counts its text pays for twice.
 #[cfg(all(feature = "codec-push", feature = "alloc"))]
 pub(crate) fn push_capacity_hint(push: &PushOwned) -> usize {
-    wz_codecs::push::PushWire::measure(push).len()
+    #[cfg(feature = "tx-lend-only")]
+    {
+        crate::tx_buf::encoded_len(&push_body(push))
+    }
+    #[cfg(not(feature = "tx-lend-only"))]
+    {
+        wz_codecs::push::PushWire::measure(push).len()
+    }
 }
 
 /// The `OAM_LINKSTATE` body encoder — the linkstate-peer routing TX path
@@ -1697,6 +1709,60 @@ mod tests {
                 wire.len(),
                 "{shape}: the hint is not the {} bytes the body writes",
                 wire.len()
+            );
+        }
+    }
+
+    /// The length the lend-only build asks a slot for (each body writer run into a count,
+    /// `tx_buf::encoded_len`) is the codec's measure of the same message, for every owned kind
+    /// that build sends through its dispatch: a Push of each shape, a Declare, a Request, a
+    /// Response and a ResponseFinal.
+    #[cfg(all(feature = "codec-push", feature = "alloc"))]
+    #[test]
+    fn the_counted_length_of_each_body_is_the_codecs_measure() {
+        use crate::push_build::{build_push_del_literal, build_push_literal};
+        use crate::tx_buf::encoded_len;
+        for push in [
+            build_push_literal("demo/x", b"payload").unwrap(),
+            build_push_literal("", b"").unwrap(),
+            build_push_literal("demo/x", &vec![3u8; 70_000]).unwrap(),
+            build_push_del_literal("demo/x").unwrap(),
+        ] {
+            assert_eq!(
+                encoded_len(&push_body(&push)),
+                wz_codecs::push::PushWire::measure(&push).len()
+            );
+        }
+        #[cfg(feature = "codec-declare")]
+        {
+            let declare = build_declare_kexpr(7, "demo/test").unwrap();
+            assert_eq!(
+                encoded_len(&declare_body(&declare)),
+                wz_codecs::declare::DeclareWire::measure(&declare).len()
+            );
+        }
+        #[cfg(feature = "codec-request")]
+        {
+            let request = build_request_query(42, 7, None).unwrap();
+            assert_eq!(
+                encoded_len(&request_body(&request)),
+                wz_codecs::request::RequestWire::measure(&request).len()
+            );
+        }
+        #[cfg(feature = "codec-response")]
+        {
+            let response = build_response_reply_literal(42, "k", b"v").unwrap();
+            assert_eq!(
+                encoded_len(&response_body(&response)),
+                wz_codecs::response::ResponseWire::measure(&response).len()
+            );
+        }
+        #[cfg(feature = "codec-response-final")]
+        {
+            let response_final = build_response_final(42, crate::sample::QosLevel::DEFAULT);
+            assert_eq!(
+                encoded_len(&response_final_body(&response_final)),
+                wz_codecs::response_final::ResponseFinalWire::measure(&response_final).len()
             );
         }
     }

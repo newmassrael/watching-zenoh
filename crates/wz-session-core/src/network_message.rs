@@ -1092,27 +1092,69 @@ fn absorb_unknown(cursor: &mut SceCursor<'_>, out: &mut impl RecordOut) -> Resul
 /// not name the backing.
 #[cfg(all(
     feature = "codec-frame",
-    feature = "alloc",
+    all(
+        feature = "alloc",
+        any(
+            test,
+            not(feature = "rx-lent-control"),
+            feature = "transport-stats",
+            feature = "routing-namespace"
+        )
+    ),
     not(feature = "bounded-heapless")
 ))]
 pub type RecordBuf = Vec<NetworkMessage>;
 /// See the growable form of this alias.
 #[cfg(all(
     feature = "codec-frame",
-    feature = "alloc",
+    all(
+        feature = "alloc",
+        any(
+            test,
+            not(feature = "rx-lent-control"),
+            feature = "transport-stats",
+            feature = "routing-namespace"
+        )
+    ),
     feature = "bounded-heapless"
 ))]
 pub type RecordBuf = heapless::Vec<NetworkMessage, 1>;
 
-/// The record buffer of a build with no allocator: nothing. Such a build has no
-/// owned message to decode a record into (`NetworkMessage` is the heap profile's),
-/// so the walk reads every record where it lies and the buffer is a marker the
-/// walk and the pump that holds it still pass around, one value of no size.
-#[cfg(all(feature = "codec-frame", not(feature = "alloc")))]
+/// The record buffer of a build whose walk decodes no record into an owned message:
+/// nothing. A build with no allocator has no owned message (`NetworkMessage` is the
+/// heap profile's), and a heap build that lends every record (`rx-lent-control`, with
+/// no owned reader kept for the counters of `transport-stats` or the strip of
+/// `routing-namespace`) never puts one here (its walk has the one form that lends
+/// every kind), so the walk reads every record where it lies and the buffer is a marker the
+/// walk and the pump that holds it still pass around, one value of no size. A list of
+/// owned messages there would link their drop for a list that is always empty.
+#[cfg(all(
+    feature = "codec-frame",
+    not(all(
+        feature = "alloc",
+        any(
+            test,
+            not(feature = "rx-lent-control"),
+            feature = "transport-stats",
+            feature = "routing-namespace"
+        )
+    ))
+))]
 #[derive(Debug, Default)]
 pub struct RecordBuf;
 
-#[cfg(all(feature = "codec-frame", not(feature = "alloc")))]
+#[cfg(all(
+    feature = "codec-frame",
+    not(all(
+        feature = "alloc",
+        any(
+            test,
+            not(feature = "rx-lent-control"),
+            feature = "transport-stats",
+            feature = "routing-namespace"
+        )
+    ))
+))]
 impl RecordBuf {
     /// Empty the buffer: it holds nothing, so there is nothing to do.
     pub fn clear(&mut self) {}
@@ -1122,15 +1164,45 @@ impl RecordBuf {
 /// so a walk that decodes an owned record never grows it.
 #[cfg(feature = "codec-frame")]
 pub fn new_record_buf() -> RecordBuf {
-    #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
+    #[cfg(all(
+        all(
+            feature = "alloc",
+            any(
+                test,
+                not(feature = "rx-lent-control"),
+                feature = "transport-stats",
+                feature = "routing-namespace"
+            )
+        ),
+        not(feature = "bounded-heapless")
+    ))]
     {
         Vec::with_capacity(1)
     }
-    #[cfg(all(feature = "alloc", feature = "bounded-heapless"))]
+    #[cfg(all(
+        all(
+            feature = "alloc",
+            any(
+                test,
+                not(feature = "rx-lent-control"),
+                feature = "transport-stats",
+                feature = "routing-namespace"
+            )
+        ),
+        feature = "bounded-heapless"
+    ))]
     {
         heapless::Vec::new()
     }
-    #[cfg(not(feature = "alloc"))]
+    #[cfg(not(all(
+        feature = "alloc",
+        any(
+            test,
+            not(feature = "rx-lent-control"),
+            feature = "transport-stats",
+            feature = "routing-namespace"
+        )
+    )))]
     {
         RecordBuf
     }

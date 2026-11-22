@@ -13278,13 +13278,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         reliable: bool,
     ) -> Result<Dispatched, SendWireError> {
         let encode_body = crate::frame_encode::declare_body(declare);
+        // The lend-only build counts with the encoder it sends with
+        // (`frame_encode::push_capacity_hint` says why).
+        #[cfg(feature = "tx-lend-only")]
+        let len = crate::tx_buf::encoded_len(as_encoder(&encode_body));
+        #[cfg(not(feature = "tx-lend-only"))]
+        let len = wz_codecs::declare::DeclareWire::measure(declare).len();
         self.dispatch_network_message_at(
             stage,
             // Declare = a control-plane message; zenoh `QoSType::DECLARE` = Control.
             Priority::Control,
             reliable,
             crate::declare_ext_qos::read_declare_qos(declare),
-            wz_codecs::declare::DeclareWire::measure(declare).len(),
+            len,
             // Control plane: `n_msgs` only, no payload cell (upstream's payload
             // labels cover the four data kinds).
             crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Declare),
@@ -13361,13 +13367,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         reliable: bool,
     ) -> Result<Dispatched, SendWireError> {
         let encode_body = crate::frame_encode::oam_body(oam);
+        // The lend-only build counts with the encoder it sends with
+        // (`frame_encode::push_capacity_hint` says why).
+        #[cfg(feature = "tx-lend-only")]
+        let len = crate::tx_buf::encoded_len(as_encoder(&encode_body));
+        #[cfg(not(feature = "tx-lend-only"))]
+        let len = wz_codecs::oam::OamWire::measure(oam).len();
         self.dispatch_network_message_at(
             stage,
             // OAM = a control-plane message; zenoh `QoSType::OAM` = Control.
             Priority::Control,
             reliable,
             crate::declare_ext_qos::read_oam_qos(oam),
-            wz_codecs::oam::OamWire::measure(oam).len(),
+            len,
             crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Oam),
             as_encoder(&encode_body),
         )
@@ -13404,13 +13416,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ) -> Result<Dispatched, SendWireError> {
         let class = self.outbound_request_class(request);
         let encode_body = crate::frame_encode::request_body(request);
+        // The lend-only build counts with the encoder it sends with
+        // (`frame_encode::push_capacity_hint` says why).
+        #[cfg(feature = "tx-lend-only")]
+        let len = crate::tx_buf::encoded_len(as_encoder(&encode_body));
+        #[cfg(not(feature = "tx-lend-only"))]
+        let len = wz_codecs::request::RequestWire::measure(request).len();
         self.dispatch_network_message_at(
             stage,
             // Request/Response = the data plane; zenoh default `Priority::Data`.
             Self::REQUEST_ROUTE_PRIORITY,
             reliable,
             crate::declare_ext_qos::read_request_qos(request),
-            wz_codecs::request::RequestWire::measure(request).len(),
+            len,
             class,
             as_encoder(&encode_body),
         )
@@ -13454,12 +13472,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // downstream.
         let qos = crate::declare_ext_qos::read_response_qos(response);
         let encode_body = crate::frame_encode::response_body(response);
+        // The lend-only build counts with the encoder it sends with
+        // (`frame_encode::push_capacity_hint` says why).
+        #[cfg(feature = "tx-lend-only")]
+        let len = crate::tx_buf::encoded_len(as_encoder(&encode_body));
+        #[cfg(not(feature = "tx-lend-only"))]
+        let len = wz_codecs::response::ResponseWire::measure(response).len();
         let ended = self.dispatch_network_message_at(
             stage,
             qos.priority(),
             reliable,
             qos,
-            wz_codecs::response::ResponseWire::measure(response).len(),
+            len,
             class,
             as_encoder(&encode_body),
         )?;
@@ -13501,12 +13525,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // DEFAULT band exactly as before.
         let qos = crate::declare_ext_qos::read_response_final_qos(response_final);
         let encode_body = crate::frame_encode::response_final_body(response_final);
+        // The lend-only build counts with the encoder it sends with
+        // (`frame_encode::push_capacity_hint` says why).
+        #[cfg(feature = "tx-lend-only")]
+        let len = crate::tx_buf::encoded_len(as_encoder(&encode_body));
+        #[cfg(not(feature = "tx-lend-only"))]
+        let len = wz_codecs::response_final::ResponseFinalWire::measure(response_final).len();
         self.dispatch_network_message_at(
             stage,
             qos.priority(),
             reliable,
             qos,
-            wz_codecs::response_final::ResponseFinalWire::measure(response_final).len(),
+            len,
             // A pure correlation marker — no key expression and no payload, so
             // it is control plane even though it closes a data-plane exchange.
             crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::ResponseFinal),
@@ -13548,13 +13578,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         reliable: bool,
     ) -> Result<Dispatched, SendWireError> {
         let encode_body = crate::frame_encode::interest_body(interest);
+        // The lend-only build counts with the encoder it sends with
+        // (`frame_encode::push_capacity_hint` says why).
+        #[cfg(feature = "tx-lend-only")]
+        let len = crate::tx_buf::encoded_len(as_encoder(&encode_body));
+        #[cfg(not(feature = "tx-lend-only"))]
+        let len = wz_codecs::interest::InterestWire::measure(interest).len();
         self.dispatch_network_message_at(
             stage,
             // Interest carries `QoSType::DECLARE` = Control (zenoh interests.rs).
             Priority::Control,
             reliable,
             crate::declare_ext_qos::read_interest_qos(interest),
-            wz_codecs::interest::InterestWire::measure(interest).len(),
+            len,
             crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Interest),
             as_encoder(&encode_body),
         )

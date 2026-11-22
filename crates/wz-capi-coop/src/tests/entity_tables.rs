@@ -220,11 +220,19 @@ fn a_write_filter_past_its_planes_count_is_refused_and_asks_nothing() {
     let querier = FilterPlane::Queryables {
         complete_required: false,
     };
-    assert!(
-        filter(&engine, querier, "demo/q/1").is_some(),
-        "a querier's row is its own"
-    );
-    assert_eq!(filter(&engine, querier, "demo/q/2"), None);
+    if cfg!(any(feature = "query", feature = "queryable")) {
+        assert!(
+            filter(&engine, querier, "demo/q/1").is_some(),
+            "a querier's row is its own"
+        );
+        assert_eq!(filter(&engine, querier, "demo/q/2"), None);
+    } else {
+        assert_eq!(
+            filter(&engine, querier, "demo/q/1"),
+            None,
+            "a build without the queryables plane holds no querier's filter"
+        );
+    }
 
     engine.undeclare_write_filter(publisher);
     assert!(

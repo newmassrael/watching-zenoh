@@ -46,6 +46,7 @@ use wz_session_core::locality::Locality;
 use wz_session_core::slot_observer::RequesterRows;
 
 use wz_session_core::declare::matching::BoxedMatchingSink;
+#[cfg(any(feature = "query", feature = "queryable"))]
 use wz_session_core::declare::queryable::QuerierCriterion;
 use wz_session_core::declare::subscriber::PublisherCriterion;
 #[cfg(feature = "liveliness")]
@@ -207,7 +208,10 @@ impl OtherPeers for Others<'_> {
             .any(|face| face.peer.remote_subscribers.has_matching_for(criterion))
     }
 
-    fn answers(&self, criterion: &wz_session_core::declare::queryable::QuerierCriterion) -> bool {
+    // Without a querier or a queryable the faces hold no queryable a peer declared, and the
+    // trait's own answer (none) is this engine's.
+    #[cfg(any(feature = "query", feature = "queryable"))]
+    fn answers(&self, criterion: &QuerierCriterion) -> bool {
         self.faces()
             .any(|face| face.peer.remote_queryables.has_matching_for(criterion))
     }
@@ -333,12 +337,16 @@ impl Registry {
                 self.faces()
                     .any(|face| face.peer.remote_subscribers.has_matching_for(&subscribers))
             }
+            #[cfg(any(feature = "query", feature = "queryable"))]
             FilterPlane::Queryables { complete_required } => {
                 let queryables =
                     QuerierCriterion::new(keyexpr, Locality::Remote, complete_required);
                 self.faces()
                     .any(|face| face.peer.remote_queryables.has_matching_for(&queryables))
             }
+            // A build without a querier or a queryable holds no queryable a peer declared.
+            #[cfg(not(any(feature = "query", feature = "queryable")))]
+            FilterPlane::Queryables { .. } => false,
         }
     }
 
@@ -707,6 +715,7 @@ impl Registry {
     }
 
     /// Declare a matching listener on the queriers' plane; see [`Self::watch_publishers`].
+    #[cfg(any(feature = "query", feature = "queryable"))]
     pub(super) fn watch_queriers(
         &mut self,
         criterion: QuerierCriterion,

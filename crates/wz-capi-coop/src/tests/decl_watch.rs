@@ -139,6 +139,7 @@ mod watched {
     /// A watch of queryables is told the router's queryable live, with the router as its peer; a
     /// second watch declared after is told it first, from what the router holds; both are told the
     /// next one and its retraction; a watch of subscribers is told none of it.
+    #[cfg(any(feature = "query", feature = "queryable"))]
     #[test]
     fn a_watch_is_told_what_the_peer_held_then_declares_and_retracts_of_its_kind() {
         let router = Router::start(CatchAll::None);
@@ -206,6 +207,11 @@ mod watched {
         });
         settle(&engine);
         assert!(gone.events().is_empty());
+        assert!(
+            kept.peers().iter().all(|peer| *peer == router_peer()),
+            "{:?}",
+            kept.peers()
+        );
     }
 
     /// A close lets go of every watch's sink, and a closed session refuses a watch by name.
@@ -214,11 +220,11 @@ mod watched {
         let router = Router::start(CatchAll::None);
         let engine = open(&router);
         let log = Log::new();
-        watch(&engine, DeclPlane::Queryables, &log);
+        watch(&engine, DeclPlane::Subscribers, &log);
         SessionDrive::close(&*engine);
         assert_eq!(Arc::strong_count(&log.sink), 1);
         assert_eq!(
-            engine.declare_decl_watch(DeclPlane::Queryables, Arc::clone(&log.sink)),
+            engine.declare_decl_watch(DeclPlane::Subscribers, Arc::clone(&log.sink)),
             Err(DeclWatchRefused::SessionClosed)
         );
         assert_eq!(
@@ -228,7 +234,7 @@ mod watched {
         );
     }
 
-    /// A watch of tokens is told the router's token and its retraction, and a watch of queryables
+    /// A watch of tokens is told the router's token and its retraction, and a watch of subscribers
     /// is told neither. A build without the liveliness plane refuses a watch of tokens by name.
     #[cfg(feature = "liveliness")]
     #[test]
@@ -236,9 +242,9 @@ mod watched {
         let router = Router::start(CatchAll::None);
         let engine = open(&router);
         let tokens = Log::new();
-        let queryables = Log::new();
+        let subscribers = Log::new();
         watch(&engine, DeclPlane::Tokens, &tokens);
-        watch(&engine, DeclPlane::Queryables, &queryables);
+        watch(&engine, DeclPlane::Subscribers, &subscribers);
         router.send(Command::DeclareToken(11, "demo/w/alive"));
         until(&engine, "the token", || {
             tokens.has(&Seen::Declared(11, "demo/w/alive".to_owned()))
@@ -247,7 +253,22 @@ mod watched {
         until(&engine, "the token's retraction", || {
             tokens.has(&Seen::Undeclared(11))
         });
-        assert!(queryables.events().is_empty());
+        assert!(subscribers.events().is_empty());
+    }
+
+    /// A build without a querier or a queryable holds no table of the queryables a peer declares,
+    /// so it refuses a watch of them by name and keeps no sink of it.
+    #[cfg(not(any(feature = "query", feature = "queryable")))]
+    #[test]
+    fn a_build_without_the_queryables_plane_refuses_a_watch_of_queryables() {
+        let router = Router::start(CatchAll::None);
+        let engine = open(&router);
+        let log = Log::new();
+        assert_eq!(
+            engine.declare_decl_watch(DeclPlane::Queryables, Arc::clone(&log.sink)),
+            Err(DeclWatchRefused::PlaneNotBuilt)
+        );
+        assert_eq!(Arc::strong_count(&log.sink), 1);
     }
 
     #[cfg(not(feature = "liveliness"))]
@@ -270,9 +291,15 @@ mod watched {
         let router = Router::start(CatchAll::None);
         let engine = open(&router);
         let subscribers = Log::new();
-        let queryables = Log::new();
+        let other = Log::new();
         watch(&engine, DeclPlane::Subscribers, &subscribers);
-        watch(&engine, DeclPlane::Queryables, &queryables);
+        // A watch of another kind where the build hears one, of the same kind where it does not.
+        let other_plane = if cfg!(any(feature = "query", feature = "queryable")) {
+            DeclPlane::Queryables
+        } else {
+            DeclPlane::Subscribers
+        };
+        watch(&engine, other_plane, &other);
         router.send(Command::FinishInitial);
         router.send(Command::FinishInitial);
         // A declaration after both finals marks where the router's sends have arrived.
@@ -283,7 +310,7 @@ mod watched {
         });
         settle(&engine);
         let synced = usize::from(cfg!(feature = "declarations-synced-event"));
-        for log in [&subscribers, &queryables] {
+        for log in [&subscribers, &other] {
             assert_eq!(
                 log.events()
                     .iter()

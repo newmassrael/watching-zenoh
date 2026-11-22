@@ -176,6 +176,68 @@ impl TxBuf for SliceTxBuf<'_> {
     }
 }
 
+/// A [`TxBuf`] that keeps no byte and counts the ones written to it.
+///
+/// What a send finds a message's length with when it holds the encoder its dispatch then runs
+/// into the lent slot ([`encoded_len`]): the count and the write are then one compiled encoder,
+/// where the codec's `measure` compiles the same field walk a second time over a sink of its
+/// own type. It holds nothing to send, so [`TxBuf::as_slice`] is empty and it hands out no
+/// window; it is never given to a link.
+#[derive(Debug, Default)]
+pub struct CountTxBuf {
+    len: usize,
+}
+
+impl CountTxBuf {
+    /// A count of nothing.
+    pub const fn new() -> Self {
+        Self { len: 0 }
+    }
+}
+
+impl TxBuf for CountTxBuf {
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        &[]
+    }
+
+    fn truncate(&mut self, len: usize) {
+        if len < self.len {
+            self.len = len;
+        }
+    }
+
+    fn append(&mut self, bytes: &[u8]) -> Result<(), CodecError> {
+        self.len = self.len.saturating_add(bytes.len());
+        Ok(())
+    }
+
+    fn append_byte(&mut self, _byte: u8) -> Result<(), CodecError> {
+        self.len = self.len.saturating_add(1);
+        Ok(())
+    }
+}
+
+/// The bytes `encode` writes, counted with nothing written ([`CountTxBuf`]): the length a send
+/// asks its link to lend for a message whose encoder is the one its dispatch then runs. Zero for
+/// a message the encoder refuses, which the dispatch's own run refuses with the same error.
+///
+/// Present where the encoders write through `dyn TxBuf` ([`EncodeBuf`]), which is what lets one
+/// compiled encoder serve the count and the slot.
+#[cfg(any(feature = "transport-tx-lend", not(feature = "alloc")))]
+pub fn encoded_len(encode: &dyn Fn(&mut TxSink<'_>) -> Result<(), CodecError>) -> usize {
+    let mut count = CountTxBuf::new();
+    let written = encode(&mut TxSink::new(&mut count)).is_ok();
+    if written {
+        count.len
+    } else {
+        0
+    }
+}
+
 /// A [`TxBuf`] that refuses to hold more than `cap` bytes, over another one.
 ///
 /// What a sender encodes a frame through when the frame must not pass the batch
@@ -429,6 +491,45 @@ mod tests {
         let mut sink = TxSink::new(&mut buf);
         sink.write_u8(1).unwrap();
         assert_eq!(sink.write_bytes(&[2, 3]), Err(CodecError::BufferOverflow));
+    }
+
+    #[test]
+    fn a_count_buffer_counts_what_is_written_and_holds_none_of_it() {
+        let mut count = CountTxBuf::new();
+        {
+            let mut sink = TxSink::over(&mut count);
+            sink.write_u8(1).unwrap();
+            sink.write_bytes(&[2, 3, 4]).unwrap();
+            sink.write_bytes(&[]).unwrap();
+            assert_eq!(sink.position(), 4);
+            assert!(
+                matches!(sink.reserve(2), Ok(None)),
+                "a count hands out no window"
+            );
+        }
+        assert_eq!(count.len(), 4);
+        assert!(count.as_slice().is_empty());
+        count.truncate(9);
+        assert_eq!(count.len(), 4, "a truncate past the end changes nothing");
+        count.truncate(1);
+        assert_eq!(count.len(), 1);
+    }
+
+    #[cfg(any(feature = "transport-tx-lend", not(feature = "alloc")))]
+    #[test]
+    fn the_encoded_length_is_what_the_encoder_writes_and_zero_for_a_refusal() {
+        let written = encoded_len(&|sink: &mut TxSink<'_>| {
+            sink.write_u8(0x7f)?;
+            sink.write_bytes(&[0u8; 300])
+        });
+        assert_eq!(written, 301);
+        // A refusal after a byte was written still counts as nothing.
+        let refused = encoded_len(&|sink: &mut TxSink<'_>| {
+            sink.write_u8(1)?;
+            Err(CodecError::LengthOutOfRange)
+        });
+        assert_eq!(refused, 0);
+        assert_eq!(encoded_len(&|_: &mut TxSink<'_>| Ok(())), 0);
     }
 
     #[cfg(not(feature = "session-slot"))]

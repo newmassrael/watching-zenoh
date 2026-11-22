@@ -79,3 +79,21 @@ fn the_tables_take_owned_records_only_where_the_engine_projects_them() {
         "an empty batch is read only where owned records are"
     );
 }
+
+/// The walk of a frame this engine reads in place lends every record (`rx-lent-control`): in the
+/// build whose tables take no owned record (the C library's, `rx-lent-only` with no counters), the
+/// walk's one-record buffer is a marker of no size too, so the build links no drop of an owned
+/// message for a list that is always empty. Run with `--features rx-lent-only` to build that form.
+#[test]
+fn the_walk_holds_a_record_buffer_of_no_size_where_the_tables_take_no_owned_record() {
+    use wz_session_core::driver_loop::OWNED_RECORDS;
+    use wz_session_core::network_message::{new_record_buf, RecordBuf};
+    let mut record = new_record_buf();
+    record.clear();
+    const {
+        assert!(
+            OWNED_RECORDS || core::mem::size_of::<RecordBuf>() == 0,
+            "a build that lends every record holds a buffer of no size"
+        );
+    }
+}
