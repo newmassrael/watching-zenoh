@@ -1723,6 +1723,25 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         role: SessionRole,
         endpoint: Option<&str>,
     ) -> Result<Wire<C>, OpenError> {
+        let wire = self.start_wire(face, opened, role, endpoint)?;
+        self.local.run_until_idle();
+        Ok(wire)
+    }
+
+    /// [`Self::open_wire`] up to the first step of the task: the link's session, its gates and its
+    /// task made, and the task spawned. Never inlined, for the stack: what is built here (the
+    /// session's parameters moved into its actions, the gates over the link, the task's closure)
+    /// lies in this frame alone, which has returned before the task first runs, so the frame of
+    /// the caller the session's first steps run under (a dial, a face's poll) holds only the wire
+    /// handed back.
+    #[inline(never)]
+    fn start_wire(
+        &mut self,
+        face: FaceId,
+        opened: OpenedLink<L::Pump>,
+        role: SessionRole,
+        endpoint: Option<&str>,
+    ) -> Result<Wire<C>, OpenError> {
         let OpenedLink { sink, pump } = opened;
         // The parameters the tokio engine gives a session (`wz-capi-core`'s `init_params`), with a
         // cookie key of its own per attempt.
@@ -1857,7 +1876,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             move |place| lent_reassembly_in(place, &policy, chains),
             dispatch,
         );
-        self.local.run_until_idle();
         Ok(Wire {
             actions,
             task,
