@@ -1055,7 +1055,8 @@ function Invoke-Run {
     $transportList = Get-Words $Transports
     $workloadList = Get-Words $Workloads
     $batchings = Get-Words $Batching
-    $sizeList = @(Get-Words $Sizes | ForEach-Object { [int]$_ })
+    # Get-Words hands its list back as one object (the unary comma), so the pipeline would see the array.
+$sizeList = @(foreach ($w in (Get-Words $Sizes)) { [int]$w })
     $unknown = @($transportList | Where-Object { @($script:PlanDoc.transports) -notcontains $_ }) +
                @($workloadList | Where-Object { @($script:PlanDoc.workloads) -notcontains $_ }) +
                @($batchings | Where-Object { @('off', 'on') -notcontains $_ })
