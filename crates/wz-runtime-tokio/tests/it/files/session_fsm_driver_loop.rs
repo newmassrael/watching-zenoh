@@ -1440,12 +1440,12 @@ async fn a_frame_followed_by_a_second_frame_leaves_it_for_the_next_unit() {
 
 /// The same batch, read where it lies (`dispatch_datagram`, the receive path of the fixed-memory
 /// profile): the walk of the first frame's records stops at the second Frame header, and the
-/// rest of the datagram is the next unit, read on from there. A heap build parks it, so the
-/// driver reads it before the link, and the records of the second and third frames are
-/// delivered after the first's, in order.
+/// rest of the datagram is the next unit, read on from there where it lies, in the same call:
+/// the records of the second and third frames are delivered after the first's, in order, and
+/// nothing is parked as a copy for the driver.
 #[cfg(feature = "codec-push")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_in_place_frame_followed_by_a_second_frame_leaves_it_for_the_next_unit() {
+async fn an_in_place_frame_followed_by_a_second_frame_reads_it_as_the_next_unit() {
     use wz_codecs::lent::Push;
     use wz_session_core::drive::{dispatch_datagram, dispatch_pending, DatagramPath};
     use wz_session_core::driver_loop::IterationEvent;
@@ -1488,23 +1488,13 @@ async fn an_in_place_frame_followed_by_a_second_frame_leaves_it_for_the_next_uni
     );
     assert_eq!(
         seen,
-        vec![(true, 1)],
-        "the first frame's record, and nothing of the frames behind it"
+        vec![(true, 1), (false, 0), (true, 2)],
+        "each frame's record, in order, read where the datagram lies"
     );
-    // The rest is parked for the driver, which reads it before the link.
-    while let Some(outcome) = dispatch_pending(&actions, &mut engine) {
-        if let DriverLoopOutcome::FramePayload {
-            reliable,
-            sn,
-            messages,
-            ..
-        } = outcome
-        {
-            assert_eq!(messages.len(), 1, "one Push for each frame");
-            seen.push((reliable, sn));
-        }
-    }
-    assert_eq!(seen, vec![(true, 1), (false, 0), (true, 2)]);
+    assert!(
+        dispatch_pending(&actions, &mut engine).is_none(),
+        "nothing of the datagram was copied to wait"
+    );
 }
 
 /// A datagram its link keeps is read where it lies, one record for each lend while the host has
@@ -1722,24 +1712,71 @@ async fn an_in_place_refused_frame_leaves_the_frame_behind_it_for_the_next_unit(
     };
     dispatch_datagram(&first, &actions, &mut engine, &mut record, &mut sink);
     dispatch_datagram(&batch, &actions, &mut engine, &mut record, &mut sink);
-    // What follows the refused frame is parked on a heap build, and read before the link.
-    while let Some(outcome) = dispatch_pending(&actions, &mut engine) {
-        if let DriverLoopOutcome::FramePayload {
-            reliable,
-            sn,
-            messages,
-            ..
-        } = outcome
-        {
-            assert_eq!(messages.len(), 1, "one Push for the frame");
-            seen.push((reliable, sn));
-        }
-    }
+    // What follows the refused frame is read on where the datagram lies, in the same call.
+    assert!(
+        dispatch_pending(&actions, &mut engine).is_none(),
+        "nothing of the datagram was copied to wait"
+    );
     assert_eq!(refused, vec![(true, 1)], "the duplicate is refused");
     assert_eq!(
         seen,
         vec![(true, 1), (false, 0)],
         "the first frame, then the best-effort frame behind the refused one"
+    );
+}
+
+/// A datagram whose first message is not a Frame (a KeepAlive) and whose second is, read where it
+/// lies (`dispatch_datagram`): the KeepAlive is decoded and judged where the datagram lies, the
+/// Frame behind it is read in place in the same call, and nothing of the datagram is parked as a
+/// copy for the driver.
+#[cfg(feature = "codec-push")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_message_that_is_not_a_frame_is_read_where_it_lies_and_the_datagram_read_on() {
+    use wz_codecs::lent::Push;
+    use wz_session_core::drive::{dispatch_datagram, dispatch_pending, CopyReason, DatagramPath};
+    use wz_session_core::driver_loop::IterationEvent;
+    use wz_session_core::network_message::new_record_buf;
+
+    let (actions, mut engine) = fresh_setup();
+    drive_to_sent_init_syn(&mut engine);
+
+    let push = {
+        let push = Push {
+            header: 0x1D,
+            ..Push::default()
+        };
+        wz_codecs_test_support::with_empty_inline_put(push).encode_to_vec()
+    };
+    // [KeepAlive][Frame(reliable, sn 1) Push]
+    let mut unit = vec![0x04, 0x25, 0x01];
+    unit.extend(push);
+
+    let mut record = new_record_buf();
+    let mut seen: Vec<(bool, u64)> = Vec::new();
+    let mut sink = |event: IterationEvent<'_, '_>| match event {
+        IterationEvent::InPlace(rec) => seen.push((rec.reliable(), rec.sn())),
+        IterationEvent::Poll(DriverLoopOutcome::FramePayload {
+            reliable,
+            sn,
+            messages,
+            ..
+        }) if !messages.is_empty() => seen.push((*reliable, *sn)),
+        _ => {}
+    };
+    let path = dispatch_datagram(&unit, &actions, &mut engine, &mut record, &mut sink);
+    assert_eq!(
+        path,
+        DatagramPath::Copied(CopyReason::NotAFrame),
+        "the first message names the path"
+    );
+    assert_eq!(
+        seen,
+        vec![(true, 1)],
+        "the Frame behind the KeepAlive, read in the same call"
+    );
+    assert!(
+        dispatch_pending(&actions, &mut engine).is_none(),
+        "nothing of the datagram was copied to wait"
     );
 }
 

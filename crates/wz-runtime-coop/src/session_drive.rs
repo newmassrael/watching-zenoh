@@ -57,7 +57,9 @@ use wz_session_core::caps;
 use wz_session_core::drive::dispatch_datagram;
 #[cfg(all(not(feature = "rx-in-place"), feature = "alloc"))]
 use wz_session_core::drive::dispatch_link_event;
-#[cfg(feature = "alloc")]
+#[cfg(all(feature = "alloc", feature = "rx-in-place"))]
+use wz_session_core::drive::dispatch_parked_in_place;
+#[cfg(all(feature = "alloc", not(feature = "rx-in-place")))]
 use wz_session_core::drive::dispatch_pending;
 use wz_session_core::drive::SessionEngine;
 #[cfg(feature = "transport-keepalive")]
@@ -879,10 +881,11 @@ pub struct SessionPump<
 }
 
 /// `rx-in-place` — the units a [`SessionPump`] dispatched, by the path they
-/// took (`wz_session_core::drive::dispatch_datagram`): read where the link held
-/// them, or copied onto the heap for one of the documented reasons. A unit the
-/// in-place path does not take is not lost: it is dispatched by the copying
-/// path, and this is where a profile sees how often that happens.
+/// took (`wz_session_core::drive::dispatch_datagram`): read in place as a `Frame`,
+/// a `Fragment` or a lean batch, or not read as one, for one of the documented
+/// reasons. A unit of the second kind is not lost: it is read where the link holds
+/// it as one transport message (a compressed batch is copied and inflated), and
+/// this is where a profile sees how often that happens.
 #[cfg(feature = "rx-in-place")]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct RxPathCounts {
@@ -1267,10 +1270,19 @@ impl<
         // is a batch, and `try_recv` below would otherwise hold the second
         // message until the peer sends again.
         // A build with no allocator parks nothing: it reads the rest of a datagram
-        // where the link holds it, so there is no remainder to come back to.
+        // where the link holds it, so there is no remainder to come back to. Nor
+        // does a receive in place, but for the rest of a compressed batch, which
+        // was inflated into a buffer of its own (`dispatch_parked_in_place`).
         #[cfg(feature = "alloc")]
         let pending = if self.link.takes_input() {
-            dispatch_pending(&self.actions, &mut self.engine)
+            #[cfg(not(feature = "rx-in-place"))]
+            {
+                dispatch_pending(&self.actions, &mut self.engine)
+            }
+            #[cfg(feature = "rx-in-place")]
+            {
+                dispatch_parked_in_place(&self.actions, &mut self.engine)
+            }
         } else {
             None
         };
@@ -2140,7 +2152,9 @@ mod wake_budget_tests {
 
     /// The rest of a datagram already read waits while the link's owner holds its input back, and
     /// is dispatched by the first step after it lets go: a step hands the session nothing while
-    /// held, not even what it had read.
+    /// held, not even what it had read. The copying receive's: a receive in place parks nothing
+    /// of a datagram, which it reads where the link holds it.
+    #[cfg(not(feature = "rx-in-place"))]
     #[test]
     fn a_held_link_leaves_the_rest_of_a_datagram_parked() {
         let runtime = CoopRuntime::new(Stopped);

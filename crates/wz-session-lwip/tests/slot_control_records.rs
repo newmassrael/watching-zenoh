@@ -789,9 +789,9 @@ fn a_frame_chain_is_owned_by_no_record_of_the_slot_profile() {
 /// refuses is dropped with its records, and the Frame behind it is still read, as upstream drains
 /// a refused Frame's reader and reads the batch on.
 ///
-/// This build has an allocator, so what follows the Frame is parked, one copy, and the next
-/// iteration reads it before it reaches for the link. A build with none reads the datagram on
-/// where it lies, in the same iteration, which `slot_frames_without_alloc` holds.
+/// The datagram is read on where it lies, in the iteration that received it, on this build with an
+/// allocator as on one with none (`slot_frames_without_alloc`): nothing of it is parked as a copy
+/// for a later iteration, so the next step tells the application nothing more.
 #[test]
 fn a_datagram_of_two_frames_is_read_frame_by_frame() {
     let (_serial, link) = wz_link_lwip::lwip_test_link();
@@ -819,7 +819,6 @@ fn a_datagram_of_two_frames_is_read_frame_by_frame() {
         best_effort,
         &record::subscriber(62, "two/b"),
     ));
-    // What the copying path that reads a parked unit costs is not this test's claim.
     let _ = read(
         &measure,
         &mut acceptor,
@@ -829,15 +828,11 @@ fn a_datagram_of_two_frames_is_read_frame_by_frame() {
     );
     assert_eq!(
         declared(),
-        (1, 61),
-        "(declarations told, the id of the last): the reliable Frame's record, the rest parked"
-    );
-    acceptor.step();
-    assert_eq!(
-        declared(),
         (2, 62),
         "(declarations told, the id of the last): each Frame's record, the reliable one first"
     );
+    acceptor.step();
+    assert_eq!(declared(), (2, 62), "nothing was parked for the next step");
 
     // The reliable Frame again, at the SN already read: a duplicate the gate refuses.
     let mut wire = frame_wire(reliable, &[], &record::subscriber(63, "two/c"));
@@ -854,16 +849,12 @@ fn a_datagram_of_two_frames_is_read_frame_by_frame() {
     );
     assert_eq!(
         declared(),
-        (2, 62),
-        "(declarations told, the id of the last): nothing of the refused Frame, the rest parked"
-    );
-    acceptor.step();
-    assert_eq!(
-        declared(),
         (3, 64),
         "(declarations told, the id of the last): the refused Frame's record is not told, the \
          record of the Frame behind it is"
     );
+    acceptor.step();
+    assert_eq!(declared(), (3, 64), "nothing was parked for the next step");
 }
 
 /// The SEND side of the same records, measured and not claimed. A session sends a

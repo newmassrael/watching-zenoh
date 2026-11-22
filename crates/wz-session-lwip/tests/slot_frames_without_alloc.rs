@@ -6,10 +6,9 @@
 //! iteration that received it.
 //!
 //! The other slot-profile files of this crate are built with the crate's default `alloc`, which
-//! reaches `wz-session-core` and gives the receive a heap: there what follows a Frame in the same
-//! datagram is copied and parked for the next iteration, and the walk that reads the rest of a
-//! datagram in place (`drive::dispatch_datagram`, the loop a build with no allocator takes) is not
-//! compiled. This file is built with `--no-default-features`, so no crate of the session tier
+//! reaches `wz-session-core` and gives the receive a heap; it reads the rest of a datagram where
+//! it lies too (`drive::dispatch_datagram`), which `slot_control_records` holds. This file is
+//! built with `--no-default-features`, so no crate of the session tier
 //! links `alloc`, and its application layer is the slot profile's own: the process-wide
 //! [`SlotApp`] observer of closed sink types, dispatched by [`SlotDispatch`], in place of the
 //! heap profile's `ApplicationLayerObserver` and its boxed closures.
