@@ -228,8 +228,9 @@ mod wait_parked {
         waker: Waker,
     }
 
-    impl Default for Waits {
-        fn default() -> Self {
+    impl Waits {
+        /// The waits of a new link, sharing one wake.
+        pub(super) fn new() -> Self {
             let wake = Arc::new(LinkWake {
                 wakes: Mutex::new(0),
                 changed: Condvar::new(),
@@ -297,10 +298,15 @@ mod wait_turns {
     const TURNS: u32 = 1 << 12;
 
     /// The waits of one link on an image, which has no thread to park: nothing to hold.
-    #[derive(Clone, Default)]
+    #[derive(Clone)]
     pub(super) struct Waits;
 
     impl Waits {
+        /// The waits of a new link: nothing to make.
+        pub(super) const fn new() -> Self {
+            Self
+        }
+
         /// Look while `pending` answers `true`, for a bounded number of turns: an image's loop
         /// comes back.
         pub(super) fn wait_while(
@@ -363,7 +369,7 @@ fn open_link(
     let transport = &session.transport;
     let handle = session.begin_open(kind, locator);
     // The link's waits are made with it, so the open's wait and every one after share its wake.
-    let waits = wait::Waits::default();
+    let waits = wait::Waits::new();
     let mut progress = OpenProgress::Opening;
     let opening = |waker: Option<&core::task::Waker>| {
         progress = transport.with(|table| table.poll_open(handle, waker));
@@ -403,7 +409,7 @@ impl Held {
         Self {
             transport: Arc::clone(transport),
             handle,
-            waits: wait::Waits::default(),
+            waits: wait::Waits::new(),
         }
     }
 
@@ -1134,7 +1140,7 @@ impl SessionLinks for AppLinks {
             held: Some(Held {
                 transport: Arc::clone(&self.transport.transport),
                 handle,
-                waits: wait::Waits::default(),
+                waits: wait::Waits::new(),
             }),
             buffers: Some(buffers),
             to: to.at,
@@ -2054,7 +2060,7 @@ mod tests {
         use core::task::Waker;
         use std::sync::atomic::{AtomicBool, Ordering};
 
-        let waits = wait::Waits::default();
+        let waits = wait::Waits::new();
         let ready = AtomicBool::new(false);
         let held: Mutex<Option<Waker>> = Mutex::new(None);
         let started = std::time::Instant::now();
