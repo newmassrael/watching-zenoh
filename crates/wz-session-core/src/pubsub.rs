@@ -8437,7 +8437,8 @@ mod match_memo_position_tests {
         let delivered = Arc::new(AtomicUsize::new(0));
         let mut table: SubscriberTable<Count, Heap> = SubscriberTable::default();
         table
-            .register_sink("a/*", Locality::Any, Count(delivered.clone()))
+            // A literal key: a build without the wildcard features matches `a/*` only as text.
+            .register_sink("a/x", Locality::Any, Count(delivered.clone()))
             .expect("a heap table grows");
         let sample = BorrowedSample {
             keyexpr: "a/x",

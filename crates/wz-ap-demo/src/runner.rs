@@ -3570,8 +3570,9 @@ pub(crate) async fn run_demo(
         let mut obs = observer.lock().expect("observer mutex poisoned");
         wz_ap_demo_app::register_bindings(&mut obs.switchboard);
         log::info!(
-            "wz-ap-demo: switchboard registered (demo/sensor/temp value, \
-             demo/sensor/reset signal); app machine = sensor_monitor"
+            "wz-ap-demo: switchboard registered ({} rows from wz-ap-demo-app's \
+             sidecar); app machine = sensor_monitor",
+            obs.switchboard.len()
         );
     }
     #[cfg(feature = "switchboard")]

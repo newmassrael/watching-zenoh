@@ -256,24 +256,24 @@ fn measure(case: &str, congestion: CongestionControl, subscribers: usize, n: usi
 /// them. `(case, congestion control, subscribers, allocations, bytes)`.
 ///
 /// One record per build the cost differs in: with `time-hlc` the router stamps every put it forwards
-/// from the hybrid clock: six more allocations and 54 more bytes a forward to one subscriber, 21 and
-/// 324 to sixteen (the `Drop` cases). Measured on a build host with `routing-router-hat` alone, and
+/// from the hybrid clock: five more allocations and 50 more bytes a forward to one subscriber, 20 and
+/// 320 to sixteen (the `Drop` cases). Measured on a build host with `routing-router-hat` alone, and
 /// with the features of the crate's wide leg beside it in groups: only `time-hlc` moves the figure.
 #[cfg(not(feature = "time-hlc"))]
 const BUDGET: [(&str, CongestionControl, usize, usize, usize); 4] = [
-    ("drop_k1", CongestionControl::Drop, 1, 8, 472),
-    ("block_k1", CongestionControl::Block, 1, 10, 602),
-    ("drop_k16", CongestionControl::Drop, 16, 68, 6_142),
-    ("block_k16", CongestionControl::Block, 16, 85, 7_262),
+    ("drop_k1", CongestionControl::Drop, 1, 5, 442),
+    ("block_k1", CongestionControl::Block, 1, 3, 139),
+    ("drop_k16", CongestionControl::Drop, 16, 65, 6_112),
+    ("block_k16", CongestionControl::Block, 16, 18, 799),
 ];
 
 /// The same cases in a build with `time-hlc`.
 #[cfg(feature = "time-hlc")]
 const BUDGET: [(&str, CongestionControl, usize, usize, usize); 4] = [
-    ("drop_k1", CongestionControl::Drop, 1, 14, 526),
-    ("block_k1", CongestionControl::Block, 1, 17, 720),
-    ("drop_k16", CongestionControl::Drop, 16, 89, 6_466),
-    ("block_k16", CongestionControl::Block, 16, 107, 7_650),
+    ("drop_k1", CongestionControl::Drop, 1, 10, 492),
+    ("block_k1", CongestionControl::Block, 1, 8, 263),
+    ("drop_k16", CongestionControl::Drop, 16, 85, 6_432),
+    ("block_k16", CongestionControl::Block, 16, 23, 1_133),
 ];
 
 /// Frames per case. Few, because the figure is exact and not a mean: it is the same at 100 as at

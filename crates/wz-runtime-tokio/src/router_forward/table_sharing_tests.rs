@@ -1267,3 +1267,118 @@ fn a_put_between_declarations_of_one_frame_is_routed_by_the_one_before_it() {
         "the Put ended the first write, and the declaration after it took a second"
     );
 }
+
+/// A Put of `keyexpr` that the router may drop.
+fn put_of(keyexpr: &str) -> NetworkMessage {
+    NetworkMessage::Push(Box::new(
+        wz_session_core::push_build::build_push_literal(keyexpr, b"x").expect("build push"),
+    ))
+}
+
+/// The Puts of one frame are routed under one read of the tables, and each reaches the subscriber.
+/// Turned red by a frame that takes the tables again for each message it reads.
+#[test]
+fn the_puts_of_one_frame_are_routed_under_one_read_of_the_tables() {
+    let (fwd, _sink, _faces) = subscriber_and_publisher();
+    bring(&fwd, SUBSCRIBER, declare_sub("demo/a"));
+    let (reads, sent) = (fwd.frame_table_reads(), fwd.data_sent());
+    bring_frame(&fwd, PUBLISHER, (0..5).map(|_| put_of("demo/a")).collect());
+    assert_eq!(
+        fwd.frame_table_reads() - reads,
+        1,
+        "the frame's five Puts share one read"
+    );
+    assert_eq!(
+        fwd.data_sent() - sent,
+        5,
+        "every Put reached the subscriber"
+    );
+}
+
+/// A declaration between the Puts of one frame ends the read: the Put after it is routed under a
+/// read of its own, by the tables the declaration left. Turned red by a read kept across a write,
+/// or by a Put routed by the tables from before the declaration.
+#[test]
+fn a_declaration_between_puts_of_one_frame_ends_the_read() {
+    let (fwd, _sink, _faces) = subscriber_and_publisher();
+    bring(&fwd, SUBSCRIBER, declare_sub("demo/a"));
+    let (reads, sent) = (fwd.frame_table_reads(), fwd.data_sent());
+    let alias = NetworkMessage::Declare(Box::new(
+        wz_session_core::declare_build::build_declare_kexpr(5, "demo/a").expect("kexpr"),
+    ));
+    let aliased = NetworkMessage::Push(Box::new(
+        wz_session_core::push_build::build_push_aliased(5, None, b"x").expect("aliased push"),
+    ));
+    bring_frame(
+        &fwd,
+        PUBLISHER,
+        vec![put_of("demo/a"), alias, aliased, put_of("demo/a")],
+    );
+    assert_eq!(
+        fwd.frame_table_reads() - reads,
+        2,
+        "one read before the declaration and one after it"
+    );
+    assert_eq!(
+        fwd.data_sent() - sent,
+        3,
+        "every Put reached the subscriber, the aliased one by the alias the frame declared"
+    );
+}
+
+/// A frame of more Puts than one read holds takes the tables once for each
+/// [`TABLE_READS_PER_GUARD`] of them, and every Put is routed.
+#[test]
+fn a_frame_of_more_puts_than_a_read_holds_takes_the_tables_once_per_bound() {
+    let (fwd, _sink, _faces) = subscriber_and_publisher();
+    bring(&fwd, SUBSCRIBER, declare_sub("demo/a"));
+    let count = 2 * TABLE_READS_PER_GUARD + 1;
+    let (reads, sent) = (fwd.frame_table_reads(), fwd.data_sent());
+    bring_frame(
+        &fwd,
+        PUBLISHER,
+        (0..count).map(|_| put_of("demo/a")).collect(),
+    );
+    assert_eq!(
+        fwd.frame_table_reads() - reads,
+        3,
+        "two full reads and one for the Put past them"
+    );
+    assert_eq!(
+        fwd.data_sent() - sent,
+        count,
+        "every Put of the frame was routed"
+    );
+}
+
+/// A Put that a subscriber of the node's own session is handed ends the read, so that the call is
+/// made before the next message of the frame is routed, as it was when each message took the
+/// tables alone. Turned red by a run that keeps the read across a call it owes.
+#[test]
+fn a_put_owed_to_the_nodes_own_subscriber_ends_the_read() {
+    let (fwd, _sink, _faces) = subscriber_and_publisher();
+    let heard = Arc::new(AtomicUsize::new(0));
+    let kept = Arc::clone(&heard);
+    fwd.host_subscriber(
+        "demo/own",
+        Box::new(move |_view: &dyn SampleView| {
+            kept.fetch_add(1, Ordering::AcqRel);
+        }),
+    );
+    let reads = fwd.frame_table_reads();
+    bring_frame(
+        &fwd,
+        PUBLISHER,
+        (0..3).map(|_| put_of("demo/own")).collect(),
+    );
+    assert_eq!(
+        heard.load(Ordering::Acquire),
+        3,
+        "the subscriber heard every Put"
+    );
+    assert_eq!(
+        fwd.frame_table_reads() - reads,
+        3,
+        "each Put owed a call, which ended its read"
+    );
+}

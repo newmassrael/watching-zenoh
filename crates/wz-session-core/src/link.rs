@@ -1021,6 +1021,18 @@ pub trait BoxedLinkDriver {
     /// writer to wake.
     fn tx_staged(&self) {}
 
+    /// Leave every data frame handed to this link to the link's own writer from now on: no
+    /// sender writes on its own thread what it hands over, neither a lone message it flushes at
+    /// once nor a datagram as it lands. What a node that sends on behalf of other links (a
+    /// router) asks of each link it routes to: its routing thread serves every destination, and
+    /// a write made there per destination is a system call per message that no writer batches,
+    /// where each link's writer coalesces what it finds. A keepalive is still written from the
+    /// thread that sends it, which carries liveness and no data.
+    ///
+    /// The default is the driver whose senders never write on their own thread. A driver that
+    /// WRAPS another must forward this.
+    fn tx_writer_only(&self) {}
+
     /// Everything handed to this link so far is to leave before the Control-priority message
     /// handed to it next, whatever the priorities. The session calls it for a control message
     /// (a declaration, its retraction, an OAM) after it has handed over the data it staged

@@ -6591,6 +6591,155 @@
       "carry_forward_bullets": [
         "W10 (`register_bindings` restates the switchboard sidecar's rows) is to be generated from the sidecar."
       ]
+    },
+    "Round 4596": {
+      "decision_summary": "Run 44965297393 at eac841595 (and 44945434085 at 9602b8617) went red in 16 jobs with several causes, repaid here together. (1) C1f/C1t: `a_heap_table_remembers_as_many_keys_as_its_creator_states` subscribed `a/*`, which a build without `keyexpr-wildcard-single` (the C1f no-default arm) matches only as text, so the delivery read 0; the test is of the match cache, not of wildcards, and now subscribes a literal key. (2) Count guards: C1cb 41 to 44 and C1ah 41 to 42, moved to what the runs printed. (3) C1cn/C1bnl: the six `limits::enforcement` tests of `shared-key-ids` and `app-link` and wz-capture's `proto_encode_tests` (`message-payload`) were claimed by no leg; the wz-capi-coop leg filtered on the name prefix `decl_watch`, now two module paths. (4) C1bzr/C1bz: glue.rs's `[`log`]` is ambiguous with the `log` crate (now `fn@log`); timestamp_source.rs linked `std::time::SystemTime` in a build without std (now a code span); the reduced set that keeps both `os-posix` and `os-zephyr` is refused by wz-capi-pico's guard by name, which is the crate's design, so the ledger records the refusal; six rows of wz-capi-core and wz-capi-port measured 0 and are dropped. (5) C1bn: wz-app-frame's `sce-generated-codec` gates one test arm and no public item, stated in NO_PUBLIC_PATH. (6) C1cc: the shared-memory session-keys differential waited 2 s for the sender's provider; upstream builds the `transport_optimization` pool in the background and sends a message above the threshold as its bytes until the pool is ready (`io/zenoh-transport/src/common/shm/interop.rs` @ `if let ProviderInitState::Ready(provider) = self.try_get_provider() {`), and the hosted runner mapped the pool later than that. Upstream's blocking ask is not usable for the wait: it receives the build's one word off the channel the lazy provider polls (`zenoh-c/src/session.rs` @ `waiter.recv_async().await.ok().flatten()`), after which the transport's provider stays initializing; that is upstream's defect, and wz does not take it on (its provider state is a monitor every ask reads; a new unit test holds that a blocking ask leaves the provider ready for the transport). The programs now wait on signals only: the sender asks the provider without blocking until it has left its build, the receiver is known by the matching status of a publisher on the key and the sender closes once it has left, a reply's receiver asks once the querier's matching status names the sender's queryable, which is declared only after the provider is ready; the only times left are deadlines that end a broken run.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/pubsub.rs: the match-cache test subscribes a literal key.",
+        "scripts/run-ci.sh: C1cb 44, C1ah 42, with the commits that moved them.",
+        "scripts/lib/nondefault-tests-gate.sh: legs for `limits::enforcement::` (shared-key-ids, app-link) and `proto_encode_tests::` (message-payload); the wz-capi-coop decl_watch leg split into `engine::decl_watch::` and `tests::decl_watch::`.",
+        "crates/wz-runtime-posix/src/glue.rs, crates/wz-node-time/src/timestamp_source.rs: doc links that resolve in every set.",
+        "scripts/lib/reduced_docs_ledger.txt: the os-posix/os-zephyr refusal row; six stale rows dropped.",
+        "scripts/lib/feature_gate_diagnostic.py: wz-app-frame `sce-generated-codec` in NO_PUBLIC_PATH.",
+        "crates/wz-integration-tests/tests/it/files/zenoh_c_shm_session_keys_twice_and_diff.rs: sender and receiver wait on the provider's state and on matching status, not on the clock; RECEIVER_SECONDS is a 60 s deadline.",
+        "crates/wz-capi-c/src/shm.rs: `a_blocking_ask_leaves_the_provider_ready_for_the_transport`."
+      ],
+      "verification_bullets": [
+        "On the local machine through bx: C1f no-default arm (alloc, codec-response, codec-response-final, query-reply) 1280 passed, 0 failed (it failed 1 of 1280 before); the C1f maximal arm 1454 passed; C1cb filter 44 passed; new legs ran tests: wz-capi-coop engine::decl_watch 4, tests::decl_watch 5, wz-capture proto_encode_tests 67, wz-session-core limits::enforcement 37.",
+        "guarded_count_gate.py --range c72460b30..HEAD on a build host: 179 of 179 guards judged, the one drift C1ah (41 to 42), now moved; C1cb's guard is deferred by that tool (WZ_TEST_ARGS) and was read off the run above.",
+        "C1cc differential with wz-capi-c built as the lane builds it for the installed unstable-shm oracle: 3 passed in 5.3 s (the 2 s clock version passed locally in 234 s and failed hosted); wz-capi-c shm::promotion_tests 4 passed, the new one listed.",
+        "reduced_docs_gate.py measure --only for wz-runtime-posix, wz-node-time, wz-capi-pico, wz-capi-core, wz-capi-port: 108 configurations, measured equal to the ledger on all 14 rows; cargo doc --all-features of wz-runtime-posix and wz-node-time: 0 errors (C1bz).",
+        "feature_gate_diagnostic.py: 142 probes told the missing feature; feature_public_surface_census.py --check rc 0; the pre-push hook's round-fed gates 170 of 170.",
+        "clippy -D warnings, all targets, per crate: wz-session-core, wz-capi-c (zenoh-c-shared-memory), wz-integration-tests, wz-runtime-posix, wz-node-time; cargo fmt --check."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Round 4590 carry still open: face_drive_loop_core's debug frame (172,032 B) into a loop state and step methods; accept_loop tests' debug frame (458,752 B); the remaining window of the routing_spans callsite registration race.",
+        "The MAPS_PROBE of the same differential still settles 500 ms after the open before reading /proc/self/maps; whether an `init` open maps its segment synchronously on both libraries is to be read and the wait replaced by that fact.",
+        "Upstream 1.10.2's blocking `z_obtain_shm_provider` leaves the transport's provider initializing; to be recorded where wz states its departures from upstream defects."
+      ]
+    },
+    "Round 4597": {
+      "decision_summary": "- A router fan-out encodes a blocking client Put once and hands every face the same bytes; a face that must hold, chain or rewrite it still takes its own copy.\n- The router C ABI budgets move by the measured growth of that path.",
+      "changes_bullets": [
+        "EncodedPush and try_send_encoded_push_qos in session_actions; SharedCarrier per fan-out in router_forward.",
+        "docs/router-fanout-cost.md: the per-subscriber costs of a fan-out, by file, with the textbook fix of each.",
+        "Hot-path budgets: block_k16 85 alloc/7,262 B to 22/893 B (time-hlc 107/7,650 to 28/1,231)."
+      ],
+      "verification_bullets": [
+        "router_forward lib tests 345 pass; router_hot_path_cost plain and time-hlc pass; clippy of both crates clean.",
+        "capic-router-node 6,425,764 to 6,433,468 and capic-default 11,483,973 to 11,491,513 on one host, attributed by symbol diff.",
+        "Fleet lanes 0, C0, C1cs pass on the landing branch."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-5-preset-ap-full"
+      ],
+      "carry_forward_bullets": [
+        "Re-measure the D13 router fan-out and throughput cells; the inline write on the routing thread (row 1 of the cost page) is still a hypothesis.",
+        "A droppable Put still takes a copy per face."
+      ]
+    },
+    "Round 4598": {
+      "decision_summary": "`wz-ap-demo-app`'s `register_bindings` restated the two rows of its `wz-switchboard.yaml` by hand (census W10), so the dynamic registry and the generated static dispatch agreed only by inspection. The schema crate gives an AP host the deserialize of the sidecar and keeps the row-kind mapping in `SwitchboardRegistry::apply_spec` (`crates/wz-switchboard-schema/src/lib.rs` @ `parsed model to \\`SwitchboardRegistry::apply_spec\\``). For a host whose document is fixed at build time, the switchboard generator is where the document is already parsed, so it now also writes that parse as a Rust value beside the dispatch, and `register_bindings` hands the value to `apply_spec`. The demo carries no YAML backend and has no start-up parse that can fail, and the rows it registers come from the same parse the dispatch was generated and validated from. The emitter destructures the spec whole, so a field added to the schema stops it compiling until it writes that field.",
+      "changes_bullets": [
+        "crates/wz-switchboard-codegen/src/lib.rs: `generate_spec_value` writes `pub fn switchboard_spec() -> SwitchboardSpec` from a parsed sidecar; two golden tests.",
+        "xtask/src/main.rs: a switchboard target with `spec_value` also gets `switchboard_spec.rs`; only wz-ap-demo-app sets it.",
+        "out/wz-ap-demo-app/switchboard_spec.rs: the generated value; crates/wz-ap-demo-app: `register_bindings` applies it (new dependency on wz-switchboard-schema); crates/wz-ap-demo/src/runner.rs logs the registered row count instead of restating the rows.",
+        "docs/zenoh-logic-as-sce-kinds.md and S10.md: W10 recorded as fixed; S10 row 29 restated."
+      ],
+      "verification_bullets": [
+        "On build hosts: wz-switchboard-codegen tests 31 passed (2 new); wz-ap-demo-app tests 4 unit and 4 fan-out integration passed, the integration tests registering through the generated value.",
+        "The regen-codegen action (both stages, all three switchboards) changed 0 files, so the committed `switchboard_spec.rs` is byte-identical to the generator's output.",
+        "clippy -D warnings for wz-switchboard-codegen and wz-ap-demo-app (all targets), wz-ap-demo with `switchboard`, and xtask; rustfmt --check of the changed sources; the pre-push hook's round-fed gates 170 of 170."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage"
+      ],
+      "carry_forward_bullets": [
+        "Census findings W12 onward (§7.3) stay recorded and not changed; W9, W10 and W11 are fixed."
+      ]
+    },
+    "Round 4599": {
+      "decision_summary": "- A host bench builds the pico ABI on the engine the shipped profile selects, and every reading and table states its engine; a table filled from another engine is refused.\n- The pico performance table now reads the coop engine; its rows start empty.",
+      "changes_bullets": [
+        "wz_config.bench_engine resolves the engine from configs/profiles/host-peer-ext.conf; PICO_CMP_ENGINE overrides it.",
+        "pico-compare.sh and perf_matrix.py build with it, stamp the build and refuse a mismatched stamp.",
+        "docs/reason-review-pins.md: the close ingress row names R4597, the round that re-read it."
+      ],
+      "verification_bullets": [
+        "wz-config selftest 449/449, perf-matrix selftest 93/93, batch-control 18/18, check-table passes on the coop table.",
+        "Fleet lanes 0 and C0 pass on the landing branch."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "Fill the coop table from a full perf run; the first reading of 11-22 was taken from the tokio engine and is not used."
+      ]
+    },
+    "Round 4600": {
+      "decision_summary": "- A router leaves every face write to the face's own writer; the routing thread stages and wakes, so a burst to N faces is written in batches.\n- A frame's Puts are routed under one table read; the key and an unchanged literal Put are lent, and a route is kept per face alias.",
+      "changes_bullets": [
+        "OutboundTx::set_writer_only and BoxedLinkDriver::tx_writer_only, asked by a router node when it holds a face; peers keep the inline write.",
+        "forward_frame shares one read for up to 64 reading messages; lent_keyexpr; LiteralPush holds a Cow; AliasRoutes per face.",
+        "Budgets: hot-path rows fall (block_k1 7/233 to 3/139); capic-router-node +7,784 and capic-default +7,740 by symbol."
+      ],
+      "verification_bullets": [
+        "fanout_io_tests 2, writer_queue writer-only 3, swap seams 1, router_forward lib 356, wz-runtime-tokio lib 779, hot-path plain and time-hlc pass; clippy of both crates clean.",
+        "Fleet lanes 0, C0, C1cs pass on the landing branch."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-5-preset-ap-full"
+      ],
+      "carry_forward_bullets": [
+        "Re-measure the D13 router cells on a machine no other run shares; the first try was refused by the pinned CPU interference check.",
+        "An aliased Put still copies its carrier; re-encode only its key (row 6)."
+      ]
+    },
+    "Round 4601": {
+      "decision_summary": "Round 4590's carry on the face loop, decided by measurement. (1) The face loop's state machine was held by value by everything that awaited it: `face_drive_loop` awaited `face_drive_loop_core(..)` in place, so every entry (`accept_loop*`, `peer_loop*`) and every test future that held one carried the loop's whole size. The wrapper now boxes the core once (`Box::pin`), one allocation for a node's lifetime, and every caller holds a pointer: the largest accept_loop test debug frame went 458,752 to 347,288 bytes, and the rest of it is the initiators' session-open and drive futures the tests hold beside the loop, a different seam. Release text on one machine, both trees built there: -240 to +840 bytes over the seven C ABI cases that link the loop, 0 elsewhere; capic-default's budget moves by its 840. (2) Splitting `face_drive_loop_core` into a state struct and step methods was built (debug poll frame 172,032 to 19,832 bytes) and is NOT landed: on one machine it added 93,904 bytes of release text to pico-peer, 92,924 to pico-default, 99,692 to capic-peer and 49,984 to capic-default-lean. The pieces sum to the old body within 3.6 KB; the rest is inlining moved elsewhere (`drive_session_until_terminal_with_extra_deadline` newly out of line, +14 KB, `Dialer::open_with` +6.6 KB, the reassembly dispatch +10 KB). A debug frame bought with release text on the library whose size is a registered debt is a trade the owner decides; the commit is kept on branch rc4f-frames. (3) The routing_spans test's remaining window: tracing-core 0.1.36 computes a callsite's interest without a lock while the process has at most one live dispatcher (`Rebuilder::JustOne`), so a registration another test began before this recorder existed can store \"never\" after any rebuild; no step inside the process orders against it, so the recording runs in a re-executed child process that runs this test alone (the pattern of `uring.rs`'s reclaim witness). (4) A red that main carried since its fan-out commit: `a_fan_out_to_many_clients_encodes_its_carrier_once` asserted one shared encode in every build, but with `pubsub-ts-stack` `sends_shared` is false by design (each destination's routing is recorded on its own message); the test is held to builds without it and a twin holds the timestamp-stack build to its own rule (no shared encode, every subscriber its copy with the payload).",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/accept_loop.rs: `face_drive_loop` boxes the core's future once.",
+        "crates/wz-runtime-tokio/src/router_forward/routing_spans.rs: the recording runs in a re-executed child process.",
+        "crates/wz-runtime-tokio/src/router_forward.rs: the shared fan-out test is `not(pubsub-ts-stack)`; `a_fan_out_with_a_timestamp_stack_is_sent_to_each_face_on_its_own` added.",
+        "scripts/lib/capability_cost_gate.py: capic-default 11,495,640 to 11,496,480.",
+        "docs/reason-review-pins.md: session-close-ingress / accept_loop.rs to the new blob; both cited anchors (`pub enum ConnectReconcile`, `AddNodePassive {`) re-read and hold."
+      ],
+      "verification_bullets": [
+        "wz-runtime-tokio on this machine through bx: lib default 775 passed; lib --all-features 2654 passed, 11 ignored (2653 and 1 failed before the fan-out test fix, the failure deterministic alone); routing_spans leg (routing-router-hat, tracing-instrument, tracing-spans) 1 passed, the child's own \"1 passed\" asserted; --test it 288 passed; clippy -D warnings all targets, default and --all-features; cargo fmt --check.",
+        "Debug frames, objdump prologue of the --all-features lib test binary: peer_loop_holds_a_dialed_and_an_accepted_face_at_once 458,752 to 347,288; face_drive_loop_core 172,032 to 174,072 (the split, measured at 19,832, is not landed).",
+        "C1cs, capability_cost_gate.py --measure on one machine, base main 85330b9e0 against this branch: pico-peer -240, pico-default -240, capic-scout 0, capic-peer +88, capic-router-node +596, capic-default +840, capic-default-lean +748, every other case 0 (full run of the split: the figures in the decision).",
+        "The pre-push hook's round-fed gates 170 of 170; reason_review_pin_gate OK."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "The face loop split (branch rc4f-frames, commit c9dbe6a6f): owner to decide the debug-frame / release-text trade, or a split that keeps the release text (the growth is inlining moved, not the pieces).",
+        "Test debug frames left by the initiators' futures: session_open's dial_locator (80,824), open/drive futures held by value in the accept_loop tests (idle initiators 132,712); FaceLoop-independent.",
+        "From Round 4596: the MAPS_PROBE settle of the shared-memory differential, and recording upstream 1.10.2's blocking z_obtain_shm_provider defect."
+      ]
+    },
+    "Round 4602": {
+      "decision_summary": "The hosted run at main `85330b9e0` read every zenoh-c ABI build about 4.6 KB larger than the run before it, growth no budget note named (capic-default's note of the day records main reading over its earlier budget before the router changes it measured). Measured on one host with only `crates/wz-capi-c/src/events.rs` swapped, the census W9 fix (Round 4595) was that growth: capic-client 2,342,925 bytes of text without it and 2,347,533 with it, +4,608. Most of it was the hold of the watch's transitions written inside the generic `EventClosure<T>`, compiled once per closure type. The hold now is a non-generic type (`HeldTransitions`) that every listener kind shares, with the same behaviour: transitions told while the history is reported are held and reported after it in order, and the hold ends only when it is found empty under its lock. capic-client reads 2,346,245, so the fix costs 3,320 bytes. No budget moves; the change only shrinks.",
+      "changes_bullets": [
+        "crates/wz-capi-c/src/events.rs: the hold moves from `EventClosure<T>` into the non-generic `HeldTransitions` (`hold`, `release_next`); `deliver_or_hold` and `finish_history` call it."
+      ],
+      "verification_bullets": [
+        "On build host pc2, with `capability_cost_gate.py --measure capic-client`: 2,342,925 without the W9 fix, 2,347,533 with it, 2,346,245 with the hold moved out.",
+        "On build hosts: wz-capi-c library tests 221 passed (the hold test among them), listener integration tests `transport_events_roundtrip` 4 passed and `node_connectivity` 1 passed; clippy -D warnings with all targets for wz-capi-c; rustfmt --check; the pre-push hook's round-fed gates 170 of 170."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "The other reds of hosted run 44996720658 (C1g and C1bnl `session_memory` test, C1bnl and C1ay `router_forward`, C1cc shared-memory threshold, C1bzr shard 2 at 94% of its budget) belong to the sessions that landed those changes; C1cs was moved by them after that run."
+      ]
     }
   },
   "inventory_entries": {

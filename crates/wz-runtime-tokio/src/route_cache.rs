@@ -481,6 +481,12 @@ impl<T, S> Default for RouteCache<T, S> {
 }
 
 impl<T, S> RouteCache<T, S> {
+    /// Whether this memo is at `inputs`, so that a route it serves there is one of the tables at
+    /// those inputs. A memo no writer has brought to a version, a draft's among them, is at none.
+    pub fn is_at(&self, inputs: RouteInputs) -> bool {
+        self.inputs == Some(inputs)
+    }
+
     /// A memo brought to no version yet, keeping `kept`.
     fn starting(kept: Kept<T, S>) -> Self {
         Self {

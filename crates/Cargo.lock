@@ -3885,6 +3885,7 @@ dependencies = [
  "wz-codecs",
  "wz-runtime-tokio",
  "wz-session-core",
+ "wz-switchboard-schema",
 ]
 
 [[package]]

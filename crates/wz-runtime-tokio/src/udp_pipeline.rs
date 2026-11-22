@@ -1225,6 +1225,11 @@ impl BoxedLinkDriver for UdpWriteDriver {
         self.tx.fence()
     }
 
+    // A datagram that lands is otherwise written by the thread that lands it.
+    fn tx_writer_only(&self) {
+        self.tx.set_writer_only()
+    }
+
     // R2952 — the block-first slot lives on this link's outbound queue.
     fn block_first_acquire(&self, priority: wz_session_core::qos::Priority, wait_us: u64) -> bool {
         self.tx.block_first_acquire(priority, wait_us)

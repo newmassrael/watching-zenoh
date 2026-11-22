@@ -1953,6 +1953,34 @@ mod promotion_tests {
         shm
     }
 
+    /// A blocking ask for the provider reads the build's outcome and leaves it in place, so the
+    /// transport's next copy finds the provider ready. Upstream's blocking form receives the
+    /// build's one word off the channel its lazy provider polls (`zenoh-c/src/session.rs` @
+    /// `waiter.recv_async().await.ok().flatten()`), after which that provider stays initializing
+    /// and copies nothing; that is a defect wz does not take on. Here the state is a monitor every
+    /// ask reads (`SessionShm::wait_ready` waits on it and takes nothing out of it).
+    #[test]
+    fn a_blocking_ask_leaves_the_provider_ready_for_the_transport() {
+        let shm = SessionShm::from_config(true, true, 1 << 16);
+        assert_eq!(
+            shm.try_get().0,
+            Z_SHM_PROVIDER_STATE_INITIALIZING,
+            "the first ask starts the build"
+        );
+        assert!(shm.wait_ready().is_some(), "the provider could not be made");
+        let (state, asked) = shm.try_get();
+        assert_eq!(
+            state, Z_SHM_PROVIDER_STATE_READY,
+            "an ask after the blocking one reads the provider as ready"
+        );
+        assert!(asked.is_some(), "and is handed it");
+        assert!(
+            shm.promote(&PUTS_FROM_64, PromotedMessage::Put, &[3u8; 128], || true)
+                .is_some(),
+            "the transport copies a large put into it after the blocking ask"
+        );
+    }
+
     #[test]
     fn a_large_put_is_copied_into_the_sessions_provider_as_the_transports() {
         let shm = ready_session();

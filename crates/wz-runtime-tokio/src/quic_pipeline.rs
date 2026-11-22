@@ -860,6 +860,10 @@ impl BoxedLinkDriver for QuicWriteDriver {
         self.streams.tx_staged()
     }
 
+    fn tx_writer_only(&self) {
+        self.streams.tx_writer_only()
+    }
+
     fn tx_fence(&self) {
         self.streams.tx_fence()
     }

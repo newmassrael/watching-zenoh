@@ -9,12 +9,13 @@ committed rows.
 
 `scripts/pico-compare.sh perf` builds the arms and runs this; the subcommands are its steps.
 
-    perf_matrix.py reference --out DIR
-        zenoh-pico built as the same build as wz-capi-pico's default features: the build the
+    perf_matrix.py reference --out DIR --engine ENGINE
+        zenoh-pico built as the same build as wz-capi-pico's default capabilities on ENGINE (tokio or
+        coop, what `wz_config.py --bench-engine` resolved, `wz_config.bench_features`): the build the
         capability cost gate measures (`capability_cost_gate.pico_reference_tree` under the gate's
         `build_env`, its switches from `wz_config.pico_reference`), its library copied to DIR/lib-P,
         its headers to DIR/include-P, and what both arms are built as (the reference's pin, toolchain and switches, the wz features) to
-        DIR/reference.json
+        DIR/reference.json, the engine among it (`wz_engine`), which the run's record and the gate read
     perf_matrix.py pico-sys-include REPORT
         the include directory of the one zenoh-pico-sys build cargo's JSON REPORT names
     perf_matrix.py external-record OUT [WHY]
@@ -629,6 +630,13 @@ def first_line(cmd: list[str], cwd: pathlib.Path | None = None) -> str:
     return out.splitlines()[0] if out else "unknown"
 
 
+def run_engine(builds: dict) -> str | None:
+    """The engine a run's arm W was built on, as the record of its build states it (`reference --engine`);
+    `None` when it states none, or no engine."""
+    engine = builds.get("wz_engine")
+    return engine if engine in ENGINES else None
+
+
 def host_record(args: argparse.Namespace) -> dict:
     cpu = "unknown"
     try:
@@ -652,6 +660,7 @@ def host_record(args: argparse.Namespace) -> dict:
     }
     if args.reference_record:
         record["builds"] = json.loads(pathlib.Path(args.reference_record).read_text(encoding="utf-8"))
+    record["engine"] = run_engine(record.get("builds") or {})
     record["external"] = (json.loads(pathlib.Path(args.external_record).read_text(encoding="utf-8"))
                           if args.external_record else
                           {"status": "not-measured", "why": "the run was given no record of arm X"})
@@ -672,6 +681,10 @@ def cmd_run(args: argparse.Namespace) -> int:
         print("perf-matrix: a payload is at least 8 bytes (the round trip's sequence number)", flush=True)
         return 64
     record = host_record(args)
+    if record["engine"] is None:
+        print("perf-matrix: NOT-MEASURED, the run names no record of the build it measures that states its "
+              "engine (--reference-record, written by `reference --engine`)", flush=True)
+        return 2
     arms = run_arms(record["external"])
     wanted = {binary_name(arm, t) for arm in arms for t in transports} - {None}
     missing = sorted(b for b in wanted if not os.access(pathlib.Path(args.bin_dir) / b, os.X_OK))
@@ -693,7 +706,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             for arm in (arms if rep % 2 else arms[::-1])]
     print(f"perf-matrix: {args.reps} repetition(s) of {', '.join(transports)} x batching {', '.join(batchings)} "
           f"x {', '.join(workloads)} x {', '.join(map(str, sizes))} B, arms {', '.join(arms)}; client side on "
-          f"{args.client_cpus}, server side on {args.server_cpus}", flush=True)
+          f"{args.client_cpus}, server side on {args.server_cpus}; arm W on the {record['engine']} engine", flush=True)
     with (run / "cells.jsonl").open("w", encoding="utf-8") as log:
 
         def run_one(spec: tuple, again: bool) -> dict:
@@ -730,15 +743,20 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_reference(out: pathlib.Path) -> int:
-    """zenoh-pico built as the same build as wz-capi-pico's default features, into `out`."""
+def cmd_reference(out: pathlib.Path, engine: str) -> int:
+    """zenoh-pico built as the same build as wz-capi-pico's default capabilities on `engine`, into
+    `out`."""
     # The gate's builder and resolver, imported here and not at the top: the selftest needs neither.
     import capability_cost_gate as cost
     import wz_config
 
     table = wz_config.manifest_features(cost.CRATES / "wz-capi-pico" / "Cargo.toml")
-    features = wz_config.pico_build_features("tokio", [], table)
-    program_features = wz_config.pico_build_features("tokio", ["app-transport"], table)
+    try:
+        features = wz_config.bench_features(engine, [], table)
+        program_features = wz_config.bench_features(engine, ["app-transport"], table)
+    except wz_config.PresetError as error:
+        print(f"perf-matrix: NOT-MEASURED, {error}", flush=True)
+        return 2
     asked = wz_config.pico_reference(wz_config.load_decl(), features)
     # The gate's build rule too: the reference's key holds the rule's C flags and epoch, so the
     # library timed here is the one the gate's size and ratio are read from.
@@ -767,7 +785,7 @@ def cmd_reference(out: pathlib.Path) -> int:
     shutil.copytree(work / "build" / "include", inc, dirs_exist_ok=True)
     record = {"reference_pin": pin, "reference_toolchain": toolchain, "reference_switches": asked,
               "reference_refused": refused, "wz_features": sorted(features),
-              "wz_program_transport_features": sorted(program_features)}
+              "wz_program_transport_features": sorted(program_features), "wz_engine": engine}
     (out / "reference.json").write_text(json.dumps(record, indent=1, sort_keys=True) + "\n", encoding="utf-8")
     print(f"perf-matrix: reference zenoh-pico {pin[:12]} as the same build ({toolchain}); "
           f"{len(asked)} switches set from the declaration", flush=True)
@@ -827,6 +845,9 @@ def cmd_external_record(out: pathlib.Path, why: str) -> int:
 #: The committed table of W over P.
 CEILING = ROOT / "deploy" / "pico_perf_ceiling.json"
 TABLE_SCHEMA = "wz-pico-perf-ceiling/1"
+#: The engines arm W is built on, as `wz_config.PICO_ENGINES` names them: a run records the one it measured
+#: and a table the one its rows were filled from, and the gate refuses a run against another engine's rows.
+ENGINES = ("tokio", "coop")
 PAIR_NAMES = {"P": "W/P", "X": "W/X"}
 #: The figures the gate holds, per workload: the round trip at its middle and its tail, the CPU the
 #: answering side spent per answer, the delivered rate and the CPU a delivered message cost both sides, and
@@ -1077,13 +1098,28 @@ def parse_table(text: str, pair: str) -> tuple[dict, float]:
     return rows, float(tolerance)
 
 
-def load_table(path: pathlib.Path, pair: str) -> tuple[dict, float]:
+def table_engine(text: str) -> str | None:
+    """The engine a table says its rows were filled from, `None` when it says none; one that is no
+    engine is refused."""
+    try:
+        doc = json.loads(text)
+    except ValueError as error:
+        raise Refused(f"not JSON: {error}") from None
+    engine = doc.get("engine") if isinstance(doc, dict) else None
+    if engine is not None and engine not in ENGINES:
+        raise Refused(f"`engine` is one of {', '.join(ENGINES)}, not {engine!r}")
+    return engine
+
+
+def load_table(path: pathlib.Path, pair: str) -> tuple[dict, float, str | None]:
+    """The rows, the tolerance and the engine of the table at `path`."""
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as error:
         raise Refused(f"{path} cannot be read: {error}") from None
     try:
-        return parse_table(text, pair)
+        rows, tolerance = parse_table(text, pair)
+        return rows, tolerance, table_engine(text)
     except Refused as why:
         raise Refused(f"{path}: {why}") from None
 
@@ -1103,8 +1139,9 @@ def repository_roots() -> list[pathlib.Path]:
     return roots
 
 
-def table_document(pair: str, rows: dict, tolerance: float) -> str:
-    return json.dumps({"schema": TABLE_SCHEMA, "pair": pair, "tolerance": tolerance, "rows": rows}, indent=1)
+def table_document(pair: str, rows: dict, tolerance: float, engine: str) -> str:
+    return json.dumps({"schema": TABLE_SCHEMA, "pair": pair, "engine": engine, "tolerance": tolerance,
+                       "rows": rows}, indent=1)
 
 
 def print_pair(pair: str, table: str, tolerance: float | None, judged: list[Judged]) -> str:
@@ -1131,9 +1168,11 @@ def print_pair(pair: str, table: str, tolerance: float | None, judged: list[Judg
     return outcome
 
 
-def gate_pair(ref: str, cells: list[dict], table: pathlib.Path | None, roots: list[pathlib.Path]) -> str:
-    """Judge the pair of W and `ref`. A table of W over X inside the repository is refused; one that is not
-    named, or does not exist yet, fails with the whole table to write printed."""
+def gate_pair(ref: str, cells: list[dict], table: pathlib.Path | None, roots: list[pathlib.Path],
+              engine: str) -> str:
+    """Judge the pair of W and `ref`, arm W measured on `engine`. A table of W over X inside the repository is
+    refused; one that is not named, or does not exist yet, fails with the whole table to write printed. A table
+    whose rows were filled from another engine is refused, and so is a table of W over P that does not say."""
     pair = PAIR_NAMES[ref]
     found = readings(cells, ref)
     if ref == "X":
@@ -1146,12 +1185,19 @@ def gate_pair(ref: str, cells: list[dict], table: pathlib.Path | None, roots: li
             rows = {key: fill_row(found[key]) for key in sorted(found, key=key_order)}
             print(f"perf-gate {pair}: arm X was measured and no table judges it ({where}); the table this run "
                   f"writes, to be kept outside the repository:", flush=True)
-            print(table_document(pair, rows, DEFAULT_TOLERANCE), flush=True)
+            print(table_document(pair, rows, DEFAULT_TOLERANCE, engine), flush=True)
             print(f"perf-gate {pair}: FAIL", flush=True)
             return "FAIL"
     if table is None:
         raise Refused(f"no table of {pair} was named")
-    rows, tolerance = load_table(table, pair)
+    rows, tolerance, filled_from = load_table(table, pair)
+    if filled_from is None and ref == "P":
+        raise Refused(f"{table} does not say which engine its rows were filled from (`engine`)")
+    if filled_from is not None and filled_from != engine:
+        raise Refused(f"{table} holds rows filled from the {filled_from} engine, and this run measured the "
+                      f"{engine} engine: judge it against a table of its own engine, or run that engine "
+                      f"(PICO_CMP_ENGINE={filled_from})")
+    print(f"perf-gate {pair}: arm W on the {engine} engine", flush=True)
     return print_pair(pair, str(table), tolerance, judge(found, rows, tolerance))
 
 
@@ -1161,12 +1207,16 @@ def cmd_gate(args: argparse.Namespace) -> int:
         if doc.get("schema") != SCHEMA:
             raise Refused(f"{args.result} is not a result of schema {SCHEMA}")
         cells = doc["cells"]
+        engine = doc.get("record", {}).get("engine")
+        if engine not in ENGINES:
+            raise Refused(f"{args.result} does not say which engine arm W was built on")
         external = doc.get("record", {}).get("external") or {
             "status": "not-measured", "why": "the run's record says nothing of arm X"}
-        outcomes = [gate_pair("P", cells, pathlib.Path(args.table), [])]
+        outcomes = [gate_pair("P", cells, pathlib.Path(args.table), [], engine)]
         if external.get("status") == "built":
             named = args.external_table or os.environ.get(EXTERNAL_TABLE, "")
-            outcomes.append(gate_pair("X", cells, pathlib.Path(named) if named else None, repository_roots()))
+            outcomes.append(gate_pair("X", cells, pathlib.Path(named) if named else None, repository_roots(),
+                                      engine))
         elif args.without_external:
             print(f"perf-gate W/X: not asked (--without-external); arm X NOT-MEASURED, {external.get('why')}",
                   flush=True)
@@ -1182,10 +1232,14 @@ def cmd_gate(args: argparse.Namespace) -> int:
 def check_table(path: pathlib.Path) -> int:
     """The committed table's shape, and its rows exactly the population of the default matrix of W over P."""
     try:
-        rows, tolerance = load_table(path, PAIR_NAMES["P"])
+        rows, tolerance, engine = load_table(path, PAIR_NAMES["P"])
     except Refused as why:
         print(f"perf-gate table: refused: {why}", file=sys.stderr)
         return 2
+    if engine is None:
+        print(f"  perf-gate table FAIL: {path} does not say which engine its rows were filled from (`engine`)",
+              file=sys.stderr)
+        return 1
     wanted = set(population("P"))
     missing = sorted(wanted - set(rows), key=key_order)
     extra = sorted(set(rows) - wanted, key=key_order)
@@ -1197,7 +1251,7 @@ def check_table(path: pathlib.Path) -> int:
         return 1
     filled = sum(value is not None for value in rows.values())
     print(f"  perf-gate table: {len(rows)} row(s), the population of the default matrix; {filled} filled, "
-          f"{len(rows) - filled} not yet (tolerance {tolerance})")
+          f"{len(rows) - filled} not yet (tolerance {tolerance}), filled from the {engine} engine")
     return 0
 
 
@@ -1475,8 +1529,11 @@ def cmd_selftest() -> int:
            and exit_status(["PASS", "PASS"]) == 0 and outcome_of([]) == "NOT-MEASURED")
     expect("a value rounds up to three decimals for its ratchet", ceil3(0.9301) == 0.931 and ceil3(0.93) == 0.93)
 
-    def table(rows, pair="W/P", tolerance=0.05, schema=TABLE_SCHEMA):
-        return json.dumps({"schema": schema, "pair": pair, "tolerance": tolerance, "rows": rows})
+    def table(rows, pair="W/P", tolerance=0.05, schema=TABLE_SCHEMA, engine="tokio"):
+        doc = {"schema": schema, "pair": pair, "tolerance": tolerance, "rows": rows}
+        if engine is not None:
+            doc["engine"] = engine
+        return json.dumps(doc)
 
     def refused(text, pair="W/P"):
         try:
@@ -1516,14 +1573,15 @@ def cmd_selftest() -> int:
     keys = [row_key("tcp", False, "thr", 8, m) for m in GATED["thr"]]
     locked = {key: {"locked": True} for key in keys}
 
-    def gate(cells, record, table_rows, external_table="", without=False, x_rows=None, schema=SCHEMA):
+    def gate(cells, record, table_rows, external_table="", without=False, x_rows=None, schema=SCHEMA,
+             table_engine_="tokio"):
         with tempfile.TemporaryDirectory() as scratch:
             base = pathlib.Path(scratch)
             (base / "perf.json").write_text(json.dumps({"schema": schema, "record": record, "cells": cells}),
                                             encoding="utf-8")
             if external_table == "absent":
                 external_table = str(base / "no-such-table.json")
-            (base / "table.json").write_text(table(table_rows), encoding="utf-8")
+            (base / "table.json").write_text(table(table_rows, engine=table_engine_), encoding="utf-8")
             if x_rows is not None:
                 where = base / "x.json"
                 where.write_text(table(x_rows, pair="W/X"), encoding="utf-8")
@@ -1533,14 +1591,14 @@ def cmd_selftest() -> int:
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                 return cmd_gate(args)
 
-    no_x = {"external": {"status": "not-measured", "why": "unset"}}
+    no_x = {"engine": "tokio", "external": {"status": "not-measured", "why": "unset"}}
     expect("a run without arm X is NOT-MEASURED for W/X even when W/P holds",
            gate(run_cells, no_x, locked) == 3)
     expect("asked W/P alone, a run whose every row holds passes", gate(run_cells, no_x, locked, without=True) == 0)
     expect("a row missing from the table fails the gate",
            gate(run_cells, no_x, {k: v for k, v in locked.items() if k != keys[0]}, without=True) == 1)
     x_cells = run_cells + [dict(c, arm="X") for c in run_cells if c["arm"] == "P"]
-    built_x = {"external": {"status": "built", "name": "lab"}}
+    built_x = {"engine": "tokio", "external": {"status": "built", "name": "lab"}}
     expect("a run that measured arm X and was given no table of it fails, asked W/P alone or not",
            gate(x_cells, built_x, locked, external_table="absent") == 1
            and gate(x_cells, built_x, locked, external_table="absent", without=True) == 1)
@@ -1549,6 +1607,33 @@ def cmd_selftest() -> int:
     expect("a table of W/X inside the repository is refused",
            gate(x_cells, built_x, locked, external_table=str(ROOT / "deploy" / "x.json")) == 2)
     expect("a result of another schema is refused", gate(run_cells, no_x, locked, schema="wz-other/1") == 2)
+    # The engine: a run states the one arm W was built on and a table the one its rows were filled from, and
+    # a run is judged only against rows of its own engine.
+    expect("a run of the engine its table was filled from is judged",
+           gate(run_cells, dict(no_x, engine="coop"), locked, without=True, table_engine_="coop") == 0)
+    expect("a run of another engine than its table's is refused",
+           gate(run_cells, dict(no_x, engine="coop"), locked, without=True) == 2)
+    expect("a run whose record names no engine is refused",
+           gate(run_cells, {"external": no_x["external"]}, locked, without=True) == 2)
+    expect("a table of W/P that does not say its engine is refused",
+           gate(run_cells, no_x, locked, without=True, table_engine_=None) == 2)
+
+    def engine_refused(text):
+        try:
+            table_engine(text)
+        except Refused:
+            return True
+        return False
+
+    expect("a table that names what is no engine is refused, and one that names an engine is read",
+           engine_refused(table(good, engine="fast")) and not engine_refused(table(good))
+           and table_engine(table(good, engine="coop")) == "coop"
+           and table_engine(table(good, engine=None)) is None)
+    expect("a run's engine is the one its build's record states, and nothing else",
+           run_engine({"wz_engine": "coop"}) == "coop" and run_engine({}) is None
+           and run_engine({"wz_engine": "fast"}) is None)
+    import wz_config
+    expect("the engines a table names are the ones a bench builds on", ENGINES == wz_config.PICO_ENGINES)
     print(f"  perf-matrix selftest: {ok}/{ok + bad} arm(s) pass")
     return 0 if bad == 0 else 1
 
@@ -1583,8 +1668,11 @@ def main(argv: list[str]) -> int:
             print(f"perf-matrix: {why}", file=sys.stderr)
             return 1
         return 0
-    if len(argv) == 4 and argv[1] == "reference" and argv[2] == "--out":
-        return cmd_reference(pathlib.Path(argv[3]))
+    if len(argv) == 6 and argv[1] == "reference" and argv[2] == "--out" and argv[4] == "--engine":
+        if argv[5] not in ENGINES:
+            print(f"perf-matrix: --engine is one of {', '.join(ENGINES)}", file=sys.stderr)
+            return 64
+        return cmd_reference(pathlib.Path(argv[3]), argv[5])
     if 2 <= len(argv) <= 4 and argv[1] == "idle-cpus":
         try:
             seconds = float(argv[2]) if len(argv) > 2 else 5.0

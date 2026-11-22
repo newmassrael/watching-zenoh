@@ -13,9 +13,8 @@
 //! API so `wz-ap-demo` can drive the live value path without naming an
 //! sce-rust-runtime / sce-forge-runtime type directly:
 //!  - [`new_engine`] — a fresh, initialized engine for the demo machine;
-//!  - [`register_bindings`] — install the demo's switchboard rows
-//!    (`demo/sensor/temp` value, `demo/sensor/reset` signal) onto a registry,
-//!    mirroring `wz-switchboard.yaml`;
+//!  - [`register_bindings`] — install the demo's switchboard rows onto a
+//!    registry, from `wz-switchboard.yaml` as the generator parsed it;
 //!  - [`SensorMonitorInjector`] — the generated value-capable
 //!    [`EventInjector`](wz_session_core::switchboard::EventInjector) the
 //!    observer fan-out threads;
@@ -74,6 +73,17 @@ include!(concat!(
     "/dispatch_switchboard.rs"
 ));
 
+// Census W10 — the sidecar as the value the generator parsed it into
+// (`pub fn switchboard_spec()`), emitted beside the dispatch from the same
+// parse. Private: the registry is this crate's API, the document is not.
+mod sidecar {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-ap-demo-app",
+        "/switchboard_spec.rs"
+    ));
+}
+
 use wz_session_core::switchboard::SwitchboardRegistry;
 
 /// Re-export of the SCE engine type so the demo can hold an
@@ -89,20 +99,20 @@ pub fn new_engine() -> Engine<SensorMonitorPolicy> {
     engine
 }
 
-/// Install the demo's switchboard rows onto `board`, mirroring
-/// `wz-switchboard.yaml`: a VALUE row (`demo/sensor/temp` -> `temp_update`,
-/// decoded by the temp_payload codec) and a SIGNAL row (`demo/sensor/reset` ->
-/// `reset`, empty `_event.data`). The demo calls this on the observer's
-/// `switchboard` registry before `drive_session` starts so an inbound sample
-/// on either keyexpr fans out to the application engine.
+/// Install the demo's switchboard rows onto `board`: `wz-switchboard.yaml`,
+/// as the generator parsed it, handed to `SwitchboardRegistry::apply_spec`,
+/// which owns the mapping from a document row to a registry row. The demo
+/// calls this on the observer's `switchboard` registry before
+/// `drive_session` starts so an inbound sample on a mapped keyexpr fans out
+/// to the application engine.
 ///
-/// The static `dispatch_switchboard` and this dynamic registration share the
-/// same routing by construction (both derive from the one sidecar); the value
-/// row's codec<->payload decode is supplied by [`SensorMonitorInjector`], which
-/// the registry's type-erased rows resolve through `inject_value`.
+/// The static `dispatch_switchboard` and this registration are generated from
+/// one parse of the sidecar, so they cannot hold different rows (census W10:
+/// this used to restate the two rows by hand). A value row's codec<->payload
+/// decode is supplied by [`SensorMonitorInjector`], which the registry's
+/// type-erased rows resolve through `inject_value`.
 pub fn register_bindings(board: &mut SwitchboardRegistry) {
-    board.register_value("demo/sensor/temp", "temp_update");
-    board.register("demo/sensor/reset", "reset");
+    board.apply_spec(&sidecar::switchboard_spec());
 }
 
 #[cfg(test)]

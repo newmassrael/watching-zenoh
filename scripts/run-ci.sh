@@ -9091,7 +9091,10 @@ layer_c1ah_cargo_test_time_hlc() {
     # 35 -> 36, step 3c's node clock snapshot test, printed on a build host. 36 -> 39, a clock
     # bound the build does not allow or that is no number is refused by name (three tests).
     # 39 -> 41 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
-    _runci_guarded_test "C1ah node_clock" 41 \
+    # 41 -> 42 (2026-11-22): the clock bound read from the open's runtime limits (ead799c27,
+    # 535375cf3, 8efc53f7b) added a case this filter selects; hosted run 44965297393 read 42, and
+    # guarded_count_gate.py printed 42 at 4ec20e655.
+    _runci_guarded_test "C1ah node_clock" 42 \
         cargo test -p wz-node-time --features time-hlc,codec-push,pubsub-timestamp \
         --lib node_clock:: --quiet || return 1
     # R311y818 — the PUBLISH-side auto-stamp (zenoh `resolve_put`'s head,
@@ -12681,8 +12684,12 @@ layer_c1cb_cargo_test_init_ack_admission() {
     # 39 -> 41: the declaration watch from establishment to the peer's final (8f3812304) and the
     # quiet window that settles an accepted link's sync (7bbf9c0ea), which landed without moving
     # this guard; hosted run 44740160167 read 41 at 581714684.
+    # 41 -> 44: the wider InitAck batch adopted under zenoh's rule (a5bd566db) and the declaration
+    # watch's window read from the snapshot, with nothing stated and stated (d6f10a2e6), which
+    # landed without moving this guard; hosted runs 44945434085 and 44965297393 read 44, and so
+    # did a local run at 4ec20e655.
     wz_test_args wz-runtime-tokio session_fsm_driver_loop
-    _runci_guarded_test C1cb 41 \
+    _runci_guarded_test C1cb 44 \
         cargo test -p wz-runtime-tokio "${WZ_TEST_ARGS[@]}" --quiet || return 1
 }
 

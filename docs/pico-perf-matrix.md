@@ -16,12 +16,23 @@ API and is compiled from the same source for each arm:
 | arm | library | headers | carries |
 |---|---|---|---|
 | P | zenoh-pico at the submodule's pin, built as the same build (below) | that build's own (`include` of the export with the `config.h` its CMake generated) | tcp, multicast |
-| W | `wz-capi-pico`, release, default features | the zenoh-pico-sys headers of that build with the `config.h` of its feature list (`wz_config.py --pico-config-h`) | tcp, udp, multicast |
-| W (program transport) | `wz-capi-pico`, release, default features and `app-transport` | the same, for that feature list | the program transport |
+| W | `wz-capi-pico`, release, its default capabilities on the engine of the run (below) | the zenoh-pico-sys headers of that build with the `config.h` of its feature list (`wz_config.py --bench-config-h`) | tcp, udp, multicast |
+| W (program transport) | the same build with `app-transport` | the same, for that feature list | the program transport |
 | X | an external library of the pico API, named by the environment (below); measured only when named | its own, with its own `config.h` | tcp, udp, multicast |
 
 The program-transport cell is measured on its own build because a capability that is off adds
 nothing to a build, so the default build is the one the other transports are measured on.
+
+**The engine.** Arm W is built on the engine the package for a host ships on, which its profile
+`configs/profiles/host-peer-ext.conf` chooses on the global axis `engine`, unless `PICO_CMP_ENGINE`
+(`tokio` or `coop`) names the other to compare them. `wz_config.py --bench-engine` is the one place a
+bench learns it, and `--bench-cargo-args` and `--bench-config-h` give the build and its header on it: on
+the tokio engine the crate's default build, on the cooperative one that build with what selects the
+tokio engine left out (`wz_config.coop_features`); a capability asked that the cooperative engine does
+not run is refused by name. `reference --engine` records it (`wz_engine` in `reference.json`), the run
+carries it into `perf.json` (`record.engine`) and prints it, and the gate refuses a run against a
+table filled from the other engine. The other host modes of `scripts/pico-compare.sh` (`rtt`, `thr`,
+`nodrop`, `profile`, `tids`, `batch`) build on the same answer and print it with their readings.
 
 **The same build.** Arm P is the build `scripts/lib/capability_cost_gate.py` measures the size of:
 every `Z_FEATURE_*` switch the declaration (`deploy/wz-config.toml`) answers is set from that answer
@@ -301,8 +312,9 @@ repetition of wz fails the cell's rows: what wz could not do once is a defect, n
 measured repetitions of either arm give no interval, and the row is not measured. A reference that lost
 every repetition leaves the cell without a ratio.
 
-**The table.** A JSON object: `schema` `wz-pico-perf-ceiling/1`, `pair` (`W/P` or `W/X`),
-`tolerance`, and `rows`, one per row key, each of four shapes:
+**The table.** A JSON object: `schema` `wz-pico-perf-ceiling/1`, `pair` (`W/P` or `W/X`), `engine` (the
+engine arm W was built on when the rows were filled; required of the W over P table, and a run of
+another engine is refused against it), `tolerance`, and `rows`, one per row key, each of four shapes:
 
 | row | holds |
 |---|---|

@@ -672,8 +672,11 @@ transport-link-unixpipe,transport-link-ws|"
     # `declarations-synced-event`): the router's declarations told to the watches of their kind,
     # what it held told first to a watch that came after, the end of its initial declarations told
     # once, and a watch undeclared or a session closed letting go of its sink; `liveliness` joins
-    # for the watch of tokens. Without either feature the first row runs the refusal by name.
-    "wz-capi-coop|hook|declarations-synced-event,liveliness,remote-declaration-watch|decl_watch"
+    # for the watch of tokens. Without either feature the first row runs the refusal by name. Two
+    # rows, one per module path (the engine's own and the host tests'), so a test added to either
+    # module is claimed and a test merely named alike is not.
+    "wz-capi-coop|hook|declarations-synced-event,liveliness,remote-declaration-watch|engine::decl_watch::"
+    "wz-capi-coop|hook|declarations-synced-event,liveliness,remote-declaration-watch|tests::decl_watch::"
     # The receive in place on the cooperative engine (`tests::in_place::`, 2; the engine's one
     # receive): a Push and a get's reply read where the link's buffer holds them reach the
     # subscriber and the get. `query` is the get's.
@@ -756,6 +759,9 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     #     build reaches; legs run 84 and SKIPS excuses 0, leaving 4 claimed by
     #     NOTHING (all four in `compressed_capture_fixture`).
     "wz-capture|hook|compression,dissect,fixtures|"
+    # A program's payload set field by field and the same values given as JSON write one message
+    # (`proto_encode_tests::`): its one test needs `message-payload`, which no row above builds.
+    "wz-capture|hook|message-payload|proto_encode_tests::"
     "wz-mcu-multicast-e2e|hook|fixed-memory,loopif-multicast|"
     "wz-mcu-session-acceptor|hook|buffer-pool-session-rx-slim,fixed-memory,reassembly|"
     "wz-packet-socket|hook|tap|"
@@ -1415,6 +1421,10 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # dictionary and a parsed document; the filter is the module path. Its reply-frame tests also
     # need `codec-response` and its registry tests `pubsub-put`, so the leg builds both.
     "wz-session-core|hook|shared-key-ids,codec-response,pubsub-put|shared_key_ids::"
+    # The limits a creator states to the tables it opens (`limits::enforcement::`): the bounds
+    # read by the key-id dictionary and the link's noted requests (`shared-key-ids`) and by the
+    # program's links (`app-link`) are tests no other row builds.
+    "wz-session-core|hook|shared-key-ids,app-link|limits::enforcement::"
     # The storage plane is the wz-storage crate's (server-layer split, steps 2-4), and its
     # gated tests went with it: the plugins document reader's (step 3) and the history,
     # strip-prefix, replication, aligner, wildcard and garbage-collection subsets (step 4),

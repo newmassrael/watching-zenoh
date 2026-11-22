@@ -556,6 +556,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-runtime-tokio/src/router_forward/egress_tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-runtime-tokio/src/router_forward/face_runtime.rs` | S4 | |
 | `crates/wz-runtime-tokio/src/router_forward/face_table.rs` | S4 | |
+| `crates/wz-runtime-tokio/src/router_forward/fanout_io_tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-runtime-tokio/src/router_forward/held_route.rs` | S10 | |
 | `crates/wz-runtime-tokio/src/router_forward/joined_link_tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-runtime-tokio/src/router_forward/local_publish.rs` | S4 | |

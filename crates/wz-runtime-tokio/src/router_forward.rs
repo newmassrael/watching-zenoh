@@ -343,6 +343,7 @@
 //!   re-advertise and the query Request/Response sends all pass the §5.16
 //!   egress chain.
 
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -384,11 +385,15 @@ use wz_session_core::multicast_tx::MulticastTxItem;
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::publish_options::PublishOptions;
 use wz_session_core::push_build::reliteralize_push;
-use wz_session_core::push_routing_context::{read_push_source, set_push_source};
+use wz_session_core::push_routing_context::{
+    push_names_a_source, read_push_source, set_push_source,
+};
 use wz_session_core::qos::Priority;
 use wz_session_core::query::QueryResponder;
+use wz_session_core::wire_id::peer_key;
 use wz_session_core::wireexpr_resolve::{
-    resolve_wireexpr, wireexpr_is_empty, wireexpr_names_a_declaration,
+    id_and_suffix, resolve_wireexpr, resolve_wireexpr_into, wireexpr_is_empty,
+    wireexpr_names_a_declaration, KeyexprBuf, KeyexprPastBound, MappingSpaces,
 };
 
 use crate::accept_loop::{
@@ -406,14 +411,14 @@ use crate::interceptor::{
 };
 use crate::linkstate_forward::{
     absorb_keyexpr_into, all_query_directions, bring_client_routes, bring_mesh_routes,
-    build_declare_queryable_with_info, client_query_route, client_route, complete_query_directions,
-    compute_push_forward, compute_self_publish_forward, declare_queryable_wireexpr,
-    declare_subscriber_wireexpr, emit_current_interest_replies, is_tree_forward_target,
-    peer_acl_username, peer_whatami_routing, peer_zid_routing, query_candidates,
-    re_advertise_interest_into, resolve_governed_keyexpr, resolve_source_in, resolve_source_zid_in,
-    select_best_matching, stamped, synthesize_drained_fan_finals, synthesize_expired_query_returns,
-    Cached, ClientQablStore, ClientQueryRoutes, ClientQueryable, ClientRoutes, ClientSubStore,
-    DataRoutes, QueryCandidate, QueryRoutes,
+    build_declare_queryable_with_info, client_inputs, client_query_route, client_route,
+    complete_query_directions, compute_push_forward, compute_self_publish_forward,
+    declare_queryable_wireexpr, declare_subscriber_wireexpr, emit_current_interest_replies,
+    is_tree_forward_target, peer_acl_username, peer_whatami_routing, peer_zid_routing,
+    query_candidates, re_advertise_interest_into, resolve_governed_keyexpr, resolve_source_in,
+    resolve_source_zid_in, select_best_matching, stamped, synthesize_drained_fan_finals,
+    synthesize_expired_query_returns, Cached, ClientQablStore, ClientQueryRoutes, ClientQueryable,
+    ClientRoutes, ClientSubStore, DataRoutes, QueryCandidate, QueryRoutes,
 };
 use crate::node_clock::ForwardStamp;
 #[cfg(feature = "routing-token-tables")]
@@ -460,9 +465,11 @@ mod egress;
 mod egress_tests;
 mod face_runtime;
 mod face_table;
+#[cfg(all(test, feature = "transport-batching"))]
+mod fanout_io_tests;
 use face_table::FaceTable;
 mod held_route;
-use held_route::{HeldFace, HeldFaceContext, LiteralPush};
+use held_route::{AliasRoutes, HeldFace, HeldFaceContext, LiteralPush, SharedCarrier};
 
 /// The client leg's routes of a broker hat, each naming its faces as the router holds them while
 /// they are up.
@@ -608,6 +615,21 @@ fn is_peer_hat(region: Region, node_mode: WhatAmI) -> bool {
 /// lies, so the router hat's rules ask this rather than name `North`.
 fn is_router_hat(region: Region, node_mode: WhatAmI) -> bool {
     matches!(hat_kind(&region, node_mode), HatKind::Router)
+}
+
+/// What a node of role `node_mode` asks of the link of a face it holds, when it holds it.
+///
+/// A router leaves every frame it sends the face to the face's own writer: the thread that
+/// routes a message serves every destination, and a write made on it per destination is a
+/// system call per message that no writer batches, while each writer takes what was staged
+/// for its face in a few writes. Upstream's producer only stages and notifies, and the link's
+/// own task pulls the batch (`io/zenoh-transport/src/common/pipeline.rs` @
+/// `fn try_pull_deep(`). A peer or a client node keeps the sender's own write for a lone
+/// message, which is what the round trip of its own puts is measured by.
+fn hold_face_link(node_mode: WhatAmI, actions: &SessionLinkActions) {
+    if node_mode == WhatAmI::Router {
+        actions.link_writer_only();
+    }
 }
 
 /// R2867 (open-debt item 751, step 3a) — the state one MESH region's hat owns:
@@ -1943,6 +1965,10 @@ struct RouterFaceState {
     /// the link came up is held when the program can declare anything
     /// ([`RouterForwarder::initial_declares_pending`]). Set by the arrival, never by a timer.
     initial_final: bool,
+    /// The client legs of the routes of this face's Puts that named one of its aliases with no
+    /// suffix, by the alias ([`AliasRoutes`]). Shared by every version of the tables that holds
+    /// these aliases, and given anew when they change ([`OnTables::absorb_keyexpr_declaration`]).
+    alias_routes: Arc<AliasRoutes>,
 }
 
 impl RouterFaceState {
@@ -1959,7 +1985,15 @@ impl RouterFaceState {
 /// and its routing source reset to 0, since a client is a leaf and refuses a Push that names a
 /// source (`deliver_to_client_subscribers`). A literal by its type, so that it can be sent
 /// through a route that holds its faces; `None` drops the Put for every client.
-fn client_carrier(push: &PushOwned, keyexpr: &str) -> Option<LiteralPush> {
+///
+/// A literal that names no source is that carrier as it came, and is lent rather than copied, as
+/// upstream hands each face the Put it routes with a reference to its payload
+/// (`zenoh/src/net/routing/dispatcher/pubsub.rs` @ `payload: msg.payload.clone(),`). Any other
+/// Put is copied once for the fan-out, re-keyed and its source reset.
+fn client_carrier<'a>(push: &'a PushOwned, keyexpr: &str) -> Option<LiteralPush<'a>> {
+    if let Some(lent) = LiteralPush::lent(push).filter(|_| !push_names_a_source(push)) {
+        return Some(lent);
+    }
     let mut carrier = reliteralize_push(push, keyexpr).ok()?;
     stamped(
         set_push_source(&mut carrier, 0),
@@ -2084,6 +2118,46 @@ fn classify_inbound(faces: &FaceTable, inbound: FaceId) -> InboundFace<'_> {
     match faces.get(&inbound) {
         Some(s) => InboundFace::Held(s),
         None => InboundFace::Gone,
+    }
+}
+
+/// The legs a face keeps for its aliases ([`AliasRoutes`]), and the alias a Put named, by the key
+/// the face's alias table holds it under.
+type AliasOf<'a> = (&'a AliasRoutes, u64);
+
+/// The key a Put is routed by: its text, and, for a Put that named one of the aliases of the face
+/// it came from with no suffix, the legs that face keeps for the alias, by which the client legs of
+/// the Put's route are found without its text being looked up ([`AliasRoutes`]).
+#[derive(Clone, Copy)]
+struct RoutedKey<'a> {
+    text: &'a str,
+    alias: Option<AliasOf<'a>>,
+}
+
+impl<'a> RoutedKey<'a> {
+    /// A key known by its text alone.
+    fn of_text(text: &'a str) -> Self {
+        Self { text, alias: None }
+    }
+}
+
+/// The key `push` names against `aliases`, the alias table of the face it came from, lent where
+/// one string already is it: the message's own suffix for a literal, the face's alias for an alias
+/// with no suffix. Only an alias with a suffix is composed, in `composed`, which on the growable
+/// backing is the one allocation of a resolution, where every resolution copied the key before;
+/// one past what the fixed backing composes is composed as the growable one does.
+fn lent_keyexpr<'k>(
+    push: &'k PushOwned,
+    aliases: &'k hashbrown::HashMap<u64, String>,
+    composed: &'k mut KeyexprBuf,
+) -> Option<Cow<'k, str>> {
+    match resolve_wireexpr_into(
+        &push.keyexpr.body,
+        MappingSpaces::peer_only(aliases),
+        composed,
+    ) {
+        Ok(key) => key.map(Cow::Borrowed),
+        Err(KeyexprPastBound) => resolve_wireexpr(&push.keyexpr.body, aliases).map(Cow::Owned),
     }
 }
 
@@ -3335,6 +3409,24 @@ pub struct RouterForwarder {
     /// Count of messages a route that holds its faces did not send to a face because the face had
     /// left the tables since the route was computed (its runtime closed).
     held_route_closed_skips: Counter,
+    /// Count of the client carriers encoded to shared bytes: one for each fan-out that sent at
+    /// least one face the bytes, however many faces it sent them to.
+    client_carrier_encodes: Counter,
+    /// The client legs served from those a face keeps for its aliases, and those read by their key
+    /// and kept there (`OnTables::client_leg_for`). Counted in test builds only, where the tests
+    /// read them, so that a Put pays nothing for them.
+    #[cfg(test)]
+    alias_legs_served: Counter,
+    #[cfg(test)]
+    alias_legs_kept: Counter,
+    /// Count of the client carriers made by copying the Put routed: one for each fan-out of a Put
+    /// that had to be re-keyed or have its source reset, none for a literal that names no source,
+    /// which is lent as it came ([`client_carrier`]).
+    client_carrier_copies: Counter,
+    /// Count of the reads of the tables the frames of the faces took for their reading messages:
+    /// one for each run of them ([`TABLE_READS_PER_GUARD`]), where a read for each message counts
+    /// one a message.
+    frame_table_reads: Counter,
     /// Total spanning-tree recomputes flushed across both nets — the D2c
     /// coalescing witness (rises once per flushed net per tick window).
     recomputes: Counter,
@@ -3530,6 +3622,14 @@ const TABLES_WRITER_FIRST_AFTER: Duration = Duration::from_millis(10);
 /// The bound keeps a frame from holding the tables against the other faces for longer than this
 /// many declarations take: a frame of the batch size carries a few thousand of them.
 const TABLE_WRITES_PER_GUARD: usize = 64;
+
+/// How many table-reading messages of one frame are routed under one read of the tables
+/// ([`RouterForwarder::forward_frame`]). Upstream's data path takes its read lock once for a Put
+/// (`zenoh/src/net/routing/dispatcher/pubsub.rs` @ `let rtables = zread!(tables_ref.tables);`);
+/// a read taken for each message of a frame cost each Put a read of the tables' cell besides. The
+/// bound keeps one frame from holding a read for longer than a writer that has waited
+/// [`TABLES_WRITER_FIRST_AFTER`] should wait behind it.
+const TABLE_READS_PER_GUARD: usize = 64;
 
 /// How a log line names the remote node of a face: its zid as zenoh prints it, or `-` for a face
 /// whose peer has not told one (a client that never surfaced an id).
@@ -4179,9 +4279,9 @@ impl RouterForwarder {
 
     /// [`Self::on_tables`] for a face's own frame, taken behind a writer that has waited
     /// [`TABLES_WRITER_FIRST_AFTER`] ([`TablesCell::read_behind_a_writer_waiting`]): every face's
-    /// thread takes the tables once per message, and with the recursive read alone their guards
-    /// overlap without end, so that a face coming up, a declaration or a face leaving waits for as
-    /// long as the faces route. Only where the thread holds no guard of the tables, which is the
+    /// thread takes the tables once for each run of a frame's messages, and with the recursive read
+    /// alone their guards overlap without end, so that a face coming up, a declaration or a face
+    /// leaving waits for as long as the faces route. Only where the thread holds no guard of the tables, which is the
     /// top of [`Self::forward_frame`]: a face's drive calls it with nothing held. Under the
     /// `snapshot` value no reader keeps a writer out, and this is [`Self::on_tables`].
     #[cfg_attr(debug_assertions, track_caller)]
@@ -4485,6 +4585,9 @@ router_entry_points! { on_tables:
     fn deferred_client_delivery_seen(&self) -> usize;
     fn fan_out_face_visits(&self) -> usize;
     fn held_route_closed_skips(&self) -> usize;
+    fn client_carrier_encodes(&self) -> usize;
+    fn client_carrier_copies(&self) -> usize;
+    fn frame_table_reads(&self) -> usize;
     #[cfg(feature = "router-multicast-faces")]
     fn mcast_ingress_federated(&self) -> usize;
     #[cfg(feature = "router-multicast-faces")]
@@ -5258,6 +5361,13 @@ impl RouterForwarder {
             egress_interceptor_cache_recomputes: Counter::new(),
             interceptor_dropped: Counter::new(),
             held_route_closed_skips: Counter::new(),
+            client_carrier_encodes: Counter::new(),
+            client_carrier_copies: Counter::new(),
+            #[cfg(test)]
+            alias_legs_served: Counter::new(),
+            #[cfg(test)]
+            alias_legs_kept: Counter::new(),
+            frame_table_reads: Counter::new(),
             recomputes: Counter::new(),
             trees_delay: Self::DEFAULT_TREES_DELAY,
             clock,
@@ -5851,6 +5961,29 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// since the route was computed (see the field).
     pub fn held_route_closed_skips(&self) -> usize {
         self.held_route_closed_skips.get()
+    }
+
+    /// The client carriers encoded to shared bytes so far (see the field): one a fan-out, where a
+    /// carrier encoded for each face would count one a face.
+    pub fn client_carrier_encodes(&self) -> usize {
+        self.client_carrier_encodes.get()
+    }
+
+    /// The client carriers made by copying the Put routed (see the field).
+    pub fn client_carrier_copies(&self) -> usize {
+        self.client_carrier_copies.get()
+    }
+
+    /// The client legs served from those the faces keep for their aliases, and those kept there
+    /// (see the fields).
+    #[cfg(test)]
+    fn alias_legs(&self) -> (usize, usize) {
+        (self.alias_legs_served.get(), self.alias_legs_kept.get())
+    }
+
+    /// The reads of the tables the faces' frames took for their reading messages (see the field).
+    pub fn frame_table_reads(&self) -> usize {
+        self.frame_table_reads.get()
     }
 
     /// I3c — count of mcast-ingress Pushes this router FEDERATED into the mesh as
@@ -6482,6 +6615,37 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         )
     }
 
+    /// [`Self::client_leg`] for a Put routed by `key`, in the client region `region` that `hat`
+    /// serves. A Put that named one of its face's aliases with no suffix is served the leg the
+    /// face keeps for that alias ([`AliasRoutes`]) when it was read from the memo these tables
+    /// hold, as upstream serves a Put the route cached on the resource its mapping names
+    /// (`zenoh/src/net/routing/dispatcher/pubsub.rs` @ `fn get_data_route(`). Any other Put, and
+    /// that one when no leg is served, is routed by its key's text, and a leg read so for an alias
+    /// is kept on the face for the next Put that names it. A memo that is not at these tables'
+    /// inputs (a writer's draft) serves and keeps nothing for an alias.
+    fn client_leg_for(
+        &self,
+        region: Region,
+        hat: &BrokerHat,
+        key: RoutedKey<'_>,
+        wire: bool,
+    ) -> Arc<[HeldFace]> {
+        let memo = &hat.client_routes;
+        let Some((legs, id)) = key.alias.filter(|_| memo.is_at(client_inputs(&hat.subs))) else {
+            return self.client_leg(hat, key.text, wire);
+        };
+        if let Some(route) = legs.get(id, region, memo) {
+            #[cfg(test)]
+            self.alias_legs_served.bump();
+            return route;
+        }
+        let route = self.client_leg(hat, key.text, wire);
+        legs.keep(id, region, memo, &route);
+        #[cfg(test)]
+        self.alias_legs_kept.bump();
+        route
+    }
+
     /// Whether any client face holds a subscription at all. The node's own session is not a
     /// client here: what it hosts is delivered by its own dispatch, and a client's deferral is
     /// counted only where a client was owed a copy.
@@ -6584,7 +6748,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         Ok(sent)
     }
 
-    /// Send to each of `targets` that is a face of `tier` the Put `build` produces for it,
+    /// Send to each of `targets` that is a face of `tier` the carrier `build` names for it,
     /// returning the count of faces that accepted one — the TARGETED twin of
     /// [`fan_out_tier_qos`](Self::fan_out_tier_qos), for a caller that already knows which faces
     /// a message goes to (a cached client route, which holds its faces).
@@ -6592,15 +6756,17 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// Its cost is the number of targets, not the number of faces the router holds, and no target
     /// is looked up: the route holds what a send reads of each face. A target of another tier is
     /// skipped, and one that left the tables since the route was computed is skipped by
-    /// [`egress_held`](Self::egress_held), the send every target goes through.
-    fn fan_out_to_held_faces(
+    /// [`egress_held_shared`](Self::egress_held_shared), the send every target goes through. The
+    /// targets are handed one carrier, encoded once for all of them where they can be sent its
+    /// bytes.
+    fn fan_out_to_held_faces<'c>(
         &self,
         tier: Region,
         targets: &[HeldFace],
         reliable: bool,
         priority: Priority,
         express: bool,
-        mut build: impl FnMut(FaceId) -> Option<LiteralPush>,
+        mut build: impl FnMut(FaceId) -> Option<&'c SharedCarrier<'c>>,
     ) -> usize {
         let mut sent = 0;
         for face in targets {
@@ -6609,7 +6775,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 continue;
             }
             if let Some(carrier) = build(face.id) {
-                if self.egress_held(face, carrier, reliable, express, priority) {
+                if self.egress_held_shared(face, carrier, reliable, express, priority) {
                     sent += 1;
                 }
             }
@@ -6687,7 +6853,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     fn egress_held(
         &self,
         face: &HeldFace,
-        carrier: LiteralPush,
+        carrier: LiteralPush<'_>,
         reliable: bool,
         express: bool,
         priority: Priority,
@@ -6707,6 +6873,66 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             express,
             priority,
         )
+    }
+
+    /// [`egress_held`](Self::egress_held) of the carrier of a fan-out, sent as the bytes the carrier
+    /// was encoded to once for every face, so that nothing of the message is copied, measured or
+    /// encoded for this face. Only where this face would be sent exactly those bytes
+    /// ([`sends_shared`](Self::sends_shared)); any other face is sent a copy through
+    /// [`egress_held`](Self::egress_held). What the shared send skips of
+    /// [`egress_through`](Self::egress_through) is what `sends_shared` found empty: no egress
+    /// interceptor to admit or rewrite the message, and no routing to record on it.
+    fn egress_held_shared(
+        &self,
+        face: &HeldFace,
+        carrier: &SharedCarrier<'_>,
+        reliable: bool,
+        express: bool,
+        priority: Priority,
+    ) -> bool {
+        let push = carrier.push();
+        if !self.sends_shared(push.as_push(), reliable) {
+            return self.egress_held(face, push.clone(), reliable, express, priority);
+        }
+        if face.is_closed() {
+            self.held_route_closed_skips.bump();
+            return false;
+        }
+        let send = face.send_face();
+        route_event!(
+            "node {} sends to face {:?} (remote {:?}): {}",
+            self.own_zid,
+            face.id,
+            send.peer_zid,
+            Crossing::Push(push.as_push())
+        );
+        let encoded = carrier.encoded(|| self.client_carrier_encodes.bump());
+        match self.credited_send_shared(face.id, send, push, encoded, reliable, express, priority) {
+            egress::Credited::Sent => {
+                self.note_sent(true);
+                true
+            }
+            egress::Credited::Held => true,
+            egress::Credited::Refused => false,
+        }
+    }
+
+    /// Whether a face of a fan-out is sent the carrier's shared bytes rather than a message of its
+    /// own: the Put goes through the credit stage (reliable, not droppable, sent on behalf of a face
+    /// that can be gated, no shared memory), and no egress interceptor is installed to read it or
+    /// rewrite its QoS for one destination.
+    #[cfg(not(feature = "pubsub-ts-stack"))]
+    fn sends_shared(&self, push: &PushOwned, reliable: bool) -> bool {
+        reliable
+            && self.held_push_lane(push).is_some()
+            && self.egress_interceptors.read().is_empty()
+    }
+
+    /// With `pubsub-ts-stack` a router records its routing on the message once for each destination
+    /// it is sent to, so no two faces are sent the same bytes.
+    #[cfg(feature = "pubsub-ts-stack")]
+    fn sends_shared(&self, _push: &PushOwned, _reliable: bool) -> bool {
+        false
     }
 
     /// The egress both doors share: the egress interceptors over `context`, the QoS overwrite, the
@@ -7098,6 +7324,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             return;
         };
         absorb_keyexpr_into(&mut state.keyexpr_table, declare);
+        // A leg kept for an alias was routed by the key the alias named when it was kept.
+        state.alias_routes = Arc::default();
     }
 
     /// R2876 (step 3e) — resolve a declaration on `inbound` against the hat
@@ -8778,7 +9006,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let Some(_held) = self.open_shm_relay_pass(inbound, push) else {
             return;
         };
-        let Some(keyexpr) = self.resolve_inbound_keyexpr(inbound, push) else {
+        let mut composed = KeyexprBuf::new();
+        let Some((keyexpr, alias)) = self.resolve_inbound_keyexpr(inbound, push, &mut composed)
+        else {
             return;
         };
         // The §5.18 forward-path stamp, taken ONCE, by the first block below whose
@@ -8835,7 +9065,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // so a relayed Put keeps its priority end-to-end. The mcast-group egress
         // (broadcast_to_mcast_groups) is the one remaining DEFAULT wire egress — the
         // 2-channel mcast plane has no per-priority conduit (residual, not inert).
-        self.forward_push_tier(inbound, tier, reliable, priority, &stamp);
+        self.forward_push_tier(inbound, tier, reliable, priority, &stamp, &keyexpr);
         // Blocks 1 & 2 — the filtered cross-mesh bridge (a received-frame transit
         // re-injected into the other mesh; preserves the band).
         let origin = (src_zid.as_ref(), fwd_zid.as_ref());
@@ -8883,7 +9113,10 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 express: false,
             },
             &stamp,
-            &keyexpr,
+            RoutedKey {
+                text: &keyexpr,
+                alias,
+            },
             defer,
         );
         // Block 3b (R2393) — local HOST delivery: a subscriber this router itself
@@ -9191,28 +9424,46 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         false
     }
 
-    /// Resolve a `Push`'s wire keyexpr against the inbound face's alias table —
-    /// the scoped-borrow head [`route_push`](Self::route_push) runs ONCE to elect
-    /// the master and feed the client-delivery / bridge / publish legs the literal
-    /// keyexpr. (The within-tier [`forward_push_tier`](Self::forward_push_tier)
-    /// resolves again in its own borrow, since it also needs the inbound zid/link
-    /// there; `resolve_wireexpr` is pure, so the two resolutions are identical.)
+    /// Resolve a `Push`'s wire keyexpr against the inbound face's alias table — the scoped-borrow
+    /// head [`route_push`](Self::route_push) runs ONCE for every leg of the route, the within-tier
+    /// one included. The key is lent where one string already is it ([`lent_keyexpr`]), as
+    /// upstream finds a Put's key by its mapping and composes no text
+    /// (`zenoh/src/net/routing/dispatcher/pubsub.rs` @
+    /// `.get_mapping(src_face, &msg.wire_expr.scope, msg.wire_expr.mapping)`).
     /// `None` = the face is gone or the alias id is unknown (drop the Push).
-    fn resolve_inbound_keyexpr(&self, inbound: FaceId, push: &PushOwned) -> Option<String> {
+    ///
+    /// With the key, the legs the inbound face keeps for the alias the Put named, when it named one
+    /// of the face's aliases with no suffix ([`RoutedKey`]).
+    fn resolve_inbound_keyexpr<'k>(
+        &'k self,
+        inbound: FaceId,
+        push: &'k PushOwned,
+        composed: &'k mut KeyexprBuf,
+    ) -> Option<(Cow<'k, str>, Option<AliasOf<'k>>)> {
         let faces = &self.tables.faces;
         // R2734 — this is the ONE site that recognised the sentinel before the
         // classifier existed, and it is why Push worked at all while every other
         // kind died at its lookup. It now asks the same question the other eleven
         // ask, so the special case is the enum's rather than this function's.
         match classify_inbound(faces, inbound) {
-            InboundFace::Held(s) => resolve_wireexpr(&push.keyexpr.body, &s.keyexpr_table),
+            InboundFace::Held(s) => {
+                let text = lent_keyexpr(push, &s.keyexpr_table, composed)?;
+                // A key that resolved from an id with no suffix is the face's alias for that id,
+                // whose legs the face keeps.
+                let alias = match id_and_suffix(&push.keyexpr.body) {
+                    (id, None) if id != 0 => Some((&*s.alias_routes, peer_key(id))),
+                    _ => None,
+                };
+                Some((text, alias))
+            }
             // A source-only face carries no per-peer alias table, so a literal
             // (id==0) push yields its suffix and an aliased id-only push yields
             // None and is dropped. wz resolves a group peer's aliases UPSTREAM of
             // here, per peer by source address, in `apply_declared_aliases`.
-            InboundFace::SourceOnly => {
-                resolve_wireexpr(&push.keyexpr.body, &hashbrown::HashMap::new())
-            }
+            InboundFace::SourceOnly => match id_and_suffix(&push.keyexpr.body) {
+                (0, suffix) => suffix.map(|text| (Cow::Borrowed(text), None)),
+                _ => None,
+            },
             InboundFace::Gone => None,
         }
     }
@@ -9392,6 +9643,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         reliable: bool,
         priority: Priority,
         stamp: &ForwardStamp<'_>,
+        keyexpr: &str,
     ) {
         let push = stamp.received();
         // R2889 (open-debt item 751, step 8b) — not within a region the pin's
@@ -9406,9 +9658,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let Some(hat) = self.mesh_hat(tier) else {
             return; // Client tier: no mesh -> within-tier routes nowhere (C2/C3).
         };
-        // Resolve the keyexpr against the inbound face's alias table + read its
-        // zid / link in one scoped borrow (an unresolvable alias drops the Push).
-        let (inbound_zid, inbound_link, keyexpr) = {
+        // The inbound face's zid and link, in one scoped borrow; its key is the one the
+        // [`route_push`](Self::route_push) head resolved against the same face's aliases.
+        let (inbound_zid, inbound_link) = {
             let faces = &self.tables.faces;
             // R2734 — SourceOnly declines, and this one is a REAL routing
             // decision rather than a formality: the within-tier mesh transit of a
@@ -9422,10 +9674,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 InboundFace::Held(s) => s,
                 InboundFace::SourceOnly | InboundFace::Gone => return,
             };
-            let Some(keyexpr) = resolve_wireexpr(&push.keyexpr.body, &s.keyexpr_table) else {
-                return;
-            };
-            (s.peer_zid, s.link, keyexpr)
+            (s.peer_zid, s.link)
         };
         let names = |k: &str| self.names_a_resource(k);
         let Some((carrier, children)) = compute_push_forward(
@@ -9438,7 +9687,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             inbound_zid,
             inbound_link,
             push,
-            &keyexpr,
+            keyexpr,
             || stamp.for_egress(),
         ) else {
             return;
@@ -9486,7 +9735,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         inbound_tier: Region,
         egress: Egress,
         stamp: &ForwardStamp<'_>,
-        keyexpr: &str,
+        key: RoutedKey<'_>,
         defer: bool,
     ) {
         let Egress {
@@ -9494,6 +9743,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             priority,
             express,
         } = egress;
+        let keyexpr = key.text;
         // Deliver to each Client-tier face subscribing a keyexpr that INTERSECTS
         // the published K, excluding the inbound face (never echo a client's own
         // Push back to it). Wildcard-aware via the SAME `keyexpr_intersects`
@@ -9522,7 +9772,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 // them away, so a Put one of them subscribes takes the stamp.
                 let routed = self
                     .client_regions()
-                    .any(|(_, hat)| !self.client_leg(hat, keyexpr, wire).is_empty());
+                    .any(|(region, hat)| !self.client_leg_for(region, hat, key, wire).is_empty());
                 if routed {
                     let _ = stamp.for_egress();
                 }
@@ -9534,8 +9784,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         }
         // Re-literalized once, from the stamped Push, by the first region whose route
         // has a client (payload / encoding / attachment preserved, literal keyexpr for
-        // the client leaf); the fan-out clones it per matching client. `keyexpr` is
-        // resolved once by the [`route_push`](Self::route_push) head.
+        // the client leaf); every matching client of every region is handed that one
+        // carrier, encoded at most once (`SharedCarrier`). `keyexpr` is resolved once
+        // by the [`route_push`](Self::route_push) head.
         //
         // A client subscriber is a LEAF, not a routing-graph node: reset the Push's
         // routing source node-id to 0 (set_push_source(_, 0) omits the ext, zenoh's
@@ -9546,8 +9797,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // mandatory ext_nodeid id 0x03). Faithful to zenoh pubsub.rs (a client-sub
         // data-route direction node-id is NodeId::default()=0). The DATA-plane twin of
         // the R311y179 forward_request_to_client_queryables source-reset fix.
-        let carry = || client_carrier(stamp.for_egress()?, keyexpr);
-        let mut carrier: Option<LiteralPush> = None;
+        let carry = || {
+            let carrier = client_carrier(stamp.for_egress()?, keyexpr)?;
+            if !carrier.is_lent() {
+                self.client_carrier_copies.bump();
+            }
+            Some(SharedCarrier::new(carrier))
+        };
+        let mut carrier: Option<SharedCarrier<'_>> = None;
         // R311y225 — preserve the received band on the CLIENT-face egress (the y224
         // residual): route through `fan_out_tier_qos` on the frame's `priority`, so a
         // QoS-negotiated client observes the same band the mesh legs carry (zenoh
@@ -9560,7 +9817,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // R2873 (step 3d) — one fan-out per broker hat, each scoped to the
         // region that hat owns and reading that hat's own table.
         for (region, hat) in self.client_regions() {
-            let clients = self.client_leg(hat, keyexpr, wire);
+            let clients = self.client_leg_for(region, hat, key, wire);
             if clients.is_empty() {
                 continue;
             }
@@ -9576,7 +9833,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             // cost follows the subscribers and not the faces the router holds.
             let _ =
                 self.fan_out_to_held_faces(region, &clients, reliable, priority, express, |id| {
-                    (id != inbound).then(|| carrier.clone())
+                    (id != inbound).then_some(carrier)
                 });
         }
     }
@@ -12072,7 +12329,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 Region::Local,
                 egress,
                 &settled,
-                keyexpr,
+                RoutedKey::of_text(keyexpr),
                 false,
             );
         }
@@ -14120,6 +14377,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // a routing zid joins the matching net; a Client face — or one whose
         // zid never surfaced — is HELD without a graph link (it routes nothing).
         let registering = Instant::now();
+        hold_face_link(self.tables.node_mode, actions);
         let whatami = peer_whatami_routing(actions);
         // A face the rules cannot place was refused by `refuses_face` before it got
         // here; a caller that registers one anyway holds it in the `Local` region,
@@ -14175,6 +14433,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 link: added.map(|(link, _, _)| link),
                 keyexpr_table: hashbrown::HashMap::new(),
                 initial_final: false,
+                alias_routes: Arc::default(),
             }),
         );
         // A face held under the same id before is gone, as a face that left is: a route that
@@ -14511,6 +14770,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     ) where
         T: std::ops::DerefMut,
     {
+        hold_face_link(self.tables.node_mode, actions);
         self.tables.joined_links_mut().insert(
             joined_id,
             JoinedLink {
@@ -14749,9 +15009,34 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     }
 }
 
+/// The reading messages of one frame that share one read of the tables
+/// ([`TABLE_READS_PER_GUARD`]). The fields drop in their order, so the tables are let go before
+/// the calls the run owes the node's own session are made.
+struct ReadRun<'a> {
+    on: OnTables<'a, TablesRead<'a>>,
+    deliveries: local_publish::DeliveryScope<'a>,
+    /// The messages routed under `on` so far.
+    held: usize,
+}
+
+impl<'a> ReadRun<'a> {
+    /// A run of the frame of a face: the span its calls are owed in is opened before the tables
+    /// are taken ([`RouterForwarder::on_tables_for_a_frame`]), so that it ends after they are let
+    /// go.
+    fn begin(fwd: &'a RouterForwarder) -> Self {
+        let deliveries = local_publish::DeliveryScope::enter(fwd);
+        fwd.frame_table_reads.bump();
+        Self {
+            on: fwd.on_tables_for_a_frame(),
+            deliveries,
+            held: 0,
+        }
+    }
+}
+
 impl RouterForwarder {
-    /// One frame from face `id`, a message at a time, each taking the tables for the kind of work
-    /// it is (`docs/router-task-per-face.md`, phase 3e): the data and query planes read them, so
+    /// One frame from face `id`, a message at a time, under the tables taken for the kind of work
+    /// each is (`docs/router-task-per-face.md`, phase 3e): the data and query planes read them, so
     /// that frames of different faces route at once, and a declaration, a topology message or an
     /// interest writes them, alone.
     ///
@@ -14760,6 +15045,10 @@ impl RouterForwarder {
     /// as the ones before it left them, in the frame's order, which is what one write each did.
     /// A message that reads ends the write first, so that it is routed by every declaration the
     /// frame carried before it, and the data between declarations is not held behind them.
+    ///
+    /// Consecutive reading messages share one read, up to [`TABLE_READS_PER_GUARD`] of them
+    /// ([`ReadRun`]). A message that writes ends the read first, and so does a message whose
+    /// route owes the node's own session a call, which is made before the next message is routed.
     fn forward_frame(&self, id: FaceId, event: IterationEvent<'_, '_>) {
         let IterationEvent::Poll(DriverLoopOutcome::FramePayload {
             messages,
@@ -14806,6 +15095,7 @@ impl RouterForwarder {
         // is published while they stand, as one ended inside the loop is.
         let mut writing: Option<OnTables<'_, WrittenTables<'_>>> = None;
         let mut writes_held = 0usize;
+        let mut reading: Option<ReadRun<'_>> = None;
         for message in messages {
             // A topology message, a declaration and an interest write the tables; every other
             // kind reads them.
@@ -14813,6 +15103,11 @@ impl RouterForwarder {
                 message,
                 NetworkMessage::Oam(_) | NetworkMessage::Declare(_) | NetworkMessage::Interest(_)
             );
+            // A writer may not take the tables while this thread reads them, and the calls the
+            // reads owe are made before the write.
+            if writes {
+                reading = None;
+            }
             // A reader may not take the tables while this thread holds them for writing, and is
             // owed the writes before it published; a full run lets the other faces in.
             if !writes || writes_held == TABLE_WRITES_PER_GUARD {
@@ -14911,10 +15206,18 @@ impl RouterForwarder {
             } else {
                 // The subscribers and the queryables of the node's own session are the program's
                 // callbacks, which may use the session and so write the tables: they are handed
-                // what this message brings once the guard below is let go. Declared before it, so
-                // it ends after it.
-                let deliveries = local_publish::DeliveryScope::enter(self);
-                let on = self.on_tables_for_a_frame();
+                // what a message brings once the read is let go, and a message that owes them a
+                // call ends the run below, so that the next message is routed by what the call
+                // changed. A full run lets the writers in.
+                if reading
+                    .as_ref()
+                    .is_some_and(|run| run.held == TABLE_READS_PER_GUARD)
+                {
+                    reading = None;
+                }
+                let run = reading.get_or_insert_with(|| ReadRun::begin(self));
+                run.held += 1;
+                let (on, deliveries) = (&run.on, &run.deliveries);
                 if !on.admits_ingress(id, message) {
                     continue;
                 }
@@ -14947,7 +15250,7 @@ impl RouterForwarder {
                     // BestMatching region by region, C5b).
                     NetworkMessage::Request(request) => {
                         self.queries_seen.bump();
-                        on.route_request(id, tier, *reliable, request, None, &deliveries);
+                        on.route_request(id, tier, *reliable, request, None, deliveries);
                     }
                     // A queryable's reply: route it BACK toward the querier via the
                     // pending table (C5c) — peek on a Response (more replies may
@@ -14960,6 +15263,9 @@ impl RouterForwarder {
                         on.forward_response_final(id, *reliable, response_final);
                     }
                     _ => {}
+                }
+                if deliveries.owes() {
+                    reading = None;
                 }
             }
         }
@@ -20772,10 +21078,10 @@ mod tests {
     }
 
     /// The carrier of a Put of `keyexpr`, as the client leg sends it.
-    fn literal_put(keyexpr: &str) -> LiteralPush {
+    fn literal_put(keyexpr: &str) -> LiteralPush<'static> {
         let push =
             wz_session_core::push_build::build_push_literal(keyexpr, b"x").expect("build push");
-        client_carrier(&push, keyexpr).expect("a literal carrier")
+        LiteralPush::new(push).expect("a literal carrier")
     }
 
     /// The targeted fan-out asks only the targets of its tier, skips one of another tier without
@@ -20797,6 +21103,7 @@ mod tests {
             sink.reset();
         }
         let asked = RefCell::new(Vec::new());
+        let carrier = SharedCarrier::new(literal_put("demo/c1"));
         let (visits, skips) = (fwd.fan_out_face_visits(), fwd.held_route_closed_skips());
         let sent = fwd.on_tables().fan_out_to_held_faces(
             client_tier,
@@ -20806,7 +21113,7 @@ mod tests {
             false,
             |id| {
                 asked.borrow_mut().push(id);
-                Some(literal_put("demo/c1"))
+                Some(&carrier)
             },
         );
         assert_eq!(sent, 1, "face 2 was sent the Put");
@@ -20857,13 +21164,14 @@ mod tests {
             fwd.deregister(FaceId(1));
             sink.reset();
             let skips = fwd.held_route_closed_skips();
+            let carrier = SharedCarrier::new(literal_put("demo/held"));
             let sent = fwd.on_tables().fan_out_to_held_faces(
                 route[0].tier,
                 &route,
                 true,
                 Priority::DEFAULT,
                 false,
-                |_| Some(literal_put("demo/held")),
+                |_| Some(&carrier),
             );
             assert_eq!(sent, 0, "{}", sharing.id());
             assert_eq!(
@@ -20927,18 +21235,390 @@ mod tests {
     }
 
     /// The client leg's carrier is a literal whatever the Put it is made from named: an aliased
-    /// Put's carrier names the key the router resolved, and a literal Put's its own. Turned red by
-    /// a client leg that hands the held egress a carrier it did not re-key.
+    /// Put's carrier names the key the router resolved, and a literal Put's its own. A literal that
+    /// names no source is lent as it came; an aliased Put, and a literal that names a source, are
+    /// copied, the second with its source reset. Turned red by a client leg that hands the held
+    /// egress a carrier it did not re-key, copies a Put that needs no change, or lends one that
+    /// names a source.
     #[test]
     fn the_client_leg_carries_a_literal_whatever_the_put_named() {
         let aliased =
             wz_session_core::push_build::build_push_aliased(5, None, b"x").expect("aliased push");
         let carrier = client_carrier(&aliased, "demo/resolved").expect("a carrier");
         assert_eq!(carrier.keyexpr(), "demo/resolved");
+        assert!(!carrier.is_lent(), "an aliased Put is re-keyed in a copy");
         let literal = wz_session_core::push_build::build_push_literal("demo/own", b"x")
             .expect("literal push");
         let carrier = client_carrier(&literal, "demo/own").expect("a carrier");
         assert_eq!(carrier.keyexpr(), "demo/own");
+        assert!(carrier.is_lent(), "a literal that names no source is lent");
+        let mut sourced = literal.clone();
+        set_push_source(&mut sourced, 7).expect("a source");
+        let carrier = client_carrier(&sourced, "demo/own").expect("a carrier");
+        assert!(!carrier.is_lent(), "a Put that names a source is copied");
+        assert_eq!(
+            read_push_source(carrier.as_push()),
+            0,
+            "with its source reset"
+        );
+        assert!(!push_names_a_source(carrier.as_push()));
+    }
+
+    /// A Put's key is lent from the message for a literal and from the face's aliases for an alias
+    /// with no suffix, and composed only for an alias with a suffix; an alias the face did not
+    /// declare resolves to nothing. Turned red by a resolution that copies a key one string
+    /// already is.
+    #[test]
+    fn a_puts_key_is_lent_unless_a_suffix_must_be_composed() {
+        use wz_session_core::push_build::{build_push_aliased, build_push_literal};
+        let aliases: hashbrown::HashMap<u64, String> =
+            [(5, "demo/a".to_owned())].into_iter().collect();
+        let literal = build_push_literal("demo/x", b"x").expect("literal push");
+        let alias = build_push_aliased(5, None, b"x").expect("aliased push");
+        let suffixed = build_push_aliased(5, Some("/b"), b"x").expect("aliased push");
+        let unknown = build_push_aliased(6, None, b"x").expect("aliased push");
+
+        let mut composed = KeyexprBuf::new();
+        let key = lent_keyexpr(&literal, &aliases, &mut composed).expect("a literal resolves");
+        assert_eq!(&*key, "demo/x");
+        let (_, suffix) = id_and_suffix(&literal.keyexpr.body);
+        assert_eq!(
+            key.as_ptr(),
+            suffix.expect("a literal names its key").as_ptr(),
+            "lent from the message"
+        );
+
+        let mut composed = KeyexprBuf::new();
+        let key = lent_keyexpr(&alias, &aliases, &mut composed).expect("a declared alias resolves");
+        assert_eq!(&*key, "demo/a");
+        assert_eq!(
+            key.as_ptr(),
+            aliases[&5].as_ptr(),
+            "lent from the face's aliases"
+        );
+
+        let mut composed = KeyexprBuf::new();
+        let key =
+            lent_keyexpr(&suffixed, &aliases, &mut composed).expect("an alias and its suffix");
+        assert_eq!(&*key, "demo/a/b");
+        let at = key.as_ptr();
+        drop(key);
+        assert_eq!(
+            at,
+            composed.as_str().as_ptr(),
+            "composed in the caller's buffer"
+        );
+
+        let mut composed = KeyexprBuf::new();
+        assert!(lent_keyexpr(&unknown, &aliases, &mut composed).is_none());
+    }
+
+    /// The payload the fan-out tests publish.
+    const FAN_PAYLOAD: &[u8] = b"fan-out-payload";
+
+    /// A Put of `keyexpr` whose congestion control blocks, so the router may not drop it and
+    /// sends it through the credit stage.
+    fn blocking_put_of(keyexpr: &str) -> NetworkMessage {
+        let meta = wz_session_core::metadata::PushMetadata {
+            qos: Some(
+                wz_session_core::sample::QosLevel::DEFAULT
+                    .with_congestion(wz_session_core::qos::CongestionControl::Block),
+            ),
+            ..wz_session_core::metadata::PushMetadata::default()
+        };
+        NetworkMessage::Push(Box::new(
+            wz_session_core::push_build::build_push_literal_with_meta(keyexpr, FAN_PAYLOAD, &meta)
+                .expect("build push"),
+        ))
+    }
+
+    /// A router with one publishing client face (returned) and `subscribers` client faces that
+    /// subscribe `keyexpr`, every subscriber's link emptied of what the set-up sent it.
+    fn clients_subscribed_to(
+        keyexpr: &str,
+        subscribers: usize,
+    ) -> (RouterForwarder, Vec<Arc<RecordingLinkDriver>>, FaceId) {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let publisher = FaceId(1);
+        let (publishing, _) = face(zid(0xAB), WIRE_CLIENT);
+        fwd.register(publisher, &publishing);
+        let sinks: Vec<_> = (0..subscribers)
+            .map(|i| {
+                let id = FaceId(2 + i as u64);
+                let peer = Zid::from_slice(&(0x3000_0000_u32 + i as u32).to_be_bytes());
+                let (client, sink) = face(peer, WIRE_CLIENT);
+                fwd.register(id, &client);
+                forward_one(&fwd, id, declare_sub(keyexpr));
+                sink
+            })
+            .collect();
+        for sink in &sinks {
+            sink.reset();
+        }
+        (fwd, sinks, publisher)
+    }
+
+    /// The network messages a delivered frame carries, without the frame's own header.
+    fn frame_messages(frame: &[u8]) -> Vec<u8> {
+        use crate::session_glue::{parse_inbound, InboundFrame};
+        let InboundFrame::Frame { payload, .. } = parse_inbound(frame).expect("parse a frame")
+        else {
+            panic!("the delivered bytes are not a Frame");
+        };
+        payload.to_vec()
+    }
+
+    /// A Put the router may not drop, fanned out to eight client subscribers, is encoded once for
+    /// the whole fan-out, and every subscriber is sent the same message, which carries the Put's
+    /// payload. Turned red by a fan-out that encodes the carrier again for each face, or that sends
+    /// one face other bytes than the rest.
+    ///
+    /// A build without `pubsub-ts-stack` only: with it a router records its routing on the message
+    /// once for each destination, so no two faces are sent the same bytes and no fan-out is shared
+    /// (`sends_shared`); [`a_fan_out_with_a_timestamp_stack_is_sent_to_each_face_on_its_own`]
+    /// holds that build to it.
+    #[cfg(not(feature = "pubsub-ts-stack"))]
+    #[test]
+    fn a_fan_out_to_many_clients_encodes_its_carrier_once() {
+        const SUBSCRIBERS: usize = 8;
+        let (fwd, sinks, publisher) = clients_subscribed_to("demo/fan", SUBSCRIBERS);
+        let encodes = fwd.client_carrier_encodes();
+        forward_one(&fwd, publisher, blocking_put_of("demo/fan"));
+        assert_eq!(
+            fwd.client_carrier_encodes() - encodes,
+            1,
+            "one encode for {SUBSCRIBERS} subscribers"
+        );
+        let messages: Vec<Vec<u8>> = sinks
+            .iter()
+            .map(|sink| {
+                assert_eq!(
+                    sink.frame_count(),
+                    1,
+                    "every subscriber is sent the Put once"
+                );
+                frame_messages(&sink.frame_bytes(0))
+            })
+            .collect();
+        assert!(
+            messages.iter().all(|message| *message == messages[0]),
+            "every subscriber is sent the same message"
+        );
+        assert!(
+            messages[0]
+                .windows(FAN_PAYLOAD.len())
+                .any(|window| window == FAN_PAYLOAD),
+            "the message carries the Put's payload"
+        );
+        forward_one(&fwd, publisher, blocking_put_of("demo/fan"));
+        assert_eq!(
+            fwd.client_carrier_encodes() - encodes,
+            2,
+            "the next Put is a fan-out of its own, encoded once"
+        );
+    }
+
+    /// With `pubsub-ts-stack` a fan-out is not shared: the router records its routing on the message
+    /// for each destination, so it encodes no shared carrier, and every subscriber is still sent the
+    /// Put once with its payload. Turned red by a timestamp-stack build that shares one encoding
+    /// among faces whose messages must differ, or that loses a subscriber's copy.
+    #[cfg(feature = "pubsub-ts-stack")]
+    #[test]
+    fn a_fan_out_with_a_timestamp_stack_is_sent_to_each_face_on_its_own() {
+        const SUBSCRIBERS: usize = 8;
+        let (fwd, sinks, publisher) = clients_subscribed_to("demo/fan", SUBSCRIBERS);
+        let encodes = fwd.client_carrier_encodes();
+        forward_one(&fwd, publisher, blocking_put_of("demo/fan"));
+        assert_eq!(
+            fwd.client_carrier_encodes(),
+            encodes,
+            "no shared carrier is encoded"
+        );
+        for sink in &sinks {
+            assert_eq!(
+                sink.frame_count(),
+                1,
+                "every subscriber is sent the Put once"
+            );
+            assert!(
+                frame_messages(&sink.frame_bytes(0))
+                    .windows(FAN_PAYLOAD.len())
+                    .any(|window| window == FAN_PAYLOAD),
+                "each message carries the Put's payload"
+            );
+        }
+    }
+
+    /// A session sends a Push as its shared encoding in the same message it sends the Push itself
+    /// in: the probe of the shared bytes and the probe of the message put the same bytes in their
+    /// frames. Turned red by a shared send that frames anything but the encoding it is handed.
+    #[test]
+    fn a_push_sent_as_its_encoding_is_framed_as_the_push_itself() {
+        use wz_session_core::session_actions::EncodedPush;
+        let push = match blocking_put_of("demo/framed") {
+            NetworkMessage::Push(push) => *push,
+            _ => unreachable!("blocking_put_of builds a Push"),
+        };
+        let (as_message, message_sink) = recording_actions();
+        let (as_bytes, bytes_sink) = recording_actions();
+        as_message
+            .try_send_network_message_qos(
+                NetworkMessage::Push(Box::new(push.clone())),
+                true,
+                false,
+                Priority::DEFAULT,
+            )
+            .expect("the message is sent");
+        as_bytes
+            .try_send_encoded_push_qos(
+                &push,
+                &EncodedPush::of(&push),
+                true,
+                false,
+                Priority::DEFAULT,
+            )
+            .expect("the bytes are sent");
+        assert_eq!(message_sink.frame_count(), 1);
+        assert_eq!(bytes_sink.frame_count(), 1);
+        assert_eq!(
+            frame_messages(&bytes_sink.frame_bytes(0)),
+            frame_messages(&message_sink.frame_bytes(0)),
+        );
+    }
+
+    /// The Puts whose fan-out is not sent as shared bytes encode no shared carrier: one the router
+    /// may drop, and one on a best-effort channel, keep the send they had and still reach every
+    /// subscriber, a copy each; one nobody subscribes reaches nobody. Turned red by a shared
+    /// encoding made for a Put outside the credit stage, or for a fan-out with no destination.
+    #[test]
+    fn a_fan_out_outside_the_credit_stage_encodes_no_shared_carrier() {
+        let (fwd, sinks, publisher) = clients_subscribed_to("demo/fan", 3);
+        let encodes = fwd.client_carrier_encodes();
+        let droppable = wz_session_core::push_build::build_push_literal("demo/fan", FAN_PAYLOAD)
+            .expect("build push");
+        forward_one(&fwd, publisher, NetworkMessage::Push(Box::new(droppable)));
+        forward_one_reliability(&fwd, publisher, blocking_put_of("demo/fan"), false);
+        forward_one(&fwd, publisher, blocking_put_of("demo/nobody"));
+        assert_eq!(
+            fwd.client_carrier_encodes(),
+            encodes,
+            "no fan-out above is sent as shared bytes"
+        );
+        for sink in &sinks {
+            assert_eq!(
+                sink.frame_count(),
+                2,
+                "the droppable and the best-effort Put each reach every subscriber"
+            );
+        }
+    }
+
+    /// A literal Put from a client is fanned out to its subscribers as it came, with no copy made
+    /// for the fan-out, whether it may be dropped or not; a Put that names an alias is copied once,
+    /// re-keyed, for all of its subscribers. Every subscriber is sent each Put. Turned red by a
+    /// fan-out that copies a Put which needs no change, or that copies once for each face.
+    #[test]
+    fn a_literal_put_is_fanned_out_without_a_copy_and_an_aliased_one_with_one() {
+        let (fwd, sinks, publisher) = clients_subscribed_to("demo/fan", 3);
+        let copies = fwd.client_carrier_copies();
+        forward_one(&fwd, publisher, blocking_put_of("demo/fan"));
+        let droppable = wz_session_core::push_build::build_push_literal("demo/fan", FAN_PAYLOAD)
+            .expect("build push");
+        forward_one(&fwd, publisher, NetworkMessage::Push(Box::new(droppable)));
+        assert_eq!(
+            fwd.client_carrier_copies(),
+            copies,
+            "a literal Put is lent to its fan-out"
+        );
+        forward_one(
+            &fwd,
+            publisher,
+            NetworkMessage::Declare(Box::new(
+                wz_session_core::declare_build::build_declare_kexpr(5, "demo/fan").expect("kexpr"),
+            )),
+        );
+        let aliased = wz_session_core::push_build::build_push_aliased(5, None, FAN_PAYLOAD)
+            .expect("aliased push");
+        forward_one(&fwd, publisher, NetworkMessage::Push(Box::new(aliased)));
+        assert_eq!(
+            fwd.client_carrier_copies() - copies,
+            1,
+            "one copy for the aliased Put's three subscribers"
+        );
+        for sink in &sinks {
+            assert_eq!(sink.frame_count(), 3, "every subscriber is sent every Put");
+        }
+    }
+
+    /// A Put that names its face's alias with no suffix is routed by the leg the face keeps for the
+    /// alias from its second Put on, and the leg follows the tables: a subscriber that comes, and
+    /// the alias naming another key, have the leg read again by the key. Turned red by a leg served
+    /// after the subscribers it was read for changed or after its alias named another key, or by an
+    /// aliased Put whose leg is looked up by its key every time.
+    #[test]
+    fn an_aliased_put_is_routed_by_the_leg_its_face_keeps_for_the_alias() {
+        let (fwd, sinks, publisher) = clients_subscribed_to("demo/fan", 2);
+        let alias = |keyexpr: &str| {
+            NetworkMessage::Declare(Box::new(
+                wz_session_core::declare_build::build_declare_kexpr(5, keyexpr).expect("kexpr"),
+            ))
+        };
+        let aliased_put = || {
+            NetworkMessage::Push(Box::new(
+                wz_session_core::push_build::build_push_aliased(5, None, FAN_PAYLOAD)
+                    .expect("aliased push"),
+            ))
+        };
+        let legs = || fwd.on_tables().alias_legs();
+        forward_one(&fwd, publisher, alias("demo/fan"));
+        let (served, kept) = legs();
+        forward_one(&fwd, publisher, aliased_put());
+        assert_eq!(
+            legs(),
+            (served, kept + 1),
+            "the first Put reads the leg by its key and keeps it"
+        );
+        forward_one(&fwd, publisher, aliased_put());
+        forward_one(&fwd, publisher, aliased_put());
+        assert_eq!(
+            legs(),
+            (served + 2, kept + 1),
+            "the next two are served the leg kept"
+        );
+        for sink in &sinks {
+            assert_eq!(sink.frame_count(), 3, "every subscriber is sent every Put");
+        }
+
+        // A subscriber that comes moves the memo the leg was read from: the leg is read again,
+        // and reaches it.
+        let (late, late_sink) = face(Zid::from_slice(&0x3000_00ff_u32.to_be_bytes()), WIRE_CLIENT);
+        fwd.register(FaceId(40), &late);
+        forward_one(&fwd, FaceId(40), declare_sub("demo/fan"));
+        late_sink.reset();
+        forward_one(&fwd, publisher, aliased_put());
+        assert_eq!(
+            legs(),
+            (served + 2, kept + 2),
+            "a subscriber that came has the leg read again"
+        );
+        assert_eq!(late_sink.frame_count(), 1, "and the Put reaches it");
+
+        // The alias names a key nobody subscribes: the leg kept for the key before is not served.
+        forward_one(&fwd, publisher, alias("demo/other"));
+        for sink in &sinks {
+            sink.reset();
+        }
+        late_sink.reset();
+        forward_one(&fwd, publisher, aliased_put());
+        assert_eq!(
+            legs(),
+            (served + 2, kept + 3),
+            "an alias that names another key has its leg read again"
+        );
+        assert!(
+            sinks.iter().all(|sink| sink.frame_count() == 0) && late_sink.frame_count() == 0,
+            "no subscriber of the key the alias named before is sent the Put"
+        );
     }
 
     /// R2879 (open-debt item 751, step 5) — a CLIENT-sourced Push leaves its one
