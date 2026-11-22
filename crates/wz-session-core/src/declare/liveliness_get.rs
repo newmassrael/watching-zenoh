@@ -631,6 +631,9 @@ impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
     /// Routes `FramePayload` events through [`Self::dispatch_messages`];
     /// other variants (Lease branch, non-poll outcomes) are no-ops.
     /// `alloc`-gated (consumes owned messages).
+    // Out of line, for the stack: the observer's fan (`SlotObserverOf::dispatch_event_among`)
+    // calls each plane in turn, and each plane's temporaries stay in a frame of its own.
+    #[inline(never)]
     #[cfg(feature = "storage-profile")]
     pub fn dispatch_iteration_event<'a>(
         &mut self,

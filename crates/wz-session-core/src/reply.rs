@@ -1895,6 +1895,9 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     /// ([`IterationEvent::InPlace`]) is delivered as a view over the frame
     /// (`dispatch_response_in_place`); every other lent record is not this
     /// registry's.
+    // Out of line, for the stack: the observer's fan (`SlotObserverOf::dispatch_event_among`)
+    // calls each plane in turn, and each plane's temporaries stay in a frame of its own.
+    #[inline(never)]
     #[cfg(feature = "storage-profile")]
     pub fn dispatch_iteration_event<'a>(
         &mut self,

@@ -300,6 +300,9 @@ impl<D: DeclSink, U: UndeclSink> LivelinessRegistry<D, U> {
 
     /// [`Self::dispatch_iteration_event`] with the claim filter of
     /// [`Self::dispatch_messages_unclaimed`].
+    // Out of line, for the stack: the observer's fan (`SlotObserverOf::dispatch_event_among`)
+    // calls each plane in turn, and each plane's temporaries stay in a frame of its own.
+    #[inline(never)]
     #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
     pub fn dispatch_iteration_event_unclaimed<'a>(
         &mut self,

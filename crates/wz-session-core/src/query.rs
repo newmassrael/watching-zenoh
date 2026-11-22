@@ -3555,6 +3555,9 @@ impl<C: ResponderSink, P: Storage> QueryableRegistry<C, P> {
     /// ([`IterationEvent::InPlace`]) is dispatched as a view over its frame.
     /// Other `IterationEvent` variants (`Lease`, non-FramePayload Poll
     /// outcomes) are no-ops.
+    // Out of line, for the stack: the observer's fan (`SlotObserverOf::dispatch_event_among`)
+    // calls each plane in turn, and each plane's temporaries stay in a frame of its own.
+    #[inline(never)]
     pub fn dispatch_iteration_event<'a, S: Storage>(
         &mut self,
         event: IterationEvent<'_, '_>,
