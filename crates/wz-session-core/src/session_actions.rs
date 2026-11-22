@@ -4712,7 +4712,21 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// (`commons/zenoh-stats/src/transport.rs` @ `pub fn tx_observe_no_link(&self, msg: NetworkMessageRef) {`).
     /// Its size is the payload size, and `0` for a control message, which is
     /// upstream's `payload_size().unwrap_or_default()`.
-    #[cfg(feature = "transport-stats")]
+    #[cfg(all(
+        feature = "transport-stats",
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        )
+    ))]
     fn drop_for_no_link(&self, priority: Priority, class: &crate::stats::NetworkStatsClass) {
         let Some(kind) = class.kind else {
             return;
@@ -4735,7 +4749,21 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// message was routed to
     /// (`commons/zenoh-stats/src/link.rs` @ `pub fn tx_observe_congestion(&self, msg: impl NetworkMessageExt) {`),
     /// for a droppable message and a blocking one alike.
-    #[cfg(feature = "transport-stats")]
+    #[cfg(all(
+        feature = "transport-stats",
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        )
+    ))]
     fn drop_for_congestion(
         &self,
         link: &LinkState<R>,
