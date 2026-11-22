@@ -45,9 +45,9 @@ use wz_runtime_tokio::retry_period::RetryPolicy;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session::LocalDeliveryDrain;
 use wz_runtime_tokio::session_glue::{
-    drive_session_until_terminal_with_extra_deadline, EntropyUnavailable, ExtraDeadline,
-    IterationEvent, KeepAliveConf, LinkRxConf, OsEntropy, SessionInitParams, SessionTimeouts,
-    SessionZid, SigningKey, TxQueueConf, WhatAmI,
+    drive_session_dyn_send, DriveClosures, EntropyUnavailable, IterationEvent, KeepAliveConf,
+    LinkRxConf, OsEntropy, SendHostStage, SessionInitParams, SessionTimeouts, SessionZid,
+    SigningKey, TxQueueConf, WhatAmI,
 };
 #[cfg(feature = "peer")]
 use wz_runtime_tokio::session_open::{bind_endpoint_with_config, AcceptConfig, BoundListener};
@@ -2140,7 +2140,7 @@ async fn drive_face(
     // needs a HIGHER-RANKED `FnMut(IterationEvent<'_, '_>)`, and without it inference
     // pins the closure to one specific lifetime ("implementation of `FnMut` is not
     // general enough").
-    let mut dispatch = |event: IterationEvent<'_, '_>| dispatch_shared.dispatch(face, event);
+    let dispatch = |event: IterationEvent<'_, '_>| dispatch_shared.dispatch(face, event);
     // R311y296 — the dial role does NOT go through `accept_loop`, so the
     // `FaceForwarder::next_extra_deadline_ms` hook that arms the accepted
     // faces' wakes cannot reach it; this closure is the dial role's equivalent,
@@ -2165,34 +2165,35 @@ async fn drive_face(
     // Skipped when the session closed while the face was held above: a face that
     // was told to go must not read one frame on its way out.
     if !closed_while_held {
+        // Through the runtime's one type-erased loop ([`drive_session_dyn_send`]), which the
+        // node's accepted faces are driven by too: the loop is compiled once for every face of
+        // the library, whichever role and whichever close the face was made with.
+        //
+        // R2702/R2703 — no session-owned stages: the C API drives a session whose §5.16 policy
+        // and whose subscriptions, if any, belong to the embedding application, and this loop
+        // does not own one.
+        let mut hooks = DriveClosures {
+            on_event: dispatch,
+            next_extra_deadline: next_deadline,
+            // The parameter type is named rather than inferred: `|_| {}` infers a closure
+            // that is not general enough over the outcome's lifetime ("implementation of
+            // `FnMut` is not general enough").
+            ingress: |outcome: &mut wz_runtime_tokio::session_glue::DriverLoopOutcome| {
+                ingress_shared.ingress(face, outcome)
+            },
+            after_dispatch: || None::<SendHostStage<'_>>,
+        };
         tokio::select! {
-            _ = drive_session_until_terminal_with_extra_deadline(
-            &mut driver,
-            &actions,
-            &mut engine,
-            None,
-            &clock,
-            &timeouts,
-            &mut dispatch,
-            ExtraDeadline {
-                next_ms: next_deadline,
-                revised: revised.as_deref(),
-            },
-            // R2702/R2703 — no session-owned stages: the C API drives a session
-            // whose §5.16 policy and whose subscriptions, if any, belong to the
-            // embedding application, and this loop does not own one.
-            wz_runtime_tokio::session_glue::LoopStages {
-                // The parameter type is named rather than inferred: inside the
-                // bundle, `|_| {}` infers a closure that is not general enough
-                // over the outcome's lifetime, and rustc reports it as
-                // "implementation of `FnMut` is not general enough" at the
-                // `select!` rather than at the closure.
-                ingress: |outcome: &mut wz_runtime_tokio::session_glue::DriverLoopOutcome| {
-                    ingress_shared.ingress(face, outcome)
-                },
-                after_dispatch: || core::future::ready(()),
-            },
-        ) => {}
+            _ = drive_session_dyn_send(
+                &mut driver,
+                &actions,
+                &mut engine,
+                None,
+                &clock,
+                &timeouts,
+                revised.as_deref(),
+                &mut hooks,
+            ) => {}
             _ = closing.as_mut() => {}
         }
     }

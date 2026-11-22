@@ -59,6 +59,7 @@
 // alloc::sync::Arc are the same type, and the zero-cost relabel is deferred
 // to R311di proper where the file moves to wz-session-core (no_std + alloc)
 // and the import line becomes `use alloc::sync::Arc;`.
+use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::sync::Mutex;
@@ -1121,10 +1122,10 @@ fn wake_rearms(armed_ms: Option<u64>, deadline_ms: u64, handshake: bool, lazy: b
 /// every `select!` that waits on it, so the `None` case is not reached there; this
 /// stays total for the same reason [`wait_revised`] does.
 async fn wait_armed<S: core::future::Future<Output = ()>>(
-    slot: &mut Option<(u64, core::pin::Pin<Box<S>>)>,
+    slot: &mut Option<core::pin::Pin<Box<S>>>,
 ) {
     match slot {
-        Some((_, timer)) => timer.as_mut().await,
+        Some(timer) => timer.as_mut().await,
         None => std::future::pending().await,
     }
 }
@@ -1258,15 +1259,15 @@ pub struct LoopStages<H, P> {
 /// iteration-granular, and the loop reaches it as soon as the park ends. Naming
 /// it is the point — a park that silently widened its own remit would be the
 /// next round's finding.
-async fn park_on_drain<T, F>(
+async fn park_on_drain<T, K>(
     drain: impl core::future::Future<Output = ()>,
     actions: &Arc<SessionLinkActions>,
     engine: &mut Engine<crate::session_fsm_unicast::SessionFsmUnicastPolicy<SessionActionsBinding>>,
     clock: &T,
-    on_event: &mut F,
+    hooks: &mut K,
 ) where
     T: TimeSource,
-    F: FnMut(IterationEvent<'_, '_>),
+    K: LoopHooks + ?Sized,
 {
     tokio::pin!(drain);
     // THE FAST PATH, and it is a correctness-of-cost matter rather than a micro
@@ -1288,13 +1289,9 @@ async fn park_on_drain<T, F>(
         _ = &mut drain => return,
         _ = core::future::ready(()) => {}
     }
+    let now = || clock.now_monotonic_ms();
     loop {
-        let lease_dl = lease_wake_deadline(actions);
-        #[cfg(feature = "transport-keepalive")]
-        let ka_dl = keepalive_wake_deadline(actions);
-        #[cfg(not(feature = "transport-keepalive"))]
-        let ka_dl: Option<u64> = None;
-        let Some(deadline_ms) = [lease_dl, ka_dl].into_iter().flatten().min() else {
+        let Some(deadline_ms) = liveness_deadline(actions) else {
             // No liveness duty runs. Once this transport has been
             // established that means the machine has left Established and
             // released them: the session is closing, there is nothing left
@@ -1308,52 +1305,407 @@ async fn park_on_drain<T, F>(
             (&mut drain).await;
             return;
         };
-        let remaining_ms = deadline_ms.saturating_sub(clock.now_monotonic_ms());
+        let remaining_ms = deadline_ms.saturating_sub(now());
         tokio::select! {
             _ = &mut drain => return,
             _ = clock.sleep(remaining_ms) => {
-                // The loop head's own deadline arm, unchanged and in its order
-                // (R311kx — the keepalive emit runs first so an Expired lease
-                // tearing the session down in the same wake cannot starve it).
-                #[cfg(feature = "transport-keepalive")]
-                let ka_dormant = {
-                    let ka_outcome = crate::emission_cost::check_keepalive_timed(
-                        actions,
-                        clock.now_monotonic_ms(),
-                    );
-                    on_event(IterationEvent::KeepAlive(ka_outcome));
-                    ka_outcome == KeepAliveCheckOutcome::Inactive
-                };
-                #[cfg(not(feature = "transport-keepalive"))]
-                let ka_dormant = false;
-                let lease_outcome =
-                    check_lease_deadline(actions, engine, clock.now_monotonic_ms());
-                on_event(IterationEvent::Lease(lease_outcome));
-                // THE PARK ENDS WITH THE SESSION, and this is a correctness
-                // condition before it is a termination one. Waiting for a
-                // consumer is only justified while there is a session to
-                // deliver into: once the lease has expired the FSM is in
-                // Closing and the loop's job is to tear down, not to hold a
-                // dead session open on a reader that may never read.
-                //
-                // It is also what keeps this from spinning. `Expired` moves the
-                // FSM to Closing, which is NOT a final state; a check that
-                // finds no monitor running (`NotMonitored`) or a dormant
-                // keepalive emitter says the session has left Established, and
-                // a build without `transport-keepalive` has only the lease
-                // verdict to say it. MEASURED: the first draft returned on
-                // `is_in_final_state()` alone and hung exactly there, burning a
-                // ten-minute build, when a stale lease stamp still armed a
-                // deadline in the past.
-                if ka_dormant
-                    || lease_outcome == LeaseCheckOutcome::Expired
-                    || lease_outcome == LeaseCheckOutcome::NotMonitored
-                    || engine.is_in_final_state()
-                {
+                if park_wake_ends(actions, engine, &now, hooks.lend().on_event) {
                     return;
                 }
             }
         }
+    }
+}
+
+/// The earlier of the lease-expiry and keepalive deadlines, the duties a parked loop keeps
+/// running ([`park_on_drain`]).
+fn liveness_deadline(actions: &Arc<SessionLinkActions>) -> Option<u64> {
+    let lease_dl = lease_wake_deadline(actions);
+    #[cfg(feature = "transport-keepalive")]
+    let ka_dl = keepalive_wake_deadline(actions);
+    #[cfg(not(feature = "transport-keepalive"))]
+    let ka_dl: Option<u64> = None;
+    [lease_dl, ka_dl].into_iter().flatten().min()
+}
+
+/// A parked loop's liveness wake: the loop head's own deadline checks, unchanged and in their
+/// order, and whether the park ends with them.
+fn park_wake_ends(
+    actions: &Arc<SessionLinkActions>,
+    engine: &mut Engine<crate::session_fsm_unicast::SessionFsmUnicastPolicy<SessionActionsBinding>>,
+    now: &dyn Fn() -> u64,
+    on_event: &mut dyn FnMut(IterationEvent<'_, '_>),
+) -> bool {
+    // R311kx — the keepalive emit runs first so an Expired lease tearing the
+    // session down in the same wake cannot starve it.
+    #[cfg(feature = "transport-keepalive")]
+    let ka_dormant = {
+        let ka_outcome = crate::emission_cost::check_keepalive_timed(actions, now());
+        on_event(IterationEvent::KeepAlive(ka_outcome));
+        ka_outcome == KeepAliveCheckOutcome::Inactive
+    };
+    #[cfg(not(feature = "transport-keepalive"))]
+    let ka_dormant = false;
+    let lease_outcome = check_lease_deadline(actions, engine, now());
+    on_event(IterationEvent::Lease(lease_outcome));
+    // THE PARK ENDS WITH THE SESSION, and this is a correctness
+    // condition before it is a termination one. Waiting for a
+    // consumer is only justified while there is a session to
+    // deliver into: once the lease has expired the FSM is in
+    // Closing and the loop's job is to tear down, not to hold a
+    // dead session open on a reader that may never read.
+    //
+    // It is also what keeps this from spinning. `Expired` moves the
+    // FSM to Closing, which is NOT a final state; a check that
+    // finds no monitor running (`NotMonitored`) or a dormant
+    // keepalive emitter says the session has left Established, and
+    // a build without `transport-keepalive` has only the lease
+    // verdict to say it. MEASURED: the first draft returned on
+    // `is_in_final_state()` alone and hung exactly there, burning a
+    // ten-minute build, when a stale lease stamp still armed a
+    // deadline in the past.
+    ka_dormant
+        || lease_outcome == LeaseCheckOutcome::Expired
+        || lease_outcome == LeaseCheckOutcome::NotMonitored
+        || engine.is_in_final_state()
+}
+
+/// The hooks a caller lends the drive loop for one decision: its observer, its extra deadline
+/// and its ingress decorator, each as a trait object. Lent per call and never held across a
+/// wait, so the decisions ([`SessionDrive`]) are compiled once for every caller, and the
+/// loop's future keeps whatever `Send` the caller's hooks have.
+pub struct DriveHooks<'h> {
+    on_event: &'h mut dyn FnMut(IterationEvent<'_, '_>),
+    next_extra_deadline: &'h mut dyn FnMut() -> Option<u64>,
+    ingress: &'h mut dyn FnMut(&mut DriverLoopOutcome),
+}
+
+/// What a caller drives a session with: its observer, its extra deadline, its ingress decorator
+/// and the stage the loop awaits after each dispatch ([`LoopStages`] and [`ExtraDeadline`]
+/// describe each). One trait object of it stands for any set of them, so a library that drives
+/// sessions from several places compiles the loop once ([`drive_session_dyn`]).
+/// [`DriveClosures`] is its one implementation.
+pub trait LoopHooks {
+    /// The stage awaited after a dispatch.
+    type Stage: core::future::Future<Output = ()>;
+    /// The hooks, lent for one decision.
+    fn lend(&mut self) -> DriveHooks<'_>;
+    /// The stage to await after a dispatch, or `None` when there is nothing to wait for: a
+    /// type-erased stage is boxed, and `None` is what spares the box on the data plane.
+    fn after_dispatch(&mut self) -> Option<Self::Stage>;
+}
+
+/// A [`LoopHooks`] made of closures.
+pub struct DriveClosures<F, G, H, P> {
+    /// Each event of the loop ([`IterationEvent`]).
+    pub on_event: F,
+    /// [`ExtraDeadline::next_ms`].
+    pub next_extra_deadline: G,
+    /// [`LoopStages::ingress`].
+    pub ingress: H,
+    /// [`LoopStages::after_dispatch`], or `None` for no stage this time.
+    pub after_dispatch: P,
+}
+
+impl<F, G, H, P, S> LoopHooks for DriveClosures<F, G, H, P>
+where
+    F: FnMut(IterationEvent<'_, '_>),
+    G: FnMut() -> Option<u64>,
+    H: FnMut(&mut DriverLoopOutcome),
+    P: FnMut() -> Option<S>,
+    S: core::future::Future<Output = ()>,
+{
+    type Stage = S;
+
+    fn lend(&mut self) -> DriveHooks<'_> {
+        DriveHooks {
+            on_event: &mut self.on_event,
+            next_extra_deadline: &mut self.next_extra_deadline,
+            ingress: &mut self.ingress,
+        }
+    }
+
+    fn after_dispatch(&mut self) -> Option<S> {
+        (self.after_dispatch)()
+    }
+}
+
+/// What the drive loop does next, as [`SessionDrive::head`] decides it.
+enum Head {
+    /// The loop ends with this outcome.
+    Done(DriverOutcome),
+    /// A request from outside the loop was raised: decide again.
+    Again,
+    /// Wait for the next thing to happen.
+    Wait(Wait),
+}
+
+/// What the drive loop waits for.
+enum Wait {
+    /// The link, and a request from outside the loop: no deadline is armed.
+    Link,
+    /// The link raced against the wake for a deadline: a handshake phase's (`kind` is the event
+    /// its expiry raises) or the Established lease / keepalive one (`kind` is `None`).
+    /// `rearm` is the wait in ms of a wake to arm anew; `None` keeps the one armed.
+    Deadline {
+        kind: Option<crate::session_fsm_unicast::SessionFsmUnicastEvent>,
+        rearm: Option<u64>,
+    },
+}
+
+/// The drive loop's state from one wait to the next, and every decision it takes, apart from
+/// the waiting ([`drive_session_until_terminal_with_extra_deadline`] is the waiting). The
+/// sans-I/O form of the loop: each method is a function of this state, the session and the
+/// hooks lent for the call, so one copy of it serves every caller, whatever closures they
+/// drive the session with.
+struct SessionDrive {
+    // R311il — host-owned handshake deadline tracker (the arming-key
+    // staleness logic lives once in wz-session-core; see
+    // [`HandshakeDeadlineTracker`]). The engine-free FSM arms no
+    // `<send delay>`, so this loop owns every handshake deadline; in
+    // Established the keepalive-resetting lease deadline takes over.
+    deadline_tracker: HandshakeDeadlineTracker,
+    // R311im — the steady-state loop owns the reassembly Router (the
+    // stateful slot pool + clock the engine-free slot FSM cannot own).
+    // Established-only: fragments arriving before Established are reported
+    // but not reassembled (this loop runs the data plane).
+    #[cfg(feature = "reassembly")]
+    reasm: TokioReassembly,
+    // The deadline the wake the loop holds was armed for. Both Established
+    // deadlines only move LATER while the session stands (every inbound frame
+    // pushes the lease out, every outbound one the keepalive), so a wake armed
+    // for an earlier moment is still correct: it wakes early, the loop finds
+    // the real deadline still ahead, and re-arms. What it spares is the
+    // per-frame cost of recomputing three deadlines (a dozen mutex reads and
+    // two clock reads) and of registering and cancelling a timer entry, which
+    // on a request/reply round trip is a measurable share of the thread's work.
+    //
+    // A caller WITHOUT a revision source gives no signal when its deadline
+    // moves earlier, so its deadline is recomputed every iteration; the wake is
+    // kept all the same while it is armed no later than that deadline, and
+    // replaced when the deadline moves earlier. A handshake phase arms it for
+    // its own deadline, exactly.
+    armed_ms: Option<u64>,
+    // An outcome taken off the link by a deadline wake, to be delivered first
+    // (see [`take_what_is_waiting`]).
+    held: Option<DriverLoopOutcome>,
+    max_iters: Option<usize>,
+    iter: usize,
+    // Whether the caller signals its deadline's revisions (`ExtraDeadline::revised`).
+    revisable: bool,
+}
+
+impl SessionDrive {
+    fn new(
+        timeouts: &SessionTimeouts,
+        actions: &Arc<SessionLinkActions>,
+        max_iters: Option<usize>,
+        revisable: bool,
+    ) -> Self {
+        #[cfg(not(feature = "reassembly"))]
+        let _ = actions;
+        Self {
+            deadline_tracker: HandshakeDeadlineTracker::new(*timeouts),
+            #[cfg(feature = "reassembly")]
+            reasm: TokioReassembly::new(reassembly_config(&actions.params.policy)),
+            armed_ms: None,
+            held: None,
+            max_iters,
+            iter: 0,
+            revisable,
+        }
+    }
+
+    /// The loop head: whether the loop ends, decides again, or waits, and for what.
+    fn head(
+        &mut self,
+        actions: &Arc<SessionLinkActions>,
+        engine: &mut Engine<
+            crate::session_fsm_unicast::SessionFsmUnicastPolicy<SessionActionsBinding>,
+        >,
+        now: &dyn Fn() -> u64,
+        hooks: &mut DriveHooks<'_>,
+    ) -> Head {
+        if engine.is_in_final_state() {
+            return Head::Done(DriverOutcome::Terminated);
+        }
+        if let Some(limit) = self.max_iters {
+            if self.iter >= limit {
+                return Head::Done(DriverOutcome::IterationLimit);
+            }
+            self.iter += 1;
+        }
+        // R2922 — raise what the session was asked from OUTSIDE this loop (a
+        // rail close) before anything else this iteration; the selects of the
+        // wait wake on the same slot, so a request reaches a parked loop at once.
+        if wz_session_core::drive::check_out_of_band(actions, engine) {
+            return Head::Again;
+        }
+        // R311im — abort + reclaim any reassembly chain past its deadline.
+        // Swept once per loop iteration (whenever an event or deadline
+        // fires); in Established the lease deadline guarantees the loop
+        // iterates well within the reassembly window. `sweep_reporting` (the
+        // shared SSOT with the MCU loop) raises a `ReassemblyTimeout` event
+        // when an eviction occurs so the observer sees it.
+        #[cfg(feature = "reassembly")]
+        sweep_reporting(&mut self.reasm, now(), &mut hooks.on_event);
+        // This iteration's deadline. During the handshake phases the
+        // tracker yields the host-owned handshake deadline; in Established
+        // it disarms and the earlier of the lease-expiry deadline and the
+        // keepalive TX deadline applies (R311kx — both via the
+        // wz-session-core::drive wake helpers, so the arming shares the
+        // comparators' arithmetic: baseline max(established_at, any-RX
+        // `last_inbound_at` — R311la pico `_received` parity) + the
+        // adopted min(local, peer) window; the prior arming read the
+        // inbound stamp alone with the local window, so a silent peer
+        // left the loop blocked on the link poll forever); in Init /
+        // between there is none (block on
+        // the link poll). `Some((abs_ms, Some(event)))` = handshake
+        // timeout to raise; `Some((abs_ms, None))` = lease / keepalive
+        // deadline (-> run both checks, each self-guarded).
+        let loop_now_ms = now();
+        let deadline = match self
+            .deadline_tracker
+            .poll(engine.get_current_state(), loop_now_ms)
+        {
+            Some((deadline_ms, event)) => {
+                // A handshake phase: the armed steady-state wake is not this
+                // iteration's wake and must not outlive the phase it was armed in.
+                self.armed_ms = None;
+                Some((deadline_ms, Some(event)))
+            }
+            None if self.revisable && self.armed_ms.is_some() => {
+                self.armed_ms.map(|armed_ms| (armed_ms, None))
+            }
+            // R311y296 — the caller's extra deadline joins the same `min`.
+            // With the default `|| None` source this is the two-way `min` of
+            // the lease and keepalive deadlines (and `None` when both are absent).
+            None => [liveness_deadline(actions), (hooks.next_extra_deadline)()]
+                .into_iter()
+                .flatten()
+                .min()
+                .map(|d| (d, None)),
+        };
+        let Some((deadline_ms, kind)) = deadline else {
+            return Head::Wait(Wait::Link);
+        };
+        // One wake, kept across iterations (see `armed_ms`). A caller with a revision
+        // source keeps it until the source says the deadline moved. A caller without one
+        // recomputes the deadline every iteration, and the wake stays while it is armed
+        // no later than that deadline: it may wake early, and the wake looks before it
+        // acts. A handshake deadline is armed exactly. Without this a timer entry was
+        // registered and cancelled for every frame, as `select!` builds even a disabled
+        // branch's future.
+        let lazy = kind.is_none() && self.revisable;
+        let rearm = if wake_rearms(self.armed_ms, deadline_ms, kind.is_some(), lazy) {
+            self.armed_ms = Some(deadline_ms);
+            Some(deadline_ms.saturating_sub(loop_now_ms))
+        } else {
+            None
+        };
+        Head::Wait(Wait::Deadline { kind, rearm })
+    }
+
+    /// The wake the loop holds was dropped: the caller revised its deadline.
+    fn disarm(&mut self) {
+        self.armed_ms = None;
+    }
+
+    /// An outcome of the link, before the loop's stages: rewritten by the session's namespace
+    /// and the caller's ingress decorator, then reported (and reassembled). The value is the
+    /// work it cost, in turn units ([`event_units`]).
+    fn take(
+        &mut self,
+        outcome: DriverLoopOutcome,
+        actions: &Arc<SessionLinkActions>,
+        now_ms: u64,
+        hooks: &mut DriveHooks<'_>,
+    ) -> u32 {
+        // §5.21 routing-namespace — strip the DIRECT decoded
+        // FramePayload before dispatch. Covers BOTH the
+        // reassembly-on path (where `report_outcome_reassembling`
+        // would otherwise dispatch the unstripped messages) and the
+        // reassembly-off path; a chain that completes reassembly is
+        // stripped inside `report_outcome_reassembling` instead.
+        let mut outcome = outcome;
+        #[cfg(feature = "routing-namespace")]
+        actions.apply_namespace_ingress(&mut outcome);
+        // R2702 — then the caller's ingress decorator, in THIS
+        // order: the namespace is a transport-level rewrite and
+        // a policy governs the keyexpr that rewrite produced, so
+        // an enforcer must see the stripped form, which is also
+        // the form this session's own alias table holds.
+        (hooks.ingress)(&mut outcome);
+        let units = event_units(&outcome);
+        // The same decorator again for a chain that completes inside this
+        // call: that outcome is made there, not here, and skipped it.
+        #[cfg(feature = "reassembly")]
+        report_outcome_reassembling_with(
+            &outcome,
+            &mut self.reasm,
+            actions,
+            now_ms,
+            &mut hooks.ingress,
+            &mut hooks.on_event,
+        );
+        #[cfg(not(feature = "reassembly"))]
+        {
+            let _ = (actions, now_ms);
+            (hooks.on_event)(IterationEvent::Poll(&outcome));
+        }
+        units
+    }
+
+    /// The armed wake fired. A handshake deadline raises the event its arming state declared
+    /// (`*.timeout -> Closing` / accept -> Closed); each of the 5 events has a handler in its
+    /// arming state, so the raise always advances out of that state and the loop cannot hot-spin
+    /// re-raising. An Established wake was armed for the deadline of some earlier iteration, so
+    /// the real one may be further out: the value is whether it is due, and when it is not the
+    /// loop arms again and runs no check (the early wake is not a deadline).
+    fn fired(
+        &mut self,
+        kind: Option<crate::session_fsm_unicast::SessionFsmUnicastEvent>,
+        actions: &Arc<SessionLinkActions>,
+        engine: &mut Engine<
+            crate::session_fsm_unicast::SessionFsmUnicastPolicy<SessionActionsBinding>,
+        >,
+        now: &dyn Fn() -> u64,
+        hooks: &mut DriveHooks<'_>,
+    ) -> bool {
+        self.armed_ms = None;
+        match kind {
+            Some(event) => {
+                engine.process_event(event);
+                false
+            }
+            None => ![liveness_deadline(actions), (hooks.next_extra_deadline)()]
+                .into_iter()
+                .flatten()
+                .min()
+                .is_some_and(|d| d > now()),
+        }
+    }
+
+    /// The Established deadline is due. Both checks are deadline-self-guarded, so whichever
+    /// armed the earlier wake fires and the other reports its within-window verdict truthfully
+    /// (R311kx — the keepalive emit runs first: it is wire-side only and must not be starved by
+    /// an Expired transition tearing the session down in the same wake).
+    fn liveness_checks(
+        &mut self,
+        actions: &Arc<SessionLinkActions>,
+        engine: &mut Engine<
+            crate::session_fsm_unicast::SessionFsmUnicastPolicy<SessionActionsBinding>,
+        >,
+        now: &dyn Fn() -> u64,
+        hooks: &mut DriveHooks<'_>,
+    ) {
+        #[cfg(feature = "transport-keepalive")]
+        {
+            let ka_outcome = crate::emission_cost::check_keepalive_timed(actions, now());
+            (hooks.on_event)(IterationEvent::KeepAlive(ka_outcome));
+        }
+        let lease_outcome = check_lease_deadline(actions, engine, now());
+        (hooks.on_event)(IterationEvent::Lease(lease_outcome));
     }
 }
 
@@ -1378,7 +1730,7 @@ pub async fn drive_session_until_terminal_with_extra_deadline<D, F, T, G, H, P, 
     max_iters: Option<usize>,
     clock: &T,
     timeouts: &SessionTimeouts,
-    mut on_event: F,
+    on_event: F,
     extra: ExtraDeadline<'_, G>,
     stages: LoopStages<H, P>,
 ) -> DriverOutcome
@@ -1392,133 +1744,121 @@ where
     Fut: core::future::Future<Output = ()>,
 {
     let LoopStages {
-        mut ingress,
-        mut after_dispatch,
+        ingress,
+        after_dispatch,
     } = stages;
-    let ExtraDeadline {
-        next_ms: mut next_extra_deadline,
-        revised: deadline_revised,
-    } = extra;
-    // R311il — host-owned handshake deadline tracker (the arming-key
-    // staleness logic lives once in wz-session-core; see
-    // [`HandshakeDeadlineTracker`]). The engine-free FSM arms no
-    // `<send delay>`, so this loop owns every handshake deadline; in
-    // Established the keepalive-resetting lease deadline takes over.
-    let mut deadline_tracker = HandshakeDeadlineTracker::new(*timeouts);
-    // R311im — the steady-state loop owns the reassembly Router (the
-    // stateful slot pool + clock the engine-free slot FSM cannot own).
-    // Established-only: fragments arriving before Established are reported
-    // but not reassembled (this loop runs the data plane).
-    #[cfg(feature = "reassembly")]
-    let mut reasm = TokioReassembly::new(reassembly_config(&actions.params.policy));
-    // The Established lease / keepalive wake, kept ARMED across iterations for a
-    // caller that signals its own deadline revisions (`ExtraDeadline::revised`).
-    // Both deadlines only move LATER while the session stands (every inbound
-    // frame pushes the lease out, every outbound one the keepalive), so a timer
-    // armed for an earlier moment is still correct: it wakes early, the loop
-    // finds the real deadline still ahead, and re-arms. What it spares is the
-    // per-frame cost of recomputing three deadlines (a dozen mutex reads and two
-    // clock reads) and of registering and cancelling a timer entry, which on a
-    // request/reply round trip is a measurable share of the thread's work.
-    //
-    // A caller WITHOUT a revision source gives no signal when its deadline moves
-    // earlier, so its deadline is recomputed every iteration; the timer is kept
-    // all the same while it is armed no later than that deadline, and replaced
-    // when the deadline moves earlier. A handshake phase arms it for its own
-    // deadline, exactly.
-    let mut steady_timer: Option<(u64, core::pin::Pin<Box<_>>)> = None;
-    // An outcome taken off the link by a deadline wake, to be delivered first (see
-    // [`take_what_is_waiting`]).
-    let mut held: Option<DriverLoopOutcome> = None;
+    let mut hooks = DriveClosures {
+        on_event,
+        next_extra_deadline: extra.next_ms,
+        ingress,
+        after_dispatch: {
+            let mut after_dispatch = after_dispatch;
+            move || Some(after_dispatch())
+        },
+    };
+    drive_core(
+        driver,
+        actions,
+        engine,
+        max_iters,
+        clock,
+        timeouts,
+        extra.revised,
+        &mut hooks,
+    )
+    .await
+}
+
+/// The stage a type-erased hook set hands the drive loop after a dispatch ([`LoopHooks`]).
+pub type HostStage<'s> = Pin<Box<dyn core::future::Future<Output = ()> + 's>>;
+
+/// [`HostStage`] for a drive that runs on a worker thread.
+pub type SendHostStage<'s> = Pin<Box<dyn core::future::Future<Output = ()> + Send + 's>>;
+
+/// The session drive loop over a type-erased hook set, made on the heap: the form for a library
+/// that drives sessions from more than one place. Every caller of it shares one compiled loop,
+/// however its hooks are made, and the loop's code is not copied into its callers (a call
+/// through the box cannot be inlined). Over the node's own link and clock, the ones its faces
+/// are opened with. The loop is
+/// [`drive_session_until_terminal_with_extra_deadline`]'s; `hooks` stands for its closures.
+#[allow(clippy::too_many_arguments)]
+pub fn drive_session_dyn<'a, 's: 'a>(
+    driver: &'a mut crate::session_open::InboundLink,
+    actions: &'a Arc<SessionLinkActions>,
+    engine: &'a mut Engine<
+        crate::session_fsm_unicast::SessionFsmUnicastPolicy<SessionActionsBinding>,
+    >,
+    max_iters: Option<usize>,
+    clock: &'a TokioTime,
+    timeouts: &'a SessionTimeouts,
+    revised: Option<&'a tokio::sync::Notify>,
+    hooks: &'a mut (dyn LoopHooks<Stage = HostStage<'s>> + 's),
+) -> Pin<Box<dyn core::future::Future<Output = DriverOutcome> + 'a>> {
+    Box::pin(drive_core(
+        driver, actions, engine, max_iters, clock, timeouts, revised, hooks,
+    ))
+}
+
+/// [`drive_session_dyn`] for a drive that runs on a worker thread: its hooks, its stage and so
+/// its loop are `Send`.
+#[allow(clippy::too_many_arguments)]
+pub fn drive_session_dyn_send<'a, 's: 'a>(
+    driver: &'a mut crate::session_open::InboundLink,
+    actions: &'a Arc<SessionLinkActions>,
+    engine: &'a mut Engine<
+        crate::session_fsm_unicast::SessionFsmUnicastPolicy<SessionActionsBinding>,
+    >,
+    max_iters: Option<usize>,
+    clock: &'a TokioTime,
+    timeouts: &'a SessionTimeouts,
+    revised: Option<&'a tokio::sync::Notify>,
+    hooks: &'a mut (dyn LoopHooks<Stage = SendHostStage<'s>> + Send + 's),
+) -> Pin<Box<dyn core::future::Future<Output = DriverOutcome> + Send + 'a>> {
+    Box::pin(drive_core(
+        driver, actions, engine, max_iters, clock, timeouts, revised, hooks,
+    ))
+}
+
+/// The session drive loop: [`drive_session_until_terminal_with_extra_deadline`] over a hook set.
+/// Its decisions are [`SessionDrive`]'s; what is here is what waits.
+#[allow(clippy::too_many_arguments)]
+async fn drive_core<D, T, K>(
+    driver: &mut D,
+    actions: &Arc<SessionLinkActions>,
+    engine: &mut Engine<crate::session_fsm_unicast::SessionFsmUnicastPolicy<SessionActionsBinding>>,
+    max_iters: Option<usize>,
+    clock: &T,
+    timeouts: &SessionTimeouts,
+    deadline_revised: Option<&tokio::sync::Notify>,
+    hooks: &mut K,
+) -> DriverOutcome
+where
+    D: LinkDriver,
+    T: TimeSource,
+    K: LoopHooks + ?Sized,
+{
+    // What the loop decides from one wait to the next ([`SessionDrive`]). Every decision is
+    // taken there, against the caller's hooks lent for that one call; what stays here is
+    // what waits.
+    let mut drive = SessionDrive::new(timeouts, actions, max_iters, deadline_revised.is_some());
+    let now = || clock.now_monotonic_ms();
+    // The Established lease / keepalive wake, kept ARMED across iterations (see
+    // [`SessionDrive::armed_ms`], which holds the deadline it was armed for).
+    let mut steady_timer = None;
     // The caller's revision wake, kept registered across iterations (see
     // [`wait_revised`]).
     let mut revision = deadline_revised.map(|n| Box::pin(n.notified()));
-    let mut iter: usize = 0;
     let mut turn = Turn::default();
     loop {
-        if engine.is_in_final_state() {
-            return DriverOutcome::Terminated;
-        }
-        if let Some(limit) = max_iters {
-            if iter >= limit {
-                return DriverOutcome::IterationLimit;
-            }
-            iter += 1;
-        }
-        // R2922 — raise what the session was asked from OUTSIDE this loop (a
-        // rail close) before anything else this iteration; the selects below
-        // wake on the same slot, so a request reaches a parked loop at once.
-        if wz_session_core::drive::check_out_of_band(actions, engine) {
-            continue;
-        }
-        // R311im — abort + reclaim any reassembly chain past its deadline.
-        // Swept once per loop iteration (whenever an event or deadline
-        // fires); in Established the lease deadline guarantees the loop
-        // iterates well within the reassembly window. `sweep_reporting` (the
-        // shared SSOT with the MCU loop) raises a `ReassemblyTimeout` event
-        // when an eviction occurs so the observer sees it.
-        #[cfg(feature = "reassembly")]
-        sweep_reporting(&mut reasm, clock.now_monotonic_ms(), &mut on_event);
-        // This iteration's deadline. During the handshake phases the
-        // tracker yields the host-owned handshake deadline; in Established
-        // it disarms and the earlier of the lease-expiry deadline and the
-        // keepalive TX deadline applies (R311kx — both via the
-        // wz-session-core::drive wake helpers, so the arming shares the
-        // comparators' arithmetic: baseline max(established_at, any-RX
-        // `last_inbound_at` — R311la pico `_received` parity) + the
-        // adopted min(local, peer) window; the prior arming read the
-        // inbound stamp alone with the local window, so a silent peer
-        // left the loop blocked on the link poll forever); in Init /
-        // between there is none (block on
-        // the link poll). `Some((abs_ms, Some(event)))` = handshake
-        // timeout to raise; `Some((abs_ms, None))` = lease / keepalive
-        // deadline (-> run both checks, each self-guarded).
-        let loop_now_ms = clock.now_monotonic_ms();
-        let deadline: Option<(
-            u64,
-            Option<crate::session_fsm_unicast::SessionFsmUnicastEvent>,
-        )> = match deadline_tracker.poll(engine.get_current_state(), loop_now_ms) {
-            Some((deadline_ms, event)) => {
-                // A handshake phase: the armed steady-state timer is not this
-                // iteration's wake and must not outlive the phase it was armed in.
-                steady_timer = None;
-                Some((deadline_ms, Some(event)))
-            }
-            None if deadline_revised.is_some() && steady_timer.is_some() => {
-                steady_timer.as_ref().map(|(armed_ms, _)| (*armed_ms, None))
-            }
-            None => {
-                let lease_dl = lease_wake_deadline(actions);
-                #[cfg(feature = "transport-keepalive")]
-                let ka_dl = keepalive_wake_deadline(actions);
-                #[cfg(not(feature = "transport-keepalive"))]
-                let ka_dl: Option<u64> = None;
-                // R311y296 — the caller's extra deadline joins the same `min`.
-                // With the default `|| None` source this is byte-identical to
-                // the prior two-way match: `flatten` drops every `None`, so a
-                // no-extra-deadline caller still arms exactly
-                // `min(lease_dl, ka_dl)` (and `None` when both are absent).
-                [lease_dl, ka_dl, next_extra_deadline()]
-                    .into_iter()
-                    .flatten()
-                    .min()
-                    .map(|d| (d, None))
-            }
-        };
-        match deadline {
-            Some((deadline_ms, kind)) => {
-                let remaining_ms = deadline_ms.saturating_sub(loop_now_ms);
-                // One timer, kept across iterations (see `steady_timer`). A caller with a revision
-                // source keeps it until the source says the deadline moved. A caller without one
-                // recomputes the deadline every iteration, and the timer stays while it is armed
-                // no later than that deadline: it may wake early, and the wake looks before it
-                // acts. A handshake deadline is armed exactly. Without this a timer entry was
-                // registered and cancelled for every frame, as `select!` builds even a disabled
-                // branch's future.
-                let lazy = kind.is_none() && deadline_revised.is_some();
-                let armed_ms = steady_timer.as_ref().map(|(armed_ms, _)| *armed_ms);
-                if wake_rearms(armed_ms, deadline_ms, kind.is_some(), lazy) {
-                    steady_timer = Some((deadline_ms, Box::pin(clock.sleep(remaining_ms))));
+        // Decided first, in a statement of its own: a temporary of the `match` head would
+        // live to the end of the `match`, across its waits, and hold the lent hooks there.
+        let head = drive.head(actions, engine, &now, &mut hooks.lend());
+        match head {
+            Head::Done(outcome) => return outcome,
+            Head::Again => continue,
+            Head::Wait(Wait::Deadline { kind, rearm }) => {
+                if let Some(remaining_ms) = rearm {
+                    steady_timer = Some(Box::pin(clock.sleep(remaining_ms)));
                 }
                 tokio::select! {
                     // R311y296 — the caller revised its extra deadline while we
@@ -1538,43 +1878,14 @@ where
                     // the loop head arms a new one.
                     _ = wait_revised(&mut revision), if revision.is_some() => {
                         steady_timer = None;
+                        drive.disarm();
                         revision = deadline_revised.map(|n| Box::pin(n.notified()));
                     }
                     // R2922 — a request staged from outside the loop. Fall
                     // through: the loop head raises it.
                     _ = actions.out_of_band_signalled() => {}
-                    outcome = next_outcome(&mut held, driver, actions, engine) => {
-                        // §5.21 routing-namespace — strip the DIRECT decoded
-                        // FramePayload before dispatch. Covers BOTH the
-                        // reassembly-on path (where `report_outcome_reassembling`
-                        // re-forwards this same `&outcome` for a whole frame) and
-                        // the reassembly-off direct `on_event`; a fragment is not
-                        // a FramePayload, so this is a no-op for it and its
-                        // reassembled completion is stripped inside
-                        // `report_outcome_reassembling` instead.
-                        let mut outcome = outcome;
-                        #[cfg(feature = "routing-namespace")]
-                        actions.apply_namespace_ingress(&mut outcome);
-                        // R2702 — then the caller's ingress decorator, in THIS
-                        // order: the namespace is a transport-level rewrite and
-                        // a policy governs the keyexpr that rewrite produced, so
-                        // an enforcer must see the stripped form, which is also
-                        // the form this session's own alias table holds.
-                        ingress(&mut outcome);
-                        let units = event_units(&outcome);
-                        // The same decorator again for a chain that completes inside this
-                        // call: that outcome is made there, not here, and skipped it.
-                        #[cfg(feature = "reassembly")]
-                        report_outcome_reassembling_with(
-                            &outcome,
-                            &mut reasm,
-                            actions,
-                            clock.now_monotonic_ms(),
-                            &mut ingress,
-                            &mut on_event,
-                        );
-                        #[cfg(not(feature = "reassembly"))]
-                        on_event(IterationEvent::Poll(&outcome));
+                    outcome = next_outcome(&mut drive.held, driver, actions, engine) => {
+                        let units = drive.take(outcome, actions, now(), &mut hooks.lend());
                         // R2703 — AFTER dispatch, and awaited. A buffered
                         // subscription whose consumer is behind suspends the
                         // loop right here instead of dropping the sample. It is
@@ -1604,16 +1915,18 @@ where
                         // `FnMut` this loop owns for its whole life, and moving
                         // it into a per-iteration future would move it away.
                         let session_work = actions.core.iteration_work.clone();
-                        let host_stage = after_dispatch();
+                        let host_stage = hooks.after_dispatch();
                         park_on_drain(
                             async move {
                                 session_work.drain_all().await;
-                                host_stage.await;
+                                if let Some(host_stage) = host_stage {
+                                    host_stage.await;
+                                }
                             },
                             actions,
                             engine,
                             clock,
-                            &mut on_event,
+                            hooks,
                         )
                         .await;
                         turn.after_event(units).await;
@@ -1621,59 +1934,16 @@ where
                     // The armed timer fired.
                     _ = wait_armed(&mut steady_timer) => {
                         steady_timer = None;
-                        match kind {
-                            // Established lease / keepalive deadline. It was armed for the
-                            // deadline of some earlier iteration, so the real one may be
-                            // further out: look before acting, and when it is, arm again and
-                            // run no check (the early wake is not a deadline). Both checks are
-                            // deadline-self-guarded, so whichever armed the earlier wake fires
-                            // and the other reports its within-window verdict truthfully
-                            // (R311kx — the keepalive emit runs first: it is wire-side only
-                            // and must not be starved by an Expired transition tearing the
-                            // session down in the same wake).
-                            None => {
-                                #[cfg(feature = "transport-keepalive")]
-                                let ka_dl = keepalive_wake_deadline(actions);
-                                #[cfg(not(feature = "transport-keepalive"))]
-                                let ka_dl: Option<u64> = None;
-                                let real_deadline = [
-                                    lease_wake_deadline(actions),
-                                    ka_dl,
-                                    next_extra_deadline(),
-                                ]
-                                .into_iter()
-                                .flatten()
-                                .min();
-                                if real_deadline.is_some_and(|d| d > clock.now_monotonic_ms()) {
-                                    continue;
-                                }
-                                take_what_is_waiting(&mut held, driver, actions, engine);
-                                #[cfg(feature = "transport-keepalive")]
-                                {
-                                    let ka_outcome = crate::emission_cost::check_keepalive_timed(
-                                        actions,
-                                        clock.now_monotonic_ms(),
-                                    );
-                                    on_event(IterationEvent::KeepAlive(ka_outcome));
-                                }
-                                let lease_outcome =
-                                    check_lease_deadline(actions, engine, clock.now_monotonic_ms());
-                                on_event(IterationEvent::Lease(lease_outcome));
-                            }
-                            // Handshake timeout: raise the FSM event the arming
-                            // state declared (`*.timeout -> Closing` / accept ->
-                            // Closed). Each of the 5 events has a handler in its
-                            // arming state, so the raise always advances out of
-                            // that state — the loop cannot hot-spin re-raising.
-                            // The timer was armed for exactly this deadline.
-                            Some(event) => {
-                                engine.process_event(event);
-                            }
+                        if drive.fired(kind, actions, engine, &now, &mut hooks.lend()) {
+                            // Before the loop judges the peer silent, take what it has
+                            // already sent ([`take_what_is_waiting`]).
+                            take_what_is_waiting(&mut drive.held, driver, actions, engine);
+                            drive.liveness_checks(actions, engine, &now, &mut hooks.lend());
                         }
                     }
                 }
             }
-            None => {
+            Head::Wait(Wait::Link) => {
                 // R2922 — the same out-of-band wake as the select arm above.
                 let outcome = tokio::select! {
                     _ = actions.out_of_band_signalled() => None,
@@ -1682,32 +1952,25 @@ where
                 let Some(outcome) = outcome else {
                     continue;
                 };
-                // §5.21 routing-namespace — strip the DIRECT decoded FramePayload
-                // before dispatch (the no-deadline arm; same rationale as the
-                // `tokio::select!` poll arm above).
-                let mut outcome = outcome;
-                #[cfg(feature = "routing-namespace")]
-                actions.apply_namespace_ingress(&mut outcome);
-                // R2702 — same order as the select arm; see there.
-                ingress(&mut outcome);
-                let units = event_units(&outcome);
-                #[cfg(feature = "reassembly")]
-                report_outcome_reassembling_with(
-                    &outcome,
-                    &mut reasm,
-                    actions,
-                    clock.now_monotonic_ms(),
-                    &mut ingress,
-                    &mut on_event,
-                );
-                #[cfg(not(feature = "reassembly"))]
-                on_event(IterationEvent::Poll(&outcome));
+                let units = drive.take(outcome, actions, now(), &mut hooks.lend());
                 // R2703 — same placement and same park as the select arm; see
                 // there. This arm arms no deadline, so the park finds nothing
                 // to keep alive and waits plainly — but it goes through the
                 // same seam, because "which arm the loop happened to take" is
                 // not a reason for delivery to behave differently.
-                park_on_drain(after_dispatch(), actions, engine, clock, &mut on_event).await;
+                let host_stage = hooks.after_dispatch();
+                park_on_drain(
+                    async move {
+                        if let Some(host_stage) = host_stage {
+                            host_stage.await;
+                        }
+                    },
+                    actions,
+                    engine,
+                    clock,
+                    hooks,
+                )
+                .await;
                 turn.after_event(units).await;
             }
         }

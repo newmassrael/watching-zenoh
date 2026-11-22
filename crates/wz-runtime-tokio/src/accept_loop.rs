@@ -103,19 +103,18 @@ use crate::retry_period::RetryPeriod;
 use crate::retry_period::RetryPolicy;
 use crate::runtime_impl::TokioTime;
 use crate::session_glue::{
-    drive_session_until_terminal_with_extra_deadline, DriverOutcome, ExtraDeadline, IterationEvent,
-    SessionInitParams, SessionLinkActions, SessionTimeouts,
+    drive_session_dyn, drive_session_dyn_send, DriveClosures, DriverOutcome, HostStage,
+    IterationEvent, SendHostStage, SessionInitParams, SessionLinkActions, SessionTimeouts,
 };
-// R311y296 — the plain (no-extra-deadline) drive is now reached only by the
-// aggregated-secondary-link path and this module's own tests. `drive_face` —
-// the registered-face path, and the only one a `FaceForwarder` hook can key on
-// — threads `next_extra_deadline_ms` instead. A JOINED link is deliberately
-// left on the plain drive: it shares the primary's session (and so its pending
-// table), is never `register`ed as its own face, and the forwarder maps its
-// events back to the primary via `register_joined` — so it has no per-face
-// deadline of its own to arm, and the primary's drive already arms that
-// session's.
-#[cfg(any(test, feature = "transport-multilink"))]
+// R311y296 — the plain (no-extra-deadline) drive is reached only by this module's
+// own tests: every drive of the node runs through the type-erased loop. `drive_face`
+// — the registered-face path, and the only one a `FaceForwarder` hook can key on —
+// threads `next_extra_deadline_ms`. A JOINED link threads none: it shares the
+// primary's session (and so its pending table), is never `register`ed as its own
+// face, and the forwarder maps its events back to the primary via `register_joined`
+// — so it has no per-face deadline of its own to arm, and the primary's drive
+// already arms that session's.
+#[cfg(test)]
 use crate::session_glue::drive_session_until_terminal;
 use crate::session_open::{
     dial_locator, mesh_dial_plan, AcceptedLink, AcceptedPeer, BoundListener, DialConfig,
@@ -2056,14 +2055,13 @@ fn schedule_multilink_redial(
 /// bounded writer-drain a single typed primitive (the R292 drain contract), not
 /// a hand-ordered sequence re-copied here.
 ///
-/// Generic over the forwarder (`?Sized`, so `&dyn FaceForwarder` still fits) because
-/// the drive of a SPAWNED face holds the forwarder as `dyn FaceForwarder + Send +
-/// Sync`, and the future is `Send` only if the reference it holds is to a `Sync`
-/// type, which a bare `dyn FaceForwarder` is not.
-async fn drive_face<F: FaceForwarder + ?Sized>(
+/// The session's loop is the type-erased one ([`drive_session_dyn`]): every drive of the
+/// node, held, spawned ([`drive_face_shared`]) or joined, and the C ABI's own, runs one
+/// compiled loop, and only the forwarder's hooks are this face's ([`face_hooks`]).
+async fn drive_face(
     face: Face,
     mut opened: OpenedSession,
-    forwarder: &F,
+    forwarder: &dyn FaceForwarder,
 ) -> (Face, DriverOutcome) {
     let timeouts = SessionTimeouts::from_build();
     // R311y296 — the forwarder's per-face deadline joins this face's wake
@@ -2073,61 +2071,83 @@ async fn drive_face<F: FaceForwarder + ?Sized>(
     // (`Step::Opened`), so `deadline_revised` resolves to the real signal
     // rather than the inert fallback.
     let revised = forwarder.deadline_revised(face.id);
-    let outcome = drive_session_until_terminal_with_extra_deadline(
+    let mut hooks = face_hooks(forwarder, face.id, |forwarder, id| {
+        forwarder
+            .read_gate(id)
+            .is_some()
+            .then(|| Box::pin(read_gate_wait(forwarder, id)) as HostStage<'_>)
+    });
+    let outcome = drive_session_dyn(
         &mut opened.inbound,
         &opened.actions,
         &mut opened.engine,
         None,
         &opened.clock,
         &timeouts,
-        |event| forwarder.forward(face.id, event),
-        ExtraDeadline {
-            next_ms: || forwarder.next_extra_deadline_ms(face.id),
-            revised: revised.as_deref(),
-        },
-        // R2702/R2703 — no session-owned stages here, and that is a scope
-        // statement rather than an omission: this loop drives a FACE of a
-        // routing node, whose §5.16 ingress admission already happens at the
-        // forwarder (`admit_inbound`, consulted at the top of `forward`), and
-        // whose samples go to the routing tables rather than to a buffered
-        // subscription. Adding the decorator here would run the chain twice, which is why the
-        // forwarder is ASKED ([`FaceForwarder::ingress`]) and the routing ones answer nothing.
-        crate::session_glue::LoopStages {
-            ingress: |outcome: &mut wz_session_core::driver_loop::DriverLoopOutcome| {
-                forwarder.ingress(face.id, outcome)
-            },
-            // The forwarder's credit gate: a face that fed a destination with no room left
-            // stops reading until the destination drains, and nothing else stops.
-            after_dispatch: || {
-                let (forwarder, id) = (forwarder, face.id);
-                async move {
-                    while let Some(wake) = forwarder.read_gate(id) {
-                        // Registered as a waiter BEFORE the gate is asked again, so a notice
-                        // raised between the two is not lost: either the second answer sees
-                        // the room, or the notice finds this waiter.
-                        let notified = wake.notified();
-                        tokio::pin!(notified);
-                        notified.as_mut().enable();
-                        if forwarder.read_gate(id).is_none() {
-                            break;
-                        }
-                        // Bounded, so that a link that does not notify (a driver that was
-                        // not asked, or one whose waker was cleared) costs a recheck and not
-                        // a stalled face.
-                        let _ = tokio::time::timeout(READ_GATE_BACKSTOP, notified).await;
-                    }
-                }
-            },
-        },
+        revised.as_deref(),
+        &mut hooks,
     )
     .await;
     opened.drain_to_close().await;
     (face, outcome)
 }
 
-/// The longest a gated face waits for its notice before it asks the forwarder again. The notice is
-/// what ends the wait (the router's pass that releases the face wakes it, once, with a permit);
-/// this is a bound on a forwarder that never gives one, and is not the cadence of a healthy gate.
+/// What a face's session is driven with: its forwarder's hooks for the face. `gated` makes the
+/// stage after a dispatch, boxed as the drive needs it (`Send` for a spawned drive), when the
+/// forwarder's credit gate is closed, and nothing when it is open, which is every dispatch of a
+/// face that feeds destinations with room.
+///
+/// R2702/R2703 — no session-owned stages here, and that is a scope statement rather than an
+/// omission: this loop drives a FACE of a routing node, whose §5.16 ingress admission already
+/// happens at the forwarder (`admit_inbound`, consulted at the top of `forward`), and whose
+/// samples go to the routing tables rather than to a buffered subscription. Adding the decorator
+/// here would run the chain twice, which is why the forwarder is ASKED
+/// ([`FaceForwarder::ingress`]) and the routing ones answer nothing.
+#[allow(clippy::type_complexity)]
+fn face_hooks<'f, F, S>(
+    forwarder: &'f F,
+    id: FaceId,
+    gated: impl Fn(&'f F, FaceId) -> Option<S> + 'f,
+) -> DriveClosures<
+    impl FnMut(IterationEvent<'_, '_>) + 'f,
+    impl FnMut() -> Option<u64> + 'f,
+    impl FnMut(&mut wz_session_core::driver_loop::DriverLoopOutcome) + 'f,
+    impl FnMut() -> Option<S> + 'f,
+>
+where
+    F: FaceForwarder + ?Sized,
+    S: 'f,
+{
+    DriveClosures {
+        on_event: move |event: IterationEvent<'_, '_>| forwarder.forward(id, event),
+        next_extra_deadline: move || forwarder.next_extra_deadline_ms(id),
+        ingress: move |outcome: &mut wz_session_core::driver_loop::DriverLoopOutcome| {
+            forwarder.ingress(id, outcome)
+        },
+        after_dispatch: move || gated(forwarder, id),
+    }
+}
+
+/// The forwarder's credit gate: a face that fed a destination with no room left stops reading
+/// until the destination drains, and nothing else stops.
+async fn read_gate_wait<F: FaceForwarder + ?Sized>(forwarder: &F, id: FaceId) {
+    while let Some(wake) = forwarder.read_gate(id) {
+        // Registered as a waiter BEFORE the gate is asked again, so a notice
+        // raised between the two is not lost: either the second answer sees
+        // the room, or the notice finds this waiter.
+        let notified = wake.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if forwarder.read_gate(id).is_none() {
+            break;
+        }
+        // Bounded, so that a link that does not notify (a driver that was
+        // not asked, or one whose waker was cleared) costs a recheck and not
+        // a stalled face.
+        let _ = tokio::time::timeout(READ_GATE_BACKSTOP, notified).await;
+    }
+}
+
 const READ_GATE_BACKSTOP: Duration = Duration::from_millis(25);
 
 /// R311y205 (transport-multilink) — drive an AGGREGATED secondary link to
@@ -2148,14 +2168,23 @@ async fn drive_joined_face(
     forwarder: &dyn FaceForwarder,
 ) -> (Face, DriverOutcome) {
     let timeouts = SessionTimeouts::from_build();
-    let outcome = drive_session_until_terminal(
+    // Through the node's one loop ([`drive_session_dyn`]); a joined link has no stage, no
+    // deadline of its own and no decorator.
+    let mut hooks = DriveClosures {
+        on_event: |event: IterationEvent<'_, '_>| forwarder.forward(face.id, event),
+        next_extra_deadline: || None,
+        ingress: |_: &mut wz_session_core::driver_loop::DriverLoopOutcome| {},
+        after_dispatch: || None::<HostStage<'_>>,
+    };
+    let outcome = drive_session_dyn(
         &mut opened.inbound,
         &joined,
         &mut opened.engine,
         None,
         &opened.clock,
         &timeouts,
-        |event| forwarder.forward(face.id, event),
+        None,
+        &mut hooks,
     )
     .await;
     opened.drain_to_close().await;
@@ -2240,13 +2269,35 @@ pub struct SpawnedFaces {
     pub on: SpawnOn,
 }
 
-/// [`drive_face`] owning its forwarder handle, as a spawned drive must.
+/// [`drive_face`] owning its forwarder handle, as a spawned drive must, and driving through the
+/// loop's `Send` form ([`drive_session_dyn_send`]), since it runs on a worker thread.
 async fn drive_face_shared(
     face: Face,
-    opened: OpenedSession,
+    mut opened: OpenedSession,
     forwarder: Arc<dyn FaceForwarder + Send + Sync>,
 ) -> (Face, DriverOutcome) {
-    drive_face(face, opened, &*forwarder).await
+    let forwarder = &*forwarder;
+    let timeouts = SessionTimeouts::from_build();
+    let revised = forwarder.deadline_revised(face.id);
+    let mut hooks = face_hooks(forwarder, face.id, |forwarder, id| {
+        forwarder
+            .read_gate(id)
+            .is_some()
+            .then(|| Box::pin(read_gate_wait(forwarder, id)) as SendHostStage<'_>)
+    });
+    let outcome = drive_session_dyn_send(
+        &mut opened.inbound,
+        &opened.actions,
+        &mut opened.engine,
+        None,
+        &opened.clock,
+        &timeouts,
+        revised.as_deref(),
+        &mut hooks,
+    )
+    .await;
+    opened.drain_to_close().await;
+    (face, outcome)
 }
 
 /// The next spawned drive to finish, with the face it drove. A drive that PANICKED or was
