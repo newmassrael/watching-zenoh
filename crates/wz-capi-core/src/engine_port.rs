@@ -9,7 +9,8 @@ use std::any::Any;
 
 use wz_capi_port::{
     CalledFromReadTask, FanoutError, FilterId, FilterPlane, FilteredPut, LinksNotHonoured, MatchId,
-    MatchingSink, SessionClosed, SessionDrive, SessionEngine, SubId, SubscriberSink, WireKey,
+    MatchingSink, ReadTaskStartRefused, SessionClosed, SessionDrive, SessionEngine, SubId,
+    SubscriberSink, WireKey,
 };
 use wz_session_core::declare_form::{InterestForm, RetractionKey};
 use wz_session_core::link_restriction::LinkRestriction;
@@ -68,8 +69,9 @@ impl SessionDrive for SessionState {
         SessionState::is_closed(self)
     }
 
-    fn start_read_task(&self) -> Result<(), CalledFromReadTask> {
-        SessionState::start_read_task(self)
+    fn start_read_task(&self) -> Result<(), ReadTaskStartRefused> {
+        // This engine's read task is a gate on its own runtime and takes no thread to start.
+        SessionState::start_read_task(self).map_err(ReadTaskStartRefused::from)
     }
 
     fn stop_read_task(&self) -> Result<(), CalledFromReadTask> {

@@ -73,7 +73,7 @@ use crate::config::{
 };
 use crate::ffi::{guard_val, guarded};
 use crate::prelude::*;
-// The read-task doors' refusal, which only the multi-threaded arm has.
+// The read-task doors' refusals, which only the multi-threaded arm has.
 #[cfg(feature = "multi-thread")]
 use crate::result::Z_EINVAL;
 #[cfg(feature = "engine-tokio")]
@@ -81,10 +81,14 @@ use crate::result::Z_ERR_GENERIC;
 use crate::result::{
     ZResult, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_ERR_TRANSPORT_NOT_AVAILABLE, Z_OK,
 };
+#[cfg(feature = "multi-thread")]
+use crate::sync::Z_ERR_SYSTEM_GENERIC;
 #[cfg(feature = "engine-tokio")]
 use wz_capi_core::drive::{open_blocking, DialPhase, OpenError, OpenStance, SessionState};
 #[cfg(any(feature = "engine-tokio", feature = "tls-mbedtls"))]
 use wz_capi_port::tls_material::CapiTlsConfig;
+#[cfg(feature = "multi-thread")]
+use wz_capi_port::ReadTaskStartRefused;
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::policy::{SessionPolicy, SnResolution};
 use wz_session_core::session_init_params::{KeepAliveConf, LinkRxConf, TxQueueConf};
@@ -1583,15 +1587,24 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     let handle = PicoSessionHandle::new(drive, ext);
     #[cfg(feature = "session-memory")]
     let handle = handle.with_memory(memory);
-    // The multi-threaded arm's read task starts with the open unless the options say not to.
-    #[cfg(feature = "multi-thread")]
-    if request.start_read_task {
-        let _ = handle.drive.start_read_task();
-    }
     *zs = z_owned_session_t {
         _val: request.slot.fill(handle) as *mut c_void,
         _cnt: core::ptr::null_mut(),
     };
+    // The multi-threaded arm's read task starts with the open unless the options say not to. A
+    // start that fails fails the open, the session dropped, as pico's `z_open` does
+    // (`vendor/zenoh-pico/src/api/api.c` @ `_Z_CLEAN_RETURN_IF_ERR(_z_runtime_start(`).
+    #[cfg(feature = "multi-thread")]
+    if request.start_read_task {
+        let code = read_task_start_code(
+            session_handle(z_session_loan_mut(zs))
+                .map_or(Ok(()), |handle| handle.drive.start_read_task()),
+        );
+        if code != Z_OK {
+            z_session_drop(z_session_move(zs));
+            return code;
+        }
+    }
     #[cfg(feature = "admin-space")]
     if request.start_admin_space {
         let code = crate::admin_space::zp_start_admin_space(z_session_loan_mut(zs));
@@ -1711,19 +1724,28 @@ pub unsafe extern "C" fn z_session_drop(obj: *mut z_moved_session_t) {
 /// Start the session's read task (pico `zp_start_read_task`). Idempotent, as
 /// pico's is. From inside one of the session's own callbacks it answers
 /// `_Z_ERR_INVALID` and changes nothing, as pico's does from its executor's
-/// thread.
+/// thread. A system that gives no thread answers `_Z_ERR_SYSTEM_GENERIC`, as
+/// pico's task creation does where `pthread_create` refuses, and the task is
+/// not running.
 #[cfg(feature = "multi-thread")]
 #[no_mangle]
 pub unsafe extern "C" fn zp_start_read_task(
     zs: *mut z_loaned_session_t,
     _options: *const c_void,
 ) -> ZResult {
-    match session_handle(zs) {
-        Some(handle) => match handle.drive.start_read_task() {
-            Ok(()) => Z_OK,
-            Err(_) => Z_EINVAL,
-        },
+    guarded(|| match session_handle(zs) {
+        Some(handle) => read_task_start_code(handle.drive.start_read_task()),
         None => Z_ERR_NULL,
+    })
+}
+
+/// The code a start of the read task answers with, as zenoh-pico's start answers it.
+#[cfg(feature = "multi-thread")]
+fn read_task_start_code(started: Result<(), ReadTaskStartRefused>) -> ZResult {
+    match started {
+        Ok(()) => Z_OK,
+        Err(ReadTaskStartRefused::CalledFromReadTask) => Z_EINVAL,
+        Err(ReadTaskStartRefused::NoThread) => Z_ERR_SYSTEM_GENERIC,
     }
 }
 
@@ -2997,5 +3019,28 @@ mod build_numbers {
                 width.id()
             );
         }
+    }
+}
+
+#[cfg(all(test, feature = "multi-thread"))]
+mod read_task_start_codes {
+    use super::*;
+
+    /// Each answer of a start of the read task is the code zenoh-pico's start answers: a start
+    /// made from the task's own thread `_Z_ERR_INVALID`, and a system that gave no thread
+    /// `_Z_ERR_SYSTEM_GENERIC`
+    /// (`vendor/zenoh-pico/include/zenoh-pico/utils/result.h` @ `_Z_ERR_SYSTEM_GENERIC = -80,`),
+    /// which is what `pthread_create`'s refusal becomes there.
+    #[test]
+    fn each_answer_of_a_start_is_picos_code() {
+        assert_eq!(read_task_start_code(Ok(())), Z_OK);
+        assert_eq!(
+            read_task_start_code(Err(ReadTaskStartRefused::CalledFromReadTask)),
+            Z_EINVAL
+        );
+        assert_eq!(
+            read_task_start_code(Err(ReadTaskStartRefused::NoThread)),
+            -80
+        );
     }
 }
