@@ -3585,10 +3585,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         };
         let mut next = self.samples.lock().take_front();
         let handed = next.is_some();
-        loop {
-            let Some(item) = next.take() else {
-                break;
-            };
+        while let Some(item) = next.take() {
             // The head goes back to the lane when the last callback returns, or one unwinds.
             let held = Handed::new(&self.samples);
             match item {
