@@ -226,8 +226,11 @@ Run the matrix with the defaults and paste the rows the gate prints in the table
 debt) into the table, run the gate again over the same result to see it pass, and commit the table with
 the run's record. The committed rows are the reading of the run of 2026-11-22: 70 rows, 5 of them WIN, the
 rest ratchets at that run's upper end, every one a debt. The eight rows of the 1,024-byte receiving cells
-are still null: that run offered them 1,000 samples a second, which stopped the emulated card, and they
-are read again at the byte-held offer.
+are from a later run at the byte-held offer (117 samples a second), since 1,000 a second stopped the
+emulated card: all eight ratchets and debts. Its single-threaded arm kept two measured repetitions of each
+library (one of each was invalid), so those four rows hold the largest ratio the two allow, which is
+what the bootstrap's upper end is for so few repetitions; the gate reads them NOT-MEASURED until a run
+gives three.
 
 ## 6. Where it runs
 
