@@ -21,7 +21,9 @@ use core::net::IpAddr;
 use wz_runtime_coop::{ClockSource, CoopRuntime};
 use wz_runtime_posix::group::MulticastSocket;
 use wz_runtime_posix::scouting::ScoutMembers;
-use wz_session_core::scouting_host::{deliver_in_upstream_order, ScoutWindow, ScoutingActions};
+use wz_session_core::scouting_host::{
+    deliver_in_upstream_order, ScoutWindowPlace, ScoutingActions,
+};
 use wz_session_core::session_zid::SessionZid;
 
 use crate::prelude::*;
@@ -57,7 +59,10 @@ fn run_window<S: MulticastSocket, C: ClockSource + Clone + 'static>(
     mut members: ScoutMembers<S>,
     params: ScoutParams,
 ) -> Arc<ScoutingActions<CoopRuntime<C>>> {
-    let mut window = ScoutWindow::<CoopRuntime<C>>::new(params);
+    // Built in this frame's place and pumped from it: the machine is made in a frame that has
+    // returned before the first datagram is read.
+    let mut place = ScoutWindowPlace::<CoopRuntime<C>>::empty();
+    let window = place.build(params);
     let actions = window.actions().clone();
     if members.is_empty() {
         return actions;

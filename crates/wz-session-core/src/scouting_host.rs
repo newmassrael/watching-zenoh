@@ -50,6 +50,7 @@
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::mem::MaybeUninit;
 
 use sce_forge_runtime::codec::{SceCursor, VecSink};
 use sce_rust_runtime::Engine;
@@ -551,12 +552,25 @@ pub struct ScoutWindow<R: Runtime> {
 impl<R: Runtime> ScoutWindow<R> {
     /// A window over `params`, not yet open.
     pub fn new(params: ScoutParams) -> Self {
+        let mut place = MaybeUninit::uninit();
+        Self::write_in(&mut place, params);
+        // SAFETY: `write_in` wrote every field of the window into `place`.
+        unsafe { place.assume_init() }
+    }
+
+    /// The window over `params` written field by field into `place`, which is overwritten without
+    /// dropping what it held. Never inlined, for the stack: the machine is made in this frame and
+    /// written into its field, and the frame has returned before the window is pumped.
+    #[inline(never)]
+    fn write_in(place: &mut MaybeUninit<Self>, params: ScoutParams) {
+        let at = place.as_mut_ptr();
         let actions = ScoutingActions::<R>::new(params);
         let engine = new_scouting_engine(&actions);
-        Self {
-            actions,
-            engine,
-            started_ms: 0,
+        // SAFETY: `at` is valid for writes of a `Self`, and each field is written once.
+        unsafe {
+            core::ptr::addr_of_mut!((*at).engine).write(engine);
+            core::ptr::addr_of_mut!((*at).actions).write(actions);
+            core::ptr::addr_of_mut!((*at).started_ms).write(0);
         }
     }
 
@@ -599,6 +613,45 @@ impl<R: Runtime> ScoutWindow<R> {
     /// How it ended ([`window_outcome`]).
     pub fn outcome(&self) -> ScoutOutcome {
         window_outcome(&self.actions)
+    }
+}
+
+/// A place a [`ScoutWindow`] is built in where its holder lies, and dropped with it: what a host
+/// whose stack is to stay shallow pumps its window from. The window (the scouting machine and its
+/// actions) is written once in the holder's frame, never returned into it, and the frame that
+/// builds the machine has returned before the window is pumped.
+pub struct ScoutWindowPlace<R: Runtime> {
+    window: MaybeUninit<ScoutWindow<R>>,
+    built: bool,
+}
+
+impl<R: Runtime> ScoutWindowPlace<R> {
+    /// A place with no window in it.
+    pub const fn empty() -> Self {
+        Self {
+            window: MaybeUninit::uninit(),
+            built: false,
+        }
+    }
+
+    /// A window over `params` built in this place and lent for as long as the place is. A place
+    /// holds one window: building a second in it is refused with a panic, and the first is kept.
+    pub fn build(&mut self, params: ScoutParams) -> &mut ScoutWindow<R> {
+        assert!(!self.built, "a place holds one window");
+        ScoutWindow::write_in(&mut self.window, params);
+        self.built = true;
+        // SAFETY: `write_in` wrote every field of the window into this place.
+        unsafe { self.window.assume_init_mut() }
+    }
+}
+
+impl<R: Runtime> Drop for ScoutWindowPlace<R> {
+    fn drop(&mut self) {
+        if self.built {
+            // SAFETY: `built` is set only once `build` wrote the window here, and it is dropped
+            // here alone, once.
+            unsafe { self.window.assume_init_drop() };
+        }
     }
 }
 
