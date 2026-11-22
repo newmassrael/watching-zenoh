@@ -230,17 +230,18 @@ pub fn payload_len<S: MsgPutStorage>(put: &MsgPutOwned<S>) -> usize {
 /// counts a sliced Put's. A Query's value in the sliced layout is the same list
 /// of slices and is counted by the same rule (R3044).
 pub fn slices_len<S: ZbufSliceStorage>(slices: &[ZbufSliceOwned<S>]) -> usize {
-    slices
-        .iter()
-        .map(|slice| {
-            let bytes = slice.bytes.as_bytes().into_inner();
-            match slice_kind(slice.kind) {
-                SLICE_KIND_RAW => bytes.len(),
-                SLICE_KIND_SHM_PTR => shm_slice_len(bytes),
-                _ => 0,
-            }
-        })
-        .sum()
+    slices.iter().map(slice_len).sum()
+}
+
+/// What one slice carries, counted as [`slices_len`] counts each: what a list of slices read
+/// where its frame lies is summed by, one slice at a time.
+pub fn slice_len<S: ZbufSliceStorage>(slice: &ZbufSliceOwned<S>) -> usize {
+    let bytes = slice.bytes.as_bytes().into_inner();
+    match slice_kind(slice.kind) {
+        SLICE_KIND_RAW => bytes.len(),
+        SLICE_KIND_SHM_PTR => shm_slice_len(bytes),
+        _ => 0,
+    }
 }
 
 /// The buffer length a shared-memory slice's descriptor names, or `0` when the

@@ -184,10 +184,7 @@ fn count_rx_network_messages<R: SessionRuntime, T: TimeSource>(
     messages
 }
 
-/// [`count_rx_network_messages`] for one message: what the in-place walk counts a record it
-/// lends by, the owned message its bytes decode to
-/// (`network_message::try_for_each_record_while`), so a record counts the same whichever form it
-/// was received in.
+/// [`count_rx_network_messages`] for one message.
 #[cfg(all(
     feature = "alloc",
     feature = "codec-frame",
@@ -210,6 +207,25 @@ fn count_rx_network_message<R: SessionRuntime, T: TimeSource>(
     let rx = crate::stats_registry::StatsDirection::Rx;
     actions.observe_payload(rx, priority, &class);
     actions.count_network_message(rx, &actions.link, priority, &class);
+}
+
+/// [`count_rx_network_message`] for a record the in-place walk lent, by its class read off the
+/// record as it was decoded (`network_message::RecordClass`): the same counters, by the same rules,
+/// so a record counts the same whichever form it was received in.
+#[cfg(all(
+    feature = "alloc",
+    feature = "codec-frame",
+    feature = "transport-stats"
+))]
+fn count_rx_record<R: SessionRuntime, T: TimeSource>(
+    actions: &SessionLinkActions<R, T>,
+    record: &crate::network_message::RecordClass<'_>,
+) {
+    let class = actions.stats_keys_of(record.class, || record.keyexpr());
+    actions.stats.inc_rx_network(&class);
+    let rx = crate::stats_registry::StatsDirection::Rx;
+    actions.observe_payload(rx, record.priority, &class);
+    actions.count_network_message(rx, &actions.link, record.priority, &class);
 }
 
 /// [`count_rx_network_messages`] for a frame read on the plain-Put lane, whose records are not
@@ -2895,12 +2911,12 @@ fn walk_records_in_place<R: SessionRuntime, T: TimeSource>(
             }
             Ok(())
         },
-        // A record lent is counted by the owned message its bytes decode to, as an owned one is
+        // A record lent is counted by its class, read off it as it was decoded, as an owned one is
         // counted above: a `Frame`'s, as the copying path counts.
         #[cfg(all(feature = "transport-stats", feature = "alloc"))]
-        &mut |message: &crate::network_message::NetworkMessage| {
+        &mut |record: &crate::network_message::RecordClass<'_>| {
             if source == RecordSource::Frame {
-                count_rx_network_message(actions, message);
+                count_rx_record(actions, record);
             }
         },
     )?;
