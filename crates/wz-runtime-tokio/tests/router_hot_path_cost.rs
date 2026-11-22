@@ -271,9 +271,9 @@ const BUDGET: [(&str, CongestionControl, usize, usize, usize); 4] = [
 #[cfg(feature = "time-hlc")]
 const BUDGET: [(&str, CongestionControl, usize, usize, usize); 4] = [
     ("drop_k1", CongestionControl::Drop, 1, 14, 526),
-    ("block_k1", CongestionControl::Block, 1, 17, 720),
+    ("block_k1", CongestionControl::Block, 1, 13, 361),
     ("drop_k16", CongestionControl::Drop, 16, 89, 6_466),
-    ("block_k16", CongestionControl::Block, 16, 107, 7_650),
+    ("block_k16", CongestionControl::Block, 16, 28, 1_231),
 ];
 
 /// Frames per case. Few, because the figure is exact and not a mean: it is the same at 100 as at
