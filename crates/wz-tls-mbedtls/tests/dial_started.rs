@@ -17,7 +17,7 @@
 mod common;
 
 use std::io::Read;
-use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -155,17 +155,42 @@ fn a_begun_dial_completes_its_handshake_one_step_for_each_ask() {
     assert_eq!(served.join().expect("thread").expect("served"), None);
 }
 
+/// A loopback port that refuses every connect for as long as the value lives. Its number is the
+/// near end of a connection the value holds open, so no other socket is bound to it, and nothing
+/// listens on it, so a connect to it is answered with a reset. The tree's guard
+/// (`wz_runtime_tokio_test_support::refusing_port`, a socket bound and never listening) needs a
+/// call the standard library does not make, and its crate would bring the tokio runtime into
+/// these tests.
+struct RefusingPort {
+    _listener: TcpListener,
+    held: TcpStream,
+}
+
+impl RefusingPort {
+    fn hold() -> Self {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("a listener");
+        let held = TcpStream::connect(listener.local_addr().expect("its address"))
+            .expect("a connection to hold");
+        Self {
+            _listener: listener,
+            held,
+        }
+    }
+
+    fn port(&self) -> u16 {
+        self.held.local_addr().expect("the held number").port()
+    }
+}
+
 /// A port nobody listens on: the dial is refused, by the stack when it begins or as the answer
 /// of a later ask, and is never made.
 #[test]
 fn a_begun_dial_to_a_closed_port_is_refused() {
     let _library = library();
     let authority = Authority::new();
-    let closed = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("a listener");
-    let port = closed.local_addr().expect("its port").port();
-    drop(closed);
+    let closed = RefusingPort::hold();
 
-    match chain_dial(&authority).dial_started(at(port)) {
+    match chain_dial(&authority).dial_started(at(closed.port())) {
         Err(refused) => assert_eq!(refused, LinkOpenError::Refused),
         Ok(mut stream) => {
             let (answer, _) = ask_until_answered(&mut stream, Duration::from_secs(10));
