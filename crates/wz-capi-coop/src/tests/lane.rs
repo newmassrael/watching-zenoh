@@ -528,8 +528,11 @@ fn the_lane_hands_its_samples_on_in_order_to_one_delivery_at_a_time() {
     );
     let mut seen = Vec::new();
     while let Some((item, head)) = delivery.take() {
-        let LaneItem::Sample(sample) = item else {
-            panic!("samples were offered");
+        let sample = match item {
+            LaneItem::Sample(sample) => sample,
+            // The other items exist only where their planes are built.
+            #[cfg(any(feature = "liveliness", feature = "query"))]
+            _ => panic!("samples were offered"),
         };
         seen.push(sample.subscribers().collect::<Vec<_>>());
         drop(head);
