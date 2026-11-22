@@ -4335,6 +4335,69 @@ mod rx_sn_gate_tests {
         );
     }
 
+    /// The receive in place reports its outcomes through its own reporter, which clears the chain
+    /// of a rejected frame's channel as the copying one does, reports the outcome once, and leaves
+    /// a chain of the other channel alone.
+    #[cfg(feature = "reassembly")]
+    #[test]
+    fn the_in_place_reporter_clears_the_rejected_channels_chain() {
+        use wz_session_core::drive::{report_outcome_in_place, report_outcome_reassembling};
+        use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
+        use wz_session_core::reassembly_dispatch::{ReassemblyConfig, ReassemblyDispatcher};
+
+        let (actions, _driver) =
+            crate::test_fixtures::recording_actions_with_params(fixture_session_init_params());
+        *actions.inbound_peer_zid.lock().unwrap() = Some([0x0A; 4].into());
+        let mut reasm: ReassemblyDispatcher<4, 4096> =
+            ReassemblyDispatcher::new(ReassemblyConfig::new(2, 5_000));
+        let begin = DriverLoopOutcome::Fragment {
+            reliable: true,
+            sn: 10,
+            more: true,
+            payload: vec![0x01],
+            has_ext: false,
+            extensions: Vec::new(),
+            priority: wz_session_core::qos::Priority::DEFAULT,
+            markers: wz_session_core::extfragment::FragmentMarkers::NONE,
+        };
+        let mut ignore = |_e: IterationEvent<'_, '_>| {};
+        report_outcome_reassembling(&begin, &mut reasm, &actions, 0, &mut ignore);
+        assert_eq!(reasm.active_chains(), 1, "chain armed");
+
+        let mut reported = 0usize;
+        let mut count = |e: IterationEvent<'_, '_>| {
+            if matches!(
+                e,
+                IterationEvent::Poll(DriverLoopOutcome::RxSnRejected { .. })
+            ) {
+                reported += 1;
+            }
+        };
+        let rejected_be = DriverLoopOutcome::RxSnRejected {
+            reliable: false,
+            sn: 9,
+            priority: wz_session_core::qos::Priority::DEFAULT,
+        };
+        report_outcome_in_place(&rejected_be, &mut reasm, &actions, 0, &mut count);
+        assert_eq!(
+            reasm.active_chains(),
+            1,
+            "the other channel's chain is kept"
+        );
+        let rejected = DriverLoopOutcome::RxSnRejected {
+            reliable: true,
+            sn: 9,
+            priority: wz_session_core::qos::Priority::DEFAULT,
+        };
+        report_outcome_in_place(&rejected, &mut reasm, &actions, 0, &mut count);
+        assert_eq!(
+            reasm.active_chains(),
+            0,
+            "the rejected channel's chain is cleared"
+        );
+        assert_eq!(reported, 2, "each outcome reported once");
+    }
+
     /// The unicast reporter raises the chain an ingest evicted, beside the
     /// fragment's own admission: under oldest-wins a one-slot pool gives the
     /// slot of the open chain to the next chain start, and the observer is told

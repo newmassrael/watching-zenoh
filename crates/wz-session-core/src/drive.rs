@@ -2077,9 +2077,9 @@ fn dispatch_copied_of<R: SessionRuntime, T: TimeSource>(
 ///   the whole message into a list first, out of a copy of the slot.
 ///
 /// Every other unit takes the path [`dispatch_datagram`] takes, and every
-/// `Poll` it reports goes through [`report_outcome_reassembling`], as the
-/// copying loop's outcomes do, so an SN rejection on a `Frame` clears its
-/// channel's chain too.
+/// `Poll` it reports goes through [`report_outcome_in_place`], as the
+/// copying loop's outcomes go through [`report_outcome_reassembling`], so an SN
+/// rejection on a `Frame` clears its channel's chain too.
 ///
 /// One difference from the copying path is deliberate, and it is the frame
 /// path's: a completed message's records are dispatched as they are decoded, so
@@ -2197,7 +2197,7 @@ where
     }
 }
 
-/// `on_event` with every `Poll` passed through [`report_outcome_reassembling`]
+/// `on_event` with every `Poll` passed through [`report_outcome_in_place`]
 /// on its way, as the copying loop reports its outcomes. A lent record is not an outcome
 /// and goes to `on_event`'s `record` as it is.
 #[cfg(feature = "reassembly")]
@@ -2225,7 +2225,7 @@ where
         match event {
             IterationEvent::Poll(outcome) => {
                 let on_event = &mut *self.on_event;
-                report_outcome_reassembling(
+                report_outcome_in_place(
                     outcome,
                     self.reasm,
                     self.actions,
@@ -2988,7 +2988,7 @@ where
     // The copying `Fragment` arm's two gates, in its order; an SN rejection
     // reaches the hand-off, which clears the channel's chain.
     if let Some(refused) = refuse_frame_in_place(actions, engine, priority, reliable, sn) {
-        report_outcome_reassembling(&refused, reasm, actions, now_ms, &mut |event| {
+        report_outcome_in_place(&refused, reasm, actions, now_ms, &mut |event| {
             on_event.event(event)
         });
         return DatagramPath::FragmentInPlace;
@@ -4084,26 +4084,73 @@ pub fn report_outcome_reassembling_with<R, T, const SLOTS: usize, const CAP: usi
     H: FnMut(&mut DriverLoopOutcome) + ?Sized,
 {
     on_event(IterationEvent::Poll(outcome));
-    // R311ke — a channel-gate rejection clears that channel's in-progress
-    // reassembly chain (pico clears the dbuf + state on an out-of-order
-    // FRAME or FRAGMENT, rx.c:112-113/166-168): a continuation superseded
-    // by the rejection must never complete a chain from mixed generations.
-    if let DriverLoopOutcome::RxSnRejected {
-        priority, reliable, ..
-    } = outcome
-    {
-        R::with_mutex_mut(&actions.inbound_peer_zid, |zid_slot| {
-            let zid: &[u8] = zid_slot.as_deref().unwrap_or(&[]);
-            // R311y215 (SN-safety F4) — clear only the (peer, reliable, priority)
-            // chain the rejected frame's conduit owns, not a sibling priority's.
-            reasm.abort_channel(zid, *priority, *reliable);
-        });
+    if clear_rejected_chain(outcome, reasm, actions) {
         return;
     }
     #[cfg(not(feature = "alloc"))]
     let _ = (now_ms, ingress);
     #[cfg(feature = "alloc")]
     report_fragment_outcome(outcome, reasm, actions, now_ms, ingress, on_event);
+}
+
+/// R311ke — a channel-gate rejection clears that channel's in-progress
+/// reassembly chain (pico clears the dbuf + state on an out-of-order
+/// FRAME or FRAGMENT, rx.c:112-113/166-168): a continuation superseded
+/// by the rejection must never complete a chain from mixed generations.
+/// Whether `outcome` was such a rejection.
+#[cfg(feature = "reassembly")]
+fn clear_rejected_chain<R, T, const SLOTS: usize, const CAP: usize, S>(
+    outcome: &DriverLoopOutcome,
+    reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
+    actions: &SessionLinkActions<R, T>,
+) -> bool
+where
+    R: SessionRuntime,
+    T: TimeSource,
+    S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
+{
+    let DriverLoopOutcome::RxSnRejected {
+        priority, reliable, ..
+    } = outcome
+    else {
+        return false;
+    };
+    R::with_mutex_mut(&actions.inbound_peer_zid, |zid_slot| {
+        let zid: &[u8] = zid_slot.as_deref().unwrap_or(&[]);
+        // R311y215 (SN-safety F4) — clear only the (peer, reliable, priority)
+        // chain the rejected frame's conduit owns, not a sibling priority's.
+        reasm.abort_channel(zid, *priority, *reliable);
+    });
+    true
+}
+
+/// [`report_outcome_reassembling`] for a receive in place ([`dispatch_datagram_reassembling`],
+/// and what it parked, [`dispatch_parked_in_place`]): the outcome reported, and a channel-gate
+/// rejection clears that channel's chain. Such a receive stages every fragment where its datagram
+/// lies, so no outcome of it carries a `Fragment`, but one read out of a compressed batch, which
+/// the copying path inflated: only a build that compresses drives the pool from an outcome here,
+/// and one that does not links no decode of a reassembled chain into owned messages through it.
+#[cfg(feature = "reassembly")]
+pub fn report_outcome_in_place<R, T, const SLOTS: usize, const CAP: usize, S, F>(
+    outcome: &DriverLoopOutcome,
+    reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
+    actions: &SessionLinkActions<R, T>,
+    now_ms: u64,
+    on_event: &mut F,
+) where
+    R: SessionRuntime,
+    T: TimeSource,
+    S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
+    F: FnMut(IterationEvent<'_, '_>) + ?Sized,
+{
+    #[cfg(all(feature = "alloc", feature = "transport-compression"))]
+    report_outcome_reassembling(outcome, reasm, actions, now_ms, on_event);
+    #[cfg(not(all(feature = "alloc", feature = "transport-compression")))]
+    {
+        let _ = now_ms;
+        on_event(IterationEvent::Poll(outcome));
+        clear_rejected_chain(outcome, reasm, actions);
+    }
 }
 
 /// The `Fragment` half of [`report_outcome_reassembling`]: drive the pool with the

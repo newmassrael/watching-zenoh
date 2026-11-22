@@ -86,7 +86,13 @@ use crate::reassembly_rx::{in_place_reassembly, InPlaceReassembly, PoolStorage, 
 use crate::reassembly_rx::{mcu_reassembly, CoopReassembly};
 #[cfg(all(feature = "reassembly", feature = "rx-in-place"))]
 use wz_session_core::drive::dispatch_datagram_reassembling;
-#[cfg(all(feature = "reassembly", feature = "alloc"))]
+#[cfg(all(feature = "reassembly", feature = "alloc", feature = "rx-in-place"))]
+use wz_session_core::drive::report_outcome_in_place;
+#[cfg(all(
+    feature = "reassembly",
+    feature = "alloc",
+    not(feature = "rx-in-place")
+))]
 use wz_session_core::drive::report_outcome_reassembling;
 // R311mh — sweep_reporting moved drive -> reassembly_dispatch (pure reassembly
 // helper, not a unicast-drive one).
@@ -792,7 +798,13 @@ where
         T: TimeSource,
         F: FnMut(IterationEvent<'_, '_>) + ?Sized,
     {
+        // What the copying receive dispatched, through the whole reassembly hand-off; what a
+        // receive in place parked, through its own, which drives the pool from no outcome of a
+        // build that does not compress.
+        #[cfg(not(feature = "rx-in-place"))]
         report_outcome_reassembling(outcome, self, actions, now_ms, on_event);
+        #[cfg(feature = "rx-in-place")]
+        report_outcome_in_place(outcome, self, actions, now_ms, on_event);
     }
 
     #[cfg(feature = "rx-in-place")]
