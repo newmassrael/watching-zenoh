@@ -6809,6 +6809,26 @@
       "carry_forward_bullets": [
         "W16 has nine tables left: S1 55, S2 7, 39, 44, S4 24, 58, S7 10, S8 53, S10 22, each to be bounded after reading what zenoh-pico does at the same limit. Hosted run 45027021871 (1288f22e9) was cancelled with no job, so the reading of C1g, C1bnl, C1ay and C1sb after round 4603 moves to the next hosted run. Local pico-client-coop-query reads ratio 3.16 against the committed ceiling row 3.0977 already on the tree before this round (local toolchain cmake 4.4.2, row read with 3.28.3); this round adds 0.0007 of it, and the hosted C1cs reading decides."
       ]
+    },
+    "Round 4607": {
+      "decision_summary": "- A fenced control frame leaves ahead of everything queued after the fence: the stream writer packs and takes only what was queued before the fence while it holds, and the pooled stream queue opens a new slot for a frame queued after it.\n- The encoded Push module's documentation resolves its own links: the outer doc block on its declaration is a plain comment.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/writer_queue.rs: take_next, take_lane_packed and pack_heap skip a lane whose head was queued after the held fence; send_encoded and lend open a slot of their own after the fence. Two tests that asserted the old order now assert the barrier's order; four new tests.",
+        "crates/wz-session-core/src/lib.rs: the outer doc block on `pub mod encoded_push` becomes a plain comment so rustdoc resolves the module's links from the module."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --features transport-qos,transport-unicast,transport-link-tcp --test it files::packed_writer_e2e:: : 3 passed.",
+        "cargo test -p wz-runtime-tokio --lib writer_queue::tests:: : 78 passed; with runtime-zero-copy: 83 passed.",
+        "cargo test -p wz-runtime-tokio --lib: 781 passed; --test it: 288 passed.",
+        "RUSTDOCFLAGS=\"-D warnings\" cargo doc -p wz-session-core --no-deps --all-features: no error.",
+        "cargo clippy -p wz-runtime-tokio --all-targets (default and runtime-zero-copy) -D warnings: clean."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-5-preset-ap-full"
+      ],
+      "carry_forward_bullets": [
+        "The aliased fan-out copy test under pubsub-ts-stack and the capic-default budget of the same hosted run are repaired by another session's round, as agreed between the two sessions."
+      ]
     }
   },
   "inventory_entries": {
