@@ -51,6 +51,8 @@ use crate::declare::queryable::RemoteQueryablePeer;
 use crate::declare::subscriber::RemoteSubscriberPeer;
 use crate::pubsub::SubscriberPeer;
 use crate::reply_stage::{FinalStage, ReplyStage};
+use core::mem::MaybeUninit;
+use core::ptr::{self, addr_of_mut};
 
 #[cfg(feature = "liveliness-token")]
 use crate::bounded::BoundedVec;
@@ -91,18 +93,68 @@ pub struct PeerTables<P: Storage = Profile> {
 
 impl<P: Storage> Default for PeerTables<P> {
     fn default() -> Self {
-        Self {
-            subscribers: SubscriberPeer::default(),
-            remote_subscribers: RemoteSubscriberPeer::default(),
-            remote_queryables: RemoteQueryablePeer::default(),
-            tokens: PeerTokens::default(),
-            replies: ReplyStage::default(),
-            finals: FinalStage::default(),
+        let mut place = MaybeUninit::uninit();
+        Self::init_in(&mut place);
+        // SAFETY: `init_in` wrote every field of the tables into `place`.
+        unsafe { place.assume_init() }
+    }
+}
+
+impl<P: Storage> PeerTables<P> {
+    /// Empty tables, for a peer that has said nothing yet, written field by field into `place`,
+    /// which is overwritten without dropping what it held: the single list of fields, which
+    /// [`Default`] shares. Of the lent policy the tables have no rows until
+    /// [`PeerTables::lend_rows`] lends them some where they lie.
+    ///
+    /// The tables keyed by the peer's ids are inline at the build's capacity, kilobytes each, so a
+    /// set built as a value and moved into the place that keeps it passes through the frame of every
+    /// function it is moved by. Not inlined: the largest value its own frame holds is one table.
+    #[inline(never)]
+    pub fn init_in(place: &mut MaybeUninit<Self>) -> &mut Self {
+        let at = place.as_mut_ptr();
+        // Each gated statement opens with the path `ptr::write(`, not with the `addr_of_mut!`
+        // macro, as `SlotObserverOf::init_in_place` says why.
+        // SAFETY: `at` is valid for writes of a `Self`, and each field is written once through a
+        // pointer to it; `every_field_is_written` names every field, so the tables are whole when
+        // they are lent.
+        unsafe {
+            ptr::write(addr_of_mut!((*at).subscribers), SubscriberPeer::default());
+            ptr::write(
+                addr_of_mut!((*at).remote_subscribers),
+                RemoteSubscriberPeer::default(),
+            );
+            ptr::write(
+                addr_of_mut!((*at).remote_queryables),
+                RemoteQueryablePeer::default(),
+            );
+            ptr::write(addr_of_mut!((*at).tokens), PeerTokens::default());
+            ptr::write(addr_of_mut!((*at).replies), ReplyStage::default());
+            ptr::write(addr_of_mut!((*at).finals), FinalStage::default());
             #[cfg(feature = "liveliness-token")]
-            pending_declares: BoundedVec::default(),
+            ptr::write(addr_of_mut!((*at).pending_declares), BoundedVec::default());
             #[cfg(feature = "liveliness-token")]
-            token_interest_chains_refused: 0,
+            ptr::write(addr_of_mut!((*at).token_interest_chains_refused), 0);
+            &mut *at
         }
+    }
+
+    /// A field added to [`PeerTables`] and not written by [`Self::init_in`] would be read
+    /// uninitialised. This destructures the tables with no `..`, so adding a field without naming
+    /// it here (and so without writing it there) does not compile.
+    #[allow(dead_code)]
+    fn every_field_is_written(tables: Self) {
+        let Self {
+            subscribers: _,
+            remote_subscribers: _,
+            remote_queryables: _,
+            tokens: _,
+            replies: _,
+            finals: _,
+            #[cfg(feature = "liveliness-token")]
+                pending_declares: _,
+            #[cfg(feature = "liveliness-token")]
+                token_interest_chains_refused: _,
+        } = tables;
     }
 }
 
@@ -154,20 +206,32 @@ impl PeerTables<Lent> {
         rows: PeerRows,
         limits: &crate::limits::SessionLimits,
     ) -> Result<Self, LendRefused> {
-        let mut tables = Self {
-            subscribers: SubscriberPeer::lent(arena, rows.sub_interests, rows.pending_declares)?,
-            remote_subscribers: RemoteSubscriberPeer::default(),
-            remote_queryables: RemoteQueryablePeer::default(),
-            tokens: PeerTokens::default(),
-            replies: ReplyStage::lent(arena, rows.replies, rows.reply_bytes)?,
-            finals: FinalStage::lent(arena, rows.finals)?,
-            #[cfg(feature = "liveliness-token")]
-            pending_declares: arena.lend(rows.pending_declares)?,
-            #[cfg(feature = "liveliness-token")]
-            token_interest_chains_refused: 0,
-        };
-        tables.limit_to(limits);
+        let mut tables = Self::default();
+        tables.lend_rows(arena, rows, limits)?;
         Ok(tables)
+    }
+
+    /// Lend tables of no rows ([`PeerTables::init_in`]) the rows `rows` states from `arena`,
+    /// where they lie, and hold them to `limits`: what [`Self::lent`] makes, without the tables
+    /// being a value of their own. Each table is lent in the order `lent` lends them, so the arena
+    /// is laid out as its plan ([`Self::arena_bytes`]) counts it. Refused as `lent` is; the tables
+    /// stay whole, those lent before the refusal holding their rows, which go back with the arena.
+    pub fn lend_rows(
+        &mut self,
+        arena: &mut Arena,
+        rows: PeerRows,
+        limits: &crate::limits::SessionLimits,
+    ) -> Result<(), LendRefused> {
+        self.subscribers
+            .lend_rows(arena, rows.sub_interests, rows.pending_declares)?;
+        self.replies = ReplyStage::lent(arena, rows.replies, rows.reply_bytes)?;
+        self.finals = FinalStage::lent(arena, rows.finals)?;
+        #[cfg(feature = "liveliness-token")]
+        {
+            self.pending_declares = arena.lend(rows.pending_declares)?;
+        }
+        self.limit_to(limits);
+        Ok(())
     }
 
     /// The bytes of an arena [`Self::lent`] takes for `rows`: each table's spans. `None` past the
@@ -524,6 +588,72 @@ mod lent_tests {
         assert_eq!(memory.high_water(), planned);
         assert!(planned > 0, "a plan of two rows each lends something");
         drop(tables);
+    }
+
+    /// Tables written where they lie and lent their rows there are the tables `lent` makes by
+    /// value: the same bytes of the arena, one row of each table that bounds them, the quotas.
+    #[test]
+    fn peer_tables_lent_in_place_are_the_tables_lent_by_value() {
+        let rows = rows(1);
+        let limits = SessionLimits::defaults();
+        let mut by_value_memory = arena(1 << 16);
+        let mut by_value =
+            PeerTables::<Lent>::lent(&mut by_value_memory, rows, &limits).expect("the rows");
+        let mut memory = arena(1 << 16);
+        let mut place = MaybeUninit::<PeerTables<Lent>>::uninit();
+        let in_place = PeerTables::init_in(&mut place);
+        assert!(
+            !in_place.finals.has_room(),
+            "CONTROL: tables of no rows refuse a Final"
+        );
+        in_place
+            .lend_rows(&mut memory, rows, &limits)
+            .expect("the arena has the rows");
+        assert_eq!(
+            memory.high_water(),
+            by_value_memory.high_water(),
+            "the same tables lent in the same order take the same bytes"
+        );
+        for tables in [&mut by_value, &mut *in_place] {
+            assert_eq!(tables.replies.stage_parts(reply(1, None, None)), Ok(()));
+            assert_eq!(
+                tables.replies.stage_parts(reply(2, None, None)),
+                Err(ReplyError::StagingFull)
+            );
+            tables.finals.owe(1, QosLevel::DEFAULT);
+            assert!(!tables.finals.has_room(), "one row of Finals");
+            #[cfg(feature = "liveliness-token")]
+            {
+                assert!(tables
+                    .pending_declares
+                    .push(DeclResponseItem::Final { interest_id: 1 })
+                    .is_ok());
+                assert!(tables
+                    .pending_declares
+                    .push(DeclResponseItem::Final { interest_id: 2 })
+                    .is_err());
+            }
+        }
+        // SAFETY: `init_in` wrote the whole tables into `place`, and they are dropped once.
+        unsafe { place.assume_init_drop() };
+    }
+
+    /// A refusal of the rows leaves the tables written in place whole: they are dropped as tables,
+    /// with what was lent before the refusal.
+    #[test]
+    fn peer_tables_refused_their_rows_in_place_stay_whole() {
+        let rows = rows(1);
+        let planned = PeerTables::<Lent>::arena_bytes(rows).expect("within the address space");
+        let mut place = MaybeUninit::<PeerTables<Lent>>::uninit();
+        let refused = PeerTables::init_in(&mut place).lend_rows(
+            &mut arena(planned - 1),
+            rows,
+            &SessionLimits::defaults(),
+        );
+        assert!(matches!(refused, Err(LendRefused::Exhausted { .. })));
+        // SAFETY: `init_in` wrote the whole tables into `place`, a refused lend leaves them whole,
+        // and they are dropped once.
+        unsafe { place.assume_init_drop() };
     }
 
     /// An arena one byte short of the plan refuses the tables as exhausted.
