@@ -43,6 +43,12 @@ use crate::group_transport::{GroupJoiner, GroupTransport, NoGroups};
 use crate::link_storage::TxStore;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::link_storage::{heap_link_buffers, LinkTables, RxBuffer, TxBuffer};
+#[cfg(all(
+    feature = "alloc",
+    not(feature = "session-slot"),
+    target_has_atomic = "ptr"
+))]
+use crate::session_drive::RxLease;
 use crate::session_drive::SessionDatagramLink;
 #[cfg(feature = "session-slot")]
 use crate::session_drive::{Accept, Bind, DriverPump, SlotStack};
@@ -273,6 +279,24 @@ where
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     fn writability(&self) -> Option<alloc::boxed::Box<dyn LinkWritability>> {
         either!(self, link => link.writability())
+    }
+
+    #[cfg(all(
+        feature = "alloc",
+        not(feature = "session-slot"),
+        target_has_atomic = "ptr"
+    ))]
+    fn lend_rx(&self) -> Option<RxLease> {
+        either!(self, link => link.lend_rx())
+    }
+
+    #[cfg(all(
+        feature = "alloc",
+        not(feature = "session-slot"),
+        target_has_atomic = "ptr"
+    ))]
+    fn land_rx(&self, lease: RxLease) {
+        either!(self, link => link.land_rx(lease))
     }
 }
 

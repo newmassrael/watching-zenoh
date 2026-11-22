@@ -148,48 +148,95 @@ how much of the estimate each of them was.
 
 Measured on the same Windows x64 host over loopback, peer mode, each probe pinned to four CPUs:
 TCP round trip at 8 B, median 46.5 us for wz against 30.0 us for zenoh-pico, the pong answering
-47 k pings in the time pico's answered 68 k; over multicast wz is 1.06 times pico's. This section
-traces one round trip of the pong side on the cooperative engine (the read task wakes, steps,
-delivers, the callback puts, the put writes) against zenoh-pico's, and counts what each does. Read
-from the source, not measured.
+47 k pings in the time pico's answered 68 k; over multicast wz is 1.06 times pico's. After
+`rx-stream`, the median at 8 B was 1.43 times pico's on Windows (43.8 against 30.7 us) and 1.42
+times on Linux (13.1 against 9.3 us), and the pong's CPU a round trip 1.63 times pico's on Linux.
+This section traces one round trip of the pong side on the cooperative engine (the read task
+wakes, steps, delivers, the callback puts, the put writes) against zenoh-pico's, and counts what
+each does. Read from the source, not measured.
 
 zenoh-pico's read task reads the socket with one blocking `recv` bounded by the socket's receive
 timeout (`vendor/zenoh-pico/src/link/transport/tcp/tcp_windows.c` @
-`int rb = recv(sock._sock._fd, (char *)ptr, (int)len, 0);`), decodes, takes the session mutex for
-the subscription lookup and calls the callback, whose put takes the transmit mutex and sends.
+`int rb = recv(sock._sock._fd, (char *)ptr, (int)len, 0);`), with its mutex let go of, decodes,
+takes the session mutex for the subscription lookup and calls the callback, whose put takes the
+transmit mutex and sends. A client's read task reads so with no wait before the read
+(`vendor/zenoh-pico/src/transport/unicast/read.c` @ `_z_unicast_client_read`).
 
-| Step | zenoh-pico | wz before `rx-stream` | wz after |
-|---|---|---|---|
-| wait for the ping | the `recv` below, blocking | `WSAPoll` (`poll` on POSIX), the read's wait with nothing of the session held, after one take of the session to work the wait out | the same |
-| read the batch | one `recv` | `WSAPoll(0)` and `recv` on Windows (one `recv` on POSIX), under the step's take of the session | one `recv` (a9d542f57) |
-| look for more in the same step | none | a second read of the stream, which found nothing: `WSAPoll(0)` on Windows, a `recv` answering `EAGAIN` on POSIX | none: the pong's sample lies in the stream's buffer, so the link is not read again until it is delivered (cec3473f5, e6a430162) |
-| after the Push record | nothing | the drain's burst: the conduit's lock taken and given back to flush nothing (eight with `transport-qos`) | nothing (f2b0c6a25) |
-| hand the sample over | session mutex for the lookup, then the callback | the step lets go of the session; the delivery takes the sample from the lane's queue and locks the callback's mutex | the same, the sample read where it lies rather than from a copy |
-| the pong's put | the transmit mutex, one `send` | one take of the session, the conduit's lock, one `WSASend` tried first, no wait for room (section 3, row 7) | the same |
-| the handed legs | none | one look under their lock each read | the same |
-| wakes | none | none: the put writes on the callback's thread; only a put that finds the session held by a step hands its leg to that step (`CoopEngine::hand_off`), and nothing is woken for it | the same |
+| Step | zenoh-pico | wz before `rx-stream` | wz after `rx-stream` | wz after `rtt-poll` |
+|---|---|---|---|---|
+| wait for the ping | the `recv` below, blocking | `WSAPoll` (`poll` on POSIX), the read's wait with nothing of the session held, after one take of the session to work the wait out | the same | POSIX: the `recv` below, blocking, with nothing of the session held, after the take that works the wait out and lends the read the link's buffer; Windows: as after `rx-stream` |
+| read the batch | one `recv` | `WSAPoll(0)` and `recv` on Windows (one `recv` on POSIX), under the step's take of the session | one `recv` (a9d542f57) | POSIX: the wait's `recv`, into the free part of the link's receive buffer, landed on the link by the step's take before it reads; Windows: one `recv` |
+| look for more in the same step | none | a second read of the stream, which found nothing: `WSAPoll(0)` on Windows, a `recv` answering `EAGAIN` on POSIX | none: the pong's sample lies in the stream's buffer, so the link is not read again until it is delivered (cec3473f5, e6a430162) | the same |
+| after the Push record | nothing | the drain's burst: the conduit's lock taken and given back to flush nothing (eight with `transport-qos`) | nothing (f2b0c6a25) | the same |
+| hand the sample over | session mutex for the lookup, then the callback | the step lets go of the session; the delivery takes the sample from the lane's queue and locks the callback's mutex | the same, the sample read where it lies rather than from a copy | the same |
+| the pong's put | the transmit mutex, one `send` | one take of the session, the conduit's lock, one `WSASend` tried first, no wait for room (section 3, row 7) | the same | the same |
+| the handed legs | none | one look under their lock each read | the same | the same |
+| wakes | none | none: the put writes on the callback's thread; only a put that finds the session held by a step hands its leg to that step (`CoopEngine::hand_off`), and nothing is woken for it | the same | the same |
 
-System calls a round trip, pong side: zenoh-pico 2 (`recv`, `send`); wz before 5 on Windows (`WSAPoll`,
-`WSAPoll`, `recv`, `WSAPoll`, `WSASend`) and 4 on POSIX (`poll`, `recv`, `recv`, `send`); after,
-3 on both (the wait, `recv`, the send). Lock pairs: zenoh-pico 2; wz 3 takes of the session (the
-wait, the step, the put), the handed legs, the conduit and the callback's mutex, where before the
-empty drain added the conduit once more (or eight times).
+System calls a round trip, pong side: zenoh-pico 2 (`recv`, `send`); wz before `rx-stream` 5 on
+Windows (`WSAPoll`, `WSAPoll`, `recv`, `WSAPoll`, `WSASend`) and 4 on POSIX (`poll`, `recv`,
+`recv`, `send`); after it, 3 on both (the wait, `recv`, the send); after `rtt-poll`, 2 on POSIX
+(`recv`, `send`), as zenoh-pico's, and 3 on Windows. The receive timeout is set on the socket only
+when a read asks for another wait than the one set last, so a session with nothing due before its
+idle wait sets it once (a `setsockopt` beside the `recv` when a deadline shortens the wait, which
+is the count the `poll` it replaces cost). Lock pairs: zenoh-pico 2; wz 3 takes of the session (the
+wait, which now lends the buffer, the step, which first takes it back, and the put), the handed
+legs, the conduit and the callback's mutex.
+
+The buffer handed to the read. The read's wait is made in the read of the link when it is the one
+thing waited on: one stream link of the session, waited on for its input alone (a link that owes
+its stream the rest of a frame is waited on for room as well, which a read cannot), with no port,
+group, other link or program clock word beside it (`Core::idle_wait`). Under the session's lock
+the link moves what is left of a batch to the front of its buffer, as a receive does, and lends
+the free part behind it (`SessionDatagramLink::lend_rx`), only where a receive could be asked: no
+sample lies in a datagram a link lent (`SharedLane::lends_a_datagram`). While it is lent the
+link's receive reads nothing and leaves the buffer alone, whoever steps the session; the step after
+the read lands the lease first (`SessionDatagramLink::land_rx`), and a lease of a link that has
+gone is let go of. A link let go of with its buffer lent shuts its stream, which ends a read
+waiting in it at once, and waits the read out before the buffer goes.
+
+The ping side. The pinging thread's put takes the session, writes one `sendmsg` (one `WSASend`)
+and returns; the reply reaches it through the program's own wait, which zenoh-pico's ping makes
+the same way: one system call of the engine's a round trip on that thread, as pico's. The extra
+one it could make was under a race with its own read task, which takes the session to work out
+its next wait just as the reply's callback lets the pinging thread go: a droppable put that found
+the session held so asked each face for room (`poll` for `POLLOUT`) on every turn under zenoh's
+queue profile, and slept on the session's lock under pico's. That take now marks itself as holding
+no send (`Holder::Waiting`), and the put tries the session again at once under either profile,
+asking nothing. The ping process's read task is the pong side's: one `recv` a reply on POSIX when
+its session dials.
 
 What is left, and why it stays for now:
 
-* The wait before the read. wz waits for input with nothing of the session held and reads under
-  the session's lock, so a publisher on another thread is not held behind a reader that sleeps; a
-  blocking read would sleep holding the link's buffer, which is the session's. One `WSAPoll` a
-  round trip is the price of that.
-* The second take of the session for the read's wait (item 9 of `docs/rx-sample-cost.md`), and the
-  look at the handed legs each read, which a test holds as its CONTROL
-  (`tests::a_publish_with_nothing_handed_takes_the_session_once_and_not_the_handed_queue`): it is
-  what sends a leg a put handed across a stale reading of the word that says one waits.
+* Windows: the wait before the read. The socket does not block, so that a write is tried first
+  without waiting (section 3, row 7), which Winsock has no per-call flag for; its blocking mode is
+  the socket's, so a read that waited in `recv` would make that write wait too. Reading first and
+  waiting in `WSAPoll` only when the read would block costs a round trip three calls in place of
+  two: the read task is back before the next ping arrives, so its first read would block nearly
+  every time. The owner is given no read of a Windows stream (`StreamSocket::reader`), and waits
+  in `WSAPoll` before the step's `recv`.
+* A session that listens waits on its port beside its links, with one `poll` over both, and its
+  step asks the port for a connection (`accept`, answering `EAGAIN`) every step: two calls beside
+  the `recv` and the send where zenoh-pico's peer gives the port a task of its own. A peer whose
+  ping listens pays them on the ping side. Taking the connection only when the wait says the port
+  is ready needs a wait that names what was ready, which no stack's gives yet.
+* Several links and a group are waited on together, with one `poll` before the step's reads.
+* The second take of the session for the read's wait (item 9 of `docs/rx-sample-cost.md`), which
+  now also lends the buffer, and the look at the handed legs each read, which a test holds as its
+  CONTROL (`tests::a_publish_with_nothing_handed_takes_the_session_once_and_not_the_handed_queue`):
+  it is what sends a leg a put handed across a stale reading of the word that says one waits.
 * The callback's mutex: with `local-subscriber` a session's own put hands its subscribers the
   sample on the putting thread, beside the read task's delivery.
 
 The tests that count what changed: `stream_link::tests::a_lent_batch_lies_where_it_was_lent_until_the_next_receive`,
 `tests::listen::the_puts_of_one_stream_batch_are_handed_where_they_lie_in_a_few_reads`,
 `slot_observer::tests::a_drain_with_nothing_staged_opens_no_burst` and
-`windows::stream::tests::a_read_asks_the_stream_with_no_poll_before_it`. The Windows probes are the
-measurement.
+`windows::stream::tests::a_read_asks_the_stream_with_no_poll_before_it`; for the read made in the
+wait, `stream_link::tests::a_batch_the_owner_read_is_handed_over_with_no_read_of_the_links_own`
+(one read a batch, the owner's, and none of the link's own),
+`stream::tests::the_owners_read_waits_in_the_recv_and_sets_its_timeout_once` (one `recv` a read
+and the receive timeout set once), `tests::listen::a_lone_stream_link_is_waited_on_in_its_read_and_a_listener_polls`
+(no wait on the readiness of a lone stream link, a listener's CONTROL) and, for the ping side,
+`tests::congestion::a_session_held_by_a_read_working_out_its_wait_is_tried_again_without_asking`
+and `tests::a_droppable_publish_behind_a_read_working_out_its_wait_spins_and_is_sent`. The probes
+are the measurement.

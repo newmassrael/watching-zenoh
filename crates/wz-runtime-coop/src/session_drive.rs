@@ -48,6 +48,12 @@ use core::mem::MaybeUninit;
 use core::net::SocketAddr;
 #[cfg(feature = "session-slot")]
 use core::ops::{Deref, DerefMut};
+#[cfg(all(
+    feature = "alloc",
+    not(feature = "session-slot"),
+    target_has_atomic = "ptr"
+))]
+use core::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(feature = "session-slot")]
 use critical_section::Mutex;
@@ -266,6 +272,39 @@ pub trait SessionDatagramLink {
     fn writability(&self) -> Option<Box<dyn LinkWritability>> {
         None
     }
+
+    /// Lend the owner the free part of this link's receive buffer for one read it makes with
+    /// nothing of the session held, waiting in the read itself ([`RxLease`]), where a wait on the
+    /// link's readiness ([`Self::readiness`]) is followed by the step's read. `None` for a link
+    /// that gives no such read, holds input already, has a lease out, or has ended; its owner then
+    /// waits on its readiness. While the lease is out the link's receive reads nothing and leaves
+    /// the buffer alone, and what the read brought is the link's once the lease is landed
+    /// ([`Self::land_rx`]).
+    ///
+    /// Asked only where the link could be asked to receive: what is left of a batch is moved to
+    /// the front of the buffer here, as a receive moves it, so nothing a receive lent may be read
+    /// any more ([`Self::lends_until_next_receive`]). The heap profile's, as [`Self::readiness`]
+    /// is.
+    #[cfg(all(
+        feature = "alloc",
+        not(feature = "session-slot"),
+        target_has_atomic = "ptr"
+    ))]
+    fn lend_rx(&self) -> Option<RxLease> {
+        None
+    }
+
+    /// Take back a lease [`Self::lend_rx`] gave, with what its read brought: the bytes it read
+    /// are the link's from here, and a stream it found ended or failed ends the link, after what
+    /// came before is handed over. A lease another link gave is let go of and changes nothing.
+    #[cfg(all(
+        feature = "alloc",
+        not(feature = "session-slot"),
+        target_has_atomic = "ptr"
+    ))]
+    fn land_rx(&self, lease: RxLease) {
+        drop(lease);
+    }
 }
 
 /// A wait for room on a link's outbound side, made by a thread that does not drive the link
@@ -398,6 +437,154 @@ pub fn wait_any(waits: &[Arc<dyn LinkReadiness>], timeout_ms: u32) {
     }
 }
 
+/// What a read its owner made of a link's input came to ([`LinkRead::read_waiting`]).
+#[cfg(all(
+    feature = "alloc",
+    not(feature = "session-slot"),
+    target_has_atomic = "ptr"
+))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadWaited {
+    /// This many bytes were taken into the buffer, at least one.
+    Read(usize),
+    /// Nothing came within the wait, or the wait was interrupted: the link is as it was.
+    Quiet,
+    /// The other end closed the stream: nothing more comes.
+    Ended,
+    /// The read failed, with the platform's code for why.
+    Failed(i32),
+}
+
+/// A read of a link's input that its owner makes with nothing of the session held and that waits
+/// in the read itself, as zenoh-pico's read task waits in its socket's `recv`
+/// (`vendor/zenoh-pico/src/transport/unicast/read.c` @ `_z_unicast_client_read`): one call where a
+/// wait for the link to be readable and the read after it are two
+/// ([`SessionDatagramLink::lend_rx`]).
+#[cfg(all(
+    feature = "alloc",
+    not(feature = "session-slot"),
+    target_has_atomic = "ptr"
+))]
+pub trait LinkRead: Send + Sync {
+    /// Wait up to `timeout_ms` milliseconds (at least one) for the link's stack to have bytes,
+    /// and take what it has, at most `buf.len()`, into `buf`; at once when some are queued.
+    fn read_waiting(&self, buf: &mut [u8], timeout_ms: u32) -> ReadWaited;
+}
+
+/// A link's [`LinkRead`], shared between the link and the leases it gives ([`RxLease`]), with
+/// whether a read of a lease is under way: what the link waits out before it lets its buffer go
+/// ([`Self::wait_out`]).
+#[cfg(all(
+    feature = "alloc",
+    not(feature = "session-slot"),
+    target_has_atomic = "ptr"
+))]
+pub struct OwnerRead {
+    read: Box<dyn LinkRead>,
+    reading: AtomicBool,
+}
+
+#[cfg(all(
+    feature = "alloc",
+    not(feature = "session-slot"),
+    target_has_atomic = "ptr"
+))]
+impl OwnerRead {
+    /// The owner's read `read`, with no lease out.
+    pub fn new(read: Box<dyn LinkRead>) -> Arc<Self> {
+        Arc::new(Self {
+            read,
+            reading: AtomicBool::new(false),
+        })
+    }
+
+    /// Lend the `len` bytes at `at` to one read of the owner's.
+    ///
+    /// # Safety
+    /// The bytes are writable, and nothing reads, writes or frees them until the lease's read has
+    /// ended or the lease is let go of unread, which [`Self::wait_out`] waits for.
+    pub unsafe fn lend(self: &Arc<Self>, at: *mut u8, len: usize) -> RxLease {
+        self.reading.store(true, Ordering::Release);
+        RxLease {
+            owner: Arc::clone(self),
+            at,
+            len,
+            waited: None,
+        }
+    }
+
+    /// Return once no read of a lease of this is under way. A link that lets go of its buffer
+    /// while a lease is out first ends the read (its stream shut, which a read waiting on it
+    /// answers at once) and then waits here, so the buffer is not freed under the read.
+    pub fn wait_out(&self) {
+        while self.reading.load(Ordering::Acquire) {
+            core::hint::spin_loop();
+        }
+    }
+
+    /// Whether `lease` was lent by this, and not by another link's read.
+    pub fn lent(self: &Arc<Self>, lease: &RxLease) -> bool {
+        Arc::ptr_eq(self, &lease.owner)
+    }
+}
+
+/// The free part of a link's receive buffer, lent to one read its owner makes with nothing of the
+/// session held ([`SessionDatagramLink::lend_rx`]), and what that read brought. Made, read and
+/// landed by the owner's thread; the session takes it back under its lock
+/// ([`SessionDatagramLink::land_rx`]).
+#[cfg(all(
+    feature = "alloc",
+    not(feature = "session-slot"),
+    target_has_atomic = "ptr"
+))]
+pub struct RxLease {
+    owner: Arc<OwnerRead>,
+    at: *mut u8,
+    len: usize,
+    waited: Option<ReadWaited>,
+}
+
+#[cfg(all(
+    feature = "alloc",
+    not(feature = "session-slot"),
+    target_has_atomic = "ptr"
+))]
+impl RxLease {
+    /// Make the read, waiting up to `timeout_ms` milliseconds in it. A lease is read once; a
+    /// second call reads nothing.
+    pub fn read(&mut self, timeout_ms: u32) {
+        if self.waited.is_some() {
+            return;
+        }
+        // SAFETY: the bytes were lent by `OwnerRead::lend`, whose caller leaves them to this read
+        // alone until it ends, which the store below says.
+        let buf = unsafe { core::slice::from_raw_parts_mut(self.at, self.len) };
+        let waited = self.owner.read.read_waiting(buf, timeout_ms.max(1));
+        self.owner.reading.store(false, Ordering::Release);
+        self.waited = Some(waited);
+    }
+
+    /// What the read brought: [`ReadWaited::Quiet`] for a lease not read.
+    pub fn waited(&self) -> ReadWaited {
+        self.waited.unwrap_or(ReadWaited::Quiet)
+    }
+}
+
+#[cfg(all(
+    feature = "alloc",
+    not(feature = "session-slot"),
+    target_has_atomic = "ptr"
+))]
+impl Drop for RxLease {
+    fn drop(&mut self) {
+        // A lease let go of unread lets the link have its buffer back; one that was read said so
+        // when its read ended, and a later lease of the same link may be reading now.
+        if self.waited.is_none() {
+            self.owner.reading.store(false, Ordering::Release);
+        }
+    }
+}
+
 /// The loop's sink as the dispatch of a datagram sees it: what is handed goes to `sink`, and
 /// whether the session takes another record, and whether the datagram stays where the link holds
 /// it when the dispatch stops, are the link's to say.
@@ -490,6 +677,16 @@ impl<T: SessionDatagramLink + ?Sized> SessionDatagramLink for Rc<T> {
     #[cfg(feature = "alloc")]
     fn writability(&self) -> Option<Box<dyn LinkWritability>> {
         (**self).writability()
+    }
+
+    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+    fn lend_rx(&self) -> Option<RxLease> {
+        (**self).lend_rx()
+    }
+
+    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+    fn land_rx(&self, lease: RxLease) {
+        (**self).land_rx(lease)
     }
 }
 

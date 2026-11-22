@@ -135,6 +135,38 @@ fn under_the_pico_profile_a_held_session_drops_without_asking() {
     assert_eq!(*free.asked.lock().unwrap(), [1_000]);
 }
 
+/// A session held by a read working out its wait is tried again at once under either profile,
+/// with no link asked for room: the read holds no send and lets go within its take, so zenoh's
+/// profile has no room to ask after and pico's nothing to wait for blocked. CONTROL: zenoh's
+/// profile behind a read step asks the link.
+#[test]
+fn a_session_held_by_a_read_working_out_its_wait_is_tried_again_without_asking() {
+    use wz_session_core::session_init_params::HeldDrop;
+    let rooms = LinkRooms::default();
+    let free = answer(true);
+    held(&rooms, 1, &free);
+    for profile in [HeldDrop::DropAtOnce, HeldDrop::WaitForRoom] {
+        assert_eq!(
+            rooms.for_held(profile, Holder::Waiting, 1_000),
+            Room::Free,
+            "{profile:?} tries the session again"
+        );
+    }
+    assert!(
+        free.asked.lock().unwrap().is_empty(),
+        "no link was asked for room"
+    );
+    assert_eq!(
+        rooms.for_held(HeldDrop::WaitForRoom, Holder::Step, 1_000),
+        Room::Free
+    );
+    assert_eq!(
+        *free.asked.lock().unwrap(),
+        [1_000],
+        "CONTROL: behind a read step zenoh's profile asks the link"
+    );
+}
+
 /// A link that has gone is not asked: its wait goes with its wire, and what is left is a session
 /// with no wait to ask.
 #[test]

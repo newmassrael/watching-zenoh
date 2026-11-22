@@ -1174,6 +1174,46 @@ fn a_droppable_publish_behind_a_read_step_waits_without_spinning_and_is_sent() {
     });
 }
 
+/// Under the pico profile a droppable publish that finds the session held by a read working out
+/// its wait tries the session again, spinning, rather than blocking on its lock, and is sent once
+/// the read lets go: the read holds no send and lets go within its take. The CONTROL is the read
+/// step's hold above, which the same publish waits for blocked, with no spin.
+#[test]
+fn a_droppable_publish_behind_a_read_working_out_its_wait_spins_and_is_sent() {
+    use wz_session_core::qos::CongestionControl;
+    let router = Router::start(CatchAll::Held);
+    let engine = open(&router);
+    let spins = engine.takes.spins.load(Ordering::SeqCst);
+    let (holds, held) = channel();
+    let wait = {
+        let engine = Arc::clone(&engine);
+        std::thread::spawn(move || {
+            engine.holding_as_a_read_wait(|| {
+                holds.send(()).expect("the test waits for the hold");
+                std::thread::sleep(Duration::from_millis(100));
+            });
+        })
+    };
+    held.recv().expect("the read holds the session");
+    let sent = engine.publish_on_wire_all(
+        "demo/behind-wait",
+        &WireKey::literal(),
+        b"behind",
+        &PublishOptions::put()
+            .with_locality(Locality::Remote)
+            .with_congestion_control(CongestionControl::Drop),
+    );
+    wait.join().expect("the read");
+    assert!(sent.is_ok(), "the publish was sent: {sent:?}");
+    assert!(
+        engine.takes.spins.load(Ordering::SeqCst) > spins,
+        "it tried the held session again rather than wait on its lock"
+    );
+    until(&engine, "the router to receive the put", || {
+        router.seen(|s| s.samples.iter().any(|(k, _)| k == "demo/behind-wait"))
+    });
+}
+
 /// A write filter asks the router who subscribes and suppresses until a subscriber is declared,
 /// then lets a put through; a session that is closed answers every step as closed. The router
 /// holds no subscriber of its own until the test declares one, so what opens the filter is that
