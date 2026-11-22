@@ -2882,8 +2882,11 @@ pub fn push_stats_class_under(
     push_body_stats_class(push, crate::stats::StatSpace::of_keyexpr(keyexpr))
 }
 
-/// The class of `push`'s body, its key expression read into `space`.
+/// The class of `push`'s body, its key expression read into `space`. Inlined into both callers,
+/// so that [`push_stats_class`] is one body in a build that never classifies a Put under another
+/// key, which is every build without a router.
 #[cfg(all(feature = "transport-stats", feature = "codec-push"))]
+#[inline(always)]
 fn push_body_stats_class(
     push: &crate::wire::PushOwned,
     space: crate::stats::StatSpace,

@@ -340,7 +340,9 @@ where
 /// the owned message's `encode(sink)`, shared by the
 /// immediate-path `encode_frame_with_*` reference wrapper and the
 /// batching-path direct-into-buffer append in `SessionLinkActions`
-/// (`Fn`, not `FnOnce` — the batch-overflow retry encodes twice).
+/// (`Fn`, not `FnOnce` — the batch-overflow retry encodes twice), and by a
+/// router's leaf encoding (`encoded_push::LeafPush::encode`), so that a router
+/// links one Push writer.
 #[cfg(all(feature = "codec-push", feature = "alloc"))]
 pub(crate) fn push_body(
     push: &PushOwned,
@@ -348,9 +350,8 @@ pub(crate) fn push_body(
     // Written straight from the owned fields, as `request_body` is. A borrowed projection holds its
     // lists as the owner's profile holds them, so at `Heap` it would allocate a vector for the
     // extension chain on every send (measured: one allocation and 40 bytes a subscriber on the
-    // router's forward). Through the source a router's fan-out writes its leaves' Push with, so an
-    // image links one Push writer for both.
-    move |sink| crate::encoded_push::PushAs::sent(push).write(sink)
+    // router's forward).
+    move |sink| push.encode(sink)
 }
 
 /// The bytes `push` encodes to: what a frame buffer for it needs to reserve. It is the generated
@@ -364,12 +365,12 @@ pub(crate) fn push_body(
 /// too small is a refused send.
 ///
 /// Its callers are the unicast send (`SessionLinkActions::dispatch_push` and `dispatch_push_at`), the
-/// multicast group send (`multicast_tx_push`, behind `session-multicast`) and
-/// [`encode_frame_with_push_qos`], which measures through it so that every Push is counted by the one
-/// source the send writes it through.
+/// multicast group send (`multicast_tx_push`, behind `session-multicast`) and a router's leaf
+/// encoding (`encoded_push::LeafPush::encode`), which frames the Push it receives with this send's
+/// own writer.
 #[cfg(all(feature = "codec-push", feature = "alloc"))]
 pub(crate) fn push_capacity_hint(push: &PushOwned) -> usize {
-    crate::encoded_push::PushAs::sent(push).encoded_len()
+    wz_codecs::push::PushWire::measure(push).len()
 }
 
 /// The `OAM_LINKSTATE` body encoder — the linkstate-peer routing TX path
@@ -698,7 +699,7 @@ pub fn encode_frame_with_push_qos(
     encode_frame_envelope(
         sn,
         frame_flags(reliable),
-        push_capacity_hint(&push),
+        wz_codecs::push::PushWire::measure(&push).len(),
         ext_qos,
         push_body(&push),
     )

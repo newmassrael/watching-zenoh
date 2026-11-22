@@ -157,7 +157,7 @@ after the change.
 
 A fan-out to the client faces makes one carrier (`SharedCarrier`,
 `crates/wz-runtime-tokio/src/router_forward/held_route.rs:142`) and encodes it at most once, on the
-first face that is sent its bytes (`EncodedPush`, `crates/wz-session-core/src/encoded_push.rs:218`).
+first face that is sent its bytes (`EncodedPush`, `crates/wz-session-core/src/encoded_push.rs:220`).
 Each such face's session frames those bytes under its own sequence number
 (`try_send_encoded_push_qos`, `crates/wz-session-core/src/session_actions.rs:12517`), through the
 same dispatch, congestion decision and batching as before. The message is made of the carrier only
@@ -227,10 +227,13 @@ Four changes, each its own commit with the count that holds it.
   and `an_alias_leg_is_served_only_with_the_memo_it_was_read_from`.
 - **An aliased Put encoded re-keyed, not copied.** A Put that names an alias, or one that names a
   routing source, is no longer copied to be re-keyed for the fan-out. Its bytes are written once
-  from the Put as received (`LeafPush::encode`, `crates/wz-session-core/src/encoded_push.rs`),
-  through the codec's own writer, with the literal key in place of the alias and the routing source
-  left out of the extension chain as it is read: the bytes `reliteralize_push` and
-  `set_push_source` with 0 would have made a copy encode to. The encoding is kept split where the
+  from the Put as received (`LeafPush::encode`, `crates/wz-session-core/src/encoded_push.rs`):
+  framed by the writer the session's own send uses, behind a literal head, with the received head
+  and the routing source then taken out of the bytes in place. They are the bytes
+  `reliteralize_push` and `set_push_source` with 0 would have made a copy encode to. A writer of
+  its own for the leaf would link a second Push writer into the router, and the session's send
+  moved onto that writer grew every build that sends a Push (pico and MCU images among them), so
+  the router reuses the send's writer and nothing of this is linked into a build with no fan-out. The encoding is kept split where the
   key expression ends: the header and key expression of one key form, then the extensions and body
   every key form shares, so another key form costs only its head (`EncodedPush::head_for`), which
   is what row 6 needs. What the send read of the Push is read once on the routing side and handed
@@ -239,9 +242,10 @@ Four changes, each its own commit with the count that holds it.
   that class against its own `stats/filters`. The message is made, and counted in
   `RouterForwarder::client_carrier_copies`, only for a face that must be sent one of its own (held,
   a chain, shared memory, an interceptor, a droppable Put), once for the fan-out. The tests are the
-  five in `encoded_push.rs`, which compare the spliced frame with a full encode of the re-keyed
+  six in `encoded_push.rs`, which compare the spliced frame with a full encode of the re-keyed
   Push for a literal, an alias with and without a suffix and a Del, with no extension and with a
-  routing source, a QoS and a timestamp extension alone and together, and for each egress key form;
+  routing source, a QoS and a timestamp extension alone and together, a key of the receiver's
+  mapping, and each egress key form;
   `an_aliased_fan_out_to_sixteen_clients_makes_no_copy_of_its_carrier` in `router_forward.rs`;
   and `an_aliased_carrier_is_copied_only_for_a_face_sent_a_message_of_its_own` in `held_route.rs`.
 
