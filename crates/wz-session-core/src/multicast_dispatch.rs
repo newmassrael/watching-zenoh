@@ -1129,11 +1129,12 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
         Some(crate::driver_loop::DriverLoopOutcome::FramePayload {
             reliable: true,
             sn: 0,
-            messages: self
-                .member_retractions
-                .drain(..)
-                .map(crate::multicast_member_scope::Retraction::owned)
-                .collect(),
+            messages: crate::driver_loop::frame_records(
+                self.member_retractions
+                    .drain(..)
+                    .map(crate::multicast_member_scope::Retraction::owned)
+                    .collect(),
+            ),
             has_ext: false,
             extensions: alloc::vec::Vec::new(),
             priority: crate::qos::Priority::DEFAULT,

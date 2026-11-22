@@ -97,3 +97,34 @@ fn the_walk_holds_a_record_buffer_of_no_size_where_the_tables_take_no_owned_reco
         );
     }
 }
+
+/// The records an outcome carries are a list of no size in the build whose tables take no owned
+/// record, so an outcome dropped there links no drop of an owned message; in either form a frame
+/// with no record reads as an empty batch, and the tables are handed it only where they read owned
+/// records. Run with `--features rx-lent-only` to build the form of no size.
+#[test]
+fn an_outcome_holds_a_batch_of_no_size_where_the_tables_take_no_owned_record() {
+    use wz_session_core::driver_loop::{
+        frame_records, owned_records, DriverLoopOutcome, FrameRecords, OWNED_RECORDS,
+    };
+    const {
+        assert!(
+            OWNED_RECORDS == (core::mem::size_of::<FrameRecords>() != 0),
+            "the batch is owned exactly where the tables read owned records"
+        );
+    }
+    let outcome = DriverLoopOutcome::FramePayload {
+        reliable: true,
+        sn: 0,
+        messages: frame_records(Vec::new()),
+        has_ext: false,
+        extensions: Vec::new(),
+        priority: wz_session_core::qos::Priority::DEFAULT,
+    };
+    let DriverLoopOutcome::FramePayload { messages, .. } = &outcome else {
+        panic!("built as a frame's payload, got {outcome:?}");
+    };
+    assert!(messages.is_empty());
+    assert_eq!(owned_records(messages).is_some(), OWNED_RECORDS);
+    assert!(FrameRecords::new().is_empty());
+}

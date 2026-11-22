@@ -586,7 +586,9 @@ fn dispatch_lean_unit<R: SessionRuntime, T: TimeSource>(
                     DriverLoopOutcome::FramePayload {
                         reliable: true,
                         sn: 0,
-                        messages: count_rx_network_messages(actions, messages),
+                        messages: crate::driver_loop::frame_records(count_rx_network_messages(
+                            actions, messages,
+                        )),
                         has_ext: false,
                         extensions: Vec::new(),
                         // R311y221 — the lowlatency lean wire carries no Frame
@@ -790,7 +792,9 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
                             DriverLoopOutcome::FramePayload {
                                 reliable,
                                 sn,
-                                messages: count_rx_network_messages(actions, messages),
+                                messages: crate::driver_loop::frame_records(
+                                    count_rx_network_messages(actions, messages),
+                                ),
                                 has_ext,
                                 extensions,
                                 // R311y221 — the true decoded band (already
@@ -2817,7 +2821,7 @@ fn walk_records_in_place<R: SessionRuntime, T: TimeSource>(
     let empty = |extensions| DriverLoopOutcome::FramePayload {
         reliable,
         sn,
-        messages: alloc::vec::Vec::new(),
+        messages: crate::driver_loop::FrameRecords::new(),
         has_ext,
         extensions,
         priority,
