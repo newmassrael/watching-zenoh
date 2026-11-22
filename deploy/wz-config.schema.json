@@ -437,6 +437,19 @@
               "x-wz-binding-fixed": "build",
               "x-wz-wire": "none"
             },
+            "KEY_ARENA_BYTES": {
+              "description": "How many bytes of key text the rows of a session's own declarations hold at once, in one arena each row keeps its key in: each key takes 8 bytes and its length, rounded up to 4.",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4294967291,
+              "default": 59136,
+              "x-wz-kind": "parameter",
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "open",
+              "x-wz-wire": "none"
+            },
             "MAX_SUBSCRIPTIONS": {
               "description": "The subscribers a session holds at once.",
               "oneOf": [
