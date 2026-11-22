@@ -7703,6 +7703,62 @@ mod reconnect_tx_tests {
         );
     }
 
+    /// Both swap seams leave the session's frames to the writer of the live link when asked, and
+    /// to the writer of every link swapped in after: a link a reconnect installs is not written
+    /// on a sender's thread either. A link swapped out before the ask is not asked.
+    #[test]
+    fn both_swap_seams_keep_a_link_writer_only_across_a_swap() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use wz_session_core::link::{BoxedLinkDriver as _, LinkSendOutcome};
+        use wz_session_core::reconnect::LocalSwappableLink;
+        use wz_session_core::reliability::Reliability;
+
+        /// Records whether it was asked to leave its frames to its writer.
+        #[derive(Default)]
+        struct Marked(AtomicBool);
+        impl Marked {
+            fn writer_only(&self) -> bool {
+                self.0.load(Ordering::SeqCst)
+            }
+        }
+        impl super::BoxedLinkDriver for Marked {
+            fn send_blocking(&self, _bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
+                LinkSendOutcome::Sent
+            }
+            fn open_blocking(&self) {}
+            fn close_blocking(&self) {}
+            fn tx_writer_only(&self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let (first, live, later) = (
+            Arc::new(Marked::default()),
+            Arc::new(Marked::default()),
+            Arc::new(Marked::default()),
+        );
+        let shared = SwappableLink::<TokioRuntime>::new(first.clone());
+        let _ = shared.swap(live.clone());
+        shared.tx_writer_only();
+        let _ = shared.swap(later.clone());
+        assert!(!first.writer_only(), "a link swapped out before the ask");
+        assert!(live.writer_only(), "the live link is asked");
+        assert!(later.writer_only(), "a link swapped in after is asked too");
+
+        let (first, live, later) = (
+            Arc::new(Marked::default()),
+            Arc::new(Marked::default()),
+            Arc::new(Marked::default()),
+        );
+        let local = LocalSwappableLink::<TokioRuntime>::new(first.clone());
+        let _ = local.swap(live.clone());
+        local.tx_writer_only();
+        let _ = local.swap(later.clone());
+        assert!(!first.writer_only(), "a link swapped out before the ask");
+        assert!(live.writer_only(), "the live link is asked");
+        assert!(later.writer_only(), "a link swapped in after is asked too");
+    }
+
     /// A reservation is the live link's, through both swap seams: a link with room gives a permit
     /// that holds its room until it drops, a link with none gives nothing, and the question is
     /// asked of whichever link was swapped in last. Without the forward the seam would grant the

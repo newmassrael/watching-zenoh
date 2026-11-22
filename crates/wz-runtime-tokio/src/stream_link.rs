@@ -1044,6 +1044,10 @@ impl BoxedLinkDriver for StreamWriteDriver {
         self.tx.wake_for_flush()
     }
 
+    fn tx_writer_only(&self) {
+        self.tx.set_writer_only()
+    }
+
     fn tx_fence(&self) {
         self.tx.fence()
     }

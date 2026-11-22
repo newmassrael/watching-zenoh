@@ -189,6 +189,7 @@ pub fn outbound_channel_with_capacity(
         last_flush_ns: AtomicU64::new(NEVER_FLUSHED),
         last_write_ns: AtomicU64::new(NEVER_FLUSHED),
         inline: std::sync::OnceLock::new(),
+        writer_only: AtomicBool::new(false),
         role: AtomicBool::new(false),
     });
     (
@@ -343,6 +344,9 @@ struct Lanes {
     /// How a thread other than the writer puts bytes on the link, when the link has a way
     /// ([`OutboundTx::set_inline_write`]). Set once, before the first frame.
     inline: std::sync::OnceLock<Arc<dyn InlineWrite>>,
+    /// Whether every data frame of this queue is the writer's to write, whatever `inline`
+    /// allows ([`OutboundTx::set_writer_only`]).
+    writer_only: AtomicBool,
     /// The right to take frames off the lanes and write them to the link. One thread holds
     /// it from the take to the end of the write, so what one thread takes is written before
     /// what another takes after it: the writer, and (on a link with an
@@ -528,7 +532,7 @@ impl Lanes {
         let Some(sink) = self.inline.get() else {
             return false;
         };
-        if !sink.datagrams() {
+        if !sink.datagrams() || self.writer_only.load(Ordering::Relaxed) {
             return false;
         }
         let last = self.last_flush_ns.load(Ordering::Relaxed);
@@ -2059,6 +2063,16 @@ impl OutboundTx {
         let _ = self.shared.inline.set(sink);
     }
 
+    /// Leave every data frame of this queue to its writer from now on: a sender stages and wakes
+    /// the writer, and writes neither its own lone message (`flush_inline`) nor a datagram it
+    /// lands on its own thread. What a router asks of the link of each face it routes to
+    /// ([`wz_session_core::link::BoxedLinkDriver::tx_writer_only`]). An urgent frame is still
+    /// written from the thread that sends it ([`Self::send_urgent`]): that thread carries
+    /// liveness and no data.
+    pub fn set_writer_only(&self) {
+        self.shared.writer_only.store(true, Ordering::Relaxed);
+    }
+
     /// Flush the message this sender has just staged, and write it, on the sender's own
     /// thread: the writer is a thread asleep in the runtime, and waking it, running its task
     /// and handing the frame over cost two thread hops and a system call per message in
@@ -2071,12 +2085,16 @@ impl OutboundTx {
     /// call per message. Only when the role is free (`Lanes::role`): a writer that is mid-write
     /// finds the flush request this sender raised when it looks for work. Only on a link that
     /// has an inline write, which writes without waiting; a write the link takes part of
-    /// leaves the rest in the queue's carry for the writer, who is woken.
+    /// leaves the rest in the queue's carry for the writer, who is woken. Never on a queue whose
+    /// data is its writer's alone ([`Self::set_writer_only`]), whatever the timing.
     fn flush_inline(&self, staged: u64) -> bool {
         let shared = &self.shared;
         let Some(sink) = shared.inline.get() else {
             return false;
         };
+        if shared.writer_only.load(Ordering::Relaxed) {
+            return false;
+        }
         let since = staged.wrapping_sub(shared.staged_at_flush.load(Ordering::Relaxed));
         if since > LONE_STAGED_MAX {
             return false;
@@ -4707,6 +4725,68 @@ mod tests {
         tx.wake_for_flush();
 
         assert!(link.bytes().is_empty(), "a closed queue wrote nothing");
+    }
+
+    /// A queue whose data is its writer's alone is not written through by a sender, however
+    /// quiet the link: the lone message stays staged, and the writer is woken to flush it. The
+    /// same queue without the mark is flushed by its sender
+    /// (`a_message_right_after_a_flush_is_left_to_the_writer`, its second half).
+    #[tokio::test]
+    async fn a_writer_only_queue_leaves_a_lone_message_to_the_writer() {
+        let (tx, rx) = outbound_channel();
+        let link = FakeLink::new(usize::MAX, 0);
+        tx.set_inline_write(link.clone());
+        let hook_tx = tx.clone();
+        tx.set_idle_hook(Arc::new(move || {
+            let _ = hook_tx.send(Priority::DEFAULT, b"frame".to_vec());
+            IdleFlush::Drained
+        }));
+        tx.set_writer_only();
+
+        tx.wake_for_flush();
+
+        assert!(link.bytes().is_empty(), "no sender wrote anything");
+        assert!(!rx.shared.has_queued(), "the message is still staged");
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), rx.shared.ready.notified())
+                .await
+                .is_ok(),
+            "the writer is woken to flush it"
+        );
+    }
+
+    /// On a datagram link whose data is its writer's alone, a datagram that lands is left on
+    /// the queue for the writer, where an unmarked one is written by the thread that sends it
+    /// (`a_lone_datagram_is_written_by_the_thread_that_sends_it`).
+    #[test]
+    fn a_writer_only_datagram_link_leaves_a_landed_datagram_to_the_writer() {
+        let (tx, rx) = datagram_outbound_channel();
+        let link = DatagramLink::new(false);
+        tx.set_inline_write(link.clone());
+        tx.set_writer_only();
+
+        tx.send(Priority::Data, b"datagram".to_vec()).expect("open");
+
+        assert!(
+            link.sent().is_empty(),
+            "not written from the sending thread"
+        );
+        assert!(rx.shared.has_queued(), "the writer's to write");
+    }
+
+    /// The mark keeps data off the sender's thread and nothing else: a keepalive is still
+    /// written by the thread that sends it, which carries liveness and no data.
+    #[tokio::test]
+    async fn a_writer_only_queue_still_writes_its_keepalive_inline() {
+        let (tx, rx) = outbound_channel();
+        let link = FakeLink::new(usize::MAX, 0);
+        tx.set_inline_write(link.clone());
+        tx.set_writer_only();
+
+        tx.send_urgent(b"keepalive".to_vec()).expect("open");
+
+        assert_eq!(link.bytes(), b"keepalive", "the urgent frame left inline");
+        assert!(!rx.shared.has_queued(), "nothing is left for the writer");
     }
 
     /// Several senders flushing their own messages, and a writer, over a link that takes a

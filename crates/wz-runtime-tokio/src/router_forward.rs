@@ -460,6 +460,8 @@ mod egress;
 mod egress_tests;
 mod face_runtime;
 mod face_table;
+#[cfg(all(test, feature = "transport-batching"))]
+mod fanout_io_tests;
 use face_table::FaceTable;
 mod held_route;
 use held_route::{HeldFace, HeldFaceContext, LiteralPush, SharedCarrier};
@@ -608,6 +610,21 @@ fn is_peer_hat(region: Region, node_mode: WhatAmI) -> bool {
 /// lies, so the router hat's rules ask this rather than name `North`.
 fn is_router_hat(region: Region, node_mode: WhatAmI) -> bool {
     matches!(hat_kind(&region, node_mode), HatKind::Router)
+}
+
+/// What a node of role `node_mode` asks of the link of a face it holds, when it holds it.
+///
+/// A router leaves every frame it sends the face to the face's own writer: the thread that
+/// routes a message serves every destination, and a write made on it per destination is a
+/// system call per message that no writer batches, while each writer takes what was staged
+/// for its face in a few writes. Upstream's producer only stages and notifies, and the link's
+/// own task pulls the batch (`io/zenoh-transport/src/common/pipeline.rs` @
+/// `fn try_pull_deep(`). A peer or a client node keeps the sender's own write for a lone
+/// message, which is what the round trip of its own puts is measured by.
+fn hold_face_link(node_mode: WhatAmI, actions: &SessionLinkActions) {
+    if node_mode == WhatAmI::Router {
+        actions.link_writer_only();
+    }
 }
 
 /// R2867 (open-debt item 751, step 3a) — the state one MESH region's hat owns:
@@ -14194,6 +14211,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // a routing zid joins the matching net; a Client face — or one whose
         // zid never surfaced — is HELD without a graph link (it routes nothing).
         let registering = Instant::now();
+        hold_face_link(self.tables.node_mode, actions);
         let whatami = peer_whatami_routing(actions);
         // A face the rules cannot place was refused by `refuses_face` before it got
         // here; a caller that registers one anyway holds it in the `Local` region,
@@ -14585,6 +14603,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     ) where
         T: std::ops::DerefMut,
     {
+        hold_face_link(self.tables.node_mode, actions);
         self.tables.joined_links_mut().insert(
             joined_id,
             JoinedLink {

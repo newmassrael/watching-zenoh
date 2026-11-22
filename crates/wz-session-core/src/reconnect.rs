@@ -610,6 +610,10 @@ where
     inner: R::Mutex<R::LinkSink>,
     /// Outbound slots lent through this seam and not yet settled.
     lent: R::Mutex<LentSlots<R::LinkSink>>,
+    /// Whether the session left its frames to the link's writer
+    /// ([`BoxedLinkDriver::tx_writer_only`]): asked of the live link, and of every link a
+    /// swap installs after it.
+    writer_only: R::Mutex<bool>,
 }
 
 impl<R: SessionRuntime> SwappableLink<R>
@@ -624,6 +628,7 @@ where
         Self {
             inner: R::new_mutex(initial),
             lent: R::new_mutex(LentSlots::default()),
+            writer_only: R::new_mutex(false),
         }
     }
 
@@ -631,6 +636,9 @@ where
     /// sink so the supervisor can drop it (releasing the dead transport)
     /// outside the lock.
     pub fn swap(&self, next: R::LinkSink) -> R::LinkSink {
+        if R::with_mutex_mut(&self.writer_only, |on| *on) {
+            R::link_driver(&next).tx_writer_only();
+        }
         R::with_mutex_mut(&self.inner, |slot| core::mem::replace(slot, next))
     }
 }
@@ -850,6 +858,11 @@ where
         R::with_mutex_mut(&self.inner, |sink| R::link_driver(sink).tx_fence())
     }
 
+    fn tx_writer_only(&self) {
+        R::with_mutex_mut(&self.writer_only, |on| *on = true);
+        R::with_mutex_mut(&self.inner, |sink| R::link_driver(sink).tx_writer_only())
+    }
+
     fn open_blocking(&self) {
         R::with_mutex_mut(&self.inner, |sink| {
             R::link_driver(sink).open_blocking();
@@ -901,6 +914,8 @@ pub struct LocalSwappableLink<R: SessionRuntime> {
     inner: core::cell::RefCell<R::LinkSink>,
     /// Outbound slots lent through this seam and not yet settled.
     lent: core::cell::RefCell<LentSlots<R::LinkSink>>,
+    /// As `SwappableLink`'s: kept for every link a swap installs.
+    writer_only: core::cell::Cell<bool>,
 }
 
 impl<R: SessionRuntime> LocalSwappableLink<R> {
@@ -910,6 +925,7 @@ impl<R: SessionRuntime> LocalSwappableLink<R> {
         Self {
             inner: core::cell::RefCell::new(initial),
             lent: core::cell::RefCell::new(LentSlots::default()),
+            writer_only: core::cell::Cell::new(false),
         }
     }
 
@@ -917,6 +933,9 @@ impl<R: SessionRuntime> LocalSwappableLink<R> {
     /// sink so the supervisor can drop the dead transport outside any
     /// borrow.
     pub fn swap(&self, next: R::LinkSink) -> R::LinkSink {
+        if self.writer_only.get() {
+            R::link_driver(&next).tx_writer_only();
+        }
         self.inner.replace(next)
     }
 }
@@ -1088,6 +1107,11 @@ impl<R: SessionRuntime> BoxedLinkDriver for LocalSwappableLink<R> {
     // As `SwappableLink`'s: the live link's order fence.
     fn tx_fence(&self) {
         R::link_driver(&self.inner.borrow()).tx_fence()
+    }
+
+    fn tx_writer_only(&self) {
+        self.writer_only.set(true);
+        R::link_driver(&self.inner.borrow()).tx_writer_only()
     }
 
     fn open_blocking(&self) {

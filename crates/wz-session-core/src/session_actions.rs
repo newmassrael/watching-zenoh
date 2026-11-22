@@ -4428,6 +4428,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         self.link_driver().watch_room(waker);
     }
 
+    /// Leave every data frame this session hands its link to the link's own writer
+    /// ([`BoxedLinkDriver::tx_writer_only`]): what a router asks of the session of each face it
+    /// routes to, so that the thread that routes does none of the face's writes.
+    pub fn link_writer_only(&self) {
+        self.link_driver().tx_writer_only();
+    }
+
     /// R2259 (open-debt item 593) — this session's per-physical-link `(src, dst)`
     /// enumeration, the one the admin space renders as a `sessions[]` row's links
     /// (`admin_links` of the admin space's `SessionAdminRow`).
