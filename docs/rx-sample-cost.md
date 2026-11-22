@@ -200,6 +200,8 @@ What this branch changed:
 | e6a430162 | A sample lying in the lent datagram is a record of the lane that holds its key (when the key lies elsewhere) and its subscribers' ids, and points at the rest (`lane::Lying`); every sample of the datagram is handed on in the step that read it, in order with what else the lane holds; the link is held back from its next receive, not from the next record, until the last is given back | per sample: the payload's copy into the lane for a stream; per sample after the first of a datagram: a read step | `wz-capi-coop` `tests::lane::the_samples_lying_in_a_lent_datagram_are_handed_where_they_lie`: three samples of one datagram handed on in one step, 13 bytes of the lane each where a copy takes 17, the link held back until the third is given back; CONTROLS a sample offered while a delivery runs and one whose payload lies elsewhere, written whole. `tests::listen::the_puts_of_one_stream_batch_are_handed_where_they_lie_in_a_few_reads`: 32 puts of one TCP batch, 32 lying, 32 handed on, at most 8 reads asserted (one or two when nothing else arrives) where one sample a read took at least 32. `tests::a_received_sample_is_handed_where_it_lies_and_an_empty_read_hands_nothing`: 8 lying of 8 handed on |
 | f2b0c6a25 | A drain with nothing staged opens no burst | per Push: one conduit lock pair (eight with `transport-qos`) and three sequentially consistent atomics | `wz-session-core` `slot_observer::tests::a_drain_with_nothing_staged_opens_no_burst`: 16 drains of nothing open no burst; CONTROL a staged answer to an interest opens one |
 | a9d542f57 | A Windows stream is read with one `recv`, no `WSAPoll` before it: its socket never blocks | one `WSAPoll` a read | `wz-runtime-posix` `windows::stream::tests::a_read_asks_the_stream_with_no_poll_before_it`: two reads and a wait poll once (the wait), three times before |
+| 49eef8275 | A read whose step left a link holding input (a batch behind the one it read, the rest of a datagram the lane had no room for) steps at once, with no take of the session to work out a wait that would be none | per read under load: one take of the session and the wait's work (`Core::idle_wait`) | `wz-capi-coop` `tests::listen::a_read_after_a_step_that_left_input_held_takes_the_session_once`: the read after a held batch takes the session once; CONTROL the first read, twice |
+| 4c4d34da4 | The records of a lent datagram are offered with no hold of the lane each; the hold the gate takes at the end of the walk hands them all on and stores the counts once | per sample: the hold's take-back, its hand-on loop and its two sequentially consistent stores, now once a datagram; the room word is still left after each record | `wz-capi-coop` `tests::lane::the_samples_of_a_lent_datagram_are_handed_on_by_one_hold`: three samples, one hold (three before); CONTROL a sample with no datagram lent takes one |
 
 What the read step does for each sample of a batch now, against zenoh-pico's
 (`vendor/zenoh-pico/src/session/subscription.c` @ `z_result_t _z_trigger_subscriptions_impl(`):
@@ -227,6 +229,21 @@ given back. A read made from inside a callback (a delivery runs) writes its samp
 whole and holds no link back, since the callback may be waiting for what the link brings next.
 None of the figures above is a measurement after the change; the Windows probes against the same
 pico library are the test.
+
+A profile of the subscriber under a saturating batched TCP publisher, taken after the first four
+commits (`SampleLane::offer_from` 9%, `memmove` 8%, the lane's hold and give-back and take 11%,
+`idle_wait` 6%), read against the source: the samples are lent, not copied. Every link of that
+chain forwards `lends_until_next_receive` (`LaneGate`, `AdmissionGate`, the `Rc`, `IpDriver`,
+`StreamDriver`), a frame cut by the end of a read is the only one left unlent (the complete ones
+before it are lent where they lie), and the one read task delivers after its step, so no delivery
+runs while the step offers. `offer_from` is the body of both offers, and on the lying path it still
+reads the sample's nine fields, writes its key (an alias's, resolved outside the batch) and its
+subscriber's id with two `memcpy`s, and moves a record of about 180 bytes into its slot and out of
+it again at the delivery: that is where the `memmove` is, not in a payload. What bounds a read is
+the lane's event slots: each sample lying in the batch takes one, so a read hands out at most 63
+(`DELIVERY_LANE_EVENTS` 64) and a batch of 8 B puts takes about three reads. The two commits above
+take the per-read and per-hold work that profile showed; a record for a whole batch's samples, one
+slot and one handle a batch, is the next step and the one that removes the record's moves.
 
 ## What is next, in order of expected gain
 
