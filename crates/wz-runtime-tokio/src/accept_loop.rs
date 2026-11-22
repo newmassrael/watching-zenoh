@@ -3288,117 +3288,62 @@ async fn face_drive_loop_core(
     params: SessionInitParams,
     clock: TokioTime,
     tick_interval_ms: u64,
-    mut shutdown: Pin<&mut dyn Future<Output = ()>>,
+    shutdown: Pin<&mut dyn Future<Output = ()>>,
     on_event: &mut dyn FnMut(&AcceptEvent),
     driving: FaceDriving<'_>,
 ) -> AcceptLoopSummary {
-    let FaceDriving { forwarder, spawned } = driving;
-    let FaceSources {
-        listeners,
-        dial_targets,
-        dial_config,
-        mut dial_intents,
-        mut mcast_ingress,
-        mut mcast_members,
-        mut mcast_group_subs,
-        mut reconcile,
-        #[cfg(feature = "transport-multilink")]
-        max_links,
-        max_sessions,
-        accept,
-        ceiling,
-        peer_board,
-        offer,
-        retry,
-        stats,
-    } = sources;
-    // Only the loop that holds its peers by machines publishes them (decision D6).
-    #[cfg(not(all(feature = "routing-peer", feature = "session-close-ingress")))]
-    let _ = peer_board;
-    // The loop serves every face of the node; one that stops here stops the node without a line,
-    // so it turns a heartbeat that a thread outside this runtime reads ([`crate::liveness`]).
-    let heartbeat = crate::liveness::Heartbeat::register(
-        format!(
-            "face loop {}",
-            wz_session_core::zid_hex::zid_to_zenoh_hex(&params.zid)
-        ),
-        LOOP_STEPS,
-        forwarder.liveness_probe(),
-    );
-    // Item 751 — every face below is opened from this one template, so each
-    // session announces from the partition the forwarder places it by.
-    //
-    // The node's admission of a second link to a node it holds is asked by the handshake, which
-    // an aggregating loop must not let refuse: its second link to a node is the aggregation.
+    FaceLoop::new(sources, params, clock, tick_interval_ms, driving)
+        .run(shutdown, on_event)
+        .await
+}
+
+/// A face `FaceLoop::on_opened` holds by a drive inside the loop's own task, handed to the set
+/// of drives `FaceLoop::run` races. Only `run` can make the drive: without
+/// `transport-multilink` that set holds the unboxed future of `drive_face`, whose type has no
+/// name a field could be declared with.
+struct HeldDrive {
+    face: Face,
+    opened: OpenedSession,
     #[cfg(feature = "transport-multilink")]
-    let admission = if max_links > 1 {
-        None
-    } else {
-        forwarder.link_admission()
-    };
-    #[cfg(not(feature = "transport-multilink"))]
-    let admission = forwarder.link_admission();
-    let params = FaceTemplate {
-        params,
-        partition: Arc::new(forwarder.south_partition()),
-        #[cfg(feature = "session-extauth")]
-        auth: forwarder.session_auth(),
-        #[cfg(feature = "routing-namespace")]
-        namespace: forwarder.session_namespace(),
-        admission,
-    };
-    // The listeners and the handshakes of what they yield. Off this task when the faces' drives
-    // are, since this task writes the node's tables synchronously (a face admitted or dropped, the
-    // forwarder's tick), and an accept or a handshake that waited for that write would leave a
-    // peer unanswered while the node holds the session of another.
-    let intake_on = match &spawned {
-        Some(spawn) if spawn.on == SpawnOn::Workers && spawn.executor.spawns_intake() => {
-            intake::IntakeOn::OwnTasks
-        }
-        _ => intake::IntakeOn::LoopTask,
-    };
-    let mut intake = intake::Intake::start(
-        listeners,
-        accept,
-        accept_opener(
-            params.clone(),
-            offer,
-            clock,
-            tick_interval_ms,
-            accept,
-            #[cfg(feature = "transport-multilink")]
-            max_links,
-        ),
-        intake_on,
-    );
+    shape: DriveShape,
+}
 
-    // R2233 (open-debt item 585) — fold the configured dial targets into their
-    // dial PLANS at the seam, and REFUSE (loudly) any member with no
-    // pre-handshake identity. `mesh_dial_plan` is the same classification
-    // `resolve_mesh_dial_target` applies at configuration time, so a host that
-    // built its list through that resolver loses nothing here; this arm exists
-    // because `FaceSources` is public and its field is the wider `AnyLocator`,
-    // so a caller CAN hand the loop a target the dial axis has no identity for.
-    // Refusing and naming it is the honest answer — dropping it silently would
-    // reproduce, one layer up, exactly the half-truth item 585 is about.
-    // R2900 — the one shape left to refuse is an UNRESOLVED name: the loop must
-    // not block on a resolver, and `resolve_mesh_dial_target` resolves names at
-    // configuration time. Every other shape has a `MeshDialKey`.
-    let dial_targets: Vec<MeshDialTarget> = dial_targets
-        .into_iter()
-        .filter_map(|locator| match mesh_dial_plan(locator) {
-            Ok(target) => Some(target),
-            Err(rejected) => {
-                log::warn!(
-                    "mesh dial: refusing configured target {rejected:?} — an unresolved \
-                     name; resolve it at configuration time \
-                     (session_open::resolve_mesh_dial_target)"
-                );
-                None
-            }
-        })
-        .collect();
+/// How an aggregating loop drives a link it holds.
+#[cfg(feature = "transport-multilink")]
+enum DriveShape {
+    /// A face of its own, which is also what an aggregated session's first link is.
+    Face,
+    /// A further link of a session the loop holds, joined onto its shared core through this
+    /// handle.
+    Joined(Arc<SessionLinkActions>),
+    /// A link the session it would join refused, draining its close.
+    Rejected,
+}
 
+/// What `face_drive_loop_core` keeps from one pass of its loop to the next: the sources it
+/// races, the faces it holds and the tables it keeps of them. Each step a pass takes is handled
+/// by a method of its own, so what a step needs while it is handled lives in that method's frame
+/// and not in the loop's future, whose poll every face of the node waits on.
+struct FaceLoop<'a> {
+    dial_config: Arc<DialConfig>,
+    dial_intents: Option<DialIntentReceiver>,
+    mcast_ingress: Option<tokio::sync::mpsc::UnboundedReceiver<McastIngressItem>>,
+    mcast_members: Option<tokio::sync::mpsc::UnboundedReceiver<Vec<Vec<u8>>>>,
+    mcast_group_subs: Option<tokio::sync::mpsc::UnboundedReceiver<Vec<String>>>,
+    reconcile: Option<ReconcileReceiver>,
+    #[cfg(feature = "transport-multilink")]
+    max_links: usize,
+    max_sessions: usize,
+    ceiling: Option<SessionCeiling>,
+    #[cfg(all(feature = "routing-peer", feature = "session-close-ingress"))]
+    peer_board: Option<crate::peer_board::PeerBoard>,
+    offer: SessionOffer,
+    stats: Option<crate::node_stats::NodeStats>,
+    params: FaceTemplate,
+    clock: TokioTime,
+    tick_interval_ms: u64,
+    intake: intake::Intake,
+    heartbeat: crate::liveness::Heartbeat,
     // The live faces, each mapped to its peer zid (`None` if the handshake never
     // surfaced one). The value is READ — `holds_zid` scans it for the
     // gossip-autoconnect dial-intent dedup and, for a zid-keying forwarder, the
@@ -3407,36 +3352,34 @@ async fn face_drive_loop_core(
     // duplication the old comment warned against; the value is no longer write-only
     // now that the dedups read it). `peak_concurrent` and the held-count read its
     // cardinality.
-    let mut faces: BTreeMap<FaceId, Option<Vec<u8>>> = BTreeMap::new();
+    faces: BTreeMap<FaceId, Option<Vec<u8>>>,
     // The directions of the faces held, and the links waiting behind a face that is closing
     // because a link that replaces it came up ([`crate::link_collision`]). Both are read at the
     // face-establishment dedup and written where a face is held and where one leaves.
-    let mut collisions: LinkCollisions<ParkedOpen> = LinkCollisions::default();
+    collisions: LinkCollisions<ParkedOpen>,
     // R2951 — the ids of opens the loop ACCEPTED, from the moment it takes the
     // handshake from its intake until the open resolves either way. What is not
     // in it is a dial, which is how `Face::dialed` is answered in every build,
     // the loop's peers or not.
-    let mut accepted_ids: std::collections::BTreeSet<FaceId> = std::collections::BTreeSet::new();
+    accepted_ids: std::collections::BTreeSet<FaceId>,
     // Decision D3 — where the nodes this loop dials by zid may be reached: the
     // hints the discovery planes and the lifecycle opener give, read just after
     // each gives them. Boxed, because a table of its rows is too large for the
     // loop's future to carry inline.
-    let mut directory: Box<LoopDirectory> = Box::new(LoopDirectory::new());
-    // The longest locator a hint may name is the node's, as its runtime limits state it.
-    directory.limit_to(dial_config.runtime_limits.max_locator_len_held());
+    directory: Box<LoopDirectory>,
     // R311y786 — the per-link re-dial waits of the multilink per-link re-add,
     // replacing the fixed `RECONNECT_BACKOFF_MS`. Loop-local (not per-face)
     // because the growth must survive the FaceId churn of the retries it is
     // pacing. The loop's peers keep their own (decision D5).
     #[cfg(feature = "transport-multilink")]
-    let mut redial: RedialSchedule<LinkRedialKey> = RedialSchedule::new(retry);
+    redial: RedialSchedule<LinkRedialKey>,
     // The nodes a discovery plane found whose dial is in flight, by the face the dial will open
     // as, and the waits between the dials of one node that did not open. A dial that fails is
     // made again at the node's next locator, as upstream's `peer_connector_retry` and
     // `connect_peer` do; before, one try at the first locator was all a found node got.
-    let mut dialing_nodes: BTreeMap<FaceId, NodeDial> = BTreeMap::new();
-    let mut node_redial: RedialSchedule<DirectoryZid> = RedialSchedule::new(retry);
-    let mut next_id: u64 = 0;
+    dialing_nodes: BTreeMap<FaceId, NodeDial>,
+    node_redial: RedialSchedule<DirectoryZid>,
+    next_id: u64,
     // R311y205 (transport-multilink) — the per-peer aggregation registry (active
     // only when `max_links > 1`). `ml_sessions` maps a peer zid to its logical
     // session: the (primary FaceId, primary Face) reported on FaceUp/FaceDown and
@@ -3453,12 +3396,11 @@ async fn face_drive_loop_core(
     // silently when their drive ends. All feature-gated, so a non-multilink loop
     // allocates none of them.
     #[cfg(feature = "transport-multilink")]
-    let mut ml_sessions: BTreeMap<Vec<u8>, (FaceId, Face, Arc<SessionLinkActions>)> =
-        BTreeMap::new();
+    ml_sessions: BTreeMap<Vec<u8>, (FaceId, Face, Arc<SessionLinkActions>)>,
     #[cfg(feature = "transport-multilink")]
-    let mut ml_faces: BTreeMap<FaceId, (Vec<u8>, Arc<SessionLinkActions>)> = BTreeMap::new();
+    ml_faces: BTreeMap<FaceId, (Vec<u8>, Arc<SessionLinkActions>)>,
     #[cfg(feature = "transport-multilink")]
-    let mut ml_rejected: BTreeSet<FaceId> = BTreeSet::new();
+    ml_rejected: BTreeSet<FaceId>,
     // R311y212 (transport-multilink per-link auto-re-add) — the retained dial
     // endpoint (+ traffic-class pref) for every aggregated link THIS node dialed,
     // keyed by FaceId. Its own substrate (not the connection machine of a
@@ -3468,1375 +3410,1707 @@ async fn face_drive_loop_core(
     // session. An
     // ACCEPTED link has no entry (no re-dial owner — the peer re-dials it).
     #[cfg(feature = "transport-multilink")]
-    let mut ml_dial_endpoints: BTreeMap<FaceId, RetainedLink> = BTreeMap::new();
-    let mut summary = AcceptLoopSummary::default();
-    let mut opening: FuturesUnordered<OpenFuture> = FuturesUnordered::new();
+    ml_dial_endpoints: BTreeMap<FaceId, RetainedLink>,
+    summary: AcceptLoopSummary,
+    opening: FuturesUnordered<OpenFuture>,
     // Decision D5 — the peers the loop is told to hold, each by its connection
     // machine: the configured endpoints (`connect/endpoints`, and each reconcile
     // of them) and the nodes a lifecycle `open` names. The planner, the sessions
     // a `close` may drop, and the retry timers it arms.
     #[cfg(feature = "routing-peer")]
-    let mut peers = crate::loop_peers::LoopPeers::new(retry);
+    peers: crate::loop_peers::LoopPeers,
     #[cfg(all(feature = "routing-peer", feature = "session-close-ingress"))]
-    let mut peer_sessions: BTreeMap<FaceId, Arc<SessionLinkActions>> = BTreeMap::new();
+    peer_sessions: BTreeMap<FaceId, Arc<SessionLinkActions>>,
     // Decision D10 — the sessions this loop accepted whose link's key proved the peer's zid, by
     // face: what a passive intent holds, at accept or when the intent comes later.
     #[cfg(all(feature = "routing-peer", feature = "session-close-ingress"))]
-    let mut proven_inbound: BTreeMap<FaceId, (DirectoryZid, Arc<SessionLinkActions>)> =
-        BTreeMap::new();
-    let mut peer_retries: PeerRetries = FuturesUnordered::new();
-    // The planner's view of the loop at this moment.
-    #[cfg(feature = "routing-peer")]
-    macro_rules! peer_cx {
-        () => {
-            crate::loop_peers::PeerContext {
-                directory: &directory,
-                now_ms: clock.now_monotonic_ms(),
-            }
+    proven_inbound: BTreeMap<FaceId, (DirectoryZid, Arc<SessionLinkActions>)>,
+    peer_retries: PeerRetries,
+    // The drives of faces SPAWNED on the runtime (`spawned` is `Some`), and the face each
+    // task drives, by task id, for the one whose task ends without a result. Empty in a
+    // loop that holds its drives itself.
+    spawned_drives: tokio::task::JoinSet<(Face, DriverOutcome)>,
+    spawned_faces: BTreeMap<tokio::task::Id, Face>,
+    tick_timer: Option<tokio::time::Interval>,
+    wake_signal: Option<Arc<tokio::sync::Notify>>,
+    spawned: Option<SpawnedFaces>,
+    forwarder: &'a dyn FaceForwarder,
+}
+
+impl<'a> FaceLoop<'a> {
+    /// The loop before its first pass, from the arguments of `face_drive_loop_core`: its
+    /// heartbeat registered, its intake started on the listeners and the configured targets
+    /// seeded. Made on the loop's first poll, inside the runtime the intake and the timers need.
+    fn new(
+        sources: FaceSources,
+        params: SessionInitParams,
+        clock: TokioTime,
+        tick_interval_ms: u64,
+        driving: FaceDriving<'a>,
+    ) -> Self {
+        let FaceDriving { forwarder, spawned } = driving;
+        let FaceSources {
+            listeners,
+            dial_targets,
+            dial_config,
+            dial_intents,
+            mcast_ingress,
+            mcast_members,
+            mcast_group_subs,
+            reconcile,
+            #[cfg(feature = "transport-multilink")]
+            max_links,
+            max_sessions,
+            accept,
+            ceiling,
+            peer_board,
+            offer,
+            retry,
+            stats,
+        } = sources;
+        // Only the loop that holds its peers by machines publishes them (decision D6).
+        #[cfg(not(all(feature = "routing-peer", feature = "session-close-ingress")))]
+        let _ = peer_board;
+        // The loop serves every face of the node; one that stops here stops the node without a line,
+        // so it turns a heartbeat that a thread outside this runtime reads ([`crate::liveness`]).
+        let heartbeat = crate::liveness::Heartbeat::register(
+            format!(
+                "face loop {}",
+                wz_session_core::zid_hex::zid_to_zenoh_hex(&params.zid)
+            ),
+            LOOP_STEPS,
+            forwarder.liveness_probe(),
+        );
+        // Item 751 — every face below is opened from this one template, so each
+        // session announces from the partition the forwarder places it by.
+        //
+        // The node's admission of a second link to a node it holds is asked by the handshake, which
+        // an aggregating loop must not let refuse: its second link to a node is the aggregation.
+        #[cfg(feature = "transport-multilink")]
+        let admission = if max_links > 1 {
+            None
+        } else {
+            forwarder.link_admission()
         };
+        #[cfg(not(feature = "transport-multilink"))]
+        let admission = forwarder.link_admission();
+        let params = FaceTemplate {
+            params,
+            partition: Arc::new(forwarder.south_partition()),
+            #[cfg(feature = "session-extauth")]
+            auth: forwarder.session_auth(),
+            #[cfg(feature = "routing-namespace")]
+            namespace: forwarder.session_namespace(),
+            admission,
+        };
+        // The listeners and the handshakes of what they yield. Off this task when the faces' drives
+        // are, since this task writes the node's tables synchronously (a face admitted or dropped, the
+        // forwarder's tick), and an accept or a handshake that waited for that write would leave a
+        // peer unanswered while the node holds the session of another.
+        let intake_on = match &spawned {
+            Some(spawn) if spawn.on == SpawnOn::Workers && spawn.executor.spawns_intake() => {
+                intake::IntakeOn::OwnTasks
+            }
+            _ => intake::IntakeOn::LoopTask,
+        };
+        let intake = intake::Intake::start(
+            listeners,
+            accept,
+            accept_opener(
+                params.clone(),
+                offer,
+                clock,
+                tick_interval_ms,
+                accept,
+                #[cfg(feature = "transport-multilink")]
+                max_links,
+            ),
+            intake_on,
+        );
+
+        // R2233 (open-debt item 585) — fold the configured dial targets into their
+        // dial PLANS at the seam, and REFUSE (loudly) any member with no
+        // pre-handshake identity. `mesh_dial_plan` is the same classification
+        // `resolve_mesh_dial_target` applies at configuration time, so a host that
+        // built its list through that resolver loses nothing here; this arm exists
+        // because `FaceSources` is public and its field is the wider `AnyLocator`,
+        // so a caller CAN hand the loop a target the dial axis has no identity for.
+        // Refusing and naming it is the honest answer — dropping it silently would
+        // reproduce, one layer up, exactly the half-truth item 585 is about.
+        // R2900 — the one shape left to refuse is an UNRESOLVED name: the loop must
+        // not block on a resolver, and `resolve_mesh_dial_target` resolves names at
+        // configuration time. Every other shape has a `MeshDialKey`.
+        let dial_targets: Vec<MeshDialTarget> = dial_targets
+            .into_iter()
+            .filter_map(|locator| match mesh_dial_plan(locator) {
+                Ok(target) => Some(target),
+                Err(rejected) => {
+                    log::warn!(
+                        "mesh dial: refusing configured target {rejected:?} — an unresolved \
+                         name; resolve it at configuration time \
+                         (session_open::resolve_mesh_dial_target)"
+                    );
+                    None
+                }
+            })
+            .collect();
+
+        let mut directory: Box<LoopDirectory> = Box::new(LoopDirectory::new());
+        // The longest locator a hint may name is the node's, as its runtime limits state it.
+        directory.limit_to(dial_config.runtime_limits.max_locator_len_held());
+
+        // Arm the forwarder's periodic tick (e.g. the linkstate peer's self-flood
+        // cadence — its protocol obligation, now driven by the loop so EVERY caller
+        // converges, not only a demo with a hand-rolled flood `select!`). A
+        // forwarder with no periodic obligation returns `None`, so no timer is
+        // created and the tick arm parks forever — the accept-only and hold-only
+        // loops keep their exact prior behaviour (no extra wakeups).
+        let tick_timer = forwarder.tick_period().map(tokio::time::interval);
+        // The forwarder's wake signal: a forwarder that holds messages for a full link is told when
+        // the link has room, and sends them then and not at the next tick.
+        let wake_signal = forwarder.wake_signal();
+
+        let mut this = Self {
+            forwarder,
+            spawned,
+            dial_config,
+            dial_intents,
+            mcast_ingress,
+            mcast_members,
+            mcast_group_subs,
+            reconcile,
+            #[cfg(feature = "transport-multilink")]
+            max_links,
+            max_sessions,
+            ceiling,
+            #[cfg(all(feature = "routing-peer", feature = "session-close-ingress"))]
+            peer_board,
+            offer,
+            stats,
+            heartbeat,
+            params,
+            clock,
+            tick_interval_ms,
+            intake,
+            faces: BTreeMap::new(),
+            collisions: LinkCollisions::default(),
+            accepted_ids: std::collections::BTreeSet::new(),
+            directory,
+            #[cfg(feature = "transport-multilink")]
+            redial: RedialSchedule::new(retry),
+            dialing_nodes: BTreeMap::new(),
+            node_redial: RedialSchedule::new(retry),
+            next_id: 0,
+            #[cfg(feature = "transport-multilink")]
+            ml_sessions: BTreeMap::new(),
+            #[cfg(feature = "transport-multilink")]
+            ml_faces: BTreeMap::new(),
+            #[cfg(feature = "transport-multilink")]
+            ml_rejected: BTreeSet::new(),
+            #[cfg(feature = "transport-multilink")]
+            ml_dial_endpoints: BTreeMap::new(),
+            summary: AcceptLoopSummary::default(),
+            opening: FuturesUnordered::new(),
+            #[cfg(feature = "routing-peer")]
+            peers: crate::loop_peers::LoopPeers::new(retry),
+            #[cfg(all(feature = "routing-peer", feature = "session-close-ingress"))]
+            peer_sessions: BTreeMap::new(),
+            #[cfg(all(feature = "routing-peer", feature = "session-close-ingress"))]
+            proven_inbound: BTreeMap::new(),
+            peer_retries: FuturesUnordered::new(),
+            spawned_drives: tokio::task::JoinSet::new(),
+            spawned_faces: BTreeMap::new(),
+            tick_timer,
+            wake_signal,
+        };
+        this.seed_dials(dial_targets);
+        this
     }
+
+    /// The configured targets, dialled once the loop exists.
+    fn seed_dials(&mut self, dial_targets: Vec<MeshDialTarget>) {
+        // Seed the outbound dial faces (peer-mesh mode). Each configured target is
+        // dialed concurrently and, once Established, held in the SAME face set as
+        // accepted peers — the dial-out face source, symmetric to the accept arm
+        // below. Boxed into the shared `opening` set because `dial_face` and
+        // `open_face` are distinct future types (see [`OpenFuture`]). Empty for a
+        // pure acceptor, so [`accept_loop`] seeds nothing here.
+        //
+        // Decision D5 — the configured targets are the loop's endpoints, each held by
+        // its connection machine, which dials it until it answers and again whenever
+        // its session is lost, until a reconcile forgets it. Every loop that dials a
+        // configured list holds it so, as upstream retries a configured endpoint for
+        // every mode (`zenoh/src/net/runtime/orchestrator.rs` @
+        // `async fn peer_connector_retry(`); the reconcile only changes the list.
+        #[cfg(feature = "routing-peer")]
+        {
+            let actions = self.plan_peers(|peers, cx, next_id| {
+                peers.set_endpoints(dial_targets, false, cx, next_id)
+            });
+            let dials = self.take_peer_actions(actions);
+            self.summary.dialed += dials;
+        }
+        #[cfg(not(feature = "routing-peer"))]
+        for target in dial_targets {
+            let id = FaceId::mint(&mut self.next_id);
+            self.summary.dialed += 1;
+            // R311y205 (transport-multilink) — a `max_links > 1` node dials with the
+            // 0x4-negotiating variant so its outbound links aggregate (the pref tags
+            // this link's traffic class); the `#[cfg(not)]` arm is the byte-identical
+            // single-link seed.
+            #[cfg(not(feature = "transport-multilink"))]
+            self.opening.push(boxed(|| {
+                dial_face(
+                    id,
+                    target,
+                    Arc::clone(&self.dial_config),
+                    self.params.clone(),
+                    self.offer,
+                    self.clock,
+                    self.tick_interval_ms,
+                )
+            }));
+            #[cfg(feature = "transport-multilink")]
+            self.opening.push(if self.max_links > 1 {
+                // R311y212 — retain the dial endpoint so a partial-loss re-add can
+                // re-dial this link (aggregating dials only; a single-link seed is not
+                // re-added through this substrate). R311y219 — retain the priority
+                // band so a re-add restores it (a fresh-id band would flip on
+                // parity). R2233 — retained BEFORE the dial consumes the plan, and
+                // it is the plan (scheme included) that is retained now.
+                self.ml_dial_endpoints
+                    .insert(id, RetainedLink::first(id, target.clone()));
+                boxed(|| {
+                    dial_face_multilink(
+                        id,
+                        target,
+                        Arc::clone(&self.dial_config),
+                        self.offer,
+                        multilink_priority_range(id),
+                        self.params.clone(),
+                        self.clock,
+                        self.tick_interval_ms,
+                    )
+                }) as OpenFuture
+            } else {
+                boxed(|| {
+                    dial_face(
+                        id,
+                        target,
+                        Arc::clone(&self.dial_config),
+                        self.params.clone(),
+                        self.offer,
+                        self.clock,
+                        self.tick_interval_ms,
+                    )
+                }) as OpenFuture
+            });
+        }
+    }
+
+    /// Race the loop's sources until `shutdown` resolves, handling each step as it comes, then
+    /// close the intake and the drives and return what the loop counted.
+    async fn run(
+        mut self,
+        mut shutdown: Pin<&mut dyn Future<Output = ()>>,
+        on_event: &mut dyn FnMut(&AcceptEvent),
+    ) -> AcceptLoopSummary {
+        let forwarder = self.forwarder;
+        // R311y205 (transport-multilink) — an aggregating loop drives three distinct
+        // future shapes (face / joined / rejected), so `driving` holds boxed futures;
+        // a non-multilink loop keeps the unboxed single-shape set, byte-identical.
+        #[cfg(not(feature = "transport-multilink"))]
+        let mut driving = FuturesUnordered::new();
+        #[cfg(feature = "transport-multilink")]
+        let mut driving: FuturesUnordered<DriveFuture<'_>> = FuturesUnordered::new();
+        loop {
+            // Busy while the sources are polled, resting while they are all pending: a poll that does
+            // not return is what the heartbeat reports, a quiet node is not. In a block, so that what
+            // the sources lend the `select!` is given back before the step is handled.
+            let step = {
+                let Self {
+                    opening,
+                    peer_retries,
+                    spawned_drives,
+                    spawned_faces,
+                    intake,
+                    tick_timer,
+                    wake_signal,
+                    dial_intents,
+                    mcast_ingress,
+                    mcast_members,
+                    mcast_group_subs,
+                    reconcile,
+                    heartbeat,
+                    ..
+                } = &mut self;
+                let next = async {
+                    tokio::select! {
+                        _ = &mut shutdown => Step::Shutdown,
+                        Some(opened) = opening.next() => Step::Opened(Box::new(opened)),
+                        Some(due) = peer_retries.next() => Step::PeerRetry(due),
+                        Some(driven) = driving.next() => Step::Driven(driven),
+                        Some(driven) = next_spawned(spawned_drives, spawned_faces) => {
+                            Step::Driven(driven)
+                        }
+                        // What the intake has to tell: a link's handshake ended, or a
+                        // listener failed to accept. The accepts themselves (over EVERY bound
+                        // listener, R2099) and the handshakes run in the intake.
+                        event = intake.next() => Step::Intake(event),
+                        _ = forwarder_tick(tick_timer) => Step::Tick,
+                        _ = forwarder_woken(wake_signal) => Step::Woken,
+                        intent = recv_dial_intent(dial_intents) => Step::Dial(intent),
+                        item = recv_mcast_ingress(mcast_ingress) => Step::McastIngress(Box::new(item)),
+                        members = recv_mcast_members(mcast_members) => Step::McastMembers(members),
+                        subs = recv_mcast_group_subs(mcast_group_subs) => Step::McastGroupSubs(subs),
+                        set = recv_reconcile(reconcile) => Step::Reconcile(set),
+                    }
+                };
+                tokio::pin!(next);
+                heartbeat.polled(0, next.as_mut()).await
+            };
+            self.heartbeat.turn(step.liveness_step());
+
+            match step {
+                Step::Shutdown => break,
+
+                Step::Opened(opened) => self.on_opened(opened, on_event, &mut |held| {
+                    let HeldDrive {
+                        face,
+                        opened,
+                        #[cfg(feature = "transport-multilink")]
+                        shape,
+                    } = held;
+                    // R311y205 (transport-multilink) — box the drive future in
+                    // an aggregating build so it shares `driving` with the
+                    // joined / rejected drives; unboxed + byte-identical
+                    // otherwise.
+                    #[cfg(not(feature = "transport-multilink"))]
+                    push_made(&mut driving, || drive_face(face, opened, forwarder));
+                    #[cfg(feature = "transport-multilink")]
+                    driving.push(match shape {
+                        DriveShape::Face => {
+                            boxed(|| drive_face(face, opened, forwarder)) as DriveFuture<'_>
+                        }
+                        DriveShape::Joined(joined) => {
+                            boxed(|| drive_joined_face(face, opened, joined, forwarder))
+                                as DriveFuture<'_>
+                        }
+                        DriveShape::Rejected => {
+                            boxed(|| drain_rejected_face(face, opened)) as DriveFuture<'_>
+                        }
+                    });
+                }),
+
+                Step::Driven((face, outcome)) => self.on_driven(face, outcome, on_event),
+
+                Step::Dial(intent) => self.on_dial(intent),
+
+                // A Push arrived on the multicast INGRESS group (the deferred
+                // `mcast_faces` plane, I1) — route it into the forwarder as a
+                // mcast-sourced Push (delivered to unicast subscribers, echo-guarded
+                // off the groups). Folded here, on the loop's single task, so the
+                // `!Send` forwarder is touched only from its own task. A no-ingress
+                // loop never reaches here (the arm parks on a `None` channel). The
+                // route call is `codec-push`-gated (the trait method takes `PushOwned`);
+                // without `codec-push` the channel is always `None` so this is dead.
+                Step::McastIngress(_item) => {
+                    // R2734 — the fold now carries a Query as well as a Push, so the
+                    // kind is decided HERE rather than by the fold dropping everything
+                    // that is not a Push. Each arm is a different routing entry point
+                    // on the forwarder; both enter through the same source-only
+                    // ingress face.
+                    #[cfg(feature = "codec-push")]
+                    match &_item.body {
+                        McastIngressBody::Push(push) => {
+                            self.forwarder.route_mcast_ingress(
+                                _item.priority,
+                                _item.reliable,
+                                push,
+                                _item.from.as_ref(),
+                            );
+                        }
+                        McastIngressBody::Request(request) => {
+                            self.forwarder.route_mcast_ingress_request(
+                                _item.reliable,
+                                request,
+                                _item.from.as_ref(),
+                            );
+                        }
+                    }
+                }
+
+                // The on-group ROUTER set changed — refresh the forwarder's DR
+                // election candidates (I3b). No-op default for non-router forwarders;
+                // the arm parks when there is no membership channel.
+                Step::McastMembers(members) => {
+                    self.forwarder.set_mcast_group_members(&members);
+                }
+
+                // The on-group SUBSCRIBER aggregate changed — advertise/withdraw the
+                // group's interest into the unicast mesh (sub plane, S2). No-op default
+                // for non-router forwarders; the arm parks when there is no sub channel.
+                Step::McastGroupSubs(subs) => {
+                    self.forwarder.set_mcast_group_subs(&subs);
+                }
+
+                // A runtime connect-list reconcile arrived (`router-connect-reconcile`):
+                // the loop's endpoints change, and each newly-listed one is dialled by
+                // its connection machine (decision D5). ADD-ONLY, as upstream's
+                // close-time re-read of the connect list is: a removed endpoint is
+                // forgotten, NOT torn down, because closing a live federation face on
+                // a list edit would blackhole the mesh (see [`ReconcileSender`]).
+                // An endpoint is named by its ADDRESS (a config endpoint carries
+                // no zid until the handshake, so the gossip `holds_zid` zid dedup
+                // cannot apply), and one already held or being reached is unchanged.
+                // The arm parks when `reconcile` is `None`, so a non-router /
+                // feature-off loop never reaches here; the body is `#[cfg]`-gated so a
+                // feature-off build compiles none of the reconcile dial logic.
+                Step::Reconcile(_desired_set) => {
+                    #[cfg(feature = "router-connect-reconcile")]
+                    self.on_reconcile(_desired_set);
+                }
+
+                Step::PeerRetry(_due) => {
+                    #[cfg(feature = "routing-peer")]
+                    self.on_peer_retry(_due);
+                    #[cfg(not(feature = "routing-peer"))]
+                    match _due {}
+                }
+
+                Step::Intake(intake::IntakeEvent::Handshaken(ended)) => self.on_handshaken(ended),
+
+                Step::Intake(intake::IntakeEvent::AcceptError(e)) => {
+                    on_event(&AcceptEvent::AcceptError(e));
+                }
+
+                // The forwarder's periodic cadence elapsed — let it do its
+                // time-driven control-plane work (the linkstate peer floods its own
+                // link-state). A no-timer forwarder never reaches here.
+                Step::Tick => self.forwarder.tick(),
+
+                // The forwarder was told a link it holds messages for has room.
+                Step::Woken => self.forwarder.woken(),
+            }
+        }
+
+        // Stop accepting; drop in-flight opens + drives (sockets close, writer tasks
+        // drain). Faces table cleared — the summary already captured the high-water
+        // mark.
+        self.intake.close().await;
+        self.summary.accepted = self.intake.accepted();
+        self.summary.refused_over_pending = self.intake.refused_over_pending();
+        drop(self.opening);
+        drop(driving);
+        // Spawned drives are cancelled AND awaited: a task mid-poll finishes that poll on its
+        // worker, so without the wait a callback could still be running after this returns.
+        self.spawned_drives.shutdown().await;
+        self.faces.clear();
+        self.summary
+    }
+
+    /// An open ended, a dial or an accept: held as a face, joined to a session, parked behind
+    /// the face it replaces, or refused or failed and reported so.
+    fn on_opened(
+        &mut self,
+        opened: Box<OpenResult>,
+        on_event: &mut dyn FnMut(&AcceptEvent),
+        hold: &mut dyn FnMut(HeldDrive),
+    ) {
+        let (id, peer, result) = *opened;
+        // Decision D5 — whether this is a dial the loop's peers asked for:
+        // its end is reported to its peer's machine at whichever arm below
+        // ends it. A node's dial is held as a single-link face.
+        #[cfg(feature = "routing-peer")]
+        let peer_dial = self.peers.is_dialing(id);
+        #[cfg(all(feature = "routing-peer", feature = "transport-multilink"))]
+        let node_dial = self.peers.dials_a_node(id);
+        // Without the planner no dial is a node's; only the multilink JOIN
+        // branch reads the answer then.
+        #[cfg(all(feature = "transport-multilink", not(feature = "routing-peer")))]
+        let node_dial = false;
+        match result {
+            Ok(opened) => {
+                let held = self.on_established(
+                    id,
+                    peer,
+                    opened,
+                    #[cfg(feature = "routing-peer")]
+                    peer_dial,
+                    #[cfg(feature = "transport-multilink")]
+                    node_dial,
+                    on_event,
+                );
+                if let Some(held) = held {
+                    hold(held);
+                }
+            }
+            Err(cause) => self.on_open_failed(
+                id,
+                peer,
+                cause,
+                #[cfg(feature = "routing-peer")]
+                peer_dial,
+                on_event,
+            ),
+        }
+    }
+
+    /// An open that came up: the face to drive inside the loop's task, or `None` when it
+    /// is driven by a task of its own, joined to a session, parked or refused.
+    fn on_established(
+        &mut self,
+        id: FaceId,
+        peer: AcceptedPeer,
+        opened: OpenedSession,
+        #[cfg(feature = "routing-peer")] peer_dial: bool,
+        #[cfg(feature = "transport-multilink")] node_dial: bool,
+        on_event: &mut dyn FnMut(&AcceptEvent),
+    ) -> Option<HeldDrive> {
+        // A node a discovery plane found is linked: its wait starts from the
+        // beginning the next time it is down.
+        if let Some(dial) = self.dialing_nodes.remove(&id) {
+            self.node_redial.forget(&dial.zid);
+        }
+        // R311y786 — this dial SUCCEEDED, so the outage it was
+        // retrying is over: forget the address's grown wait, and the
+        // NEXT outage starts at `period_init_ms` again. zenoh's
+        // `period` is a local of `peer_connector_retry` and dies with
+        // the successful connect (`orchestrator.rs:787-806`); this is
+        // that lifetime, spelled out because wz's re-dial is a future
+        // in a shared loop rather than a per-peer task with a stack.
+        // Placed BEFORE the multilink JOIN branch below, which
+        // `continue`s: a joined link is a successful dial too, and a
+        // reset written after that branch would never run for one.
+        // A peer's dial resets its own schedule when its machine
+        // reaches Established (`reset_retry`, decision D5).
+        #[cfg(feature = "transport-multilink")]
+        if let Some(retained) = self.ml_dial_endpoints.get(&id) {
+            self.redial.forget(&retained.redial_key());
+        }
+        // R311qi — capture the remote peer's zid (the routing
+        // identity) from the established session before `opened`
+        // is moved into the drive future.
+        let face = Face {
+            id,
+            peer,
+            peer_zid: opened.peer_zid(),
+            peer_whatami: opened.peer_whatami(),
+            // R2951 — not an accept, so one of this node's dials.
+            dialed: !self.accepted_ids.remove(&id),
+            // session-extqos — read the MERGED metadata off the
+            // session actions, before `opened` moves into the
+            // drive future. Post-handshake, so it is the outcome
+            // of the containment, not the staged offer.
+            #[cfg(feature = "session-extqos")]
+            qos_link: opened.actions.qos_link_metadata(),
+        };
+        // R311y205 (transport-multilink) — aggregation JOIN. When
+        // `max_links > 1` and this established link's peer zid
+        // already has a logical session, aggregate this physical
+        // link onto that session's shared `SessionCore` (the wz
+        // analogue of zenoh's `init_existing_transport_unicast`
+        // add-link path) instead of registering a second face — the
+        // replacement for the `dedups_faces_by_zid` drop in the
+        // aggregating case. The FIRST link to a peer records the
+        // session and falls through to the normal register+drive
+        // (it IS the session's primary face). A zid-less link cannot
+        // aggregate, so it falls through and is held single-link. A
+        // node dial (decision D5) is held single-link too: its
+        // machine holds the node by one face.
+        #[cfg(feature = "transport-multilink")]
+        if let Some(shape) = self.join_held_session(
+            id,
+            &face,
+            &opened,
+            node_dial,
+            #[cfg(feature = "routing-peer")]
+            peer_dial,
+            on_event,
+        ) {
+            return Some(HeldDrive {
+                face,
+                opened,
+                shape,
+            });
+        }
+        // Face-establishment zid-dedup, but ONLY when the forwarder
+        // keys routing state on the zid ([`FaceForwarder::dedups_faces_by_zid`]
+        // — the linkstate peer, whose graph self-edge is zid-keyed).
+        // For such a forwarder a second face to an already-held zid
+        // is a redundant link (a mutual `--connect`, a dial+accept
+        // to the same peer, or an autoconnect dial that raced one);
+        // dropping it keeps one face per peer, so the graph never
+        // gets two links for one zid and one face's teardown can't
+        // `remove_link`-prune the still-live peer. The pure acceptor
+        // / star router (FaceId-keyed) returns `false` and holds N
+        // faces regardless of zid (so two clients sharing a fixture
+        // zid are both held — Layer E3/E5). A zid-less face cannot be
+        // deduped, so it is held. zenoh's transport manager
+        // (`init_transport_unicast`) keeps one transport per zid for
+        // EVERY node; wz scopes it to the forwarders that need it.
+        //
+        // A second link to a held node is a COLLISION and is resolved, not
+        // merely refused ([`crate::link_collision`]): of two links that went
+        // opposite ways the forwarder's rule keeps the one the lower zid
+        // dialled, which both ends read alike, so a forwarder that has the rule
+        // may keep the NEW link. The held face is then asked to close and the new
+        // link waits, parked, for the face to leave, because the graph is keyed
+        // on the zid (see above) and a face still leaving would remove the link
+        // of the one that replaced it.
+        if self.forwarder.dedups_faces_by_zid() {
+            if let Some(z) = &face.peer_zid {
+                // A face the forwarder holds and this loop cannot see keeps the
+                // first up, as it always has.
+                let resolution = if self.forwarder.holds_peer(z) {
+                    Resolution::Refuse
+                } else if holds_zid(&self.faces, z) {
+                    // One link of an aggregated session is not a face of its
+                    // own and cannot be closed alone.
+                    #[cfg(feature = "transport-multilink")]
+                    let can_replace = |held: FaceId| !self.ml_faces.contains_key(&held);
+                    #[cfg(not(feature = "transport-multilink"))]
+                    let can_replace = |_: FaceId| true;
+                    self.collisions.resolve(
+                        &self.faces,
+                        z,
+                        face.dialed,
+                        |held_dialled, new_dialled| {
+                            self.forwarder
+                                .judge_second_link(held_dialled, new_dialled, z)
+                        },
+                        can_replace,
+                    )
+                } else {
+                    Resolution::Admit
+                };
+                let refused = match resolution {
+                    Resolution::Admit => false,
+                    Resolution::Refuse => true,
+                    Resolution::Replace { held } => {
+                        if self.forwarder.close_face(held) {
+                            log::debug!(
+                                "face {} to the node of held face {} is the link \
+                                 to keep: face {} is closing and face {} waits",
+                                id.0,
+                                held.0,
+                                held.0,
+                                id.0
+                            );
+                            self.collisions.park(
+                                held,
+                                ParkedOpen {
+                                    id,
+                                    peer: face.peer.clone(),
+                                    opened,
+                                    accepted: !face.dialed,
+                                },
+                            );
+                            return None;
+                        }
+                        // The forwarder holds no such face to ask: the held one
+                        // stays, as it did before there was a rule.
+                        true
+                    }
+                };
+                if refused {
+                    log::debug!("dropping redundant face {} to an already-held peer", id.0);
+                    // Decision D5 — a peer's dial that met the remote
+                    // already held: the peer is held by that face (a
+                    // configured endpoint a gossip dial reached first
+                    // is lost, and dialled again, with that face).
+                    #[cfg(feature = "routing-peer")]
+                    if peer_dial {
+                        let end = match self.faces.iter().find(|(_, held)| {
+                            held.as_deref()
+                                .is_some_and(|held| crate::zid_hex::same_zid(held, z))
+                        }) {
+                            Some((held, _)) => crate::loop_peers::DialEnd::AlreadyHeld {
+                                held: *held,
+                                remote: wz_session_core::credential_identity::zid_from_wire(z),
+                            },
+                            // Held by the forwarder alone, by no face
+                            // this loop can watch: not a hold the
+                            // machine can keep, so the dial failed.
+                            None => crate::loop_peers::DialEnd::Failed,
+                        };
+                        self.peer_dial_ended(id, end);
+                    }
+                    return None;
+                }
+            }
+        }
+        // R2758 — THE SESSION BOUND, at upstream's moment.
+        //
+        // `io/zenoh-transport/src/unicast/manager.rs` @
+        // `max_sessions` denies under the session-table guard,
+        // immediately after the connection-to-self check:
+        // `if guard.len() >= self.config.unicast.max_sessions`
+        // returns `close::reason::INVALID`. The dedup-by-zid
+        // rule above is this loop's analogue of that self/dup
+        // check, so the bound belongs directly under it — and
+        // BEFORE `faces.insert`, because a bound applied after
+        // admission is not a bound.
+        //
+        // A rejected face is dropped exactly the way a
+        // redundant one is: it never enters `faces`.
+        if self.faces.len() >= self.max_sessions {
+            log::debug!(
+                "refusing face {} — max_sessions {} reached",
+                id.0,
+                self.max_sessions
+            );
+            // Decision D5 — no room for the session: the peer's
+            // machine names the refusal `NoSlot`.
+            #[cfg(feature = "routing-peer")]
+            if peer_dial {
+                self.peer_dial_ended(id, crate::loop_peers::DialEnd::NoSlot);
+            }
+            self.summary.refused_over_max_sessions += 1;
+            if let Some(ceiling) = self.ceiling.as_ref() {
+                ceiling
+                    .refused_over_max_sessions
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            on_event(&AcceptEvent::FaceRefused {
+                id,
+                peer_zid: face.peer_zid.clone(),
+                held: self.faces.len(),
+            });
+            return None;
+        }
+        // The host's moving ceiling, read at the same moment and for the same
+        // reason: the capacity the node has measured is a bound on admission,
+        // and a bound applied after the face is held is not one.
+        if let Some(limit) = self.ceiling.as_ref().map(SessionCeiling::get) {
+            if self.faces.len() >= limit {
+                log::debug!(
+                    "refusing face {} — measured capacity {} reached",
+                    id.0,
+                    limit
+                );
+                #[cfg(feature = "routing-peer")]
+                if peer_dial {
+                    self.peer_dial_ended(id, crate::loop_peers::DialEnd::NoSlot);
+                }
+                self.summary.refused_over_capacity += 1;
+                // Looked up again rather than held from the read above: telling the peer's machine of
+                // the refusal takes the whole loop.
+                if let Some(host_ceiling) = self.ceiling.as_ref() {
+                    host_ceiling
+                        .refused_over_capacity
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                on_event(&AcceptEvent::FaceRefused {
+                    id,
+                    peer_zid: face.peer_zid.clone(),
+                    held: self.faces.len(),
+                });
+                return None;
+            }
+        }
+        // Item 751 -- a remote the forwarder's region rules cannot
+        // place is refused here, before it is held, as the pin
+        // refuses it when the transport opens.
+        if let Some(why) = self.forwarder.refuses_face(&opened.actions) {
+            log::warn!("refusing face {} -- {why}", id.0);
+            #[cfg(feature = "routing-peer")]
+            if peer_dial {
+                self.peer_dial_ended(id, crate::loop_peers::DialEnd::Failed);
+            }
+            on_event(&AcceptEvent::FaceRefused {
+                id,
+                peer_zid: face.peer_zid.clone(),
+                held: self.faces.len(),
+            });
+            return None;
+        }
+        // Register the face's send seam BEFORE moving `opened`
+        // into the drive future, so a forwarder can route TO
+        // this face from the moment it is held. The registration is the
+        // forwarder's admission ([`FaceForwarder::admit`]) and it comes before
+        // anything is told of the face: a link it refuses is dropped as a
+        // redundant one is, and the dial machine below is told the dial failed,
+        // not that the peer is held by a face that does not exist.
+        if !self.forwarder.admit(id, &opened.actions) {
+            log::debug!(
+                "dropping face {} to a peer the forwarder holds by another face",
+                id.0
+            );
+            #[cfg(feature = "routing-peer")]
+            if peer_dial {
+                self.peer_dial_ended(id, crate::loop_peers::DialEnd::Failed);
+            }
+            on_event(&AcceptEvent::FaceRefused {
+                id,
+                peer_zid: face.peer_zid.clone(),
+                held: self.faces.len(),
+            });
+            return None;
+        }
+        // Decision D5 — a peer's dial that came up: its machine
+        // holds the peer by this face, unless the peer stopped
+        // wanting it while it ran, when the session is dropped here
+        // unheld.
+        #[cfg(feature = "routing-peer")]
+        if peer_dial {
+            let end = crate::loop_peers::DialEnd::Established {
+                remote: face
+                    .peer_zid
+                    .as_deref()
+                    .and_then(wz_session_core::credential_identity::zid_from_wire),
+            };
+            if !self.peer_dial_ended(id, end) {
+                self.forwarder.deregister(id);
+                return None;
+            }
+            #[cfg(feature = "session-close-ingress")]
+            self.peer_sessions.insert(id, opened.actions.clone());
+        }
+        // Decision D10 — a session the node accepted, from a peer whose key
+        // proved its zid: a node waiting for that peer under a passive intent
+        // holds it. The admission is the accept policy's, which this neither
+        // widens nor narrows; only a peer the node already waits for is
+        // affected, and an unverified claim of its zid is not the peer.
+        #[cfg(all(feature = "routing-peer", feature = "session-close-ingress"))]
+        if !peer_dial && !face.dialed && opened.actions.peer_identity_verified() {
+            if let Some(zid) = face
+                .peer_zid
+                .as_deref()
+                .and_then(wz_session_core::credential_identity::zid_from_wire)
+            {
+                // Kept for as long as the face lives, so a passive intent that
+                // comes after the session holds it too.
+                self.proven_inbound
+                    .insert(id, (zid, opened.actions.clone()));
+                let actions =
+                    self.plan_peers(|peers, cx, next_id| peers.inbound_up(zid, id, cx, next_id));
+                if self.peers.state(&crate::loop_peers::PeerKey::Node(zid))
+                    == Some(wz_session_core::peer_connection::PeerConnectionState::PassiveUp)
+                {
+                    self.peer_sessions.insert(id, opened.actions.clone());
+                }
+                self.take_peer_actions(actions);
+            }
+        }
+        self.faces.insert(id, face.peer_zid.clone());
+        self.collisions.admitted(id, face.dialed);
+        self.summary.established += 1;
+        self.summary.peak_concurrent = self.summary.peak_concurrent.max(self.faces.len());
+        if let Some(stats) = &self.stats {
+            stats.transport_opened(id.0, &opened.actions);
+        }
+        // `Face` is no longer `Copy` (it owns the zid), so clone
+        // it for the borrowed FaceUp event; the original moves
+        // into the drive future.
+        on_event(&AcceptEvent::FaceUp(face.clone()));
+        // A node whose forwarder is `Send + Sync` has the drive spawned
+        // on the runtime instead, wrapped as its executor wants it
+        // polled: this face is then driven by a task of its own.
+        if let Some(spawn) = &self.spawned {
+            let drive = spawn.executor.wrap(boxed(|| {
+                drive_face_shared(face.clone(), opened, Arc::clone(&spawn.forwarder))
+            }));
+            let drive = crate::runtime_pool::in_caller_span(drive);
+            let task = match spawn.on {
+                SpawnOn::Workers => self.spawned_drives.spawn(drive),
+                SpawnOn::LocalSet => self.spawned_drives.spawn_local(drive),
+            };
+            self.spawned_faces.insert(task.id(), face);
+            None
+        } else {
+            Some(HeldDrive {
+                face,
+                opened,
+                #[cfg(feature = "transport-multilink")]
+                shape: DriveShape::Face,
+            })
+        }
+    }
+
+    /// A link to a node whose aggregated session the loop holds, joined onto that session or
+    /// refused by it. `None` leaves the link to be held as a face: the first link to a node,
+    /// recorded here as its session's primary, a link with no zid, a node's dial, and every link
+    /// of a loop that does not aggregate.
+    #[cfg(feature = "transport-multilink")]
+    fn join_held_session(
+        &mut self,
+        id: FaceId,
+        face: &Face,
+        opened: &OpenedSession,
+        node_dial: bool,
+        #[cfg(feature = "routing-peer")] peer_dial: bool,
+        on_event: &mut dyn FnMut(&AcceptEvent),
+    ) -> Option<DriveShape> {
+        if self.max_links <= 1 || node_dial {
+            return None;
+        }
+        let peer_zid = face.peer_zid.clone()?;
+        // The session's STABLE shared-core handle (held in
+        // `ml_sessions`, alive across link deaths), used as
+        // join_link's primary arg — NOT a per-link entry that
+        // teardown removes, so a join after the original
+        // primary link died still resolves the session.
+        let existing = self
+            .ml_sessions
+            .get(&peer_zid)
+            .map(|(primary_id, _, core_handle)| (*primary_id, core_handle.clone()));
+        if let Some((primary_id, core_handle)) = existing {
+            // A second+ link to a held peer: try to aggregate.
+            let join = match join_link(&core_handle, &opened.actions, self.max_links) {
+                JoinOutcome::Joined(joined) => {
+                    let live_links = core_handle.live_link_count();
+                    log::debug!(
+                        "multilink: aggregated link {} onto peer {:02x?} \
+                         (live links now {})",
+                        id.0,
+                        peer_zid,
+                        live_links
+                    );
+                    // Surface the aggregation to the loop's
+                    // event consumer — a joined link never
+                    // reaches the FaceUp emit below (the arm
+                    // `continue`s), so this is the ONLY
+                    // on_event a caller sees for the join.
+                    on_event(&AcceptEvent::LinkAggregated {
+                        peer_zid: peer_zid.clone(),
+                        live_links,
+                    });
+                    // Decision D5 — an endpoint whose dial
+                    // joined a session is held by that
+                    // session's face, and is lost with it;
+                    // the link itself is the re-add's.
+                    #[cfg(feature = "routing-peer")]
+                    if peer_dial {
+                        self.peer_dial_ended(
+                            id,
+                            crate::loop_peers::DialEnd::AlreadyHeld {
+                                held: primary_id,
+                                remote: wz_session_core::credential_identity::zid_from_wire(
+                                    &peer_zid,
+                                ),
+                            },
+                        );
+                    }
+                    self.ml_faces.insert(id, (peer_zid, joined.clone()));
+                    // R311y219b — tell the forwarder this
+                    // joined link's inbound (which arrives
+                    // tagged with its OWN id, never
+                    // `register`ed) maps to the PRIMARY
+                    // registered face, so a routing forwarder
+                    // delivers its data/control instead of
+                    // dropping it at the faces.get gate. A
+                    // no-op for observation-only forwarders.
+                    self.forwarder.register_joined(id, primary_id, &joined);
+                    DriveShape::Joined(joined)
+                }
+                JoinOutcome::OverLimit => {
+                    log::debug!(
+                        "multilink: link {} over max_links ({}) for peer \
+                         {:02x?}; rejected MAX_LINKS",
+                        id.0,
+                        self.max_links,
+                        peer_zid
+                    );
+                    // Decision D5 — the session is full, but
+                    // it is the endpoint's: held by its face.
+                    #[cfg(feature = "routing-peer")]
+                    if peer_dial {
+                        self.peer_dial_ended(
+                            id,
+                            crate::loop_peers::DialEnd::AlreadyHeld {
+                                held: primary_id,
+                                remote: wz_session_core::credential_identity::zid_from_wire(
+                                    &peer_zid,
+                                ),
+                            },
+                        );
+                    }
+                    // R311y212 — a REJECTED dialed link is not
+                    // re-added; drop its retained endpoint so it
+                    // does not leak past the ml_rejected drain
+                    // (which `continue`s in Step::Driven before
+                    // the death-handler leak-guard is reached).
+                    self.ml_dial_endpoints.remove(&id);
+                    self.ml_rejected.insert(id);
+                    DriveShape::Rejected
+                }
+                JoinOutcome::InvalidPubkey => {
+                    log::debug!(
+                        "multilink: link {} pubkey mismatch for peer \
+                         {:02x?}; rejected INVALID",
+                        id.0,
+                        peer_zid
+                    );
+                    // Decision D5 — a link the session refuses
+                    // is a dial that failed: the endpoint
+                    // backs off and tries again.
+                    #[cfg(feature = "routing-peer")]
+                    if peer_dial {
+                        self.peer_dial_ended(id, crate::loop_peers::DialEnd::Failed);
+                    }
+                    // R311y212 — see the MAX_LINKS arm: drop the
+                    // rejected link's retained endpoint so it does
+                    // not leak past the ml_rejected drain.
+                    self.ml_dial_endpoints.remove(&id);
+                    self.ml_rejected.insert(id);
+                    DriveShape::Rejected
+                }
+            };
+            return Some(join);
+        }
+        // The FIRST link to this peer becomes the session's
+        // primary; record it (with a stable shared-core
+        // handle for future joins), then fall through to
+        // register it as the representative face.
+        self.ml_sessions
+            .insert(peer_zid.clone(), (id, face.clone(), opened.actions.clone()));
+        self.ml_faces.insert(id, (peer_zid, opened.actions.clone()));
+        None
+    }
+
+    /// An open that did not come up.
+    fn on_open_failed(
+        &mut self,
+        id: FaceId,
+        peer: AcceptedPeer,
+        cause: OpenError,
+        #[cfg(feature = "routing-peer")] peer_dial: bool,
+        on_event: &mut dyn FnMut(&AcceptEvent),
+    ) {
+        // R2951 — an accept that never opened leaves no mark behind.
+        let was_accept = self.accepted_ids.remove(&id);
+        // A link that did not open is worth a line, with the way it did not: a
+        // handshake window that ran out, a peer that answered as another node, a
+        // refusal. Nothing else says so, since the event below goes to the host
+        // and not to a log. A dial is this node's own act and warns; an accept is
+        // a stranger's and informs.
+        if was_accept {
+            log::info!("accept: face={} from {peer} did not open: {cause:?}", id.0);
+        } else {
+            log::warn!(
+                "accept: dial face={} to {peer} did not open: {cause:?}",
+                id.0
+            );
+        }
+        // A node a discovery plane found is dialled again, at its next locator
+        // and after a wait that grows (upstream's `peer_connector_retry`), until
+        // a face to it is held, the node's locators are gone from the directory
+        // (its link state was withdrawn), or none of them can be dialled.
+        if let Some(dial) = self.dialing_nodes.remove(&id) {
+            let attempt = dial.attempt + 1;
+            let target = if holds_zid(&self.faces, &dial.zid) {
+                None
+            } else {
+                node_dial_target(
+                    &self.directory,
+                    &dial.zid,
+                    self.clock.now_monotonic_ms(),
+                    attempt,
+                )
+            };
+            match target {
+                Some(target) => {
+                    let again = FaceId::mint(&mut self.next_id);
+                    let backoff_ms = self.node_redial.next_ms(&dial.zid, target.retry());
+                    log::info!(
+                        "autoconnect: dialling node {:02x?} again in {backoff_ms}ms \
+                         at {:?} (attempt {attempt}, face={})",
+                        dial.zid,
+                        target.locator,
+                        again.0
+                    );
+                    self.dialing_nodes.insert(
+                        again,
+                        NodeDial {
+                            zid: dial.zid,
+                            attempt,
+                        },
+                    );
+                    self.opening.push(boxed(|| {
+                        dial_face_after(
+                            again,
+                            target,
+                            Arc::clone(&self.dial_config),
+                            backoff_ms,
+                            self.params.clone(),
+                            self.offer,
+                            self.clock,
+                            self.tick_interval_ms,
+                        )
+                    }) as OpenFuture);
+                }
+                None => {
+                    self.node_redial.forget(&dial.zid);
+                    log::debug!(
+                        "autoconnect: not dialling node {:02x?} again (it is held, \
+                         or no dialable locator is left)",
+                        dial.zid
+                    );
+                }
+            }
+        }
+        // Decision D5 — a peer's dial that did not open: another
+        // node answered (D4), or the peer was not reached. Its
+        // machine backs off and dials again, so the link the dial
+        // retained for the multilink re-add is not the re-add's.
+        #[cfg(feature = "routing-peer")]
+        if peer_dial {
+            let end = if matches!(cause, OpenError::InitAckPeerMismatch) {
+                crate::loop_peers::DialEnd::Mismatch
+            } else {
+                crate::loop_peers::DialEnd::Failed
+            };
+            #[cfg(feature = "transport-multilink")]
+            self.ml_dial_endpoints.remove(&id);
+            self.peer_dial_ended(id, end);
+        }
+        // R311y212 — a failed retained MULTILINK dial (a re-add, or a
+        // discovered peer's aggregating dial that never connected) is
+        // re-scheduled: retry-until-success. A peer's dial left
+        // `ml_dial_endpoints` above, so no id is dialled again twice.
+        #[cfg(feature = "transport-multilink")]
+        if self.max_links > 1 {
+            if let Some(retained) = self.ml_dial_endpoints.remove(&id) {
+                schedule_multilink_redial(
+                    retained,
+                    &self.dial_config,
+                    self.offer,
+                    &mut self.ml_dial_endpoints,
+                    &mut self.redial,
+                    &mut self.opening,
+                    &mut self.next_id,
+                    false,
+                    &self.params,
+                    self.clock,
+                    self.tick_interval_ms,
+                );
+            }
+        }
+        on_event(&AcceptEvent::FaceFailed { id, peer, cause });
+    }
+
+    /// A drive that ended: the face, or one link of an aggregated session, has left.
+    fn on_driven(
+        &mut self,
+        face: Face,
+        outcome: DriverOutcome,
+        on_event: &mut dyn FnMut(&AcceptEvent),
+    ) {
+        // R311y205 (transport-multilink) — aggregation teardown. A rejected
+        // (MAX_LINKS/INVALID) link finished draining its close: drop it
+        // silently (it never entered `faces` nor the forwarder). Otherwise,
+        // if this is a tracked aggregated link, remove it from the shared
+        // set; the whole session tears down (deregister + FaceDown on its
+        // primary face) only when the LAST link departs — while ≥1 link
+        // remains the session survives and the forwarder keeps routing over
+        // it (failover). A link not tracked here (a zid-less single-link
+        // face) falls through to the normal single-link teardown below.
+        #[cfg(feature = "transport-multilink")]
+        if self.max_links > 1 {
+            if self.ml_rejected.remove(&face.id) {
+                return;
+            }
+            if let Some((peer_zid, handle)) = self.ml_faces.remove(&face.id) {
+                // R311y219b — this link died: drop its joined->primary mapping
+                // so a later FaceId reuse cannot mis-resolve its successor's
+                // inbound onto a stale primary. A no-op for observation-only
+                // forwarders. This fires for BOTH a joined secondary (removes
+                // its real entry) AND the primary (which reaches here too, but
+                // is never a `joined_faces` KEY — it is `register`ed, not
+                // joined — so its removal is a harmless no-op).
+                self.forwarder.deregister_joined(face.id);
+                // R311y212 — drop this link's retained dial endpoint (Some
+                // iff THIS node dialed it); a partial-loss re-add re-inserts
+                // a fresh id, a total-collapse leaves it removed (no re-add).
+                let dead = self.ml_dial_endpoints.remove(&face.id);
+                // Remove THIS link from the shared aggregation set. For the
+                // primary its FSM `release_link` already did so (idempotent
+                // here); for a transplanted secondary that `release_link`
+                // touched only its throwaway core, so this is the effective
+                // removal from the shared core.
+                let remaining = handle.del_link(&handle.link);
+                if remaining == 0 {
+                    if let Some((primary_id, primary_face, _core)) =
+                        self.ml_sessions.remove(&peer_zid)
+                    {
+                        self.faces.remove(&primary_id);
+                        // An aggregated session is never replaced (`can_replace`), so
+                        // nothing waits behind it; a link that did would be admitted as
+                        // any other is, and its direction is forgotten all the same.
+                        if let Some(parked) = self.collisions.departed(primary_id) {
+                            admit_parked(parked, &mut self.opening, &mut self.accepted_ids);
+                        }
+                        // Decision D5 — the session is gone: the peers its
+                        // primary face held back off and dial again.
+                        #[cfg(feature = "routing-peer")]
+                        self.peer_face_down(primary_id);
+                        self.forwarder.deregister(primary_id);
+                        if let Some(stats) = &self.stats {
+                            stats.transport_closed(primary_id.0);
+                        }
+                        on_event(&AcceptEvent::FaceDown(primary_face, outcome));
+                    }
+                } else if handle.transport_deleted() {
+                    // The peer deleted the transport: the links that remain
+                    // are leaving with this one, so it is not re-added.
+                    log::debug!(
+                        "multilink: link {} left a transport peer {:02x?} deleted; \
+                         {} link(s) still closing",
+                        face.id.0,
+                        peer_zid,
+                        remaining
+                    );
+                } else if let Some(retained) = dead {
+                    // R311y212 — PARTIAL loss of a link THIS node DIALED:
+                    // re-dial + re-JOIN it onto the surviving shared core so
+                    // the aggregate returns to strength. The survivor is
+                    // uninterrupted and the shared SN stays continuous (no
+                    // core reset; `del_link` above freed a max_links slot, and
+                    // the re-dial re-presents the OnceLock pubkey so join_link
+                    // config-equality passes). The 1s backoff means the
+                    // del_link always lands first.
+                    log::debug!(
+                        "multilink: dialed link {} left; peer {:02x?} survives on {} \
+                         link(s), re-adding",
+                        face.id.0,
+                        peer_zid,
+                        remaining
+                    );
+                    schedule_multilink_redial(
+                        retained,
+                        &self.dial_config,
+                        self.offer,
+                        &mut self.ml_dial_endpoints,
+                        &mut self.redial,
+                        &mut self.opening,
+                        &mut self.next_id,
+                        true,
+                        &self.params,
+                        self.clock,
+                        self.tick_interval_ms,
+                    );
+                } else {
+                    // A dropped link this node ACCEPTED (no retained
+                    // endpoint) — the peer owns its re-dial; just note the
+                    // survival (failover holds on the survivor meanwhile).
+                    log::debug!(
+                        "multilink: accepted link {} left; peer {:02x?} session survives \
+                         on {} link(s)",
+                        face.id.0,
+                        peer_zid,
+                        remaining
+                    );
+                }
+                return;
+            }
+        }
+        // R311y212 — leak-guard: a dialed multilink link that fell through
+        // the JOIN branch (zid-less, or died before Establishing) is torn
+        // down single-link here and never hit the `dead` removal above; drop
+        // its retained endpoint so the map does not leak. A link that DID go
+        // through the multilink branch `continue`d already (its entry removed
+        // via `dead`), so this is a no-op for it.
+        #[cfg(feature = "transport-multilink")]
+        self.ml_dial_endpoints.remove(&face.id);
+        self.faces.remove(&face.id);
+        let departed = face.id;
+        // Decision D5 — the face a peer was held by died: each peer's
+        // machine backs off and asks for the retry. This is the peer
+        // auto-reconnect, upstream's re-dial of a configured endpoint
+        // its closed session still lists
+        // (`zenoh/src/net/runtime/orchestrator.rs`
+        // @ `if peers.contains(&endpoint) && zwrite!(session.endpoints).remove(&endpoint) {`):
+        // an endpoint a reconcile no longer lists was forgotten, and a
+        // face no peer holds (an accepted one, a discovered peer's)
+        // reports nothing.
+        #[cfg(feature = "routing-peer")]
+        self.peer_face_down(face.id);
+        self.forwarder.deregister(face.id);
+        if let Some(stats) = &self.stats {
+            stats.transport_closed(face.id.0);
+        }
+        on_event(&AcceptEvent::FaceDown(face, outcome));
+        // The face has left the loop, the forwarder and the observers, which is what a
+        // link parked behind it waited for: the node is held by no face now, and the
+        // link that replaces it is admitted as any other.
+        if let Some(parked) = self.collisions.departed(departed) {
+            admit_parked(parked, &mut self.opening, &mut self.accepted_ids);
+        }
+    }
+
+    /// A node a discovery plane found and its autoconnect policy admitted.
+    fn on_dial(&mut self, intent: DialIntent) {
+        // A DISCOVERED, policy-admitted peer — the producing plane applied
+        // the autoconnect role + zid gate at emit (the forwarder for
+        // gossip, A5b; the scouting task for a Hello, R2141). Dial it as
+        // an outbound face unless a face to it is already held (dedup) or
+        // no locator is TCP-dialable. A dialed face flows through the SAME
+        // `opening` -> `Step::Opened` path as a static dial, so it is
+        // registered + held + zid-tracked identically.
+        let learned = learn_intent(&mut self.directory, &intent, self.clock.now_monotonic_ms());
+        // A node that was opened before any hint could be dialled for it waits
+        // in `NoLocator` (decision D15): this discovery is the hint it waited for. The
+        // machines are the loop's peers, which exist with `routing-peer`, as the macros
+        // above do; `session-close-ingress` alone does not give the loop any.
+        #[cfg(all(feature = "routing-peer", feature = "session-close-ingress"))]
+        if let Some(zid) = learned {
+            let actions =
+                self.plan_peers(|peers, cx, next_id| peers.locator_learned(zid, cx, next_id));
+            self.take_peer_actions(actions);
+        }
+        #[cfg(not(all(feature = "routing-peer", feature = "session-close-ingress")))]
+        let _ = learned;
+        match dial_decision(
+            &self.faces,
+            &intent,
+            &self.directory,
+            self.clock.now_monotonic_ms(),
+        ) {
+            DialDecision::Dial(target) => {
+                let id = FaceId::mint(&mut self.next_id);
+                self.summary.dialed += 1;
+                // A dial that does not open is made again at the node's next locator
+                // (the Err arm). The aggregating dial of a multilink node has its own
+                // retention and its own re-dial below, so only the single-link dial is
+                // kept here.
+                #[cfg(feature = "transport-multilink")]
+                let single_link = self.max_links <= 1;
+                #[cfg(not(feature = "transport-multilink"))]
+                let single_link = true;
+                if single_link {
+                    if let Some(zid) =
+                        wz_session_core::credential_identity::zid_from_wire(&intent.zid)
+                    {
+                        self.dialing_nodes.insert(id, NodeDial { zid, attempt: 0 });
+                    }
+                }
+                // R311y423 — the discovery-only counters. This arm is
+                // reached ONLY via a DialIntent, which a plane emits only
+                // after its autoconnect policy admits a node it
+                // discovered, so incrementing here (and nowhere else)
+                // makes the pair true discriminators.
+                //
+                // R2141 — split by ORIGIN. There are two producers on this
+                // channel now, and a single counter would credit whichever
+                // atom the reader happened to be asking about; see
+                // `DialIntentOrigin`.
+                log::debug!(
+                    "autoconnect: dialing node {:02x?} at {target:?} as face={} ({:?})",
+                    intent.zid,
+                    id.0,
+                    intent.origin
+                );
+                match intent.origin {
+                    DialIntentOrigin::Gossip => self.summary.gossip_dialed += 1,
+                    DialIntentOrigin::MulticastScout => self.summary.scout_dialed += 1,
+                }
+                // R311y205 (transport-multilink) — a `max_links > 1` node
+                // dials the discovered peer with the 0x4-negotiating variant
+                // (aggregation), else the byte-identical single-link dial.
+                //
+                // An aggregating node opens a link for each pair of priority range
+                // and reliability among the locators it knows for the node, as
+                // upstream's connect does (see `discovered_links`); each is retained
+                // with its band for the partial-loss re-add (R311y212, R311y219).
+                #[cfg(feature = "transport-multilink")]
+                if self.max_links > 1 {
+                    let candidates = target
+                        .expected_zid
+                        .map(|zid| {
+                            candidate_locators(&self.directory, &zid, self.clock.now_monotonic_ms())
+                        })
+                        .unwrap_or_default();
+                    let links = discovered_links::discovered_peer_links(
+                        target,
+                        &candidates,
+                        self.max_links,
+                    );
+                    for (n, target) in links.into_iter().enumerate() {
+                        let id = if n == 0 {
+                            id
+                        } else {
+                            self.summary.dialed += 1;
+                            FaceId::mint(&mut self.next_id)
+                        };
+                        let retained = RetainedLink::first(id, target.clone());
+                        let band = retained.band;
+                        self.ml_dial_endpoints.insert(id, retained);
+                        self.opening.push(boxed(|| {
+                            dial_face_multilink(
+                                id,
+                                target,
+                                Arc::clone(&self.dial_config),
+                                self.offer,
+                                band,
+                                self.params.clone(),
+                                self.clock,
+                                self.tick_interval_ms,
+                            )
+                        }) as OpenFuture);
+                    }
+                } else {
+                    self.opening.push(boxed(|| {
+                        dial_face(
+                            id,
+                            target,
+                            Arc::clone(&self.dial_config),
+                            self.params.clone(),
+                            self.offer,
+                            self.clock,
+                            self.tick_interval_ms,
+                        )
+                    }) as OpenFuture);
+                }
+                #[cfg(not(feature = "transport-multilink"))]
+                self.opening.push(boxed(|| {
+                    dial_face(
+                        id,
+                        target,
+                        Arc::clone(&self.dial_config),
+                        self.params.clone(),
+                        self.offer,
+                        self.clock,
+                        self.tick_interval_ms,
+                    )
+                }));
+            }
+            DialDecision::AlreadyHeld => {
+                // An aggregating node too: its links to a node are the ones the
+                // dial above planned when the node was found, and finding the node
+                // again adds none, as upstream connects only to a peer it holds no
+                // session to (`discovered_links`).
+                log::debug!(
+                    "autoconnect: already hold a face to peer {:02x?}; \
+                     skipping redundant dial",
+                    intent.zid
+                );
+            }
+            DialDecision::NoLocator => log::debug!(
+                "autoconnect: discovered peer advertised no numeric IP \
+                 locator ({:?}); skipping dial",
+                intent.locators
+            ),
+        }
+    }
+
+    /// A new desired connect set, or a lifecycle verb carried on the same channel.
+    #[cfg(feature = "router-connect-reconcile")]
+    fn on_reconcile(&mut self, desired_set: ConnectReconcile) {
+        // R2671 — the fold, the refusal and the verb are read in
+        // `fold_connect_reconcile`, and the set it lands in is the
+        // planner's, so a unit test reaches both; this arm keeps only
+        // the loop's own wording.
+        let plan = fold_connect_reconcile(desired_set, |rejected| {
+            log::warn!(
+                "reconcile: refusing connect endpoint {rejected:?} — a {} \
+                 endpoint has no address to identify it by before the \
+                 handshake",
+                crate::session_open::locator_scheme(&rejected)
+            );
+        });
+        match plan {
+            // `Replace` adopts the whole set and `Add` leaves the
+            // existing members standing. An added endpoint is dialled
+            // now AND again whenever its session is lost; one a
+            // replace drops is not dialled again, and its live face
+            // is NOT closed (the add-only / close-removed asymmetry).
+            ConnectPlan::Endpoints { targets, replace } => {
+                let actions = self.plan_peers(|peers, cx, next_id| {
+                    peers.set_endpoints(targets, replace, cx, next_id)
+                });
+                let dials = self.take_peer_actions(actions);
+                if dials > 0 {
+                    log::debug!("reconcile: dialing {dials} newly-listed connect endpoint(s)");
+                }
+                self.summary.dialed += dials;
+            }
+            // Decision D5 — a node's add goes to its connection
+            // machine: the graph's locators become its link-state
+            // hints (D3), and the machine resolves and dials them for
+            // its zid (D4).
+            #[cfg(feature = "session-close-ingress")]
+            ConnectPlan::Node { zid, locators } => {
+                learn_locators(
+                    &mut self.directory,
+                    &zid,
+                    &locators,
+                    LocatorSource::Linkstate,
+                    self.clock.now_monotonic_ms(),
+                );
+                let actions =
+                    self.plan_peers(|peers, cx, next_id| peers.open_node(zid, cx, next_id));
+                self.take_peer_actions(actions);
+            }
+            // Decision D10 — the passive form of `open`: the node's
+            // machine waits for the node's own session.
+            #[cfg(feature = "session-close-ingress")]
+            ConnectPlan::NodePassive { zid } => {
+                let actions =
+                    self.plan_peers(|peers, cx, next_id| peers.open_node_passive(zid, cx, next_id));
+                self.take_peer_actions(actions);
+                // The intent is the node's session, so one the node already
+                // opened here and proved is held at once, as the fixed-memory
+                // host holds the sessions it is told of at each tick: an intent
+                // that waited for the next session would leave this one unheld.
+                let proven = self
+                    .proven_inbound
+                    .iter()
+                    .find(|(_, (node, _))| *node == zid)
+                    .map(|(id, (_, actions))| (*id, Arc::clone(actions)));
+                if let Some((id, actions_of)) = proven {
+                    let actions = self
+                        .plan_peers(|peers, cx, next_id| peers.inbound_up(zid, id, cx, next_id));
+                    if self.peers.state(&crate::loop_peers::PeerKey::Node(zid))
+                        == Some(wz_session_core::peer_connection::PeerConnectionState::PassiveUp)
+                    {
+                        self.peer_sessions.insert(id, actions_of);
+                    }
+                    self.take_peer_actions(actions);
+                }
+            }
+            // Decision D6 — a lifecycle `close`: every machine that
+            // holds the node is stopped, so it is not dialled again.
+            #[cfg(feature = "session-close-ingress")]
+            ConnectPlan::Withdraw { zid } => {
+                let actions =
+                    self.plan_peers(|peers, cx, next_id| peers.withdraw(&zid, cx, next_id));
+                self.take_peer_actions(actions);
+            }
+        }
+    }
+
+    /// Decision D5 — the retry timer of a peer the loop holds fired.
+    #[cfg(feature = "routing-peer")]
+    fn on_peer_retry(&mut self, due: PeerRetryDue) {
+        let (key, generation) = due;
+        let actions =
+            self.plan_peers(|peers, cx, next_id| peers.retry_due(key, generation, cx, next_id));
+        self.take_peer_actions(actions);
+    }
+
+    /// The intake finished the handshake of a link it accepted.
+    fn on_handshaken(&mut self, ended: Box<intake::Handshaken>) {
+        // Slice B — the mesh accept loop holds a face per accepted peer
+        // keyed by its handshake zid, so an IP peer AND a mesh-capable
+        // non-IP peer (unixsock / vsock / unixpipe — each a genuine per-peer
+        // stream accept) are all held as faces; `peer` (an `AcceptedPeer`)
+        // is threaded straight through the handshake as a log/event tag.
+        //
+        // ⛔ R2723 — THE NON-MESH REJECT ARM IS GONE, and it is the CADENCE
+        // of an acceptor that made it obsolete rather than a decision to be
+        // more permissive. It dropped any link whose acceptor could not
+        // yield N CONCURRENT peers, and the only such acceptor is serial: a
+        // tty is point-to-point. But "N at once" and "N over time" are
+        // different questions, and the loop only ever needed the second.
+        // R2722 gave the serial listener link-liveness feedback, so its
+        // `accept_raw` parks while a link is live and yields the next peer
+        // once that one has dropped — and `accept_any` rebuilds its future
+        // set every iteration, so a listener that serves peers ONE AT A TIME
+        // feeds this loop exactly as a multi-peer one does. The budget is
+        // enforced by the listener, not by an admission test here.
+        //
+        // Widening the predicate instead would have been the wrong repair
+        // twice over: it is a TRUE statement about concurrency that must
+        // keep answering `false` for a tty, and a widened version would
+        // admit every variant, leaving this arm a check that can never fire.
+        // The surviving consumer is the BIND-time one, which now reports the
+        // cadence to an operator rather than refusing the listen.
+        let intake::Handshaken {
+            peer,
+            result,
+            pending,
+        } = *ended;
+        let id = FaceId::mint(&mut self.next_id);
+        // R2951 — every open that is not an ACCEPT is one of this node's
+        // dials; this is the one arm accepts reach the loop by, so marking
+        // it here is what lets `Face::dialed` be answered in every build.
+        self.accepted_ids.insert(id);
+        // Taken through the arm every open ends in. The accept stays counted
+        // against `accept_pending` until then, as upstream counts it until
+        // its transport is up.
+        self.opening.push(boxed(|| async move {
+            let opened = (id, peer, result);
+            drop(pending);
+            opened
+        }));
+    }
+
+    /// One call into the planner, with the loop's id counter.
+    #[cfg(feature = "routing-peer")]
+    fn plan_peers<R>(
+        &mut self,
+        plan: impl FnOnce(
+            &mut crate::loop_peers::LoopPeers,
+            &crate::loop_peers::PeerContext<'_>,
+            &mut u64,
+        ) -> R,
+    ) -> R {
+        // The planner's view of the loop at this moment.
+        let cx = crate::loop_peers::PeerContext {
+            directory: &self.directory,
+            now_ms: self.clock.now_monotonic_ms(),
+        };
+        plan(&mut self.peers, &cx, &mut self.next_id)
+    }
+
     // Take what the loop's peers asked for; the value is how many dials it opened.
     // Every call into the planner ends here, so this is where its machines, as
     // they now are, are published for the status query (decision D6).
     #[cfg(feature = "routing-peer")]
-    macro_rules! take_peer_actions {
-        ($actions:expr) => {{
-            let dials = PeerHost {
-                opening: &mut opening,
-                retries: &mut peer_retries,
-                #[cfg(feature = "session-close-ingress")]
-                sessions: &peer_sessions,
-                #[cfg(feature = "transport-multilink")]
-                max_links,
-                #[cfg(feature = "transport-multilink")]
-                ml_dial_endpoints: &mut ml_dial_endpoints,
-                dial_config: &dial_config,
-                params: &params,
-                offer,
-                clock,
-                tick_interval_ms,
-            }
-            .take($actions);
+    fn take_peer_actions(&mut self, actions: Vec<crate::loop_peers::PeerAction>) -> usize {
+        let dials = PeerHost {
+            opening: &mut self.opening,
+            retries: &mut self.peer_retries,
             #[cfg(feature = "session-close-ingress")]
-            if let Some(board) = &peer_board {
-                board.publish(peers.board_rows());
-            }
-            dials
-        }};
+            sessions: &self.peer_sessions,
+            #[cfg(feature = "transport-multilink")]
+            max_links: self.max_links,
+            #[cfg(feature = "transport-multilink")]
+            ml_dial_endpoints: &mut self.ml_dial_endpoints,
+            dial_config: &self.dial_config,
+            params: &self.params,
+            offer: self.offer,
+            clock: self.clock,
+            tick_interval_ms: self.tick_interval_ms,
+        }
+        .take(actions);
+        #[cfg(feature = "session-close-ingress")]
+        if let Some(board) = &self.peer_board {
+            board.publish(self.peers.board_rows());
+        }
+        dials
     }
+
     // Report how a peer's dial ended and take what its machine asks next; the
     // value is whether the loop is to hold the face (`true` for a face that is
     // not a peer's dial). Every arm that ends a dial reports through this one
     // spelling.
     #[cfg(feature = "routing-peer")]
-    macro_rules! peer_dial_ended {
-        ($id:expr, $end:expr) => {{
-            let cx = peer_cx!();
-            match peers.dial_ended($id, $end, &cx, &mut next_id) {
-                Some((keep, actions)) => {
-                    take_peer_actions!(actions);
-                    keep
-                }
-                None => true,
+    fn peer_dial_ended(&mut self, id: FaceId, end: crate::loop_peers::DialEnd) -> bool {
+        match self.plan_peers(|peers, cx, next_id| peers.dial_ended(id, end, cx, next_id)) {
+            Some((keep, actions)) => {
+                self.take_peer_actions(actions);
+                keep
             }
-        }};
-    }
-    // Report a face's death to the peers it held, and take what their machines
-    // ask next.
-    #[cfg(feature = "routing-peer")]
-    macro_rules! peer_face_down {
-        ($id:expr) => {{
-            #[cfg(feature = "session-close-ingress")]
-            peer_sessions.remove(&$id);
-            #[cfg(feature = "session-close-ingress")]
-            proven_inbound.remove(&$id);
-            let cx = peer_cx!();
-            if let Some(actions) = peers.face_down($id, &cx, &mut next_id) {
-                take_peer_actions!(actions);
-            }
-        }};
-    }
-    // R311y205 (transport-multilink) — an aggregating loop drives three distinct
-    // future shapes (face / joined / rejected), so `driving` holds boxed futures;
-    // a non-multilink loop keeps the unboxed single-shape set, byte-identical.
-    #[cfg(not(feature = "transport-multilink"))]
-    let mut driving = FuturesUnordered::new();
-    #[cfg(feature = "transport-multilink")]
-    let mut driving: FuturesUnordered<DriveFuture<'_>> = FuturesUnordered::new();
-    // The drives of faces SPAWNED on the runtime (`spawned` is `Some`), and the face each
-    // task drives, by task id, for the one whose task ends without a result. Empty in a
-    // loop that holds its drives itself.
-    let mut spawned_drives: tokio::task::JoinSet<(Face, DriverOutcome)> =
-        tokio::task::JoinSet::new();
-    let mut spawned_faces: BTreeMap<tokio::task::Id, Face> = BTreeMap::new();
-
-    // Arm the forwarder's periodic tick (e.g. the linkstate peer's self-flood
-    // cadence — its protocol obligation, now driven by the loop so EVERY caller
-    // converges, not only a demo with a hand-rolled flood `select!`). A
-    // forwarder with no periodic obligation returns `None`, so no timer is
-    // created and the tick arm parks forever — the accept-only and hold-only
-    // loops keep their exact prior behaviour (no extra wakeups).
-    let mut tick_timer = forwarder.tick_period().map(tokio::time::interval);
-    // The forwarder's wake signal: a forwarder that holds messages for a full link is told when
-    // the link has room, and sends them then and not at the next tick.
-    let wake_signal = forwarder.wake_signal();
-
-    // Seed the outbound dial faces (peer-mesh mode). Each configured target is
-    // dialed concurrently and, once Established, held in the SAME face set as
-    // accepted peers — the dial-out face source, symmetric to the accept arm
-    // below. Boxed into the shared `opening` set because `dial_face` and
-    // `open_face` are distinct future types (see [`OpenFuture`]). Empty for a
-    // pure acceptor, so [`accept_loop`] seeds nothing here.
-    //
-    // Decision D5 — the configured targets are the loop's endpoints, each held by
-    // its connection machine, which dials it until it answers and again whenever
-    // its session is lost, until a reconcile forgets it. Every loop that dials a
-    // configured list holds it so, as upstream retries a configured endpoint for
-    // every mode (`zenoh/src/net/runtime/orchestrator.rs` @
-    // `async fn peer_connector_retry(`); the reconcile only changes the list.
-    #[cfg(feature = "routing-peer")]
-    {
-        let cx = peer_cx!();
-        let actions = peers.set_endpoints(dial_targets, false, &cx, &mut next_id);
-        summary.dialed += take_peer_actions!(actions);
-    }
-    #[cfg(not(feature = "routing-peer"))]
-    for target in dial_targets {
-        let id = FaceId::mint(&mut next_id);
-        summary.dialed += 1;
-        // R311y205 (transport-multilink) — a `max_links > 1` node dials with the
-        // 0x4-negotiating variant so its outbound links aggregate (the pref tags
-        // this link's traffic class); the `#[cfg(not)]` arm is the byte-identical
-        // single-link seed.
-        #[cfg(not(feature = "transport-multilink"))]
-        opening.push(boxed(|| {
-            dial_face(
-                id,
-                target,
-                Arc::clone(&dial_config),
-                params.clone(),
-                offer,
-                clock,
-                tick_interval_ms,
-            )
-        }));
-        #[cfg(feature = "transport-multilink")]
-        opening.push(if max_links > 1 {
-            // R311y212 — retain the dial endpoint so a partial-loss re-add can
-            // re-dial this link (aggregating dials only; a single-link seed is not
-            // re-added through this substrate). R311y219 — retain the priority
-            // band so a re-add restores it (a fresh-id band would flip on
-            // parity). R2233 — retained BEFORE the dial consumes the plan, and
-            // it is the plan (scheme included) that is retained now.
-            ml_dial_endpoints.insert(id, RetainedLink::first(id, target.clone()));
-            boxed(|| {
-                dial_face_multilink(
-                    id,
-                    target,
-                    Arc::clone(&dial_config),
-                    offer,
-                    multilink_priority_range(id),
-                    params.clone(),
-                    clock,
-                    tick_interval_ms,
-                )
-            }) as OpenFuture
-        } else {
-            boxed(|| {
-                dial_face(
-                    id,
-                    target,
-                    Arc::clone(&dial_config),
-                    params.clone(),
-                    offer,
-                    clock,
-                    tick_interval_ms,
-                )
-            }) as OpenFuture
-        });
-    }
-
-    loop {
-        // Busy while the sources are polled, resting while they are all pending: a poll that does
-        // not return is what the heartbeat reports, a quiet node is not. In a block, so that what
-        // the sources lend the `select!` is given back before the step is handled.
-        let step = {
-            let next = async {
-                tokio::select! {
-                    _ = &mut shutdown => Step::Shutdown,
-                    Some(opened) = opening.next() => Step::Opened(Box::new(opened)),
-                    Some(due) = peer_retries.next() => Step::PeerRetry(due),
-                    Some(driven) = driving.next() => Step::Driven(driven),
-                    Some(driven) = next_spawned(&mut spawned_drives, &mut spawned_faces) => {
-                        Step::Driven(driven)
-                    }
-                    // What the intake has to tell: a link's handshake ended, or a
-                    // listener failed to accept. The accepts themselves (over EVERY bound
-                    // listener, R2099) and the handshakes run in the intake.
-                    event = intake.next() => Step::Intake(event),
-                    _ = forwarder_tick(&mut tick_timer) => Step::Tick,
-                    _ = forwarder_woken(&wake_signal) => Step::Woken,
-                    intent = recv_dial_intent(&mut dial_intents) => Step::Dial(intent),
-                    item = recv_mcast_ingress(&mut mcast_ingress) => Step::McastIngress(Box::new(item)),
-                    members = recv_mcast_members(&mut mcast_members) => Step::McastMembers(members),
-                    subs = recv_mcast_group_subs(&mut mcast_group_subs) => Step::McastGroupSubs(subs),
-                    set = recv_reconcile(&mut reconcile) => Step::Reconcile(set),
-                }
-            };
-            tokio::pin!(next);
-            heartbeat.polled(0, next.as_mut()).await
-        };
-        heartbeat.turn(step.liveness_step());
-
-        match step {
-            Step::Shutdown => break,
-
-            Step::Opened(opened) => {
-                let (id, peer, result) = *opened;
-                // Decision D5 — whether this is a dial the loop's peers asked for:
-                // its end is reported to its peer's machine at whichever arm below
-                // ends it. A node's dial is held as a single-link face.
-                #[cfg(feature = "routing-peer")]
-                let peer_dial = peers.is_dialing(id);
-                #[cfg(all(feature = "routing-peer", feature = "transport-multilink"))]
-                let node_dial = peers.dials_a_node(id);
-                // Without the planner no dial is a node's; only the multilink JOIN
-                // branch reads the answer then.
-                #[cfg(all(feature = "transport-multilink", not(feature = "routing-peer")))]
-                let node_dial = false;
-                match result {
-                    Ok(opened) => {
-                        // A node a discovery plane found is linked: its wait starts from the
-                        // beginning the next time it is down.
-                        if let Some(dial) = dialing_nodes.remove(&id) {
-                            node_redial.forget(&dial.zid);
-                        }
-                        // R311y786 — this dial SUCCEEDED, so the outage it was
-                        // retrying is over: forget the address's grown wait, and the
-                        // NEXT outage starts at `period_init_ms` again. zenoh's
-                        // `period` is a local of `peer_connector_retry` and dies with
-                        // the successful connect (`orchestrator.rs:787-806`); this is
-                        // that lifetime, spelled out because wz's re-dial is a future
-                        // in a shared loop rather than a per-peer task with a stack.
-                        // Placed BEFORE the multilink JOIN branch below, which
-                        // `continue`s: a joined link is a successful dial too, and a
-                        // reset written after that branch would never run for one.
-                        // A peer's dial resets its own schedule when its machine
-                        // reaches Established (`reset_retry`, decision D5).
-                        #[cfg(feature = "transport-multilink")]
-                        if let Some(retained) = ml_dial_endpoints.get(&id) {
-                            redial.forget(&retained.redial_key());
-                        }
-                        // R311qi — capture the remote peer's zid (the routing
-                        // identity) from the established session before `opened`
-                        // is moved into the drive future.
-                        let face = Face {
-                            id,
-                            peer,
-                            peer_zid: opened.peer_zid(),
-                            peer_whatami: opened.peer_whatami(),
-                            // R2951 — not an accept, so one of this node's dials.
-                            dialed: !accepted_ids.remove(&id),
-                            // session-extqos — read the MERGED metadata off the
-                            // session actions, before `opened` moves into the
-                            // drive future. Post-handshake, so it is the outcome
-                            // of the containment, not the staged offer.
-                            #[cfg(feature = "session-extqos")]
-                            qos_link: opened.actions.qos_link_metadata(),
-                        };
-                        // R311y205 (transport-multilink) — aggregation JOIN. When
-                        // `max_links > 1` and this established link's peer zid
-                        // already has a logical session, aggregate this physical
-                        // link onto that session's shared `SessionCore` (the wz
-                        // analogue of zenoh's `init_existing_transport_unicast`
-                        // add-link path) instead of registering a second face — the
-                        // replacement for the `dedups_faces_by_zid` drop in the
-                        // aggregating case. The FIRST link to a peer records the
-                        // session and falls through to the normal register+drive
-                        // (it IS the session's primary face). A zid-less link cannot
-                        // aggregate, so it falls through and is held single-link. A
-                        // node dial (decision D5) is held single-link too: its
-                        // machine holds the node by one face.
-                        #[cfg(feature = "transport-multilink")]
-                        if max_links > 1 && !node_dial {
-                            if let Some(peer_zid) = face.peer_zid.clone() {
-                                // The session's STABLE shared-core handle (held in
-                                // `ml_sessions`, alive across link deaths), used as
-                                // join_link's primary arg — NOT a per-link entry that
-                                // teardown removes, so a join after the original
-                                // primary link died still resolves the session.
-                                let existing = ml_sessions.get(&peer_zid).map(
-                                    |(primary_id, _, core_handle)| {
-                                        (*primary_id, core_handle.clone())
-                                    },
-                                );
-                                if let Some((primary_id, core_handle)) = existing {
-                                    // A second+ link to a held peer: try to aggregate.
-                                    match join_link(&core_handle, &opened.actions, max_links) {
-                                        JoinOutcome::Joined(joined) => {
-                                            let live_links = core_handle.live_link_count();
-                                            log::debug!(
-                                                "multilink: aggregated link {} onto peer {:02x?} \
-                                                 (live links now {})",
-                                                id.0,
-                                                peer_zid,
-                                                live_links
-                                            );
-                                            // Surface the aggregation to the loop's
-                                            // event consumer — a joined link never
-                                            // reaches the FaceUp emit below (the arm
-                                            // `continue`s), so this is the ONLY
-                                            // on_event a caller sees for the join.
-                                            on_event(&AcceptEvent::LinkAggregated {
-                                                peer_zid: peer_zid.clone(),
-                                                live_links,
-                                            });
-                                            // Decision D5 — an endpoint whose dial
-                                            // joined a session is held by that
-                                            // session's face, and is lost with it;
-                                            // the link itself is the re-add's.
-                                            #[cfg(feature = "routing-peer")]
-                                            if peer_dial {
-                                                peer_dial_ended!(
-                                                    id,
-                                                    crate::loop_peers::DialEnd::AlreadyHeld {
-                                                        held: primary_id,
-                                                        remote: wz_session_core::credential_identity::zid_from_wire(&peer_zid),
-                                                    }
-                                                );
-                                            }
-                                            ml_faces.insert(id, (peer_zid, joined.clone()));
-                                            // R311y219b — tell the forwarder this
-                                            // joined link's inbound (which arrives
-                                            // tagged with its OWN id, never
-                                            // `register`ed) maps to the PRIMARY
-                                            // registered face, so a routing forwarder
-                                            // delivers its data/control instead of
-                                            // dropping it at the faces.get gate. A
-                                            // no-op for observation-only forwarders.
-                                            forwarder.register_joined(id, primary_id, &joined);
-                                            driving.push(boxed(|| {
-                                                drive_joined_face(face, opened, joined, forwarder)
-                                            })
-                                                as DriveFuture<'_>);
-                                        }
-                                        JoinOutcome::OverLimit => {
-                                            log::debug!(
-                                                "multilink: link {} over max_links ({}) for peer \
-                                                 {:02x?}; rejected MAX_LINKS",
-                                                id.0,
-                                                max_links,
-                                                peer_zid
-                                            );
-                                            // Decision D5 — the session is full, but
-                                            // it is the endpoint's: held by its face.
-                                            #[cfg(feature = "routing-peer")]
-                                            if peer_dial {
-                                                peer_dial_ended!(
-                                                    id,
-                                                    crate::loop_peers::DialEnd::AlreadyHeld {
-                                                        held: primary_id,
-                                                        remote: wz_session_core::credential_identity::zid_from_wire(&peer_zid),
-                                                    }
-                                                );
-                                            }
-                                            // R311y212 — a REJECTED dialed link is not
-                                            // re-added; drop its retained endpoint so it
-                                            // does not leak past the ml_rejected drain
-                                            // (which `continue`s in Step::Driven before
-                                            // the death-handler leak-guard is reached).
-                                            ml_dial_endpoints.remove(&id);
-                                            ml_rejected.insert(id);
-                                            driving
-                                                .push(boxed(|| drain_rejected_face(face, opened))
-                                                    as DriveFuture<'_>);
-                                        }
-                                        JoinOutcome::InvalidPubkey => {
-                                            log::debug!(
-                                                "multilink: link {} pubkey mismatch for peer \
-                                                 {:02x?}; rejected INVALID",
-                                                id.0,
-                                                peer_zid
-                                            );
-                                            // Decision D5 — a link the session refuses
-                                            // is a dial that failed: the endpoint
-                                            // backs off and tries again.
-                                            #[cfg(feature = "routing-peer")]
-                                            if peer_dial {
-                                                peer_dial_ended!(
-                                                    id,
-                                                    crate::loop_peers::DialEnd::Failed
-                                                );
-                                            }
-                                            // R311y212 — see the MAX_LINKS arm: drop the
-                                            // rejected link's retained endpoint so it does
-                                            // not leak past the ml_rejected drain.
-                                            ml_dial_endpoints.remove(&id);
-                                            ml_rejected.insert(id);
-                                            driving
-                                                .push(boxed(|| drain_rejected_face(face, opened))
-                                                    as DriveFuture<'_>);
-                                        }
-                                    }
-                                    continue;
-                                }
-                                // The FIRST link to this peer becomes the session's
-                                // primary; record it (with a stable shared-core
-                                // handle for future joins), then fall through to
-                                // register it as the representative face.
-                                ml_sessions.insert(
-                                    peer_zid.clone(),
-                                    (id, face.clone(), opened.actions.clone()),
-                                );
-                                ml_faces.insert(id, (peer_zid, opened.actions.clone()));
-                            }
-                        }
-                        // Face-establishment zid-dedup, but ONLY when the forwarder
-                        // keys routing state on the zid ([`FaceForwarder::dedups_faces_by_zid`]
-                        // — the linkstate peer, whose graph self-edge is zid-keyed).
-                        // For such a forwarder a second face to an already-held zid
-                        // is a redundant link (a mutual `--connect`, a dial+accept
-                        // to the same peer, or an autoconnect dial that raced one);
-                        // dropping it keeps one face per peer, so the graph never
-                        // gets two links for one zid and one face's teardown can't
-                        // `remove_link`-prune the still-live peer. The pure acceptor
-                        // / star router (FaceId-keyed) returns `false` and holds N
-                        // faces regardless of zid (so two clients sharing a fixture
-                        // zid are both held — Layer E3/E5). A zid-less face cannot be
-                        // deduped, so it is held. zenoh's transport manager
-                        // (`init_transport_unicast`) keeps one transport per zid for
-                        // EVERY node; wz scopes it to the forwarders that need it.
-                        //
-                        // A second link to a held node is a COLLISION and is resolved, not
-                        // merely refused ([`crate::link_collision`]): of two links that went
-                        // opposite ways the forwarder's rule keeps the one the lower zid
-                        // dialled, which both ends read alike, so a forwarder that has the rule
-                        // may keep the NEW link. The held face is then asked to close and the new
-                        // link waits, parked, for the face to leave, because the graph is keyed
-                        // on the zid (see above) and a face still leaving would remove the link
-                        // of the one that replaced it.
-                        if forwarder.dedups_faces_by_zid() {
-                            if let Some(z) = &face.peer_zid {
-                                // A face the forwarder holds and this loop cannot see keeps the
-                                // first up, as it always has.
-                                let resolution = if forwarder.holds_peer(z) {
-                                    Resolution::Refuse
-                                } else if holds_zid(&faces, z) {
-                                    // One link of an aggregated session is not a face of its
-                                    // own and cannot be closed alone.
-                                    #[cfg(feature = "transport-multilink")]
-                                    let can_replace = |held: FaceId| !ml_faces.contains_key(&held);
-                                    #[cfg(not(feature = "transport-multilink"))]
-                                    let can_replace = |_: FaceId| true;
-                                    collisions.resolve(
-                                        &faces,
-                                        z,
-                                        face.dialed,
-                                        |held_dialled, new_dialled| {
-                                            forwarder.judge_second_link(
-                                                held_dialled,
-                                                new_dialled,
-                                                z,
-                                            )
-                                        },
-                                        can_replace,
-                                    )
-                                } else {
-                                    Resolution::Admit
-                                };
-                                let refused = match resolution {
-                                    Resolution::Admit => false,
-                                    Resolution::Refuse => true,
-                                    Resolution::Replace { held } => {
-                                        if forwarder.close_face(held) {
-                                            log::debug!(
-                                                "face {} to the node of held face {} is the link \
-                                                 to keep: face {} is closing and face {} waits",
-                                                id.0,
-                                                held.0,
-                                                held.0,
-                                                id.0
-                                            );
-                                            collisions.park(
-                                                held,
-                                                ParkedOpen {
-                                                    id,
-                                                    peer: face.peer.clone(),
-                                                    opened,
-                                                    accepted: !face.dialed,
-                                                },
-                                            );
-                                            continue;
-                                        }
-                                        // The forwarder holds no such face to ask: the held one
-                                        // stays, as it did before there was a rule.
-                                        true
-                                    }
-                                };
-                                if refused {
-                                    log::debug!(
-                                        "dropping redundant face {} to an already-held peer",
-                                        id.0
-                                    );
-                                    // Decision D5 — a peer's dial that met the remote
-                                    // already held: the peer is held by that face (a
-                                    // configured endpoint a gossip dial reached first
-                                    // is lost, and dialled again, with that face).
-                                    #[cfg(feature = "routing-peer")]
-                                    if peer_dial {
-                                        let end = match faces.iter().find(|(_, held)| {
-                                            held.as_deref().is_some_and(|held| {
-                                                crate::zid_hex::same_zid(held, z)
-                                            })
-                                        }) {
-                                            Some((held, _)) => {
-                                                crate::loop_peers::DialEnd::AlreadyHeld {
-                                                    held: *held,
-                                                    remote: wz_session_core::credential_identity::zid_from_wire(z),
-                                                }
-                                            }
-                                            // Held by the forwarder alone, by no face
-                                            // this loop can watch: not a hold the
-                                            // machine can keep, so the dial failed.
-                                            None => crate::loop_peers::DialEnd::Failed,
-                                        };
-                                        peer_dial_ended!(id, end);
-                                    }
-                                    continue;
-                                }
-                            }
-                        }
-                        // R2758 — THE SESSION BOUND, at upstream's moment.
-                        //
-                        // `io/zenoh-transport/src/unicast/manager.rs` @
-                        // `max_sessions` denies under the session-table guard,
-                        // immediately after the connection-to-self check:
-                        // `if guard.len() >= self.config.unicast.max_sessions`
-                        // returns `close::reason::INVALID`. The dedup-by-zid
-                        // rule above is this loop's analogue of that self/dup
-                        // check, so the bound belongs directly under it — and
-                        // BEFORE `faces.insert`, because a bound applied after
-                        // admission is not a bound.
-                        //
-                        // A rejected face is dropped exactly the way a
-                        // redundant one is: it never enters `faces`.
-                        if faces.len() >= max_sessions {
-                            log::debug!(
-                                "refusing face {} — max_sessions {} reached",
-                                id.0,
-                                max_sessions
-                            );
-                            // Decision D5 — no room for the session: the peer's
-                            // machine names the refusal `NoSlot`.
-                            #[cfg(feature = "routing-peer")]
-                            if peer_dial {
-                                peer_dial_ended!(id, crate::loop_peers::DialEnd::NoSlot);
-                            }
-                            summary.refused_over_max_sessions += 1;
-                            if let Some(ceiling) = ceiling.as_ref() {
-                                ceiling
-                                    .refused_over_max_sessions
-                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            }
-                            on_event(&AcceptEvent::FaceRefused {
-                                id,
-                                peer_zid: face.peer_zid.clone(),
-                                held: faces.len(),
-                            });
-                            continue;
-                        }
-                        // The host's moving ceiling, read at the same moment and for the same
-                        // reason: the capacity the node has measured is a bound on admission,
-                        // and a bound applied after the face is held is not one.
-                        if let Some((host_ceiling, limit)) = ceiling.as_ref().map(|c| (c, c.get()))
-                        {
-                            if faces.len() >= limit {
-                                log::debug!(
-                                    "refusing face {} — measured capacity {} reached",
-                                    id.0,
-                                    limit
-                                );
-                                #[cfg(feature = "routing-peer")]
-                                if peer_dial {
-                                    peer_dial_ended!(id, crate::loop_peers::DialEnd::NoSlot);
-                                }
-                                summary.refused_over_capacity += 1;
-                                host_ceiling
-                                    .refused_over_capacity
-                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                on_event(&AcceptEvent::FaceRefused {
-                                    id,
-                                    peer_zid: face.peer_zid.clone(),
-                                    held: faces.len(),
-                                });
-                                continue;
-                            }
-                        }
-                        // Item 751 -- a remote the forwarder's region rules cannot
-                        // place is refused here, before it is held, as the pin
-                        // refuses it when the transport opens.
-                        if let Some(why) = forwarder.refuses_face(&opened.actions) {
-                            log::warn!("refusing face {} -- {why}", id.0);
-                            #[cfg(feature = "routing-peer")]
-                            if peer_dial {
-                                peer_dial_ended!(id, crate::loop_peers::DialEnd::Failed);
-                            }
-                            on_event(&AcceptEvent::FaceRefused {
-                                id,
-                                peer_zid: face.peer_zid.clone(),
-                                held: faces.len(),
-                            });
-                            continue;
-                        }
-                        // Register the face's send seam BEFORE moving `opened`
-                        // into the drive future, so a forwarder can route TO
-                        // this face from the moment it is held. The registration is the
-                        // forwarder's admission ([`FaceForwarder::admit`]) and it comes before
-                        // anything is told of the face: a link it refuses is dropped as a
-                        // redundant one is, and the dial machine below is told the dial failed,
-                        // not that the peer is held by a face that does not exist.
-                        if !forwarder.admit(id, &opened.actions) {
-                            log::debug!(
-                                "dropping face {} to a peer the forwarder holds by another face",
-                                id.0
-                            );
-                            #[cfg(feature = "routing-peer")]
-                            if peer_dial {
-                                peer_dial_ended!(id, crate::loop_peers::DialEnd::Failed);
-                            }
-                            on_event(&AcceptEvent::FaceRefused {
-                                id,
-                                peer_zid: face.peer_zid.clone(),
-                                held: faces.len(),
-                            });
-                            continue;
-                        }
-                        // Decision D5 — a peer's dial that came up: its machine
-                        // holds the peer by this face, unless the peer stopped
-                        // wanting it while it ran, when the session is dropped here
-                        // unheld.
-                        #[cfg(feature = "routing-peer")]
-                        if peer_dial {
-                            let end = crate::loop_peers::DialEnd::Established {
-                                remote: face
-                                    .peer_zid
-                                    .as_deref()
-                                    .and_then(wz_session_core::credential_identity::zid_from_wire),
-                            };
-                            if !peer_dial_ended!(id, end) {
-                                forwarder.deregister(id);
-                                continue;
-                            }
-                            #[cfg(feature = "session-close-ingress")]
-                            peer_sessions.insert(id, opened.actions.clone());
-                        }
-                        // Decision D10 — a session the node accepted, from a peer whose key
-                        // proved its zid: a node waiting for that peer under a passive intent
-                        // holds it. The admission is the accept policy's, which this neither
-                        // widens nor narrows; only a peer the node already waits for is
-                        // affected, and an unverified claim of its zid is not the peer.
-                        #[cfg(all(feature = "routing-peer", feature = "session-close-ingress"))]
-                        if !peer_dial && !face.dialed && opened.actions.peer_identity_verified() {
-                            if let Some(zid) = face
-                                .peer_zid
-                                .as_deref()
-                                .and_then(wz_session_core::credential_identity::zid_from_wire)
-                            {
-                                // Kept for as long as the face lives, so a passive intent that
-                                // comes after the session holds it too.
-                                proven_inbound.insert(id, (zid, opened.actions.clone()));
-                                let cx = peer_cx!();
-                                let actions = peers.inbound_up(zid, id, &cx, &mut next_id);
-                                if peers.state(&crate::loop_peers::PeerKey::Node(zid))
-                                    == Some(wz_session_core::peer_connection::PeerConnectionState::PassiveUp)
-                                {
-                                    peer_sessions.insert(id, opened.actions.clone());
-                                }
-                                take_peer_actions!(actions);
-                            }
-                        }
-                        faces.insert(id, face.peer_zid.clone());
-                        collisions.admitted(id, face.dialed);
-                        summary.established += 1;
-                        summary.peak_concurrent = summary.peak_concurrent.max(faces.len());
-                        if let Some(stats) = &stats {
-                            stats.transport_opened(id.0, &opened.actions);
-                        }
-                        // `Face` is no longer `Copy` (it owns the zid), so clone
-                        // it for the borrowed FaceUp event; the original moves
-                        // into the drive future.
-                        on_event(&AcceptEvent::FaceUp(face.clone()));
-                        // R311y205 (transport-multilink) — box the drive future in
-                        // an aggregating build so it shares `driving` with the
-                        // joined / rejected drives; unboxed + byte-identical
-                        // otherwise.
-                        //
-                        // A node whose forwarder is `Send + Sync` has the drive spawned
-                        // on the runtime instead, wrapped as its executor wants it
-                        // polled: this face is then driven by a task of its own.
-                        if let Some(spawn) = &spawned {
-                            let drive = spawn.executor.wrap(boxed(|| {
-                                drive_face_shared(
-                                    face.clone(),
-                                    opened,
-                                    Arc::clone(&spawn.forwarder),
-                                )
-                            }));
-                            let drive = crate::runtime_pool::in_caller_span(drive);
-                            let task = match spawn.on {
-                                SpawnOn::Workers => spawned_drives.spawn(drive),
-                                SpawnOn::LocalSet => spawned_drives.spawn_local(drive),
-                            };
-                            spawned_faces.insert(task.id(), face);
-                        } else {
-                            #[cfg(not(feature = "transport-multilink"))]
-                            push_made(&mut driving, || drive_face(face, opened, forwarder));
-                            #[cfg(feature = "transport-multilink")]
-                            driving
-                                .push(boxed(|| drive_face(face, opened, forwarder))
-                                    as DriveFuture<'_>);
-                        }
-                    }
-                    Err(cause) => {
-                        // R2951 — an accept that never opened leaves no mark behind.
-                        let was_accept = accepted_ids.remove(&id);
-                        // A link that did not open is worth a line, with the way it did not: a
-                        // handshake window that ran out, a peer that answered as another node, a
-                        // refusal. Nothing else says so, since the event below goes to the host
-                        // and not to a log. A dial is this node's own act and warns; an accept is
-                        // a stranger's and informs.
-                        if was_accept {
-                            log::info!("accept: face={} from {peer} did not open: {cause:?}", id.0);
-                        } else {
-                            log::warn!(
-                                "accept: dial face={} to {peer} did not open: {cause:?}",
-                                id.0
-                            );
-                        }
-                        // A node a discovery plane found is dialled again, at its next locator
-                        // and after a wait that grows (upstream's `peer_connector_retry`), until
-                        // a face to it is held, the node's locators are gone from the directory
-                        // (its link state was withdrawn), or none of them can be dialled.
-                        if let Some(dial) = dialing_nodes.remove(&id) {
-                            let attempt = dial.attempt + 1;
-                            let target = if holds_zid(&faces, &dial.zid) {
-                                None
-                            } else {
-                                node_dial_target(
-                                    &directory,
-                                    &dial.zid,
-                                    clock.now_monotonic_ms(),
-                                    attempt,
-                                )
-                            };
-                            match target {
-                                Some(target) => {
-                                    let again = FaceId::mint(&mut next_id);
-                                    let backoff_ms = node_redial.next_ms(&dial.zid, target.retry());
-                                    log::info!(
-                                        "autoconnect: dialling node {:02x?} again in {backoff_ms}ms \
-                                         at {:?} (attempt {attempt}, face={})",
-                                        dial.zid,
-                                        target.locator,
-                                        again.0
-                                    );
-                                    dialing_nodes.insert(
-                                        again,
-                                        NodeDial {
-                                            zid: dial.zid,
-                                            attempt,
-                                        },
-                                    );
-                                    opening.push(boxed(|| {
-                                        dial_face_after(
-                                            again,
-                                            target,
-                                            Arc::clone(&dial_config),
-                                            backoff_ms,
-                                            params.clone(),
-                                            offer,
-                                            clock,
-                                            tick_interval_ms,
-                                        )
-                                    })
-                                        as OpenFuture);
-                                }
-                                None => {
-                                    node_redial.forget(&dial.zid);
-                                    log::debug!(
-                                        "autoconnect: not dialling node {:02x?} again (it is held, \
-                                         or no dialable locator is left)",
-                                        dial.zid
-                                    );
-                                }
-                            }
-                        }
-                        // Decision D5 — a peer's dial that did not open: another
-                        // node answered (D4), or the peer was not reached. Its
-                        // machine backs off and dials again, so the link the dial
-                        // retained for the multilink re-add is not the re-add's.
-                        #[cfg(feature = "routing-peer")]
-                        if peer_dial {
-                            let end = if matches!(cause, OpenError::InitAckPeerMismatch) {
-                                crate::loop_peers::DialEnd::Mismatch
-                            } else {
-                                crate::loop_peers::DialEnd::Failed
-                            };
-                            #[cfg(feature = "transport-multilink")]
-                            ml_dial_endpoints.remove(&id);
-                            peer_dial_ended!(id, end);
-                        }
-                        // R311y212 — a failed retained MULTILINK dial (a re-add, or a
-                        // discovered peer's aggregating dial that never connected) is
-                        // re-scheduled: retry-until-success. A peer's dial left
-                        // `ml_dial_endpoints` above, so no id is dialled again twice.
-                        #[cfg(feature = "transport-multilink")]
-                        if max_links > 1 {
-                            if let Some(retained) = ml_dial_endpoints.remove(&id) {
-                                schedule_multilink_redial(
-                                    retained,
-                                    &dial_config,
-                                    offer,
-                                    &mut ml_dial_endpoints,
-                                    &mut redial,
-                                    &mut opening,
-                                    &mut next_id,
-                                    false,
-                                    &params,
-                                    clock,
-                                    tick_interval_ms,
-                                );
-                            }
-                        }
-                        on_event(&AcceptEvent::FaceFailed { id, peer, cause });
-                    }
-                }
-            }
-
-            Step::Driven((face, outcome)) => {
-                // R311y205 (transport-multilink) — aggregation teardown. A rejected
-                // (MAX_LINKS/INVALID) link finished draining its close: drop it
-                // silently (it never entered `faces` nor the forwarder). Otherwise,
-                // if this is a tracked aggregated link, remove it from the shared
-                // set; the whole session tears down (deregister + FaceDown on its
-                // primary face) only when the LAST link departs — while ≥1 link
-                // remains the session survives and the forwarder keeps routing over
-                // it (failover). A link not tracked here (a zid-less single-link
-                // face) falls through to the normal single-link teardown below.
-                #[cfg(feature = "transport-multilink")]
-                if max_links > 1 {
-                    if ml_rejected.remove(&face.id) {
-                        continue;
-                    }
-                    if let Some((peer_zid, handle)) = ml_faces.remove(&face.id) {
-                        // R311y219b — this link died: drop its joined->primary mapping
-                        // so a later FaceId reuse cannot mis-resolve its successor's
-                        // inbound onto a stale primary. A no-op for observation-only
-                        // forwarders. This fires for BOTH a joined secondary (removes
-                        // its real entry) AND the primary (which reaches here too, but
-                        // is never a `joined_faces` KEY — it is `register`ed, not
-                        // joined — so its removal is a harmless no-op).
-                        forwarder.deregister_joined(face.id);
-                        // R311y212 — drop this link's retained dial endpoint (Some
-                        // iff THIS node dialed it); a partial-loss re-add re-inserts
-                        // a fresh id, a total-collapse leaves it removed (no re-add).
-                        let dead = ml_dial_endpoints.remove(&face.id);
-                        // Remove THIS link from the shared aggregation set. For the
-                        // primary its FSM `release_link` already did so (idempotent
-                        // here); for a transplanted secondary that `release_link`
-                        // touched only its throwaway core, so this is the effective
-                        // removal from the shared core.
-                        let remaining = handle.del_link(&handle.link);
-                        if remaining == 0 {
-                            if let Some((primary_id, primary_face, _core)) =
-                                ml_sessions.remove(&peer_zid)
-                            {
-                                faces.remove(&primary_id);
-                                // An aggregated session is never replaced (`can_replace`), so
-                                // nothing waits behind it; a link that did would be admitted as
-                                // any other is, and its direction is forgotten all the same.
-                                if let Some(parked) = collisions.departed(primary_id) {
-                                    admit_parked(parked, &mut opening, &mut accepted_ids);
-                                }
-                                // Decision D5 — the session is gone: the peers its
-                                // primary face held back off and dial again.
-                                #[cfg(feature = "routing-peer")]
-                                peer_face_down!(primary_id);
-                                forwarder.deregister(primary_id);
-                                if let Some(stats) = &stats {
-                                    stats.transport_closed(primary_id.0);
-                                }
-                                on_event(&AcceptEvent::FaceDown(primary_face, outcome));
-                            }
-                        } else if handle.transport_deleted() {
-                            // The peer deleted the transport: the links that remain
-                            // are leaving with this one, so it is not re-added.
-                            log::debug!(
-                                "multilink: link {} left a transport peer {:02x?} deleted; \
-                                 {} link(s) still closing",
-                                face.id.0,
-                                peer_zid,
-                                remaining
-                            );
-                        } else if let Some(retained) = dead {
-                            // R311y212 — PARTIAL loss of a link THIS node DIALED:
-                            // re-dial + re-JOIN it onto the surviving shared core so
-                            // the aggregate returns to strength. The survivor is
-                            // uninterrupted and the shared SN stays continuous (no
-                            // core reset; `del_link` above freed a max_links slot, and
-                            // the re-dial re-presents the OnceLock pubkey so join_link
-                            // config-equality passes). The 1s backoff means the
-                            // del_link always lands first.
-                            log::debug!(
-                                "multilink: dialed link {} left; peer {:02x?} survives on {} \
-                                 link(s), re-adding",
-                                face.id.0,
-                                peer_zid,
-                                remaining
-                            );
-                            schedule_multilink_redial(
-                                retained,
-                                &dial_config,
-                                offer,
-                                &mut ml_dial_endpoints,
-                                &mut redial,
-                                &mut opening,
-                                &mut next_id,
-                                true,
-                                &params,
-                                clock,
-                                tick_interval_ms,
-                            );
-                        } else {
-                            // A dropped link this node ACCEPTED (no retained
-                            // endpoint) — the peer owns its re-dial; just note the
-                            // survival (failover holds on the survivor meanwhile).
-                            log::debug!(
-                                "multilink: accepted link {} left; peer {:02x?} session survives \
-                                 on {} link(s)",
-                                face.id.0,
-                                peer_zid,
-                                remaining
-                            );
-                        }
-                        continue;
-                    }
-                }
-                // R311y212 — leak-guard: a dialed multilink link that fell through
-                // the JOIN branch (zid-less, or died before Establishing) is torn
-                // down single-link here and never hit the `dead` removal above; drop
-                // its retained endpoint so the map does not leak. A link that DID go
-                // through the multilink branch `continue`d already (its entry removed
-                // via `dead`), so this is a no-op for it.
-                #[cfg(feature = "transport-multilink")]
-                ml_dial_endpoints.remove(&face.id);
-                faces.remove(&face.id);
-                let departed = face.id;
-                // Decision D5 — the face a peer was held by died: each peer's
-                // machine backs off and asks for the retry. This is the peer
-                // auto-reconnect, upstream's re-dial of a configured endpoint
-                // its closed session still lists
-                // (`zenoh/src/net/runtime/orchestrator.rs`
-                // @ `if peers.contains(&endpoint) && zwrite!(session.endpoints).remove(&endpoint) {`):
-                // an endpoint a reconcile no longer lists was forgotten, and a
-                // face no peer holds (an accepted one, a discovered peer's)
-                // reports nothing.
-                #[cfg(feature = "routing-peer")]
-                peer_face_down!(face.id);
-                forwarder.deregister(face.id);
-                if let Some(stats) = &stats {
-                    stats.transport_closed(face.id.0);
-                }
-                on_event(&AcceptEvent::FaceDown(face, outcome));
-                // The face has left the loop, the forwarder and the observers, which is what a
-                // link parked behind it waited for: the node is held by no face now, and the
-                // link that replaces it is admitted as any other.
-                if let Some(parked) = collisions.departed(departed) {
-                    admit_parked(parked, &mut opening, &mut accepted_ids);
-                }
-            }
-
-            Step::Dial(intent) => {
-                // A DISCOVERED, policy-admitted peer — the producing plane applied
-                // the autoconnect role + zid gate at emit (the forwarder for
-                // gossip, A5b; the scouting task for a Hello, R2141). Dial it as
-                // an outbound face unless a face to it is already held (dedup) or
-                // no locator is TCP-dialable. A dialed face flows through the SAME
-                // `opening` -> `Step::Opened` path as a static dial, so it is
-                // registered + held + zid-tracked identically.
-                let learned = learn_intent(&mut directory, &intent, clock.now_monotonic_ms());
-                // A node that was opened before any hint could be dialled for it waits
-                // in `NoLocator` (decision D15): this discovery is the hint it waited for. The
-                // machines are the loop's peers, which exist with `routing-peer`, as the macros
-                // above do; `session-close-ingress` alone does not give the loop any.
-                #[cfg(all(feature = "routing-peer", feature = "session-close-ingress"))]
-                if let Some(zid) = learned {
-                    let cx = peer_cx!();
-                    let actions = peers.locator_learned(zid, &cx, &mut next_id);
-                    take_peer_actions!(actions);
-                }
-                #[cfg(not(all(feature = "routing-peer", feature = "session-close-ingress")))]
-                let _ = learned;
-                match dial_decision(&faces, &intent, &directory, clock.now_monotonic_ms()) {
-                    DialDecision::Dial(target) => {
-                        let id = FaceId::mint(&mut next_id);
-                        summary.dialed += 1;
-                        // A dial that does not open is made again at the node's next locator
-                        // (the Err arm). The aggregating dial of a multilink node has its own
-                        // retention and its own re-dial below, so only the single-link dial is
-                        // kept here.
-                        #[cfg(feature = "transport-multilink")]
-                        let single_link = max_links <= 1;
-                        #[cfg(not(feature = "transport-multilink"))]
-                        let single_link = true;
-                        if single_link {
-                            if let Some(zid) =
-                                wz_session_core::credential_identity::zid_from_wire(&intent.zid)
-                            {
-                                dialing_nodes.insert(id, NodeDial { zid, attempt: 0 });
-                            }
-                        }
-                        // R311y423 — the discovery-only counters. This arm is
-                        // reached ONLY via a DialIntent, which a plane emits only
-                        // after its autoconnect policy admits a node it
-                        // discovered, so incrementing here (and nowhere else)
-                        // makes the pair true discriminators.
-                        //
-                        // R2141 — split by ORIGIN. There are two producers on this
-                        // channel now, and a single counter would credit whichever
-                        // atom the reader happened to be asking about; see
-                        // `DialIntentOrigin`.
-                        log::debug!(
-                            "autoconnect: dialing node {:02x?} at {target:?} as face={} ({:?})",
-                            intent.zid,
-                            id.0,
-                            intent.origin
-                        );
-                        match intent.origin {
-                            DialIntentOrigin::Gossip => summary.gossip_dialed += 1,
-                            DialIntentOrigin::MulticastScout => summary.scout_dialed += 1,
-                        }
-                        // R311y205 (transport-multilink) — a `max_links > 1` node
-                        // dials the discovered peer with the 0x4-negotiating variant
-                        // (aggregation), else the byte-identical single-link dial.
-                        //
-                        // An aggregating node opens a link for each pair of priority range
-                        // and reliability among the locators it knows for the node, as
-                        // upstream's connect does (see `discovered_links`); each is retained
-                        // with its band for the partial-loss re-add (R311y212, R311y219).
-                        #[cfg(feature = "transport-multilink")]
-                        if max_links > 1 {
-                            let candidates = target
-                                .expected_zid
-                                .map(|zid| {
-                                    candidate_locators(&directory, &zid, clock.now_monotonic_ms())
-                                })
-                                .unwrap_or_default();
-                            let links = discovered_links::discovered_peer_links(
-                                target,
-                                &candidates,
-                                max_links,
-                            );
-                            for (n, target) in links.into_iter().enumerate() {
-                                let id = if n == 0 {
-                                    id
-                                } else {
-                                    summary.dialed += 1;
-                                    FaceId::mint(&mut next_id)
-                                };
-                                let retained = RetainedLink::first(id, target.clone());
-                                let band = retained.band;
-                                ml_dial_endpoints.insert(id, retained);
-                                opening.push(boxed(|| {
-                                    dial_face_multilink(
-                                        id,
-                                        target,
-                                        Arc::clone(&dial_config),
-                                        offer,
-                                        band,
-                                        params.clone(),
-                                        clock,
-                                        tick_interval_ms,
-                                    )
-                                }) as OpenFuture);
-                            }
-                        } else {
-                            opening.push(boxed(|| {
-                                dial_face(
-                                    id,
-                                    target,
-                                    Arc::clone(&dial_config),
-                                    params.clone(),
-                                    offer,
-                                    clock,
-                                    tick_interval_ms,
-                                )
-                            }) as OpenFuture);
-                        }
-                        #[cfg(not(feature = "transport-multilink"))]
-                        opening.push(boxed(|| {
-                            dial_face(
-                                id,
-                                target,
-                                Arc::clone(&dial_config),
-                                params.clone(),
-                                offer,
-                                clock,
-                                tick_interval_ms,
-                            )
-                        }));
-                    }
-                    DialDecision::AlreadyHeld => {
-                        // An aggregating node too: its links to a node are the ones the
-                        // dial above planned when the node was found, and finding the node
-                        // again adds none, as upstream connects only to a peer it holds no
-                        // session to (`discovered_links`).
-                        log::debug!(
-                            "autoconnect: already hold a face to peer {:02x?}; \
-                             skipping redundant dial",
-                            intent.zid
-                        );
-                    }
-                    DialDecision::NoLocator => log::debug!(
-                        "autoconnect: discovered peer advertised no numeric IP \
-                         locator ({:?}); skipping dial",
-                        intent.locators
-                    ),
-                }
-            }
-
-            // A Push arrived on the multicast INGRESS group (the deferred
-            // `mcast_faces` plane, I1) — route it into the forwarder as a
-            // mcast-sourced Push (delivered to unicast subscribers, echo-guarded
-            // off the groups). Folded here, on the loop's single task, so the
-            // `!Send` forwarder is touched only from its own task. A no-ingress
-            // loop never reaches here (the arm parks on a `None` channel). The
-            // route call is `codec-push`-gated (the trait method takes `PushOwned`);
-            // without `codec-push` the channel is always `None` so this is dead.
-            Step::McastIngress(_item) => {
-                // R2734 — the fold now carries a Query as well as a Push, so the
-                // kind is decided HERE rather than by the fold dropping everything
-                // that is not a Push. Each arm is a different routing entry point
-                // on the forwarder; both enter through the same source-only
-                // ingress face.
-                #[cfg(feature = "codec-push")]
-                match &_item.body {
-                    McastIngressBody::Push(push) => {
-                        forwarder.route_mcast_ingress(
-                            _item.priority,
-                            _item.reliable,
-                            push,
-                            _item.from.as_ref(),
-                        );
-                    }
-                    McastIngressBody::Request(request) => {
-                        forwarder.route_mcast_ingress_request(
-                            _item.reliable,
-                            request,
-                            _item.from.as_ref(),
-                        );
-                    }
-                }
-            }
-
-            // The on-group ROUTER set changed — refresh the forwarder's DR
-            // election candidates (I3b). No-op default for non-router forwarders;
-            // the arm parks when there is no membership channel.
-            Step::McastMembers(members) => {
-                forwarder.set_mcast_group_members(&members);
-            }
-
-            // The on-group SUBSCRIBER aggregate changed — advertise/withdraw the
-            // group's interest into the unicast mesh (sub plane, S2). No-op default
-            // for non-router forwarders; the arm parks when there is no sub channel.
-            Step::McastGroupSubs(subs) => {
-                forwarder.set_mcast_group_subs(&subs);
-            }
-
-            // A runtime connect-list reconcile arrived (`router-connect-reconcile`):
-            // the loop's endpoints change, and each newly-listed one is dialled by
-            // its connection machine (decision D5). ADD-ONLY, as upstream's
-            // close-time re-read of the connect list is: a removed endpoint is
-            // forgotten, NOT torn down, because closing a live federation face on
-            // a list edit would blackhole the mesh (see [`ReconcileSender`]).
-            // An endpoint is named by its ADDRESS (a config endpoint carries
-            // no zid until the handshake, so the gossip `holds_zid` zid dedup
-            // cannot apply), and one already held or being reached is unchanged.
-            // The arm parks when `reconcile` is `None`, so a non-router /
-            // feature-off loop never reaches here; the body is `#[cfg]`-gated so a
-            // feature-off build compiles none of the reconcile dial logic.
-            Step::Reconcile(_desired_set) => {
-                #[cfg(feature = "router-connect-reconcile")]
-                {
-                    // R2671 — the fold, the refusal and the verb are read in
-                    // `fold_connect_reconcile`, and the set it lands in is the
-                    // planner's, so a unit test reaches both; this arm keeps only
-                    // the loop's own wording.
-                    let plan = fold_connect_reconcile(_desired_set, |rejected| {
-                        log::warn!(
-                            "reconcile: refusing connect endpoint {rejected:?} — a {} \
-                             endpoint has no address to identify it by before the \
-                             handshake",
-                            crate::session_open::locator_scheme(&rejected)
-                        );
-                    });
-                    match plan {
-                        // `Replace` adopts the whole set and `Add` leaves the
-                        // existing members standing. An added endpoint is dialled
-                        // now AND again whenever its session is lost; one a
-                        // replace drops is not dialled again, and its live face
-                        // is NOT closed (the add-only / close-removed asymmetry).
-                        ConnectPlan::Endpoints { targets, replace } => {
-                            let cx = peer_cx!();
-                            let actions = peers.set_endpoints(targets, replace, &cx, &mut next_id);
-                            let dials = take_peer_actions!(actions);
-                            if dials > 0 {
-                                log::debug!(
-                                    "reconcile: dialing {dials} newly-listed connect endpoint(s)"
-                                );
-                            }
-                            summary.dialed += dials;
-                        }
-                        // Decision D5 — a node's add goes to its connection
-                        // machine: the graph's locators become its link-state
-                        // hints (D3), and the machine resolves and dials them for
-                        // its zid (D4).
-                        #[cfg(feature = "session-close-ingress")]
-                        ConnectPlan::Node { zid, locators } => {
-                            learn_locators(
-                                &mut directory,
-                                &zid,
-                                &locators,
-                                LocatorSource::Linkstate,
-                                clock.now_monotonic_ms(),
-                            );
-                            let cx = peer_cx!();
-                            let actions = peers.open_node(zid, &cx, &mut next_id);
-                            take_peer_actions!(actions);
-                        }
-                        // Decision D10 — the passive form of `open`: the node's
-                        // machine waits for the node's own session.
-                        #[cfg(feature = "session-close-ingress")]
-                        ConnectPlan::NodePassive { zid } => {
-                            let cx = peer_cx!();
-                            let actions = peers.open_node_passive(zid, &cx, &mut next_id);
-                            take_peer_actions!(actions);
-                            // The intent is the node's session, so one the node already
-                            // opened here and proved is held at once, as the fixed-memory
-                            // host holds the sessions it is told of at each tick: an intent
-                            // that waited for the next session would leave this one unheld.
-                            let proven = proven_inbound
-                                .iter()
-                                .find(|(_, (node, _))| *node == zid)
-                                .map(|(id, (_, actions))| (*id, Arc::clone(actions)));
-                            if let Some((id, actions_of)) = proven {
-                                let cx = peer_cx!();
-                                let actions = peers.inbound_up(zid, id, &cx, &mut next_id);
-                                if peers.state(&crate::loop_peers::PeerKey::Node(zid))
-                                    == Some(wz_session_core::peer_connection::PeerConnectionState::PassiveUp)
-                                {
-                                    peer_sessions.insert(id, actions_of);
-                                }
-                                take_peer_actions!(actions);
-                            }
-                        }
-                        // Decision D6 — a lifecycle `close`: every machine that
-                        // holds the node is stopped, so it is not dialled again.
-                        #[cfg(feature = "session-close-ingress")]
-                        ConnectPlan::Withdraw { zid } => {
-                            let cx = peer_cx!();
-                            let actions = peers.withdraw(&zid, &cx, &mut next_id);
-                            take_peer_actions!(actions);
-                        }
-                    }
-                }
-            }
-
-            Step::PeerRetry(_due) => {
-                #[cfg(feature = "routing-peer")]
-                {
-                    let (key, generation) = _due;
-                    let cx = peer_cx!();
-                    let actions = peers.retry_due(key, generation, &cx, &mut next_id);
-                    take_peer_actions!(actions);
-                }
-                #[cfg(not(feature = "routing-peer"))]
-                match _due {}
-            }
-
-            Step::Intake(intake::IntakeEvent::Handshaken(ended)) => {
-                // Slice B — the mesh accept loop holds a face per accepted peer
-                // keyed by its handshake zid, so an IP peer AND a mesh-capable
-                // non-IP peer (unixsock / vsock / unixpipe — each a genuine per-peer
-                // stream accept) are all held as faces; `peer` (an `AcceptedPeer`)
-                // is threaded straight through the handshake as a log/event tag.
-                //
-                // ⛔ R2723 — THE NON-MESH REJECT ARM IS GONE, and it is the CADENCE
-                // of an acceptor that made it obsolete rather than a decision to be
-                // more permissive. It dropped any link whose acceptor could not
-                // yield N CONCURRENT peers, and the only such acceptor is serial: a
-                // tty is point-to-point. But "N at once" and "N over time" are
-                // different questions, and the loop only ever needed the second.
-                // R2722 gave the serial listener link-liveness feedback, so its
-                // `accept_raw` parks while a link is live and yields the next peer
-                // once that one has dropped — and `accept_any` rebuilds its future
-                // set every iteration, so a listener that serves peers ONE AT A TIME
-                // feeds this loop exactly as a multi-peer one does. The budget is
-                // enforced by the listener, not by an admission test here.
-                //
-                // Widening the predicate instead would have been the wrong repair
-                // twice over: it is a TRUE statement about concurrency that must
-                // keep answering `false` for a tty, and a widened version would
-                // admit every variant, leaving this arm a check that can never fire.
-                // The surviving consumer is the BIND-time one, which now reports the
-                // cadence to an operator rather than refusing the listen.
-                let intake::Handshaken {
-                    peer,
-                    result,
-                    pending,
-                } = *ended;
-                let id = FaceId::mint(&mut next_id);
-                // R2951 — every open that is not an ACCEPT is one of this node's
-                // dials; this is the one arm accepts reach the loop by, so marking
-                // it here is what lets `Face::dialed` be answered in every build.
-                accepted_ids.insert(id);
-                // Taken through the arm every open ends in. The accept stays counted
-                // against `accept_pending` until then, as upstream counts it until
-                // its transport is up.
-                opening.push(boxed(|| async move {
-                    let opened = (id, peer, result);
-                    drop(pending);
-                    opened
-                }));
-            }
-
-            Step::Intake(intake::IntakeEvent::AcceptError(e)) => {
-                on_event(&AcceptEvent::AcceptError(e));
-            }
-
-            // The forwarder's periodic cadence elapsed — let it do its
-            // time-driven control-plane work (the linkstate peer floods its own
-            // link-state). A no-timer forwarder never reaches here.
-            Step::Tick => forwarder.tick(),
-
-            // The forwarder was told a link it holds messages for has room.
-            Step::Woken => forwarder.woken(),
+            None => true,
         }
     }
 
-    // Stop accepting; drop in-flight opens + drives (sockets close, writer tasks
-    // drain). Faces table cleared — the summary already captured the high-water
-    // mark.
-    intake.close().await;
-    summary.accepted = intake.accepted();
-    summary.refused_over_pending = intake.refused_over_pending();
-    drop(opening);
-    drop(driving);
-    // Spawned drives are cancelled AND awaited: a task mid-poll finishes that poll on its
-    // worker, so without the wait a callback could still be running after this returns.
-    spawned_drives.shutdown().await;
-    faces.clear();
-    summary
+    // Report a face's death to the peers it held, and take what their machines
+    // ask next.
+    #[cfg(feature = "routing-peer")]
+    fn peer_face_down(&mut self, id: FaceId) {
+        #[cfg(feature = "session-close-ingress")]
+        self.peer_sessions.remove(&id);
+        #[cfg(feature = "session-close-ingress")]
+        self.proven_inbound.remove(&id);
+        if let Some(actions) =
+            self.plan_peers(|peers, cx, next_id| peers.face_down(id, cx, next_id))
+        {
+            self.take_peer_actions(actions);
+        }
+    }
 }
 
 /// Bind-once, accept-and-hold-N: the multi-peer accept loop (the
