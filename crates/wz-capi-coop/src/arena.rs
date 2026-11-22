@@ -24,7 +24,8 @@
 //!   (`MAX_PENDING_REPLIES`, each with a key and a payload of `MAX_KEYEXPR_BYTES` and
 //!   `MAX_REPLY_PAYLOAD_BYTES`) and the `Final`s owed after them (`MAX_PENDING_FINALS`), the
 //!   replies and `Final`s none in a build without `queryable`. What a peer declares by its own
-//!   ids is held inline in the table, at the build's capacities;
+//!   ids is held inline in the table, at the build's capacities, each row the place of its key in
+//!   the key arena below;
 //! - the buffers of each link the session may hold: a receive buffer of the batch the session
 //!   advertises, a streamed batch's length counted inside it, and [`LINK_TX_SLOTS`] slots of that
 //!   length to encode its frames into, each table with the flags that say which buffers are lent
@@ -44,9 +45,12 @@
 //!   (`MAX_DECLARED_KEYEXPRS`), the write filters of its publishers (`MAX_PUBLISHERS`) and
 //!   queriers (`MAX_QUERIERS`), its matching listeners (`MAX_MATCHING_LISTENERS`), and the
 //!   Interests those filters and listeners hold open, at most one for each of them;
-//! - the key arena every row of that record keeps its key in (`KEY_ARENA_BYTES`, under the
-//!   build's), one area of blocks a key takes as long as it is held
-//!   ([`KeySpace`](wz_session_core::key_arena::KeySpace)), lent after the record.
+//! - the key arena every keyed row of the session keeps its key in (`KEY_ARENA_BYTES`, under the
+//!   build's): that record's, the application's tables', each face's pending gets' and what each
+//!   face's peer declares and asks, one area of blocks a key takes as long as it is held
+//!   ([`KeySpace`](wz_session_core::key_arena::KeySpace)), lent after the record and before the
+//!   tables that keep their keys in it. A peer's key that finds no room there is dropped and
+//!   counted, as zenoh-pico drops a declaration its heap cannot hold.
 //!
 //! A table's entry is the registry's own `ROW_BYTES` as the lent policy lays the row out
 //! ([`Lent`]), and its count the value of its limit the open resolved, under the build's value
@@ -496,8 +500,9 @@ impl ArenaPlan {
             rows.interests().ok_or(ArenaRefused::TooLarge)?,
             EntryBytes::INTEREST,
         );
-        // The keys of those rows, in one area that a key takes a block of as long as it is held
-        // (`SessionArena::lend_keys`), not a row of each.
+        // The keys of those rows and of every other keyed row of the session, in one area that a
+        // key takes a block of as long as it is held (`SessionArena::lend_keys`), not a row of
+        // each.
         self.put(
             "key arena",
             "KEY_ARENA_BYTES",
@@ -512,7 +517,8 @@ impl ArenaPlan {
         self.entities
     }
 
-    /// The bytes of blocks of the key arena those rows keep their keys in (`KEY_ARENA_BYTES`).
+    /// The bytes of blocks of the key arena every keyed row of the session keeps its key in
+    /// (`KEY_ARENA_BYTES`).
     pub fn key_bytes(&self) -> usize {
         self.key_bytes
     }
@@ -833,9 +839,8 @@ impl SessionArena {
             .map_err(ArenaRefused::Lend)
     }
 
-    /// Lend the key arena `plan` lays out: the area the rows of the session's own declarations
-    /// keep their keys in, for the session's life. Refused only by an arena reserved by another
-    /// plan.
+    /// Lend the key arena `plan` lays out: the area every keyed row of the session keeps its key
+    /// in, for the session's life. Refused only by an arena reserved by another plan.
     pub(crate) fn lend_keys(&mut self, plan: &ArenaPlan) -> Result<KeySpace, ArenaRefused> {
         self.arena
             .lend_keys(plan.key_bytes)

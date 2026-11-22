@@ -421,6 +421,44 @@ fn the_plan_lays_out_the_key_arena_the_limits_state() {
     }
 }
 
+/// The plan lends each keyed row of the session at the lent policy's size, which keeps the place
+/// of its key and not its text: a subscription's row and a face's peer tables are shorter than the
+/// static policy's, whose rows keep a key of `MAX_KEYEXPR_BYTES` inline, and the text of every key
+/// lies in the plan's one key arena row.
+#[test]
+fn the_plans_keyed_rows_keep_a_keys_place_and_not_its_text() {
+    use wz_session_core::bounded::Static;
+    use wz_session_core::id_map::{DeclaredKeys, PeerAliases};
+    use wz_session_core::key_arena::KeyRef;
+    use wz_session_core::pubsub::SubscriberTable;
+    use wz_session_core::sink::BoxedSink;
+
+    let plan =
+        ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
+    assert_eq!(
+        row(&plan, "subscribers").entry_bytes,
+        SubscriberTable::<BoxedSink, Lent>::ROW_BYTES
+    );
+    assert_eq!(row(&plan, "key arena").count, 1, "one area for every key");
+    // A key of the static policy is its text and its length; a place is a few words.
+    if caps::MAX_KEYEXPR_BYTES >= 2 * core::mem::size_of::<KeyRef>()
+        && caps::MAX_PEER_KEYEXPR_ALIASES > 0
+        && caps::MAX_REMOTE_DECLS > 0
+    {
+        assert!(
+            SubscriberTable::<BoxedSink, Lent>::ROW_BYTES
+                < SubscriberTable::<BoxedSink, Static>::ROW_BYTES
+        );
+        assert!(
+            core::mem::size_of::<PeerAliases<Lent>>() < core::mem::size_of::<PeerAliases<Static>>()
+        );
+        assert!(
+            core::mem::size_of::<DeclaredKeys<Lent>>()
+                < core::mem::size_of::<DeclaredKeys<Static>>()
+        );
+    }
+}
+
 /// A listener lays out the gets and the link of a face for the dial role, each face it admits and
 /// each handshake it holds; the application's tables are the session's, once, however many faces
 /// it holds.

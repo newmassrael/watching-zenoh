@@ -465,16 +465,17 @@ fn a_key_past_its_row_is_refused_and_sends_nothing() {
     );
 }
 
-/// The rows of the session's own declarations keep their keys in one key arena of
-/// `KEY_ARENA_BYTES`: a key that finds no room there is refused as a full table refuses, before an
-/// id is taken, a callback minted or anything sent, and the key an undeclaration gives back is
-/// taken by the next declaration.
+/// The keyed rows of the session keep their keys in one key arena of `KEY_ARENA_BYTES`: a key
+/// that finds no room there is refused as a full table refuses, before an id is taken, a callback
+/// minted or anything sent, and the keys an undeclaration gives back are taken by the next
+/// declaration.
 #[test]
 fn a_key_past_the_key_arena_is_refused_and_a_key_given_back_is_taken_again() {
     use wz_session_core::key_arena::block_bytes;
 
-    // Room for exactly two keys of eight bytes.
-    let room = 2 * block_bytes("demo/k/1".len()).expect("a short key");
+    // Room for exactly two subscribers of eight-byte keys: the engine's record of each and the
+    // application's table each keep the key in a block of its own.
+    let room = 2 * 2 * block_bytes("demo/k/1".len()).expect("a short key");
     let Some(limits) = lowered(|l| l.select_key_arena_bytes(room).is_ok()) else {
         return;
     };
