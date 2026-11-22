@@ -6930,6 +6930,29 @@
         "C1cs job margin (92 percent of 1200 s).",
         "C1cc `the_message_size_threshold_decides_which_puts_travel_as_shared_memory_on_wz_and_libzenohc`: oracle-side, the C1cc lane session's."
       ]
+    },
+    "Round 4612": {
+      "decision_summary": "Layer C1bnl's hosted shard 1/4 failed its budget margin on runs 45030244784, 45047838675 and 45051019628 with every leg green (1796 s of 1800 on the last). The shards took the legs whose position in the LEGS table is congruent to the shard number, and a position says nothing about cost: read from the four shard logs of run 45051019628 (each leg's cost is the time between its line and the one before it, its build included), the shards held 869, 1,647, 810 and 995 s of legs, the second with the 543 s `wz-capture` leg and the 227 s `wz-runtime-tokio` one. That is the defect Round 4576 found in the C1cn census, and the remedy is the same: the legs are dealt by measured cost, heaviest first to the least loaded shard, by `census_shard_plan.py` over a weights table of their own (`c1bnl_leg_weights.tsv`), which puts about 1,110 s of that run's legs in each shard. A leg is named by a key, not a position, so that a row inserted mid-table moves no other row's weight: its package, its filter and the CRC of its feature field (`~n` after a key a row above already took). A leg whose row changes loses its weight and is planned at the median and named in the log, as an unmeasured census member is; the weights decide balance only and never which legs run, and every shard computes the same plan from the same tree, so the plan is a partition. Each leg's line now carries its key and its own seconds, so the table can be refreshed from a run log.",
+      "changes_bullets": [
+        "scripts/lib/nondefault-tests-gate.sh: `leg_keys` and `--list-legs`; a sharded `--all-legs` takes its legs from `census_shard_plan.py` over `c1bnl_leg_weights.tsv` (`in_shard`, both the uring provisioning and the leg loop); each leg's line ends `[<key>, <N>s]`.",
+        "scripts/lib/c1bnl_leg_weights.tsv (new): 166 legs' seconds from run 45051019628; the 8 legs added since are planned at the median (15 s).",
+        "scripts/lib/census_shard_plan.py: the docstring states the C1bnl use; the selftest reads both committed tables.",
+        ".github/workflows/ci.yml: the C1bnl job's comment records the split by cost and a prediction for the next run."
+      ],
+      "verification_bullets": [
+        "`--list-legs` prints 174 distinct keys; planned over four shards they partition the table (46, 52, 54, 54 legs; 174 distinct across them), LPT loads 1,111, 1,110, 1,110 and 1,110 s.",
+        "`--all-legs` with `WZ_LEGS_SHARDS=4` and each `WZ_LEGS_SHARD`, cargo replaced by a stand-in that reports one passing test: 38, 44, 46 and 46 legs run, 174 distinct keys, no FAIL; the hook's shape (no argument) runs its 173 hook legs and defers the one lane leg as before.",
+        "census_shard_plan.py --selftest OK; shellcheck -x of the gate clean.",
+        "The pre-push hook's round-fed gates: 168 of 170 pass; the two that fail, feature_gate_diagnostic (`limits-lent-at-open`, `rx-lent-only` in no table) and silent_skip_gate (33 coop tests bailing out on silent helpers), fail the same on origin/main 66cff413d and come from Round 4610's integration, not this change."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Read the four C1bnl shards' times on this landing's hosted run against the prediction (each near 1,260 s with setup); refresh `c1bnl_leg_weights.tsv` from the `[<key>, <N>s]` lines if they come out unbalanced.",
+        "Round 4610's two round-fed gate failures (feature_gate_diagnostic: `limits-lent-at-open`, `rx-lent-only`; silent_skip_gate: 33 wz-capi-coop tests on silent helpers), hosted C0 reds on the next run.",
+        "C1cs job margin (92 percent of 1200 s on run 45051019628)."
+      ]
     }
   },
   "inventory_entries": {
