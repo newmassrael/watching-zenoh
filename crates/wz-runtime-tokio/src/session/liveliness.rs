@@ -1417,6 +1417,11 @@ impl From<SendWireError> for LivelinessSubscriberAliasError {
                 LivelinessSubscriberAliasError::FragmentChainAbandoned
             }
             SendWireError::HeldConduit => LivelinessSubscriberAliasError::HeldConduit,
+            // A link that refuses a frame it lends no slot for exists only in a lend-only build,
+            // which this crate refuses to be built in (`lib.rs`): the arm keeps the match whole
+            // there, so the refusal stays the one error such a build reports.
+            #[allow(unreachable_patterns)]
+            _ => LivelinessSubscriberAliasError::ExceedsCapacity,
         }
     }
 }

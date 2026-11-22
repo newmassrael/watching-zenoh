@@ -220,6 +220,11 @@ impl From<SendWireError> for LivelinessGetError {
             // "no wire bytes emitted", which this one breaks.
             SendWireError::FragmentTxBudgetExhausted => LivelinessGetError::FragmentChainAbandoned,
             SendWireError::HeldConduit => LivelinessGetError::HeldConduit,
+            // A link that refuses a frame it lends no slot for exists only in a lend-only build,
+            // which this crate refuses to be built in (`lib.rs`): the arm keeps the match whole
+            // there, so the refusal stays the one error such a build reports.
+            #[allow(unreachable_patterns)]
+            _ => LivelinessGetError::ExceedsCapacity,
         }
     }
 }
@@ -378,6 +383,11 @@ impl From<SendWireError> for QueryAliasError {
             // "no wire bytes emitted", which this one breaks.
             SendWireError::FragmentTxBudgetExhausted => QueryAliasError::FragmentChainAbandoned,
             SendWireError::HeldConduit => QueryAliasError::HeldConduit,
+            // A link that refuses a frame it lends no slot for exists only in a lend-only build,
+            // which this crate refuses to be built in (`lib.rs`): the arm keeps the match whole
+            // there, so the refusal stays the one error such a build reports.
+            #[allow(unreachable_patterns)]
+            _ => QueryAliasError::ExceedsCapacity,
         }
     }
 }
