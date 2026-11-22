@@ -10,6 +10,12 @@
 #
 # The profile is fixed here, not an input: the package a release ships is the one the Platform lane
 # tests. Composite steps take no `timeout-minutes`, so the caller's job timeout bounds the build.
+#
+# `stdlib` names the standard library the DLL is built with: `std` (the default, and the form a
+# release ships until the owner switches it) or `nostd`, the library without it over the system's
+# own calls (`os-windows`, docs/c-abi-engine-and-memory.md P4), which is made in the one form. A
+# `nostd` package also prints the sizes of the size gate's client built for its width in both forms
+# (`--measure`), which only a Windows host can read.
 name: pico library Windows package
 description: Build the pico C ABI library's Windows package of one width and form, then test its zip
 inputs:
@@ -19,6 +25,10 @@ inputs:
   form:
     description: The form of the library (`single` or `split`), as `pico_windows_package.py --form` takes it
     required: true
+  stdlib:
+    description: The standard library the DLL is built with (`std` or `nostd`), as `pico_windows_package.py --stdlib` takes it
+    required: false
+    default: std
 outputs:
   directory:
     description: The directory holding the package's zip and its `.zip.sha256`
@@ -32,7 +42,8 @@ runs:
       env:
         WZ_PACKAGE_ARCH: ${{ inputs.arch }}
         WZ_PACKAGE_FORM: ${{ inputs.form }}
-      run: echo "directory=${RUNNER_TEMP}/pico-package-${WZ_PACKAGE_ARCH}-${WZ_PACKAGE_FORM}" >> "$GITHUB_OUTPUT"
+        WZ_PACKAGE_STDLIB: ${{ inputs.stdlib }}
+      run: echo "directory=${RUNNER_TEMP}/pico-package-${WZ_PACKAGE_ARCH}-${WZ_PACKAGE_FORM}-${WZ_PACKAGE_STDLIB}" >> "$GITHUB_OUTPUT"
 
     - name: Install Rust toolchain (pinned by rust-toolchain.toml)
       shell: bash
@@ -63,20 +74,32 @@ runs:
       env:
         WZ_PACKAGE_ARCH: ${{ inputs.arch }}
         WZ_PACKAGE_FORM: ${{ inputs.form }}
+        WZ_PACKAGE_STDLIB: ${{ inputs.stdlib }}
         WZ_PACKAGE_OUT: ${{ steps.where.outputs.directory }}
-      run: python scripts/lib/pico_windows_package.py --build "$WZ_PACKAGE_OUT" --profile host-peer-ext --arch "$WZ_PACKAGE_ARCH" --form "$WZ_PACKAGE_FORM"
+      run: python scripts/lib/pico_windows_package.py --build "$WZ_PACKAGE_OUT" --profile host-peer-ext --arch "$WZ_PACKAGE_ARCH" --form "$WZ_PACKAGE_FORM" --stdlib "$WZ_PACKAGE_STDLIB"
 
     - name: the package's regression test (its zip, extracted, verified, compiled against and run)
       shell: bash
       env:
         WZ_PACKAGE_ARCH: ${{ inputs.arch }}
         WZ_PACKAGE_FORM: ${{ inputs.form }}
+        WZ_PACKAGE_STDLIB: ${{ inputs.stdlib }}
         WZ_PACKAGE_OUT: ${{ steps.where.outputs.directory }}
       run: |
         out="$(cygpath -u "$WZ_PACKAGE_OUT")"
         set -- "$out"/*-windows-"$WZ_PACKAGE_ARCH"-*.zip
         if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
-          echo "pico-package-test on Windows $WZ_PACKAGE_ARCH $WZ_PACKAGE_FORM: the build left no single zip in $out: FAIL" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "pico-package-test on Windows $WZ_PACKAGE_ARCH $WZ_PACKAGE_FORM $WZ_PACKAGE_STDLIB: the build left no single zip in $out: FAIL" | tee -a "$GITHUB_STEP_SUMMARY"
           exit 1
         fi
         python scripts/lib/pico_windows_package.py --test "$(cygpath -w "$1")"
+
+    # The size gate's client in both forms, for this width: the DLL's sizes read from its own
+    # section table, and the ratio of the form without `std` to the one with it. Printed, gating
+    # nothing yet; after the package's test, so a measurement never stands in for it.
+    - name: the sizes of the client with and without std (printed)
+      if: ${{ inputs.stdlib == 'nostd' }}
+      shell: bash
+      env:
+        WZ_PACKAGE_ARCH: ${{ inputs.arch }}
+      run: python scripts/lib/pico_windows_package.py --measure --arch "$WZ_PACKAGE_ARCH"

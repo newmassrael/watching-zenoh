@@ -41,9 +41,10 @@
 #
 # WZ_PICO_FORM names the form of a cooperative library: `std` (or unset), the host's standard
 # library under the engine, or `nostd`, the same engine and capabilities without it (`os-posix` in
-# place of `engine-coop`), built as the host library without `std` is: the `capi-nostd` profile
-# and its configuration (`crates/.cargo/capi-nostd.toml`), for the host's own target, so it lives in
-# a target directory of its own. Its header arm is the cooperative one, as the capabilities are.
+# place of `engine-coop`, `os-windows` on Windows), built as the host library without `std` is:
+# the `capi-nostd` profile and its configuration (`crates/.cargo/capi-nostd.toml`), for the host's
+# own target, so it lives in a target directory of its own. Its header arm is the cooperative one,
+# as the capabilities are.
 #
 # WZ_PICO_PROGRAM_ROLES, when set, is a list of words the program is run with, one process each,
 # all at once, each given its role and one loopback port the script picks (`<exe> <role> <port>`):
@@ -132,7 +133,12 @@ if [ "$form" = nostd ]; then
         say "pico-program-probe on ${os}: rustc named no host target NOT-MEASURED"
         exit 1
     fi
-    build_features="os-posix${features:+,$features}"
+    # The form names the host it is built for: Windows has its own (`os-windows`).
+    case "$host_triple" in
+        *-windows-*) host_form=os-windows ;;
+        *) host_form=os-posix ;;
+    esac
+    build_features="${host_form}${features:+,$features}"
     engine_args=(--no-default-features --profile capi-nostd --config .cargo/capi-nostd.toml
         --target "$host_triple")
     lib_dir="$WZ_ARTIFACTS/crates/target/$host_triple/capi-nostd"
