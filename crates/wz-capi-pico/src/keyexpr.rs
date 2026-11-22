@@ -1045,7 +1045,7 @@ pub unsafe extern "C" fn z_keyexpr_concat(
                 Err(_) => return Z_ERR_INVALID,
             }
         };
-        let joined = format!("{head}{tail}");
+        let joined = [head, tail].concat();
         match wz_session_core::keyexpr_canon::canonize_keyexpr(&joined) {
             // Canonizing only shortens a key, so one still past the bound is past it.
             Ok(canon) if !fits(canon.as_str()) => Z_EINVAL,
@@ -1090,7 +1090,7 @@ pub unsafe extern "C" fn z_keyexpr_join(
         let (Some(l), Some(r)) = (keyexpr_str(left), keyexpr_str(right)) else {
             return Z_ERR_NULL;
         };
-        let joined = format!("{l}/{r}");
+        let joined = [l, "/", r].concat();
         match wz_session_core::keyexpr_canon::canonize_keyexpr(&joined) {
             Ok(canon) if !fits(canon.as_str()) => Z_EINVAL,
             Ok(canon) => {
