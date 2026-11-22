@@ -450,8 +450,10 @@ impl GroupFace {
 
     /// Write what the group's stage holds on the group's socket, on this thread, until the stage
     /// is empty or the socket has no room; what it refuses is offered again first at the next
-    /// write, the face's or the task's.
-    fn write_staged(&self) {
+    /// write, the face's or the task's. Whatever the session puts on the stage outside the group's
+    /// own step is written so, by the thread that put it: a read already waiting on the group's
+    /// socket is not woken by a push, and would hold it until that wait ends.
+    pub(super) fn write_staged(&self) {
         self.link.write_staged(&self.tx);
     }
 
@@ -536,7 +538,9 @@ impl GroupFace {
         self.generation == generation && !self.has_ended()
     }
 
-    /// The sink a member's query is answered through: the group's stage (`queryable`).
+    /// The sink a member's query is answered through: the group's stage (`queryable`). An answer
+    /// made outside the group's step is written after it by the answering thread
+    /// (`Self::write_staged`).
     #[cfg(feature = "queryable")]
     pub(super) fn replies(&self) -> &GroupReplies {
         &self.replies

@@ -457,7 +457,7 @@ mod asked {
     use std::sync::{Arc, Mutex};
 
     use wz_capi_port::{
-        QueryCallback, QueryHolder, ReplyCallback, SessionDrive, SessionEngine, WireKey,
+        HeldQuery, QueryCallback, QueryHolder, ReplyCallback, SessionDrive, SessionEngine, WireKey,
     };
     use wz_session_core::locality::Locality;
     use wz_session_core::query_options::QueryOptions;
@@ -556,6 +556,104 @@ mod asked {
                 ReplyKind::Put,
                 "demo/group/ask".to_owned(),
                 b"answer-over-the-group".to_vec()
+            )]
+        );
+        SessionDrive::close(&*second);
+        SessionDrive::close(&*first);
+    }
+
+    /// Whether `datagram` carries `payload` anywhere in it.
+    fn carries(datagram: &[u8], payload: &[u8]) -> bool {
+        datagram
+            .windows(payload.len())
+            .any(|window| window == payload)
+    }
+
+    /// A query a member's queryable keeps is answered later from the program's own thread, with
+    /// the member's read task stopped: the reply, and then the Final, are on the group by the time
+    /// each call returns, written by the answering thread as a put on the group is. A read waiting
+    /// on the group's socket is not woken by an answer, so one left on the group's stage would
+    /// leave only when that wait ends. The CONTROL is the kept query: nothing of its answer is on
+    /// the group, and the asking leg stays open, until the program answers it.
+    #[test]
+    fn a_kept_query_answered_by_the_program_is_written_on_the_group_by_its_thread() {
+        let network = Arc::new(Network::default());
+        let first = open_member(&network, 1, member_config(1, GROUP)).expect("the first joins");
+        SessionDrive::start_read_task(&*first).expect("the first's read task starts");
+        let second = open_member(&network, 2, member_config(2, GROUP)).expect("the second joins");
+        SessionDrive::start_read_task(&*second).expect("the second's read task starts");
+        let kept: Arc<Mutex<Option<Box<dyn HeldQuery>>>> = Arc::new(Mutex::new(None));
+        let slot = Arc::clone(&kept);
+        second
+            .declare_queryable_on_wire(
+                "demo/group/**".to_owned(),
+                WireKey::literal(),
+                false,
+                Locality::Remote,
+                None,
+                Arc::new(move |holder: Arc<dyn QueryHolder>| {
+                    let slot = Arc::clone(&slot);
+                    Box::new(move |query: &dyn QueryView, _out: &mut dyn ReplyOut| {
+                        *slot.lock().unwrap() = Some(holder.hold_query(query));
+                    }) as QueryCallback
+                }),
+            )
+            .expect("the engine has queryables in this build");
+        until_members_know_each_other(&first, &second);
+
+        let (issued, seen) = ask(&first, "demo/group/kept");
+        assert_eq!(issued, Some(1), "one leg: the group");
+        eventually("the second's queryable to keep the query", || {
+            kept.lock().unwrap().is_some()
+        });
+        // From here nothing writes the second's datagrams but the thread that answers.
+        SessionDrive::stop_read_task(&*second).expect("the second's read task stops");
+        let sent_by_second = || -> Vec<Vec<u8>> {
+            network
+                .datagrams
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(member, _)| *member == 2)
+                .map(|(_, datagram)| datagram.clone())
+                .collect()
+        };
+        assert!(
+            !sent_by_second()
+                .iter()
+                .any(|datagram| carries(datagram, b"kept-answer")),
+            "CONTROL: a kept query sends nothing of its own accord"
+        );
+        assert!(
+            !seen.lock().unwrap().ended,
+            "CONTROL: the leg waits for the kept query's Final"
+        );
+
+        let held = kept.lock().unwrap().take().expect("the kept query");
+        held.reply(&mut |out| {
+            out.reply_keyed("demo/group/kept", b"kept-answer")
+                .expect("a reply on the query's own key");
+        });
+        let after_reply = sent_by_second();
+        assert!(
+            after_reply
+                .iter()
+                .any(|datagram| carries(datagram, b"kept-answer")),
+            "the reply is on the group before the answering call returns"
+        );
+        drop(held);
+        assert_eq!(
+            sent_by_second().len(),
+            after_reply.len() + 1,
+            "the Final is on the group before the drop returns"
+        );
+        eventually("the leg to end", || seen.lock().unwrap().ended);
+        assert_eq!(
+            seen.lock().unwrap().replies,
+            vec![(
+                ReplyKind::Put,
+                "demo/group/kept".to_owned(),
+                b"kept-answer".to_vec()
             )]
         );
         SessionDrive::close(&*second);
