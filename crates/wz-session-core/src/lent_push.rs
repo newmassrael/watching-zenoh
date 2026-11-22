@@ -224,19 +224,12 @@ pub fn write_plain_put<S: sce_forge_runtime::codec::SceSink>(
 where
     CodecError: From<S::Error>,
 {
-    if suffix.is_some_and(|text| text.len() > usize::from(u16::MAX))
-        || u32::try_from(value.len()).is_err()
-    {
+    #[cfg(test)]
+    WRITER_RUNS.with(|runs| runs.set(runs.get() + 1));
+    if refuses(suffix, value) {
         return Err(CodecError::LengthOutOfRange);
     }
-    // The QoS extension rides when `pubsub-qos` is built and the byte is not the default one.
-    #[cfg(feature = "pubsub-qos")]
-    let with_qos = qos != crate::sample::QosLevel::DEFAULT;
-    #[cfg(not(feature = "pubsub-qos"))]
-    let with_qos = {
-        let _ = qos;
-        false
-    };
+    let with_qos = qos_rides(qos);
     let header = wz_codecs::wire_const::N_MID_PUSH
         | if suffix.is_some() { FLAG_PUSH_N } else { 0 }
         // `M`: the id is in the sender's space, which the codec derives from its
@@ -273,6 +266,75 @@ where
     sink.write_bytes(&head[..used])?;
     sink.write_bytes(value)?;
     Ok(())
+}
+
+/// The bytes [`write_plain_put`] writes for the same arguments, worked out from the parts with
+/// nothing written: what a send asks its link to lend, so the Put is written once, into the slot,
+/// and not first into a sink that only counts. Zero for a Put the writer refuses, which the encode
+/// that follows refuses with the same error.
+#[cfg(feature = "storage-profile")]
+pub fn plain_put_len(
+    mapping_id: crate::wire_id::ExprId,
+    suffix: Option<&str>,
+    value: &[u8],
+    qos: crate::sample::QosLevel,
+) -> usize {
+    if refuses(suffix, value) {
+        return 0;
+    }
+    // The Push header and the key's id, then the suffix with its length when one rides.
+    let mut len = 1 + vle_len(u64::from(mapping_id));
+    if let Some(text) = suffix {
+        len += vle_len(text.len() as u64) + text.len();
+    }
+    // The QoS extension's header and its value.
+    if qos_rides(qos) {
+        len += 1 + vle_len(u64::from(qos.raw));
+    }
+    // The Put header, the payload's length and the payload.
+    len + 1 + vle_len(value.len() as u64) + value.len()
+}
+
+/// Whether [`write_plain_put`] refuses a Put on `suffix` carrying `value`: a key past the
+/// protocol's `u16` length or a payload past its `u32` length.
+#[cfg(feature = "storage-profile")]
+fn refuses(suffix: Option<&str>, value: &[u8]) -> bool {
+    suffix.is_some_and(|text| text.len() > usize::from(u16::MAX))
+        || u32::try_from(value.len()).is_err()
+}
+
+/// Whether the QoS extension rides a plain Put: `pubsub-qos` is built and the byte is not the
+/// default one.
+#[cfg(feature = "storage-profile")]
+fn qos_rides(qos: crate::sample::QosLevel) -> bool {
+    #[cfg(feature = "pubsub-qos")]
+    {
+        qos != crate::sample::QosLevel::DEFAULT
+    }
+    #[cfg(not(feature = "pubsub-qos"))]
+    {
+        let _ = qos;
+        false
+    }
+}
+
+/// How many bytes [`put_vle`] writes `value` in: seven data bits a byte for the first eight, and
+/// a ninth that carries its eight bits whole.
+#[cfg(feature = "storage-profile")]
+fn vle_len(mut value: u64) -> usize {
+    let mut len = 1;
+    while value >= 0x80 && len < 9 {
+        value >>= 7;
+        len += 1;
+    }
+    len
+}
+
+#[cfg(all(test, feature = "storage-profile"))]
+std::thread_local! {
+    /// How many times [`write_plain_put`] ran on this thread: what a test of how often a Put is
+    /// written counts.
+    static WRITER_RUNS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
 }
 
 /// Write `value` as the codec's `vle_u64` at `buf[at..]` and return where it ends: seven data
@@ -490,6 +552,92 @@ mod tests {
             }
         }
         assert_eq!(compared, 6 * 3 * 3 * 3);
+    }
+
+    /// The length a send asks its link for is the bytes the writer writes, for a literal key and
+    /// for an id, with and without a suffix, with and without the QoS extension, and for payloads
+    /// whose lengths take one, two and three VLE bytes; and zero, as the counted measure gave, for
+    /// a Put the writer refuses. The encoder the send hands its link is the writer itself, so with
+    /// the same length the link lends the same room and the same bytes are written into it, into
+    /// a batch or a frame of their own.
+    #[test]
+    fn the_worked_out_length_is_the_counted_one() {
+        let long = "k".repeat(200);
+        let mut compared = 0usize;
+        for id in [0u16, 1, 127, 128, 16_383, 16_384, 65_535] {
+            for suffix in [
+                None,
+                Some(""),
+                Some("a"),
+                Some("demo/thr"),
+                Some(long.as_str()),
+            ] {
+                for raw in [crate::sample::QosLevel::DEFAULT.raw, 0x00, 0x05, 0x1a, 0xff] {
+                    let qos = crate::sample::QosLevel::from_raw(raw);
+                    for payload in [
+                        &b""[..],
+                        &b"x"[..],
+                        &[7u8; 127][..],
+                        &[7u8; 128][..],
+                        &[9u8; 16_383][..],
+                        &[9u8; 16_384][..],
+                    ] {
+                        let mut count = sce_forge_runtime::codec::CountSink::new();
+                        write_plain_put(&mut count, id, suffix, payload, qos)
+                            .expect("within the bounds");
+                        let mut written = alloc::vec::Vec::new();
+                        write_plain_put(
+                            &mut sce_forge_runtime::codec::VecSink::new(&mut written),
+                            id,
+                            suffix,
+                            payload,
+                            qos,
+                        )
+                        .expect("a Vec grows");
+                        let len = plain_put_len(id, suffix, payload, qos);
+                        assert_eq!(
+                            len,
+                            count.len(),
+                            "id {id} suffix {suffix:?} qos {raw:#04x} {} payload bytes",
+                            payload.len()
+                        );
+                        assert_eq!(len, written.len());
+                        compared += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(compared, 7 * 5 * 5 * 6);
+        let past = "k".repeat(usize::from(u16::MAX) + 1);
+        let qos = crate::sample::QosLevel::DEFAULT;
+        let mut count = sce_forge_runtime::codec::CountSink::new();
+        let counted = match write_plain_put(&mut count, 3, Some(&past), b"x", qos) {
+            Ok(()) => count.len(),
+            Err(_) => 0,
+        };
+        assert_eq!(counted, 0, "the counted measure of a refused Put");
+        assert_eq!(plain_put_len(3, Some(&past), b"x", qos), counted);
+    }
+
+    /// Working out a Put's length runs its writer no times, where the measure it replaces ran the
+    /// writer once into a sink that only counts before the send ran it again into the slot: a
+    /// plain put is written once. The CONTROL is that measure, counted by the same seam.
+    #[test]
+    fn working_out_a_puts_length_runs_its_writer_no_times() {
+        let qos = crate::sample::QosLevel::DEFAULT;
+        let runs = || WRITER_RUNS.with(core::cell::Cell::get);
+        let before = runs();
+        let len = plain_put_len(0, Some("demo/thr"), b"payload", qos);
+        assert_eq!(runs(), before, "no run of the writer to learn the length");
+        let mut count = sce_forge_runtime::codec::CountSink::new();
+        write_plain_put(&mut count, 0, Some("demo/thr"), b"payload", qos)
+            .expect("within the bounds");
+        assert_eq!(
+            runs(),
+            before + 1,
+            "CONTROL: the counted measure is a run of the writer"
+        );
+        assert_eq!(len, count.len());
     }
 
     /// A key past the protocol's `u16` length is refused with `LengthOutOfRange` by every
