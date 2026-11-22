@@ -6464,6 +6464,36 @@
         "The idle no-heap family reads 0.1 a round (a periodic allocation), unlocked.",
         "L1(a) batch-size test and the Q4 memory report verified on their branches, next landing."
       ]
+    },
+    "Round 4590": {
+      "decision_summary": "Round 4588's carry, five items. The tokio clock's TimeSource::timeout was two async fns that held the raced future twice; it is the named future TimeoutOn over the clock's own sleep, and the program-time sleep is its Wait enum, a future of its own. face_drive_loop_core made each open and drive future (2 to 30 KB) in its own frame before boxing it, a slot per place in a debug build; a helper makes each now, and the all-features debug poll frame falls from 311,296 to 172,032 bytes. The C ABI's StatedTxQueue laid four queue keys over the ABI model and dropped the three congestion waits a document states, which the reader lists as honoured; it lays them now. No all-features test lane is added: the test table refuses that spelling by name, and its wide wz-runtime-tokio leg in Layer C1bnl runs that population and caught the overflows. No image holds the slot-form reply queue, so no limit_to is left to call.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/runtime_impl.rs: TokioTime::timeout returns TimeoutOn over its sleep; Wait implements Future; the two cfg forms of timeout are one.",
+        "crates/wz-runtime-core/src/time.rs: the tokio sentence of the timeout contract.",
+        "crates/wz-runtime-tokio/src/accept_loop.rs: boxed and push_made; the 13 boxed and 1 unboxed future sites of face_drive_loop_core make their futures through them.",
+        "crates/wz-capi-core/src/open_plan.rs: StatedTxQueue carries wait_before_drop, max_wait_before_drop_fragments and wait_before_close; its test asserts them over both models and that upstream's own waits are no instruction.",
+        "crates/wz-runtime-tokio/src/router_forward/routing_spans.rs: the span test registers its two callsites and rebuilds the interest cache under its recorder.",
+        "docs/reason-review-pins.md: the session-close-ingress row of accept_loop.rs re-read and moved."
+      ],
+      "verification_bullets": [
+        "On build hosts: wz-runtime-tokio with all features 3,265 passed and at default 1,095; wz-capi-core at default and with all features 488; the workspace 11,656; 0 failed each.",
+        "The span test failed once in an all-features run and once in a workspace run (the route query told, the final not); the same command on main 9602b8617 and on this tree passed 3 of 3 each and alone, and the full runs pass after the change.",
+        "objdump of the all-features debug lib test build of wz-runtime-tokio on one host: the face_drive_loop_core poll frame is 311,296 bytes on main and 172,032 here; -Zprint-type-sizes gives the futures it makes 2,104 to 29,624 bytes.",
+        "clippy -D warnings on wz-runtime-tokio (default and all features), wz-capi-core (both) and wz-runtime-core; cargo fmt --check.",
+        "run-ci C1cs (21 cases within budget) and C1bz for the three crates pass; guarded_count_gate over origin/main..HEAD judged 16 of 16 reached guards.",
+        "The pre-push round-fed gates 166 of 166, upstream_citation_anchor_gate and reason_review_pin_gate pass."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "face_drive_loop_core's debug poll frame is still 172,032 bytes: the body itself, 1,554 lines with the peer macros expanded about ten times each (a 1,176-byte PeerHost per expansion); its steps as methods on a loop state is the next repair.",
+        "The three runtime-scope build limits (MESSAGE_CATALOG_ENTRIES, SUPERVISION_CHECKPOINTS, E2E_SUPERVISED_STREAMS) wait for a pico or C door that hands its machines RuntimeLimits, which the C ABI one-engine work owns; the other six stay build by structure.",
+        "The accept_loop tests hold their loops by value, so their own debug frames reach 458,752 bytes.",
+        "The span test keeps one window: a thread that began to register one of its callsites before the test did and has not finished.",
+        "The hosted run of 9602b8617 had not concluded when this round was filed."
+      ]
     }
   },
   "inventory_entries": {
