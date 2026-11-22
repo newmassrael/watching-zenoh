@@ -656,14 +656,18 @@ pub unsafe extern "C" fn z_closure_hello_call(
 // z_scout
 // ---------------------------------------------------------------------------
 
-/// pico `z_scout_options_t` (`api/types.h:553-556`), 8 B measured:
+/// pico `z_what_t`, the bitmask of roles a scout asks for: a C enum, as wide as the target's C ABI
+/// makes it (`crate::c_enum`).
+pub type z_what_t = crate::c_enum::PicoEnum;
+
+/// pico `z_scout_options_t` (`api/types.h:553-556`), 8 B measured on a host:
 /// `{ uint32_t timeout_ms; z_what_t what; }`.
 #[repr(C)]
 pub struct z_scout_options_t {
     /// Total discovery budget in milliseconds.
     pub timeout_ms: u32,
     /// `z_what_t` bitmask of roles to scout for.
-    pub what: u32,
+    pub what: z_what_t,
 }
 
 /// Default scout options (pico `z_scout_options_default`) — the same values
@@ -675,7 +679,7 @@ pub struct z_scout_options_t {
 pub unsafe extern "C" fn z_scout_options_default(options: *mut z_scout_options_t) {
     if let Some(options) = options.as_mut() {
         options.timeout_ms = u32::try_from(SCOUTING_TIMEOUT_DEFAULT_MS).unwrap_or(u32::MAX);
-        options.what = SCOUTING_WHAT_DEFAULT as u32;
+        options.what = z_what_t::from(SCOUTING_WHAT_DEFAULT);
     }
 }
 

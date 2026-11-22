@@ -1710,15 +1710,15 @@ fn put_options() -> PublishOptions {
 #[repr(C)]
 pub struct z_put_options_t {
     pub encoding: *mut c_void,
-    pub congestion_control: c_int,
-    pub priority: c_int,
+    pub congestion_control: crate::qos::z_congestion_control_t,
+    pub priority: crate::qos::z_priority_t,
     pub timestamp: *mut z_timestamp_t,
     pub is_express: bool,
     pub attachment: *mut z_moved_bytes_t,
     #[cfg(feature = "local-subscriber")]
     pub allowed_destination: crate::locality::z_locality_t,
     #[cfg(feature = "unstable-api")]
-    pub reliability: c_int,
+    pub reliability: z_reliability_t,
     #[cfg(feature = "unstable-api")]
     pub source_info: *mut z_source_info_t,
 }
@@ -1726,7 +1726,7 @@ pub struct z_put_options_t {
 crate::locality::locality_option_field!(z_put_options_t, allowed_destination, "local-subscriber");
 
 unstable_option_fields!(z_put_options_t {
-    reliability: c_int = Z_RELIABILITY_RELIABLE,
+    reliability: z_reliability_t = Z_RELIABILITY_RELIABLE,
     source_info: *mut z_source_info_t = core::ptr::null_mut(),
 });
 
@@ -1736,14 +1736,14 @@ unstable_option_fields!(z_put_options_t {
 /// struct reflects that.
 #[repr(C)]
 pub struct z_delete_options_t {
-    pub congestion_control: c_int,
-    pub priority: c_int,
+    pub congestion_control: crate::qos::z_congestion_control_t,
+    pub priority: crate::qos::z_priority_t,
     pub is_express: bool,
     pub timestamp: *mut z_timestamp_t,
     #[cfg(feature = "local-subscriber")]
     pub allowed_destination: crate::locality::z_locality_t,
     #[cfg(feature = "unstable-api")]
-    pub reliability: c_int,
+    pub reliability: z_reliability_t,
     #[cfg(feature = "unstable-api")]
     pub source_info: *mut z_source_info_t,
 }
@@ -1755,7 +1755,7 @@ crate::locality::locality_option_field!(
 );
 
 unstable_option_fields!(z_delete_options_t {
-    reliability: c_int = Z_RELIABILITY_RELIABLE,
+    reliability: z_reliability_t = Z_RELIABILITY_RELIABLE,
     source_info: *mut z_source_info_t = core::ptr::null_mut(),
 });
 
@@ -1838,10 +1838,12 @@ pub unsafe extern "C" fn z_publisher_delete_options_default(
     };
 }
 
+/// pico `z_reliability_t`, as wide as the target's C ABI makes it (`crate::c_enum`).
+pub type z_reliability_t = crate::c_enum::PicoEnum;
 /// pico `Z_RELIABILITY_RELIABLE`, its `Z_RELIABILITY_DEFAULT`.
-pub const Z_RELIABILITY_RELIABLE: c_int = 0;
+pub const Z_RELIABILITY_RELIABLE: z_reliability_t = 0;
 /// pico `Z_RELIABILITY_BEST_EFFORT`.
-pub const Z_RELIABILITY_BEST_EFFORT: c_int = 1;
+pub const Z_RELIABILITY_BEST_EFFORT: z_reliability_t = 1;
 
 /// A caller's PUSH-side `z_congestion_control_t` as wz's.
 ///
@@ -1853,7 +1855,9 @@ pub const Z_RELIABILITY_BEST_EFFORT: c_int = 1;
 /// plane it serves. The two recognised values agree, and the mapping is written
 /// out rather than cast because the SIBLING zenoh-c ABI inverts them —
 /// R311y545 paid for exactly that.
-fn push_congestion_from_pico(c: c_int) -> wz_session_core::qos::CongestionControl {
+fn push_congestion_from_pico(
+    c: crate::qos::z_congestion_control_t,
+) -> wz_session_core::qos::CongestionControl {
     match c {
         crate::qos::Z_CONGESTION_CONTROL_BLOCK => wz_session_core::qos::CongestionControl::Block,
         _ => wz_session_core::qos::CongestionControl::Drop,
@@ -1865,7 +1869,7 @@ fn push_congestion_from_pico(c: c_int) -> wz_session_core::qos::CongestionContro
 /// INVERTED against wz's own enum: pico spells `RELIABLE = 0` /
 /// `BEST_EFFORT = 1` while wz is `BestEffort = 0` / `Reliable = 1`. Written
 /// out for exactly that reason.
-fn reliability_from_pico(r: c_int) -> Reliability {
+fn reliability_from_pico(r: z_reliability_t) -> Reliability {
     match r {
         Z_RELIABILITY_BEST_EFFORT => Reliability::BestEffort,
         _ => Reliability::Reliable,
@@ -2143,17 +2147,17 @@ pub struct z_publisher_options_t {
     /// `crate::encoding::take_moved_encoding`; the SLOT must exist and be 8 B
     /// wide or every field after it lands at the wrong offset.
     pub encoding: *mut c_void,
-    pub congestion_control: c_int,
-    pub priority: c_int,
+    pub congestion_control: crate::qos::z_congestion_control_t,
+    pub priority: crate::qos::z_priority_t,
     pub is_express: bool,
     #[cfg(feature = "unstable-api")]
-    pub reliability: c_int,
+    pub reliability: z_reliability_t,
     #[cfg(feature = "local-subscriber")]
     pub allowed_destination: crate::locality::z_locality_t,
 }
 
 unstable_option_fields!(z_publisher_options_t {
-    reliability: c_int = Z_RELIABILITY_RELIABLE,
+    reliability: z_reliability_t = Z_RELIABILITY_RELIABLE,
 });
 
 crate::locality::locality_option_field!(

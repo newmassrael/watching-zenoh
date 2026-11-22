@@ -246,8 +246,9 @@ pub unsafe extern "C" fn ze_closure_miss_call(
 // advanced publisher
 // ---------------------------------------------------------------------------
 
-/// pico `ze_advanced_publisher_heartbeat_mode_t` — a plain C enum, so an `int`.
-pub type ze_advanced_publisher_heartbeat_mode_t = core::ffi::c_int;
+/// pico `ze_advanced_publisher_heartbeat_mode_t` — a plain C enum, as wide as the target's C ABI
+/// makes it (`crate::c_enum`).
+pub type ze_advanced_publisher_heartbeat_mode_t = crate::c_enum::PicoEnum;
 /// `ZE_ADVANCED_PUBLISHER_HEARTBEAT_MODE_NONE` = 0, also the DEFAULT.
 pub const ZE_ADVANCED_PUBLISHER_HEARTBEAT_MODE_NONE: ze_advanced_publisher_heartbeat_mode_t = 0;
 /// `ZE_ADVANCED_PUBLISHER_HEARTBEAT_MODE_PERIODIC` = 1.
@@ -261,8 +262,8 @@ pub const ZE_ADVANCED_PUBLISHER_HEARTBEAT_MODE_SPORADIC: ze_advanced_publisher_h
 pub struct ze_advanced_publisher_cache_options_t {
     pub is_enabled: bool,
     pub max_samples: usize,
-    pub congestion_control: core::ffi::c_int,
-    pub priority: core::ffi::c_int,
+    pub congestion_control: crate::qos::z_congestion_control_t,
+    pub priority: crate::qos::z_priority_t,
     pub is_express: bool,
     /// pico's own private field, carried for layout. Named `_liveliness`
     /// upstream and documented there as "not yet exposed in Zenoh".

@@ -6,12 +6,11 @@
 //! Core types of the publication path (a put, a delete, a publisher carry both), so they live
 //! here and not in the query module, which a build without the query plane leaves out.
 //!
-//! pico's two types are plain C enums, so each occupies an `int` in the option structs.
+//! pico's two types are plain C enums, each as wide in the option structs as the target's C ABI
+//! makes it (`crate::c_enum`).
 
-use core::ffi::c_int;
-
-pub type z_congestion_control_t = c_int;
-pub type z_priority_t = c_int;
+pub type z_congestion_control_t = crate::c_enum::PicoEnum;
+pub type z_priority_t = crate::c_enum::PicoEnum;
 
 /// pico `Z_CONGESTION_CONTROL_BLOCK` (`api/constants.h:216`) — the value pico's
 /// `z_query_reply_options_default` writes (`src/api/api.c:2118,2181`). NOT 0:

@@ -2550,7 +2550,7 @@ pub unsafe extern "C" fn zp_lease_task_is_running(zs: *const z_loaned_session_t)
 
 /// pico's default priority (pico `z_priority_default`) — `Z_PRIORITY_DATA`.
 #[no_mangle]
-pub extern "C" fn z_priority_default() -> core::ffi::c_int {
+pub extern "C" fn z_priority_default() -> crate::qos::z_priority_t {
     crate::qos::Z_PRIORITY_DEFAULT
 }
 
@@ -2558,7 +2558,7 @@ pub extern "C" fn z_priority_default() -> core::ffi::c_int {
 /// `Z_RELIABILITY_RELIABLE`, which is 0 on this ABI and 1 in wz's own enum.
 #[cfg(feature = "unstable-api")]
 #[no_mangle]
-pub extern "C" fn z_reliability_default() -> core::ffi::c_int {
+pub extern "C" fn z_reliability_default() -> crate::pubsub::z_reliability_t {
     crate::pubsub::Z_RELIABILITY_RELIABLE
 }
 

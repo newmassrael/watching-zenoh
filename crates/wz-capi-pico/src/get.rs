@@ -127,7 +127,7 @@
 //! status. That is a real seam, not a cost, and it is a follow-up round.
 
 use alloc::sync::Arc;
-use core::ffi::{c_int, c_void};
+use core::ffi::c_void;
 
 use wz_capi_port::cancellation::{register_fan, CancellableFan, CancellationToken, Registration};
 use wz_capi_port::ReplyCallback;
@@ -151,8 +151,8 @@ use wz_capi_port::WireKey;
 // --- pico enum-typed option fields -----------------------------------------
 
 /// pico `z_query_target_t` (`api/constants.h:262-266`): which queryables a get
-/// should reach. A plain C enum, so it occupies an `int`.
-pub type z_query_target_t = c_int;
+/// should reach. A plain C enum, as wide as the target's C ABI makes it (`crate::c_enum`).
+pub type z_query_target_t = crate::c_enum::PicoEnum;
 /// pico `Z_QUERY_TARGET_BEST_MATCHING` = 0 (`constants.h:262`), also
 /// `Z_QUERY_TARGET_DEFAULT`.
 pub const Z_QUERY_TARGET_BEST_MATCHING: z_query_target_t = 0;
@@ -161,10 +161,11 @@ pub const Z_QUERY_TARGET_ALL: z_query_target_t = 1;
 /// pico `Z_QUERY_TARGET_ALL_COMPLETE` = 2 (`constants.h:264`).
 pub const Z_QUERY_TARGET_ALL_COMPLETE: z_query_target_t = 2;
 
-/// pico `z_consolidation_mode_t` (`api/constants.h:184-189`).
-pub type z_consolidation_mode_t = c_int;
+/// pico `z_consolidation_mode_t` (`api/constants.h:184-189`), the one pico enum with a
+/// negative value, as wide as the target's C ABI makes it (`crate::c_enum`).
+pub type z_consolidation_mode_t = crate::c_enum::PicoSignedEnum;
 /// pico `Z_CONSOLIDATION_MODE_AUTO` = **-1** (`constants.h:184`), also
-/// `Z_CONSOLIDATION_MODE_DEFAULT`. Negative, hence the signed `int`.
+/// `Z_CONSOLIDATION_MODE_DEFAULT`. Negative, hence the signed type.
 pub const Z_CONSOLIDATION_MODE_AUTO: z_consolidation_mode_t = -1;
 /// pico `Z_CONSOLIDATION_MODE_NONE` = 0 (`constants.h:185`).
 pub const Z_CONSOLIDATION_MODE_NONE: z_consolidation_mode_t = 0;
@@ -686,8 +687,8 @@ pub struct z_get_options_t {
     /// shipped.
     pub encoding: *mut crate::encoding::z_moved_encoding_t,
     pub consolidation: z_query_consolidation_t,
-    pub congestion_control: c_int,
-    pub priority: c_int,
+    pub congestion_control: crate::qos::z_congestion_control_t,
+    pub priority: crate::qos::z_priority_t,
     pub is_express: bool,
     /// Only with `local-queryable`, between `is_express` and `target` as pico
     /// declares it; `target` moves from 32 to 36 and nothing after it moves.

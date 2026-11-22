@@ -241,6 +241,8 @@ mod advanced_plane;
 #[cfg(feature = "app-transport")]
 pub mod app_transport;
 pub mod bytes;
+// The width of pico's C enums in the structs a C program allocates, read from the target's C ABI.
+pub mod c_enum;
 // The conformance digest of this build (decision C15), handed out by `wz_ext_conformance_digest`.
 pub mod conformance;
 // What the cooperative engine is given by the system the build runs on (the tokio engine brings
