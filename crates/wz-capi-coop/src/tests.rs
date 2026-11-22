@@ -1688,6 +1688,113 @@ fn a_build_without_groups_refuses_a_session_that_joins_one() {
     );
 }
 
+/// The open with the config's maker answers what the open with the config answers, the maker run
+/// once whether the open succeeds or is refused: a config that names nothing to dial or listen on
+/// is refused with `NoEndpoint` both ways, after the maker ran once. Turned red by an open that
+/// makes the config twice, or reads it otherwise than `open_in`.
+#[test]
+fn a_config_made_inside_the_open_is_refused_as_the_config_handed_in() {
+    use crate::arena::AllocatorMemory;
+    use crate::{OpenError, OpenKeyIds};
+    use std::cell::Cell;
+    use wz_session_core::policy::SessionPolicy;
+
+    let made = Cell::new(0u32);
+    let refused = Engine::open_made_in(
+        PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        PosixClock,
+        PosixEntropy,
+        || {
+            made.set(made.get() + 1);
+            client_config()
+        },
+        SessionPolicy::defaults(),
+        OpenKeyIds::none(),
+        &AllocatorMemory,
+    )
+    .err();
+    assert_eq!(refused, Some(OpenError::NoEndpoint));
+    assert_eq!(made.get(), 1, "the maker runs once, inside the open");
+    let handed_in = Engine::open(
+        PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        PosixClock,
+        PosixEntropy,
+        client_config(),
+    )
+    .err();
+    assert_eq!(
+        handed_in, refused,
+        "CONTROL: the config handed in is refused the same way"
+    );
+}
+
+/// A session opened from a config its maker builds is the session the same config opens handed
+/// in: a listener on a loopback port the kernel picks announces the zid the config states and
+/// reserved an arena of the same bytes either way.
+#[cfg(feature = "listen")]
+#[test]
+fn a_config_made_inside_the_open_opens_the_session_the_config_opens() {
+    use crate::arena::AllocatorMemory;
+    use crate::OpenKeyIds;
+    use wz_session_core::policy::SessionPolicy;
+
+    let listener = || CoopConfig {
+        whatami: WhatAmI::Peer,
+        zid: Some(vec![0xa7; 4]),
+        listen: vec!["tcp/127.0.0.1:0".to_owned()],
+        ..client_config()
+    };
+    let made = Engine::open_made_in(
+        PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        PosixClock,
+        PosixEntropy,
+        listener,
+        SessionPolicy::defaults(),
+        OpenKeyIds::none(),
+        &AllocatorMemory,
+    )
+    .expect("a listener opens once it is bound");
+    let handed_in = open_with(listener());
+    assert_eq!(
+        SessionDrive::zid(&*made),
+        SessionDrive::zid(&*handed_in),
+        "the zid the config states"
+    );
+    assert_eq!(made.arena_bytes(), handed_in.arena_bytes());
+    assert_eq!(made.listening().len(), 1, "one port is bound");
+}
+
+/// An open that fails once its engine is built ends what it began: the port it bound before its
+/// dial was refused is let go of, so a listener can bind it again at once.
+#[cfg(feature = "listen")]
+#[test]
+fn an_open_whose_dial_is_refused_lets_go_of_the_port_it_bound() {
+    let free_port = || {
+        std::net::TcpListener::bind(std::net::SocketAddr::from((LOOPBACK, 0)))
+            .and_then(|taken| taken.local_addr())
+            .expect("a free loopback port")
+            .port()
+    };
+    let (bound, dead) = (free_port(), free_port());
+    let refused = Engine::open(
+        PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        PosixClock,
+        PosixEntropy,
+        CoopConfig {
+            whatami: WhatAmI::Peer,
+            listen: vec![format!("tcp/127.0.0.1:{bound}")],
+            endpoints: vec![format!("tcp/127.0.0.1:{dead}")],
+            ..client_config()
+        },
+    );
+    assert!(
+        refused.is_err(),
+        "no node listens on the endpoint it dials, and it redials none"
+    );
+    std::net::TcpListener::bind(std::net::SocketAddr::from((LOOPBACK, bound)))
+        .expect("the failed open let go of its port");
+}
+
 #[cfg(all(feature = "ticker", feature = "query", feature = "liveliness"))]
 mod advanced;
 mod arena;
