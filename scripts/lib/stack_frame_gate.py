@@ -746,6 +746,29 @@ IMAGES = (
         # that recovers the kit's text (which frame fell was not attributed).
         peak=10552,
     ),
+    # The pico C ABI on the cooperative engine for Zephyr, arm W of the MCU speed matrix
+    # (`deploy/zephyr-mcu-speed`, `scripts/mcu-speed.sh`, which runs this row on each image of the
+    # arm it builds). The program's main thread opens the session, so the chain held is the one under
+    # `z_open`: the engine put together (`CoopEngine::assemble`, the registry's sets of face tables
+    # and the delivery lane), the dial, and a face's loss and the session's end beneath them
+    # (`Core::remove_face`, `Core::end_links`). Every frame of the image is held to half the stack,
+    # as in the rows above.
+    #
+    # The image of 2026-11-22 did not boot: the stack overflowed inside `z_open`, whose chain held
+    # `CoopEngine::assemble` at 16,128 bytes (the delivery lane built as a value and moved twice)
+    # and `Registry::new` at 55,040 (each face's tables, 18 KB, built as a value and moved), and the
+    # image's other frames over 8,192 were `Core::remove_face` 36,352, `Registry::give_back` and
+    # `Core::end_links` 18,176 each and `FaceRows::lent` 8,960 (docs/coop-mcu-stack.md, findings 10
+    # to 12). No `peak` is committed: the image has not been read since the sets and the lane were
+    # built where they are kept, so the gate reports the chain until a reading commits it.
+    Image(
+        key="zephyr-mcu-speed-w",
+        elf=None,
+        source="deploy/zephyr-mcu-speed/prj.conf",
+        pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
+        unit=1,
+        entry="z_open",
+    ),
 )
 
 _HEAD = re.compile(r"^([0-9a-f]{8}) <(.*)>:$")

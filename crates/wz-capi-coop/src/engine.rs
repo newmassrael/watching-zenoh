@@ -3121,9 +3121,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let reassembly = arena.lend_reassembly(&plan).map_err(OpenError::Arena)?;
         // SAFETY: the area is the arena's, lent to the lane alone, and the arena is the session's
         // and given back only when the session is let go, after its last delivery.
-        let samples = Arc::new(Mutex::new(unsafe {
-            SampleLane::over(lane_area, lane_bytes, &resolve_limits(&config))
-        }));
+        let samples =
+            unsafe { SampleLane::shared_over(lane_area, lane_bytes, &resolve_limits(&config)) };
         let mut entropy = SharedEntropy::new(entropy);
         let wire = match (&config.zid, policy.zid_derivation()) {
             (Some(zid), _) => wire_zid(zid)?,

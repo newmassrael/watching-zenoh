@@ -206,6 +206,43 @@ fn a_full_lane_drops_what_may_be_dropped_and_counts_apart_what_holds_its_sender(
     assert_eq!(view.payload().len(), 8);
 }
 
+/// A lane built where the lock it is shared behind keeps it serves as one built by value: a full
+/// lane drops what may be dropped and counts it, and hands what it kept, alike.
+#[test]
+fn a_lane_built_in_its_shared_place_serves_as_one_built_by_value() {
+    let Some(mut by_value) = lane(1024, 1) else {
+        return;
+    };
+    let mut limits = SessionLimits::defaults();
+    assert!(limits.select_delivery_lane_bytes(1024).is_ok());
+    assert!(limits
+        .select_delivery_lane_events(Quota::at_most(1))
+        .is_ok());
+    let area: &'static mut [u8] = vec![0u8; 1024].leak();
+    // SAFETY: the area is leaked, so it outlives the lane, and nothing else uses it.
+    let shared =
+        unsafe { SampleLane::shared_over(NonNull::from(area).cast::<u8>(), 1024, &limits) };
+    let mut in_place = shared.lock();
+    for lane in [&mut by_value, &mut *in_place] {
+        assert_eq!(
+            lane.counts(),
+            LaneCounts::default(),
+            "CONTROL: nothing is counted yet"
+        );
+        lane.offer(1, &best_effort(8));
+        lane.offer(1, &best_effort(8));
+        assert_eq!(
+            lane.counts(),
+            LaneCounts {
+                dropped: 1,
+                held_over: 0
+            }
+        );
+        assert_eq!(drain(lane), [(vec![1], 0xab)]);
+        assert!(lane.take_front().is_none(), "nothing is left");
+    }
+}
+
 /// A sample longer than the whole area is refused, whatever is queued.
 #[test]
 fn a_sample_longer_than_the_area_is_refused() {

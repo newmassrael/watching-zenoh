@@ -109,6 +109,27 @@ mod host {
             Self(std::sync::Mutex::new(value))
         }
 
+        /// A new mutex written in `place` around the value `make` writes in the place it is
+        /// handed and lends back. The host's mutex is not written field by field, so the value is
+        /// made in a place of this frame and moved into the mutex once: a host's stack holds it.
+        /// A maker that lends back anything but the place it was handed has not written it there,
+        /// and is refused with a panic. `place` is overwritten without dropping what it held.
+        pub fn new_in(
+            place: &mut core::mem::MaybeUninit<Self>,
+            make: impl FnOnce(&mut core::mem::MaybeUninit<T>) -> &mut T,
+        ) -> &mut Self {
+            let mut value = core::mem::MaybeUninit::uninit();
+            let cell: *const T = value.as_ptr();
+            let made: *const T = make(&mut value);
+            assert!(
+                core::ptr::eq(made, cell),
+                "the value is written in the place it was handed"
+            );
+            // SAFETY: `make` lent back this place as a `T`, which safe code does only by writing
+            // a `T` there (`MaybeUninit::write`).
+            place.write(Self::new(unsafe { value.assume_init() }))
+        }
+
         /// Wait until the mutex is this thread's. A mutex poisoned by a panic still holds a
         /// consistent value (every critical section of an engine leaves it so), and is recovered.
         pub fn lock(&self) -> MutexGuard<'_, T> {
@@ -171,8 +192,9 @@ mod kernel {
     use alloc::boxed::Box;
     use core::cell::UnsafeCell;
     use core::ffi::{c_int, c_void};
+    use core::mem::MaybeUninit;
     use core::ops::{Deref, DerefMut};
-    use core::ptr::NonNull;
+    use core::ptr::{addr_of_mut, NonNull};
 
     extern "C" {
         fn wz_os_mutex_new() -> *mut c_void;
@@ -268,14 +290,46 @@ mod kernel {
         /// `value`, behind a new mutex. A kernel with no mutex left is out of memory, which this
         /// answers as an allocation that failed.
         pub fn new(value: T) -> Self {
-            // SAFETY: the image's contract (module doc).
-            let raw = NonNull::new(unsafe { wz_os_mutex_new() }).unwrap_or_else(|| {
-                alloc::alloc::handle_alloc_error(core::alloc::Layout::new::<T>())
-            });
             Self {
-                raw,
+                raw: Self::raw(),
                 value: UnsafeCell::new(value),
             }
+        }
+
+        /// A new mutex written in `place` around the value `make` writes in the place it is
+        /// handed and lends back: neither the value nor the mutex is a value of its own on a
+        /// stack, where `new` takes the value by value and returns the mutex by value. A maker
+        /// that lends back anything but the place it was handed has not written it there, and is
+        /// refused with a panic. `place` is overwritten without dropping what it held.
+        pub fn new_in(
+            place: &mut MaybeUninit<Self>,
+            make: impl FnOnce(&mut MaybeUninit<T>) -> &mut T,
+        ) -> &mut Self {
+            let at = place.as_mut_ptr();
+            // SAFETY: `at` is valid for writes of a `Self`, and each field is written once
+            // through a pointer to it: the value in its cell (`UnsafeCell<T>` and
+            // `MaybeUninit<T>` each have the layout of `T`) by `make`, which lent the cell back
+            // and so wrote it, then the kernel's mutex.
+            unsafe {
+                let cell = &mut *addr_of_mut!((*at).value).cast::<MaybeUninit<T>>();
+                let field: *const T = cell.as_ptr();
+                let made: *const T = make(cell);
+                assert!(
+                    core::ptr::eq(made, field),
+                    "the value is written in the place it was handed"
+                );
+                addr_of_mut!((*at).raw).write(Self::raw());
+                &mut *at
+            }
+        }
+
+        /// A new kernel mutex. A kernel with no mutex left is out of memory, which this answers
+        /// as an allocation that failed.
+        fn raw() -> NonNull<c_void> {
+            // SAFETY: the image's contract (module doc).
+            NonNull::new(unsafe { wz_os_mutex_new() }).unwrap_or_else(|| {
+                alloc::alloc::handle_alloc_error(core::alloc::Layout::new::<T>())
+            })
         }
 
         /// Wait until the mutex is this thread's.
@@ -414,7 +468,9 @@ mod sys {
     use alloc::boxed::Box;
     use alloc::sync::Arc;
     use core::cell::UnsafeCell;
+    use core::mem::MaybeUninit;
     use core::ops::{Deref, DerefMut};
+    use core::ptr::addr_of_mut;
     use core::sync::atomic::{AtomicBool, Ordering};
 
     use wz_host_sync::{RawCondvar, RawLock, ThreadStart};
@@ -511,6 +567,33 @@ mod sys {
             Self {
                 raw: RawLock::new(),
                 value: UnsafeCell::new(value),
+            }
+        }
+
+        /// A new mutex written in `place` around the value `make` writes in the place it is
+        /// handed and lends back: neither the value nor the mutex is a value of its own on a
+        /// stack. A maker that lends back anything but the place it was handed has not written it
+        /// there, and is refused with a panic. `place` is overwritten without dropping what it
+        /// held.
+        pub fn new_in(
+            place: &mut MaybeUninit<Self>,
+            make: impl FnOnce(&mut MaybeUninit<T>) -> &mut T,
+        ) -> &mut Self {
+            let at = place.as_mut_ptr();
+            // SAFETY: `at` is valid for writes of a `Self`, and each field is written once
+            // through a pointer to it: the value in its cell (`UnsafeCell<T>` and
+            // `MaybeUninit<T>` each have the layout of `T`) by `make`, which lent the cell back
+            // and so wrote it, then the lock.
+            unsafe {
+                let cell = &mut *addr_of_mut!((*at).value).cast::<MaybeUninit<T>>();
+                let field: *const T = cell.as_ptr();
+                let made: *const T = make(cell);
+                assert!(
+                    core::ptr::eq(made, field),
+                    "the value is written in the place it was handed"
+                );
+                addr_of_mut!((*at).raw).write(RawLock::new());
+                &mut *at
             }
         }
 
@@ -665,6 +748,20 @@ mod sys {
             handle.join();
         }
 
+        /// A mutex made in its place holds the value its maker wrote there, and its lock is the
+        /// lock a mutex made by value has.
+        #[test]
+        fn a_mutex_made_in_its_place_holds_what_its_maker_wrote() {
+            let mut place = core::mem::MaybeUninit::<Mutex<u32>>::uninit();
+            let mutex = Mutex::new_in(&mut place, |value| value.write(7));
+            let guard = mutex.lock();
+            assert!(mutex.try_lock().is_none(), "a held mutex is not given");
+            drop(guard);
+            assert_eq!(mutex.try_lock().map(|value| *value), Some(7));
+            // SAFETY: `new_in` wrote the whole mutex into `place`, and it is dropped once.
+            unsafe { place.assume_init_drop() };
+        }
+
         /// A held mutex is not given to a try, by this thread or another, and is once let go;
         /// `get_mut` reaches the value with no lock.
         #[test]
@@ -752,5 +849,25 @@ mod tests {
         })
         .join();
         assert_eq!(*shared.lock(), 3);
+    }
+
+    /// A mutex made in its place holds the value its maker wrote there, as one made by value.
+    #[test]
+    fn a_mutex_made_in_its_place_holds_what_its_maker_wrote() {
+        let mut place = core::mem::MaybeUninit::<Mutex<u32>>::uninit();
+        let mutex = Mutex::new_in(&mut place, |value| value.write(7));
+        *mutex.lock() += 1;
+        assert_eq!(*mutex.lock(), 8);
+        // SAFETY: `new_in` wrote the whole mutex into `place`, and it is dropped once.
+        unsafe { place.assume_init_drop() };
+    }
+
+    /// A maker that lends back a value it did not write in the place it was handed is refused.
+    #[test]
+    #[should_panic(expected = "the value is written in the place it was handed")]
+    fn a_maker_that_lends_back_another_place_is_refused() {
+        let elsewhere: &'static mut u32 = std::boxed::Box::leak(std::boxed::Box::new(1));
+        let mut place = core::mem::MaybeUninit::<Mutex<u32>>::uninit();
+        Mutex::new_in(&mut place, |_| elsewhere);
     }
 }

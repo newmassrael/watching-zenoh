@@ -2996,23 +2996,35 @@ impl SubscriberPeer<Lent> {
     /// An empty side whose interest table (`interests` rows) and staging (`staged` rows) are lent
     /// from `arena`. Refused when either is over the build's capacity or the arena has not the
     /// room. The alias table is the policy's inline one.
-    #[cfg(feature = "declare-subscriber")]
     pub fn lent(arena: &mut Arena, interests: usize, staged: usize) -> Result<Self, LendRefused> {
-        Ok(Self {
-            interests: InterestSide::lent(arena, interests, staged)?,
-            ..Self::default()
-        })
+        let mut side = Self::default();
+        side.lend_rows(arena, interests, staged)?;
+        Ok(side)
     }
 
-    /// An empty side: a build without `declare-subscriber` keeps no interest of the peer, so
-    /// nothing is lent.
+    /// Lend an empty side its interest table (`interests` rows) and staging (`staged` rows) from
+    /// `arena`, where it lies: what [`Self::lent`] makes, without the side, whose alias table is
+    /// inline and kilobytes, being a value of its own. Refused as `lent` is.
+    #[cfg(feature = "declare-subscriber")]
+    pub fn lend_rows(
+        &mut self,
+        arena: &mut Arena,
+        interests: usize,
+        staged: usize,
+    ) -> Result<(), LendRefused> {
+        self.interests = InterestSide::lent(arena, interests, staged)?;
+        Ok(())
+    }
+
+    /// Nothing to lend: a build without `declare-subscriber` keeps no interest of the peer.
     #[cfg(not(feature = "declare-subscriber"))]
-    pub fn lent(
+    pub fn lend_rows(
+        &mut self,
         _arena: &mut Arena,
         _interests: usize,
         _staged: usize,
-    ) -> Result<Self, LendRefused> {
-        Ok(Self::default())
+    ) -> Result<(), LendRefused> {
+        Ok(())
     }
 
     /// The bytes of an arena [`Self::lent`] takes. `None` past the address space.
