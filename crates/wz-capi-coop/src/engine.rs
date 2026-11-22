@@ -655,6 +655,12 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     /// holder, as one that took the queue a moment before the leg was handed does; a read step
     /// always looks under the lock ([`Self::send_handed_now`]).
     owed: AtomicBool,
+    /// Whether the last read's step left a link holding input it had already taken from its stack
+    /// (a batch behind the one it read, the rest of a datagram the lane had no room for), or a
+    /// group with a datagram its next step reads: the next read steps at once, with no wait to
+    /// work out under the session's lock, since that wait would be none. Written by the step, under
+    /// the lock; a stale `true` costs one step that finds nothing, after which the read waits.
+    input_held: AtomicBool,
     /// How many handed legs of each priority are held at most: as many as the session's queue
     /// holds batches of that priority (`TxQueueConf::sizes`), which is as many as a face whose
     /// queue were its own would take before a droppable message found no room on it.
@@ -2816,6 +2822,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         None
     }
 
+    /// Whether a link of the session holds input it has already taken from its stack, or a group
+    /// took a datagram its next step reads: what makes a read's wait none ([`Self::idle_wait`]).
+    fn holds_input(&self) -> bool {
+        #[cfg(feature = "group")]
+        if self.groups.iter().any(GroupFace::took_input) {
+            return true;
+        }
+        self.faces.iter().any(|face| match &face.link {
+            Link::Up(wire) | Link::Opening { wire, .. } => wire.link.holds_input(),
+            _ => false,
+        })
+    }
+
     /// What a read waits for before it steps the session: the link's next input, for at most
     /// [`CoopConfig::idle_wait_ms`], unless the link already holds some or waits in its own loop;
     /// and while no link is open, the next dial, for no longer either. zenoh-pico's read waits
@@ -3321,6 +3340,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             sending_on: AtomicU64::new(NOT_SENDING),
             handed: Mutex::new(VecDeque::new()),
             owed: AtomicBool::new(false),
+            input_held: AtomicBool::new(false),
             handed_at_most,
             #[cfg(feature = "transport-stats")]
             unsent_drops: AtomicU64::new(0),
@@ -3851,19 +3871,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 Some(held) => held,
                 None => own.insert(Resolved::new()),
             };
-            // A sample handed where its datagram lies is older than anything written into the lane
-            // while it waited, so it goes first; the link it lies in is read again once it is back.
-            if let Some(lent) = delivery.take_lent() {
-                handed = true;
-                let sample = lent.sample();
-                self.hand_sample(resolved, sample, sample.subscribers());
-                drop(lent);
-            }
             while let Some((item, head)) = delivery.take() {
                 handed = true;
                 match item {
                     LaneItem::Sample(sample) => {
                         self.hand_sample(resolved, &sample, sample.subscribers());
+                    }
+                    // The samples of a lent datagram, one record for all of them: each handed to
+                    // its subscribers from a view of its entry, and the datagram given back once,
+                    // after the last of them.
+                    LaneItem::Batch(batch) => {
+                        for sample in batch.samples() {
+                            self.hand_sample(resolved, &sample, sample.subscribers());
+                        }
                     }
                     #[cfg(feature = "query")]
                     LaneItem::Reply(reply) => {
@@ -5048,9 +5068,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             &keyexpr,
             allowed_origin,
             // SAFETY: the registry hands its sinks a sample under the session's lock.
-            BoxedSink::new(move |sample: &dyn SampleView| {
-                unsafe { lane.held() }.offer_sample(id, sample)
-            }),
+            BoxedSink::new(move |sample: &dyn SampleView| unsafe { lane.offer_sample(id, sample) }),
         );
         // A registration the observer refuses is a refused declaration, told as one: an id
         // answered for it would name a subscriber that hears nothing and was never announced.
@@ -6374,10 +6392,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
 
     fn read(&self, _single: bool) -> Result<(), SessionClosed> {
         // The wait comes first and holds nothing of the session, so what arrives during it is
-        // read by this call and a publisher on another thread is not held up by it.
-        let wait = self
-            .live()
-            .map_or(IdleWait::None, |mut core| core.0.idle_wait());
+        // read by this call and a publisher on another thread is not held up by it. Input the last
+        // step left held makes it none, which it is then without the session taken to say so:
+        // under a stream of batches each read takes the session once, for its step.
+        let wait = if self.input_held.swap(false, Ordering::Relaxed) {
+            IdleWait::None
+        } else {
+            self.live()
+                .map_or(IdleWait::None, |mut core| core.0.idle_wait())
+        };
         let spare = wait.wait();
         // One pass of the session's task reads what its link holds, a batch at a time, and does
         // what is due: `single` asks for one message, and a pass is the least this engine reads.
@@ -6387,6 +6410,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
             Some(mut core) => {
                 core.0.give_back_waits(spare);
                 let stepped = self.step(&mut core.0);
+                self.input_held
+                    .store(stepped.is_some() && core.0.holds_input(), Ordering::Relaxed);
                 let jobs_due_ms = stepped.and_then(|now_us| core.0.jobs_due_at(now_us));
                 // What publishes handed to the session while it was held leaves on this step too,
                 // so a program that only reads its session sends it.

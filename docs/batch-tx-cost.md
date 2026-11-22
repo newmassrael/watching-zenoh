@@ -143,3 +143,53 @@ the takes (`CoopEngine::takes`), the searches (`CoopEngine::peer_looks`), the qu
 lending driver (`lent_slot_send`'s `storage_asks`) and the socket's waits for room (`stream_link`'s
 `room_waits`); a profile of the publisher's thread, taken again after rows 5 to 9, is what says
 how much of the estimate each of them was.
+
+## 6. One round trip
+
+Measured on the same Windows x64 host over loopback, peer mode, each probe pinned to four CPUs:
+TCP round trip at 8 B, median 46.5 us for wz against 30.0 us for zenoh-pico, the pong answering
+47 k pings in the time pico's answered 68 k; over multicast wz is 1.06 times pico's. This section
+traces one round trip of the pong side on the cooperative engine (the read task wakes, steps,
+delivers, the callback puts, the put writes) against zenoh-pico's, and counts what each does. Read
+from the source, not measured.
+
+zenoh-pico's read task reads the socket with one blocking `recv` bounded by the socket's receive
+timeout (`vendor/zenoh-pico/src/link/transport/tcp/tcp_windows.c` @
+`int rb = recv(sock._sock._fd, (char *)ptr, (int)len, 0);`), decodes, takes the session mutex for
+the subscription lookup and calls the callback, whose put takes the transmit mutex and sends.
+
+| Step | zenoh-pico | wz before `rx-stream` | wz after |
+|---|---|---|---|
+| wait for the ping | the `recv` below, blocking | `WSAPoll` (`poll` on POSIX), the read's wait with nothing of the session held, after one take of the session to work the wait out | the same |
+| read the batch | one `recv` | `WSAPoll(0)` and `recv` on Windows (one `recv` on POSIX), under the step's take of the session | one `recv` (a9d542f57) |
+| look for more in the same step | none | a second read of the stream, which found nothing: `WSAPoll(0)` on Windows, a `recv` answering `EAGAIN` on POSIX | none: the pong's sample lies in the stream's buffer, so the link is not read again until it is delivered (cec3473f5, e6a430162) |
+| after the Push record | nothing | the drain's burst: the conduit's lock taken and given back to flush nothing (eight with `transport-qos`) | nothing (f2b0c6a25) |
+| hand the sample over | session mutex for the lookup, then the callback | the step lets go of the session; the delivery takes the sample from the lane's queue and locks the callback's mutex | the same, the sample read where it lies rather than from a copy |
+| the pong's put | the transmit mutex, one `send` | one take of the session, the conduit's lock, one `WSASend` tried first, no wait for room (section 3, row 7) | the same |
+| the handed legs | none | one look under their lock each read | the same |
+| wakes | none | none: the put writes on the callback's thread; only a put that finds the session held by a step hands its leg to that step (`CoopEngine::hand_off`), and nothing is woken for it | the same |
+
+System calls a round trip, pong side: zenoh-pico 2 (`recv`, `send`); wz before 5 on Windows (`WSAPoll`,
+`WSAPoll`, `recv`, `WSAPoll`, `WSASend`) and 4 on POSIX (`poll`, `recv`, `recv`, `send`); after,
+3 on both (the wait, `recv`, the send). Lock pairs: zenoh-pico 2; wz 3 takes of the session (the
+wait, the step, the put), the handed legs, the conduit and the callback's mutex, where before the
+empty drain added the conduit once more (or eight times).
+
+What is left, and why it stays for now:
+
+* The wait before the read. wz waits for input with nothing of the session held and reads under
+  the session's lock, so a publisher on another thread is not held behind a reader that sleeps; a
+  blocking read would sleep holding the link's buffer, which is the session's. One `WSAPoll` a
+  round trip is the price of that.
+* The second take of the session for the read's wait (item 9 of `docs/rx-sample-cost.md`), and the
+  look at the handed legs each read, which a test holds as its CONTROL
+  (`tests::a_publish_with_nothing_handed_takes_the_session_once_and_not_the_handed_queue`): it is
+  what sends a leg a put handed across a stale reading of the word that says one waits.
+* The callback's mutex: with `local-subscriber` a session's own put hands its subscribers the
+  sample on the putting thread, beside the read task's delivery.
+
+The tests that count what changed: `stream_link::tests::a_lent_batch_lies_where_it_was_lent_until_the_next_receive`,
+`tests::listen::the_puts_of_one_stream_batch_are_handed_where_they_lie_in_a_few_reads`,
+`slot_observer::tests::a_drain_with_nothing_staged_opens_no_burst` and
+`windows::stream::tests::a_read_asks_the_stream_with_no_poll_before_it`. The Windows probes are the
+measurement.

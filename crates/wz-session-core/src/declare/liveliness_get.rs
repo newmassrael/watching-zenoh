@@ -254,6 +254,11 @@ impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
         taken
     }
 
+    /// Whether a terminated get is staged for [`Self::take_finalized`], asked without taking it.
+    pub fn has_finalized(&self) -> bool {
+        !self.finalized.is_empty()
+    }
+
     /// Register a pending get keyed by `interest_id`. Fresh ids come
     /// from
     /// `crate::session_glue::SessionLinkActions::alloc_next_interest_id`,
