@@ -438,8 +438,11 @@ fn the_puts_of_one_stream_batch_are_handed_where_they_lie_in_a_few_reads() {
             })
         }),
     );
-    let peer = client(&endpoint, 0xc1);
+    // The client's open waits for the listener's answer, and this thread is what steps the
+    // listener: the client opens on a thread of its own meanwhile.
+    let dialing = std::thread::spawn(move || client(&endpoint, 0xc1));
     reads_until(&engine, "the client's face", || engine.faces_up() == 1);
+    let peer = dialing.join().expect("the client opens");
     // What the handshake and the declarations left on the link is read before the batch is sent.
     std::thread::sleep(Duration::from_millis(100));
     for _ in 0..4 {
