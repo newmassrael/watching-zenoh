@@ -190,11 +190,7 @@ fn a_cancelled_get_ends_without_a_step() {
 /// back at its deadline holds the next. The CONTROL is the first get, held and sent.
 #[test]
 fn a_get_past_its_table_is_refused_and_sends_nothing() {
-    let Some(limits) =
-        super::entity_tables::lowered(|l| l.select_max_pending_queries(Quota::at_most(1)).is_ok())
-    else {
-        return;
-    };
+    let limits = super::entity_tables::lowered(|l| l.select_max_pending_queries(Quota::at_most(1)));
     let router = Router::start(CatchAll::None);
     let engine = super::entity_tables::open_under(&router, limits);
     settle(&router, &engine, Command::Silence);

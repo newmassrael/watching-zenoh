@@ -13,7 +13,7 @@ use wz_capi_port::{
     WireKey,
 };
 use wz_session_core::declare_form::InterestForm;
-use wz_session_core::limit_binding::Quota;
+use wz_session_core::limit_binding::{OutsideLimitDomain, Quota};
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::locality::Locality;
 use wz_session_core::sink::SampleView;
@@ -22,11 +22,18 @@ use super::{client_config, config, open_with, until, CatchAll, Engine, Router};
 use crate::arena::ArenaPlan;
 use crate::CoopConfig;
 
-/// The build's limits with `select` applied, or `None` on a build whose domain of the limit is its
-/// own value alone, which a test cannot lower.
-pub(super) fn lowered(select: impl FnOnce(&mut SessionLimits) -> bool) -> Option<SessionLimits> {
+/// The build's limits with `select` applied. Every build these tests run in lets a test lower a
+/// limit; one that keeps a limit to its own value (`WZ_LIMIT_DOMAINS=defaults`, a target with no
+/// operating system) refuses the lowering, and the test fails naming the limit rather than passing
+/// without having opened the session it is about.
+pub(super) fn lowered(
+    select: impl FnOnce(&mut SessionLimits) -> Result<(), OutsideLimitDomain>,
+) -> SessionLimits {
     let mut limits = SessionLimits::defaults();
-    select(&mut limits).then_some(limits)
+    if let Err(refused) = select(&mut limits) {
+        panic!("this build refuses the limits the test lowers: {refused}");
+    }
+    limits
 }
 
 /// A session open to `router` under `limits`.
@@ -84,15 +91,13 @@ fn filter(engine: &Engine, plane: FilterPlane, key: &str) -> Option<FilterId> {
 /// and a querier's each.
 #[test]
 fn the_plan_lends_each_declaration_table_its_limit() {
-    let Some(limits) = lowered(|l| {
-        l.select_max_subscriptions(Quota::at_most(2)).is_ok()
-            && l.select_max_publishers(Quota::at_most(3)).is_ok()
-            && l.select_max_queriers(Quota::at_most(4)).is_ok()
-            && l.select_max_matching_listeners(Quota::at_most(5)).is_ok()
-            && l.select_max_declared_keyexprs(Quota::at_most(6)).is_ok()
-    }) else {
-        return;
-    };
+    let limits = lowered(|l| {
+        l.select_max_subscriptions(Quota::at_most(2))?;
+        l.select_max_publishers(Quota::at_most(3))?;
+        l.select_max_queriers(Quota::at_most(4))?;
+        l.select_max_matching_listeners(Quota::at_most(5))?;
+        l.select_max_declared_keyexprs(Quota::at_most(6))
+    });
     let plan = ArenaPlan::of(&client_config(), &limits).expect("lays an arena out");
     let rows = plan.entities();
     assert_eq!(rows.subscribers, 2);
@@ -119,9 +124,7 @@ fn the_plan_lends_each_declaration_table_its_limit() {
 /// Undeclaring one gives its row back, and the next declaration takes it.
 #[test]
 fn a_subscriber_past_its_table_is_refused_and_sends_nothing() {
-    let Some(limits) = lowered(|l| l.select_max_subscriptions(Quota::at_most(2)).is_ok()) else {
-        return;
-    };
+    let limits = lowered(|l| l.select_max_subscriptions(Quota::at_most(2)));
     let router = Router::start(CatchAll::None);
     let engine = open_under(&router, limits);
     let minted = Arc::new(AtomicUsize::new(0));
@@ -155,10 +158,7 @@ fn a_subscriber_past_its_table_is_refused_and_sends_nothing() {
 /// when the last hold goes.
 #[test]
 fn a_key_expression_past_its_table_is_refused_and_sends_nothing() {
-    let Some(limits) = lowered(|l| l.select_max_declared_keyexprs(Quota::at_most(1)).is_ok())
-    else {
-        return;
-    };
+    let limits = lowered(|l| l.select_max_declared_keyexprs(Quota::at_most(1)));
     let router = Router::start(CatchAll::None);
     let engine = open_under(&router, limits);
     let before = router.seen(|s| s.declares);
@@ -198,12 +198,10 @@ fn a_key_expression_past_its_table_is_refused_and_sends_nothing() {
 /// its own.
 #[test]
 fn a_write_filter_past_its_planes_count_is_refused_and_asks_nothing() {
-    let Some(limits) = lowered(|l| {
-        l.select_max_publishers(Quota::at_most(1)).is_ok()
-            && l.select_max_queriers(Quota::at_most(1)).is_ok()
-    }) else {
-        return;
-    };
+    let limits = lowered(|l| {
+        l.select_max_publishers(Quota::at_most(1))?;
+        l.select_max_queriers(Quota::at_most(1))
+    });
     let router = Router::start(CatchAll::None);
     let engine = open_under(&router, limits);
     let publisher =
@@ -245,10 +243,7 @@ fn a_write_filter_past_its_planes_count_is_refused_and_asks_nothing() {
 /// hold (id 0), before its Interest is asked; its sink goes with the refusal.
 #[test]
 fn a_matching_listener_past_its_table_is_refused_and_asks_nothing() {
-    let Some(limits) = lowered(|l| l.select_max_matching_listeners(Quota::at_most(1)).is_ok())
-    else {
-        return;
-    };
+    let limits = lowered(|l| l.select_max_matching_listeners(Quota::at_most(1)));
     let router = Router::start(CatchAll::None);
     let engine = open_under(&router, limits);
     let first_sink: MatchingSink = Arc::new(|_matching: bool| {});
@@ -301,9 +296,7 @@ fn a_queryable_past_its_table_is_refused_and_sends_nothing() {
     use wz_capi_port::{QueryCallback, QueryHolder, QueryableSink};
     use wz_session_core::query_sink::{QueryView, ReplyOut};
 
-    let Some(limits) = lowered(|l| l.select_max_queryables(Quota::at_most(1)).is_ok()) else {
-        return;
-    };
+    let limits = lowered(|l| l.select_max_queryables(Quota::at_most(1)));
     let router = Router::start(CatchAll::None);
     let engine = open_under(&router, limits);
     let minted = Arc::new(AtomicUsize::new(0));
@@ -351,9 +344,7 @@ fn a_queryable_past_its_table_is_refused_and_sends_nothing() {
 #[cfg(feature = "liveliness")]
 #[test]
 fn a_token_past_its_table_is_refused_and_sends_nothing() {
-    let Some(limits) = lowered(|l| l.select_max_local_tokens(Quota::at_most(1)).is_ok()) else {
-        return;
-    };
+    let limits = lowered(|l| l.select_max_local_tokens(Quota::at_most(1)));
     let router = Router::start(CatchAll::None);
     let engine = open_under(&router, limits);
     let first = engine
@@ -389,12 +380,7 @@ fn a_liveliness_subscriber_past_its_table_is_refused_and_asks_nothing() {
     use wz_capi_port::LivelinessSink;
     use wz_session_core::declare::liveliness_sample::LivelinessSample;
 
-    let Some(limits) = lowered(|l| {
-        l.select_max_liveliness_subscriptions(Quota::at_most(1))
-            .is_ok()
-    }) else {
-        return;
-    };
+    let limits = lowered(|l| l.select_max_liveliness_subscriptions(Quota::at_most(1)));
     let router = Router::start(CatchAll::None);
     let engine = open_under(&router, limits);
     let minted = Arc::new(AtomicUsize::new(0));
@@ -475,9 +461,7 @@ fn a_key_past_the_key_arena_is_refused_and_a_key_given_back_is_taken_again() {
 
     // Room for exactly two keys of eight bytes.
     let room = 2 * block_bytes("demo/k/1".len()).expect("a short key");
-    let Some(limits) = lowered(|l| l.select_key_arena_bytes(room).is_ok()) else {
-        return;
-    };
+    let limits = lowered(|l| l.select_key_arena_bytes(room));
     let plan = ArenaPlan::of(&client_config(), &limits).expect("lays an arena out");
     assert_eq!(plan.key_bytes(), room);
     let router = Router::start(CatchAll::None);

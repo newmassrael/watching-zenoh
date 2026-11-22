@@ -25,6 +25,7 @@ use wz_session_core::policy::SessionPolicy;
 use wz_session_core::publish_options::PublishOptions;
 use wz_session_core::session_actions::{BatchLendCounts, FrameLendCounts};
 
+use super::entity_tables::lowered;
 use super::{
     client_config, config, open, open_with, until, CatchAll, Command, Engine, Router, LOOPBACK,
 };
@@ -208,11 +209,7 @@ fn an_open_whose_limit_is_over_the_builds_value_dials_nothing() {
 /// session that states none.
 #[test]
 fn a_limit_lowered_at_open_lowers_its_row() {
-    let mut lowered = SessionLimits::defaults();
-    if lowered.select_max_subscriptions(Quota::at_most(2)).is_err() {
-        // A build that keeps the limit to its own value has no other.
-        return;
-    }
+    let lowered = lowered(|l| l.select_max_subscriptions(Quota::at_most(2)));
     let at_two = ArenaPlan::of(&client_config(), &lowered).expect("lays an arena out");
     let built =
         ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
@@ -289,11 +286,7 @@ fn each_declaration_limit_is_the_snapshots_under_the_builds_value() {
 /// batch over the stated one refuses the plan, naming the limit and both values.
 #[test]
 fn the_links_batch_is_held_to_the_snapshots() {
-    let mut lowered = SessionLimits::defaults();
-    if lowered.select_pico_unicast_batch_bytes(512).is_err() {
-        // A build that keeps the batch to its own value has no other.
-        return;
-    }
+    let lowered = lowered(|l| l.select_pico_unicast_batch_bytes(512));
     let fits = ArenaPlan::of(
         &CoopConfig {
             batch_size: 512,
@@ -356,11 +349,9 @@ fn the_plan_lays_out_the_delivery_lane_the_limits_state() {
         SessionLimits::defaults().delivery_lane_bytes()
     );
     assert_eq!(row(&built, "delivery lane flag").count, 1);
-    let mut lowered = SessionLimits::defaults();
-    if lowered.select_delivery_lane_bytes(1024).is_ok() {
-        let plan = ArenaPlan::of(&client_config(), &lowered).expect("lays an arena out");
-        assert_eq!(row(&plan, "delivery lane").entry_bytes, 1024);
-    }
+    let lowered = lowered(|l| l.select_delivery_lane_bytes(1024));
+    let plan = ArenaPlan::of(&client_config(), &lowered).expect("lays an arena out");
+    assert_eq!(row(&plan, "delivery lane").entry_bytes, 1024);
     let over = caps::DELIVERY_LANE_BYTES + 1;
     let mut raised = SessionLimits::defaults();
     if raised.select_delivery_lane_bytes(over).is_ok() {
@@ -395,16 +386,14 @@ fn the_plan_lays_out_the_key_arena_the_limits_state() {
         Some(row(&built, "key arena").entry_bytes),
         KeySpace::span_bytes(built.key_bytes())
     );
-    let mut lowered = SessionLimits::defaults();
-    if lowered.select_key_arena_bytes(512).is_ok() {
-        let plan = ArenaPlan::of(&client_config(), &lowered).expect("lays an arena out");
-        assert_eq!(plan.key_bytes(), 512);
-        assert_eq!(
-            Some(row(&plan, "key arena").entry_bytes),
-            KeySpace::span_bytes(512)
-        );
-        assert!(plan.reserved_bytes() < built.reserved_bytes());
-    }
+    let lowered = lowered(|l| l.select_key_arena_bytes(512));
+    let plan = ArenaPlan::of(&client_config(), &lowered).expect("lays an arena out");
+    assert_eq!(plan.key_bytes(), 512);
+    assert_eq!(
+        Some(row(&plan, "key arena").entry_bytes),
+        KeySpace::span_bytes(512)
+    );
+    assert!(plan.reserved_bytes() < built.reserved_bytes());
     let over = caps::KEY_ARENA_BYTES + 1;
     let mut raised = SessionLimits::defaults();
     if raised.select_key_arena_bytes(over).is_ok() {
@@ -497,14 +486,7 @@ fn each_faces_peer_tables_take_the_values_the_open_resolved() {
             (0, 0, 0)
         }
     );
-    let mut lowered = SessionLimits::defaults();
-    if lowered
-        .select_max_pending_declares(Quota::at_most(1))
-        .is_err()
-    {
-        // A build that keeps the limit to its own value has no other.
-        return;
-    }
+    let lowered = lowered(|l| l.select_max_pending_declares(Quota::at_most(1)));
     let at_one = ArenaPlan::of(&client_config(), &lowered).expect("lays an arena out");
     assert_eq!(at_one.peers().rows.pending_declares, 1);
     assert!(
@@ -534,14 +516,9 @@ fn each_link_is_lent_reassembly_buffers_of_the_snapshots_length() {
         built.reassembly(),
         (caps::PICO_FRAG_MAX_BYTES, 3 * LENT_CHAINS)
     );
-    let mut lowered = SessionLimits::defaults();
-    if lowered
-        .select_pico_frag_max_bytes(Quota::at_most(1024))
-        .is_ok()
-    {
-        let plan = ArenaPlan::of(&config, &lowered).expect("lays an arena out");
-        assert_eq!(row(&plan, "reassembly buffers").entry_bytes, 1024);
-    }
+    let lowered = lowered(|l| l.select_pico_frag_max_bytes(Quota::at_most(1024)));
+    let plan = ArenaPlan::of(&config, &lowered).expect("lays an arena out");
+    assert_eq!(row(&plan, "reassembly buffers").entry_bytes, 1024);
     let over = caps::PICO_FRAG_MAX_BYTES + 1;
     let mut raised = SessionLimits::defaults();
     if raised
@@ -592,14 +569,7 @@ fn the_plan_holds_the_queries_its_limit_resolves() {
     let built =
         ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
     assert_eq!(built.held_queries(), caps::MAX_PENDING_FINALS);
-    let mut lowered = SessionLimits::defaults();
-    if lowered
-        .select_max_pending_finals(Quota::at_most(1))
-        .is_err()
-    {
-        // A build that keeps the limit to its own value has no other.
-        return;
-    }
+    let lowered = lowered(|l| l.select_max_pending_finals(Quota::at_most(1)));
     let at_one = ArenaPlan::of(&client_config(), &lowered).expect("lays an arena out");
     assert_eq!(at_one.held_queries(), 1);
 }
@@ -851,21 +821,21 @@ fn pico_preset() -> Vec<(&'static str, usize)> {
     presets
 }
 
-/// The build's limits with the pico preset selected over them, or `None` in a build whose domain
-/// keeps a limit to its own value, which has no other.
-fn pico_preset_limits() -> Option<SessionLimits> {
-    let mut limits = SessionLimits::defaults();
-    for (id, value) in pico_preset() {
-        let entry = SESSION_LIMITS
-            .iter()
-            .find(|entry| entry.id() == id)
-            .expect("a preset names a limit of the session");
-        entry
-            .select(&mut limits, LimitValue::Integer(value))
-            .expect("the session reads the limit from its snapshot")
-            .ok()?;
-    }
-    Some(limits)
+/// The build's limits with the pico preset selected over them, through the lowering every build
+/// these tests run in allows (`lowered`).
+fn pico_preset_limits() -> SessionLimits {
+    lowered(|limits| {
+        for (id, value) in pico_preset() {
+            let entry = SESSION_LIMITS
+                .iter()
+                .find(|entry| entry.id() == id)
+                .expect("a preset names a limit of the session");
+            entry
+                .select(limits, LimitValue::Integer(value))
+                .expect("the session reads the limit from its snapshot")?;
+        }
+        Ok(())
+    })
 }
 
 /// The value the pico preset gives `id`, if it gives one.
@@ -896,10 +866,7 @@ fn the_pico_presets_arena_lends_the_presets_rows() {
             "the generated Kconfig states the pico preset of {id}"
         );
     }
-    let Some(limits) = pico_preset_limits() else {
-        // A build that keeps each limit to its own value has no preset to lower it to.
-        return;
-    };
+    let limits = pico_preset_limits();
     let plan = ArenaPlan::of(&client_config(), &limits).expect("the preset is under the build");
     let built =
         ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
@@ -964,10 +931,7 @@ fn the_pico_preset_stages_an_answer_to_every_entity_it_admits() {
 fn the_pico_presets_lane_holds_one_record() {
     let presets = pico_preset();
     let lane = preset_of(&presets, "DELIVERY_LANE_BYTES").expect("the preset states the lane");
-    let Some(limits) = pico_preset_limits() else {
-        // A build that keeps each limit to its own value has no preset to lower it to.
-        return;
-    };
+    let limits = pico_preset_limits();
     let frag = limits
         .pico_frag_max_bytes()
         .lent_under(Quota::at_most(caps::PICO_FRAG_MAX_BYTES))

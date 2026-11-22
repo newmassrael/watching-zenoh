@@ -438,11 +438,7 @@ fn a_get_made_inside_a_queryables_own_callback_is_answered_once_it_returns() {
 /// The CONTROL is the first get, whose query a queryable keeps in the one row.
 #[test]
 fn a_get_of_its_own_with_no_row_for_its_final_is_refused_whole() {
-    let Some(limits) =
-        super::entity_tables::lowered(|l| l.select_max_pending_finals(Quota::at_most(1)).is_ok())
-    else {
-        return;
-    };
+    let limits = super::entity_tables::lowered(|l| l.select_max_pending_finals(Quota::at_most(1)));
     let router = Router::start(CatchAll::None);
     let engine = super::entity_tables::open_under(&router, limits);
     settle(&router, &engine, Command::Silence);

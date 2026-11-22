@@ -122,9 +122,7 @@ fn a_subscribers_callback_is_dropped_once_on_close() {
 /// the refusal, once.
 #[test]
 fn a_refused_subscribers_factory_is_dropped_once_and_mints_nothing() {
-    let Some(limits) = lowered(|l| l.select_max_subscriptions(Quota::at_most(1)).is_ok()) else {
-        return;
-    };
+    let limits = lowered(|l| l.select_max_subscriptions(Quota::at_most(1)));
     let router = Router::start(CatchAll::None);
     let engine = open_under(&router, limits);
     let held = Counts::default();
@@ -148,10 +146,7 @@ fn a_refused_subscribers_factory_is_dropped_once_and_mints_nothing() {
 /// refusal: none of them outlives its end.
 #[test]
 fn a_matching_listeners_sink_is_let_go_of_on_each_end() {
-    let Some(limits) = lowered(|l| l.select_max_matching_listeners(Quota::at_most(1)).is_ok())
-    else {
-        return;
-    };
+    let limits = lowered(|l| l.select_max_matching_listeners(Quota::at_most(1)));
     let router = Router::start(CatchAll::None);
     let engine = open_under(&router, limits);
     let listen = |sink: MatchingSink| {
@@ -200,12 +195,7 @@ fn a_liveliness_subscribers_callback_is_dropped_once_on_each_end() {
     use wz_capi_port::LivelinessSink;
     use wz_session_core::declare::liveliness_sample::LivelinessSample;
 
-    let Some(limits) = lowered(|l| {
-        l.select_max_liveliness_subscriptions(Quota::at_most(1))
-            .is_ok()
-    }) else {
-        return;
-    };
+    let limits = lowered(|l| l.select_max_liveliness_subscriptions(Quota::at_most(1)));
     let router = Router::start(CatchAll::None);
     let engine = open_under(&router, limits);
     let sink = |counts: &Counts| -> LivelinessSink {
@@ -257,9 +247,7 @@ fn a_queryables_callback_is_dropped_once_on_each_end() {
     use wz_capi_port::{QueryCallback, QueryHolder, QueryableSink};
     use wz_session_core::query_sink::{QueryView, ReplyOut};
 
-    let Some(limits) = lowered(|l| l.select_max_queryables(Quota::at_most(1)).is_ok()) else {
-        return;
-    };
+    let limits = lowered(|l| l.select_max_queryables(Quota::at_most(1)));
     let router = Router::start(CatchAll::None);
     let engine = open_under(&router, limits);
     let sink = |counts: &Counts| -> QueryableSink {

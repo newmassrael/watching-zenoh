@@ -18,37 +18,40 @@ use wz_session_core::sink::{BorrowedSample, SampleView};
 
 use wz_capi_port::SubId;
 
+use super::entity_tables::lowered;
 use crate::lane::{LaneCounts, LaneItem, LaneSample, MatchFlips, ReadRoom, SampleLane};
 
 /// The QoS byte of a sample sent at the data priority whose congestion control holds its sender.
 const BLOCK: u8 = 0x05 | 0x08;
 
-/// A lane over an area of `bytes` the test leaks, admitting `events` samples at once; `None` in a
-/// build whose domains keep either limit to its own value.
-fn lane(bytes: usize, events: usize) -> Option<SampleLane> {
-    let mut limits = SessionLimits::defaults();
-    limits.select_delivery_lane_bytes(bytes).ok()?;
-    limits
-        .select_delivery_lane_events(Quota::at_most(events))
-        .ok()?;
+/// The build's limits with the lane's area `bytes` long, admitting `events` samples at once.
+fn lane_limits(bytes: usize, events: usize) -> SessionLimits {
+    lowered(|l| {
+        l.select_delivery_lane_bytes(bytes)?;
+        l.select_delivery_lane_events(Quota::at_most(events))
+    })
+}
+
+/// A lane over an area of `bytes` the test leaks, under `limits`.
+fn over(bytes: usize, limits: &SessionLimits) -> SampleLane {
     let area: &'static mut [u8] = vec![0u8; bytes].leak();
     // SAFETY: the area is leaked, so it outlives the lane, and nothing else uses it.
-    Some(unsafe { SampleLane::over(NonNull::from(area).cast::<u8>(), bytes, &limits) })
+    unsafe { SampleLane::over(NonNull::from(area).cast::<u8>(), bytes, limits) }
+}
+
+/// A lane over an area of `bytes` the test leaks, admitting `events` samples at once.
+fn lane(bytes: usize, events: usize) -> SampleLane {
+    over(bytes, &lane_limits(bytes, events))
 }
 
 /// [`lane`] whose callbacks owed at once are `callbacks` at most.
-fn lane_owing(bytes: usize, events: usize, callbacks: usize) -> Option<SampleLane> {
-    let mut limits = SessionLimits::defaults();
-    limits.select_delivery_lane_bytes(bytes).ok()?;
-    limits
-        .select_delivery_lane_events(Quota::at_most(events))
-        .ok()?;
-    limits
-        .select_delivery_lane_callbacks(Quota::at_most(callbacks))
-        .ok()?;
-    let area: &'static mut [u8] = vec![0u8; bytes].leak();
-    // SAFETY: the area is leaked, so it outlives the lane, and nothing else uses it.
-    Some(unsafe { SampleLane::over(NonNull::from(area).cast::<u8>(), bytes, &limits) })
+fn lane_owing(bytes: usize, events: usize, callbacks: usize) -> SampleLane {
+    let limits = lowered(|l| {
+        l.select_delivery_lane_bytes(bytes)?;
+        l.select_delivery_lane_events(Quota::at_most(events))?;
+        l.select_delivery_lane_callbacks(Quota::at_most(callbacks))
+    });
+    over(bytes, &limits)
 }
 
 /// The sample at the head of `lane`, and the subscribers it is for, held by the caller until it
@@ -97,9 +100,7 @@ fn best_effort(payload: usize) -> Sample {
 /// the lane's area, and the lane is empty once its callback is done.
 #[test]
 fn a_sample_is_handed_as_it_was_offered() {
-    let Some(mut lane) = lane(1024, 4) else {
-        return;
-    };
+    let mut lane = lane(1024, 4);
     let source = SourceInfo::new(&[9, 9], 3, 4);
     let sample = Sample::new_put("demo/a", b"payload".to_vec())
         .with_attachment(b"att".to_vec())
@@ -136,9 +137,7 @@ fn a_sample_is_handed_as_it_was_offered() {
 /// A sample with no attachment, encoding or timestamp is handed with none: absent is not empty.
 #[test]
 fn a_sample_with_no_metadata_is_handed_with_none() {
-    let Some(mut lane) = lane(256, 4) else {
-        return;
-    };
+    let mut lane = lane(256, 4);
     lane.offer(1, &Sample::new_del("demo/gone"));
     {
         let (_, view) = front(&mut lane).expect("the sample is at the head");
@@ -156,9 +155,7 @@ fn a_sample_with_no_metadata_is_handed_with_none() {
 /// the head is complete: no sample is handed twice.
 #[test]
 fn a_second_delivery_finds_the_head_held() {
-    let Some(mut lane) = lane(256, 4) else {
-        return;
-    };
+    let mut lane = lane(256, 4);
     lane.offer(1, &filled(8, 1));
     lane.offer(2, &filled(8, 2));
     let (first, _) = front(&mut lane).expect("the first sample");
@@ -178,9 +175,7 @@ fn a_full_lane_drops_what_may_be_dropped_and_counts_apart_what_holds_its_sender(
         QosLevel::from_raw(BLOCK).congestion(),
         CongestionControl::Block
     );
-    let Some(mut lane) = lane(1024, 1) else {
-        return;
-    };
+    let mut lane = lane(1024, 1);
     lane.offer(1, &best_effort(8));
     lane.offer(1, &best_effort(8));
     assert_eq!(
@@ -211,14 +206,8 @@ fn a_full_lane_drops_what_may_be_dropped_and_counts_apart_what_holds_its_sender(
 /// lane drops what may be dropped and counts it, and hands what it kept, alike.
 #[test]
 fn a_lane_built_in_its_shared_place_serves_as_one_built_by_value() {
-    let Some(mut by_value) = lane(1024, 1) else {
-        return;
-    };
-    let mut limits = SessionLimits::defaults();
-    assert!(limits.select_delivery_lane_bytes(1024).is_ok());
-    assert!(limits
-        .select_delivery_lane_events(Quota::at_most(1))
-        .is_ok());
+    let mut by_value = lane(1024, 1);
+    let limits = lane_limits(1024, 1);
     let area: &'static mut [u8] = vec![0u8; 1024].leak();
     // SAFETY: the area is leaked, so it outlives the lane, and nothing else uses it.
     let shared = unsafe {
@@ -249,9 +238,7 @@ fn a_lane_built_in_its_shared_place_serves_as_one_built_by_value() {
 /// A sample longer than the whole area is refused, whatever is queued.
 #[test]
 fn a_sample_longer_than_the_area_is_refused() {
-    let Some(mut lane) = lane(64, 4) else {
-        return;
-    };
+    let mut lane = lane(64, 4);
     lane.offer(1, &best_effort(100));
     assert_eq!(lane.counts().dropped, 1);
     assert!(lane.take_front().is_none());
@@ -261,9 +248,7 @@ fn a_sample_longer_than_the_area_is_refused() {
 /// longer than the area is read only into an empty lane, so a link is never stopped for good.
 #[test]
 fn the_gate_reads_a_link_only_while_the_lane_takes_a_batch() {
-    let Some(mut lane) = lane(256, 4) else {
-        return;
-    };
+    let mut lane = lane(256, 4);
     assert!(lane.takes_a_read(room(128)));
     assert!(
         lane.takes_a_read(room(512)),
@@ -378,15 +363,10 @@ fn a_lane_is_sized_from_the_sessions_message() {
     use wz_session_core::caps;
 
     let frag = caps::PICO_FRAG_MAX_BYTES / 4;
-    let mut short = SessionLimits::defaults();
-    if short.select_delivery_lane_bytes(1).is_err()
-        || short
-            .select_pico_frag_max_bytes(Quota::at_most(frag))
-            .is_err()
-    {
-        // A build that keeps either limit to its own value has no other.
-        return;
-    }
+    let short = lowered(|l| {
+        l.select_delivery_lane_bytes(1)?;
+        l.select_pico_frag_max_bytes(Quota::at_most(frag))
+    });
     let held = holding_a_read::<
         { caps::PICO_UNICAST_BATCH_BYTES },
         { caps::PICO_FRAG_MAX_BYTES },
@@ -424,9 +404,7 @@ fn a_lane_is_sized_from_the_sessions_message() {
 fn a_token_takes_the_lane_in_order_with_the_samples() {
     use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
 
-    let Some(mut lane) = lane(64, 4) else {
-        return;
-    };
+    let mut lane = lane(64, 4);
     lane.offer(1, &best_effort(8));
     lane.offer_liveliness(
         2,
@@ -482,9 +460,7 @@ fn the_gate_holds_back_what_was_read_while_the_lane_is_full() {
     use crate::lane::{LaneGate, SharedLane};
     use wz_runtime_coop::session_drive::SessionDatagramLink;
 
-    let Some(lane) = lane(64, 4) else {
-        return;
-    };
+    let lane = lane(64, 4);
     let lane = alloc::sync::Arc::new(SharedLane::new(lane));
     // SAFETY (every hold and the gate here): this thread is the lane's one writer and asks the
     // gate itself, as a session's step does under its lock.
@@ -516,9 +492,7 @@ fn a_delivery_on_another_thread_gives_the_room_back_with_no_lock() {
     use crate::lane::{LaneGate, SharedLane};
     use wz_runtime_coop::session_drive::SessionDatagramLink;
 
-    let Some(lane) = lane(64, 4) else {
-        return;
-    };
+    let lane = lane(64, 4);
     let lane = alloc::sync::Arc::new(SharedLane::new(lane));
     // SAFETY (every hold and the gate here): this thread is the lane's one writer.
     let gate = unsafe { LaneGate::new(Quiet, lane.clone(), room(32)) };
@@ -556,9 +530,7 @@ fn a_delivery_on_another_thread_gives_the_room_back_with_no_lock() {
 fn the_lane_hands_its_samples_on_in_order_to_one_delivery_at_a_time() {
     use crate::lane::SharedLane;
 
-    let Some(lane) = lane(256, 4) else {
-        return;
-    };
+    let lane = lane(256, 4);
     let lane = SharedLane::new(lane);
     for subscriber in 1..=3 {
         // SAFETY: this thread is the lane's one writer.
@@ -611,9 +583,7 @@ fn the_samples_of_a_lent_datagram_are_one_record_handed_where_they_lie() {
     use crate::lane::{LaneGate, SharedLane};
     use wz_runtime_coop::session_drive::SessionDatagramLink;
 
-    let Some(lane) = lane(1024, 4) else {
-        return;
-    };
+    let lane = lane(1024, 4);
     let lane = alloc::sync::Arc::new(SharedLane::new(lane));
     // SAFETY (every hold, the gate and the lending here): this thread is the lane's one writer,
     // as a session's step is under its lock, and the datagram outlives every use below.
@@ -752,9 +722,7 @@ fn the_samples_of_a_lent_datagram_are_handed_on_by_one_hold() {
     use crate::lane::{LaneGate, SharedLane};
     use wz_runtime_coop::session_drive::SessionDatagramLink;
 
-    let Some(lane) = lane(1024, 8) else {
-        return;
-    };
+    let lane = lane(1024, 8);
     let lane = alloc::sync::Arc::new(SharedLane::new(lane));
     let datagram = vec![1u8, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3];
     // SAFETY (every offer, hold and the gate here): this thread is the lane's one writer, as a
@@ -842,9 +810,7 @@ fn a_lent_batch_takes_one_event_slot_however_many_samples_it_holds() {
     use crate::lane::{LaneGate, SharedLane};
     use wz_runtime_coop::session_drive::SessionDatagramLink;
 
-    let (Some(lane), Some(mut whole)) = (lane(4096, 2), lane(4096, 2)) else {
-        return;
-    };
+    let (lane, mut whole) = (lane(4096, 2), lane(4096, 2));
     let lane = alloc::sync::Arc::new(SharedLane::new(lane));
     let datagram: Vec<u8> = (0..10).collect();
     // SAFETY (every offer and the gate here): this thread is the lane's one writer.
@@ -883,9 +849,7 @@ fn a_lent_batch_takes_one_event_slot_however_many_samples_it_holds() {
 fn a_lent_sample_for_several_subscribers_is_one_entry_of_its_batch() {
     use crate::lane::SharedLane;
 
-    let Some(lane) = lane(1024, 4) else {
-        return;
-    };
+    let lane = lane(1024, 4);
     let lane = SharedLane::new(lane);
     let datagram = [7u8, 7, 8, 8];
     let (first, second) = (borrowed(&datagram[..2]), borrowed(&datagram[2..]));
@@ -912,9 +876,7 @@ fn a_lent_sample_for_several_subscribers_is_one_entry_of_its_batch() {
 fn a_lent_sample_with_a_part_elsewhere_is_written_whole_in_order() {
     use crate::lane::SharedLane;
 
-    let Some(lane) = lane(1024, 8) else {
-        return;
-    };
+    let lane = lane(1024, 8);
     let lane = SharedLane::new(lane);
     let datagram = [1u8, 1, 3, 3];
     let elsewhere = [2u8, 2];
@@ -943,9 +905,7 @@ fn a_lent_sample_with_a_part_elsewhere_is_written_whole_in_order() {
 fn a_key_that_lies_in_the_lent_datagram_is_read_there() {
     use crate::lane::SharedLane;
 
-    let Some(lane) = lane(1024, 4) else {
-        return;
-    };
+    let lane = lane(1024, 4);
     let lane = SharedLane::new(lane);
     let datagram = *b"demo/kxyz";
     let sample = BorrowedSample {
@@ -1036,9 +996,7 @@ fn a_lent_sample_with_every_part_is_handed_from_its_batch_as_it_was_offered() {
         }
     }
 
-    let Some(lane) = lane(1024, 4) else {
-        return;
-    };
+    let lane = lane(1024, 4);
     let lane = SharedLane::new(lane);
     let datagram = [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10];
     let source = SourceInfo::new(&[9, 9], 3, 4);
@@ -1083,9 +1041,7 @@ fn a_lent_sample_with_every_part_is_handed_from_its_batch_as_it_was_offered() {
 /// order it was offered to them: it takes the room of one copy and the ids, and one event slot.
 #[test]
 fn a_sample_for_several_subscribers_is_written_once_and_handed_to_each() {
-    let Some(mut lane) = lane(256, 4) else {
-        return;
-    };
+    let mut lane = lane(256, 4);
     let sample = filled(40, 7);
     lane.offer(3, &sample);
     lane.offer(1, &sample);
@@ -1102,9 +1058,7 @@ fn a_sample_for_several_subscribers_is_written_once_and_handed_to_each() {
 /// ahead of the sample between them.
 #[test]
 fn a_sample_is_shared_only_by_the_subscribers_offered_it_together() {
-    let Some(mut lane) = lane(512, 8) else {
-        return;
-    };
+    let mut lane = lane(512, 8);
     let same = filled(8, 1);
     lane.offer(1, &same);
     lane.offer(2, &same);
@@ -1122,9 +1076,7 @@ fn a_sample_is_shared_only_by_the_subscribers_offered_it_together() {
 /// it: a sample that would need its room is refused meanwhile, and the room comes back after.
 #[test]
 fn a_held_sample_keeps_its_room_until_its_last_subscriber_is_done() {
-    let Some(mut lane) = lane(128, 4) else {
-        return;
-    };
+    let mut lane = lane(128, 4);
     let shared = filled(40, 5);
     lane.offer(1, &shared);
     lane.offer(2, &shared);
@@ -1147,9 +1099,7 @@ fn a_held_sample_keeps_its_room_until_its_last_subscriber_is_done() {
 /// once are counted and handed nothing, and the ones before them are handed the sample.
 #[test]
 fn subscribers_past_the_callbacks_owed_are_counted() {
-    let Some(mut lane) = lane_owing(256, 4, 3) else {
-        return;
-    };
+    let mut lane = lane_owing(256, 4, 3);
     // A sample queued ahead owes one of the three, so the shared one is not alone in the lane,
     // where it would be let owe more than all of them.
     lane.offer(9, &filled(8, 9));
@@ -1165,9 +1115,7 @@ fn subscribers_past_the_callbacks_owed_are_counted() {
 /// which is refused and counted when there is no room for that either.
 #[test]
 fn a_subscriber_with_no_room_for_its_id_is_counted() {
-    let Some(mut lane) = lane(64, 4) else {
-        return;
-    };
+    let mut lane = lane(64, 4);
     // The key's 9 bytes, the payload's 47 and two ids fill the 64.
     let shared = filled(47, 4);
     lane.offer(1, &shared);
@@ -1181,9 +1129,7 @@ fn a_subscriber_with_no_room_for_its_id_is_counted() {
 /// published count, and callbacks past the whole budget are found only in an empty lane.
 #[test]
 fn the_gate_asks_for_the_callbacks_of_a_record() {
-    let Some(mut lane) = lane_owing(256, 4, 3) else {
-        return;
-    };
+    let mut lane = lane_owing(256, 4, 3);
     let two = ReadRoom {
         bytes: 16,
         callbacks: 2,
@@ -1213,9 +1159,7 @@ fn the_gate_asks_for_the_callbacks_of_a_record() {
 fn a_token_for_several_subscribers_is_written_once() {
     use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
 
-    let Some(mut lane) = lane(256, 4) else {
-        return;
-    };
+    let mut lane = lane(256, 4);
     let token = |kind| LivelinessSample {
         kind,
         keyexpr: "demo/alive",
@@ -1251,14 +1195,7 @@ fn a_token_for_several_subscribers_is_written_once() {
     should_panic(expected = "a record the gate let through found no room")
 )]
 fn a_gated_record_that_finds_no_room_is_a_defect() {
-    let Some(mut lane) = lane(1024, 1) else {
-        // A build that keeps the lane's limits to its own values has no such lane: its debug form
-        // ends as the test expects of it.
-        #[cfg(debug_assertions)]
-        panic!("a record the gate let through found no room: no such lane in this build");
-        #[cfg(not(debug_assertions))]
-        return;
-    };
+    let mut lane = lane(1024, 1);
     lane.offer(1, &best_effort(8));
     #[cfg(debug_assertions)]
     lane.offering_gated(true);
@@ -1274,9 +1211,7 @@ fn a_gated_record_that_finds_no_room_is_a_defect() {
 #[cfg(feature = "local-subscriber")]
 #[test]
 fn a_captured_offer_queues_nothing_and_a_sample_for_several_is_written_once() {
-    let Some(mut lane) = lane(64, 4) else {
-        return;
-    };
+    let mut lane = lane(64, 4);
     lane.capture();
     lane.offer(3, &filled(8, 1));
     lane.offer(1, &filled(8, 1));
@@ -1300,9 +1235,7 @@ fn a_captured_offer_queues_nothing_and_a_sample_for_several_is_written_once() {
 fn a_rehearsal_says_whether_the_tokens_fit_and_queues_none() {
     use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
 
-    let Some(mut lane) = lane(64, 4) else {
-        return;
-    };
+    let mut lane = lane(64, 4);
     let token = |token_id| LivelinessSample {
         kind: LivelinessSampleKind::Put,
         keyexpr: "demo/alive",
@@ -1373,9 +1306,7 @@ impl wz_session_core::reply_sink::ReplyView for Answer {
 fn a_reply_is_handed_from_the_lane_as_it_came() {
     use wz_session_core::reply_sink::{ReplyKind, ReplyView};
 
-    let Some(mut lane) = lane(256, 4) else {
-        return;
-    };
+    let mut lane = lane(256, 4);
     assert!(lane.is_idle());
     lane.offer_reply(11, &Answer);
     assert!(!lane.is_idle(), "a reply waits");

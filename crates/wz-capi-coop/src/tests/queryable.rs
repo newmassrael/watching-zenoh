@@ -114,11 +114,7 @@ fn a_kept_query_holds_its_final_until_it_is_dropped() {
 /// router.
 #[test]
 fn a_query_past_the_finals_held_is_refused_without_a_final() {
-    let Some(limits) =
-        super::entity_tables::lowered(|l| l.select_max_pending_finals(Quota::at_most(2)).is_ok())
-    else {
-        return;
-    };
+    let limits = super::entity_tables::lowered(|l| l.select_max_pending_finals(Quota::at_most(2)));
     let router = Router::start(CatchAll::None);
     let engine = super::entity_tables::open_under(&router, limits);
     let kept: Arc<Mutex<Vec<Box<dyn HeldQuery>>>> = Arc::default();
