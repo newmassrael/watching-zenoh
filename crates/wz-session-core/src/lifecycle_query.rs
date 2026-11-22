@@ -80,6 +80,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
+use sce_portable_bytes::Heap;
 
 // Re-exported: the two types a host binds the queries with, so it names one module.
 pub use crate::drive::{LifecycleKey, SessionLifecycleAuthority};
@@ -266,9 +267,9 @@ pub struct LifecycleQueries<A, D, I = NoIntent, M = NoMachines, O = NoOpener> {
     opener: O,
     /// The latest reset generation taken for each peer, by the rule of
     /// `sources/algorithms/take_generation.scxml`. A heap node states no bound a node reaches
-    /// ([`HEAP_RESET_PEERS`]), so it never refuses a peer for room. Volatile, as every runtime
-    /// edit of D6 is.
-    resets: RefCell<ResetGenerations<HEAP_RESET_PEERS>>,
+    /// ([`HEAP_RESET_PEERS`]) and keeps the table on the heap, which grows as it fills, so it
+    /// never refuses a peer for room. Volatile, as every runtime edit of D6 is.
+    resets: RefCell<ResetGenerations<HEAP_RESET_PEERS, Heap>>,
 }
 
 /// What [`LifecycleQueries::answer`] did with a query.

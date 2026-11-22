@@ -1,0 +1,18 @@
+impact = ["rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.l-new-kind-bounded-collection"]
+decision = '''
+- Move the SCE pin to 7f52c3d78ee (ADR 0110 C11 core, map storage as a type parameter); the reset table names its storage: Heap for the heap query, Inline for fixed memory.
+- The fixed node keeps its linear reset record for now: at two peers the inline map costs the admin image 2,288 B of code.
+'''
+changes = '''
+- vendor/sce at 7f52c3d78ee; out/wz-session-core/take_generation.rs regenerated, generic over the map storage.
+- ResetGenerations<N, S: MapStorage> with no default; Inline re-exported; alloc forwards sce-portable-bytes/alloc.
+- Two tests: an inline table is a const-built static; a heap table answers as an inline one of the same bound.
+'''
+verification = '''
+- Stage 1 regeneration rewrote only take_generation.rs; stage 2 changed nothing; reset_generations tests 9/9; wz-session-mcu clippy clean.
+- Fleet lanes 0, C0, C1cf, C1cs, C1m, Q, S pass; kit-size-delta against origin/main: client images +0 B.
+- The held MCU move measured zephyr-admin-fixed-tls text +2,288 B (sce_portable_bytes +1,480: SipHash and probe), data +96 B.
+'''
+carry = '''
+- The fixed node reset record move (branch sce-pin-mcu) waits for a map form that costs no more than a linear scan at two peers.
+'''

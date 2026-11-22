@@ -73,7 +73,13 @@ request-put-del = ["wz-codecs/request-put-del"]
 # cross-compile, C1h subset matrix) never surfaced it; the mcu-noheap-probe
 # binary did. Propagating the feature makes the no-alloc profile genuinely
 # allocator-free and keeps the alloc profile unchanged.
-alloc = ["storage-profile", "wz-codecs/alloc", "dep:hashbrown", "zeroize/alloc"]
+alloc = [
+    "storage-profile",
+    "wz-codecs/alloc",
+    "sce-portable-bytes/alloc",
+    "dep:hashbrown",
+    "zeroize/alloc",
+]
 
 # `storage-profile` -- a STORAGE PROFILE is selected, so the session tier's modules
 # (the link types, the wire and frame codecs' drivers, the registries and their
@@ -1219,7 +1225,9 @@ sce-forge-runtime = { path = "../../vendor/sce/backends/rust/forge-runtime", def
 # The schema units this crate includes (`key_facts_schema`, `keyexpr_shape_schema`)
 # implement `::sce_portable_bytes::MapKey`, so a payload can key a map (SCE ADR 0108
 # D1). The crate is already in the graph through wz-codecs; declared direct so the
-# generated path resolves. No feature: `MapKey` needs no allocator.
+# generated path resolves. No feature here: `MapKey` and an `Inline` map need no
+# allocator. `alloc` forwards `sce-portable-bytes/alloc` because the heap profile's
+# reset table names the `Heap` storage, which exists only under it.
 sce-portable-bytes = { path = "../../vendor/sce/backends/rust/portable-bytes", default-features = false }
 # R311di-13 — hashbrown for the resolve_wireexpr peer-keyexpr-table
 # lookup (HashMap<u64, String>). default-features = false stays
