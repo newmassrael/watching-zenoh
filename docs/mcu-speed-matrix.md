@@ -192,7 +192,10 @@ Every rule is the host matrix's (docs/pico-perf-matrix.md section 5), from the s
   no ratio, and a row that says so passes while it still does.
 - **The table**, deploy/pico_perf_ceiling_mcu.json: schema `wz-pico-perf-ceiling-mcu/1`, pair W/P, the
   `platform` its rows are read on, a tolerance, and one row per held figure of the default matrix, each
-  `{"locked": true}`, `{"ratio_at_most": R}`, `{"reference_lost": "..."}` or null. A run on another platform is
+  `{"held": ..., "debt": ...}`: `held` is `{"locked": true}`, `{"ratio_at_most": R}`,
+  `{"reference_lost": "..."}` or null, and `debt` the register item a row that is not a WIN is filed under
+  (decision D5, `debt-mcu-speed-behind-pico` until a row is split off), which such a row may not leave out. A
+  run on another platform is
   refused against it: an instruction count of one core or shift is not another's. Layer C0 holds the table's
   shape and population (`--check-table`) with the gate's selftest on every hosted run.
 - **What it prints:** every row that did not simply pass, the rows to write (a null row filled from the
@@ -201,9 +204,12 @@ Every rule is the host matrix's (docs/pico-perf-matrix.md section 5), from the s
 - **Exit:** 0 every row held, 1 a row failed (worse than its ratchet, a lock not WIN, a null or missing
   row, a repetition wz lost), 2 an input refused, 3 nothing failed but a row was not measured.
 
-**Filling the table.** The rows are null until a run fills them, and a null row fails, so no lane runs
-the matrix until then (section 6). Run the matrix with the defaults, paste the rows the gate prints into the table, run the gate
-again over the same result to see it pass, and commit the table with the run's record.
+**Filling the table.** A null row fails, so no lane runs the matrix until the table is filled (section 6).
+Run the matrix with the defaults and paste the rows the gate prints in the table's shape (each with its
+debt) into the table, run the gate again over the same result to see it pass, and commit the table with
+the run's record. The committed rows are the reading of the run of 2026-11-22: 70 rows, 5 of them WIN, the
+rest ratchets at that run's upper end, every one a debt. The eight rows of the 1,024-byte receiving cells
+are still null: wz lost those cells, which is a defect to fix and not a reading to hold.
 
 ## 6. Where it runs
 

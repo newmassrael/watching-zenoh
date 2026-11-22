@@ -75,6 +75,7 @@ import json
 import math
 import os
 import pathlib
+import re
 import signal
 import socket
 import statistics
@@ -742,6 +743,34 @@ def key_error(key: str, machine: str) -> str | None:
     return None
 
 
+#: The register item a row of this table that is not a WIN is filed under (decision D5 of
+#: docs/upstream-parity.md): the gate writes it into each ratchet it prints, and a ratchet that names
+#: none is refused.
+DEBT_DEFAULT = "debt-mcu-speed-behind-pico"
+DEBT_ID = re.compile(r"debt-[a-z0-9][a-z0-9-]*")
+
+
+def entry_error(row: object) -> str | None:
+    """Why one row of a table is malformed, or None: `{"held": <a row of perf_matrix's four shapes>,
+    "debt": <a debt id or null>}`, and a held row that is not a WIN names its debt."""
+    if not isinstance(row, dict) or set(row) != {"held", "debt"}:
+        return 'a row is {"held": ..., "debt": ...} and nothing else'
+    held, debt = row["held"], row["debt"]
+    error = pm.row_error(held)
+    if error:
+        return error
+    if debt is not None and not (isinstance(debt, str) and DEBT_ID.fullmatch(debt)):
+        return "a row's debt is debt-<id> of the store's inventory, or null"
+    if isinstance(held, dict) and not held.get("locked") and debt is None:
+        return f"a row that is not locked names its debt ({DEBT_DEFAULT}, or the item it is filed under)"
+    return None
+
+
+def held_rows(rows: dict) -> dict:
+    """What the judge reads of a table's rows: each key's held row."""
+    return {key: row["held"] for key, row in rows.items()}
+
+
 def parse_table(text: str) -> tuple[dict, float, dict]:
     """The rows, the tolerance and the platform of a table."""
     try:
@@ -766,7 +795,7 @@ def parse_table(text: str) -> tuple[dict, float, dict]:
         raise pm.Refused("`rows` is an object of row keys")
     machine = platform["qemu_machine"]
     for key, value in rows.items():
-        error = key_error(key, machine) or pm.row_error(value)
+        error = key_error(key, machine) or entry_error(value)
         if error:
             raise pm.Refused(f"{key}: {error}")
     return rows, float(tolerance), platform
@@ -792,8 +821,15 @@ def gate(doc: dict, table: pathlib.Path) -> str:
     if ran_on != platform:
         raise pm.Refused(f"the run was made on {json.dumps(ran_on)}, and {table} holds rows read on "
                          f"{json.dumps(platform)}: judge it against a table of its own platform")
-    judged = pm.judge(readings(doc["cells"], platform["qemu_machine"]), rows, tolerance)
-    return pm.print_pair(f"{PAIR} on {platform['board']}", str(table), tolerance, judged)
+    judged = pm.judge(readings(doc["cells"], platform["qemu_machine"]), held_rows(rows), tolerance)
+    outcome = pm.print_pair(f"{PAIR} on {platform['board']}", str(table), tolerance, judged)
+    edits = {j.key: j.edit for j in judged if j.edit is not None}
+    if edits:
+        print("mcu-speed-gate: the same rows in this table's shape, each with its debt:", flush=True)
+        for key, held in edits.items():
+            debt = rows.get(key, {}).get("debt") or (None if held.get("locked") else DEBT_DEFAULT)
+            print(f"  {json.dumps(key)}: {json.dumps({'held': held, 'debt': debt})},", flush=True)
+    return outcome
 
 
 def cmd_gate(result: pathlib.Path, table: pathlib.Path) -> int:
@@ -822,7 +858,7 @@ def check_table(path: pathlib.Path) -> int:
         print(f"  mcu-speed-gate table FAIL: the row {key} is no cell of the default matrix", file=sys.stderr)
     if missing or extra:
         return 1
-    filled = sum(value is not None for value in rows.values())
+    filled = sum(row["held"] is not None for row in rows.values())
     print(f"  mcu-speed-gate table: {len(rows)} row(s), the population of the default matrix on "
           f"{platform['board']}; {filled} filled, {len(rows) - filled} not yet (tolerance {tolerance})")
     return 0
@@ -981,19 +1017,30 @@ def cmd_selftest() -> int:
         doc.update(head)
         return json.dumps(doc)
 
-    rows_null = {key: None for key in population(machine)}
+    rows_null = {key: {"held": None, "debt": None} for key in population(machine)}
     expect("a table of null rows is read", parse_table(table_text(rows_null))[0] == rows_null)
     expect("another schema is refused", "schema" in refused(lambda: parse_table(table_text({}, schema="x"))))
     expect("another pair is refused", "pair" in refused(lambda: parse_table(table_text({}, pair="W/X"))))
     expect("a platform that is not the board's is refused", "platform" in refused(
         lambda: parse_table(table_text({}, platform=dict(platform_of(DEFAULT_BOARD, 0), qemu_machine="virt")))))
     expect("a tolerance of 1 is refused", "tolerance" in refused(lambda: parse_table(table_text({}, tolerance=1))))
+    empty = {"held": None, "debt": None}
     expect("a key of another machine is refused", "machine" in refused(
-        lambda: parse_table(table_text({"virt/st/put/8/instr_per_put": None}))))
+        lambda: parse_table(table_text({"virt/st/put/8/instr_per_put": empty}))))
     expect("a figure the gate does not hold is refused", "figure" in refused(
-        lambda: parse_table(table_text({f"{machine}/st/put/8/delivered_share": None}))))
+        lambda: parse_table(table_text({f"{machine}/st/put/8/delivered_share": empty}))))
+    put8 = f"{machine}/st/put/8/instr_per_put"
     expect("a row of no known shape is refused", "row" in refused(
-        lambda: parse_table(table_text({f"{machine}/st/put/8/instr_per_put": {"win": True}}))))
+        lambda: parse_table(table_text({put8: {"held": {"win": True}, "debt": None}}))))
+    expect("a row that is no held-and-debt pair is refused", "row" in refused(
+        lambda: parse_table(table_text({put8: {"locked": True}}))))
+    expect("a ratchet that names no debt is refused", "debt" in refused(
+        lambda: parse_table(table_text({put8: {"held": {"ratio_at_most": 1.2}, "debt": None}}))))
+    expect("a debt that is no id is refused", "debt" in refused(
+        lambda: parse_table(table_text({put8: {"held": {"ratio_at_most": 1.2}, "debt": "later"}}))))
+    expect("a ratchet with its debt and a lock without one are read", parse_table(table_text({
+        put8: {"held": {"ratio_at_most": 1.2}, "debt": DEBT_DEFAULT},
+        f"{machine}/st/put/8/stack_bytes": {"held": {"locked": True}, "debt": None}}))[0][put8]["debt"] == DEBT_DEFAULT)
     expect("a key written twice is refused", "twice" in refused(
         lambda: parse_table('{"schema": "%s", "schema": "%s"}' % (TABLE_SCHEMA, TABLE_SCHEMA))))
 
@@ -1010,13 +1057,13 @@ def cmd_selftest() -> int:
                 outcome_null = gate(run, table)
                 held = dict(rows_null)
                 for key in readings(cells, machine):
-                    held[key] = {"locked": True}
-                held[rate] = {"ratio_at_most": 2.0}
+                    held[key] = {"held": {"locked": True}, "debt": None}
+                held[rate] = {"held": {"ratio_at_most": 2.0}, "debt": DEBT_DEFAULT}
                 table.write_text(table_text(held), encoding="utf-8")
                 outcome_held = gate(run, table)
                 locked = dict(held)
-                locked[rate] = {"locked": True}
-                outcome_lost_lock = pm.outcome_of(pm.judge(readings(cells, machine), locked, 0.05))
+                locked[rate] = {"held": {"locked": True}, "debt": None}
+                outcome_lost_lock = pm.outcome_of(pm.judge(readings(cells, machine), held_rows(locked), 0.05))
                 other = dict(run, record={"platform": platform_of(DEFAULT_BOARD, 1)})
                 why_other = refused(lambda: gate(other, table))
             finally:

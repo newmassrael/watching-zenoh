@@ -292,10 +292,11 @@ static int run_sub(uint32_t size, uint32_t window_ms, uint32_t warm_ms)
 	const unsigned int n1 = atomic_load(&thr_count);
 	const unsigned int b1 = atomic_load(&thr_bytes);
 
+	/* total says whether a window that took nothing followed a warm-up that did. */
 	printk("MCU-SPEED RESULT workload=sub size=%u received=%u bytes=%u window_cycles=%u "
-	       "busy_cycles=%llu hz=%u\n",
+	       "busy_cycles=%llu hz=%u total=%u\n",
 	       size, n1 - n0, b1 - b0, window, (unsigned long long)busy,
-	       (uint32_t)sys_clock_hw_cycles_per_sec());
+	       (uint32_t)sys_clock_hw_cycles_per_sec(), n1);
 	return 0;
 }
 
