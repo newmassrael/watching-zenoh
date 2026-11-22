@@ -239,7 +239,9 @@ impl SampleMarshal {
     /// must run once the value has reached its final address. See
     /// [`crate::query::QueryMarshal::bind`] for why the split is load-bearing
     /// (an earlier cut bound inside a by-value constructor and handed C a
-    /// pointer into the dead constructor frame).
+    /// pointer into the dead constructor frame). Its callers are a get's reply and a liveliness
+    /// event; a subscriber's sample goes through [`Self::lent`].
+    #[cfg(any(feature = "query", feature = "liveliness"))]
     pub(crate) fn new(keyexpr: String, payload: ByteBuf, kind: z_sample_kind_t) -> Self {
         Self::keyed(KeyText::Owned(keyexpr), payload, kind)
     }
