@@ -1799,6 +1799,80 @@ mod woken {
         );
         SessionDrive::close(&*member);
     }
+
+    /// Puts of one size inside a batch window leave as full frames, as zenoh-pico's overflow sends
+    /// its batch: each frame is written by the putting thread in the put it has no room for, before
+    /// that put returns, with one take of the session a put and no read; a put that finds room
+    /// writes nothing. N puts are N over what a frame of the group's batch holds, rounded up,
+    /// datagrams, where each put alone was a datagram of its own.
+    #[test]
+    fn inside_a_batch_window_puts_on_the_group_leave_one_datagram_a_full_frame() {
+        let (member, stack, _transport) = open_alone(PosixClock, 5_000);
+        let sent = || stack.sent.lock().unwrap().clone();
+        let payload = |at: usize| format!("{at:08}").into_bytes();
+        let key = "demo/group/thr";
+        let budget = usize::from(profile().batch_size);
+        assert_eq!(member.batch_start_all(), 1, "the group opens a window");
+
+        // The bytes one put adds to a frame, and the frame's head: a frame of one and one of two.
+        let base = sent().len();
+        put(&member, key, &payload(0));
+        assert_eq!(member.batch_flush_all(), 1);
+        put(&member, key, &payload(1));
+        put(&member, key, &payload(2));
+        assert_eq!(member.batch_flush_all(), 1);
+        let calibration = sent();
+        assert_eq!(calibration.len(), base + 2);
+        let (one, two) = (calibration[base].len(), calibration[base + 1].len());
+        let each = two - one;
+        let head = one - each;
+        let fits = (budget - head) / each;
+        assert!(
+            fits > 1,
+            "a frame of the group's batch holds several such puts"
+        );
+
+        let base = sent().len();
+        let takes = member.takes.core.load(Ordering::SeqCst);
+        let puts = 2 * fits + 3;
+        for at in 0..puts {
+            put(&member, key, &payload(at));
+            assert_eq!(sent().len() - base, at / fits, "written by put {at}");
+        }
+        assert_eq!(
+            member.takes.core.load(Ordering::SeqCst) - takes,
+            puts,
+            "one take of the session a put"
+        );
+        assert_eq!(member.batch_stop_all(), 1);
+        let frames = sent().split_off(base);
+        assert_eq!(frames.len(), puts.div_ceil(fits));
+        for (at, frame) in frames.iter().enumerate() {
+            let first = at * fits;
+            let last = (first + fits).min(puts) - 1;
+            assert_eq!(frame.len(), head + (last + 1 - first) * each, "frame {at}");
+            assert!(carries(frame, &payload(first)) && frame.ends_with(&payload(last)));
+        }
+        assert!(
+            head + (fits + 1) * each > budget,
+            "a full frame has no room for one more"
+        );
+        let here = std::thread::current().id();
+        assert!(
+            stack.threads.lock().unwrap()[base..]
+                .iter()
+                .all(|thread| *thread == here),
+            "every write the putting thread's"
+        );
+
+        // CONTROL: with the window closed each put is a datagram of its own.
+        let base = sent().len();
+        for at in 0..3 {
+            put(&member, key, &payload(at));
+        }
+        assert_eq!(sent().len() - base, 3);
+        SessionDrive::close(&*member);
+    }
 }
 
 /// What a member sends is read where its datagram lies, record by record, as a link's frames are:

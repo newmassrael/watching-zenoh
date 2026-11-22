@@ -1427,6 +1427,58 @@ mod tests {
         assert_eq!([both.sn, third.sn, alone.sn], [0, 1, 2]);
     }
 
+    /// Puts of one size inside a batch window fill each frame as zenoh-pico fills its batch: a
+    /// frame goes on its lane as one datagram in the put it has no room for, holding as many puts
+    /// as the group's batch takes, with no pass of the host and no wait while it has room; the
+    /// stop puts the rest on its lane. N puts are N over what a frame holds, rounded up, datagrams.
+    #[test]
+    fn a_batch_window_puts_a_frame_on_its_lane_each_time_it_fills() {
+        let params = params();
+        let budget = params.frame_budget();
+        let payload = |at: usize| alloc::format!("{at:08}");
+        // The bytes one put adds to a frame, and the frame's head: a frame of one and one of two.
+        let frame_of = |count: usize| {
+            let stage = GroupTxStage::new(&params);
+            stage.batch_start();
+            for at in 0..count {
+                push_at_once(&stage, put(&payload(at)));
+            }
+            stage.batch_stop();
+            stage.take().expect("the window's frame").bytes.len()
+        };
+        let (one, two) = (frame_of(1), frame_of(2));
+        let each = two - one;
+        let head = one - each;
+        let fits = (budget - head) / each;
+        assert!(
+            fits > 1,
+            "a frame of the group's batch holds several such puts"
+        );
+
+        let stage = GroupTxStage::new(&params);
+        stage.batch_start();
+        let puts = 2 * fits + 3;
+        let mut frames = Vec::new();
+        for at in 0..puts {
+            push_at_once(&stage, put(&payload(at)));
+            frames.extend(core::iter::from_fn(|| stage.take()));
+            assert_eq!(frames.len(), at / fits, "after put {at}");
+        }
+        stage.batch_stop();
+        frames.extend(core::iter::from_fn(|| stage.take()));
+        assert_eq!(frames.len(), puts.div_ceil(fits));
+        for (at, frame) in frames.iter().enumerate() {
+            let first = at * fits;
+            let last = (first + fits).min(puts) - 1;
+            assert_eq!(frame.bytes.len(), head + (last + 1 - first) * each);
+            let opens = payload(first);
+            assert!(frame.bytes.windows(8).any(|w| w == opens.as_bytes()));
+            assert!(frame.bytes.ends_with(payload(last).as_bytes()));
+            assert_eq!(frame.sn, at as u64, "one sequence number a frame");
+        }
+        assert!(head + fits * each <= budget && head + (fits + 1) * each > budget);
+    }
+
     /// A batch window the program leaves open leaves at the session's next beacon, as zenoh-pico
     /// sends its batch before a transport message: the step that sends the JOIN puts the window's
     /// frame on its lane and writes it behind the JOIN, which advertises it as the next to come,
