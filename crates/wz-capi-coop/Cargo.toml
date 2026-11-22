@@ -36,7 +36,7 @@ crate-type = ["rlib"]
 # The port, without its host half: `std` below asks for it (src/lib.rs, "Where it builds").
 wz-capi-port = { path = "../wz-capi-port", default-features = false }
 # What a zenoh-pico client does on a session: publish (Put and Delete, with every
-# metadata field), declare key expressions and subscribers and retract them, ask a
+# metadata field of pico's stable API), declare key expressions and subscribers and retract them, ask a
 # router who subscribes or answers (the write filter and the matching status),
 # batch, keep the lease, fragment what does not fit a batch and put back together
 # what arrives fragmented, and match key expressions with their wildcards. The
@@ -55,6 +55,9 @@ wz-capi-port = { path = "../wz-capi-port", default-features = false }
 # The queryables a peer declares (`declare-queryable`) are not here: a querier's write filter and
 # matching status read them and a queryable declares its own, so `query` and `queryable` name them,
 # and a client with neither links no table of them, no dispatch to it and no listener on it.
+# Nor is a Push's source info (`pubsub-source-info`): pico's API sets and reads it only with its
+# unstable API, so the C ABI's `unstable-api` names it, and a build without it neither writes the
+# extension nor decodes it from what it receives.
 wz-session-core = { path = "../wz-session-core", default-features = false, features = [
     "alloc",
     "transport-tx-lend",
@@ -69,7 +72,6 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
     "pubsub-encoding",
     "pubsub-timestamp",
     "pubsub-attachment",
-    "pubsub-source-info",
     "pubsub-qos",
     "pubsub-priority",
     "pubsub-congestion-control",
@@ -319,8 +321,11 @@ wz-session-mcu = { path = "../wz-session-mcu", default-features = false, feature
 wz-ext-pubsub = { path = "../wz-ext-pubsub", features = ["engine-host"] }
 # The stand-in accepts the engine's session, answers its gets and declares the queryables a test
 # tells it to (`declare-queryable`), in every test build: an engine built without `query` and
-# `queryable` is then shown a peer's queryable it keeps no table of.
+# `queryable` is then shown a peer's queryable it keeps no table of. The stand-in's sequenced
+# publisher stamps a source info the advanced subscriber orders by (`pubsub-source-info`), which
+# the C ABI's `advanced` brings through its unstable API.
 wz-session-core = { path = "../wz-session-core", default-features = false, features = [
+    "pubsub-source-info",
     "session-unicast-accept",
     "query-queryable",
     "request-put-del",
