@@ -190,6 +190,11 @@ pub mod limit_binding;
 // outer doc here joins the module's own and rustdoc resolves its links from the crate root.
 pub mod limits;
 
+// What a runtime's limits give the machines a process holds apart from any session (its
+// supervisor, its reception supervisors, its message catalogs), each lent under the build's value.
+// Unconditional, no_std and no_alloc, like `limits`. Documented from inside.
+pub mod process_limits;
+
 // The open stage of the policies: a document's statements composed in layers over a base into one
 // snapshot and the origin of each value, or every refusal found. The core is no_std and no_alloc;
 // the reader of a JSON5 tree needs `alloc`. Documented from inside.

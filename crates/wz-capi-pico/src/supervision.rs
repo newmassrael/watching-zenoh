@@ -74,7 +74,7 @@ pub unsafe extern "C" fn wz_ext_supervision_set_hook(
 }
 
 /// Begin supervising `checkpoint`, with a deadline `timeout_ms` after now and after each feed.
-/// `Z_ERR_INVALID` for a checkpoint the build does not have (`SUPERVISION_CHECKPOINTS`), or a
+/// `Z_ERR_INVALID` for a checkpoint the process does not watch (`SUPERVISION_CHECKPOINTS`), or a
 /// timeout of 0 or past 2147483647 ms. A checkpoint that is already supervised is left as it is.
 #[no_mangle]
 pub extern "C" fn wz_ext_supervision_start(checkpoint: u8, timeout_ms: u32) -> ZResult {
@@ -85,7 +85,7 @@ pub extern "C" fn wz_ext_supervision_start(checkpoint: u8, timeout_ms: u32) -> Z
 }
 
 /// The program made progress: start `checkpoint`'s deadline again. A checkpoint that is not
-/// armed ignores it. `Z_ERR_INVALID` for a checkpoint the build does not have.
+/// armed ignores it. `Z_ERR_INVALID` for a checkpoint the process does not watch.
 #[no_mangle]
 pub extern "C" fn wz_ext_supervision_feed(checkpoint: u8) -> ZResult {
     crate::ffi::guarded(|| match supervisor::feed(checkpoint) {
@@ -95,7 +95,7 @@ pub extern "C" fn wz_ext_supervision_feed(checkpoint: u8) -> ZResult {
 }
 
 /// Stop supervising `checkpoint`. `Z_ERR_GENERIC` when its expiry hook is running: it does not
-/// stop until the hook returns. `Z_ERR_INVALID` for a checkpoint the build does not have.
+/// stop until the hook returns. `Z_ERR_INVALID` for a checkpoint the process does not watch.
 #[no_mangle]
 pub extern "C" fn wz_ext_supervision_stop(checkpoint: u8) -> ZResult {
     crate::ffi::guarded(|| match supervisor::stop(checkpoint) {

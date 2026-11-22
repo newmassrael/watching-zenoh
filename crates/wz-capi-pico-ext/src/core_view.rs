@@ -192,7 +192,7 @@ pub mod ext_interface {
     /// The major version of the interface these doors were written against.
     pub const WZ_EXT_INTERFACE_MAJOR: u16 = 1;
     /// The minor version of the interface these doors were written against.
-    pub const WZ_EXT_INTERFACE_MINOR: u16 = 1;
+    pub const WZ_EXT_INTERFACE_MINOR: u16 = 2;
 
     /// `replay_reply_shape`: one reply per frame, as it was sent.
     pub const WZ_EXT_REPLAY_SHAPE_FRAME_PER_SAMPLE: u8 = 0;
@@ -227,6 +227,16 @@ pub mod ext_interface {
         pub replay_depth_max: usize,
     }
 
+    /// What the core says of the process's runtime (`wz_ext_runtime_facts_t`).
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct wz_ext_runtime_facts_t {
+        pub struct_size: u32,
+        pub reserved: u32,
+        pub message_catalog_entries: usize,
+        pub e2e_supervised_streams: usize,
+    }
+
     #[cfg_attr(
         all(not(test), windows, target_arch = "x86"),
         link(
@@ -248,6 +258,9 @@ pub mod ext_interface {
         pub fn wz_ext_interface_session_facts(
             session: *const super::session::z_loaned_session_t,
             out: *mut wz_ext_session_facts_t,
+        ) -> crate::result::ZResult;
+        pub fn wz_ext_interface_runtime_facts(
+            out: *mut wz_ext_runtime_facts_t,
         ) -> crate::result::ZResult;
         pub fn wz_ext_interface_bytes_view(
             bytes: *const super::abi::z_loaned_bytes_t,

@@ -426,6 +426,9 @@ transport-link-unixpipe,transport-link-ws|"
     # behind `shared-key-ids`). The filter is each module path.
     "wz-capi-pico|hook|app-transport|app_transport::tests::"
     "wz-capi-pico|hook|config-document|config_policy::tests::"
+    # The process's runtime document with the three machines that read its limits: a document
+    # that lowers each limit, and each machine refusing the one past what it was lent.
+    "wz-capi-pico|hook|config-document,supervision,e2e-supervision,message-catalog|config_policy::tests::a_runtime_document"
     "wz-capi-pico|hook|shared-key-ids|key_ids::"
     # The same doors driven from C-shaped calls over loopback: sessions joined by the program's
     # transport (`app_transport_doors`) and puts and gets by a shared id (`key_ids_tokio`), each
@@ -522,6 +525,8 @@ transport-link-unixpipe,transport-link-ws|"
     "wz-capi-pico|hook|session-memory|session_memory"
     "wz-capi-pico|hook|-default,engine-coop,peer,multi-thread,link-udp,session-memory|session_memory"
     "wz-capi-pico|hook|session-memory,config-document|session_memory_door::a_document"
+    # The rows of the process's machines in the report, which follow what its runtime lends them.
+    "wz-capi-pico|hook|session-memory,supervision,e2e-supervision,message-catalog|session_memory::tests::the_process_rows"
     # What those doors do, once, in the port both C ABIs and both engines share
     # (`wz-capi-port`'s `observation`): the unit tests of the clock callback and of the refusals.
     # `time-base` joins: the time base made from a door's C calls (`time_base::`), its read and the

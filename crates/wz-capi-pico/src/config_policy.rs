@@ -26,6 +26,10 @@
 //! of a session's limits: a pico session holds no runtime's limits, so a runtime's limit the
 //! document states is refused, as a limit the build does not have is.
 //!
+//! The runtime is the process's (`wz_capi_port::runtime_limits`): its limits are stated by
+//! `wz_ext_runtime_limits_document`, from the `wz/limits` of a document of their own, before the
+//! first machine of the process that reads them is made.
+//!
 //! Each door checks its change the way the open will compose it, so a change the build would
 //! refuse is refused when it is made, with `Z_ERR_CONFIG_INVALID_VALUE`, and leaves the config as
 //! it was. The document is the zenoh JSON5 document the zenoh-c ABI reads, of which only the `wz`
@@ -35,6 +39,8 @@ use core::ffi::{c_char, CStr};
 
 #[cfg(feature = "config-document")]
 use wz_session_core::json5::{self, Json5Value};
+#[cfg(feature = "config-document")]
+use wz_session_core::limits::RuntimeLimits;
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::policy_document::{self, Overrides, Resolved, Statement};
 
@@ -42,6 +48,8 @@ use crate::abi::z_loaned_config_t;
 use crate::config::ConfigState;
 use crate::ffi::guarded;
 use crate::prelude::*;
+#[cfg(feature = "config-document")]
+use crate::result::Z_EINVAL;
 use crate::result::{ZResult, Z_ERR_CONFIG_INVALID_VALUE, Z_ERR_NULL, Z_OK};
 
 /// The top-level member of a zenoh document that holds wz's own statements.
@@ -258,6 +266,75 @@ pub unsafe extern "C" fn wz_ext_config_document(
             statements.document = Some(wz_members(text_of(json5)?)?);
             Ok(())
         })
+    })
+}
+
+/// The runtime's limits the `wz/limits` of the zenoh document `text` states, over the build's, or
+/// `Z_ERR_CONFIG_INVALID_VALUE`. The document states the process's runtime and nothing of a
+/// session: a profile, a policy, key ids and a limit of a session are its config's to state, and
+/// are refused here with everything the reader of a node's document refuses.
+#[cfg(feature = "config-document")]
+fn runtime_limits_of(text: &str) -> Result<RuntimeLimits, ZResult> {
+    let document = wz_members(text)?;
+    let read = policy_document::statements_from_json5(&document)
+        .map_err(|_| Z_ERR_CONFIG_INVALID_VALUE)?;
+    let of_a_session = read.profile.is_some()
+        || !read.statements.is_empty()
+        || read.limits.iter().any(|stated| {
+            wz_session_core::limits::SESSION_LIMITS
+                .iter()
+                .any(|entry| entry.id() == stated.limit)
+        });
+    #[cfg(feature = "shared-key-ids")]
+    let of_a_session =
+        of_a_session || read.key_ids != wz_session_core::shared_key_ids::KeyIdsAtOpen::default();
+    if of_a_session {
+        return Err(Z_ERR_CONFIG_INVALID_VALUE);
+    }
+    policy_document::resolve_document(
+        policy_document::Base::node(SessionPolicy::defaults()),
+        &document,
+    )
+    .map(|resolved| resolved.limits.runtime)
+    .map_err(|_| Z_ERR_CONFIG_INVALID_VALUE)
+}
+
+/// States the limits of the process's runtime from a zenoh JSON5 document, of which the
+/// `wz/limits` member is read: the limits of the machines the process makes apart from any session,
+/// its supervisor of checkpoints (`SUPERVISION_CHECKPOINTS`), its message catalogs
+/// (`MESSAGE_CATALOG_ENTRIES`) and its reception supervisors (`E2E_SUPERVISED_STREAMS`), each at
+/// most the build's value. A limit the document does not state keeps the build's value, and a
+/// second call replaces the first.
+///
+/// The process's first machine of those takes the limits: the first call of a
+/// `wz_ext_supervision_*` door, `wz_ext_stream_supervisor_new` or `wz_ext_message_catalog_new`.
+/// A call after it is refused with `Z_EINVAL` and the process keeps the limits it took.
+///
+/// Text that is no JSON5 object, a `wz` member whose shape is refused, a profile, a policy, key
+/// ids, a limit of a session, a limit the build does not have, a limit only the build decides and
+/// a value the build's domain leaves out or that is over the build's value are refused with
+/// `Z_ERR_CONFIG_INVALID_VALUE`, whenever the call comes, and the process keeps what it held. A
+/// null `json5` is `Z_ERR_NULL`.
+///
+/// In a build with the `config-document` capability alone, as `wz_ext_config_document` is.
+///
+/// # Safety
+/// `json5` must be null or a NUL-terminated string.
+#[cfg(feature = "config-document")]
+#[no_mangle]
+pub unsafe extern "C" fn wz_ext_runtime_limits_document(json5: *const c_char) -> ZResult {
+    use wz_capi_port::runtime_limits::{self, StateRefused};
+
+    guarded(|| {
+        let limits = match text_of(json5).and_then(runtime_limits_of) {
+            Ok(limits) => limits,
+            Err(code) => return code,
+        };
+        match runtime_limits::state(&limits) {
+            Ok(_) => Z_OK,
+            Err(StateRefused::Limit(_)) => Z_ERR_CONFIG_INVALID_VALUE,
+            Err(StateRefused::Taken) => Z_EINVAL,
+        }
     })
 }
 
@@ -719,6 +796,142 @@ mod tests {
                         case.name
                     );
                 }
+            }
+        }
+    }
+
+    /// The runtime's document states the process's runtime alone: a session's limit, a policy, a
+    /// profile, text that is no document and no text are refused, before the process is asked,
+    /// so whatever the process holds the refusal is the same and changes nothing.
+    #[cfg(feature = "config-document")]
+    #[test]
+    fn the_runtime_document_refuses_what_a_session_states() {
+        let door = |text: &str| {
+            let text = CString::new(text).unwrap();
+            // SAFETY: a live string.
+            unsafe { wz_ext_runtime_limits_document(text.as_ptr()) }
+        };
+        let held = wz_capi_port::runtime_limits::held();
+        for text in [
+            "{ wz: { limits: { MAX_SUBSCRIPTIONS: 1 } } }",
+            "{ wz: { profile: \"upstream\" } }",
+            "not a document",
+            "{ wz: { limits: { NO_SUCH_LIMIT: 1 } } }",
+        ] {
+            assert_eq!(door(text), Z_ERR_CONFIG_INVALID_VALUE, "{text}");
+        }
+        let (entry, value) = one_allowed();
+        assert_eq!(
+            door(&policies_document(&[(entry.id(), value)])),
+            Z_ERR_CONFIG_INVALID_VALUE
+        );
+        // SAFETY: a null pointer, which the door refuses.
+        assert_eq!(
+            unsafe { wz_ext_runtime_limits_document(core::ptr::null()) },
+            Z_ERR_NULL
+        );
+        assert_eq!(wz_capi_port::runtime_limits::held(), held);
+    }
+
+    /// A value over the build's of each limit the process's machines read is refused, by the
+    /// limit's name where the build's domain holds the value and by the domain where it does not.
+    #[cfg(feature = "config-document")]
+    #[test]
+    fn a_runtime_limit_over_the_builds_value_is_refused_by_name() {
+        use wz_session_core::caps;
+        use wz_session_core::process_limits::ProcessRows;
+
+        let held = wz_capi_port::runtime_limits::held();
+        for (limit, build) in [
+            ("SUPERVISION_CHECKPOINTS", caps::SUPERVISION_CHECKPOINTS),
+            ("MESSAGE_CATALOG_ENTRIES", caps::MESSAGE_CATALOG_ENTRIES),
+            ("E2E_SUPERVISED_STREAMS", caps::E2E_SUPERVISED_STREAMS),
+        ] {
+            let text = format!("{{ wz: {{ limits: {{ {limit}: {} }} }} }}", build + 1);
+            match runtime_limits_of(&text) {
+                Ok(limits) => assert_eq!(
+                    ProcessRows::of(&limits).map_err(|refused| refused.limit),
+                    Err(limit)
+                ),
+                Err(code) => assert_eq!(code, Z_ERR_CONFIG_INVALID_VALUE, "{limit}"),
+            }
+            let text = CString::new(text).unwrap();
+            // SAFETY: a live string.
+            let code = unsafe { wz_ext_runtime_limits_document(text.as_ptr()) };
+            assert_eq!(code, Z_ERR_CONFIG_INVALID_VALUE, "{limit}");
+        }
+        assert_eq!(wz_capi_port::runtime_limits::held(), held);
+    }
+
+    /// A runtime's document that lowers each limit gives each machine the lowered rows, and each
+    /// machine refuses the one past them.
+    #[cfg(feature = "config-document")]
+    #[test]
+    fn a_runtime_document_that_lowers_each_limit_is_honoured_by_its_machines() {
+        use wz_session_core::limit_binding::LimitSpec;
+        use wz_session_core::limits::{
+            E2eSupervisedStreams, MessageCatalogEntries, SupervisionCheckpoints,
+        };
+        use wz_session_core::process_limits::ProcessRows;
+
+        // A build whose domain keeps the build's value alone of a limit refuses any other.
+        if SupervisionCheckpoints::DOMAIN.is_singleton()
+            || MessageCatalogEntries::DOMAIN.is_singleton()
+            || E2eSupervisedStreams::DOMAIN.is_singleton()
+        {
+            return;
+        }
+        let limits = runtime_limits_of(
+            "{ wz: { limits: { SUPERVISION_CHECKPOINTS: 1, MESSAGE_CATALOG_ENTRIES: 1, \
+             E2E_SUPERVISED_STREAMS: 1 } } }",
+        )
+        .expect("one is inside every domain");
+        let rows = ProcessRows::of(&limits).expect("one is under every build's value");
+        assert_eq!(
+            rows,
+            ProcessRows {
+                supervision_checkpoints: 1,
+                message_catalog_entries: 1,
+                e2e_supervised_streams: 1,
+            }
+        );
+        #[cfg(feature = "supervision")]
+        {
+            use wz_session_core::supervisor::{BuildSupervisor, StartRefused};
+            let mut supervisor = BuildSupervisor::of_snapshots(&SessionPolicy::defaults(), &rows);
+            assert_eq!(supervisor.start(0, 0, 5), Ok(()));
+            assert_eq!(
+                supervisor.start(1, 0, 5),
+                Err(StartRefused::NoSuchCheckpoint)
+            );
+        }
+        #[cfg(feature = "e2e-supervision")]
+        {
+            use wz_session_core::stream_supervisor::{
+                AddRefused, Notify, StreamSlot, StreamSupervisor,
+            };
+            let mut slots = [StreamSlot::EMPTY; 4];
+            let mut supervisor = StreamSupervisor::new(
+                &mut slots,
+                &mut [],
+                0,
+                0,
+                Notify::StatusOnly,
+                rows.e2e_supervised_streams,
+            )
+            .expect("the storage is the program's");
+            assert_eq!(supervisor.add(10, 1, 1, false), Ok(0));
+            assert_eq!(supervisor.add(10, 1, 1, false), Err(AddRefused::Full));
+        }
+        #[cfg(feature = "message-catalog")]
+        {
+            use wz_app_frame::message_catalog::{limits_with_messages, Catalog, RefusalKind};
+            let two = "{nodes: [{name: 'a'}], messages: [\
+                       {key_expr: 'k/one', id: 1, publishers: ['a'], subscribers: []}, \
+                       {key_expr: 'k/two', id: 2, publishers: ['a'], subscribers: []}]}";
+            match Catalog::parse(two, limits_with_messages(rows.message_catalog_entries)) {
+                Ok(_) => panic!("two messages are read where one is lent"),
+                Err(refused) => assert_eq!(refused.kind, RefusalKind::TooManyMessages),
             }
         }
     }

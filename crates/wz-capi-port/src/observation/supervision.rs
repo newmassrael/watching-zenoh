@@ -13,7 +13,9 @@
 //! at run time. The program calls [`check`] on its own cadence, and the supervisor compares the
 //! time it is given with the deadlines it holds ([`wz_session_core::supervisor`]).
 //!
-//! The one supervisor is the process's, with the build's `SUPERVISION_CHECKPOINTS` checkpoints.
+//! The one supervisor is the process's. Its storage is the build's `SUPERVISION_CHECKPOINTS`
+//! checkpoints, and it watches as many of them as the process's runtime limits lend it
+//! ([`crate::runtime_limits`]), which its first door takes.
 
 use std::ffi::c_void;
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
@@ -21,7 +23,7 @@ use std::time::Instant;
 
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::supervision::SupervisionState;
-use wz_session_core::supervisor::{BuildSupervisor, StartRefused, Stop};
+use wz_session_core::supervisor::{BuildSupervisor, StartRefused, Stop, MAX_CHECKPOINTS};
 
 use super::Refusal;
 
@@ -72,7 +74,10 @@ fn doors() -> &'static Mutex<Doors> {
     static DOORS: OnceLock<Mutex<Doors>> = OnceLock::new();
     DOORS.get_or_init(|| {
         Mutex::new(Doors {
-            supervisor: BuildSupervisor::for_policy(&resolve_policy()),
+            supervisor: BuildSupervisor::of_snapshots(
+                &resolve_policy(),
+                &crate::runtime_limits::take(),
+            ),
             hook: None,
             origin: Instant::now(),
         })
@@ -95,8 +100,8 @@ pub unsafe fn set_hook(hook: Option<HookFn>, context: *mut c_void) {
 }
 
 /// Begin supervising `checkpoint`, with a deadline `timeout_ms` after now and after each feed.
-/// [`Refusal::Invalid`] for a checkpoint the build does not have (`SUPERVISION_CHECKPOINTS`), or a
-/// timeout of 0 or past 2147483647 ms. A checkpoint that is already supervised is left as it is.
+/// [`Refusal::Invalid`] for a checkpoint the process does not watch (`SUPERVISION_CHECKPOINTS`), or
+/// a timeout of 0 or past 2147483647 ms. A checkpoint that is already supervised is left as it is.
 pub fn start(checkpoint: u8, timeout_ms: u32) -> Result<(), Refusal> {
     let mut doors = locked();
     let now = doors.now();
@@ -112,19 +117,20 @@ pub fn start(checkpoint: u8, timeout_ms: u32) -> Result<(), Refusal> {
 }
 
 /// The program made progress: start `checkpoint`'s deadline again. A checkpoint that is not armed
-/// ignores it. [`Refusal::Invalid`] for a checkpoint the build does not have.
+/// ignores it. [`Refusal::Invalid`] for a checkpoint the process does not watch.
 pub fn feed(checkpoint: u8) -> Result<(), Refusal> {
-    if usize::from(checkpoint) >= wz_session_core::caps::SUPERVISION_CHECKPOINTS {
+    let mut doors = locked();
+    if usize::from(checkpoint) >= doors.supervisor.checkpoints() {
         return Err(Refusal::Invalid);
     }
-    let mut doors = locked();
     let now = doors.now();
     doors.supervisor.feed(usize::from(checkpoint), now);
     Ok(())
 }
 
 /// Stop supervising `checkpoint`. [`Refusal::Unavailable`] when its expiry hook is running: it does
-/// not stop until the hook returns. [`Refusal::Invalid`] for a checkpoint the build does not have.
+/// not stop until the hook returns. [`Refusal::Invalid`] for a checkpoint the process does not
+/// watch.
 pub fn stop(checkpoint: u8) -> Result<(), Refusal> {
     match locked().supervisor.stop(usize::from(checkpoint)) {
         Stop::Stopped => Ok(()),
@@ -144,7 +150,7 @@ pub fn check() {
     if check.is_clear() {
         return;
     }
-    for index in 0..wz_session_core::caps::SUPERVISION_CHECKPOINTS {
+    for index in 0..MAX_CHECKPOINTS {
         if !check.hook(index) {
             continue;
         }

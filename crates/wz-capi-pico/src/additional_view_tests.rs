@@ -102,6 +102,7 @@ stands_for!(
     view::session::z_subscriber_options_t => crate::session::z_subscriber_options_t,
     view::ext_interface::wz_ext_interface_version_t => crate::ext_interface::wz_ext_interface_version_t,
     view::ext_interface::wz_ext_session_facts_t => crate::ext_interface::wz_ext_session_facts_t,
+    view::ext_interface::wz_ext_runtime_facts_t => crate::ext_interface::wz_ext_runtime_facts_t,
 );
 
 // The types only the replay doors read, behind one gated private module: a gated macro call at
@@ -214,6 +215,7 @@ fn every_function_the_view_imports_has_the_core_s_signature() {
     same_fn!(ext_interface::wz_ext_interface_version(_));
     same_fn!(ext_interface::wz_ext_interface_major_1());
     same_fn!(ext_interface::wz_ext_interface_bytes_view(_, _, _));
+    same_fn!(ext_interface::wz_ext_interface_runtime_facts(_));
     same_fn!(ext_interface::wz_ext_interface_run_in_callback(_, _));
     #[cfg(feature = "query")]
     same_fn!(ext_interface::wz_ext_interface_session_facts(_, _));
@@ -289,6 +291,18 @@ fn every_value_the_doors_allocate_has_the_core_s_layout() {
         reserved,
         querier_max_pending_queries,
         replay_depth_max,
+    );
+    same_size!(
+        view::ext_interface::wz_ext_runtime_facts_t,
+        crate::ext_interface::wz_ext_runtime_facts_t
+    );
+    same_fields!(
+        view::ext_interface::wz_ext_runtime_facts_t,
+        crate::ext_interface::wz_ext_runtime_facts_t;
+        struct_size,
+        reserved,
+        message_catalog_entries,
+        e2e_supervised_streams,
     );
 }
 

@@ -19,7 +19,8 @@
 //! The protection profiles and the header values stay JSON text: the profile is the
 //! `e2e_profile` document and is read where a sender or a receiver is made.
 
-/// The bounds a catalog is read against: the build's limits of the same names.
+/// The bounds a catalog is read against: the limits of the same names, the messages as the runtime
+/// lends them and the rest as the build states them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
     /// How many messages one catalog declares (`MESSAGE_CATALOG_ENTRIES`).

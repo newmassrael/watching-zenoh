@@ -492,6 +492,26 @@ fn a_table_whose_instance_key_is_past_the_limits_is_refused() {
     assert_eq!(refusal.path, "/messages/0/instance_key");
 }
 
+/// A runtime that lends a catalog fewer messages than the build's: a catalog of one more is
+/// refused by the limit's name, and the build's bounds lend the build's value.
+#[test]
+fn the_messages_a_catalog_is_read_under_are_the_ones_it_is_lent() {
+    assert_eq!(
+        crate::message_catalog::build_limits().messages,
+        wz_session_core::process_limits::ProcessRows::BUILD.message_catalog_entries
+    );
+    let lent = crate::message_catalog::limits_with_messages(1);
+    assert_eq!(lent.messages, 1);
+    assert_eq!(
+        lent.replay_depth_max,
+        crate::message_catalog::build_limits().replay_depth_max
+    );
+    let refusal = Catalog::parse(SYNTHETIC, lent).unwrap_err();
+    assert_eq!(refusal.kind, RefusalKind::TooManyMessages);
+    assert_eq!(refusal.path, "/messages");
+    assert!(format!("{refusal}").contains("MESSAGE_CATALOG_ENTRIES"));
+}
+
 /// The build's own bounds are the build's limits of the same names.
 #[test]
 fn the_builds_limits_carry_the_instance_key_bounds() {

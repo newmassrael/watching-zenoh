@@ -49,7 +49,7 @@ use wz_session_core::limit_binding::Quota;
 /// The major version of this interface.
 pub const WZ_EXT_INTERFACE_MAJOR: u16 = 1;
 /// The minor version of this interface.
-pub const WZ_EXT_INTERFACE_MINOR: u16 = 1;
+pub const WZ_EXT_INTERFACE_MINOR: u16 = 2;
 
 /// `replay_reply_shape` of the session facts: one reply per frame, as it was sent.
 pub const WZ_EXT_REPLAY_SHAPE_FRAME_PER_SAMPLE: u8 = 0;
@@ -94,6 +94,21 @@ pub struct wz_ext_session_facts_t {
     /// How many frames one instance's ring of a replay cache made on the session may keep
     /// (`REPLAY_DEPTH_MAX`), 0 for no bound. Added in minor version 1.
     pub replay_depth_max: usize,
+}
+
+/// What the core says of the process's runtime that a door of the additional features reads: the
+/// rows its limits lend each machine the door makes, under the build's values. 24 bytes on a 64-bit
+/// target, 16 on a 32-bit one. Added in minor version 2.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct wz_ext_runtime_facts_t {
+    /// In: the size of this struct as the caller was compiled with it. Out: the bytes written.
+    pub struct_size: u32,
+    pub reserved: u32,
+    /// How many messages one message catalog may declare (`MESSAGE_CATALOG_ENTRIES`).
+    pub message_catalog_entries: usize,
+    /// How many streams one reception supervisor may hold (`E2E_SUPERVISED_STREAMS`).
+    pub e2e_supervised_streams: usize,
 }
 
 /// `quota` as a count of this interface, whose fields write no bound as `0`: the number, or `0`
@@ -201,6 +216,37 @@ pub unsafe extern "C" fn wz_ext_interface_session_facts(
     })
 }
 
+/// Write what the core says of the process's runtime into `out`, whose `struct_size` the caller has
+/// set. A door asks it when it makes a machine, so the process's limits are taken from then on: the
+/// door that states them (`wz_ext_runtime_limits_document`) refuses a statement after it.
+///
+/// Returns `Z_OK`; `Z_ERR_NULL` for a null `out`; `Z_EINVAL` when `struct_size` is smaller than
+/// the struct of this version. Nothing is written, and nothing taken, on a refusal.
+///
+/// # Safety
+/// `out` is null or valid and writable for `struct_size` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn wz_ext_interface_runtime_facts(
+    out: *mut wz_ext_runtime_facts_t,
+) -> ZResult {
+    guarded(|| {
+        if out.is_null() {
+            return Z_ERR_NULL;
+        }
+        if !holds::<wz_ext_runtime_facts_t>((*out).struct_size) {
+            return Z_EINVAL;
+        }
+        let rows = wz_capi_port::runtime_limits::take();
+        *out = wz_ext_runtime_facts_t {
+            struct_size: written::<wz_ext_runtime_facts_t>(),
+            reserved: 0,
+            message_catalog_entries: rows.message_catalog_entries,
+            e2e_supervised_streams: rows.e2e_supervised_streams,
+        };
+        Z_OK
+    })
+}
+
 /// Write where the bytes of `bytes` are into `*data` and `*len`, in place: the payload is one
 /// buffer in this library, so the view is the whole payload and nothing is copied, valid while
 /// the loan is. An empty payload is a length of 0.
@@ -278,6 +324,68 @@ mod tests {
         assert_eq!(
             size_of::<wz_ext_session_facts_t>(),
             16 + 2 * size_of::<usize>()
+        );
+        assert_eq!(
+            core::mem::offset_of!(wz_ext_runtime_facts_t, message_catalog_entries),
+            8
+        );
+        assert_eq!(
+            core::mem::offset_of!(wz_ext_runtime_facts_t, e2e_supervised_streams),
+            8 + size_of::<usize>()
+        );
+        assert_eq!(
+            size_of::<wz_ext_runtime_facts_t>(),
+            8 + 2 * size_of::<usize>()
+        );
+    }
+
+    /// The runtime's facts are refused, with nothing written, for no struct and for one smaller
+    /// than this version's.
+    #[test]
+    fn the_runtime_facts_are_refused_for_a_struct_this_version_does_not_fill() {
+        let blank = wz_ext_runtime_facts_t {
+            struct_size: 4,
+            reserved: 7,
+            message_catalog_entries: 7,
+            e2e_supervised_streams: 7,
+        };
+        let mut facts = blank;
+        // SAFETY: a local the door may write, and a null pointer.
+        unsafe {
+            assert_eq!(wz_ext_interface_runtime_facts(&mut facts), Z_EINVAL);
+            assert_eq!(
+                wz_ext_interface_runtime_facts(core::ptr::null_mut()),
+                Z_ERR_NULL
+            );
+        }
+        assert_eq!(facts, blank);
+    }
+
+    /// The facts are the rows the process lends its machines.
+    #[test]
+    fn the_runtime_facts_are_the_rows_the_process_lends() {
+        let mut facts = wz_ext_runtime_facts_t {
+            struct_size: size_of::<wz_ext_runtime_facts_t>() as u32,
+            reserved: 7,
+            message_catalog_entries: 0,
+            e2e_supervised_streams: 0,
+        };
+        // SAFETY: a local the door may write.
+        assert_eq!(unsafe { wz_ext_interface_runtime_facts(&mut facts) }, Z_OK);
+        let rows = wz_capi_port::runtime_limits::held();
+        assert_eq!(
+            (
+                facts.struct_size as usize,
+                facts.reserved,
+                facts.message_catalog_entries,
+                facts.e2e_supervised_streams
+            ),
+            (
+                size_of::<wz_ext_runtime_facts_t>(),
+                0,
+                rows.message_catalog_entries,
+                rows.e2e_supervised_streams
+            )
         );
     }
 
