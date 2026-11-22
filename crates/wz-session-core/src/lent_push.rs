@@ -330,6 +330,190 @@ fn vle_len(mut value: u64) -> usize {
     len
 }
 
+/// A Del's header with no timestamp and no extension.
+#[cfg(all(feature = "storage-profile", feature = "alloc"))]
+const DEL_HEADER: u8 = 0x02;
+
+/// Whether a send of a publication from its borrowed parts ([`write_publication`]) may decline it
+/// and leave it to the owned message: a session that rewrites the keys it originates
+/// (`routing-namespace`), the network counters, which classify a publication by its owned message
+/// (`transport-stats`), and a timestamp stack, which the writer does not carry
+/// (`pubsub-ts-stack`). A build with none of them sends every publication from its parts, so a
+/// sender that reads this links no owned form of one.
+pub const LENT_PUBLICATION_MAY_DECLINE: bool = cfg!(any(
+    feature = "routing-namespace",
+    feature = "transport-stats",
+    feature = "pubsub-ts-stack"
+));
+
+/// The body fields of a publication the build writes, read from its metadata under the build's
+/// feature for each, as the owned builders read them (`push_build`'s gated fields and its body
+/// extension chain).
+#[cfg(all(feature = "storage-profile", feature = "alloc"))]
+struct BodyParts<'m> {
+    timestamp: Option<&'m crate::sample::TimestampHint>,
+    /// A Put's alone: a Del has no encoding.
+    encoding: Option<&'m crate::sample::EncodingHint>,
+    /// Absent where the info names no source, which the owned builder leaves out too.
+    source_info: Option<&'m crate::sample::SourceInfo>,
+    /// The extension's id, which a Put and a Del number apart, and the bytes.
+    attachment: Option<(u8, &'m [u8])>,
+}
+
+#[cfg(all(feature = "storage-profile", feature = "alloc"))]
+impl<'m> BodyParts<'m> {
+    #[cfg_attr(
+        not(all(
+            feature = "pubsub-timestamp",
+            feature = "pubsub-encoding",
+            feature = "pubsub-source-info",
+            feature = "pubsub-attachment"
+        )),
+        allow(unused_variables)
+    )]
+    fn of(put: bool, meta: &'m crate::metadata::PushMetadata) -> Self {
+        Self {
+            #[cfg(feature = "pubsub-timestamp")]
+            timestamp: meta.timestamp.as_ref(),
+            #[cfg(not(feature = "pubsub-timestamp"))]
+            timestamp: None,
+            #[cfg(feature = "pubsub-encoding")]
+            encoding: meta.encoding.as_ref().filter(|_| put),
+            #[cfg(not(feature = "pubsub-encoding"))]
+            encoding: None,
+            #[cfg(feature = "pubsub-source-info")]
+            source_info: meta
+                .source_info
+                .as_ref()
+                .filter(|info| !info.zid_prefix().is_empty()),
+            #[cfg(not(feature = "pubsub-source-info"))]
+            source_info: None,
+            #[cfg(feature = "pubsub-attachment")]
+            attachment: meta.attachment.as_deref().map(|bytes| {
+                let id = if put {
+                    crate::attachment::ATTACHMENT_EXT_ID_PUSH
+                } else {
+                    crate::attachment::ATTACHMENT_EXT_ID_DEL
+                };
+                (id, bytes)
+            }),
+            #[cfg(not(feature = "pubsub-attachment"))]
+            attachment: None,
+        }
+    }
+
+    /// Whether a field is past the bound the codec holds it to, which the owned builder refuses
+    /// with `LengthOutOfRange`: a timestamp's id past 16 bytes, a schema past 255 and an
+    /// attachment past the protocol's `u32` length.
+    fn refused(&self) -> bool {
+        let long_schema = |encoding: &crate::sample::EncodingHint| {
+            encoding
+                .schema
+                .as_ref()
+                .is_some_and(|schema| schema.len() > 255)
+        };
+        self.timestamp.is_some_and(|stamp| stamp.zid.len() > 16)
+            || self.encoding.is_some_and(long_schema)
+            || self
+                .attachment
+                .is_some_and(|(_, bytes)| u32::try_from(bytes.len()).is_err())
+    }
+}
+
+/// A Put or a Del with the metadata its publisher gave it, written straight into `sink` from the
+/// caller's own text, bytes and metadata: the bytes of the owned builders
+/// ([`crate::push_build::build_push_literal_with_meta`] and its aliased and Del twins) once
+/// encoded, with nothing built on a heap and no codec message composed (see the equality test).
+/// The key is `(mapping_id, suffix)` as [`write_plain_put`] takes it. Each field rides under the
+/// build's feature for it, as the owned builders gate them: the timestamp, a Put's encoding, the
+/// source info and the attachment in the body, a QoS byte other than the default on the outer
+/// chain. What the owned builders refuse is refused with `LengthOutOfRange` before a byte is
+/// written: a key past the protocol's `u16` length, a Put's payload past its `u32` length, and a
+/// field past its bound. A timestamp stack is not written ([`LENT_PUBLICATION_MAY_DECLINE`]).
+#[cfg(all(feature = "storage-profile", feature = "alloc"))]
+pub fn write_publication<S: sce_forge_runtime::codec::SceSink>(
+    sink: &mut S,
+    mapping_id: crate::wire_id::ExprId,
+    suffix: Option<&str>,
+    kind: crate::sample::SampleKind,
+    value: &[u8],
+    meta: &crate::metadata::PushMetadata,
+) -> Result<(), CodecError>
+where
+    CodecError: From<S::Error>,
+{
+    let put = kind == crate::sample::SampleKind::Put;
+    let body = BodyParts::of(put, meta);
+    if suffix.is_some_and(|text| text.len() > usize::from(u16::MAX))
+        || (put && u32::try_from(value.len()).is_err())
+        || body.refused()
+    {
+        return Err(CodecError::LengthOutOfRange);
+    }
+    let qos = meta.qos.unwrap_or(crate::sample::QosLevel::DEFAULT);
+    let with_qos = qos_rides(qos);
+    sink.write_u8(
+        wz_codecs::wire_const::N_MID_PUSH
+            | if suffix.is_some() { FLAG_PUSH_N } else { 0 }
+            | FLAG_PUSH_M
+            | if with_qos { 0x80 } else { 0 },
+    )?;
+    sink.write_vle_u64(u64::from(mapping_id))?;
+    if let Some(text) = suffix {
+        sink.write_vle_u64(text.len() as u64)?;
+        sink.write_bytes(text.as_bytes())?;
+    }
+    if with_qos {
+        // ENC_ZINT(0x20) | id_qos(0x01), no `Z`: the only extension of the outer chain.
+        sink.write_u8(0x21)?;
+        sink.write_vle_u64(u64::from(qos.raw))?;
+    }
+    let extended = body.source_info.is_some() || body.attachment.is_some();
+    sink.write_u8(
+        if put { PUT_HEADER } else { DEL_HEADER }
+            | if body.timestamp.is_some() { 0x20 } else { 0 }
+            | if body.encoding.is_some() { 0x40 } else { 0 }
+            | if extended { 0x80 } else { 0 },
+    )?;
+    if let Some(stamp) = body.timestamp {
+        sink.write_vle_u64(stamp.time)?;
+        sink.write_vle_u64(stamp.zid.len() as u64)?;
+        sink.write_bytes(&stamp.zid)?;
+    }
+    if let Some(encoding) = body.encoding {
+        // The id's low bit says a schema follows.
+        sink.write_vle_u32((encoding.packed_id & !1) | u32::from(encoding.schema.is_some()))?;
+        if let Some(schema) = &encoding.schema {
+            sink.write_vle_u64(schema.len() as u64)?;
+            sink.write_bytes(schema)?;
+        }
+    }
+    // The body chain: the source info, then the attachment, each a ZBuf entry whose header has
+    // the `Z` bit when another entry follows it.
+    if let Some(info) = body.source_info {
+        let zid = info.zid_prefix();
+        let (eid, sn) = (u64::from(info.eid), u64::from(info.sn));
+        // ENC_ZBUF(0x40) | id 0x01.
+        sink.write_u8(0x41 | if body.attachment.is_some() { 0x80 } else { 0 })?;
+        // One byte of the id's length, the id, then the entity and the sequence number.
+        sink.write_vle_u64((1 + zid.len() + vle_len(eid) + vle_len(sn)) as u64)?;
+        sink.write_u8(((zid.len() as u8) - 1) << 4)?;
+        sink.write_bytes(zid)?;
+        sink.write_vle_u64(eid)?;
+        sink.write_vle_u64(sn)?;
+    }
+    if let Some((id, bytes)) = body.attachment {
+        sink.write_u8(0x40 | id)?;
+        sink.write_vle_u64(bytes.len() as u64)?;
+        sink.write_bytes(bytes)?;
+    }
+    if put {
+        sink.write_vle_u64(value.len() as u64)?;
+        sink.write_bytes(value)?;
+    }
+    Ok(())
+}
+
 #[cfg(all(test, feature = "storage-profile"))]
 std::thread_local! {
     /// How many times [`write_plain_put`] ran on this thread: what a test of how often a Put is
@@ -678,5 +862,174 @@ mod tests {
         )
         .expect("a key at the bound is written");
         assert!(!got.is_empty());
+    }
+
+    /// A publication with metadata written from its parts is the owned builders' bytes: a Put and
+    /// a Del, on a literal key and on an id with and without a suffix, with every combination of
+    /// a timestamp, an encoding with and without a schema, a source info, an attachment and a QoS
+    /// byte, each as far as the build carries it.
+    #[test]
+    fn a_publication_written_from_its_parts_is_the_owned_builders_bytes() {
+        use crate::metadata::PushMetadata;
+        use crate::push_build::{
+            build_push_aliased_with_meta, build_push_del_aliased_with_meta,
+            build_push_del_literal_with_meta, build_push_literal_with_meta,
+        };
+        use crate::sample::{EncodingHint, QosLevel, SampleKind, SourceInfo, TimestampHint};
+
+        let keys: [(u16, Option<&str>); 4] = [
+            (0, Some("demo/meta/key")),
+            (5, None),
+            (5, Some("tail")),
+            (300, Some("a/longer/suffix")),
+        ];
+        let payloads: [&[u8]; 2] = [b"", &[9u8; 130]];
+        let mut compared = 0usize;
+        let (mut shortest, mut longest) = (usize::MAX, 0usize);
+        for fields in 0u8..64 {
+            let meta = PushMetadata {
+                timestamp: (fields & 1 != 0).then(|| TimestampHint {
+                    time: 0x1234_5678_9abc,
+                    zid: alloc::vec![7; 16],
+                }),
+                encoding: (fields & 2 != 0).then(|| EncodingHint {
+                    packed_id: 42 << 1,
+                    schema: (fields & 4 != 0).then(|| b"text/plain;x".to_vec()),
+                }),
+                source_info: (fields & 8 != 0)
+                    .then(|| SourceInfo::new(&[0xa1, 0xa2, 0xa3], 0x5150, 9001)),
+                attachment: (fields & 16 != 0).then(|| alloc::vec![3u8; 200]),
+                qos: (fields & 32 != 0).then(|| QosLevel::from_raw(0x1a)),
+                ..PushMetadata::default()
+            };
+            for (id, suffix) in keys {
+                for kind in [SampleKind::Put, SampleKind::Del] {
+                    for payload in payloads {
+                        let put = kind == SampleKind::Put;
+                        let owned = if id == 0 {
+                            let key = suffix.expect("a literal key");
+                            if put {
+                                build_push_literal_with_meta(key, payload, &meta)
+                            } else {
+                                build_push_del_literal_with_meta(key, &meta)
+                            }
+                        } else if put {
+                            build_push_aliased_with_meta(id, suffix, payload, &meta)
+                        } else {
+                            build_push_del_aliased_with_meta(id, suffix, &meta)
+                        }
+                        .expect("within the bounds");
+                        let mut want = alloc::vec::Vec::new();
+                        owned
+                            .try_as_borrowed()
+                            .expect("the owned Push has a view")
+                            .encode(&mut sce_forge_runtime::codec::VecSink::new(&mut want))
+                            .expect("a Vec grows");
+                        let mut got = alloc::vec::Vec::new();
+                        write_publication(
+                            &mut sce_forge_runtime::codec::VecSink::new(&mut got),
+                            id,
+                            suffix,
+                            kind,
+                            payload,
+                            &meta,
+                        )
+                        .expect("a Vec grows");
+                        assert_eq!(
+                            got,
+                            want,
+                            "fields {fields:#08b} id {id} suffix {suffix:?} {kind:?} {} bytes",
+                            payload.len()
+                        );
+                        if id == 0 && put && payload.is_empty() {
+                            shortest = shortest.min(got.len());
+                            longest = longest.max(got.len());
+                        }
+                        compared += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(compared, 64 * 4 * 2 * 2);
+        // The control: the fields really ride in a build that carries them, so the equality above
+        // is not two bare messages agreeing.
+        #[cfg(feature = "pubsub-attachment")]
+        assert!(longest >= shortest + 200, "{shortest} to {longest}");
+        #[cfg(not(any(
+            feature = "pubsub-timestamp",
+            feature = "pubsub-encoding",
+            feature = "pubsub-source-info",
+            feature = "pubsub-attachment",
+            feature = "pubsub-qos"
+        )))]
+        assert_eq!(shortest, longest);
+    }
+
+    /// What the owned builders refuse the writer refuses before it writes a byte, and what they
+    /// build it writes: a key past the protocol's `u16` length, a timestamp's id past 16 bytes and a
+    /// schema past 255, each refused only in a build that carries the field.
+    #[test]
+    fn a_publication_the_owned_builders_refuse_is_refused_with_nothing_written() {
+        use crate::metadata::PushMetadata;
+        use crate::push_build::build_push_aliased_with_meta;
+        use crate::sample::{EncodingHint, SampleKind, TimestampHint};
+
+        let past = "k".repeat(usize::from(u16::MAX) + 1);
+        let stamped = |len: usize| PushMetadata {
+            timestamp: Some(TimestampHint {
+                time: 1,
+                zid: alloc::vec![1; len],
+            }),
+            ..PushMetadata::default()
+        };
+        let encoded = |len: usize| PushMetadata {
+            encoding: Some(EncodingHint {
+                packed_id: 2,
+                schema: Some(alloc::vec![b's'; len]),
+            }),
+            ..PushMetadata::default()
+        };
+        let cases: [(Option<&str>, PushMetadata, bool); 5] = [
+            (Some(past.as_str()), PushMetadata::default(), true),
+            (Some("k"), stamped(17), cfg!(feature = "pubsub-timestamp")),
+            (Some("k"), stamped(16), false),
+            (Some("k"), encoded(256), cfg!(feature = "pubsub-encoding")),
+            (Some("k"), encoded(255), false),
+        ];
+        for (suffix, meta, refused) in cases {
+            let owned = build_push_aliased_with_meta(3, suffix, b"x", &meta);
+            assert_eq!(owned.is_err(), refused, "the owned builder");
+            let mut got = alloc::vec::Vec::new();
+            let written = write_publication(
+                &mut sce_forge_runtime::codec::VecSink::new(&mut got),
+                3,
+                suffix,
+                SampleKind::Put,
+                b"x",
+                &meta,
+            );
+            if refused {
+                assert_eq!(written, Err(CodecError::LengthOutOfRange));
+                assert!(
+                    got.is_empty(),
+                    "nothing of a refused publication is written"
+                );
+            } else {
+                assert_eq!(written, Ok(()));
+                assert!(!got.is_empty());
+            }
+        }
+    }
+
+    /// The flag a sender reads to keep its owned send is the build's: a build with no key
+    /// rewriting, no network counters and no timestamp stack declines no publication.
+    #[test]
+    fn a_publication_is_declined_only_where_the_build_reads_its_owned_form() {
+        assert_eq!(
+            LENT_PUBLICATION_MAY_DECLINE,
+            cfg!(feature = "routing-namespace")
+                || cfg!(feature = "transport-stats")
+                || cfg!(feature = "pubsub-ts-stack")
+        );
     }
 }

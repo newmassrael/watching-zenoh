@@ -83,6 +83,7 @@ use wz_session_core::declare_form::{InterestForm, RetractionKey};
 use wz_session_core::driver_loop::DriverOutcome;
 use wz_session_core::entropy::{EntropySource, EntropyUnavailable};
 use wz_session_core::interest_build::InterestKinds;
+use wz_session_core::lent_push;
 use wz_session_core::limits::SessionLimits;
 #[cfg(feature = "listen")]
 use wz_session_core::link_admission::{LinkAdmission, LinkRegistry};
@@ -4086,22 +4087,41 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             // Each link names the key as its own key-wire form says.
             let wire = on_link(actions, keyexpr, wire);
             let suffix = wire.suffix.as_deref();
-            // A plain Put is sent from the borrowed bytes, as the tokio engine sends it, unless
-            // the session rewrites what it originates, which leaves it to the owned send below.
-            let plain = if opts.kind == SampleKind::Put && meta.is_plain_apart_from_qos() {
-                let (mapping_id, suffix) = if wire.is_literal() {
-                    (0, Some(keyexpr))
-                } else {
-                    (wire.mapping_id, suffix)
-                };
+            // A publication is written from the borrowed key, bytes and metadata into the slot its
+            // link lends, a plain Put by its own shorter writer, unless the session or the build
+            // leaves it to the owned send below.
+            let (mapping_id, lent_suffix) = if wire.is_literal() {
+                (0, Some(keyexpr))
+            } else {
+                (wire.mapping_id, suffix)
+            };
+            let lent = if opts.kind == SampleKind::Put && meta.is_plain_apart_from_qos() {
                 actions.send_plain_put_qos(
-                    mapping_id, suffix, payload, meta.qos, reliable, express, priority,
+                    mapping_id,
+                    lent_suffix,
+                    payload,
+                    meta.qos,
+                    reliable,
+                    express,
+                    priority,
                 )
             } else {
-                None
+                actions.send_publication_qos(
+                    mapping_id,
+                    lent_suffix,
+                    opts.kind,
+                    payload,
+                    meta,
+                    reliable,
+                    express,
+                    priority,
+                )
             };
-            let sent = if let Some(plain) = plain {
-                leg(plain)
+            let sent = if let Some(lent) = lent {
+                leg(lent)
+            } else if !lent_push::LENT_PUBLICATION_MAY_DECLINE {
+                // No send of this build declines one, so the owned builders are not linked.
+                Err(FanoutError::ExceedsCapacity)
             } else {
                 let push = match (opts.kind, wire.mapping_id) {
                     (SampleKind::Put, 0) => {
