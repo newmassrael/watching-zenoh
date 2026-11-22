@@ -77,6 +77,80 @@ impl WindowsTcpSocket {
     }
 }
 
+impl WindowsTcpSocket {
+    /// Begin a connection to `to` and return without waiting for it: the socket is non-blocking
+    /// until [`StreamSocket::connected`] finds the connection made, and blocking from then on, as
+    /// a socket [`Self::connect`] made is. A refusal Winsock knows at once is the error here.
+    pub fn connect_started(to: SocketAddr) -> Result<Self, WindowsNetError> {
+        let socket = open_socket(&to, ws::SOCK_STREAM, ws::IPPROTO_TCP)?;
+        // Owned from here, so an early return closes it.
+        let this = Self {
+            socket,
+            local: to,
+            peer: to,
+        };
+        set_flag(socket, ws::IPPROTO_TCP, ws::TCP_NODELAY).map_err(WindowsNetError::NoDelay)?;
+        set_nonblocking(socket, true).map_err(WindowsNetError::NonBlocking)?;
+        let peer = RawAddr::of(to);
+        // SAFETY: `peer` is a live socket address of the length passed.
+        if unsafe { ws::connect(socket, peer.as_ptr(), peer.size()) } != 0 {
+            match last_error() {
+                // Under way, which `connected` reads.
+                ws::WSAEWOULDBLOCK => {}
+                refused => return Err(WindowsNetError::Connect(refused)),
+            }
+        }
+        Ok(this)
+    }
+
+    /// Whether the connection begun without waiting has ended, made or refused: `select` with no
+    /// wait, which names a refused connect in its exception set on every Windows (`WSAPoll`
+    /// reports one only from Windows 10 2004 on).
+    fn connect_ended(&self) -> (bool, bool) {
+        let mut made = ws::FD_SET {
+            fd_count: 1,
+            fd_array: [0; 64],
+        };
+        made.fd_array[0] = self.socket;
+        let mut failed = ws::FD_SET {
+            fd_count: 1,
+            fd_array: [0; 64],
+        };
+        failed.fd_array[0] = self.socket;
+        let now = ws::TIMEVAL {
+            tv_sec: 0,
+            tv_usec: 0,
+        };
+        // SAFETY: two live sets of one socket each, and a live timeout; the first argument is
+        // ignored by Winsock.
+        let ready = unsafe { ws::select(0, core::ptr::null_mut(), &mut made, &mut failed, &now) };
+        if ready <= 0 {
+            return (false, false);
+        }
+        (made.fd_count > 0, failed.fd_count > 0)
+    }
+
+    /// The error a connection begun without waiting ended with (`SO_ERROR`), 0 when it was made.
+    fn connect_error(&self) -> Result<i32, WindowsNetError> {
+        let mut error: i32 = 0;
+        let mut len = core::mem::size_of::<i32>() as i32;
+        // SAFETY: `error` and `len` are live and writable, and `len` is `error`'s size.
+        let rc = unsafe {
+            ws::getsockopt(
+                self.socket,
+                ws::SOL_SOCKET,
+                ws::SO_ERROR,
+                (&mut error as *mut i32).cast(),
+                &mut len,
+            )
+        };
+        if rc != 0 {
+            return Err(WindowsNetError::Connect(last_error()));
+        }
+        Ok(error)
+    }
+}
+
 /// The host's TCP connect as a stack's dial: the stream a `tcp/` link runs over is a plain
 /// connection.
 #[derive(Debug, Clone, Copy, Default)]
@@ -87,6 +161,10 @@ impl StreamDial for WindowsTcpDial {
 
     fn dial(&self, to: SocketAddr) -> Result<WindowsTcpSocket, LinkOpenError> {
         WindowsTcpSocket::connect(to).map_err(open_refused)
+    }
+
+    fn dial_started(&self, to: SocketAddr) -> Result<WindowsTcpSocket, LinkOpenError> {
+        WindowsTcpSocket::connect_started(to).map_err(open_refused)
     }
 
     wz_runtime_coop::with_heap_link_seams! {
@@ -286,6 +364,28 @@ impl StreamSocket for WindowsTcpSocket {
             }
         }
         Ok(())
+    }
+
+    fn connected(&mut self) -> Result<bool, WindowsNetError> {
+        match self.connect_ended() {
+            (_, true) => {
+                let error = self.connect_error()?;
+                Err(WindowsNetError::Connect(if error == 0 {
+                    ws::WSAECONNREFUSED
+                } else {
+                    error
+                }))
+            }
+            (false, false) => Ok(false),
+            (true, false) => {
+                set_nonblocking(self.socket, false).map_err(WindowsNetError::NonBlocking)?;
+                self.local =
+                    name_of(self.socket, ws::getsockname).map_err(WindowsNetError::SockName)?;
+                self.peer =
+                    name_of(self.socket, ws::getpeername).map_err(WindowsNetError::PeerName)?;
+                Ok(true)
+            }
+        }
     }
 
     fn wait_readable(&self, timeout_ms: c_int) {
@@ -493,6 +593,53 @@ mod tests {
     impl Drop for RefusingPort {
         fn drop(&mut self) {
             close(self.socket);
+        }
+    }
+
+    /// A connect begun without waiting is made once the listener has it, names both its ends from
+    /// then on and carries bytes; one to a port nobody listens on is refused, at once or when it is
+    /// asked: Windows retries a refused connect for a while, so the refusal comes late.
+    #[test]
+    fn a_connect_begun_without_waiting_is_made_or_refused_when_asked() {
+        use std::time::{Duration, Instant};
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a listener");
+        let port = listener.local_addr().expect("its port").port();
+        let mut near = WindowsTcpSocket::connect_started(at(port)).expect("a connect begun");
+        let until = Instant::now() + Duration::from_secs(5);
+        while !near.connected().expect("the connect is not refused") {
+            assert!(Instant::now() < until, "the connect was never made");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let (mut far, _) = listener.accept().expect("the far end");
+        assert_eq!(near.peer(), listener.local_addr().unwrap());
+        assert_eq!(near.local(), far.peer_addr().unwrap());
+        near.send_parts(&[b"made"])
+            .expect("a made connection carries bytes");
+        let mut got = [0u8; 4];
+        far.read_exact(&mut got).expect("the bytes");
+        assert_eq!(&got, b"made");
+
+        let held = RefusingPort::hold();
+        match WindowsTcpSocket::connect_started(at(held.port)) {
+            Err(WindowsNetError::Connect(e)) => assert_eq!(e, ws::WSAECONNREFUSED),
+            Err(other) => panic!("a different error: {other:?}"),
+            Ok(mut refused) => {
+                let until = Instant::now() + Duration::from_secs(15);
+                loop {
+                    match refused.connected() {
+                        Ok(false) => {
+                            assert!(Instant::now() < until, "the refusal never came");
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                        Err(WindowsNetError::Connect(e)) => {
+                            assert_eq!(e, ws::WSAECONNREFUSED);
+                            break;
+                        }
+                        other => panic!("a connect to a port nobody listens on: {other:?}"),
+                    }
+                }
+            }
         }
     }
 

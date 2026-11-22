@@ -1418,6 +1418,7 @@ fn a_build_without_groups_refuses_a_session_that_joins_one() {
 mod advanced;
 mod congestion;
 mod decl_watch;
+mod dial_in_flight;
 #[cfg(all(feature = "query", feature = "queryable", feature = "local-queryable"))]
 mod face_table;
 #[cfg(feature = "connectivity")]

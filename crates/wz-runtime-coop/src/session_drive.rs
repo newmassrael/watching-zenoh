@@ -476,6 +476,20 @@ pub trait SessionLinks {
     /// [`LinkOpenError::Unsupported`].
     fn open_initiator(&self, to: Locator) -> Result<OpenedLink<Self::Pump>, LinkOpenError>;
 
+    /// [`Self::open_initiator`], begun without waiting for the link's connection to be made: the
+    /// dial is asked again ([`PendingDial::poll`]) until its link is made or refused, so a dial that
+    /// is slow to be answered or refused (a stream's connect) does not hold whoever holds the
+    /// session meanwhile. The default makes the link here, as [`Self::open_initiator`] does, which
+    /// is the answer of a stack whose dials do not wait.
+    #[cfg(feature = "alloc")]
+    fn begin_initiator(
+        &self,
+        to: Locator,
+    ) -> Result<Box<dyn PendingDial<Self::Pump>>, LinkOpenError> {
+        let opened = self.open_initiator(to)?;
+        Ok(Box::new(Dialled::new(opened)))
+    }
+
     /// A listener on `at`, which yields one link for each connection a peer opens to it. A stack
     /// that does not listen, or not for the locator's protocol, is
     /// [`LinkOpenError::Unsupported`]: the default, so a stack that never accepts a stream
@@ -528,6 +542,35 @@ pub trait LinkListener<P> {
     /// when the stack gives none, and then the node looks for one at a pace of its own.
     fn readiness(&self) -> Option<Box<dyn LinkReadiness>> {
         None
+    }
+}
+
+/// A dial begun and not yet answered ([`SessionLinks::begin_initiator`]), asked without waiting
+/// whether its link has been made.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+pub trait PendingDial<P> {
+    /// The link, once its connection is made; the refusal, once the other end or the stack has
+    /// refused it; `None` while it is still being made, and after it has answered.
+    fn poll(&mut self) -> Option<Result<OpenedLink<P>, LinkOpenError>>;
+}
+
+/// A dial whose link was made by the time it was begun: what a stack whose dials do not wait
+/// answers [`SessionLinks::begin_initiator`] with.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+pub struct Dialled<P>(Option<OpenedLink<P>>);
+
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+impl<P> Dialled<P> {
+    /// The dial whose link is `opened`.
+    pub fn new(opened: OpenedLink<P>) -> Self {
+        Self(Some(opened))
+    }
+}
+
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+impl<P> PendingDial<P> for Dialled<P> {
+    fn poll(&mut self) -> Option<Result<OpenedLink<P>, LinkOpenError>> {
+        self.0.take().map(Ok)
     }
 }
 

@@ -102,6 +102,15 @@ pub trait StreamSocket: Sized {
     /// when the peer has closed the stream, `Ok(None)` when nothing is queued.
     fn try_read(&self, buf: &mut [u8]) -> Result<Option<usize>, Self::Error>;
 
+    /// Whether a connection begun without waiting ([`StreamDial::dial_started`]) has been made:
+    /// `Ok(true)` once it carries bytes, `Ok(false)` while it is still being made, the failure once
+    /// the other end or the stack refused it. Asked without waiting. Once made, the stream is read
+    /// and written as a dialled one is and names its two ends as they are. A stream whose dial
+    /// waited is made from the start.
+    fn connected(&mut self) -> Result<bool, Self::Error> {
+        Ok(true)
+    }
+
     /// End the connection in both directions. The peer reads the end of the stream.
     fn shutdown(&self);
 
@@ -142,6 +151,14 @@ pub trait StreamDial {
     /// it, [`LinkOpenError::Exhausted`] when the platform had no socket to give,
     /// [`LinkOpenError::Unsupported`] when it has no socket of that family at all.
     fn dial(&self, to: SocketAddr) -> Result<Self::Stream, LinkOpenError>;
+
+    /// Begin a connection to `to` without waiting for it to be made: the stream, whose
+    /// [`StreamSocket::connected`] tells when it is, so whoever holds a session is not held by
+    /// a connect the other end is slow to answer or to refuse. A dial that cannot begin one
+    /// without waiting makes it here, as [`Self::dial`] does, and its stream is made from the start.
+    fn dial_started(&self, to: SocketAddr) -> Result<Self::Stream, LinkOpenError> {
+        self.dial(to)
+    }
 
     /// Whether the dial opens streams at all. A stack asks before it claims any buffer, so a
     /// protocol it does not carry is [`LinkOpenError::Unsupported`] (permanent) and never

@@ -47,7 +47,7 @@ use crate::session_drive::SessionDatagramLink;
 #[cfg(feature = "session-slot")]
 use crate::session_drive::{Accept, Bind, DriverPump, SlotStack};
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-use crate::session_drive::{LinkListener, OpenedLink, SessionLinks};
+use crate::session_drive::{Dialled, LinkListener, OpenedLink, PendingDial, SessionLinks};
 #[cfg(any(feature = "session-slot", feature = "alloc"))]
 use crate::session_drive::{LinkOpenError, LinkProto, Locator};
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
@@ -504,6 +504,25 @@ where
         })
     }
 
+    /// A `tcp/` dial begins its connection and is asked for it later (`PendingStream`); a
+    /// datagram link has no connection to wait for, and a `tls/` one is dialled as before, its
+    /// channel's handshake run in its dial.
+    fn begin_initiator(
+        &self,
+        to: Locator,
+    ) -> Result<Box<dyn PendingDial<Self::Pump>>, LinkOpenError> {
+        if to.proto == LinkProto::Tcp && D::CARRIED {
+            let socket = self.dial.dial_started(to.at)?;
+            return Ok(Box::new(PendingStream::<U, D::Stream, L::Stream> {
+                socket: Some(socket),
+                shape: self.shape,
+                stack: core::marker::PhantomData,
+            }));
+        }
+        let opened = self.open_initiator(to)?;
+        Ok(Box::new(Dialled::new(opened)))
+    }
+
     /// A `tcp/` listener over the stack's stream dial, a `tls/` one over its secure channel's
     /// (the channel's own listening half, which completes each handshake before the link sees the
     /// connection), or, with `udp-listen`, a `udp/` one over one datagram socket, whose peers are
@@ -546,6 +565,44 @@ where
     /// ([`IpLinks::with_groups`]); links given none refuse it as unsupported.
     fn open_group(&self, endpoint: &str) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
         self.groups.join(endpoint)
+    }
+}
+
+/// A `tcp/` dial whose connection is being made: the link is made over the stream once the stream
+/// says its connection is, shaped as the stack's links are.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+struct PendingStream<U, S: StreamSocket, T> {
+    socket: Option<S>,
+    shape: LinkShape,
+    stack: core::marker::PhantomData<fn() -> (U, T)>,
+}
+
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+impl<U, S, T> PendingDial<Rc<HeapIpDriver<U, S, T>>> for PendingStream<U, S, T>
+where
+    U: DatagramSocket + 'static,
+    S: StreamSocket + 'static,
+    T: StreamSocket + 'static,
+{
+    fn poll(&mut self) -> Option<Result<OpenedLink<Rc<HeapIpDriver<U, S, T>>>, LinkOpenError>> {
+        match self.socket.as_mut()?.connected() {
+            Ok(false) => None,
+            // The stack's own answer to the connect: the other end did not take it.
+            Err(_) => {
+                self.socket = None;
+                Some(Err(LinkOpenError::Refused))
+            }
+            Ok(true) => {
+                let socket = self.socket.take()?;
+                let driver = Rc::new(IpDriver::Tcp(self.shape.stream(
+                    StreamDriver::with_buffers(socket, STREAM_RX_CAPACITY, self.shape.tx()),
+                )));
+                Some(Ok(OpenedLink {
+                    sink: driver.clone(),
+                    pump: driver,
+                }))
+            }
+        }
     }
 }
 
