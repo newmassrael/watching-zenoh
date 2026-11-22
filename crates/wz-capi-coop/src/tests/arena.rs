@@ -746,6 +746,46 @@ fn a_put_is_encoded_into_a_slot_the_arena_lent() {
     );
 }
 
+/// A link is lent one transmit slot: a run of puts leaves frame after frame from it, each frame
+/// sent before the next takes the slot, none built on the heap and none refused for want of a
+/// slot, and every put reaches the router.
+#[test]
+fn one_slot_a_link_carries_a_run_of_puts() {
+    let router = Router::start(CatchAll::Held);
+    let engine = open(&router);
+    until(&engine, "the link to be up", || engine.faces_up() == 1);
+    let before = engine.lend_counts().expect("the link is up");
+    for n in 0..16u8 {
+        engine
+            .publish_on_wire_all(
+                "demo/one-slot",
+                &WireKey::literal(),
+                &[n],
+                &PublishOptions::put().with_locality(Locality::Remote),
+            )
+            .expect("a put the link carries");
+    }
+    until(&engine, "the router to receive every put", || {
+        router.seen(|s| {
+            s.samples
+                .iter()
+                .filter(|(k, _)| k == "demo/one-slot")
+                .count()
+                == 16
+        })
+    });
+    let (batch, whole) = engine.lend_counts().expect("the link is up");
+    assert!(
+        batch.slot_frames + whole.slot_frames > before.0.slot_frames + before.1.slot_frames,
+        "the puts left from the slot: {batch:?} {whole:?}"
+    );
+    assert_eq!(
+        (batch.heap_no_slot, batch.heap_short_slot, whole.heap_frames),
+        (0, 0, 0),
+        "no frame was built on the heap for want of a second slot: {batch:?} {whole:?}"
+    );
+}
+
 /// A session whose arena holds one link dials again, after its link is lost, over the buffers the
 /// lost link held: the lost link lets them go before the next is opened.
 #[test]

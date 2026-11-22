@@ -126,9 +126,16 @@ impl ArenaRow {
 /// The most rows a plan holds: every row of the build with every feature.
 pub const ARENA_ROWS: usize = 24;
 
-/// The slots each link is lent to encode its frames into: a batching session holds a batch open in
-/// one slot while it encodes the next message, which does not join it, into another.
-pub const LINK_TX_SLOTS: usize = 2;
+/// The slots each link is lent to encode its frames into: one, as zenoh-pico keeps one write buffer
+/// (`vendor/zenoh-pico/src/transport/common/tx.c` @
+/// `static z_result_t _z_transport_tx_send_t_msg_inner(_z_transport_common_t *ztc, const _z_transport_message_t *t_msg,`).
+/// The batch a session holds open is sent before a message that does not join it takes the slot:
+/// a transport message drains the open batch first (`send_close_with_reason`, `send_keep_alive`),
+/// and a frame of the other reliability closes it. A stream link keeps the slot of a frame it has
+/// not written whole until it has, so the next frame asks for room within its message's wait,
+/// which writes it (`wait_for_room`), and a message that asks for a slot meanwhile writes it first
+/// (`StreamDriver::tx_slot_acquire` in `wz-runtime-coop`).
+pub const LINK_TX_SLOTS: usize = 1;
 
 /// A row of a plan that has none yet.
 const NO_ROW: ArenaRow = ArenaRow {
