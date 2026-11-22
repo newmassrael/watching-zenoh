@@ -59,6 +59,34 @@ fn a_job_runs_from_the_step_after_its_time_and_not_before() {
     engine.stop_ticker(id);
 }
 
+/// A read with no job due takes the session's lock once for its jobs, with its wait and its step
+/// three in all, where reading the clock and looking for a due job took a take each. The CONTROL
+/// is a read that runs a due job: one take more, to put the job back and look for the next.
+#[test]
+fn a_read_with_no_job_due_takes_the_session_once_for_its_jobs() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let takes = || engine.takes.core.load(Ordering::SeqCst);
+    let before = takes();
+    let _ = SessionDrive::read(&*engine, false);
+    assert_eq!(takes() - before, 3, "the wait, the step and the jobs");
+
+    let runs = Arc::new(AtomicUsize::new(0));
+    let id = engine
+        .start_ticker(20, counting(&runs))
+        .expect("the engine runs periodic jobs");
+    std::thread::sleep(Duration::from_millis(40));
+    let before = takes();
+    let _ = SessionDrive::read(&*engine, false);
+    assert_eq!(runs.load(Ordering::SeqCst), 1, "the job was due and ran");
+    assert_eq!(
+        takes() - before,
+        4,
+        "CONTROL: the run puts the job back and looks for the next in one take"
+    );
+    engine.stop_ticker(id);
+}
+
 /// A run is due a period after the PREVIOUS run ended, so a job is not run again to catch up,
 /// and the gaps between runs are no shorter than the period.
 #[test]

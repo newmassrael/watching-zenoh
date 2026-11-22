@@ -3201,21 +3201,23 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// period runs once per call and does not keep the caller here.
     #[cfg(feature = "ticker")]
     fn run_due_tickers(&self) {
-        let Some(started_ms) = self.live().map(|core| core.0.clock.now_us() / 1000) else {
-            return;
+        // Every read steps here, almost always with nothing due: the clock is read and the first
+        // due job taken under one take of the lock, and a job that ran is put back and the next
+        // taken under one more.
+        let (started_ms, mut next) = match self.live() {
+            Some(mut core) => {
+                let started_ms = core.0.clock.now_us() / 1000;
+                (started_ms, core.0.tickers.take_next_due(started_ms))
+            }
+            None => return,
         };
-        loop {
-            let next = self
-                .live()
-                .and_then(|mut core| core.0.tickers.take_next_due(started_ms));
-            let Some((id, tick)) = next else {
-                return;
-            };
+        while let Some((id, tick)) = next {
             let goes_on = tick();
-            if let Some(mut core) = self.live() {
+            next = self.live().and_then(|mut core| {
                 let now_ms = core.0.clock.now_us() / 1000;
                 core.0.tickers.rearm(id, goes_on, now_ms);
-            }
+                core.0.tickers.take_next_due(started_ms)
+            });
         }
     }
 
