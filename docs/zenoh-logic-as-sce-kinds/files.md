@@ -179,6 +179,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-coop/src/tests/closure_drops.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/congestion.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/decl_watch.rs` | S7 | |
+| `crates/wz-capi-coop/src/tests/dial_in_flight.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/entity_tables.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/face_table.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/faces.rs` | S7 | |
@@ -193,8 +194,10 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-coop/src/tests/local.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/local_query.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/one_face.rs` | excluded: test | Test-only file by its name. |
+| `crates/wz-capi-coop/src/tests/plain_put.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/program_clock.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/queryable.rs` | excluded: test | Test-only file by its name. |
+| `crates/wz-capi-coop/src/tests/redial_wait.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/replay.rs` | S7 | |
 | `crates/wz-capi-coop/src/tests/shared_key_ids.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/snapshot.rs` | S7 | |
@@ -860,6 +863,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/scouting_message_parity.rs` | excluded: test | Parity tests of Scout and Hello against their documents, compiled only under `#[cfg(all(test, ...))]` (`lib.rs:1139`). |
 | `crates/wz-session-core/src/selector_params.rs` | S2 | |
 | `crates/wz-session-core/src/send_declare_error.rs` | S3 | |
+| `crates/wz-session-core/src/send_gate.rs` | S1 | |
 | `crates/wz-session-core/src/send_wire_error.rs` | S3 | |
 | `crates/wz-session-core/src/serde_codec.rs` | S3 | |
 | `crates/wz-session-core/src/serial_link.rs` | S1 | |

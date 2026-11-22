@@ -135,8 +135,8 @@ if [ "$form" = nostd ]; then
     fi
     # The form names the host it is built for: Windows has its own (`os-windows`).
     case "$host_triple" in
-        *-windows-*) host_form=os-windows ;;
-        *) host_form=os-posix ;;
+        *-windows-*) host_form="os-windows" ;;
+        *) host_form="os-posix" ;;
     esac
     build_features="${host_form}${features:+,$features}"
     engine_args=(--no-default-features --profile capi-nostd --config .cargo/capi-nostd.toml

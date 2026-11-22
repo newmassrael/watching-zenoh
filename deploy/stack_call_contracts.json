@@ -25,7 +25,8 @@
     "planner-call": {"zephyr-client-fixed": 2, "zephyr-client-heap": 2, "zephyr-client-fixed-batching": 2, "zephyr-client-fixed-get": 2, "zephyr-admin-fixed-tls": 0, "zephyr-client-fixed-tls": 2},
     "planner-emit": {"zephyr-client-fixed": 3, "zephyr-client-heap": 3, "zephyr-client-fixed-batching": 3, "zephyr-client-fixed-get": 3, "zephyr-admin-fixed-tls": 3, "zephyr-client-fixed-tls": 3},
     "record": {"zephyr-client-fixed": 1, "zephyr-client-heap": 1, "zephyr-client-fixed-batching": 1, "zephyr-client-fixed-get": 3, "zephyr-admin-fixed-tls": 6, "zephyr-client-fixed-tls": 1},
-    "own-mapping": {"zephyr-client-fixed": 0, "zephyr-client-heap": 0, "zephyr-client-fixed-batching": 0, "zephyr-client-fixed-get": 1, "zephyr-admin-fixed-tls": 2},
+    "sink": {"zephyr-client-fixed-batching": 1, "zephyr-client-fixed-get": 3, "zephyr-admin-fixed-tls": 7, "zephyr-client-fixed-tls": 1},
+    "own-mapping": {"zephyr-client-fixed": 0, "zephyr-client-heap": 0, "zephyr-client-fixed-batching": 1, "zephyr-client-fixed-get": 1, "zephyr-admin-fixed-tls": 2, "zephyr-client-fixed-tls": 1},
     "wireexpr-suffix-tail-append": {"zephyr-client-fixed": 0, "zephyr-client-heap": 0, "zephyr-client-fixed-batching": 0, "zephyr-client-fixed-get": 0, "zephyr-admin-fixed-tls": 1, "zephyr-client-fixed-tls": 0},
     "answer-reply": {"zephyr-client-fixed": 0, "zephyr-client-heap": 0, "zephyr-client-fixed-batching": 0, "zephyr-client-fixed-get": 0, "zephyr-client-fixed-tls": 0},
     "byte-cells": {"zephyr-client-fixed": 2, "zephyr-client-heap": 2, "zephyr-client-fixed-batching": 2, "zephyr-client-fixed-get": 2, "zephyr-admin-fixed-tls": 2, "zephyr-client-fixed-tls": 2},
@@ -139,6 +140,12 @@
       "why": "the function a queryable was registered with: the admin node's answer to the admin space. The client's answer is no function pointer: its registry holds the answer itself and calls it with the query and the responder as their own types (QuerySinkOf), a direct call"
     },
     {
+      "id": "reply-stage",
+      "where": {"file": "query.rs", "anchor": "self.replies.stage_reply("},
+      "callees": "reply_stage::StagesReplies>::stage_reply$",
+      "why": "a responder stages each reply through the stage it is lent, held as a StagesReplies so the stage of any storage policy serves; ReplyStage is the trait's one implementation"
+    },
+    {
       "id": "planner-call",
       "where": {"file": "connect_manager.rs"},
       "callees": "ConnectManager>::(fire_due|observe|open_node|reconcile)::\\{closure#\\d+\\}",
@@ -215,8 +222,8 @@
     {
       "id": "sink",
       "where": {"file": "drive.rs"},
-      "callees": "driver_loop::EventSink>::(event|record)$",
-      "why": "the receive chain reports to its sink"
+      "callees": "driver_loop::EventSink>::(event|record|takes_another|holds_datagram)$",
+      "why": "the receive chain reports to its sink, and asks it whether it takes another unit of a datagram and whether its link keeps the datagram"
     },
     {
       "id": "own-mapping",

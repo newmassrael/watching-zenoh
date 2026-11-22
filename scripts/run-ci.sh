@@ -14639,7 +14639,10 @@ layer_c1m_session_lwip() {
     # and only a family the kernel lacks is `Unsupported`.
     # 17 -> 19 = what hosted run 44790303307 printed: a stream the peer does not read stops being
     # writable until it reads, and the wait for room handed out answers as the socket does.
-    _runci_guarded_test "C1m posix tcp seam" 19 \
+    # 19 -> 23, counted from the source: a connect begun without waiting is made or refused when
+    # asked, a write that does not wait takes what the stream has room for, a timed wait for room
+    # reports the time it took, and a link that owes the stream is woken by room alone.
+    _runci_guarded_test "C1m posix tcp seam" 23 \
         cargo test -p wz-runtime-posix --lib stream:: --quiet || return 1
     # The host's multicast seam (`wz_runtime_posix::group`): the receivers of one host share the group's
     # port, a group that is not one is not joined, a member sends from a port of its own with the hop
