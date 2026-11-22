@@ -75,6 +75,7 @@ use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntim
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::close_reason::CloseReason;
 use wz_session_core::declare::matching::BoxedMatchingSink;
+#[cfg(any(feature = "query", feature = "queryable"))]
 use wz_session_core::declare::queryable::QuerierCriterion;
 use wz_session_core::declare::subscriber::PublisherCriterion;
 use wz_session_core::declare_form::{InterestForm, RetractionKey};
@@ -1564,6 +1565,17 @@ fn counted(plane: FilterPlane, count_local: bool) -> Locality {
 /// every critical section here leaves its value consistent ([`os::Mutex::lock`]).
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock()
+}
+
+/// Whether this build holds what a matching listener or a write filter of `plane` counts: the
+/// subscribers a peer declares in every build, and the queryables with a querier or a queryable
+/// (`query`, `queryable`). One of a plane the build does not hold is refused before anything is
+/// asked, as one the session has no row for is: there is no table to count it with.
+const fn counts(plane: FilterPlane) -> bool {
+    match plane {
+        FilterPlane::Subscribers => true,
+        FilterPlane::Queryables { .. } => cfg!(any(feature = "query", feature = "queryable")),
+    }
 }
 
 /// The two planes' Interest kinds, an Interest held per plane and key.
@@ -5156,6 +5168,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // locally.
         count_local: bool,
     ) -> MatchId {
+        if !counts(plane) {
+            return 0;
+        }
         let Some(mut guard) = self.live() else {
             return 0;
         };
@@ -5199,11 +5214,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                     local,
                     report,
                 ),
+                #[cfg(any(feature = "query", feature = "queryable"))]
                 FilterPlane::Queryables { complete_required } => registry.watch_queriers(
                     QuerierCriterion::new(&keyexpr, counted(plane, count_local), complete_required),
                     local,
                     report,
                 ),
+                // Refused before its Interest was asked (`counts`).
+                #[cfg(not(any(feature = "query", feature = "queryable")))]
+                FilterPlane::Queryables { .. } => return 0,
             }
         };
         lock(&self.targets).push((TargetKey::Matching(id), Target::Matching(sink)));
@@ -5238,10 +5257,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                             .app
                             .remote_subscribers
                             .undeclare_matching_listener(entry.watch),
+                        #[cfg(any(feature = "query", feature = "queryable"))]
                         FilterPlane::Queryables { .. } => registry
                             .app
                             .remote_queryables
                             .undeclare_matching_listener(entry.watch),
+                        // No listener of the plane is held where it is not built (`counts`).
+                        #[cfg(not(any(feature = "query", feature = "queryable")))]
+                        FilterPlane::Queryables { .. } => false,
                     };
                 }
                 Self::release_interest(core, entry.plane, &entry.keyexpr);
@@ -5261,6 +5284,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // `local-subscriber`.
         count_local: bool,
     ) -> Option<FilterId> {
+        if !counts(plane) {
+            return None;
+        }
         let Some(mut core) = self.live() else {
             return Some(0);
         };

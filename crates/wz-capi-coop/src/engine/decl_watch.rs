@@ -28,12 +28,15 @@ use wz_session_core::slot_observer::{HeapSinks, SlotObserverOf};
 use super::lock;
 use super::registry::FaceTables;
 
-/// Whether this build hears what a peer declares of `plane`: subscribers and queryables in every
-/// build, whose declarations the engine reads for its write filters, and tokens with the
-/// liveliness plane, which reads a peer's token declarations.
+/// Whether this build hears what a peer declares of `plane`: subscribers in every build, whose
+/// declarations the engine reads for its publishers' write filters, queryables with a querier or a
+/// queryable (`query`, `queryable`), which read a peer's queryable declarations, and tokens with
+/// the liveliness plane, which reads a peer's token declarations. A watch of a plane the build does
+/// not hear is refused by name: the build holds no table of that plane to tell it from.
 pub(super) const fn hears(plane: DeclPlane) -> bool {
     match plane {
-        DeclPlane::Subscribers | DeclPlane::Queryables => true,
+        DeclPlane::Subscribers => true,
+        DeclPlane::Queryables => cfg!(any(feature = "query", feature = "queryable")),
         DeclPlane::Tokens => cfg!(feature = "liveliness"),
     }
 }
@@ -217,12 +220,16 @@ impl DeclWatches {
                 .iter_declared()
                 .map(|(declared, keyexpr)| (declared, keyexpr.to_owned()))
                 .collect(),
+            #[cfg(any(feature = "query", feature = "queryable"))]
             DeclPlane::Queryables => tables
                 .peer
                 .remote_queryables
                 .iter_declared()
                 .map(|(declared, keyexpr)| (declared, keyexpr.to_owned()))
                 .collect(),
+            // Refused before it is told anything ([`hears`]).
+            #[cfg(not(any(feature = "query", feature = "queryable")))]
+            DeclPlane::Queryables => Vec::new(),
             DeclPlane::Tokens => Vec::new(),
         };
         if held.is_empty() {
@@ -370,6 +377,7 @@ fn install<P: Storage>(
                 }
             }
         }
+        #[cfg(any(feature = "query", feature = "queryable"))]
         DeclPlane::Queryables => {
             let tables = &mut app.remote_queryables;
             let declared = tables
@@ -383,6 +391,8 @@ fn install<P: Storage>(
                 }
             }
         }
+        #[cfg(not(any(feature = "query", feature = "queryable")))]
+        DeclPlane::Queryables => return Err(DeclWatchRefused::PlaneNotBuilt),
         #[cfg(feature = "liveliness")]
         DeclPlane::Tokens => {
             let tables = &mut app.liveliness;
@@ -416,12 +426,15 @@ fn uninstall<P: Storage>(app: &mut SlotObserverOf<HeapSinks, P>, observers: Obse
             app.remote_subscribers
                 .remove_subscriber_undeclared_sink(observers.undeclared);
         }
+        #[cfg(any(feature = "query", feature = "queryable"))]
         DeclPlane::Queryables => {
             app.remote_queryables
                 .remove_queryable_declared_sink(observers.declared);
             app.remote_queryables
                 .remove_queryable_undeclared_sink(observers.undeclared);
         }
+        #[cfg(not(any(feature = "query", feature = "queryable")))]
+        DeclPlane::Queryables => {}
         #[cfg(feature = "liveliness")]
         DeclPlane::Tokens => {
             app.liveliness
@@ -437,12 +450,18 @@ fn uninstall<P: Storage>(app: &mut SlotObserverOf<HeapSinks, P>, observers: Obse
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(any(feature = "query", feature = "queryable"))]
     use crate::arena::{AllocatorMemory, SessionArena};
+    #[cfg(any(feature = "query", feature = "queryable"))]
     use wz_session_core::limits::SessionLimits;
-    use wz_session_core::slot_observer::{ObserverRows, SlotObserver};
+    #[cfg(any(feature = "query", feature = "queryable"))]
+    use wz_session_core::slot_observer::ObserverRows;
+    use wz_session_core::slot_observer::SlotObserver;
 
+    #[cfg(any(feature = "query", feature = "queryable"))]
     use super::super::registry::App;
 
+    #[cfg(any(feature = "query", feature = "queryable"))]
     const PEER: [u8; 4] = [0xc3; 4];
 
     /// A sink that records each event it is told, as its owned form.
@@ -472,6 +491,7 @@ mod tests {
     /// What one dispatch staged is owed to each watch of its kind and to none of another kind,
     /// named as the settling link's peer where the build names peers, and what a group's dispatch
     /// staged is dropped by the next dispatch, owed to no one.
+    #[cfg(any(feature = "query", feature = "queryable"))]
     #[test]
     fn a_settled_event_reaches_the_watches_of_its_kind_and_a_dropped_one_none() {
         let watches = DeclWatches::default();
@@ -550,6 +570,7 @@ mod tests {
 
     /// The observers go into and out of the application tables a session's arena lent, which the
     /// session's registry holds, as they do into the heap profile's.
+    #[cfg(any(feature = "query", feature = "queryable"))]
     #[test]
     fn the_observers_come_and_go_in_the_application_tables_an_arena_lent() {
         let mut arena =
@@ -590,11 +611,33 @@ mod tests {
         );
     }
 
-    /// Tokens are heard with the liveliness plane only.
+    /// Tokens are heard with the liveliness plane only, and queryables with a querier or a
+    /// queryable only.
     #[test]
     fn tokens_are_heard_with_the_liveliness_plane_alone() {
         assert!(hears(DeclPlane::Subscribers));
-        assert!(hears(DeclPlane::Queryables));
+        assert_eq!(
+            hears(DeclPlane::Queryables),
+            cfg!(any(feature = "query", feature = "queryable"))
+        );
         assert_eq!(hears(DeclPlane::Tokens), cfg!(feature = "liveliness"));
+    }
+
+    /// A build without a querier or a queryable installs no observer of queryables: it holds no
+    /// table of them, so the watch is refused by name and nothing is left installed.
+    #[cfg(not(any(feature = "query", feature = "queryable")))]
+    #[test]
+    fn a_build_without_the_queryables_plane_refuses_their_observers() {
+        let watches = DeclWatches::default();
+        let mut app = SlotObserver::new();
+        assert_eq!(
+            watches.observe(&mut app, DeclPlane::Queryables),
+            Err(DeclWatchRefused::PlaneNotBuilt)
+        );
+        assert!(lock(&watches.table).observers.is_empty());
+        watches
+            .observe(&mut app, DeclPlane::Subscribers)
+            .expect("CONTROL: the subscribers' plane is built");
+        assert_eq!(app.remote_subscribers.on_decl_len(), 1);
     }
 }

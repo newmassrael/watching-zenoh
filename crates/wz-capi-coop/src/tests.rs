@@ -1122,10 +1122,58 @@ fn heard() -> (wz_capi_port::MatchingSink, Arc<Mutex<Vec<bool>>>) {
     )
 }
 
+/// A build without a querier or a queryable holds no table of the queryables a peer declares, so a
+/// matching listener and a write filter on that plane are refused (a listener as id 0, a filter as
+/// none) and the listener's sink goes with the refusal. The CONTROL is a listener on the
+/// subscribers' plane, which every build holds.
+#[cfg(not(any(feature = "query", feature = "queryable")))]
+#[test]
+fn a_build_without_the_queryables_plane_refuses_their_listener_and_filter() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let plane = FilterPlane::Queryables {
+        complete_required: false,
+    };
+    let (sink, told) = heard();
+    let kept = Arc::downgrade(&sink);
+    assert_eq!(
+        engine.declare_matching_listener(plane, "demo/q".to_owned(), sink, false),
+        0
+    );
+    assert!(kept.upgrade().is_none(), "the refused sink is not kept");
+    assert_eq!(
+        engine.declare_write_filter(
+            plane,
+            "demo/q".to_owned(),
+            &WireKey::literal(),
+            Some(InterestForm {
+                mapping_id: 0,
+                suffix: Some("demo/q".to_owned()),
+                aggregate: false,
+            }),
+            false,
+        ),
+        None
+    );
+    let (sink, _) = heard();
+    assert_ne!(
+        engine.declare_matching_listener(
+            FilterPlane::Subscribers,
+            "demo/q".to_owned(),
+            sink,
+            false
+        ),
+        0,
+        "CONTROL: the subscribers' plane is held"
+    );
+    assert!(told.lock().unwrap().is_empty());
+}
+
 /// A matching listener on the queryables counts what a querier's write filter on the same plane
 /// counts: any queryable on the key, or only a complete one when the plane requires it, as
 /// zenoh-pico's listener is that filter's callback. The CONTROL is a subscriber on the key, which
 /// the router declares first and which opens a subscriber filter while neither listener hears it.
+#[cfg(any(feature = "query", feature = "queryable"))]
 #[test]
 fn a_queryable_matching_listener_counts_what_its_filter_counts() {
     let router = Router::start(CatchAll::None);

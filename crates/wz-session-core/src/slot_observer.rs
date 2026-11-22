@@ -197,9 +197,15 @@ pub trait OtherPeers {
     #[cfg(feature = "declare-subscriber")]
     fn subscribes(&self, criterion: &crate::declare::subscriber::PublisherCriterion) -> bool;
 
-    /// Whether another face's peer declared a queryable the querier `criterion` reaches.
+    /// Whether another face's peer declared a queryable the querier `criterion` reaches. `false`
+    /// unless the faces say otherwise: a session whose engine reads no queryable a peer declares
+    /// (an engine built without a querier or a queryable, in a build that has the plane for another
+    /// crate's sake) has no other face that answers.
     #[cfg(feature = "declare-queryable")]
-    fn answers(&self, criterion: &crate::declare::queryable::QuerierCriterion) -> bool;
+    fn answers(&self, criterion: &crate::declare::queryable::QuerierCriterion) -> bool {
+        let _ = criterion;
+        false
+    }
 }
 
 /// The session has no face but the one dispatched.
@@ -1581,5 +1587,30 @@ mod lent_tests {
                 subscription_id,
             } if *subscription_id == id.as_u64()
         )));
+    }
+
+    /// Faces that say nothing of queryables answer no querier: what an engine that reads no
+    /// queryable a peer declares relies on, in a build that has the plane for another crate.
+    #[cfg(all(feature = "declare-queryable", feature = "declare-subscriber"))]
+    #[test]
+    fn faces_that_say_nothing_of_queryables_answer_no_querier() {
+        struct SubscribersOnly;
+        impl OtherPeers for SubscribersOnly {
+            fn subscribes(
+                &self,
+                _criterion: &crate::declare::subscriber::PublisherCriterion,
+            ) -> bool {
+                true
+            }
+        }
+        let querier =
+            crate::declare::queryable::QuerierCriterion::new("demo/q", Locality::Remote, false);
+        assert!(!SubscribersOnly.answers(&querier));
+        let publisher =
+            crate::declare::subscriber::PublisherCriterion::new("demo/q", Locality::Remote);
+        assert!(
+            SubscribersOnly.subscribes(&publisher),
+            "CONTROL: the method the faces do say is theirs"
+        );
     }
 }
