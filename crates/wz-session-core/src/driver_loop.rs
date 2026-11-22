@@ -745,11 +745,20 @@ pub struct InPlaceRecord<'a, 'f> {
     reliable: bool,
     sn: u64,
     priority: crate::qos::Priority,
+    // Where an accessor reads it: a lending build that reads no control kind off
+    // the wire (no `rx-control`, no lent ResponseFinal) has no record to lend.
     #[cfg(any(
         feature = "codec-push",
         feature = "codec-request",
         feature = "codec-response",
-        all(feature = "rx-lent-control", feature = "codec-frame")
+        all(
+            feature = "rx-lent-control",
+            feature = "codec-frame",
+            any(
+                feature = "rx-control",
+                all(feature = "codec-response-final", feature = "rx-response")
+            )
+        )
     ))]
     record: LentRecord<'a, 'f>,
     _frame: core::marker::PhantomData<(&'a (), &'f [u8])>,
@@ -765,7 +774,14 @@ pub struct InPlaceRecord<'a, 'f> {
     feature = "codec-push",
     feature = "codec-request",
     feature = "codec-response",
-    all(feature = "rx-lent-control", feature = "codec-frame")
+    all(
+        feature = "rx-lent-control",
+        feature = "codec-frame",
+        any(
+            feature = "rx-control",
+            all(feature = "codec-response-final", feature = "rx-response")
+        )
+    )
 ))]
 #[cfg_attr(
     not(any(
@@ -851,7 +867,14 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
             feature = "codec-push",
             feature = "codec-request",
             feature = "codec-response",
-            all(feature = "rx-lent-control", feature = "codec-frame")
+            all(
+                feature = "rx-lent-control",
+                feature = "codec-frame",
+                any(
+                    feature = "rx-control",
+                    all(feature = "codec-response-final", feature = "rx-response")
+                )
+            )
         )
     ))]
     #[cfg_attr(
