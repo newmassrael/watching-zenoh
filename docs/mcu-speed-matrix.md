@@ -69,12 +69,24 @@ perf/thr, a sequence number in the first eight bytes):
   instructions are counted over the loop and the 200 ms after it, in which the network stack sends what
   the loop left it.
 - **sub.** The image subscribes; once it says READY a host publisher of the same zenoh-pico build
-  (scripts/host-bench/paced_pub.c) offers 1,000 samples a second. From the image's first sample it waits
+  (scripts/host-bench/paced_pub.c) offers 1,000 samples a second, held to 128,000 bytes of the guest's link
+  a second (a sample's payload plus 64 bytes of zenoh, UDP, IPv4 and Ethernet headers): 1,000 samples at 8
+  and 64 bytes, 117 at 1,024. From the image's first sample it waits
   500 ms, then counts over a 2,000 ms window. The offer is paced: a publisher that puts as fast as its
   session takes them floods QEMU's user network, which drops what the guest cannot take (the emulator says
   "Slirp: Failed to send packet"), the guest's session starves, the router ends it, and neither arm is
   delivered anything. So the receiving side's throughput is read as the core's capacity, the samples a
   second of its busy time, and not as what a flooded link happened to deliver.
+- **Why bytes a second, and not one count.** A run that offered 1,000 samples of 1,024 bytes stopped the
+  emulated card for both arms: QEMU could not hand the guest thousands of frames, each guest stack took
+  under twenty datagrams, and neither was delivered anything. The card (QEMU's LAN9118 model) takes a frame
+  only into the receive FIFO the guest drains, so the limit is the emulated card's and not the backend's:
+  a tap backend or a longer queue in front of the card would hold frames longer, not let the guest take
+  them faster, and a tap would ask a bridge and privileges of every runner besides. So the offer is the
+  rate both arms are carried at, 1,000 samples of 64 bytes, kept in bytes across sizes
+  (`--offer-bytes`): the 8- and 64-byte cells are offered what the committed table was read at, and the
+  1,024-byte cells a load the card carries. The rate each cell was offered follows from the record's
+  `offer_rate` and `offer_bytes`.
 - **rtt.** The probe answers perf/ping on perf/pong. The image times 500 round trips after 50, each waited
   for up to 200 ms; in the multi-threaded arm the program sleeps on a semaphore the answer gives, in the
   single-threaded arm it steps the session until the answer comes. A run that loses more than a tenth of
@@ -129,7 +141,7 @@ bx -- bash scripts/mcu-speed.sh --board mps2/an385 --qemu-machine mps2-an385 --r
 | `--reps` | 3 | repetitions, the least the gate reads |
 | `--sizes` | 8,64,1024 | payload sizes, 8 to 1,024 bytes |
 | `--no-build` | builds | run the images and probe already under target/mcu-speed |
-| after `--` | | more options of `mcu_speed.py run` (`--threads`, `--workloads`, `--puts`, `--window-ms`, `--offer-rate`, `--round-trips`, `--router-log`, ...) |
+| after `--` | | more options of `mcu_speed.py run` (`--threads`, `--workloads`, `--puts`, `--window-ms`, `--offer-rate`, `--offer-bytes`, `--round-trips`, `--router-log`, ...) |
 | `WZ_ZEPHYR_VENV`, `WZ_ZEPHYR_BASE` | under ~/zephyrproject | the Zephyr workspace |
 | `WZ_ZENOHD_BIN` | the oracle under the artifact root | the router |
 
@@ -166,7 +178,10 @@ the tree, QEMU's and zenohd's versions, the parameters), `metrics` (each figure 
 
 **Status.** `measured`: the image printed its result and memory lines. `lost`: it did not, and `why` says what
 it or the run saw (the image's FAIL line and its reason, no READY in 60 s, no DONE in 300 s, nothing
-delivered). There is no disturbed cell as on the host: no other work shares the emulated core.
+delivered). `invalid`: QEMU's stderr says it could not hand the guest's card a frame ("Failed to send
+packet"), whatever the image printed; the cell measured the emulator and not the stacks, so it counts for
+neither arm, and `why` says how many frames and what the guest's stack took and dropped. There is no
+disturbed cell as on the host: no other work shares the emulated core.
 
 **The image's lines.** `MCU-SPEED BOOT` (arm, threading arm), `MCU-SPEED READY`, one `MCU-SPEED RESULT` line of
 cycles (the counter's rate is on it), one `MCU-SPEED STACK` line per thread, `MCU-SPEED MEMORY`, then
@@ -189,7 +204,9 @@ Every rule is the host matrix's (docs/pico-perf-matrix.md section 5), from the s
   is below 1, LOSS when above, TIE otherwise. An instruction count repeats, so its interval is narrow and
   its verdict clean; a time carries the host side's real time and its interval is as wide as that varied.
 - **Any lost repetition of wz fails its rows.** A reference that lost every repetition leaves its rows with
-  no ratio, and a row that says so passes while it still does.
+  no ratio, and a row that says so passes while it still does. An invalid repetition is neither arm's: a
+  row left with fewer than three measured repetitions of either arm is NOT-MEASURED, and the reason names
+  the repetitions the emulator did not carry.
 - **The table**, deploy/pico_perf_ceiling_mcu.json: schema `wz-pico-perf-ceiling-mcu/1`, pair W/P, the
   `platform` its rows are read on, a tolerance, and one row per held figure of the default matrix, each
   `{"held": ..., "debt": ...}`: `held` is `{"locked": true}`, `{"ratio_at_most": R}`,
@@ -209,7 +226,8 @@ Run the matrix with the defaults and paste the rows the gate prints in the table
 debt) into the table, run the gate again over the same result to see it pass, and commit the table with
 the run's record. The committed rows are the reading of the run of 2026-11-22: 70 rows, 5 of them WIN, the
 rest ratchets at that run's upper end, every one a debt. The eight rows of the 1,024-byte receiving cells
-are still null: wz lost those cells, which is a defect to fix and not a reading to hold.
+are still null: that run offered them 1,000 samples a second, which stopped the emulated card, and they
+are read again at the byte-held offer.
 
 ## 6. Where it runs
 
@@ -230,6 +248,7 @@ lane that boots its machine.
 - **Not the kit's core.** The board is a Cortex-M3 at the emulator's one instruction a nanosecond; the kit is
   a Cortex-M7 at 350 MHz with caches. A ratio is the comparable figure, an absolute is the emulator's.
 - **Not a lossless network.** QEMU's user network and the router are the path, and a datagram dropped there
-  is lost to both arms alike; the share the probe got says how much.
+  is lost to both arms alike; the share the probe got says how much. A frame the emulated card refused
+  makes the cell invalid (section 4) rather than a loss of either arm.
 - **One client, one router, one probe,** UDP unicast, no batching window, payloads under the batch, so no
   fragment.

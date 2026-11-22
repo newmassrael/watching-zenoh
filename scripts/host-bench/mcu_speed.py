@@ -12,8 +12,8 @@ deploy/pico_perf_ceiling_mcu.json.
     mcu_speed.py run --images DIR --peer FILE --pacer FILE --zenohd FILE --run DIR [--board mps2/an385]
                      [--qemu-machine MACHINE] [--qemu qemu-system-arm] [--reps 3] [--sizes 8,64,1024]
                      [--threads st,mt] [--workloads put,sub,rtt] [--puts 2000] [--window-ms 2000]
-                     [--warmup-ms 500] [--offer-rate 1000] [--round-trips 500] [--warmup-round-trips 50]
-                     [--timeout-ms 200] [--router-log FILTER]
+                     [--warmup-ms 500] [--offer-rate 1000] [--offer-bytes 128000] [--round-trips 500]
+                     [--warmup-round-trips 50] [--timeout-ms 200] [--router-log FILTER]
         the matrix; DIR (--images) holds <arm>-<threads>.elf for each arm and threading arm asked, --peer the
         host probe (scripts/host-bench/perf_probe.c built against zenoh-pico on the host), --pacer the host
         publisher that offers a stated rate (scripts/host-bench/paced_pub.c, built the same way), --zenohd the
@@ -46,18 +46,25 @@ QEMU's user network and runs the workload against the host probe, which is a pee
   * put  the probe subscribes (perf/thr), the image puts --puts samples as fast as the session takes them
          once its publisher matches; figures: instructions per put (every thread but the idle thread, over
          the loop and the network stack's tail), puts a second over the loop, and the share the probe got.
-  * sub  the image subscribes, the pacer puts --offer-rate samples a second once it matches; from the
+  * sub  the image subscribes, the pacer puts --offer-rate samples a second, held to --offer-bytes of
+         the guest's link a second (size plus 64 bytes of headers a sample), once it matches; from the
          image's first sample it waits --warmup-ms, then counts over a --window-ms window: instructions
          per sample, samples a second of the window, and samples a second of busy time (the most the core
          could take if receiving were all it did). The offer is paced because a publisher that puts as fast
          as its session takes them floods QEMU's user network: it drops what the guest cannot take, the
-         guest's session starves and the router ends it, and nothing is delivered to either arm.
+         guest's session starves and the router ends it, and nothing is delivered to either arm. The
+         byte budget is the 64-byte rate both arms are carried at: 1,000 samples a second of 1,024
+         bytes stopped the emulated card for both, so a large size is offered the same bytes a second
+         (117 samples at 1,024 bytes), not the same count.
   * rtt  the probe answers perf/ping on perf/pong; the image times --round-trips after
          --warmup-round-trips, each waited for up to --timeout-ms: the percentiles in microseconds and the
          instructions per round trip.
 
 After its workload the image says the sum of every thread's stack high-water mark and the kernel heap's
-peak. A cell whose image or probe did not give its figures is LOST with the reason. The order of the arms
+peak. A cell whose image or probe did not give its figures is LOST with the reason. A cell in which QEMU
+could not hand the guest's card a frame is INVALID: it measured the emulator, so it is no repetition of
+either arm, and a row left with too few repetitions is NOT-MEASURED with the reason, never wz's loss.
+The order of the arms
 alternates by repetition, so a drift of the host falls on both.
 
 THE GATE reads each row as perf_matrix.py's does (decision D10 of docs/upstream-parity.md): the cost ratio
@@ -161,6 +168,11 @@ ROUTER_S = 20.0
 
 class Lost(Exception):
     """A cell that gave no figures: the reason is the message."""
+
+
+class Invalid(Lost):
+    """A cell the emulator's network did not carry: QEMU could not hand the guest's card a frame, so
+    the cell measured the emulator and not the stacks. It is no repetition of either arm."""
 
 
 # -- reading a console ---------------------------------------------------------------------------------------
@@ -424,6 +436,7 @@ class Plan:
     peer: str
     pacer: str
     offer_rate: int
+    offer_bytes: int
     endpoint: str  # the host probe's way to the router
     locator: str  # the image's way to the router
     shift: int
@@ -455,6 +468,20 @@ def qemu_argv(plan: Plan, image: pathlib.Path, args: list[str]) -> list[str]:
             "-kernel", str(image)]
 
 
+#: The bytes a sample of the receiving workload takes on the guest's link beyond its payload: the
+#: zenoh push and frame headers, UDP, IPv4 and Ethernet, rounded up.
+WIRE_OVERHEAD = 64
+
+
+def offered_rate(plan: Plan, size: int) -> int:
+    """The samples a second the pacer offers at `size`: --offer-rate, held to --offer-bytes of the
+    guest's link a second. The emulated card (QEMU's LAN9118 behind its user network) takes frames
+    only as fast as the guest drains its FIFO, and a link it cannot keep up with stops for both arms
+    (a run at 1,024 bytes and 1,000 samples a second lost both); so a size is offered the bytes a
+    second the smaller sizes are carried at, and not the same count."""
+    return max(1, min(plan.offer_rate, plan.offer_bytes // (size + WIRE_OVERHEAD)))
+
+
 def probe_argv(plan: Plan, role: str, size: int) -> list[str]:
     """The host probe in its role, a peer of the router. Its long durations are ended by the run."""
     base = [plan.peer, role, "-m", "peer", "-e", plan.endpoint]
@@ -463,7 +490,7 @@ def probe_argv(plan: Plan, role: str, size: int) -> list[str]:
     if role == "pub":
         # The pacer reads its options from the first word, and waits for its publisher to match.
         return [plan.pacer, "-m", "peer", "-e", plan.endpoint, "-k", "perf/thr", "-s", str(size),
-                "-r", str(plan.offer_rate), "-t", "3600", "-w"]
+                "-r", str(offered_rate(plan, size)), "-t", "3600", "-w"]
     return base
 
 
@@ -503,6 +530,8 @@ def run_cell(plan: Plan, image: pathlib.Path, workload: str, size: int, stem: pa
     errors = stem.with_name(stem.name + ".qemu-stderr")
     refused = errors.read_text(encoding="utf-8", errors="replace").count(NIC_REFUSED) if errors.exists() else 0
     net = net_of(console_text)
+    if refused:
+        raise Invalid(f"the emulator measured itself{network_note(refused, net)}")
     try:
         figures = cell_figures(workload, console_text, probe_text, plan.shift)
     except Lost as why:
@@ -579,7 +608,8 @@ def summarize(cells: list[dict]) -> list[dict]:
                     med[metric] = statistics.median(values)
             medians[arm] = med
             row["arms"][arm] = {"measured": len(measured),
-                                "lost": sum(c["status"] == "lost" for c in runs), "median": med}
+                                "lost": sum(c["status"] == "lost" for c in runs),
+                                "invalid": sum(c["status"] == "invalid" for c in runs), "median": med}
         if "W" in medians and "P" in medians:
             row["w_over_p"] = {m: medians["W"][m] / medians["P"][m] for m in medians["W"]
                                if medians["P"].get(m)}
@@ -596,7 +626,8 @@ def report_lines(rows: list[dict]) -> list[str]:
             if got is None:
                 continue
             shown = ", ".join(f"{m} {v:.3f}" for m, v in got["median"].items())
-            out.append(f"  {arm}: {got['measured']} measured, {got['lost']} lost; {shown}")
+            out.append(f"  {arm}: {got['measured']} measured, {got['lost']} lost, "
+                       f"{got.get('invalid', 0)} invalid; {shown}")
         if row.get("w_over_p"):
             out.append("  W/P: " + ", ".join(f"{m} {v:.3f}" for m, v in row["w_over_p"].items()))
     return out
@@ -628,8 +659,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     if missing:
         print(f"mcu-speed: refused: {images} holds no {', '.join(missing)}", file=sys.stderr)
         return 2
-    if args.offer_rate < 1:
-        print("mcu-speed: refused: --offer-rate is at least one sample a second", file=sys.stderr)
+    if args.offer_rate < 1 or args.offer_bytes < 1:
+        print("mcu-speed: refused: --offer-rate and --offer-bytes are at least one a second", file=sys.stderr)
         return 2
     for tool in (args.peer, args.pacer, args.zenohd):
         if not os.access(tool, os.X_OK):
@@ -640,6 +671,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     run.mkdir(parents=True, exist_ok=True)
     udp, tcp = free_port(socket.SOCK_DGRAM), free_port(socket.SOCK_STREAM)
     plan = Plan(qemu=args.qemu, board=board, peer=args.peer, pacer=args.pacer, offer_rate=args.offer_rate,
+                offer_bytes=args.offer_bytes,
                 endpoint=f"tcp/127.0.0.1:{tcp}",
                 locator=f"udp/{GUEST_HOST}:{udp}", shift=ICOUNT_SHIFT, puts=args.puts, window_ms=args.window_ms,
                 warmup_ms=args.warmup_ms, round_trips=args.round_trips,
@@ -651,7 +683,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         "qemu": first_line([args.qemu, "--version"]), "zenohd": first_line([args.zenohd, "--version"]),
         "host": socket.gethostname(), "sizes": sizes, "threads": threads, "workloads": workloads,
         "reps": args.reps, "puts": args.puts, "window_ms": args.window_ms, "warmup_ms": args.warmup_ms,
-        "offer_rate": args.offer_rate, "router_log": args.router_log,
+        "offer_rate": args.offer_rate, "offer_bytes": args.offer_bytes, "router_log": args.router_log,
         "round_trips": args.round_trips, "warmup_round_trips": args.warmup_round_trips,
         "timeout_ms": args.timeout_ms, "start": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
@@ -675,11 +707,16 @@ def cmd_run(args: argparse.Namespace) -> int:
                                     return 2
                                 cell = {"arm": arm, "threads": thread_arm, "workload": workload, "size": size,
                                         "rep": rep}
+                                if workload == "sub":
+                                    cell["offered_rate"] = offered_rate(plan, size)
                                 try:
                                     cell["figures"] = run_cell(
                                         plan, images / f"{arm}-{thread_arm}.elf", workload, size,
                                         run / f"r{rep}-{arm}-{thread_arm}-{workload}-{size}")
                                     cell["status"] = "measured"
+                                except Invalid as why:
+                                    cell["status"] = "invalid"
+                                    cell["why"] = str(why)
                                 except Lost as why:
                                     cell["status"] = "lost"
                                     cell["why"] = str(why)
@@ -733,11 +770,13 @@ def readings(cells: list[dict], machine: str) -> dict[str, pm.Reading]:
     groups: dict[tuple, dict[str, dict]] = {}
     for cell in cells:
         key = (cell["threads"], cell["workload"], cell["size"])
-        arm = groups.setdefault(key, {}).setdefault(cell["arm"], {"figures": [], "lost": []})
+        arm = groups.setdefault(key, {}).setdefault(cell["arm"], {"figures": [], "lost": [], "invalid": []})
         if cell["status"] == "measured":
             arm["figures"].append(cell["figures"])
         elif cell["status"] == "lost":
             arm["lost"].append(f"r{cell['rep']}: {cell.get('why', 'no reason given')}")
+        elif cell["status"] == "invalid":
+            arm["invalid"].append(f"r{cell['rep']}: {cell.get('why', 'no reason given')}")
     out: dict[str, pm.Reading] = {}
     for (threads, workload, size), arms in groups.items():
         wz, ref = arms.get("W"), arms.get("P")
@@ -754,8 +793,11 @@ def readings(cells: list[dict], machine: str) -> dict[str, pm.Reading]:
                 continue
             ws, rs = held_values(wz["figures"], metric), held_values(ref["figures"], metric)
             if len(ws) < pm.MIN_REPS or len(rs) < pm.MIN_REPS:
+                invalid = wz["invalid"] + ref["invalid"]
+                said = f"; {len(invalid)} repetition(s) the emulator did not carry ({invalid[0]})" if invalid else ""
                 out[key] = pm.Reading("too-few", f"{len(ws)} repetition(s) of wz and {len(rs)} of the reference "
-                                                 f"gave {metric}, and an interval needs {pm.MIN_REPS} of each")
+                                                 f"gave {metric}, and an interval needs {pm.MIN_REPS} of each"
+                                                 f"{said}")
                 continue
             point, lo, hi = cost_ratio(metric, ws, rs)
             out[key] = pm.Reading("ratio", point=point, lo=lo, hi=hi, verdict=pm.verdict_of(lo, hi))
@@ -911,7 +953,8 @@ def _console(workload: str, result: str, memory: str = "stack_used=9000 heap_pea
             f"MCU-SPEED MEMORY {memory}\r\nMCU-SPEED DONE\r\n")
 
 
-def _cells(wz: list[float], ref: list[float], workload: str = "put", lost: str = "") -> list[dict]:
+def _cells(wz: list[float], ref: list[float], workload: str = "put", lost: str = "",
+           invalid: str = "") -> list[dict]:
     """Synthetic cells of one threading arm, workload and size: every held figure of a repetition takes
     the repetition's value, so a row's ratio is the two lists'."""
     out = []
@@ -920,6 +963,8 @@ def _cells(wz: list[float], ref: list[float], workload: str = "put", lost: str =
             cell = {"arm": arm, "threads": "st", "workload": workload, "size": 64, "rep": rep}
             if arm == lost:
                 cell.update(status="lost", why="the image failed: open")
+            elif arm == invalid:
+                cell.update(status="invalid", why="the emulator measured itself")
             else:
                 cell.update(status="measured", figures={m: value for m in GATED[workload]})
             out.append(cell)
@@ -1015,7 +1060,7 @@ def cmd_selftest() -> int:
 
     # The command lines of a cell.
     plan = Plan(qemu="qemu-system-arm", board=DEFAULT_BOARD, peer="/p", pacer="/q", offer_rate=1000,
-                endpoint="tcp/127.0.0.1:2",
+                offer_bytes=128000, endpoint="tcp/127.0.0.1:2",
                 locator="udp/10.0.2.2:1", shift=0, puts=2000, window_ms=2000, warmup_ms=500, round_trips=500,
                 warmup_round_trips=50, timeout_ms=200)
     argv = qemu_argv(plan, pathlib.Path("/i.elf"), cell_args(plan, "rtt", 64))
@@ -1029,6 +1074,14 @@ def cmd_selftest() -> int:
     pacer = probe_argv(plan, "pub", 64)
     expect("the sub cell's publisher is the pacer, at the offered rate, on the probe's key",
            pacer[0] == "/q" and pacer[pacer.index("-r") + 1] == "1000" and pacer[pacer.index("-k") + 1] == "perf/thr")
+    expect("the small sizes are offered the whole rate",
+           offered_rate(plan, 8) == 1000 and offered_rate(plan, 64) == 1000)
+    expect("a large size is offered the small sizes' bytes a second, not their count",
+           offered_rate(plan, 1024) == 128000 // (1024 + WIRE_OVERHEAD) == 117)
+    pacer = probe_argv(plan, "pub", 1024)
+    expect("the pacer is given the rate of its size", pacer[pacer.index("-r") + 1] == "117")
+    expect("a size larger than the byte budget is still offered a sample a second",
+           offered_rate(plan, 1 << 20) == 1)
     expect("the probe is a peer of the router",
            probe_argv(plan, "pong", 64)[2:6] == ["-m", "peer", "-e", "tcp/127.0.0.1:2"])
 
@@ -1046,6 +1099,15 @@ def cmd_selftest() -> int:
     found = readings(_cells([1.0, 1.0, 1.0], [2.0, 2.0, 2.0], lost="P"), "m")
     expect("a reference that lost every repetition says so",
            found["m/st/put/64/instr_per_put"].state == "reference-lost")
+    found = readings(_cells([1.0, 1.0, 1.0], [2.0, 2.0, 2.0], invalid="W"), "m")
+    row = found["m/st/put/64/instr_per_put"]
+    expect("a repetition the emulator did not carry is no loss of wz but leaves its row unmeasured",
+           row.state == "too-few" and "did not carry" in row.why)
+    found = readings(_cells([1.0, 1.0, 1.0], [2.0, 2.0, 2.0], invalid="P"), "m")
+    expect("a reference repetition the emulator did not carry leaves its row unmeasured",
+           found["m/st/put/64/instr_per_put"].state == "too-few")
+    expect("a cell the emulator did not carry is a kind of lost cell to its caller",
+           issubclass(Invalid, Lost))
     found = readings(_cells([1.0, 1.0, 1.0], [2.0, 2.0, 2.0], workload="rtt"), "m")
     expect("a round-trip cell gives its five held rows", len(found) == len(GATED["rtt"]))
 
@@ -1151,6 +1213,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--window-ms", type=int, default=2000)
     parser.add_argument("--warmup-ms", type=int, default=500)
     parser.add_argument("--offer-rate", type=int, default=1000)
+    parser.add_argument("--offer-bytes", type=int, default=128000)
     parser.add_argument("--router-log", default="")
     parser.add_argument("--round-trips", type=int, default=500)
     parser.add_argument("--warmup-round-trips", type=int, default=50)
