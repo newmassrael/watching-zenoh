@@ -601,6 +601,74 @@ mod tests {
     }
 
     wz_runtime_coop::with_heap_link_seams! {
+        /// A link that took only part of a frame is woken by its stream's room alone: its owner's
+        /// wait, made for room as well while the link owes the stream (`AndRoom`), ends once the far
+        /// end reads, with no input and no send, and the one step it wakes writes the rest, every
+        /// frame arriving whole and in order. CONTROL: the owner's wait for input alone, while
+        /// nothing is owed and the stream has room, sleeps its whole time.
+        #[cfg(feature = "alloc")]
+        #[test]
+        fn a_link_that_owes_the_stream_is_woken_by_room_and_writes_the_rest() {
+            use std::sync::Arc;
+            use std::time::{Duration, Instant};
+            use wz_runtime_coop::link_storage::HeapTx;
+            use wz_runtime_coop::session_drive::{
+                wait_any, AndRoom, LinkReadiness, SessionDatagramLink,
+            };
+            use wz_runtime_coop::stream_link::StreamDriver;
+            use wz_session_core::link::{BoxedLinkDriver, LinkSendOutcome};
+            use wz_session_core::reliability::Reliability;
+
+            let (near, mut far) = pair();
+            let link =
+                StreamDriver::with_buffers(near, 4096, HeapTx::new(2, 2048)).waited_by_owner();
+            let ready: Arc<dyn LinkReadiness> =
+                Arc::from(link.readiness().expect("the owner's wait"));
+
+            assert!(!link.owes_write(), "CONTROL: nothing is owed");
+            let started = Instant::now();
+            wait_any(&[Arc::clone(&ready)], 200);
+            assert!(
+                started.elapsed() >= Duration::from_millis(150),
+                "CONTROL: a wait for input alone is not woken by room"
+            );
+
+            let frame = [0x5au8; 1000];
+            let mut frames = 0usize;
+            while !link.owes_write() {
+                assert_eq!(
+                    link.send_blocking(&frame, Reliability::Reliable),
+                    LinkSendOutcome::Sent
+                );
+                frames += 1;
+                assert!(frames < 1 << 16, "the stream never filled");
+            }
+            let total = frames * (2 + frame.len());
+            let reader = std::thread::spawn(move || {
+                let mut got = std::vec![0u8; total];
+                far.read_exact(&mut got).expect("every frame arrives");
+                got
+            });
+            let mut wakes = 0;
+            while link.owes_write() {
+                let started = Instant::now();
+                wait_any(&[AndRoom::of(Arc::clone(&ready))], 10_000);
+                assert!(
+                    started.elapsed() < Duration::from_secs(10),
+                    "the stream's room ended the wait"
+                );
+                wakes += 1;
+                link.service();
+                assert!(wakes < 100, "the rest was never written");
+            }
+            assert_eq!(wakes, 1, "one wake, and its step wrote the rest");
+            let got = reader.join().expect("the reader");
+            for (i, written) in got.chunks(2 + frame.len()).enumerate() {
+                assert_eq!(&written[..2], &1000u16.to_le_bytes(), "frame {i}'s length");
+                assert!(written[2..].iter().all(|&b| b == 0x5a), "frame {i}'s bytes");
+            }
+        }
+
         /// The wait for room handed to another thread answers as the socket's own wait does: it
         /// has room while the stream takes bytes, and none once the peer has stopped reading.
         #[cfg(feature = "alloc")]

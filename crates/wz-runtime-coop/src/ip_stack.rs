@@ -245,6 +245,10 @@ where
         either!(self, link => link.holds_input())
     }
 
+    fn owes_write(&self) -> bool {
+        either!(self, link => link.owes_write())
+    }
+
     fn takes_input(&self) -> bool {
         either!(self, link => link.takes_input())
     }

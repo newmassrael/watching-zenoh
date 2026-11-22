@@ -1311,6 +1311,12 @@ impl<P: SessionDatagramLink> SessionDatagramLink for LaneGate<P> {
         self.pump.holds_input()
     }
 
+    // The gate holds back input only: what the session owes the stack is written whatever it
+    // holds, and the owner's wait wakes for it.
+    fn owes_write(&self) -> bool {
+        self.pump.owes_write()
+    }
+
     /// The rest of a datagram already read is held back with the link's next one.
     fn takes_input(&self) -> bool {
         !self.shut() && self.pump.takes_input()

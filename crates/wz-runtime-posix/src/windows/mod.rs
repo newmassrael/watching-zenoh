@@ -557,6 +557,20 @@ impl LinkWritability for SocketReadiness {
     }
 }
 
+/// A `WSAPoll` entry for `socket` that asks for input, and for room as well when `room`.
+#[cfg(feature = "alloc")]
+fn wait_entry(socket: ws::SOCKET, room: bool) -> ws::WSAPOLLFD {
+    ws::WSAPOLLFD {
+        fd: socket,
+        events: if room {
+            ws::POLLRDNORM | ws::POLLWRNORM
+        } else {
+            ws::POLLRDNORM
+        },
+        revents: 0,
+    }
+}
+
 #[cfg(feature = "alloc")]
 impl LinkReadiness for SocketReadiness {
     fn wait_readable(&self, timeout_ms: u32) {
@@ -568,21 +582,29 @@ impl LinkReadiness for SocketReadiness {
     }
 
     fn wait_readable_among(&self, others: &[alloc::sync::Arc<dyn LinkReadiness>], timeout_ms: u32) {
-        let mut fds = alloc::vec![ws::WSAPOLLFD {
-            fd: self.0,
-            events: ws::POLLRDNORM,
-            revents: 0,
-        }];
+        self.wait_ready_among(false, others, timeout_ms);
+    }
+
+    fn wait_ready(&self, room: bool, timeout_ms: u32) {
+        let mut fd = wait_entry(self.0, room);
+        // SAFETY: one live `WSAPOLLFD` over the socket this owns; the timeout bounds the wait. A
+        // failed wait is a quiet socket: the step that follows reads and reports the error.
+        unsafe { ws::WSAPoll(&mut fd, 1, wait_ms(timeout_ms)) };
+    }
+
+    fn wait_ready_among(
+        &self,
+        room: bool,
+        others: &[alloc::sync::Arc<dyn LinkReadiness>],
+        timeout_ms: u32,
+    ) {
+        let mut fds = alloc::vec![wait_entry(self.0, room)];
         for other in others {
             match other.handle() {
-                Some(socket) => fds.push(ws::WSAPOLLFD {
-                    fd: socket,
-                    events: ws::POLLRDNORM,
-                    revents: 0,
-                }),
+                Some(socket) => fds.push(wait_entry(socket, other.wants_room())),
                 // A wait this cannot name to the system: the bounded look, so it is not starved
                 // behind a wait on the others.
-                None => return self.wait_readable(timeout_ms.min(1)),
+                None => return self.wait_ready(room, timeout_ms.min(1)),
             }
         }
         // SAFETY: `fds` is live for the call and its length is the count passed; every socket is

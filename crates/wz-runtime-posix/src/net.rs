@@ -134,12 +134,34 @@ impl LinkWritability for FdReadiness {
     }
 }
 
+/// What a wait on a socket asks `poll` for: input, and room as well when `room`.
+#[cfg(feature = "alloc")]
+fn wait_events(room: bool) -> libc::c_short {
+    if room {
+        libc::POLLIN | libc::POLLOUT
+    } else {
+        libc::POLLIN
+    }
+}
+
 #[cfg(feature = "alloc")]
 impl LinkReadiness for FdReadiness {
     fn wait_readable(&self, timeout_ms: u32) {
+        self.wait_ready(false, timeout_ms);
+    }
+
+    fn handle(&self) -> Option<usize> {
+        usize::try_from(self.0).ok()
+    }
+
+    fn wait_readable_among(&self, others: &[alloc::sync::Arc<dyn LinkReadiness>], timeout_ms: u32) {
+        self.wait_ready_among(false, others, timeout_ms);
+    }
+
+    fn wait_ready(&self, room: bool, timeout_ms: u32) {
         let mut pfd = libc::pollfd {
             fd: self.0,
-            events: libc::POLLIN,
+            events: wait_events(room),
             revents: 0,
         };
         let timeout = c_int::try_from(timeout_ms).unwrap_or(c_int::MAX);
@@ -148,14 +170,15 @@ impl LinkReadiness for FdReadiness {
         unsafe { libc::poll(&mut pfd, 1, timeout) };
     }
 
-    fn handle(&self) -> Option<usize> {
-        usize::try_from(self.0).ok()
-    }
-
-    fn wait_readable_among(&self, others: &[alloc::sync::Arc<dyn LinkReadiness>], timeout_ms: u32) {
+    fn wait_ready_among(
+        &self,
+        room: bool,
+        others: &[alloc::sync::Arc<dyn LinkReadiness>],
+        timeout_ms: u32,
+    ) {
         let mut fds = alloc::vec![libc::pollfd {
             fd: self.0,
-            events: libc::POLLIN,
+            events: wait_events(room),
             revents: 0,
         }];
         for other in others {
@@ -165,12 +188,12 @@ impl LinkReadiness for FdReadiness {
             {
                 Some(fd) => fds.push(libc::pollfd {
                     fd,
-                    events: libc::POLLIN,
+                    events: wait_events(other.wants_room()),
                     revents: 0,
                 }),
                 // A wait this cannot name to the kernel: the bounded look, so it is not starved
                 // behind a wait on the others.
-                None => return self.wait_readable(timeout_ms.min(1)),
+                None => return self.wait_ready(room, timeout_ms.min(1)),
             }
         }
         let timeout = c_int::try_from(timeout_ms).unwrap_or(c_int::MAX);

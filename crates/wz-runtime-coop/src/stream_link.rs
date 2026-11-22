@@ -960,6 +960,10 @@ impl<S: StreamSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static> 
         self.batch_held()
     }
 
+    fn owes_write(&self) -> bool {
+        self.owes()
+    }
+
     // A batch lies in the link's own receive buffer until the link moves what follows it to the
     // front: a batch kept is left where it lies, and costs no copy.
     fn keeps_input(&self) -> bool {
@@ -1602,9 +1606,17 @@ mod tests {
             "a frame handed over now waits behind the rest"
         );
         assert_eq!(link.socket.writes.borrow().len(), 1, "nothing more written");
+        assert!(
+            link.owes_write(),
+            "the owner's wait is told to wake on room"
+        );
 
         link.socket.takes.set(None);
         link.service();
+        assert!(
+            !link.owes_write(),
+            "and, nothing owed, on input alone again"
+        );
         assert_eq!(
             link.socket.writes.borrow().concat(),
             [frame, batch(b"next")].concat(),

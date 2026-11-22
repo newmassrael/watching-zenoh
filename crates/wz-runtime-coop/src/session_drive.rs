@@ -205,6 +205,16 @@ pub trait SessionDatagramLink {
         false
     }
 
+    /// Whether the link owes its stack bytes of a frame it was already handed, which its next
+    /// step writes as far as the stack takes them ([`Self::service`]). While it does, a wait its
+    /// owner makes for the link's input must end on room as well (`AndRoom`, the heap profile's),
+    /// or the rest waits for the next input; while it owes nothing that wait is for input alone,
+    /// so a link with room does not wake it. The provided form owes nothing: a link that writes
+    /// each frame whole.
+    fn owes_write(&self) -> bool {
+        false
+    }
+
     /// Whether the session may be handed input now. A link whose owner holds its input back (the
     /// delivery lane of a session that cannot take another message) answers `false`, and the loop
     /// then dispatches nothing this step: no datagram, and not the rest of one already read, so
@@ -285,6 +295,83 @@ pub trait LinkReadiness: Send + Sync {
         let _ = others;
         self.wait_readable(timeout_ms.min(1));
     }
+
+    /// Whether this wait ends on the link's room as well as on its input (`AndRoom`): what a
+    /// wait over several links reads of each of the others.
+    fn wants_room(&self) -> bool {
+        false
+    }
+
+    /// [`Self::wait_readable`], ending also when the link has room if `room`. A stack that can
+    /// wait for room overrides it; the provided form waits for input alone, which is right for a
+    /// link that never owes its stack a write ([`SessionDatagramLink::owes_write`]).
+    fn wait_ready(&self, room: bool, timeout_ms: u32) {
+        let _ = room;
+        self.wait_readable(timeout_ms);
+    }
+
+    /// [`Self::wait_readable_among`], ending also when this link has room if `room`, or when any
+    /// of `others` whose wait asks for it ([`Self::wants_room`]) has. The provided form waits as
+    /// [`Self::wait_readable_among`] does.
+    #[cfg(target_has_atomic = "ptr")]
+    fn wait_ready_among(&self, room: bool, others: &[Arc<dyn LinkReadiness>], timeout_ms: u32) {
+        let _ = room;
+        self.wait_readable_among(others, timeout_ms);
+    }
+}
+
+/// A link's wait for input that ends on its room as well: what the owner of a link that owes its
+/// stack a write waits on ([`SessionDatagramLink::owes_write`]), so the rest is written as soon
+/// as the stack takes it and not when the next input comes. Made only while the link owes, so a
+/// link with room and nothing to write does not wake its owner.
+#[cfg(all(
+    feature = "alloc",
+    not(feature = "session-slot"),
+    target_has_atomic = "ptr"
+))]
+pub struct AndRoom(Arc<dyn LinkReadiness>);
+
+#[cfg(all(
+    feature = "alloc",
+    not(feature = "session-slot"),
+    target_has_atomic = "ptr"
+))]
+impl AndRoom {
+    /// The wait `ready`, ending on room as well.
+    pub fn of(ready: Arc<dyn LinkReadiness>) -> Arc<dyn LinkReadiness> {
+        Arc::new(Self(ready))
+    }
+}
+
+#[cfg(all(
+    feature = "alloc",
+    not(feature = "session-slot"),
+    target_has_atomic = "ptr"
+))]
+impl LinkReadiness for AndRoom {
+    fn wait_readable(&self, timeout_ms: u32) {
+        self.0.wait_ready(true, timeout_ms);
+    }
+
+    fn handle(&self) -> Option<usize> {
+        self.0.handle()
+    }
+
+    fn wait_readable_among(&self, others: &[Arc<dyn LinkReadiness>], timeout_ms: u32) {
+        self.0.wait_ready_among(true, others, timeout_ms);
+    }
+
+    fn wants_room(&self) -> bool {
+        true
+    }
+
+    fn wait_ready(&self, _room: bool, timeout_ms: u32) {
+        self.0.wait_ready(true, timeout_ms);
+    }
+
+    fn wait_ready_among(&self, _room: bool, others: &[Arc<dyn LinkReadiness>], timeout_ms: u32) {
+        self.0.wait_ready_among(true, others, timeout_ms);
+    }
 }
 
 /// Block until one of `waits` is ready or `timeout_ms` has passed. Nothing to wait on returns at
@@ -364,6 +451,10 @@ impl<T: SessionDatagramLink + ?Sized> SessionDatagramLink for Rc<T> {
 
     fn holds_input(&self) -> bool {
         (**self).holds_input()
+    }
+
+    fn owes_write(&self) -> bool {
+        (**self).owes_write()
     }
 
     fn takes_input(&self) -> bool {
@@ -1828,6 +1919,10 @@ impl<D: SessionDatagramLink + 'static> SessionDatagramLink for DriverPump<D> {
 
     fn holds_input(&self) -> bool {
         self.0.holds_input()
+    }
+
+    fn owes_write(&self) -> bool {
+        self.0.owes_write()
     }
 
     fn takes_input(&self) -> bool {
