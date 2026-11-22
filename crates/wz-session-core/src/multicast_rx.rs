@@ -1517,10 +1517,7 @@ where
             )
         };
         match next {
-            MulticastRxNext::Done => match multicast_message_len(msg) {
-                Some(consumed) => at += consumed,
-                None => return None,
-            },
+            MulticastRxNext::Done => at += multicast_message_len(msg)?,
             other => {
                 reassembling_tail(dispatcher, reasm, msg, other, src, now_ms, on_event, stats);
                 return None;
