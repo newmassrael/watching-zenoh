@@ -179,25 +179,54 @@ mod tests {
         fn exit(&self, _span: &Id) {}
     }
 
+    /// The environment variable that tells a re-executed test binary it is the child of
+    /// [`a_query_routed_and_its_final_are_told_with_their_face_and_id`].
+    const RECORDING_CHILD: &str = "WZ_ROUTING_SPANS_RECORDING_CHILD";
+
     /// A query the node routes and the final it sends are told with the face and the query id,
     /// which is what a reader matches the two by.
+    ///
+    /// The recording runs in a child process that runs this test alone. Whether a subscriber
+    /// wants a callsite is cached per callsite for the whole process, and while the process has
+    /// at most one live dispatcher, `tracing-core` works that out without a lock, from the
+    /// registering thread's own dispatcher (`tracing-core` 0.1.36, `src/callsite.rs`,
+    /// `Rebuilder::JustOne`): another test's thread that began to register one of these
+    /// callsites before this recorder was made, and finished after, left "never" in the cache,
+    /// and the event at it was not told (seen once each in an all-features and a workspace run,
+    /// 2026-11-22). No step inside the process orders against a registration already under way,
+    /// so the test takes the cache out of reach of every other test instead: in the child, no
+    /// other thread registers anything.
     #[test]
     fn a_query_routed_and_its_final_are_told_with_their_face_and_id() {
+        if std::env::var_os(RECORDING_CHILD).is_some() {
+            recording_child_body();
+            return;
+        }
+        let exe = std::env::current_exe().expect("this test binary's own path");
+        let out = std::process::Command::new(exe)
+            .args([
+                "--exact",
+                "--test-threads=1",
+                "--nocapture",
+                "router_forward::routing_spans::tests::a_query_routed_and_its_final_are_told_with_their_face_and_id",
+            ])
+            .env(RECORDING_CHILD, "1")
+            .output()
+            .expect("re-exec this test binary in child mode");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && stdout.contains("1 passed"),
+            "the child that records the two events failed or ran no test ({}):\n{stdout}\n{}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// The child half of the test above, alone in its process.
+    fn recording_child_body() {
         let recorded = Recorded::default();
         let zid = Zid::from_slice(&[1, 2, 3, 4]);
-        // The two callsites are the router's own, which other tests of this binary reach on
-        // other threads. A callsite caches whether any subscriber wants it, and until the process
-        // has made its first subscriber it registers by reading the registering thread's own
-        // (none, so "never") without the lock that orders it against a subscriber being made: one
-        // that another thread was registering as this recorder was made kept "never", and the
-        // event at it was not told (seen once each in an all-features and a workspace run,
-        // 2026-11-22). So the callsites are registered here first, by this thread, and the cache is
-        // made again once the recorder is in place; what is left is a thread that began to
-        // register one of them before this test did and has still not finished.
-        query_routed(zid, FaceId(0), 0);
-        query_final(zid, FaceId(0), 0);
         tracing::subscriber::with_default(recorded.clone(), || {
-            tracing::callsite::rebuild_interest_cache();
             query_routed(zid, FaceId(7), 41);
             query_final(zid, FaceId(7), 41);
         });
