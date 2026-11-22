@@ -485,6 +485,10 @@ impl Rehearsal {
     }
 }
 
+/// The event slots a lane holds: the length of its records and of its published list, storage
+/// only the build sizes; a session's limits hold the lane to fewer of them (`with_limits`).
+const LANE_SLOTS: usize = caps::DELIVERY_LANE_EVENTS;
+
 /// What waits at each event slot of the lane besides its bytes, a cell for each slot, reached
 /// through a pointer as the area is: the lane's holder writes a slot while it writes the sample
 /// there, and the one delivery a sample is handed to takes it ([`SharedLane`]), so a hold of the
@@ -493,9 +497,8 @@ struct Records(NonNull<UnsafeCell<Option<Event>>>);
 
 impl Records {
     fn new() -> Self {
-        let cells: Box<[UnsafeCell<Option<Event>>]> = (0..caps::DELIVERY_LANE_EVENTS)
-            .map(|_| UnsafeCell::new(None))
-            .collect();
+        let cells: Box<[UnsafeCell<Option<Event>>]> =
+            (0..LANE_SLOTS).map(|_| UnsafeCell::new(None)).collect();
         let first = Box::into_raw(cells).cast::<UnsafeCell<Option<Event>>>();
         // SAFETY: the pointer of a box is never null.
         Self(unsafe { NonNull::new_unchecked(first) })
@@ -503,7 +506,7 @@ impl Records {
 
     /// The cell of event slot `index`.
     fn cell(&self, index: usize) -> &UnsafeCell<Option<Event>> {
-        assert!(index < caps::DELIVERY_LANE_EVENTS, "a slot of the lane");
+        assert!(index < LANE_SLOTS, "a slot of the lane");
         // SAFETY: the cells are `DELIVERY_LANE_EVENTS`, this one's until it drops.
         unsafe { &*self.0.as_ptr().add(index) }
     }
@@ -511,9 +514,8 @@ impl Records {
 
 impl Drop for Records {
     fn drop(&mut self) {
-        let cells =
-            core::ptr::slice_from_raw_parts_mut(self.0.as_ptr(), caps::DELIVERY_LANE_EVENTS);
-        // SAFETY: the box `Records::new` made, of `DELIVERY_LANE_EVENTS` cells, given back once.
+        let cells = core::ptr::slice_from_raw_parts_mut(self.0.as_ptr(), LANE_SLOTS);
+        // SAFETY: the box `Records::new` made, of `LANE_SLOTS` cells, given back once.
         drop(unsafe { Box::from_raw(cells) });
     }
 }
@@ -522,7 +524,7 @@ impl Drop for Records {
 /// slot of each and where its bytes start. Published in the order their slots were taken, so the
 /// front is the oldest of the lane's heads not handed on.
 struct Published {
-    entries: [(u16, u32); caps::DELIVERY_LANE_EVENTS],
+    entries: [(u16, u32); LANE_SLOTS],
     head: usize,
     len: usize,
 }
@@ -531,10 +533,10 @@ impl Published {
     /// The sample at event slot `index`, its bytes at `offset`, was published.
     fn push(&mut self, index: usize, offset: usize) {
         debug_assert!(
-            self.len < caps::DELIVERY_LANE_EVENTS,
+            self.len < LANE_SLOTS,
             "a published sample holds a slot of the lane"
         );
-        let at = (self.head + self.len) % caps::DELIVERY_LANE_EVENTS;
+        let at = (self.head + self.len) % LANE_SLOTS;
         self.entries[at] = (index as u16, offset as u32);
         self.len += 1;
     }
@@ -547,7 +549,7 @@ impl Published {
     /// The oldest was handed on.
     fn pop(&mut self) {
         if self.len > 0 {
-            self.head = (self.head + 1) % caps::DELIVERY_LANE_EVENTS;
+            self.head = (self.head + 1) % LANE_SLOTS;
             self.len -= 1;
         }
     }
@@ -652,7 +654,7 @@ impl SampleLane {
             ptr::write(addr_of_mut!((*at).records), Records::new());
             let published = addr_of_mut!((*at).published);
             let entries = addr_of_mut!((*published).entries).cast::<(u16, u32)>();
-            for slot in 0..caps::DELIVERY_LANE_EVENTS {
+            for slot in 0..LANE_SLOTS {
                 ptr::write(entries.add(slot), (0, 0));
             }
             ptr::write(addr_of_mut!((*published).head), 0);
@@ -1233,12 +1235,11 @@ unsafe impl Sync for SharedLane {}
 // The queues hold a handle for every event slot the lane can have out at once, and a handle names
 // any slot and any offset of the area.
 const _: () = assert!(
-    delivery_lane_queue::CAPACITY >= caps::DELIVERY_LANE_EVENTS,
+    delivery_lane_queue::CAPACITY >= LANE_SLOTS,
     "the delivery lane's queue holds every event slot of the lane: raise its document's capacity"
 );
 const _: () = assert!(
-    caps::DELIVERY_LANE_EVENTS <= u16::MAX as usize
-        && caps::DELIVERY_LANE_BYTES <= u32::MAX as usize,
+    LANE_SLOTS <= u16::MAX as usize && caps::DELIVERY_LANE_BYTES <= u32::MAX as usize,
     "a delivery lane handle names every event slot and every offset of the area"
 );
 
@@ -1453,7 +1454,7 @@ impl SharedLane {
 
     /// The cell of event slot `index`.
     fn record_cell(&self, index: usize) -> &UnsafeCell<Option<Event>> {
-        assert!(index < caps::DELIVERY_LANE_EVENTS, "a slot of the lane");
+        assert!(index < LANE_SLOTS, "a slot of the lane");
         // SAFETY: the lane's records are `DELIVERY_LANE_EVENTS` cells, which live as long as the
         // lane, and so as long as `self`.
         unsafe { &*self.records.as_ptr().add(index) }

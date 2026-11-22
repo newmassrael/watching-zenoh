@@ -120,6 +120,9 @@ ALLOWED: tuple[tuple[str, str, str], ...] = (
     ("crates/wz-session-mcu/src/connect_manager.rs", "new", "a compile-time check of the endpoints a fixed image names against the endpoint and locator rows the build sizes; the fixed connect manager holds no snapshot"),
     ("crates/wz-session-mcu/src/connect_manager.rs", "PEERS", "a constant that sizes the fixed connect manager's peer and dial tables from the endpoint rows the build sizes"),
     ("crates/wz-admin/src/admin_connect.rs", "push_entry", "the admin write fills a heapless list of the build's endpoint rows on every backing, and refuses the entry that list has no row for"),
+    ("crates/wz-capi-coop/src/lane.rs", "LANE_SLOTS", "a constant that sizes the delivery lane's records and published list, a slot index and the ring's wrap, from the build's event slots; a session's limits hold the lane to fewer through DeliveryLane::with_limits"),
+    ("crates/wz-capi-coop/src/lane.rs", "_", "build-time assertions on the storage the constants size: the lane queue's handles name every event slot and every offset of the area"),
+    ("crates/wz-capi-coop/src/lane.rs", "lends", "a sample lent where it lies copies its key into the array the build sizes (LentSample::key), so a key past it is not lent and is written into the lane as any other sample is"),
 )
 
 #: (path pattern relative to the root, innermost item, reason): a site that reads a snapshot it
