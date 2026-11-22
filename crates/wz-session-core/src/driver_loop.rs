@@ -803,12 +803,7 @@ enum LentRecord<'a, 'f> {
         any(
             all(
                 feature = "alloc",
-                any(
-                    test,
-                    not(feature = "rx-lent-control"),
-                    feature = "transport-stats",
-                    feature = "routing-namespace"
-                )
+                any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
             ),
             feature = "rx-push"
         )
@@ -821,12 +816,7 @@ enum LentRecord<'a, 'f> {
         any(
             all(
                 feature = "alloc",
-                any(
-                    test,
-                    not(feature = "rx-lent-control"),
-                    feature = "transport-stats",
-                    feature = "routing-namespace"
-                )
+                any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
             ),
             feature = "rx-response"
         )
@@ -907,12 +897,7 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
         any(
             all(
                 feature = "alloc",
-                any(
-                    test,
-                    not(feature = "rx-lent-control"),
-                    feature = "transport-stats",
-                    feature = "routing-namespace"
-                )
+                any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
             ),
             feature = "rx-push"
         ),
@@ -969,12 +954,7 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
         any(
             all(
                 feature = "alloc",
-                any(
-                    test,
-                    not(feature = "rx-lent-control"),
-                    feature = "transport-stats",
-                    feature = "routing-namespace"
-                )
+                any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
             ),
             feature = "rx-response"
         ),
@@ -1112,12 +1092,7 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
             #[cfg(any(
                 all(
                     feature = "alloc",
-                    any(
-                        test,
-                        not(feature = "rx-lent-control"),
-                        feature = "transport-stats",
-                        feature = "routing-namespace"
-                    )
+                    any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
                 ),
                 feature = "rx-push"
             ))]
@@ -1149,12 +1124,7 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
             #[cfg(any(
                 all(
                     feature = "alloc",
-                    any(
-                        test,
-                        not(feature = "rx-lent-control"),
-                        feature = "transport-stats",
-                        feature = "routing-namespace"
-                    )
+                    any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
                 ),
                 feature = "rx-response"
             ))]
@@ -1318,12 +1288,7 @@ pub(crate) fn report_lent_record(
         // Owned: the caller's, see above.
         #[cfg(all(
             feature = "alloc",
-            any(
-                test,
-                not(feature = "rx-lent-control"),
-                feature = "transport-stats",
-                feature = "routing-namespace"
-            )
+            any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
         ))]
         WalkedRecord::Owned(_) => {}
         #[cfg(all(
@@ -1331,12 +1296,7 @@ pub(crate) fn report_lent_record(
             any(
                 all(
                     feature = "alloc",
-                    any(
-                        test,
-                        not(feature = "rx-lent-control"),
-                        feature = "transport-stats",
-                        feature = "routing-namespace"
-                    )
+                    any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
                 ),
                 feature = "rx-push"
             )
@@ -1353,12 +1313,7 @@ pub(crate) fn report_lent_record(
             any(
                 all(
                     feature = "alloc",
-                    any(
-                        test,
-                        not(feature = "rx-lent-control"),
-                        feature = "transport-stats",
-                        feature = "routing-namespace"
-                    )
+                    any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
                 ),
                 feature = "rx-response"
             )

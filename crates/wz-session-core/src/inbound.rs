@@ -651,12 +651,7 @@ pub(crate) struct InPlaceExtChain {
     /// whose every record is lent never does.
     #[cfg(all(
         feature = "alloc",
-        any(
-            test,
-            not(feature = "rx-lent-control"),
-            feature = "transport-stats",
-            feature = "routing-namespace"
-        )
+        any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
     ))]
     chained: bool,
     /// The admission verdict, which only the unicast receive path asks for.
@@ -685,12 +680,7 @@ impl InPlaceExtChain {
     /// every record is lent never pays for it.
     #[cfg(all(
         feature = "alloc",
-        any(
-            test,
-            not(feature = "rx-lent-control"),
-            feature = "transport-stats",
-            feature = "routing-namespace"
-        )
+        any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
     ))]
     pub(crate) fn owned(&self, unit: &[u8]) -> Result<Vec<ExtEntryOwned>, InboundParseError> {
         if !self.chained {
@@ -939,12 +929,7 @@ impl KeptChain for InPlaceExtChain {
         let mut refused: Option<u8> = None;
         #[cfg(all(
             feature = "alloc",
-            any(
-                test,
-                not(feature = "rx-lent-control"),
-                feature = "transport-stats",
-                feature = "routing-namespace"
-            )
+            any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
         ))]
         let mut chained = false;
         #[cfg(feature = "reassembly")]
@@ -953,12 +938,7 @@ impl KeptChain for InPlaceExtChain {
         for entry in walked {
             #[cfg(all(
                 feature = "alloc",
-                any(
-                    test,
-                    not(feature = "rx-lent-control"),
-                    feature = "transport-stats",
-                    feature = "routing-namespace"
-                )
+                any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
             ))]
             {
                 chained = true;
@@ -980,12 +960,7 @@ impl KeptChain for InPlaceExtChain {
         Ok(Self {
             #[cfg(all(
                 feature = "alloc",
-                any(
-                    test,
-                    not(feature = "rx-lent-control"),
-                    feature = "transport-stats",
-                    feature = "routing-namespace"
-                )
+                any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
             ))]
             chained,
             #[cfg(feature = "session-unicast")]

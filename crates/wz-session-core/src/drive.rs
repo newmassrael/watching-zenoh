@@ -179,21 +179,37 @@ fn count_rx_network_messages<R: SessionRuntime, T: TimeSource>(
 ) -> alloc::vec::Vec<crate::network_message::NetworkMessage> {
     #[cfg(feature = "transport-stats")]
     for msg in &messages {
-        let class = crate::network_message::stats_class(msg, |_id| None);
-        // Matched against the session's `stats/filters` with the same empty resolver, so an
-        // aliased key counts under no filter as it counts in the user space.
-        let class = _actions.stats_keys_of(class, || {
-            crate::network_message::stats_keyexpr(msg, |_id| None)
-        });
-        _actions.stats.inc_rx_network(&class);
-        // R2825 — the registry: the payload observed, and the message counted
-        // on the link that received it, under the message's own band.
-        let priority = crate::network_message::network_message_priority(msg);
-        let rx = crate::stats_registry::StatsDirection::Rx;
-        _actions.observe_payload(rx, priority, &class);
-        _actions.count_network_message(rx, &_actions.link, priority, &class);
+        count_rx_network_message(_actions, msg);
     }
     messages
+}
+
+/// [`count_rx_network_messages`] for one message: what the in-place walk counts a record it
+/// lends by, the owned message its bytes decode to
+/// (`network_message::try_for_each_record_while`), so a record counts the same whichever form it
+/// was received in.
+#[cfg(all(
+    feature = "alloc",
+    feature = "codec-frame",
+    feature = "transport-stats"
+))]
+fn count_rx_network_message<R: SessionRuntime, T: TimeSource>(
+    actions: &SessionLinkActions<R, T>,
+    msg: &crate::network_message::NetworkMessage,
+) {
+    let class = crate::network_message::stats_class(msg, |_id| None);
+    // Matched against the session's `stats/filters` with the same empty resolver, so an
+    // aliased key counts under no filter as it counts in the user space.
+    let class = actions.stats_keys_of(class, || {
+        crate::network_message::stats_keyexpr(msg, |_id| None)
+    });
+    actions.stats.inc_rx_network(&class);
+    // R2825 — the registry: the payload observed, and the message counted
+    // on the link that received it, under the message's own band.
+    let priority = crate::network_message::network_message_priority(msg);
+    let rx = crate::stats_registry::StatsDirection::Rx;
+    actions.observe_payload(rx, priority, &class);
+    actions.count_network_message(rx, &actions.link, priority, &class);
 }
 
 /// [`count_rx_network_messages`] for a frame read on the plain-Put lane, whose records are not
@@ -1768,11 +1784,10 @@ pub enum CopyReason {
 /// How [`dispatch_datagram`] hands over a Push, a Request or a Response record:
 /// lent where the frame lies when this build can deliver it so, owned otherwise.
 ///
-/// `transport-stats` keeps the owned form: its counters classify a received
-/// message by reading the owned message (`network_message::stats_class`), and
-/// that profile is the AP's, which never takes this path. A counter that
-/// silently skipped the records of an in-place frame would be a wrong number,
-/// so the build that has the counters does not lend.
+/// The transport counters (`transport-stats`) do not change it: the walk counts a record it lends
+/// by the owned message its bytes decode to
+/// (`network_message::try_for_each_record_while`), the counters' one classification, so a build
+/// that counts receives as one that does not.
 ///
 /// A build that lends its control records (`rx-lent-control`, which the slot profile
 /// selects) lends EVERY record, the control kinds (a Declare, an Interest, a
@@ -1781,17 +1796,7 @@ pub enum CopyReason {
 /// the owned message a control record would otherwise become is a boxed
 /// `DeclareOwned` with heap lists, which a slot has no room for and a heap engine
 /// whose every record is read in place has no use for.
-#[cfg(all(
-    feature = "codec-frame",
-    feature = "rx-lent-control",
-    feature = "transport-stats"
-))]
-const RECORD_FORM: crate::network_message::RecordForm = crate::network_message::RecordForm::Owned;
-#[cfg(all(
-    feature = "codec-frame",
-    feature = "rx-lent-control",
-    not(feature = "transport-stats")
-))]
+#[cfg(all(feature = "codec-frame", feature = "rx-lent-control"))]
 const RECORD_FORM: crate::network_message::RecordForm =
     crate::network_message::RecordForm::LentControl;
 #[cfg(all(
@@ -1803,11 +1808,7 @@ const RECORD_FORM: crate::network_message::RecordForm =
         feature = "codec-response"
     )
 ))]
-const RECORD_FORM: crate::network_message::RecordForm = if cfg!(feature = "transport-stats") {
-    crate::network_message::RecordForm::Owned
-} else {
-    crate::network_message::RecordForm::Lent
-};
+const RECORD_FORM: crate::network_message::RecordForm = crate::network_message::RecordForm::Lent;
 /// Without a lendable codec there is no record to lend.
 #[cfg(all(
     feature = "codec-frame",
@@ -2503,12 +2504,7 @@ fn lean_in_place<R: SessionRuntime, T: TimeSource>(
         carrier,
         #[cfg(all(
             feature = "alloc",
-            any(
-                test,
-                not(feature = "rx-lent-control"),
-                feature = "transport-stats",
-                feature = "routing-namespace"
-            )
+            any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
         ))]
         &mut || Ok(alloc::vec::Vec::new()),
         RECORD_FORM,
@@ -2582,12 +2578,7 @@ fn frame_in_place<R: SessionRuntime, T: TimeSource>(
     // record has none of.
     #[cfg(not(all(
         feature = "alloc",
-        any(
-            test,
-            not(feature = "rx-lent-control"),
-            feature = "transport-stats",
-            feature = "routing-namespace"
-        )
+        any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
     )))]
     let _ = chain;
     let refused = match resume {
@@ -2624,12 +2615,7 @@ fn frame_in_place<R: SessionRuntime, T: TimeSource>(
         carrier,
         #[cfg(all(
             feature = "alloc",
-            any(
-                test,
-                not(feature = "rx-lent-control"),
-                feature = "transport-stats",
-                feature = "routing-namespace"
-            )
+            any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
         ))]
         &mut || chain.owned(unit),
         RECORD_FORM,
@@ -2688,12 +2674,7 @@ enum RecordSource {
 #[cfg(all(
     all(
         feature = "alloc",
-        any(
-            test,
-            not(feature = "rx-lent-control"),
-            feature = "transport-stats",
-            feature = "routing-namespace"
-        )
+        any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
     ),
     feature = "codec-frame",
     not(feature = "bounded-heapless")
@@ -2710,12 +2691,7 @@ fn hand_record_to(
 #[cfg(all(
     all(
         feature = "alloc",
-        any(
-            test,
-            not(feature = "rx-lent-control"),
-            feature = "transport-stats",
-            feature = "routing-namespace"
-        )
+        any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
     ),
     feature = "codec-frame",
     feature = "bounded-heapless"
@@ -2734,12 +2710,7 @@ fn hand_record_to(
 #[cfg(all(
     all(
         feature = "alloc",
-        any(
-            test,
-            not(feature = "rx-lent-control"),
-            feature = "transport-stats",
-            feature = "routing-namespace"
-        )
+        any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
     ),
     feature = "codec-frame",
     not(feature = "bounded-heapless")
@@ -2756,12 +2727,7 @@ fn take_record_back(
 #[cfg(all(
     all(
         feature = "alloc",
-        any(
-            test,
-            not(feature = "rx-lent-control"),
-            feature = "transport-stats",
-            feature = "routing-namespace"
-        )
+        any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
     ),
     feature = "codec-frame",
     feature = "bounded-heapless"
@@ -2790,12 +2756,7 @@ fn walk_records_in_place<R: SessionRuntime, T: TimeSource>(
     carrier: RecordCarrier,
     #[cfg(all(
         feature = "alloc",
-        any(
-            test,
-            not(feature = "rx-lent-control"),
-            feature = "transport-stats",
-            feature = "routing-namespace"
-        )
+        any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
     ))]
     extensions: &mut dyn FnMut() -> Result<
         alloc::vec::Vec<wz_codecs::ext_entry::ExtEntryOwned>,
@@ -2811,12 +2772,7 @@ fn walk_records_in_place<R: SessionRuntime, T: TimeSource>(
     use crate::driver_loop::IterationEvent;
     #[cfg(all(
         feature = "alloc",
-        any(
-            test,
-            not(feature = "rx-lent-control"),
-            feature = "transport-stats",
-            feature = "routing-namespace"
-        )
+        any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
     ))]
     use crate::network_message::WalkedRecord;
     #[cfg(feature = "alloc")]
@@ -2838,12 +2794,7 @@ fn walk_records_in_place<R: SessionRuntime, T: TimeSource>(
     // session: each lent arm below is handed what it needs by the record.
     #[cfg(not(all(
         feature = "alloc",
-        any(
-            test,
-            not(feature = "rx-lent-control"),
-            feature = "transport-stats",
-            feature = "routing-namespace"
-        )
+        any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
     )))]
     let _ = (source, actions);
     #[cfg(feature = "alloc")]
@@ -2857,30 +2808,24 @@ fn walk_records_in_place<R: SessionRuntime, T: TimeSource>(
     };
     #[cfg(all(
         feature = "alloc",
-        any(
-            test,
-            not(feature = "rx-lent-control"),
-            feature = "transport-stats",
-            feature = "routing-namespace"
-        )
+        any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
     ))]
     let mut outcome: Option<DriverLoopOutcome> = None;
     let mut dispatched = false;
     // Set once the host has no room for another record; the walk then ends before the next.
     let stopping = core::cell::Cell::new(false);
     let go_on = || !stopping.get();
-    let (read, stopped) =
-        crate::network_message::try_for_each_record_while(payload, record, form, &go_on, |one| {
+    let (read, stopped) = crate::network_message::try_for_each_record_while(
+        payload,
+        record,
+        form,
+        &go_on,
+        |one| {
             // A build with no owned record walks none: every one is lent.
             #[cfg(all(
                 not(all(
                     feature = "alloc",
-                    any(
-                        test,
-                        not(feature = "rx-lent-control"),
-                        feature = "transport-stats",
-                        feature = "routing-namespace"
-                    )
+                    any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
                 )),
                 any(
                     feature = "codec-push",
@@ -2894,12 +2839,7 @@ fn walk_records_in_place<R: SessionRuntime, T: TimeSource>(
             #[cfg(all(
                 not(all(
                     feature = "alloc",
-                    any(
-                        test,
-                        not(feature = "rx-lent-control"),
-                        feature = "transport-stats",
-                        feature = "routing-namespace"
-                    )
+                    any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
                 )),
                 not(any(
                     feature = "codec-push",
@@ -2911,12 +2851,7 @@ fn walk_records_in_place<R: SessionRuntime, T: TimeSource>(
             let _ = one;
             #[cfg(all(
                 feature = "alloc",
-                any(
-                    test,
-                    not(feature = "rx-lent-control"),
-                    feature = "transport-stats",
-                    feature = "routing-namespace"
-                )
+                any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
             ))]
             match one {
                 WalkedRecord::Owned(one) => {
@@ -2959,16 +2894,20 @@ fn walk_records_in_place<R: SessionRuntime, T: TimeSource>(
                 stopping.set(true);
             }
             Ok(())
-        })?;
+        },
+        // A record lent is counted by the owned message its bytes decode to, as an owned one is
+        // counted above: a `Frame`'s, as the copying path counts.
+        #[cfg(all(feature = "transport-stats", feature = "alloc"))]
+        &mut |message: &crate::network_message::NetworkMessage| {
+            if source == RecordSource::Frame {
+                count_rx_network_message(actions, message);
+            }
+        },
+    )?;
     if !dispatched {
         #[cfg(all(
             feature = "alloc",
-            any(
-                test,
-                not(feature = "rx-lent-control"),
-                feature = "transport-stats",
-                feature = "routing-namespace"
-            )
+            any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
         ))]
         on_event.event(IterationEvent::Poll(&empty(extensions()?)));
         // The frame's own chain is not owned where no record is: the empty batch
@@ -2977,12 +2916,7 @@ fn walk_records_in_place<R: SessionRuntime, T: TimeSource>(
             feature = "alloc",
             not(all(
                 feature = "alloc",
-                any(
-                    test,
-                    not(feature = "rx-lent-control"),
-                    feature = "transport-stats",
-                    feature = "routing-namespace"
-                )
+                any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
             ))
         ))]
         on_event.event(IterationEvent::Poll(&empty(alloc::vec::Vec::new())));
@@ -3086,12 +3020,7 @@ where
                 carrier,
                 #[cfg(all(
                     feature = "alloc",
-                    any(
-                        test,
-                        not(feature = "rx-lent-control"),
-                        feature = "transport-stats",
-                        feature = "routing-namespace"
-                    )
+                    any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
                 ))]
                 &mut || Ok(alloc::vec::Vec::new()),
                 REASSEMBLED_RECORD_FORM,

@@ -699,12 +699,7 @@ fn judge_put_chain<S: wz_codecs::msg_put::MsgPutStorage>(
     any(
         all(
             feature = "alloc",
-            any(
-                test,
-                not(feature = "rx-lent-control"),
-                feature = "transport-stats",
-                feature = "routing-namespace"
-            )
+            any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
         ),
         feature = "rx-push"
     ),
@@ -871,12 +866,7 @@ fn request_view_admission(
     any(
         all(
             feature = "alloc",
-            any(
-                test,
-                not(feature = "rx-lent-control"),
-                feature = "transport-stats",
-                feature = "routing-namespace"
-            )
+            any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
         ),
         feature = "rx-response"
     ),
@@ -1226,12 +1216,7 @@ pub(crate) enum RecordForm {
     /// place is ever an owned message, and the owned walk is not linked.
     #[cfg(all(
         feature = "alloc",
-        any(
-            test,
-            not(feature = "rx-lent-control"),
-            feature = "transport-stats",
-            feature = "routing-namespace"
-        )
+        any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
     ))]
     Owned,
     /// A Push, a Request and a Response are decoded where the payload lies and
@@ -1239,12 +1224,7 @@ pub(crate) enum RecordForm {
     #[cfg(all(
         all(
             feature = "alloc",
-            any(
-                test,
-                not(feature = "rx-lent-control"),
-                feature = "transport-stats",
-                feature = "routing-namespace"
-            )
+            any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
         ),
         any(
             feature = "codec-push",
@@ -1302,12 +1282,7 @@ pub(crate) enum WalkedRecord<'r, 'f> {
     /// The record's owned message, the one entry of the buffer.
     #[cfg(all(
         feature = "alloc",
-        any(
-            test,
-            not(feature = "rx-lent-control"),
-            feature = "transport-stats",
-            feature = "routing-namespace"
-        )
+        any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
     ))]
     Owned(&'r mut RecordBuf),
     /// A Push decoded where the payload lies, valid for the call.
@@ -1316,12 +1291,7 @@ pub(crate) enum WalkedRecord<'r, 'f> {
         any(
             all(
                 feature = "alloc",
-                any(
-                    test,
-                    not(feature = "rx-lent-control"),
-                    feature = "transport-stats",
-                    feature = "routing-namespace"
-                )
+                any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
             ),
             feature = "rx-push"
         )
@@ -1337,12 +1307,7 @@ pub(crate) enum WalkedRecord<'r, 'f> {
         any(
             all(
                 feature = "alloc",
-                any(
-                    test,
-                    not(feature = "rx-lent-control"),
-                    feature = "transport-stats",
-                    feature = "routing-namespace"
-                )
+                any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
             ),
             feature = "rx-response"
         )
@@ -1445,12 +1410,27 @@ pub(crate) fn try_for_each_record<'f>(
     form: RecordForm,
     each: impl FnMut(WalkedRecord<'_, 'f>) -> Result<(), crate::parse_error::InboundParseError>,
 ) -> Result<usize, crate::parse_error::InboundParseError> {
-    try_for_each_record_while(payload, record, form, &|| true, each).map(|(read, _)| read)
+    try_for_each_record_while(
+        payload,
+        record,
+        form,
+        &|| true,
+        each,
+        #[cfg(all(feature = "transport-stats", feature = "alloc"))]
+        &mut |_: &NetworkMessage| {},
+    )
+    .map(|(read, _)| read)
 }
 
 /// [`try_for_each_record`] that ends the walk before a record when `go_on` answers `false`:
 /// how far the walk read, and whether it ended so, with records of the payload still unread.
 /// What a receive path asks whose consumer may have no room for another record.
+///
+/// A build with the transport counters (`transport-stats`) hands `counted` each record it lends,
+/// as the owned message the same bytes decode to: the counters classify a message by reading the
+/// owned form, and so a lent record is counted as the same record walked owned is, and how a
+/// record is received does not depend on whether the build counts it. An owned record is not
+/// handed to `counted`: its consumer counts it from the owned message it is handed.
 #[cfg(all(
     feature = "codec-frame",
     any(
@@ -1465,19 +1445,29 @@ pub(crate) fn try_for_each_record_while<'f>(
     form: RecordForm,
     go_on: &dyn Fn() -> bool,
     mut each: impl FnMut(WalkedRecord<'_, 'f>) -> Result<(), crate::parse_error::InboundParseError>,
+    #[cfg(all(feature = "transport-stats", feature = "alloc"))] counted: &mut dyn FnMut(
+        &NetworkMessage,
+    ),
 ) -> Result<(usize, bool), crate::parse_error::InboundParseError> {
     let mut stopped = false;
+    // A build that lends no kind of record has none to count here.
+    #[cfg(all(
+        feature = "transport-stats",
+        feature = "alloc",
+        not(any(
+            feature = "rx-lent-control",
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response"
+        ))
+    ))]
+    let _ = &counted;
     // Without a lendable codec there is nothing to lend, and every form is owned.
     #[cfg(not(any(
         all(
             all(
                 feature = "alloc",
-                any(
-                    test,
-                    not(feature = "rx-lent-control"),
-                    feature = "transport-stats",
-                    feature = "routing-namespace"
-                )
+                any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
             ),
             any(
                 feature = "codec-push",
@@ -1511,16 +1501,16 @@ pub(crate) fn try_for_each_record_while<'f>(
             feature = "rx-lent-control",
             all(
                 feature = "alloc",
-                any(
-                    test,
-                    not(feature = "rx-lent-control"),
-                    feature = "transport-stats",
-                    feature = "routing-namespace"
-                )
+                any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
             )
         ))]
         if form == RecordForm::LentControl {
-            match lend_any_record(&mut cursor, &mut each)? {
+            #[cfg(all(feature = "transport-stats", feature = "alloc"))]
+            let at = cursor;
+            let walked = lend_any_record(&mut cursor, &mut each)?;
+            #[cfg(all(feature = "transport-stats", feature = "alloc"))]
+            count_lent(at, record, counted);
+            match walked {
                 Walk::Continue => continue,
                 Walk::End => break,
             }
@@ -1529,28 +1519,23 @@ pub(crate) fn try_for_each_record_while<'f>(
         // owned reader kept) has the one form: this is the whole walk.
         #[cfg(not(all(
             feature = "alloc",
-            any(
-                test,
-                not(feature = "rx-lent-control"),
-                feature = "transport-stats",
-                feature = "routing-namespace"
-            )
+            any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
         )))]
         {
             let RecordForm::LentControl = form;
-            match lend_any_record(&mut cursor, &mut each)? {
+            #[cfg(all(feature = "transport-stats", feature = "alloc"))]
+            let at = cursor;
+            let walked = lend_any_record(&mut cursor, &mut each)?;
+            #[cfg(all(feature = "transport-stats", feature = "alloc"))]
+            count_lent(at, record, counted);
+            match walked {
                 Walk::Continue => continue,
                 Walk::End => break,
             }
         }
         #[cfg(all(
             feature = "alloc",
-            any(
-                test,
-                not(feature = "rx-lent-control"),
-                feature = "transport-stats",
-                feature = "routing-namespace"
-            )
+            any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
         ))]
         {
             use crate::parse_error::InboundParseError;
@@ -1561,7 +1546,11 @@ pub(crate) fn try_for_each_record_while<'f>(
             ))]
             if form == RecordForm::Lent {
                 let mid = cursor.peek_slice(1).map_err(InboundParseError::Codec)?[0] & 0x1F;
+                #[cfg(all(feature = "transport-stats", feature = "alloc"))]
+                let at = cursor;
                 if lend_record(mid, &mut cursor, &mut each)? {
+                    #[cfg(all(feature = "transport-stats", feature = "alloc"))]
+                    count_lent(at, record, counted);
                     continue;
                 }
             }
@@ -1589,6 +1578,33 @@ pub(crate) fn try_for_each_record_while<'f>(
     Ok((payload.len() - cursor.remaining(), stopped))
 }
 
+/// Hand `counted` the owned message the record at `at` decodes to, a record the walk has just
+/// lent: the record of a MID this build has no decoder for as the `Unknown` the owned walk makes
+/// of it. `record` is the walk's own buffer, empty between records, and is left empty.
+#[cfg(all(
+    feature = "transport-stats",
+    feature = "alloc",
+    any(
+        feature = "rx-lent-control",
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response"
+    )
+))]
+fn count_lent(at: SceCursor<'_>, record: &mut RecordBuf, counted: &mut dyn FnMut(&NetworkMessage)) {
+    let mut again = at;
+    record.clear();
+    // The bytes were just decoded where they lie, so the owned decode of them reads them too.
+    let known = decode_one_record(&mut again, record, NO_ORIGIN).unwrap_or(false);
+    if !known {
+        let _ = absorb_unknown(&mut again, record);
+    }
+    for message in record.iter() {
+        counted(message);
+    }
+    record.clear();
+}
+
 /// The lent half of [`try_for_each_record`]: when the record at the cursor is of
 /// a kind the walk lends (`mid`), decode it where the payload lies, judge it by
 /// the owned rule, hand it to `each`, and answer `true`; `false` for any other
@@ -1608,12 +1624,7 @@ pub(crate) fn try_for_each_record_while<'f>(
 #[cfg(all(
     all(
         feature = "alloc",
-        any(
-            test,
-            not(feature = "rx-lent-control"),
-            feature = "transport-stats",
-            feature = "routing-namespace"
-        )
+        any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
     ),
     feature = "codec-frame",
     any(
@@ -1638,12 +1649,7 @@ fn lend_record<'f>(
             any(
                 all(
                     feature = "alloc",
-                    any(
-                        test,
-                        not(feature = "rx-lent-control"),
-                        feature = "transport-stats",
-                        feature = "routing-namespace"
-                    )
+                    any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
                 ),
                 feature = "rx-push"
             )
@@ -1665,12 +1671,7 @@ fn lend_record<'f>(
             any(
                 all(
                     feature = "alloc",
-                    any(
-                        test,
-                        not(feature = "rx-lent-control"),
-                        feature = "transport-stats",
-                        feature = "routing-namespace"
-                    )
+                    any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
                 ),
                 feature = "rx-response"
             )
@@ -1688,12 +1689,7 @@ fn lend_record<'f>(
     any(
         all(
             feature = "alloc",
-            any(
-                test,
-                not(feature = "rx-lent-control"),
-                feature = "transport-stats",
-                feature = "routing-namespace"
-            )
+            any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
         ),
         feature = "rx-push"
     ),
@@ -1747,12 +1743,7 @@ fn admit_lent(
     any(
         all(
             feature = "alloc",
-            any(
-                test,
-                not(feature = "rx-lent-control"),
-                feature = "transport-stats",
-                feature = "routing-namespace"
-            )
+            any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
         ),
         feature = "rx-push"
     ),
@@ -1814,12 +1805,7 @@ fn lend_request<'f>(
     any(
         all(
             feature = "alloc",
-            any(
-                test,
-                not(feature = "rx-lent-control"),
-                feature = "transport-stats",
-                feature = "routing-namespace"
-            )
+            any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
         ),
         feature = "rx-response"
     ),
@@ -3406,6 +3392,54 @@ mod record_walk_tests {
         });
         assert!(result.is_ok());
         assert_eq!(owned, 3);
+    }
+
+    /// A build with the transport counters counts each record the walk lends as the owned message
+    /// its bytes decode to, so the counters read the same for one batch walked lent and walked
+    /// owned: the classes the counters are handed, in wire order, are one list for each form, and
+    /// the lent walk handed both Pushes to the counter and the OAM it owns to its consumer.
+    #[cfg(all(feature = "transport-stats", feature = "codec-push"))]
+    #[test]
+    fn a_lent_record_is_counted_as_the_same_record_walked_owned() {
+        use crate::stats::NetworkStatsClass;
+        let payload = [push_record("a/1"), oam_record(2), push_record("a/3")].concat();
+        let counted = |form: RecordForm| -> (Vec<NetworkStatsClass>, usize) {
+            let classes = core::cell::RefCell::new(Vec::new());
+            let lent = core::cell::Cell::new(0);
+            let mut record = new_record_buf();
+            let result = try_for_each_record_while(
+                &payload,
+                &mut record,
+                form,
+                &|| true,
+                |one| {
+                    if let WalkedRecord::Owned(owned) = one {
+                        for message in owned.iter() {
+                            classes.borrow_mut().push(stats_class(message, |_id| None));
+                        }
+                    }
+                    Ok(())
+                },
+                &mut |message: &NetworkMessage| {
+                    lent.set(lent.get() + 1);
+                    classes.borrow_mut().push(stats_class(message, |_id| None));
+                },
+            );
+            assert!(result.is_ok());
+            (classes.into_inner(), lent.get())
+        };
+        let (owned, none_lent) = counted(RecordForm::Owned);
+        assert_eq!(owned.len(), 3, "the owned walk counts every record it owns");
+        assert_eq!(none_lent, 0, "an owned walk lends nothing to count");
+        let (lent, pushes) = counted(RecordForm::Lent);
+        assert_eq!(
+            pushes, 2,
+            "the two Pushes were lent and counted from their bytes"
+        );
+        assert_eq!(
+            lent, owned,
+            "a lent batch counts as the same batch walked owned"
+        );
     }
 
     /// The slot profile's walk ([`RecordForm::LentControl`]): every kind this
