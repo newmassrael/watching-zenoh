@@ -53,7 +53,7 @@ through `dyn TxBuf`.
 | allocations (std, warm) | the clone's slice vector | 0 (the box cache) | 0 |
 | key-expression searches | 0 | 1 a put (every face's peer subscribers) | 0 while no face's tables were written |
 | options built | 0 | 1 `PublishOptions`, built and dropped | 0 |
-| driver calls | 0 | 1 `tx_slot_storage` a put; a `poll` and an acquire a batch | 0 a put; an acquire a batch, and a `poll` only after a write the socket did not take whole (POSIX; a Windows socket is still polled each batch) |
+| driver calls | 0 | 1 `tx_slot_storage` a put; a `poll` and an acquire a batch | 0 a put; an acquire a batch, and a `poll` only after a write the socket did not take whole |
 | statistics counters | 0 | 0 (`transport-stats` off) | 0 |
 
 ## 3. The costs, by expected gain
@@ -66,7 +66,7 @@ through `dyn TxBuf`.
 | 4 | The Put written twice to learn its size | `session_actions.rs:13751` | encoded once | 30-80 ns | worked out from the parts | done on `coop-cpu`, not redone here |
 | 5 | Two lock round trips at the send gate: the sticky congestion order behind the out-of-band lock, and the link's availability behind its own | `congestion_close_ordered`, `session_send_available` (`session_actions.rs`) | none | 40-60 ns | the sticky order as a `send_gate::Latch` of the out-of-band slot, raised where `request_congestion_close` stages its request and never lowered; `transport_available` as a `send_gate::SendGate` (a `pub` field the tokio runtime also writes: `session_glue.rs`, `multilink.rs`, `shm_auth_segment.rs`, `session/tests.rs`, three integration tests). Release stores and Acquire loads: no user reads and writes either flag in one step, so the pair gives every edge the lock gave | done |
 | 6 | Per append, the link's slot table locked, the open slot taken out, its memory asked of the driver, put down and put back | `append_lent_batch` (`session_actions.rs`), `TxLease::resume` (`tx_lease.rs`) | appended to the transport's own buffer | 30-50 ns | the open frame kept in the conduit's `BatchStage` as a `tx_lease::OpenSlot` (the slot with where its memory is), which the conduit's lock guards, and picked up with `TxLease::pick_up`, which asks the driver nothing; the link's `batch_slots` record (two `Relaxed` atomics a conduit, ordered by the conduit's lock) is written when the frame opens and cleared before its slot is sent or aborted, so a record that names the slot is the proof the pointer is still good. The holder search of `transport-multilink`, the reopen abort and the move off a leaving link read it; the own link's record is read first, one load | done |
-| 7 | A `poll` for room before each frame opens, then the write | `StreamDriver::wait_for_room`, `crates/wz-runtime-coop/src/stream_link.rs`; `poll_writable`, `crates/wz-runtime-posix/src/net.rs` | the write alone | 1-3 us a batch, 6-18 ns a message at 2048 B batches of 12 B messages | the write is tried first (`StreamSocket::send_parts_now`, one `sendmsg` with `MSG_DONTWAIT` on POSIX) and the socket is asked for room only after a write it did not take whole, until one is taken whole again; the rest of a partial write is written by waiting, since a frame begun on a stream must end on it | done on POSIX; a Windows socket has no per-call non-blocking write and is still polled each batch (it needs the socket left non-blocking after its connect) |
+| 7 | A `poll` for room before each frame opens, then the write | `StreamDriver::wait_for_room`, `crates/wz-runtime-coop/src/stream_link.rs`; `poll_writable`, `crates/wz-runtime-posix/src/net.rs` | the write alone | 1-3 us a batch, 6-18 ns a message at 2048 B batches of 12 B messages | the write is tried first (`StreamSocket::send_parts_now`: one `sendmsg` with `MSG_DONTWAIT` on POSIX, one `WSASend` on Windows, whose stream socket stays non-blocking from its connect on) and the socket is asked for room only after a write it did not take whole, until one is taken whole again. Nothing waits inside a send: the rest of a partial write is owed by the link (the lent slot held until it is written, a frame handed over as bytes copied into a slot of the link's or onto the heap), and the next step that finds the stream room (a send, a question of room, the loop's service) writes it before anything after it | done |
 | 8 | Each runtime lock on a host also pushes its guard onto a thread-local stack and pops it | `cs.rs` `Held::enter` | the lock alone | 5-10 ns a lock, five locks | a `Held` that owns its guard, as the `host-lock-sys` form does; the stack was not a re-entrancy check (a value's lock is not reentrant), only where the guard was kept. The guard is held in a `ManuallyDrop` and let go only inside `Held`'s out-of-line drop, so each instance of `with` still carries two calls and no release of its own: the text-size reason the stack was chosen for is kept, to be confirmed by the size gate | done |
 | 9 | The sender flag's two sequentially consistent stores | `SenderInside` (`session_actions.rs`) | none | 10-20 ns | `Relaxed` stores and load: the flag carries no data, its one reader reads the conduit only under the lock, and the lock's acquire and release keep the mark and the clear inside the holding; a late read costs a spin or a drop pico's try-lock would also make (the argument is on `SenderInside`) | done |
 
@@ -109,9 +109,14 @@ reference measured takes one lock a message.
   `lent_slot_send::a_window_asks_its_link_where_the_slot_is_once_whatever_its_messages` (eight
   messages and the flush ask once; the same window asked nine times before).
 * A stream link tries its write before it asks the socket for room, and asks only after a write
-  the socket did not take whole (row 7). Tests: `stream_link::tests::a_stream_that_takes_each_write_whole_is_asked_for_room_once`
-  (three frames, one question; CONTROL three), `..::a_write_taken_in_part_ends_by_waiting_and_the_next_frame_asks_for_room`,
-  and in the POSIX runtime `a_write_that_does_not_wait_takes_what_the_stream_has_room_for`.
+  the socket did not take whole; what a write leaves is owed and written by the next step that
+  finds room, never by waiting inside the call (row 7). Tests:
+  `stream_link::tests::a_stream_that_takes_each_write_whole_is_asked_for_room_once` (three frames,
+  one question; CONTROL three), `..::a_frame_taken_half_is_finished_by_the_next_step_before_any_new_frame`
+  (half taken, then would block: the call returns, nothing waits, the rest leaves before the next
+  frame), `..::a_lent_frame_keeps_its_slot_until_the_stream_has_taken_it_all`, and
+  `a_write_that_does_not_wait_takes_what_the_stream_has_room_for` in both the POSIX and the
+  Windows stream sockets.
 * A host lock of the runtime keeps its guard in the value that took it, not on a thread-local
   stack (row 8). Tests: `cs::tests::a_cell_is_let_go_when_its_closure_unwinds`,
   `cs::tests::nested_cells_are_held_together_and_let_go_in_turn`.
@@ -121,7 +126,7 @@ Rows 1 to 3 take two lock round trips, a key-expression search and an options bu
 off each put: about 100-200 ns of the 830-990 ns a message the measurement shows, by the
 estimates above. Rows 5 to 9 take three more lock round trips, a driver call, two sequentially
 consistent stores and the host lock's thread-local work off each put, and the `poll` off each
-batch on POSIX: about 110-200 ns a message more, by the same estimates. What is left of the gap
+batch: about 110-200 ns a message more, by the same estimates. What is left of the gap
 is not located by reading the code, and none of these estimates is a measurement.
 
 ## 5. Measuring it
